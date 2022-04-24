@@ -1,0 +1,27 @@
+/**
+ * @file except
+ * @author jungkwang.lee (ntoskrnl7@google.com)
+ * @brief
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authoers.
+ *
+ */
+#pragma once
+
+#include "status"
+
+#include <string>
+
+namespace ntl {
+class except : public std::exception {
+public:
+  explicit except(NTSTATUS status, const std::string &message)
+      : status_(status), message_(message) {}
+  explicit except(status status, const std::string &message)
+      : status_(status), message_(message) {}
+
+private:
+  status status_;
+  std::string message_;
+};
+} // namespace ntl

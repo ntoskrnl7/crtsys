@@ -1,0 +1,276 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <RuntimeLibrary />
+      <AdditionalIncludeDirectories>$(VC_CRT_SourcePath.Split(%3B)[0])\\vcruntime;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_VCRT_WIN32_WINNT=_WIN32_WINNT;_VCRT_ALLOW_INTERNALS;_CRT_WINDOWS_USE_VISTA_TSS;_CRTIMP_ALT;_CRTBLD;_KERNELX;PROCESSOR_FAST_FAIL_AVAILABLE;_NO_CRT_STDIO_INLINE;_HAS_EXCEPTIONS=1;_ITERATOR_DEBUG_LEVEL=0;</PreprocessorDefinitions>
+      <LanguageStandard>stdcpplatest</LanguageStandard>
+      <ObjectFileName>$(IntDir)\%(Directory)%(FileName).obj</ObjectFileName>
+    </ClCompile>
+  </ItemDefinitionGroup>
+
+  <!-- new operator -->
+  <ItemGroup>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\new_array.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\new_array_align.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\new_array_align_nothrow.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\new_array_nothrow.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\new_debug.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\new_mode.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\new_scalar.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\new_scalar_align.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\new_scalar_align_nothrow.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\new_scalar_nothrow.cpp" />
+  </ItemGroup>
+
+  <!-- delete operator-->
+  <ItemGroup>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\delete_array.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\delete_array_align.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\delete_array_align_nothrow.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\delete_array_nothrow.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\delete_array_size.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\delete_array_size_align.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\delete_debug.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\delete_scalar.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\delete_scalar_align.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\delete_scalar_align_nothrow.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\delete_scalar_nothrow.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\delete_scalar_size.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\delete_scalar_size_align.cpp" />
+  </ItemGroup>
+
+  <!-- ntoskrnl longjmp, memchr, strstr, strchr, strrchr, wcsstr, wcschr, wcsrchr -->
+  <ItemGroup>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\memchr.c">
+      <CompileAs>CompileAsC</CompileAs>
+    </ClCompile>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\strchr.c">
+      <CompileAs>CompileAsC</CompileAs>
+    </ClCompile>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\strrchr.c">
+      <CompileAs>CompileAsC</CompileAs>
+    </ClCompile>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\strstr.c">
+      <CompileAs>CompileAsC</CompileAs>
+    </ClCompile>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\wcschr.c">
+      <CompileAs>CompileAsC</CompileAs>
+    </ClCompile>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\wcsrchr.c">
+      <CompileAs>CompileAsC</CompileAs>
+    </ClCompile>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\wcsstr.c">
+      <CompileAs>CompileAsC</CompileAs>
+    </ClCompile>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\longjmpc.c">
+      <CallingConvention>Cdecl</CallingConvention>
+      <CompileAs>CompileAsC</CompileAs>
+    </ClCompile>
+  </ItemGroup>
+
+  <!-- BufferOverflowK.lib(gs_support.obj) __security_cookie -->
+  <ItemGroup>  
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\gs_cookie.c">
+      <CompileAs>CompileAsC</CompileAs>
+    </ClCompile>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\gs_support.c">
+      <CompileAs>CompileAsC</CompileAs>
+    </ClCompile>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\gs_report.c">
+      <CompileAs>CompileAsC</CompileAs>
+    </ClCompile>
+  </ItemGroup>
+
+  <!-- managed code -->
+  <ItemGroup>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\mbsearch.cpp">
+      <ExcludedFromBuild>true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\mcrtexe.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\mcrtexew.cpp">
+      <ExcludedFromBuild>true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\mgdframe.cpp">
+      <ExcludedFromBuild>true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\managdeh.cpp">
+      <ExcludedFromBuild>true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\ManagedMain.cpp">
+      <ExcludedFromBuild>true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\mlfind.cpp">
+      <ExcludedFromBuild>true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\mlsearch.cpp">
+      <ExcludedFromBuild>true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\mpxinit.cpp">
+      <ExcludedFromBuild>true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\mqsort.cpp">
+      <ExcludedFromBuild>true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\msilexit.cpp">
+      <ExcludedFromBuild>true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\mstartup.cpp">
+      <ExcludedFromBuild>true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\mwcrtexe.cpp">
+      <ExcludedFromBuild>true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\mwcrtexew.cpp">
+      <ExcludedFromBuild>true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\pureMSILcode.cpp">
+      <ExcludedFromBuild>true</ExcludedFromBuild>
+    </ClCompile>
+  </ItemGroup>
+
+  <!-- eh -->
+  <ItemGroup>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\ehhelpers.cpp">
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\ehstate.cpp">
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\ehvccctr.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\ehvcccvb.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\ehvecctr.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\ehveccvb.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\ehvecdtr.cpp" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\app_appinit.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\argv_mode.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\checkcfg.c" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\commit_mode.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\debugger_jmc.c" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\denormal_control.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\dll_dllmain.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\dll_dllmain_stub.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\dyn_tls_init.c">
+      <CompileAs>CompileAsC</CompileAs>
+    </ClCompile>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\env_mode.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\exe_main.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\exe_winmain.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\exe_wmain.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\exe_wwinmain.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\file_mode.cpp" />
+
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\frame.cpp">
+      <CallingConvention>Cdecl</CallingConvention>
+      <!--bug :-(
+        line:1398 intptr_t continuationIndex = reinterpret_cast<intptr_t>(continuationAddress); -->
+      <ExcludedFromBuild Condition="'$(Platform)'=='x64'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\riscchandler.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\risctrnsctrl.cpp" />
+
+    <!-- <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\loadcfg.c" /> -->
+    <!-- <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\guard_support.c" /> -->
+    <!-- <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\ptrust.cpp" /> -->
+
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\huge.c" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\initialization.cpp">
+      <ObjectFileName>$(IntDir)vcruntime\%(FileName).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\initializers.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\invalid_parameter_handler.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\jbcxrval.c">
+      <CompileAs>CompileAsC</CompileAs>
+    </ClCompile>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\lconv_unsigned_char.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\locks.cpp">
+      <ObjectFileName>$(IntDir)vcruntime\%(FileName).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\matherr.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\matherr_detection.c">
+      <CompileAs>CompileAsC</CompileAs>
+    </ClCompile>
+
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\per_thread_data.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\pesect.c" />
+    
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\purevirt.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\purevirt_data.cpp" />
+
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\rtti.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\std_exception.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\std_nothrow.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\std_type_info_static.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\std_type_info.cpp">
+      <!-- :-( __unDName function is not implemented yet. -->
+      <ExcludedFromBuild>true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\undname.cxx">
+      <!-- :-( __unDName function is not implemented yet. -->
+      <ExcludedFromBuild>true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\thread_locale.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\thread_safe_statics.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\throw.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\throw_bad_alloc.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\tlsdtor.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\tlsdyn.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\tlssup.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\tncleanup.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\ucrt_detection.c">
+      <CallingConvention>Cdecl</CallingConvention>
+      <CompileAs>CompileAsC</CompileAs>
+    </ClCompile>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\ucrt_stubs.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\uncaught_exception.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\uncaught_exceptions.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\unexpected.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\user.cpp" />
+
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\utility.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\utility_app.cpp">
+      <PreprocessorDefinitions>_ROAPI_;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\utility_desktop.cpp">
+      <ExcludedFromBuild>true</ExcludedFromBuild>
+    </ClCompile>
+
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\vcruntime_dllmain.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\vcruntime_stubs.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\winapi_downlevel.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\winapi_thunks.cpp" />
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\x86_exception_filter.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\x86_exception_filter.cpp" />
+    <ClCompile Condition="'$(Platform)'=='Win32'" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\default_precision.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\ehhelpers.h" />
+    <ClInclude Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\internal_shared.h" />
+    <ClInclude Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\isa_availability.h" />
+    <ClInclude Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\minternal.h" />
+    <ClInclude Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\trnsctrl.h" />
+    <ClInclude Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\vcruntime_internal.h" />
+    <ClInclude Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\vcstartup_internal.h" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(Platform)'=='Win32'">
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\i386\trnsctrl.cpp">
+      <!-- line:20 #include "../ehhelpers.h" (relative path) -->
+      <!-- src\custom\msvc\$(PlatformToolsetVersion)\i386\trnsctrl_redirect.cpp -->
+      <ExcludedFromBuild>true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\i386\chandler4.c">
+      <CompileAs>CompileAsC</CompileAs>
+    </ClCompile>
+    <MASM Include="$(VC_CRT_SourcePath.Split(%3B)[0])\i386\lowhelpr.asm" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(Platform)'=='x64'">
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\x64\gshandlereh.cpp" />
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\x64\gshandlereh4.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\x64\gshandlereh4.cpp" />
+    <MASM Include="$(VC_CRT_SourcePath.Split(%3B)[0])\x64\handlers.asm" />
+  </ItemGroup>
+</Project>

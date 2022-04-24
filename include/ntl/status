@@ -1,0 +1,29 @@
+/**
+ * @file status
+ * @author jungkwang.lee (ntoskrnl7@google.com)
+ * @brief NTSTATUS
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authoers.
+ *
+ */
+#pragma once
+
+#include <ntstatus.h>
+
+namespace ntl {
+class status {
+public:
+  status(NTSTATUS status) : status_(status) {}
+  bool is_ok() const { return NT_SUCCESS(status_); }
+  bool is_info() const { return NT_INFORMATION(status_); }
+  bool is_warn() const { return NT_WARNING(status_); }
+  bool is_err() const { return NT_ERROR(status_); }
+
+  operator NTSTATUS() const { return status_; }
+
+  static status ok() { return STATUS_SUCCESS; }
+
+private:
+  NTSTATUS status_;
+};
+} // namespace ntl

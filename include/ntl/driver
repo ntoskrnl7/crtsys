@@ -1,0 +1,44 @@
+/**
+ * @file driver
+ * @author jungkwang.lee (ntoskrnl7@google.com)
+ * @brief
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authoers.
+ *
+ */
+#pragma once
+
+#include "status"
+
+#include <functional>
+#include <string>
+
+namespace ntl {
+class driver {
+public:
+  friend class driver_unload_invoker;
+
+  using unload_routine = std::function<void()>;
+  driver(PDRIVER_OBJECT object) : object_(object) {}
+
+  void on_unload(unload_routine unload_routine) {
+    unload_routine_ = unload_routine;
+  }
+
+  PDRIVER_OBJECT get() const { return object_; }
+
+private:
+  void unload() {
+    if (unload_routine_)
+      unload_routine_();
+  }
+
+private:
+  PDRIVER_OBJECT object_;
+  unload_routine unload_routine_;
+};
+
+#define NTL_API __stdcall
+
+status NTL_API main(driver &driver, const std::wstring &registry_path);
+} // namespace ntl
