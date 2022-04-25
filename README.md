@@ -47,7 +47,7 @@ C/C++ Runtime library for system file (Windows Kernel Driver)
       - 커널에서만 존재하는 매커니즘에 대한 템플릿 라이브러리를 제공하기 때문에, 실제 드라이버 제작 시에는 STL을 보다도 더 애용할만한 기능이 많음
     - 높은 품질의 코드
   - 단점
-    - Microsoft STL 헤더를 사용하기 힘든 구조로 프로젝트가 구성됨
+    - Microsoft STL을 사용하는 것을 고려해서 작성된것으로 보이나 실제로 Microsoft STL을 사용하도록 변경하는 것에 어려움을 느낌 (오탈자 및 ktl 만 사용하는 코드가 생각보다 많았음)
     - 러시아어 주석인데 파일이 UTF8+BOM로 인코딩되어있지 않아서 러시아 외 국가 환경에서 빌드를 실패함
     - x86 미지원
 
