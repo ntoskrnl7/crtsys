@@ -1,0 +1,190 @@
+/**
+ * @file expand_stack
+ * @author jungkwang.lee (ntoskrnl7@google.com)
+ * @brief KeExpandKernelStackAndCalloutEx Helper features.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authoers.
+ *
+ */
+#pragma once
+
+// clang-format off
+#if defined(_WDM_INCLUDED_)
+#ifdef _X86_
+#define KERNEL_LARGE_STACK_SIZE 61440
+#endif
+#ifdef _AMD64_
+#define KERNEL_LARGE_STACK_SIZE 0x12000
+#endif
+#ifdef _ARM_
+#define KERNEL_LARGE_STACK_SIZE   0xF000
+#endif
+#ifdef _ARM64_
+#define KERNEL_LARGE_STACK_SIZE   0x12000
+#endif
+#define MAXIMUM_EXPANSION_SIZE (KERNEL_LARGE_STACK_SIZE - (PAGE_SIZE / 2))
+EXTERN_C_START
+typedef
+_IRQL_requires_same_
+_Function_class_(EXPAND_STACK_CALLOUT)
+VOID
+(NTAPI EXPAND_STACK_CALLOUT) (
+    _In_opt_ PVOID Parameter
+    );
+
+typedef EXPAND_STACK_CALLOUT *PEXPAND_STACK_CALLOUT;
+
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+_Must_inspect_result_
+_IRQL_requires_min_(PASSIVE_LEVEL)
+_IRQL_requires_max_(DISPATCH_LEVEL)
+__drv_reportError("DISPATCH_LEVEL is only supported on Windows 7 or later.")
+NTKERNELAPI
+NTSTATUS
+KeExpandKernelStackAndCalloutEx (
+    _In_ PEXPAND_STACK_CALLOUT Callout,
+    _In_opt_ PVOID Parameter,
+    _In_ SIZE_T Size,
+    _In_ BOOLEAN Wait,
+    _In_opt_ PVOID Context
+    );
+EXTERN_C_END
+#endif
+#else
+#include <ntddk.h>
+#endif
+// clang-format on
+
+#include "except"
+#include <memory>
+#include <stdexcept>
+#include <tuple>
+
+namespace ntl {
+
+namespace internal {
+namespace expand_stack {
+inline ntl::except make_exception(NTSTATUS status) {
+  const char *message;
+  switch (status) {
+  case STATUS_INVALID_PARAMETER_3:
+    message = "The stack_size parameter is greater than MAXIMUM_EXPANSION_SIZE";
+    break;
+  case STATUS_INVALID_PARAMETER_4:
+    message = "The routine was called at IRQL = DISPATCH_LEVEL";
+    break;
+  case STATUS_NO_MEMORY:
+    message = "Not enough memory is available to expand the stack.";
+    break;
+  case STATUS_STACK_OVERFLOW:
+    message = "The stack, if expanded, would exceed the operating "
+              "system's internal limits on stack space.";
+    break;
+  default:
+    message = "Unknown error";
+    break;
+  }
+  return std::move(ntl::except(status, message));
+}
+} // namespace expand_stack
+} // namespace internal
+
+static const size_t expand_stack_size_max = MAXIMUM_EXPANSION_SIZE;
+
+struct expand_stack_options {
+  expand_stack_options()
+      : stack_size_(expand_stack_size_max), wait_(true),
+        ignore_failure_(false) {}
+  expand_stack_options(size_t stack_size)
+      : stack_size_(stack_size), wait_(true), ignore_failure_(false) {
+    validate();
+  }
+  expand_stack_options(size_t stack_size, bool wait)
+      : stack_size_(stack_size), wait_(wait), ignore_failure_(false) {
+    validate();
+  }
+  expand_stack_options(size_t stack_size, bool wait, bool ignore_failure)
+      : stack_size_(stack_size), wait_(wait), ignore_failure_(ignore_failure) {
+    validate();
+  }
+
+  expand_stack_options &stack_size(size_t stack_size) {
+    stack_size_ = stack_size;
+    validate();
+    return *this;
+  }
+  expand_stack_options &wait(bool wait) {
+    wait_ = wait;
+    return *this;
+  }
+  expand_stack_options &ignore_failure(bool ignore_failure) {
+    ignore_failure_ = ignore_failure;
+    return *this;
+  }
+
+  void validate() const {
+    if (stack_size_ > expand_stack_size_max)
+      throw std::invalid_argument(
+          "The stack_size parameter is greater than MAXIMUM_EXPANSION_SIZE.");
+  }
+  size_t stack_size_;
+  bool wait_;
+  bool ignore_failure_;
+};
+
+template <class Fn, class... Args>
+inline std::invoke_result_t<Fn, Args...>
+expand_stack(expand_stack_options &&opts, Fn &&f, Args &&...args) {
+  struct context_t {
+    context_t(Fn &&f, Args &&...args)
+        : f(f), args(std::make_tuple(std::move(args)...)) {}
+    Fn &f;
+    std::tuple<Args...> args;
+  };
+  context_t ctx(std::forward<Fn &&>(f), std::forward<Args &&>(args)...);
+
+  using return_type = std::invoke_result_t<Fn, Args...>;
+  if constexpr (std::is_void_v<return_type>) {
+    NTSTATUS status = KeExpandKernelStackAndCalloutEx(
+        [](void *ptr) {
+          auto &ctx = *(context_t *)ptr;
+          std::apply(ctx.f, ctx.args);
+        },
+        &ctx, opts.stack_size_, opts.wait_, NULL);
+    if (NT_SUCCESS(status))
+      return;
+    if (opts.ignore_failure_)
+      std::apply(ctx.f, std::move(ctx.args));
+    throw internal::expand_stack::make_exception(status);
+  } else {
+    std::tuple<context_t *, std::unique_ptr<return_type>> context_with_ret =
+        std::make_tuple(&ctx, nullptr);
+    NTSTATUS status = KeExpandKernelStackAndCalloutEx(
+        [](void *ptr) {
+          auto context_with_ret =
+              (std::tuple<context_t *, std::unique_ptr<return_type>> *)ptr;
+          auto &ctx = *std::get<0>(*context_with_ret);
+          std::get<1>(*context_with_ret) = std::make_unique<return_type>(
+              std::move(std::apply(ctx.f, ctx.args)));
+        },
+        &context_with_ret, opts.stack_size_, opts.wait_, NULL);
+    if (NT_SUCCESS(status))
+      return std::move(*std::get<1>(context_with_ret));
+    if (opts.ignore_failure_)
+      return std::apply(ctx.f, ctx.args);
+    throw internal::expand_stack::make_exception(status);
+  }
+}
+
+template <class Fn, class... Args>
+inline std::invoke_result_t<Fn, Args...> expand_stack(Fn &&f, Args &&...args) {
+  using return_type = std::invoke_result_t<Fn, Args...>;
+  if constexpr (std::is_void_v<return_type>)
+    expand_stack<Fn, Args...>(expand_stack_options{}, std::forward<Fn &&>(f),
+                              std::forward<Args &&>(args)...);
+  else
+    return expand_stack<Fn, Args...>(expand_stack_options{},
+                                     std::forward<Fn &&>(f),
+                                     std::forward<Args &&>(args)...);
+}
+} // namespace ntl
