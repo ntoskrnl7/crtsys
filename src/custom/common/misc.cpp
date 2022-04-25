@@ -33,8 +33,6 @@ RoInitialize (
 
 #if !CRTSYS_USE_LIBCNTPR
 
-extern "C" int _fltused{0x9875};
-
 //
 //
 //

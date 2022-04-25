@@ -19,6 +19,7 @@ public:
   friend class driver_unload_invoker;
 
   using unload_routine = std::function<void()>;
+
   driver(PDRIVER_OBJECT object) : object_(object) {}
 
   void on_unload(unload_routine unload_routine) {
@@ -38,7 +39,9 @@ private:
   unload_routine unload_routine_;
 };
 
-#define NTL_API __stdcall
-
-status NTL_API main(driver &driver, const std::wstring &registry_path);
+#if _X86_
+// warning C4007: 'main' : must be '__cdecl'
+#pragma warning(disable:4007)
+#endif
+status main(driver &driver, const std::wstring &registry_path);
 } // namespace ntl

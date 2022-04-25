@@ -1,22 +1,31 @@
+//
 // https://github.com/SpoilerScriptsGroup/RetrievAL/blob/develop/SpoilerAL-winmm.dll/crt/math/ftol3.c
+//
 #if defined(_X86_)
 #define _CRT_SECURE_NO_WARNINGS
-#include <windows.h>
-#include <stdint.h>
 #include <float.h>
+#include <stdint.h>
+#include <windows.h>
 #include <xmmintrin.h>
 
-static const double   Int32ToUInt32[2] = { 0, (UINT64_C(1) << 32)/*0x41F0000000000000*/ };
+static const double Int32ToUInt32[2] = {
+    0, (UINT64_C(1) << 32) /*0x41F0000000000000*/};
 #define DP2to32 (Int32ToUInt32 + 8)
-static const uint64_t MantissaMask     = 0x000FFFFFFFFFFFFF;
-static const uint64_t IntegerBit       = 0x0010000000000000;
-static const double   MinInt64         = (double)INT64_MIN;                         // 0xC3E0000000000000
-static const double   MaxInt64         = (double)INT64_MAX;                         // 0x43E0000000000000
-static const double   MaxUInt64        = (double)UINT64_MAX;                        // 0x43F0000000000000
-static const double   MaxFP32          = FLT_MAX + (double)FLT_MAX / 0x01FFFFFE;    // 0x47EFFFFFF0000000 ... 0x1.FFFFFFp+127 (C++17)
-static const double   MinFP32          = FLT_MIN - (double)FLT_MIN / 0x02000000;    // 0x380FFFFFF0000000 ... 0x1.FFFFFFp-127 (C++17)
-static const double   MinSubInexact    = 1.0 * 0x8000000000000000u * 0x01000000;    // 0x4560000000000000 ... 0x1.000000p+087 (C++17)
-static const uint32_t i1075            = 1075;
+static const uint64_t MantissaMask = 0x000FFFFFFFFFFFFF;
+static const uint64_t IntegerBit = 0x0010000000000000;
+static const double MinInt64 = (double)INT64_MIN;   // 0xC3E0000000000000
+static const double MaxInt64 = (double)INT64_MAX;   // 0x43E0000000000000
+static const double MaxUInt64 = (double)UINT64_MAX; // 0x43F0000000000000
+static const double MaxFP32 =
+    FLT_MAX + (double)FLT_MAX /
+                  0x01FFFFFE; // 0x47EFFFFFF0000000 ... 0x1.FFFFFFp+127 (C++17)
+static const double MinFP32 =
+    FLT_MIN - (double)FLT_MIN /
+                  0x02000000; // 0x380FFFFFF0000000 ... 0x1.FFFFFFp-127 (C++17)
+static const double MinSubInexact =
+    1.0 * 0x8000000000000000u *
+    0x01000000; // 0x4560000000000000 ... 0x1.000000p+087 (C++17)
+static const uint32_t i1075 = 1075;
 
 void __cdecl _ftoui3();
 void __cdecl _ftoul3();
@@ -35,62 +44,56 @@ static void __cdecl ftol3_except();
 static void __cdecl dtol3_NaN();
 
 #pragma warning(push)
-#pragma warning(disable:4005)
-#define EXCEPTION_FLT_INEXACT_RESULT    0xC000008F
+#pragma warning(disable : 4005)
+#define EXCEPTION_FLT_INEXACT_RESULT 0xC000008F
 #define EXCEPTION_FLT_INVALID_OPERATION 0xC0000090
-#define EXCEPTION_FLT_OVERFLOW          0xC0000091
-#define EXCEPTION_FLT_UNDERFLOW         0xC0000093
+#define EXCEPTION_FLT_OVERFLOW 0xC0000091
+#define EXCEPTION_FLT_UNDERFLOW 0xC0000093
 #pragma warning(pop)
 
-#pragma warning(disable:4102 4414)
+#pragma warning(disable : 4102 4414)
 
-__declspec(naked) void __cdecl _ftoui3()
-{
-	__asm
-	{
+__declspec(naked) void __cdecl _ftoui3() {
+  __asm
+  {
 		mov     ecx, 1
 		movsd   xmm5, qword ptr [MaxInt64]
 		jmp     ftol3_NaN
-	}
+  }
 }
 
-__declspec(naked) void __cdecl _ftoul3()
-{
-	__asm
-	{
+__declspec(naked) void __cdecl _ftoul3() {
+  __asm
+  {
 		mov     ecx, 2
 		movsd   xmm5, qword ptr [MaxUInt64]
 		jmp     ftol3_NaN
-	}
+  }
 }
 
-__declspec(naked) void __cdecl _ftol3()
-{
-	__asm
-	{
+__declspec(naked) void __cdecl _ftol3() {
+  __asm
+  {
 		mov     ecx, 3
 		movsd   xmm5, qword ptr [MaxInt64]
 		jmp     ftol3_NaN
-	}
+  }
 }
 
-__declspec(naked) static void __cdecl ftol3_NaN()
-{
-	__asm
-	{
+__declspec(naked) static void __cdecl ftol3_NaN() {
+  __asm
+  {
 		movd    eax, xmm0
 		and     eax, 7FFFFFFFH
 		cmp     eax, 7F800000H
 		jae     ftol3_arg_error
 		cvtss2sd xmm0, xmm0
 		jmp     ftol3_work
-	}
+  }
 }
 
-__declspec(naked) static void __cdecl ftol3_work()
-{
-	__asm
-	{
+__declspec(naked) static void __cdecl ftol3_work() {
+  __asm {
 		cmp     ecx, 2
 		jne     ftol3_non_ftoul3
 		movsd   xmm2, qword ptr [MinSubInexact]
@@ -129,13 +132,11 @@ __declspec(naked) static void __cdecl ftol3_work()
 		xor     eax, eax
 		mov     edx, 80000000H
 		ret
-	}
+  }
 }
 
-__declspec(naked) static void __cdecl ftol3_common()
-{
-	__asm
-	{
+__declspec(naked) static void __cdecl ftol3_common() {
+  __asm {
 		xorpd   xmm6, xmm6
 		comisd  xmm1, xmm6
 		je      ftol3_exact
@@ -186,26 +187,23 @@ __declspec(naked) static void __cdecl ftol3_common()
 		psrldq  xmm6, 4
 		movd    edx, xmm6
 		ret
-	}
+  }
 }
 
-__declspec(naked) static void __cdecl ftol3_arg_error()
-{
-	__asm
-	{
+__declspec(naked) static void __cdecl ftol3_arg_error() {
+  __asm
+  {
 		mov     ecx, EXCEPTION_FLT_INVALID_OPERATION
 		mov     edx, _MM_EXCEPT_INVALID
 		call    ftol3_except
 		xor     eax, eax
 		mov     edx, 80000000H
 		ret
-	}
+  }
 }
 
-__declspec(naked) static void __cdecl ftol3_except()
-{
-	__asm
-	{
+__declspec(naked) static void __cdecl ftol3_except() {
+  __asm {
 		sub     esp, 32
 		xor     eax, eax
 		fstenv  [esp]
@@ -240,43 +238,38 @@ __declspec(naked) static void __cdecl ftol3_except()
 	ftol3_eh_cont:
 		add     esp, 32
 		ret
-	}
+  }
 }
 
-__declspec(naked) void __cdecl _dtoui3()
-{
-	__asm
-	{
+__declspec(naked) void __cdecl _dtoui3() {
+  __asm
+  {
 		mov     ecx, 1
 		movsd   xmm5, qword ptr [MaxInt64]
 		jmp     dtol3_NaN
-	}
+  }
 }
 
-__declspec(naked) void __cdecl _dtoul3()
-{
-	__asm
-	{
+__declspec(naked) void __cdecl _dtoul3() {
+  __asm
+  {
 		mov     ecx, 4
 		movsd   xmm5, qword ptr [MaxUInt64]
 		jmp     dtol3_NaN
-	}
+  }
 }
 
-__declspec(naked) void __cdecl _dtol3()
-{
-	__asm
-	{
+__declspec(naked) void __cdecl _dtol3() {
+  __asm
+  {
 		mov     ecx, 5
 		movsd   xmm5, qword ptr [MaxInt64]
 		jmp     dtol3_NaN
-	}
+  }
 }
 
-__declspec(naked) static void __cdecl dtol3_NaN()
-{
-	__asm
-	{
+__declspec(naked) static void __cdecl dtol3_NaN() {
+  __asm {
 		movdqa  xmm1, xmm0
 		psrldq  xmm1, 4
 		movd    eax, xmm1
@@ -355,13 +348,11 @@ __declspec(naked) static void __cdecl dtol3_NaN()
 		comisd  xmm0, xmm2
 		jb      ftol3_arg_error
 		jmp     ftol3_common
-	}
+  }
 }
 
-__declspec(naked) void __cdecl _ultod3()
-{
-	__asm
-	{
+__declspec(naked) void __cdecl _ultod3() {
+  __asm {
 		xorps   xmm0, xmm0
 		cvtsi2sd xmm0, ecx
 		shr     ecx, 31
@@ -377,13 +368,12 @@ __declspec(naked) void __cdecl _ultod3()
 
 	ultod3_uint32:
 		rep ret
-	}
+  }
 }
 
-__declspec(naked) void __cdecl _ltod3()
-{
-	__asm
-	{
+__declspec(naked) void __cdecl _ltod3() {
+  __asm
+  {
 		xorps   xmm1, xmm1
 		cvtsi2sd xmm1, edx
 		xorps   xmm0, xmm0
@@ -393,6 +383,6 @@ __declspec(naked) void __cdecl _ltod3()
 		addsd   xmm0, qword ptr [Int32ToUInt32 + ecx * 8]
 		addsd   xmm0, xmm1
 		ret
-	}
+  }
 }
 #endif

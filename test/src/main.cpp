@@ -16,20 +16,18 @@ void test_all();
 
 #if CRTSYS_USE_NTL_MAIN
 #include <ntl/driver>
-namespace ntl {
-status NTL_API main(ntl::driver &driver, const std::wstring &registry_path) {
 
+ntl::status ntl::main(ntl::driver &driver, const std::wstring &registry_path) {
   KdBreakPoint();
 
   test_all();
 
   driver.on_unload([registry_path]() {
-    printf("unload (registry_path : %ws)\n", registry_path.c_str());
+    DbgPrint("unload (registry_path : %ws)\n", registry_path.c_str());
   });
 
   return status::ok();
 }
-} // namespace ntl
 
 #else
 // clang-format off

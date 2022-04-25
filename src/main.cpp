@@ -1,4 +1,6 @@
-﻿#include <Ldk/windows.h>
+﻿// clang-format off
+
+#include <Ldk/windows.h>
 
 #include <corecrt_startup.h>
 #include <vcruntime_internal.h>

@@ -1,7 +1,7 @@
 #include <wdm.h>
 
 #if !DBG
-#pragma warning(disable:4702)
+#pragma warning(disable : 4702)
 #endif
 
 #include <stdio.h>
@@ -9,7 +9,7 @@
   (DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, __VA_ARGS__))
 
 //
-// https://en.cppreference.com/w/cpp/language/throw
+// https://en.cppreference.com/w/cpp/language/throw#Example
 //
 #include <iostream>
 #include <stdexcept>
@@ -51,11 +51,35 @@ void throw_test() try {
   // unwinding destroys the A base subobject
   C c;
 } catch (const std::exception &e) {
-  printf("main() failed to create C with: %s", e.what());
+  printf("main() failed to create C with: %s\n", e.what());
 }
 
 //
-// https://en.cppreference.com/w/cpp/thread/condition_variable
+// https://en.cppreference.com/w/cpp/chrono#Example
+//
+#include <chrono>
+#include <iostream>
+
+long fibonacci(unsigned n) {
+  if (n < 2)
+    return n;
+  return fibonacci(n - 1) + fibonacci(n - 2);
+}
+
+void chrono_test() {
+  auto start = std::chrono::steady_clock::now();
+  // std::cout << "f(42) = " << fibonacci(42) << '\n';
+  printf("f(40) = %d\n", fibonacci(40));
+  auto end = std::chrono::steady_clock::now();
+  // std::chrono::duration<double> elapsed_seconds = end - start;
+  // std::cout << "elapsed time: " << elapsed_seconds.count() << "s\n";
+  printf("elapsed time: %dms\n",
+         std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
+             .count());
+}
+
+//
+// https://en.cppreference.com/w/cpp/thread/condition_variable#Example
 //
 #include <condition_variable>
 #include <iostream>
@@ -111,7 +135,7 @@ void condition_variable_test() {
 }
 
 //
-// https://en.cppreference.com/w/cpp/thread/mutex
+// https://en.cppreference.com/w/cpp/thread/mutex#Example
 //
 #include <chrono>
 #include <iostream>
@@ -145,7 +169,7 @@ void mutex_test() {
 }
 
 //
-// https://en.cppreference.com/w/cpp/thread/shared_mutex
+// https://en.cppreference.com/w/cpp/thread/shared_mutex#Example
 //
 #include <iostream>
 #include <mutex>
@@ -199,7 +223,7 @@ void shared_mutex_test() {
 }
 
 //
-// https://en.cppreference.com/w/cpp/thread/future
+// https://en.cppreference.com/w/cpp/thread/future#Example
 //
 #include <future>
 #include <iostream>
@@ -227,4 +251,133 @@ void future_test() {
   printf("Done!\nResults are: %d, %d, %d\n", f1.get(), f2.get(), f3.get());
 
   t.join();
+}
+
+//
+// https://en.cppreference.com/w/cpp/thread/promise#Example
+//
+#include <chrono>
+#include <future>
+#include <iostream>
+#include <numeric>
+#include <thread>
+#include <vector>
+
+void accumulate(std::vector<int>::iterator first,
+                std::vector<int>::iterator last,
+                std::promise<int> accumulate_promise) {
+  int sum = std::accumulate(first, last, 0);
+  accumulate_promise.set_value(sum); // Notify future
+}
+
+void do_work(std::promise<void> barrier) {
+  std::this_thread::sleep_for(std::chrono::seconds(1));
+  barrier.set_value();
+}
+
+void promise_test() {
+  // Demonstrate using promise<int> to transmit a result between threads.
+  std::vector<int> numbers = {1, 2, 3, 4, 5, 6};
+  std::promise<int> accumulate_promise;
+  std::future<int> accumulate_future = accumulate_promise.get_future();
+  std::thread work_thread(accumulate, numbers.begin(), numbers.end(),
+                          std::move(accumulate_promise));
+
+  // future::get() will wait until the future has a valid result and retrieves
+  // it. Calling wait() before get() is not needed
+  // accumulate_future.wait();  // wait for result
+  // std::cout << "result=" << accumulate_future.get() << '\n';
+  printf("result=%d\n", accumulate_future.get());
+  work_thread.join(); // wait for thread completion
+
+  // Demonstrate using promise<void> to signal state between threads.
+  std::promise<void> barrier;
+  std::future<void> barrier_future = barrier.get_future();
+  std::thread new_work_thread(do_work, std::move(barrier));
+  barrier_future.wait();
+  new_work_thread.join();
+}
+
+//
+// https://en.cppreference.com/w/cpp/thread/packaged_task#Example
+//
+#include <cmath>
+#include <functional>
+#include <future>
+#include <iostream>
+#include <thread>
+
+// unique function to avoid disambiguating the std::pow overload set
+int f(int x, int y) { return (int)std::pow(x, y); }
+
+void task_lambda() {
+  std::packaged_task<int(int, int)> task(
+      [](int a, int b) { return (int)std::pow(a, b); });
+  std::future<int> result = task.get_future();
+
+  task(2, 9);
+
+  // std::cout << "task_lambda:\t" << result.get() << '\n';
+  printf("task_lambda:\t%d\n", result.get());
+}
+
+void task_bind() {
+  std::packaged_task<int()> task(std::bind(f, 2, 11));
+  std::future<int> result = task.get_future();
+
+  task();
+
+  // std::cout << "task_bind:\t" << result.get() << '\n';
+  printf("task_bind:\t%d\n", result.get());
+}
+
+void task_thread() {
+  std::packaged_task<int(int, int)> task(f);
+  std::future<int> result = task.get_future();
+
+  std::thread task_td(std::move(task), 2, 10);
+  task_td.join();
+
+  // std::cout << "task_thread:\t" << result.get() << '\n';
+  printf("task_thread:\t%d\n", result.get());
+}
+
+void packaged_task() {
+  task_lambda();
+  task_bind();
+  task_thread();
+}
+
+//
+// https://en.cppreference.com/w/cpp/language/try_catch#Example
+//
+#include <iostream>
+#include <vector>
+
+void try_catch_test() {
+  try {
+    printf("Throwing an integer exception...\n");
+    // std::cout << "Throwing an integer exception...\n";
+    throw 42;
+  } catch (int i) {
+    printf(" the integer exception was caught, with value: %d\n", i);
+    // std::cout << " the integer exception was caught, with value: " << i
+    // << '\n';
+  }
+
+  try {
+    printf("Creating a vector of size 5... \n");
+    // std::cout << "Creating a vector of size 5... \n";
+    std::vector<int> v(5);
+    printf("Accessing the 11th element of the vector...\n");
+    // std::cout << "Accessing the 11th element of the vector...\n";
+    printf("%d", v.at(10));
+    // std::cout << v.at(10);          // vector::at() throws std::out_of_range
+  } catch (const std::exception &e) // caught by reference to base
+  {
+    printf("a standard exception was caught, with message '%s'\n", e.what());
+    // std::cout << " a standard exception was caught, with message '" <<
+    // e.what()
+    //           << "'\n";
+  }
 }

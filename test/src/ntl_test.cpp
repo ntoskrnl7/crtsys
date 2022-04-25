@@ -4,12 +4,6 @@
 
 bool ntl_expand_stack_test() {
 
-//   try {
-//       ntl::expand_stack(ntl::expand_stack_options(ntl::expand_stack_options ))
-//   } catch (const std::exception &e) {
-//     // std::cerr << e.what() << '\n';
-//   }
-
   long result = 0;
   ntl::expand_stack(
       [&result](int i, long l, double d) { result = (long)(i + l + d); }, 1, 2,

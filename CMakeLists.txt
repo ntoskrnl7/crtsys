@@ -58,10 +58,10 @@ if (UCXXRT_ENABLED)
       ${ucxxrt_SOURCE_DIR}/src/x64/*.asm
     )
   elseif("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "Win32")
-  file(GLOB PLATFORM_SOURCE_FILES
-      ${ucxxrt_SOURCE_DIR}/src/i386/*.cpp
-      ${ucxxrt_SOURCE_DIR}/src/i386/*.asm
-      )
+    file(GLOB PLATFORM_SOURCE_FILES
+        ${ucxxrt_SOURCE_DIR}/src/i386/*.cpp
+        ${ucxxrt_SOURCE_DIR}/src/i386/*.asm
+        )
   endif()
 
   list(APPEND SOURCE_FILES ${PLATFORM_SOURCE_FILES})
@@ -70,6 +70,8 @@ if (UCXXRT_ENABLED)
   list(APPEND SOURCE_FILES
     src/main.cpp
     src/custom/common/misc.cpp
+    src/custom/common/math/fpconst.c
+    src/custom/common/math/pow.c
     src/custom/msvc/common/crt/src/stl/winapisupp.cpp
     )
 else()
@@ -80,12 +82,17 @@ else()
     src/custom/common/*.cpp
     src/custom/common/*.c
     src/custom/common/*/*.cpp
-    src/custom/common/*/*.c
 
     # ucrt
     src/custom/ucrt/common/*/*.cpp
     src/custom/ucrt/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/*.cpp
     )
+  if("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "Win32")
+    file(GLOB MATH_SOURCE_FILES
+      src/custom/common/math/*.c
+      )
+    list(APPEND SOURCE_FILES ${MATH_SOURCE_FILES})
+  endif()
 endif()
 
 wdk_add_library(
@@ -132,6 +139,13 @@ target_compile_options(crtsys PUBLIC /Zc:threadSafeInit-)
 if (UCXXRT_ENABLED AND "${CMAKE_VS_PLATFORM_NAME}" STREQUAL "x64")
   # VS2017 Build Tools
   # ntoskrnl.lib(ntoskrnl.exe) : error LNK2005: RtlRaiseException already defined in Ldk.lib(except.obj).
+  target_link_options(crtsys PUBLIC "/FORCE:MULTIPLE")
+endif()
+
+if (CRTSYS_USE_LIBCNTPR AND "${CMAKE_VS_PLATFORM_NAME}" STREQUAL "x64")
+  # 10.0.17763.0
+  # 10.0.22000.0
+  # km/x64/libcntpr.lib(fpexcept.obj) : error LNK2005: RaiseException already defined in Ldk.lib(errhandlingapi.obj)
   target_link_options(crtsys PUBLIC "/FORCE:MULTIPLE")
 endif()
 
