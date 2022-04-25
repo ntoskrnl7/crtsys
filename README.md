@@ -33,7 +33,7 @@ C/C++ Runtime library for system file (Windows Kernel Driver)
   - 단점
     - 현재까지는 Win32 API와 연관성이 적은 std::string, std::vector 클래스 등 자료형이나 자료구조 관련 기능만 지원됨.
     - vcxproj이 개발 환경에 종속되기 때문에 VS 버전이 바뀌면 일일이 수작업으로 수정해줘야함.
-    - Microsoft의 x86 예외처리 시 [throw](https://en.cppreference.com/w/cpp/language/throw#Example)를 처리하는 중 Hang이 발생함
+    - x86에서 [이 코드](https://en.cppreference.com/w/cpp/language/throw#Example)를 실행하는 중 Hang이 발생함
     - Microsoft의 소스 코드를 그대로 복사하여 상단에 자신의 라이센스 주석만 넣어서 프로젝트에 포함시킨것으로 보이며 라이센스 문제에서 자유롭지 못해보임
       - 라이센스를 변조하는 것과 **(Microsoft CRT 및 STL 소스 코드를 재배포하는 행위는 허가되지 않은것으로 파악됨)**
 
