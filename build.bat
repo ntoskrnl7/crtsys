@@ -1,38 +1,22 @@
-@ECHO OFF
+@REM build.bat "PATH" "x86 | x64" [Debug (default) | Release]
+@REM build.bat "PATH" "2017 | 2019 | 2022" "x86 | x64"
+@REM build.bat "PATH" "2017 | 2019 | 2022" "x86 | x64" [Debug (default) | Release]
 
-CD test
+@ECHO OFF
 
 SETLOCAL ENABLEDELAYEDEXPANSION
 
-IF "%1" == "Win32" (
-    SET ARCH=Win32
-    SET ARCH_NAME=x86
-)
-IF "%1" == "x86" (
-    SET ARCH=Win32
-    SET ARCH_NAME=x86
-)
-IF "%1" == "Win64" (
-    SET ARCH=x64
-    SET ARCH_NAME=x64
-)
-IF "%1" == "x64" (
-    SET ARCH=x64
-    SET ARCH_NAME=x64
-)
-
-if "%2" == "" (
-:DEFAULT_GENERATOR 
-    ECHO cmake -S . -B build_!ARCH_NAME! -A !ARCH! -DCMAKE_CXX_FLAGS=/MP
-    cmake -S . -B build_!ARCH_NAME! -A !ARCH! -DCMAKE_CXX_FLAGS=/MP
-    ECHO cmake --build build_!ARCH_NAME!
-    cmake --build build_!ARCH_NAME!
-) ELSE (
-    IF "%2" == "Win32" (
+IF EXIST "%1/CMakeLists.txt" (
+        SET WORK_PATH=%1
+    IF "%2" == "x86" (
         SET ARCH=Win32
         SET ARCH_NAME=x86
     )
-    IF "%2" == "x86" (
+    IF "%2" == "x64" (
+        SET ARCH=x64
+        SET ARCH_NAME=x64
+    )
+    IF "%2" == "Win32" (
         SET ARCH=Win32
         SET ARCH_NAME=x86
     )
@@ -40,29 +24,77 @@ if "%2" == "" (
         SET ARCH=x64
         SET ARCH_NAME=x64
     )
-    IF "%2" == "x64" (
-        SET ARCH=x64
-        SET ARCH_NAME=x64
+    IF /I "%3" == "Debug" (
+        SET CONFIG=Debug
     )
-    SET GENERATOR=
-    IF %1 == 2017 (
-        SET GENERATOR="Visual Studio 15 2017"
+    IF /I "%3" == "Release" (
+        SET CONFIG=Release
     )
-    IF %1 == 2019 (
-        SET GENERATOR="Visual Studio 16 2019"
-    )
-    IF %1 == 2022 (
-        SET GENERATOR="Visual Studio 17 2022"
-    )
-    if "!GENERATOR!" == "" (
-        ECHO Unknown Target [%1]
-        GOTO DEFAULT_GENERATOR
-    )
-    ECHO cmake -S . -B build_%1_!ARCH_NAME! -A !ARCH! -DCMAKE_CXX_FLAGS=/MP -G !GENERATOR!
-    cmake -S . -B build_%1_!ARCH_NAME! -A !ARCH! -DCMAKE_CXX_FLAGS=/MP -G !GENERATOR!
-    ECHO cmake --build build_%1_!ARCH_NAME!
-    cmake --build build_%1_!ARCH_NAME!
-)
+    SET BUILD_PATH=!WORK_PATH!/build_!ARCH_NAME!
 
+    IF /I "!ARCH!" == "" (
+        IF %2 == 2017 (
+            SET GENERATOR="Visual Studio 15 2017"
+            SET VS_VERSION=2017
+        )
+        IF %2 == 2019 (
+            SET GENERATOR="Visual Studio 16 2019"
+            SET VS_VERSION=2019
+        )
+        IF %2 == 2022 (
+            SET GENERATOR="Visual Studio 17 2022"
+            SET VS_VERSION=2022
+        )
+        IF /I "%3" == "x86" (
+            SET ARCH=Win32
+            SET ARCH_NAME=x86
+        )
+        IF /I "%3" == "x64" (
+            SET ARCH=x64
+            SET ARCH_NAME=x64
+        )
+        IF /I "%3" == "Win32" (
+            SET ARCH=Win32
+            SET ARCH_NAME=x86
+        )
+        IF /I "%3" == "Win64" (
+            SET ARCH=x64
+            SET ARCH_NAME=x64
+        )
+        IF "!VS_VERSION!" == "" (
+            SET BUILD_PATH=!WORK_PATH!/build_!ARCH_NAME!
+        ) ELSE (
+            SET BUILD_PATH=!WORK_PATH!/build_!VS_VERSION!_!ARCH_NAME!
+        )
+        IF /I "%4" == "Debug" (
+            SET CONFIG=Debug
+        )
+        IF /I "%4" == "Release" (
+            SET CONFIG=Release
+        )
+    )
+
+    IF NOT "!ARCH!" == "" (
+        IF "!GENERATOR!" == "" (
+            ECHO Unsupported Visual Studio.
+            ECHO Use Visual Studio set as CMake default generator.
+            ECHO cmake -S !WORK_PATH! -B !BUILD_PATH! -A !ARCH! -DCMAKE_CXX_FLAGS=/MP
+            cmake -S !WORK_PATH! -B !BUILD_PATH! -A !ARCH! -DCMAKE_CXX_FLAGS=/MP
+        ) ELSE (
+            ECHO cmake -S !WORK_PATH! -B !BUILD_PATH! -A !ARCH! -DCMAKE_CXX_FLAGS=/MP -G !GENERATOR!
+            cmake -S !WORK_PATH! -B !BUILD_PATH! -A !ARCH! -DCMAKE_CXX_FLAGS=/MP -G !GENERATOR!
+        )
+        IF "!CONFIG!" == "" (
+            ECHO cmake --build !BUILD_PATH!
+            cmake --build !BUILD_PATH!
+        ) ELSE (
+            ECHO cmake --build !BUILD_PATH! --config !CONFIG!
+            cmake --build !BUILD_PATH! --config !CONFIG!
+        )
+    ) ELSE (
+        ECHO Unsupported architecture.
+    )
+) ELSE (
+    ECHO "%1/CMakeLists.txt not exist"
+)
 ENDLOCAL
-CD ..

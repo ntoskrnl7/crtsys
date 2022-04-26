@@ -148,6 +148,17 @@ git clone https://github.com/ntoskrnl7/crtsys
 cd crtsys
 cmake -S . -B build
 cmake --build build --config Release
+cmake -S . -B build_x86 -A Win32
+cmake --build build_x86 --config Release
+```
+
+혹은
+
+```Batch
+git clone https://github.com/ntoskrnl7/crtsys
+cd crtsys
+build.bat . x86 release
+build.bat . x64 release
 ```
 
 ## Test
@@ -159,9 +170,28 @@ cmake --build build --config Release
     cd crtsys/test
     cmake -S . -B build
     cmake --build build
+    cmake -S . -B build_x86 -A Win32
+    cmake --build build_x86
     ```
 
-2. build/Debug/crtsys_test.sys를 설치 및 로드하시기 바랍니다.
+    혹은
+
+    ```Batch
+    git clone https://github.com/ntoskrnl7/crtsys
+    cd crtsys/test
+    build.bat . x86
+    build.bat . x64
+    ```
+
+    혹은 아래 명령을 수행하시면 지원되는 모든 VS에 대해서 Debug, Release 구성을 모두 빌드합니다.
+
+    ```Batch
+    git clone https://github.com/ntoskrnl7/crtsys
+    cd crtsys/test
+    build_all.bat test
+    ```
+
+2. build/Debug/crtsys_test.sys를 설치 및 로드하시기 바랍니다. (x86은 build_x86/Debug/crtsys_test.sys)
 3. 정상적으로 로드 및 언로드가 되는지 확인하시기 바랍니다.
 
 ## Usage
