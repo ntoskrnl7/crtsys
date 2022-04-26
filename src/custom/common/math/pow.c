@@ -1,7 +1,18 @@
+#pragma warning(disable : 4100 4210)
+
+#include <math.h>
+// error C2169: 'pow' : intrinsic function, cannot be defined
+#pragma function(pow)
+
+// error LNK2019: unresolved external symbol __libm_sse2_pow_precise referenced
+// in function double __stdcall pow<int,int,0>(int,int)
+EXTERN_C double __cdecl _libm_sse2_pow_precise(double x, double y) {
+  return pow(x, y);
+}
+
 //
 // https://github.com/SpoilerScriptsGroup/RetrievAL/blob/develop/SpoilerAL-winmm.dll/crt/math/pow.c
 //
-#pragma warning(disable : 4100 4210)
 #ifndef _M_IX86
 #include <errno.h>
 #include <float.h>

@@ -58,7 +58,7 @@ C/C++ Runtime library for system file (Windows Kernel Driver)
 
 으로 인해서 새로운 라이브러리를 개발하게 되었습니다.
 
-CRTSYS가 장점은 아래와 같습니다.
+crtsys가 장점은 아래와 같습니다.
 
 1. Micosoft CRT와 STL을 최대한 비슷하게 지원하기 위해서 Microsoft CRT 소스코드를 사용하긴 하지만 Microsoft Visual Studio가 설치되어있는 디렉토리 내의 소스를 직접 빌드하는 방법으로 처리하여, Visual Studio를 합법적으로 사용하는 사용자는 라이센스 문제 없이 사용 가능합니다.
 2. Win32 API를 구현한 [Ldk](https://github.com/ntoskrnl7/Ldk)를 활용하여 많은 범위의 STL 기능을 지원합니다.
@@ -143,6 +143,10 @@ CRTSYS가 장점은 아래와 같습니다.
 
 ## Build
 
+이 프로젝트를 직접 빌드하여 lib와 include를 사용하시려면 Microsoft STL 사용을 위해서 포함 경로 설정 및 전처리기 설정 등 복잡한 사전 작업이 필요하므로  **직접 빌드하여 사용하는것보다는 [Usage](#usage)을 참고하여 CPM을 통해서 사용하시는것을 권장합니다.**
+
+빌드 방법은 아래와 같습니다.
+
 ```Batch
 git clone https://github.com/ntoskrnl7/crtsys
 cd crtsys
@@ -160,6 +164,11 @@ cd crtsys
 build.bat . x86 release
 build.bat . x64 release
 ```
+
+위 명령을 실행하여 빌드를 하시면 lib/x64/crtsys.lib와 lib/x86/crtsys.lib가 생성됩니다.
+
+lib 디렉토리와 include 디렉토리를 타 프로젝트에서 사용하시면 됩니다.
+이 라이브러리를 사용할 프로젝트의 전처리기 정의나 포함 경로 설정 등 프로젝트 설정은 [CMakeLists.txt](./CMakeLists.txt)에서 PUBLIC으로 설정된 항목들을 참고하여 설정하시기 바랍니다.
 
 ## Test
 

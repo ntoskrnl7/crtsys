@@ -72,6 +72,7 @@ if (UCXXRT_ENABLED)
     src/custom/common/misc.cpp
     src/custom/common/math/fpconst.c
     src/custom/common/math/pow.c
+    src/custom/common/math/pow.c
     src/custom/msvc/common/crt/src/stl/winapisupp.cpp
     )
 else()
@@ -87,6 +88,7 @@ else()
     src/custom/ucrt/common/*/*.cpp
     src/custom/ucrt/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/*.cpp
     )
+
   if("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "Win32")
     file(GLOB MATH_SOURCE_FILES
       src/custom/common/math/*.c
@@ -166,9 +168,9 @@ target_compile_options(crtsys PUBLIC "/MT") # "/MT$<$<CONFIG:Debug>:d>"
 target_compile_definitions(crtsys PUBLIC "_ITERATOR_DEBUG_LEVEL=0")
 
 if (UCXXRT_ENABLED)
-  set_target_properties(crtsys PROPERTIES VS_USER_PROPS "${CMAKE_CURRENT_SOURCE_DIR}/stl.props")
+  set_target_properties(crtsys PROPERTIES VS_USER_PROPS "${CMAKE_CURRENT_SOURCE_DIR}/src/stl.props")
 else()
-  set_target_properties(crtsys PROPERTIES VS_USER_PROPS "${CMAKE_CURRENT_SOURCE_DIR}/stl.props;${CMAKE_CURRENT_SOURCE_DIR}/vcruntime.props;${CMAKE_CURRENT_SOURCE_DIR}/src/custom/msvc/crt.props")
+  set_target_properties(crtsys PROPERTIES VS_USER_PROPS "${CMAKE_CURRENT_SOURCE_DIR}/src/stl.props;${CMAKE_CURRENT_SOURCE_DIR}/src/vcruntime.props;${CMAKE_CURRENT_SOURCE_DIR}/src/custom/msvc/crt.props")
 endif()
 
 
