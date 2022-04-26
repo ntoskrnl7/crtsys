@@ -1,4 +1,9 @@
+#include "../test.h"
 #include <stdint.h>
+
+typedef char bool;
+#define true 1
+#define false 0
 
 bool int64_t_test() {
   volatile int64_t s = 1;
@@ -26,10 +31,10 @@ bool uint64_t_test() {
 
 bool float_to_integer() {
   float f = 1.6f;
-  auto i8 = (uint8_t)f;
-  auto i16 = (uint16_t)f;
-  auto i32 = (uint32_t)f;
-  auto i64 = (uint64_t)f;
+  uint8_t i8 = (uint8_t)f;
+  uint16_t i16 = (uint16_t)f;
+  uint32_t i32 = (uint32_t)f;
+  uint64_t i64 = (uint64_t)f;
   return i8 + i16 + i32 + i64 == 4;
 }
 
@@ -43,10 +48,10 @@ bool integer_to_float() {
 
 bool double_to_integer() {
   double d = 1.6f;
-  auto i8 = (uint8_t)d;
-  auto i16 = (uint16_t)d;
-  auto i32 = (uint32_t)d;
-  auto i64 = (uint64_t)d;
+  uint8_t i8 = (uint8_t)d;
+  uint16_t i16 = (uint16_t)d;
+  uint32_t i32 = (uint32_t)d;
+  uint64_t i64 = (uint64_t)d;
   return i8 + i16 + i32 + i64 == 4;
 }
 
@@ -56,4 +61,19 @@ bool integer_to_double() {
   double d_i32 = (uint8_t)1;
   double d_i64 = (uint8_t)1;
   return d_i8 + d_i16 + d_i32 + d_i64 == 4;
+}
+
+void math_test() {
+  if (!float_to_integer()) {
+    printf("float_to_integer failed");
+  }
+  if (!integer_to_float()) {
+    printf("integer_to_float failed");
+  }
+  if (!double_to_integer()) {
+    printf("double_to_integer failed");
+  }
+  if (!integer_to_double()) {
+    printf("integer_to_double failed");
+  }
 }

@@ -1,82 +1,4 @@
-#include <wdm.h>
-
-#if !DBG
-#pragma warning(disable : 4702)
-#endif
-
-#include <stdio.h>
-#define printf(...)                                                            \
-  (DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, __VA_ARGS__))
-
-//
-// https://en.cppreference.com/w/cpp/language/throw#Example
-//
-#include <iostream>
-#include <stdexcept>
-
-struct A {
-  int n;
-
-  A(int n = 0) : n(n) { printf("A(%d) constructed successfully\n", n); }
-  ~A() { printf("A(%d) destroyed\n", n); }
-};
-
-int foo() { throw std::runtime_error("error"); }
-
-struct B {
-  A a1, a2, a3;
-
-  B() try : a1(1), a2(foo()), a3(3) {
-    printf("B constructed successfully\n");
-  } catch (...) {
-    printf("B::B() exiting with exception\n");
-  }
-
-  ~B() { printf("B destroyed\n"); }
-};
-
-struct C : A, B {
-  C() try { printf("C::C() completed successfully\n"); } catch (...) {
-    printf("C::C() exiting with exception\n");
-  }
-
-  ~C() { printf("C destroyed\n"); }
-};
-
-void throw_test() try {
-  // creates the A base subobject
-  // creates the a1 member of B
-  // fails to create the a2 member of B
-  // unwinding destroys the a1 member of B
-  // unwinding destroys the A base subobject
-  C c;
-} catch (const std::exception &e) {
-  printf("main() failed to create C with: %s\n", e.what());
-}
-
-//
-// https://en.cppreference.com/w/cpp/chrono#Example
-//
-#include <chrono>
-#include <iostream>
-
-long fibonacci(unsigned n) {
-  if (n < 2)
-    return n;
-  return fibonacci(n - 1) + fibonacci(n - 2);
-}
-
-void chrono_test() {
-  auto start = std::chrono::steady_clock::now();
-  // std::cout << "f(42) = " << fibonacci(42) << '\n';
-  printf("f(40) = %d\n", fibonacci(40));
-  auto end = std::chrono::steady_clock::now();
-  // std::chrono::duration<double> elapsed_seconds = end - start;
-  // std::cout << "elapsed time: " << elapsed_seconds.count() << "s\n";
-  printf("elapsed time: %dms\n",
-         std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
-             .count());
-}
+#include "../../test.h"
 
 //
 // https://en.cppreference.com/w/cpp/thread/condition_variable#Example
@@ -86,7 +8,7 @@ void chrono_test() {
 #include <mutex>
 #include <string>
 #include <thread>
-
+namespace condition_variable_test {
 std::mutex m;
 std::condition_variable cv;
 std::string data;
@@ -99,12 +21,13 @@ void worker_thread() {
   cv.wait(lk, [] { return ready; });
 
   // after the wait, we own the lock.
-
+  // std::cout << "Worker thread is processing data\n";
   printf("Worker thread is processing data\n");
   data += " after processing";
 
   // Send data back to main()
   processed = true;
+  // std::cout << "Worker thread signals data processing completed\n";
   printf("Worker thread signals data processing completed\n");
 
   // Manual unlocking is done before notifying, to avoid waking up
@@ -113,7 +36,7 @@ void worker_thread() {
   cv.notify_one();
 }
 
-void condition_variable_test() {
+void run() {
   std::thread worker(worker_thread);
 
   data = "Example data";
@@ -121,6 +44,7 @@ void condition_variable_test() {
   {
     std::lock_guard lk(m);
     ready = true;
+    // std::cout << "main() signals data ready for processing\n";
     printf("condition_variable_test() signals data ready for processing\n");
   }
   cv.notify_one();
@@ -130,9 +54,12 @@ void condition_variable_test() {
     std::unique_lock lk(m);
     cv.wait(lk, [] { return processed; });
   }
+  // std::cout << "Back in main(), data = " << data << '\n';
   printf("Back in condition_variable_test(), data = %s\n", data.c_str());
+
   worker.join();
 }
+} // namespace condition_variable_test
 
 //
 // https://en.cppreference.com/w/cpp/thread/mutex#Example
@@ -143,7 +70,7 @@ void condition_variable_test() {
 #include <mutex>
 #include <string>
 #include <thread>
-
+namespace mutex_test {
 std::map<std::string, std::string> g_pages;
 std::mutex g_pages_mutex;
 
@@ -156,7 +83,7 @@ void save_page(const std::string &url) {
   g_pages[url] = result;
 }
 
-void mutex_test() {
+void run() {
   std::thread t1(save_page, "http://foo");
   std::thread t2(save_page, "http://bar");
   t1.join();
@@ -164,9 +91,11 @@ void mutex_test() {
 
   // safe to access g_pages without lock now, as the threads are joined
   for (const auto &pair : g_pages) {
+    // std::cout << pair.first << " => " << pair.second << '\n';
     printf("%s => %s\n", pair.first.c_str(), pair.second.c_str());
   }
 }
+} // namespace mutex_test
 
 //
 // https://en.cppreference.com/w/cpp/thread/shared_mutex#Example
@@ -175,7 +104,7 @@ void mutex_test() {
 #include <mutex>
 #include <shared_mutex>
 #include <thread>
-
+namespace shared_mutex_test {
 class ThreadSafeCounter {
 public:
   ThreadSafeCounter() = default;
@@ -203,11 +132,13 @@ private:
   unsigned int value_ = 0;
 };
 
-void shared_mutex_test() {
+void run() {
   ThreadSafeCounter counter;
 
   auto increment_and_print = [&counter]() {
     for (int i = 0; i < 3; i++) {
+      // std::cout << std::this_thread::get_id() << ' ' << counter.increment()
+      // << '\n';
       printf("%p %d\n", std::this_thread::get_id(), counter.increment());
 
       // Note: Writing to std::cout actually needs to be synchronized as well
@@ -221,6 +152,7 @@ void shared_mutex_test() {
   thread1.join();
   thread2.join();
 }
+} // namespace shared_mutex_test
 
 //
 // https://en.cppreference.com/w/cpp/thread/future#Example
@@ -228,8 +160,8 @@ void shared_mutex_test() {
 #include <future>
 #include <iostream>
 #include <thread>
-
-void future_test() {
+namespace future_test {
+void run() {
   // future from a packaged_task
   std::packaged_task<int()> task([] { return 7; }); // wrap the function
   std::future<int> f1 = task.get_future();          // get a future
@@ -243,15 +175,17 @@ void future_test() {
   std::future<int> f3 = p.get_future();
   std::thread([&p] { p.set_value_at_thread_exit(9); }).detach();
 
+  // std::cout << "Waiting..." << std::flush;
   printf("Waiting...\n");
-
   f1.wait();
   f2.wait();
   f3.wait();
+  // std::cout << "Done!\nResults are: " << f1.get() << ' ' << f2.get() << ' '
+  // << f3.get() << '\n';
   printf("Done!\nResults are: %d, %d, %d\n", f1.get(), f2.get(), f3.get());
-
   t.join();
 }
+} // namespace future_test
 
 //
 // https://en.cppreference.com/w/cpp/thread/promise#Example
@@ -262,7 +196,7 @@ void future_test() {
 #include <numeric>
 #include <thread>
 #include <vector>
-
+namespace promise_test {
 void accumulate(std::vector<int>::iterator first,
                 std::vector<int>::iterator last,
                 std::promise<int> accumulate_promise) {
@@ -275,7 +209,7 @@ void do_work(std::promise<void> barrier) {
   barrier.set_value();
 }
 
-void promise_test() {
+void run() {
   // Demonstrate using promise<int> to transmit a result between threads.
   std::vector<int> numbers = {1, 2, 3, 4, 5, 6};
   std::promise<int> accumulate_promise;
@@ -297,6 +231,7 @@ void promise_test() {
   barrier_future.wait();
   new_work_thread.join();
 }
+} // namespace promise_test
 
 //
 // https://en.cppreference.com/w/cpp/thread/packaged_task#Example
@@ -306,7 +241,7 @@ void promise_test() {
 #include <future>
 #include <iostream>
 #include <thread>
-
+namespace packaged_task_test {
 // unique function to avoid disambiguating the std::pow overload set
 int f(int x, int y) { return (int)std::pow(x, y); }
 
@@ -342,42 +277,9 @@ void task_thread() {
   printf("task_thread:\t%d\n", result.get());
 }
 
-void packaged_task() {
+void run() {
   task_lambda();
   task_bind();
   task_thread();
 }
-
-//
-// https://en.cppreference.com/w/cpp/language/try_catch#Example
-//
-#include <iostream>
-#include <vector>
-
-void try_catch_test() {
-  try {
-    printf("Throwing an integer exception...\n");
-    // std::cout << "Throwing an integer exception...\n";
-    throw 42;
-  } catch (int i) {
-    printf(" the integer exception was caught, with value: %d\n", i);
-    // std::cout << " the integer exception was caught, with value: " << i
-    // << '\n';
-  }
-
-  try {
-    printf("Creating a vector of size 5... \n");
-    // std::cout << "Creating a vector of size 5... \n";
-    std::vector<int> v(5);
-    printf("Accessing the 11th element of the vector...\n");
-    // std::cout << "Accessing the 11th element of the vector...\n";
-    printf("%d", v.at(10));
-    // std::cout << v.at(10);          // vector::at() throws std::out_of_range
-  } catch (const std::exception &e) // caught by reference to base
-  {
-    printf("a standard exception was caught, with message '%s'\n", e.what());
-    // std::cout << " a standard exception was caught, with message '" <<
-    // e.what()
-    //           << "'\n";
-  }
-}
+} // namespace packaged_task_test

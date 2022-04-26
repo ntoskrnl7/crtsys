@@ -1,3 +1,5 @@
+﻿// clang-format off
+
 //
 // vcruntime/guard_support.c
 //
@@ -24,8 +26,9 @@ RoInitialize (
     _In_ RO_INIT_TYPE initType
     )
 {
-	UNREFERENCED_PARAMETER(initType);
+    // unreachable code
     KdBreakPoint(); // untested :-( 
+	UNREFERENCED_PARAMETER(initType);
     return S_OK;
 }
 
@@ -41,23 +44,28 @@ RoInitialize (
 EXTERN_C_START
 _ACRTIMP_ALT FILE* __cdecl __acrt_iob_func(unsigned _Ix)
 {
-    KdBreakPoint();
+    // unreachable code
+    KdBreakPoint();  // untested :-( 
     _Ix;
     return NULL;
 }
 
 void __cdecl abort() {
+    KdBreakPoint();  // untested :-( 
 }
 EXTERN_C_END
 #endif
 
 
 
+#if CRTSYS_USE_NTL_MAIN
 //
-//
+// 
+// /GS 옵션을 사용하여 빌드하는 경우
+// BufferOverflowK.lib(gs_support.obj) GsDriverEntry가 포함되며
+// GsDriverEntry에서 DriverEntry를 호출하기 때문에 DriverEntry를 임의로 정의하였습니다.
 //
 
-#if CRTSYS_USE_NTL_MAIN
 EXTERN_C DRIVER_INITIALIZE DriverEntry;
 
 #ifdef ALLOC_PRAGMA
@@ -80,6 +88,9 @@ DriverEntry (
 {
     PAGED_CODE();
 
+    //
+    // ntl::main을 사용하도록 빌드하였는데 DriverEntry가 빌드되는건 뭔가 잘못된것입니다.
+    // 
     KdBreakPoint();
 
     return CrtSysDriverEntry( DriverObject,
