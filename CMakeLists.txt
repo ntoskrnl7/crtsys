@@ -106,6 +106,11 @@ wdk_add_library(
 
 if (CRTSYS_USE_LIBCNTPR)
   target_compile_definitions(crtsys PUBLIC "CRTSYS_USE_LIBCNTPR")
+  if ("${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}" VERSION_GREATER_EQUAL "10.0.22000.0")
+    target_compile_definitions(crtsys PRIVATE "CRTSYS_NEED_CRT")
+  endif()
+else()
+  target_compile_definitions(crtsys PRIVATE "CRTSYS_NEED_CRT")
 endif()
 
 if (CRTSYS_NTL_MAIN)

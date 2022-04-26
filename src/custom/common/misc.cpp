@@ -34,7 +34,7 @@ RoInitialize (
 
 
 
-#if !CRTSYS_USE_LIBCNTPR
+#if (!CRTSYS_USE_LIBCNTPR) || CRTSYS_NEED_CRT
 
 //
 //
