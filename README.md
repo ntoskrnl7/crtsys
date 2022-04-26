@@ -85,33 +85,38 @@ CRTSYS가 장점은 아래와 같습니다.
 현재 지원되거나 앞으로 지원할 기능은 아래와 같습니다.
 
 - 체크된 항목은 구현 완료된 항목입니다.
-- 테스트 코드가 작성된 항목은 테스트 코드가 링크로 설정되어 있습니다.
+- 테스트 코드가 작성된 항목은 테스트 코드의 링크를 추가하였습니다.
 
 ### C++ Standard
 
-- [ ] Initialization
+[C++ reference](https://en.cppreference.com)를 기준으로 작성하였습니다.
+
+- [Initialization](https://en.cppreference.com/w/cpp/language/initialization)
   - [x] [Non-local variables](https://en.cppreference.com/w/cpp/language/initialization#Non-local_variables)
     - [x] [Static initialization](https://en.cppreference.com/w/cpp/language/initialization#Static_initialization)
-    - [x] [Dynamic initialization](https://en.cppreference.com/w/cpp/language/initialization#Dynamic_initialization)
+      - [x] [Constant initialization](https://en.cppreference.com/w/cpp/language/constant_initialization) [(tested)](./test/src/cpp/lang/initialization.cpp#L15)
+      - [x] [Zero initialization](https://en.cppreference.com/w/cpp/language/zero_initialization) [(tested)](./test/src/cpp/lang/initialization.cpp#L44)
+    - [x] [Dynamic initialization](https://en.cppreference.com/w/cpp/language/initialization#Dynamic_initialization) [(tested)](./test/src/cpp/lang/initialization.cpp#L71)
   - [ ] [Static local variables](https://en.cppreference.com/w/cpp/language/storage_duration#Static_local_variables)
     - [ ] thread_local
     - [ ] static
-- [x] [catch](https://en.cppreference.com/w/cpp/keyword/catch)
-  - [x] [try-block](./test/src/std_test.cpp#L357)
-  - [x] [Function-try-block](https://en.cppreference.com/w/cpp/language/function-try-block)
+- [Exceptions](https://en.cppreference.com/w/cpp/language/exceptions)
+  - [x] [throw](https://en.cppreference.com/w/cpp/language/throw) [(tested)](./test/src/cpp/lang/exceptions.cpp#L58)
+  - [x] [try-block](https://en.cppreference.com/w/cpp/language/try_catch) [(tested)](./test/src/cpp/lang/exceptions.cpp#L77)
+  - [x] [Function-try-block](https://en.cppreference.com/w/cpp/language/function-try-block) [(tested)](./test/src/cpp/lang/exceptions.cpp#L125)
 
 #### STL
 
-- [x] [std::chrono](./test/src/std_test.cpp#L69)
-- [x] [std::thread](./test/src/std_test.cpp#L116)
-- [x] [std::condition_variable](./test/src/std_test.cpp#L116)
-- [x] [std::mutex](./test/src/std_test.cpp#L159)
-- [x] [std::shared_mutex](./test/src/std_test.cpp#L206)
-- [x] [std::future](./test/src/std_test.cpp#L232)
-- [x] [std::promise](./test/src/std_test.cpp#278)
-- [x] [std::packaged_task](./test/src/std_test.cpp#L345)
-- [ ] std::cout
-- [ ] std::cerr
+- [x] [std::chrono](https://en.cppreference.com/w/cpp/chrono) [(tested)](./test/src/cpp/stl/chrono.cpp#L15)
+- [x] [std::thread](https://en.cppreference.com/w/cpp/thread) [(tested)](./test/src/cpp/stl/thread.cpp#L39)
+- [x] [std::condition_variable](https://en.cppreference.com/w/cpp/thread/condition_variable) [(tested)](./test/src/cpp/stl/thread.cpp#L39)
+- [x] [std::mutex](https://en.cppreference.com/w/cpp/thread/mutex) [(tested)](./test/src/cpp/stl/thread.cpp#L86)
+- [x] [std::shared_mutex](https://en.cppreference.com/w/cpp/thread/shared_mutex) [(tested)](./test/src/cpp/stl/thread.cpp#L135)
+- [x] [std::future](https://en.cppreference.com/w/cpp/thread/future) [(tested)](./test/src/cpp/stl/thread.cpp#L164)
+- [x] [std::promise](https://en.cppreference.com/w/cpp/thread/promise) [(tested)](./test/src/cpp/stl/thread.cpp#L212)
+- [x] [std::packaged_task](https://en.cppreference.com/w/cpp/thread/packaged_task) [(tested)](./test/src/cpp/stl/thread.cpp#L280)
+- [ ] [std::cout](https://en.cppreference.com/w/cpp/io/cout)
+- [ ] [std::cerr](https://en.cppreference.com/w/cpp/io/cerr)
 
 ### C Standard
 
@@ -122,7 +127,7 @@ CRTSYS가 장점은 아래와 같습니다.
 
 커널에서 더 나은 개발 환경을 지원하기 위한 기능을 제공합니다.
 
-- ntl::expand_stack
+- ntl::expand_stack [(tested)](./test/src/ntl_test.cpp#L5)
   - 스택 크기를 확장하기 위한 함수
   - 기본적으로 커널 스택은 사용자 스레드 스택보다 훨씬 작은 크기를 할당받기 때문에 STL 기능을 사용하거나, 특히 throw를 수행할때 사용하는것이 좋습니다.
 - ntl::status
@@ -130,10 +135,10 @@ CRTSYS가 장점은 아래와 같습니다.
 - ntl::driver
   - DRIVER_OBJECT에 대한 클래스
   - 기능
-    - [x] DriverUnload
+    - [x] DriverUnload [(tested)](./test/src/main.cpp#L25)
     - [ ] DriverDispatch
 - ntl::driver_main
-  - C++ 용 드라이버 진입점
+  - C++ 용 드라이버 진입점 [(tested)](./test/src/main.cpp#L20)
   - ntl::expand_stack 함수로 스택을 최대 크기로 확장하여 호출됩니다.
 
 ## Build

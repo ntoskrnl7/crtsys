@@ -1,83 +1,112 @@
-#include <wdm.h>
-
-#include <stdio.h>
-#define printf(...)                                                            \
-  (DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, __VA_ARGS__))
+﻿#include "test.h"
 
 //
-// initialization test
+// c/math.c
 //
-struct test_object {
-  int n;
-  test_object(int n = 0) : n(n) {
-    printf("test_object(%d) constructed successfully\n", n);
-  }
-  ~test_object() { printf("test_object(%d) destroyed\n", n); }
-};
-
-test_object object_(1);
-static test_object static_object_(2);
+EXTERN_C void math_test();
 
 //
-// math_test.cpp
+// cpp/lang/initialization.cpp
 //
-bool float_to_integer();
-bool integer_to_float();
-bool double_to_integer();
-bool integer_to_double();
+namespace constant_initialization_test {
+void run();
+}
+namespace zero_initialization_test {
+void run(int argc = 5, char *[] = nullptr);
+}
+//
+// cpp/lang/exceptions.cpp
+//
+namespace throw_test {
+void run();
+}
+namespace try_catch_test {
+void run();
+}
+namespace function_try_block_test {
+void run();
+}
 
 //
-// std_test.cpp
+// cpp/stl/chrono.cpp
 //
-void throw_test();
-void chrono_test();
-void condition_variable_test();
-void mutex_test();
-void shared_mutex_test();
-void future_test();
-void promise_test();
-void packaged_task();
-void try_catch_test();
+namespace chrono_test {
+void run();
+}
+
+//
+// cpp/stl/thread.cpp
+//
+namespace condition_variable_test {
+void run();
+}
+namespace mutex_test {
+void run();
+}
+namespace shared_mutex_test {
+void run();
+}
+namespace future_test {
+void run();
+}
+namespace promise_test {
+void run();
+}
+namespace packaged_task_test {
+void run();
+}
 
 //
 // ntl_test.cpp
 //
 bool ntl_expand_stack_test();
 
+//
+// C Standard tests.
+//
+void c_std_tests() { math_test(); }
+
 #if defined(_AMD64_) && !defined(CRTSYS_USE_NTL_MAIN)
+// x64에서는 throw_test 테스트를 진행하기엔 스택이 부족합니다 :-(
 #include <ntl/expand_stack>
 #endif
+
+//
+// C++ Standard tests.
+//
+void cpp_std_tests() {
+  //
+  // C++ Language tests.
+  //
+  constant_initialization_test::run();
+  zero_initialization_test::run();
+#if defined(_AMD64_) && !defined(CRTSYS_USE_NTL_MAIN)
+  // x64에서는 throw_test 테스트를 진행하기엔 스택이 부족합니다 :-(
+  ntl::expand_stack(throw_test::run);
+#else
+  throw_test::run();
+#endif
+  try_catch_test::run();
+  function_try_block_test::run();
+
+  //
+  // C++ STL tests.
+  //
+  chrono_test::run();
+  condition_variable_test::run();
+  mutex_test::run();
+  shared_mutex_test::run();
+  future_test::run();
+  promise_test::run();
+  packaged_task_test::run();
+}
 
 void test_all() {
   if (!ntl_expand_stack_test()) {
     printf("float_to_integer failed");
   }
 
-  if (!float_to_integer()) {
-    printf("float_to_integer failed");
-  }
-  if (!integer_to_float()) {
-    printf("integer_to_float failed");
-  }
-  if (!double_to_integer()) {
-    printf("double_to_integer failed");
-  }
-  if (!integer_to_double()) {
-    printf("integer_to_double failed");
-  }
+  c_std_tests();
 
-  chrono_test();
-  condition_variable_test();
-  mutex_test();
-  shared_mutex_test();
-  future_test();
-  promise_test();
-  packaged_task();
-  try_catch_test();
-
-#if defined(_AMD64_) && !defined(CRTSYS_USE_NTL_MAIN)
-  ntl::expand_stack(throw_test);
-#else
-  throw_test();
-#endif
+  cpp_std_tests();
 }
