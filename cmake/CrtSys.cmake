@@ -48,7 +48,7 @@ function(crtsys_add_driver _target)
         )
     set_target_properties(${_target} PROPERTIES LINK_FLAGS "${WDK_LINK_FLAGS}")
 
-    set_property(TARGET crtsys_test PROPERTY INCLUDE_DIRECTORIES "${crtsys_SOURCE_DIR}/include;${crtsys_SOURCE_DIR}/include/${MSVC_TOOLSET_VERSION};${crtsys_SOURCE_DIR}/include/${MSVC_TOOLSET_VERSION}/stl;$(VC_IncludePath);$(WindowsSDK_IncludePath)")
+    set_property(TARGET crtsys_test PROPERTY INCLUDE_DIRECTORIES "${crtsys_SOURCE_DIR}/include;${crtsys_SOURCE_DIR}/include/$(VCToolsVersion);${crtsys_SOURCE_DIR}/include/${MSVC_TOOLSET_VERSION};${crtsys_SOURCE_DIR}/include/$(VCToolsVersion)/stl;${crtsys_SOURCE_DIR}/include/${MSVC_TOOLSET_VERSION}/stl;$(VC_IncludePath);$(WindowsSDK_IncludePath)")
     target_include_directories(${_target} SYSTEM PRIVATE
         "${WDK_ROOT}/Include/${WDK_VERSION}/shared"
         "${WDK_ROOT}/Include/${WDK_VERSION}/km"
