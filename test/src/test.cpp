@@ -103,7 +103,7 @@ void cpp_std_tests() {
 
 void test_all() {
   if (!ntl_expand_stack_test()) {
-    printf("float_to_integer failed");
+    DbgPrint("ntl_expand_stack_test failed");
   }
 
   c_std_tests();

@@ -1,6 +1,8 @@
 #pragma warning(disable : 4100 4210)
 
 #include <math.h>
+#include <stdint.h>
+
 // error C2169: 'pow' : intrinsic function, cannot be defined
 #pragma function(pow)
 
@@ -33,6 +35,16 @@ EXTERN_C double __cdecl _libm_sse2_pow_precise(double x, double y) {
 #endif
 
 EXTERN_C double __cdecl pow(double x, double y) {
+  int is_int = ((x == (uint64_t)x) && (y == (uint64_t)y));
+  if (is_int) {
+    if (x == 1 || y == 0)
+      return 1;
+    uint64_t ix = (uint64_t)x;
+    uint64_t iy = (uint64_t)y;
+    if (ix % 2 == 0) {
+      return (double)(2 << ((iy * (ix / 2)) - 1));
+    }
+  }
   if (y) {
     if (x) {
       double dummy;
