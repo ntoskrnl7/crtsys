@@ -40,18 +40,42 @@ CPMAddPackage("gh:ntoskrnl7/FindWDK#master")
 list(APPEND CMAKE_MODULE_PATH "${FindWDK_SOURCE_DIR}/cmake")
 find_package(WDK REQUIRED)
 
+#
+# Add source files.
+#
+
+file(GLOB SOURCE_FILES
+  src/*.cpp
+
+  # common
+  src/custom/common/*.cpp
+  src/custom/common/*.c
+  src/custom/common/*/*.cpp
+  src/custom/common/*/*.c
+
+  # ucrt
+  src/custom/ucrt/common/*/*.cpp
+  src/custom/ucrt/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/*.cpp
+  )
+
+if("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "Win32")
+  file(GLOB MATH_SOURCE_FILES
+    src/custom/common/math/*.c
+    )
+  list(APPEND SOURCE_FILES ${MATH_SOURCE_FILES})
+endif()
+
 if (UCXXRT_ENABLED)
   CPMAddPackage("gh:ntoskrnl7/ucxxrt#master")
-
-  file(GLOB_RECURSE SOURCE_FILES
+  file(GLOB_RECURSE UCXXRT_SOURCE_FILES
     ${ucxxrt_SOURCE_DIR}/src/*.cpp
     ${ucxxrt_SOURCE_DIR}/vcruntime/*.cpp
     ${ucxxrt_SOURCE_DIR}/misc/*.cpp
     )
-
-  list(REMOVE_ITEM SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/sys_main.cpp)
-  list(REMOVE_ITEM SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/unittest.cpp)
-
+  list(REMOVE_ITEM UCXXRT_SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/vcruntime/crt.cpp)
+  list(REMOVE_ITEM UCXXRT_SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/vcruntime/locales.cpp)
+  list(REMOVE_ITEM UCXXRT_SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/sys_main.cpp)
+  list(REMOVE_ITEM UCXXRT_SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/unittest.cpp)
   if("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "x64")
     file(GLOB PLATFORM_SOURCE_FILES
       ${ucxxrt_SOURCE_DIR}/src/x64/*.cpp
@@ -63,38 +87,20 @@ if (UCXXRT_ENABLED)
         ${ucxxrt_SOURCE_DIR}/src/i386/*.asm
         )
   endif()
+  list(APPEND UCXXRT_SOURCE_FILES ${PLATFORM_SOURCE_FILES})
 
-  list(APPEND SOURCE_FILES ${PLATFORM_SOURCE_FILES})
-  add_definitions(/FI"${ucxxrt_SOURCE_DIR}/ucxxrt.inl")
-
-  list(APPEND SOURCE_FILES
-    src/main.cpp
-    src/custom/common/misc.cpp
-    src/custom/common/math/fpconst.c
-    src/custom/common/math/pow.c
-    src/custom/common/math/pow.c
-    src/custom/msvc/common/crt/src/stl/winapisupp.cpp
-    )
-else()
-  file(GLOB SOURCE_FILES
-    src/*.cpp
-
-    # common
-    src/custom/common/*.cpp
-    src/custom/common/*.c
-    src/custom/common/*/*.cpp
-
-    # ucrt
-    src/custom/ucrt/common/*/*.cpp
-    src/custom/ucrt/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/*.cpp
-    )
-
-  if("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "Win32")
-    file(GLOB MATH_SOURCE_FILES
-      src/custom/common/math/*.c
-      )
-    list(APPEND SOURCE_FILES ${MATH_SOURCE_FILES})
-  endif()
+  list(APPEND SOURCE_FILES ${UCXXRT_SOURCE_FILES})
+  list(APPEND SOURCE_FILES src/custom/msvc/common/crt/src/stl/winapisupp.cpp)
+  list(REMOVE_ITEM SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/custom/common/isa_available_init.c)
+  list(REMOVE_ITEM SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/custom/common/errno.c)
+  list(REMOVE_ITEM SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/custom/common/math/ftol3.c)
+  list(REMOVE_ITEM SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/custom/ucrt/common/startup/thread.cpp)
+  list(REMOVE_ITEM SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/custom/ucrt/common/startup/initterm.cpp)
+  list(REMOVE_ITEM SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/custom/ucrt/common/startup/onexit.cpp)
+  list(REMOVE_ITEM SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/custom/ucrt/common/startup/argv_parsing.cpp)
+  list(REMOVE_ITEM SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/custom/ucrt/common/heap/malloc.cpp)
+  list(REMOVE_ITEM SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/custom/ucrt/common/misc/terminate.cpp)
+  list(REMOVE_ITEM SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/custom/ucrt/common/misc/invalid_parameter.cpp)
 endif()
 
 wdk_add_library(
@@ -104,33 +110,13 @@ wdk_add_library(
     ${SOURCE_FILES}
     )
 
-if (CRTSYS_USE_LIBCNTPR)
-  target_compile_definitions(crtsys PUBLIC "CRTSYS_USE_LIBCNTPR")
-  if ("${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}" VERSION_GREATER_EQUAL "10.0.22000.0")
-    target_compile_definitions(crtsys PRIVATE "CRTSYS_NEED_CRT")
-  endif()
-else()
-  target_compile_definitions(crtsys PRIVATE "CRTSYS_NEED_CRT")
-endif()
-
-if (CRTSYS_NTL_MAIN)
-  target_compile_definitions(crtsys PUBLIC CRTSYS_USE_NTL_MAIN)
-endif()
-target_compile_definitions(crtsys PUBLIC "_HAS_EXCEPTIONS")
-
-
-
-if (UCXXRT_ENABLED)
-  target_compile_definitions(crtsys PRIVATE "UCXXRT")
-  target_compile_definitions(crtsys PRIVATE "__KERNEL_MODE")
-  target_include_directories(crtsys PRIVATE "${ucxxrt_SOURCE_DIR}")
-endif()
-
-
-
+#
+# Add include directories
+#
 get_target_property(INC_DIR_TMP crtsys INCLUDE_DIRECTORIES)
 if (UCXXRT_ENABLED)
   set_property(TARGET crtsys PROPERTY INCLUDE_DIRECTORIES "${Ldk_SOURCE_DIR}/include/Ldk;${ucxxrt_SOURCE_DIR}/src;${ucxxrt_SOURCE_DIR}/src/vcruntime;${CMAKE_CURRENT_SOURCE_DIR}/src/custom/winsdk/include/um;$(VC_IncludePath);$(WindowsSDK_IncludePath);${INC_DIR_TMP}")
+  target_include_directories(crtsys PRIVATE "${ucxxrt_SOURCE_DIR}")
 else()
   set_property(TARGET crtsys PROPERTY INCLUDE_DIRECTORIES "${Ldk_SOURCE_DIR}/include/Ldk;${CMAKE_CURRENT_SOURCE_DIR}/src/custom/winsdk/include/um;$(VC_IncludePath);$(WindowsSDK_IncludePath);${INC_DIR_TMP}")
 endif()
@@ -139,20 +125,78 @@ target_include_directories(crtsys PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/custo
 target_include_directories(crtsys PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/custom/msvc/${MSVC_TOOLSET_VERSION}/crt/src/vcruntime")
 target_include_directories(crtsys PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/custom/msvc/${MSVC_TOOLSET_VERSION}/crt/src/stl")
 
-
-add_definitions(/FI"${CMAKE_CURRENT_SOURCE_DIR}/src/crtsys.h")
-target_compile_options(crtsys PUBLIC /Zc:threadSafeInit-)
-
-if (UCXXRT_ENABLED AND "${CMAKE_VS_PLATFORM_NAME}" STREQUAL "x64")
-  # VS2017 Build Tools
-  # ntoskrnl.lib(ntoskrnl.exe) : error LNK2005: RtlRaiseException already defined in Ldk.lib(except.obj).
-  target_link_options(crtsys PUBLIC "/FORCE:MULTIPLE")
+#
+# link libraries
+#
+if(CRTSYS_USE_LIBCNTPR)
+  target_link_libraries(crtsys PRIVATE $<BUILD_INTERFACE:Ldk> WDK::LIBCNTPR)
+else()
+  target_link_libraries(crtsys PRIVATE $<BUILD_INTERFACE:Ldk>)
 endif()
 
-if (CRTSYS_USE_LIBCNTPR AND "${CMAKE_VS_PLATFORM_NAME}" STREQUAL "x64")
+#
+# Add compile definitions
+#
+target_compile_definitions(crtsys PUBLIC "_ITERATOR_DEBUG_LEVEL=0")
+if (CRTSYS_USE_LIBCNTPR)
+  target_compile_definitions(crtsys PUBLIC "CRTSYS_USE_LIBCNTPR")
+  if ("${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}" VERSION_GREATER_EQUAL "10.0.22000.0")
+    target_compile_definitions(crtsys PRIVATE "CRTSYS_NEED_CRT_IOB_FUNC")
+    target_compile_definitions(crtsys PRIVATE "CRTSYS_NEED_CRT_ABORT")
+  endif()
+else()
+  target_compile_definitions(crtsys PRIVATE "CRTSYS_NEED_CRT_IOB_FUNC")
+  target_compile_definitions(crtsys PRIVATE "CRTSYS_NEED_CRT_ABORT")
+endif()
+if (CRTSYS_NTL_MAIN)
+  target_compile_definitions(crtsys PUBLIC CRTSYS_USE_NTL_MAIN)
+endif()
+target_compile_definitions(crtsys PUBLIC "_HAS_EXCEPTIONS")
+if (UCXXRT_ENABLED)
+  target_compile_definitions(crtsys PRIVATE "UCXXRT")
+  target_compile_definitions(crtsys PUBLIC "UCXXRT_X86_NO_THROW_TEST")
+  target_compile_definitions(crtsys PRIVATE "__KERNEL_MODE")
+endif()
+
+#
+# Forced Include File
+#
+target_compile_options(crtsys PRIVATE /FI"${CMAKE_CURRENT_SOURCE_DIR}/src/crtsys.h")
+if (UCXXRT_ENABLED)
+  target_compile_options(crtsys PRIVATE /FI"${ucxxrt_SOURCE_DIR}/ucxxrt.inl")
+endif()
+
+#
+# TLS isn't supported yet.
+#
+target_compile_options(crtsys PUBLIC /Zc:threadSafeInit-)
+
+target_compile_options(crtsys PUBLIC "/MT") # "/MT$<$<CONFIG:Debug>:d>"
+# [not working] set_property(TARGET crtsys PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
+#
+# Generate Debug Info
+#
+target_compile_options(crtsys PUBLIC "$<$<CONFIG:Release>:/Zi>")
+target_link_options(crtsys PUBLIC "$<$<CONFIG:Release>:/DEBUG>")
+
+#
+# Force File Output
+#
+if (CRTSYS_USE_LIBCNTPR)
   # 10.0.17763.0
   # 10.0.22000.0
   # km/x64/libcntpr.lib(fpexcept.obj) : error LNK2005: RaiseException already defined in Ldk.lib(errhandlingapi.obj)
+
+  # 10.0.17763.0
+  # km/x64/ntoskrnl.lib(ntoskrnl.exe) : error LNK2005: _wcslen already defined in km/x64/libcntpr.lib(wcslen.obj)
+
+  # 10.0.17763.0
+  # libcntpr.lib fflush
+  # src\custom\ucrt\common\stdio\fflush.cpp fflush
+  target_link_options(crtsys PUBLIC "/FORCE:MULTIPLE")
+elseif(UCXXRT_ENABLED AND "${CMAKE_VS_PLATFORM_NAME}" STREQUAL "x64")
+  # ntoskrnl.lib(ntoskrnl.exe) : error LNK2005: RtlRaiseException already defined in Ldk.lib(except.obj).
   target_link_options(crtsys PUBLIC "/FORCE:MULTIPLE")
 endif()
 
@@ -168,25 +212,14 @@ if("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "Win32")
   string(REGEX REPLACE "/RTC(su|[1su])" "" CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO}")
 endif()
 
-target_compile_options(crtsys PUBLIC "/MT") # "/MT$<$<CONFIG:Debug>:d>"
-# [not working] set_property(TARGET crtsys PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-target_compile_definitions(crtsys PUBLIC "_ITERATOR_DEBUG_LEVEL=0")
-
-if (UCXXRT_ENABLED)
-  set_target_properties(crtsys PROPERTIES VS_USER_PROPS "${CMAKE_CURRENT_SOURCE_DIR}/src/stl.props")
-else()
-  set_target_properties(crtsys PROPERTIES VS_USER_PROPS "${CMAKE_CURRENT_SOURCE_DIR}/src/stl.props;${CMAKE_CURRENT_SOURCE_DIR}/src/vcruntime.props;${CMAKE_CURRENT_SOURCE_DIR}/src/custom/msvc/crt.props")
+#
+# set visual studio properties file
+#
+set(VS_PROPS "${CMAKE_CURRENT_SOURCE_DIR}/src/stl.props")
+if (NOT UCXXRT_ENABLED)
+  list(APPEND VS_PROPS "${CMAKE_CURRENT_SOURCE_DIR}/src/vcruntime.props;${CMAKE_CURRENT_SOURCE_DIR}/src/custom/msvc/crt.props")
 endif()
-
-
-
-if(CRTSYS_USE_LIBCNTPR)
-  target_link_libraries(crtsys PRIVATE $<BUILD_INTERFACE:Ldk> WDK::LIBCNTPR)
-else()
-  target_link_libraries(crtsys PRIVATE $<BUILD_INTERFACE:Ldk>)
-endif()
-
-
+set_target_properties(crtsys PROPERTIES VS_USER_PROPS "${VS_PROPS}")
 
 #
 # set library output path (release only)

@@ -511,10 +511,11 @@ public:
 // #ifdef _M_CEE
 #define _WINDOWS_API              __stdcall
 #define _RENAME_WINDOWS_API(_Api) _Api##_clr
-// #else // ^^^ _M_CEE // !_M_CEE vvv
+#else // ^^^ _M_CEE // !_M_CEE vvv
 // #define _WINDOWS_API              __declspec(dllimport) __stdcall
-// #define _RENAME_WINDOWS_API(_Api) _Api
-// #endif // _M_CEE
+#define _WINDOWS_API              __stdcall
+#define _RENAME_WINDOWS_API(_Api) _Api
+#endif // _M_CEE
 
 // WINBASEAPI
 // BOOL

@@ -10,6 +10,7 @@
 
 #include "status"
 
+#include <ntstatus.h>
 #include <string>
 
 namespace ntl {

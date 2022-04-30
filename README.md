@@ -68,10 +68,14 @@ crtsys가 장점은 아래와 같습니다.
 
 - Windows 8 or later
 - Visual Studio 2017 or later
+- CMake 3.16 or later
+- Git
 
 ## Test Environments
 
 - Windows 10
+- CMake 3.21.4
+- Git 2.23.0
 - Visual Studio 2017
   - Visual Studio 2017의 CRT 소스 코드는 일부 헤더가 누락되어 빌드가 되지 않아서, UCXXRT의 코드를 일부 사용하여 지원합니다.
   - 추후 누락된 헤더를 직접 작성하여 지원할 예정입니다.
@@ -125,8 +129,14 @@ crtsys가 장점은 아래와 같습니다.
 - [x] [std::future](https://en.cppreference.com/w/cpp/thread/future) [(tested)](./test/src/cpp/stl/thread.cpp#L164)
 - [x] [std::promise](https://en.cppreference.com/w/cpp/thread/promise) [(tested)](./test/src/cpp/stl/thread.cpp#L212)
 - [x] [std::packaged_task](https://en.cppreference.com/w/cpp/thread/packaged_task) [(tested)](./test/src/cpp/stl/thread.cpp#L280)
-- [ ] [std::cout](https://en.cppreference.com/w/cpp/io/cout)
-- [ ] [std::cerr](https://en.cppreference.com/w/cpp/io/cerr)
+- [x] [std::cin](https://en.cppreference.com/w/cpp/io/cin)
+- [x] [std::clog](https://en.cppreference.com/w/cpp/io/clog)
+- [x] [std::cerr](https://en.cppreference.com/w/cpp/io/cerr)
+- [x] [std::cout](https://en.cppreference.com/w/cpp/io/cout) (tested)
+- [x] [std::wcin](https://en.cppreference.com/w/cpp/io/cin)
+- [x] [std::wclog](https://en.cppreference.com/w/cpp/io/clog)
+- [x] [std::wcerr](https://en.cppreference.com/w/cpp/io/cerr)
+- [x] [std::wcout](https://en.cppreference.com/w/cpp/io/cout) (tested)
 
 ### C Standard
 
@@ -147,8 +157,8 @@ crtsys가 장점은 아래와 같습니다.
   - 기능
     - [x] DriverUnload [(tested)](./test/src/main.cpp#L25)
     - [ ] DriverDispatch
-- ntl::driver_main
-  - C++ 용 드라이버 진입점 [(tested)](./test/src/main.cpp#L20)
+- ntl::driver_main [(tested)](./test/src/main.cpp#L21)
+  - C++ 용 드라이버 진입점
   - ntl::expand_stack 함수로 스택을 최대 크기로 확장하여 호출됩니다.
 
 ## Build
@@ -257,23 +267,20 @@ crtsys_add_driver(crtsys_test main.cpp)
 아래는 ntl::main를 진입점으로 설정한 프로젝트의 예제 코드입니다.
 
 ```C
-#include <wdm.h>
+#include <iostream>
 #include <ntl/driver>
 
-namespace ntl {
-status main(ntl::driver &driver, const std::wstring &registry_path) {
-
-  DbgPrint("load (registry_path : %ws)\n", registry_path.c_str());
+ntl::status ntl::main(ntl::driver &driver, const std::wstring &registry_path) {
+  std::wcout << "load (registry_path :" << registry_path << ")\n";
 
   // TODO
 
   driver.on_unload([registry_path]() {
-    DbgPrint("unload (registry_path : %ws)\n", registry_path.c_str());
+    std::wcout << "unload (registry_path :" << registry_path << ")\n";
   });
 
   return status::ok();
 }
-} // namespace ntl
 ```
 
 ## TODO

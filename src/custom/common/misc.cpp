@@ -34,30 +34,6 @@ RoInitialize (
 
 
 
-#if (!CRTSYS_USE_LIBCNTPR) || CRTSYS_NEED_CRT
-
-//
-//
-//
-
-#include <stdio.h>
-EXTERN_C_START
-_ACRTIMP_ALT FILE* __cdecl __acrt_iob_func(unsigned _Ix)
-{
-    // unreachable code
-    KdBreakPoint();  // untested :-( 
-    _Ix;
-    return NULL;
-}
-
-void __cdecl abort() {
-    KdBreakPoint();  // untested :-( 
-}
-EXTERN_C_END
-#endif
-
-
-
 #if CRTSYS_USE_NTL_MAIN
 //
 // 
@@ -97,3 +73,92 @@ DriverEntry (
                               RegistryPath );
 }
 #endif
+
+#if CRTSYS_USE_LIBCNTPR
+#include "crt/crt_internal.h"
+#include "crt/setlocal.h"
+
+#pragma warning(disable:4100)
+
+EXTERN_C
+NTSTATUS
+CrtSyspInitializeLocaleLock (
+	VOID
+	);
+
+EXTERN_C
+VOID
+CrtSyspUninitializeLocaleLock (
+	VOID
+	);
+
+#include <windows.h>
+
+EXTERN_C CRITICAL_SECTION CrtSyspIobEntriesLock[_IOB_ENTRIES];
+
+NTSTATUS
+CrtSyspInitializeStdio (
+    VOID
+    )
+{
+    for (int i = 0; i != _IOB_ENTRIES; ++i) {
+        InitializeCriticalSection( &CrtSyspIobEntriesLock[i] );
+    }
+
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+CrtSyspUninitializeStdio (
+    VOID
+    )
+{
+    for (int i = 0; i != _IOB_ENTRIES; ++i) {
+        DeleteCriticalSection( &CrtSyspIobEntriesLock[i] );
+    }
+    return STATUS_SUCCESS;
+}
+
+EXTERN_C
+NTSTATUS
+CrtSyspInitializeForLibcntpr (
+    VOID
+    )
+{
+    NTSTATUS status;
+
+    //
+    // 10.0.17763.0
+    // libcntpr.lib!__ptlocinfo->lc_time_curr가 NULL로 초기화되어있기 때문에 __lc_time_curr를 직접 설정해야합니다.
+    // 
+    __ptlocinfo->lc_time_curr = __lc_time_curr;
+
+    //
+    //
+    //
+
+    status = CrtSyspInitializeLocaleLock();
+    if (! NT_SUCCESS(status)) {
+        return status;
+    }
+
+    status = CrtSyspInitializeStdio();
+    if (! NT_SUCCESS(status)) {
+        CrtSyspUninitializeLocaleLock();
+        return status;
+    }
+    return status;
+}
+
+
+EXTERN_C
+VOID
+CrtSyspUninitializeForLibcntpr (
+    VOID
+    )
+{
+    CrtSyspUninitializeStdio();
+    CrtSyspUninitializeLocaleLock();
+}
+
+#endif // CRTSYS_USE_LIBCNTPR

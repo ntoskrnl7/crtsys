@@ -1,4 +1,4 @@
-﻿#include "test.h"
+﻿#include <wdm.h>
 
 //
 // c/math.c
@@ -84,11 +84,18 @@ void cpp_std_tests() {
   // x64에서는 throw_test 테스트를 진행하기엔 스택이 부족합니다 :-(
   ntl::expand_stack(throw_test::run);
 #else
+#if !(defined(_X86_) && defined(UCXXRT_X86_NO_THROW_TEST))
+  // UCXXRT의 x86 예외처리 기능은 아래 테스트 수행 시, hang이 발생합니다. :-(
   throw_test::run();
 #endif
+#endif
   try_catch_test::run();
+#if !(defined(_X86_) && defined(UCXXRT_X86_NO_THROW_TEST))
+  // UCXXRT의 x86 예외처리 기능은 아래 테스트 수행 시,
+  // KeExpandKernelStackAndCallout 루틴으로 스택 크기를 최대로 늘려 놓은
+  // 상태임에도 불구하고 스택 부족으로 인한 BSOD가 발생합니다.  :-(
   function_try_block_test::run();
-
+#endif
   //
   // C++ STL tests.
   //
@@ -101,9 +108,11 @@ void cpp_std_tests() {
   packaged_task_test::run();
 }
 
+#include <iostream>
+
 void test_all() {
   if (!ntl_expand_stack_test()) {
-    printf("float_to_integer failed");
+    std::cerr << "ntl_expand_stack_test failed\n";
   }
 
   c_std_tests();

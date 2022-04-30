@@ -121,8 +121,6 @@ extern "C" extern _onexit_table_t __acrt_atexit_table;
 extern "C" extern _onexit_table_t __acrt_at_quick_exit_table;
 #endif
 
-
-
 EXTERN_C
 NTSTATUS
 CrtSysDriverEntry (
@@ -151,6 +149,16 @@ CrtSysDriverEntry (
         return status;
     }
 
+#if CRTSYS_USE_LIBCNTPR
+    NTSTATUS
+    CrtSyspInitializeForLibcntpr (
+        VOID
+        );
+    status = CrtSyspInitializeForLibcntpr();
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+#endif
 #if UCXXRT
     // do feature initializions
     __isa_available_init();
@@ -181,37 +189,12 @@ CrtSysDriverEntry (
        return STATUS_UNSUCCESSFUL;
     }
 
-    _initialize_onexit_table(&__acrt_atexit_table);
-    // _initialize_onexit_table(&__acrt_at_quick_exit_table);
-
-    // Do C initialization:
-    if (_initterm_e(__xi_a, __xi_z) != 0)
-    {
+    if (!__acrt_initialize()) {
        KdBreakPoint();
        __vcrt_uninitialize(false);
        LdkTerminate();
        return STATUS_UNSUCCESSFUL;
     }
-
-    // Do C++ initialization:
-    _initterm(__xc_a, __xc_z);
-
-    //// If this module has any dynamically initialized __declspec(thread)
-    //// variables, then we invoke their initialization for the primary thread
-    //// used to start the process:
-    //_tls_callback_type const* const tls_init_callback = __scrt_get_dyn_tls_init_callback();
-    //if (*tls_init_callback != nullptr && __scrt_is_nonwritable_in_current_image(tls_init_callback))
-    //{
-    //   (*tls_init_callback)(nullptr, DLL_THREAD_ATTACH, nullptr);
-    //}
-
-    //// If this module has any thread-local destructors, register the
-    //// callback function with the Unified CRT to run on exit.
-    //_tls_callback_type const* const tls_dtor_callback = __scrt_get_dyn_tls_dtor_callback();
-    //if (*tls_dtor_callback != nullptr && __scrt_is_nonwritable_in_current_image(tls_dtor_callback))
-    //{
-    //   _register_thread_local_exe_atexit_callback(*tls_dtor_callback);
-    //}
 #endif
 
 #if CRTSYS_USE_NTL_MAIN
@@ -272,13 +255,15 @@ CrtSysDriverUnload (
     // do terminations
     _initterm(__xt_a, __xt_z);
 #else
-    _execute_onexit_table(&__acrt_atexit_table);
-    // _execute_onexit_table(&__acrt_at_quick_exit_table);
-
-    _initterm(__xp_a, __xp_z);
-    _initterm(__xt_a, __xt_z);
-
+    __acrt_uninitialize(true);
     __scrt_uninitialize_crt(true, false);
+#endif
+#if CRTSYS_USE_LIBCNTPR
+    VOID
+    CrtSyspUninitializeForLibcntpr (
+        VOID
+        );
+    CrtSyspUninitializeForLibcntpr();
 #endif
     LdkTerminate();
 }

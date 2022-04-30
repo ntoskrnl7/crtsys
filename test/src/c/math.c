@@ -63,17 +63,31 @@ bool integer_to_double() {
   return d_i8 + d_i16 + d_i32 + d_i64 == 4;
 }
 
+#include <math.h>
+
+void pow_test() {
+  int actual;
+  int excepted = 1;
+  for (int i = 0; i < 20; i++, excepted <<= 1) {
+    actual = (int)pow(2, i);
+    if (excepted != actual)
+      printf("pow(2, %d) faield - excepted = %d, actual =%d\n", i, excepted,
+             actual);
+  }
+}
+
 void math_test() {
-  if (!float_to_integer()) {
+  if (!float_to_integer())
     printf("float_to_integer failed");
-  }
-  if (!integer_to_float()) {
+
+  if (!integer_to_float())
     printf("integer_to_float failed");
-  }
-  if (!double_to_integer()) {
+
+  if (!double_to_integer())
     printf("double_to_integer failed");
-  }
-  if (!integer_to_double()) {
+
+  if (!integer_to_double())
     printf("integer_to_double failed");
-  }
+
+  pow_test();
 }

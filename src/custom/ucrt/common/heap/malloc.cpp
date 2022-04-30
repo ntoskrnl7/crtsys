@@ -1,3 +1,5 @@
+// clang-format off
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <windows.h>
@@ -82,9 +84,13 @@ void* __cdecl _recalloc(
     _In_ _CRT_GUARDOVERFLOW        size_t _Size
     )
 {
-    void* buffer = realloc(_Block, _Count * _Size);
+    size_t old_len = _Block ? CONTAINING_RECORD(_Block, CRTSYS_MEM_BLOCK, Buffer)->Length : 0;
+    size_t new_len = _Count * _Size;
+    void* buffer = realloc(_Block, new_len);
     if (buffer) {
-        RtlZeroMemory(buffer, _Count * _Size);
+        if (old_len < new_len) {
+            RtlZeroMemory((void *)((ULONG_PTR)buffer + old_len), new_len - old_len);
+        }
         return buffer;
     }
     return NULL;

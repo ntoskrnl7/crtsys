@@ -127,7 +127,7 @@ unsigned int __favor = 0;
 #pragma intrinsic(__cpuid)
 #pragma intrinsic(__cpuidex)
 
-void __cdecl __isa_available_init() {
+int __cdecl __isa_available_init(void) {
 #define C1_AVX (CF_OSXSAVE | CF_AVX)
 #define C7_AVX512                                                              \
   (CX_AVX512F | CX_AVX512DQ | CX_AVX512CD | CX_AVX512BW | CX_AVX512VL)
@@ -191,35 +191,35 @@ void __cdecl __isa_available_init() {
 ISA_AVAILABLE_X86:
   __isa_available = __ISA_AVAILABLE_X86;
   __isa_enabled = __ISA_ENABLED_X86;
-  return;
+  return 0;
 
 ISA_AVAILABLE_SSE2:
   __isa_available = __ISA_AVAILABLE_SSE2;
   __isa_enabled = __ISA_ENABLED_X86 | __ISA_ENABLED_SSE2;
-  return;
+  return 0;
 
 ISA_AVAILABLE_SSE42:
   __isa_available = __ISA_AVAILABLE_SSE42;
   __isa_enabled = __ISA_ENABLED_X86 | __ISA_ENABLED_SSE2 | __ISA_ENABLED_SSE42;
-  return;
+  return 0;
 
 ISA_AVAILABLE_AVX:
   __isa_available = __ISA_AVAILABLE_AVX;
   __isa_enabled = __ISA_ENABLED_X86 | __ISA_ENABLED_SSE2 | __ISA_ENABLED_SSE42 |
                   __ISA_ENABLED_AVX;
-  return;
+  return 0;
 
 ISA_AVAILABLE_AVX2:
   __isa_available = __ISA_AVAILABLE_AVX2;
   __isa_enabled = __ISA_ENABLED_X86 | __ISA_ENABLED_SSE2 | __ISA_ENABLED_SSE42 |
                   __ISA_ENABLED_AVX | __ISA_ENABLED_AVX2;
-  return;
+  return 0;
 
 ISA_AVAILABLE_AVX512:
   __isa_available = __ISA_AVAILABLE_AVX512;
   __isa_enabled = __ISA_ENABLED_X86 | __ISA_ENABLED_SSE2 | __ISA_ENABLED_SSE42 |
                   __ISA_ENABLED_AVX | __ISA_ENABLED_AVX2 | __ISA_ENABLED_AVX512;
-  return;
+  return 0;
 
 #undef C1_AVX
 #undef C7_AVX512
