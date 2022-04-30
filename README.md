@@ -157,8 +157,8 @@ crtsys가 장점은 아래와 같습니다.
   - 기능
     - [x] DriverUnload [(tested)](./test/src/main.cpp#L25)
     - [ ] DriverDispatch
-- ntl::driver_main
-  - C++ 용 드라이버 진입점 [(tested)](./test/src/main.cpp#L20)
+- ntl::driver_main [(tested)](./test/src/main.cpp#L21)
+  - C++ 용 드라이버 진입점
   - ntl::expand_stack 함수로 스택을 최대 크기로 확장하여 호출됩니다.
 
 ## Build
