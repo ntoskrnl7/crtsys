@@ -1,6 +1,4 @@
-﻿#include "../../test.h"
-
-//
+﻿//
 // https://en.cppreference.com/w/cpp/language/constant_initialization#Example
 //
 #include <array>
@@ -13,8 +11,7 @@ const int d = 10 * S::c; // not a constant expression: S::c has no preceding
                          // initializer, this initialization happens after const
 const int S::c = 5;      // constant initialization, guaranteed to happen first
 void run() {
-  // std::cout << "d = " << d << '\n';
-  printf("d = %d\n", d);
+  std::cout << "d = " << d << '\n';
   std::array<int, S::c> a1; // OK: S::c is a constant expression
   //  std::array<int, d> a2;    // error: d is not a constant expression
   a1;
@@ -45,12 +42,10 @@ void run(int argc, char *[]) {
   delete p; // safe to delete a null pointer
 
   static int n = argc; // zero-initialized to 0 then copy-initialized to argc
-  // std::cout << "n = " << n << '\n';
-  printf("n = %d\n", n);
+  std::cout << "n = " << n << '\n';
 
   A a = A(); // the effect is same as: A a{}; or A a = {};
-  // std::cout << "a = {" << a.a << ' ' << a.b << ' ' << a.c << "}\n";
-  printf("a = { %d, %d, %d }\n", a.a, a.b, a.c);
+  std::cout << "a = {" << a.a << ' ' << a.b << ' ' << a.c << "}\n";
 }
 } // namespace zero_initialization_test
 
@@ -62,9 +57,9 @@ namespace dynamic_initialization_test {
 struct test_object {
   int n;
   test_object(int n = 0) : n(n) {
-    printf("test_object(%d) constructed successfully\n", n);
+    std::cout << "test_object(" << n << ") constructed successfully\n";
   }
-  ~test_object() { printf("test_object(%d) destroyed\n", n); }
+  ~test_object() { std::cout << "test_object(" << n << ") destroyed\n"; }
 };
 
 test_object global_object_(1);

@@ -15,15 +15,18 @@ EXTERN_C DRIVER_UNLOAD DriverUnload;
 void test_all();
 
 #if CRTSYS_USE_NTL_MAIN
+#include <iostream>
 #include <ntl/driver>
 
 ntl::status ntl::main(ntl::driver &driver, const std::wstring &registry_path) {
   KdBreakPoint();
 
+  std::wcout << "load (registry_path :" << registry_path << ")\n";
+
   test_all();
 
   driver.on_unload([registry_path]() {
-    DbgPrint("unload (registry_path : %ws)\n", registry_path.c_str());
+    std::wcout << "unload (registry_path :" << registry_path << ")\n";
   });
 
   return status::ok();

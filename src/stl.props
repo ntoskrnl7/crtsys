@@ -5,7 +5,7 @@
     <ClCompile>
       <RuntimeLibrary />
       <AdditionalIncludeDirectories>$(VC_CRT_SourcePath.Split(%3B)[0])\\vcruntime;$(VC_CRT_SourcePath.Split(%3B)[0])\\stl;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_WIN32_WINNT=_WIN32_WINNT;</PreprocessorDefinitions>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_WIN32_WINNT=_WIN32_WINNT;_CRTBLD;_NO_CRT_STDIO_INLINE;_KERNEL32_</PreprocessorDefinitions>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <ObjectFileName>$(IntDir)\%(Directory)%(FileName).obj</ObjectFileName>
     </ClCompile>
@@ -79,11 +79,83 @@
     <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\excptptr.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\excptptr.cpp">
       <CallingConvention>Cdecl</CallingConvention>
     </ClCompile>
-    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\syserror.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\syserror.cpp">
-    </ClCompile>
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\syserror.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\syserror.cpp"></ClCompile>
     <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\thread0.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\thread0.cpp" />
     <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xlock.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xlock.cpp">
       <CallingConvention>Cdecl</CallingConvention>
     </ClCompile>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\uncaught_exception.cpp">
+      <ObjectFileName>$(IntDir)vcruntime\%(FileName).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\uncaught_exceptions.cpp">
+      <ObjectFileName>$(IntDir)vcruntime\%(FileName).obj</ObjectFileName>
+    </ClCompile>
+
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\_tolower.c')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\_tolower.c" />
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\_tolower.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\_tolower.cpp" />
+
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\_toupper.c')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\_toupper.c" />
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\_toupper.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\_toupper.cpp" />
+
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xwctomb.c')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xwctomb.c" />
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xwctomb.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xwctomb.cpp" />
+
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xstol.c')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xstol.c" />
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xstol.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xstol.cpp" />
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xstol.c')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xstoul.c" />
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xstol.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xstoul.cpp" />
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xstol.c')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xstoll.c" />
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xstol.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xstoll.cpp" />
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xstol.c')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xstoull.c" />
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xstol.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xstoull.cpp" />
+
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xstrcoll.c')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xstrcoll.c" />
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xstrcoll.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xstrcoll.cpp" />
+
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xwcscoll.c')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xwcscoll.c" />
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xwcscoll.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xwcscoll.cpp" />
+
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xmbtowc.c')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xmbtowc.c" />
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xmbtowc.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xmbtowc.cpp" />
+
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xstrxfrm.c')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xstrxfrm.c" />
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xstrxfrm.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xstrxfrm.cpp" />
+
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xwcsxfrm.c')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xwcsxfrm.c" />
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xwcsxfrm.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xwcsxfrm.cpp" />
+
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xgetwctype.c')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xgetwctype.c" />
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xgetwctype.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xgetwctype.cpp" />
+
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xtowlower.c')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xtowlower.c" />
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xtowlower.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xtowlower.cpp" />
+
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xtowupper.c')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xtowupper.c" />
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xtowupper.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xtowupper.cpp" />
+
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xdateord.cpp" />
+
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\locale0.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\locale0.cpp" />
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\locale.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\locale.cpp">
+      <ObjectFileName>$(IntDir)stl\%(FileName).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\wlocale.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\wlocale.cpp" />
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xlocale.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xlocale.cpp" />
+
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\iosptrs.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\iosptrs.cpp" />
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\ios.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\ios.cpp" />
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\cout.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\cout.cpp" />
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\cerr.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\cerr.cpp" />
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\clog.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\clog.cpp" />
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\cin.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\cin.cpp" />
+
+
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\cout.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\wcout.cpp" />
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\cerr.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\wcerr.cpp" />
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\clog.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\wclog.cpp" />
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\cin.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\wcin.cpp" />
   </ItemGroup>
 </Project>

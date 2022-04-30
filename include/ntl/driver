@@ -8,8 +8,10 @@
  */
 #pragma once
 
+#ifndef _NTDDK_
+#include <wdm.h>
+#endif
 #include "status"
-
 #include <functional>
 #include <string>
 
@@ -41,7 +43,7 @@ private:
 
 #if _X86_
 // warning C4007: 'main' : must be '__cdecl'
-#pragma warning(disable:4007)
+#pragma warning(disable : 4007)
 #endif
 status main(driver &driver, const std::wstring &registry_path);
 } // namespace ntl

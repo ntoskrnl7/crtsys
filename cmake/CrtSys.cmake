@@ -1,7 +1,8 @@
 # INCLUDE_DIRECTORIES $(VC_IncludePath);$(WindowsSDK_IncludePath)
 cmake_policy(SET CMP0021 OLD)
 
-
+set(CMAKE_CXX_STANDARD_LIBRARIES " ")
+set(CMAKE_C_STANDARD_LIBRARIES ${CMAKE_CXX_STANDARD_LIBRARIES})
 
 #---------------------------------------------------------------------------------------------------
 # include("${CMAKE_CURRENT_LIST_DIR}/CPM.cmake")

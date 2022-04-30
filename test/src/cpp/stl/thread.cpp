@@ -1,5 +1,3 @@
-#include "../../test.h"
-
 //
 // https://en.cppreference.com/w/cpp/thread/condition_variable#Example
 //
@@ -21,14 +19,12 @@ void worker_thread() {
   cv.wait(lk, [] { return ready; });
 
   // after the wait, we own the lock.
-  // std::cout << "Worker thread is processing data\n";
-  printf("Worker thread is processing data\n");
+  std::cout << "Worker thread is processing data\n";
   data += " after processing";
 
   // Send data back to main()
   processed = true;
-  // std::cout << "Worker thread signals data processing completed\n";
-  printf("Worker thread signals data processing completed\n");
+  std::cout << "Worker thread signals data processing completed\n";
 
   // Manual unlocking is done before notifying, to avoid waking up
   // the waiting thread only to block again (see notify_one for details)
@@ -44,8 +40,8 @@ void run() {
   {
     std::lock_guard lk(m);
     ready = true;
-    // std::cout << "main() signals data ready for processing\n";
-    printf("condition_variable_test() signals data ready for processing\n");
+    std::cout
+        << "condition_variable_test::run() signals data ready for processing\n";
   }
   cv.notify_one();
 
@@ -54,8 +50,7 @@ void run() {
     std::unique_lock lk(m);
     cv.wait(lk, [] { return processed; });
   }
-  // std::cout << "Back in main(), data = " << data << '\n';
-  printf("Back in condition_variable_test(), data = %s\n", data.c_str());
+  std::cout << "Back in main(), data = " << data << '\n';
 
   worker.join();
 }
@@ -91,8 +86,7 @@ void run() {
 
   // safe to access g_pages without lock now, as the threads are joined
   for (const auto &pair : g_pages) {
-    // std::cout << pair.first << " => " << pair.second << '\n';
-    printf("%s => %s\n", pair.first.c_str(), pair.second.c_str());
+    std::cout << pair.first << " => " << pair.second << '\n';
   }
 }
 } // namespace mutex_test
@@ -137,9 +131,8 @@ void run() {
 
   auto increment_and_print = [&counter]() {
     for (int i = 0; i < 3; i++) {
-      // std::cout << std::this_thread::get_id() << ' ' << counter.increment()
-      // << '\n';
-      printf("%p %d\n", std::this_thread::get_id(), counter.increment());
+      std::cout << std::this_thread::get_id() << ' ' << counter.increment()
+                << '\n';
 
       // Note: Writing to std::cout actually needs to be synchronized as well
       // by another std::mutex. This has been omitted to keep the example small.
@@ -175,14 +168,12 @@ void run() {
   std::future<int> f3 = p.get_future();
   std::thread([&p] { p.set_value_at_thread_exit(9); }).detach();
 
-  // std::cout << "Waiting..." << std::flush;
-  printf("Waiting...\n");
+  std::cout << "Waiting..." << std::flush;
   f1.wait();
   f2.wait();
   f3.wait();
-  // std::cout << "Done!\nResults are: " << f1.get() << ' ' << f2.get() << ' '
-  // << f3.get() << '\n';
-  printf("Done!\nResults are: %d, %d, %d\n", f1.get(), f2.get(), f3.get());
+  std::cout << "Done!\nResults are: " << f1.get() << ' ' << f2.get() << ' '
+            << f3.get() << '\n';
   t.join();
 }
 } // namespace future_test
@@ -220,8 +211,7 @@ void run() {
   // future::get() will wait until the future has a valid result and retrieves
   // it. Calling wait() before get() is not needed
   // accumulate_future.wait();  // wait for result
-  // std::cout << "result=" << accumulate_future.get() << '\n';
-  printf("result=%d\n", accumulate_future.get());
+  std::cout << "result=" << accumulate_future.get() << '\n';
   work_thread.join(); // wait for thread completion
 
   // Demonstrate using promise<void> to signal state between threads.
@@ -252,8 +242,7 @@ void task_lambda() {
 
   task(2, 9);
 
-  // std::cout << "task_lambda:\t" << result.get() << '\n';
-  printf("task_lambda:\t%d\n", result.get());
+  std::cout << "task_lambda:\t" << result.get() << '\n';
 }
 
 void task_bind() {
@@ -262,8 +251,7 @@ void task_bind() {
 
   task();
 
-  // std::cout << "task_bind:\t" << result.get() << '\n';
-  printf("task_bind:\t%d\n", result.get());
+  std::cout << "task_bind:\t" << result.get() << '\n';
 }
 
 void task_thread() {
@@ -273,8 +261,7 @@ void task_thread() {
   std::thread task_td(std::move(task), 2, 10);
   task_td.join();
 
-  // std::cout << "task_thread:\t" << result.get() << '\n';
-  printf("task_thread:\t%d\n", result.get());
+  std::cout << "task_thread:\t" << result.get() << '\n';
 }
 
 void run() {
