@@ -188,13 +188,6 @@ CrtSysDriverEntry (
        LdkTerminate();
        return STATUS_UNSUCCESSFUL;
     }
-
-    if (!__acrt_initialize()) {
-       KdBreakPoint();
-       __vcrt_uninitialize(false);
-       LdkTerminate();
-       return STATUS_UNSUCCESSFUL;
-    }
 #endif
 
 #if CRTSYS_USE_NTL_MAIN
@@ -255,7 +248,6 @@ CrtSysDriverUnload (
     // do terminations
     _initterm(__xt_a, __xt_z);
 #else
-    __acrt_uninitialize(true);
     __scrt_uninitialize_crt(true, false);
 #endif
 #if CRTSYS_USE_LIBCNTPR

@@ -1,3 +1,5 @@
+#include <gtest/gtest.h>
+
 //
 // https://en.cppreference.com/w/cpp/chrono#Example
 //
@@ -18,3 +20,13 @@ void run() {
   std::cout << "elapsed time: " << elapsed_seconds.count() << "s\n";
 }
 } // namespace chrono_test
+
+TEST(cxx_stl_test, chrono_test) {
+  auto start = std::chrono::steady_clock::now();
+  auto actual = chrono_test::fibonacci(42);
+  EXPECT_EQ(actual, 267914296);
+  std::cout << "f(42) = " << actual << '\n';
+  auto end = std::chrono::steady_clock::now();
+  std::chrono::duration<double> elapsed_seconds = end - start;
+  std::cout << "elapsed time: " << elapsed_seconds.count() << "s\n";
+}

@@ -3,7 +3,6 @@
 #include <string>
 
 bool ntl_expand_stack_test() {
-
   long result = 0;
   ntl::expand_stack(
       [&result](int i, long l, double d) { result = (long)(i + l + d); }, 1, 2,

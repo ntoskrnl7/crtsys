@@ -1,9 +1,9 @@
-﻿#include <wdm.h>
+﻿#include <iostream>
 
 //
 // c/math.c
 //
-EXTERN_C void math_test();
+extern "C" void math_test();
 
 //
 // cpp/lang/initialization.cpp
@@ -108,12 +108,19 @@ void cpp_std_tests() {
   packaged_task_test::run();
 }
 
-#include <iostream>
+//
+// NTL tests.
+//
 
-void test_all() {
+void ntl_test() {
   if (!ntl_expand_stack_test()) {
     std::cerr << "ntl_expand_stack_test failed\n";
   }
+}
+
+void test_all() {
+
+  ntl_test();
 
   c_std_tests();
 

@@ -97,6 +97,7 @@ if (UCXXRT_ENABLED)
   list(REMOVE_ITEM SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/custom/ucrt/common/startup/thread.cpp)
   list(REMOVE_ITEM SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/custom/ucrt/common/startup/initterm.cpp)
   list(REMOVE_ITEM SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/custom/ucrt/common/startup/onexit.cpp)
+  list(REMOVE_ITEM SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/custom/ucrt/common/startup/exit.cpp)
   list(REMOVE_ITEM SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/custom/ucrt/common/startup/argv_parsing.cpp)
   list(REMOVE_ITEM SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/custom/ucrt/common/heap/malloc.cpp)
   list(REMOVE_ITEM SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/custom/ucrt/common/misc/terminate.cpp)
@@ -128,15 +129,16 @@ target_include_directories(crtsys PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/custo
 #
 # link libraries
 #
+target_link_libraries(crtsys PRIVATE $<BUILD_INTERFACE:Ldk>)
 if(CRTSYS_USE_LIBCNTPR)
-  target_link_libraries(crtsys PRIVATE $<BUILD_INTERFACE:Ldk> WDK::LIBCNTPR)
-else()
-  target_link_libraries(crtsys PRIVATE $<BUILD_INTERFACE:Ldk>)
+  target_link_libraries(crtsys PRIVATE WDK::LIBCNTPR)
 endif()
 
 #
 # Add compile definitions
 #
+target_compile_definitions(crtsys PUBLIC "_NO_CRT_STDIO_INLINE")
+target_compile_definitions(crtsys PUBLIC "_KERNEL32_")
 target_compile_definitions(crtsys PUBLIC "_ITERATOR_DEBUG_LEVEL=0")
 if (CRTSYS_USE_LIBCNTPR)
   target_compile_definitions(crtsys PUBLIC "CRTSYS_USE_LIBCNTPR")
@@ -153,7 +155,7 @@ if (CRTSYS_NTL_MAIN)
 endif()
 target_compile_definitions(crtsys PUBLIC "_HAS_EXCEPTIONS")
 if (UCXXRT_ENABLED)
-  target_compile_definitions(crtsys PRIVATE "UCXXRT")
+  target_compile_definitions(crtsys PUBLIC "UCXXRT")
   target_compile_definitions(crtsys PUBLIC "UCXXRT_X86_NO_THROW_TEST")
   target_compile_definitions(crtsys PRIVATE "__KERNEL_MODE")
 endif()
