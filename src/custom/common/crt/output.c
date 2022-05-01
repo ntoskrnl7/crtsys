@@ -124,11 +124,17 @@ _Check_return_opt_ _CRT_STDIO_INLINE int __CRTDECL fprintf(_Inout_ FILE *const _
     return vfprintf(_Stream, _Format, args);
 }
 
+_Check_return_opt_ _CRT_STDIO_INLINE int __CRTDECL vprintf(_In_z_ _Printf_format_string_ char const *const _Format,
+                                                           va_list _ArgList)
+{
+    return vfprintf(stdout, _Format, _ArgList);
+}
+
 _Check_return_opt_ _CRT_STDIO_INLINE int __CRTDECL printf(_In_z_ _Printf_format_string_ char const *const _Format, ...)
 {
     va_list args;
     va_start(args, _Format);
-    return vfprintf(stdout, _Format, args);
+    return vprintf(_Format, args);
 }
 
 _Check_return_opt_ _ACRTIMP int __cdecl puts(_In_z_ char const *_Buffer)

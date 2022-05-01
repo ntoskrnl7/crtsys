@@ -188,6 +188,7 @@
     <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\jbcxrval.c">
       <CompileAs>CompileAsC</CompileAs>
     </ClCompile>
+    <!-- locale.h __use_char_max -> do_unsigned_char_lconv_initialization -->
     <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\lconv_unsigned_char.cpp" />
     <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\locks.cpp">
       <ObjectFileName>$(IntDir)vcruntime\%(FileName).obj</ObjectFileName>

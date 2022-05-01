@@ -1,8 +1,5 @@
-#include <wdm.h>
-
 #include <stdio.h>
-#define printf(...)                                                            \
-  (DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, __VA_ARGS__))
+#include <wdm.h>
 
 EXTERN_C DRIVER_INITIALIZE DriverEntry;
 EXTERN_C DRIVER_UNLOAD DriverUnload;
@@ -14,14 +11,20 @@ EXTERN_C DRIVER_UNLOAD DriverUnload;
 
 void test_all();
 
+#include <gtest/gtest.h>
+
 #if CRTSYS_USE_NTL_MAIN
 #include <iostream>
 #include <ntl/driver>
 
 ntl::status ntl::main(ntl::driver &driver, const std::wstring &registry_path) {
+
   KdBreakPoint();
 
   std::wcout << "load (registry_path :" << registry_path << ")\n";
+
+  testing::InitGoogleTest();
+  RUN_ALL_TESTS();
 
   test_all();
 
@@ -46,6 +49,9 @@ DriverEntry (
   UNREFERENCED_PARAMETER(RegistryPath);
 
   KdBreakPoint();
+
+  testing::InitGoogleTest();
+  RUN_ALL_TESTS();
 
   test_all();
 

@@ -94,6 +94,8 @@
       <ObjectFileName>$(IntDir)vcruntime\%(FileName).obj</ObjectFileName>
     </ClCompile>
 
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\iomanip.cpp" />
+
     <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\_tolower.c')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\_tolower.c" />
     <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\_tolower.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\_tolower.cpp" />
 
@@ -151,7 +153,6 @@
     <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\cerr.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\cerr.cpp" />
     <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\clog.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\clog.cpp" />
     <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\cin.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\cin.cpp" />
-
 
     <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\cout.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\wcout.cpp" />
     <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\cerr.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\wcerr.cpp" />
