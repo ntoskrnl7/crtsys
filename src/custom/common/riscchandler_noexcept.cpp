@@ -1,3 +1,5 @@
+// clang-format off
+
 #include <corecrt_terminate.h>
 #include <ehdata.h>
 

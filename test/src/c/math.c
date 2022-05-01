@@ -1,5 +1,5 @@
-#include "../test.h"
 #include <stdint.h>
+#include <stdio.h>
 
 typedef char bool;
 #define true 1
@@ -71,23 +71,23 @@ void pow_test() {
   for (int i = 0; i < 20; i++, excepted <<= 1) {
     actual = (int)pow(2, i);
     if (excepted != actual)
-      printf("pow(2, %d) faield - excepted = %d, actual =%d\n", i, excepted,
-             actual);
+      fprintf(stderr, "pow(2, %d) faield - excepted = %d, actual =%d\n", i,
+              excepted, actual);
   }
 }
 
 void math_test() {
   if (!float_to_integer())
-    printf("float_to_integer failed");
+    fprintf(stderr, "float_to_integer failed\n");
 
   if (!integer_to_float())
-    printf("integer_to_float failed");
+    fprintf(stderr, "integer_to_float failed\n");
 
   if (!double_to_integer())
-    printf("double_to_integer failed");
+    fprintf(stderr, "double_to_integer failed\n");
 
   if (!integer_to_double())
-    printf("integer_to_double failed");
+    fprintf(stderr, "integer_to_double failed\n");
 
   pow_test();
 }
