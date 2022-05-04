@@ -31,13 +31,13 @@ static bool __cdecl uninitialize_c(bool) {
   return true;
 }
 
-__crt_bool __cdecl __acrt_initialize() {
-  __isa_available_init();
-  return initialize_c();
-}
+// __crt_bool __cdecl __acrt_initialize() {
+//   __isa_available_init();
+//   return initialize_c();
+// }
 
-__crt_bool __cdecl __acrt_uninitialize(__crt_bool const terminating) {
-  UNREFERENCED_PARAMETER(terminating);
-  return uninitialize_c(false);
-}
+// __crt_bool __cdecl __acrt_uninitialize(__crt_bool const terminating) {
+//   UNREFERENCED_PARAMETER(terminating);
+//   return uninitialize_c(false);
+// }
 EXTERN_C_END

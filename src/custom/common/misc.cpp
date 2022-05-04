@@ -80,44 +80,44 @@ DriverEntry (
 
 #pragma warning(disable:4100)
 
-EXTERN_C
-NTSTATUS
-CrtSyspInitializeLocaleLock (
-	VOID
-	);
+// EXTERN_C
+// NTSTATUS
+// CrtSyspInitializeLocaleLock (
+// 	VOID
+// 	);
 
-EXTERN_C
-VOID
-CrtSyspUninitializeLocaleLock (
-	VOID
-	);
+// EXTERN_C
+// VOID
+// CrtSyspUninitializeLocaleLock (
+// 	VOID
+// 	);
 
 #include <windows.h>
 
-EXTERN_C CRITICAL_SECTION CrtSyspIobEntriesLock[_IOB_ENTRIES];
+// EXTERN_C CRITICAL_SECTION CrtSyspIobEntriesLock[_IOB_ENTRIES];
 
-NTSTATUS
-CrtSyspInitializeStdio (
-    VOID
-    )
-{
-    for (int i = 0; i != _IOB_ENTRIES; ++i) {
-        InitializeCriticalSection( &CrtSyspIobEntriesLock[i] );
-    }
-
-    return STATUS_SUCCESS;
-}
-
-NTSTATUS
-CrtSyspUninitializeStdio (
-    VOID
-    )
-{
-    for (int i = 0; i != _IOB_ENTRIES; ++i) {
-        DeleteCriticalSection( &CrtSyspIobEntriesLock[i] );
-    }
-    return STATUS_SUCCESS;
-}
+//NTSTATUS
+//CrtSyspInitializeStdio (
+//    VOID
+//    )
+//{
+//    for (int i = 0; i != _IOB_ENTRIES; ++i) {
+//        InitializeCriticalSection( &CrtSyspIobEntriesLock[i] );
+//    }
+//
+//    return STATUS_SUCCESS;
+//}
+//
+//NTSTATUS
+//CrtSyspUninitializeStdio (
+//    VOID
+//    )
+//{
+//    for (int i = 0; i != _IOB_ENTRIES; ++i) {
+//        DeleteCriticalSection( &CrtSyspIobEntriesLock[i] );
+//    }
+//    return STATUS_SUCCESS;
+//}
 
 EXTERN_C
 NTSTATUS
@@ -137,16 +137,17 @@ CrtSyspInitializeForLibcntpr (
     //
     //
 
-    status = CrtSyspInitializeLocaleLock();
-    if (! NT_SUCCESS(status)) {
-        return status;
-    }
+    // status = CrtSyspInitializeLocaleLock();
+    // if (! NT_SUCCESS(status)) {
+    //     return status;
+    // }
 
-    status = CrtSyspInitializeStdio();
-    if (! NT_SUCCESS(status)) {
-        CrtSyspUninitializeLocaleLock();
-        return status;
-    }
+    //status = CrtSyspInitializeStdio();
+    //if (! NT_SUCCESS(status)) {
+    //    // CrtSyspUninitializeLocaleLock();
+    //    return status;
+    //}
+    status = STATUS_SUCCESS;
     return status;
 }
 
@@ -157,8 +158,8 @@ CrtSyspUninitializeForLibcntpr (
     VOID
     )
 {
-    CrtSyspUninitializeStdio();
-    CrtSyspUninitializeLocaleLock();
+    // CrtSyspUninitializeStdio();
+    // CrtSyspUninitializeLocaleLock();
 }
 
 #endif // CRTSYS_USE_LIBCNTPR

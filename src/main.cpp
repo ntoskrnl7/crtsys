@@ -117,8 +117,6 @@ extern "C" void __cdecl __initialize_memory();
 extern "C" void __cdecl __acrt_initialize_new_handler(_In_opt_ void* encoded_null);
 #else
 #include <vcstartup_internal.h>
-extern "C" extern _onexit_table_t __acrt_atexit_table;
-extern "C" extern _onexit_table_t __acrt_at_quick_exit_table;
 #endif
 
 EXTERN_C
@@ -128,8 +126,6 @@ CrtSysDriverEntry (
     _In_ PUNICODE_STRING RegistryPath
     )
 {
-    NTSTATUS status;
-
     PAGED_CODE();
 #if CRTSYS_USE_NTL_MAIN
     std::unique_ptr<ntl::driver> driver = std::make_unique<ntl::driver>(DriverObject);
@@ -137,7 +133,7 @@ CrtSysDriverEntry (
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 #endif
-    status = CrtSysInitializeTebThreadLocalStoragePointer();
+    NTSTATUS status = CrtSysInitializeTebThreadLocalStoragePointer();
     if (!NT_SUCCESS(status)) {
         return status;
     }
@@ -171,25 +167,36 @@ CrtSysDriverEntry (
     __acrt_initialize_new_handler(encoded_null);
 
     // do C initializions
-    if (_initterm_e(__xi_a, __xi_z) != 0)
+    if (_initterm_e(__xi_a, __xi_z) != 0) {
         return 255;
+    }
 
     // do C++ initializions
     _initterm(__xc_a, __xc_z);
 #else
     if (!__scrt_initialize_onexit_tables(__scrt_module_type::exe)) {
-       KdBreakPoint();
-       LdkTerminate();
-       return STATUS_UNSUCCESSFUL;
+        KdBreakPoint();
+        LdkTerminate();
+        return STATUS_FAILED_DRIVER_ENTRY;
     }
 
     if (!__scrt_initialize_crt(__scrt_module_type::exe)) {
-       KdBreakPoint();
-       LdkTerminate();
-       return STATUS_UNSUCCESSFUL;
+        KdBreakPoint();
+        LdkTerminate();
+        return STATUS_FAILED_DRIVER_ENTRY;
     }
-#endif
 
+     __scrt_current_native_startup_state = __scrt_native_startup_state::initializing;
+
+    if (_initterm_e(__xi_a, __xi_z) != 0) {
+        CrtSysDriverUnload( DriverObject );
+        return STATUS_FAILED_DRIVER_ENTRY;
+     }
+    
+    _initterm(__xc_a, __xc_z);
+
+    __scrt_current_native_startup_state = __scrt_native_startup_state::initialized;
+#endif
 #if CRTSYS_USE_NTL_MAIN
     ntl::status s = ntl::expand_stack( ntl::main,
                                        std::ref(*driver.get()),

@@ -54,7 +54,8 @@ file(GLOB SOURCE_FILES
   src/custom/common/*/*.c
 
   # ucrt
-  src/custom/ucrt/common/*/*.cpp
+  src/custom/ucrt/common/internal/winapi_thunks.cpp
+  # src/custom/ucrt/common/*/*.cpp
   src/custom/ucrt/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/*.cpp
   )
 
@@ -125,6 +126,7 @@ endif()
 target_include_directories(crtsys PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/custom/msvc/${MSVC_TOOLSET_VERSION}/include")
 target_include_directories(crtsys PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/custom/msvc/${MSVC_TOOLSET_VERSION}/crt/src/vcruntime")
 target_include_directories(crtsys PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/custom/msvc/${MSVC_TOOLSET_VERSION}/crt/src/stl")
+target_include_directories(crtsys BEFORE PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/custom/ucrt/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/inc")
 
 #
 # link libraries
@@ -137,7 +139,7 @@ endif()
 #
 # Add compile definitions
 #
-target_compile_definitions(crtsys PUBLIC "_NO_CRT_STDIO_INLINE")
+# target_compile_definitions(crtsys PUBLIC "_NO_CRT_STDIO_INLINE")
 target_compile_definitions(crtsys PUBLIC "_KERNEL32_")
 target_compile_definitions(crtsys PUBLIC "_ITERATOR_DEBUG_LEVEL=0")
 if (CRTSYS_USE_LIBCNTPR)
@@ -219,7 +221,7 @@ endif()
 #
 set(VS_PROPS "${CMAKE_CURRENT_SOURCE_DIR}/src/stl.props")
 if (NOT UCXXRT_ENABLED)
-  list(APPEND VS_PROPS "${CMAKE_CURRENT_SOURCE_DIR}/src/vcruntime.props;${CMAKE_CURRENT_SOURCE_DIR}/src/custom/msvc/crt.props")
+  list(APPEND VS_PROPS "${CMAKE_CURRENT_SOURCE_DIR}/src/ucrt.props;${CMAKE_CURRENT_SOURCE_DIR}/src/vcruntime.props;${CMAKE_CURRENT_SOURCE_DIR}/src/custom/msvc/crt.props")
 endif()
 set_target_properties(crtsys PROPERTIES VS_USER_PROPS "${VS_PROPS}")
 

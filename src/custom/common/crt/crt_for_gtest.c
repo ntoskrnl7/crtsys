@@ -32,11 +32,11 @@ _Check_return_ _ACRTIMP FILE *__cdecl fdopen(_In_ int _FileHandle, _In_z_ char c
     return NULL;
 }
 
-_Check_return_ _ACRTIMP int __cdecl _fileno(_In_ FILE *_Stream)
-{
-    KdBreakPoint();
-    return 0;
-}
+// _Check_return_ _ACRTIMP int __cdecl _fileno(_In_ FILE *_Stream)
+// {
+//     KdBreakPoint();
+//     return 0;
+// }
 
 _Check_return_opt_ _CRT_NONSTDC_DEPRECATE(_close)
 _ACRTIMP
@@ -77,11 +77,11 @@ int __cdecl dup2(_In_ int _FileHandleSrc, _In_ int _FileHandleDst)
     return 0;
 }
 
-_Check_return_ _ACRTIMP int __cdecl _isatty(_In_ int _FileHandle)
-{
-    KdBreakPoint();
-    return 0;
-}
+// _Check_return_ _ACRTIMP int __cdecl _isatty(_In_ int _FileHandle)
+// {
+//     KdBreakPoint();
+//     return 0;
+// }
 
 _ACRTIMP int __cdecl _stat64i32(_In_z_ char const *_FileName, _Out_ struct _stat64i32 *_Stat)
 {
@@ -89,11 +89,12 @@ _ACRTIMP int __cdecl _stat64i32(_In_z_ char const *_FileName, _Out_ struct _stat
     KdBreakPoint();
     return 0;
 }
-_ACRTIMP int __cdecl _open_osfhandle(_In_ intptr_t _OSFileHandle, _In_ int _Flags)
-{
-    KdBreakPoint();
-    return 0;
-}
+
+// _ACRTIMP int __cdecl _open_osfhandle(_In_ intptr_t _OSFileHandle, _In_ int _Flags)
+// {
+//     KdBreakPoint();
+//     return 0;
+// }
 
 #if UCXXRT
 _ACRTIMP __declspec(noreturn) void __cdecl exit(_In_ int _Code)
@@ -123,7 +124,9 @@ _Check_return_ _ACRTIMP short __cdecl _dclass(_In_ double _X)
     return 0;
 }
 
+#if UCXXRT
 int __do_unsigned_char_lconv_initialization = 255;
+#endif
 
 _Check_return_ _ACRTIMP double __cdecl nextafter(_In_ double _X, _In_ double _Y)
 {
@@ -149,11 +152,11 @@ _Check_return_ _ACRTIMP unsigned long long __cdecl strtoull(_In_z_ char const *_
     return 0;
 }
 
-_Check_return_ _DCRTIMP char *__cdecl getenv(_In_z_ char const *_VarName)
-{
-    // untested :-(
-    return NULL;
-}
+// _Check_return_ _DCRTIMP char *__cdecl getenv(_In_z_ char const *_VarName)
+// {
+//     // untested :-(
+//     return NULL;
+// }
 
 _Ret_z_ _Check_return_ _ACRTIMP char *__cdecl strerror(_In_ int _ErrorMessage)
 {
@@ -165,18 +168,40 @@ __declspec(noalias) void __cdecl __std_reverse_trivially_swappable_4(void *_Firs
 {
 }
 
-_Check_return_ _ACRTIMP FILE *__cdecl _wfopen(_In_z_ wchar_t const *_FileName, _In_z_ wchar_t const *_Mode)
-{
-    KdBreakPoint();
-    return NULL;
-}
+// _Check_return_ _ACRTIMP FILE *__cdecl _wfopen(_In_z_ wchar_t const *_FileName, _In_z_ wchar_t const *_Mode)
+// {
+//     KdBreakPoint();
+//     return NULL;
+// }
 
-_Success_(return != -1) _Check_return_ _ACRTIMP long __cdecl ftell(_Inout_ FILE *_Stream)
+// _Success_(return != -1) _Check_return_ _ACRTIMP long __cdecl ftell(_Inout_ FILE *_Stream)
+// {
+//     KdBreakPoint();
+//     return 0;
+// }
+
+_ACRTIMP int __cdecl remove(_In_z_ char const *_FileName)
 {
     KdBreakPoint();
     return 0;
 }
-_ACRTIMP int __cdecl remove(_In_z_ char const *_FileName)
+
+
+#include <fenv.h>
+
+_ACRTIMP int __cdecl fegetenv(_Out_ fenv_t* _Env)
+{
+    KdBreakPoint();
+    return 0;
+}
+
+_ACRTIMP int __cdecl fesetenv(_In_ fenv_t const *_Env)
+{
+    KdBreakPoint();
+    return 0;
+}
+
+_ACRTIMP _Success_(return == 0) int __cdecl feholdexcept(_Out_ fenv_t *_Env)
 {
     KdBreakPoint();
     return 0;
