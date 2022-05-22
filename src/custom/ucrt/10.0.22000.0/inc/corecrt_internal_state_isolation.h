@@ -1,7 +1,5 @@
 #pragma once
 
-#include <type_traits>
-
 #define __acrt_select_exit_lock() __acrt_exit_lock
 
 #pragma warning(disable : 4101)
@@ -43,15 +41,22 @@ extern "C++"
       public:
         T &value()
         {
-            return values_[0];
+            return _value[0];
         }
+
+        T &value_explicit(size_t const current_global_state_index)
+        {
+            return _value[current_global_state_index];
+        }
+
+        T &value(__crt_cached_ptd_host &ptd) throw();
+
+        T const &value(__crt_cached_ptd_host &ptd) const throw();
 
         void initialize(const T &value)
         {
             for (size_t i = 0; i != state_index_count; i++)
-            {
-                values_[i] = value;
-            }
+                _value[i] = value;
         }
 
         template <typename Ta> void initialize_from_array(Ta (&arr)[2])
@@ -67,10 +72,10 @@ extern "C++"
 
         T *const dangerous_get_state_array()
         {
-            return reinterpret_cast<T *const>(&values_);
+            return reinterpret_cast<T *const>(&_value);
         }
 
-        T values_[state_index_count];
+        T _value[state_index_count];
     };
     } // namespace __crt_state_management
 }

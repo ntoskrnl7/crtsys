@@ -108,27 +108,27 @@ crtsys가 장점은 아래와 같습니다.
 - [Initialization](https://en.cppreference.com/w/cpp/language/initialization)
   - [x] [Non-local variables](https://en.cppreference.com/w/cpp/language/initialization#Non-local_variables)
     - [x] [Static initialization](https://en.cppreference.com/w/cpp/language/initialization#Static_initialization)
-      - [x] [Constant initialization](https://en.cppreference.com/w/cpp/language/constant_initialization) [(tested)](./test/src/cpp/lang/initialization.cpp#L15)
-      - [x] [Zero initialization](https://en.cppreference.com/w/cpp/language/zero_initialization) [(tested)](./test/src/cpp/lang/initialization.cpp#L44)
-    - [x] [Dynamic initialization](https://en.cppreference.com/w/cpp/language/initialization#Dynamic_initialization) [(tested)](./test/src/cpp/lang/initialization.cpp#L71)
+      - [x] [Constant initialization](https://en.cppreference.com/w/cpp/language/constant_initialization) [(tested)](./test/src/cpp/lang/initialization.cpp#L13)
+      - [x] [Zero initialization](https://en.cppreference.com/w/cpp/language/zero_initialization) [(tested)](./test/src/cpp/lang/initialization.cpp#L41)
+    - [x] [Dynamic initialization](https://en.cppreference.com/w/cpp/language/initialization#Dynamic_initialization) [(tested)](./test/src/cpp/lang/initialization.cpp#L65)
   - [ ] [Static local variables](https://en.cppreference.com/w/cpp/language/storage_duration#Static_local_variables)
     - [ ] thread_local
     - [ ] static
 - [Exceptions](https://en.cppreference.com/w/cpp/language/exceptions)
-  - [x] [throw](https://en.cppreference.com/w/cpp/language/throw) [(tested)](./test/src/cpp/lang/exceptions.cpp#L58)
-  - [x] [try-block](https://en.cppreference.com/w/cpp/language/try_catch) [(tested)](./test/src/cpp/lang/exceptions.cpp#L77)
-  - [x] [Function-try-block](https://en.cppreference.com/w/cpp/language/function-try-block) [(tested)](./test/src/cpp/lang/exceptions.cpp#L125)
+  - [x] [throw](https://en.cppreference.com/w/cpp/language/throw) [(tested)](./test/src/cpp/lang/exceptions.cpp#L42)
+  - [x] [try-block](https://en.cppreference.com/w/cpp/language/try_catch) [(tested)](./test/src/cpp/lang/exceptions.cpp#L60)
+  - [x] [Function-try-block](https://en.cppreference.com/w/cpp/language/function-try-block) [(tested)](./test/src/cpp/lang/exceptions.cpp#L98)
 
 #### STL
 
 - [x] [std::chrono](https://en.cppreference.com/w/cpp/chrono) [(tested)](./test/src/cpp/stl/chrono.cpp#L15)
-- [x] [std::thread](https://en.cppreference.com/w/cpp/thread) [(tested)](./test/src/cpp/stl/thread.cpp#L39)
-- [x] [std::condition_variable](https://en.cppreference.com/w/cpp/thread/condition_variable) [(tested)](./test/src/cpp/stl/thread.cpp#L39)
-- [x] [std::mutex](https://en.cppreference.com/w/cpp/thread/mutex) [(tested)](./test/src/cpp/stl/thread.cpp#L86)
-- [x] [std::shared_mutex](https://en.cppreference.com/w/cpp/thread/shared_mutex) [(tested)](./test/src/cpp/stl/thread.cpp#L135)
-- [x] [std::future](https://en.cppreference.com/w/cpp/thread/future) [(tested)](./test/src/cpp/stl/thread.cpp#L164)
-- [x] [std::promise](https://en.cppreference.com/w/cpp/thread/promise) [(tested)](./test/src/cpp/stl/thread.cpp#L212)
-- [x] [std::packaged_task](https://en.cppreference.com/w/cpp/thread/packaged_task) [(tested)](./test/src/cpp/stl/thread.cpp#L280)
+- [x] [std::thread](https://en.cppreference.com/w/cpp/thread) [(tested)](./test/src/cpp/stl/thread.cpp#L35)
+- [x] [std::condition_variable](https://en.cppreference.com/w/cpp/thread/condition_variable) [(tested)](./test/src/cpp/stl/thread.cpp#L35)
+- [x] [std::mutex](https://en.cppreference.com/w/cpp/thread/mutex) [(tested)](./test/src/cpp/stl/thread.cpp#L81)
+- [x] [std::shared_mutex](https://en.cppreference.com/w/cpp/thread/shared_mutex) [(tested)](./test/src/cpp/stl/thread.cpp#L129)
+- [x] [std::future](https://en.cppreference.com/w/cpp/thread/future) [(tested)](./test/src/cpp/stl/thread.cpp#L157)
+- [x] [std::promise](https://en.cppreference.com/w/cpp/thread/promise) [(tested)](./test/src/cpp/stl/thread.cpp#L203)
+- [x] [std::packaged_task](https://en.cppreference.com/w/cpp/thread/packaged_task) [(tested)](./test/src/cpp/stl/thread.cpp#L267)
 - [x] [std::cin](https://en.cppreference.com/w/cpp/io/cin)
 - [x] [std::clog](https://en.cppreference.com/w/cpp/io/clog)
 - [x] [std::cerr](https://en.cppreference.com/w/cpp/io/cerr)
@@ -241,7 +241,7 @@ project(crtsys_test LANGUAGES C)
 include(cmake/CPM.cmake)
 
 set(CRTSYS_NTL_MAIN ON) # use ntl::main
-CPMAddPackage("gh:ntoskrnl7/crtsys@0.1.0")
+CPMAddPackage("gh:ntoskrnl7/crtsys@0.1.1")
 include(${crtsys_SOURCE_DIR}/cmake/CrtSys.cmake)
 
 # add driver

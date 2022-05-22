@@ -27,25 +27,9 @@ extern "C" BOOL WINAPI __acrt_FlsSetValue(DWORD const fls_index, PVOID const fls
     return FlsSetValue(fls_index, fls_data);
 }
 
-
-extern "C" void __cdecl __acrt_eagerly_load_locale_apis()
+extern "C" BOOL WINAPI __acrt_AreFileApisANSI()
 {
-}
-
-#define _CORECRT_BUILD
-#define _CRT_GLOBAL_STATE_ISOLATION
-#define _CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY
-#include <corecrt_internal.h>
-
-#pragma warning(disable : 4100)
-
-extern "C" HRESULT WINAPI __acrt_RoInitialize(RO_INIT_TYPE const init_type)
-{
-    return S_OK;
-}
-
-extern "C" void WINAPI __acrt_RoUninitialize()
-{
+    return AreFileApisANSI();
 }
 
 extern "C"
@@ -86,51 +70,6 @@ extern "C" int WINAPI __acrt_GetUserDefaultLocaleName(
     return GetUserDefaultLocaleName(locale_name, locale_name_count);
 }
 
-//
-//
-//
-
-extern "C"
-begin_thread_init_policy __cdecl __acrt_get_begin_thread_init_policy()
-{
-    return begin_thread_init_policy_none;
-}
-
-extern "C"
-process_end_policy __cdecl __acrt_get_process_end_policy(void)
-{
-    return process_end_policy_exit_process;
-}
-
-extern "C" BOOL WINAPI __acrt_AreFileApisANSI()
-{
-    return TRUE;
-}
-
-
-extern "C" BOOL WINAPI __acrt_EnumSystemLocalesEx(
-    LOCALE_ENUMPROCEX const enum_proc,
-    DWORD             const flags,
-    LPARAM            const param,
-    LPVOID            const reserved
-    )
-{
-    return EnumSystemLocalesEx(enum_proc, flags, param, reserved);
-}
-
-extern "C"
-int __cdecl __acrt_GetLocaleInfoA(_locale_t const locale, int const lc_type, wchar_t const *const locale_name,
-                                  LCTYPE const locale_type, void *const void_result)
-{
-    return 0;
-}
-
-extern "C" int __cdecl __acrt_LCMapStringA(_locale_t const plocinfo, PCWSTR const LocaleName, DWORD const dwMapFlags,
-                                           PCCH const lpSrcStr, int const cchSrc, PCH const lpDestStr,
-                                           int const cchDest, int const code_page, BOOL const bError)
-{
-    return 0;
-}
 
 extern "C" int WINAPI __acrt_LCIDToLocaleName(
     LCID   const locale,
@@ -139,7 +78,7 @@ extern "C" int WINAPI __acrt_LCIDToLocaleName(
     DWORD  const flags
     )
 {
-    return LCIDToLocaleName(locale, name, name_count, 0);
+    return LCIDToLocaleName(locale, name, name_count, flags);
 }
 
 extern "C" LCID WINAPI __acrt_LocaleNameToLCID(
@@ -154,6 +93,59 @@ extern "C" BOOL WINAPI __acrt_IsValidLocaleName(LPCWSTR const locale_name)
 {
     return IsValidLocale(__acrt_LocaleNameToLCID(locale_name, 0), LCID_INSTALLED);
 }
+
+
+
+#define _CORECRT_BUILD
+#define _CRT_GLOBAL_STATE_ISOLATION
+#define _CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY
+#include <corecrt_internal.h>
+
+#pragma warning(disable : 4100)
+
+extern "C" HRESULT WINAPI __acrt_RoInitialize(RO_INIT_TYPE const init_type)
+{
+    return S_OK;
+}
+
+extern "C" void WINAPI __acrt_RoUninitialize()
+{
+}
+
+
+//
+//
+//
+
+extern "C" void __cdecl __acrt_eagerly_load_locale_apis()
+{
+}
+
+extern "C"
+begin_thread_init_policy __cdecl __acrt_get_begin_thread_init_policy()
+{
+    return begin_thread_init_policy_none;
+}
+
+extern "C"
+process_end_policy __cdecl __acrt_get_process_end_policy(void)
+{
+    return process_end_policy_exit_process;
+}
+
+
+extern "C" BOOL WINAPI __acrt_EnumSystemLocalesEx(
+    LOCALE_ENUMPROCEX const enum_proc,
+    DWORD             const flags,
+    LPARAM            const param,
+    LPVOID            const reserved
+    )
+{
+    return EnumSystemLocalesEx(enum_proc, flags, param, reserved);
+}
+
+
+
 
 extern "C" int WINAPI __acrt_GetDateFormatEx(
     LPCWSTR           const locale_name,
@@ -188,6 +180,20 @@ extern "C" int WINAPI __acrt_GetLocaleInfoEx(
     )
 {
     return GetLocaleInfoW(__acrt_LocaleNameToLCID(locale_name, 0), lc_type, data, data_count);
+}
+
+extern "C"
+int __cdecl __acrt_GetLocaleInfoA(_locale_t const locale, int const lc_type, wchar_t const *const locale_name,
+                                  LCTYPE const locale_type, void *const void_result)
+{
+    return 0;
+}
+
+extern "C" int __cdecl __acrt_LCMapStringA(_locale_t const plocinfo, PCWSTR const LocaleName, DWORD const dwMapFlags,
+                                           PCCH const lpSrcStr, int const cchSrc, PCH const lpDestStr,
+                                           int const cchDest, int const code_page, BOOL const bError)
+{
+    return 0;
 }
 
 extern "C" bool __cdecl __acrt_can_use_vista_locale_apis()
@@ -254,14 +260,3 @@ extern "C" void __cdecl _setdefaultprecision()
     _controlfp_s(NULL, _PC_53, _MCW_PC);
 }
 #endif
-
-extern "C" int __cdecl fegetround(int)
-{
-    return 0;
-}
-
-extern "C" void** __cdecl __pxcptinfoptrs();
-extern "C" void ** __cdecl _pxcptinfoptrs(void)
-{
-    return __pxcptinfoptrs();
-}

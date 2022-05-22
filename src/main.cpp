@@ -49,7 +49,7 @@ CrtSysSetTebThreadLocalStoragePointer (
 
 _Function_class_(KDEFERRED_ROUTINE)
 VOID
-CrtpSetTebThreadLocalStoragePointerDpcRoutine(
+CrtpSetTebThreadLocalStoragePointerDpcRoutine (
     _In_ struct _KDPC* Dpc,
     _In_opt_ PVOID DeferredContext,
     _In_ PVOID ThreadLocalStoragePointer,
@@ -64,7 +64,7 @@ CrtpSetTebThreadLocalStoragePointerDpcRoutine(
 }
 
 NTSTATUS
-CrtSysInitializeTebThreadLocalStoragePointer(
+CrtSysInitializeTebThreadLocalStoragePointer (
     VOID
     )
 {
@@ -109,15 +109,7 @@ CrtSysInitializeTebThreadLocalStoragePointer(
 
 
 
-#if UCXXRT
-extern "C" int  __cdecl _do_onexit();
-extern "C" int  __cdecl _do_quick_onexit();
-
-extern "C" void __cdecl __initialize_memory();
-extern "C" void __cdecl __acrt_initialize_new_handler(_In_opt_ void* encoded_null);
-#else
 #include <vcstartup_internal.h>
-#endif
 
 EXTERN_C
 NTSTATUS
@@ -127,53 +119,38 @@ CrtSysDriverEntry (
     )
 {
     PAGED_CODE();
-#if CRTSYS_USE_NTL_MAIN
-    std::unique_ptr<ntl::driver> driver = std::make_unique<ntl::driver>(DriverObject);
-    if (!driver) {
-        return STATUS_INSUFFICIENT_RESOURCES;
-    }
-#endif
     NTSTATUS status = CrtSysInitializeTebThreadLocalStoragePointer();
-    if (!NT_SUCCESS(status)) {
+    if (! NT_SUCCESS(status)) {
         return status;
     }
 
     status = LdkInitialize( DriverObject,
                             RegistryPath,
                             0 );
-    if (!NT_SUCCESS(status)) {
+    if (! NT_SUCCESS(status)) {
         return status;
     }
 
+    NTSTATUS
+    CrtSysInitializeFlsXState (
+        VOID
+        );
+    status = CrtSysInitializeFlsXState();
+    if (! NT_SUCCESS(status)) {
+        LdkTerminate();
+        return status;
+    }
 #if CRTSYS_USE_LIBCNTPR
     NTSTATUS
     CrtSyspInitializeForLibcntpr (
         VOID
         );
     status = CrtSyspInitializeForLibcntpr();
-    if (!NT_SUCCESS(status)) {
+    if (! NT_SUCCESS(status)) {
+        LdkTerminate();
         return status;
     }
 #endif
-#if UCXXRT
-    // do feature initializions
-    __isa_available_init();
-
-    // do memory initializions
-    __initialize_memory();
-
-    // do pointer initializions
-    void* const encoded_null = __crt_fast_encode_pointer(nullptr);
-    __acrt_initialize_new_handler(encoded_null);
-
-    // do C initializions
-    if (_initterm_e(__xi_a, __xi_z) != 0) {
-        return 255;
-    }
-
-    // do C++ initializions
-    _initterm(__xc_a, __xc_z);
-#else
     if (!__scrt_initialize_onexit_tables(__scrt_module_type::exe)) {
         KdBreakPoint();
         LdkTerminate();
@@ -196,8 +173,12 @@ CrtSysDriverEntry (
     _initterm(__xc_a, __xc_z);
 
     __scrt_current_native_startup_state = __scrt_native_startup_state::initialized;
-#endif
+
 #if CRTSYS_USE_NTL_MAIN
+    std::unique_ptr<ntl::driver> driver = std::make_unique<ntl::driver>(DriverObject);
+    if (!driver) {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
     ntl::status s = ntl::expand_stack( ntl::main,
                                        std::ref(*driver.get()),
                                        std::wstring(RegistryPath->Buffer) );
@@ -245,18 +226,7 @@ CrtSysDriverUnload (
         CrtsyspDriverUnload( DriverObject );
     }
 #endif
-#if UCXXRT
-    // do exit() of atexit()
-    _do_onexit();
-
-    // do pre terminations
-    _initterm(__xp_a, __xp_z);
-
-    // do terminations
-    _initterm(__xt_a, __xt_z);
-#else
     __scrt_uninitialize_crt(true, false);
-#endif
 #if CRTSYS_USE_LIBCNTPR
     VOID
     CrtSyspUninitializeForLibcntpr (

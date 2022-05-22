@@ -3,9 +3,14 @@ cmake_minimum_required(VERSION 3.14)
 # INCLUDE_DIRECTORIES $(VC_IncludePath);$(WindowsSDK_IncludePath)
 cmake_policy(SET CMP0021 OLD)
 
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/")
+include(pkg-utils)
+
+pkg_get_version(CRTSYS ${CMAKE_CURRENT_SOURCE_DIR}/include/_version VERSION)
+
 project(
     crtsys
-    VERSION 0.1.0
+    VERSION "${VERSION}"
     DESCRIPTION "C Runtime Lbrary for Windows driver file (*.sys)"
     HOMEPAGE_URL "https://github.com/ntoskrnl7/crtsys"
     LANGUAGES C CXX ASM_MASM
@@ -34,7 +39,7 @@ else()
   set(LDK_USE_RAISE_EXCEPTION OFF)
   set(LDK_USE_RTL_RAISE_EXCEPTION OFF)
 endif()
-CPMAddPackage("gh:ntoskrnl7/Ldk#features/kernel32")
+CPMAddPackage("gh:ntoskrnl7/Ldk@0.6.3")
 
 CPMAddPackage("gh:ntoskrnl7/FindWDK#master")
 list(APPEND CMAKE_MODULE_PATH "${FindWDK_SOURCE_DIR}/cmake")
@@ -47,27 +52,43 @@ find_package(WDK REQUIRED)
 file(GLOB SOURCE_FILES
   src/*.cpp
 
-  # common
-  src/custom/common/*.cpp
-  src/custom/common/*.c
-  src/custom/common/*/*.cpp
-  src/custom/common/*/*.c
+  # misc
+  src/custom/misc/*.cpp
+  src/custom/misc/*.c
+
+  # crt
+  src/custom/crt/*.c
+  src/custom/crt/fenv/*.c
 
   # ucrt
-  src/custom/ucrt/common/internal/winapi_thunks.cpp
-  # src/custom/ucrt/common/*/*.cpp
+  src/custom/ucrt/common/*.cpp
+  src/custom/ucrt/common/*/*.cpp
+
+  # ucrt
   src/custom/ucrt/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/*.cpp
+  src/custom/ucrt/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/*/*.cpp  
   )
 
 if("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "Win32")
   file(GLOB MATH_SOURCE_FILES
-    src/custom/common/math/*.c
+    src/custom/crt/math/*.c
     )
+  list(APPEND SOURCE_FILES ${MATH_SOURCE_FILES})
+else()
+  file(GLOB MATH_SOURCE_FILES
+  src/custom/crt/math/nextafter.c
+  src/custom/crt/math/fpclassify.c
+  )
   list(APPEND SOURCE_FILES ${MATH_SOURCE_FILES})
 endif()
 
 if (UCXXRT_ENABLED)
+  list(APPEND SOURCE_FILES src/custom/msvc/common/crt/src/stl/winapisupp.cpp)
+  list(REMOVE_ITEM SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/custom/crt/isa_available_init.c)
+  list(REMOVE_ITEM SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/custom/crt/math/ftol3.c)
+
   CPMAddPackage("gh:ntoskrnl7/ucxxrt#master")
+ 
   file(GLOB_RECURSE UCXXRT_SOURCE_FILES
     ${ucxxrt_SOURCE_DIR}/src/*.cpp
     ${ucxxrt_SOURCE_DIR}/vcruntime/*.cpp
@@ -75,6 +96,9 @@ if (UCXXRT_ENABLED)
     )
   list(REMOVE_ITEM UCXXRT_SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/vcruntime/crt.cpp)
   list(REMOVE_ITEM UCXXRT_SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/vcruntime/locales.cpp)
+  list(REMOVE_ITEM UCXXRT_SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/vcruntime/thread.cpp)
+  list(REMOVE_ITEM UCXXRT_SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/terminate.cpp)
+  list(REMOVE_ITEM UCXXRT_SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/misc/invalid_parameter.cpp)
   list(REMOVE_ITEM UCXXRT_SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/sys_main.cpp)
   list(REMOVE_ITEM UCXXRT_SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/unittest.cpp)
   if("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "x64")
@@ -91,18 +115,6 @@ if (UCXXRT_ENABLED)
   list(APPEND UCXXRT_SOURCE_FILES ${PLATFORM_SOURCE_FILES})
 
   list(APPEND SOURCE_FILES ${UCXXRT_SOURCE_FILES})
-  list(APPEND SOURCE_FILES src/custom/msvc/common/crt/src/stl/winapisupp.cpp)
-  list(REMOVE_ITEM SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/custom/common/isa_available_init.c)
-  list(REMOVE_ITEM SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/custom/common/errno.c)
-  list(REMOVE_ITEM SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/custom/common/math/ftol3.c)
-  list(REMOVE_ITEM SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/custom/ucrt/common/startup/thread.cpp)
-  list(REMOVE_ITEM SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/custom/ucrt/common/startup/initterm.cpp)
-  list(REMOVE_ITEM SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/custom/ucrt/common/startup/onexit.cpp)
-  list(REMOVE_ITEM SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/custom/ucrt/common/startup/exit.cpp)
-  list(REMOVE_ITEM SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/custom/ucrt/common/startup/argv_parsing.cpp)
-  list(REMOVE_ITEM SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/custom/ucrt/common/heap/malloc.cpp)
-  list(REMOVE_ITEM SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/custom/ucrt/common/misc/terminate.cpp)
-  list(REMOVE_ITEM SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/custom/ucrt/common/misc/invalid_parameter.cpp)
 endif()
 
 wdk_add_library(
@@ -158,7 +170,6 @@ endif()
 target_compile_definitions(crtsys PUBLIC "_HAS_EXCEPTIONS")
 if (UCXXRT_ENABLED)
   target_compile_definitions(crtsys PUBLIC "UCXXRT")
-  target_compile_definitions(crtsys PUBLIC "UCXXRT_X86_NO_THROW_TEST")
   target_compile_definitions(crtsys PRIVATE "__KERNEL_MODE")
 endif()
 
@@ -219,11 +230,12 @@ endif()
 #
 # set visual studio properties file
 #
-set(VS_PROPS "${CMAKE_CURRENT_SOURCE_DIR}/src/stl.props")
-if (NOT UCXXRT_ENABLED)
-  list(APPEND VS_PROPS "${CMAKE_CURRENT_SOURCE_DIR}/src/ucrt.props;${CMAKE_CURRENT_SOURCE_DIR}/src/vcruntime.props;${CMAKE_CURRENT_SOURCE_DIR}/src/custom/msvc/crt.props")
+if (UCXXRT_ENABLED)
+  list(APPEND VS_PROPS "${CMAKE_CURRENT_SOURCE_DIR}/src/ucrt_for_ucxxrt.props")
+else()
+  list(APPEND VS_PROPS "${CMAKE_CURRENT_SOURCE_DIR}/src/vcruntime.props;${CMAKE_CURRENT_SOURCE_DIR}/src/custom/msvc/crt.props;${CMAKE_CURRENT_SOURCE_DIR}/src/ucrt.props")
 endif()
-set_target_properties(crtsys PROPERTIES VS_USER_PROPS "${VS_PROPS}")
+set_target_properties(crtsys PROPERTIES VS_USER_PROPS "${CMAKE_CURRENT_SOURCE_DIR}/src/stl.props;${VS_PROPS}")
 
 #
 # set library output path (release only)
