@@ -159,7 +159,7 @@
     <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\clog.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\wclog.cpp" />
     <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\cin.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\wcin.cpp" />
 
-    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xmtx.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\vector_algorithms.cpp">
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\vector_algorithms.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\vector_algorithms.cpp">
       <CallingConvention>Cdecl</CallingConvention>
     </ClCompile>
   </ItemGroup>
