@@ -43,14 +43,14 @@ extern "C++"
       public:
         T &value()
         {
-            return values_[0];
+            return _value[0];
         }
 
         void initialize(const T &value)
         {
             for (size_t i = 0; i != state_index_count; i++)
             {
-                values_[i] = value;
+                _value[i] = value;
             }
         }
 
@@ -67,10 +67,10 @@ extern "C++"
 
         T *const dangerous_get_state_array()
         {
-            return reinterpret_cast<T *const>(&values_);
+            return reinterpret_cast<T *const>(&_value);
         }
 
-        T values_[state_index_count];
+        T _value[state_index_count];
     };
     } // namespace __crt_state_management
 }

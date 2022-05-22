@@ -1,4 +1,4 @@
-#include <corecrt_internal.h>
+#include <internal_shared.h>
 
 //
 // ucrt/misc/invalid_parameter.cpp (__acrt_call_reportfault -> _CRT_DEBUGGER_HOOK)
@@ -29,6 +29,8 @@ void ** __cdecl _pxcptinfoptrs(void)
 //
 
 #if UCXXRT
+#include <stdlib.h>
+
 int __do_unsigned_char_lconv_initialization = 255;
 
 _ACRTIMP __declspec(noreturn) void __cdecl exit(_In_ int _Code) { _exit(_Code); }
