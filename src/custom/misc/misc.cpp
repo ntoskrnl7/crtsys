@@ -185,13 +185,15 @@ extern "C" bool __cdecl __scrt_initialize_crt(__scrt_module_type const module_ty
     return true;
 }
 
+extern "C" _ACRTIMP void __cdecl _cexit(void)
+{
+    _do_onexit();
+}
+
 extern "C" bool __cdecl __scrt_uninitialize_crt(bool const is_terminating, bool const from_exit)
 {
     ASSERT(from_exit == false);
     UNREFERENCED_PARAMETER(from_exit);
-
-    // ucxxrt
-    _do_onexit();
 
     __acrt_uninitialize(is_terminating);
     __vcrt_uninitialize(is_terminating);

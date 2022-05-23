@@ -226,7 +226,17 @@ CrtSysDriverUnload (
         CrtsyspDriverUnload( DriverObject );
     }
 #endif
-    __scrt_uninitialize_crt(true, false);
+
+    _cexit();
+
+    __scrt_uninitialize_crt(
+#if DBG
+        false,
+#else
+        true,
+#endif
+        false);
+
 #if CRTSYS_USE_LIBCNTPR
     VOID
     CrtSyspUninitializeForLibcntpr (
