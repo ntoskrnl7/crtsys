@@ -34,8 +34,7 @@ ntl::status ntl::main(ntl::driver &driver, const std::wstring &registry_path) {
 
   return status::ok();
 }
-
-#else
+#else  // !CRTSYS_USE_NTL_MAIN
 // clang-format off
 EXTERN_C
 NTSTATUS
@@ -70,4 +69,4 @@ DriverUnload (
   PAGED_CODE();
   UNREFERENCED_PARAMETER(DriverObject);
 }
-#endif
+#endif // !CRTSYS_USE_NTL_MAIN

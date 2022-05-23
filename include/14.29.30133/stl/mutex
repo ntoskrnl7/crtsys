@@ -508,7 +508,7 @@ public:
 #endif // _HAS_CXX17
 
 // FUNCTION TEMPLATE call_once
-// #ifdef _M_CEE
+#ifdef _M_CEE
 #define _WINDOWS_API              __stdcall
 #define _RENAME_WINDOWS_API(_Api) _Api##_clr
 #else // ^^^ _M_CEE // !_M_CEE vvv

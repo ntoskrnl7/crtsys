@@ -4,27 +4,27 @@
     <ClCompile>
       <RuntimeLibrary />
       <AdditionalIncludeDirectories>$(VC_CRT_SourcePath.Split(%3B)[0])\\vcruntime;$(VC_CRT_SourcePath.Split(%3B)[0])\\stl;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_WIN32_WINNT=_WIN32_WINNT;_VCRT_WIN32_WINNT=_WIN32_WINNT;_VCRT_ALLOW_INTERNALS;_CRT_WINDOWS_USE_VISTA_TSS;_CRTIMP_ALT;_CRTBLD;_KERNELX;PROCESSOR_FAST_FAIL_AVAILABLE;_NO_CRT_STDIO_INLINE;_HAS_EXCEPTIONS=1;_ITERATOR_DEBUG_LEVEL=0;</PreprocessorDefinitions>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_WIN32_WINNT=_WIN32_WINNT;_VCRT_WIN32_WINNT=_WIN32_WINNT;_VCRT_ALLOW_INTERNALS;_CRT_WINDOWS_USE_VISTA_TSS;_CRTIMP_ALT;_CRTBLD;_KERNELX;PROCESSOR_FAST_FAIL_AVAILABLE;_HAS_EXCEPTIONS=1;_ITERATOR_DEBUG_LEVEL=0;</PreprocessorDefinitions>
       <LanguageStandard>stdcpplatest</LanguageStandard>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
     <!-- remove unused code -->
-    <ClCompile Include="$(MSBuildThisFileDirectory)\common\crt\src\stl\winapisupp.cpp">
+    <ClCompile Include="$(MSBuildThisFileDirectory)common\crt\src\stl\winapisupp.cpp">
       <CallingConvention>Cdecl</CallingConvention>
     </ClCompile>
     <!-- __std_type_info_compare -->
-    <ClCompile Include="$(MSBuildThisFileDirectory)\$(PlatformToolsetVersion)\crt\src\vcruntime\std_type_info.cpp">
+    <ClCompile Include="$(MSBuildThisFileDirectory)$(PlatformToolsetVersion)\crt\src\vcruntime\std_type_info.cpp">
       <CallingConvention>Cdecl</CallingConvention>
     </ClCompile>
   </ItemGroup>
   <ItemGroup Condition="'$(Platform)'=='x64'">
-    <ClCompile Include="$(MSBuildThisFileDirectory)\$(PlatformToolsetVersion)\crt\src\vcruntime\frame_redirect.cpp">
+    <ClCompile Include="$(MSBuildThisFileDirectory)$(PlatformToolsetVersion)\crt\src\vcruntime\frame_redirect.cpp">
       <CallingConvention>Cdecl</CallingConvention>
     </ClCompile>
   </ItemGroup>
   <ItemGroup Condition="'$(Platform)'=='Win32'">
-    <ClCompile Include="$(MSBuildThisFileDirectory)\$(PlatformToolsetVersion)\crt\src\i386\trnsctrl_redirect.cpp">
+    <ClCompile Include="$(MSBuildThisFileDirectory)$(PlatformToolsetVersion)\crt\src\i386\trnsctrl_redirect.cpp">
       <CallingConvention>Cdecl</CallingConvention>
     </ClCompile>
   </ItemGroup>

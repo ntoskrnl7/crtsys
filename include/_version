@@ -1,0 +1,31 @@
+/*++
+
+Copyright (c) CrtSys Authors. All rights reserved.
+
+Module Name:
+
+    version.h
+
+Abstract:
+
+    This module defines the version preprocessor.
+
+Author:
+
+    Jung Kwang Lee (ntoskrnl7@gmail.com)
+
+Environment:
+
+    Kernel mode
+
+--*/
+#pragma once
+
+#ifndef _CRTSYS_VERSION_H_
+#define _CRTSYS_VERSION_H_
+
+#define CRTSYS_VERSION_MAJOR 0
+#define CRTSYS_VERSION_MINOR 1
+#define CRTSYS_VERSION_PATCH 2
+
+#endif // _CRTSYS_VERSION_H_

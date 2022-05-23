@@ -1,0 +1,433 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <RuntimeLibrary />
+      <AdditionalIncludeDirectories>$(UniversalCRT_SourcePath.Split(%3B)[0])\\inc;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>false</ConformanceMode>
+    </ClCompile>
+  </ItemDefinitionGroup>
+
+  <ItemGroup>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\stdio\*.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)\ucrt\%(Directory)%(FileName).obj</ObjectFileName>
+      <CallingConvention>Cdecl</CallingConvention>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
+      <DisableSpecificWarnings>4189</DisableSpecificWarnings>
+    </ClCompile>
+
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\lowio\*.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <DisableSpecificWarnings>4189</DisableSpecificWarnings>
+    </ClCompile>
+
+    <!-- <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\heap\malloc_base.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\heap\realloc_base.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\heap\calloc_base.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\heap\free_base.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\heap\malloc.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\heap\realloc.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\heap\calloc.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\heap\free.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\heap\recalloc.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\heap\new_handler.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\heap\new_mode.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)ucrt\%(FileName).obj</ObjectFileName>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\heap\msize.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <LanguageStandard>stdcpp14</LanguageStandard>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile> -->
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\heap\heap_handle.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)\ucrt\%(Directory)%(FileName).obj</ObjectFileName>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\misc\drive.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\misc\getcwd.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\misc\syserr.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\misc\strerror.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\misc\set_error_mode.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\misc\invalid_parameter.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <DisableSpecificWarnings>4245</DisableSpecificWarnings>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\misc\terminate.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <LanguageStandard>stdcpp14</LanguageStandard>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\misc\errno.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)\ucrt\%(Directory)%(FileName).obj</ObjectFileName>
+      <LanguageStandard>stdcpp14</LanguageStandard>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+
+    <!-- <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\startup\abort.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile> -->
+
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\startup\thread.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+
+    <!-- <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\startup\exit.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile> -->
+
+    <!-- <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\startup\onexit.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <DisableSpecificWarnings>4101;</DisableSpecificWarnings>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile> -->
+
+    <!-- <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\startup\argv_parsing.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <DisableSpecificWarnings>4101;</DisableSpecificWarnings>
+    </ClCompile> -->
+  
+    <!-- <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\startup\initterm.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile> -->
+
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\initializers\locale_initializer.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\initializers\timeset_initializer.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\initializers\console_output_initializer.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\initializers\stdio_initializer.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\initializers\multibyte_initializer.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\initializers\fmode_initializer.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\internal\shared_initialization.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\internal\initialization.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\internal\per_thread_data.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)ucrt\%(FileName).obj</ObjectFileName>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\internal\locks.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\internal\SetEnvironmentVariableA.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\internal\report_runtime_error.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)ucrt\%(FileName).obj</ObjectFileName>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+
+    
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\locale\lconv_unsigned_char_initialization.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\locale\initmon.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\locale\initnum.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\locale\inittime.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\locale\nlsdata.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+      <AdditionalOptions>%(AdditionalOptions) /Zc:strictStrings-</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\locale\initctype.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\locale\locale_refcounting.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\locale\GetStringTypeA.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\locale\locale_update.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\locale\setlocale.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)ucrt\%(FileName).obj</ObjectFileName>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\locale\wsetlocale.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\locale\localeconv.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\locale\get_qualified_locale.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+      <AdditionalOptions>%(AdditionalOptions) /Zc:strictStrings-</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\locale\getqloc_downlevel.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\misc\exception_filter.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <DisableSpecificWarnings>4245;4838</DisableSpecificWarnings>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\misc\signal.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <DisableSpecificWarnings>4245;4838</DisableSpecificWarnings>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\env\environment_initialization.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\env\get_environment_from_os.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <LanguageStandard>stdcpp14</LanguageStandard>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\env\setenv.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\env\getenv.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\mbstring\mbctype.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)ucrt\%(FileName).obj</ObjectFileName>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\convert\strtox.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\convert\strtod.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\convert\mbrtowc.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\convert\mbrtoc32.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\convert\mbtowc.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\convert\wctomb.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile> 
+    <ClCompile Condition="exists('$(UniversalCRT_SourcePath.Split(%3B)[0])\convert\common_utf8.cpp')" Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\convert\common_utf8.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>     
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\convert\mbstowcs.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\convert\wcstombs.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\convert\wcrtomb.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\convert\c16rtomb.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\convert\c32rtomb.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\convert\cvt.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\convert\_fptostr.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\convert\cfout.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\conio\initcon.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\conio\putwch.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+
+
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\time\strftime.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\time\wcsftime.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\time\timeset.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\time\tzset.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\time\days.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\time\localtime.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\time\gmtime.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\time\loctotime.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\filesystem\mkdir.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\filesystem\wmkdir.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\filesystem\unlink.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\filesystem\wunlink.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\filesystem\stat.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+      <LanguageStandard>stdcpp14</LanguageStandard>
+    </ClCompile>
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\filesystem\fullpath.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+  </ItemGroup>
+</Project>

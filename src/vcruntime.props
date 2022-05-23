@@ -3,8 +3,8 @@
   <ItemDefinitionGroup>
     <ClCompile>
       <RuntimeLibrary />
-      <AdditionalIncludeDirectories>$(VC_CRT_SourcePath.Split(%3B)[0])\\vcruntime;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);_VCRT_WIN32_WINNT=_WIN32_WINNT;_VCRT_ALLOW_INTERNALS;_CRT_WINDOWS_USE_VISTA_TSS;_CRTIMP_ALT;_CRTBLD;_KERNELX;PROCESSOR_FAST_FAIL_AVAILABLE;_NO_CRT_STDIO_INLINE;_HAS_EXCEPTIONS=1;_ITERATOR_DEBUG_LEVEL=0;</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_VCRT_WIN32_WINNT=_WIN32_WINNT;_VCRT_ALLOW_INTERNALS;_CRT_WINDOWS_USE_VISTA_TSS;_CRTIMP_ALT;_CRTBLD;_KERNELX;PROCESSOR_FAST_FAIL_AVAILABLE;_HAS_EXCEPTIONS=1;_ITERATOR_DEBUG_LEVEL=0;</PreprocessorDefinitions>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <ObjectFileName>$(IntDir)\%(Directory)%(FileName).obj</ObjectFileName>
     </ClCompile>
@@ -228,7 +228,7 @@
       <CallingConvention>Cdecl</CallingConvention>
       <CompileAs>CompileAsC</CompileAs>
     </ClCompile>
-    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\ucrt_stubs.cpp" />
+    <!-- <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\ucrt_stubs.cpp" /> -->
     <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\uncaught_exception.cpp" />
     <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\uncaught_exceptions.cpp" />
     <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\unexpected.cpp" />
@@ -245,7 +245,9 @@
     <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\vcruntime_dllmain.cpp" />
     <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\vcruntime_stubs.cpp" />
     <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\winapi_downlevel.cpp" />
-    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\winapi_thunks.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\winapi_thunks.cpp">
+      <ObjectFileName>$(IntDir)vcruntime\%(FileName).obj</ObjectFileName>
+    </ClCompile>
     <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\x86_exception_filter.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\x86_exception_filter.cpp" />
     <ClCompile Condition="'$(Platform)'=='Win32'" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\default_precision.cpp" />
   </ItemGroup>

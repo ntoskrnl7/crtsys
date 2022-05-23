@@ -4,8 +4,8 @@
   <ItemDefinitionGroup>
     <ClCompile>
       <RuntimeLibrary />
-      <AdditionalIncludeDirectories>$(VC_CRT_SourcePath.Split(%3B)[0])\\vcruntime;$(VC_CRT_SourcePath.Split(%3B)[0])\\stl;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_WIN32_WINNT=_WIN32_WINNT;_CRTBLD;_NO_CRT_STDIO_INLINE;_KERNEL32_</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime;$(VC_CRT_SourcePath.Split(%3B)[0])\stl;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_WIN32_WINNT=_WIN32_WINNT;_CRTBLD;_KERNEL32_</PreprocessorDefinitions>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <ObjectFileName>$(IntDir)\%(Directory)%(FileName).obj</ObjectFileName>
     </ClCompile>
@@ -158,5 +158,9 @@
     <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\cerr.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\wcerr.cpp" />
     <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\clog.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\wclog.cpp" />
     <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\cin.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\wcin.cpp" />
+
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\vector_algorithms.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\vector_algorithms.cpp">
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
   </ItemGroup>
 </Project>

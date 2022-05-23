@@ -63,7 +63,7 @@ function(crtsys_add_driver _target)
         "${WDK_ROOT}/Include/${WDK_VERSION}/km/crt"
         )
     
-    target_compile_definitions(${_target} PRIVATE "_NO_CRT_STDIO_INLINE=0")
+    # target_compile_definitions(${_target} PRIVATE "_NO_CRT_STDIO_INLINE=0")
 
     if(CRTSYS_NTL_MAIN)
       target_compile_definitions(crtsys PUBLIC CRTSYS_USE_NTL_MAIN)
