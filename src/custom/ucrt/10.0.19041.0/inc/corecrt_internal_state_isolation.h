@@ -1,7 +1,5 @@
 #pragma once
 
-#include <type_traits>
-
 #define __acrt_select_exit_lock() __acrt_exit_lock
 
 #pragma warning(disable : 4101)
@@ -49,9 +47,7 @@ extern "C++"
         void initialize(const T &value)
         {
             for (size_t i = 0; i != state_index_count; i++)
-            {
                 _value[i] = value;
-            }
         }
 
         template <typename Ta> void initialize_from_array(Ta (&arr)[2])
@@ -60,9 +56,10 @@ extern "C++"
                 _value[i] = arr[i];
         }
 
-        template <class Fn> void uninitialize(Fn &&)
+        template <class Fn> void uninitialize(Fn &&fn)
         {
-            KdBreakPoint();
+            for (size_t i = 0; i != state_index_count; i++)
+                fn(_value[i]);
         }
 
         T *const dangerous_get_state_array()

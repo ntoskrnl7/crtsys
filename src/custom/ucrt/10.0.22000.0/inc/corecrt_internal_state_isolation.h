@@ -65,9 +65,10 @@ extern "C++"
                 _value[i] = arr[i];
         }
 
-        template <class Fn> void uninitialize(Fn &&)
+        template <class Fn> void uninitialize(Fn &&fn)
         {
-            KdBreakPoint();
+            for (size_t i = 0; i != state_index_count; i++)
+                fn(_value[i]);
         }
 
         T *const dangerous_get_state_array()

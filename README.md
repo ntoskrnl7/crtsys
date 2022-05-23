@@ -241,7 +241,7 @@ project(crtsys_test LANGUAGES C)
 include(cmake/CPM.cmake)
 
 set(CRTSYS_NTL_MAIN ON) # use ntl::main
-CPMAddPackage("gh:ntoskrnl7/crtsys@0.1.1")
+CPMAddPackage("gh:ntoskrnl7/crtsys@0.1.2")
 include(${crtsys_SOURCE_DIR}/cmake/CrtSys.cmake)
 
 # add driver
