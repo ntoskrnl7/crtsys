@@ -21,6 +21,9 @@ void run() {
 }
 } // namespace chrono_test
 
+//
+// Google Test.
+//
 TEST(cxx_stl_test, chrono_test) {
   auto start = std::chrono::steady_clock::now();
   auto actual = chrono_test::fibonacci(42);

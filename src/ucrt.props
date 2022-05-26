@@ -118,7 +118,19 @@
       <LanguageStandard>stdcpp14</LanguageStandard>
       <CallingConvention>Cdecl</CallingConvention>
     </ClCompile>
-
+  
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\startup\assert.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <LanguageStandard>stdcpp14</LanguageStandard>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+  
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\startup\argv_data.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <LanguageStandard>stdcpp14</LanguageStandard>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+  
     <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\startup\abort.cpp">
       <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
       <CallingConvention>Cdecl</CallingConvention>
@@ -182,6 +194,18 @@
       <CallingConvention>Cdecl</CallingConvention>
     </ClCompile>
 
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\internal\GetModuleFileNameA.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+      <DisableSpecificWarnings>4189</DisableSpecificWarnings>
+    </ClCompile>
+
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\internal\OutputDebugStringA.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+      <DisableSpecificWarnings>4189</DisableSpecificWarnings>
+    </ClCompile>
+  
     <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\internal\per_thread_data.cpp">
       <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
       <ObjectFileName>$(IntDir)ucrt\%(FileName).obj</ObjectFileName>
@@ -268,6 +292,12 @@
       <CallingConvention>Cdecl</CallingConvention>
     </ClCompile>
     <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\misc\signal.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <DisableSpecificWarnings>4245;4838</DisableSpecificWarnings>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
+
+    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\misc\crtmbox.cpp">
       <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
       <DisableSpecificWarnings>4245;4838</DisableSpecificWarnings>
       <CallingConvention>Cdecl</CallingConvention>

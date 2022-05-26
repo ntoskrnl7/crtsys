@@ -10,6 +10,8 @@ CPMAddPackage(NAME crtsys SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}/..)
 # CPMAddPackage("gh:ntoskrnl7/crtsys@0.1.0")
 include(${crtsys_SOURCE_DIR}/cmake/CrtSys.cmake)
 
+CPMAddPackage("gh:nlohmann/json@3.10.5")
+
 CPMAddPackage(
     NAME googletest
     GITHUB_REPOSITORY google/googletest
@@ -36,7 +38,7 @@ file(GLOB SOURCE_FILES
 
 crtsys_add_driver(crtsys_test ${SOURCE_FILES})
 
-target_link_libraries(crtsys_test gtest)
+target_link_libraries(crtsys_test gtest nlohmann_json::nlohmann_json)
 
 include(../cmake/std-cxx.cmake)
 set_std_cxx_latest(crtsys_test)

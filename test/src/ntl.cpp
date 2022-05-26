@@ -40,3 +40,10 @@ bool ntl_expand_stack_test() {
   });
   return !(t1.empty() || t2.empty() || t3.empty());
 }
+
+//
+// Google Test.
+//
+#include <gtest/gtest.h>
+
+TEST(ntl_test, ntl_expand_stack_test) { EXPECT_TRUE(ntl_expand_stack_test()); }
