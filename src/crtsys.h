@@ -12,6 +12,9 @@ typedef PSTRING PUTF8_STRING;
 #define DECLSPEC_RESTRICT
 #endif
 #endif
+#if !defined(NTDDI_WIN10_FE)
+#define NTDDI_WIN10_FE                      0x0A00000A
+#endif
 
 #undef _CTYPE_DISABLE_MACROS
 #include <ctype.h>
