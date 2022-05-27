@@ -22,6 +22,16 @@ jobs:
       with:
         submodules: true
 
+    - name: check
+      shell: cmd
+      run: dir "C:\Program Files (x86)\Windows Kits\10\Include"
+      working-directory: test
+
+    - name: check
+      shell: cmd
+      run: dir "C:\Program Files (x86)\Windows Kits\10\Extension SDKs\WindowsDesktop"
+      working-directory: test
+  
     - name: build x86
       shell: cmd
       run: ..\build.bat . x86
