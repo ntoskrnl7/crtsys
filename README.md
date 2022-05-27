@@ -2,6 +2,7 @@
 
 **C**/C++ Run**t**ime library for **sys**tem file (Windows Kernel Driver)
 
+[![CMake](https://github.com/ntoskrnl7/crtsys/actions/workflows/cmake.yml/badge.svg)](https://github.com/ntoskrnl7/crtsys/actions/workflows/cmake.yml)
 ![GitHub](https://img.shields.io/github/license/ntoskrnl7/crtsys)
 ![GitHub release (latest SemVer)](https://img.shields.io/github/v/release/ntoskrnl7/crtsys)
 ![Windows 7+](https://img.shields.io/badge/Windows-7+-blue?logo=windows&logoColor=white)
