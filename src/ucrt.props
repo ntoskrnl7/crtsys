@@ -180,7 +180,7 @@
       <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
       <CallingConvention>Cdecl</CallingConvention>
     </ClCompile>
-    <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\initializers\fmode_initializer.cpp">
+    <ClCompile Condition="exists('$(UniversalCRT_SourcePath.Split(%3B)[0])\initializers\fmode_initializer.cpp')" Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\initializers\fmode_initializer.cpp">
       <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
       <CallingConvention>Cdecl</CallingConvention>
     </ClCompile>
