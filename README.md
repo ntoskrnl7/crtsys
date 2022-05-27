@@ -2,7 +2,7 @@
 
 **C**/C++ Run**t**ime library for **sys**tem file (Windows Kernel Driver)
 
-![GitHub](https://img.shields.io/github/license/ntoskrnl7/crtsys) 
+![GitHub](https://img.shields.io/github/license/ntoskrnl7/crtsys)
 ![GitHub release (latest SemVer)](https://img.shields.io/github/v/release/ntoskrnl7/crtsys)
 ![Windows 7+](https://img.shields.io/badge/Windows-7+-blue?logo=windows&logoColor=white)
 ![Visual Studio 2017+](https://img.shields.io/badge/Visual%20Studio-2017+-682270?logo=visualstudio&logoColor=682270)
