@@ -1,5 +1,5 @@
-#include <stdio.h>
 #include <wdm.h>
+#include <stdio.h>
 
 EXTERN_C DRIVER_INITIALIZE DriverEntry;
 EXTERN_C DRIVER_UNLOAD DriverUnload;
@@ -13,7 +13,7 @@ void test_all();
 
 #include <gtest/gtest.h>
 
-#if 0 // CRTSYS_USE_NTL_MAIN
+#if CRTSYS_USE_NTL_MAIN
 #include <iostream>
 #include <ntl/driver>
 
