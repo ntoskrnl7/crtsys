@@ -24,9 +24,11 @@ jobs:
         submodules: true
 
     - name: build x86
+      shell: cmd
       run: build.bat . ${{ matrix.gen }} x86
       working-directory: test
 
     - name: build x64
+      shell: cmd
       run: build.bat . ${{ matrix.gen }} x64
       working-directory: test
