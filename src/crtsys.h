@@ -3,8 +3,15 @@
 #pragma once
 
 #include <ntdef.h>
-
 typedef PSTRING PUTF8_STRING;
+
+#ifndef DECLSPEC_RESTRICT
+#if (_MSC_VER >= 1915) && !defined(MIDL_PASS)
+#define DECLSPEC_RESTRICT   __declspec(restrict)
+#else
+#define DECLSPEC_RESTRICT
+#endif
+#endif
 
 #undef _CTYPE_DISABLE_MACROS
 #include <ctype.h>
