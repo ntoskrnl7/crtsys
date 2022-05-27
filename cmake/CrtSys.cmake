@@ -62,9 +62,10 @@ function(crtsys_add_driver _target)
         "${WDK_ROOT}/Include/${WDK_VERSION}/km"
         "${WDK_ROOT}/Include/${WDK_VERSION}/km/crt"
         )
+
     # Forced Include File
     if(EXISTS "${crtsys_SOURCE_DIR}/include/winsdk/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/wdk/${WDK_VERSION}/forced.h")
-      target_compile_options(crtsys PRIVATE /FI"${crtsys_SOURCE_DIR}/include/winsdk/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/wdk/${WDK_VERSION}/forced.h")
+      target_compile_options(${_target} PRIVATE /FI"${crtsys_SOURCE_DIR}/include/winsdk/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/wdk/${WDK_VERSION}/forced.h")
     endif()
 
     if(CRTSYS_NTL_MAIN)
