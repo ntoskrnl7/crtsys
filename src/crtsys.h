@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include <ntdef.h>
+
 #undef _CTYPE_DISABLE_MACROS
 #include <ctype.h>
 
