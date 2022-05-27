@@ -78,11 +78,11 @@ IF EXIST "%1/CMakeLists.txt" (
         IF "!GENERATOR!" == "" (
             ECHO Unsupported Visual Studio.
             ECHO Use Visual Studio set as CMake default generator.
-            ECHO cmake -S !WORK_PATH! -B !BUILD_PATH! -A !ARCH! -DCMAKE_CXX_FLAGS=/MP -DWDK_WINVER=0x0602
-            cmake -S !WORK_PATH! -B !BUILD_PATH! -A !ARCH! -DCMAKE_CXX_FLAGS=/MP -DWDK_WINVER=0x0602
+            ECHO cmake -S !WORK_PATH! -B !BUILD_PATH! -A !ARCH! -DCMAKE_CXX_FLAGS=/MP
+            cmake -S !WORK_PATH! -B !BUILD_PATH! -A !ARCH! -DCMAKE_CXX_FLAGS=/MP
         ) ELSE (
-            ECHO cmake -S !WORK_PATH! -B !BUILD_PATH! -A !ARCH! -DCMAKE_CXX_FLAGS=/MP -DWDK_WINVER=0x0602 -G !GENERATOR!
-            cmake -S !WORK_PATH! -B !BUILD_PATH! -A !ARCH! -DCMAKE_CXX_FLAGS=/MP -DWDK_WINVER=0x0602 -G !GENERATOR!
+            ECHO cmake -S !WORK_PATH! -B !BUILD_PATH! -A !ARCH! -DCMAKE_CXX_FLAGS=/MP -G !GENERATOR!
+            cmake -S !WORK_PATH! -B !BUILD_PATH! -A !ARCH! -DCMAKE_CXX_FLAGS=/MP -G !GENERATOR!
         )
         IF "!CONFIG!" == "" (
             ECHO cmake --build !BUILD_PATH!
