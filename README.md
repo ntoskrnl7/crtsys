@@ -2,7 +2,12 @@
 
 **C**/C++ Run**t**ime library for **sys**tem file (Windows Kernel Driver)
 
-![GitHub](https://img.shields.io/github/license/ntoskrnl7/crtsys) ![GitHub release (latest by date)](https://img.shields.io/github/v/release/ntoskrnl7/crtsys) ![Windows 7+](https://img.shields.io/badge/Windows-7+-red.svg) ![Visual Studio 2017+](https://img.shields.io/badge/Visual%20Studio-2017+-orange.svg) ![CMake 3.14+](https://img.shields.io/badge/CMake-3.14+-yellow.svg)
+![GitHub](https://img.shields.io/github/license/ntoskrnl7/crtsys) 
+![GitHub release (latest SemVer)](https://img.shields.io/github/v/release/ntoskrnl7/crtsys)
+![Windows 7+](https://img.shields.io/badge/Windows-7+-blue?logo=windows&logoColor=white)
+![Visual Studio 2017+](https://img.shields.io/badge/Visual%20Studio-2017+-682270?logo=visualstudio&logoColor=682270)
+![CMake 3.14+](https://img.shields.io/badge/CMake-3.14+-yellow.svg?logo=cmake&logoColor=white)
+![C++ 14+](https://img.shields.io/badge/C++-14+-white.svg?logo=cplusplus&logoColor=blue)
 
 커널 드라이버에서 C++ 및 STL 기능을 사용할 수 있도록 도와주는 CRT 라이브러리 입니다.
 
