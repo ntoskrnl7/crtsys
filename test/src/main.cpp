@@ -13,7 +13,7 @@ void test_all();
 
 #include <gtest/gtest.h>
 
-#if CRTSYS_USE_NTL_MAIN
+#if 0 // CRTSYS_USE_NTL_MAIN
 #include <iostream>
 #include <ntl/driver>
 
