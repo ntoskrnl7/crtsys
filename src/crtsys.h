@@ -4,6 +4,8 @@
 
 #include <ntdef.h>
 
+typedef PSTRING PUTF8_STRING;
+
 #undef _CTYPE_DISABLE_MACROS
 #include <ctype.h>
 
