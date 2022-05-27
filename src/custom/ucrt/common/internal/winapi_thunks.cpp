@@ -1,9 +1,15 @@
 #include <windows.h>
 
+extern "C" bool __cdecl __acrt_uninitialize_winapi_thunks(bool const terminating)
+{
+    UNREFERENCED_PARAMETER(terminating);
+    return true;
+}
+
 extern "C" BOOL WINAPI __acrt_InitializeCriticalSectionEx(LPCRITICAL_SECTION const critical_section,
                                                           DWORD const spin_count, DWORD const flags)
 {
-    flags;
+    UNREFERENCED_PARAMETER(flags);
     return InitializeCriticalSectionAndSpinCount(critical_section, spin_count);
 }
 
@@ -70,7 +76,6 @@ extern "C" int WINAPI __acrt_GetUserDefaultLocaleName(
     return GetUserDefaultLocaleName(locale_name, locale_name_count);
 }
 
-
 extern "C" int WINAPI __acrt_LCIDToLocaleName(
     LCID   const locale,
     LPWSTR const name,
@@ -112,11 +117,6 @@ extern "C" void WINAPI __acrt_RoUninitialize()
 {
 }
 
-
-//
-//
-//
-
 extern "C" void __cdecl __acrt_eagerly_load_locale_apis()
 {
 }
@@ -127,13 +127,6 @@ begin_thread_init_policy __cdecl __acrt_get_begin_thread_init_policy()
     return begin_thread_init_policy_none;
 }
 
-extern "C"
-process_end_policy __cdecl __acrt_get_process_end_policy(void)
-{
-    return process_end_policy_exit_process;
-}
-
-
 extern "C" BOOL WINAPI __acrt_EnumSystemLocalesEx(
     LOCALE_ENUMPROCEX const enum_proc,
     DWORD             const flags,
@@ -143,9 +136,6 @@ extern "C" BOOL WINAPI __acrt_EnumSystemLocalesEx(
 {
     return EnumSystemLocalesEx(enum_proc, flags, param, reserved);
 }
-
-
-
 
 extern "C" int WINAPI __acrt_GetDateFormatEx(
     LPCWSTR           const locale_name,
@@ -196,6 +186,32 @@ extern "C" int __cdecl __acrt_LCMapStringA(_locale_t const plocinfo, PCWSTR cons
     return 0;
 }
 
+extern "C" int WINAPI __acrt_MessageBoxA(
+    HWND   const hwnd,
+    LPCSTR const text,
+    LPCSTR const caption,
+    UINT   const type
+    )
+{
+    KdBreakPoint();
+    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+    return 0;
+    // abort(); // No fallback; callers should check availablility before calling
+}
+
+extern "C" int WINAPI __acrt_MessageBoxW(
+    HWND    const hwnd,
+    LPCWSTR const text,
+    LPCWSTR const caption,
+    UINT    const type
+    )
+{
+    KdBreakPoint();
+    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+    return 0;
+    // abort(); // No fallback; callers should check availablility before calling
+}
+
 extern "C" bool __cdecl __acrt_can_use_vista_locale_apis()
 {
     return true;
@@ -205,58 +221,40 @@ extern "C" bool __cdecl __acrt_initialize_winapi_thunks()
 {
     return true;
 }
-extern "C" bool __cdecl __acrt_uninitialize_winapi_thunks(bool const terminating)
+
+extern "C" HWND __cdecl __acrt_get_parent_window()
+{
+    return nullptr;
+}
+
+extern "C" bool __cdecl __acrt_is_interactive()
 {
     return true;
 }
-bool __cdecl __acrt_initialize_command_line()
+
+extern "C" bool __cdecl __acrt_can_show_message_box()
 {
-    return true;
+    return false;
 }
-bool __cdecl __acrt_uninitialize_command_line(bool const terminating)
-{
-    return true;
-}
+
+//
+// unexported sources
+//
 void __cdecl __acrt_initialize_user_matherr(void* encoded_null)
 {
 }
 
-extern "C" {
-    char**    __argv   = nullptr; // The arguments as narrow strings
-    wchar_t** __wargv  = nullptr; // The arguments as wide strings
-}
-
-//
-// :-(
-//
-extern "C" errno_t __cdecl _configure_narrow_argv(_crt_argv_mode const mode)
+extern "C" process_end_policy __cdecl __acrt_get_process_end_policy(void)
 {
-    return 0;
+    return process_end_policy_terminate_process;
 }
 
-extern "C" int __cdecl __acrt_show_wide_message_box(
-    wchar_t const* const text,
-    wchar_t const* const caption,
-    unsigned       const type
-    )
+extern "C" developer_information_policy __cdecl __acrt_get_developer_information_policy(void)
 {
-    return 0;
+    return developer_information_policy_none;
 }
 
-#include <float.h>
-
-#ifdef _M_IX86
-extern "C" unsigned int __cdecl __get_fpsr_sse2()
+extern "C" windowing_model_policy __cdecl __acrt_get_windowing_model_policy(void)
 {
-    return 0;
+    return windowing_model_policy_none;
 }
-
-extern "C" void __cdecl __set_fpsr_sse2(unsigned int)
-{
-}
-
-extern "C" void __cdecl _setdefaultprecision()
-{
-    _controlfp_s(NULL, _PC_53, _MCW_PC);
-}
-#endif

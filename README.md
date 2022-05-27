@@ -1,6 +1,8 @@
 # crtsys
 
-C/C++ Runtime library for system file (Windows Kernel Driver)
+**C**/C++ Run**t**ime library for **sys**tem file (Windows Kernel Driver)
+
+![GitHub](https://img.shields.io/github/license/ntoskrnl7/crtsys) ![GitHub release (latest by date)](https://img.shields.io/github/v/release/ntoskrnl7/crtsys) ![Windows 7+](https://img.shields.io/badge/Windows-7+-red.svg) ![Visual Studio 2017+](https://img.shields.io/badge/Visual%20Studio-2017+-orange.svg) ![CMake 3.14+](https://img.shields.io/badge/CMake-3.14+-yellow.svg)
 
 커널 드라이버에서 C++ 및 STL 기능을 사용할 수 있도록 도와주는 CRT 라이브러리 입니다.
 
@@ -141,13 +143,15 @@ crtsys가 장점은 아래와 같습니다.
 ### C Standard
 
 - [x] math functions
-  - 직접 구현하기에는 시간이 부족하여 [RetrievAL](https://github.com/SpoilerScriptsGroup/RetrievAL)의 코드를 그대로 사용하였습니다. (SpoilerScriptsGroup 감사합니다! :-))
+  - 직접 구현하기에는 시간이 부족하여 아래 프로젝트의 내용을 참고하엿습니다. 감사합니다! :-)
+  - [RetrievAL](https://github.com/SpoilerScriptsGroup/RetrievAL)
+  - [musl](https://github.com/bminor/musl)
 
 ### NTL (NT Template Library)
 
 커널에서 더 나은 개발 환경을 지원하기 위한 기능을 제공합니다.
 
-- ntl::expand_stack [(tested)](./test/src/ntl_test.cpp#L5)
+- ntl::expand_stack [(tested)](./test/src/ntl.cpp#L5)
   - 스택 크기를 확장하기 위한 함수
   - 기본적으로 커널 스택은 사용자 스레드 스택보다 훨씬 작은 크기를 할당받기 때문에 STL 기능을 사용하거나, 특히 throw를 수행할때 사용하는것이 좋습니다.
 - ntl::status
@@ -241,7 +245,7 @@ project(crtsys_test LANGUAGES C)
 include(cmake/CPM.cmake)
 
 set(CRTSYS_NTL_MAIN ON) # use ntl::main
-CPMAddPackage("gh:ntoskrnl7/crtsys@0.1.2")
+CPMAddPackage("gh:ntoskrnl7/crtsys@0.1.3")
 include(${crtsys_SOURCE_DIR}/cmake/CrtSys.cmake)
 
 # add driver
