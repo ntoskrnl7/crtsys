@@ -12,7 +12,6 @@ jobs:
     strategy:
       matrix:
         os: [windows-2019, windows-2022]
-        gen: [2019, 2022]
 
     defaults:
       run:
@@ -25,10 +24,10 @@ jobs:
 
     - name: build x86
       shell: cmd
-      run: ..\build.bat . ${{ matrix.gen }} x86
+      run: ..\build.bat . x86
       working-directory: test
 
     - name: build x64
       shell: cmd
-      run: ..\build.bat . ${{ matrix.gen }} x64
+      run: ..\build.bat . x64
       working-directory: test
