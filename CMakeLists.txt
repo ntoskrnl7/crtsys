@@ -39,7 +39,7 @@ else()
   set(LDK_USE_RAISE_EXCEPTION OFF)
   set(LDK_USE_RTL_RAISE_EXCEPTION OFF)
 endif()
-CPMAddPackage("gh:ntoskrnl7/Ldk@0.7.2")
+CPMAddPackage("gh:ntoskrnl7/Ldk@0.7.3")
 
 CPMAddPackage("gh:ntoskrnl7/FindWDK#master")
 list(APPEND CMAKE_MODULE_PATH "${FindWDK_SOURCE_DIR}/cmake")
@@ -129,10 +129,10 @@ wdk_add_library(
 #
 get_target_property(INC_DIR_TMP crtsys INCLUDE_DIRECTORIES)
 if (UCXXRT_ENABLED)
-  set_property(TARGET crtsys PROPERTY INCLUDE_DIRECTORIES "${Ldk_SOURCE_DIR}/include/Ldk;${ucxxrt_SOURCE_DIR}/src;${ucxxrt_SOURCE_DIR}/src/vcruntime;${CMAKE_CURRENT_SOURCE_DIR}/src/custom/winsdk/include/um;$(VC_IncludePath);$(WindowsSDK_IncludePath);${INC_DIR_TMP}")
+  set_property(TARGET crtsys PROPERTY INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/src/custom/winsdk/include/um/crtsys;${Ldk_SOURCE_DIR}/include/Ldk;${ucxxrt_SOURCE_DIR}/src;${ucxxrt_SOURCE_DIR}/src/vcruntime;$(VC_IncludePath);$(WindowsSDK_IncludePath);${INC_DIR_TMP}")
   target_include_directories(crtsys PRIVATE "${ucxxrt_SOURCE_DIR}")
 else()
-  set_property(TARGET crtsys PROPERTY INCLUDE_DIRECTORIES "${Ldk_SOURCE_DIR}/include/Ldk;${CMAKE_CURRENT_SOURCE_DIR}/src/custom/winsdk/include/um;$(VC_IncludePath);$(WindowsSDK_IncludePath);${INC_DIR_TMP}")
+  set_property(TARGET crtsys PROPERTY INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/src/custom/winsdk/include/um/crtsys;${Ldk_SOURCE_DIR}/include/Ldk;$(VC_IncludePath);$(WindowsSDK_IncludePath);${INC_DIR_TMP}")
 endif()
 
 target_include_directories(crtsys PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/custom/msvc/${MSVC_TOOLSET_VERSION}/include")

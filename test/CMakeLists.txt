@@ -4,13 +4,16 @@ project(crtsys_test LANGUAGES C CXX)
 
 include(../cmake/CPM.cmake)
 
-set(CRTSYS_USE_LIBCNTPR ON)
 set(CRTSYS_NTL_MAIN ON)
 CPMAddPackage(NAME crtsys SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}/..)
-# CPMAddPackage("gh:ntoskrnl7/crtsys@0.1.0")
+# CPMAddPackage("gh:ntoskrnl7/crtsys@0.1.4")
 include(${crtsys_SOURCE_DIR}/cmake/CrtSys.cmake)
 
-CPMAddPackage("gh:nlohmann/json@3.10.5")
+set(CRTSYS_TEST_NLOHMANN_JSON ON)
+
+if (CRTSYS_TEST_NLOHMANN_JSON)
+    CPMAddPackage("gh:nlohmann/json@3.10.5")
+endif()
 
 CPMAddPackage(
     NAME googletest
@@ -28,17 +31,26 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /W4 /WX")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /W4 /WX")
 
 file(GLOB SOURCE_FILES
-    ./src/*.cpp
-    ./src/*/*.cpp
-    ./src/*/*/*.cpp
-    ./src/*.c
-    ./src/*/*.c
-    ./src/*/*/*.c
+    src/*.cpp
+    src/*/*.cpp
+    src/*/*/*.cpp
+    src/*.c
+    src/*/*.c
+    src/*/*/*.c
     )
+
+if (NOT CRTSYS_TEST_NLOHMANN_JSON)
+    list(REMOVE_ITEM SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/libs/nlohmann_json.cpp)
+endif()
 
 crtsys_add_driver(crtsys_test ${SOURCE_FILES})
 
-target_link_libraries(crtsys_test gtest nlohmann_json::nlohmann_json)
+if (CRTSYS_TEST_NLOHMANN_JSON)
+    target_compile_definitions(crtsys_test PRIVATE "CRTSYS_TEST_NLOHMANN_JSON")
+    target_link_libraries(crtsys_test nlohmann_json::nlohmann_json)
+endif()
+
+target_link_libraries(crtsys_test gtest)
 
 include(../cmake/std-cxx.cmake)
 set_std_cxx_latest(crtsys_test)
