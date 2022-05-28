@@ -1,3 +1,4 @@
+#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
 extern "C" bool __cdecl __acrt_uninitialize_winapi_thunks(bool const terminating)

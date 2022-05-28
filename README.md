@@ -24,9 +24,6 @@
   - [Build](#build)
   - [Test](#test)
   - [Usage](#usage)
-    - [CMake](#cmake)
-      - [CMakeLists.txt](#cmakeliststxt)
-    - [main.cpp](#maincpp)
   - [TODO](#todo)
 
 ## Overview
@@ -175,6 +172,9 @@ crtsys가 장점은 아래와 같습니다.
 
 이 프로젝트를 직접 빌드하여 lib와 include를 사용하시려면 Microsoft STL 사용을 위해서 포함 경로 설정 및 전처리기 설정 등 복잡한 사전 작업이 필요하므로  **직접 빌드하여 사용하는것보다는 [Usage](#usage)을 참고하여 CPM을 통해서 사용하시는것을 권장합니다.**
 
+그리고 SDK와 WDK의 버전이 다르면 빌드가 실패할 가능성이 높으므로
+**가능하다면 SDK와 WDK의 버전이 같은 환경에서 빌드하는것을 권장합니다.**
+
 빌드 방법은 아래와 같습니다.
 
 ```Batch
@@ -237,61 +237,95 @@ lib 디렉토리와 include 디렉토리를 타 프로젝트에서 사용하시�
 
 CMake를 사용하는것을 권장합니다.
 
-### CMake
+1. 프로젝트 디렉토리를 생성 후 이동하시기 바랍니다.
 
-CMake를 사용하신다면 아래와 같이 CMakeLists.txt를 만드시기 바랍니다.
+   ```batch
+   mkdir test-project
+   cd test-project
+   ```
 
-#### CMakeLists.txt
+2. CPM을 프로젝트 디렉토리에 다운로드 받으시기 바랍니다.
 
-```CMake
-cmake_minimum_required(VERSION 3.14 FATAL_ERROR)
-
-project(crtsys_test LANGUAGES C)
-
-include(cmake/CPM.cmake)
-
-set(CRTSYS_NTL_MAIN ON) # use ntl::main
-CPMAddPackage("gh:ntoskrnl7/crtsys@0.1.3")
-include(${crtsys_SOURCE_DIR}/cmake/CrtSys.cmake)
-
-# add driver
-crtsys_add_driver(crtsys_test main.cpp)
-```
-
-### main.cpp
-
-간단한 샘플 코드입니다.
-
-- 아래와 같이 CRTSYS_NTL_MAIN을 활성화한다면 ntl::main을 진입점으로 정의하시기 바랍니다. **(권장)**
-
-    ```CMake
-    set(CRTSYS_NTL_MAIN ON)
+    ```batch
+    mkdir -p cmake
+    wget -O cmake/CPM.cmake https://github.com/cpm-cmake/CPM.cmake/releases/latest/download/get_cpm.cmake
+    curl -o cmake/CPM.cmake -LJO https://github.com/cpm-cmake/CPM.cmake/releases/latest/download/get_cpm.cmake
     ```
 
-- 만약 아래와 같이 CRTSYS_NTL_MAIN을 비활성화한다면 기존과 깉이 DriverEntry를 진입점으로 정의하시기 바랍니다.
+3. 프로젝트 디렉토리에 아래와 같은 파일을 작성해주시기 바랍니다.
 
-    ```CMake
-    set(CRTSYS_NTL_MAIN OFF)
-    ```
+   - 디렉토리 구조
+    📦test-project
+    ┣ 📂src
+    ┃ ┗ 📜main.cpp
+    ┗ 📜CMakeLists.txt
 
-아래는 ntl::main를 진입점으로 설정한 프로젝트의 예제 코드입니다.
+   - CMakeLists.txt
 
-```C
-#include <iostream>
-#include <ntl/driver>
+        ```CMake
+        cmake_minimum_required(VERSION 3.14 FATAL_ERROR)
 
-ntl::status ntl::main(ntl::driver &driver, const std::wstring &registry_path) {
-  std::wcout << "load (registry_path :" << registry_path << ")\n";
+        project(crtsys_test LANGUAGES C)
 
-  // TODO
+        include(cmake/CPM.cmake)
 
-  driver.on_unload([registry_path]() {
-    std::wcout << "unload (registry_path :" << registry_path << ")\n";
-  });
+        set(CRTSYS_NTL_MAIN ON) # use ntl::main
+        CPMAddPackage("gh:ntoskrnl7/crtsys@0.1.4")
+        include(${crtsys_SOURCE_DIR}/cmake/CrtSys.cmake)
 
-  return status::ok();
-}
-```
+        # add driver
+        crtsys_add_driver(crtsys_test main.cpp)
+        ```
+
+   - src/main.cpp
+
+        - 아래와 같이 CRTSYS_NTL_MAIN을 활성화한다면 ntl::main을 진입점으로 정의하시기 바랍니다. **(권장)**
+
+          ```CMake
+          set(CRTSYS_NTL_MAIN ON)
+          ```
+
+        - 만약 아래와 같이 CRTSYS_NTL_MAIN을 비활성화한다면 기존과 깉이 DriverEntry를 진입점으로 정의하시기 바랍니다.
+
+          ```CMake
+          set(CRTSYS_NTL_MAIN OFF)
+          ```
+
+        아래는 ntl::main를 진입점으로 설정한 프로젝트의 예제 코드입니다.
+
+        ```C
+        #include <iostream>
+        #include <ntl/driver>
+
+        ntl::status ntl::main(ntl::driver &driver, const std::wstring &registry_path) {
+
+            std::wcout << "load (registry_path :" << registry_path << ")\n";
+
+            // TODO
+
+            driver.on_unload([registry_path]() {
+                std::wcout << "unload (registry_path :" << registry_path << ")\n";
+            });
+
+            return status::ok();
+        }
+        ```
+
+4. 빌드를 수행합니다.
+
+   ```batch
+   cmake -S . -B build
+   cmake --build build
+   ```
+
+5. 드라이버가 정상적으로 시작되고 종료되는지 확인하시기 바랍니다.
+
+   ```batch
+   sc create CrtSysTest binpath= "빌드된 crtsys_test.sys의 전체 경로" displayname= "crtsys test" start= demand type= kernel
+   sc start CrtSysTest
+   sc stop CrtSysTest
+   sc delete CrtSysTest
+   ```
 
 ## TODO
 

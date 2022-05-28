@@ -1,6 +1,5 @@
 // clang-format off
 
-#include <wdm.h>
 #include <corecrt_terminate.h>
 #include <ehdata.h>
 

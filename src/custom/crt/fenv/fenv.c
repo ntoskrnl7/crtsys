@@ -1,6 +1,5 @@
 // clang-format off
 
-#include <wdm.h>
 #include <windows.h>
 #include <fenv.h>
 

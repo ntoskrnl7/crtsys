@@ -1,7 +1,5 @@
 ﻿// clang-format off
 
-#include <wdm.h>
-
 //
 // vcruntime/guard_support.c
 //
