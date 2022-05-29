@@ -464,4 +464,52 @@
       <PreprocessorDefinitions>%(PreprocessorDefinitions);_CRT_WINDOWS</PreprocessorDefinitions>
     </ClCompile>
   </ItemGroup>
+
+
+  <PropertyGroup>
+    <Platform_Arm Condition="'$(Platform)'=='ARM' or '$(Platform)'=='ARM64'">true</Platform_Arm>
+    <Platform_Arm Condition="'$(Platform_Arm)'!='true'">false</Platform_Arm>
+    <Platform_Intel>!$(Platform_Arm)</Platform_Intel>
+  </PropertyGroup>
+
+  <ImportGroup>
+    <Import Condition="$(Platform_Arm)" Project="$(VCTargetsPath)\BuildCustomizations\marmasm.props" />
+  </ImportGroup>
+
+  <Target Name="PreprocessArmHandlers" Condition="'$(Platform)'=='ARM'" BeforeTargets="_MARMASM" Outputs="$(IntDir)handlers.pp" Inputs="$(VC_CRT_SourcePath.Split(%3B)[0])\arm\handlers.asm">
+    <Exec Command="cl /E /Tc &quot;$(VC_CRT_SourcePath.Split(%3B)[0])\arm\handlers.asm&quot; &gt; $(IntDir)handlers.pp" />
+  </Target>
+  <Target Name="PreprocessArmThunkMemCpy" Condition="'$(Platform)'=='ARM'" BeforeTargets="_MARMASM" Outputs="$(IntDir)memcpy.pp" Inputs="$(VC_CRT_SourcePath.Split(%3B)[0])\arm\memcpy.asm">
+    <!-- fix .pdata (remove READONLY) -->
+    <Exec Command="cl /E /Tc &quot;$(VC_CRT_SourcePath.Split(%3B)[0])\arm\memcpy.asm&quot; &gt; $(IntDir)memcpy.pp0
+                  powershell -Command &quot;(gc '$(IntDir)memcpy.pp0').replace('|.pdata|,ALIGN=2,READONLY', '|.pdata|,ALIGN=2') | Out-File -encoding ASCII '$(IntDir)memcpy.pp'&quot;" />
+  </Target>
+  <ItemGroup Condition="'$(Platform)'=='ARM'">  
+    <MARMASM Include="$(IntDir)handlers.pp">
+      <PreprocessWithCl Condition="'$(VisualStudioVersion)' &gt;= '17.0'">false</PreprocessWithCl>
+    </MARMASM>
+    <MARMASM Include="$(IntDir)memcpy.pp">
+      <PreprocessWithCl Condition="'$(VisualStudioVersion)' &gt;= '17.0'">false</PreprocessWithCl>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_BOOTCRT_</PreprocessorDefinitions>
+    </MARMASM>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\arm\gshandlereh.cpp">
+      <ObjectFileName>$(IntDir)vcruntime\%(FileName).obj</ObjectFileName>
+    </ClCompile>
+  </ItemGroup>
+
+  <Target Name="PreprocessArm64Handlers" Condition="'$(Platform)'=='ARM64'" BeforeTargets="_MARMASM" Outputs="$(IntDir)handlers.pp" Inputs="$(VC_CRT_SourcePath.Split(%3B)[0])\arm64\handlers.asm">
+    <Exec Command="cl /I$(MSBuildThisFileDirectory)\custom\msvc\$(PlatformToolsetVersion)\include /E /Tc &quot;$(VC_CRT_SourcePath.Split(%3B)[0])\arm64\handlers.asm&quot; &gt; $(IntDir)handlers.pp" />
+  </Target>
+  <ItemGroup Condition="'$(Platform)'=='ARM64'">  
+    <MARMASM Include="$(IntDir)handlers.pp">
+      <PreprocessWithCl Condition="'$(VisualStudioVersion)' &gt;= '17.0'">false</PreprocessWithCl>
+    </MARMASM>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\arm64\gshandlereh.cpp">
+      <ObjectFileName>$(IntDir)vcruntime\%(FileName).obj</ObjectFileName>
+    </ClCompile>
+  </ItemGroup>
+
+  <ImportGroup>
+    <Import Condition="$(Platform_Arm)" Project="$(VCTargetsPath)\BuildCustomizations\marmasm.targets" />
+  </ImportGroup>
 </Project>

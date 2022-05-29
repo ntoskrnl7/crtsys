@@ -106,6 +106,16 @@ CrtSyspUninitializeForLibcntpr (
 #endif // CRTSYS_USE_LIBCNTPR
 
 #if UCXXRT
+extern "C" void __cdecl __CxxRaiseException(
+    _In_ DWORD dwExceptionCode,
+    _In_ DWORD dwExceptionFlags,
+    _In_ DWORD nNumberOfArguments,
+    _In_reads_opt_(nNumberOfArguments) CONST ULONG_PTR* lpArguments
+    )
+{
+    RaiseException(dwExceptionCode, dwExceptionFlags, nNumberOfArguments, lpArguments);
+}
+
 extern "C" int  __cdecl _do_onexit();
 extern "C" int  __cdecl _do_quick_onexit();
 extern "C" void __cdecl __initialize_memory();

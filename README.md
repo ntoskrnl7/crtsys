@@ -79,6 +79,7 @@ crtsys의 장점은 아래와 같습니다.
 ## Test Environments
 
 - Windows 10 x64
+  - **x86, x64, ARM, ARM64**로 빌드 가능하지만, 실제 테스트는 x86, x64 모듈에 대해서만 검증되었습니다.
 - CMake 3.21.4
 - Git 2.23.0
 - Visual Studio 2017

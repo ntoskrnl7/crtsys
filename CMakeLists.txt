@@ -13,7 +13,7 @@ project(
     VERSION "${VERSION}"
     DESCRIPTION "C Runtime Lbrary for Windows driver file (*.sys)"
     HOMEPAGE_URL "https://github.com/ntoskrnl7/crtsys"
-    LANGUAGES C CXX
+    LANGUAGES C CXX ASM_MASM
     )
 
 option(CRTSYS_NTL_MAIN      "Set to ON to use ntl::main" ON)
@@ -84,7 +84,6 @@ endif()
 
 if (UCXXRT_ENABLED)
   list(APPEND SOURCE_FILES src/custom/msvc/common/crt/src/stl/winapisupp.cpp)
-  list(REMOVE_ITEM SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/custom/crt/isa_available_init.c)
   list(REMOVE_ITEM SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/custom/crt/math/ftol3.c)
 
   CPMAddPackage("gh:ntoskrnl7/ucxxrt#master")
@@ -96,7 +95,11 @@ if (UCXXRT_ENABLED)
     )
   list(REMOVE_ITEM UCXXRT_SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/vcruntime/crt.cpp)
   list(REMOVE_ITEM UCXXRT_SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/vcruntime/locales.cpp)
-  list(REMOVE_ITEM UCXXRT_SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/vcruntime/thread.cpp)
+  list(REMOVE_ITEM UCXXRT_SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/vcruntime/thread.cpp)  
+  if(NOT "${CMAKE_VS_PLATFORM_NAME}" STREQUAL "Win32" AND NOT "${CMAKE_VS_PLATFORM_NAME}" STREQUAL "x64" )
+    list(REMOVE_ITEM UCXXRT_SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/vcruntime/x86_exception_filter.cpp)
+  endif()
+  list(REMOVE_ITEM UCXXRT_SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/cpu_disp.cpp)
   list(REMOVE_ITEM UCXXRT_SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/terminate.cpp)
   list(REMOVE_ITEM UCXXRT_SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/misc/invalid_parameter.cpp)
   list(REMOVE_ITEM UCXXRT_SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/sys_main.cpp)

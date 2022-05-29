@@ -27,10 +27,6 @@ PDRIVER_UNLOAD CrtsyspDriverUnload = NULL;
 
 
 
-#if defined(_ARM_) || defined(_ARM64_)
-#include <arm_neon.h>
-#endif
-
 //
 // :-(
 // TEB Tls(gs[0x58], fs[0x18])에 직접 접근하는 코드가 존재하므로 임시로 버퍼를 설정합니다.

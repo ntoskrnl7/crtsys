@@ -272,7 +272,6 @@
   </PropertyGroup>
 
   <ImportGroup>
-    <Import Condition="$(Platform_Intel)" Project="$(VCTargetsPath)\BuildCustomizations\masm.props" />
     <Import Condition="$(Platform_Arm)" Project="$(VCTargetsPath)\BuildCustomizations\marmasm.props" />
   </ImportGroup>
 
@@ -324,7 +323,6 @@
   </ItemGroup>
 
   <ImportGroup>
-    <Import Condition="$(Platform_Intel)" Project="$(VCTargetsPath)\BuildCustomizations\masm.targets" />
     <Import Condition="$(Platform_Arm)" Project="$(VCTargetsPath)\BuildCustomizations\marmasm.targets" />
   </ImportGroup>
 </Project>
