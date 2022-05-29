@@ -1,22 +1,6 @@
-﻿// // // clang-format off
+﻿// clang-format off
 
-// #pragma once
-
-// #undef _CTYPE_DISABLE_MACROS
-// #include <ctype.h>
-
-// // #define WINBASEAPI
-
-// #define WIN32_LEAN_AND_MEAN
-// #include <windows.h>
-
-// // #define WINBASEAPI
-
-// // #include <apiset.h>
-// // #include <apisetcconv.h>
-// // #include <minwindef.h>
-// // #include <minwinbase.h>
-
+#pragma once
 
 // sdkddkver.h가 ntddk.h(ntdef.h)보다 포함되는 경우가 발생하여,
 // DECLSPEC_DEPRECATED_DDK, DECLSPEC_DEPRECATED_DDK_WINXP 등이 정의되지 않아서 문제가 발생하였습니다.

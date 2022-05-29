@@ -27,6 +27,10 @@ PDRIVER_UNLOAD CrtsyspDriverUnload = NULL;
 
 
 
+#if defined(_ARM_) || defined(_ARM64_)
+#include <arm_neon.h>
+#endif
+
 //
 // :-(
 // TEB Tls(gs[0x58], fs[0x18])에 직접 접근하는 코드가 존재하므로 임시로 버퍼를 설정합니다.
@@ -40,10 +44,14 @@ CrtSysSetTebThreadLocalStoragePointer (
     _In_ PVOID ThreadLocalStoragePointer
     )
 {
-#if _WIN64
+#if _AMD64_
     __writegsqword(0x58, (ULONG_PTR)ThreadLocalStoragePointer);
-#else
+#elif _X86_
     __writefsdword(0x18, (ULONG_PTR)ThreadLocalStoragePointer);
+#elif _ARM_
+    *(PVOID *)(_MoveFromCoprocessor(15, 0, 13, 0, 2) + 0x18) = ThreadLocalStoragePointer;
+#elif _ARM64_
+    *(PVOID *)(__getReg(18) + 0x58) = ThreadLocalStoragePointer;
 #endif
 }
 

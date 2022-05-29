@@ -44,24 +44,11 @@ list(APPEND CMAKE_MODULE_PATH "${FindWDK_SOURCE_DIR}/cmake")
 find_package(WDK REQUIRED)
 
 function(crtsys_add_driver _target)
-    cmake_parse_arguments(CRTSYS "" "WINVER" "" ${ARGN})
+    cmake_parse_arguments(WDK "" "WINVER" "" ${ARGN})
+    wdk_add_driver(${_target} ${WDK_UNPARSED_ARGUMENTS} CUSTOM_ENTRY_POINT CrtSysDriverEntry EXTENDED_CPP_FEATURES)
 
-    EXTENDED_CPP_FEATURES_ON(${_target})
-    add_executable(${_target} ${CRTSYS_UNPARSED_ARGUMENTS})
-    
-    set_target_properties(${_target} PROPERTIES SUFFIX ".sys")
-    set_target_properties(${_target} PROPERTIES COMPILE_OPTIONS "${WDK_COMPILE_FLAGS}")
-    set_target_properties(${_target} PROPERTIES COMPILE_DEFINITIONS
-        "${WDK_COMPILE_DEFINITIONS};$<$<CONFIG:Debug>:${WDK_COMPILE_DEFINITIONS_DEBUG}>;_WIN32_WINNT=${WDK_WINVER}"
-        )
-    set_target_properties(${_target} PROPERTIES LINK_FLAGS "${WDK_LINK_FLAGS}")
-
-    set_property(TARGET crtsys_test PROPERTY INCLUDE_DIRECTORIES "${crtsys_SOURCE_DIR}/include;${crtsys_SOURCE_DIR}/include/$(VCToolsVersion);${crtsys_SOURCE_DIR}/include/${MSVC_TOOLSET_VERSION};${crtsys_SOURCE_DIR}/include/$(VCToolsVersion)/stl;${crtsys_SOURCE_DIR}/include/${MSVC_TOOLSET_VERSION}/stl;$(VC_IncludePath);$(WindowsSDK_IncludePath)")
-    target_include_directories(${_target} SYSTEM PRIVATE
-        "${WDK_ROOT}/Include/${WDK_VERSION}/shared"
-        "${WDK_ROOT}/Include/${WDK_VERSION}/km"
-        "${WDK_ROOT}/Include/${WDK_VERSION}/km/crt"
-        )
+    get_target_property(INC_DIR_TMP crtsys INCLUDE_DIRECTORIES)
+    set_property(TARGET ${_target} PROPERTY INCLUDE_DIRECTORIES "${crtsys_SOURCE_DIR}/include;${crtsys_SOURCE_DIR}/include/$(VCToolsVersion);${crtsys_SOURCE_DIR}/include/${MSVC_TOOLSET_VERSION};${crtsys_SOURCE_DIR}/include/$(VCToolsVersion)/stl;${crtsys_SOURCE_DIR}/include/${MSVC_TOOLSET_VERSION}/stl;$(VC_IncludePath);$(WindowsSDK_IncludePath);${INC_DIR_TMP}")
 
     # Forced Include File
     if(EXISTS "${crtsys_SOURCE_DIR}/include/winsdk/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/wdk/${WDK_VERSION}/forced.h")
@@ -70,16 +57,5 @@ function(crtsys_add_driver _target)
 
     if(CRTSYS_NTL_MAIN)
       target_compile_definitions(crtsys PUBLIC CRTSYS_USE_NTL_MAIN)
-    endif()
-    target_link_libraries(${_target} crtsys WDK::NTOSKRNL WDK::HAL WDK::WMILIB WDK::BUFFEROVERFLOWK)
-
-    if(CMAKE_SIZEOF_VOID_P EQUAL 4)
-        target_link_libraries(${_target} WDK::MEMCMP)
-    endif()
-
-    if(CMAKE_SIZEOF_VOID_P EQUAL 4)
-        set_property(TARGET ${_target} APPEND_STRING PROPERTY LINK_FLAGS "/ENTRY:CrtSysDriverEntry@8")
-    elseif(CMAKE_SIZEOF_VOID_P  EQUAL 8)
-        set_property(TARGET ${_target} APPEND_STRING PROPERTY LINK_FLAGS "/ENTRY:CrtSysDriverEntry")
     endif()
 endfunction()

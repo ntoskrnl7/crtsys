@@ -13,7 +13,7 @@ project(
     VERSION "${VERSION}"
     DESCRIPTION "C Runtime Lbrary for Windows driver file (*.sys)"
     HOMEPAGE_URL "https://github.com/ntoskrnl7/crtsys"
-    LANGUAGES C CXX ASM_MASM
+    LANGUAGES C CXX
     )
 
 option(CRTSYS_NTL_MAIN      "Set to ON to use ntl::main" ON)
@@ -39,7 +39,7 @@ else()
   set(LDK_USE_RAISE_EXCEPTION OFF)
   set(LDK_USE_RTL_RAISE_EXCEPTION OFF)
 endif()
-CPMAddPackage("gh:ntoskrnl7/Ldk@0.7.3")
+CPMAddPackage("gh:ntoskrnl7/Ldk@0.7.4")
 
 CPMAddPackage("gh:ntoskrnl7/FindWDK#master")
 list(APPEND CMAKE_MODULE_PATH "${FindWDK_SOURCE_DIR}/cmake")

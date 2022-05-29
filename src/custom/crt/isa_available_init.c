@@ -1,3 +1,5 @@
+#if defined(_X86_) || defined(_AMD64_)
+
 //
 // https://github.com/SpoilerScriptsGroup/RetrievAL/blob/develop/SpoilerAL-winmm.dll/crt/msvc/isa_available_init.c
 //
@@ -357,5 +359,11 @@ __declspec(naked) void __cdecl __isa_available_init()
 #undef cpuid_1_ecx
 #undef cpuid_7_ebx
     }
+}
+#endif
+#else
+int __cdecl __isa_available_init(void)
+{
+    return 0;
 }
 #endif
