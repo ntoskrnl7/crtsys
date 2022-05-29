@@ -47,7 +47,9 @@ function(crtsys_add_driver _target)
     cmake_parse_arguments(WDK "" "WINVER" "" ${ARGN})
     wdk_add_driver(${_target} ${WDK_UNPARSED_ARGUMENTS} CUSTOM_ENTRY_POINT CrtSysDriverEntry EXTENDED_CPP_FEATURES)
 
-    get_target_property(INC_DIR_TMP crtsys INCLUDE_DIRECTORIES)
+    target_link_libraries(${_target} crtsys)
+
+    get_target_property(INC_DIR_TMP ${_target} INCLUDE_DIRECTORIES)
     set_property(TARGET ${_target} PROPERTY INCLUDE_DIRECTORIES "${crtsys_SOURCE_DIR}/include;${crtsys_SOURCE_DIR}/include/$(VCToolsVersion);${crtsys_SOURCE_DIR}/include/${MSVC_TOOLSET_VERSION};${crtsys_SOURCE_DIR}/include/$(VCToolsVersion)/stl;${crtsys_SOURCE_DIR}/include/${MSVC_TOOLSET_VERSION}/stl;$(VC_IncludePath);$(WindowsSDK_IncludePath);${INC_DIR_TMP}")
 
     # Forced Include File
@@ -56,6 +58,6 @@ function(crtsys_add_driver _target)
     endif()
 
     if(CRTSYS_NTL_MAIN)
-      target_compile_definitions(crtsys PUBLIC CRTSYS_USE_NTL_MAIN)
+      target_compile_definitions(${_target} PUBLIC CRTSYS_USE_NTL_MAIN)
     endif()
 endfunction()
