@@ -36,6 +36,7 @@
     <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xonce.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xonce.cpp" />
     <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xonce2.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xonce2.cpp">
       <PreprocessorDefinitions>__std_init_once_begin_initialize_clr=__std_init_once_begin_initialize; __std_init_once_complete_clr=__std_init_once_complete;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <LanguageStandard>stdcpp14</LanguageStandard>
     </ClCompile>
     <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xthrow.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xthrow.cpp" />
     <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\cthread.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\cthread.cpp">
