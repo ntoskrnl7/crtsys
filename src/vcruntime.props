@@ -176,7 +176,9 @@
     </ClCompile>
     <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\risctrnsctrl.cpp" />
 
-    <!-- <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\loadcfg.c" /> -->
+    <!-- <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\loadcfg.c">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_CRT_WINDOWS</PreprocessorDefinitions>
+    </ClCompile> -->
     <!-- <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\guard_support.c" /> -->
     <!-- <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\ptrust.cpp" /> -->
 
