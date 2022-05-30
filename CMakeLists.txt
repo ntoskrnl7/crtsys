@@ -179,7 +179,7 @@ endif()
 # Forced Include File
 #
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/include/.internal/winsdk/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/wdk/${WDK_VERSION}/forced.h")
-  target_compile_options(crtsys PUBLIC /FI"${CMAKE_CURRENT_SOURCE_DIR}/include/.internal/winsdk/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/wdk/${WDK_VERSION}/forced.h")
+  target_compile_options(crtsys PRIVATE /FI"${CMAKE_CURRENT_SOURCE_DIR}/include/.internal/winsdk/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/wdk/${WDK_VERSION}/forced.h")
 endif()
 target_compile_options(crtsys PRIVATE /FI"${CMAKE_CURRENT_SOURCE_DIR}/src/crtsys.h")
 if (UCXXRT_ENABLED)
