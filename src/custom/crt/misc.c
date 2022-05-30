@@ -1,3 +1,5 @@
+﻿// clang-format off
+
 #include <internal_shared.h>
 
 //
@@ -59,6 +61,7 @@ _Check_return_ _ACRTIMP int __cdecl _ldsign(_In_ long double _X)
 {
     return _LSIGN_C(_X);
 }
+
 _Check_return_ _ACRTIMP int __cdecl _fdsign(_In_ float _X)
 {
     return _FSIGN_C(_X);

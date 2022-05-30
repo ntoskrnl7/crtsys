@@ -1,0 +1,42 @@
+﻿#pragma once
+
+/*
+[현상]
+
+MSVC 2019 2017, 2022
+SDK 10.0.17763.0
+WDK 10.0.17763.0
+
+  위 환경에서 ARM 모듈료 빌드할 때
+read 함수를 io.c에 정의하는 경우, 해당 read함수는 무시되고
+C:\Program Files (x86)\Windows
+Kits\10\Lib\10.0.17763.0\km\ARM\libcntpr.lib(stubs.obj)의 read를 사용하는
+현상이 발생합니다.
+
+이 상황에서 ARM의 경우, fatal error LNK1223 (파일이 잘못되었거나
+손상되었습니다. 파일의 .pdata 정보가 잘못되었습니다.) 링커 오류가 발생합니다.
+링커 오류가 발생하지 않는다해도, 직접 정의한 함수들이 사용되지 못하는 잠재적
+문제가 존재합니다.
+
+[원인]
+
+  pow 함수를 사용한 코드가 먼저 처리되면서 libcntpr.lib(pow.obj)가 로드 되면서
+read함수가 정의된 libcntpr.lib(stub.obj)까지 로드되어지며
+이때 io.c.obj보다 먼저 로드되었기때문에, io.c의 read를 비롯한 함수가 무시되고
+libcntpr.lib(stub.obj에 정의된 dummy함수가 사용되게 됩니다.
+
+[해결책]
+
+프로젝트 빌드 시, 이 헤더를 강제로 포함시키도록 처리하여,
+libcntpr.lib이 crtsys의 오브젝트보다 먼저 로드 되지 않도록 처리하였습니다.
+
+  - 이 것은 임시 조치이며, 컴파일러 차원에서 링크 순서를 안정적으로 조정하는
+방법을 찾아야합니다.
+*/
+
+#ifdef __cplusplus
+extern "C" ___crtsys_crt_io_link_order_dummy();
+extern "C" void ___crtsys_load_order_dummy() {
+  ___crtsys_crt_io_link_order_dummy();
+}
+#endif

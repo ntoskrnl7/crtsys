@@ -59,15 +59,6 @@ EXTERN_C_END
 #include <memory>
 #include <stdexcept>
 #include <tuple>
-#include <type_traits>
-
-#if _MSVC_LANG >= 201703L
-#define _NTL_INVOKE_RESULT(F, Args) std::invoke_result_t<F, Args>
-#elif _MSVC_LANG >= 201402L
-#define _NTL_INVOKE_RESULT(F, Args) std::result_of_t<F(Args)>
-#else
-#define _NTL_INVOKE_RESULT(F, Args) std::result_of<F(Args)>::type
-#endif
 
 namespace ntl {
 
@@ -142,8 +133,8 @@ struct expand_stack_options {
 };
 
 template <class Fn, class... Args>
-inline _NTL_INVOKE_RESULT(Fn, Args...)
-    expand_stack(expand_stack_options &&opts, Fn &&f, Args &&... args) {
+inline std::invoke_result_t<Fn, Args...>
+expand_stack(expand_stack_options &&opts, Fn &&f, Args &&... args) {
   struct context_t {
     context_t(Fn &&f, Args &&... args)
         : f(f), args(std::make_tuple(std::move(args)...)) {}
@@ -152,7 +143,7 @@ inline _NTL_INVOKE_RESULT(Fn, Args...)
   };
   context_t ctx(std::forward<Fn &&>(f), std::forward<Args &&>(args)...);
 
-  using return_type = _NTL_INVOKE_RESULT(Fn, Args...);
+  using return_type = std::invoke_result_t<Fn, Args...>;
   if constexpr (std::is_void_v<return_type>) {
     NTSTATUS status = KeExpandKernelStackAndCalloutEx(
         [](void *ptr) {
@@ -186,8 +177,8 @@ inline _NTL_INVOKE_RESULT(Fn, Args...)
 }
 
 template <class Fn, class... Args>
-inline _NTL_INVOKE_RESULT(Fn, Args...) expand_stack(Fn &&f, Args &&... args) {
-  using return_type = _NTL_INVOKE_RESULT(Fn, Args...);
+inline std::invoke_result_t<Fn, Args...> expand_stack(Fn &&f, Args &&... args) {
+  using return_type = std::invoke_result_t<Fn, Args...>;
   if constexpr (std::is_void_v<return_type>)
     expand_stack<Fn, Args...>(expand_stack_options{}, std::forward<Fn &&>(f),
                               std::forward<Args &&>(args)...);

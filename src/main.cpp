@@ -123,6 +123,7 @@ CrtSysDriverEntry (
     )
 {
     PAGED_CODE();
+
     NTSTATUS status = CrtSysInitializeTebThreadLocalStoragePointer();
     if (! NT_SUCCESS(status)) {
         return status;
@@ -183,6 +184,7 @@ CrtSysDriverEntry (
     if (!driver) {
         return STATUS_INSUFFICIENT_RESOURCES;
     }
+
     ntl::status s = ntl::expand_stack( ntl::main,
                                        std::ref(*driver.get()),
                                        std::wstring(RegistryPath->Buffer) );

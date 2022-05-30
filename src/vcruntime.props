@@ -297,9 +297,7 @@
     <Exec Command="cl /E /Tc &quot;$(VC_CRT_SourcePath.Split(%3B)[0])\arm\handlers.asm&quot; &gt; $(IntDir)handlers.pp" />
   </Target>
   <Target Name="PreprocessArmThunkMemCpy" Condition="'$(Platform)'=='ARM'" BeforeTargets="_MARMASM" Outputs="$(IntDir)memcpy.pp" Inputs="$(VC_CRT_SourcePath.Split(%3B)[0])\arm\memcpy.asm">
-    <!-- fix .pdata (remove READONLY) -->
-    <Exec Command="cl /E /Tc &quot;$(VC_CRT_SourcePath.Split(%3B)[0])\arm\memcpy.asm&quot; &gt; $(IntDir)memcpy.pp0
-                  powershell -Command &quot;(gc '$(IntDir)memcpy.pp0').replace('|.pdata|,ALIGN=2,READONLY', '|.pdata|,ALIGN=2') | Out-File -encoding ASCII '$(IntDir)memcpy.pp'&quot;" />
+    <Exec Command="cl /E /Tc &quot;$(VC_CRT_SourcePath.Split(%3B)[0])\arm\memcpy.asm&quot; &gt; $(IntDir)memcpy.pp" />
   </Target>
   <ItemGroup Condition="'$(Platform)'=='ARM'">  
     <MARMASM Include="$(IntDir)handlers.pp">

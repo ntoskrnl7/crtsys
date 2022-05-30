@@ -50,12 +50,9 @@ function(crtsys_add_driver _target)
     target_link_libraries(${_target} crtsys)
 
     get_target_property(INC_DIR_TMP ${_target} INCLUDE_DIRECTORIES)
-    set_property(TARGET ${_target} PROPERTY INCLUDE_DIRECTORIES "${crtsys_SOURCE_DIR}/include;${crtsys_SOURCE_DIR}/include/$(VCToolsVersion);${crtsys_SOURCE_DIR}/include/${MSVC_TOOLSET_VERSION};${crtsys_SOURCE_DIR}/include/$(VCToolsVersion)/stl;${crtsys_SOURCE_DIR}/include/${MSVC_TOOLSET_VERSION}/stl;$(VC_IncludePath);$(WindowsSDK_IncludePath);${INC_DIR_TMP}")
+    set_property(TARGET ${_target} PROPERTY INCLUDE_DIRECTORIES "${crtsys_SOURCE_DIR}/include;${crtsys_SOURCE_DIR}/include/.internal/msvc/$(VCToolsVersion);${crtsys_SOURCE_DIR}/include/.internal/msvc/${MSVC_TOOLSET_VERSION};${crtsys_SOURCE_DIR}/include/.internal/msvc/$(VCToolsVersion)/stl;${crtsys_SOURCE_DIR}/include/.internal/msvc/${MSVC_TOOLSET_VERSION}/stl;$(VC_IncludePath);$(WindowsSDK_IncludePath);${INC_DIR_TMP}")
 
-    # Forced Include File
-    if(EXISTS "${crtsys_SOURCE_DIR}/include/winsdk/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/wdk/${WDK_VERSION}/forced.h")
-      target_compile_options(${_target} PRIVATE /FI"${crtsys_SOURCE_DIR}/include/winsdk/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/wdk/${WDK_VERSION}/forced.h")
-    endif()
+    target_compile_options(${_target} PRIVATE /FI"${crtsys_SOURCE_DIR}/include/.internal/adjust_link_order")
 
     if(CRTSYS_NTL_MAIN)
       target_compile_definitions(${_target} PUBLIC CRTSYS_USE_NTL_MAIN)
