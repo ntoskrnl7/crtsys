@@ -36,7 +36,7 @@ libcntpr.lib이 crtsys의 오브젝트보다 먼저 로드 되지 않도록 처�
 
 #ifdef __cplusplus
 extern "C" ___crtsys_crt_io_link_order_dummy();
-extern "C" void ___crtsys_load_order_dummy() {
+extern "C" void ___crtsys_link_order_dummy() {
   ___crtsys_crt_io_link_order_dummy();
 }
 #endif
