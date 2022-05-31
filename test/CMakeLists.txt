@@ -6,7 +6,6 @@ include(../cmake/CPM.cmake)
 
 set(CRTSYS_NTL_MAIN ON)
 CPMAddPackage(NAME crtsys SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}/..)
-# CPMAddPackage("gh:ntoskrnl7/crtsys@0.1.4")
 include(${crtsys_SOURCE_DIR}/cmake/CrtSys.cmake)
 
 set(CRTSYS_TEST_NLOHMANN_JSON ON)

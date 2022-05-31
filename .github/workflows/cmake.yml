@@ -31,3 +31,13 @@ jobs:
       shell: cmd
       run: ..\build.bat . x64
       working-directory: test
+
+    - name: build ARM
+      shell: cmd
+      run: ..\build.bat . ARM
+      working-directory: test
+
+    - name: build ARM64
+      shell: cmd
+      run: ..\build.bat . ARM64
+      working-directory: test

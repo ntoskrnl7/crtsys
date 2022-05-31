@@ -1,6 +1,6 @@
-@REM build.bat "PATH" "x86 | x64" [Debug (default) | Release]
-@REM build.bat "PATH" "2017 | 2019 | 2022" "x86 | x64"
-@REM build.bat "PATH" "2017 | 2019 | 2022" "x86 | x64" [Debug (default) | Release]
+@REM build.bat "PATH" "x86 | x64" | "ARM" | "ARM64" [Debug (default) | Release]
+@REM build.bat "PATH" "2017 | 2019 | 2022" "x86 | x64" | "ARM" | "ARM64"
+@REM build.bat "PATH" "2017 | 2019 | 2022" "x86 | x64" | "ARM" | "ARM64" [Debug (default) | Release]
 
 @ECHO OFF
 
@@ -8,21 +8,29 @@ SETLOCAL ENABLEDELAYEDEXPANSION
 
 IF EXIST "%1/CMakeLists.txt" (
         SET WORK_PATH=%1
-    IF "%2" == "x86" (
+    IF /I "%2" == "x86" (
         SET ARCH=Win32
         SET ARCH_NAME=x86
     )
-    IF "%2" == "x64" (
+    IF /I "%2" == "x64" (
         SET ARCH=x64
         SET ARCH_NAME=x64
     )
-    IF "%2" == "Win32" (
+    IF /I "%2" == "Win32" (
         SET ARCH=Win32
         SET ARCH_NAME=x86
     )
-    IF "%2" == "Win64" (
+    IF /I "%2" == "Win64" (
         SET ARCH=x64
         SET ARCH_NAME=x64
+    )
+    IF /I "%2" == "ARM" (
+        SET ARCH=ARM
+        SET ARCH_NAME=ARM
+    )
+    IF /I "%2" == "ARM64" (
+        SET ARCH=ARM64
+        SET ARCH_NAME=ARM64
     )
     IF /I "%3" == "Debug" (
         SET CONFIG=Debug
@@ -60,6 +68,14 @@ IF EXIST "%1/CMakeLists.txt" (
         IF /I "%3" == "Win64" (
             SET ARCH=x64
             SET ARCH_NAME=x64
+        )
+        IF /I "%3" == "ARM" (
+            SET ARCH=ARM
+            SET ARCH_NAME=ARM
+        )
+        IF /I "%3" == "ARM64" (
+            SET ARCH=ARM64
+            SET ARCH_NAME=ARM64
         )
         IF "!VS_VERSION!" == "" (
             SET BUILD_PATH=!WORK_PATH!/build_!ARCH_NAME!

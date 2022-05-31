@@ -4,7 +4,7 @@
     <ClCompile>
       <RuntimeLibrary />
       <AdditionalIncludeDirectories>$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);_VCRT_WIN32_WINNT=_WIN32_WINNT;_VCRT_ALLOW_INTERNALS;_CRT_WINDOWS_USE_VISTA_TSS;_CRTIMP_ALT;_CRTBLD;_KERNELX;PROCESSOR_FAST_FAIL_AVAILABLE;_HAS_EXCEPTIONS=1;_ITERATOR_DEBUG_LEVEL=0;</PreprocessorDefinitions>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_VCRT_WIN32_WINNT=_WIN32_WINNT;_VCRT_ALLOW_INTERNALS;_CRT_WINDOWS_USE_VISTA_TSS;_CRTIMP_ALT;_CRTBLD;_KERNELX;_HAS_EXCEPTIONS=1;_ITERATOR_DEBUG_LEVEL=0;</PreprocessorDefinitions>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <ObjectFileName>$(IntDir)\%(Directory)%(FileName).obj</ObjectFileName>
     </ClCompile>
@@ -42,7 +42,7 @@
   </ItemGroup>
 
   <!-- ntoskrnl longjmp, memchr, strstr, strchr, strrchr, wcsstr, wcschr, wcsrchr -->
-  <ItemGroup>
+  <!-- <ItemGroup>
     <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\memchr.c">
       <CompileAs>CompileAsC</CompileAs>
     </ClCompile>
@@ -68,7 +68,7 @@
       <CallingConvention>Cdecl</CallingConvention>
       <CompileAs>CompileAsC</CompileAs>
     </ClCompile>
-  </ItemGroup>
+  </ItemGroup> -->
 
   <!-- BufferOverflowK.lib(gs_support.obj) __security_cookie -->
   <ItemGroup>  
@@ -80,6 +80,7 @@
     </ClCompile>
     <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\gs_report.c">
       <CompileAs>CompileAsC</CompileAs>
+      <DisableSpecificWarnings>4245</DisableSpecificWarnings>
     </ClCompile>
   </ItemGroup>
 
@@ -175,7 +176,9 @@
     </ClCompile>
     <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\risctrnsctrl.cpp" />
 
-    <!-- <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\loadcfg.c" /> -->
+    <!-- <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\loadcfg.c">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_CRT_WINDOWS</PreprocessorDefinitions>
+    </ClCompile> -->
     <!-- <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\guard_support.c" /> -->
     <!-- <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\ptrust.cpp" /> -->
 
@@ -248,8 +251,9 @@
     <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\winapi_thunks.cpp">
       <ObjectFileName>$(IntDir)vcruntime\%(FileName).obj</ObjectFileName>
     </ClCompile>
-    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\x86_exception_filter.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\x86_exception_filter.cpp" />
+    <ClCompile Condition="'$(Platform)'=='Win32' And exists('$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\x86_exception_filter.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\x86_exception_filter.cpp" />
     <ClCompile Condition="'$(Platform)'=='Win32'" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\default_precision.cpp" />
+  
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\ehhelpers.h" />
@@ -260,6 +264,17 @@
     <ClInclude Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\vcruntime_internal.h" />
     <ClInclude Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\vcstartup_internal.h" />
   </ItemGroup>
+
+  <PropertyGroup>
+    <Platform_Arm Condition="'$(Platform)'=='ARM' or '$(Platform)'=='ARM64'">true</Platform_Arm>
+    <Platform_Arm Condition="'$(Platform_Arm)'!='true'">false</Platform_Arm>
+    <Platform_Intel>!$(Platform_Arm)</Platform_Intel>
+  </PropertyGroup>
+
+  <ImportGroup>
+    <Import Condition="$(Platform_Arm)" Project="$(VCTargetsPath)\BuildCustomizations\marmasm.props" />
+  </ImportGroup>
+
   <ItemGroup Condition="'$(Platform)'=='Win32'">
     <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\i386\trnsctrl.cpp">
       <!-- line:20 #include "../ehhelpers.h" (relative path) -->
@@ -271,9 +286,41 @@
     </ClCompile>
     <MASM Include="$(VC_CRT_SourcePath.Split(%3B)[0])\i386\lowhelpr.asm" />
   </ItemGroup>
+
   <ItemGroup Condition="'$(Platform)'=='x64'">
     <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\x64\gshandlereh.cpp" />
     <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\x64\gshandlereh4.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\x64\gshandlereh4.cpp" />
     <MASM Include="$(VC_CRT_SourcePath.Split(%3B)[0])\x64\handlers.asm" />
   </ItemGroup>
+
+  <Target Name="PreprocessArmHandlers" Condition="'$(Platform)'=='ARM'" BeforeTargets="_MARMASM" Outputs="$(IntDir)handlers.pp" Inputs="$(VC_CRT_SourcePath.Split(%3B)[0])\arm\handlers.asm">
+    <Exec Command="cl /E /Tc &quot;$(VC_CRT_SourcePath.Split(%3B)[0])\arm\handlers.asm&quot; &gt; $(IntDir)handlers.pp" />
+  </Target>
+  <Target Name="PreprocessArmThunkMemCpy" Condition="'$(Platform)'=='ARM'" BeforeTargets="_MARMASM" Outputs="$(IntDir)memcpy.pp" Inputs="$(VC_CRT_SourcePath.Split(%3B)[0])\arm\memcpy.asm">
+    <Exec Command="cl /E /Tc &quot;$(VC_CRT_SourcePath.Split(%3B)[0])\arm\memcpy.asm&quot; &gt; $(IntDir)memcpy.pp" />
+  </Target>
+  <ItemGroup Condition="'$(Platform)'=='ARM'">  
+    <MARMASM Include="$(IntDir)handlers.pp">
+      <PreprocessWithCl Condition="'$(VisualStudioVersion)' &gt;= '17.0'">false</PreprocessWithCl>
+    </MARMASM>
+    <MARMASM Include="$(IntDir)memcpy.pp">
+      <PreprocessWithCl Condition="'$(VisualStudioVersion)' &gt;= '17.0'">false</PreprocessWithCl>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_BOOTCRT_</PreprocessorDefinitions>
+    </MARMASM>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\arm\gshandlereh.cpp" />
+  </ItemGroup>
+
+  <Target Name="PreprocessArm64Handlers" Condition="'$(Platform)'=='ARM64'" BeforeTargets="_MARMASM" Outputs="$(IntDir)handlers.pp" Inputs="$(VC_CRT_SourcePath.Split(%3B)[0])\arm64\handlers.asm">
+    <Exec Command="cl /I$(MSBuildThisFileDirectory)\custom\msvc\$(PlatformToolsetVersion)\include /E /Tc &quot;$(VC_CRT_SourcePath.Split(%3B)[0])\arm64\handlers.asm&quot; &gt; $(IntDir)handlers.pp" />
+  </Target>
+  <ItemGroup Condition="'$(Platform)'=='ARM64'">  
+    <MARMASM Include="$(IntDir)handlers.pp">
+      <PreprocessWithCl Condition="'$(VisualStudioVersion)' &gt;= '17.0'">false</PreprocessWithCl>
+    </MARMASM>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\arm64\gshandlereh.cpp" />
+  </ItemGroup>
+
+  <ImportGroup>
+    <Import Condition="$(Platform_Arm)" Project="$(VCTargetsPath)\BuildCustomizations\marmasm.targets" />
+  </ImportGroup>
 </Project>

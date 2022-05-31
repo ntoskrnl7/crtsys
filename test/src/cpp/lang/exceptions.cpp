@@ -1,4 +1,4 @@
-﻿#if !DBG
+﻿#if !DBG || defined(_ARM_)
 #pragma warning(disable : 4702) // line 25
 #endif
 

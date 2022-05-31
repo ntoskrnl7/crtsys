@@ -72,12 +72,21 @@ CrtSyspSaveXState (
 			CrtySyspCleanupXState( StateSave );
 			return NULL;
 		}
+#if defined(_ARM_) || defined(_ARM64_)
+	} else if (StateSave->Dummy == 0) {
+		if (! NT_SUCCESS(KeSaveExtendedProcessorState( XSTATE_MASK_LEGACY,
+													   StateSave ))) {
+			return NULL;
+		}
+	}
+#else
 	} else if (StateSave->XStateContext.Area == NULL) {
 		if (! NT_SUCCESS(KeSaveExtendedProcessorState( XSTATE_MASK_LEGACY,
 													   StateSave ))) {
 			return NULL;
 		}
 	}
+#endif
 	return StateSave;
 }
 
@@ -94,26 +103,43 @@ CrtSyspRestoreXState (
 				   sizeof(XSTATE_SAVE) );
 }
 
+
+
 _ACRTIMP int __cdecl fegetenv(_Out_ fenv_t *_Env)
 {
 	PXSTATE_SAVE StateSave = CrtSyspSaveXState();
+#if defined(_X86_) || defined(_AMD64_)
 	if (StateSave == NULL || StateSave->XStateContext.Area == NULL) {
 		return 1;
 	}
 	_Env->_Fe_ctl = StateSave->XStateContext.Area->LegacyState.ControlWord;
 	_Env->_Fe_stat = StateSave->XStateContext.Area->LegacyState.StatusWord;
 	CrtSyspRestoreXState( StateSave );
-    return 0;
+#else
+	if (StateSave == NULL) {
+		return 1;
+	}
+	_Env->_Fe_stat = StateSave->Dummy;
+	CrtSyspRestoreXState( StateSave );
+#endif
+   return 0;
 }
 
 _ACRTIMP int __cdecl fesetenv(_In_ fenv_t const *_Env)
 {
 	PXSTATE_SAVE StateSave = CrtSyspSaveXState();
+#if defined(_X86_) || defined(_AMD64_)
 	if (StateSave == NULL || StateSave->XStateContext.Area == NULL) {
 		return 1;
 	}
 	StateSave->XStateContext.Area->LegacyState.ControlWord = (USHORT)_Env->_Fe_ctl;
 	StateSave->XStateContext.Area->LegacyState.StatusWord = (USHORT)_Env->_Fe_stat;
+#else
+	if (StateSave == NULL) {
+		return 1;
+	}
+	StateSave->Dummy = (USHORT)_Env->_Fe_stat;
+#endif
 	CrtSyspRestoreXState( StateSave );
 	return 0;
 }
@@ -121,6 +147,7 @@ _ACRTIMP int __cdecl fesetenv(_In_ fenv_t const *_Env)
 _ACRTIMP _Success_(return == 0) int __cdecl feholdexcept(_Out_ fenv_t *_Env)
 {
 	PXSTATE_SAVE StateSave = CrtSyspSaveXState();
+#if defined(_X86_) || defined(_AMD64_)
 	if (StateSave == NULL || StateSave->XStateContext.Area == NULL) {
 		return 1;
 	}
@@ -128,16 +155,25 @@ _ACRTIMP _Success_(return == 0) int __cdecl feholdexcept(_Out_ fenv_t *_Env)
 	_Env->_Fe_stat = StateSave->XStateContext.Area->LegacyState.StatusWord;
 
 	StateSave->XStateContext.Area->LegacyState.StatusWord &= ~FE_ALL_EXCEPT;
+#else
+	if (StateSave == NULL) {
+		return 1;
+	}
+	_Env->_Fe_stat = StateSave->Dummy;
+	StateSave->Dummy &= ~FE_ALL_EXCEPT;
+#endif
 	CrtSyspRestoreXState( StateSave );
 	return CrtSyspSaveXState() == NULL ? 0 : 1;
 }
 
 _ACRTIMP int __cdecl fegetround(void)
 {
+#if defined(_X86_) || defined(_AMD64_)
 	PXSTATE_SAVE StateSave = (PXSTATE_SAVE)FlsGetValue( CrtSyspFlsXStateSaveIndex );
 	if (StateSave && StateSave->XStateContext.Area) {
 		return (int)StateSave->XStateContext.Area->LegacyState.ControlWord & _MCW_RC;
 	}
+#endif
 	unsigned int state;
 	if (_controlfp_s(&state, 0, 0)) {
 		return -1;

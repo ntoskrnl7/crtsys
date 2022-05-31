@@ -9,6 +9,7 @@
 ![Visual Studio 2017+](https://img.shields.io/badge/Visual%20Studio-2017+-682270?logo=visualstudio&logoColor=682270)
 ![CMake 3.14+](https://img.shields.io/badge/CMake-3.14+-yellow.svg?logo=cmake&logoColor=white)
 ![C++ 14+](https://img.shields.io/badge/C++-14+-white.svg?logo=cplusplus&logoColor=blue)
+![Architecture](https://img.shields.io/badge/CPU-x86%20%2F%20x64%20%2F%20ARM%20%2F%20ARM64-blue.svg?logo=data:image/svg+xml;base64,PD94bWwgdmVyc2lvbj0iMS4wIj8+CjxzdmcgZW5hYmxlLWJhY2tncm91bmQ9Im5ldyAwIDAgNTIgNTIiIGlkPSJMYXllcl8xIiB2ZXJzaW9uPSIxLjEiIHZpZXdCb3g9IjAgMCA1MiA1MiIgeG1sOnNwYWNlPSJwcmVzZXJ2ZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIiB4bWxuczp4bGluaz0iaHR0cDovL3d3dy53My5vcmcvMTk5OS94bGluayI+CiAgICA8Zz4KICAgICAgICA8cGF0aCBmaWxsPSJ3aGl0ZSIgZD0iTTQ5LDE5LjV2LTJoLTYuOTk4NDEzMXYtNy40OTU3ODg2SDE0LjQwMTYxMTNsLTQuNDAwMDI0NCw0LjUzMDAyOTN2MjcuNDY5OTcwN0gxNy41VjQ5aDJ2LTYuOTk1Nzg4NmgzVjQ5aDJ2LTYuOTk1Nzg4NmgzICAgVjQ5aDJ2LTYuOTk1Nzg4NmgzVjQ5aDJ2LTYuOTk1Nzg4NmgyLjgxMTU4NDVsNC42OTAwMDI0LTUuNjQwMDE0NlYzNC41SDQ5di0yaC02Ljk5ODQxMzF2LTNINDl2LTJoLTYuOTk4NDEzMXYtM0g0OXYtMmgtNi45OTg0MTMxICAgdi0zSDQ5eiBNMzYuMDAxNTg2OSwzMy41MDQyMTE0YzAsMS42NTAwMjQ0LTEuMzQ5OTc1NiwzLTMsM2gtMTRjLTEuNjU5OTczMSwwLTMtMS4zNDk5NzU2LTMtM3YtMTRjMC0xLjY1OTk3MzEsMS4zNDAwMjY5LTMsMy0zaDE0ICAgYzEuNjUwMDI0NCwwLDMsMS4zNDAwMjY5LDMsM1YzMy41MDQyMTE0eiIgLz4KICAgICAgICA8cmVjdCBzdHlsZT0iZmlsbDp3aGl0ZSIgaGVpZ2h0PSIyIiB3aWR0aD0iNyIgeD0iMyIgeT0iMTcuNSIgLz4KICAgICAgICA8cmVjdCBzdHlsZT0iZmlsbDp3aGl0ZSIgaGVpZ2h0PSIyIiB3aWR0aD0iNyIgeD0iMyIgeT0iMjIuNSIgLz4KICAgICAgICA8cmVjdCBzdHlsZT0iZmlsbDp3aGl0ZSIgaGVpZ2h0PSIyIiB3aWR0aD0iNyIgeD0iMyIgeT0iMjcuNSIgLz4KICAgICAgICA8cmVjdCBzdHlsZT0iZmlsbDp3aGl0ZSIgaGVpZ2h0PSIyIiB3aWR0aD0iNyIgeD0iMyIgeT0iMzIuNSIgLz4KICAgICAgICA8cmVjdCBzdHlsZT0iZmlsbDp3aGl0ZSIgaGVpZ2h0PSI3IiB3aWR0aD0iMiIgeD0iMzIuNSIgeT0iMyIgLz4KICAgICAgICA8cmVjdCBzdHlsZT0iZmlsbDp3aGl0ZSIgaGVpZ2h0PSI3IiB3aWR0aD0iMiIgeD0iMjcuNSIgeT0iMyIgLz4KICAgICAgICA8cmVjdCBzdHlsZT0iZmlsbDp3aGl0ZSIgaGVpZ2h0PSI3IiB3aWR0aD0iMiIgeD0iMjIuNSIgeT0iMyIgLz4KICAgICAgICA8cmVjdCBzdHlsZT0iZmlsbDp3aGl0ZSIgaGVpZ2h0PSI3IiB3aWR0aD0iMiIgeD0iMTcuNSIgeT0iMyIgLz4KICAgIDwvZz4KPC9zdmc+)
 
 커널 드라이버에서 C++ 및 STL 기능을 사용할 수 있도록 도와주는 CRT 라이브러리 입니다.
 
@@ -63,7 +64,7 @@
 
 으로 인해서 새로운 라이브러리를 개발하게 되었습니다.
 
-crtsys가 장점은 아래와 같습니다.
+crtsys의 장점은 아래와 같습니다.
 
 1. Micosoft CRT와 STL을 최대한 비슷하게 지원하기 위해서 Microsoft CRT 소스코드를 사용하긴 하지만 Microsoft Visual Studio가 설치되어있는 디렉토리 내의 소스를 직접 빌드하는 방법으로 처리하여, Visual Studio를 합법적으로 사용하는 사용자는 라이센스 문제 없이 사용 가능합니다.
 2. Win32 API를 구현한 [Ldk](https://github.com/ntoskrnl7/Ldk)를 활용하여 많은 범위의 STL 기능을 지원합니다.
@@ -78,7 +79,8 @@ crtsys가 장점은 아래와 같습니다.
 
 ## Test Environments
 
-- Windows 10
+- Windows 10 x64
+  - **x86, x64, ARM, ARM64**로 빌드 가능하지만, 실제 테스트는 x86, x64 모듈에 대해서만 검증되었습니다.
 - CMake 3.21.4
 - Git 2.23.0
 - Visual Studio 2017
@@ -207,10 +209,14 @@ lib 디렉토리와 include 디렉토리를 타 프로젝트에서 사용하시�
     ```Batch
     git clone https://github.com/ntoskrnl7/crtsys
     cd crtsys/test
-    cmake -S . -B build
-    cmake --build build
+    cmake -S . -B build_x64
+    cmake --build build_x64
     cmake -S . -B build_x86 -A Win32
     cmake --build build_x86
+    cmake -S . -B build_ARM -A ARM
+    cmake --build build_ARM
+    cmake -S . -B build_ARM64 -A ARM64
+    cmake --build build_ARM64
     ```
 
     혹은
@@ -220,9 +226,11 @@ lib 디렉토리와 include 디렉토리를 타 프로젝트에서 사용하시�
     cd crtsys/test
     build.bat . x86
     build.bat . x64
+    build.bat . ARM
+    build.bat . ARM64
     ```
 
-    혹은 아래 명령을 수행하시면 지원되는 모든 VS에 대해서 Debug, Release 구성을 모두 빌드합니다.
+    혹은 아래 명령을 수행하시면 지원되는 모든 아키텍쳐에 대해서 Debug, Release 구성을 모두 빌드합니다.
 
     ```Batch
     git clone https://github.com/ntoskrnl7/crtsys
@@ -230,8 +238,21 @@ lib 디렉토리와 include 디렉토리를 타 프로젝트에서 사용하시�
     build_all.bat test
     ```
 
-2. build/Debug/crtsys_test.sys를 설치 및 로드하시기 바랍니다. (x86은 build_x86/Debug/crtsys_test.sys)
-3. 정상적으로 로드 및 언로드가 되는지 확인하시기 바랍니다.
+2. build/Debug/crtsys_test.sys를 설치 및 로드하시기 바랍니다.
+
+   x64 : build_x64/Debug/crtsys_test.sys
+   x86 : build_x86/Debug/crtsys_test.sys
+   ARM : build_ARM/Debug/crtsys_test.sys
+   ARM64 : build_ARM64/Debug/crtsys_test.sys
+
+   ```batch
+   sc create CrtSysTest binpath= "빌드된 crtsys_test.sys의 전체 경로" displayname= "crtsys test" start= demand type= kernel
+   sc start CrtSysTest
+   sc stop CrtSysTest
+   sc delete CrtSysTest
+   ```
+
+3. 정상적으로 로드/언로드가 되었다면 테스트 성공한 것이며, 테스트 내용은 DebugView나 WinDbg를 통해서 확인 가능합니다.
 
 ## Usage
 
@@ -247,10 +268,18 @@ CMake를 사용하는것을 권장합니다.
 2. CPM을 프로젝트 디렉토리에 다운로드 받으시기 바랍니다.
 
     ```batch
-    mkdir -p cmake
+    mkdir cmake
     wget -O cmake/CPM.cmake https://github.com/cpm-cmake/CPM.cmake/releases/latest/download/get_cpm.cmake
+    ```
+
+    혹은
+
+    ```batch
+    mkdir cmake
     curl -o cmake/CPM.cmake -LJO https://github.com/cpm-cmake/CPM.cmake/releases/latest/download/get_cpm.cmake
     ```
+
+    로 CPM.cmake를 다운로드 받으시기 바랍니다.
 
 3. 프로젝트 디렉토리에 아래와 같은 파일을 작성해주시기 바랍니다.
 
@@ -273,7 +302,7 @@ CMake를 사용하는것을 권장합니다.
         include(cmake/CPM.cmake)
 
         set(CRTSYS_NTL_MAIN ON) # use ntl::main
-        CPMAddPackage("gh:ntoskrnl7/crtsys@0.1.4")
+        CPMAddPackage("gh:ntoskrnl7/crtsys@0.1.5")
         include(${crtsys_SOURCE_DIR}/cmake/CrtSys.cmake)
 
         # add driver
@@ -302,26 +331,26 @@ CMake를 사용하는것을 권장합니다.
 
         ntl::status ntl::main(ntl::driver &driver, const std::wstring &registry_path) {
 
-            std::wcout << "load (registry_path :" << registry_path << ")\n";
+          std::wcout << "load (registry_path :" << registry_path << ")\n";
 
-            // TODO
+          // TODO
 
-            driver.on_unload([registry_path]() {
-                std::wcout << "unload (registry_path :" << registry_path << ")\n";
-            });
+          driver.on_unload([registry_path]() {
+            std::wcout << "unload (registry_path :" << registry_path << ")\n";
+          });
 
-            return status::ok();
+          return status::ok();
         }
         ```
 
-1. 빌드를 수행합니다.
+4. 빌드를 수행합니다.
 
    ```batch
    cmake -S . -B build
    cmake --build build
    ```
 
-2. 드라이버가 정상적으로 시작되고 종료되는지 확인하시기 바랍니다.
+5. 드라이버가 정상적으로 시작되고 종료되는지 확인하시기 바랍니다.
 
    ```batch
    sc create CrtSysTest binpath= "빌드된 crtsys_test.sys의 전체 경로" displayname= "crtsys test" start= demand type= kernel
@@ -332,6 +361,7 @@ CMake를 사용하는것을 권장합니다.
 
 ## TODO
 
+- CMake Install 구현
 - 아직 구현되지 않은 C++ 및 STL 기능 구현
 - Visual Studio 2017의 CRT 소스 코드 빌드
 - 커널 드라이버와 사용자 프로세스 간 통신 기능

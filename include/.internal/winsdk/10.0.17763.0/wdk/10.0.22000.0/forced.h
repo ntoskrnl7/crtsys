@@ -25,7 +25,6 @@
 // Include\10.0.17763.0\shared\ntdef.h
 //
 #include <ntdef.h>
-
 typedef PSTRING PUTF8_STRING;
 
 #ifndef DECLSPEC_RESTRICT

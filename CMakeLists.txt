@@ -6,7 +6,7 @@ cmake_policy(SET CMP0021 OLD)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/")
 include(pkg-utils)
 
-pkg_get_version(CRTSYS ${CMAKE_CURRENT_SOURCE_DIR}/include/_version VERSION)
+pkg_get_version(CRTSYS ${CMAKE_CURRENT_SOURCE_DIR}/include/.internal/version VERSION)
 
 project(
     crtsys
@@ -39,7 +39,7 @@ else()
   set(LDK_USE_RAISE_EXCEPTION OFF)
   set(LDK_USE_RTL_RAISE_EXCEPTION OFF)
 endif()
-CPMAddPackage("gh:ntoskrnl7/Ldk@0.7.3")
+CPMAddPackage("gh:ntoskrnl7/Ldk@0.7.4")
 
 CPMAddPackage("gh:ntoskrnl7/FindWDK#master")
 list(APPEND CMAKE_MODULE_PATH "${FindWDK_SOURCE_DIR}/cmake")
@@ -84,7 +84,6 @@ endif()
 
 if (UCXXRT_ENABLED)
   list(APPEND SOURCE_FILES src/custom/msvc/common/crt/src/stl/winapisupp.cpp)
-  list(REMOVE_ITEM SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/custom/crt/isa_available_init.c)
   list(REMOVE_ITEM SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/custom/crt/math/ftol3.c)
 
   CPMAddPackage("gh:ntoskrnl7/ucxxrt#master")
@@ -96,7 +95,11 @@ if (UCXXRT_ENABLED)
     )
   list(REMOVE_ITEM UCXXRT_SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/vcruntime/crt.cpp)
   list(REMOVE_ITEM UCXXRT_SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/vcruntime/locales.cpp)
-  list(REMOVE_ITEM UCXXRT_SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/vcruntime/thread.cpp)
+  list(REMOVE_ITEM UCXXRT_SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/vcruntime/thread.cpp)  
+  if(NOT "${CMAKE_VS_PLATFORM_NAME}" STREQUAL "Win32" AND NOT "${CMAKE_VS_PLATFORM_NAME}" STREQUAL "x64" )
+    list(REMOVE_ITEM UCXXRT_SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/vcruntime/x86_exception_filter.cpp)
+  endif()
+  list(REMOVE_ITEM UCXXRT_SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/cpu_disp.cpp)
   list(REMOVE_ITEM UCXXRT_SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/terminate.cpp)
   list(REMOVE_ITEM UCXXRT_SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/misc/invalid_parameter.cpp)
   list(REMOVE_ITEM UCXXRT_SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/sys_main.cpp)
@@ -151,7 +154,6 @@ endif()
 #
 # Add compile definitions
 #
-# target_compile_definitions(crtsys PUBLIC "_NO_CRT_STDIO_INLINE")
 target_compile_definitions(crtsys PUBLIC "_KERNEL32_")
 target_compile_definitions(crtsys PUBLIC "_ITERATOR_DEBUG_LEVEL=0")
 if (CRTSYS_USE_LIBCNTPR)
@@ -176,8 +178,8 @@ endif()
 #
 # Forced Include File
 #
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/include/winsdk/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/wdk/${WDK_VERSION}/forced.h")
-  target_compile_options(crtsys PRIVATE /FI"${CMAKE_CURRENT_SOURCE_DIR}/include/winsdk/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/wdk/${WDK_VERSION}/forced.h")
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/include/.internal/winsdk/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/wdk/${WDK_VERSION}/forced.h")
+  target_compile_options(crtsys PRIVATE /FI"${CMAKE_CURRENT_SOURCE_DIR}/include/.internal/winsdk/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/wdk/${WDK_VERSION}/forced.h")
 endif()
 target_compile_options(crtsys PRIVATE /FI"${CMAKE_CURRENT_SOURCE_DIR}/src/crtsys.h")
 if (UCXXRT_ENABLED)

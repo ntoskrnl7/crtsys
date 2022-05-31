@@ -40,10 +40,14 @@ CrtSysSetTebThreadLocalStoragePointer (
     _In_ PVOID ThreadLocalStoragePointer
     )
 {
-#if _WIN64
+#if _AMD64_
     __writegsqword(0x58, (ULONG_PTR)ThreadLocalStoragePointer);
-#else
+#elif _X86_
     __writefsdword(0x18, (ULONG_PTR)ThreadLocalStoragePointer);
+#elif _ARM_
+    *(PVOID *)(_MoveFromCoprocessor(15, 0, 13, 0, 2) + 0x18) = ThreadLocalStoragePointer;
+#elif _ARM64_
+    *(PVOID *)(__getReg(18) + 0x58) = ThreadLocalStoragePointer;
 #endif
 }
 
@@ -119,6 +123,7 @@ CrtSysDriverEntry (
     )
 {
     PAGED_CODE();
+
     NTSTATUS status = CrtSysInitializeTebThreadLocalStoragePointer();
     if (! NT_SUCCESS(status)) {
         return status;
@@ -179,6 +184,7 @@ CrtSysDriverEntry (
     if (!driver) {
         return STATUS_INSUFFICIENT_RESOURCES;
     }
+
     ntl::status s = ntl::expand_stack( ntl::main,
                                        std::ref(*driver.get()),
                                        std::wstring(RegistryPath->Buffer) );

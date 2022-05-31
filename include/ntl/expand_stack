@@ -134,9 +134,9 @@ struct expand_stack_options {
 
 template <class Fn, class... Args>
 inline std::invoke_result_t<Fn, Args...>
-expand_stack(expand_stack_options &&opts, Fn &&f, Args &&...args) {
+expand_stack(expand_stack_options &&opts, Fn &&f, Args &&... args) {
   struct context_t {
-    context_t(Fn &&f, Args &&...args)
+    context_t(Fn &&f, Args &&... args)
         : f(f), args(std::make_tuple(std::move(args)...)) {}
     Fn &f;
     std::tuple<Args...> args;
@@ -177,7 +177,7 @@ expand_stack(expand_stack_options &&opts, Fn &&f, Args &&...args) {
 }
 
 template <class Fn, class... Args>
-inline std::invoke_result_t<Fn, Args...> expand_stack(Fn &&f, Args &&...args) {
+inline std::invoke_result_t<Fn, Args...> expand_stack(Fn &&f, Args &&... args) {
   using return_type = std::invoke_result_t<Fn, Args...>;
   if constexpr (std::is_void_v<return_type>)
     expand_stack<Fn, Args...>(expand_stack_options{}, std::forward<Fn &&>(f),

@@ -4,7 +4,7 @@ Copyright (c) CrtSys Authors. All rights reserved.
 
 Module Name:
 
-    version.h
+    version
 
 Abstract:
 
@@ -21,11 +21,11 @@ Environment:
 --*/
 #pragma once
 
-#ifndef _CRTSYS_VERSION_H_
-#define _CRTSYS_VERSION_H_
+#ifndef _CRTSYS_VERSION_
+#define _CRTSYS_VERSION_
 
 #define CRTSYS_VERSION_MAJOR 0
 #define CRTSYS_VERSION_MINOR 1
-#define CRTSYS_VERSION_PATCH 4
+#define CRTSYS_VERSION_PATCH 5
 
-#endif // _CRTSYS_VERSION_H_
+#endif // _CRTSYS_VERSION_

@@ -1,4 +1,10 @@
+﻿// clang-format off
+
 #include <stdio.h>
+
+void ___crtsys_crt_io_link_order_dummy()
+{
+}
 
 int __cdecl _creat(char const *const path, int const pmode);
 _ACRTIMP int __cdecl creat(_In_z_ char const *_FileName, _In_ int _PermissionMode)

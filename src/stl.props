@@ -5,11 +5,13 @@
     <ClCompile>
       <RuntimeLibrary />
       <AdditionalIncludeDirectories>$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime;$(VC_CRT_SourcePath.Split(%3B)[0])\stl;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_WIN32_WINNT=_WIN32_WINNT;_CRTBLD;_KERNEL32_</PreprocessorDefinitions>
+      <PreprocessorDefinitions Condition="'$(Platform)'=='ARM64'">%(PreprocessorDefinitions);_STD_ATOMIC_ALWAYS_USE_CMPXCHG16B=1;_STL_WIN32_WINNT=_WIN32_WINNT;_CRTBLD;_KERNEL32_</PreprocessorDefinitions>
+      <PreprocessorDefinitions Condition="'$(Platform)'!='ARM64'">%(PreprocessorDefinitions);_STL_WIN32_WINNT=_WIN32_WINNT;_CRTBLD;_KERNEL32_</PreprocessorDefinitions>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <ObjectFileName>$(IntDir)\%(Directory)%(FileName).obj</ObjectFileName>
     </ClCompile>
   </ItemDefinitionGroup>
+
   <ItemGroup>
     <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\future.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\future.cpp" />
     <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\cond.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\cond.cpp">
