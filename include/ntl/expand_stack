@@ -109,7 +109,7 @@ constexpr decltype(auto) apply(F &&f, Tuple &&t) {
 #pragma warning(disable : 4984)
 #endif // _MSVC_LANG >= 201703L
 
-namespace internal {
+namespace detail {
 namespace expand_stack {
 inline ntl::except make_exception(NTSTATUS status) {
   const char *message;
@@ -134,7 +134,7 @@ inline ntl::except make_exception(NTSTATUS status) {
   return std::move(ntl::except(status, message));
 }
 } // namespace expand_stack
-} // namespace internal
+} // namespace detail
 
 static const size_t expand_stack_size_max = MAXIMUM_EXPANSION_SIZE;
 
@@ -202,7 +202,7 @@ inline NTL_INVOKE_RESULT(Fn, Args...)
       return;
     if (opts.ignore_failure_)
       NTL_APPLY(ctx.f, std::move(ctx.args));
-    throw internal::expand_stack::make_exception(status);
+    throw detail::expand_stack::make_exception(status);
   } else {
     std::tuple<context_t *, std::unique_ptr<return_type>> context_with_ret =
         std::make_tuple(&ctx, nullptr);
@@ -219,7 +219,7 @@ inline NTL_INVOKE_RESULT(Fn, Args...)
       return std::move(*std::get<1>(context_with_ret));
     if (opts.ignore_failure_)
       return NTL_APPLY(ctx.f, ctx.args);
-    throw internal::expand_stack::make_exception(status);
+    throw detail::expand_stack::make_exception(status);
   }
 }
 
