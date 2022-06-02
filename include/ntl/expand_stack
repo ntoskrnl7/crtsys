@@ -184,18 +184,18 @@ inline NTL_INVOKE_RESULT(Fn, Args...)
     expand_stack(expand_stack_options &&opts, Fn &&f, Args &&... args) {
   struct context_t {
     context_t(Fn &&f, Args &&... args)
-        : f(f), args(std::make_tuple(std::move(args)...)) {}
+        : f(f), args(std::make_tuple(std::forward<Args>(args)...)) {}
     Fn &f;
     std::tuple<Args...> args;
   };
-  context_t ctx(std::forward<Fn &&>(f), std::forward<Args &&>(args)...);
+  context_t ctx(std::forward<Fn &&>(f), std::forward<Args>(args)...);
 
   using return_type = NTL_INVOKE_RESULT(Fn, Args...);
   if constexpr (std::is_void_v<return_type>) {
     NTSTATUS status = KeExpandKernelStackAndCalloutEx(
         [](void *ptr) {
           auto &ctx = *(context_t *)ptr;
-          NTL_APPLY(ctx.f, ctx.args);
+          NTL_APPLY(ctx.f, std::forward<decltype(ctx.args)>(ctx.args));
         },
         &ctx, opts.stack_size_, opts.wait_, NULL);
     if (NT_SUCCESS(status))
@@ -211,23 +211,23 @@ inline NTL_INVOKE_RESULT(Fn, Args...)
           auto context_with_ret =
               (std::tuple<context_t *, std::unique_ptr<return_type>> *)ptr;
           auto &ctx = *std::get<0>(*context_with_ret);
-          std::get<1>(*context_with_ret) = std::make_unique<return_type>(
-              std::move(NTL_APPLY(ctx.f, ctx.args)));
+          std::get<1>(*context_with_ret) =
+              std::make_unique<return_type>(std::move(NTL_APPLY(
+                  ctx.f, std::forward<decltype(ctx.args)>(ctx.args))));
         },
         &context_with_ret, opts.stack_size_, opts.wait_, NULL);
     if (NT_SUCCESS(status))
       return std::move(*std::get<1>(context_with_ret));
     if (opts.ignore_failure_)
-      return NTL_APPLY(ctx.f, ctx.args);
+      return NTL_APPLY(ctx.f, std::forward<decltype(ctx.args)>(ctx.args));
     throw detail::expand_stack::make_exception(status);
   }
 }
 
 template <class Fn, class... Args>
 inline NTL_INVOKE_RESULT(Fn, Args...) expand_stack(Fn &&f, Args &&... args) {
-  return expand_stack<Fn, Args...>(expand_stack_options{},
-                                   std::forward<Fn &&>(f),
-                                   std::forward<Args &&>(args)...);
+  return expand_stack<Fn, Args...>(expand_stack_options{}, std::forward<Fn>(f),
+                                   std::forward<Args>(args)...);
 }
 #pragma warning(pop)
 } // namespace ntl
