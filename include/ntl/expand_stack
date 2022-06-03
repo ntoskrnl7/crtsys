@@ -8,6 +8,10 @@
  */
 #pragma once
 
+#if _MSC_VER < 1911
+#error Visual Studio 20017 15.3 or later is required.
+#endif
+
 // clang-format off
 #if defined(_WDM_INCLUDED_)
 #ifdef _X86_
@@ -59,10 +63,53 @@ EXTERN_C_END
 #include <memory>
 #include <stdexcept>
 #include <tuple>
+#include <type_traits>
 
 namespace ntl {
+#pragma warning(push)
 
-namespace internal {
+#ifndef NTL_INVOKE_RESULT
+#if _MSVC_LANG >= 201703L
+#define NTL_INVOKE_RESULT(F, Args) std::invoke_result_t<F, Args>
+#elif _MSVC_LANG >= 201402L
+#define NTL_INVOKE_RESULT(F, Args) std::result_of_t<F(Args)>
+#else
+#define NTL_INVOKE_RESULT(F, Args) std::result_of<F(Args)>::type
+#endif
+#endif // NTL_INVOKE_RESULT
+
+#ifndef NTL_APPLY
+#if _MSVC_LANG >= 201703L
+#define NTL_APPLY std::apply
+#else
+namespace detail {
+template <class F, class Tuple, std::size_t... I>
+constexpr decltype(auto) apply_impl(F &&f, Tuple &&t,
+                                    std::index_sequence<I...>) {
+  // This implementation is valid since C++20 (via P1065R2)
+  // In C++17, a constexpr counterpart of std::invoke is actually needed here
+  return std::invoke(std::forward<F>(f),
+                     std::get<I>(std::forward<Tuple>(t))...);
+}
+} // namespace detail
+
+template <class F, class Tuple>
+constexpr decltype(auto) apply(F &&f, Tuple &&t) {
+  return detail::apply_impl(
+      std::forward<F>(f), std::forward<Tuple>(t),
+      std::make_index_sequence<
+          std::tuple_size_v<std::remove_reference_t<Tuple>>>{});
+}
+#define NTL_APPLY ntl::apply
+#endif // _MSVC_LANG >= 201703L
+#endif // NTL_APPLY
+
+#if _MSVC_LANG < 201703L
+// warning disable c4984 'if constexpr' is a c++17 language extension
+#pragma warning(disable : 4984)
+#endif // _MSVC_LANG >= 201703L
+
+namespace detail {
 namespace expand_stack {
 inline ntl::except make_exception(NTSTATUS status) {
   const char *message;
@@ -87,7 +134,7 @@ inline ntl::except make_exception(NTSTATUS status) {
   return std::move(ntl::except(status, message));
 }
 } // namespace expand_stack
-} // namespace internal
+} // namespace detail
 
 static const size_t expand_stack_size_max = MAXIMUM_EXPANSION_SIZE;
 
@@ -133,29 +180,29 @@ struct expand_stack_options {
 };
 
 template <class Fn, class... Args>
-inline std::invoke_result_t<Fn, Args...>
-expand_stack(expand_stack_options &&opts, Fn &&f, Args &&... args) {
+inline NTL_INVOKE_RESULT(Fn, Args...)
+    expand_stack(expand_stack_options &&opts, Fn &&f, Args &&... args) {
   struct context_t {
     context_t(Fn &&f, Args &&... args)
-        : f(f), args(std::make_tuple(std::move(args)...)) {}
+        : f(f), args(std::make_tuple(std::forward<Args>(args)...)) {}
     Fn &f;
     std::tuple<Args...> args;
   };
-  context_t ctx(std::forward<Fn &&>(f), std::forward<Args &&>(args)...);
+  context_t ctx(std::forward<Fn &&>(f), std::forward<Args>(args)...);
 
-  using return_type = std::invoke_result_t<Fn, Args...>;
+  using return_type = NTL_INVOKE_RESULT(Fn, Args...);
   if constexpr (std::is_void_v<return_type>) {
     NTSTATUS status = KeExpandKernelStackAndCalloutEx(
         [](void *ptr) {
           auto &ctx = *(context_t *)ptr;
-          std::apply(ctx.f, ctx.args);
+          NTL_APPLY(ctx.f, std::forward<decltype(ctx.args)>(ctx.args));
         },
         &ctx, opts.stack_size_, opts.wait_, NULL);
     if (NT_SUCCESS(status))
       return;
     if (opts.ignore_failure_)
-      std::apply(ctx.f, std::move(ctx.args));
-    throw internal::expand_stack::make_exception(status);
+      NTL_APPLY(ctx.f, std::move(ctx.args));
+    throw detail::expand_stack::make_exception(status);
   } else {
     std::tuple<context_t *, std::unique_ptr<return_type>> context_with_ret =
         std::make_tuple(&ctx, nullptr);
@@ -164,27 +211,23 @@ expand_stack(expand_stack_options &&opts, Fn &&f, Args &&... args) {
           auto context_with_ret =
               (std::tuple<context_t *, std::unique_ptr<return_type>> *)ptr;
           auto &ctx = *std::get<0>(*context_with_ret);
-          std::get<1>(*context_with_ret) = std::make_unique<return_type>(
-              std::move(std::apply(ctx.f, ctx.args)));
+          std::get<1>(*context_with_ret) =
+              std::make_unique<return_type>(std::move(NTL_APPLY(
+                  ctx.f, std::forward<decltype(ctx.args)>(ctx.args))));
         },
         &context_with_ret, opts.stack_size_, opts.wait_, NULL);
     if (NT_SUCCESS(status))
       return std::move(*std::get<1>(context_with_ret));
     if (opts.ignore_failure_)
-      return std::apply(ctx.f, ctx.args);
-    throw internal::expand_stack::make_exception(status);
+      return NTL_APPLY(ctx.f, std::forward<decltype(ctx.args)>(ctx.args));
+    throw detail::expand_stack::make_exception(status);
   }
 }
 
 template <class Fn, class... Args>
-inline std::invoke_result_t<Fn, Args...> expand_stack(Fn &&f, Args &&... args) {
-  using return_type = std::invoke_result_t<Fn, Args...>;
-  if constexpr (std::is_void_v<return_type>)
-    expand_stack<Fn, Args...>(expand_stack_options{}, std::forward<Fn &&>(f),
-                              std::forward<Args &&>(args)...);
-  else
-    return expand_stack<Fn, Args...>(expand_stack_options{},
-                                     std::forward<Fn &&>(f),
-                                     std::forward<Args &&>(args)...);
+inline NTL_INVOKE_RESULT(Fn, Args...) expand_stack(Fn &&f, Args &&... args) {
+  return expand_stack<Fn, Args...>(expand_stack_options{}, std::forward<Fn>(f),
+                                   std::forward<Args>(args)...);
 }
+#pragma warning(pop)
 } // namespace ntl
