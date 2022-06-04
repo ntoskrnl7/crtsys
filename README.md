@@ -94,10 +94,12 @@ crtsys의 장점은 아래와 같습니다.
   - 14.26.28801
   - 14.29.30133
   - 14.31.31103
-- Windows Kit
+- Windows Kit (SDK, WDK)
   - 10.0.17763.0
   - 10.0.18362.0
   - 10.0.22000.0
+
+SDK와 WDK의 버전이 다르면 빌드가 실패할 가능성이 높으므로 **가능하다면 SDK와 WDK의 버전이 같은 환경에서 빌드하는것을 권장합니다.**
 
 ## Goal
 
@@ -169,13 +171,15 @@ crtsys의 장점은 아래와 같습니다.
 - ntl::driver_main [(tested)](./test/src/main.cpp#L21)
   - C++ 용 드라이버 진입점
   - ntl::expand_stack 함수로 스택을 최대 크기로 확장하여 호출됩니다.
+- ntl::rpc
+  - User Mode App <--> Kernel Driver간 통신을 Modern C++스러운 방법으로 수행합니다.
 
 ## Build
 
 이 프로젝트를 직접 빌드하여 lib와 include를 사용하시려면 Microsoft STL 사용을 위해서 포함 경로 설정 및 전처리기 설정 등 복잡한 사전 작업이 필요하므로  **직접 빌드하여 사용하는것보다는 [Usage](#usage)을 참고하여 CPM을 통해서 사용하시는것을 권장합니다.**
 
-그리고 SDK와 WDK의 버전이 다르면 빌드가 실패할 가능성이 높으므로
-**가능하다면 SDK와 WDK의 버전이 같은 환경에서 빌드하는것을 권장합니다.**
+<details>
+<summary>빌드 방법 보기</summary>
 
 빌드 방법은 아래와 같습니다.
 
@@ -201,6 +205,8 @@ build.bat . x64 release
 
 lib 디렉토리와 include 디렉토리를 타 프로젝트에서 사용하시면 됩니다.
 이 라이브러리를 사용할 프로젝트의 전처리기 정의나 포함 경로 설정 등 프로젝트 설정은 [CMakeLists.txt](./CMakeLists.txt)에서 PUBLIC으로 설정된 항목들을 참고하여 설정하시기 바랍니다.
+
+</details>
 
 ## Test
 
@@ -297,7 +303,7 @@ CMake를 사용하는것을 권장합니다.
         ```CMake
         cmake_minimum_required(VERSION 3.14 FATAL_ERROR)
 
-        project(crtsys_test LANGUAGES C)
+        project(crtsys_test LANGUAGES C CXX)
 
         include(cmake/CPM.cmake)
 
@@ -306,7 +312,7 @@ CMake를 사용하는것을 권장합니다.
         include(${crtsys_SOURCE_DIR}/cmake/CrtSys.cmake)
 
         # add driver
-        crtsys_add_driver(crtsys_test main.cpp)
+        crtsys_add_driver(crtsys_test src/main.cpp)
         ```
 
    - src/main.cpp
