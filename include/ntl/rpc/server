@@ -1,0 +1,204 @@
+/**
+ * @file server
+ * @author jungkwang.lee (ntoskrnl7@google.com)
+ * @brief rpc server
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authoers.
+ *
+ */
+
+#pragma once
+
+#include "common"
+
+#define NTL_ADD_CALLBACK_0(_ret_, _name_, ...)                                 \
+  if (IoGetFunctionCodeFromCtlCode(ctl_code) == __LINE__) {                    \
+    auto _name_ = []() -> _ret_ __VA_ARGS__;                                   \
+    if constexpr (std::is_void_v<_ret_>) {                                     \
+      _name_();                                                                \
+    } else {                                                                   \
+      zpp::serializer::memory_view_output_archive out(out_buffer,              \
+                                                      out_buffer_length);      \
+      out(_name_());                                                           \
+    }                                                                          \
+    return;                                                                    \
+  }
+
+#define NTL_ADD_CALLBACK_1(_ret_, _name_, _arg0_type_, _arg0_name_, ...)       \
+  if (IoGetFunctionCodeFromCtlCode(ctl_code) == __LINE__) {                    \
+    auto _name_ = [](_arg0_type_ _arg0_name_) -> _ret_ __VA_ARGS__;            \
+    zpp::serializer::memory_view_input_archive in(in_buffer,                   \
+                                                  in_buffer_length);           \
+    std::remove_const_t<                                                       \
+        std::remove_reference_t<std::remove_cv_t<_arg0_type_>>>                \
+        _arg0_name_;                                                           \
+    in(_arg0_name_);                                                           \
+    if constexpr (std::is_void_v<_ret_>) {                                     \
+      _name_(_arg0_name_);                                                     \
+    } else {                                                                   \
+      zpp::serializer::memory_view_output_archive out(out_buffer,              \
+                                                      *out_buffer_length);     \
+      _ret_ ___return_value___ = _name_(_arg0_name_);                          \
+      out(___return_value___);                                                 \
+      *out_buffer_length = out.offset();                                       \
+    }                                                                          \
+    return;                                                                    \
+  }
+
+#define NTL_ADD_CALLBACK_2(_ret_, _name_, _arg0_type_, _arg0_name_,            \
+                           _arg1_type_, _arg1_name_, ...)                      \
+  if (IoGetFunctionCodeFromCtlCode(ctl_code) == __LINE__) {                    \
+    auto _name_ = [](_arg0_type_ _arg0_name_,                                  \
+                     _arg1_type_ _arg1_name_) -> _ret_ __VA_ARGS__;            \
+    zpp::serializer::memory_view_input_archive in(in_buffer,                   \
+                                                  in_buffer_length);           \
+    std::remove_const_t<                                                       \
+        std::remove_reference_t<std::remove_cv_t<_arg0_type_>>>                \
+        _arg0_name_;                                                           \
+    std::remove_const_t<                                                       \
+        std::remove_reference_t<std::remove_cv_t<_arg1_type_>>>                \
+        _arg1_name_;                                                           \
+    in(_arg0_name_, _arg1_name_);                                              \
+    if constexpr (std::is_void_v<_ret_>) {                                     \
+      _name_(_arg0_name_, _arg1_name_);                                        \
+    } else {                                                                   \
+      zpp::serializer::memory_view_output_archive out(out_buffer,              \
+                                                      *out_buffer_length);     \
+      _ret_ ___return_value___ = _name_(_arg0_name_, _arg1_name_);             \
+      out(___return_value___);                                                 \
+      *out_buffer_length = out.offset();                                       \
+    }                                                                          \
+    return;                                                                    \
+  }
+
+#define NTL_ADD_CALLBACK_3(_ret_, _name_, _arg0_type_, _arg0_name_,            \
+                           _arg1_type_, _arg1_name_, _arg2_type_, _arg2_name_, \
+                           ...)                                                \
+  if (IoGetFunctionCodeFromCtlCode(ctl_code) == __LINE__) {                    \
+    auto _name_ = [](_arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_,         \
+                     _arg2_type_ _arg2_name_) -> _ret_ __VA_ARGS__;            \
+    zpp::serializer::memory_view_input_archive in(in_buffer,                   \
+                                                  in_buffer_length);           \
+    std::remove_const_t<                                                       \
+        std::remove_reference_t<std::remove_cv_t<_arg0_type_>>>                \
+        _arg0_name_;                                                           \
+    std::remove_const_t<                                                       \
+        std::remove_reference_t<std::remove_cv_t<_arg1_type_>>>                \
+        _arg1_name_;                                                           \
+    std::remove_const_t<                                                       \
+        std::remove_reference_t<std::remove_cv_t<_arg2_type_>>>                \
+        _arg2_name_;                                                           \
+    in(_arg0_name_, _arg1_name_, _arg2_name_);                                 \
+    if constexpr (std::is_void_v<_ret_>) {                                     \
+      _name_(_arg0_name_, _arg1_name_, _arg2_name_);                           \
+    } else {                                                                   \
+      zpp::serializer::memory_view_output_archive out(out_buffer,              \
+                                                      *out_buffer_length);     \
+      _ret_ ___return_value___ =                                               \
+          _name_(_arg0_name_, _arg1_name_, _arg2_name_);                       \
+      out(___return_value___);                                                 \
+      *out_buffer_length = out.offset();                                       \
+    }                                                                          \
+    return;                                                                    \
+  }
+
+#define NTL_ADD_CALLBACK_4(_ret_, _name_, _arg0_type_, _arg0_name_,            \
+                           _arg1_type_, _arg1_name_, _arg2_type_, _arg2_name_, \
+                           _arg3_type_, _arg3_name_, ...)                      \
+  if (IoGetFunctionCodeFromCtlCode(ctl_code) == __LINE__) {                    \
+    auto _name_ = [](_arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_,         \
+                     _arg2_type_ _arg2_name_,                                  \
+                     _arg3_type_ _arg3_name_) -> _ret_ __VA_ARGS__;            \
+    zpp::serializer::memory_view_input_archive in(in_buffer,                   \
+                                                  in_buffer_length);           \
+    std::remove_const_t<                                                       \
+        std::remove_reference_t<std::remove_cv_t<_arg0_type_>>>                \
+        _arg0_name_;                                                           \
+    std::remove_const_t<                                                       \
+        std::remove_reference_t<std::remove_cv_t<_arg1_type_>>>                \
+        _arg1_name_;                                                           \
+    std::remove_const_t<                                                       \
+        std::remove_reference_t<std::remove_cv_t<_arg2_type_>>>                \
+        _arg2_name_;                                                           \
+    std::remove_const_t<                                                       \
+        std::remove_reference_t<std::remove_cv_t<_arg3_type_>>>                \
+        _arg3_name_;                                                           \
+    in(_arg0_name_, _arg1_name_, _arg2_name_, _arg3_name_);                    \
+    if constexpr (std::is_void_v<_ret_>) {                                     \
+      _name_(_arg0_name_, _arg1_name_, _arg2_name_, _arg3_name_);              \
+    } else {                                                                   \
+      zpp::serializer::memory_view_output_archive out(out_buffer,              \
+                                                      *out_buffer_length);     \
+      _ret_ ___return_value___ =                                               \
+          _name_(_arg0_name_, _arg1_name_, _arg2_name_, _arg3_name_);          \
+      out(___return_value___);                                                 \
+      *out_buffer_length = out.offset();                                       \
+    }                                                                          \
+    return;                                                                    \
+  }
+
+#define NTL_ADD_CALLBACK_5(_ret_, _name_, _arg0_type_, _arg0_name_,            \
+                           _arg1_type_, _arg1_name_, _arg2_type_, _arg2_name_, \
+                           _arg3_type_, _arg3_name_, _arg4_type_, _arg4_name_, \
+                           ...)                                                \
+  if (IoGetFunctionCodeFromCtlCode(ctl_code) == __LINE__) {                    \
+    auto _name_ = [](_arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_,         \
+                     _arg2_type_ _arg2_name_, _arg3_type_ _arg3_name_,         \
+                     _arg4_type_ _arg4_name_) -> _ret_ __VA_ARGS__;            \
+    zpp::serializer::memory_view_input_archive in(in_buffer,                   \
+                                                  in_buffer_length);           \
+    std::remove_const_t<                                                       \
+        std::remove_reference_t<std::remove_cv_t<_arg0_type_>>>                \
+        _arg0_name_;                                                           \
+    std::remove_const_t<                                                       \
+        std::remove_reference_t<std::remove_cv_t<_arg1_type_>>>                \
+        _arg1_name_;                                                           \
+    std::remove_const_t<                                                       \
+        std::remove_reference_t<std::remove_cv_t<_arg2_type_>>>                \
+        _arg2_name_;                                                           \
+    std::remove_const_t<                                                       \
+        std::remove_reference_t<std::remove_cv_t<_arg3_type_>>>                \
+        _arg3_name_;                                                           \
+    std::remove_const_t<                                                       \
+        std::remove_reference_t<std::remove_cv_t<_arg4_type_>>>                \
+        _arg4_name_;                                                           \
+    in(_arg0_name_, _arg1_name_, _arg2_name_, _arg3_name_, _arg4_name_);       \
+    if constexpr (std::is_void_v<_ret_>) {                                     \
+      _name_(_arg0_name_, _arg1_name_, _arg2_name_, _arg3_name_, _arg4_name_); \
+    } else {                                                                   \
+      zpp::serializer::memory_view_output_archive out(out_buffer,              \
+                                                      *out_buffer_length);     \
+      _ret_ ___return_value___ = _name_(_arg0_name_, _arg1_name_, _arg2_name_, \
+                                        _arg3_name_, _arg4_name_);             \
+      out(___return_value___);                                                 \
+      *out_buffer_length = out.offset();                                       \
+    }                                                                          \
+    return;                                                                    \
+  }
+
+#if defined(NTL_USER_MODE)
+
+#else  // !defined(NTL_USER_MODE)
+namespace ntl {
+namespace rpc {
+class server {
+public:
+  server(driver &driver, const std::wstring &name)
+      : dev_(driver.create_device(name, FILE_DEVICE_NTL_RPC)) {}
+
+  server(server &&other) { *this = std::move(other); }
+
+  server &operator=(server &&rhs) {
+    dev_ = std::move(rhs.dev_);
+    return *this;
+  }
+
+private:
+  server(const server &) = delete;
+
+private:
+  device dev_;
+};
+} // namespace rpc
+} // namespace ntl
+#endif // !defined(NTL_USER_MODE)

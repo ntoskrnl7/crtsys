@@ -1,0 +1,32 @@
+/**
+ * @file common
+ * @author jungkwang.lee (ntoskrnl7@google.com)
+ * @brief rpc common
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authoers.
+ *
+ */
+
+#pragma once
+
+#if defined(_DDK_DRIVER_)
+#undef NTL_USER_MODE
+#else
+#define NTL_USER_MODE
+#endif
+
+#include "../deps/zpp/serializer.h"
+
+#if defined(NTL_USER_MODE)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <winioctl.h>
+#endif // defined(NTL_USER_MODE)
+
+#define FILE_DEVICE_NTL_RPC 60000
+
+#define NTL_RPC_DEVICE_CTL(_idx_)                                              \
+  ((DWORD)CTL_CODE(FILE_DEVICE_NTL_RPC, _idx_, METHOD_BUFFERED,                \
+                   FILE_ANY_ACCESS))
+
+#define NTL_RPC_ARG_PACK(...) __VA_ARGS__
