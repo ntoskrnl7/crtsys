@@ -22,22 +22,42 @@ jobs:
       with:
         submodules: true
 
-    - name: build x86
+    - name: build app x86
       shell: cmd
       run: ..\build.bat . x86
-      working-directory: test
+      working-directory: test/app
 
-    - name: build x64
+    - name: build app x64
       shell: cmd
       run: ..\build.bat . x64
-      working-directory: test
+      working-directory: test/app
 
-    - name: build ARM
+    - name: build app ARM
       shell: cmd
       run: ..\build.bat . ARM
-      working-directory: test
+      working-directory: test/app
 
-    - name: build ARM64
+    - name: build app ARM64
       shell: cmd
       run: ..\build.bat . ARM64
-      working-directory: test
+      working-directory: test/app
+
+    - name: build driver x86
+      shell: cmd
+      run: ..\build.bat . x86
+      working-directory: test/driver
+
+    - name: build driver x64
+      shell: cmd
+      run: ..\build.bat . x64
+      working-directory: test/driver
+
+    - name: build driver ARM
+      shell: cmd
+      run: ..\build.bat . ARM
+      working-directory: test/driver
+
+    - name: build driver ARM64
+      shell: cmd
+      run: ..\build.bat . ARM64
+      working-directory: test/driver
