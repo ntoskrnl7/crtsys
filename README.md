@@ -41,7 +41,7 @@
     - vcxproj이 개발 환경에 종속되기 때문에 VS 버전이 바뀌면 일일이 수작업으로 수정해줘야함.
     - x86에서 [이 코드](https://en.cppreference.com/w/cpp/language/throw#Example)를 실행하는 중 Hang이 발생함
     - Microsoft의 소스 코드를 그대로 복사하여 상단에 자신의 라이센스 주석만 넣어서 프로젝트에 포함시킨것으로 보이며 라이센스 문제에서 자유롭지 못해보임
-      - 라이센스를 변조하는 것과 **(Microsoft CRT 및 STL 소스 코드를 재배포하는 행위는 허가되지 않은것으로 파악됨)**
+      - 라이센스를 변경하는 것과 **(Microsoft CRT 및 STL 소스 코드를 재배포하는 행위는 허가되지 않은것으로 파악됨)**
 
 - [KTL](https://github.com/DymOK93/KTL)
   - 장점
@@ -166,13 +166,17 @@ SDK와 WDK의 버전이 다르면 빌드가 실패할 가능성이 높으므로 
 - ntl::driver
   - DRIVER_OBJECT에 대한 클래스
   - 기능
-    - [x] DriverUnload [(tested)](./test/src/main.cpp#L25)
+    - [x] DriverUnload [(tested)](./test/driver/src/main.cpp#L30)
     - [ ] DriverDispatch
-- ntl::driver_main [(tested)](./test/src/main.cpp#L21)
+- ntl::driver_main [(tested)](./test/driver/src/main.cpp#L22)
   - C++ 용 드라이버 진입점
   - ntl::expand_stack 함수로 스택을 최대 크기로 확장하여 호출됩니다.
 - ntl::rpc
-  - User Mode App <--> Kernel Driver간 통신을 Modern C++스러운 방법으로 수행합니다.
+  - User Mode App과 Kernel Driver간 손쉬운 통신 방법을 제공합니다.
+    - ntl::rpc::server [(tested)](./test/common/rpc/server.hpp) [(tested)](./test/common/rpc/procedures.cpp)
+    - ntl::rpc::client [(tested)](./test/common/rpc/client.hpp) [(tested)](./test/common/rpc/procedures.cpp)
+      - 데이터 직렬화 부분은 직접 구현하기에는 시간이 부족하여 아래 프로젝트의 내용을 참고하엿습니다. 감사합니다! :-)
+        - [Eyal Z/zpp serializer](https://github.com/eyalz800/serializer)
 
 ## Build
 
@@ -214,26 +218,7 @@ lib 디렉토리와 include 디렉토리를 타 프로젝트에서 사용하시�
 
     ```Batch
     git clone https://github.com/ntoskrnl7/crtsys
-    cd crtsys/test
-    cmake -S . -B build_x64
-    cmake --build build_x64
-    cmake -S . -B build_x86 -A Win32
-    cmake --build build_x86
-    cmake -S . -B build_ARM -A ARM
-    cmake --build build_ARM
-    cmake -S . -B build_ARM64 -A ARM64
-    cmake --build build_ARM64
-    ```
-
-    혹은
-
-    ```Batch
-    git clone https://github.com/ntoskrnl7/crtsys
-    cd crtsys/test
-    build.bat . x86
-    build.bat . x64
-    build.bat . ARM
-    build.bat . ARM64
+    cd crtsys\test\build.bat
     ```
 
     혹은 아래 명령을 수행하시면 지원되는 모든 아키텍쳐에 대해서 Debug, Release 구성을 모두 빌드합니다.
@@ -241,24 +226,34 @@ lib 디렉토리와 include 디렉토리를 타 프로젝트에서 사용하시�
     ```Batch
     git clone https://github.com/ntoskrnl7/crtsys
     cd crtsys/test
-    build_all.bat test
+    build_all.bat test\app
+    build_all.bat test\driver
     ```
 
-2. build/Debug/crtsys_test.sys를 설치 및 로드하시기 바랍니다.
+2. build\Debug\crtsys_test.sys를 설치 및 로드하시기 바랍니다.
 
-   x64 : build_x64/Debug/crtsys_test.sys
-   x86 : build_x86/Debug/crtsys_test.sys
-   ARM : build_ARM/Debug/crtsys_test.sys
-   ARM64 : build_ARM64/Debug/crtsys_test.sys
+   - driver
+    x64 : test\driver\build_x64\Debug\crtsys_test.sys
+    x86 : test\driver\build_x86\Debug\crtsys_test.sys
+    ARM : test\driver\build_ARM\Debug\crtsys_test.sys
+    ARM64 : test\driver\build_ARM64\Debug\crtsys_test.sys
+   - app
+    x64 : test\driver\build_x64\Debug\crtsys_test_app.sys
+    x86 : test\driver\build_x86\Debug\crtsys_test_app.sys
+    ARM : test\driver\build_ARM\Debug\crtsys_test_app.sys
+    ARM64 : test\driver\build_ARM64\Debug\crtsys_test_app.sys
 
    ```batch
    sc create CrtSysTest binpath= "빌드된 crtsys_test.sys의 전체 경로" displayname= "crtsys test" start= demand type= kernel
    sc start CrtSysTest
+
+   crtsys_test.app.exe
+
    sc stop CrtSysTest
    sc delete CrtSysTest
    ```
 
-3. 정상적으로 로드/언로드가 되었다면 테스트 성공한 것이며, 테스트 내용은 DebugView나 WinDbg를 통해서 확인 가능합니다.
+3. 정상적으로 로드, Google Test 통과/언로드가 되었다면 테스트 성공한 것이며, 테스트 내용은 DebugView나 WinDbg를 통해서 확인 가능합니다.
 
 ## Usage
 
@@ -308,7 +303,7 @@ CMake를 사용하는것을 권장합니다.
         include(cmake/CPM.cmake)
 
         set(CRTSYS_NTL_MAIN ON) # use ntl::main
-        CPMAddPackage("gh:ntoskrnl7/crtsys@0.1.5")
+        CPMAddPackage("gh:ntoskrnl7/crtsys@0.1.6")
         include(${crtsys_SOURCE_DIR}/cmake/CrtSys.cmake)
 
         # add driver
@@ -370,4 +365,3 @@ CMake를 사용하는것을 권장합니다.
 - CMake Install 구현
 - 아직 구현되지 않은 C++ 및 STL 기능 구현
 - Visual Studio 2017의 CRT 소스 코드 빌드
-- 커널 드라이버와 사용자 프로세스 간 통신 기능

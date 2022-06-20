@@ -61,6 +61,8 @@ void run();
 //
 bool ntl_expand_stack_test();
 
+bool ntl_rpc();
+
 //
 // C Standard tests.
 //

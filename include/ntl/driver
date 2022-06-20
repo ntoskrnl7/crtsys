@@ -16,19 +16,111 @@
 #include <string>
 
 namespace ntl {
+class unicode_string {
+public:
+  unicode_string(std::wstring &&str) : str_(std::move(str)) {
+    value_.Buffer = &str_[0];
+    value_.MaximumLength = value_.Length = (USHORT)str_.size() * sizeof(WCHAR);
+  }
+  unicode_string(const std::wstring &str) : str_(str) {
+    value_.Buffer = &str_[0];
+    value_.MaximumLength = value_.Length = (USHORT)str_.size() * sizeof(WCHAR);
+  }
+  unicode_string(std::wstring &str) {
+    value_.Buffer = &str[0];
+    value_.MaximumLength = value_.Length = (USHORT)str.size() * sizeof(WCHAR);
+  }
+
+  UNICODE_STRING &operator*() { return value_; }
+
+private:
+  std::wstring str_;
+  UNICODE_STRING value_;
+};
+
+class device {
+  friend class driver;
+
+public:
+  using type = ULONG;
+
+protected:
+  device(PDEVICE_OBJECT device) : object_(device) {}
+
+private:
+  device(const device &) = delete;
+
+public:
+  device() : object_(NULL) {}
+
+  device(device &&other) { *this = std::move(other); }
+
+  device &operator=(device &&rhs) {
+    object_ = rhs.object_;
+    rhs.object_ = NULL;
+    return *this;
+  }
+
+  ~device() {
+    if (object_)
+      IoDeleteDevice(object_);
+  }
+
+public:
+  PDEVICE_OBJECT detach() {
+    return (PDEVICE_OBJECT)InterlockedExchangePointer((PVOID *)&object_, NULL);
+  }
+
+#ifdef NTL_EXPORT_OBJECT_PTR
+public:
+#else
+protected:
+#endif
+  PDEVICE_OBJECT ptr() const { return object_; }
+
+private:
+  PDEVICE_OBJECT object_;
+};
+
 class driver {
 public:
   friend class driver_unload_invoker;
+  friend class device_dispatch_invoker;
 
   using unload_routine = std::function<void()>;
 
-  driver(PDRIVER_OBJECT object) : object_(object) {}
+  using devcie_control_routine =
+      std::function<void(uint32_t, const uint8_t *, size_t, uint8_t *, size_t *)>;
 
-  void on_unload(unload_routine unload_routine) {
-    unload_routine_ = unload_routine;
+  driver(PDRIVER_OBJECT driver)
+      : object_(driver), name_(driver->DriverName.Buffer,
+                               driver->DriverName.Length / sizeof(WCHAR)) {}
+
+  device create_device(const std::wstring &name, device::type type) {
+    unicode_string dev_name(L"\\Device\\" + name);
+    PDEVICE_OBJECT dev = NULL;
+    status s = IoCreateDevice(object_, 0, &*dev_name, type, 0, FALSE, &dev);
+    return dev;
   }
 
-  PDRIVER_OBJECT get() const { return object_; }
+  void on_device_control(devcie_control_routine &&f) {
+    devcie_control_routine_ = f;
+  }
+
+  void on_unload(unload_routine &&f) { unload_routine_ = f; }
+
+  PDRIVER_OBJECT detach() {
+    return (PDRIVER_OBJECT)InterlockedExchangePointer((PVOID *)&object_, NULL);
+  }
+
+  const std::wstring &name() const { return name_; }
+
+#ifdef NTL_EXPORT_OBJECT_PTR
+public:
+#else
+protected:
+#endif
+  PDRIVER_OBJECT ptr() const { return object_; }
 
 private:
   void unload() {
@@ -38,6 +130,9 @@ private:
 
 private:
   PDRIVER_OBJECT object_;
+  std::wstring name_;
+
+  devcie_control_routine devcie_control_routine_;
   unload_routine unload_routine_;
 };
 

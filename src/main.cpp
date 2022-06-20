@@ -15,17 +15,70 @@ EXTERN_C DRIVER_UNLOAD CrtSysDriverUnload;
 #endif
 
 #if CRTSYS_USE_NTL_MAIN
+// clang-format on
 #include "../include/ntl/driver"
 #include "../include/ntl/expand_stack"
 #include <memory>
 std::unique_ptr<ntl::driver> this_driver;
+
+namespace ntl {
+class device_dispatch_invoker {
+public:
+  static status invoke(ntl::driver &driver, PDEVICE_OBJECT DeviceObject,
+                       PIRP Irp) {
+    NTSTATUS Status = STATUS_INVALID_DEVICE_REQUEST;
+    Irp->IoStatus.Information = 0;
+
+    PIO_STACK_LOCATION IrpSp = IoGetCurrentIrpStackLocation(Irp);
+    DeviceObject;
+    switch (IrpSp->MajorFunction) {
+    case IRP_MJ_CREATE:
+      ///
+      if (driver.devcie_control_routine_) {
+        Status = STATUS_SUCCESS;
+        break;
+      }
+      break;
+    case IRP_MJ_CLOSE:
+      //
+      if (driver.devcie_control_routine_) {
+        Status = STATUS_SUCCESS;
+        break;
+      }
+      break;
+    case IRP_MJ_DEVICE_CONTROL:
+      if (driver.devcie_control_routine_) {
+        __try {
+          Irp->IoStatus.Information =
+              IrpSp->Parameters.DeviceIoControl.OutputBufferLength;
+          driver.devcie_control_routine_(
+              IrpSp->Parameters.DeviceIoControl.IoControlCode,
+              (const uint8_t *)Irp->AssociatedIrp.SystemBuffer,
+              IrpSp->Parameters.DeviceIoControl.InputBufferLength,
+              (uint8_t *)Irp->AssociatedIrp.SystemBuffer,
+              &Irp->IoStatus.Information);
+          Status = STATUS_SUCCESS;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+          Status = GetExceptionCode();
+          Irp->IoStatus.Information = 0;
+        }
+      }
+      break;
+    }
+    Irp->IoStatus.Status = Status;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return Status;
+  }
+};
+} // namespace ntl
+  // clang-format off
 #else
 EXTERN_C DRIVER_INITIALIZE DriverEntry;
-#endif
-
 PDRIVER_UNLOAD CrtsyspDriverUnload = NULL;
-
-
+PDRIVER_DISPATCH CrtsyspDispatchDeviceControl = NULL;
+PDRIVER_DISPATCH CrtsyspDispatchCreate = NULL;
+PDRIVER_DISPATCH CrtsyspDispatchClose = NULL;
+#endif
 
 //
 // :-(
@@ -115,6 +168,72 @@ CrtSysInitializeTebThreadLocalStoragePointer (
 
 #include <vcstartup_internal.h>
 
+NTSTATUS
+CrtSysDispatchCreate (
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _Inout_ PIRP Irp
+    )
+{
+#if CRTSYS_USE_NTL_MAIN
+  // clang-format on
+  if (this_driver) {
+    return ntl::device_dispatch_invoker::invoke(*this_driver.get(),
+                                                DeviceObject, Irp);
+  }
+// clang-format off
+#else
+    if (CrtsyspDispatchCreate) {
+        return CrtsyspDispatchCreate( DeviceObject,
+                                      Irp );
+    }
+#endif
+    return STATUS_INVALID_DEVICE_REQUEST;
+}
+
+NTSTATUS
+CrtSysDispatchClose (
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _Inout_ PIRP Irp
+    )
+{
+#if CRTSYS_USE_NTL_MAIN
+  // clang-format on
+  if (this_driver) {
+    return ntl::device_dispatch_invoker::invoke(*this_driver.get(),
+                                                DeviceObject, Irp);
+  }
+// clang-format off
+#else
+    if (CrtsyspDispatchClose) {
+        return CrtsyspDispatchClose( DeviceObject,
+                                     Irp );
+    }
+#endif
+    return STATUS_INVALID_DEVICE_REQUEST;
+}
+
+NTSTATUS
+CrtSysDispatchDeviceControl (
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _Inout_ PIRP Irp
+    )
+{
+#if CRTSYS_USE_NTL_MAIN
+  // clang-format on
+  if (this_driver) {
+    return ntl::device_dispatch_invoker::invoke(*this_driver.get(),
+                                                DeviceObject, Irp);
+  }
+// clang-format off
+#else
+    if (CrtsyspDispatchDeviceControl) {
+        return CrtsyspDispatchDeviceControl( DeviceObject,
+                                             Irp );
+    }
+#endif
+    return STATUS_INVALID_DEVICE_REQUEST;
+}
+
 EXTERN_C
 NTSTATUS
 CrtSysDriverEntry (
@@ -180,19 +299,20 @@ CrtSysDriverEntry (
     __scrt_current_native_startup_state = __scrt_native_startup_state::initialized;
 
 #if CRTSYS_USE_NTL_MAIN
-    std::unique_ptr<ntl::driver> driver = std::make_unique<ntl::driver>(DriverObject);
-    if (!driver) {
-        return STATUS_INSUFFICIENT_RESOURCES;
-    }
-
-    ntl::status s = ntl::expand_stack( ntl::main,
-                                       std::ref(*driver.get()),
-                                       std::wstring(RegistryPath->Buffer) );
-    if (!s.is_ok()) {
-        CrtSysDriverUnload( DriverObject );
-        return s;
-    }
-    this_driver = std::move(driver);
+  // clang-format on
+  std::unique_ptr<ntl::driver> driver =
+      std::make_unique<ntl::driver>(DriverObject);
+  if (!driver) {
+    return STATUS_INSUFFICIENT_RESOURCES;
+  }
+  ntl::status s = ntl::expand_stack(ntl::main, std::ref(*driver.get()),
+                                    std::wstring(RegistryPath->Buffer));
+  if (!s.is_ok()) {
+    CrtSysDriverUnload(DriverObject);
+    return s;
+  }
+  this_driver = std::move(driver);
+// clang-format off
 #else
     status = DriverEntry( DriverObject,
                           RegistryPath );
@@ -201,18 +321,26 @@ CrtSysDriverEntry (
         return status;
     }
     CrtsyspDriverUnload = DriverObject->DriverUnload;
+    CrtsyspDispatchCreate = DriverObject->MajorFunction[IRP_MJ_CREATE];
+    CrtsyspDispatchClose = DriverObject->MajorFunction[IRP_MJ_CLOSE];
+    CrtsyspDispatchDeviceControl = DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL];
 #endif
+    DriverObject->MajorFunction[IRP_MJ_CREATE] = CrtSysDispatchCreate;
+    DriverObject->MajorFunction[IRP_MJ_CLOSE] = CrtSysDispatchClose;
+    DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = CrtSysDispatchDeviceControl;
     DriverObject->DriverUnload = CrtSysDriverUnload;
     return status;
 }
 
 #if CRTSYS_USE_NTL_MAIN
+// clang-format on
 namespace ntl {
 class driver_unload_invoker {
 public:
   static void unload(driver &driver) { driver.unload(); }
 };
 } // namespace ntl
+  // clang-format off
 #endif
 
 EXTERN_C
@@ -223,10 +351,12 @@ CrtSysDriverUnload (
 {
     PAGED_CODE();
 #if CRTSYS_USE_NTL_MAIN
-    UNREFERENCED_PARAMETER(DriverObject);
-    if (this_driver) {
-        ntl::driver_unload_invoker::unload( *this_driver.get() );
-    }
+  // clang-format on
+  UNREFERENCED_PARAMETER(DriverObject);
+  if (this_driver) {
+    ntl::driver_unload_invoker::unload(*this_driver.get());
+  }
+  // clang-format off
 #else
     if (CrtsyspDriverUnload) {
         CrtsyspDriverUnload( DriverObject );

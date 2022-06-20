@@ -1,0 +1,133 @@
+/**
+ * @file rpc
+ * @author jungkwang.lee (ntoskrnl7@google.com)
+ * @brief rpc client
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authoers.
+ *
+ */
+
+#include "common"
+
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+#if defined(NTL_USER_MODE)
+namespace ntl {
+namespace rpc {
+class client {
+public:
+  client(const std::wstring &rpc_name, size_t out_buffer_size = 4096)
+      : handle_(::CreateFileW(
+            (L"\\\\?\\Global\\GLOBALROOT\\Device\\" + rpc_name).c_str(),
+            GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL)),
+        out_buffer_size_(out_buffer_size) {}
+  ~client() {
+    if (handle_ != INVALID_HANDLE_VALUE)
+      ::CloseHandle(handle_);
+  }
+
+  template <typename Ret, typename... Args>
+  Ret invoke(uint64_t index, Args &&... args) {
+    if (handle_ == INVALID_HANDLE_VALUE)
+      throw std::runtime_error("invalid handle");
+
+    std::vector<uint8_t> in_buffer;
+    zpp::serializer::memory_output_archive out(in_buffer);
+    out(args...);
+
+    DWORD returned = 0;
+#pragma warning(disable : 4984)
+    if constexpr (std::is_void_v<Ret>) {
+      if (!::DeviceIoControl(handle_, NTL_RPC_DEVICE_CTL(index),
+                             in_buffer.empty() ? NULL : &in_buffer[0],
+                             (DWORD)in_buffer.size(), NULL, 0, &returned, NULL))
+        throw std::runtime_error("failed to DeviceIoControl");
+    } else {
+      std::vector<uint8_t> out_buffer(out_buffer_size_);
+      if (!::DeviceIoControl(handle_, NTL_RPC_DEVICE_CTL(index),
+                             in_buffer.empty() ? NULL : &in_buffer[0],
+                             (DWORD)in_buffer.size(), &out_buffer[0],
+                             (DWORD)out_buffer.size(), &returned, NULL))
+        throw std::runtime_error("failed to DeviceIoControl");
+      zpp::serializer::memory_input_archive in(out_buffer);
+      Ret rv;
+      in(rv);
+      return std::move(rv);
+    }
+#pragma warning(default : 4984)
+  }
+
+private:
+  HANDLE handle_;
+  size_t out_buffer_size_;
+};
+} // namespace rpc
+} // namespace ntl
+
+#define NTL_ADD_CALLBACK_0(_ret_, _name_, ...)                                 \
+  static const int _name_##_0_index = __LINE__;                                \
+  inline _ret_ _name_() {                                                      \
+    return ntl::rpc::client(NTL_RPC_NAME).invoke<_ret_>(__LINE__);             \
+  }
+
+#define NTL_ADD_CALLBACK_1(_ret_, _name_, _arg0_type_, _arg0_name_, ...)       \
+  static const int _name_##_1_index = __LINE__;                                \
+  inline _ret_ _name_(_arg0_type_ _arg0_name_) {                               \
+    return ntl::rpc::client(NTL_RPC_NAME)                                      \
+        .invoke<_ret_>(__LINE__, std::forward<_arg0_type_>(_arg0_name_));      \
+  }
+
+#define NTL_ADD_CALLBACK_2(_ret_, _name_, _arg0_type_, _arg0_name_,            \
+                           _arg1_type_, _arg1_name_, ...)                      \
+  static const int _name_##_2_index = __LINE__;                                \
+  inline _ret_ _name_(_arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_) {      \
+    return ntl::rpc::client(NTL_RPC_NAME)                                      \
+        .invoke<_ret_>(__LINE__, std::forward<_arg0_type_>(_arg0_name_),       \
+                       std::forward<_arg1_type_>(_arg1_name_));                \
+  }
+
+#define NTL_ADD_CALLBACK_3(_ret_, _name_, _arg0_type_, _arg0_name_,            \
+                           _arg1_type_, _arg1_name_, _arg2_type_, _arg2_name_, \
+                           ...)                                                \
+  static const int _name_##_3_index = __LINE__;                                \
+  inline _ret_ _name_(_arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_,        \
+                      _arg2_type_ _arg2_name_) {                               \
+    return ntl::rpc::client(NTL_RPC_NAME)                                      \
+        .invoke<_ret_>(__LINE__, std::forward<_arg0_type_>(_arg0_name_),       \
+                       std::forward<_arg1_type_>(_arg1_name_),                 \
+                       std::forward<_arg2_type_>(_arg2_name_));                \
+  }
+
+#define NTL_ADD_CALLBACK_4(_ret_, _name_, _arg0_type_, _arg0_name_,            \
+                           _arg1_type_, _arg1_name_, _arg2_type_, _arg2_name_, \
+                           _arg3_type_, _arg3_name_, ...)                      \
+  static const int _name_##_4_index = __LINE__;                                \
+  inline _ret_ _name_(_arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_,        \
+                      _arg2_type_ _arg2_name_, _arg3_type_ _arg3_name_) {      \
+    return ntl::rpc::client(NTL_RPC_NAME)                                      \
+        .invoke<_ret_>(__LINE__, std::forward<_arg0_type_>(_arg0_name_),       \
+                       std::forward<_arg1_type_>(_arg1_name_),                 \
+                       std::forward<_arg2_type_>(_arg2_name_),                 \
+                       std::forward<_arg3_type_>(_arg3_name_));                \
+  }
+
+#define NTL_ADD_CALLBACK_5(_ret_, _name_, _arg0_type_, _arg0_name_,            \
+                           _arg1_type_, _arg1_name_, _arg2_type_, _arg2_name_, \
+                           _arg3_type_, _arg3_name_, _arg4_type_, _arg4_name_, \
+                           ...)                                                \
+  static const int _name_##_5_index = __LINE__;                                \
+  inline _ret_ _name_(_arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_,        \
+                      _arg2_type_ _arg2_name_, _arg3_type_ _arg3_name_,        \
+                      _arg4_type_ _arg4_name_) {                               \
+    return ntl::rpc::client(NTL_RPC_NAME)                                      \
+        .invoke<_ret_>(__LINE__, std::forward<_arg0_type_>(_arg0_name_),       \
+                       std::forward<_arg1_type_>(_arg1_name_),                 \
+                       std::forward<_arg2_type_>(_arg2_name_),                 \
+                       std::forward<_arg3_type_>(_arg3_name_),                 \
+                       std::forward<_arg4_type_>(_arg4_name_));                \
+  }
+#else // !defined(NTL_USER_MODE)
+
+#endif // !defined(NTL_USER_MODE)

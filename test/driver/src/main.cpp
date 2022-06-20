@@ -1,4 +1,4 @@
-#include <stdio.h>
+﻿#include <stdio.h>
 #include <wdm.h>
 
 EXTERN_C DRIVER_INITIALIZE DriverEntry;
@@ -17,22 +17,22 @@ void test_all();
 #include <iostream>
 #include <ntl/driver>
 
+#include "common/rpc/server.hpp"
+
 ntl::status ntl::main(ntl::driver &driver, const std::wstring &registry_path) {
 
   KdBreakPoint();
 
   std::wcout << "load (registry_path :" << registry_path << ")\n";
 
-  testing::InitGoogleTest();
-  RUN_ALL_TESTS();
-
   test_all();
 
-  driver.on_unload([registry_path]() {
+  driver.on_unload([registry_path, rpc_svr = init_rpc(driver)]() {
     std::wcout << "unload (registry_path :" << registry_path << ")\n";
   });
 
-  return status::ok();
+  testing::InitGoogleTest();
+  return RUN_ALL_TESTS() == 0 ? status::ok() : status(STATUS_UNSUCCESSFUL);
 }
 #else  // !CRTSYS_USE_NTL_MAIN
 // clang-format off
@@ -49,13 +49,12 @@ DriverEntry (
 
   KdBreakPoint();
 
-  testing::InitGoogleTest();
-  RUN_ALL_TESTS();
-
   test_all();
 
   DriverObject->DriverUnload = DriverUnload;
-  return STATUS_SUCCESS;
+
+  testing::InitGoogleTest();
+  return RUN_ALL_TESTS() == 0 ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
 }
 
 // clang-format off
