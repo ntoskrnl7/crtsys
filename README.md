@@ -238,10 +238,10 @@ lib 디렉토리와 include 디렉토리를 타 프로젝트에서 사용하시�
     ARM : test\driver\build_ARM\Debug\crtsys_test.sys
     ARM64 : test\driver\build_ARM64\Debug\crtsys_test.sys
    - app
-    x64 : test\driver\build_x64\Debug\crtsys_test_app.sys
-    x86 : test\driver\build_x86\Debug\crtsys_test_app.sys
-    ARM : test\driver\build_ARM\Debug\crtsys_test_app.sys
-    ARM64 : test\driver\build_ARM64\Debug\crtsys_test_app.sys
+    x64 : test\driver\build_x64\Debug\crtsys_test_app.exe
+    x86 : test\driver\build_x86\Debug\crtsys_test_app.exe
+    ARM : test\driver\build_ARM\Debug\crtsys_test_app.exe
+    ARM64 : test\driver\build_ARM64\Debug\crtsys_test_app.exe
 
    ```batch
    sc create CrtSysTest binpath= "빌드된 crtsys_test.sys의 전체 경로" displayname= "crtsys test" start= demand type= kernel
