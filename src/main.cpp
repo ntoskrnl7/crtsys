@@ -51,12 +51,13 @@ public:
         __try {
           Irp->IoStatus.Information =
               IrpSp->Parameters.DeviceIoControl.OutputBufferLength;
+          size_t out_len = (size_t)Irp->IoStatus.Information;
           driver.devcie_control_routine_(
               IrpSp->Parameters.DeviceIoControl.IoControlCode,
               (const uint8_t *)Irp->AssociatedIrp.SystemBuffer,
-              IrpSp->Parameters.DeviceIoControl.InputBufferLength,
-              (uint8_t *)Irp->AssociatedIrp.SystemBuffer,
-              &Irp->IoStatus.Information);
+              (size_t)IrpSp->Parameters.DeviceIoControl.InputBufferLength,
+              (uint8_t *)Irp->AssociatedIrp.SystemBuffer, &out_len);
+          Irp->IoStatus.Information = (ULONG_PTR)out_len;
           Status = STATUS_SUCCESS;
         } __except (EXCEPTION_EXECUTE_HANDLER) {
           Status = GetExceptionCode();
