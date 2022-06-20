@@ -24,40 +24,40 @@ jobs:
 
     - name: build app x86
       shell: cmd
-      run: ..\build.bat . x86
-      working-directory: test/app
+      run: ..\build.bat app x86
+      working-directory: test
 
     - name: build app x64
       shell: cmd
-      run: ..\build.bat . x64
-      working-directory: test/app
+      run: ..\build.bat app x64
+      working-directory: test
 
     - name: build app ARM
       shell: cmd
-      run: ..\build.bat . ARM
-      working-directory: test/app
+      run: ..\build.bat app ARM
+      working-directory: test
 
     - name: build app ARM64
       shell: cmd
-      run: ..\build.bat . ARM64
-      working-directory: test/app
+      run: ..\build.bat app ARM64
+      working-directory: test
 
     - name: build driver x86
       shell: cmd
-      run: ..\build.bat . x86
-      working-directory: test/driver
+      run: ..\build.bat driver x86
+      working-directory: test
 
     - name: build driver x64
       shell: cmd
-      run: ..\build.bat . x64
-      working-directory: test/driver
+      run: ..\build.bat driver x64
+      working-directory: test
 
     - name: build driver ARM
       shell: cmd
-      run: ..\build.bat . ARM
-      working-directory: test/driver
+      run: ..\build.bat driver ARM
+      working-directory: test
 
     - name: build driver ARM64
       shell: cmd
-      run: ..\build.bat . ARM64
-      working-directory: test/driver
+      run: ..\build.bat driver ARM64
+      working-directory: test
