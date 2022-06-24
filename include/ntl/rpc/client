@@ -66,62 +66,66 @@ private:
 } // namespace rpc
 } // namespace ntl
 
-#define NTL_ADD_CALLBACK_0(_ret_, _name_, ...)                                 \
+#define NTL_RPC_BEGIN(_rpc_name_) namespace _rpc_name_ {
+#define NTL_RPC_END(_rpc_name_) }
+
+#define NTL_ADD_CALLBACK_0(_rpc_name_, _ret_, _name_, ...)                     \
   static const int _name_##_0_index = __LINE__;                                \
   inline _ret_ _name_() {                                                      \
-    return ntl::rpc::client(NTL_RPC_NAME).invoke<_ret_>(__LINE__);             \
+    return ntl::rpc::client(L#_rpc_name_).invoke<_ret_>(__LINE__);             \
   }
 
-#define NTL_ADD_CALLBACK_1(_ret_, _name_, _arg0_type_, _arg0_name_, ...)       \
+#define NTL_ADD_CALLBACK_1(_rpc_name_, _ret_, _name_, _arg0_type_,             \
+                           _arg0_name_, ...)                                   \
   static const int _name_##_1_index = __LINE__;                                \
   inline _ret_ _name_(_arg0_type_ _arg0_name_) {                               \
-    return ntl::rpc::client(NTL_RPC_NAME)                                      \
+    return ntl::rpc::client(L#_rpc_name_)                                      \
         .invoke<_ret_>(__LINE__, std::forward<_arg0_type_>(_arg0_name_));      \
   }
 
-#define NTL_ADD_CALLBACK_2(_ret_, _name_, _arg0_type_, _arg0_name_,            \
-                           _arg1_type_, _arg1_name_, ...)                      \
+#define NTL_ADD_CALLBACK_2(_rpc_name_, _ret_, _name_, _arg0_type_,             \
+                           _arg0_name_, _arg1_type_, _arg1_name_, ...)         \
   static const int _name_##_2_index = __LINE__;                                \
   inline _ret_ _name_(_arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_) {      \
-    return ntl::rpc::client(NTL_RPC_NAME)                                      \
+    return ntl::rpc::client(L#_rpc_name_)                                      \
         .invoke<_ret_>(__LINE__, std::forward<_arg0_type_>(_arg0_name_),       \
                        std::forward<_arg1_type_>(_arg1_name_));                \
   }
 
-#define NTL_ADD_CALLBACK_3(_ret_, _name_, _arg0_type_, _arg0_name_,            \
-                           _arg1_type_, _arg1_name_, _arg2_type_, _arg2_name_, \
-                           ...)                                                \
+#define NTL_ADD_CALLBACK_3(_rpc_name_, _ret_, _name_, _arg0_type_,             \
+                           _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_, \
+                           _arg2_name_, ...)                                   \
   static const int _name_##_3_index = __LINE__;                                \
   inline _ret_ _name_(_arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_,        \
                       _arg2_type_ _arg2_name_) {                               \
-    return ntl::rpc::client(NTL_RPC_NAME)                                      \
+    return ntl::rpc::client(L#_rpc_name_)                                      \
         .invoke<_ret_>(__LINE__, std::forward<_arg0_type_>(_arg0_name_),       \
                        std::forward<_arg1_type_>(_arg1_name_),                 \
                        std::forward<_arg2_type_>(_arg2_name_));                \
   }
 
-#define NTL_ADD_CALLBACK_4(_ret_, _name_, _arg0_type_, _arg0_name_,            \
-                           _arg1_type_, _arg1_name_, _arg2_type_, _arg2_name_, \
-                           _arg3_type_, _arg3_name_, ...)                      \
+#define NTL_ADD_CALLBACK_4(_rpc_name_, _ret_, _name_, _arg0_type_,             \
+                           _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_, \
+                           _arg2_name_, _arg3_type_, _arg3_name_, ...)         \
   static const int _name_##_4_index = __LINE__;                                \
   inline _ret_ _name_(_arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_,        \
                       _arg2_type_ _arg2_name_, _arg3_type_ _arg3_name_) {      \
-    return ntl::rpc::client(NTL_RPC_NAME)                                      \
+    return ntl::rpc::client(L#_rpc_name_)                                      \
         .invoke<_ret_>(__LINE__, std::forward<_arg0_type_>(_arg0_name_),       \
                        std::forward<_arg1_type_>(_arg1_name_),                 \
                        std::forward<_arg2_type_>(_arg2_name_),                 \
                        std::forward<_arg3_type_>(_arg3_name_));                \
   }
 
-#define NTL_ADD_CALLBACK_5(_ret_, _name_, _arg0_type_, _arg0_name_,            \
-                           _arg1_type_, _arg1_name_, _arg2_type_, _arg2_name_, \
-                           _arg3_type_, _arg3_name_, _arg4_type_, _arg4_name_, \
-                           ...)                                                \
+#define NTL_ADD_CALLBACK_5(_rpc_name_, _ret_, _name_, _arg0_type_,             \
+                           _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_, \
+                           _arg2_name_, _arg3_type_, _arg3_name_, _arg4_type_, \
+                           _arg4_name_, ...)                                   \
   static const int _name_##_5_index = __LINE__;                                \
   inline _ret_ _name_(_arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_,        \
                       _arg2_type_ _arg2_name_, _arg3_type_ _arg3_name_,        \
                       _arg4_type_ _arg4_name_) {                               \
-    return ntl::rpc::client(NTL_RPC_NAME)                                      \
+    return ntl::rpc::client(L#_rpc_name_)                                      \
         .invoke<_ret_>(__LINE__, std::forward<_arg0_type_>(_arg0_name_),       \
                        std::forward<_arg1_type_>(_arg1_name_),                 \
                        std::forward<_arg2_type_>(_arg2_name_),                 \

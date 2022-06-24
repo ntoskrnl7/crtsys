@@ -1,4 +1,7 @@
-#include "common/rpc/client.hpp"
+#include <ntl/rpc/client>
+// rpc client stub code
+#include "common/rpc.hpp"
+
 #include <gtest/gtest.h>
 #include <windows.h>
 

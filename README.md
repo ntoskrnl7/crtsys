@@ -11,23 +11,27 @@
 ![C++ 14+](https://img.shields.io/badge/C++-14+-white.svg?logo=cplusplus&logoColor=blue)
 ![Architecture](https://img.shields.io/badge/CPU-x86%20%2F%20x64%20%2F%20ARM%20%2F%20ARM64-blue.svg?logo=data:image/svg+xml;base64,PD94bWwgdmVyc2lvbj0iMS4wIj8+CjxzdmcgZW5hYmxlLWJhY2tncm91bmQ9Im5ldyAwIDAgNTIgNTIiIGlkPSJMYXllcl8xIiB2ZXJzaW9uPSIxLjEiIHZpZXdCb3g9IjAgMCA1MiA1MiIgeG1sOnNwYWNlPSJwcmVzZXJ2ZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIiB4bWxuczp4bGluaz0iaHR0cDovL3d3dy53My5vcmcvMTk5OS94bGluayI+CiAgICA8Zz4KICAgICAgICA8cGF0aCBmaWxsPSJ3aGl0ZSIgZD0iTTQ5LDE5LjV2LTJoLTYuOTk4NDEzMXYtNy40OTU3ODg2SDE0LjQwMTYxMTNsLTQuNDAwMDI0NCw0LjUzMDAyOTN2MjcuNDY5OTcwN0gxNy41VjQ5aDJ2LTYuOTk1Nzg4NmgzVjQ5aDJ2LTYuOTk1Nzg4NmgzICAgVjQ5aDJ2LTYuOTk1Nzg4NmgzVjQ5aDJ2LTYuOTk1Nzg4NmgyLjgxMTU4NDVsNC42OTAwMDI0LTUuNjQwMDE0NlYzNC41SDQ5di0yaC02Ljk5ODQxMzF2LTNINDl2LTJoLTYuOTk4NDEzMXYtM0g0OXYtMmgtNi45OTg0MTMxICAgdi0zSDQ5eiBNMzYuMDAxNTg2OSwzMy41MDQyMTE0YzAsMS42NTAwMjQ0LTEuMzQ5OTc1NiwzLTMsM2gtMTRjLTEuNjU5OTczMSwwLTMtMS4zNDk5NzU2LTMtM3YtMTRjMC0xLjY1OTk3MzEsMS4zNDAwMjY5LTMsMy0zaDE0ICAgYzEuNjUwMDI0NCwwLDMsMS4zNDAwMjY5LDMsM1YzMy41MDQyMTE0eiIgLz4KICAgICAgICA8cmVjdCBzdHlsZT0iZmlsbDp3aGl0ZSIgaGVpZ2h0PSIyIiB3aWR0aD0iNyIgeD0iMyIgeT0iMTcuNSIgLz4KICAgICAgICA8cmVjdCBzdHlsZT0iZmlsbDp3aGl0ZSIgaGVpZ2h0PSIyIiB3aWR0aD0iNyIgeD0iMyIgeT0iMjIuNSIgLz4KICAgICAgICA8cmVjdCBzdHlsZT0iZmlsbDp3aGl0ZSIgaGVpZ2h0PSIyIiB3aWR0aD0iNyIgeD0iMyIgeT0iMjcuNSIgLz4KICAgICAgICA8cmVjdCBzdHlsZT0iZmlsbDp3aGl0ZSIgaGVpZ2h0PSIyIiB3aWR0aD0iNyIgeD0iMyIgeT0iMzIuNSIgLz4KICAgICAgICA8cmVjdCBzdHlsZT0iZmlsbDp3aGl0ZSIgaGVpZ2h0PSI3IiB3aWR0aD0iMiIgeD0iMzIuNSIgeT0iMyIgLz4KICAgICAgICA8cmVjdCBzdHlsZT0iZmlsbDp3aGl0ZSIgaGVpZ2h0PSI3IiB3aWR0aD0iMiIgeD0iMjcuNSIgeT0iMyIgLz4KICAgICAgICA8cmVjdCBzdHlsZT0iZmlsbDp3aGl0ZSIgaGVpZ2h0PSI3IiB3aWR0aD0iMiIgeD0iMjIuNSIgeT0iMyIgLz4KICAgICAgICA8cmVjdCBzdHlsZT0iZmlsbDp3aGl0ZSIgaGVpZ2h0PSI3IiB3aWR0aD0iMiIgeD0iMTcuNSIgeT0iMyIgLz4KICAgIDwvZz4KPC9zdmc+)
 
-커널 드라이버에서 C++ 및 STL 기능을 사용할 수 있도록 도와주는 CRT 라이브러리 입니다.
+**crtsys** is open source library that helps you use C++ CRT and STL features in your kernel drivers.
 
 - [crtsys](#crtsys)
   - [Overview](#overview)
-  - [Requirements](#requirements)
-  - [Test Environments](#test-environments)
   - [Goal](#goal)
     - [C++ Standard](#c-standard)
       - [STL](#stl)
     - [C Standard](#c-standard-1)
     - [NTL (NT Template Library)](#ntl-nt-template-library)
-  - [Build](#build)
-  - [Test](#test)
+  - [Requirements](#requirements)
+  - [Test Environments](#test-environments)
+  - [Build & Test](#build--test)
   - [Usage](#usage)
   - [TODO](#todo)
 
 ## Overview
+
+This project has the most support for C++ STL features among similar projects.
+
+<details>
+<summary>more</summary>
 
 커널 드라이버에서 C++ 및 STL을 사용할수있도록 도와주는 기능을 조사해보았는데, 그중 사용하기 가장 잘 구현되어있는 프로젝트는 아래와 같습니다.
 
@@ -66,53 +70,24 @@
 
 crtsys의 장점은 아래와 같습니다.
 
-1. Micosoft CRT와 STL을 최대한 비슷하게 지원하기 위해서 Microsoft CRT 소스코드를 사용하긴 하지만 Microsoft Visual Studio가 설치되어있는 디렉토리 내의 소스를 직접 빌드하는 방법으로 처리하여, Visual Studio를 합법적으로 사용하는 사용자는 라이센스 문제 없이 사용 가능합니다.
+1. Micosoft CRT와 STL을 최대한 비슷하게 지원하기 위해서 Microsoft CRT 소스코드를 사용하긴 하지만 Microsoft Visual Studio 혹은 Build Tools가 설치되어있는 디렉토리 내의 소스를 직접 빌드하는 방법으로 처리하여, Visual Studio를 합법적으로 사용하는 사용자는 라이센스 문제 없이 사용 가능합니다.
 2. Win32 API를 구현한 [Ldk](https://github.com/ntoskrnl7/Ldk)를 활용하여 많은 범위의 STL 기능을 지원합니다.
 3. CMake로 프로젝트를 구성할 수 있으며, [CPM](https://github.com/cpm-cmake/CPM.cmake)을 사용하여 정말 간편하게 라이브러리를 사용할 수 있도록 지원합니다.
 
-## Requirements
-
-- Windows 8 or later
-- Visual Studio 2017 or later
-- CMake 3.16 or later
-- Git
-
-## Test Environments
-
-- Windows 10 x64
-  - **x86, x64, ARM, ARM64**로 빌드 가능하지만, 실제 테스트는 x86, x64 모듈에 대해서만 검증되었습니다.
-- CMake 3.21.4
-- Git 2.23.0
-- Visual Studio 2017
-  - Visual Studio 2017의 CRT 소스 코드는 일부 헤더가 누락되어 빌드가 되지 않아서, UCXXRT의 코드를 일부 사용하여 지원합니다.
-  - 추후 누락된 헤더를 직접 작성하여 지원할 예정입니다.
-- Visual Studio 2019
-- Visual Studio 2022
-- VC Tools
-  - 14.16.27023
-  - 14.24.28314
-  - 14.26.28801
-  - 14.29.30133
-  - 14.31.31103
-- Windows Kit (SDK, WDK)
-  - 10.0.17763.0
-  - 10.0.18362.0
-  - 10.0.22000.0
-
-SDK와 WDK의 버전이 다르면 빌드가 실패할 가능성이 높으므로 **가능하다면 SDK와 WDK의 버전이 같은 환경에서 빌드하는것을 권장합니다.**
+</details>
 
 ## Goal
 
-이 프로젝트는 커널 드라이벌르 작성할 때, 응용 프로그램에서 C++ 및 STL을 사용하는 것에 근접한 개발 경험을 제공하는것을 목표로합니다.
+This project aims to provide a development experience similar to using C++ and STL in your applications when writing kernel drivers.
 
-현재 지원되거나 앞으로 지원할 기능은 아래와 같습니다.
+Features currently supported or supported in the future are listed below.
 
-- 체크된 항목은 구현 완료된 항목입니다.
-- 테스트 코드가 작성된 항목은 테스트 코드의 링크를 추가하였습니다.
+- Checked items are items that have been implemented.
+- For the item where the test code is written, a link to the test code is added.
 
 ### C++ Standard
 
-[C++ reference](https://en.cppreference.com)를 기준으로 작성하였습니다.
+It was written based on the [C++ reference](https://en.cppreference.com)
 
 - [Initialization](https://en.cppreference.com/w/cpp/language/initialization)
   - [x] [Non-local variables](https://en.cppreference.com/w/cpp/language/initialization#Non-local_variables)
@@ -150,78 +125,76 @@ SDK와 WDK의 버전이 다르면 빌드가 실패할 가능성이 높으므로 
 ### C Standard
 
 - [x] math functions
-  - 직접 구현하기에는 시간이 부족하여 아래 프로젝트의 내용을 참고하엿습니다. 감사합니다! :-)
+  - I did not have enough time to implement it myself, so I referred to the contents of the project below. thank you! :-)
   - [RetrievAL](https://github.com/SpoilerScriptsGroup/RetrievAL)
   - [musl](https://github.com/bminor/musl)
 
 ### NTL (NT Template Library)
 
-커널에서 더 나은 개발 환경을 지원하기 위한 기능을 제공합니다.
+Provides features to support a better development environment in the kernel.
 
 - ntl::expand_stack [(tested)](./test/src/ntl.cpp#L5)
-  - 스택 크기를 확장하기 위한 함수
-  - 기본적으로 커널 스택은 사용자 스레드 스택보다 훨씬 작은 크기를 할당받기 때문에 STL 기능을 사용하거나, 특히 throw를 수행할때 사용하는것이 좋습니다.
+  - Function to extend the stack size
+  - By default, the kernel stack is allocated a much smaller size than the user thread stack, so it is recommended to use the STL function or especially when performing throw.
 - ntl::status
-  - NTSTATUS에 대한 클래스
+  - Class for NTSTATUS
 - ntl::driver
-  - DRIVER_OBJECT에 대한 클래스
-  - 기능
+  - Class for DRIVER_OBJECT
+  - Features
     - [x] DriverUnload [(tested)](./test/driver/src/main.cpp#L30)
     - [ ] DriverDispatch
 - ntl::driver_main [(tested)](./test/driver/src/main.cpp#L22)
-  - C++ 용 드라이버 진입점
-  - ntl::expand_stack 함수로 스택을 최대 크기로 확장하여 호출됩니다.
+  - Driver entry point for C++.
+  - Called by expanding the stack to its maximum size with the ntl::expand_stack function.
 - ntl::rpc
-  - User Mode App과 Kernel Driver간 손쉬운 통신 방법을 제공합니다.
-    - ntl::rpc::server [(tested)](./test/common/rpc/server.hpp) [(tested)](./test/common/rpc/procedures.cpp)
-    - ntl::rpc::client [(tested)](./test/common/rpc/client.hpp) [(tested)](./test/common/rpc/procedures.cpp)
-      - 데이터 직렬화 부분은 직접 구현하기에는 시간이 부족하여 아래 프로젝트의 내용을 참고하엿습니다. 감사합니다! :-)
+  - Provides an easy communication method between User Mode Application and Kernel Driver.
+    - ntl::rpc::server [(tested)](./test/driver/src/main.cpp#L19) [(tested)](./test/common/rpc.hpp)
+    - ntl::rpc::client [(tested)](./test/app/src/main.cpp#L1) [(tested)](./test/common/rpc.hpp)
+      - I did not have enough time to implement the data serialization part myself, so I referred to the contents of the project below. thank you! :-)
         - [Eyal Z/zpp serializer](https://github.com/eyalz800/serializer)
 
-## Build
+## Requirements
 
-이 프로젝트를 직접 빌드하여 lib와 include를 사용하시려면 Microsoft STL 사용을 위해서 포함 경로 설정 및 전처리기 설정 등 복잡한 사전 작업이 필요하므로  **직접 빌드하여 사용하는것보다는 [Usage](#usage)을 참고하여 CPM을 통해서 사용하시는것을 권장합니다.**
+- Windows 7 or later
+- [Visual Studio / Build Tools 2017 or later](https://visualstudio.microsoft.com/ko/downloads/)
+- [CMake 3.16 or later](https://cmake.org/download/)
+- [Git](https://git-scm.com/downloads)
 
-<details>
-<summary>빌드 방법 보기</summary>
+## Test Environments
 
-빌드 방법은 아래와 같습니다.
+- Windows 10 x64
+  - It can be built with **x86, x64, ARM, ARM64**, but the actual test has only been validated against x86 and x64 modules.
 
-```Batch
-git clone https://github.com/ntoskrnl7/crtsys
-cd crtsys
-cmake -S . -B build
-cmake --build build --config Release
-cmake -S . -B build_x86 -A Win32
-cmake --build build_x86 --config Release
-```
+- CMake 3.21.4
+- Git 2.23.0
+- Visual Studio 2017
+  - Visual Studio 2017's CRT source code was missing some headers and could not be built, so it is supported using some of UCXXRT code.
+  - In the future, we plan to support by manually writing the missing header.
+- Visual Studio 2019
+- Visual Studio 2022
+- VC Tools
+  - 14.16.27023
+  - 14.24.28314
+  - 14.26.28801
+  - 14.29.30133
+  - 14.31.31103
+- Windows Kit (SDK, WDK)
+  - 10.0.17763.0
+  - 10.0.18362.0
+  - 10.0.22000.0
 
-혹은
+If the SDK and WDK versions are different, builds are more likely to fail. **If possible, it is recommended to build in the same environment as the SDK and WDK versions.**
 
-```Batch
-git clone https://github.com/ntoskrnl7/crtsys
-cd crtsys
-build.bat . x86 release
-build.bat . x64 release
-```
+## Build & Test
 
-위 명령을 실행하여 빌드를 하시면 lib/x64/crtsys.lib와 lib/x86/crtsys.lib가 생성됩니다.
-
-lib 디렉토리와 include 디렉토리를 타 프로젝트에서 사용하시면 됩니다.
-이 라이브러리를 사용할 프로젝트의 전처리기 정의나 포함 경로 설정 등 프로젝트 설정은 [CMakeLists.txt](./CMakeLists.txt)에서 PUBLIC으로 설정된 항목들을 참고하여 설정하시기 바랍니다.
-
-</details>
-
-## Test
-
-1. 아래 명령을 수행하여 라이브러리 및 테스트 코드를 빌드하시기 바랍니다.
+1. Please build the library and test code by executing the command below.
 
     ```Batch
     git clone https://github.com/ntoskrnl7/crtsys
     cd crtsys\test\build.bat
     ```
 
-    혹은 아래 명령을 수행하시면 지원되는 모든 아키텍쳐에 대해서 Debug, Release 구성을 모두 빌드합니다.
+    Alternatively, if you execute the command below, both Debug and Release configurations are built for all supported architectures.
 
     ```Batch
     git clone https://github.com/ntoskrnl7/crtsys
@@ -230,7 +203,7 @@ lib 디렉토리와 include 디렉토리를 타 프로젝트에서 사용하시�
     build_all.bat test\driver
     ```
 
-2. build\Debug\crtsys_test.sys를 설치 및 로드하시기 바랍니다.
+2. Install and load build\Debug\crtsys_test.sys.
 
    - driver
     x64 : test\driver\build_x64\Debug\crtsys_test.sys
@@ -244,7 +217,7 @@ lib 디렉토리와 include 디렉토리를 타 프로젝트에서 사용하시�
     ARM64 : test\driver\build_ARM64\Debug\crtsys_test_app.exe
 
    ```batch
-   sc create CrtSysTest binpath= "빌드된 crtsys_test.sys의 전체 경로" displayname= "crtsys test" start= demand type= kernel
+   sc create CrtSysTest binpath= "crtsys_test.sys full path" displayname= "crtsys test" start= demand type= kernel
    sc start CrtSysTest
 
    crtsys_test.app.exe
@@ -253,38 +226,34 @@ lib 디렉토리와 include 디렉토리를 타 프로젝트에서 사용하시�
    sc delete CrtSysTest
    ```
 
-3. 정상적으로 로드, Google Test 통과/언로드가 되었다면 테스트 성공한 것이며, 테스트 내용은 DebugView나 WinDbg를 통해서 확인 가능합니다.
+3. If it loads normally and passes/unloads Google Test, the test is successful, and the test contents can be checked through DebugView or WinDbg.
 
 ## Usage
 
-CMake를 사용하는것을 권장합니다.
-
-1. 프로젝트 디렉토리를 생성 후 이동하시기 바랍니다.
+1. Please move after creating the project directory.
 
    ```batch
    mkdir test-project
    cd test-project
    ```
 
-2. CPM을 프로젝트 디렉토리에 다운로드 받으시기 바랍니다.
+2. Download CPM to your project directory.
 
     ```batch
     mkdir cmake
     wget -O cmake/CPM.cmake https://github.com/cpm-cmake/CPM.cmake/releases/latest/download/get_cpm.cmake
     ```
 
-    혹은
+    or
 
     ```batch
     mkdir cmake
     curl -o cmake/CPM.cmake -LJO https://github.com/cpm-cmake/CPM.cmake/releases/latest/download/get_cpm.cmake
     ```
 
-    로 CPM.cmake를 다운로드 받으시기 바랍니다.
+3. Please write the following files in the project directory.
 
-3. 프로젝트 디렉토리에 아래와 같은 파일을 작성해주시기 바랍니다.
-
-   - 디렉토리 구조
+   - Directory structure
 
       ```tree
       📦test-project
@@ -312,19 +281,19 @@ CMake를 사용하는것을 권장합니다.
 
    - src/main.cpp
 
-        - 아래와 같이 CRTSYS_NTL_MAIN을 활성화한다면 ntl::main을 진입점으로 정의하시기 바랍니다. **(권장)**
+        - If you enable CRTSYS_NTL_MAIN as shown below, define ntl::main as the entry point. **(recommend)**
 
           ```CMake
           set(CRTSYS_NTL_MAIN ON)
           ```
 
-        - 만약 아래와 같이 CRTSYS_NTL_MAIN을 비활성화한다면 기존과 깉이 DriverEntry를 진입점으로 정의하시기 바랍니다.
+        - If you disable CRTSYS_NTL_MAIN as shown below, define DriverEntry as the entry point, which is different from the previous one.
 
           ```CMake
           set(CRTSYS_NTL_MAIN OFF)
           ```
 
-        아래는 ntl::main를 진입점으로 설정한 프로젝트의 예제 코드입니다.
+        Below is example code from a project with ntl::main set as entry point.
 
         ```C
         #include <iostream>
@@ -344,17 +313,17 @@ CMake를 사용하는것을 권장합니다.
         }
         ```
 
-4. 빌드를 수행합니다.
+4. Perform a build.
 
    ```batch
    cmake -S . -B build
    cmake --build build
    ```
 
-5. 드라이버가 정상적으로 시작되고 종료되는지 확인하시기 바랍니다.
+5. Please check if the driver starts up and shuts down normally.
 
    ```batch
-   sc create CrtSysTest binpath= "빌드된 crtsys_test.sys의 전체 경로" displayname= "crtsys test" start= demand type= kernel
+   sc create CrtSysTest binpath= "crtsys_test.sys full path" displayname= "crtsys test" start= demand type= kernel
    sc start CrtSysTest
    sc stop CrtSysTest
    sc delete CrtSysTest
@@ -362,6 +331,7 @@ CMake를 사용하는것을 권장합니다.
 
 ## TODO
 
-- CMake Install 구현
-- 아직 구현되지 않은 C++ 및 STL 기능 구현
-- Visual Studio 2017의 CRT 소스 코드 빌드
+- CMake install handling.
+- Implementing C++ STL features not yet implemented.
+- Build CRT source code in Visual Studio 2017.
+- Running unit tests in GitHub Action.

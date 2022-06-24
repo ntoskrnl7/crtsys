@@ -1,5 +1,4 @@
-﻿#include <stdio.h>
-#include <wdm.h>
+﻿#include <wdm.h>
 
 EXTERN_C DRIVER_INITIALIZE DriverEntry;
 EXTERN_C DRIVER_UNLOAD DriverUnload;
@@ -17,7 +16,9 @@ void test_all();
 #include <iostream>
 #include <ntl/driver>
 
-#include "common/rpc/server.hpp"
+#include <ntl/rpc/server>
+// rpc server stub code
+#include "common/rpc.hpp"
 
 ntl::status ntl::main(ntl::driver &driver, const std::wstring &registry_path) {
 
@@ -27,7 +28,7 @@ ntl::status ntl::main(ntl::driver &driver, const std::wstring &registry_path) {
 
   test_all();
 
-  driver.on_unload([registry_path, rpc_svr = init_rpc(driver)]() {
+  driver.on_unload([registry_path, rpc_svr = test_rpc::init(driver)]() {
     std::wcout << "unload (registry_path :" << registry_path << ")\n";
   });
 

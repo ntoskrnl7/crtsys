@@ -89,8 +89,8 @@ public:
 
   using unload_routine = std::function<void()>;
 
-  using devcie_control_routine =
-      std::function<void(uint32_t, const uint8_t *, size_t, uint8_t *, size_t *)>;
+  using devcie_control_routine = std::function<void(
+      uint32_t, const uint8_t *, size_t, uint8_t *, size_t *)>;
 
   driver(PDRIVER_OBJECT driver)
       : object_(driver), name_(driver->DriverName.Buffer,
