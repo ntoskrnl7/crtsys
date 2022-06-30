@@ -1,0 +1,146 @@
+/**
+ * @file device
+ * @author jungkwang.lee (ntoskrnl7@google.com)
+ * @brief
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authoers.
+ *
+ */
+#pragma once
+
+#include "except"
+#include <functional>
+#include <stdexcept>
+#include <string>
+
+#ifndef _NTDDK_
+#include <wdm.h>
+#endif
+
+namespace ntl {
+class device {
+  friend class device_dispatch_invoker;
+
+public:
+  using on_device_control_fn = std::function<void(uint32_t, const uint8_t *,
+                                                  size_t, uint8_t *, size_t *)>;
+
+private:
+  friend class driver;
+
+  struct context_base {
+    context_base(const std::type_info &type) : type(type) {}
+    const std::type_info &type;
+    on_device_control_fn on_device_control;
+  };
+
+  template <typename T> class context;
+
+  template <> struct context<void> : public context_base {
+    context() : context_base(typeid(void)) {}
+  };
+
+  template <typename T> struct context : public context_base {
+    context() : context_base(typeid(T)) {}
+    T data;
+  };
+
+public:
+  using type_t = DEVICE_TYPE;
+
+  class options {
+    friend class driver;
+    friend class device;
+
+  public:
+    options() : type_(FILE_DEVICE_UNKNOWN), exclusive_(false) {}
+
+    options &name(const std::wstring &name) {
+      name_ = name;
+      return *this;
+    }
+    options &type(type_t type) {
+      type_ = type;
+      return *this;
+    }
+    options &exclusive(bool exclusive = true) {
+      exclusive_ = exclusive;
+      return *this;
+    }
+
+  private:
+    bool exclusive_;
+    std::wstring name_;
+    type_t type_;
+  };
+
+protected:
+  device(PDEVICE_OBJECT device, const options &opts,
+         std::function<void()> finalizer)
+      : object_(device), name_(opts.name_), finalizer_(finalizer) {}
+
+private:
+  device(const device &) = delete;
+
+public:
+  device() : object_(nullptr) {}
+
+  device(device &&other) { *this = std::move(other); }
+
+  device &operator=(device &&rhs) {
+    object_ = rhs.detach();
+    name_.swap(rhs.name_);
+    finalizer_ = std::move(rhs.finalizer_);
+    return *this;
+  }
+
+  ~device() {
+    auto obj = detach();
+    if (obj) {
+      if (finalizer_)
+        finalizer_();
+      IoDeleteDevice(obj);
+    }
+  }
+
+private:
+  template <typename Extension> context<Extension> *get_context() {
+    return reinterpret_cast<context<Extension> *>(object_->DeviceExtension);
+  }
+
+public:
+  template <typename Extension> Extension &extension() {
+    auto ext = get_context<Extension>();
+    if (ext->type != typeid(Extension))
+      throw std::runtime_error("bad type");
+    return ext->data;
+  }
+
+  device &on_device_control(on_device_control_fn &&f) {
+    get_context<void>()->on_device_control = f;
+    return *this;
+  }
+
+  const std::wstring &name() const {
+    if (!object_)
+      throw std::runtime_error("invalid device object.");
+    return name_;
+  }
+
+  type_t type() const {
+    if (!object_)
+      throw std::runtime_error("invalid device object.");
+    return object_->DeviceType;
+  }
+
+  PDEVICE_OBJECT detach() {
+    return reinterpret_cast<PDEVICE_OBJECT>(
+        InterlockedExchangePointer(reinterpret_cast<PVOID *>(&object_), NULL));
+  }
+
+private:
+  PDEVICE_OBJECT object_;
+  std::wstring name_;
+  std::function<void()> finalizer_;
+};
+} // namespace ntl

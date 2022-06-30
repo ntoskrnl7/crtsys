@@ -1,11 +1,9 @@
-#include "common/rpc/client.hpp"
 #include <gtest/gtest.h>
 #include <windows.h>
 
-int main() {
-  testing::InitGoogleTest();
-  return RUN_ALL_TESTS();
-}
+#include <ntl/rpc/client>
+// rpc client stub code
+#include "common/rpc.hpp"
 
 TEST(ntl_rpc_client, invoke_callback_by_invoke_method) {
   ntl::rpc::client cli(L"test_rpc", 1024 * 1024);
@@ -74,4 +72,31 @@ TEST(ntl_rpc_client, invoke_callback_by_symbol) {
   auto test_point_class_ret = test_point_class(point(1, 1), point(4, 1));
   EXPECT_EQ(test_point_class_ret.get_x(), 4);
   EXPECT_EQ(test_point_class_ret.get_y(), 1);
+}
+
+TEST(ntl_device, device_io_control) {
+  HANDLE hDevice = CreateFileW(
+      L"\\\\?\\Global\\GLOBALROOT\\Device\\test_device",
+      GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+  EXPECT_NE(hDevice, INVALID_HANDLE_VALUE);
+
+  if (hDevice != INVALID_HANDLE_VALUE) {
+    DWORD bytes_returned;
+    char buffer[sizeof("world")];
+
+    EXPECT_TRUE(DeviceIoControl(
+        hDevice,
+        CTL_CODE(FILE_DEVICE_NTL_RPC, 0, METHOD_BUFFERED, FILE_ANY_ACCESS),
+        "hello", 5, buffer, sizeof("world"), &bytes_returned, NULL));
+
+    EXPECT_EQ(bytes_returned, sizeof("world"));
+    EXPECT_STREQ(buffer, "world");
+
+    CloseHandle(hDevice);
+  }
+}
+
+int main() {
+  testing::InitGoogleTest();
+  return RUN_ALL_TESTS();
 }

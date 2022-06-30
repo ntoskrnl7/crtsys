@@ -115,10 +115,11 @@ inline ntl::except make_exception(NTSTATUS status) {
   const char *message;
   switch (status) {
   case STATUS_INVALID_PARAMETER_3:
-    message = "The stack_size parameter is greater than MAXIMUM_EXPANSION_SIZE";
+    message =
+        "The stack_size parameter is greater than MAXIMUM_EXPANSION_SIZE.";
     break;
   case STATUS_INVALID_PARAMETER_4:
-    message = "The routine was called at IRQL = DISPATCH_LEVEL";
+    message = "The routine was called at IRQL = DISPATCH_LEVEL.";
     break;
   case STATUS_NO_MEMORY:
     message = "Not enough memory is available to expand the stack.";
@@ -128,7 +129,7 @@ inline ntl::except make_exception(NTSTATUS status) {
               "system's internal limits on stack space.";
     break;
   default:
-    message = "Unknown error";
+    message = "Unknown error.";
     break;
   }
   return std::move(ntl::except(status, message));

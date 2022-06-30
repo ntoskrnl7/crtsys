@@ -11,7 +11,20 @@
 
 #include "common"
 
-#define NTL_ADD_CALLBACK_0(_ret_, _name_, ...)                                 \
+#define NTL_RPC_BEGIN(_rpc_name_)                                              \
+  namespace _rpc_name_ {                                                       \
+  std::shared_ptr<ntl::rpc::server> init(ntl::driver &driver) {                \
+    auto dev = driver.create_device<void>(                                     \
+        ntl::device::options().name(L#_rpc_name_).type(FILE_DEVICE_NTL_RPC));  \
+    dev->on_device_control([](uint32_t ctl_code, const uint8_t *in_buffer,  size_t in_buffer_length, uint8_t *out_buffer, size_t *out_buffer_length) {
+
+#define NTL_RPC_END(_rpc_name_)                                                \
+  });                                                                          \
+  return std::make_shared<ntl::rpc::server>(dev);                              \
+  }                                                                            \
+  }
+
+#define NTL_ADD_CALLBACK_0(_rpc_name_, _ret_, _name_, ...)                     \
   if (IoGetFunctionCodeFromCtlCode(ctl_code) == __LINE__) {                    \
     auto _name_ = []() -> _ret_ __VA_ARGS__;                                   \
     if constexpr (std::is_void_v<_ret_>) {                                     \
@@ -24,7 +37,8 @@
     return;                                                                    \
   }
 
-#define NTL_ADD_CALLBACK_1(_ret_, _name_, _arg0_type_, _arg0_name_, ...)       \
+#define NTL_ADD_CALLBACK_1(_rpc_name_, _ret_, _name_, _arg0_type_,             \
+                           _arg0_name_, ...)                                   \
   if (IoGetFunctionCodeFromCtlCode(ctl_code) == __LINE__) {                    \
     auto _name_ = [](_arg0_type_ _arg0_name_) -> _ret_ __VA_ARGS__;            \
     zpp::serializer::memory_view_input_archive in(in_buffer,                   \
@@ -45,8 +59,8 @@
     return;                                                                    \
   }
 
-#define NTL_ADD_CALLBACK_2(_ret_, _name_, _arg0_type_, _arg0_name_,            \
-                           _arg1_type_, _arg1_name_, ...)                      \
+#define NTL_ADD_CALLBACK_2(_rpc_name_, _ret_, _name_, _arg0_type_,             \
+                           _arg0_name_, _arg1_type_, _arg1_name_, ...)         \
   if (IoGetFunctionCodeFromCtlCode(ctl_code) == __LINE__) {                    \
     auto _name_ = [](_arg0_type_ _arg0_name_,                                  \
                      _arg1_type_ _arg1_name_) -> _ret_ __VA_ARGS__;            \
@@ -71,9 +85,9 @@
     return;                                                                    \
   }
 
-#define NTL_ADD_CALLBACK_3(_ret_, _name_, _arg0_type_, _arg0_name_,            \
-                           _arg1_type_, _arg1_name_, _arg2_type_, _arg2_name_, \
-                           ...)                                                \
+#define NTL_ADD_CALLBACK_3(_rpc_name_, _ret_, _name_, _arg0_type_,             \
+                           _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_, \
+                           _arg2_name_, ...)                                   \
   if (IoGetFunctionCodeFromCtlCode(ctl_code) == __LINE__) {                    \
     auto _name_ = [](_arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_,         \
                      _arg2_type_ _arg2_name_) -> _ret_ __VA_ARGS__;            \
@@ -102,9 +116,9 @@
     return;                                                                    \
   }
 
-#define NTL_ADD_CALLBACK_4(_ret_, _name_, _arg0_type_, _arg0_name_,            \
-                           _arg1_type_, _arg1_name_, _arg2_type_, _arg2_name_, \
-                           _arg3_type_, _arg3_name_, ...)                      \
+#define NTL_ADD_CALLBACK_4(_rpc_name_, _ret_, _name_, _arg0_type_,             \
+                           _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_, \
+                           _arg2_name_, _arg3_type_, _arg3_name_, ...)         \
   if (IoGetFunctionCodeFromCtlCode(ctl_code) == __LINE__) {                    \
     auto _name_ = [](_arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_,         \
                      _arg2_type_ _arg2_name_,                                  \
@@ -137,10 +151,10 @@
     return;                                                                    \
   }
 
-#define NTL_ADD_CALLBACK_5(_ret_, _name_, _arg0_type_, _arg0_name_,            \
-                           _arg1_type_, _arg1_name_, _arg2_type_, _arg2_name_, \
-                           _arg3_type_, _arg3_name_, _arg4_type_, _arg4_name_, \
-                           ...)                                                \
+#define NTL_ADD_CALLBACK_5(_rpc_name_, _ret_, _name_, _arg0_type_,             \
+                           _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_, \
+                           _arg2_name_, _arg3_type_, _arg3_name_, _arg4_type_, \
+                           _arg4_name_, ...)                                   \
   if (IoGetFunctionCodeFromCtlCode(ctl_code) == __LINE__) {                    \
     auto _name_ = [](_arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_,         \
                      _arg2_type_ _arg2_name_, _arg3_type_ _arg3_name_,         \
@@ -183,8 +197,7 @@ namespace ntl {
 namespace rpc {
 class server {
 public:
-  server(driver &driver, const std::wstring &name)
-      : dev_(driver.create_device(name, FILE_DEVICE_NTL_RPC)) {}
+  server(std::shared_ptr<device> &device) : dev_(device) {}
 
   server(server &&other) { *this = std::move(other); }
 
@@ -197,7 +210,7 @@ private:
   server(const server &) = delete;
 
 private:
-  device dev_;
+  std::shared_ptr<device> dev_;
 };
 } // namespace rpc
 } // namespace ntl
