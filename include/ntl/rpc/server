@@ -14,11 +14,13 @@
 #define NTL_RPC_BEGIN(_rpc_name_)                                              \
   namespace _rpc_name_ {                                                       \
   std::shared_ptr<ntl::rpc::server> init(ntl::driver &driver) {                \
-  driver.on_device_control([](uint32_t ctl_code, const uint8_t *in_buffer,  size_t in_buffer_length, uint8_t *out_buffer, size_t *out_buffer_length) {
+    auto dev = driver.create_device<void>(                                     \
+        ntl::device::options().name(L#_rpc_name_).type(FILE_DEVICE_NTL_RPC));  \
+    dev->on_device_control([](uint32_t ctl_code, const uint8_t *in_buffer,  size_t in_buffer_length, uint8_t *out_buffer, size_t *out_buffer_length) {
 
 #define NTL_RPC_END(_rpc_name_)                                                \
   });                                                                          \
-  return std::make_shared<ntl::rpc::server>(driver, L#_rpc_name_);             \
+  return std::make_shared<ntl::rpc::server>(dev);                              \
   }                                                                            \
   }
 
@@ -195,8 +197,7 @@ namespace ntl {
 namespace rpc {
 class server {
 public:
-  server(driver &driver, const std::wstring &name)
-      : dev_(driver.create_device(name, FILE_DEVICE_NTL_RPC)) {}
+  server(std::shared_ptr<device> &device) : dev_(device) {}
 
   server(server &&other) { *this = std::move(other); }
 
@@ -209,7 +210,7 @@ private:
   server(const server &) = delete;
 
 private:
-  device dev_;
+  std::shared_ptr<device> dev_;
 };
 } // namespace rpc
 } // namespace ntl

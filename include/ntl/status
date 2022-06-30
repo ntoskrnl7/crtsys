@@ -14,6 +14,7 @@ namespace ntl {
 class status {
 public:
   status(NTSTATUS status) : status_(status) {}
+
   bool is_ok() const { return NT_SUCCESS(status_); }
   bool is_info() const { return NT_INFORMATION(status_); }
   bool is_warn() const { return NT_WARNING(status_); }

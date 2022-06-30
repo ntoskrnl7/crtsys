@@ -1,0 +1,41 @@
+/**
+ * @file unicode_string
+ * @author jungkwang.lee (ntoskrnl7@google.com)
+ * @brief
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authoers.
+ *
+ */
+#pragma once
+
+#include <string>
+
+#ifndef _NTDDK_
+#include <wdm.h>
+#endif
+
+namespace ntl {
+class unicode_string {
+public:
+  unicode_string(std::wstring &&str) : str_(std::move(str)) {
+    value_.Buffer = &str_[0];
+    value_.MaximumLength = value_.Length = (USHORT)str_.size() * sizeof(WCHAR);
+  }
+  unicode_string(const std::wstring &str) : str_(str) {
+    value_.Buffer = &str_[0];
+    value_.MaximumLength = value_.Length = (USHORT)str_.size() * sizeof(WCHAR);
+  }
+  unicode_string(std::wstring &str) {
+    value_.Buffer = &str[0];
+    value_.MaximumLength = value_.Length = (USHORT)str.size() * sizeof(WCHAR);
+  }
+
+  const std::wstring &c_str() const { return str_; }
+
+  UNICODE_STRING &operator*() { return value_; }
+
+private:
+  std::wstring str_;
+  UNICODE_STRING value_;
+};
+} // namespace ntl
