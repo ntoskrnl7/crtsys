@@ -143,15 +143,22 @@ crtsys의 장점은 아래와 같습니다.
 * ntl::driver
   * DRIVER_OBJECT에 대한 클래스
   * 기능
-    * [x] DriverUnload [(tested)](../test/driver/src/main.cpp#L30)
-    * [ ] DriverDispatch
+    * [x] DriverUnload [(tested)](./test/driver/src/main.cpp#L30)
+    * [x] Create device [(tested)](./test/driver/src/main.cpp#L39)
+* ntl::device
+  * DEVICE_OBJECT에 대한 클래스
+  * Features
+    * [x] Device Extension [(tested)](./test/driver/src/main.cpp#L39)
+    * [ ] IRP_MJ_CREATE
+    * [ ] IRP_MJ_CLOSE
+    * [x] IRP_MJ_DEVICE_CONTROL [(tested)](./test/app/src/main.cpp#L77) [(tested)](./test/driver/src/main.cpp#L47)
 * ntl::driver_main [(tested)](../test/driver/src/main.cpp#L22)
   * C++ 용 드라이버 진입점
   * ntl::expand_stack 함수로 스택을 최대 크기로 확장하여 호출됩니다.
 * ntl::rpc
   * User Mode App과 Kernel Driver간 손쉬운 통신 방법을 제공합니다.
     * ntl::rpc::server [(tested)](../test/driver/src/main.cpp#L19) [(tested)](../test/common/rpc.hpp)
-    * ntl::rpc::client [(tested)](../test/app/src/main.cpp#L1) [(tested)](../test/common/rpc.hpp)
+    * ntl::rpc::client [(tested)](../test/app/src/main.cpp#L4) [(tested)](../test/common/rpc.hpp)
       * 데이터 직렬화 부분을 직접 구현하기에는 시간이 부족하여 아래 프로젝트 내용을 참고했습니다. 감사합니다! :-)
         * [Eyal Z/zpp serializer](https://github.com/eyalz800/serializer)
 
