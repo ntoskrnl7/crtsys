@@ -27,17 +27,17 @@ public:
   static status invoke(PDEVICE_OBJECT device_object, PIRP irp) noexcept {
     NTSTATUS status = STATUS_INVALID_DEVICE_REQUEST;
     irp->IoStatus.Information = 0;
-    auto dispatcher = this_driver->dispatchers(device_object);
-    if (dispatcher) {
+    auto dispatchers = this_driver->dispatchers(device_object);
+    if (dispatchers) {
       PIO_STACK_LOCATION irp_sp = IoGetCurrentIrpStackLocation(irp);
       switch (irp_sp->MajorFunction) {
       case IRP_MJ_CREATE:
       case IRP_MJ_CLOSE:
-        if (dispatcher->on_device_control)
+        if (dispatchers->on_device_control)
           status = STATUS_SUCCESS;
         break;
       case IRP_MJ_DEVICE_CONTROL:
-        if (dispatcher->on_device_control) {
+        if (dispatchers->on_device_control) {
           auto ret = ntl::seh::try_except([&]() {
             const void *in_buf_ptr;
             void *out_buf_ptr;
@@ -73,17 +73,15 @@ public:
                                      "Invalid control code method");
                 break;
               }
-
               device_control::code code(
                   irp_sp->Parameters.DeviceIoControl.IoControlCode);
               device_control::in_buffer in_buf(
                   in_buf_ptr,
                   irp_sp->Parameters.DeviceIoControl.InputBufferLength);
               device_control::out_buffer out_buf(out_buf_ptr, out_len);
-              dispatcher->on_device_control(code, in_buf, out_buf);
+              dispatchers->on_device_control(code, in_buf, out_buf);
               status = STATUS_SUCCESS;
               irp->IoStatus.Information = (ULONG_PTR)out_buf.size;
-
             } catch (const ntl::exception &e) {
               status = e.get_status();
               irp->IoStatus.Information = 0;
