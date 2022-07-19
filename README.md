@@ -148,7 +148,7 @@ Provides features to support a better development environment in the kernel.
 * ntl::device
   * Class for DEVICE_OBJECT
   * Features
-    * [x] Device Extension [(tested)](./test/driver/src/main.cpp#L39)
+    * [x] Device Extension [(tested)](./test/driver/src/main.cpp#L33)
     * [ ] IRP_MJ_CREATE
     * [ ] IRP_MJ_CLOSE
     * [x] IRP_MJ_DEVICE_CONTROL [(tested)](./test/app/src/main.cpp#L77) [(tested)](./test/driver/src/main.cpp#L55)
