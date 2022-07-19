@@ -20,6 +20,8 @@ void test_all();
 // rpc server stub code
 #include "common/rpc.hpp"
 
+#include "common/test_device.h"
+
 ntl::status ntl::main(ntl::driver &driver, const std::wstring &registry_path) {
 
   KdBreakPoint();
@@ -33,45 +35,48 @@ ntl::status ntl::main(ntl::driver &driver, const std::wstring &registry_path) {
       std::cout << "constructor - val : " << val << '\n';
     }
     ~test_extension() { std::cout << "destroctor - val : " << val << '\n'; }
+
+    void inc() { val++; }
+
     int val;
   };
 
   auto test_dev =
-      driver.create_device<test_extension>(ntl::device::options()
-                                               .name(L"test_device")
+      driver.create_device<test_extension>(ntl::device_options()
+                                               .name(TEST_DEVICE_NAME)
                                                .type(FILE_DEVICE_UNKNOWN)
                                                .exclusive());
 
-  test_dev->extension<test_extension>().val = 100;
+  if (test_dev) {
+    test_dev->extension().val = 100;
+    test_dev->extension().inc();
 
-  test_dev->on_device_control([](uint32_t ctl_code, const uint8_t *in_buffer,
-                                 size_t in_buffer_length, uint8_t *out_buffer,
-                                 size_t *out_buffer_length) {
-#define TEST_DEVICE_CTL                                                        \
-  CTL_CODE(FILE_DEVICE_NTL_RPC, 0, METHOD_BUFFERED, FILE_ANY_ACCESS)
-    if (ctl_code == TEST_DEVICE_CTL) {
-      in_buffer;
-      in_buffer_length;
-    }
-    std::string actual(reinterpret_cast<const char *>(in_buffer),
-                       in_buffer_length);
-    if (actual != "hello")
-      std::cout << "[FAILED] expect : hello, actual : " << actual << '\n';
-
-    if (out_buffer) {
-      strcpy_s(reinterpret_cast<char *>(out_buffer), *out_buffer_length,
-               "world");
-    } else {
-      std::cout << "[FAILED] out_buffer == null\n";
-    }
+    std::weak_ptr test_dev_weak = test_dev;
+    test_dev->on_device_control([test_dev_weak](
+                                    const ntl::device_control::code &code,
+                                    const ntl::device_control::in_buffer &in,
+                                    ntl::device_control::out_buffer &out) {
+      if (code == TEST_DEVICE_CTL) {
+        if (auto test_dev = test_dev_weak.lock())
+          test_dev->extension().val--;
+        std::string actual(reinterpret_cast<const char *>(in.ptr), in.size);
+        if (actual != "hello")
+          std::cout << "[FAILED] expect : hello, actual : " << actual << '\n';
+        if (out.ptr) {
+          strcpy_s(reinterpret_cast<char *>(out.ptr), out.size, "world");
+        } else {
+          std::cout << "[FAILED] out_buffer == null\n";
+        }
+      }
+    });
+  }
+  driver.on_unload([registry_path, test_dev,
+                    rpc_svr = test_rpc::init(driver)]() mutable {
+    if (test_dev)
+      std::wcout << L"delete device :" << test_dev->name() << " - "
+                 << test_dev->extension().val << L'\n';
+    std::wcout << L"unload driver (registry_path :" << registry_path << L")\n";
   });
-
-  driver.on_unload(
-      [registry_path, test_dev, rpc_svr = test_rpc::init(driver)]() {
-        if (test_dev)
-          std::wcout << L"delete device :" << test_dev->name() << L'\n';
-        std::wcout << L"unload (registry_path :" << registry_path << L")\n";
-      });
 
   testing::InitGoogleTest();
   return RUN_ALL_TESTS() == 0 ? status::ok() : status(STATUS_UNSUCCESSFUL);

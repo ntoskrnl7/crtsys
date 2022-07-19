@@ -24,43 +24,85 @@ std::unique_ptr<ntl::driver> this_driver;
 namespace ntl {
 class device_dispatch_invoker {
 public:
-  static status invoke(ntl::device &device, PIRP irp) {
-    auto ctx = device.get_context<void>();
-    NTSTATUS Status = STATUS_INVALID_DEVICE_REQUEST;
+  static status invoke(PDEVICE_OBJECT device_object, PIRP irp) noexcept {
+    NTSTATUS status = STATUS_INVALID_DEVICE_REQUEST;
     irp->IoStatus.Information = 0;
-    PIO_STACK_LOCATION irp_sp = IoGetCurrentIrpStackLocation(irp);
-    switch (irp_sp->MajorFunction) {
-    case IRP_MJ_CREATE:
-      if (ctx->on_device_control)
-        Status = STATUS_SUCCESS;
-      break;
-    case IRP_MJ_CLOSE:
-      if (ctx->on_device_control)
-        Status = STATUS_SUCCESS;
-      break;
-    case IRP_MJ_DEVICE_CONTROL:
-      if (ctx->on_device_control) {
-        __try {
-          irp->IoStatus.Information =
-              irp_sp->Parameters.DeviceIoControl.OutputBufferLength;
-          size_t out_len = (size_t)irp->IoStatus.Information;
-          ctx->on_device_control(
-              irp_sp->Parameters.DeviceIoControl.IoControlCode,
-              (const uint8_t *)irp->AssociatedIrp.SystemBuffer,
-              (size_t)irp_sp->Parameters.DeviceIoControl.InputBufferLength,
-              (uint8_t *)irp->AssociatedIrp.SystemBuffer, &out_len);
-          irp->IoStatus.Information = (ULONG_PTR)out_len;
-          Status = STATUS_SUCCESS;
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-          Status = GetExceptionCode();
-          irp->IoStatus.Information = 0;
+    auto dispatcher = this_driver->dispatchers(device_object);
+    if (dispatcher) {
+      PIO_STACK_LOCATION irp_sp = IoGetCurrentIrpStackLocation(irp);
+      switch (irp_sp->MajorFunction) {
+      case IRP_MJ_CREATE:
+      case IRP_MJ_CLOSE:
+        if (dispatcher->on_device_control)
+          status = STATUS_SUCCESS;
+        break;
+      case IRP_MJ_DEVICE_CONTROL:
+        if (dispatcher->on_device_control) {
+          auto ret = ntl::seh::try_except([&]() {
+            const void *in_buf_ptr;
+            void *out_buf_ptr;
+            size_t out_len =
+                irp_sp->Parameters.DeviceIoControl.OutputBufferLength;
+            try {
+              switch (METHOD_FROM_CTL_CODE(
+                  irp_sp->Parameters.DeviceIoControl.IoControlCode)) {
+              case METHOD_BUFFERED:
+                in_buf_ptr = irp->AssociatedIrp.SystemBuffer;
+                out_buf_ptr = irp->AssociatedIrp.SystemBuffer;
+                break;
+              case METHOD_IN_DIRECT:
+              case METHOD_OUT_DIRECT:
+                in_buf_ptr = reinterpret_cast<const uint8_t *>(
+                    irp->AssociatedIrp.SystemBuffer);
+                out_buf_ptr =
+                    reinterpret_cast<uint8_t *>(MmGetSystemAddressForMdlSafe(
+                        irp->MdlAddress, NormalPagePriority));
+                break;
+              case METHOD_NEITHER: {
+                ProbeForRead(
+                    irp_sp->Parameters.DeviceIoControl.Type3InputBuffer,
+                    irp_sp->Parameters.DeviceIoControl.InputBufferLength,
+                    sizeof(UCHAR));
+                in_buf_ptr =
+                    irp_sp->Parameters.DeviceIoControl.Type3InputBuffer;
+                out_buf_ptr = irp->UserBuffer;
+                break;
+              }
+              default:
+                throw ntl::exception(STATUS_INVALID_DEVICE_REQUEST,
+                                     "Invalid control code method");
+                break;
+              }
+
+              device_control::code code(
+                  irp_sp->Parameters.DeviceIoControl.IoControlCode);
+              device_control::in_buffer in_buf(
+                  in_buf_ptr,
+                  irp_sp->Parameters.DeviceIoControl.InputBufferLength);
+              device_control::out_buffer out_buf(out_buf_ptr, out_len);
+              dispatcher->on_device_control(code, in_buf, out_buf);
+              status = STATUS_SUCCESS;
+              irp->IoStatus.Information = (ULONG_PTR)out_buf.size;
+
+            } catch (const ntl::exception &e) {
+              status = e.get_status();
+              irp->IoStatus.Information = 0;
+            } catch (const std::exception &) {
+            }
+          });
+          if (!std::get<0>(ret)) {
+            status = std::get<1>(ret);
+            irp->IoStatus.Information = 0;
+          }
         }
+        break;
+      default:
+        break;
       }
-      break;
     }
-    irp->IoStatus.Status = Status;
+    irp->IoStatus.Status = status;
     IoCompleteRequest(irp, IO_NO_INCREMENT);
-    return Status;
+    return status;
   }
 };
 } // namespace ntl
@@ -169,11 +211,8 @@ CrtSysDispatchRoutine (
 {
 #if CRTSYS_USE_NTL_MAIN
   // clang-format on
-  if (this_driver) {
-    auto dev = this_driver->devices(DeviceObject);
-    if (dev)
-      return ntl::device_dispatch_invoker::invoke(*dev.get(), Irp);
-  }
+  if (this_driver)
+    return ntl::device_dispatch_invoker::invoke(DeviceObject, Irp);
 #else
   PIO_STACK_LOCATION IrpSp = IoGetCurrentIrpStackLocation(Irp);
   switch (IrpSp->MajorFunction) {
@@ -181,7 +220,6 @@ CrtSysDispatchRoutine (
     if (CrtsyspDispatchCreate)
       return CrtsyspDispatchCreate(DeviceObject, Irp);
     break;
-
   case IRP_MJ_CLOSE:
     if (CrtsyspDispatchClose)
       return CrtsyspDispatchClose(DeviceObject, Irp);

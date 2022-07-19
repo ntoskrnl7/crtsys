@@ -14,15 +14,34 @@
 #include <string>
 
 namespace ntl {
-class except : public std::exception {
+class exception : public std::exception {
 public:
-  explicit except(NTSTATUS status, const std::string &message)
+  explicit exception(NTSTATUS status, const std::string &message)
       : status_(status), message_(message) {}
-  explicit except(status status, const std::string &message)
+  explicit exception(status status, const std::string &message)
       : status_(status), message_(message) {}
+
+  const status &get_status() const { return status_; }
 
 private:
   status status_;
   std::string message_;
 };
+
+namespace seh {
+template <class Fn, class... Args>
+inline std::tuple<bool, unsigned long> try_except(Fn &&f, Args &&... args) {
+  auto code = [&]() -> unsigned long {
+    __try {
+      f(std::forward<Args>(args)...);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+      return GetExceptionCode();
+    }
+    return 0;
+  }();
+  if (code)
+    return {false, code};
+  return {true, 0};
+}
+} // namespace seh
 } // namespace ntl

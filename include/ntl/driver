@@ -27,7 +27,7 @@
 namespace ntl {
 namespace detail {
 namespace driver {
-inline ntl::except make_exception(NTSTATUS status) {
+inline ntl::exception make_exception(NTSTATUS status) {
   const char *message;
   switch (status) {
   case STATUS_INSUFFICIENT_RESOURCES:
@@ -40,7 +40,7 @@ inline ntl::except make_exception(NTSTATUS status) {
     message = "Unknown error.";
     break;
   }
-  return std::move(ntl::except(status, message));
+  return ntl::exception(status, message);
 }
 } // namespace driver
 } // namespace detail
@@ -48,6 +48,7 @@ inline ntl::except make_exception(NTSTATUS status) {
 class driver {
   friend class driver_initializer;
   friend class driver_unload_invoker;
+  friend class device_dispatch_invoker;
 
 private:
   driver(PDRIVER_OBJECT driver)
@@ -57,14 +58,12 @@ private:
 public:
   using unload_routine = std::function<void()>;
 
-  using devcie_control_routine = std::function<void(
-      uint32_t, const uint8_t *, size_t, uint8_t *, size_t *)>;
-
   template <typename Extension>
-  std::shared_ptr<device> create_device(device::options &opts) {
+  std::shared_ptr<device<Extension>> create_device(device_options &opts) {
     PDEVICE_OBJECT dev = NULL;
     status s = [&dev, &opts, this]() {
-      ULONG extension_size = (ULONG)sizeof(device::context<Extension>);
+      ULONG extension_size =
+          (ULONG)sizeof(detail::device_extension_data<Extension>);
       if (opts.name_.empty()) {
         return IoCreateDevice(object_, extension_size, NULL, opts.type_, 0,
                               opts.exclusive_, &dev);
@@ -77,14 +76,12 @@ public:
     if (s.is_err())
       throw detail::driver::make_exception(s);
 
-    new (dev->DeviceExtension) device::context<Extension>();
+    new (dev->DeviceExtension) detail::device_extension_data<Extension>();
 
-    auto ptr = std::make_shared<device>(std::move(device(dev, opts, [dev]() {
-      reinterpret_cast<device::context<Extension> *>(dev->DeviceExtension)
-          ->~context();
-    })));
-    devices_.insert({dev, ptr});
+    auto ptr =
+        std::make_shared<device<Extension>>(device<Extension>(dev, opts));
 
+    dispatchers_.insert({dev, &ptr->dispatchers()});
     ClearFlag(dev->Flags, DO_DEVICE_INITIALIZING);
 
     return ptr;
@@ -92,28 +89,21 @@ public:
 
   void on_unload(unload_routine &&f) { unload_routine_ = f; }
 
-  std::shared_ptr<device> devices(PDEVICE_OBJECT ptr) noexcept {
+  const std::wstring &name() const { return name_; }
+
+protected:
+  detail::device_dispatchers *dispatchers(PDEVICE_OBJECT ptr) noexcept {
     try {
-      return devices_[ptr];
+      return dispatchers_[ptr];
     } catch (...) {
       return nullptr;
     }
-  };
-
-  std::vector<std::shared_ptr<device>> devices() {
-    std::vector<std::shared_ptr<device>> vec;
-    std::transform(devices_.begin(), devices_.end(), vec.end(),
-                   [](auto &item) { return item.second; });
-    return vec;
   }
-
-  const std::wstring &name() const { return name_; }
 
 private:
   PDRIVER_OBJECT object_;
   std::wstring name_;
-
-  std::unordered_map<PDEVICE_OBJECT, std::shared_ptr<device>> devices_;
+  std::unordered_map<PDEVICE_OBJECT, detail::device_dispatchers *> dispatchers_;
   unload_routine unload_routine_;
 };
 
