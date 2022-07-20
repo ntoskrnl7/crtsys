@@ -51,47 +51,43 @@ using dispatch_fn = std::function<void(const device_control::code &,
 } // namespace ntl
 
 namespace ntl {
-
 namespace detail {
-
-struct device_dispatchers {
+namespace device {
+struct dispatchers_t {
   device_control::dispatch_fn on_device_control;
 };
 
-template <typename Extension> struct device_extension_data;
+template <typename Extension> struct extension_data_t;
 
-template <> struct device_extension_data<void> {
-  device_dispatchers dispatchers;
-};
+template <> struct extension_data_t<void> { dispatchers_t dispatchers; };
 
-template <typename Extension> struct device_extension_data {
-  device_dispatchers dispatchers;
+template <typename Extension> struct extension_data_t {
+  dispatchers_t dispatchers;
   Extension data;
 };
 
-template <typename T> class device_extension;
+template <typename T> class extension_t;
 
-template <> class device_extension<void> {
+template <> class extension_t<void> {
 public:
-  device_extension() : device_(nullptr) {}
-  device_extension(PDEVICE_OBJECT device) : device_(device) {}
+  extension_t() : device_(nullptr) {}
+  extension_t(PDEVICE_OBJECT device) : device_(device) {}
 
-  detail::device_extension_data<void> *get_context() {
-    return reinterpret_cast<detail::device_extension_data<void> *>(
-        device_->DeviceExtension);
+  extension_data_t<void> *get_context() {
+    return reinterpret_cast<extension_data_t<void> *>(device_->DeviceExtension);
   }
 
 private:
   PDEVICE_OBJECT device_;
 };
 
-template <typename Extension> class device_extension {
+template <typename Extension> class extension_t {
 public:
-  device_extension() : device_(nullptr) {}
-  device_extension(PDEVICE_OBJECT device) : device_(device) {}
+  extension_t() : device_(nullptr) {}
+  extension_t(PDEVICE_OBJECT device) : device_(device) {}
 
-  detail::device_extension_data<Extension> *get_context() {
-    return reinterpret_cast<detail::device_extension_data<Extension> *>(
+  extension_data_t<Extension> *get_context() {
+    return reinterpret_cast<extension_data_t<Extension> *>(
         device_->DeviceExtension);
   }
 
@@ -100,6 +96,7 @@ public:
 private:
   PDEVICE_OBJECT device_;
 };
+} // namespace device
 } // namespace detail
 
 using device_type = DEVICE_TYPE;
@@ -125,22 +122,22 @@ public:
 
   const std::wstring &name() const { return name_; }
   device_type type() const { return type_; }
-  bool exclusive() const { return exclusive_; }
+  bool is_exclusive() const { return exclusive_; }
 
 private:
-  bool exclusive_;
   std::wstring name_;
   device_type type_;
+  bool exclusive_;
 };
 
 template <typename Extension>
-class device : public detail::device_extension<Extension> {
+class device : public detail::device::extension_t<Extension> {
   friend class device_dispatch_invoker;
   friend class driver;
 
 protected:
   device(PDEVICE_OBJECT device, const device_options &opts)
-      : detail::device_extension<Extension>(device), object_(device),
+      : detail::device::extension_t<Extension>(device), object_(device),
         name_(opts.name()) {}
 
 private:
@@ -149,7 +146,8 @@ private:
 public:
   device() : object_(nullptr) {}
 
-  device(device &&other) : detail::device_extension<Extension>(other.object_) {
+  device(device &&other)
+      : detail::device::extension_t<Extension>(other.object_) {
     *this = std::move(other);
   }
 
@@ -163,16 +161,15 @@ public:
     auto obj = detach();
     if (obj) {
       if (obj->DeviceExtension)
-        reinterpret_cast<detail::device_extension_data<Extension> *>(
-            obj->DeviceExtension)
-            ->~device_extension_data();
+        detail::device::extension_t<Extension>::get_context()
+            ->~extension_data_t();
       IoDeleteDevice(obj);
     }
   }
 
 protected:
-  detail::device_dispatchers &dispatchers() {
-    return detail::device_extension<Extension>::get_context()->dispatchers;
+  detail::device::dispatchers_t &dispatchers() {
+    return detail::device::extension_t<Extension>::get_context()->dispatchers;
   }
 
 public:

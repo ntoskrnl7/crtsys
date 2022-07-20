@@ -63,7 +63,7 @@ public:
     PDEVICE_OBJECT dev = NULL;
     status s = [&dev, &opts, this]() {
       ULONG extension_size =
-          (ULONG)sizeof(detail::device_extension_data<Extension>);
+          (ULONG)sizeof(detail::device::extension_data_t<Extension>);
       if (opts.name_.empty()) {
         return IoCreateDevice(object_, extension_size, NULL, opts.type_, 0,
                               opts.exclusive_, &dev);
@@ -76,7 +76,7 @@ public:
     if (s.is_err())
       throw detail::driver::make_exception(s);
 
-    new (dev->DeviceExtension) detail::device_extension_data<Extension>();
+    new (dev->DeviceExtension) detail::device::extension_data_t<Extension>();
 
     auto ptr =
         std::make_shared<device<Extension>>(device<Extension>(dev, opts));
@@ -92,7 +92,7 @@ public:
   const std::wstring &name() const { return name_; }
 
 protected:
-  detail::device_dispatchers *dispatchers(PDEVICE_OBJECT ptr) noexcept {
+  detail::device::dispatchers_t *dispatchers(PDEVICE_OBJECT ptr) noexcept {
     try {
       return dispatchers_[ptr];
     } catch (...) {
@@ -103,7 +103,8 @@ protected:
 private:
   PDRIVER_OBJECT object_;
   std::wstring name_;
-  std::unordered_map<PDEVICE_OBJECT, detail::device_dispatchers *> dispatchers_;
+  std::unordered_map<PDEVICE_OBJECT, detail::device::dispatchers_t *>
+      dispatchers_;
   unload_routine unload_routine_;
 };
 
