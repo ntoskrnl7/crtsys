@@ -143,16 +143,16 @@ Provides features to support a better development environment in the kernel.
 * ntl::driver
   * Class for DRIVER_OBJECT
   * Features
-    * [x] DriverUnload [(tested)](./test/driver/src/main.cpp#L30)
-    * [x] Create device [(tested)](./test/driver/src/main.cpp#L39)
+    * [x] DriverUnload [(tested)](./test/driver/src/main.cpp#L73)
+    * [x] Create device [(tested)](./test/driver/src/main.cpp#L44)
 * ntl::device
   * Class for DEVICE_OBJECT
   * Features
-    * [x] Device Extension [(tested)](./test/driver/src/main.cpp#L39)
+    * [x] Device Extension [(tested)](./test/driver/src/main.cpp#L33)
     * [ ] IRP_MJ_CREATE
     * [ ] IRP_MJ_CLOSE
-    * [x] IRP_MJ_DEVICE_CONTROL [(tested)](./test/app/src/main.cpp#L77) [(tested)](./test/driver/src/main.cpp#L47)
-* ntl::driver_main [(tested)](./test/driver/src/main.cpp#L22)
+    * [x] IRP_MJ_DEVICE_CONTROL [(tested)](./test/app/src/main.cpp#L77) [(tested)](./test/driver/src/main.cpp#L55)
+* ntl::driver_main [(tested)](./test/driver/src/main.cpp#L25)
   * Driver entry point for C++.
   * Called by expanding the stack to its maximum size with the ntl::expand_stack function.
 * ntl::rpc
@@ -281,7 +281,7 @@ If the SDK and WDK versions are different, builds are more likely to fail. **If 
         include(cmake/CPM.cmake)
 
         set(CRTSYS_NTL_MAIN ON) # use ntl::main
-        CPMAddPackage("gh:ntoskrnl7/crtsys@0.1.7")
+        CPMAddPackage("gh:ntoskrnl7/crtsys@0.1.8")
         include(${crtsys_SOURCE_DIR}/cmake/CrtSys.cmake)
 
         # add driver

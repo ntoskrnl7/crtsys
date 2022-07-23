@@ -43,14 +43,16 @@ public:
       if (!::DeviceIoControl(handle_, NTL_RPC_DEVICE_CTL(index),
                              in_buffer.empty() ? NULL : &in_buffer[0],
                              (DWORD)in_buffer.size(), NULL, 0, &returned, NULL))
-        throw std::runtime_error("failed to DeviceIoControl");
+        throw std::runtime_error("failed to DeviceIoControl (index : " +
+                                 std::to_string(index) + ")");
     } else {
       std::vector<uint8_t> out_buffer(out_buffer_size_);
       if (!::DeviceIoControl(handle_, NTL_RPC_DEVICE_CTL(index),
                              in_buffer.empty() ? NULL : &in_buffer[0],
                              (DWORD)in_buffer.size(), &out_buffer[0],
                              (DWORD)out_buffer.size(), &returned, NULL))
-        throw std::runtime_error("failed to DeviceIoControl");
+        throw std::runtime_error("failed to DeviceIoControl (index : " +
+                                 std::to_string(index) + ")");
       zpp::serializer::memory_input_archive in(out_buffer);
       Ret rv;
       in(rv);

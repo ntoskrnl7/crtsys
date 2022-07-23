@@ -74,9 +74,11 @@ TEST(ntl_rpc_client, invoke_callback_by_symbol) {
   EXPECT_EQ(test_point_class_ret.get_y(), 1);
 }
 
+#include "common/test_device.h"
+
 TEST(ntl_device, device_io_control) {
   HANDLE hDevice = CreateFileW(
-      L"\\\\?\\Global\\GLOBALROOT\\Device\\test_device",
+      L"\\\\?\\Global\\GLOBALROOT\\Device\\" TEST_DEVICE_NAME,
       GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
   EXPECT_NE(hDevice, INVALID_HANDLE_VALUE);
 
@@ -84,10 +86,8 @@ TEST(ntl_device, device_io_control) {
     DWORD bytes_returned;
     char buffer[sizeof("world")];
 
-    EXPECT_TRUE(DeviceIoControl(
-        hDevice,
-        CTL_CODE(FILE_DEVICE_NTL_RPC, 0, METHOD_BUFFERED, FILE_ANY_ACCESS),
-        "hello", 5, buffer, sizeof("world"), &bytes_returned, NULL));
+    EXPECT_TRUE(DeviceIoControl(hDevice, TEST_DEVICE_CTL, "hello", 5, buffer,
+                                sizeof("world"), &bytes_returned, NULL));
 
     EXPECT_EQ(bytes_returned, sizeof("world"));
     EXPECT_STREQ(buffer, "world");

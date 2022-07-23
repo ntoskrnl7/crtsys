@@ -143,16 +143,16 @@ crtsys의 장점은 아래와 같습니다.
 * ntl::driver
   * DRIVER_OBJECT에 대한 클래스
   * 기능
-    * [x] DriverUnload [(tested)](../test/driver/src/main.cpp#L30)
-    * [x] Create device [(tested)](../test/driver/src/main.cpp#L39)
+    * [x] DriverUnload [(tested)](../test/driver/src/main.cpp#L73)
+    * [x] Create device [(tested)](../test/driver/src/main.cpp#L44)
 * ntl::device
   * DEVICE_OBJECT에 대한 클래스
   * Features
-    * [x] Device Extension [(tested)](../test/driver/src/main.cpp#L39)
+    * [x] Device Extension [(tested)](../test/driver/src/main.cpp#L33)
     * [ ] IRP_MJ_CREATE
     * [ ] IRP_MJ_CLOSE
-    * [x] IRP_MJ_DEVICE_CONTROL [(tested)](../test/app/src/main.cpp#L77) [(tested)](../test/driver/src/main.cpp#L47)
-* ntl::driver_main [(tested)](../test/driver/src/main.cpp#L22)
+    * [x] IRP_MJ_DEVICE_CONTROL [(tested)](../test/app/src/main.cpp#L77) [(tested)](../test/driver/src/main.cpp#L55)
+* ntl::driver_main [(tested)](../test/driver/src/main.cpp#L25)
   * C++ 용 드라이버 진입점
   * ntl::expand_stack 함수로 스택을 최대 크기로 확장하여 호출됩니다.
 * ntl::rpc
@@ -281,7 +281,7 @@ SDK와 WDK의 버전이 다르면 빌드가 실패할 가능성이 높으므로 
         include(cmake/CPM.cmake)
 
         set(CRTSYS_NTL_MAIN ON) # use ntl::main
-        CPMAddPackage("gh:ntoskrnl7/crtsys@0.1.7")
+        CPMAddPackage("gh:ntoskrnl7/crtsys@0.1.8")
         include(${crtsys_SOURCE_DIR}/cmake/CrtSys.cmake)
 
         # add driver

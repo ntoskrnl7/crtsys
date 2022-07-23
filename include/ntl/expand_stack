@@ -111,7 +111,7 @@ constexpr decltype(auto) apply(F &&f, Tuple &&t) {
 
 namespace detail {
 namespace expand_stack {
-inline ntl::except make_exception(NTSTATUS status) {
+inline ntl::exception make_exception(NTSTATUS status) {
   const char *message;
   switch (status) {
   case STATUS_INVALID_PARAMETER_3:
@@ -132,7 +132,7 @@ inline ntl::except make_exception(NTSTATUS status) {
     message = "Unknown error.";
     break;
   }
-  return std::move(ntl::except(status, message));
+  return std::move(ntl::exception(status, message));
 }
 } // namespace expand_stack
 } // namespace detail

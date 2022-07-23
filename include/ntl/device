@@ -18,66 +18,127 @@
 #endif
 
 namespace ntl {
-class device {
-  friend class device_dispatch_invoker;
+namespace device_control {
+struct code {
+  code(ULONG code) : value(code) {}
 
+  auto device_type() const { return DEVICE_TYPE_FROM_CTL_CODE(value); }
+  auto method() const { return METHOD_FROM_CTL_CODE(value); }
+  auto function() const { return IoGetFunctionCodeFromCtlCode(value); }
+  bool operator==(const code &rhs) const { return value == rhs.value; }
+  bool operator==(ULONG rhs) const { return value == rhs; }
+  bool operator==(int rhs) const { return value == static_cast<ULONG>(rhs); }
+
+  ULONG value;
+};
+
+struct in_buffer {
+  in_buffer(const void *ptr, size_t size) : ptr(ptr), size(size) {}
+  const void *ptr;
+  size_t size;
+};
+
+struct out_buffer {
+  out_buffer(void *ptr, size_t size) : ptr(ptr), size(size) {}
+  void *ptr;
+  size_t size;
+};
+
+using dispatch_fn = std::function<void(const device_control::code &,
+                                       const device_control::in_buffer &,
+                                       device_control::out_buffer &)>;
+} // namespace device_control
+} // namespace ntl
+
+namespace ntl {
+namespace detail {
+namespace device {
+struct dispatchers_t {
+  device_control::dispatch_fn on_device_control;
+};
+
+template <typename Extension> struct extension_data_t;
+
+template <> struct extension_data_t<void> { dispatchers_t dispatchers; };
+
+template <typename Extension> struct extension_data_t {
+  dispatchers_t dispatchers;
+  Extension data;
+};
+
+template <typename T> class extension_t;
+
+template <> class extension_t<void> {
 public:
-  using on_device_control_fn = std::function<void(uint32_t, const uint8_t *,
-                                                  size_t, uint8_t *, size_t *)>;
+  extension_t() : device_(nullptr) {}
+  extension_t(PDEVICE_OBJECT device) : device_(device) {}
+
+  extension_data_t<void> *get_context() {
+    return reinterpret_cast<extension_data_t<void> *>(device_->DeviceExtension);
+  }
 
 private:
+  PDEVICE_OBJECT device_;
+};
+
+template <typename Extension> class extension_t {
+public:
+  extension_t() : device_(nullptr) {}
+  extension_t(PDEVICE_OBJECT device) : device_(device) {}
+
+  extension_data_t<Extension> *get_context() {
+    return reinterpret_cast<extension_data_t<Extension> *>(
+        device_->DeviceExtension);
+  }
+
+  Extension &extension() { return get_context()->data; }
+
+private:
+  PDEVICE_OBJECT device_;
+};
+} // namespace device
+} // namespace detail
+
+using device_type = DEVICE_TYPE;
+
+class device_options {
   friend class driver;
 
-  struct context_base {
-    context_base(const std::type_info &type) : type(type) {}
-    const std::type_info &type;
-    on_device_control_fn on_device_control;
-  };
-
-  template <typename T> class context;
-
-  template <> struct context<void> : public context_base {
-    context() : context_base(typeid(void)) {}
-  };
-
-  template <typename T> struct context : public context_base {
-    context() : context_base(typeid(T)) {}
-    T data;
-  };
-
 public:
-  using type_t = DEVICE_TYPE;
+  device_options() : type_(FILE_DEVICE_UNKNOWN), exclusive_(false) {}
 
-  class options {
-    friend class driver;
-    friend class device;
+  device_options &name(const std::wstring &name) {
+    name_ = name;
+    return *this;
+  }
+  device_options &type(device_type type) {
+    type_ = type;
+    return *this;
+  }
+  device_options &exclusive(bool exclusive = true) {
+    exclusive_ = exclusive;
+    return *this;
+  }
 
-  public:
-    options() : type_(FILE_DEVICE_UNKNOWN), exclusive_(false) {}
+  const std::wstring &name() const { return name_; }
+  device_type type() const { return type_; }
+  bool is_exclusive() const { return exclusive_; }
 
-    options &name(const std::wstring &name) {
-      name_ = name;
-      return *this;
-    }
-    options &type(type_t type) {
-      type_ = type;
-      return *this;
-    }
-    options &exclusive(bool exclusive = true) {
-      exclusive_ = exclusive;
-      return *this;
-    }
+private:
+  std::wstring name_;
+  device_type type_;
+  bool exclusive_;
+};
 
-  private:
-    bool exclusive_;
-    std::wstring name_;
-    type_t type_;
-  };
+template <typename Extension>
+class device : public detail::device::extension_t<Extension> {
+  friend class device_dispatch_invoker;
+  friend class driver;
 
 protected:
-  device(PDEVICE_OBJECT device, const options &opts,
-         std::function<void()> finalizer)
-      : object_(device), name_(opts.name_), finalizer_(finalizer) {}
+  device(PDEVICE_OBJECT device, const device_options &opts)
+      : detail::device::extension_t<Extension>(device), object_(device),
+        name_(opts.name()) {}
 
 private:
   device(const device &) = delete;
@@ -85,39 +146,35 @@ private:
 public:
   device() : object_(nullptr) {}
 
-  device(device &&other) { *this = std::move(other); }
+  device(device &&other)
+      : detail::device::extension_t<Extension>(other.object_) {
+    *this = std::move(other);
+  }
 
   device &operator=(device &&rhs) {
     object_ = rhs.detach();
     name_.swap(rhs.name_);
-    finalizer_ = std::move(rhs.finalizer_);
     return *this;
   }
 
   ~device() {
     auto obj = detach();
     if (obj) {
-      if (finalizer_)
-        finalizer_();
+      if (obj->DeviceExtension)
+        detail::device::extension_t<Extension>::get_context()
+            ->~extension_data_t();
       IoDeleteDevice(obj);
     }
   }
 
-private:
-  template <typename Extension> context<Extension> *get_context() {
-    return reinterpret_cast<context<Extension> *>(object_->DeviceExtension);
+protected:
+  detail::device::dispatchers_t &dispatchers() {
+    return detail::device::extension_t<Extension>::get_context()->dispatchers;
   }
 
 public:
-  template <typename Extension> Extension &extension() {
-    auto ext = get_context<Extension>();
-    if (ext->type != typeid(Extension))
-      throw std::runtime_error("bad type");
-    return ext->data;
-  }
-
-  device &on_device_control(on_device_control_fn &&f) {
-    get_context<void>()->on_device_control = f;
+  device &on_device_control(device_control::dispatch_fn &&f) {
+    dispatchers().on_device_control = f;
     return *this;
   }
 
@@ -127,7 +184,7 @@ public:
     return name_;
   }
 
-  type_t type() const {
+  device_type type() const {
     if (!object_)
       throw std::runtime_error("invalid device object.");
     return object_->DeviceType;
@@ -141,6 +198,5 @@ public:
 private:
   PDEVICE_OBJECT object_;
   std::wstring name_;
-  std::function<void()> finalizer_;
 };
 } // namespace ntl

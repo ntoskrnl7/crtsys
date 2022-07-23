@@ -25,15 +25,9 @@ private:
 
 NTL_RPC_BEGIN(test_rpc)
 
-NTL_ADD_CALLBACK_1(test_rpc, int, test_inc, int, i, {
-  i = i;
-  return i + 1;
-})
+NTL_ADD_CALLBACK_1(test_rpc, int, test_inc, int, i, { return i + 1; })
 
-NTL_ADD_CALLBACK_1(test_rpc, int, test_dec, int, i, {
-  i = i;
-  return i - 1;
-})
+NTL_ADD_CALLBACK_1(test_rpc, int, test_dec, int, i, { return i - 1; })
 
 NTL_ADD_CALLBACK_2(test_rpc, int, test_sum, int, a, int, b, { return a + b; })
 
