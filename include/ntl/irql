@@ -23,7 +23,9 @@ enum irql : KIRQL {
 #endif
   clock = CLOCK_LEVEL,
   ipi = IPI_LEVEL,
+#if !defined(_X86_) 
   drs = DRS_LEVEL,
+#endif  
   power = POWER_LEVEL,
   profile = PROFILE_LEVEL,
 #if defined(_X86_)
