@@ -1,0 +1,285 @@
+﻿
+/**
+ * @file resource
+ * @author jungkwang.lee (ntoskrnl7@google.com)
+ * @brief ERESOURCE Helper features.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authoers.
+ *
+ */
+
+#ifndef _NTDDK_
+#include <wdm.h>
+#endif
+
+#include <shared_mutex>
+
+namespace ntl {
+namespace detail {
+namespace resource {
+extern NPAGED_LOOKASIDE_LIST lookaside;
+} // namespace resource
+} // namespace detail
+
+class resource {
+  friend class unique_lock<resource>;
+
+public:
+  resource() {
+    res_ = reinterpret_cast<PERESOURCE>(
+        ExAllocateFromNPagedLookasideList(&detail::resource::lookaside));
+    if (res_)
+      ExInitializeResourceLite(res_);
+  }
+
+  ~resource() {
+    if (res_) {
+      ExDeleteResourceLite(res_);
+      ExFreeToNPagedLookasideList(&detail::resource::lookaside, res_);
+    }
+  }
+
+  resource(const resource &) = delete;
+  resource &operator=(const resource &) = delete;
+
+  _NODISCARD bool try_lock() {
+    if (res_ == NULL)
+      return false;
+    KeEnterCriticalRegion();
+    bool locked = ExAcquireResourceExclusiveLite(res_, FALSE) == TRUE;
+    if (!locked)
+      KeLeaveCriticalRegion();
+    return locked;
+  }
+
+  _NODISCARD bool try_lock_shared() {
+    if (res_ == NULL)
+      return false;
+    KeEnterCriticalRegion();
+    bool locked = ExAcquireResourceSharedLite(res_, FALSE) == TRUE;
+    if (!locked)
+      KeLeaveCriticalRegion();
+    return locked;
+  }
+
+  void lock() {
+    KeEnterCriticalRegion();
+    ExAcquireResourceExclusiveLite(res_, TRUE);
+  }
+
+  void unlock() {
+    ExReleaseResourceLite(res_);
+    KeLeaveCriticalRegion();
+  }
+
+  void lock_shared() {
+    KeEnterCriticalRegion();
+    ExAcquireResourceSharedLite(res_, TRUE);
+  }
+
+  void unlock_shared() { unlock(); }
+
+  bool locked() const { return ExIsResourceAcquiredSharedLite(res_) == TRUE; }
+
+  bool locked_exclusive() const {
+    return ExIsResourceAcquiredExclusiveLite(res_) == TRUE;
+  }
+
+  bool locked_shared() const { return (!locked_exclusive()) && locked(); }
+
+  void lock_no_critical_region(bool wait = true) {
+    ExAcquireResourceExclusiveLite(res_, wait ? TRUE : FALSE);
+  }
+  void lock_shared_no_critical_region(bool wait = true) {
+    ExAcquireResourceSharedLite(res_, wait ? TRUE : FALSE);
+  }
+  void unlock_no_critical_region() { ExReleaseResourceLite(res_); }
+  void unlock_shared_no_critical_region() { unlock_no_critical_region(); }
+
+  void convert_to_shared() {
+    if (!locked_exclusive())
+      throw std::runtime_error("");
+    ExConvertExclusiveToSharedLite(res_);
+  }
+
+  size_t waiter_count() const {
+    return static_cast<size_t>(ExGetExclusiveWaiterCount(res_));
+  }
+
+  size_t shared_waiter_count() const {
+    return static_cast<size_t>(ExGetSharedWaiterCount(res_));
+  }
+
+  using native_handle_type = PERESOURCE;
+
+  _NODISCARD native_handle_type native_handle() { return res_; }
+
+private:
+  PERESOURCE res_;
+};
+
+struct adopt_critical_region_t {
+  explicit adopt_critical_region_t() = default;
+};
+
+_INLINE_VAR constexpr adopt_critical_region_t adopt_critical_region{};
+
+template <class Lockable> class unique_lock;
+template <class Lockable> class shared_lock;
+
+template <> class unique_lock<resource> : public std::unique_lock<resource> {
+  friend class shared_lock<resource>;
+
+public:
+  using lock_type = resource;
+  using type = std::unique_lock<lock_type>;
+  using type::type;
+
+  unique_lock() noexcept : lockable_(nullptr), owns_(false) {}
+
+  _NODISCARD_CTOR unique_lock(lock_type &lockable, std::adopt_lock_t)
+      : std::unique_lock<lock_type>(lockable, std::adopt_lock),
+        lockable_(nullptr), owns_(false) {
+  } // construct and assume already locked
+
+  unique_lock(lock_type &lockable, std::defer_lock_t) noexcept
+      : std::unique_lock<lock_type>(lockable, std::defer_lock),
+        lockable_(nullptr), owns_(false) {} // construct but don't lock
+
+  _NODISCARD_CTOR unique_lock(lock_type &lockable, std::try_to_lock_t)
+      : std::unique_lock<lock_type>(lockable, std::try_to_lock),
+        lockable_(nullptr), owns_(false) {} // construct and try to lock
+
+  _NODISCARD_CTOR unique_lock(lock_type &lockable, adopt_critical_region_t)
+      : std::unique_lock<lock_type>(lockable, std::defer_lock),
+        lockable_(std::addressof(lockable)), owns_(false) {
+    lockable.lock_no_critical_region();
+    owns_ = true;
+  } // construct but don't enter critical region
+
+  unique_lock &operator=(unique_lock &&other) {
+    if (this != _STD addressof(other)) {
+      if (owns_)
+        lockable_->unlock_no_critical_region();
+      else if (std::unique_lock<lock_type>::owns_lock())
+        std::unique_lock<lock_type>::unlock();
+      lockable_ = other.lockable_;
+      owns_ = other.owns_;
+      other.lockable_ = nullptr;
+      other.owns_ = false;
+      std::unique_lock<lock_type>::operator=(
+          std::forward<std::unique_lock<lock_type>>(other));
+    }
+    return *this;
+  }
+
+  ~unique_lock() noexcept {
+    if (owns_)
+      lockable_->unlock_no_critical_region();
+  }
+
+  unique_lock(const unique_lock &) = delete;
+  unique_lock &operator=(const unique_lock &) = delete;
+
+  _NODISCARD bool owns_lock() const noexcept {
+    if (owns_)
+      return true;
+    return type::owns_lock();
+  }
+
+  explicit operator bool() const noexcept {
+    if (owns_)
+      return true;
+    return type::owns_lock();
+  }
+
+protected:
+  bool owns_;
+  lock_type *lockable_;
+};
+
+template <> class shared_lock<resource> : public std::shared_lock<resource> {
+public:
+  using lock_type = resource;
+  using type = std::shared_lock<lock_type>;
+  using type::type;
+
+  shared_lock() noexcept : lockable_(nullptr), owns_(false) {}
+
+  _NODISCARD_CTOR explicit shared_lock(lock_type &lockable)
+      : lockable_(_STD addressof(lockable)),
+        owns_(true) { // construct with mutex and lock shared
+    lockable.lock_shared();
+  }
+
+  shared_lock(lock_type &lockable, std::defer_lock_t) noexcept
+      : std::shared_lock<lock_type>(lockable, std::defer_lock),
+        lockable_(_STD addressof(lockable)), owns_(false) {
+  } // construct with unlocked mutex
+
+  _NODISCARD_CTOR shared_lock(lock_type &lockable, std::try_to_lock_t)
+      : std::shared_lock<lock_type>(lockable, std::try_to_lock),
+        lockable_(_STD addressof(lockable)), owns_(lockable.try_lock_shared()) {
+  } // construct with mutex and try to lock shared
+
+  _NODISCARD_CTOR shared_lock(lock_type &lockable, std::adopt_lock_t)
+      : std::shared_lock<lock_type>(lockable, std::adopt_lock),
+        lockable_(_STD addressof(lockable)), owns_(true) {
+  } // construct with mutex and adopt ownership
+
+  _NODISCARD_CTOR shared_lock(lock_type &lockable, adopt_critical_region_t)
+      : std::shared_lock<lock_type>(lockable, std::defer_lock),
+        lockable_(std::addressof(lockable)), owns_(false) {
+    lockable.lock_shared_no_critical_region();
+    owns_ = true;
+  } // construct but don't enter critical region
+
+  _NODISCARD_CTOR shared_lock(unique_lock<lock_type> &lock)
+      : std::shared_lock<lock_type>(*lock.mutex(), std::defer_lock),
+        lockable_(lock.mutex()), owns_(false) {
+    lock.mutex()->convert_to_shared();
+    lock.owns_ = false;
+    owns_ = true;
+  } // construct with convert lock exclusive to lock shared
+
+  shared_lock &operator=(shared_lock &&other) {
+    if (this != _STD addressof(other)) {
+      if (owns_)
+        lockable_->unlock_no_critical_region();
+      else if (std::shared_lock<lock_type>::owns_lock())
+        std::shared_lock<lock_type>::unlock();
+      lockable_ = other.lockable_;
+      owns_ = other.owns_;
+      other.lockable_ = nullptr;
+      other.owns_ = false;
+      std::shared_lock<lock_type>::operator=(
+          std::forward<std::shared_lock<lock_type>>(other));
+    }
+    return *this;
+  }
+
+  ~shared_lock() noexcept {
+    if (owns_)
+      lockable_->unlock_shared_no_critical_region();
+  }
+
+  shared_lock(const shared_lock &) = delete;
+  shared_lock &operator=(const shared_lock &) = delete;
+
+  _NODISCARD bool owns_lock() const noexcept {
+    if (owns_)
+      return true;
+    return type::owns_lock();
+  }
+
+  explicit operator bool() const noexcept {
+    if (owns_)
+      return true;
+    return type::owns_lock();
+  }
+
+private:
+  bool owns_;
+  lock_type *lockable_;
+};
+} // namespace ntl

@@ -61,7 +61,11 @@ void run();
 //
 bool ntl_expand_stack_test();
 
-bool ntl_rpc();
+bool ntl_irql_test();
+
+bool ntl_spin_lock_test();
+
+bool ntl_resource_test();
 
 //
 // C Standard tests.
@@ -118,10 +122,18 @@ void ntl_test() {
   if (!ntl_expand_stack_test()) {
     std::cerr << "ntl_expand_stack_test failed\n";
   }
+  if (!ntl_irql_test()) {
+    std::cerr << "ntl_irql_test failed\n";
+  }
+  if (!ntl_spin_lock_test()) {
+    std::cerr << "ntl_spin_lock_test failed\n";
+  }
+  if (!ntl_resource_test()) {
+    std::cerr << "ntl_resource_test failed\n";
+  }
 }
 
 void test_all() {
-
   ntl_test();
 
   c_std_tests();

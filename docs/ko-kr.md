@@ -147,7 +147,7 @@ crtsys의 장점은 아래와 같습니다.
     * [x] Create device [(tested)](../test/driver/src/main.cpp#L44)
 * ntl::device
   * DEVICE_OBJECT에 대한 클래스
-  * Features
+  * 기능
     * [x] Device Extension [(tested)](../test/driver/src/main.cpp#L33)
     * [ ] IRP_MJ_CREATE
     * [ ] IRP_MJ_CLOSE
@@ -161,6 +161,25 @@ crtsys의 장점은 아래와 같습니다.
     * ntl::rpc::client [(tested)](../test/app/src/main.cpp#L4) [(tested)](../test/common/rpc.hpp)
       * 데이터 직렬화 부분을 직접 구현하기에는 시간이 부족하여 아래 프로젝트 내용을 참고했습니다. 감사합니다! :-)
         * [Eyal Z/zpp serializer](https://github.com/eyalz800/serializer)
+* ntl::irql
+  * KIRQL에 대한 클래스
+  * 클래스
+    * ntl::irql [(tested)](../test/driver/src/ntl.cpp#L46)
+  * 함수
+    * ntl::raise_irql [(tested)](../test/driver/src/ntl.cpp#L49)
+    * raise_irql_to_dpc_level [(tested)](../test/driver/src/ntl.cpp#L62)
+    * raise_irql_to_synch_level [(tested)](../test/driver/src/ntl.cpp#L71)
+* ntl::spin_lock
+  * KSPIN_LOCK에 대한 클래스
+  * 클래스
+    * ntl::spin_lock [(tested)](../test/driver/src/ntl.cpp#L80)
+    * ntl::unique_lock [(tested)](../test/driver/src/ntl.cpp#L99)
+* ntl::resource
+  * ERESOURCE에 대한 클래스
+  * 클래스
+    * ntl::resource [(tested)](../test/driver/src/ntl.cpp#L117)
+    * ntl::unique_lock [(tested)](../test/driver/src/ntl.cpp#L156)
+    * ntl::shared_lock [(tested)](../test/driver/src/ntl.cpp#L179)
 
 ## Requirements
 
@@ -187,7 +206,7 @@ crtsys의 장점은 아래와 같습니다.
   * 14.26.28801
   * 14.29.30133
   * 14.31.31103
-* Windows Kit (SDK, WDK)
+* Windows Kits (SDK, WDK)
   * 10.0.17763.0
   * 10.0.18362.0
   * 10.0.22000.0
@@ -281,7 +300,7 @@ SDK와 WDK의 버전이 다르면 빌드가 실패할 가능성이 높으므로 
         include(cmake/CPM.cmake)
 
         set(CRTSYS_NTL_MAIN ON) # use ntl::main
-        CPMAddPackage("gh:ntoskrnl7/crtsys@0.1.8")
+        CPMAddPackage("gh:ntoskrnl7/crtsys@0.1.9")
         include(${crtsys_SOURCE_DIR}/cmake/CrtSys.cmake)
 
         # add driver

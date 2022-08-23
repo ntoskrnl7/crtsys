@@ -1,0 +1,73 @@
+﻿/**
+ * @file irql
+ * @author jungkwang.lee (ntoskrnl7@google.com)
+ * @brief KIRQL Helper features.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authoers.
+ *
+ */
+
+#ifndef _NTDDK_
+#include <wdm.h>
+#endif
+
+namespace ntl {
+enum irql : KIRQL {
+  passive = PASSIVE_LEVEL,
+  low = passive,
+  apc = APC_LEVEL,
+  dispatch = DISPATCH_LEVEL,
+  dpc = dispatch,
+#if defined(_X86_) || defined(_AMD64_)
+  cmci = CMCI_LEVEL,
+#endif
+  clock = CLOCK_LEVEL,
+  ipi = IPI_LEVEL,
+  drs = DRS_LEVEL,
+  power = POWER_LEVEL,
+  profile = PROFILE_LEVEL,
+#if defined(_X86_)
+  clock1 = CLOCK1_LEVEL,
+  clock2 = CLOCK2_LEVEL,
+#endif
+  high = HIGH_LEVEL
+};
+
+struct to_dpc_level_t {
+  explicit to_dpc_level_t() = default;
+};
+
+struct to_synch_level_t {
+  explicit to_synch_level_t() = default;
+};
+
+_INLINE_VAR constexpr to_dpc_level_t to_dpc_level{};
+_INLINE_VAR constexpr to_synch_level_t to_synch_level{};
+
+class raised_irql {
+public:
+  raised_irql(to_dpc_level_t) : old_irql_(KeRaiseIrqlToDpcLevel()) {}
+  raised_irql(to_synch_level_t) : old_irql_(KeRaiseIrqlToSynchLevel()) {}
+  raised_irql(irql irql) { KeRaiseIrql(static_cast<KIRQL>(irql), &old_irql_); }
+
+  ~raised_irql() { KeLowerIrql(old_irql_); }
+
+  raised_irql(const raised_irql &) = delete;
+  raised_irql &operator=(const raised_irql &) = delete;
+
+  irql old() const { return static_cast<irql>(old_irql_); }
+
+private:
+  KIRQL old_irql_;
+};
+
+raised_irql raise_irql(KIRQL irql) {
+  return raised_irql{static_cast<ntl::irql>(irql)};
+}
+
+raised_irql raise_irql_to_dpc_level() { return raised_irql{to_dpc_level}; }
+
+raised_irql raise_irql_to_synch_level() { return raised_irql{to_synch_level}; }
+
+ntl::irql current_irql() { return static_cast<ntl::irql>(KeGetCurrentIrql()); }
+} // namespace ntl

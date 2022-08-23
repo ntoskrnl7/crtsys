@@ -46,7 +46,6 @@ ntl::status ntl::main(ntl::driver &driver, const std::wstring &registry_path) {
                                                .name(TEST_DEVICE_NAME)
                                                .type(FILE_DEVICE_UNKNOWN)
                                                .exclusive());
-
   if (test_dev) {
     test_dev->extension().val = 100;
     test_dev->extension().inc();
@@ -70,6 +69,7 @@ ntl::status ntl::main(ntl::driver &driver, const std::wstring &registry_path) {
       }
     });
   }
+
   driver.on_unload([registry_path, test_dev,
                     rpc_svr = test_rpc::init(driver)]() mutable {
     if (test_dev)
