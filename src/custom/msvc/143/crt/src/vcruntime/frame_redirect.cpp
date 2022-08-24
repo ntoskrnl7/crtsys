@@ -1,4 +1,11 @@
-#include <eh.h> 
+﻿//
+// MSVC\14.33.31629\include\eh.h
+// _VCRT_COMPILER_PREPROCESSOR가 1이면서 _VCRT_BUILD가 정의되어있어야 unexpected 함수가 정의됩니다.
+//
+#define _VCRT_COMPILER_PREPROCESSOR 1
+#define _VCRT_BUILD
+
+#include <eh.h>
 #include <ehassert.h> 
 #include <ehdata.h>
 #include <ehdata4.h>

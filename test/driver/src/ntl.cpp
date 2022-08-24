@@ -66,6 +66,12 @@ bool ntl_irql_test() {
     if (ntl::current_irql() != ntl::irql::dispatch)
       return false;
   }
+  old_irql = ntl::current_irql();
+  {
+    auto raised_irql = ntl::raise_irql_to_synch_level();
+    if (old_irql != raised_irql.old())
+      return false;
+  }
   return (ntl::current_irql() == old_irql);
 }
 
@@ -114,6 +120,8 @@ bool ntl_resource_test() {
     std::shared_lock lk(res);
     if (!lk.owns_lock())
       return false;
+    if (!res.locked())
+      return false;
     if (!res.locked_shared())
       return false;
 
@@ -123,15 +131,18 @@ bool ntl_resource_test() {
     if (res.locked_exclusive())
       return false;
   }
+  if (res.locked())
+    return false;
   if (res.locked_exclusive())
     return false;
-
   if (res.locked_shared())
     return false;
 
   ntl::resource res2;
   std::unique_lock lk3(res);
   if (!lk3.owns_lock())
+    return false;
+  if (!res.locked())
     return false;
   if (!res.locked_exclusive())
     return false;
@@ -142,15 +153,33 @@ bool ntl_resource_test() {
   if (res.locked_shared())
     return false;
 
-  std::shared_lock lk5(res2);
+  ntl::unique_lock<ntl::resource> lk5(res2, ntl::adopt_critical_region);
   if (!lk5.owns_lock())
+    return false;
+  if (!res2.locked())
+    return false;
+  if (!res2.locked_exclusive())
+    return false;
+  if (res2.locked_shared())
+    return false;
+
+  ntl::shared_lock<ntl::resource> lk6(lk5);
+  if (lk5.owns_lock())
+    return false;
+  if (!lk6.owns_lock())
+    return false;
+  if (!res2.locked())
     return false;
   if (!res2.locked_shared())
     return false;
+  if (res2.locked_exclusive())
+    return false;
 
   ntl::resource res3;
-  ntl::shared_lock<ntl::resource> lk6(res3, ntl::adopt_critical_region);
-  if (!lk6.owns_lock())
+  ntl::shared_lock<ntl::resource> lk7(res3, ntl::adopt_critical_region);
+  if (!lk7.owns_lock())
+    return false;
+  if (!res3.locked())
     return false;
   return res3.locked_shared();
 }
@@ -271,16 +300,16 @@ TEST(ntl_test, ntl_resource_test) {
   EXPECT_TRUE(res2.locked_exclusive());
   EXPECT_FALSE(res2.locked_shared());
 
-  ntl::shared_lock<ntl::resource> lk7(lk5);
+  ntl::shared_lock<ntl::resource> lk6(lk5);
   EXPECT_FALSE(lk5.owns_lock());
-  EXPECT_TRUE(lk7.owns_lock());
+  EXPECT_TRUE(lk6.owns_lock());
   EXPECT_TRUE(res2.locked());
   EXPECT_TRUE(res2.locked_shared());
   EXPECT_FALSE(res2.locked_exclusive());
 
   ntl::resource res3;
-  ntl::shared_lock<ntl::resource> lk6(res3, ntl::adopt_critical_region);
-  EXPECT_TRUE(lk6.owns_lock());
+  ntl::shared_lock<ntl::resource> lk7(res3, ntl::adopt_critical_region);
+  EXPECT_TRUE(lk7.owns_lock());
   EXPECT_TRUE(res3.locked());
   EXPECT_TRUE(res3.locked_shared());
 }

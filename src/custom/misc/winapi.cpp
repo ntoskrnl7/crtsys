@@ -220,4 +220,110 @@ EnumSystemLocalesW (
     return FALSE; 
 }
 
+//
+// https://github.com/ntoskrnl7/crtsys/issues/23
+//
+// Windows Kits\10\Include\10.0.22621.0\winrt\wrl\wrappers\corewrappers.h
+// Microsoft Visual Studio\2022\Preview\VC\Tools\MSVC\14.34.31721\crt\src\stl\ppltasks.cpp
+//
+// MutexTraits::Lock, SemaphoreTraits::Lock
+//
+WINBASEAPI
+BOOL
+WINAPI
+ReleaseSemaphore (
+    _In_ HANDLE hSemaphore,
+    _In_ LONG lReleaseCount,
+    _Out_opt_ LPLONG lpPreviousCount
+    )
+{
+    KdBreakPoint();
+    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
+    return FALSE; 
+}
+
+WINBASEAPI
+BOOL
+WINAPI
+ReleaseMutex (
+    _In_ HANDLE hMutex
+    )
+{
+    KdBreakPoint();
+    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
+    return FALSE; 
+}
+
+#ifdef WINOLEAPI
+#undef WINOLEAPI
+#endif
+#ifdef WINOLEAPI_
+#undef WINOLEAPI_
+#endif
+
+#ifdef _OLE32_
+#define WINOLEAPI        STDAPI
+#define WINOLEAPI_(type) STDAPI_(type)
+#else
+
+#ifdef _68K_
+#ifndef REQUIRESAPPLEPASCAL
+#define WINOLEAPI        EXTERN_C HRESULT PASCAL
+#define WINOLEAPI_(type) EXTERN_C type PASCAL
+#else
+#define WINOLEAPI        EXTERN_C PASCAL HRESULT
+#define WINOLEAPI_(type) EXTERN_C PASCAL type
+#endif
+#else
+#define WINOLEAPI        EXTERN_C HRESULT STDAPICALLTYPE
+#define WINOLEAPI_(type) EXTERN_C type STDAPICALLTYPE
+#endif
+
+#endif
+
+_Check_return_
+WINOLEAPI
+CoGetObjectContext(
+    _In_ REFIID riid,
+    _Outptr_ LPVOID  FAR * ppv
+    )
+{
+    KdBreakPoint();
+    return E_NOTIMPL;
+}
+
+typedef 
+enum _APTTYPEQUALIFIER
+    {
+        APTTYPEQUALIFIER_NONE	= 0,
+        APTTYPEQUALIFIER_IMPLICIT_MTA	= 1,
+        APTTYPEQUALIFIER_NA_ON_MTA	= 2,
+        APTTYPEQUALIFIER_NA_ON_STA	= 3,
+        APTTYPEQUALIFIER_NA_ON_IMPLICIT_MTA	= 4,
+        APTTYPEQUALIFIER_NA_ON_MAINSTA	= 5,
+        APTTYPEQUALIFIER_APPLICATION_STA	= 6,
+        APTTYPEQUALIFIER_RESERVED_1	= 7
+    } 	APTTYPEQUALIFIER;
+
+typedef 
+enum _APTTYPE
+    {
+        APTTYPE_CURRENT	= -1,
+        APTTYPE_STA	= 0,
+        APTTYPE_MTA	= 1,
+        APTTYPE_NA	= 2,
+        APTTYPE_MAINSTA	= 3
+    } 	APTTYPE;
+
+_Check_return_
+WINOLEAPI
+CoGetApartmentType(
+    _Out_ APTTYPE* pAptType,
+    _Out_ APTTYPEQUALIFIER* pAptQualifier
+    )
+{
+    KdBreakPoint();
+    return E_NOTIMPL;
+}
+
 EXTERN_C_END

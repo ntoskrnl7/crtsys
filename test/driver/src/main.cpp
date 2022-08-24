@@ -1,4 +1,6 @@
-﻿#include <wdm.h>
+﻿#define _SILENCE_CXX23_ALIGNED_STORAGE_DEPRECATION_WARNING
+
+#include <wdm.h>
 
 EXTERN_C DRIVER_INITIALIZE DriverEntry;
 EXTERN_C DRIVER_UNLOAD DriverUnload;

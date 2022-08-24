@@ -206,10 +206,12 @@ Provides features to support a better development environment in the kernel.
   * 14.26.28801
   * 14.29.30133
   * 14.31.31103
+  * 14.33.31629
 * Windows Kits (SDK, WDK)
   * 10.0.17763.0
   * 10.0.18362.0
   * 10.0.22000.0
+  * 10.0.22621.0
 
 If the SDK and WDK versions are different, builds are more likely to fail. **If possible, it is recommended to build in the same environment as the SDK and WDK versions.**
 
@@ -300,7 +302,7 @@ If the SDK and WDK versions are different, builds are more likely to fail. **If 
         include(cmake/CPM.cmake)
 
         set(CRTSYS_NTL_MAIN ON) # use ntl::main
-        CPMAddPackage("gh:ntoskrnl7/crtsys@0.1.9")
+        CPMAddPackage("gh:ntoskrnl7/crtsys@0.1.10")
         include(${crtsys_SOURCE_DIR}/cmake/CrtSys.cmake)
 
         # add driver

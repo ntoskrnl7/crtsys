@@ -56,9 +56,11 @@ CrtSyspSaveXState (
 {
 	PXSTATE_SAVE StateSave = (PXSTATE_SAVE)FlsGetValue( CrtSyspFlsXStateSaveIndex );
 	if (StateSave == NULL) {
+#pragma warning(disable:4996)
 		StateSave = ExAllocatePoolWithTag( NonPagedPool,
 									   	   sizeof(XSTATE_SAVE),
 									       'ttsX' );
+#pragma warning(default:4996)
 		if (StateSave == NULL) {
 			return NULL;
 		}

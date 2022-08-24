@@ -165,10 +165,11 @@ CrtSysInitializeTebThreadLocalStoragePointer (
         CrtSysSetTebThreadLocalStoragePointer(&CrtSyspTlsSlots);
         return STATUS_SUCCESS;
     }
-
+#pragma warning(disable:4996)
     PKDPC dpcs = (PKDPC)ExAllocatePoolWithTag( NonPagedPool,
                                                sizeof(KDPC) * ((SIZE_T)KeNumberProcessors - 1),
                                                'pmeT' );
+#pragma warning(default:4996)
     if (dpcs == NULL) {
         return STATUS_INSUFFICIENT_RESOURCES;
     }

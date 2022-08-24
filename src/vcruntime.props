@@ -165,12 +165,6 @@
     <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\exe_wwinmain.cpp" />
     <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\file_mode.cpp" />
 
-    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\frame.cpp">
-      <CallingConvention>Cdecl</CallingConvention>
-      <!--bug :-(
-        line:1398 intptr_t continuationIndex = reinterpret_cast<intptr_t>(continuationAddress); -->
-      <ExcludedFromBuild Condition="'$(Platform)'=='x64'">true</ExcludedFromBuild>
-    </ClCompile>
     <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\riscchandler.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
@@ -234,7 +228,10 @@
     <!-- <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\ucrt_stubs.cpp" /> -->
     <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\uncaught_exception.cpp" />
     <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\uncaught_exceptions.cpp" />
-    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\unexpected.cpp" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\unexpected.cpp">
+      <PreprocessorDefinitions>_VCRT_BUILD;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    
     <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\user.cpp" />
 
     <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\utility.cpp" />

@@ -206,10 +206,12 @@ crtsys의 장점은 아래와 같습니다.
   * 14.26.28801
   * 14.29.30133
   * 14.31.31103
+  * 14.33.31629
 * Windows Kits (SDK, WDK)
   * 10.0.17763.0
   * 10.0.18362.0
   * 10.0.22000.0
+  * 10.0.22621.0
 
 SDK와 WDK의 버전이 다르면 빌드가 실패할 가능성이 높으므로 **가능하다면 SDK와 WDK의 버전이 같은 환경에서 빌드하는것을 권장합니다.**
 
@@ -300,7 +302,7 @@ SDK와 WDK의 버전이 다르면 빌드가 실패할 가능성이 높으므로 
         include(cmake/CPM.cmake)
 
         set(CRTSYS_NTL_MAIN ON) # use ntl::main
-        CPMAddPackage("gh:ntoskrnl7/crtsys@0.1.9")
+        CPMAddPackage("gh:ntoskrnl7/crtsys@0.1.10")
         include(${crtsys_SOURCE_DIR}/cmake/CrtSys.cmake)
 
         # add driver

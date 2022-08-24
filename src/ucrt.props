@@ -224,7 +224,10 @@
       <ObjectFileName>$(IntDir)ucrt\%(FileName).obj</ObjectFileName>
       <CallingConvention>Cdecl</CallingConvention>
     </ClCompile>
-
+    <ClCompile Condition="exists('$(UniversalCRT_SourcePath.Split(%3B)[0])\internal\peb_access.cpp')" Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\internal\peb_access.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
     
     <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\locale\lconv_unsigned_char_initialization.cpp">
       <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
