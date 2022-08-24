@@ -137,7 +137,7 @@ public:
 
   unique_lock() noexcept : lockable_(nullptr), owns_(false) {}
 
-  _NODISCARD_CTOR unique_lock(lock_type &lockable, std::adopt_lock_t)
+  unique_lock(lock_type &lockable, std::adopt_lock_t)
       : std::unique_lock<lock_type>(lockable, std::adopt_lock),
         lockable_(nullptr), owns_(false) {
   } // construct and assume already locked
@@ -146,11 +146,11 @@ public:
       : std::unique_lock<lock_type>(lockable, std::defer_lock),
         lockable_(nullptr), owns_(false) {} // construct but don't lock
 
-  _NODISCARD_CTOR unique_lock(lock_type &lockable, std::try_to_lock_t)
+  unique_lock(lock_type &lockable, std::try_to_lock_t)
       : std::unique_lock<lock_type>(lockable, std::try_to_lock),
         lockable_(nullptr), owns_(false) {} // construct and try to lock
 
-  _NODISCARD_CTOR unique_lock(lock_type &lockable, adopt_critical_region_t)
+  unique_lock(lock_type &lockable, adopt_critical_region_t)
       : std::unique_lock<lock_type>(lockable, std::defer_lock),
         lockable_(std::addressof(lockable)), owns_(false) {
     lockable.lock_no_critical_region();
@@ -206,7 +206,7 @@ public:
 
   shared_lock() noexcept : lockable_(nullptr), owns_(false) {}
 
-  _NODISCARD_CTOR explicit shared_lock(lock_type &lockable)
+  explicit shared_lock(lock_type &lockable)
       : lockable_(_STD addressof(lockable)),
         owns_(true) { // construct with mutex and lock shared
     lockable.lock_shared();
@@ -217,24 +217,24 @@ public:
         lockable_(_STD addressof(lockable)), owns_(false) {
   } // construct with unlocked mutex
 
-  _NODISCARD_CTOR shared_lock(lock_type &lockable, std::try_to_lock_t)
+  shared_lock(lock_type &lockable, std::try_to_lock_t)
       : std::shared_lock<lock_type>(lockable, std::try_to_lock),
         lockable_(_STD addressof(lockable)), owns_(lockable.try_lock_shared()) {
   } // construct with mutex and try to lock shared
 
-  _NODISCARD_CTOR shared_lock(lock_type &lockable, std::adopt_lock_t)
+  shared_lock(lock_type &lockable, std::adopt_lock_t)
       : std::shared_lock<lock_type>(lockable, std::adopt_lock),
         lockable_(_STD addressof(lockable)), owns_(true) {
   } // construct with mutex and adopt ownership
 
-  _NODISCARD_CTOR shared_lock(lock_type &lockable, adopt_critical_region_t)
+  shared_lock(lock_type &lockable, adopt_critical_region_t)
       : std::shared_lock<lock_type>(lockable, std::defer_lock),
         lockable_(std::addressof(lockable)), owns_(false) {
     lockable.lock_shared_no_critical_region();
     owns_ = true;
   } // construct but don't enter critical region
 
-  _NODISCARD_CTOR shared_lock(unique_lock<lock_type> &lock)
+  shared_lock(unique_lock<lock_type> &lock)
       : std::shared_lock<lock_type>(*lock.mutex(), std::defer_lock),
         lockable_(lock.mutex()), owns_(false) {
     lock.mutex()->convert_to_shared();

@@ -71,14 +71,14 @@ public:
 
   unique_lock() noexcept : lockable_(nullptr), owns_(false) {}
 
-  _NODISCARD_CTOR explicit unique_lock(spin_lock &lockable)
+  explicit unique_lock(lock_type &lockable)
       : lockable_(_STD addressof(lockable)),
         owns_(false) { // construct and lock
     lockable_->lock();
     owns_ = true;
   }
 
-  _NODISCARD_CTOR unique_lock(lock_type &lockable, std::adopt_lock_t)
+  unique_lock(lock_type &lockable, std::adopt_lock_t)
       : std::unique_lock<lock_type>(lockable, std::adopt_lock),
         lockable_(nullptr), owns_(false) {
   } // construct and assume already locked
@@ -87,11 +87,11 @@ public:
       : std::unique_lock<lock_type>(lockable, std::defer_lock),
         lockable_(nullptr), owns_(false) {} // construct but don't lock
 
-  _NODISCARD_CTOR unique_lock(lock_type &lockable, std::try_to_lock_t)
+  unique_lock(lock_type &lockable, std::try_to_lock_t)
       : std::unique_lock<lock_type>(lockable, std::try_to_lock),
         lockable_(nullptr), owns_(false) {} // construct and try to lock
 
-  _NODISCARD_CTOR unique_lock(lock_type &lockable, at_dpc_level_lock_t)
+  unique_lock(lock_type &lockable, at_dpc_level_lock_t)
       : std::unique_lock<lock_type>(lockable, std::defer_lock),
         lockable_(std::addressof(lockable)), owns_(false) {
     lockable.lock_at_dpc_level();

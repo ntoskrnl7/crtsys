@@ -87,11 +87,11 @@ bool ntl_spin_lock_test() {
   if (!lock2.test())
     return false;
 
-  std::unique_lock lk(lock);
+  std::unique_lock<ntl::spin_lock> lk(lock);
   if (!lk.owns_lock())
     return false;
 
-  std::unique_lock lk2(lock, std::try_to_lock);
+  std::unique_lock<ntl::spin_lock> lk2(lock, std::try_to_lock);
   if (lk2.owns_lock())
     return false;
 
@@ -117,7 +117,7 @@ bool ntl_spin_lock_test() {
 bool ntl_resource_test() {
   ntl::resource res;
   {
-    std::shared_lock lk(res);
+    std::shared_lock<ntl::resource> lk(res);
     if (!lk.owns_lock())
       return false;
     if (!res.locked())
@@ -125,7 +125,7 @@ bool ntl_resource_test() {
     if (!res.locked_shared())
       return false;
 
-    std::unique_lock lk2(res, std::try_to_lock);
+    std::unique_lock<ntl::resource> lk2(res, std::try_to_lock);
     if (lk2.owns_lock())
       return false;
     if (res.locked_exclusive())
@@ -139,7 +139,7 @@ bool ntl_resource_test() {
     return false;
 
   ntl::resource res2;
-  std::unique_lock lk3(res);
+  std::unique_lock<ntl::resource> lk3(res);
   if (!lk3.owns_lock())
     return false;
   if (!res.locked())
@@ -147,7 +147,7 @@ bool ntl_resource_test() {
   if (!res.locked_exclusive())
     return false;
 
-  std::shared_lock lk4(res, std::try_to_lock);
+  std::shared_lock<ntl::resource> lk4(res, std::try_to_lock);
   if (!lk4.owns_lock())
     return false;
   if (res.locked_shared())
