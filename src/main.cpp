@@ -165,10 +165,11 @@ CrtSysInitializeTebThreadLocalStoragePointer (
         CrtSysSetTebThreadLocalStoragePointer(&CrtSyspTlsSlots);
         return STATUS_SUCCESS;
     }
-
+#pragma warning(disable:4996)
     PKDPC dpcs = (PKDPC)ExAllocatePoolWithTag( NonPagedPool,
                                                sizeof(KDPC) * ((SIZE_T)KeNumberProcessors - 1),
                                                'pmeT' );
+#pragma warning(default:4996)
     if (dpcs == NULL) {
         return STATUS_INSUFFICIENT_RESOURCES;
     }
@@ -242,6 +243,17 @@ public:
 };
 } // namespace ntl
 
+namespace ntl {
+namespace detail {
+namespace resource {
+NPAGED_LOOKASIDE_LIST lookaside;
+}
+namespace spin_lock {
+NPAGED_LOOKASIDE_LIST lookaside;
+}
+} // namespace detail
+} // namespace ntl
+
 EXTERN_C
 NTSTATUS
 CrtSysDriverEntry(_In_ PDRIVER_OBJECT DriverObject,
@@ -274,14 +286,23 @@ CrtSysDriverEntry(_In_ PDRIVER_OBJECT DriverObject,
     return status;
   }
 #endif
+
+  ExInitializeNPagedLookasideList(&ntl::detail::resource::lookaside, NULL, NULL,
+                                  0, sizeof(ERESOURCE), 'srsc', 0);
+  ExInitializeNPagedLookasideList(&ntl::detail::spin_lock::lookaside, NULL,
+                                  NULL, 0, sizeof(KSPIN_LOCK), 'lpsc', 0);
   if (!__scrt_initialize_onexit_tables(__scrt_module_type::exe)) {
     KdBreakPoint();
+    ExDeleteNPagedLookasideList(&ntl::detail::resource::lookaside);
+    ExDeleteNPagedLookasideList(&ntl::detail::spin_lock::lookaside);
     LdkTerminate();
     return STATUS_FAILED_DRIVER_ENTRY;
   }
 
   if (!__scrt_initialize_crt(__scrt_module_type::exe)) {
     KdBreakPoint();
+    ExDeleteNPagedLookasideList(&ntl::detail::resource::lookaside);
+    ExDeleteNPagedLookasideList(&ntl::detail::spin_lock::lookaside);
     LdkTerminate();
     return STATUS_FAILED_DRIVER_ENTRY;
   }
@@ -310,6 +331,7 @@ CrtSysDriverEntry(_In_ PDRIVER_OBJECT DriverObject,
   ntl::status s = ntl::expand_stack(ntl::main, std::ref(*driver.get()),
                                     std::wstring(RegistryPath->Buffer));
   if (!s.is_ok()) {
+    driver.release();
     CrtSysDriverUnload(DriverObject);
     return s;
   }
@@ -385,5 +407,7 @@ CrtSysDriverUnload (
         );
     CrtSyspUninitializeForLibcntpr();
 #endif
+    ExDeleteNPagedLookasideList(&ntl::detail::resource::lookaside);
+    ExDeleteNPagedLookasideList(&ntl::detail::spin_lock::lookaside);
     LdkTerminate();
 }

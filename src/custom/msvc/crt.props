@@ -18,7 +18,7 @@
       <CallingConvention>Cdecl</CallingConvention>
     </ClCompile>
   </ItemGroup>
-  <ItemGroup Condition="'$(Platform)'=='x64'">
+  <ItemGroup>
     <ClCompile Include="$(MSBuildThisFileDirectory)$(PlatformToolsetVersion)\crt\src\vcruntime\frame_redirect.cpp">
       <CallingConvention>Cdecl</CallingConvention>
     </ClCompile>

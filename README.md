@@ -161,6 +161,25 @@ Provides features to support a better development environment in the kernel.
     * ntl::rpc::client [(tested)](./test/app/src/main.cpp#L4) [(tested)](./test/common/rpc.hpp)
       * I did not have enough time to implement the data serialization part myself, so I referred to the contents of the project below. thank you! :-)
         * [Eyal Z/zpp serializer](https://github.com/eyalz800/serializer)
+* ntl::irql
+  * Class for KIRQL
+  * Classes
+    * ntl::irql [(tested)](./test/driver/src/ntl.cpp#L46)
+  * Functions
+    * ntl::raise_irql [(tested)](./test/driver/src/ntl.cpp#L49)
+    * raise_irql_to_dpc_level [(tested)](./test/driver/src/ntl.cpp#L62)
+    * raise_irql_to_synch_level [(tested)](./test/driver/src/ntl.cpp#L71)
+* ntl::spin_lock
+  * Class for KSPIN_LOCK
+  * Classes
+    * ntl::spin_lock [(tested)](./test/driver/src/ntl.cpp#L80)
+    * ntl::unique_lock [(tested)](./test/driver/src/ntl.cpp#L99)
+* ntl::resource
+  * Class for ERESOURCE
+  * Classes
+    * ntl::resource [(tested)](./test/driver/src/ntl.cpp#L117)
+    * ntl::unique_lock [(tested)](./test/driver/src/ntl.cpp#L156)
+    * ntl::shared_lock [(tested)](./test/driver/src/ntl.cpp#L179)
 
 ## Requirements
 
@@ -187,10 +206,12 @@ Provides features to support a better development environment in the kernel.
   * 14.26.28801
   * 14.29.30133
   * 14.31.31103
-* Windows Kit (SDK, WDK)
+  * 14.33.31629
+* Windows Kits (SDK, WDK)
   * 10.0.17763.0
   * 10.0.18362.0
   * 10.0.22000.0
+  * 10.0.22621.0
 
 If the SDK and WDK versions are different, builds are more likely to fail. **If possible, it is recommended to build in the same environment as the SDK and WDK versions.**
 
@@ -281,7 +302,7 @@ If the SDK and WDK versions are different, builds are more likely to fail. **If 
         include(cmake/CPM.cmake)
 
         set(CRTSYS_NTL_MAIN ON) # use ntl::main
-        CPMAddPackage("gh:ntoskrnl7/crtsys@0.1.8")
+        CPMAddPackage("gh:ntoskrnl7/crtsys@0.1.10")
         include(${crtsys_SOURCE_DIR}/cmake/CrtSys.cmake)
 
         # add driver

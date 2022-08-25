@@ -1,0 +1,141 @@
+﻿/**
+ * @file spin_lock
+ * @author jungkwang.lee (ntoskrnl7@google.com)
+ * @brief KSPIN_LOCK Helper features.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authoers.
+ *
+ */
+
+#ifndef _NTDDK_
+#include <wdm.h>
+#endif
+
+#include <mutex>
+
+namespace ntl {
+namespace detail {
+namespace spin_lock {
+extern NPAGED_LOOKASIDE_LIST lookaside;
+}
+} // namespace detail
+
+class spin_lock {
+public:
+  spin_lock() {
+    lock_ = reinterpret_cast<PKSPIN_LOCK>(
+        ExAllocateFromNPagedLookasideList(&ntl::detail::spin_lock::lookaside));
+    KeInitializeSpinLock(lock_);
+  }
+  ~spin_lock() {
+    if (lock_)
+      ExFreeToNPagedLookasideList(&ntl::detail::spin_lock::lookaside, lock_);
+  }
+  spin_lock(const spin_lock &) = delete;
+  spin_lock &operator=(const spin_lock &) = delete;
+
+  _NODISCARD bool try_lock() {
+    return KeTryToAcquireSpinLockAtDpcLevel(lock_) == TRUE;
+  }
+
+  void lock() { KeAcquireSpinLock(lock_, &old_irql_); }
+  void unlock() { KeReleaseSpinLock(lock_, old_irql_); }
+
+  void lock_at_dpc_level() { KeAcquireSpinLockAtDpcLevel(lock_); }
+  void unlock_from_dpc_level() { KeReleaseSpinLockFromDpcLevel(lock_); }
+
+  bool test() { return KeTestSpinLock(lock_); }
+
+  using native_handle_type = PKSPIN_LOCK;
+
+  _NODISCARD native_handle_type native_handle() { return lock_; }
+
+private:
+  PKSPIN_LOCK lock_;
+  KIRQL old_irql_;
+};
+
+struct at_dpc_level_lock_t {
+  explicit at_dpc_level_lock_t() = default;
+};
+
+_INLINE_VAR constexpr at_dpc_level_lock_t at_dpc_level_lock{};
+
+template <class Lockable> class unique_lock;
+
+template <> class unique_lock<spin_lock> : public std::unique_lock<spin_lock> {
+public:
+  using lock_type = spin_lock;
+  using type = std::unique_lock<lock_type>;
+  using type::type;
+
+  unique_lock() noexcept : lockable_(nullptr), owns_(false) {}
+
+  explicit unique_lock(lock_type &lockable)
+      : lockable_(_STD addressof(lockable)),
+        owns_(false) { // construct and lock
+    lockable_->lock();
+    owns_ = true;
+  }
+
+  unique_lock(lock_type &lockable, std::adopt_lock_t)
+      : std::unique_lock<lock_type>(lockable, std::adopt_lock),
+        lockable_(nullptr), owns_(false) {
+  } // construct and assume already locked
+
+  unique_lock(lock_type &lockable, std::defer_lock_t) noexcept
+      : std::unique_lock<lock_type>(lockable, std::defer_lock),
+        lockable_(nullptr), owns_(false) {} // construct but don't lock
+
+  unique_lock(lock_type &lockable, std::try_to_lock_t)
+      : std::unique_lock<lock_type>(lockable, std::try_to_lock),
+        lockable_(nullptr), owns_(false) {} // construct and try to lock
+
+  unique_lock(lock_type &lockable, at_dpc_level_lock_t)
+      : std::unique_lock<lock_type>(lockable, std::defer_lock),
+        lockable_(std::addressof(lockable)), owns_(false) {
+    lockable.lock_at_dpc_level();
+    owns_ = true;
+  } // construct and lock at dpc
+
+  unique_lock &operator=(unique_lock &&other) {
+    if (this != _STD addressof(other)) {
+      if (owns_)
+        lockable_->unlock();
+      else if (std::unique_lock<lock_type>::owns_lock())
+        std::unique_lock<lock_type>::unlock();
+      lockable_ = other.lockable_;
+      owns_ = other.owns_;
+      other.lockable_ = nullptr;
+      other.owns_ = false;
+      std::unique_lock<lock_type>::operator=(
+          std::forward<std::unique_lock<lock_type>>(other));
+    }
+    return *this;
+  }
+
+  ~unique_lock() noexcept {
+    if (owns_)
+      lockable_->unlock_from_dpc_level();
+  }
+
+  unique_lock(const unique_lock &) = delete;
+  unique_lock &operator=(const unique_lock &) = delete;
+
+  _NODISCARD bool owns_lock() const noexcept {
+    if (owns_)
+      return true;
+    return type::owns_lock();
+  }
+
+  explicit operator bool() const noexcept {
+    if (owns_)
+      return true;
+    return type::owns_lock();
+  }
+
+private:
+  bool owns_;
+  lock_type *lockable_;
+};
+} // namespace ntl

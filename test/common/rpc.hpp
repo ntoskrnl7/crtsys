@@ -40,7 +40,11 @@ NTL_ADD_CALLBACK_4(test_rpc, int, test_sum, int, a, int, b, int, c, int, d,
 NTL_ADD_CALLBACK_5(test_rpc, int, test_sum, int, a, int, b, int, c, int, d, int,
                    e, { return a + b + c + d + e; })
 
+#if _MSC_VER <= 1916
+NTL_ADD_CALLBACK_0(test_rpc, int, test_void, { return 0; })
+#else
 NTL_ADD_CALLBACK_0(test_rpc, void, test_void, { return; })
+#endif
 
 NTL_ADD_CALLBACK_1(test_rpc, bool, test_vec, const std::vector<int> &, vec,
                    { return vec.empty(); })
