@@ -228,7 +228,7 @@ If the SDK and WDK versions are different, builds are more likely to fail. **If 
 
     ```Batch
     git clone https://github.com/ntoskrnl7/crtsys
-    cd crtsys/test
+    cd crtsys
     build_all.bat test\app
     build_all.bat test\driver
     ```
@@ -313,15 +313,19 @@ If the SDK and WDK versions are different, builds are more likely to fail. **If 
 
         * If you enable CRTSYS_NTL_MAIN as shown below, define ntl::main as the entry point. **(recommend)**
 
-          ```CMake
-          set(CRTSYS_NTL_MAIN ON)
-          ```
+          * CMakeLists.txt
+
+              ```CMake
+              set(CRTSYS_NTL_MAIN ON)
+              ```
 
         * If you disable CRTSYS_NTL_MAIN as shown below, define DriverEntry as the entry point, which is different from the previous one.
 
-          ```CMake
-          set(CRTSYS_NTL_MAIN OFF)
-          ```
+          * CMakeLists.txt
+
+              ```CMake
+              set(CRTSYS_NTL_MAIN OFF)
+              ```
 
         Below is example code from a project with ntl::main set as entry point.
 
