@@ -228,7 +228,7 @@ SDK와 WDK의 버전이 다르면 빌드가 실패할 가능성이 높으므로 
 
     ```Batch
     git clone https://github.com/ntoskrnl7/crtsys
-    cd crtsys/test
+    cd crtsys
     build_all.bat test\app
     build_all.bat test\driver
     ```
@@ -313,15 +313,19 @@ SDK와 WDK의 버전이 다르면 빌드가 실패할 가능성이 높으므로 
 
         * 아래와 같이 CRTSYS_NTL_MAIN을 활성화한다면 ntl::main을 진입점으로 정의하시기 바랍니다. **(권장)**
 
-          ```CMake
-          set(CRTSYS_NTL_MAIN ON)
-          ```
+          * CMakeLists.txt
+
+              ```CMake
+              set(CRTSYS_NTL_MAIN ON)
+              ```
 
         * 만약 아래와 같이 CRTSYS_NTL_MAIN을 비활성화한다면 기존과 깉이 DriverEntry를 진입점으로 정의하시기 바랍니다.
 
-          ```CMake
-          set(CRTSYS_NTL_MAIN OFF)
-          ```
+          * CMakeLists.txt
+
+              ```CMake
+              set(CRTSYS_NTL_MAIN OFF)
+              ```
 
         아래는 ntl::main를 진입점으로 설정한 프로젝트의 예제 코드입니다.
 
