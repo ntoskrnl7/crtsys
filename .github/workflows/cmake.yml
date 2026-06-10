@@ -5,59 +5,166 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      run_driver_load_tests:
+        description: Run the x64 driver load test on a prepared self-hosted runner
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  CRTSYS_CONFIGURATION: Debug
+  CRTSYS_WINDOWS_SDK_VERSION: 10.0.22621.0
 
 jobs:
   build:
-    runs-on: ${{ matrix.os }}
+    name: Build ${{ matrix.project }} ${{ matrix.arch }}
+    runs-on: windows-2022
     strategy:
+      fail-fast: false
       matrix:
-        os: [windows-2019]
-
-    defaults:
-      run:
-        working-directory: test
+        include:
+          - project: app
+            arch: x86
+          - project: app
+            arch: x64
+          - project: app
+            arch: ARM64
+          - project: driver
+            arch: x64
+          - project: driver
+            arch: ARM64
 
     steps:
-    - uses: actions/checkout@v2
-      with:
-        submodules: true
+      - uses: actions/checkout@v4
 
-    - name: build app x86
-      shell: cmd
-      run: ..\build.bat app x86
-      working-directory: test
+      - name: Show toolchain
+        shell: pwsh
+        run: |
+          cmake --version
 
-    - name: build app x64
-      shell: cmd
-      run: ..\build.bat app x64
-      working-directory: test
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          & $vswhere -latest -products * -property installationPath
 
-    - name: build app ARM
-      shell: cmd
-      run: ..\build.bat app ARM
-      working-directory: test
+          Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\Include" -Directory |
+            Select-Object -ExpandProperty Name
 
-    - name: build app ARM64
-      shell: cmd
-      run: ..\build.bat app ARM64
-      working-directory: test
+      - name: Build
+        shell: pwsh
+        run: |
+          $parameters = @{
+            Project = '${{ matrix.project }}'
+            Architecture = '${{ matrix.arch }}'
+            Configuration = '${{ env.CRTSYS_CONFIGURATION }}'
+            WindowsSdkVersion = '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}'
+          }
 
-    - name: build driver x86
-      shell: cmd
-      run: ..\build.bat driver x86
-      working-directory: test
+          if ($parameters.Project -eq 'driver') {
+            $parameters.NoBreakpoint = $true
+          }
 
-    - name: build driver x64
-      shell: cmd
-      run: ..\build.bat driver x64
-      working-directory: test
+          ./scripts/ci/Build-CrtSys.ps1 @parameters
 
-    - name: build driver ARM
-      shell: cmd
-      run: ..\build.bat driver ARM
-      working-directory: test
+      - name: Test-sign driver
+        if: matrix.project == 'driver'
+        shell: pwsh
+        run: ./scripts/ci/TestSign-Driver.ps1 -DriverPath test\driver\build_${{ matrix.arch }}\Debug\crtsys_test.sys
 
-    - name: build driver ARM64
-      shell: cmd
-      run: ..\build.bat driver ARM64
-      working-directory: test
+      - name: Upload signed driver
+        if: matrix.project == 'driver'
+        uses: actions/upload-artifact@v4
+        with:
+          name: crtsys-test-driver-${{ matrix.arch }}
+          path: |
+            test/driver/build_${{ matrix.arch }}/Debug/crtsys_test.sys
+            test/driver/build_${{ matrix.arch }}/Debug/crtsys_test.pdb
+
+      - name: Upload x64 test app
+        if: matrix.project == 'app' && matrix.arch == 'x64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: crtsys-test-app-x64
+          path: |
+            test/app/build_x64/Debug/crtsys_test_app.exe
+            test/app/build_x64/Debug/crtsys_test_app.pdb
+
+  driver-load-test-preflight:
+    name: Driver load test preflight
+    if: github.event_name == 'workflow_dispatch' && inputs.run_driver_load_tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check for an online driver test runner
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUIRED_LABELS: 'self-hosted,windows,x64,crtsys-driver-test'
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+
+          required = set(os.environ["REQUIRED_LABELS"].split(","))
+          repository = os.environ["GITHUB_REPOSITORY"]
+          data = json.loads(subprocess.check_output([
+              "gh", "api", f"repos/{repository}/actions/runners"
+          ], text=True))
+
+          matches = []
+          for runner in data.get("runners", []):
+              labels = {label["name"] for label in runner.get("labels", [])}
+              if required.issubset(labels):
+                  matches.append(runner)
+
+          online = [runner for runner in matches if runner.get("status") == "online"]
+          if not online:
+              print(
+                  "::error::No online self-hosted runner has labels "
+                  f"{sorted(required)}. Prepare a Windows x64 runner with "
+                  "TESTSIGNING enabled and the crtsys-driver-test label."
+              )
+              sys.exit(1)
+
+          for runner in online:
+              print(f"Using runner candidate: {runner['name']} ({runner['status']})")
+          PY
+
+  driver-load-test:
+    name: Driver load test x64
+    if: github.event_name == 'workflow_dispatch' && inputs.run_driver_load_tests
+    needs:
+      - build
+      - driver-load-test-preflight
+    # Add the crtsys-driver-test label only to a self-hosted Windows x64 runner
+    # that has TESTSIGNING enabled before boot.
+    runs-on: [self-hosted, windows, x64, crtsys-driver-test]
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download signed x64 driver
+        uses: actions/download-artifact@v4
+        with:
+          name: crtsys-test-driver-x64
+          path: artifacts/driver-x64
+
+      - name: Download x64 test app
+        uses: actions/download-artifact@v4
+        with:
+          name: crtsys-test-app-x64
+          path: artifacts/app-x64
+
+      - name: Load driver and run unit tests
+        shell: pwsh
+        run: >
+          ./scripts/ci/Run-DriverTests.ps1
+          -DriverPath artifacts\driver-x64\crtsys_test.sys
+          -AppPath artifacts\app-x64\crtsys_test_app.exe

@@ -217,6 +217,9 @@ If the SDK and WDK versions are different, builds are more likely to fail. **If 
 
 ## Build & Test
 
+CI driver load tests are documented in
+[CI driver load tests](./docs/ci-driver-load-tests.md).
+
 1. Please build the library and test code by executing the command below.
 
     ```Batch

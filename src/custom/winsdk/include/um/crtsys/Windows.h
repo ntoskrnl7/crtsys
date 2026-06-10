@@ -10,6 +10,7 @@
 
 // winbase.h
 #include <wincontypes.h> // consoleapi.h 
+#include "WinBase.h"
 #include "fileapi.h"
 #include "synchapi.h"
 #include "processthreadsapi.h"

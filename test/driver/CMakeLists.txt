@@ -4,6 +4,8 @@ project(crtsys_test LANGUAGES C CXX)
 
 include(../../cmake/CPM.cmake)
 
+option(CRTSYS_TEST_BREAKPOINT "Break into the kernel debugger when the test driver loads" ON)
+
 set(CRTSYS_NTL_MAIN ON)
 CPMAddPackage(NAME crtsys SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}/../..)
 include(${crtsys_SOURCE_DIR}/cmake/CrtSys.cmake)
@@ -51,6 +53,10 @@ if (NOT CRTSYS_TEST_NLOHMANN_JSON)
 endif()
 
 crtsys_add_driver(crtsys_test ${SOURCE_FILES})
+
+if (NOT CRTSYS_TEST_BREAKPOINT)
+    target_compile_definitions(crtsys_test PRIVATE "CRTSYS_TEST_NO_BREAKPOINT")
+endif()
 
 if (CRTSYS_TEST_NLOHMANN_JSON)
     target_compile_definitions(crtsys_test PRIVATE "CRTSYS_TEST_NLOHMANN_JSON")

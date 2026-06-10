@@ -14,6 +14,17 @@ extern "C" unsigned char _guard_xfg_dispatch_icall_nop = 0x90;
 
 #include <windows.h>
 
+#if defined(_WIN64)
+#define CRTSYS_DEFAULT_SECURITY_COOKIE ((UINT_PTR)0x00002B992DDFA232)
+#else
+#define CRTSYS_DEFAULT_SECURITY_COOKIE ((UINT_PTR)0xBB40E64E)
+#endif
+
+extern "C" DECLSPEC_SELECTANY UINT_PTR
+    __security_cookie = CRTSYS_DEFAULT_SECURITY_COOKIE;
+extern "C" DECLSPEC_SELECTANY UINT_PTR
+    __security_cookie_complement = ~CRTSYS_DEFAULT_SECURITY_COOKIE;
+
 #define _ROAPI_
 #include <roapi.h>
 

@@ -19,6 +19,20 @@ project(
 option(CRTSYS_NTL_MAIN      "Set to ON to use ntl::main" ON)
 option(CRTSYS_USE_LIBCNTPR  "Set to ON to use libcntpr" ON)
 
+function(crtsys_scope_compile_options_to_c_cxx TARGET_NAME)
+  get_target_property(TARGET_COMPILE_OPTIONS ${TARGET_NAME} COMPILE_OPTIONS)
+  if(NOT TARGET_COMPILE_OPTIONS)
+    return()
+  endif()
+
+  set(SCOPED_COMPILE_OPTIONS)
+  foreach(COMPILE_OPTION IN LISTS TARGET_COMPILE_OPTIONS)
+    list(APPEND SCOPED_COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:C,CXX>:${COMPILE_OPTION}>")
+  endforeach()
+
+  set_target_properties(${TARGET_NAME} PROPERTIES COMPILE_OPTIONS "${SCOPED_COMPILE_OPTIONS}")
+endfunction()
+
 # x64 is always set to use libcntpr. (_NLG_Notify, _NLG_Return2)
 if ("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "x64")
   set(CRTSYS_USE_LIBCNTPR ON)
@@ -126,6 +140,7 @@ wdk_add_library(
     STATIC
     ${SOURCE_FILES}
     )
+crtsys_scope_compile_options_to_c_cxx(crtsys)
 
 #
 # Add include directories
@@ -179,25 +194,25 @@ endif()
 # Forced Include File
 #
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/include/.internal/winsdk/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/wdk/${WDK_VERSION}/forced.h")
-  target_compile_options(crtsys PRIVATE /FI"${CMAKE_CURRENT_SOURCE_DIR}/include/.internal/winsdk/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/wdk/${WDK_VERSION}/forced.h")
+  target_compile_options(crtsys PRIVATE "$<$<COMPILE_LANGUAGE:C,CXX>:/FI${CMAKE_CURRENT_SOURCE_DIR}/include/.internal/winsdk/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/wdk/${WDK_VERSION}/forced.h>")
 endif()
-target_compile_options(crtsys PRIVATE /FI"${CMAKE_CURRENT_SOURCE_DIR}/src/crtsys.h")
+target_compile_options(crtsys PRIVATE "$<$<COMPILE_LANGUAGE:C,CXX>:/FI${CMAKE_CURRENT_SOURCE_DIR}/src/crtsys.h>")
 if (UCXXRT_ENABLED)
-  target_compile_options(crtsys PRIVATE /FI"${ucxxrt_SOURCE_DIR}/ucxxrt.inl")
+  target_compile_options(crtsys PRIVATE "$<$<COMPILE_LANGUAGE:C,CXX>:/FI${ucxxrt_SOURCE_DIR}/ucxxrt.inl>")
 endif()
 
 #
 # TLS isn't supported yet.
 #
-target_compile_options(crtsys PUBLIC /Zc:threadSafeInit-)
+target_compile_options(crtsys PUBLIC "$<$<COMPILE_LANGUAGE:CXX>:/Zc:threadSafeInit->")
 
-target_compile_options(crtsys PUBLIC "/MT") # "/MT$<$<CONFIG:Debug>:d>"
+target_compile_options(crtsys PUBLIC "$<$<COMPILE_LANGUAGE:C,CXX>:/MT>") # "/MT$<$<CONFIG:Debug>:d>"
 # [not working] set_property(TARGET crtsys PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 #
 # Generate Debug Info
 #
-target_compile_options(crtsys PUBLIC "$<$<CONFIG:Release>:/Zi>")
+target_compile_options(crtsys PUBLIC "$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:C,CXX>>:/Zi>")
 target_link_options(crtsys PUBLIC "$<$<CONFIG:Release>:/DEBUG>")
 
 #

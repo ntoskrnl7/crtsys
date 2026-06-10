@@ -73,6 +73,7 @@
   <!-- BufferOverflowK.lib(gs_support.obj) __security_cookie -->
   <ItemGroup>  
     <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\gs_cookie.c">
+      <ExcludedFromBuild>true</ExcludedFromBuild>
       <CompileAs>CompileAsC</CompileAs>
     </ClCompile>
     <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\gs_support.c">
@@ -149,7 +150,9 @@
   <ItemGroup>
     <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\app_appinit.cpp" />
     <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\argv_mode.cpp" />
-    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\checkcfg.c" />
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\checkcfg.c">
+      <ExcludedFromBuild Condition="'$(Platform)'=='ARM64'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\commit_mode.cpp" />
     <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\debugger_jmc.c" />
     <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\denormal_control.cpp" />
