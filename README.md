@@ -25,6 +25,26 @@ The project combines three pieces:
   Win32/NTDLL-like APIs used by the runtime and STL.
 - NTL, a small C++ helper layer for common driver objects and synchronization.
 
+## Design Model
+
+`crtsys` is a kernel-mode C++ runtime substrate. It exists to make a controlled
+subset of MSVC C++ runtime, CRT, STL, and NTL facilities usable in Windows
+drivers while staying inside the normal WDK driver model.
+
+It is designed primarily for driver control paths: initialization, unload,
+device setup, IOCTL/RPC handling, worker-thread coordination, ownership
+cleanup, and error handling. These paths are normally `PASSIVE_LEVEL`, with
+selected `APC_LEVEL` use where the underlying WDK APIs allow it.
+
+It is not a promise that arbitrary user-mode C++ code, arbitrary STL usage, or
+arbitrary Win32 assumptions are safe in kernel mode. Unless an API explicitly
+documents a broader contract, assume `PASSIVE_LEVEL`. Do not use runtime-backed
+helpers in DPC, ISR, paging I/O, spin-lock-held, or other elevated-IRQL paths
+unless that exact API is documented and tested for that context.
+
+See [Design Rationale and Operational Boundaries](./docs/design-rationale.md)
+for the full model.
+
 ## Status
 
 This project is not a full user-mode CRT, not a complete Windows compatibility
@@ -35,6 +55,8 @@ that it will ship with.
 
 Known constraints:
 
+- Runtime-backed C++/CRT/STL features should be treated as `PASSIVE_LEVEL`
+  facilities unless the API reference says otherwise.
 - Thread-local storage and thread-safe local static initialization are not
   supported yet.
 - Kernel stacks are small; use `ntl::expand_stack` for paths that need more
@@ -49,6 +71,7 @@ Known constraints:
 The README keeps this section short. The detailed, test-linked checklist lives
 in the documentation directory:
 
+- [Design rationale and operational boundaries](./docs/design-rationale.md)
 - [Detailed feature coverage](./docs/feature-coverage.md)
 - [NTL API reference](./docs/ntl-api.md)
 

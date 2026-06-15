@@ -8,6 +8,23 @@ kernel-mode 사이의 간단한 RPC를 쓰기 쉽게 만드는 것을 목표로 
 
 헤더는 [`include/ntl`](../include/ntl)에 있습니다.
 
+## IRQL 계약 표기
+
+NTL은 주로 드라이버 제어 경로를 대상으로 설계되었습니다. API가 더 넓은
+계약을 문서화하지 않는다면 기본값은 `PASSIVE_LEVEL`로 보아야 합니다.
+
+아래 API 설명은 보수적인 계약을 사용합니다.
+
+- `PASSIVE_LEVEL`은 helper가 allocation, wait, throw, pageable code 접근,
+  runtime/STL state 의존성을 가질 수 있음을 의미합니다.
+- `<= APC_LEVEL`은 underlying WDK primitive가 APC-level caller를 허용할 수
+  있지만, 여전히 DPC/ISR-safe는 아니라는 뜻입니다.
+- `<= DISPATCH_LEVEL` 또는 DPC 전용 계약은 해당 문맥을 의도하고 작성한 API에만
+  명시합니다.
+
+프로젝트 수준의 실행 모델은 [설계 근거와 운영 경계](./ko-kr-design-rationale.md)를
+참고하세요.
+
 ## 진입점
 
 `CRTSYS_NTL_MAIN`을 켜면 다음 함수를 구현합니다.
@@ -19,6 +36,8 @@ ntl::status ntl::main(ntl::driver& driver,
 
 `crtsys`는 WDK driver entry point를 이 함수로 연결합니다. wrapper는
 `ntl::main` 호출 전에 stack expansion helper도 사용합니다.
+
+IRQL: `PASSIVE_LEVEL`.
 
 ## `ntl::status`
 
@@ -34,6 +53,9 @@ ntl::status ntl::main(ntl::driver& driver,
 - `operator NTSTATUS() const`
 - `static status ok()`
 
+IRQL: 값 타입 연산 자체는 allocation이나 wait를 하지 않습니다. 다만 해당
+status 흐름이 현재 IRQL에서 유효한지는 surrounding WDK call path가 결정합니다.
+
 ## Exceptions
 
 헤더: [`include/ntl/except`](../include/ntl/except)
@@ -44,6 +66,11 @@ ntl::status ntl::main(ntl::driver& driver,
 - `ntl::seh::try_except(fn, args...)`
   - callable을 SEH 안에서 실행합니다.
   - `{success, exception_code}`를 반환합니다.
+
+IRQL: C++ exception path는 `PASSIVE_LEVEL` 전용으로 취급하세요. WDK callback
+boundary, spin-lock-held region, DPC, ISR, paging I/O 경로를 exception이
+넘어가게 하지 마세요. 그런 동작이 필요하다면 별도 테스트와 문서화가 먼저
+필요합니다.
 
 ## Stack Expansion
 
@@ -68,6 +95,10 @@ API:
   - `ignore_failure(bool)`
 - `ntl::expand_stack(options, fn, args...)`
 
+IRQL: `crtsys`에서 문서화한 사용 문맥은 `PASSIVE_LEVEL`입니다. wrapper는 C++
+runtime path를 사용하고 실패 시 throw할 수 있습니다. hot path escape hatch가
+아니라 control-path helper로 보아야 합니다.
+
 ## Driver Object
 
 헤더: [`include/ntl/driver`](../include/ntl/driver)
@@ -81,6 +112,9 @@ API:
   - C++ unload callback을 등록합니다.
 - `name() const`
   - driver name을 `std::wstring`으로 반환합니다.
+
+IRQL: `PASSIVE_LEVEL`. C++ object와 container를 사용하며, driver initialization,
+unload registration, setup path를 위한 helper입니다.
 
 ## Device Object
 
@@ -112,6 +146,10 @@ Device control helper type:
 - `ntl::device_control::in_buffer`
 - `ntl::device_control::out_buffer`
 - `ntl::device_control::dispatch_fn`
+
+IRQL: 특정 dispatch path가 따로 audit되고 문서화되지 않았다면
+`PASSIVE_LEVEL`로 취급하세요. wrapper는 C++ callback과 ownership helper를
+사용합니다.
 
 ## RPC
 
@@ -145,6 +183,10 @@ RPC helper는 `DeviceIoControl` 기반의 server/client stub을 생성합니다.
 
 전체 예시는 [`test/common/rpc.hpp`](../test/common/rpc.hpp)를 참고하세요.
 
+IRQL: server-side callback은 `PASSIVE_LEVEL`로 취급하세요. user-mode
+`ntl::rpc::client` 쪽은 커널 IRQL 규칙 밖에 있지만, driver-side dispatch
+contract에는 여전히 의존합니다.
+
 ## IRQL
 
 헤더: [`include/ntl/irql`](../include/ntl/irql)
@@ -159,6 +201,10 @@ Helper:
 - `ntl::raise_irql_to_dpc_level()`
 - `ntl::raise_irql_to_synch_level()`
 - `ntl::current_irql()`
+
+IRQL: 이 helper들은 IRQL을 직접 조작하거나 관찰합니다. RAII 객체의 scope는
+최대한 짧게 유지하고, IRQL이 올라간 동안에는 해당 문맥을 문서화한 helper만
+호출하세요.
 
 ## Spin Lock
 
@@ -176,6 +222,12 @@ Helper:
 
 `ntl::unique_lock<ntl::spin_lock>`은 `std::unique_lock`을 확장하며
 `ntl::at_dpc_level_lock`을 지원합니다.
+
+IRQL: `lock()`과 성공한 `try_lock()`은 `DISPATCH_LEVEL`로 올리고,
+`unlock()`은 이전 IRQL을 복원합니다. `lock_at_dpc_level()`과
+`unlock_from_dpc_level()`은 caller가 이미 `DISPATCH_LEVEL`에서 실행 중이어야
+합니다. spin lock을 잡은 동안 실행되는 코드는 resident, short, nonblocking이어야
+하며 allocation, wait, throw, arbitrary runtime/STL helper 호출을 하면 안 됩니다.
 
 ## ERESOURCE
 
@@ -207,6 +259,11 @@ Lock helper:
 - `ntl::shared_lock<ntl::resource>`
 - `ntl::adopt_critical_region`
 
+IRQL: `<= APC_LEVEL`. 이 helper는 blocking/resource-style synchronization
+모델에 맞춥니다. DPC, ISR, spin-lock-held path에서는 사용하지 마세요.
+`adopt_critical_region`은 caller가 critical region boundary를 의도적으로
+직접 관리할 때 사용합니다.
+
 ## Unicode String
 
 헤더: [`include/ntl/unicode_string`](../include/ntl/unicode_string)
@@ -217,3 +274,6 @@ Lock helper:
 - `std::wstring`으로 생성
 - `c_str() const`
 - `operator*()`
+
+IRQL: `std::wstring`으로부터 생성하는 경로는 `PASSIVE_LEVEL`로 취급하세요.
+accessor는 가볍지만 lifetime과 storage는 owning C++ object에 속합니다.
