@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.14 FATAL_ERROR)
 
 project(crtsys_test_app LANGUAGES C CXX)
 
-include(../../cmake/CPM.cmake)
+include(../../../cmake/CPM.cmake)
 CPMAddPackage(
     NAME googletest
     GITHUB_REPOSITORY google/googletest
@@ -17,4 +17,4 @@ target_compile_options(crtsys_test_app PRIVATE "/EHsc")
 
 target_link_libraries(crtsys_test_app gtest)
 
-target_include_directories(crtsys_test_app PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../../include ${CMAKE_CURRENT_LIST_DIR}/..)
+target_include_directories(crtsys_test_app PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../../../include ${CMAKE_CURRENT_LIST_DIR}/..)

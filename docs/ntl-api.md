@@ -179,7 +179,7 @@ Types:
   - user-mode client
   - `invoke<Ret>(index, args...)`
 
-See [`test/common/rpc.hpp`](../test/common/rpc.hpp) for a complete shared RPC
+See [`test/cmake/common/rpc.hpp`](../test/cmake/common/rpc.hpp) for a complete shared RPC
 schema example.
 
 IRQL: server-side callbacks should be treated as `PASSIVE_LEVEL`. The

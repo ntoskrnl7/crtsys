@@ -248,24 +248,24 @@ test\build.bat
 Build a specific target manually:
 
 ```bat
-build.bat test\app x64 Debug
-build.bat test\driver x64 Debug
-build.bat test\app x64 Release
-build.bat test\driver x64 Release
+build.bat test\cmake\app x64 Debug
+build.bat test\cmake\driver x64 Debug
+build.bat test\cmake\app x64 Release
+build.bat test\cmake\driver x64 Release
 ```
 
 Build all supported architecture/configuration combinations:
 
 ```bat
-build_all.bat test\app
-build_all.bat test\driver
+build_all.bat test\cmake\app
+build_all.bat test\cmake\driver
 ```
 
 Typical Debug outputs:
 
 ```text
-test\driver\build_x64\Debug\crtsys_test.sys
-test\app\build_x64\Debug\crtsys_test_app.exe
+test\cmake\driver\build_x64\Debug\crtsys_test.sys
+test\cmake\app\build_x64\Debug\crtsys_test_app.exe
 ```
 
 ## Running Tests
@@ -297,8 +297,9 @@ cmake/             CMake helpers, including CrtSys.cmake
 include/ntl/       NTL C++ helper headers
 include/.internal/ Internal version and toolchain compatibility headers
 src/               crtsys runtime and CRT/STL compatibility code
-test/app/          User-mode test companion application
-test/driver/       Kernel-mode test driver
+test/cmake/app/    CMake user-mode test companion application
+test/cmake/driver/ CMake kernel-mode test driver
+test/nuget/        Visual Studio WDK NuGet consumer test project
 docs/              Additional documentation
 ```
 

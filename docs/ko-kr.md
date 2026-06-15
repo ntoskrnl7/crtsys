@@ -243,24 +243,24 @@ test\build.bat
 특정 대상을 직접 빌드하려면 다음처럼 실행합니다.
 
 ```bat
-build.bat test\app x64 Debug
-build.bat test\driver x64 Debug
-build.bat test\app x64 Release
-build.bat test\driver x64 Release
+build.bat test\cmake\app x64 Debug
+build.bat test\cmake\driver x64 Debug
+build.bat test\cmake\app x64 Release
+build.bat test\cmake\driver x64 Release
 ```
 
 지원하는 모든 아키텍처와 구성 조합을 빌드하려면 다음 명령을 사용합니다.
 
 ```bat
-build_all.bat test\app
-build_all.bat test\driver
+build_all.bat test\cmake\app
+build_all.bat test\cmake\driver
 ```
 
 일반적인 Debug 출력 경로는 다음과 같습니다.
 
 ```text
-test\driver\build_x64\Debug\crtsys_test.sys
-test\app\build_x64\Debug\crtsys_test_app.exe
+test\cmake\driver\build_x64\Debug\crtsys_test.sys
+test\cmake\app\build_x64\Debug\crtsys_test_app.exe
 ```
 
 ## 테스트 실행
@@ -291,8 +291,9 @@ cmake/             CrtSys.cmake를 포함한 CMake 헬퍼
 include/ntl/       NTL C++ 헬퍼 헤더
 include/.internal/ 내부 버전 및 toolchain 호환 헤더
 src/               crtsys 런타임 및 CRT/STL 호환 코드
-test/app/          사용자 모드 테스트 companion 앱
-test/driver/       커널 모드 테스트 드라이버
+test/cmake/app/    CMake 사용자 모드 테스트 companion 앱
+test/cmake/driver/ CMake 커널 모드 테스트 드라이버
+test/nuget/        Visual Studio WDK NuGet 소비자 테스트 프로젝트
 docs/              추가 문서
 ```
 

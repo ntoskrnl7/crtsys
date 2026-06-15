@@ -1,6 +1,6 @@
 param(
-  [string] $DriverPath = 'test\driver\build_x64\Debug\crtsys_test.sys',
-  [string] $AppPath = 'test\app\build_x64\Debug\crtsys_test_app.exe',
+  [string] $DriverPath = 'test\cmake\driver\build_x64\Debug\crtsys_test.sys',
+  [string] $AppPath = 'test\cmake\app\build_x64\Debug\crtsys_test_app.exe',
   [string] $ServiceName = 'CrtSysTest'
 )
 

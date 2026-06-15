@@ -12,6 +12,8 @@ param(
 
   [string] $WindowsSdkVersion = '10.0.22621.0',
 
+  [string] $WdkVersion,
+
   [string] $WorkDirectory
 )
 
@@ -56,31 +58,61 @@ if (-not (Test-Path $msbuild)) {
 }
 
 $windowsKitsRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10'
-$wdkHeader = Join-Path $windowsKitsRoot "Include\$WindowsSdkVersion\km\wdm.h"
+$windowsKitsIncludeRoot = Join-Path $windowsKitsRoot 'Include'
+if (-not (Test-Path $windowsKitsIncludeRoot)) {
+  throw "Windows Kits include directory was not found: $windowsKitsIncludeRoot"
+}
+
+if ([string]::IsNullOrWhiteSpace($WdkVersion)) {
+  $preferredWdkHeader = Join-Path $windowsKitsIncludeRoot "$WindowsSdkVersion\km\wdm.h"
+  if (Test-Path $preferredWdkHeader) {
+    $WdkVersion = $WindowsSdkVersion
+  } else {
+    $wdkVersionCandidates = Get-ChildItem -Path $windowsKitsIncludeRoot -Directory |
+      Where-Object { $_.Name -match '^\d+\.\d+\.\d+\.\d+$' } |
+      Where-Object { Test-Path (Join-Path $_.FullName 'km\wdm.h') } |
+      Sort-Object { [version]$_.Name }
+
+    if ($wdkVersionCandidates.Count -eq 0) {
+      throw "No installed WDK with km\wdm.h was found under $windowsKitsIncludeRoot."
+    }
+
+    $WdkVersion = $wdkVersionCandidates[-1].Name
+  }
+}
+
+$wdkHeader = Join-Path $windowsKitsIncludeRoot "$WdkVersion\km\wdm.h"
 if (-not (Test-Path $wdkHeader)) {
   throw "WDK header was not found: $wdkHeader"
 }
 
-$wdkPlatform = $Architecture
-$wdkKernelLibDirectory = Join-Path $windowsKitsRoot "Lib\$WindowsSdkVersion\km\$wdkPlatform"
+$wdkKernelLibDirectory = Join-Path $windowsKitsRoot "Lib\$WdkVersion\km\$Architecture"
 if (-not (Test-Path (Join-Path $wdkKernelLibDirectory 'ntoskrnl.lib'))) {
   throw "WDK kernel library directory is missing ntoskrnl.lib: $wdkKernelLibDirectory"
 }
 
-$wdkPreprocessorDefinitions = switch ($Architecture) {
-  'x64' { '_WIN64;_AMD64_;AMD64;WINNT=1;_WIN32_WINNT=0x0601' }
-  'ARM64' { '_ARM64;_ARM64_;ARM64;STD_CALL;WINNT=1;_WIN32_WINNT=0x0601' }
-}
-
-$wdkAdditionalDependencies = switch ($Architecture) {
-  'x64' { 'ntoskrnl.lib;hal.lib;wmilib.lib;bufferoverflowk.lib' }
-  'ARM64' { 'ntoskrnl.lib;hal.lib;wmilib.lib;bufferoverflowfastfailk.lib;arm64rt.lib' }
-}
+Write-Host "Requested Windows SDK version: $WindowsSdkVersion"
+Write-Host "Resolved WDK version: $WdkVersion"
 
 Remove-Item -Recurse -Force -Path $WorkDirectory -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $WorkDirectory | Out-Null
 
-$packagesDirectory = Join-Path $WorkDirectory 'packages'
+$testProjectSource = Join-Path $repoRoot 'test\nuget'
+if (-not (Test-Path (Join-Path $testProjectSource 'crtsys_nuget_test.vcxproj'))) {
+  throw "NuGet consumer test project was not found under '$testProjectSource'."
+}
+
+$testRoot = Join-Path $WorkDirectory 'test'
+$testProjectDirectory = Join-Path $testRoot 'nuget'
+$cmakeTestDirectory = Join-Path $testRoot 'cmake'
+New-Item -ItemType Directory -Force -Path $testProjectDirectory | Out-Null
+New-Item -ItemType Directory -Force -Path $cmakeTestDirectory | Out-Null
+
+Copy-Item -Path (Join-Path $testProjectSource '*') -Destination $testProjectDirectory -Recurse -Force
+Copy-Item -Path (Join-Path $repoRoot 'test\cmake\driver') -Destination $cmakeTestDirectory -Recurse -Force
+Copy-Item -Path (Join-Path $repoRoot 'test\cmake\common') -Destination $cmakeTestDirectory -Recurse -Force
+
+$packagesDirectory = Join-Path $testProjectDirectory 'packages'
 & $nuget.Source install crtsys `
   -Version $Version `
   -Source $PackageDirectory `
@@ -114,105 +146,21 @@ if ($packageReadme -notmatch 'crtsys NuGet Package') {
   throw "Installed package README.md does not look like the NuGet package README."
 }
 
-$sourceFile = Join-Path $WorkDirectory 'main.cpp'
-@'
-#include <string>
-#include <ntl/driver>
-
-ntl::status ntl::main(ntl::driver& driver,
-                      const std::wstring& registry_path) {
-  (void)registry_path;
-  driver.on_unload([]() {});
-  return ntl::status::ok();
+$projectFile = Join-Path $testProjectDirectory 'crtsys_nuget_test.vcxproj'
+if (-not (Test-Path $projectFile)) {
+  throw "NuGet consumer test project file was not copied: $projectFile"
 }
-'@ | Set-Content -LiteralPath $sourceFile -Encoding UTF8
 
-$projectGuid = [guid]::NewGuid().ToString('B').ToUpperInvariant()
-$projectFile = Join-Path $WorkDirectory 'crtsys_nuget_smoke.vcxproj'
-$projectXml = @'
-<?xml version="1.0" encoding="utf-8"?>
-<Project DefaultTargets="Build" ToolsVersion="12.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
-  <ItemGroup Label="ProjectConfigurations">
-    <ProjectConfiguration Include="__CONFIGURATION__|__PLATFORM__">
-      <Configuration>__CONFIGURATION__</Configuration>
-      <Platform>__PLATFORM__</Platform>
-    </ProjectConfiguration>
-  </ItemGroup>
-  <PropertyGroup Label="Globals">
-    <ProjectGuid>__PROJECT_GUID__</ProjectGuid>
-    <Keyword>Win32Proj</Keyword>
-    <RootNamespace>CrtSysNuGetSmoke</RootNamespace>
-    <Configuration Condition="'$(Configuration)' == ''">__CONFIGURATION__</Configuration>
-    <Platform Condition="'$(Platform)' == ''">__PLATFORM__</Platform>
-    <WindowsTargetPlatformVersion>__WINDOWS_SDK_VERSION__</WindowsTargetPlatformVersion>
-  </PropertyGroup>
-  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
-  <PropertyGroup Label="Configuration" Condition="'$(Configuration)|$(Platform)'=='__CONFIGURATION__|__PLATFORM__'">
-    <TargetVersion>Windows10</TargetVersion>
-    <ConfigurationType>Driver</ConfigurationType>
-    <UseDebugLibraries>false</UseDebugLibraries>
-    <DriverTargetPlatform>Windows Driver</DriverTargetPlatform>
-    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
-    <DriverType>WDM</DriverType>
-    <CharacterSet>Unicode</CharacterSet>
-  </PropertyGroup>
-  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
-  <PropertyGroup>
-    <CrtSysPackageRoot>$([MSBuild]::NormalizeDirectory('$(MSBuildThisFileDirectory)', 'packages', 'crtsys'))</CrtSysPackageRoot>
-    <TargetName>crtsys_nuget_smoke</TargetName>
-  </PropertyGroup>
-  <ImportGroup Label="PropertySheets">
-    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="Exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" />
-    <Import Project="$(CrtSysPackageRoot)build\native\crtsys.props" Condition="Exists('$(CrtSysPackageRoot)build\native\crtsys.props')" />
-  </ImportGroup>
-  <ItemGroup Label="WrappedTaskItems" />
-  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='__CONFIGURATION__|__PLATFORM__'">
-    <ClCompile>
-      <WarningLevel>Level4</WarningLevel>
-      <TreatWarningAsError>true</TreatWarningAsError>
-      <LanguageStandard>stdcpp17</LanguageStandard>
-      <PreprocessorDefinitions>__WDK_PREPROCESSOR_DEFINITIONS__;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>$(WindowsSdkDir)Include\$(WindowsTargetPlatformVersion)\shared;$(WindowsSdkDir)Include\$(WindowsTargetPlatformVersion)\km;$(WindowsSdkDir)Include\$(WindowsTargetPlatformVersion)\km\crt;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <AdditionalOptions>/Zp8 /GF /GR- /EHsc %(AdditionalOptions)</AdditionalOptions>
-    </ClCompile>
-    <Link>
-      <AdditionalLibraryDirectories>$(WindowsSdkDir)Lib\$(WindowsTargetPlatformVersion)\km\__WDK_PLATFORM__;$(WindowsSdkDir)Lib\$(WindowsTargetPlatformVersion)\um\__WDK_PLATFORM__;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>__WDK_ADDITIONAL_DEPENDENCIES__;%(AdditionalDependencies)</AdditionalDependencies>
-      <GenerateManifest>false</GenerateManifest>
-      <IgnoreAllDefaultLibraries>true</IgnoreAllDefaultLibraries>
-      <SubSystem>Native</SubSystem>
-      <AdditionalOptions>/DRIVER /OPT:REF /OPT:ICF /MERGE:_TEXT=.text /MERGE:_PAGE=PAGE /SECTION:INIT,d /VERSION:10.0 %(AdditionalOptions)</AdditionalOptions>
-    </Link>
-  </ItemDefinitionGroup>
-  <ItemGroup>
-    <ClCompile Include="main.cpp" />
-  </ItemGroup>
-  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
-  <ImportGroup Label="ExtensionTargets">
-    <Import Project="$(CrtSysPackageRoot)build\native\crtsys.targets" Condition="Exists('$(CrtSysPackageRoot)build\native\crtsys.targets')" />
-  </ImportGroup>
-</Project>
-'@
-
-$projectXml = $projectXml.Replace('__CONFIGURATION__', $Configuration)
-$projectXml = $projectXml.Replace('__PLATFORM__', $Architecture)
-$projectXml = $projectXml.Replace('__PROJECT_GUID__', $projectGuid)
-$projectXml = $projectXml.Replace('__WINDOWS_SDK_VERSION__', $WindowsSdkVersion)
-$projectXml = $projectXml.Replace('__WDK_PLATFORM__', $wdkPlatform)
-$projectXml = $projectXml.Replace('__WDK_PREPROCESSOR_DEFINITIONS__', $wdkPreprocessorDefinitions)
-$projectXml = $projectXml.Replace('__WDK_ADDITIONAL_DEPENDENCIES__', $wdkAdditionalDependencies)
-$projectXml | Set-Content -LiteralPath $projectFile -Encoding UTF8
-
-Write-Host "Building NuGet consumer smoke project for $Architecture"
+Write-Host "Building NuGet consumer test driver for $Architecture"
 & $msbuild $projectFile `
   /m `
   /p:Configuration=$Configuration `
   /p:Platform=$Architecture `
-  /p:WindowsTargetPlatformVersion=$WindowsSdkVersion `
+  /p:WindowsTargetPlatformVersion=$WdkVersion `
   /v:minimal
 
 if ($LASTEXITCODE -ne 0) {
   throw "MSBuild package consumer test failed with exit code $LASTEXITCODE."
 }
 
-Write-Host "NuGet consumer smoke test passed for $Architecture."
+Write-Host "NuGet consumer test driver passed for $Architecture."

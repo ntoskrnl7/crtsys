@@ -16,6 +16,7 @@ on:
       - 'docs/**'
       - 'include/**'
       - 'src/**'
+      - 'test/**'
   push:
     branches: [ main ]
     tags:
@@ -33,6 +34,7 @@ on:
       - 'docs/**'
       - 'include/**'
       - 'src/**'
+      - 'test/**'
   workflow_dispatch:
     inputs:
       package_version:
@@ -118,7 +120,7 @@ jobs:
           name: crtsys-nuget-${{ needs.pack.outputs.package_version }}
           path: artifacts/nuget
 
-      - name: Build package consumer smoke project
+      - name: Build package consumer test driver
         shell: pwsh
         run: >
           ./scripts/nuget/Test-CrtSysNuGetPackage.ps1
