@@ -120,11 +120,18 @@ jobs:
           name: crtsys-nuget-${{ needs.pack.outputs.package_version }}
           path: artifacts/nuget
 
+      - name: Validate NuGet trusted publishing user
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace('${{ vars.NUGET_TRUSTED_PUBLISHING_USER }}')) {
+            throw 'Repository variable NUGET_TRUSTED_PUBLISHING_USER is required for NuGet Trusted Publishing.'
+          }
+
       - name: NuGet login
         uses: NuGet/login@v1
         id: nuget-login
         with:
-          user: ntoskrnl7
+          user: ${{ vars.NUGET_TRUSTED_PUBLISHING_USER }}
 
       - name: Publish to nuget.org
         shell: pwsh
