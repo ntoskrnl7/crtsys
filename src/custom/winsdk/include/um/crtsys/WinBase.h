@@ -9,6 +9,22 @@
 #include "fileapi.h"
 #include "processthreadsapi.h"
 
+EXTERN_C_START
+
+WINBASEAPI
+BOOL
+WINAPI
+VerifyVersionInfoW(
+    _Inout_ PVOID lpVersionInformation,
+    _In_ DWORD dwTypeMask,
+    _In_ DWORDLONG dwlConditionMask
+    );
+
+#ifndef VerifyVersionInfo
+#define VerifyVersionInfo VerifyVersionInfoW
+#endif
+
+EXTERN_C_END
 
 
 #define OFS_MAXPATHNAME 128

@@ -4,6 +4,20 @@ cmake_policy(SET CMP0021 OLD)
 set(CMAKE_CXX_STANDARD_LIBRARIES " ")
 set(CMAKE_C_STANDARD_LIBRARIES ${CMAKE_CXX_STANDARD_LIBRARIES})
 
+function(crtsys_scope_compile_options_to_c_cxx TARGET_NAME)
+    get_target_property(TARGET_COMPILE_OPTIONS ${TARGET_NAME} COMPILE_OPTIONS)
+    if(NOT TARGET_COMPILE_OPTIONS)
+        return()
+    endif()
+
+    set(SCOPED_COMPILE_OPTIONS)
+    foreach(COMPILE_OPTION IN LISTS TARGET_COMPILE_OPTIONS)
+        list(APPEND SCOPED_COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:C,CXX>:${COMPILE_OPTION}>")
+    endforeach()
+
+    set_target_properties(${TARGET_NAME} PROPERTIES COMPILE_OPTIONS "${SCOPED_COMPILE_OPTIONS}")
+endfunction()
+
 # Remove Runtime Checks
 string(REGEX REPLACE "/RTC(su|[1su])" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
 string(REGEX REPLACE "/RTC(su|[1su])" "" CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
@@ -46,6 +60,7 @@ find_package(WDK REQUIRED)
 function(crtsys_add_driver _target)
     cmake_parse_arguments(WDK "" "WINVER" "" ${ARGN})
     wdk_add_driver(${_target} ${WDK_UNPARSED_ARGUMENTS} CUSTOM_ENTRY_POINT CrtSysDriverEntry EXTENDED_CPP_FEATURES)
+    crtsys_scope_compile_options_to_c_cxx(${_target})
 
     target_link_libraries(${_target} crtsys)
 
@@ -53,10 +68,10 @@ function(crtsys_add_driver _target)
     set_property(TARGET ${_target} PROPERTY INCLUDE_DIRECTORIES "${crtsys_SOURCE_DIR}/include;${crtsys_SOURCE_DIR}/include/.internal/msvc/$(VCToolsVersion);${crtsys_SOURCE_DIR}/include/.internal/msvc/${MSVC_TOOLSET_VERSION};${crtsys_SOURCE_DIR}/include/.internal/msvc/$(VCToolsVersion)/stl;${crtsys_SOURCE_DIR}/include/.internal/msvc/${MSVC_TOOLSET_VERSION}/stl;$(VC_IncludePath);$(WindowsSDK_IncludePath);${INC_DIR_TMP}")
 
     if(EXISTS "${crtsys_SOURCE_DIR}/include/.internal/winsdk/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/wdk/${WDK_VERSION}/forced.h")
-      target_compile_options(${_target} PRIVATE /FI"${crtsys_SOURCE_DIR}/include/.internal/winsdk/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/wdk/${WDK_VERSION}/forced.h")
+      target_compile_options(${_target} PRIVATE "$<$<COMPILE_LANGUAGE:C,CXX>:/FI${crtsys_SOURCE_DIR}/include/.internal/winsdk/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/wdk/${WDK_VERSION}/forced.h>")
     endif()
 
-    target_compile_options(${_target} PRIVATE /FI"${crtsys_SOURCE_DIR}/include/.internal/adjust_link_order")
+    target_compile_options(${_target} PRIVATE "$<$<COMPILE_LANGUAGE:C,CXX>:/FI${crtsys_SOURCE_DIR}/include/.internal/adjust_link_order>")
 
     if(CRTSYS_NTL_MAIN)
       target_compile_definitions(${_target} PUBLIC CRTSYS_USE_NTL_MAIN)

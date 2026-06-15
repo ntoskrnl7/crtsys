@@ -26,7 +26,9 @@ void test_all();
 
 ntl::status ntl::main(ntl::driver &driver, const std::wstring &registry_path) {
 
+#ifndef CRTSYS_TEST_NO_BREAKPOINT
   KdBreakPoint();
+#endif
 
   std::wcout << "load (registry_path :" << registry_path << ")\n";
 
@@ -96,7 +98,9 @@ DriverEntry (
   PAGED_CODE();
   UNREFERENCED_PARAMETER(RegistryPath);
 
+#ifndef CRTSYS_TEST_NO_BREAKPOINT
   KdBreakPoint();
+#endif
 
   test_all();
 

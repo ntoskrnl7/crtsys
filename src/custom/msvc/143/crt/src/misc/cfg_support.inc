@@ -1,6 +1,7 @@
 #pragma once
 
 
+EXTERN_C PVOID __guard_check_icall_fptr;
 
 
 
