@@ -6,6 +6,12 @@ This page keeps the detailed support checklist that used to live in the main
 README. Checked items are implemented and have test coverage when a `tested`
 link is attached.
 
+Coverage here means that the feature is implemented and exercised by the test
+suite. It does not mean the feature is valid in every driver execution context.
+Unless an API documents a broader contract, assume `PASSIVE_LEVEL`. See
+[Design Rationale and Operational Boundaries](./design-rationale.md) and the
+[NTL API reference](./ntl-api.md) for execution-context guidance.
+
 ## C++ Standard
 
 The tests are based on examples and behavior described by
@@ -79,7 +85,7 @@ NTL provides C++ helpers for driver code. See the
 [NTL API reference](./ntl-api.md) for API-level details.
 
 - [x] `ntl::expand_stack`
-  [(tested)](../test/driver/src/ntl.cpp#L5)
+  [(tested)](../test/driver/src/ntl.cpp#L6)
 - [x] `ntl::status`
 - [x] `ntl::driver`
   - [x] unload callback
@@ -105,22 +111,23 @@ NTL provides C++ helpers for driver code. See the
     [(schema)](../test/common/rpc.hpp)
 - [x] `ntl::irql`
   - [x] `ntl::irql`
-    [(tested)](../test/driver/src/ntl.cpp#L46)
+    [(tested)](../test/driver/src/ntl.cpp#L47)
   - [x] `ntl::raise_irql`
-    [(tested)](../test/driver/src/ntl.cpp#L49)
+    [(tested)](../test/driver/src/ntl.cpp#L50)
   - [x] `ntl::raise_irql_to_dpc_level`
-    [(tested)](../test/driver/src/ntl.cpp#L62)
+    [(tested)](../test/driver/src/ntl.cpp#L63)
   - [x] `ntl::raise_irql_to_synch_level`
-    [(tested)](../test/driver/src/ntl.cpp#L71)
+    [(tested)](../test/driver/src/ntl.cpp#L72)
 - [x] `ntl::spin_lock`
   - [x] `ntl::spin_lock`
-    [(tested)](../test/driver/src/ntl.cpp#L80)
+    [(tested)](../test/driver/src/ntl.cpp#L81)
   - [x] `ntl::unique_lock<ntl::spin_lock>`
-    [(tested)](../test/driver/src/ntl.cpp#L99)
+    [(normal lock tested)](../test/driver/src/ntl.cpp#L94)
+    [(at-DPC tested)](../test/driver/src/ntl.cpp#L140)
 - [x] `ntl::resource`
   - [x] `ntl::resource`
-    [(tested)](../test/driver/src/ntl.cpp#L117)
+    [(tested)](../test/driver/src/ntl.cpp#L181)
   - [x] `ntl::unique_lock<ntl::resource>`
-    [(tested)](../test/driver/src/ntl.cpp#L156)
+    [(tested)](../test/driver/src/ntl.cpp#L220)
   - [x] `ntl::shared_lock<ntl::resource>`
-    [(tested)](../test/driver/src/ntl.cpp#L179)
+    [(tested)](../test/driver/src/ntl.cpp#L230)

@@ -8,6 +8,23 @@ simple user-mode to kernel-mode RPC without hiding the underlying WDK objects.
 
 Headers live under [`include/ntl`](../include/ntl).
 
+## IRQL Contract Convention
+
+NTL is designed mainly for driver control paths. If an API does not document a
+broader contract, assume `PASSIVE_LEVEL`.
+
+The API notes below use conservative contracts:
+
+- `PASSIVE_LEVEL` means the helper may allocate, wait, throw, touch pageable
+  code, or depend on runtime/STL state.
+- `<= APC_LEVEL` means the helper may use WDK primitives that allow APC-level
+  callers, but it is still not DPC/ISR-safe.
+- `<= DISPATCH_LEVEL` or DPC-specific contracts are documented only for APIs
+  that are intentionally written for that context.
+
+See [Design Rationale and Operational Boundaries](./design-rationale.md) for
+the project-level execution model.
+
 ## Entry Point
 
 When `CRTSYS_NTL_MAIN` is enabled, implement:
@@ -19,6 +36,8 @@ ntl::status ntl::main(ntl::driver& driver,
 
 `crtsys` routes the WDK driver entry point into this function. The wrapper also
 uses the stack expansion helper before calling into `ntl::main`.
+
+IRQL: `PASSIVE_LEVEL`.
 
 ## `ntl::status`
 
@@ -34,6 +53,9 @@ Header: [`include/ntl/status`](../include/ntl/status)
 - `operator NTSTATUS() const`
 - `static status ok()`
 
+IRQL: value-only operations do not allocate or wait. The surrounding WDK call
+path still determines whether a given status flow is valid at the current IRQL.
+
 ## Exceptions
 
 Header: [`include/ntl/except`](../include/ntl/except)
@@ -44,6 +66,10 @@ Header: [`include/ntl/except`](../include/ntl/except)
 - `ntl::seh::try_except(fn, args...)`
   - runs a callable inside SEH
   - returns `{success, exception_code}`
+
+IRQL: treat C++ exception paths as `PASSIVE_LEVEL` only. Do not throw across
+WDK callback boundaries, spin-lock-held regions, DPC, ISR, or paging I/O paths
+unless that exact behavior is separately tested and documented.
 
 ## Stack Expansion
 
@@ -68,6 +94,10 @@ API:
   - `ignore_failure(bool)`
 - `ntl::expand_stack(options, fn, args...)`
 
+IRQL: documented `crtsys` usage is `PASSIVE_LEVEL`. The wrapper uses C++
+runtime paths and may throw on failure. Treat it as a control-path helper, not
+as a hot-path escape hatch.
+
 ## Driver Object
 
 Header: [`include/ntl/driver`](../include/ntl/driver)
@@ -81,6 +111,9 @@ Header: [`include/ntl/driver`](../include/ntl/driver)
   - registers a C++ unload callback
 - `name() const`
   - returns the driver name as `std::wstring`
+
+IRQL: `PASSIVE_LEVEL`. The helper uses C++ objects and containers and is
+intended for driver initialization, unload registration, and setup paths.
 
 ## Device Object
 
@@ -112,6 +145,9 @@ Device control helper types:
 - `ntl::device_control::in_buffer`
 - `ntl::device_control::out_buffer`
 - `ntl::device_control::dispatch_fn`
+
+IRQL: `PASSIVE_LEVEL` unless a specific dispatch path has been audited and
+documented otherwise. The wrapper uses C++ callbacks and ownership helpers.
 
 ## RPC
 
@@ -146,6 +182,10 @@ Types:
 See [`test/common/rpc.hpp`](../test/common/rpc.hpp) for a complete shared RPC
 schema example.
 
+IRQL: server-side callbacks should be treated as `PASSIVE_LEVEL`. The
+user-mode `ntl::rpc::client` side is outside kernel IRQL rules but still
+depends on the driver-side dispatch contract.
+
 ## IRQL
 
 Header: [`include/ntl/irql`](../include/ntl/irql)
@@ -160,6 +200,10 @@ Helpers:
 - `ntl::raise_irql_to_dpc_level()`
 - `ntl::raise_irql_to_synch_level()`
 - `ntl::current_irql()`
+
+IRQL: these helpers explicitly manipulate or observe IRQL. Keep the RAII object
+scoped as tightly as possible and do not call runtime-backed helpers while the
+IRQL is elevated unless those helpers document that context.
 
 ## Spin Lock
 
@@ -177,6 +221,13 @@ Header: [`include/ntl/spin_lock`](../include/ntl/spin_lock)
 
 `ntl::unique_lock<ntl::spin_lock>` extends `std::unique_lock` with
 `ntl::at_dpc_level_lock`.
+
+IRQL: `lock()` and successful `try_lock()` raise to `DISPATCH_LEVEL` and
+`unlock()` restores the previous IRQL. `lock_at_dpc_level()` and
+`unlock_from_dpc_level()` require the caller to already be running at
+`DISPATCH_LEVEL`. Code executed while holding the spin lock must be resident,
+short, nonblocking, and must not allocate, wait, throw, or call arbitrary
+runtime/STL helpers.
 
 ## ERESOURCE
 
@@ -208,6 +259,11 @@ Lock helpers:
 - `ntl::shared_lock<ntl::resource>`
 - `ntl::adopt_critical_region`
 
+IRQL: `<= APC_LEVEL`, matching the blocking/resource-style synchronization
+model. Do not use `ntl::resource` in DPC, ISR, or spin-lock-held paths.
+`adopt_critical_region` is for callers that deliberately manage the critical
+region boundary themselves.
+
 ## Unicode String
 
 Header: [`include/ntl/unicode_string`](../include/ntl/unicode_string)
@@ -217,3 +273,7 @@ Header: [`include/ntl/unicode_string`](../include/ntl/unicode_string)
 - construct from `std::wstring`
 - `c_str() const`
 - `operator*()`
+
+IRQL: construction from `std::wstring` should be treated as `PASSIVE_LEVEL`.
+Accessors are lightweight, but the lifetime and storage still belong to the
+owning C++ object.
