@@ -68,10 +68,12 @@ if ([string]::IsNullOrWhiteSpace($WdkVersion)) {
   if (Test-Path $preferredWdkHeader) {
     $WdkVersion = $WindowsSdkVersion
   } else {
-    $wdkVersionCandidates = Get-ChildItem -Path $windowsKitsIncludeRoot -Directory |
-      Where-Object { $_.Name -match '^\d+\.\d+\.\d+\.\d+$' } |
-      Where-Object { Test-Path (Join-Path $_.FullName 'km\wdm.h') } |
-      Sort-Object { [version]$_.Name }
+    $wdkVersionCandidates = @(
+      Get-ChildItem -Path $windowsKitsIncludeRoot -Directory |
+        Where-Object { $_.Name -match '^\d+\.\d+\.\d+\.\d+$' } |
+        Where-Object { Test-Path (Join-Path $_.FullName 'km\wdm.h') } |
+        Sort-Object { [version]$_.Name }
+    )
 
     if ($wdkVersionCandidates.Count -eq 0) {
       throw "No installed WDK with km\wdm.h was found under $windowsKitsIncludeRoot."
