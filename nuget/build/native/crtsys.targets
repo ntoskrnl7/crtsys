@@ -24,7 +24,7 @@
       <AdditionalLibraryDirectories>$(CrtSysLibDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>crtsys.lib;Ldk.lib;libcntpr.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <EntryPointSymbol Condition="'$(CrtSysUseNtlMain)' == 'true'">CrtSysDriverEntry</EntryPointSymbol>
-      <AdditionalOptions>/FORCE:MULTIPLE %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/FORCE:MULTIPLE /IGNORE:4006 %(AdditionalOptions)</AdditionalOptions>
     </Link>
   </ItemDefinitionGroup>
 </Project>

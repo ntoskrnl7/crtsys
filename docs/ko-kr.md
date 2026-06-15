@@ -176,8 +176,8 @@ native MSBuild import 파일, 미리 빌드된 driver용 `crtsys.lib`와
 - Driver mode: WDK driver 프로젝트에서는 CMake의 driver 설정과 같은 방향으로
   `crtsys` include 경로, WDK `km\crt`보다 앞서는 MSVC/STL 호환성 헤더,
   forced include, preprocessor 정의, `crtsys.lib`, `Ldk.lib`,
-  `libcntpr.lib`, `/FORCE:MULTIPLE`, 기본 `ntl::main` 흐름을 위한
-  `CrtSysDriverEntry` entry point를 설정합니다.
+  `libcntpr.lib`, `/FORCE:MULTIPLE`, `/IGNORE:4006`, 기본 `ntl::main`
+  흐름을 위한 `CrtSysDriverEntry` entry point를 설정합니다.
 
 Driver mode는 MSBuild가 driver 프로젝트를 감지할 때 자동으로 켜집니다
 (`ConfigurationType=Driver` 또는 `DriverType`이 설정된 경우). 필요하면

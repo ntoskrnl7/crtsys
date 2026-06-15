@@ -86,7 +86,8 @@ TEST(ntl_device, device_io_control) {
     DWORD bytes_returned;
     char buffer[sizeof("world")];
 
-    EXPECT_TRUE(DeviceIoControl(hDevice, TEST_DEVICE_CTL, "hello", 5, buffer,
+    char request[] = "hello";
+    EXPECT_TRUE(DeviceIoControl(hDevice, TEST_DEVICE_CTL, request, 5, buffer,
                                 sizeof("world"), &bytes_returned, NULL));
 
     EXPECT_EQ(bytes_returned, sizeof("world"));

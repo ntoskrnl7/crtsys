@@ -176,8 +176,8 @@ The package has two consumer modes:
 - Driver mode: WDK driver projects get the CMake-equivalent driver settings:
   `crtsys` include paths, MSVC/STL compatibility headers before WDK `km\crt`,
   forced include setup, preprocessor definitions, `crtsys.lib`, `Ldk.lib`,
-  `libcntpr.lib`, `/FORCE:MULTIPLE`, and the `CrtSysDriverEntry` entry point
-  for the default `ntl::main` flow.
+  `libcntpr.lib`, `/FORCE:MULTIPLE`, `/IGNORE:4006`, and the
+  `CrtSysDriverEntry` entry point for the default `ntl::main` flow.
 
 Driver mode is enabled automatically when MSBuild sees a driver project
 (`ConfigurationType=Driver` or `DriverType` is set). It can also be forced with
