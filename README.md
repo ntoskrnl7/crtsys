@@ -176,8 +176,8 @@ The package has two consumer modes:
 - Driver mode: WDK driver projects get the CMake-equivalent driver settings:
   `crtsys` include paths, MSVC/STL compatibility headers before WDK `km\crt`,
   forced include setup, preprocessor definitions, `crtsys.lib`, `Ldk.lib`,
-  `libcntpr.lib`, `/FORCE:MULTIPLE`, `/IGNORE:4006`, and the
-  `CrtSysDriverEntry` entry point for the default `ntl::main` flow.
+  `libcntpr.lib`, `/FORCE:MULTIPLE`, and the `CrtSysDriverEntry` entry point
+  for the default `ntl::main` flow.
 
 Driver mode is enabled automatically when MSBuild sees a driver project
 (`ConfigurationType=Driver` or `DriverType` is set). It can also be forced with
@@ -191,7 +191,7 @@ The current binary package targets:
 - Windows SDK/WDK `10.0.22621.0`
 - App header builds on `x86`, `x64`, and `ARM64`
 - Driver library builds on `x64` and `ARM64`
-- Release `crtsys.lib`, `Ldk.lib`, and WDK `libcntpr.lib`
+- Debug/Release `crtsys.lib`, `Ldk.lib`, and WDK `libcntpr.lib`
 
 Install it from Visual Studio's **Manage NuGet Packages** UI. In the Package
 Manager Console, select your app or driver project as the default project and

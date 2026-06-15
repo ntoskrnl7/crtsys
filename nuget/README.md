@@ -38,8 +38,10 @@ platform toolset, target SDK/WDK, driver type, WDK include paths, WDK libraries,
 signing, INF, and packaging settings. The `crtsys` package imports native
 MSBuild props/targets automatically and adds the `crtsys` include paths, forced
 include setup, preprocessor definitions, library path, `crtsys.lib`, `Ldk.lib`,
-`libcntpr.lib`, `/FORCE:MULTIPLE`, `/IGNORE:4006`, and the
-`CrtSysDriverEntry` entry point for the default `ntl::main` flow.
+`libcntpr.lib`, `/FORCE:MULTIPLE`, and the `CrtSysDriverEntry` entry point for
+the default `ntl::main` flow. Debug projects use the package's Debug driver
+libraries, and Release projects use the Release driver libraries. You can
+override that selection with `CrtSysLibraryConfiguration` when needed.
 
 The package also mirrors the repository CMake driver setup for the parts that
 matter to `crtsys`: it disables the WDK `/kernel` compiler switch and puts the
@@ -58,7 +60,7 @@ before importing the package props.
 - Windows SDK/WDK `10.0.22621.0`
 - app header checks on `x86`, `x64`, and `ARM64`
 - driver libraries on `x64` and `ARM64`
-- Release `crtsys.lib` and `Ldk.lib`
+- Debug/Release `crtsys.lib` and `Ldk.lib`
 - `ntl::main` entry point flow
 
 Win32/x86 binaries are not included.

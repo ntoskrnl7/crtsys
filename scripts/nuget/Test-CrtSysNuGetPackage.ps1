@@ -10,7 +10,7 @@ param(
   [ValidateSet('x86', 'x64', 'ARM64')]
   [string] $Architecture = 'x64',
 
-  [ValidateSet('Release')]
+  [ValidateSet('Debug', 'Release')]
   [string] $Configuration = 'Release',
 
   [string] $WindowsSdkVersion = '10.0.22621.0',
@@ -42,7 +42,7 @@ if ([string]::IsNullOrWhiteSpace($PackageDirectory)) {
 }
 
 if ([string]::IsNullOrWhiteSpace($WorkDirectory)) {
-  $WorkDirectory = Join-Path $repoRoot "artifacts\nuget-consumer-test\$Consumer\$Architecture"
+  $WorkDirectory = Join-Path $repoRoot "artifacts\nuget-consumer-test\$Consumer\$Architecture\$Configuration"
 }
 
 $PackageDirectory = (Resolve-Path $PackageDirectory).Path
@@ -165,8 +165,8 @@ $requiredPackagePaths = @(
 )
 if ($isDriverConsumer) {
   $requiredPackagePaths += @(
-    "lib\native\$Architecture\Release\crtsys.lib",
-    "lib\native\$Architecture\Release\Ldk.lib",
+    "lib\native\$Architecture\$Configuration\crtsys.lib",
+    "lib\native\$Architecture\$Configuration\Ldk.lib",
     'include\ntl\driver'
   )
 }
@@ -226,11 +226,11 @@ if ($isDriverConsumer) {
   $msbuildArguments += "/p:WindowsTargetPlatformVersion=$WindowsSdkVersion"
 }
 
-Write-Host "Building NuGet $Consumer consumer test for $Architecture"
+Write-Host "Building NuGet $Consumer consumer test for $Architecture $Configuration"
 & $msbuild @msbuildArguments
 
 if ($LASTEXITCODE -ne 0) {
   throw "MSBuild package $Consumer consumer test failed with exit code $LASTEXITCODE."
 }
 
-Write-Host "NuGet $Consumer consumer test passed for $Architecture."
+Write-Host "NuGet $Consumer consumer test passed for $Architecture $Configuration."

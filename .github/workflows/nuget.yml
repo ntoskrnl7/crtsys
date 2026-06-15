@@ -84,13 +84,14 @@ jobs:
           Write-Host "Package version: $version"
 
   build-libs:
-    name: Build NuGet libs ${{ matrix.arch }}
+    name: Build NuGet libs ${{ matrix.arch }} ${{ matrix.config }}
     needs: version
     runs-on: windows-2022
     strategy:
       fail-fast: false
       matrix:
         arch: [x64, ARM64]
+        config: [Debug, Release]
 
     steps:
       - uses: actions/checkout@v5
@@ -100,13 +101,13 @@ jobs:
         run: >
           ./scripts/nuget/Build-CrtSysNuGetLibs.ps1
           -Architecture '${{ matrix.arch }}'
-          -Configuration Release
+          -Configuration '${{ matrix.config }}'
           -WindowsSdkVersion '10.0.22621.0'
 
       - uses: actions/upload-artifact@v7
         with:
-          name: crtsys-nuget-libs-${{ matrix.arch }}
-          path: artifacts/nuget-staging/lib/native/${{ matrix.arch }}
+          name: crtsys-nuget-libs-${{ matrix.arch }}-${{ matrix.config }}
+          path: artifacts/nuget-staging/lib/native/${{ matrix.arch }}/${{ matrix.config }}
           if-no-files-found: error
 
   pack:
@@ -131,13 +132,23 @@ jobs:
 
       - uses: actions/download-artifact@v7
         with:
-          name: crtsys-nuget-libs-x64
-          path: artifacts/nuget-staging/lib/native/x64
+          name: crtsys-nuget-libs-x64-Debug
+          path: artifacts/nuget-staging/lib/native/x64/Debug
 
       - uses: actions/download-artifact@v7
         with:
-          name: crtsys-nuget-libs-ARM64
-          path: artifacts/nuget-staging/lib/native/ARM64
+          name: crtsys-nuget-libs-x64-Release
+          path: artifacts/nuget-staging/lib/native/x64/Release
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: crtsys-nuget-libs-ARM64-Debug
+          path: artifacts/nuget-staging/lib/native/ARM64/Debug
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: crtsys-nuget-libs-ARM64-Release
+          path: artifacts/nuget-staging/lib/native/ARM64/Release
 
       - name: Pack
         shell: pwsh
@@ -150,13 +161,14 @@ jobs:
           if-no-files-found: error
 
   test-package-driver:
-    name: Test NuGet driver package ${{ matrix.arch }}
+    name: Test NuGet driver package ${{ matrix.arch }} ${{ matrix.config }}
     needs: pack
     runs-on: windows-2022
     strategy:
       fail-fast: false
       matrix:
         arch: [x64, ARM64]
+        config: [Debug, Release]
 
     steps:
       - uses: actions/checkout@v5
@@ -176,16 +188,18 @@ jobs:
           -Version '${{ needs.pack.outputs.package_version }}'
           -Consumer Driver
           -Architecture '${{ matrix.arch }}'
+          -Configuration '${{ matrix.config }}'
           -WindowsSdkVersion '10.0.22621.0'
 
   test-package-app:
-    name: Test NuGet app package ${{ matrix.arch }}
+    name: Test NuGet app package ${{ matrix.arch }} ${{ matrix.config }}
     needs: pack
     runs-on: windows-2022
     strategy:
       fail-fast: false
       matrix:
         arch: [x86, x64, ARM64]
+        config: [Debug, Release]
 
     steps:
       - uses: actions/checkout@v5
@@ -205,6 +219,7 @@ jobs:
           -Version '${{ needs.pack.outputs.package_version }}'
           -Consumer App
           -Architecture '${{ matrix.arch }}'
+          -Configuration '${{ matrix.config }}'
           -WindowsSdkVersion '10.0.22621.0'
 
   publish:

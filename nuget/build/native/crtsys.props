@@ -7,6 +7,7 @@
     <CrtSysUseDriverSupport Condition="'$(CrtSysUseDriverSupport)' == ''">false</CrtSysUseDriverSupport>
     <CrtSysLibPlatform Condition="'$(Platform)' == 'Win32'">x86</CrtSysLibPlatform>
     <CrtSysLibPlatform Condition="'$(CrtSysLibPlatform)' == ''">$(Platform)</CrtSysLibPlatform>
+    <CrtSysLibraryConfiguration Condition="'$(CrtSysLibraryConfiguration)' == '' and ('$(Configuration)' == 'Debug' or '$(Configuration)' == 'Release')">$(Configuration)</CrtSysLibraryConfiguration>
     <CrtSysLibraryConfiguration Condition="'$(CrtSysLibraryConfiguration)' == ''">Release</CrtSysLibraryConfiguration>
     <CrtSysLibDir>$(CrtSysRoot)lib\native\$(CrtSysLibPlatform)\$(CrtSysLibraryConfiguration)\</CrtSysLibDir>
     <CrtSysUseNtlMain Condition="'$(CrtSysUseNtlMain)' == ''">true</CrtSysUseNtlMain>

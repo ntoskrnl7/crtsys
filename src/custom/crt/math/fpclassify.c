@@ -39,12 +39,4 @@ _Check_return_ _ACRTIMP short __cdecl _ldtest(_In_ long double *_Px);
 _Check_return_ _ACRTIMP short __cdecl _ldtest(_In_ long double *_Px) {
   return _dtest((double *)_Px);
 }
-
-#if _MSC_VER >= 1920
-_Check_return_ _ACRTIMP short __cdecl _ldclass(_In_ long double _X);
-#pragma function(_ldclass)
-#endif
-_Check_return_ _ACRTIMP short __cdecl _ldclass(_In_ long double _X) {
-  return _ldtest(&_X);
-}
 #pragma warning(pop)
