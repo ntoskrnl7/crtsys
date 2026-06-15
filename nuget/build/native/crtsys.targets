@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Target Name="CrtSysValidateNativePackage" BeforeTargets="PrepareForBuild">
+    <Error
+      Condition="'$(CrtSysUseNtlMain)' != 'true'"
+      Text="The prebuilt crtsys NuGet package currently supports the ntl::main entry point flow only. Leave CrtSysUseNtlMain set to true." />
+    <Error
+      Condition="'$(CrtSysLibPlatform)' != 'x64' and '$(CrtSysLibPlatform)' != 'ARM64'"
+      Text="crtsys NuGet package contains prebuilt libraries for x64 and ARM64 only. Current platform is '$(Platform)'." />
+    <Error
+      Condition="!Exists('$(CrtSysLibDir)crtsys.lib')"
+      Text="crtsys.lib was not found under '$(CrtSysLibDir)'." />
+    <Error
+      Condition="!Exists('$(CrtSysLibDir)Ldk.lib')"
+      Text="Ldk.lib was not found under '$(CrtSysLibDir)'." />
+  </Target>
+
+  <ItemDefinitionGroup>
+    <Link>
+      <AdditionalLibraryDirectories>$(CrtSysLibDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies Condition="'$(CrtSysLibPlatform)' == 'x64'">crtsys.lib;Ldk.lib;libcntpr.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies Condition="'$(CrtSysLibPlatform)' != 'x64'">crtsys.lib;Ldk.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <EntryPointSymbol Condition="'$(CrtSysUseNtlMain)' == 'true'">CrtSysDriverEntry</EntryPointSymbol>
+      <AdditionalOptions Condition="'$(CrtSysLibPlatform)' == 'x64'">/FORCE:MULTIPLE %(AdditionalOptions)</AdditionalOptions>
+    </Link>
+  </ItemDefinitionGroup>
+</Project>

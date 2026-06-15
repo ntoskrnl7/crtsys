@@ -136,6 +136,72 @@ cmake -S . -B build_x64 -A x64
 cmake --build build_x64 --config Debug
 ```
 
+## NuGet 패키지
+
+`crtsys`는 Visual Studio WDK 드라이버 프로젝트에서 바로 사용할 수 있는
+native NuGet 패키지로 배포할 수 있습니다. 패키지에는 공개 NTL 헤더, 내부
+호환성 헤더, native MSBuild import 파일, 미리 빌드된 `crtsys.lib`와
+`Ldk.lib`가 포함됩니다.
+
+Visual Studio WDK 드라이버 프로젝트에 패키지를 설치하면 NuGet이
+`build/native/crtsys.props`와 `build/native/crtsys.targets`를 자동으로
+import합니다. 이 파일들은 기본 `ntl::main` 흐름에 필요한 include 경로,
+forced include 파일, preprocessor 정의, library 경로, linker dependency,
+`CrtSysDriverEntry` entry point를 설정합니다.
+현재 binary NuGet 패키지는 `ntl::main` entry point 흐름만 지원합니다.
+
+현재 binary 패키지 대상은 다음과 같습니다.
+
+- Visual Studio 2022
+- Windows SDK/WDK `10.0.22621.0`
+- `x64` 및 `ARM64`
+- Release `crtsys.lib` 및 `Ldk.lib`
+
+Visual Studio의 **Manage NuGet Packages** UI에서 설치합니다. Package
+Manager Console을 사용할 때는 기본 프로젝트를 드라이버 프로젝트로 선택한 뒤
+다음 명령을 실행합니다.
+
+```powershell
+Install-Package crtsys -Version 0.1.10
+```
+
+그 뒤 드라이버에서 `ntl::main`을 정의합니다.
+
+```cpp
+#include <ntl/driver>
+
+ntl::status ntl::main(ntl::driver& driver,
+                      const std::wstring& registry_path) {
+  driver.on_unload([]() {});
+  return ntl::status::ok();
+}
+```
+
+native MSBuild 소비자를 위해 패키지는 `$(CrtSysRoot)` 속성도 제공합니다.
+
+로컬에서 패키지를 만들려면 다음 명령을 사용합니다.
+
+```powershell
+.\scripts\nuget\Build-CrtSysNuGetLibs.ps1
+.\scripts\nuget\Pack-CrtSysNuGet.ps1
+```
+
+환경 변수에 API key가 있을 때 publish할 수 있습니다.
+
+```powershell
+$env:NUGET_API_KEY = '<nuget-api-key>'
+.\scripts\nuget\Push-CrtSysNuGet.ps1 -SkipDuplicate
+```
+
+GitHub Actions도 pull request와 push에서 prebuilt library와 패키지를
+생성합니다. `v0.1.10` 같은 태그를 push하면, 태그 버전이
+`include/.internal/version`과 일치할 때 NuGet Trusted Publishing을 통해
+nuget.org로 publish합니다.
+
+GitHub Actions publish를 사용하려면 nuget.org Trusted Publishing policy를
+repository owner `ntoskrnl7`, repository `crtsys`, workflow file `nuget.yml`,
+environment 제한 없음으로 생성합니다.
+
 ## 이 저장소 빌드
 
 저장소를 clone한 뒤, 현재 호스트 아키텍처 기준으로 테스트 앱과 드라이버를

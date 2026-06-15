@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
+  <metadata>
+    <id>crtsys</id>
+    <version>0.0.0</version>
+    <authors>ntoskrnl7</authors>
+    <title>crtsys</title>
+    <description>C/C++ runtime support for Windows kernel-mode drivers.</description>
+    <projectUrl>https://github.com/ntoskrnl7/crtsys</projectUrl>
+    <repository type="git" url="https://github.com/ntoskrnl7/crtsys" />
+    <license type="file">LICENSE</license>
+    <readme>README.md</readme>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <tags>windows kernel driver wdk native cpp crt stl cmake</tags>
+  </metadata>
+  <files>
+    <file src="..\README.md" target="README.md" />
+    <file src="..\LICENSE" target="LICENSE" />
+    <file src="..\docs\**\*" target="docs" />
+    <file src="..\include\**\*" target="include" />
+    <file src="..\artifacts\nuget-staging\lib\native\**\*" target="lib\native" />
+
+    <file src="build\native\crtsys.props" target="build\native" />
+    <file src="build\native\crtsys.targets" target="build\native" />
+  </files>
+</package>
