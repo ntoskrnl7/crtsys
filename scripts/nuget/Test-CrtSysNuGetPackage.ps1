@@ -120,12 +120,16 @@ $projectXml = @'
     <ProjectGuid>__PROJECT_GUID__</ProjectGuid>
     <Keyword>Win32Proj</Keyword>
     <RootNamespace>CrtSysNuGetSmoke</RootNamespace>
+    <Configuration Condition="'$(Configuration)' == ''">__CONFIGURATION__</Configuration>
+    <Platform Condition="'$(Platform)' == ''">__PLATFORM__</Platform>
     <WindowsTargetPlatformVersion>__WINDOWS_SDK_VERSION__</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Label="Configuration" Condition="'$(Configuration)|$(Platform)'=='__CONFIGURATION__|__PLATFORM__'">
+    <TargetVersion>Windows10</TargetVersion>
     <ConfigurationType>Driver</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
+    <DriverTargetPlatform>Universal</DriverTargetPlatform>
     <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
     <DriverType>WDM</DriverType>
     <CharacterSet>Unicode</CharacterSet>
