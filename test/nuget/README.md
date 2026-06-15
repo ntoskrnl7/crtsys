@@ -10,5 +10,6 @@ for `crtsys.lib`, `Ldk.lib`, include paths, forced includes, and the
 `CrtSysDriverEntry` entry point.
 
 It compiles the same driver test sources used by the CMake test driver, with a
-small local Google Test compatibility header so the test sources can build
-without bringing CMake dependencies into the native NuGet consumer project.
+small local Google Test compatibility header. The CMake driver's
+`nlohmann_json.cpp` coverage is kept by installing the official
+`nlohmann.json` NuGet package and importing its native MSBuild target.

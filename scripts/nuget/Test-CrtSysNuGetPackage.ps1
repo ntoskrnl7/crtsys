@@ -127,6 +127,18 @@ if ($LASTEXITCODE -ne 0) {
   throw "nuget install failed with exit code $LASTEXITCODE."
 }
 
+& $nuget.Source install nlohmann.json `
+  -Version 3.12.0 `
+  -Source https://api.nuget.org/v3/index.json `
+  -OutputDirectory $packagesDirectory `
+  -ExcludeVersion `
+  -NonInteractive `
+  -Verbosity detailed
+
+if ($LASTEXITCODE -ne 0) {
+  throw "nlohmann.json NuGet install failed with exit code $LASTEXITCODE."
+}
+
 $packageRoot = Join-Path $packagesDirectory 'crtsys'
 foreach ($requiredPath in @(
   'README.md',
@@ -140,6 +152,17 @@ foreach ($requiredPath in @(
   $fullPath = Join-Path $packageRoot $requiredPath
   if (-not (Test-Path $fullPath)) {
     throw "Installed package is missing expected file: $fullPath"
+  }
+}
+
+$nlohmannJsonPackageRoot = Join-Path $packagesDirectory 'nlohmann.json'
+foreach ($requiredPath in @(
+  'build\native\nlohmann.json.targets',
+  'build\native\include\nlohmann\json.hpp'
+)) {
+  $fullPath = Join-Path $nlohmannJsonPackageRoot $requiredPath
+  if (-not (Test-Path $fullPath)) {
+    throw "Installed nlohmann.json package is missing expected file: $fullPath"
   }
 }
 

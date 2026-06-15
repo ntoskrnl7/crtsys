@@ -36,6 +36,7 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <PropertyGroup>
     <CrtSysPackageRoot>$([MSBuild]::NormalizeDirectory('$(MSBuildThisFileDirectory)', 'packages', 'crtsys'))</CrtSysPackageRoot>
+    <NlohmannJsonPackageRoot>$([MSBuild]::NormalizeDirectory('$(MSBuildThisFileDirectory)', 'packages', 'nlohmann.json'))</NlohmannJsonPackageRoot>
     <TargetName>crtsys_nuget_test</TargetName>
   </PropertyGroup>
   <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -53,7 +54,7 @@
       <TreatWarningAsError>true</TreatWarningAsError>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <AdditionalIncludeDirectories>$(MSBuildThisFileDirectory);$(MSBuildThisFileDirectory)..\cmake;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>CRTSYS_TEST_NO_BREAKPOINT;_SILENCE_CXX23_ALIGNED_STORAGE_DEPRECATION_WARNING;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>CRTSYS_TEST_NO_BREAKPOINT;CRTSYS_TEST_NLOHMANN_JSON;_SILENCE_CXX23_ALIGNED_STORAGE_DEPRECATION_WARNING;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ExceptionHandling>Sync</ExceptionHandling>
     </ClCompile>
   </ItemDefinitionGroup>
@@ -63,7 +64,7 @@
       <TreatWarningAsError>true</TreatWarningAsError>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <AdditionalIncludeDirectories>$(MSBuildThisFileDirectory);$(MSBuildThisFileDirectory)..\cmake;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>CRTSYS_TEST_NO_BREAKPOINT;_SILENCE_CXX23_ALIGNED_STORAGE_DEPRECATION_WARNING;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>CRTSYS_TEST_NO_BREAKPOINT;CRTSYS_TEST_NLOHMANN_JSON;_SILENCE_CXX23_ALIGNED_STORAGE_DEPRECATION_WARNING;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ExceptionHandling>Sync</ExceptionHandling>
     </ClCompile>
   </ItemDefinitionGroup>
@@ -74,11 +75,13 @@
     <ClCompile Include="..\cmake\driver\src\cpp\lang\initialization.cpp" />
     <ClCompile Include="..\cmake\driver\src\cpp\stl\chrono.cpp" />
     <ClCompile Include="..\cmake\driver\src\cpp\stl\thread.cpp" />
+    <ClCompile Include="..\cmake\driver\src\libs\nlohmann_json.cpp" />
     <ClCompile Include="..\cmake\driver\src\main.cpp" />
     <ClCompile Include="..\cmake\driver\src\ntl.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
+    <Import Project="$(NlohmannJsonPackageRoot)build\native\nlohmann.json.targets" Condition="Exists('$(NlohmannJsonPackageRoot)build\native\nlohmann.json.targets')" />
     <Import Project="$(CrtSysPackageRoot)build\native\crtsys.targets" Condition="Exists('$(CrtSysPackageRoot)build\native\crtsys.targets')" />
   </ImportGroup>
 </Project>
