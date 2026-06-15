@@ -131,7 +131,7 @@ $projectGuid = [guid]::NewGuid().ToString('B').ToUpperInvariant()
 $projectFile = Join-Path $WorkDirectory 'crtsys_nuget_smoke.vcxproj'
 $projectXml = @'
 <?xml version="1.0" encoding="utf-8"?>
-<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+<Project DefaultTargets="Build" ToolsVersion="12.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="__CONFIGURATION__|__PLATFORM__">
       <Configuration>__CONFIGURATION__</Configuration>
@@ -151,7 +151,7 @@ $projectXml = @'
     <TargetVersion>Windows10</TargetVersion>
     <ConfigurationType>Driver</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
-    <DriverTargetPlatform>Universal</DriverTargetPlatform>
+    <DriverTargetPlatform>Windows Driver</DriverTargetPlatform>
     <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
     <DriverType>WDM</DriverType>
     <CharacterSet>Unicode</CharacterSet>
@@ -162,8 +162,10 @@ $projectXml = @'
     <TargetName>crtsys_nuget_smoke</TargetName>
   </PropertyGroup>
   <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="Exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" />
     <Import Project="$(CrtSysPackageRoot)build\native\crtsys.props" Condition="Exists('$(CrtSysPackageRoot)build\native\crtsys.props')" />
   </ImportGroup>
+  <ItemGroup Label="WrappedTaskItems" />
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='__CONFIGURATION__|__PLATFORM__'">
     <ClCompile>
       <WarningLevel>Level4</WarningLevel>

@@ -4,6 +4,11 @@
 intended for users who want to consume prebuilt `crtsys.lib` and `Ldk.lib`
 directly from Visual Studio/MSBuild.
 
+This package must be installed into an existing WDK kernel-mode driver project.
+It does not convert a normal C++ project, console application, static library,
+or CMake project into a WDK driver project, and it does not provide the WDK
+toolset itself.
+
 For CMake usage, design notes, full API documentation, and tested feature
 coverage, use the repository documentation:
 
@@ -14,16 +19,19 @@ coverage, use the repository documentation:
 
 ## Install
 
-Install the package into a Visual Studio WDK driver project:
+Create or open a Visual Studio WDK kernel-mode driver project first, then
+install the package into that driver project:
 
 ```powershell
 Install-Package crtsys
 ```
 
-The package imports native MSBuild props/targets automatically and configures
-the include paths, forced include setup, preprocessor definitions, library
-paths, `crtsys.lib`, `Ldk.lib`, and the `CrtSysDriverEntry` entry point for the
-default `ntl::main` flow.
+The WDK project is still responsible for the kernel-mode platform toolset,
+target SDK/WDK, driver type, WDK include paths, WDK libraries, signing, INF, and
+packaging settings. The `crtsys` package imports native MSBuild props/targets
+automatically and adds the `crtsys` include paths, forced include setup,
+preprocessor definitions, library path, `crtsys.lib`, `Ldk.lib`, and the
+`CrtSysDriverEntry` entry point for the default `ntl::main` flow.
 
 ## Supported Binary Package Target
 

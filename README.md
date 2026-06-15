@@ -162,14 +162,22 @@ cmake --build build_x64 --config Debug
 
 ## NuGet Package
 
-`crtsys` can be distributed as a native NuGet package for Visual Studio driver
-projects. The package includes public NTL headers, internal compatibility
-headers, native MSBuild imports, and prebuilt `crtsys.lib`/`Ldk.lib` binaries.
+`crtsys` can be distributed as a native NuGet package for Visual Studio WDK
+driver projects. The package includes public NTL headers, internal
+compatibility headers, native MSBuild imports, and prebuilt
+`crtsys.lib`/`Ldk.lib` binaries.
+
+The NuGet package must be installed into an existing WDK kernel-mode driver
+project. It does not turn a normal C++ project, console application, static
+library, or CMake project into a WDK driver project, and it does not install or
+replace the WDK toolset.
 
 After installing the package in a Visual Studio WDK driver project, NuGet
 imports `build/native/crtsys.props` and `build/native/crtsys.targets`
-automatically. Those files add the include paths, forced include file,
-preprocessor definitions, library path, linker dependencies, and
+automatically. The WDK project remains responsible for the kernel-mode
+platform toolset, SDK/WDK include paths, WDK libraries, signing, INF, and
+packaging settings. The `crtsys` imports add the `crtsys` include paths, forced
+include file, preprocessor definitions, library path, linker dependencies, and
 `CrtSysDriverEntry` entry point needed for the default `ntl::main` flow.
 The binary NuGet package currently supports the `ntl::main` entry point flow
 only.
