@@ -179,8 +179,9 @@ Types:
   - user-mode client
   - `invoke<Ret>(index, args...)`
 
-See [`test/cmake/common/rpc.hpp`](../test/cmake/common/rpc.hpp) for a complete shared RPC
-schema example.
+See [`test/cmake/common/rpc.hpp`](../test/cmake/common/rpc.hpp) for a complete
+shared RPC schema example. For a smaller app/driver walkthrough, see
+[NTL usage examples](./usage-examples.md).
 
 IRQL: server-side callbacks should be treated as `PASSIVE_LEVEL`. The
 user-mode `ntl::rpc::client` side is outside kernel IRQL rules but still

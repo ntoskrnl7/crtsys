@@ -18,6 +18,7 @@ coverage, use the repository documentation:
 - CMake quick start: <https://github.com/ntoskrnl7/crtsys#quick-start>
 - Design model: <https://github.com/ntoskrnl7/crtsys/blob/main/docs/design-rationale.md>
 - NTL API reference: <https://github.com/ntoskrnl7/crtsys/blob/main/docs/ntl-api.md>
+- NTL usage examples: <https://github.com/ntoskrnl7/crtsys/blob/main/docs/usage-examples.md>
 
 ## Install
 
@@ -85,6 +86,9 @@ int main() {
   return 0;
 }
 ```
+
+For an app/driver RPC skeleton and a raw `DeviceIoControl` skeleton, see the
+repository usage examples.
 
 ## Notes
 

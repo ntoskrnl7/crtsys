@@ -74,6 +74,7 @@ in the documentation directory:
 - [Design rationale and operational boundaries](./docs/design-rationale.md)
 - [Detailed feature coverage](./docs/feature-coverage.md)
 - [NTL API reference](./docs/ntl-api.md)
+- [NTL usage examples](./docs/usage-examples.md)
 
 High-level coverage:
 
@@ -215,6 +216,8 @@ ntl::status ntl::main(ntl::driver& driver,
 ```
 
 For native MSBuild consumers, the package also exposes `$(CrtSysRoot)`.
+See [NTL usage examples](./docs/usage-examples.md) for the app/driver RPC and
+raw IOCTL skeletons.
 
 Pack locally:
 
