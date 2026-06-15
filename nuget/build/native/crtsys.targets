@@ -18,10 +18,9 @@
   <ItemDefinitionGroup>
     <Link>
       <AdditionalLibraryDirectories>$(CrtSysLibDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies Condition="'$(CrtSysLibPlatform)' == 'x64'">crtsys.lib;Ldk.lib;libcntpr.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <AdditionalDependencies Condition="'$(CrtSysLibPlatform)' != 'x64'">crtsys.lib;Ldk.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>crtsys.lib;Ldk.lib;libcntpr.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <EntryPointSymbol Condition="'$(CrtSysUseNtlMain)' == 'true'">CrtSysDriverEntry</EntryPointSymbol>
-      <AdditionalOptions Condition="'$(CrtSysLibPlatform)' == 'x64'">/FORCE:MULTIPLE %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/FORCE:MULTIPLE %(AdditionalOptions)</AdditionalOptions>
     </Link>
   </ItemDefinitionGroup>
 </Project>

@@ -40,7 +40,8 @@ foreach ($arch in $Architecture) {
     "-DCMAKE_SYSTEM_VERSION=$WindowsSdkVersion",
     "-DCMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION=$WindowsSdkVersion",
     '-DCMAKE_CXX_FLAGS=/MP',
-    '-DCRTSYS_NTL_MAIN=ON'
+    '-DCRTSYS_NTL_MAIN=ON',
+    '-DCRTSYS_USE_LIBCNTPR=ON'
   )
 
   Write-Host "Configuring crtsys $arch $Configuration with Windows SDK $WindowsSdkVersion"
