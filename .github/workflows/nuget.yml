@@ -51,18 +51,14 @@ permissions:
   contents: read
 
 jobs:
-  pack:
-    name: Pack NuGet
+  version:
+    name: Resolve package version
     runs-on: windows-2022
     outputs:
       package_version: ${{ steps.version.outputs.package_version }}
 
     steps:
       - uses: actions/checkout@v5
-
-      - uses: actions/setup-dotnet@v5
-        with:
-          dotnet-version: '10.0.x'
 
       - name: Resolve package version
         id: version
@@ -87,9 +83,61 @@ jobs:
           "package_version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           Write-Host "Package version: $version"
 
+  build-libs:
+    name: Build NuGet libs ${{ matrix.arch }}
+    needs: version
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, ARM64]
+
+    steps:
+      - uses: actions/checkout@v5
+
       - name: Build prebuilt libraries
         shell: pwsh
-        run: ./scripts/nuget/Build-CrtSysNuGetLibs.ps1 -Architecture x64,ARM64 -Configuration Release -WindowsSdkVersion '10.0.22621.0'
+        run: >
+          ./scripts/nuget/Build-CrtSysNuGetLibs.ps1
+          -Architecture '${{ matrix.arch }}'
+          -Configuration Release
+          -WindowsSdkVersion '10.0.22621.0'
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: crtsys-nuget-libs-${{ matrix.arch }}
+          path: artifacts/nuget-staging/lib/native/${{ matrix.arch }}
+          if-no-files-found: error
+
+  pack:
+    name: Pack NuGet
+    needs: [version, build-libs]
+    runs-on: windows-2022
+    outputs:
+      package_version: ${{ steps.version.outputs.package_version }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set package version
+        id: version
+        shell: pwsh
+        run: |
+          "package_version=${{ needs.version.outputs.package_version }}" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: crtsys-nuget-libs-x64
+          path: artifacts/nuget-staging/lib/native/x64
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: crtsys-nuget-libs-ARM64
+          path: artifacts/nuget-staging/lib/native/ARM64
 
       - name: Pack
         shell: pwsh

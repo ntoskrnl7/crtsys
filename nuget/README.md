@@ -33,6 +33,12 @@ automatically and adds the `crtsys` include paths, forced include setup,
 preprocessor definitions, library path, `crtsys.lib`, `Ldk.lib`, and the
 `CrtSysDriverEntry` entry point for the default `ntl::main` flow.
 
+The package also mirrors the repository CMake driver setup for the parts that
+matter to `crtsys`: it disables the WDK `/kernel` compiler switch and puts the
+Visual C++ / Windows SDK include paths before inherited WDK `km\crt` include
+paths. This is required for the C++ runtime and STL headers that `crtsys`
+supports.
+
 ## Supported Binary Package Target
 
 - Visual Studio 2022
