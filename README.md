@@ -198,8 +198,10 @@ pushes. A tag such as `v0.1.10` publishes to nuget.org through NuGet Trusted
 Publishing when the tag version matches `include/.internal/version`.
 
 For GitHub Actions publishing, create a nuget.org Trusted Publishing policy
-with repository owner `ntoskrnl7`, repository `crtsys`, workflow file
-`nuget.yml`, and no environment restriction.
+with the package owner shown by nuget.org, repository owner `ntoskrnl7`,
+repository `crtsys`, workflow file `nuget.yml`, and no environment
+restriction. Set the GitHub Actions repository variable
+`NUGET_TRUSTED_PUBLISHING_USER` to the nuget.org user that created the policy.
 
 ## Building This Repository
 
