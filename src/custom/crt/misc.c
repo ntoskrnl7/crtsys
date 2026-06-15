@@ -67,6 +67,9 @@ _Check_return_ _ACRTIMP int __cdecl _fdsign(_In_ float _X)
     return _FSIGN_C(_X);
 }
 
+#ifdef _MSC_VER
+#pragma function(llabs)
+#endif
 _Check_return_ _ACRTIMP long long __cdecl llabs(_In_ long long _X)
 {
     return _X < 0 ? -_X : _X;

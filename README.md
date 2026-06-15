@@ -137,6 +137,70 @@ cmake -S . -B build_x64 -A x64
 cmake --build build_x64 --config Debug
 ```
 
+## NuGet Package
+
+`crtsys` can be distributed as a native NuGet package for Visual Studio driver
+projects. The package includes public NTL headers, internal compatibility
+headers, native MSBuild imports, and prebuilt `crtsys.lib`/`Ldk.lib` binaries.
+
+After installing the package in a Visual Studio WDK driver project, NuGet
+imports `build/native/crtsys.props` and `build/native/crtsys.targets`
+automatically. Those files add the include paths, forced include file,
+preprocessor definitions, library path, linker dependencies, and
+`CrtSysDriverEntry` entry point needed for the default `ntl::main` flow.
+The binary NuGet package currently supports the `ntl::main` entry point flow
+only.
+
+The current binary package targets:
+
+- Visual Studio 2022
+- Windows SDK/WDK `10.0.22621.0`
+- `x64` and `ARM64`
+- Release `crtsys.lib` and `Ldk.lib`
+
+Install it from Visual Studio's **Manage NuGet Packages** UI. In the Package
+Manager Console, select your driver project as the default project and run:
+
+```powershell
+Install-Package crtsys -Version 0.1.10
+```
+
+Then define `ntl::main` in your driver:
+
+```cpp
+#include <ntl/driver>
+
+ntl::status ntl::main(ntl::driver& driver,
+                      const std::wstring& registry_path) {
+  driver.on_unload([]() {});
+  return ntl::status::ok();
+}
+```
+
+For native MSBuild consumers, the package also exposes `$(CrtSysRoot)`.
+
+Pack locally:
+
+```powershell
+.\scripts\nuget\Build-CrtSysNuGetLibs.ps1
+.\scripts\nuget\Pack-CrtSysNuGet.ps1
+```
+
+Publish with an API key in the environment:
+
+```powershell
+$env:NUGET_API_KEY = '<nuget-api-key>'
+.\scripts\nuget\Push-CrtSysNuGet.ps1 -SkipDuplicate
+```
+
+GitHub Actions builds the prebuilt libraries and package on pull requests and
+pushes. A tag such as `v0.1.10` publishes to nuget.org through NuGet Trusted
+Publishing when the tag version matches `include/.internal/version`.
+
+For GitHub Actions publishing, create a nuget.org Trusted Publishing policy
+with repository owner `ntoskrnl7`, repository `crtsys`, workflow file
+`nuget.yml`, and no environment restriction.
+
 ## Building This Repository
 
 Clone the repository and build the test app and driver for the host

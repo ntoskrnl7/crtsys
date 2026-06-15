@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <CrtSysRoot>$([MSBuild]::NormalizeDirectory('$(MSBuildThisFileDirectory)', '..', '..'))</CrtSysRoot>
+    <CrtSysLibPlatform Condition="'$(Platform)' == 'Win32'">x86</CrtSysLibPlatform>
+    <CrtSysLibPlatform Condition="'$(CrtSysLibPlatform)' == ''">$(Platform)</CrtSysLibPlatform>
+    <CrtSysLibraryConfiguration Condition="'$(CrtSysLibraryConfiguration)' == ''">Release</CrtSysLibraryConfiguration>
+    <CrtSysLibDir>$(CrtSysRoot)lib\native\$(CrtSysLibPlatform)\$(CrtSysLibraryConfiguration)\</CrtSysLibDir>
+    <CrtSysUseNtlMain Condition="'$(CrtSysUseNtlMain)' == ''">true</CrtSysUseNtlMain>
+    <CrtSysPreprocessorDefinitions>_KERNEL32_;_ITERATOR_DEBUG_LEVEL=0;_HAS_EXCEPTIONS</CrtSysPreprocessorDefinitions>
+    <CrtSysPreprocessorDefinitions Condition="'$(CrtSysUseNtlMain)' == 'true'">$(CrtSysPreprocessorDefinitions);CRTSYS_USE_NTL_MAIN</CrtSysPreprocessorDefinitions>
+    <CrtSysPreprocessorDefinitions Condition="'$(CrtSysLibPlatform)' == 'x64'">$(CrtSysPreprocessorDefinitions);CRTSYS_USE_LIBCNTPR</CrtSysPreprocessorDefinitions>
+  </PropertyGroup>
+
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(CrtSysRoot)include;$(CrtSysRoot)include\.internal\msvc\$(VCToolsVersion);$(CrtSysRoot)include\.internal\msvc\$(PlatformToolsetVersion);$(CrtSysRoot)include\.internal\msvc\$(VCToolsVersion)\stl;$(CrtSysRoot)include\.internal\msvc\$(PlatformToolsetVersion)\stl;$(CrtSysRoot)include\.internal\msvc\143;$(CrtSysRoot)include\.internal\msvc\143\stl;$(CrtSysRoot)include\.internal\msvc\142;$(CrtSysRoot)include\.internal\msvc\142\stl;$(CrtSysRoot)include\.internal\msvc\141;$(CrtSysRoot)include\.internal\msvc\141\stl;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <ForcedIncludeFiles>$(CrtSysRoot)include\.internal\adjust_link_order;%(ForcedIncludeFiles)</ForcedIncludeFiles>
+      <PreprocessorDefinitions>$(CrtSysPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>/Zc:threadSafeInit- %(AdditionalOptions)</AdditionalOptions>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+    </ClCompile>
+  </ItemDefinitionGroup>
+</Project>
