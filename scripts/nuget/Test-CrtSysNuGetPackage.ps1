@@ -222,6 +222,7 @@ $msbuildArguments = @(
 )
 if ($isDriverConsumer) {
   $msbuildArguments += "/p:WindowsTargetPlatformVersion=$WdkVersion"
+  $msbuildArguments += '/p:SignMode=Off'
 } else {
   $msbuildArguments += "/p:WindowsTargetPlatformVersion=$WindowsSdkVersion"
 }

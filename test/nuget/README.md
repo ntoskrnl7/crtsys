@@ -17,3 +17,5 @@ tree and builds the selected project with MSBuild.
 Both projects use a small local Google Test compatibility header. The driver
 test keeps the CMake driver's `nlohmann_json.cpp` coverage by installing the
 official `nlohmann.json` NuGet package and importing its native MSBuild target.
+Driver signing is disabled for this smoke test; runtime signing and load tests
+belong to the separate CMake driver CI path.
