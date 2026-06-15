@@ -14,7 +14,7 @@
     <tags>windows kernel driver wdk native cpp crt stl cmake</tags>
   </metadata>
   <files>
-    <file src="..\README.md" target="README.md" />
+    <file src="README.md" target="README.md" />
     <file src="..\LICENSE" target="LICENSE" />
     <file src="..\docs\**\*" target="docs" />
     <file src="..\include\**\*" target="include" />
