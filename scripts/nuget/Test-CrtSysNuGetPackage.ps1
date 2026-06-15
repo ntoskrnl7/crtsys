@@ -55,6 +55,28 @@ if (-not (Test-Path $msbuild)) {
   throw "MSBuild.exe was not found: $msbuild"
 }
 
+$windowsKitsRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10'
+$wdkHeader = Join-Path $windowsKitsRoot "Include\$WindowsSdkVersion\km\wdm.h"
+if (-not (Test-Path $wdkHeader)) {
+  throw "WDK header was not found: $wdkHeader"
+}
+
+$wdkPlatform = $Architecture
+$wdkKernelLibDirectory = Join-Path $windowsKitsRoot "Lib\$WindowsSdkVersion\km\$wdkPlatform"
+if (-not (Test-Path (Join-Path $wdkKernelLibDirectory 'ntoskrnl.lib'))) {
+  throw "WDK kernel library directory is missing ntoskrnl.lib: $wdkKernelLibDirectory"
+}
+
+$wdkPreprocessorDefinitions = switch ($Architecture) {
+  'x64' { '_WIN64;_AMD64_;AMD64;WINNT=1;_WIN32_WINNT=0x0601' }
+  'ARM64' { '_ARM64;_ARM64_;ARM64;STD_CALL;WINNT=1;_WIN32_WINNT=0x0601' }
+}
+
+$wdkAdditionalDependencies = switch ($Architecture) {
+  'x64' { 'ntoskrnl.lib;hal.lib;wmilib.lib;bufferoverflowk.lib' }
+  'ARM64' { 'ntoskrnl.lib;hal.lib;wmilib.lib;bufferoverflowfastfailk.lib;arm64rt.lib' }
+}
+
 Remove-Item -Recurse -Force -Path $WorkDirectory -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $WorkDirectory | Out-Null
 
@@ -147,7 +169,18 @@ $projectXml = @'
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
       <LanguageStandard>stdcpp17</LanguageStandard>
+      <PreprocessorDefinitions>__WDK_PREPROCESSOR_DEFINITIONS__;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(WindowsSdkDir)Include\$(WindowsTargetPlatformVersion)\shared;$(WindowsSdkDir)Include\$(WindowsTargetPlatformVersion)\km;$(WindowsSdkDir)Include\$(WindowsTargetPlatformVersion)\km\crt;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>/Zp8 /GF /GR- /EHsc %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
+    <Link>
+      <AdditionalLibraryDirectories>$(WindowsSdkDir)Lib\$(WindowsTargetPlatformVersion)\km\__WDK_PLATFORM__;$(WindowsSdkDir)Lib\$(WindowsTargetPlatformVersion)\um\__WDK_PLATFORM__;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>__WDK_ADDITIONAL_DEPENDENCIES__;%(AdditionalDependencies)</AdditionalDependencies>
+      <GenerateManifest>false</GenerateManifest>
+      <IgnoreAllDefaultLibraries>true</IgnoreAllDefaultLibraries>
+      <SubSystem>Native</SubSystem>
+      <AdditionalOptions>/DRIVER /OPT:REF /OPT:ICF /MERGE:_TEXT=.text /MERGE:_PAGE=PAGE /SECTION:INIT,d /VERSION:10.0 %(AdditionalOptions)</AdditionalOptions>
+    </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="main.cpp" />
@@ -163,6 +196,9 @@ $projectXml = $projectXml.Replace('__CONFIGURATION__', $Configuration)
 $projectXml = $projectXml.Replace('__PLATFORM__', $Architecture)
 $projectXml = $projectXml.Replace('__PROJECT_GUID__', $projectGuid)
 $projectXml = $projectXml.Replace('__WINDOWS_SDK_VERSION__', $WindowsSdkVersion)
+$projectXml = $projectXml.Replace('__WDK_PLATFORM__', $wdkPlatform)
+$projectXml = $projectXml.Replace('__WDK_PREPROCESSOR_DEFINITIONS__', $wdkPreprocessorDefinitions)
+$projectXml = $projectXml.Replace('__WDK_ADDITIONAL_DEPENDENCIES__', $wdkAdditionalDependencies)
 $projectXml | Set-Content -LiteralPath $projectFile -Encoding UTF8
 
 Write-Host "Building NuGet consumer smoke project for $Architecture"
