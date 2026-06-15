@@ -1,6 +1,7 @@
 #include <ntl/expand_stack>
 
 #include <string>
+#include <utility>
 
 bool ntl_expand_stack_test() {
   long result = 0;
@@ -80,6 +81,8 @@ bool ntl_irql_test() {
 bool ntl_spin_lock_test() {
   ntl::spin_lock lock;
   ntl::spin_lock lock2;
+  ntl::spin_lock lock3;
+  auto old_irql = ntl::current_irql();
 
   if (!lock.test())
     return false;
@@ -87,15 +90,53 @@ bool ntl_spin_lock_test() {
   if (!lock2.test())
     return false;
 
-  std::unique_lock<ntl::spin_lock> lk(lock);
-  if (!lk.owns_lock())
+  {
+    ntl::unique_lock<ntl::spin_lock> lk(lock);
+    if (!lk.owns_lock())
+      return false;
+    if (lock.test())
+      return false;
+    if (ntl::current_irql() != ntl::irql::dispatch)
+      return false;
+  }
+  if (!lock.test())
     return false;
-
-  std::unique_lock<ntl::spin_lock> lk2(lock, std::try_to_lock);
-  if (lk2.owns_lock())
+  if (ntl::current_irql() != old_irql)
     return false;
 
   {
+    std::unique_lock<ntl::spin_lock> lk(lock);
+    if (!lk.owns_lock())
+      return false;
+
+    std::unique_lock<ntl::spin_lock> lk2(lock, std::try_to_lock);
+    if (lk2.owns_lock())
+      return false;
+  }
+  if (!lock.test())
+    return false;
+  if (ntl::current_irql() != old_irql)
+    return false;
+
+  {
+    std::unique_lock<ntl::spin_lock> lk(lock, std::try_to_lock);
+    if (!lk.owns_lock())
+      return false;
+    if (lock.test())
+      return false;
+    if (ntl::current_irql() != ntl::irql::dispatch)
+      return false;
+  }
+  if (!lock.test())
+    return false;
+  if (ntl::current_irql() != old_irql)
+    return false;
+
+  {
+    auto raised_irql = ntl::raise_irql_to_dpc_level();
+    if (old_irql != raised_irql.old())
+      return false;
+
     ntl::unique_lock<ntl::spin_lock> nlk(lock2, ntl::at_dpc_level_lock);
     if (!nlk.owns_lock())
       return false;
@@ -108,8 +149,31 @@ bool ntl_spin_lock_test() {
   }
   if (!lock2.test())
     return false;
+  if (ntl::current_irql() != old_irql)
+    return false;
 
-  return KeTestSpinLock(lock.native_handle()) == FALSE;
+  {
+    auto raised_irql = ntl::raise_irql_to_dpc_level();
+    if (old_irql != raised_irql.old())
+      return false;
+
+    ntl::unique_lock<ntl::spin_lock> nlk(lock2, ntl::at_dpc_level_lock);
+    ntl::unique_lock<ntl::spin_lock> nlk2(lock3, ntl::at_dpc_level_lock);
+    nlk = std::move(nlk2);
+
+    if (!lock2.test())
+      return false;
+    if (lock3.test())
+      return false;
+    if (!nlk.owns_lock())
+      return false;
+    if (nlk2.owns_lock())
+      return false;
+  }
+  if (!lock3.test())
+    return false;
+
+  return ntl::current_irql() == old_irql;
 }
 
 #include <ntl/resource>
@@ -249,23 +313,64 @@ TEST(ntl_test, ntl_irql_test) {
 TEST(ntl_test, ntl_spin_lock_test) {
   ntl::spin_lock lock;
   ntl::spin_lock lock2;
+  ntl::spin_lock lock3;
+  auto old_irql = ntl::current_irql();
+
   {
     EXPECT_TRUE(lock.test());
 
-    std::unique_lock lk(lock);
+    ntl::unique_lock<ntl::spin_lock> lk(lock);
     EXPECT_FALSE(lock.test());
     EXPECT_TRUE(lk.owns_lock());
+    EXPECT_EQ(ntl::current_irql(), ntl::irql::dispatch);
+  }
+  EXPECT_TRUE(lock.test());
+  EXPECT_EQ(ntl::current_irql(), old_irql);
 
+  {
+    std::unique_lock lk(lock);
     std::unique_lock lk2(lock, std::try_to_lock);
     EXPECT_FALSE(lock.test());
     EXPECT_FALSE(lk2.owns_lock());
+  }
+  EXPECT_TRUE(lock.test());
+  EXPECT_EQ(ntl::current_irql(), old_irql);
+
+  {
+    std::unique_lock lk(lock, std::try_to_lock);
+    EXPECT_FALSE(lock.test());
+    EXPECT_TRUE(lk.owns_lock());
+    EXPECT_EQ(ntl::current_irql(), ntl::irql::dispatch);
+  }
+  EXPECT_TRUE(lock.test());
+  EXPECT_EQ(ntl::current_irql(), old_irql);
+
+  {
+    auto raised_irql = ntl::raise_irql_to_dpc_level();
+    EXPECT_EQ(old_irql, raised_irql.old());
 
     ntl::unique_lock<ntl::spin_lock> lk3(lock2, ntl::at_dpc_level_lock);
     EXPECT_FALSE(lock2.test());
     EXPECT_TRUE(lk3.owns_lock());
   }
-  EXPECT_TRUE(lock.test());
+  EXPECT_TRUE(lock2.test());
+  EXPECT_EQ(ntl::current_irql(), old_irql);
+
+  {
+    auto raised_irql = ntl::raise_irql_to_dpc_level();
+    EXPECT_EQ(old_irql, raised_irql.old());
+
+    ntl::unique_lock<ntl::spin_lock> lk3(lock2, ntl::at_dpc_level_lock);
+    ntl::unique_lock<ntl::spin_lock> lk4(lock3, ntl::at_dpc_level_lock);
+    lk3 = std::move(lk4);
+    EXPECT_TRUE(lock2.test());
+    EXPECT_FALSE(lock3.test());
+    EXPECT_TRUE(lk3.owns_lock());
+    EXPECT_FALSE(lk4.owns_lock());
+  }
+  EXPECT_TRUE(lock3.test());
   EXPECT_TRUE(KeTestSpinLock(lock.native_handle()));
+  EXPECT_EQ(ntl::current_irql(), old_irql);
 }
 
 TEST(ntl_test, ntl_resource_test) {
