@@ -107,6 +107,16 @@ inline int RunAllTests() {
     }                                                                         \
   } while (false)
 
+#define EXPECT_NE(actual, expected)                                           \
+  do {                                                                        \
+    const auto& actual_value = (actual);                                      \
+    const auto& expected_value = (expected);                                  \
+    if (!(actual_value != expected_value)) {                                  \
+      ::testing::record_failure(__FILE__, __LINE__,                           \
+                                "EXPECT_NE(" #actual ", " #expected ")");   \
+    }                                                                         \
+  } while (false)
+
 #define EXPECT_STREQ(actual, expected)                                        \
   do {                                                                        \
     const auto* actual_value = (actual);                                      \
@@ -116,6 +126,11 @@ inline int RunAllTests() {
                                 "EXPECT_STREQ(" #actual ", " #expected      \
                                 ")");                                        \
     }                                                                         \
+  } while (false)
+
+#define EXPECT_NO_FATAL_FAILURE(statement)                                    \
+  do {                                                                        \
+    statement;                                                                \
   } while (false)
 
 #define RUN_ALL_TESTS() ::testing::RunAllTests()

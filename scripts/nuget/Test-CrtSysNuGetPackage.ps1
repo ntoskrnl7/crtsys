@@ -4,7 +4,10 @@ param(
   [Parameter(Mandatory = $true)]
   [string] $Version,
 
-  [ValidateSet('x64', 'ARM64')]
+  [ValidateSet('Driver', 'App')]
+  [string] $Consumer = 'Driver',
+
+  [ValidateSet('x86', 'x64', 'ARM64')]
   [string] $Architecture = 'x64',
 
   [ValidateSet('Release')]
@@ -21,13 +24,25 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+$isDriverConsumer = $Consumer -eq 'Driver'
+
+if ($isDriverConsumer -and $Architecture -eq 'x86') {
+  throw 'The crtsys NuGet package contains prebuilt driver libraries for x64 and ARM64 only.'
+}
+
+$msbuildPlatformByArchitecture = @{
+  x86 = 'Win32'
+  x64 = 'x64'
+  ARM64 = 'ARM64'
+}
+$msbuildPlatform = $msbuildPlatformByArchitecture[$Architecture]
 
 if ([string]::IsNullOrWhiteSpace($PackageDirectory)) {
   $PackageDirectory = Join-Path $repoRoot 'artifacts\nuget'
 }
 
 if ([string]::IsNullOrWhiteSpace($WorkDirectory)) {
-  $WorkDirectory = Join-Path $repoRoot "artifacts\nuget-consumer-test\$Architecture"
+  $WorkDirectory = Join-Path $repoRoot "artifacts\nuget-consumer-test\$Consumer\$Architecture"
 }
 
 $PackageDirectory = (Resolve-Path $PackageDirectory).Path
@@ -63,7 +78,7 @@ if (-not (Test-Path $windowsKitsIncludeRoot)) {
   throw "Windows Kits include directory was not found: $windowsKitsIncludeRoot"
 }
 
-if ([string]::IsNullOrWhiteSpace($WdkVersion)) {
+if ($isDriverConsumer -and [string]::IsNullOrWhiteSpace($WdkVersion)) {
   $preferredWdkHeader = Join-Path $windowsKitsIncludeRoot "$WindowsSdkVersion\km\wdm.h"
   if (Test-Path $preferredWdkHeader) {
     $WdkVersion = $WindowsSdkVersion
@@ -83,25 +98,34 @@ if ([string]::IsNullOrWhiteSpace($WdkVersion)) {
   }
 }
 
-$wdkHeader = Join-Path $windowsKitsIncludeRoot "$WdkVersion\km\wdm.h"
-if (-not (Test-Path $wdkHeader)) {
-  throw "WDK header was not found: $wdkHeader"
-}
+if ($isDriverConsumer) {
+  $wdkHeader = Join-Path $windowsKitsIncludeRoot "$WdkVersion\km\wdm.h"
+  if (-not (Test-Path $wdkHeader)) {
+    throw "WDK header was not found: $wdkHeader"
+  }
 
-$wdkKernelLibDirectory = Join-Path $windowsKitsRoot "Lib\$WdkVersion\km\$Architecture"
-if (-not (Test-Path (Join-Path $wdkKernelLibDirectory 'ntoskrnl.lib'))) {
-  throw "WDK kernel library directory is missing ntoskrnl.lib: $wdkKernelLibDirectory"
+  $wdkKernelLibDirectory = Join-Path $windowsKitsRoot "Lib\$WdkVersion\km\$Architecture"
+  if (-not (Test-Path (Join-Path $wdkKernelLibDirectory 'ntoskrnl.lib'))) {
+    throw "WDK kernel library directory is missing ntoskrnl.lib: $wdkKernelLibDirectory"
+  }
 }
 
 Write-Host "Requested Windows SDK version: $WindowsSdkVersion"
-Write-Host "Resolved WDK version: $WdkVersion"
+if ($isDriverConsumer) {
+  Write-Host "Resolved WDK version: $WdkVersion"
+}
 
 Remove-Item -Recurse -Force -Path $WorkDirectory -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $WorkDirectory | Out-Null
 
 $testProjectSource = Join-Path $repoRoot 'test\nuget'
-if (-not (Test-Path (Join-Path $testProjectSource 'crtsys_nuget_test.vcxproj'))) {
-  throw "NuGet consumer test project was not found under '$testProjectSource'."
+$projectNameByConsumer = @{
+  Driver = 'crtsys_nuget_test.vcxproj'
+  App = 'crtsys_nuget_app_test.vcxproj'
+}
+$projectName = $projectNameByConsumer[$Consumer]
+if (-not (Test-Path (Join-Path $testProjectSource $projectName))) {
+  throw "NuGet $Consumer consumer test project was not found under '$testProjectSource'."
 }
 
 $testRoot = Join-Path $WorkDirectory 'test'
@@ -111,8 +135,12 @@ New-Item -ItemType Directory -Force -Path $testProjectDirectory | Out-Null
 New-Item -ItemType Directory -Force -Path $cmakeTestDirectory | Out-Null
 
 Copy-Item -Path (Join-Path $testProjectSource '*') -Destination $testProjectDirectory -Recurse -Force
-Copy-Item -Path (Join-Path $repoRoot 'test\cmake\driver') -Destination $cmakeTestDirectory -Recurse -Force
 Copy-Item -Path (Join-Path $repoRoot 'test\cmake\common') -Destination $cmakeTestDirectory -Recurse -Force
+if ($isDriverConsumer) {
+  Copy-Item -Path (Join-Path $repoRoot 'test\cmake\driver') -Destination $cmakeTestDirectory -Recurse -Force
+} else {
+  Copy-Item -Path (Join-Path $repoRoot 'test\cmake\app') -Destination $cmakeTestDirectory -Recurse -Force
+}
 
 $packagesDirectory = Join-Path $testProjectDirectory 'packages'
 & $nuget.Source install crtsys `
@@ -127,42 +155,51 @@ if ($LASTEXITCODE -ne 0) {
   throw "nuget install failed with exit code $LASTEXITCODE."
 }
 
-& $nuget.Source install nlohmann.json `
-  -Version 3.12.0 `
-  -Source https://api.nuget.org/v3/index.json `
-  -OutputDirectory $packagesDirectory `
-  -ExcludeVersion `
-  -NonInteractive `
-  -Verbosity detailed
-
-if ($LASTEXITCODE -ne 0) {
-  throw "nlohmann.json NuGet install failed with exit code $LASTEXITCODE."
-}
-
 $packageRoot = Join-Path $packagesDirectory 'crtsys'
-foreach ($requiredPath in @(
+$requiredPackagePaths = @(
   'README.md',
   'build\native\crtsys.props',
   'build\native\crtsys.targets',
-  "lib\native\$Architecture\Release\crtsys.lib",
-  "lib\native\$Architecture\Release\Ldk.lib",
-  'include\ntl\driver',
+  'include\ntl\rpc\client',
   'docs\ntl-api.md'
-)) {
+)
+if ($isDriverConsumer) {
+  $requiredPackagePaths += @(
+    "lib\native\$Architecture\Release\crtsys.lib",
+    "lib\native\$Architecture\Release\Ldk.lib",
+    'include\ntl\driver'
+  )
+}
+
+foreach ($requiredPath in $requiredPackagePaths) {
   $fullPath = Join-Path $packageRoot $requiredPath
   if (-not (Test-Path $fullPath)) {
     throw "Installed package is missing expected file: $fullPath"
   }
 }
 
-$nlohmannJsonPackageRoot = Join-Path $packagesDirectory 'nlohmann.json'
-foreach ($requiredPath in @(
-  'build\native\nlohmann.json.targets',
-  'build\native\include\nlohmann\json.hpp'
-)) {
-  $fullPath = Join-Path $nlohmannJsonPackageRoot $requiredPath
-  if (-not (Test-Path $fullPath)) {
-    throw "Installed nlohmann.json package is missing expected file: $fullPath"
+if ($isDriverConsumer) {
+  & $nuget.Source install nlohmann.json `
+    -Version 3.12.0 `
+    -Source https://api.nuget.org/v3/index.json `
+    -OutputDirectory $packagesDirectory `
+    -ExcludeVersion `
+    -NonInteractive `
+    -Verbosity detailed
+
+  if ($LASTEXITCODE -ne 0) {
+    throw "nlohmann.json NuGet install failed with exit code $LASTEXITCODE."
+  }
+
+  $nlohmannJsonPackageRoot = Join-Path $packagesDirectory 'nlohmann.json'
+  foreach ($requiredPath in @(
+    'build\native\nlohmann.json.targets',
+    'build\native\include\nlohmann\json.hpp'
+  )) {
+    $fullPath = Join-Path $nlohmannJsonPackageRoot $requiredPath
+    if (-not (Test-Path $fullPath)) {
+      throw "Installed nlohmann.json package is missing expected file: $fullPath"
+    }
   }
 }
 
@@ -171,21 +208,29 @@ if ($packageReadme -notmatch 'crtsys NuGet Package') {
   throw "Installed package README.md does not look like the NuGet package README."
 }
 
-$projectFile = Join-Path $testProjectDirectory 'crtsys_nuget_test.vcxproj'
+$projectFile = Join-Path $testProjectDirectory $projectName
 if (-not (Test-Path $projectFile)) {
   throw "NuGet consumer test project file was not copied: $projectFile"
 }
 
-Write-Host "Building NuGet consumer test driver for $Architecture"
-& $msbuild $projectFile `
-  /m `
-  /p:Configuration=$Configuration `
-  /p:Platform=$Architecture `
-  /p:WindowsTargetPlatformVersion=$WdkVersion `
-  /v:minimal
-
-if ($LASTEXITCODE -ne 0) {
-  throw "MSBuild package consumer test failed with exit code $LASTEXITCODE."
+$msbuildArguments = @(
+  $projectFile,
+  '/m',
+  "/p:Configuration=$Configuration",
+  "/p:Platform=$msbuildPlatform",
+  '/v:minimal'
+)
+if ($isDriverConsumer) {
+  $msbuildArguments += "/p:WindowsTargetPlatformVersion=$WdkVersion"
+} else {
+  $msbuildArguments += "/p:WindowsTargetPlatformVersion=$WindowsSdkVersion"
 }
 
-Write-Host "NuGet consumer test driver passed for $Architecture."
+Write-Host "Building NuGet $Consumer consumer test for $Architecture"
+& $msbuild @msbuildArguments
+
+if ($LASTEXITCODE -ne 0) {
+  throw "MSBuild package $Consumer consumer test failed with exit code $LASTEXITCODE."
+}
+
+Write-Host "NuGet $Consumer consumer test passed for $Architecture."

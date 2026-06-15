@@ -162,41 +162,47 @@ cmake --build build_x64 --config Debug
 
 ## NuGet Package
 
-`crtsys` can be distributed as a native NuGet package for Visual Studio WDK
-driver projects. The package includes public NTL headers, internal
-compatibility headers, native MSBuild imports, and prebuilt
-`crtsys.lib`/`Ldk.lib` binaries.
+`crtsys` can be distributed as a native NuGet package for Visual Studio/MSBuild
+projects. The package includes public NTL headers, internal compatibility
+headers, native MSBuild imports, and prebuilt `crtsys.lib`/`Ldk.lib` driver
+binaries.
 
-The NuGet package must be installed into an existing WDK kernel-mode driver
-project. It does not turn a normal C++ project, console application, static
-library, or CMake project into a WDK driver project, and it does not install or
-replace the WDK toolset.
+The package has two consumer modes:
 
-After installing the package in a Visual Studio WDK driver project, NuGet
-imports `build/native/crtsys.props` and `build/native/crtsys.targets`
-automatically. The WDK project remains responsible for the kernel-mode
-platform toolset, SDK/WDK include paths, WDK libraries, signing, INF, and
-packaging settings. The `crtsys` imports add the `crtsys` include paths, forced
-include file, preprocessor definitions, library path, linker dependencies, and
-`CrtSysDriverEntry` entry point needed for the default `ntl::main` flow.
-The binary NuGet package currently supports the `ntl::main` entry point flow
-only.
+- App mode: normal Visual C++ application projects get the public NTL headers
+  and C++ compatibility options only. No driver libraries, forced include, or
+  driver entry point are added.
+- Driver mode: WDK driver projects get the CMake-equivalent driver settings:
+  `crtsys` include paths, MSVC/STL compatibility headers before WDK `km\crt`,
+  forced include setup, preprocessor definitions, `crtsys.lib`, `Ldk.lib`,
+  `libcntpr.lib`, `/FORCE:MULTIPLE`, and the `CrtSysDriverEntry` entry point
+  for the default `ntl::main` flow.
+
+Driver mode is enabled automatically when MSBuild sees a driver project
+(`ConfigurationType=Driver` or `DriverType` is set). It can also be forced with
+`CrtSysUseDriverSupport=true`. The package does not turn a normal C++ project,
+console application, static library, or CMake project into a WDK driver project,
+and it does not install or replace the WDK toolset.
 
 The current binary package targets:
 
 - Visual Studio 2022
 - Windows SDK/WDK `10.0.22621.0`
-- `x64` and `ARM64`
-- Release `crtsys.lib` and `Ldk.lib`
+- App header builds on `x86`, `x64`, and `ARM64`
+- Driver library builds on `x64` and `ARM64`
+- Release `crtsys.lib`, `Ldk.lib`, and WDK `libcntpr.lib`
 
 Install it from Visual Studio's **Manage NuGet Packages** UI. In the Package
-Manager Console, select your driver project as the default project and run:
+Manager Console, select your app or driver project as the default project and
+run:
 
 ```powershell
-Install-Package crtsys -Version 0.1.10
+Install-Package crtsys
 ```
 
-Then define `ntl::main` in your driver:
+For an app project, include headers such as `ntl/rpc/client` directly.
+
+For a driver project, define `ntl::main`:
 
 ```cpp
 #include <ntl/driver>
@@ -225,7 +231,7 @@ $env:NUGET_API_KEY = '<nuget-api-key>'
 ```
 
 GitHub Actions builds the prebuilt libraries and package on pull requests and
-pushes. A tag such as `v0.1.10` publishes to nuget.org through NuGet Trusted
+pushes. A tag such as `v0.1.12` publishes to nuget.org through NuGet Trusted
 Publishing when the tag version matches `include/.internal/version`.
 
 For GitHub Actions publishing, create a nuget.org Trusted Publishing policy

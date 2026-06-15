@@ -162,34 +162,47 @@ cmake --build build_x64 --config Debug
 
 ## NuGet 패키지
 
-`crtsys`는 Visual Studio WDK 드라이버 프로젝트에서 바로 사용할 수 있는
-native NuGet 패키지로 배포할 수 있습니다. 패키지에는 공개 NTL 헤더, 내부
-호환성 헤더, native MSBuild import 파일, 미리 빌드된 `crtsys.lib`와
+`crtsys`는 Visual Studio/MSBuild 프로젝트에서 사용할 수 있는 native NuGet
+패키지로 배포할 수 있습니다. 패키지에는 공개 NTL 헤더, 내부 호환성 헤더,
+native MSBuild import 파일, 미리 빌드된 driver용 `crtsys.lib`와
 `Ldk.lib`가 포함됩니다.
 
-Visual Studio WDK 드라이버 프로젝트에 패키지를 설치하면 NuGet이
-`build/native/crtsys.props`와 `build/native/crtsys.targets`를 자동으로
-import합니다. 이 파일들은 기본 `ntl::main` 흐름에 필요한 include 경로,
-forced include 파일, preprocessor 정의, library 경로, linker dependency,
-`CrtSysDriverEntry` entry point를 설정합니다.
-현재 binary NuGet 패키지는 `ntl::main` entry point 흐름만 지원합니다.
+패키지는 두 가지 소비 모드를 가집니다.
+
+- App mode: 일반 Visual C++ application 프로젝트에서는 공개 NTL 헤더와 C++
+  호환성 옵션만 추가합니다. driver library, forced include, driver entry
+  point는 추가하지 않습니다.
+- Driver mode: WDK driver 프로젝트에서는 CMake의 driver 설정과 같은 방향으로
+  `crtsys` include 경로, WDK `km\crt`보다 앞서는 MSVC/STL 호환성 헤더,
+  forced include, preprocessor 정의, `crtsys.lib`, `Ldk.lib`,
+  `libcntpr.lib`, `/FORCE:MULTIPLE`, 기본 `ntl::main` 흐름을 위한
+  `CrtSysDriverEntry` entry point를 설정합니다.
+
+Driver mode는 MSBuild가 driver 프로젝트를 감지할 때 자동으로 켜집니다
+(`ConfigurationType=Driver` 또는 `DriverType`이 설정된 경우). 필요하면
+`CrtSysUseDriverSupport=true`로 강제로 켤 수 있습니다. 이 패키지는 일반 C++
+프로젝트, console application, static library, CMake 프로젝트를 WDK driver
+프로젝트로 변환하지 않으며 WDK toolset을 설치하거나 대체하지 않습니다.
 
 현재 binary 패키지 대상은 다음과 같습니다.
 
 - Visual Studio 2022
 - Windows SDK/WDK `10.0.22621.0`
-- `x64` 및 `ARM64`
-- Release `crtsys.lib` 및 `Ldk.lib`
+- App header build: `x86`, `x64`, `ARM64`
+- Driver library build: `x64`, `ARM64`
+- Release `crtsys.lib`, `Ldk.lib`, WDK `libcntpr.lib`
 
 Visual Studio의 **Manage NuGet Packages** UI에서 설치합니다. Package
-Manager Console을 사용할 때는 기본 프로젝트를 드라이버 프로젝트로 선택한 뒤
-다음 명령을 실행합니다.
+Manager Console을 사용할 때는 기본 프로젝트를 app 또는 driver 프로젝트로
+선택한 뒤 다음 명령을 실행합니다.
 
 ```powershell
-Install-Package crtsys -Version 0.1.10
+Install-Package crtsys
 ```
 
-그 뒤 드라이버에서 `ntl::main`을 정의합니다.
+App 프로젝트에서는 `ntl/rpc/client` 같은 헤더를 바로 포함해서 사용합니다.
+
+Driver 프로젝트에서는 `ntl::main`을 정의합니다.
 
 ```cpp
 #include <ntl/driver>
@@ -218,7 +231,7 @@ $env:NUGET_API_KEY = '<nuget-api-key>'
 ```
 
 GitHub Actions도 pull request와 push에서 prebuilt library와 패키지를
-생성합니다. `v0.1.10` 같은 태그를 push하면, 태그 버전이
+생성합니다. `v0.1.12` 같은 태그를 push하면, 태그 버전이
 `include/.internal/version`과 일치할 때 NuGet Trusted Publishing을 통해
 nuget.org로 publish합니다.
 

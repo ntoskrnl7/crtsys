@@ -1,13 +1,15 @@
 # crtsys NuGet Package
 
-`crtsys` is a native NuGet package for Visual Studio WDK driver projects. It is
-intended for users who want to consume prebuilt `crtsys.lib` and `Ldk.lib`
-directly from Visual Studio/MSBuild.
+`crtsys` is a native NuGet package for Visual Studio/MSBuild projects.
+User-mode applications can consume the public NTL headers from the package.
+WDK driver projects can also consume the prebuilt `crtsys.lib` and `Ldk.lib`
+driver libraries.
 
-This package must be installed into an existing WDK kernel-mode driver project.
-It does not convert a normal C++ project, console application, static library,
-or CMake project into a WDK driver project, and it does not provide the WDK
-toolset itself.
+Installing this package into a normal C++ application project keeps it in
+header-only app mode. Installing it into an existing WDK kernel-mode driver
+project enables driver support automatically. It does not convert a normal C++
+project, console application, static library, or CMake project into a WDK driver
+project, and it does not provide the WDK toolset itself.
 
 For CMake usage, design notes, full API documentation, and tested feature
 coverage, use the repository documentation:
@@ -19,19 +21,24 @@ coverage, use the repository documentation:
 
 ## Install
 
-Create or open a Visual Studio WDK kernel-mode driver project first, then
-install the package into that driver project:
+Create or open a Visual Studio project, then install the package into that
+project:
 
 ```powershell
 Install-Package crtsys
 ```
 
-The WDK project is still responsible for the kernel-mode platform toolset,
-target SDK/WDK, driver type, WDK include paths, WDK libraries, signing, INF, and
-packaging settings. The `crtsys` package imports native MSBuild props/targets
-automatically and adds the `crtsys` include paths, forced include setup,
-preprocessor definitions, library path, `crtsys.lib`, `Ldk.lib`, and the
-`CrtSysDriverEntry` entry point for the default `ntl::main` flow.
+For application projects, the package adds the `crtsys` include path and C++
+compatibility options only. It does not add driver libraries or a driver entry
+point.
+
+For WDK driver projects, the project is still responsible for the kernel-mode
+platform toolset, target SDK/WDK, driver type, WDK include paths, WDK libraries,
+signing, INF, and packaging settings. The `crtsys` package imports native
+MSBuild props/targets automatically and adds the `crtsys` include paths, forced
+include setup, preprocessor definitions, library path, `crtsys.lib`, `Ldk.lib`,
+`libcntpr.lib`, and the `CrtSysDriverEntry` entry point for the default
+`ntl::main` flow.
 
 The package also mirrors the repository CMake driver setup for the parts that
 matter to `crtsys`: it disables the WDK `/kernel` compiler switch and puts the
@@ -39,11 +46,17 @@ Visual C++ / Windows SDK include paths before inherited WDK `km\crt` include
 paths. This is required for the C++ runtime and STL headers that `crtsys`
 supports.
 
+Driver support is enabled automatically when MSBuild sees a driver project
+(`ConfigurationType=Driver` or `DriverType` is set). If you need to override
+that detection, set `CrtSysUseDriverSupport=true` or `false` in your project
+before importing the package props.
+
 ## Supported Binary Package Target
 
 - Visual Studio 2022
 - Windows SDK/WDK `10.0.22621.0`
-- `x64` and `ARM64`
+- app header checks on `x86`, `x64`, and `ARM64`
+- driver libraries on `x64` and `ARM64`
 - Release `crtsys.lib` and `Ldk.lib`
 - `ntl::main` entry point flow
 
@@ -59,6 +72,17 @@ ntl::status ntl::main(ntl::driver& driver,
   (void)registry_path;
   driver.on_unload([]() {});
   return ntl::status::ok();
+}
+```
+
+## Minimal App Usage
+
+```cpp
+#include <ntl/rpc/client>
+
+int main() {
+  ntl::rpc::client client(L"test_rpc");
+  return 0;
 }
 ```
 

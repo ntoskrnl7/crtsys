@@ -2,23 +2,28 @@
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <PropertyGroup>
     <CrtSysRoot>$([MSBuild]::NormalizeDirectory('$(MSBuildThisFileDirectory)', '..', '..'))</CrtSysRoot>
+    <CrtSysIsDriverProject Condition="'$(ConfigurationType)' == 'Driver' or '$(DriverType)' != ''">true</CrtSysIsDriverProject>
+    <CrtSysUseDriverSupport Condition="'$(CrtSysUseDriverSupport)' == '' and '$(CrtSysIsDriverProject)' == 'true'">true</CrtSysUseDriverSupport>
+    <CrtSysUseDriverSupport Condition="'$(CrtSysUseDriverSupport)' == ''">false</CrtSysUseDriverSupport>
     <CrtSysLibPlatform Condition="'$(Platform)' == 'Win32'">x86</CrtSysLibPlatform>
     <CrtSysLibPlatform Condition="'$(CrtSysLibPlatform)' == ''">$(Platform)</CrtSysLibPlatform>
     <CrtSysLibraryConfiguration Condition="'$(CrtSysLibraryConfiguration)' == ''">Release</CrtSysLibraryConfiguration>
     <CrtSysLibDir>$(CrtSysRoot)lib\native\$(CrtSysLibPlatform)\$(CrtSysLibraryConfiguration)\</CrtSysLibDir>
     <CrtSysUseNtlMain Condition="'$(CrtSysUseNtlMain)' == ''">true</CrtSysUseNtlMain>
-    <CrtSysPreprocessorDefinitions>_KERNEL32_;_ITERATOR_DEBUG_LEVEL=0;_HAS_EXCEPTIONS;CRTSYS_USE_LIBCNTPR</CrtSysPreprocessorDefinitions>
-    <CrtSysPreprocessorDefinitions Condition="'$(CrtSysUseNtlMain)' == 'true'">$(CrtSysPreprocessorDefinitions);CRTSYS_USE_NTL_MAIN</CrtSysPreprocessorDefinitions>
-    <DisableKernelFlag>true</DisableKernelFlag>
+    <CrtSysDriverPreprocessorDefinitions>_KERNEL32_;_ITERATOR_DEBUG_LEVEL=0;_HAS_EXCEPTIONS;CRTSYS_USE_LIBCNTPR</CrtSysDriverPreprocessorDefinitions>
+    <CrtSysDriverPreprocessorDefinitions Condition="'$(CrtSysUseNtlMain)' == 'true'">$(CrtSysDriverPreprocessorDefinitions);CRTSYS_USE_NTL_MAIN</CrtSysDriverPreprocessorDefinitions>
+    <DisableKernelFlag Condition="'$(CrtSysUseDriverSupport)' == 'true'">true</DisableKernelFlag>
   </PropertyGroup>
 
   <ItemDefinitionGroup>
     <ClCompile>
-      <AdditionalIncludeDirectories>$(CrtSysRoot)include;$(CrtSysRoot)include\.internal\msvc\$(VCToolsVersion);$(CrtSysRoot)include\.internal\msvc\$(PlatformToolsetVersion);$(CrtSysRoot)include\.internal\msvc\$(VCToolsVersion)\stl;$(CrtSysRoot)include\.internal\msvc\$(PlatformToolsetVersion)\stl;$(CrtSysRoot)include\.internal\msvc\143;$(CrtSysRoot)include\.internal\msvc\143\stl;$(CrtSysRoot)include\.internal\msvc\142;$(CrtSysRoot)include\.internal\msvc\142\stl;$(CrtSysRoot)include\.internal\msvc\141;$(CrtSysRoot)include\.internal\msvc\141\stl;$(VC_IncludePath);$(WindowsSDK_IncludePath);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <ForcedIncludeFiles>$(CrtSysRoot)include\.internal\adjust_link_order;%(ForcedIncludeFiles)</ForcedIncludeFiles>
-      <PreprocessorDefinitions>$(CrtSysPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalOptions>/Zc:threadSafeInit- /Zc:__cplusplus /Zc:wchar_t %(AdditionalOptions)</AdditionalOptions>
-      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <AdditionalIncludeDirectories Condition="'$(CrtSysUseDriverSupport)' == 'true'">$(CrtSysRoot)include;$(CrtSysRoot)include\.internal\msvc\$(VCToolsVersion);$(CrtSysRoot)include\.internal\msvc\$(PlatformToolsetVersion);$(CrtSysRoot)include\.internal\msvc\$(VCToolsVersion)\stl;$(CrtSysRoot)include\.internal\msvc\$(PlatformToolsetVersion)\stl;$(CrtSysRoot)include\.internal\msvc\143;$(CrtSysRoot)include\.internal\msvc\143\stl;$(CrtSysRoot)include\.internal\msvc\142;$(CrtSysRoot)include\.internal\msvc\142\stl;$(CrtSysRoot)include\.internal\msvc\141;$(CrtSysRoot)include\.internal\msvc\141\stl;$(VC_IncludePath);$(WindowsSDK_IncludePath);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories Condition="'$(CrtSysUseDriverSupport)' != 'true'">$(CrtSysRoot)include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <ForcedIncludeFiles Condition="'$(CrtSysUseDriverSupport)' == 'true'">$(CrtSysRoot)include\.internal\adjust_link_order;%(ForcedIncludeFiles)</ForcedIncludeFiles>
+      <PreprocessorDefinitions Condition="'$(CrtSysUseDriverSupport)' == 'true'">$(CrtSysDriverPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions Condition="'$(CrtSysUseDriverSupport)' == 'true'">/Zc:threadSafeInit- /Zc:__cplusplus /Zc:wchar_t %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions Condition="'$(CrtSysUseDriverSupport)' != 'true'">/Zc:__cplusplus /Zc:wchar_t %(AdditionalOptions)</AdditionalOptions>
+      <RuntimeLibrary Condition="'$(CrtSysUseDriverSupport)' == 'true'">MultiThreaded</RuntimeLibrary>
     </ClCompile>
   </ItemDefinitionGroup>
 </Project>
