@@ -35,14 +35,36 @@ public:
   spin_lock &operator=(const spin_lock &) = delete;
 
   _NODISCARD bool try_lock() {
-    return KeTryToAcquireSpinLockAtDpcLevel(lock_) == TRUE;
+    KIRQL old_irql = KeRaiseIrqlToDpcLevel();
+    if (KeTryToAcquireSpinLockAtDpcLevel(lock_) == TRUE) {
+      old_irql_ = old_irql;
+      acquired_at_dpc_level_ = false;
+      return true;
+    }
+    KeLowerIrql(old_irql);
+    return false;
   }
 
-  void lock() { KeAcquireSpinLock(lock_, &old_irql_); }
-  void unlock() { KeReleaseSpinLock(lock_, old_irql_); }
+  void lock() {
+    KeAcquireSpinLock(lock_, &old_irql_);
+    acquired_at_dpc_level_ = false;
+  }
+  void unlock() {
+    if (acquired_at_dpc_level_) {
+      unlock_from_dpc_level();
+      return;
+    }
+    KeReleaseSpinLock(lock_, old_irql_);
+  }
 
-  void lock_at_dpc_level() { KeAcquireSpinLockAtDpcLevel(lock_); }
-  void unlock_from_dpc_level() { KeReleaseSpinLockFromDpcLevel(lock_); }
+  void lock_at_dpc_level() {
+    KeAcquireSpinLockAtDpcLevel(lock_);
+    acquired_at_dpc_level_ = true;
+  }
+  void unlock_from_dpc_level() {
+    KeReleaseSpinLockFromDpcLevel(lock_);
+    acquired_at_dpc_level_ = false;
+  }
 
   bool test() { return KeTestSpinLock(lock_); }
 
@@ -51,8 +73,9 @@ public:
   _NODISCARD native_handle_type native_handle() { return lock_; }
 
 private:
-  PKSPIN_LOCK lock_;
-  KIRQL old_irql_;
+  PKSPIN_LOCK lock_ = nullptr;
+  KIRQL old_irql_ = PASSIVE_LEVEL;
+  bool acquired_at_dpc_level_ = false;
 };
 
 struct at_dpc_level_lock_t {
@@ -116,7 +139,7 @@ public:
 
   ~unique_lock() noexcept {
     if (owns_)
-      lockable_->unlock_from_dpc_level();
+      lockable_->unlock();
   }
 
   unique_lock(const unique_lock &) = delete;
