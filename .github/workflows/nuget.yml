@@ -46,6 +46,11 @@ on:
         required: true
         type: boolean
         default: false
+      github_release:
+        description: Upload release assets to GitHub Releases
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -154,10 +159,20 @@ jobs:
         shell: pwsh
         run: ./scripts/nuget/Pack-CrtSysNuGet.ps1 -Version '${{ steps.version.outputs.package_version }}'
 
+      - name: Pack GitHub release assets
+        shell: pwsh
+        run: ./scripts/nuget/Pack-CrtSysReleaseAssets.ps1 -Version '${{ steps.version.outputs.package_version }}'
+
       - uses: actions/upload-artifact@v7
         with:
           name: crtsys-nuget-${{ steps.version.outputs.package_version }}
           path: artifacts/nuget/*.nupkg
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: crtsys-release-assets-${{ steps.version.outputs.package_version }}
+          path: artifacts/release/*
           if-no-files-found: error
 
   test-package-driver:
@@ -222,6 +237,34 @@ jobs:
           -Configuration '${{ matrix.config }}'
           -WindowsSdkVersion '10.0.22621.0'
 
+  test-release-native-cmake:
+    name: Test release native CMake asset ${{ matrix.arch }} ${{ matrix.config }}
+    needs: pack
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, ARM64]
+        config: [Debug, Release]
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: crtsys-release-assets-${{ needs.pack.outputs.package_version }}
+          path: artifacts/release
+
+      - name: Build native release CMake consumer test
+        shell: pwsh
+        run: >
+          ./scripts/nuget/Test-CrtSysReleaseAssets.ps1
+          -ReleaseDirectory artifacts/release
+          -Version '${{ needs.pack.outputs.package_version }}'
+          -Architecture '${{ matrix.arch }}'
+          -Configuration '${{ matrix.config }}'
+          -WindowsSdkVersion '10.0.22621.0'
+
   publish:
     name: Publish NuGet
     needs: [pack, test-package-driver, test-package-app]
@@ -261,3 +304,53 @@ jobs:
         env:
           NUGET_API_KEY: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
         run: ./scripts/nuget/Push-CrtSysNuGet.ps1 -SkipDuplicate
+
+  github-release:
+    name: Upload GitHub Release Assets
+    needs: [pack, test-package-driver, test-package-app, test-release-native-cmake]
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.github_release)
+    runs-on: windows-2022
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: crtsys-release-assets-${{ needs.pack.outputs.package_version }}
+          path: artifacts/release
+
+      - name: Create or update GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = '${{ needs.pack.outputs.package_version }}'
+          $tagName = "v$version"
+          if ('${{ github.ref_type }}' -eq 'tag') {
+            $tagName = '${{ github.ref_name }}'
+          }
+
+          $assets = @(Get-ChildItem -Path artifacts\release -File | Sort-Object FullName | ForEach-Object { $_.FullName })
+          if ($assets.Count -eq 0) {
+            throw 'No GitHub Release assets were found.'
+          }
+
+          & gh release view $tagName *> $null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Uploading assets to existing GitHub Release $tagName"
+            & gh release upload $tagName @assets --clobber
+          } else {
+            Write-Host "Creating GitHub Release $tagName"
+            $notes = @(
+              "crtsys $version release assets."
+              ""
+              "- crtsys.$version.nupkg: offline NuGet package"
+              "- crtsys-$version-native.zip: headers, docs, CMake helpers, native MSBuild imports, and prebuilt x64/ARM64 Debug/Release libraries"
+              "- crtsys-$version-SHA256SUMS.txt: SHA-256 checksums"
+            ) -join [Environment]::NewLine
+            & gh release create $tagName @assets --target '${{ github.sha }}' --title "crtsys $version" --notes $notes
+          }
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "GitHub Release upload failed with exit code $LASTEXITCODE."
+          }

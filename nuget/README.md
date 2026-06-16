@@ -20,6 +20,10 @@ coverage, use the repository documentation:
 - NTL API reference: <https://github.com/ntoskrnl7/crtsys/blob/main/docs/ntl-api.md>
 - NTL usage examples: <https://github.com/ntoskrnl7/crtsys/blob/main/docs/usage-examples.md>
 
+GitHub Releases also attach this `.nupkg` for offline NuGet installs and a
+native zip with headers, docs, CMake helpers, native MSBuild imports, and
+prebuilt x64/ARM64 Debug/Release driver libraries.
+
 ## Install
 
 Create or open a Visual Studio project, then install the package into that

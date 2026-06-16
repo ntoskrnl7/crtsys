@@ -1,6 +1,6 @@
 # crtsys
 
-Windows 커널 드라이버(`.sys`)를 위한 **C**/C++ Run**t**ime 지원
+Windows 커널 드라이버(`.sys`)를 위한 **C**/C++ **R**un**t**ime 지원
 라이브러리입니다.
 
 [![CMake](https://github.com/ntoskrnl7/crtsys/actions/workflows/cmake.yml/badge.svg)](https://github.com/ntoskrnl7/crtsys/actions/workflows/cmake.yml)
@@ -237,6 +237,26 @@ GitHub Actions도 pull request와 push에서 prebuilt library와 패키지를
 생성합니다. `v0.1.12` 같은 태그를 push하면, 태그 버전이
 `include/.internal/version`과 일치할 때 NuGet Trusted Publishing을 통해
 nuget.org로 publish합니다.
+같은 태그 빌드는 GitHub Release asset도 생성합니다. 수동 workflow 실행에서
+`github_release=true`를 지정하면 태그를 새로 push하지 않고도 해당 버전의
+GitHub Release를 만들거나 갱신할 수 있습니다.
+
+Release asset에는 다음 파일이 포함됩니다.
+
+- 오프라인 NuGet 설치용 `crtsys.<version>.nupkg`.
+- 헤더, 문서, CMake helper, native MSBuild import, x64/ARM64 Debug/Release
+  driver library가 포함된 `crtsys-<version>-native.zip`.
+- asset 검증용 `crtsys-<version>-SHA256SUMS.txt`.
+
+native zip에는 `cmake/CrtSys.cmake`가 포함되며, 이 파일을 unpack된 bundle에서
+include하면 같은 `crtsys_add_driver` API가 prebuilt driver library를
+사용합니다. WDK CMake 프로젝트에서는 zip을 푼 뒤 다음처럼 사용할 수
+있습니다.
+
+```cmake
+include(path/to/crtsys-<version>/cmake/CrtSys.cmake)
+crtsys_add_driver(my_driver src/main.cpp)
+```
 
 GitHub Actions publish를 사용하려면 nuget.org Trusted Publishing policy를
 nuget.org에 표시되는 package owner, repository owner `ntoskrnl7`,
