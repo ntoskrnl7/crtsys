@@ -1,9 +1,27 @@
 # crtsys NuGet Package
 
-`crtsys` is a native NuGet package for Visual Studio/MSBuild projects.
-User-mode applications can consume the public NTL headers from the package.
-WDK driver projects can also consume the prebuilt `crtsys.lib` and `Ldk.lib`
-driver libraries.
+`crtsys` provides C/C++ runtime support for Windows kernel-mode drivers. It is
+meant for driver projects that want a controlled subset of MSVC C++ runtime,
+CRT/STL support, and small NTL C++ helper APIs while staying inside the WDK
+driver model.
+
+Use it when you want to write WDK driver control paths in a more familiar C++
+style: driver entry/unload setup, device object management, IOCTL/RPC handling,
+worker-thread coordination, ownership cleanup, error handling, and companion
+app communication. These paths should normally run at `PASSIVE_LEVEL`, with
+selected `APC_LEVEL` use only where the underlying WDK APIs allow it.
+
+This NuGet package is the Visual Studio/MSBuild distribution of `crtsys`.
+User-mode applications can consume the public NTL headers for companion tools
+such as RPC clients. WDK driver projects can also consume the prebuilt
+`crtsys.lib` and `Ldk.lib` driver libraries.
+
+The package includes:
+
+- public NTL headers and internal compatibility headers
+- native MSBuild `.props` and `.targets` files
+- prebuilt `crtsys.lib` and `Ldk.lib` driver libraries for x64 and ARM64
+- repository documentation for local reference
 
 Installing this package into a normal C++ application project keeps it in
 header-only app mode. Installing it into an existing WDK kernel-mode driver
