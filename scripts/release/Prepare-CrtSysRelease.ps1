@@ -36,26 +36,47 @@ function Test-GitRefExists {
   return $LASTEXITCODE -eq 0
 }
 
+function Ensure-TrimmedString {
+  param(
+    [Parameter(Mandatory = $true)]
+    [AllowNull()]
+    [object] $Value,
+
+    [Parameter(Mandatory = $true)]
+    [string] $Name
+  )
+
+  if ($null -eq $Value) {
+    throw "$Name was empty." 
+  }
+
+  if ($Value -is [string]) {
+    return $Value.Trim()
+  }
+
+  return "${Value}".Trim()
+}
+
 Push-Location $repoRoot
 try {
   Invoke-Git rev-parse --show-toplevel *> $null
 
-  $currentBranch = (& git branch --show-current).Trim()
+  $currentBranch = Ensure-TrimmedString -Value (& git branch --show-current) -Name 'Current branch'
   if (-not $AllowNonMainBranch -and $currentBranch -ne $Branch) {
     throw "Release preparation must run on '$Branch'. Current branch is '$currentBranch'."
   }
 
   Invoke-Git fetch origin $Branch --tags
   if (-not $AllowNonMainBranch) {
-    $localHead = (& git rev-parse HEAD).Trim()
-    $remoteHead = (& git rev-parse "origin/$Branch").Trim()
+    $localHead = Ensure-TrimmedString -Value (& git rev-parse HEAD) -Name 'Local HEAD'
+    $remoteHead = Ensure-TrimmedString -Value (& git rev-parse "origin/$Branch") -Name 'Remote HEAD'
     if ($localHead -ne $remoteHead) {
       throw "Local '$Branch' must match origin/$Branch before preparing a release."
     }
   }
 
-  $status = (& git status --porcelain).Trim()
-  if (-not [string]::IsNullOrWhiteSpace($status)) {
+  $status = & git status --porcelain
+  if ($null -ne $status -and -not [string]::IsNullOrWhiteSpace(($status -join "`n"))) {
     throw "Working tree must be clean before preparing a release."
   }
 
@@ -80,7 +101,7 @@ try {
     throw "Version header was not found: $versionHeader"
   }
 
-  $currentVersion = (& (Join-Path $repoRoot 'scripts\nuget\Get-CrtSysVersion.ps1')).Trim()
+  $currentVersion = Ensure-TrimmedString -Value (& (Join-Path $repoRoot 'scripts\nuget\Get-CrtSysVersion.ps1')) -Name 'Current version'
   if ($currentVersion -eq $Version) {
     throw "Version header is already $Version."
   }
@@ -102,7 +123,7 @@ try {
   $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
   [System.IO.File]::WriteAllText($versionHeader, $content, $utf8NoBom)
 
-  $resolvedVersion = (& (Join-Path $repoRoot 'scripts\nuget\Get-CrtSysVersion.ps1')).Trim()
+  $resolvedVersion = Ensure-TrimmedString -Value (& (Join-Path $repoRoot 'scripts\nuget\Get-CrtSysVersion.ps1')) -Name 'Resolved version'
   if ($resolvedVersion -ne $Version) {
     throw "Version header update failed. Expected $Version, got $resolvedVersion."
   }
