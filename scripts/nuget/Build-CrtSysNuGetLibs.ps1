@@ -57,14 +57,31 @@ foreach ($arch in $Architecture) {
       throw "CMake build failed with exit code $LASTEXITCODE."
     }
 
+    # Pick deterministic output paths first, then fallback to recursive search.
+    $archLower = $arch.ToLower()
     $crtsysCandidates = @()
-    $releaseOutput = Join-Path $repoRoot "lib\$arch\crtsys.lib"
-    if ($config -eq 'Release' -and (Test-Path $releaseOutput)) {
-      $crtsysCandidates += Get-Item -Path $releaseOutput
+    $preferredLibPaths = @(
+      Join-Path $repoRoot "lib\$arch\crtsys.lib"
+      Join-Path $repoRoot "lib\$archLower\crtsys.lib"
+    )
+    foreach ($libPath in $preferredLibPaths | Select-Object -Unique) {
+      if (Test-Path $libPath) {
+        $crtsysCandidates += Get-Item -Path $libPath
+        break
+      }
     }
-    $crtsysCandidates += @(Get-ChildItem -Path $buildDir -Filter 'crtsys.lib' -Recurse -File | Sort-Object FullName)
+
     if ($crtsysCandidates.Count -eq 0) {
-      throw "crtsys.lib was not found for $arch $config under $buildDir."
+      $crtsysCandidates = @(
+        Get-ChildItem -Path $buildDir -Filter 'crtsys.lib' -Recurse -File |
+          Sort-Object FullName
+      )
+    }
+    if ($crtsysCandidates.Count -eq 0) {
+      $available = Get-ChildItem -Path $buildDir -Filter '*.lib' -Recurse -File |
+        Where-Object { $_.Name -in @('crtsys.lib', 'Ldk.lib') } |
+        ForEach-Object { $_.FullName }
+      throw "crtsys.lib was not found for $arch $config under $buildDir or $repoRoot\lib. Available libs: $($available -join ', ')"
     }
 
     $ldkCandidates = @(Get-ChildItem -Path $buildDir -Filter 'Ldk.lib' -Recurse -File | Sort-Object FullName)

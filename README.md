@@ -125,7 +125,7 @@ project(my_driver LANGUAGES C CXX)
 include(cmake/CPM.cmake)
 
 set(CRTSYS_NTL_MAIN ON)
-CPMAddPackage("gh:ntoskrnl7/crtsys@0.1.10")
+CPMAddPackage("gh:ntoskrnl7/crtsys@<version>")
 include(${crtsys_SOURCE_DIR}/cmake/CrtSys.cmake)
 
 crtsys_add_driver(my_driver src/main.cpp)
@@ -163,121 +163,45 @@ cmake --build build_x64 --config Debug
 
 ## NuGet Package
 
-`crtsys` can be distributed as a native NuGet package for Visual Studio/MSBuild
-projects. The package includes public NTL headers, internal compatibility
-headers, native MSBuild imports, and prebuilt `crtsys.lib`/`Ldk.lib` driver
-binaries.
+`crtsys` NuGet distribution is:
 
-The package has two consumer modes:
+- `crtsys.<version>.nupkg`: install from Visual Studio/MSBuild.
 
-- App mode: normal Visual C++ application projects get the public NTL headers
-  and C++ compatibility options only. No driver libraries, forced include, or
-  driver entry point are added.
-- Driver mode: WDK driver projects get the CMake-equivalent driver settings:
-  `crtsys` include paths, MSVC/STL compatibility headers before WDK `km\crt`,
-  forced include setup, preprocessor definitions, `crtsys.lib`, `Ldk.lib`,
-  `libcntpr.lib`, `/FORCE:MULTIPLE`, and the `CrtSysDriverEntry` entry point
-  for the default `ntl::main` flow.
-
-Driver mode is enabled automatically when MSBuild sees a driver project
-(`ConfigurationType=Driver` or `DriverType` is set). It can also be forced with
-`CrtSysUseDriverSupport=true`. The package does not turn a normal C++ project,
-console application, static library, or CMake project into a WDK driver project,
-and it does not install or replace the WDK toolset.
-
-Driver builds may emit `LNK4088` because `crtsys` intentionally uses
-`/FORCE:MULTIPLE` for known duplicate CRT/runtime symbols between `libcntpr`,
-`Ldk`, `ntoskrnl`, and the runtime glue. Treat that as an expected build
-warning only when the remaining link output contains no unresolved symbols and
-the duplicate symbols are in the known runtime boundary. Final drivers still
-need load, verifier, signing, and target-OS validation.
-
-The current binary package targets:
-
-- Visual Studio 2022
-- Windows SDK/WDK `10.0.22621.0`
-- App header builds on `x86`, `x64`, and `ARM64`
-- Driver library builds on `x64` and `ARM64`
-- Debug/Release `crtsys.lib`, `Ldk.lib`, and WDK `libcntpr.lib`
-
-Install it from Visual Studio's **Manage NuGet Packages** UI. In the Package
-Manager Console, select your app or driver project as the default project and
-run:
+Install from VS/MSBuild:
 
 ```powershell
 Install-Package crtsys
 ```
 
-For an app project, include headers such as `ntl/rpc/client` directly.
+## GitHub Release Prebuilt Bundle
 
-For a driver project, define `ntl::main`:
+GitHub Release publishes these offline-only assets:
 
-```cpp
-#include <ntl/driver>
+- `crtsys-<version>-prebuilt.zip`: headers, docs, CMake helpers,
+  and prebuilt `x64/ARM64` `Debug`/`Release` libraries.
+- `crtsys-<version>-SHA256SUMS.txt`
 
-ntl::status ntl::main(ntl::driver& driver,
-                      const std::wstring& registry_path) {
-  driver.on_unload([]() {});
-  return ntl::status::ok();
-}
-```
-
-For native MSBuild consumers, the package also exposes `$(CrtSysRoot)`.
-See [NTL usage examples](./docs/usage-examples.md) for the app/driver RPC and
-raw IOCTL skeletons.
-
-Pack locally:
+Use the prebuilt bundle for WDK CMake/offline bootstrap:
 
 ```powershell
-.\scripts\nuget\Build-CrtSysNuGetLibs.ps1
-.\scripts\nuget\Pack-CrtSysNuGet.ps1
+Expand-Archive .\crtsys-<version>-prebuilt.zip .
 ```
-
-Publish with an API key in the environment:
-
-```powershell
-$env:NUGET_API_KEY = '<nuget-api-key>'
-.\scripts\nuget\Push-CrtSysNuGet.ps1 -SkipDuplicate
-```
-
-GitHub Actions builds the prebuilt libraries and package on pull requests and
-pushes. A tag such as `v0.1.12` publishes to nuget.org through NuGet Trusted
-Publishing when the tag version matches `include/.internal/version`.
-The same tag build also creates GitHub Release assets. Manual workflow runs can
-set `github_release=true` to create or update the matching GitHub Release
-without pushing a tag.
-
-Release assets include:
-
-- `crtsys.<version>.nupkg` for offline NuGet installation.
-- `crtsys-<version>-native.zip` with headers, docs, CMake helpers, native
-  MSBuild imports, and prebuilt x64/ARM64 Debug/Release driver libraries.
-- `crtsys-<version>-SHA256SUMS.txt` for asset checksums.
-
-The native zip includes `cmake/CrtSys.cmake`, and the same `crtsys_add_driver`
-API can consume the prebuilt driver libraries when it is included from the
-unpacked bundle. A WDK CMake project can unpack the zip and use:
 
 ```cmake
 include(path/to/crtsys-<version>/cmake/CrtSys.cmake)
 crtsys_add_driver(my_driver src/main.cpp)
 ```
 
-For GitHub Actions publishing, create a nuget.org Trusted Publishing policy
-with the package owner shown by nuget.org, repository owner `ntoskrnl7`,
-repository `crtsys`, workflow file `package.yml`, and no environment
-restriction. Set the GitHub Actions repository variable
-`NUGET_TRUSTED_PUBLISHING_USER` to the nuget.org user that created the policy.
+For full packaging and publishing command details, see `nuget/README.md`.
 
-To prepare a release without manually editing `include/.internal/version`, run
-the release helper from an up-to-date `main` branch:
+To publish a new version from `main`:
 
 ```powershell
-.\scripts\release\Prepare-CrtSysRelease.ps1 -Version 0.1.13 -Push
+.\scripts\release\Prepare-CrtSysRelease.ps1 -Version <version> -Push
 ```
 
 The helper updates `include/.internal/version`, commits the version bump,
-creates the matching `v0.1.13` tag, and pushes both the commit and tag. The tag
+creates the matching `v<version>` tag, and pushes both the commit and tag. The tag
 push starts the `Package` workflow.
 
 The same flow is also available from the GitHub UI: open **Actions**,
