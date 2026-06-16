@@ -143,6 +143,7 @@ if ($isDriverConsumer) {
 }
 
 $packagesDirectory = Join-Path $testProjectDirectory 'packages'
+$nlohmannJsonPackageRoot = $null
 & $nuget.Source install crtsys `
   -Version $Version `
   -Source $PackageDirectory `
@@ -179,10 +180,11 @@ foreach ($requiredPath in $requiredPackagePaths) {
 }
 
 if ($isDriverConsumer) {
+  $externalPackagesDirectory = Join-Path $testProjectDirectory 'external-packages'
   & $nuget.Source install nlohmann.json `
     -Version 3.12.0 `
     -Source https://api.nuget.org/v3/index.json `
-    -OutputDirectory $packagesDirectory `
+    -OutputDirectory $externalPackagesDirectory `
     -ExcludeVersion `
     -NonInteractive `
     -Verbosity detailed
@@ -191,7 +193,7 @@ if ($isDriverConsumer) {
     throw "nlohmann.json NuGet install failed with exit code $LASTEXITCODE."
   }
 
-  $nlohmannJsonPackageRoot = Join-Path $packagesDirectory 'nlohmann.json'
+  $nlohmannJsonPackageRoot = Join-Path $externalPackagesDirectory 'nlohmann.json'
   foreach ($requiredPath in @(
     'build\native\nlohmann.json.targets',
     'build\native\include\nlohmann\json.hpp'
@@ -200,6 +202,11 @@ if ($isDriverConsumer) {
     if (-not (Test-Path $fullPath)) {
       throw "Installed nlohmann.json package is missing expected file: $fullPath"
     }
+  }
+
+  $nlohmannJsonPackageRoot = (Resolve-Path $nlohmannJsonPackageRoot).Path
+  if (-not $nlohmannJsonPackageRoot.EndsWith('\')) {
+    $nlohmannJsonPackageRoot += '\'
   }
 }
 
@@ -223,6 +230,7 @@ $msbuildArguments = @(
 if ($isDriverConsumer) {
   $msbuildArguments += "/p:WindowsTargetPlatformVersion=$WdkVersion"
   $msbuildArguments += '/p:SignMode=Off'
+  $msbuildArguments += "/p:NlohmannJsonPackageRoot=$nlohmannJsonPackageRoot"
 } else {
   $msbuildArguments += "/p:WindowsTargetPlatformVersion=$WindowsSdkVersion"
 }
