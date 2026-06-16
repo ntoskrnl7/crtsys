@@ -125,7 +125,7 @@ project(my_driver LANGUAGES C CXX)
 include(cmake/CPM.cmake)
 
 set(CRTSYS_NTL_MAIN ON)
-CPMAddPackage("gh:ntoskrnl7/crtsys@0.1.10")
+CPMAddPackage("gh:ntoskrnl7/crtsys@<version>")
 include(${crtsys_SOURCE_DIR}/cmake/CrtSys.cmake)
 
 crtsys_add_driver(my_driver src/main.cpp)
@@ -163,131 +163,41 @@ cmake --build build_x64 --config Debug
 
 ## NuGet 패키지
 
-`crtsys`는 Visual Studio/MSBuild 프로젝트에서 사용할 수 있는 native NuGet
-패키지로 배포할 수 있습니다. 패키지에는 공개 NTL 헤더, 내부 호환성 헤더,
-native MSBuild import 파일, 미리 빌드된 driver용 `crtsys.lib`와
-`Ldk.lib`가 포함됩니다.
+`crtsys`의 NuGet 배포는 다음 하나뿐입니다.
 
-패키지는 두 가지 소비 모드를 가집니다.
+- `crtsys.<version>.nupkg`: Visual Studio/MSBuild 프로젝트용
 
-- App mode: 일반 Visual C++ application 프로젝트에서는 공개 NTL 헤더와 C++
-  호환성 옵션만 추가합니다. driver library, forced include, driver entry
-  point는 추가하지 않습니다.
-- Driver mode: WDK driver 프로젝트에서는 CMake의 driver 설정과 같은 방향으로
-  `crtsys` include 경로, WDK `km\crt`보다 앞서는 MSVC/STL 호환성 헤더,
-  forced include, preprocessor 정의, `crtsys.lib`, `Ldk.lib`,
-  `libcntpr.lib`, `/FORCE:MULTIPLE`, 기본 `ntl::main` 흐름을 위한
-  `CrtSysDriverEntry` entry point를 설정합니다.
-
-Driver mode는 MSBuild가 driver 프로젝트를 감지할 때 자동으로 켜집니다
-(`ConfigurationType=Driver` 또는 `DriverType`이 설정된 경우). 필요하면
-`CrtSysUseDriverSupport=true`로 강제로 켤 수 있습니다. 이 패키지는 일반 C++
-프로젝트, console application, static library, CMake 프로젝트를 WDK driver
-프로젝트로 변환하지 않으며 WDK toolset을 설치하거나 대체하지 않습니다.
-
-driver build에서는 `LNK4088`이 보일 수 있습니다. `crtsys`는 `libcntpr`,
-`Ldk`, `ntoskrnl`, runtime glue 사이의 알려진 CRT/runtime symbol 중복을
-처리하기 위해 의도적으로 `/FORCE:MULTIPLE`을 사용합니다. 이 경고는 남은
-link output에 unresolved symbol이 없고, 중복 symbol이 알려진 runtime 경계
-안에 있을 때만 예상 가능한 build warning으로 보아야 합니다. 최종 드라이버는
-여전히 load, verifier, signing, 대상 OS 검증이 필요합니다.
-
-현재 binary 패키지 대상은 다음과 같습니다.
-
-- Visual Studio 2022
-- Windows SDK/WDK `10.0.22621.0`
-- App header build: `x86`, `x64`, `ARM64`
-- Driver library build: `x64`, `ARM64`
-- Debug/Release `crtsys.lib`, `Ldk.lib`, WDK `libcntpr.lib`
-
-Visual Studio의 **Manage NuGet Packages** UI에서 설치합니다. Package
-Manager Console을 사용할 때는 기본 프로젝트를 app 또는 driver 프로젝트로
-선택한 뒤 다음 명령을 실행합니다.
+MSBuild 설치:
 
 ```powershell
 Install-Package crtsys
 ```
 
-App 프로젝트에서는 `ntl/rpc/client` 같은 헤더를 바로 포함해서 사용합니다.
+## GitHub Release prebuilt 번들
 
-Driver 프로젝트에서는 `ntl::main`을 정의합니다.
+GitHub Release는 별도 오프라인 번들을 배포합니다.
 
-```cpp
-#include <ntl/driver>
+- `crtsys-<version>-prebuilt.zip`: 헤더, 문서, CMake 헬퍼,
+  x64/ARM64의 `Debug`/`Release` 사전 빌드 라이브러리.
+- `crtsys-<version>-SHA256SUMS.txt`
 
-ntl::status ntl::main(ntl::driver& driver,
-                      const std::wstring& registry_path) {
-  driver.on_unload([]() {});
-  return ntl::status::ok();
-}
-```
-
-native MSBuild 소비자를 위해 패키지는 `$(CrtSysRoot)` 속성도 제공합니다.
-app/driver RPC와 raw IOCTL 골격은 [NTL 사용 예제](./ko-kr-usage-examples.md)를
-참고하세요.
-
-로컬에서 패키지를 만들려면 다음 명령을 사용합니다.
+WDK CMake/오프라인 부트스트랩은 prebuilt 번들을 사용합니다.
 
 ```powershell
-.\scripts\nuget\Build-CrtSysNuGetLibs.ps1
-.\scripts\nuget\Pack-CrtSysNuGet.ps1
+Expand-Archive .\crtsys-<version>-prebuilt.zip .
+
 ```
-
-환경 변수에 API key가 있을 때 publish할 수 있습니다.
-
-```powershell
-$env:NUGET_API_KEY = '<nuget-api-key>'
-.\scripts\nuget\Push-CrtSysNuGet.ps1 -SkipDuplicate
-```
-
-GitHub Actions도 pull request와 push에서 prebuilt library와 패키지를
-생성합니다. `v0.1.12` 같은 태그를 push하면, 태그 버전이
-`include/.internal/version`과 일치할 때 NuGet Trusted Publishing을 통해
-nuget.org로 publish합니다.
-같은 태그 빌드는 GitHub Release asset도 생성합니다. 수동 workflow 실행에서
-`github_release=true`를 지정하면 태그를 새로 push하지 않고도 해당 버전의
-GitHub Release를 만들거나 갱신할 수 있습니다.
-
-Release asset에는 다음 파일이 포함됩니다.
-
-- 오프라인 NuGet 설치용 `crtsys.<version>.nupkg`.
-- 헤더, 문서, CMake helper, native MSBuild import, x64/ARM64 Debug/Release
-  driver library가 포함된 `crtsys-<version>-native.zip`.
-- asset 검증용 `crtsys-<version>-SHA256SUMS.txt`.
-
-native zip에는 `cmake/CrtSys.cmake`가 포함되며, 이 파일을 unpack된 bundle에서
-include하면 같은 `crtsys_add_driver` API가 prebuilt driver library를
-사용합니다. WDK CMake 프로젝트에서는 zip을 푼 뒤 다음처럼 사용할 수
-있습니다.
 
 ```cmake
+# 기존 드라이버 CMakeLists.txt
 include(path/to/crtsys-<version>/cmake/CrtSys.cmake)
 crtsys_add_driver(my_driver src/main.cpp)
 ```
 
-GitHub Actions publish를 사용하려면 nuget.org Trusted Publishing policy를
-nuget.org에 표시되는 package owner, repository owner `ntoskrnl7`,
-repository `crtsys`, workflow file `package.yml`, environment 제한 없음으로
-생성합니다. GitHub Actions repository variable
-`NUGET_TRUSTED_PUBLISHING_USER`에는 policy를 생성한 nuget.org 사용자를
-설정합니다.
+`prebuilt.zip`은 GitHub Release 전용 번들이며 NuGet 패키지가 아닙니다.
 
-`include/.internal/version`을 직접 수정하지 않고 release를 준비하려면 최신
-`main` branch에서 release helper를 실행합니다.
-
-```powershell
-.\scripts\release\Prepare-CrtSysRelease.ps1 -Version 0.1.13 -Push
-```
-
-이 helper는 `include/.internal/version`을 수정하고, version bump commit을
-만든 뒤, 대응되는 `v0.1.13` tag를 만들고 commit과 tag를 push합니다. tag
-push가 `Package` workflow를 시작합니다.
-
-같은 흐름은 GitHub UI에서도 사용할 수 있습니다. **Actions**에서
-**Release**를 선택하고 **Run workflow**를 눌러 release version을 입력하면
-workflow가 version bump commit과 tag를 만들고, 그 tag 기준으로 `Package`
-workflow를 실행합니다. branch protection이 `main` 직접 push를 막는 경우에는
-로컬 helper를 사용하거나 release 규칙을 먼저 조정해야 합니다.
+릴리스/게시 방법, release helper, Trusted Publishing 설정은 `nuget/README.md`에
+모아서 정리해두었습니다. 자세한 앱/드라이버 동작 방식도 같은 문서에서 확인하세요.
 
 ## 이 저장소 빌드
 

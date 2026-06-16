@@ -29,9 +29,9 @@ if ([string]::IsNullOrWhiteSpace($WorkDirectory)) {
 }
 
 $ReleaseDirectory = (Resolve-Path $ReleaseDirectory).Path
-$nativeZipPath = Join-Path $ReleaseDirectory "crtsys-$Version-native.zip"
-if (-not (Test-Path $nativeZipPath)) {
-  throw "Native release zip was not found: $nativeZipPath"
+$prebuiltZipPath = Join-Path $ReleaseDirectory "crtsys-$Version-prebuilt.zip"
+if (-not (Test-Path $prebuiltZipPath)) {
+  throw "Prebuilt release zip was not found: $prebuiltZipPath"
 }
 
 $platformByArchitecture = @{
@@ -43,8 +43,8 @@ $platform = $platformByArchitecture[$Architecture]
 Remove-Item -Recurse -Force -Path $WorkDirectory -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $WorkDirectory | Out-Null
 
-$unpackDirectory = Join-Path $WorkDirectory 'native'
-Expand-Archive -Path $nativeZipPath -DestinationPath $unpackDirectory -Force
+$unpackDirectory = Join-Path $WorkDirectory 'prebuilt'
+Expand-Archive -Path $prebuiltZipPath -DestinationPath $unpackDirectory -Force
 
 $bundleRoot = Join-Path $unpackDirectory "crtsys-$Version"
 if (-not (Test-Path (Join-Path $bundleRoot 'cmake\CrtSys.cmake'))) {
@@ -58,7 +58,7 @@ if (-not (Test-Path (Join-Path $bundleRoot 'cmake\CrtSys.cmake'))) {
 }
 
 if ([string]::IsNullOrWhiteSpace($bundleRoot) -or -not (Test-Path (Join-Path $bundleRoot 'cmake\CrtSys.cmake'))) {
-  throw "Unpacked native release bundle does not contain cmake\CrtSys.cmake."
+  throw "Unpacked prebuilt release bundle does not contain cmake\CrtSys.cmake."
 }
 
 foreach ($requiredPath in @(
@@ -69,7 +69,7 @@ foreach ($requiredPath in @(
 )) {
   $fullPath = Join-Path $bundleRoot $requiredPath
   if (-not (Test-Path $fullPath)) {
-    throw "Native release bundle is missing expected file: $fullPath"
+    throw "Prebuilt release bundle is missing expected file: $fullPath"
   }
 }
 
@@ -120,13 +120,13 @@ $configureArgs = @(
   "-DCMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION=$WindowsSdkVersion"
 )
 
-Write-Host "Configuring native release asset consumer for $Architecture $Configuration"
+Write-Host "Configuring prebuilt release asset consumer for $Architecture $Configuration"
 & cmake @configureArgs
 if ($LASTEXITCODE -ne 0) {
   throw "CMake configure failed with exit code $LASTEXITCODE."
 }
 
-Write-Host "Building native release asset consumer for $Architecture $Configuration"
+Write-Host "Building prebuilt release asset consumer for $Architecture $Configuration"
 & cmake --build $buildDirectory --config $Configuration --target crtsys_release_asset_smoke --parallel
 if ($LASTEXITCODE -ne 0) {
   throw "CMake build failed with exit code $LASTEXITCODE."
@@ -134,7 +134,7 @@ if ($LASTEXITCODE -ne 0) {
 
 $driverPath = Join-Path $buildDirectory "$Configuration\crtsys_release_asset_smoke.sys"
 if (-not (Test-Path $driverPath)) {
-  throw "Native release asset consumer driver was not produced: $driverPath"
+  throw "Prebuilt release asset consumer driver was not produced: $driverPath"
 }
 
-Write-Host "Native release asset consumer test passed: $driverPath"
+Write-Host "Prebuilt release asset consumer test passed: $driverPath"

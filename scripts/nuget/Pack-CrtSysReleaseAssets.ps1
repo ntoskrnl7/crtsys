@@ -20,7 +20,7 @@ $nugetDirectory = Join-Path $repoRoot 'artifacts\nuget'
 $stagingDirectory = Join-Path $repoRoot 'artifacts\nuget-staging'
 $workDirectory = Join-Path $repoRoot 'artifacts\release-staging'
 $bundleRoot = Join-Path $workDirectory "crtsys-$Version"
-$nativeZipPath = Join-Path $OutputDirectory "crtsys-$Version-native.zip"
+$prebuiltZipPath = Join-Path $OutputDirectory "crtsys-$Version-prebuilt.zip"
 $checksumPath = Join-Path $OutputDirectory "crtsys-$Version-SHA256SUMS.txt"
 $packagePath = Join-Path $nugetDirectory "crtsys.$Version.nupkg"
 $releasePackagePath = Join-Path $OutputDirectory "crtsys.$Version.nupkg"
@@ -51,11 +51,10 @@ Copy-Item -Path (Join-Path $repoRoot 'include') -Destination (Join-Path $bundleR
 Copy-Item -Path (Join-Path $repoRoot 'cmake') -Destination (Join-Path $bundleRoot 'cmake') -Recurse -Force
 Copy-Item -Path (Join-Path $repoRoot 'nuget\build') -Destination (Join-Path $bundleRoot 'build') -Recurse -Force
 Copy-Item -Path (Join-Path $stagingDirectory 'lib') -Destination (Join-Path $bundleRoot 'lib') -Recurse -Force
-
 $bundleReadme = @"
-# crtsys $Version Native Release Bundle
+# crtsys $Version Prebuilt Release Bundle
 
-This archive is an offline-friendly native bundle built by the GitHub Actions
+This archive is an offline-friendly prebuilt bundle built by the GitHub Actions
 Package workflow.
 
 Contents:
@@ -76,14 +75,14 @@ Release is usually the easiest offline install path.
 "@
 Set-Content -LiteralPath (Join-Path $bundleRoot 'README.release.md') -Value $bundleReadme -Encoding UTF8
 
-Remove-Item -Force -Path $nativeZipPath -ErrorAction SilentlyContinue
+Remove-Item -Force -Path $prebuiltZipPath -ErrorAction SilentlyContinue
 Remove-Item -Force -Path $releasePackagePath -ErrorAction SilentlyContinue
 Remove-Item -Force -Path $checksumPath -ErrorAction SilentlyContinue
 
-Compress-Archive -Path $bundleRoot -DestinationPath $nativeZipPath -CompressionLevel Optimal
+Compress-Archive -Path $bundleRoot -DestinationPath $prebuiltZipPath -CompressionLevel Optimal
 Copy-Item -Path $packagePath -Destination $releasePackagePath -Force
 
-Get-FileHash -Algorithm SHA256 -Path $nativeZipPath, $releasePackagePath |
+Get-FileHash -Algorithm SHA256 -Path $prebuiltZipPath, $releasePackagePath |
   ForEach-Object { "$($_.Hash.ToLowerInvariant())  $([System.IO.Path]::GetFileName($_.Path))" } |
   Set-Content -LiteralPath $checksumPath -Encoding ASCII
 
