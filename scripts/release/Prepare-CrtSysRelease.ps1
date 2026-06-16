@@ -16,14 +16,20 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $versionHeader = Join-Path $repoRoot 'include\.internal\version'
 $tagName = "v$Version"
+$gitExe = (Get-Command git.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source)
+
+if ([string]::IsNullOrWhiteSpace($gitExe)) {
+  throw "git.exe was not found in PATH."
+}
 
 function Invoke-Git {
   param(
-    [Parameter(ValueFromRemainingArguments = $true)]
+    [Parameter(Mandatory = $true)]
     [string[]] $Arguments
   )
 
-  & git @Arguments
+  Write-Host "[git] $($Arguments -join ' ')"
+  & $gitExe @Arguments
   if ($LASTEXITCODE -ne 0) {
     throw "git $($Arguments -join ' ') failed with exit code $LASTEXITCODE."
   }
@@ -32,7 +38,7 @@ function Invoke-Git {
 function Test-GitRefExists {
   param([string] $Ref)
 
-  & git rev-parse --verify --quiet $Ref *> $null
+  & $gitExe rev-parse --verify --quiet -- $Ref *> $null
   return $LASTEXITCODE -eq 0
 }
 
@@ -59,23 +65,23 @@ function Ensure-TrimmedString {
 
 Push-Location $repoRoot
 try {
-  Invoke-Git rev-parse --show-toplevel *> $null
+  Invoke-Git @('rev-parse', '--show-toplevel') *> $null
 
-  $currentBranch = Ensure-TrimmedString -Value (& git branch --show-current) -Name 'Current branch'
+  $currentBranch = Ensure-TrimmedString -Value (Invoke-Git @('branch', '--show-current')) -Name 'Current branch'
   if (-not $AllowNonMainBranch -and $currentBranch -ne $Branch) {
     throw "Release preparation must run on '$Branch'. Current branch is '$currentBranch'."
   }
 
-  Invoke-Git fetch origin $Branch --tags
+  Invoke-Git @('fetch', 'origin', $Branch, '--tags')
   if (-not $AllowNonMainBranch) {
-    $localHead = Ensure-TrimmedString -Value (& git rev-parse HEAD) -Name 'Local HEAD'
-    $remoteHead = Ensure-TrimmedString -Value (& git rev-parse "origin/$Branch") -Name 'Remote HEAD'
+    $localHead = Ensure-TrimmedString -Value (Invoke-Git @('rev-parse', 'HEAD')) -Name 'Local HEAD'
+    $remoteHead = Ensure-TrimmedString -Value (Invoke-Git @('rev-parse', "origin/$Branch")) -Name 'Remote HEAD'
     if ($localHead -ne $remoteHead) {
       throw "Local '$Branch' must match origin/$Branch before preparing a release."
     }
   }
 
-  $status = & git status --porcelain
+  $status = (Invoke-Git @('status', '--porcelain'))
   if ($null -ne $status -and -not [string]::IsNullOrWhiteSpace(($status -join "`n"))) {
     throw "Working tree must be clean before preparing a release."
   }
@@ -84,7 +90,7 @@ try {
     throw "Local tag already exists: $tagName"
   }
 
-  & git ls-remote --exit-code --tags origin $tagName *> $null
+  & $gitExe ls-remote --exit-code --tags origin -- $tagName *> $null
   if ($LASTEXITCODE -eq 0) {
     throw "Remote tag already exists on origin: $tagName"
   }
@@ -128,14 +134,14 @@ try {
     throw "Version header update failed. Expected $Version, got $resolvedVersion."
   }
 
-  Invoke-Git diff --check
-  Invoke-Git add -- include/.internal/version
-  Invoke-Git commit -m "release crtsys $Version"
-  Invoke-Git tag -a $tagName -m "crtsys $Version"
+  Invoke-Git @('diff', '--check')
+  Invoke-Git @('add', '--', 'include/.internal/version')
+  Invoke-Git @('commit', '-m', "release crtsys $Version")
+  Invoke-Git @('tag', '-a', $tagName, '-m', "crtsys $Version")
 
   if ($Push) {
-    Invoke-Git push origin $currentBranch
-    Invoke-Git push origin $tagName
+    Invoke-Git @('push', 'origin', $currentBranch)
+    Invoke-Git @('push', 'origin', $tagName)
     Write-Host "Pushed $currentBranch and $tagName. The Package workflow should start from the tag."
   } else {
     Write-Host "Prepared release commit and tag locally."
