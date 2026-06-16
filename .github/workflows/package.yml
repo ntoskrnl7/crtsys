@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [ main ]
     paths:
-      - '.github/workflows/nuget.yml'
+      - '.github/workflows/package.yml'
       - 'nuget/**'
       - 'scripts/nuget/**'
       - 'CMakeLists.txt'
@@ -22,7 +22,7 @@ on:
     tags:
       - 'v*'
     paths:
-      - '.github/workflows/nuget.yml'
+      - '.github/workflows/package.yml'
       - 'nuget/**'
       - 'scripts/nuget/**'
       - 'CMakeLists.txt'

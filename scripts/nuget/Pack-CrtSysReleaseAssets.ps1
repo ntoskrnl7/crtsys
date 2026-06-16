@@ -56,7 +56,7 @@ $bundleReadme = @"
 # crtsys $Version Native Release Bundle
 
 This archive is an offline-friendly native bundle built by the GitHub Actions
-NuGet workflow.
+Package workflow.
 
 Contents:
 

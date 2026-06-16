@@ -267,7 +267,7 @@ crtsys_add_driver(my_driver src/main.cpp)
 
 GitHub Actions publish를 사용하려면 nuget.org Trusted Publishing policy를
 nuget.org에 표시되는 package owner, repository owner `ntoskrnl7`,
-repository `crtsys`, workflow file `nuget.yml`, environment 제한 없음으로
+repository `crtsys`, workflow file `package.yml`, environment 제한 없음으로
 생성합니다. GitHub Actions repository variable
 `NUGET_TRUSTED_PUBLISHING_USER`에는 policy를 생성한 nuget.org 사용자를
 설정합니다.
