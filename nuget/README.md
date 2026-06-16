@@ -71,6 +71,13 @@ Visual C++ / Windows SDK include paths before inherited WDK `km\crt` include
 paths. This is required for the C++ runtime and STL headers that `crtsys`
 supports.
 
+Driver builds may emit `LNK4088` because `crtsys` intentionally uses
+`/FORCE:MULTIPLE` for known duplicate CRT/runtime symbols between `libcntpr`,
+`Ldk`, `ntoskrnl`, and the runtime glue. Treat that as an expected build
+warning only when the remaining link output contains no unresolved symbols and
+the duplicate symbols are in the known runtime boundary. Final drivers still
+need load, verifier, signing, and target-OS validation.
+
 Driver support is enabled automatically when MSBuild sees a driver project
 (`ConfigurationType=Driver` or `DriverType` is set). If you need to override
 that detection, set `CrtSysUseDriverSupport=true` or `false` in your project

@@ -1,6 +1,6 @@
 # crtsys
 
-**C**/C++ **R**un**t**ime support for Windows kernel **sys** drivers.
+**C**/C++ **R**un**t**ime support for Windows kernel drivers (`.sys`).
 
 [![CMake](https://github.com/ntoskrnl7/crtsys/actions/workflows/cmake.yml/badge.svg)](https://github.com/ntoskrnl7/crtsys/actions/workflows/cmake.yml)
 ![GitHub](https://img.shields.io/github/license/ntoskrnl7/crtsys)
@@ -184,6 +184,13 @@ Driver mode is enabled automatically when MSBuild sees a driver project
 `CrtSysUseDriverSupport=true`. The package does not turn a normal C++ project,
 console application, static library, or CMake project into a WDK driver project,
 and it does not install or replace the WDK toolset.
+
+Driver builds may emit `LNK4088` because `crtsys` intentionally uses
+`/FORCE:MULTIPLE` for known duplicate CRT/runtime symbols between `libcntpr`,
+`Ldk`, `ntoskrnl`, and the runtime glue. Treat that as an expected build
+warning only when the remaining link output contains no unresolved symbols and
+the duplicate symbols are in the known runtime boundary. Final drivers still
+need load, verifier, signing, and target-OS validation.
 
 The current binary package targets:
 
