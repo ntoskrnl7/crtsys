@@ -1,4 +1,4 @@
-name: NuGet
+name: Package
 
 on:
   pull_request:
