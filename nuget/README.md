@@ -1,9 +1,27 @@
 # crtsys NuGet Package
 
-`crtsys` is a native NuGet package for Visual Studio/MSBuild projects.
-User-mode applications can consume the public NTL headers from the package.
-WDK driver projects can also consume the prebuilt `crtsys.lib` and `Ldk.lib`
-driver libraries.
+`crtsys` provides C/C++ runtime support for Windows kernel-mode drivers. It is
+meant for driver projects that want a controlled subset of MSVC C++ runtime,
+CRT/STL support, and small NTL C++ helper APIs while staying inside the WDK
+driver model.
+
+Use it when you want to write WDK driver control paths in a more familiar C++
+style: driver entry/unload setup, device object management, IOCTL/RPC handling,
+worker-thread coordination, ownership cleanup, error handling, and companion
+app communication. These paths should normally run at `PASSIVE_LEVEL`, with
+selected `APC_LEVEL` use only where the underlying WDK APIs allow it.
+
+This NuGet package is the Visual Studio/MSBuild distribution of `crtsys`.
+User-mode applications can consume the public NTL headers for companion tools
+such as RPC clients. WDK driver projects can also consume the prebuilt
+`crtsys.lib` and `Ldk.lib` driver libraries.
+
+The package includes:
+
+- public NTL headers and internal compatibility headers
+- native MSBuild `.props` and `.targets` files
+- prebuilt `crtsys.lib` and `Ldk.lib` driver libraries for x64 and ARM64
+- repository documentation for local reference
 
 Installing this package into a normal C++ application project keeps it in
 header-only app mode. Installing it into an existing WDK kernel-mode driver
@@ -19,6 +37,10 @@ coverage, use the repository documentation:
 - Design model: <https://github.com/ntoskrnl7/crtsys/blob/main/docs/design-rationale.md>
 - NTL API reference: <https://github.com/ntoskrnl7/crtsys/blob/main/docs/ntl-api.md>
 - NTL usage examples: <https://github.com/ntoskrnl7/crtsys/blob/main/docs/usage-examples.md>
+
+GitHub Releases also attach this `.nupkg` for offline NuGet installs and a
+native zip with headers, docs, CMake helpers, native MSBuild imports, and
+prebuilt x64/ARM64 Debug/Release driver libraries.
 
 ## Install
 
@@ -48,6 +70,13 @@ matter to `crtsys`: it disables the WDK `/kernel` compiler switch and puts the
 Visual C++ / Windows SDK include paths before inherited WDK `km\crt` include
 paths. This is required for the C++ runtime and STL headers that `crtsys`
 supports.
+
+Driver builds may emit `LNK4088` because `crtsys` intentionally uses
+`/FORCE:MULTIPLE` for known duplicate CRT/runtime symbols between `libcntpr`,
+`Ldk`, `ntoskrnl`, and the runtime glue. Treat that as an expected build
+warning only when the remaining link output contains no unresolved symbols and
+the duplicate symbols are in the known runtime boundary. Final drivers still
+need load, verifier, signing, and target-OS validation.
 
 Driver support is enabled automatically when MSBuild sees a driver project
 (`ConfigurationType=Driver` or `DriverType` is set). If you need to override

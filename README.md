@@ -1,6 +1,6 @@
 # crtsys
 
-**C**/C++ Run**t**ime support for Windows kernel **sys** drivers.
+**C**/C++ **R**un**t**ime support for Windows kernel drivers (`.sys`).
 
 [![CMake](https://github.com/ntoskrnl7/crtsys/actions/workflows/cmake.yml/badge.svg)](https://github.com/ntoskrnl7/crtsys/actions/workflows/cmake.yml)
 ![GitHub](https://img.shields.io/github/license/ntoskrnl7/crtsys)
@@ -185,6 +185,13 @@ Driver mode is enabled automatically when MSBuild sees a driver project
 console application, static library, or CMake project into a WDK driver project,
 and it does not install or replace the WDK toolset.
 
+Driver builds may emit `LNK4088` because `crtsys` intentionally uses
+`/FORCE:MULTIPLE` for known duplicate CRT/runtime symbols between `libcntpr`,
+`Ldk`, `ntoskrnl`, and the runtime glue. Treat that as an expected build
+warning only when the remaining link output contains no unresolved symbols and
+the duplicate symbols are in the known runtime boundary. Final drivers still
+need load, verifier, signing, and target-OS validation.
+
 The current binary package targets:
 
 - Visual Studio 2022
@@ -236,10 +243,29 @@ $env:NUGET_API_KEY = '<nuget-api-key>'
 GitHub Actions builds the prebuilt libraries and package on pull requests and
 pushes. A tag such as `v0.1.12` publishes to nuget.org through NuGet Trusted
 Publishing when the tag version matches `include/.internal/version`.
+The same tag build also creates GitHub Release assets. Manual workflow runs can
+set `github_release=true` to create or update the matching GitHub Release
+without pushing a tag.
+
+Release assets include:
+
+- `crtsys.<version>.nupkg` for offline NuGet installation.
+- `crtsys-<version>-native.zip` with headers, docs, CMake helpers, native
+  MSBuild imports, and prebuilt x64/ARM64 Debug/Release driver libraries.
+- `crtsys-<version>-SHA256SUMS.txt` for asset checksums.
+
+The native zip includes `cmake/CrtSys.cmake`, and the same `crtsys_add_driver`
+API can consume the prebuilt driver libraries when it is included from the
+unpacked bundle. A WDK CMake project can unpack the zip and use:
+
+```cmake
+include(path/to/crtsys-<version>/cmake/CrtSys.cmake)
+crtsys_add_driver(my_driver src/main.cpp)
+```
 
 For GitHub Actions publishing, create a nuget.org Trusted Publishing policy
 with the package owner shown by nuget.org, repository owner `ntoskrnl7`,
-repository `crtsys`, workflow file `nuget.yml`, and no environment
+repository `crtsys`, workflow file `package.yml`, and no environment
 restriction. Set the GitHub Actions repository variable
 `NUGET_TRUSTED_PUBLISHING_USER` to the nuget.org user that created the policy.
 
