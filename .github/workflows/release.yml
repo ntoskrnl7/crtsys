@@ -1,0 +1,74 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version, for example 0.1.13
+        required: true
+        type: string
+      publish:
+        description: Publish the generated package to nuget.org
+        required: true
+        type: boolean
+        default: true
+      github_release:
+        description: Upload release assets to GitHub Releases
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  release:
+    name: Prepare release and dispatch package workflow
+    runs-on: windows-2022
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Configure release checkout
+        shell: pwsh
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch origin main --tags
+          git checkout -B main origin/main
+
+      - name: Create version commit and tag
+        shell: pwsh
+        run: ./scripts/release/Prepare-CrtSysRelease.ps1 -Version '${{ inputs.version }}' -Push
+
+      - name: Dispatch Package workflow
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = '${{ inputs.version }}'
+          $publish = '${{ inputs.publish }}'.ToLowerInvariant()
+          $githubRelease = '${{ inputs.github_release }}'.ToLowerInvariant()
+          $tagName = "v$version"
+
+          for ($attempt = 1; $attempt -le 6; $attempt++) {
+            Write-Host "Dispatching Package workflow for $tagName (attempt $attempt)"
+            & gh workflow run package.yml `
+              --repo '${{ github.repository }}' `
+              --ref $tagName `
+              -f publish=$publish `
+              -f github_release=$githubRelease
+
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "Package workflow dispatch requested for $tagName."
+              exit 0
+            }
+
+            Start-Sleep -Seconds 10
+          }
+
+          throw "Package workflow dispatch failed for $tagName."

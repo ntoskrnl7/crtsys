@@ -280,6 +280,12 @@ The helper updates `include/.internal/version`, commits the version bump,
 creates the matching `v0.1.13` tag, and pushes both the commit and tag. The tag
 push starts the `Package` workflow.
 
+The same flow is also available from the GitHub UI: open **Actions**,
+select **Release**, choose **Run workflow**, and enter the release version. The
+workflow creates the version bump commit and tag, then dispatches the `Package`
+workflow for that tag. If branch protection blocks direct pushes to `main`, use
+the local helper or adjust the release rule first.
+
 ## Building This Repository
 
 Clone the repository and build the test app and driver for the host
