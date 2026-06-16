@@ -138,11 +138,10 @@ function(crtsys_link_prebuilt_driver_libraries _target)
 
     target_link_libraries(
         ${_target}
-        PRIVATE
-            debug "${_crtsys_debug}"
-            debug "${_ldk_debug}"
-            optimized "${_crtsys_release}"
-            optimized "${_ldk_release}"
+        debug "${_crtsys_debug}"
+        debug "${_ldk_debug}"
+        optimized "${_crtsys_release}"
+        optimized "${_ldk_release}"
     )
 
     target_compile_definitions(${_target} PUBLIC "_KERNEL32_" "_ITERATOR_DEBUG_LEVEL=0" "_HAS_EXCEPTIONS")
@@ -154,7 +153,7 @@ function(crtsys_link_prebuilt_driver_libraries _target)
             message(FATAL_ERROR "WDK::LIBCNTPR is required for crtsys prebuilt driver support.")
         endif()
 
-        target_link_libraries(${_target} PRIVATE WDK::LIBCNTPR)
+        target_link_libraries(${_target} WDK::LIBCNTPR)
         target_compile_definitions(${_target} PUBLIC CRTSYS_USE_LIBCNTPR)
         target_link_options(${_target} PUBLIC "/FORCE:MULTIPLE")
     endif()
