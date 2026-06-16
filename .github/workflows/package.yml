@@ -326,21 +326,23 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          Set-Location '${{ github.workspace }}'
           $version = '${{ needs.pack.outputs.package_version }}'
           $tagName = "v$version"
           if ('${{ github.ref_type }}' -eq 'tag') {
             $tagName = '${{ github.ref_name }}'
           }
+          $repo = '${{ github.repository }}'
 
           $assets = @(Get-ChildItem -Path artifacts\release -File | Sort-Object FullName | ForEach-Object { $_.FullName })
           if ($assets.Count -eq 0) {
             throw 'No GitHub Release assets were found.'
           }
 
-          & gh release view $tagName *> $null
+          & gh release view $tagName --repo $repo *> $null
           if ($LASTEXITCODE -eq 0) {
             Write-Host "Uploading assets to existing GitHub Release $tagName"
-            & gh release upload $tagName @assets --clobber
+            & gh release upload $tagName @assets --repo $repo --clobber
           } else {
             Write-Host "Creating GitHub Release $tagName"
             $notes = @(
@@ -350,7 +352,7 @@ jobs:
               "- crtsys-$version-native.zip: headers, docs, CMake helpers, native MSBuild imports, and prebuilt x64/ARM64 Debug/Release libraries"
               "- crtsys-$version-SHA256SUMS.txt: SHA-256 checksums"
             ) -join [Environment]::NewLine
-            & gh release create $tagName @assets --target '${{ github.sha }}' --title "crtsys $version" --notes $notes
+            & gh release create $tagName @assets --repo $repo --target '${{ github.sha }}' --title "crtsys $version" --notes $notes
           }
 
           if ($LASTEXITCODE -ne 0) {
