@@ -269,6 +269,23 @@ repository `crtsys`, workflow file `package.yml`, and no environment
 restriction. Set the GitHub Actions repository variable
 `NUGET_TRUSTED_PUBLISHING_USER` to the nuget.org user that created the policy.
 
+To prepare a release without manually editing `include/.internal/version`, run
+the release helper from an up-to-date `main` branch:
+
+```powershell
+.\scripts\release\Prepare-CrtSysRelease.ps1 -Version 0.1.13 -Push
+```
+
+The helper updates `include/.internal/version`, commits the version bump,
+creates the matching `v0.1.13` tag, and pushes both the commit and tag. The tag
+push starts the `Package` workflow.
+
+The same flow is also available from the GitHub UI: open **Actions**,
+select **Release**, choose **Run workflow**, and enter the release version. The
+workflow creates the version bump commit and tag, then dispatches the `Package`
+workflow for that tag. If branch protection blocks direct pushes to `main`, use
+the local helper or adjust the release rule first.
+
 ## Building This Repository
 
 Clone the repository and build the test app and driver for the host
