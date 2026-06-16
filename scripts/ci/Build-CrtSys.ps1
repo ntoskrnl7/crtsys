@@ -19,7 +19,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-$sourceDir = Join-Path $repoRoot "test\$Project"
+$sourceDir = Join-Path $repoRoot "test\cmake\$Project"
 
 if (-not (Test-Path (Join-Path $sourceDir 'CMakeLists.txt'))) {
   throw "CMakeLists.txt was not found under '$sourceDir'."

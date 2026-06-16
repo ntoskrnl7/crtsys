@@ -17,12 +17,11 @@ permissions:
   actions: read
 
 env:
-  CRTSYS_CONFIGURATION: Debug
   CRTSYS_WINDOWS_SDK_VERSION: 10.0.22621.0
 
 jobs:
   build:
-    name: Build ${{ matrix.project }} ${{ matrix.arch }}
+    name: Build ${{ matrix.project }} ${{ matrix.arch }} ${{ matrix.config }}
     runs-on: windows-2022
     strategy:
       fail-fast: false
@@ -30,14 +29,34 @@ jobs:
         include:
           - project: app
             arch: x86
+            config: Debug
           - project: app
             arch: x64
+            config: Debug
           - project: app
             arch: ARM64
+            config: Debug
           - project: driver
             arch: x64
+            config: Debug
           - project: driver
             arch: ARM64
+            config: Debug
+          - project: app
+            arch: x86
+            config: Release
+          - project: app
+            arch: x64
+            config: Release
+          - project: app
+            arch: ARM64
+            config: Release
+          - project: driver
+            arch: x64
+            config: Release
+          - project: driver
+            arch: ARM64
+            config: Release
 
     steps:
       - uses: actions/checkout@v4
@@ -59,7 +78,7 @@ jobs:
           $parameters = @{
             Project = '${{ matrix.project }}'
             Architecture = '${{ matrix.arch }}'
-            Configuration = '${{ env.CRTSYS_CONFIGURATION }}'
+            Configuration = '${{ matrix.config }}'
             WindowsSdkVersion = '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}'
           }
 
@@ -70,27 +89,27 @@ jobs:
           ./scripts/ci/Build-CrtSys.ps1 @parameters
 
       - name: Test-sign driver
-        if: matrix.project == 'driver'
+        if: matrix.project == 'driver' && matrix.config == 'Debug'
         shell: pwsh
-        run: ./scripts/ci/TestSign-Driver.ps1 -DriverPath test\driver\build_${{ matrix.arch }}\Debug\crtsys_test.sys
+        run: ./scripts/ci/TestSign-Driver.ps1 -DriverPath test\cmake\driver\build_${{ matrix.arch }}\Debug\crtsys_test.sys
 
       - name: Upload signed driver
-        if: matrix.project == 'driver'
+        if: matrix.project == 'driver' && matrix.config == 'Debug'
         uses: actions/upload-artifact@v4
         with:
           name: crtsys-test-driver-${{ matrix.arch }}
           path: |
-            test/driver/build_${{ matrix.arch }}/Debug/crtsys_test.sys
-            test/driver/build_${{ matrix.arch }}/Debug/crtsys_test.pdb
+            test/cmake/driver/build_${{ matrix.arch }}/Debug/crtsys_test.sys
+            test/cmake/driver/build_${{ matrix.arch }}/Debug/crtsys_test.pdb
 
       - name: Upload x64 test app
-        if: matrix.project == 'app' && matrix.arch == 'x64'
+        if: matrix.project == 'app' && matrix.arch == 'x64' && matrix.config == 'Debug'
         uses: actions/upload-artifact@v4
         with:
           name: crtsys-test-app-x64
           path: |
-            test/app/build_x64/Debug/crtsys_test_app.exe
-            test/app/build_x64/Debug/crtsys_test_app.pdb
+            test/cmake/app/build_x64/Debug/crtsys_test_app.exe
+            test/cmake/app/build_x64/Debug/crtsys_test_app.pdb
 
   driver-load-test-preflight:
     name: Driver load test preflight

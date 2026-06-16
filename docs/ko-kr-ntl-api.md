@@ -181,7 +181,9 @@ RPC helper는 `DeviceIoControl` 기반의 server/client stub을 생성합니다.
   - user-mode client입니다.
   - `invoke<Ret>(index, args...)`를 제공합니다.
 
-전체 예시는 [`test/common/rpc.hpp`](../test/common/rpc.hpp)를 참고하세요.
+전체 schema 예시는 [`test/cmake/common/rpc.hpp`](../test/cmake/common/rpc.hpp)를
+참고하세요. 더 작은 app/driver 흐름 예시는 [NTL 사용 예제](./ko-kr-usage-examples.md)를
+참고하세요.
 
 IRQL: server-side callback은 `PASSIVE_LEVEL`로 취급하세요. user-mode
 `ntl::rpc::client` 쪽은 커널 IRQL 규칙 밖에 있지만, driver-side dispatch

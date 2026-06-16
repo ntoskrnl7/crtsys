@@ -2,12 +2,12 @@ cmake_minimum_required(VERSION 3.14 FATAL_ERROR)
 
 project(crtsys_test LANGUAGES C CXX)
 
-include(../../cmake/CPM.cmake)
+include(../../../cmake/CPM.cmake)
 
 option(CRTSYS_TEST_BREAKPOINT "Break into the kernel debugger when the test driver loads" ON)
 
 set(CRTSYS_NTL_MAIN ON)
-CPMAddPackage(NAME crtsys SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}/../..)
+CPMAddPackage(NAME crtsys SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}/../../..)
 include(${crtsys_SOURCE_DIR}/cmake/CrtSys.cmake)
 
 set(CRTSYS_TEST_NLOHMANN_JSON ON)
@@ -67,5 +67,5 @@ target_link_libraries(crtsys_test gtest)
 
 target_include_directories(crtsys_test PRIVATE ${CMAKE_CURRENT_LIST_DIR}/..)
 
-include(../../cmake/std-cxx.cmake)
+include(../../../cmake/std-cxx.cmake)
 set_std_cxx_latest(crtsys_test)

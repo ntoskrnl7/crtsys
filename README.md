@@ -74,6 +74,7 @@ in the documentation directory:
 - [Design rationale and operational boundaries](./docs/design-rationale.md)
 - [Detailed feature coverage](./docs/feature-coverage.md)
 - [NTL API reference](./docs/ntl-api.md)
+- [NTL usage examples](./docs/usage-examples.md)
 
 High-level coverage:
 
@@ -162,33 +163,47 @@ cmake --build build_x64 --config Debug
 
 ## NuGet Package
 
-`crtsys` can be distributed as a native NuGet package for Visual Studio driver
+`crtsys` can be distributed as a native NuGet package for Visual Studio/MSBuild
 projects. The package includes public NTL headers, internal compatibility
-headers, native MSBuild imports, and prebuilt `crtsys.lib`/`Ldk.lib` binaries.
+headers, native MSBuild imports, and prebuilt `crtsys.lib`/`Ldk.lib` driver
+binaries.
 
-After installing the package in a Visual Studio WDK driver project, NuGet
-imports `build/native/crtsys.props` and `build/native/crtsys.targets`
-automatically. Those files add the include paths, forced include file,
-preprocessor definitions, library path, linker dependencies, and
-`CrtSysDriverEntry` entry point needed for the default `ntl::main` flow.
-The binary NuGet package currently supports the `ntl::main` entry point flow
-only.
+The package has two consumer modes:
+
+- App mode: normal Visual C++ application projects get the public NTL headers
+  and C++ compatibility options only. No driver libraries, forced include, or
+  driver entry point are added.
+- Driver mode: WDK driver projects get the CMake-equivalent driver settings:
+  `crtsys` include paths, MSVC/STL compatibility headers before WDK `km\crt`,
+  forced include setup, preprocessor definitions, `crtsys.lib`, `Ldk.lib`,
+  `libcntpr.lib`, `/FORCE:MULTIPLE`, and the `CrtSysDriverEntry` entry point
+  for the default `ntl::main` flow.
+
+Driver mode is enabled automatically when MSBuild sees a driver project
+(`ConfigurationType=Driver` or `DriverType` is set). It can also be forced with
+`CrtSysUseDriverSupport=true`. The package does not turn a normal C++ project,
+console application, static library, or CMake project into a WDK driver project,
+and it does not install or replace the WDK toolset.
 
 The current binary package targets:
 
 - Visual Studio 2022
 - Windows SDK/WDK `10.0.22621.0`
-- `x64` and `ARM64`
-- Release `crtsys.lib` and `Ldk.lib`
+- App header builds on `x86`, `x64`, and `ARM64`
+- Driver library builds on `x64` and `ARM64`
+- Debug/Release `crtsys.lib`, `Ldk.lib`, and WDK `libcntpr.lib`
 
 Install it from Visual Studio's **Manage NuGet Packages** UI. In the Package
-Manager Console, select your driver project as the default project and run:
+Manager Console, select your app or driver project as the default project and
+run:
 
 ```powershell
-Install-Package crtsys -Version 0.1.10
+Install-Package crtsys
 ```
 
-Then define `ntl::main` in your driver:
+For an app project, include headers such as `ntl/rpc/client` directly.
+
+For a driver project, define `ntl::main`:
 
 ```cpp
 #include <ntl/driver>
@@ -201,6 +216,8 @@ ntl::status ntl::main(ntl::driver& driver,
 ```
 
 For native MSBuild consumers, the package also exposes `$(CrtSysRoot)`.
+See [NTL usage examples](./docs/usage-examples.md) for the app/driver RPC and
+raw IOCTL skeletons.
 
 Pack locally:
 
@@ -217,7 +234,7 @@ $env:NUGET_API_KEY = '<nuget-api-key>'
 ```
 
 GitHub Actions builds the prebuilt libraries and package on pull requests and
-pushes. A tag such as `v0.1.10` publishes to nuget.org through NuGet Trusted
+pushes. A tag such as `v0.1.12` publishes to nuget.org through NuGet Trusted
 Publishing when the tag version matches `include/.internal/version`.
 
 For GitHub Actions publishing, create a nuget.org Trusted Publishing policy
@@ -240,24 +257,24 @@ test\build.bat
 Build a specific target manually:
 
 ```bat
-build.bat test\app x64 Debug
-build.bat test\driver x64 Debug
-build.bat test\app x64 Release
-build.bat test\driver x64 Release
+build.bat test\cmake\app x64 Debug
+build.bat test\cmake\driver x64 Debug
+build.bat test\cmake\app x64 Release
+build.bat test\cmake\driver x64 Release
 ```
 
 Build all supported architecture/configuration combinations:
 
 ```bat
-build_all.bat test\app
-build_all.bat test\driver
+build_all.bat test\cmake\app
+build_all.bat test\cmake\driver
 ```
 
 Typical Debug outputs:
 
 ```text
-test\driver\build_x64\Debug\crtsys_test.sys
-test\app\build_x64\Debug\crtsys_test_app.exe
+test\cmake\driver\build_x64\Debug\crtsys_test.sys
+test\cmake\app\build_x64\Debug\crtsys_test_app.exe
 ```
 
 ## Running Tests
@@ -289,8 +306,9 @@ cmake/             CMake helpers, including CrtSys.cmake
 include/ntl/       NTL C++ helper headers
 include/.internal/ Internal version and toolchain compatibility headers
 src/               crtsys runtime and CRT/STL compatibility code
-test/app/          User-mode test companion application
-test/driver/       Kernel-mode test driver
+test/cmake/app/    CMake user-mode test companion application
+test/cmake/driver/ CMake kernel-mode test driver
+test/nuget/        Visual Studio WDK NuGet consumer test project
 docs/              Additional documentation
 ```
 
