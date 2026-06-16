@@ -46,7 +46,7 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <PropertyGroup>
     <CrtSysPackageRoot>$([MSBuild]::NormalizeDirectory('$(MSBuildThisFileDirectory)', 'packages', 'crtsys'))</CrtSysPackageRoot>
-    <NlohmannJsonPackageRoot>$([MSBuild]::NormalizeDirectory('$(MSBuildThisFileDirectory)', 'packages', 'nlohmann.json'))</NlohmannJsonPackageRoot>
+    <NlohmannJsonPackageRoot Condition="'$(NlohmannJsonPackageRoot)' == ''">$([MSBuild]::NormalizeDirectory('$(MSBuildThisFileDirectory)', 'packages', 'nlohmann.json'))</NlohmannJsonPackageRoot>
     <TargetName>crtsys_nuget_test</TargetName>
   </PropertyGroup>
   <ImportGroup Label="PropertySheets">
