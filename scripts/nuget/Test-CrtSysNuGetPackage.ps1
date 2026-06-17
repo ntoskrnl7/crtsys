@@ -148,7 +148,6 @@ $nlohmannJsonPackageRoot = $null
   -Version $Version `
   -Source $PackageDirectory `
   -OutputDirectory $packagesDirectory `
-  -ExcludeVersion `
   -NonInteractive `
   -Verbosity detailed
 
@@ -156,7 +155,25 @@ if ($LASTEXITCODE -ne 0) {
   throw "nuget install failed with exit code $LASTEXITCODE."
 }
 
-$packageRoot = Join-Path $packagesDirectory 'crtsys'
+$packageRoot = Join-Path $packagesDirectory "crtsys.$Version"
+if (-not (Test-Path $packageRoot)) {
+  $installedPackageCandidates = @(
+    Get-ChildItem -Path $packagesDirectory -Directory |
+      Where-Object { $_.Name -like 'crtsys.*' } |
+      Sort-Object Name
+  )
+
+  if ($installedPackageCandidates.Count -ne 1) {
+    throw "Expected exactly one installed crtsys package under '$packagesDirectory', found $($installedPackageCandidates.Count)."
+  }
+
+  $packageRoot = $installedPackageCandidates[0].FullName
+}
+
+$packageRoot = (Resolve-Path $packageRoot).Path
+if (-not $packageRoot.EndsWith('\')) {
+  $packageRoot += '\'
+}
 $requiredPackagePaths = @(
   'README.md',
   'build\native\crtsys.props',
@@ -225,6 +242,7 @@ $msbuildArguments = @(
   '/m',
   "/p:Configuration=$Configuration",
   "/p:Platform=$msbuildPlatform",
+  "/p:CrtSysPackageRoot=$packageRoot",
   '/v:minimal'
 )
 if ($isDriverConsumer) {
