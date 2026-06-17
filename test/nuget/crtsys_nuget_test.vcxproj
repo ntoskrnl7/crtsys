@@ -1,5 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="12.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <CrtSysPackageRoot>$([MSBuild]::NormalizeDirectory('$(MSBuildThisFileDirectory)', 'packages', 'crtsys'))</CrtSysPackageRoot>
+  </PropertyGroup>
+  <Import Project="$(CrtSysPackageRoot)build\native\crtsys.props" Condition="Exists('$(CrtSysPackageRoot)build\native\crtsys.props')" />
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|x64">
       <Configuration>Debug</Configuration>
@@ -45,13 +49,11 @@
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <PropertyGroup>
-    <CrtSysPackageRoot>$([MSBuild]::NormalizeDirectory('$(MSBuildThisFileDirectory)', 'packages', 'crtsys'))</CrtSysPackageRoot>
     <NlohmannJsonPackageRoot Condition="'$(NlohmannJsonPackageRoot)' == ''">$([MSBuild]::NormalizeDirectory('$(MSBuildThisFileDirectory)', 'packages', 'nlohmann.json'))</NlohmannJsonPackageRoot>
     <TargetName>crtsys_nuget_test</TargetName>
   </PropertyGroup>
   <ImportGroup Label="PropertySheets">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="Exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" />
-    <Import Project="$(CrtSysPackageRoot)build\native\crtsys.props" Condition="Exists('$(CrtSysPackageRoot)build\native\crtsys.props')" />
   </ImportGroup>
   <ItemGroup Label="WrappedTaskItems" />
   <ItemDefinitionGroup>
@@ -61,7 +63,6 @@
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <AdditionalIncludeDirectories>$(MSBuildThisFileDirectory);$(MSBuildThisFileDirectory)..\cmake;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>CRTSYS_TEST_NO_BREAKPOINT;CRTSYS_TEST_NLOHMANN_JSON;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <ExceptionHandling>Sync</ExceptionHandling>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
