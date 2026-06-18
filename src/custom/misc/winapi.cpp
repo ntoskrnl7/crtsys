@@ -46,7 +46,7 @@ GetTempPathA (
     _Out_writes_to_opt_(nBufferLength, return +1) LPSTR lpBuffer
     )
 {
-    KdBreakPoint();
+    CRTSYS_DIAGNOSTIC_BREAK();
     SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
     return 0;
 }
@@ -60,7 +60,7 @@ GetTempFileNameA (
     _Out_writes_(MAX_PATH) LPSTR lpTempFileName
     )
 {
-    KdBreakPoint();
+    CRTSYS_DIAGNOSTIC_BREAK();
     SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
     return 0;
 }
@@ -72,7 +72,7 @@ ResumeThread (
     _In_ HANDLE hThread
     )
 {
-    KdBreakPoint();
+    CRTSYS_DIAGNOSTIC_BREAK();
     SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
     return 0;
 }
@@ -93,7 +93,7 @@ CreateProcessA (
     _Out_ struct PROCESS_INFORMATION *lpProcessInformation
     )
 {
-    KdBreakPoint();
+    CRTSYS_DIAGNOSTIC_BREAK();
     SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
     return FALSE;
 }
@@ -135,7 +135,7 @@ GetLocaleInfoEx (
     _In_ int cchData
     )
 {
-    KdBreakPoint();
+    CRTSYS_DIAGNOSTIC_BREAK();
     SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
     return 0;
 }
@@ -151,7 +151,7 @@ GetStringTypeW (
     _Out_ LPWORD lpCharType
     )
 {
-    KdBreakPoint();
+    CRTSYS_DIAGNOSTIC_BREAK();
     SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
     return FALSE;
 }
@@ -175,7 +175,7 @@ GetDateFormatW (
     _In_ int cchDate
     )
 {
-    KdBreakPoint();
+    CRTSYS_DIAGNOSTIC_BREAK();
     SetLastError( ERROR_CALL_NOT_IMPLEMENTED );  
     return 0;
 }
@@ -193,7 +193,7 @@ GetTimeFormatW (
     _In_ int cchTime
     )
 {
-    KdBreakPoint();
+    CRTSYS_DIAGNOSTIC_BREAK();
     SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
     return 0;
 }
@@ -209,7 +209,7 @@ GetLocaleInfoW (
     _In_ int      cchData
     )
 {
-    KdBreakPoint();
+    CRTSYS_DIAGNOSTIC_BREAK();
     SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
     return 0;
 }
@@ -225,7 +225,7 @@ EnumSystemLocalesEx (
     _In_opt_ LPVOID lpReserved
     )
 {
-    KdBreakPoint();
+    CRTSYS_DIAGNOSTIC_BREAK();
     SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
     return FALSE;
 }
@@ -241,7 +241,7 @@ EnumSystemLocalesW (
     _In_ DWORD dwFlags
     )
 {
-    KdBreakPoint();
+    CRTSYS_DIAGNOSTIC_BREAK();
     SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
     return FALSE; 
 }
@@ -263,7 +263,7 @@ ReleaseSemaphore (
     _Out_opt_ LPLONG lpPreviousCount
     )
 {
-    KdBreakPoint();
+    CRTSYS_DIAGNOSTIC_BREAK();
     SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
     return FALSE; 
 }
@@ -275,7 +275,7 @@ ReleaseMutex (
     _In_ HANDLE hMutex
     )
 {
-    KdBreakPoint();
+    CRTSYS_DIAGNOSTIC_BREAK();
     SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
     return FALSE; 
 }
@@ -314,7 +314,7 @@ CoGetObjectContext(
     _Outptr_ LPVOID  FAR * ppv
     )
 {
-    KdBreakPoint();
+    CRTSYS_DIAGNOSTIC_BREAK();
     return E_NOTIMPL;
 }
 
@@ -348,7 +348,7 @@ CoGetApartmentType(
     _Out_ APTTYPEQUALIFIER* pAptQualifier
     )
 {
-    KdBreakPoint();
+    CRTSYS_DIAGNOSTIC_BREAK();
     return E_NOTIMPL;
 }
 

@@ -13,6 +13,7 @@ TEST(ntl_rpc_client, invoke_callback_by_invoke_method) {
   EXPECT_EQ(cli.invoke<int>(test_dec_1_index, 1), 0);
 
   EXPECT_EQ(cli.invoke<int>(test_sum_2_index, 1, 2), 3);
+  EXPECT_EQ(cli.invoke<int>(test_stable_sum_2_index, 1, 2), 3);
   EXPECT_EQ(cli.invoke<int>(test_sum_3_index, 1, 2, 3), 6);
   EXPECT_EQ(cli.invoke<int>(test_sum_4_index, 1, 2, 3, 4), 10);
   EXPECT_EQ(cli.invoke<int>(test_sum_5_index, 1, 2, 3, 4, 5), 15);
@@ -48,6 +49,7 @@ TEST(ntl_rpc_client, invoke_callback_by_symbol) {
   EXPECT_EQ(test_dec(1), 0);
 
   EXPECT_EQ(test_sum(1, 2), 3);
+  EXPECT_EQ(test_stable_sum(1, 2), 3);
   EXPECT_EQ(test_sum(1, 2, 3), 6);
   EXPECT_EQ(test_sum(1, 2, 3, 4), 10);
   EXPECT_EQ(test_sum(1, 2, 3, 4, 5), 15);
@@ -92,7 +94,33 @@ TEST(ntl_device, device_io_control) {
     EXPECT_EQ(bytes_returned, sizeof("world"));
     EXPECT_STREQ(buffer, "world");
 
-    CloseHandle(hDevice);
+    test_device_state state = {};
+    EXPECT_TRUE(DeviceIoControl(hDevice, TEST_DEVICE_STATE_CTL, NULL, 0, &state,
+                                sizeof(state), &bytes_returned, NULL));
+    EXPECT_EQ(bytes_returned, sizeof(state));
+
+    int create_count = state.create_count;
+    int close_count = state.close_count;
+    EXPECT_GT(create_count, close_count);
+
+    EXPECT_TRUE(CloseHandle(hDevice));
+
+    hDevice = CreateFileW(
+        L"\\\\?\\Global\\GLOBALROOT\\Device\\" TEST_DEVICE_NAME,
+        GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    EXPECT_NE(hDevice, INVALID_HANDLE_VALUE);
+
+    if (hDevice != INVALID_HANDLE_VALUE) {
+      state = {};
+      EXPECT_TRUE(DeviceIoControl(hDevice, TEST_DEVICE_STATE_CTL, NULL, 0,
+                                  &state, sizeof(state), &bytes_returned,
+                                  NULL));
+      EXPECT_EQ(bytes_returned, sizeof(state));
+      EXPECT_EQ(state.create_count, create_count + 1);
+      EXPECT_EQ(state.close_count, close_count + 1);
+
+      EXPECT_TRUE(CloseHandle(hDevice));
+    }
   }
 }
 

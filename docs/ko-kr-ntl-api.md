@@ -116,6 +116,28 @@ runtime path를 사용하고 실패 시 throw할 수 있습니다. hot path esca
 IRQL: `PASSIVE_LEVEL`. C++ object와 container를 사용하며, driver initialization,
 unload registration, setup path를 위한 helper입니다.
 
+## IRP View
+
+헤더: [`include/ntl/irp`](../include/ntl/irp)
+
+`ntl::irp`는 dispatch 중 전달된 `PIRP`를 감싸는 non-owning view입니다. IRP를
+complete하거나 reference하거나 보관하지 않습니다.
+
+- `get() const`
+  - raw `PIRP`를 반환합니다.
+- `operator->() const`
+  - raw `PIRP`를 반환합니다.
+- `stack_location() const`
+  - `IoGetCurrentIrpStackLocation()` 결과를 반환합니다.
+- `major_function() const`
+  - 현재 major function을 반환합니다.
+- `status() const` / `status(NTSTATUS)`
+  - `IoStatus.Status`를 읽거나 씁니다.
+- `information() const` / `information(ULONG_PTR)`
+  - `IoStatus.Information`을 읽거나 씁니다.
+
+IRQL: IRP를 전달한 dispatch routine의 문맥을 따릅니다.
+
 ## Device Object
 
 헤더: [`include/ntl/device`](../include/ntl/device)
@@ -133,6 +155,12 @@ unload registration, setup path를 위한 helper입니다.
 
 - `extension()`
   - typed extension 객체를 반환합니다.
+- `on_create(callback)`
+  - `IRP_MJ_CREATE` handler를 등록합니다.
+  - callback signature: `void(ntl::irp&)`
+- `on_close(callback)`
+  - `IRP_MJ_CLOSE` handler를 등록합니다.
+  - callback signature: `void(ntl::irp&)`
 - `on_device_control(callback)`
   - `IRP_MJ_DEVICE_CONTROL` handler를 등록합니다.
 - `name() const`
@@ -172,6 +200,17 @@ RPC helper는 `DeviceIoControl` 기반의 server/client stub을 생성합니다.
 - `NTL_ADD_CALLBACK_3`
 - `NTL_ADD_CALLBACK_4`
 - `NTL_ADD_CALLBACK_5`
+- `NTL_ADD_CALLBACK_ID_0`
+- `NTL_ADD_CALLBACK_ID_1`
+- `NTL_ADD_CALLBACK_ID_2`
+- `NTL_ADD_CALLBACK_ID_3`
+- `NTL_ADD_CALLBACK_ID_4`
+- `NTL_ADD_CALLBACK_ID_5`
+
+`NTL_ADD_CALLBACK_N`은 callback ID로 `__LINE__`을 사용합니다. 작은 내부용
+schema나 테스트 schema에는 편하지만, schema line number가 ABI의 일부가
+됩니다. schema formatting이나 순서 변경 뒤에도 ID가 안정적으로 유지되어야
+한다면 `NTL_ADD_CALLBACK_ID_N`을 사용하세요.
 
 타입:
 

@@ -35,7 +35,7 @@ ntl::status ntl::main(ntl::driver &driver, const std::wstring &registry_path) {
   test_all();
 
   struct test_extension {
-    test_extension() : val(0) {
+    test_extension() : val(0), create_count(0), close_count(0) {
       std::cout << "constructor - val : " << val << '\n';
     }
     ~test_extension() { std::cout << "destroctor - val : " << val << '\n'; }
@@ -43,6 +43,8 @@ ntl::status ntl::main(ntl::driver &driver, const std::wstring &registry_path) {
     void inc() { val++; }
 
     int val;
+    int create_count;
+    int close_count;
   };
 
   auto test_dev =
@@ -55,6 +57,16 @@ ntl::status ntl::main(ntl::driver &driver, const std::wstring &registry_path) {
     test_dev->extension().inc();
 
     std::weak_ptr test_dev_weak = test_dev;
+    test_dev->on_create([test_dev_weak](ntl::irp &irp) {
+      if (auto test_dev = test_dev_weak.lock())
+        test_dev->extension().create_count++;
+      irp.information(0);
+    });
+    test_dev->on_close([test_dev_weak](ntl::irp &irp) {
+      if (auto test_dev = test_dev_weak.lock())
+        test_dev->extension().close_count++;
+      irp.information(0);
+    });
     test_dev->on_device_control([test_dev_weak](
                                     const ntl::device_control::code &code,
                                     const ntl::device_control::in_buffer &in,
@@ -69,6 +81,19 @@ ntl::status ntl::main(ntl::driver &driver, const std::wstring &registry_path) {
           strcpy_s(reinterpret_cast<char *>(out.ptr), out.size, "world");
         } else {
           std::cout << "[FAILED] out_buffer == null\n";
+        }
+      } else if (code == TEST_DEVICE_STATE_CTL) {
+        if (out.ptr && out.size >= sizeof(test_device_state)) {
+          auto state = reinterpret_cast<test_device_state *>(out.ptr);
+          state->create_count = 0;
+          state->close_count = 0;
+          if (auto test_dev = test_dev_weak.lock()) {
+            state->create_count = test_dev->extension().create_count;
+            state->close_count = test_dev->extension().close_count;
+          }
+          out.size = sizeof(test_device_state);
+        } else {
+          std::cout << "[FAILED] state out_buffer is too small\n";
         }
       }
     });

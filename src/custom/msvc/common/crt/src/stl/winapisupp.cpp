@@ -20,7 +20,7 @@ BOOL __cdecl __crtQueueUserWorkItem(__in LPTHREAD_START_ROUTINE function,
 int __cdecl __crtLCMapStringA(LPCWSTR LocaleName, DWORD dwMapFlags,
                               LPCSTR lpSrcStr, int cchSrc, LPSTR lpDestStr,
                               int cchDest, int code_page, BOOL bError) {
-  KdBreakPoint();
+  CRTSYS_DIAGNOSTIC_BREAK();
   return 0;
 }
 
@@ -28,7 +28,7 @@ int __cdecl __crtLCMapStringW(LPCWSTR const locale_name, DWORD const map_flags,
                               LPCWSTR const source, int source_count,
                               LPWSTR const destination,
                               int const destination_count) {
-  KdBreakPoint();
+  CRTSYS_DIAGNOSTIC_BREAK();
   return 0;
 }
 
@@ -36,14 +36,14 @@ int __cdecl __crtCompareStringA(LPCWSTR LocaleName, DWORD dwCmpFlags,
                                 LPCSTR lpString1, int cchCount1,
                                 LPCSTR lpString2, int cchCount2,
                                 int code_page) {
-  KdBreakPoint();
+  CRTSYS_DIAGNOSTIC_BREAK();
   return 0;
 }
 
 int __cdecl __crtCompareStringW(LPCWSTR LocaleName, DWORD dwCmpFlags,
                                 LPCWSTR lpString1, int cchCount1,
                                 LPCWSTR lpString2, int cchCount2) {
-  KdBreakPoint();
+  CRTSYS_DIAGNOSTIC_BREAK();
   return 0;
 }
 
@@ -52,7 +52,7 @@ BOOL __cdecl __crtGetStringTypeA(_In_opt_ _locale_t _Plocinfo,
                                  _In_ int _CchSrc, _Out_ LPWORD _LpCharType,
                                  _In_ int _Code_page, _In_ int _Lcid,
                                  _In_ BOOL _BError) {
-  KdBreakPoint();
+  CRTSYS_DIAGNOSTIC_BREAK();
   return FALSE;
 }
 

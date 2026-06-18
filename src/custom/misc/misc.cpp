@@ -37,7 +37,7 @@ RoInitialize (
     _In_ RO_INIT_TYPE initType
     )
 {
-    KdBreakPoint(); // untested :-( 
+    CRTSYS_DIAGNOSTIC_BREAK(); // untested :-(
 	UNREFERENCED_PARAMETER(initType);
     return S_OK;
 }
@@ -77,7 +77,7 @@ DriverEntry (
     //
     // ntl::main을 사용하도록 빌드하였는데 DriverEntry가 빌드되는건 뭔가 잘못된것입니다.
     // 
-    KdBreakPoint();
+    CRTSYS_DIAGNOSTIC_BREAK();
 
     return CrtSysDriverEntry( DriverObject,
                               RegistryPath );

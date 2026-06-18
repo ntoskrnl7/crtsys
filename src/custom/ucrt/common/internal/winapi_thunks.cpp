@@ -194,7 +194,7 @@ extern "C" int WINAPI __acrt_MessageBoxA(
     UINT   const type
     )
 {
-    KdBreakPoint();
+    CRTSYS_DIAGNOSTIC_BREAK();
     SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
     return 0;
     // abort(); // No fallback; callers should check availablility before calling
@@ -207,7 +207,7 @@ extern "C" int WINAPI __acrt_MessageBoxW(
     UINT    const type
     )
 {
-    KdBreakPoint();
+    CRTSYS_DIAGNOSTIC_BREAK();
     SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
     return 0;
     // abort(); // No fallback; callers should check availablility before calling

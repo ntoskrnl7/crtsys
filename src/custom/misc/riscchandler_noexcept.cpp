@@ -14,7 +14,7 @@ __C_specific_handler_noexcept (
     _Inout_ struct _DISPATCHER_CONTEXT* DispatcherContext
     )
 {
-    KdBreakPoint(); // untested :-( 
+    CRTSYS_DIAGNOSTIC_BREAK(); // untested :-(
 
 	EXCEPTION_DISPOSITION Excption = __C_specific_handler( ExceptionRecord,
                                                            EstablisherFrame,

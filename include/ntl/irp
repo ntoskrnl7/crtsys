@@ -1,0 +1,37 @@
+#pragma once
+
+#ifndef _NTDDK_
+#include <wdm.h>
+#endif
+
+namespace ntl {
+class irp {
+public:
+  explicit irp(PIRP irp) noexcept : irp_(irp) {}
+
+  PIRP get() const noexcept { return irp_; }
+  PIRP operator->() const noexcept { return irp_; }
+
+  PIO_STACK_LOCATION stack_location() const noexcept {
+    return IoGetCurrentIrpStackLocation(irp_);
+  }
+
+  UCHAR major_function() const noexcept {
+    return stack_location()->MajorFunction;
+  }
+
+  NTSTATUS status() const noexcept { return irp_->IoStatus.Status; }
+  void status(NTSTATUS value) noexcept { irp_->IoStatus.Status = value; }
+
+  ULONG_PTR information() const noexcept {
+    return irp_->IoStatus.Information;
+  }
+
+  void information(ULONG_PTR value) noexcept {
+    irp_->IoStatus.Information = value;
+  }
+
+private:
+  PIRP irp_;
+};
+} // namespace ntl

@@ -95,8 +95,10 @@ NTL provides C++ helpers for driver code. See the
 - [x] `ntl::device`
   - [x] device extension
     [(tested)](../test/cmake/driver/src/main.cpp#L33)
-  - [ ] `IRP_MJ_CREATE`
-  - [ ] `IRP_MJ_CLOSE`
+  - [x] `IRP_MJ_CREATE`
+    [(app test)](../test/cmake/app/src/main.cpp#L77)
+  - [x] `IRP_MJ_CLOSE`
+    [(app test)](../test/cmake/app/src/main.cpp#L77)
   - [x] `IRP_MJ_DEVICE_CONTROL`
     [(app test)](../test/cmake/app/src/main.cpp#L77)
     [(driver test)](../test/cmake/driver/src/main.cpp#L55)

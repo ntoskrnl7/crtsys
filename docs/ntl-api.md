@@ -115,6 +115,28 @@ Header: [`include/ntl/driver`](../include/ntl/driver)
 IRQL: `PASSIVE_LEVEL`. The helper uses C++ objects and containers and is
 intended for driver initialization, unload registration, and setup paths.
 
+## IRP View
+
+Header: [`include/ntl/irp`](../include/ntl/irp)
+
+`ntl::irp` is a non-owning view over the dispatch-time `PIRP`. It does not
+complete, reference, or retain the IRP.
+
+- `get() const`
+  - returns the raw `PIRP`
+- `operator->() const`
+  - returns the raw `PIRP`
+- `stack_location() const`
+  - returns `IoGetCurrentIrpStackLocation()`
+- `major_function() const`
+  - returns the current major function
+- `status() const` / `status(NTSTATUS)`
+  - reads or writes `IoStatus.Status`
+- `information() const` / `information(ULONG_PTR)`
+  - reads or writes `IoStatus.Information`
+
+IRQL: follows the dispatch routine that supplied the IRP.
+
 ## Device Object
 
 Header: [`include/ntl/device`](../include/ntl/device)
@@ -132,6 +154,12 @@ Header: [`include/ntl/device`](../include/ntl/device)
 
 - `extension()`
   - returns the typed extension object
+- `on_create(callback)`
+  - registers an `IRP_MJ_CREATE` handler
+  - callback signature: `void(ntl::irp&)`
+- `on_close(callback)`
+  - registers an `IRP_MJ_CLOSE` handler
+  - callback signature: `void(ntl::irp&)`
 - `on_device_control(callback)`
   - registers an `IRP_MJ_DEVICE_CONTROL` handler
 - `name() const`
@@ -170,6 +198,17 @@ Common macros:
 - `NTL_ADD_CALLBACK_3`
 - `NTL_ADD_CALLBACK_4`
 - `NTL_ADD_CALLBACK_5`
+- `NTL_ADD_CALLBACK_ID_0`
+- `NTL_ADD_CALLBACK_ID_1`
+- `NTL_ADD_CALLBACK_ID_2`
+- `NTL_ADD_CALLBACK_ID_3`
+- `NTL_ADD_CALLBACK_ID_4`
+- `NTL_ADD_CALLBACK_ID_5`
+
+`NTL_ADD_CALLBACK_N` uses `__LINE__` as the callback ID. This is convenient for
+small internal or test schemas, but the schema line number becomes part of the
+ABI. Use `NTL_ADD_CALLBACK_ID_N` when callback IDs need to remain stable across
+schema formatting or reordering.
 
 Types:
 

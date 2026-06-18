@@ -29,23 +29,57 @@ public:
     irp->IoStatus.Information = 0;
     auto dispatchers = this_driver->dispatchers(device_object);
     if (dispatchers) {
+      bool has_any_dispatcher = dispatchers->on_create ||
+                                dispatchers->on_close ||
+                                dispatchers->on_device_control;
+      auto invoke_dispatch = [&](auto &&dispatch) {
+        auto ret = ntl::seh::try_except([&]() {
+          irp->IoStatus.Status = STATUS_SUCCESS;
+          try {
+            dispatch();
+            status = irp->IoStatus.Status;
+          } catch (const ntl::exception &e) {
+            status = e.get_status();
+            irp->IoStatus.Information = 0;
+          } catch (const std::exception &) {
+            status = STATUS_UNSUCCESSFUL;
+            irp->IoStatus.Information = 0;
+          }
+        });
+        if (!std::get<0>(ret)) {
+          status = std::get<1>(ret);
+          irp->IoStatus.Information = 0;
+        }
+      };
       PIO_STACK_LOCATION irp_sp = IoGetCurrentIrpStackLocation(irp);
       switch (irp_sp->MajorFunction) {
-      case IRP_MJ_CREATE:
-      case IRP_MJ_CLOSE:
-        if (dispatchers->on_device_control)
+      case IRP_MJ_CREATE: {
+        if (dispatchers->on_create) {
+          ntl::irp request(irp);
+          invoke_dispatch([&]() { dispatchers->on_create(request); });
+        } else if (has_any_dispatcher) {
           status = STATUS_SUCCESS;
+        }
         break;
+      }
+      case IRP_MJ_CLOSE: {
+        if (dispatchers->on_close) {
+          ntl::irp request(irp);
+          invoke_dispatch([&]() { dispatchers->on_close(request); });
+        } else if (has_any_dispatcher) {
+          status = STATUS_SUCCESS;
+        }
+        break;
+      }
       case IRP_MJ_DEVICE_CONTROL:
         if (dispatchers->on_device_control) {
-          auto ret = ntl::seh::try_except([&]() {
+          invoke_dispatch([&]() {
             const void *in_buf_ptr;
             void *out_buf_ptr;
             size_t out_len =
                 irp_sp->Parameters.DeviceIoControl.OutputBufferLength;
-            try {
-              switch (METHOD_FROM_CTL_CODE(
-                  irp_sp->Parameters.DeviceIoControl.IoControlCode)) {
+            switch (METHOD_FROM_CTL_CODE(
+                irp_sp->Parameters.DeviceIoControl.IoControlCode)) {
               case METHOD_BUFFERED:
                 in_buf_ptr = irp->AssociatedIrp.SystemBuffer;
                 out_buf_ptr = irp->AssociatedIrp.SystemBuffer;
@@ -72,26 +106,16 @@ public:
                 throw ntl::exception(STATUS_INVALID_DEVICE_REQUEST,
                                      "Invalid control code method");
                 break;
-              }
-              device_control::code code(
-                  irp_sp->Parameters.DeviceIoControl.IoControlCode);
-              device_control::in_buffer in_buf(
-                  in_buf_ptr,
-                  irp_sp->Parameters.DeviceIoControl.InputBufferLength);
-              device_control::out_buffer out_buf(out_buf_ptr, out_len);
-              dispatchers->on_device_control(code, in_buf, out_buf);
-              status = STATUS_SUCCESS;
-              irp->IoStatus.Information = (ULONG_PTR)out_buf.size;
-            } catch (const ntl::exception &e) {
-              status = e.get_status();
-              irp->IoStatus.Information = 0;
-            } catch (const std::exception &) {
             }
+            device_control::code code(
+                irp_sp->Parameters.DeviceIoControl.IoControlCode);
+            device_control::in_buffer in_buf(
+                in_buf_ptr,
+                irp_sp->Parameters.DeviceIoControl.InputBufferLength);
+            device_control::out_buffer out_buf(out_buf_ptr, out_len);
+            dispatchers->on_device_control(code, in_buf, out_buf);
+            irp->IoStatus.Information = (ULONG_PTR)out_buf.size;
           });
-          if (!std::get<0>(ret)) {
-            status = std::get<1>(ret);
-            irp->IoStatus.Information = 0;
-          }
         }
         break;
       default:
@@ -158,7 +182,7 @@ CrtSysInitializeTebThreadLocalStoragePointer (
     VOID
     )
 {
-    KdBreakPoint();
+    CRTSYS_DIAGNOSTIC_BREAK();
 
     LONG remainingCount = KeNumberProcessors - 1;
     if (remainingCount == 0) {
@@ -241,6 +265,14 @@ public:
     return std::make_unique<ntl::driver>(std::move(ntl::driver(object)));
   }
 };
+
+class driver_unload_invoker {
+public:
+  static void unload(driver &driver) {
+    if (driver.unload_routine_)
+      driver.unload_routine_();
+  }
+};
 } // namespace ntl
 
 namespace ntl {
@@ -292,7 +324,7 @@ CrtSysDriverEntry(_In_ PDRIVER_OBJECT DriverObject,
   ExInitializeNPagedLookasideList(&ntl::detail::spin_lock::lookaside, NULL,
                                   NULL, 0, sizeof(KSPIN_LOCK), 'lpsc', 0);
   if (!__scrt_initialize_onexit_tables(__scrt_module_type::exe)) {
-    KdBreakPoint();
+    CRTSYS_DIAGNOSTIC_BREAK();
     ExDeleteNPagedLookasideList(&ntl::detail::resource::lookaside);
     ExDeleteNPagedLookasideList(&ntl::detail::spin_lock::lookaside);
     LdkTerminate();
@@ -300,7 +332,7 @@ CrtSysDriverEntry(_In_ PDRIVER_OBJECT DriverObject,
   }
 
   if (!__scrt_initialize_crt(__scrt_module_type::exe)) {
-    KdBreakPoint();
+    CRTSYS_DIAGNOSTIC_BREAK();
     ExDeleteNPagedLookasideList(&ntl::detail::resource::lookaside);
     ExDeleteNPagedLookasideList(&ntl::detail::spin_lock::lookaside);
     LdkTerminate();
@@ -326,12 +358,14 @@ CrtSysDriverEntry(_In_ PDRIVER_OBJECT DriverObject,
   auto driver = ntl::driver_initializer::make_driver(DriverObject);
 
   if (!driver) {
+    CrtSysDriverUnload(DriverObject);
     return STATUS_INSUFFICIENT_RESOURCES;
   }
   ntl::status s = ntl::expand_stack(ntl::main, std::ref(*driver.get()),
                                     std::wstring(RegistryPath->Buffer));
   if (!s.is_ok()) {
-    driver.release();
+    ntl::driver_unload_invoker::unload(*driver.get());
+    driver.reset();
     CrtSysDriverUnload(DriverObject);
     return s;
   }
@@ -354,20 +388,6 @@ CrtSysDriverEntry(_In_ PDRIVER_OBJECT DriverObject,
     DriverObject->DriverUnload = CrtSysDriverUnload;
     return status;
 }
-
-#if CRTSYS_USE_NTL_MAIN
-// clang-format on
-namespace ntl {
-class driver_unload_invoker {
-public:
-  static void unload(driver &driver) {
-    if (driver.unload_routine_)
-      driver.unload_routine_();
-  }
-};
-} // namespace ntl
-  // clang-format off
-#endif
 
 EXTERN_C
 VOID

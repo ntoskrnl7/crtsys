@@ -9,6 +9,7 @@
 #pragma once
 
 #include "except"
+#include "irp"
 #include <functional>
 #include <stdexcept>
 #include <string>
@@ -18,6 +19,12 @@
 #endif
 
 namespace ntl {
+namespace create {
+using dispatch_fn = std::function<void(irp &)>;
+} // namespace create
+namespace close {
+using dispatch_fn = std::function<void(irp &)>;
+} // namespace close
 namespace device_control {
 struct code {
   code(ULONG code) : value(code) {}
@@ -54,6 +61,8 @@ namespace ntl {
 namespace detail {
 namespace device {
 struct dispatchers_t {
+  create::dispatch_fn on_create;
+  close::dispatch_fn on_close;
   device_control::dispatch_fn on_device_control;
 };
 
@@ -173,6 +182,16 @@ protected:
   }
 
 public:
+  device &on_create(create::dispatch_fn &&f) {
+    dispatchers().on_create = f;
+    return *this;
+  }
+
+  device &on_close(close::dispatch_fn &&f) {
+    dispatchers().on_close = f;
+    return *this;
+  }
+
   device &on_device_control(device_control::dispatch_fn &&f) {
     dispatchers().on_device_control = f;
     return *this;

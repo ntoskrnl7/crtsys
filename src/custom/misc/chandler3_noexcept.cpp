@@ -22,7 +22,7 @@ _except_handler3_noexcept (
     _In_ struct _EXCEPTION_REGISTRATION *Dispatcher
     )
 {
-    KdBreakPoint(); // untested :-( 
+    CRTSYS_DIAGNOSTIC_BREAK(); // untested :-(
 
 	int Excption = _except_handler3( ExceptionRecord,
                                      Registration,

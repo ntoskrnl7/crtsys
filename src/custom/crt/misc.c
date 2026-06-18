@@ -8,7 +8,7 @@
 void __cdecl _CRT_DEBUGGER_HOOK(int reserved)
 {
     reserved;
-    KdBreakPoint();
+    CRTSYS_DIAGNOSTIC_BREAK();
 }
 
 
@@ -27,20 +27,20 @@ void ** __cdecl _pxcptinfoptrs(void)
 
 unsigned int __cdecl __get_fpsr_sse2()
 {
-    KdBreakPoint();
+    CRTSYS_DIAGNOSTIC_BREAK();
     return 0;
 }
 
 void __cdecl __set_fpsr_sse2(unsigned int _Arg)
 {
     _Arg;
-    KdBreakPoint();
+    CRTSYS_DIAGNOSTIC_BREAK();
 }
 
 #include <float.h>
 void __cdecl _setdefaultprecision()
 {
-    KdBreakPoint();
+    CRTSYS_DIAGNOSTIC_BREAK();
     _controlfp_s(NULL, _PC_53, _MCW_PC);
 }
 #endif

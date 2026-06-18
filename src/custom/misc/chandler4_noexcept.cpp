@@ -22,7 +22,7 @@ _except_handler4_noexcept(
     _Inout_ PVOID DispatcherContext
     )
 {
-    KdBreakPoint(); // untested :-( 
+    CRTSYS_DIAGNOSTIC_BREAK(); // untested :-(
 
 	EXCEPTION_DISPOSITION Excption = _except_handler4( ExceptionRecord,
                                                        EstablisherFrame,
