@@ -61,8 +61,14 @@ RPC helper는 하나의 공유 schema 헤더에서 kernel server와 user-mode cl
 같이 생성합니다. 드라이버는 schema 전에 `<ntl/rpc/server>`를 include하고,
 앱은 같은 schema 전에 `<ntl/rpc/client>`를 include합니다.
 
-callback ID는 현재 `__LINE__`을 기반으로 합니다. 양쪽은 같은 schema 파일을
+간단한 `NTL_ADD_CALLBACK_N` macro는 callback ID로 `__LINE__`을 사용합니다.
+작은 내부용 schema나 테스트 schema를 빠르게 작성하기에는 편하지만, schema
+line number가 app/driver ABI의 일부가 됩니다. 양쪽은 같은 schema 파일을
 그대로 include해야 하며, 서로 다른 line number가 생성되면 안 됩니다.
+
+오래 유지해야 하는 ABI라면 `NTL_ADD_CALLBACK_ID_N`을 사용해 stable ID를
+명시하세요. ID는 schema 안에서 고유해야 하며 `CTL_CODE` function field
+범위 안에 있어야 합니다.
 
 ### 공유 Schema
 
@@ -79,7 +85,7 @@ NTL_ADD_CALLBACK_2(demo_rpc, int, add, int, a, int, b, {
   return a + b;
 })
 
-NTL_ADD_CALLBACK_1(demo_rpc, int, negate, int, value, {
+NTL_ADD_CALLBACK_ID_1(demo_rpc, 0x802, int, negate, int, value, {
   return -value;
 })
 

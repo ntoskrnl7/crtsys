@@ -10,8 +10,11 @@
 
 #include "status"
 
+#include <exception>
 #include <ntstatus.h>
 #include <string>
+#include <tuple>
+#include <utility>
 
 namespace ntl {
 class exception : public std::exception {
@@ -22,6 +25,7 @@ public:
       : status_(status), message_(message) {}
 
   const status &get_status() const { return status_; }
+  const char *what() const noexcept override { return message_.c_str(); }
 
 private:
   status status_;

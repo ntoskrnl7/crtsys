@@ -60,8 +60,14 @@ The RPC helper generates a matching kernel server and user-mode client from one
 shared schema header. The driver includes `<ntl/rpc/server>` before the schema;
 the app includes `<ntl/rpc/client>` before the same schema.
 
-The callback IDs are currently based on `__LINE__`, so both sides must include
-the exact same schema file without generating different line numbers.
+The compact `NTL_ADD_CALLBACK_N` macros use `__LINE__` as the callback ID. This
+keeps small internal or test schemas easy to write, but it also means the schema
+line number becomes part of the app/driver ABI. Both sides must include the
+exact same schema file without generating different line numbers.
+
+For a longer-lived ABI, use `NTL_ADD_CALLBACK_ID_N` and assign stable IDs
+explicitly. Keep IDs unique within the schema and within the `CTL_CODE` function
+field range.
 
 ### Shared Schema
 
@@ -78,7 +84,7 @@ NTL_ADD_CALLBACK_2(demo_rpc, int, add, int, a, int, b, {
   return a + b;
 })
 
-NTL_ADD_CALLBACK_1(demo_rpc, int, negate, int, value, {
+NTL_ADD_CALLBACK_ID_1(demo_rpc, 0x802, int, negate, int, value, {
   return -value;
 })
 

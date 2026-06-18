@@ -31,6 +31,9 @@ NTL_ADD_CALLBACK_1(test_rpc, int, test_dec, int, i, { return i - 1; })
 
 NTL_ADD_CALLBACK_2(test_rpc, int, test_sum, int, a, int, b, { return a + b; })
 
+NTL_ADD_CALLBACK_ID_2(test_rpc, 0x900, int, test_stable_sum, int, a, int, b,
+                      { return a + b; })
+
 NTL_ADD_CALLBACK_3(test_rpc, int, test_sum, int, a, int, b, int, c,
                    { return a + b + c; })
 

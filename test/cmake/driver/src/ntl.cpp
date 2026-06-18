@@ -253,6 +253,13 @@ bool ntl_resource_test() {
 //
 #include <gtest/gtest.h>
 
+TEST(ntl_test, ntl_exception_what_test) {
+  ntl::exception e(STATUS_INVALID_PARAMETER, "test message");
+
+  EXPECT_EQ(static_cast<NTSTATUS>(e.get_status()), STATUS_INVALID_PARAMETER);
+  EXPECT_STREQ(e.what(), "test message");
+}
+
 TEST(ntl_test, ntl_expand_stack_test) {
   long result = 0;
   ntl::expand_stack(
