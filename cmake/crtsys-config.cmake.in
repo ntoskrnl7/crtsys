@@ -1,0 +1,8 @@
+@PACKAGE_INIT@
+
+set(crtsys_ROOT "${PACKAGE_PREFIX_DIR}")
+set(CRTSYS_ROOT "${PACKAGE_PREFIX_DIR}")
+
+include("${CMAKE_CURRENT_LIST_DIR}/CrtSys.cmake")
+
+check_required_components(crtsys)

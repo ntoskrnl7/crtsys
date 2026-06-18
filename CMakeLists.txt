@@ -16,8 +16,16 @@ project(
     LANGUAGES C CXX ASM_MASM
     )
 
+if(CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
+  set(CRTSYS_IS_TOP_LEVEL ON)
+else()
+  set(CRTSYS_IS_TOP_LEVEL OFF)
+endif()
+
 option(CRTSYS_NTL_MAIN      "Set to ON to use ntl::main" ON)
 option(CRTSYS_USE_LIBCNTPR  "Set to ON to use libcntpr" ON)
+option(CRTSYS_ENABLE_DIAGNOSTIC_BREAKPOINTS "Set to OFF to suppress crtsys diagnostic KdBreakPoint calls" ON)
+option(CRTSYS_ENABLE_INSTALL "Enable crtsys install rules" ${CRTSYS_IS_TOP_LEVEL})
 
 function(crtsys_scope_compile_options_to_c_cxx TARGET_NAME)
   get_target_property(TARGET_COMPILE_OPTIONS ${TARGET_NAME} COMPILE_OPTIONS)
@@ -184,6 +192,9 @@ endif()
 if (CRTSYS_NTL_MAIN)
   target_compile_definitions(crtsys PUBLIC CRTSYS_USE_NTL_MAIN)
 endif()
+if (NOT CRTSYS_ENABLE_DIAGNOSTIC_BREAKPOINTS)
+  target_compile_definitions(crtsys PRIVATE "CRTSYS_ENABLE_DIAGNOSTIC_BREAKPOINTS=0")
+endif()
 target_compile_definitions(crtsys PUBLIC "_HAS_EXCEPTIONS")
 if (UCXXRT_ENABLED)
   target_compile_definitions(crtsys PUBLIC "UCXXRT")
@@ -265,3 +276,63 @@ if(PLATFROM_SHORT_NAME STREQUAL "win32")
     set(PLATFROM_SHORT_NAME "x86")
 endif()
 set_target_properties(crtsys PROPERTIES ARCHIVE_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/lib/${PLATFROM_SHORT_NAME})
+
+if("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "Win32")
+  set(CRTSYS_NATIVE_ARCH x86)
+elseif("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "ARM64")
+  set(CRTSYS_NATIVE_ARCH ARM64)
+elseif("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "ARM")
+  set(CRTSYS_NATIVE_ARCH ARM)
+else()
+  set(CRTSYS_NATIVE_ARCH "${CMAKE_VS_PLATFORM_NAME}")
+endif()
+
+if(CRTSYS_ENABLE_INSTALL)
+  include(GNUInstallDirs)
+  include(CMakePackageConfigHelpers)
+
+  set(CRTSYS_INSTALL_CMAKEDIR "${CMAKE_INSTALL_DATADIR}/crtsys/cmake" CACHE STRING "crtsys CMake package install directory")
+  set(CRTSYS_INSTALL_LIBDIR "lib/native/${CRTSYS_NATIVE_ARCH}/$<CONFIG>")
+
+  set(CRTSYS_INSTALL_TARGETS crtsys)
+  if(TARGET Ldk)
+    list(APPEND CRTSYS_INSTALL_TARGETS Ldk)
+  endif()
+
+  install(
+    TARGETS ${CRTSYS_INSTALL_TARGETS}
+    ARCHIVE DESTINATION "${CRTSYS_INSTALL_LIBDIR}"
+    LIBRARY DESTINATION "${CRTSYS_INSTALL_LIBDIR}"
+    RUNTIME DESTINATION "${CRTSYS_INSTALL_LIBDIR}"
+  )
+
+  install(DIRECTORY include/ DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
+  install(FILES README.md LICENSE DESTINATION "${CMAKE_INSTALL_DOCDIR}")
+  install(DIRECTORY docs/ DESTINATION "${CMAKE_INSTALL_DOCDIR}/docs")
+  install(
+    FILES
+      cmake/CPM.cmake
+      cmake/CrtSys.cmake
+      cmake/pkg-utils.cmake
+      cmake/std-cxx.cmake
+    DESTINATION "${CRTSYS_INSTALL_CMAKEDIR}"
+  )
+
+  configure_package_config_file(
+    cmake/crtsys-config.cmake.in
+    "${CMAKE_CURRENT_BINARY_DIR}/crtsys-config.cmake"
+    INSTALL_DESTINATION "${CRTSYS_INSTALL_CMAKEDIR}"
+  )
+  write_basic_package_version_file(
+    "${CMAKE_CURRENT_BINARY_DIR}/crtsys-config-version.cmake"
+    VERSION "${PROJECT_VERSION}"
+    COMPATIBILITY SameMajorVersion
+  )
+  install(
+    FILES
+      "${CMAKE_CURRENT_BINARY_DIR}/crtsys-config.cmake"
+      "${CMAKE_CURRENT_BINARY_DIR}/crtsys-config-version.cmake"
+    DESTINATION "${CRTSYS_INSTALL_CMAKEDIR}"
+  )
+
+endif()

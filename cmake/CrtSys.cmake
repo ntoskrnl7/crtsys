@@ -14,6 +14,10 @@ endif()
 
 if(DEFINED crtsys_SOURCE_DIR)
     set(_CRTSYS_ROOT "${crtsys_SOURCE_DIR}")
+elseif(DEFINED crtsys_ROOT)
+    set(_CRTSYS_ROOT "${crtsys_ROOT}")
+elseif(DEFINED CRTSYS_ROOT)
+    set(_CRTSYS_ROOT "${CRTSYS_ROOT}")
 else()
     get_filename_component(_CRTSYS_ROOT "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
 endif()
@@ -84,8 +88,10 @@ function(crtsys_get_prebuilt_arch _out_arch)
         set(_arch x64)
     elseif("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "ARM64")
         set(_arch ARM64)
+    elseif("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "ARM")
+        set(_arch ARM)
     elseif("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "Win32")
-        message(FATAL_ERROR "The crtsys prebuilt driver bundle does not include x86 driver libraries.")
+        set(_arch x86)
     else()
         message(FATAL_ERROR "Unsupported crtsys prebuilt platform: ${CMAKE_VS_PLATFORM_NAME}")
     endif()
@@ -105,7 +111,8 @@ function(crtsys_get_prebuilt_library _out_path _library _configuration)
     set(_path "${_CRTSYS_ROOT}/lib/native/${_arch}/${_config_dir}/${_library}")
     file(TO_CMAKE_PATH "${_path}" _path)
     if(NOT EXISTS "${_path}")
-        message(FATAL_ERROR "Required crtsys prebuilt library was not found: ${_path}")
+        set(${_out_path} "" PARENT_SCOPE)
+        return()
     endif()
 
     set(${_out_path} "${_path}" PARENT_SCOPE)
@@ -136,13 +143,28 @@ function(crtsys_link_prebuilt_driver_libraries _target)
     crtsys_get_prebuilt_library(_crtsys_release crtsys.lib Release)
     crtsys_get_prebuilt_library(_ldk_release Ldk.lib Release)
 
-    target_link_libraries(
-        ${_target}
-        debug "${_crtsys_debug}"
-        debug "${_ldk_debug}"
-        optimized "${_crtsys_release}"
-        optimized "${_ldk_release}"
-    )
+    if((_crtsys_debug AND NOT _ldk_debug) OR (_ldk_debug AND NOT _crtsys_debug))
+        message(FATAL_ERROR "The crtsys Debug prebuilt library pair is incomplete under ${_CRTSYS_ROOT}/lib/native.")
+    endif()
+    if((_crtsys_release AND NOT _ldk_release) OR (_ldk_release AND NOT _crtsys_release))
+        message(FATAL_ERROR "The crtsys Release prebuilt library pair is incomplete under ${_CRTSYS_ROOT}/lib/native.")
+    endif()
+
+    if(_crtsys_debug AND _crtsys_release)
+        target_link_libraries(
+            ${_target}
+            debug "${_crtsys_debug}"
+            debug "${_ldk_debug}"
+            optimized "${_crtsys_release}"
+            optimized "${_ldk_release}"
+        )
+    elseif(_crtsys_debug)
+        target_link_libraries(${_target} "${_crtsys_debug}" "${_ldk_debug}")
+    elseif(_crtsys_release)
+        target_link_libraries(${_target} "${_crtsys_release}" "${_ldk_release}")
+    else()
+        message(FATAL_ERROR "No crtsys prebuilt libraries were found under ${_CRTSYS_ROOT}/lib/native for ${CMAKE_VS_PLATFORM_NAME}.")
+    endif()
 
     target_compile_definitions(${_target} PUBLIC "_KERNEL32_" "_ITERATOR_DEBUG_LEVEL=0" "_HAS_EXCEPTIONS")
     target_compile_options(${_target} PUBLIC "$<$<COMPILE_LANGUAGE:CXX>:/Zc:threadSafeInit->")

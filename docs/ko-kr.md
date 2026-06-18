@@ -161,6 +161,13 @@ cmake -S . -B build_x64 -A x64
 cmake --build build_x64 --config Debug
 ```
 
+`crtsys`는 기본적으로 진단용 `KdBreakPoint()` 호출을 유지합니다. 진단용
+breakpoint 없이 빌드하려면 다음처럼 설정합니다.
+
+```bat
+cmake -S . -B build_x64 -A x64 -DCRTSYS_ENABLE_DIAGNOSTIC_BREAKPOINTS=OFF
+```
+
 ## NuGet 패키지
 
 `crtsys`의 NuGet 배포는 다음 하나뿐입니다.
@@ -190,11 +197,37 @@ Expand-Archive .\crtsys-<version>-prebuilt.zip .
 
 ```cmake
 # 기존 드라이버 CMakeLists.txt
-include(path/to/crtsys-<version>/cmake/CrtSys.cmake)
+find_package(crtsys CONFIG REQUIRED PATHS path/to/crtsys-<version>)
 crtsys_add_driver(my_driver src/main.cpp)
 ```
 
 `prebuilt.zip`은 GitHub Release 전용 번들이며 NuGet 패키지가 아닙니다.
+
+## CMake install
+
+소스 트리 소비자는 로컬 CMake 패키지를 설치해서 사용할 수 있습니다.
+
+```bat
+cmake -S . -B build_x64 -A x64 -DCMAKE_INSTALL_PREFIX=%CD%\artifacts\install\crtsys
+cmake --build build_x64 --config Release --target crtsys
+cmake --install build_x64 --config Release
+```
+
+설치된 패키지는 소비자 프로젝트에서 다음처럼 찾습니다.
+
+```cmake
+find_package(crtsys CONFIG REQUIRED PATHS path/to/install-prefix)
+crtsys_add_driver(my_driver src/main.cpp)
+```
+
+설치 트리는 GitHub Release prebuilt 번들과 같은 native library 레이아웃인
+`lib/native/<arch>/<config>`를 사용합니다.
+
+install 흐름은 다음 스모크 테스트로 확인할 수 있습니다.
+
+```powershell
+.\scripts\cmake\Test-CrtSysInstall.ps1 -Architecture x64 -Configuration Release
+```
 
 릴리스/게시 방법, release helper, Trusted Publishing 설정은 `nuget/README.md`에
 모아서 정리해두었습니다. 자세한 앱/드라이버 동작 방식도 같은 문서에서 확인하세요.
@@ -225,6 +258,9 @@ build.bat test\cmake\driver x64 Release
 build_all.bat test\cmake\app
 build_all.bat test\cmake\driver
 ```
+
+`build_all.bat`은 빌드를 순차 실행하고, 첫 실패의 exit code를 반환합니다.
+두 번째 인자로 `Debug` 또는 `Release`를 넘기면 해당 구성만 빌드합니다.
 
 일반적인 Debug 출력 경로는 다음과 같습니다.
 
@@ -286,7 +322,9 @@ docs/              추가 문서
 
 ## 로드맵
 
-- CMake install/package 처리 추가.
-- 아직 지원하지 않는 C++ 및 STL 기능 확장.
-- Visual Studio 2017 호환성 간격 축소.
-- 환경이 허용하는 경우 실제 드라이버 로드/실행 테스트의 CI 적용.
+- 아직 지원하지 않는 C++ 및 STL 기능을 확장합니다. 특히 thread-local
+  storage와 function-local static initialization이 남아 있습니다.
+- Visual Studio 2017 호환성 간격을 줄이고 toolset별 호환 코드를 더
+  작게 유지합니다.
+- 적절한 테스트 환경이 준비되는 범위에서 실제 드라이버 로드/실행 CI
+  coverage를 넓힙니다.

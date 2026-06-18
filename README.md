@@ -161,6 +161,13 @@ cmake -S . -B build_x64 -A x64
 cmake --build build_x64 --config Debug
 ```
 
+`crtsys` keeps diagnostic `KdBreakPoint()` calls enabled by default. To build
+without those diagnostic breakpoints, configure with:
+
+```bat
+cmake -S . -B build_x64 -A x64 -DCRTSYS_ENABLE_DIAGNOSTIC_BREAKPOINTS=OFF
+```
+
 ## NuGet Package
 
 `crtsys` NuGet distribution is:
@@ -188,11 +195,37 @@ Expand-Archive .\crtsys-<version>-prebuilt.zip .
 ```
 
 ```cmake
-include(path/to/crtsys-<version>/cmake/CrtSys.cmake)
+find_package(crtsys CONFIG REQUIRED PATHS path/to/crtsys-<version>)
 crtsys_add_driver(my_driver src/main.cpp)
 ```
 
 For full packaging and publishing command details, see `nuget/README.md`.
+
+## CMake Install
+
+Source-tree consumers can install a local CMake package:
+
+```bat
+cmake -S . -B build_x64 -A x64 -DCMAKE_INSTALL_PREFIX=%CD%\artifacts\install\crtsys
+cmake --build build_x64 --config Release --target crtsys
+cmake --install build_x64 --config Release
+```
+
+Installed consumers can then use the package config:
+
+```cmake
+find_package(crtsys CONFIG REQUIRED PATHS path/to/install-prefix)
+crtsys_add_driver(my_driver src/main.cpp)
+```
+
+The install tree uses the same native library layout as the prebuilt release
+bundle: `lib/native/<arch>/<config>`.
+
+The install flow can be smoke-tested with:
+
+```powershell
+.\scripts\cmake\Test-CrtSysInstall.ps1 -Architecture x64 -Configuration Release
+```
 
 To publish a new version from `main`:
 
@@ -236,6 +269,10 @@ Build all supported architecture/configuration combinations:
 build_all.bat test\cmake\app
 build_all.bat test\cmake\driver
 ```
+
+`build_all.bat` runs builds sequentially and returns the first failing exit
+code. Pass `Debug` or `Release` as the second argument to build only one
+configuration.
 
 Typical Debug outputs:
 
@@ -301,8 +338,9 @@ fit for kernel-mode support:
 
 ## Roadmap
 
-- Add CMake install/package handling.
-- Expand unsupported C++ and STL feature coverage.
-- Reduce Visual Studio 2017 compatibility gaps.
-- Add CI coverage for actual driver load/run tests where the environment
-  supports it.
+- Expand unsupported C++ and STL feature coverage, especially thread-local
+  storage and function-local static initialization.
+- Reduce Visual Studio 2017 compatibility gaps and keep toolset-specific
+  compatibility code smaller.
+- Broaden real driver load/run CI coverage where suitable test environments are
+  available.

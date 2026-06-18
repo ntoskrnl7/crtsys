@@ -20,6 +20,7 @@ $nugetDirectory = Join-Path $repoRoot 'artifacts\nuget'
 $stagingDirectory = Join-Path $repoRoot 'artifacts\nuget-staging'
 $workDirectory = Join-Path $repoRoot 'artifacts\release-staging'
 $bundleRoot = Join-Path $workDirectory "crtsys-$Version"
+$bundleCMakePackageDirectory = Join-Path $bundleRoot 'share\crtsys\cmake'
 $prebuiltZipPath = Join-Path $OutputDirectory "crtsys-$Version-prebuilt.zip"
 $checksumPath = Join-Path $OutputDirectory "crtsys-$Version-SHA256SUMS.txt"
 $packagePath = Join-Path $nugetDirectory "crtsys.$Version.nupkg"
@@ -43,14 +44,46 @@ foreach ($arch in @('x64', 'ARM64')) {
 Remove-Item -Recurse -Force -Path $workDirectory -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 New-Item -ItemType Directory -Force -Path $bundleRoot | Out-Null
+New-Item -ItemType Directory -Force -Path $bundleCMakePackageDirectory | Out-Null
 
 Copy-Item -Path (Join-Path $repoRoot 'README.md') -Destination $bundleRoot -Force
 Copy-Item -Path (Join-Path $repoRoot 'LICENSE') -Destination $bundleRoot -Force
 Copy-Item -Path (Join-Path $repoRoot 'docs') -Destination (Join-Path $bundleRoot 'docs') -Recurse -Force
 Copy-Item -Path (Join-Path $repoRoot 'include') -Destination (Join-Path $bundleRoot 'include') -Recurse -Force
 Copy-Item -Path (Join-Path $repoRoot 'cmake') -Destination (Join-Path $bundleRoot 'cmake') -Recurse -Force
+Copy-Item -Path (Join-Path $repoRoot 'cmake\*') -Destination $bundleCMakePackageDirectory -Recurse -Force
 Copy-Item -Path (Join-Path $repoRoot 'nuget\build') -Destination (Join-Path $bundleRoot 'build') -Recurse -Force
 Copy-Item -Path (Join-Path $stagingDirectory 'lib') -Destination (Join-Path $bundleRoot 'lib') -Recurse -Force
+
+$versionMajor = ($Version -split '\.')[0]
+$configCMake = @"
+get_filename_component(PACKAGE_PREFIX_DIR "`${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
+
+set(crtsys_ROOT "`${PACKAGE_PREFIX_DIR}")
+set(CRTSYS_ROOT "`${PACKAGE_PREFIX_DIR}")
+
+include("`${CMAKE_CURRENT_LIST_DIR}/CrtSys.cmake")
+"@
+Set-Content -LiteralPath (Join-Path $bundleCMakePackageDirectory 'crtsys-config.cmake') -Value $configCMake -Encoding ASCII
+
+$configVersionCMake = @"
+set(PACKAGE_VERSION "$Version")
+
+if(PACKAGE_FIND_VERSION)
+  if(PACKAGE_FIND_VERSION VERSION_GREATER PACKAGE_VERSION)
+    set(PACKAGE_VERSION_COMPATIBLE FALSE)
+  elseif(NOT PACKAGE_FIND_VERSION_MAJOR EQUAL $versionMajor)
+    set(PACKAGE_VERSION_COMPATIBLE FALSE)
+  else()
+    set(PACKAGE_VERSION_COMPATIBLE TRUE)
+    if(PACKAGE_FIND_VERSION VERSION_EQUAL PACKAGE_VERSION)
+      set(PACKAGE_VERSION_EXACT TRUE)
+    endif()
+  endif()
+endif()
+"@
+Set-Content -LiteralPath (Join-Path $bundleCMakePackageDirectory 'crtsys-config-version.cmake') -Value $configVersionCMake -Encoding ASCII
+
 $bundleReadme = @"
 # crtsys $Version Prebuilt Release Bundle
 
@@ -61,6 +94,7 @@ Contents:
 
 - include/: public and internal compatibility headers
 - cmake/: CMake helpers; CrtSys.cmake links prebuilt libraries from this bundle
+- share/crtsys/cmake/: CMake package config for find_package(crtsys CONFIG)
 - build/native/: native MSBuild props and targets from the NuGet package
 - lib/native/: prebuilt crtsys.lib and Ldk.lib for x64 and ARM64, Debug and Release
 - docs/: repository documentation

@@ -349,7 +349,7 @@ jobs:
               "crtsys $version release assets."
               ""
               "- crtsys.$version.nupkg: offline NuGet package"
-              "- crtsys-$version-prebuilt.zip: headers, docs, CMake helpers, native MSBuild imports, and prebuilt x64/ARM64 Debug/Release libraries"
+              "- crtsys-$version-prebuilt.zip: headers, docs, CMake helpers/package config, native MSBuild imports, and prebuilt x64/ARM64 Debug/Release libraries"
               "- crtsys-$version-SHA256SUMS.txt: SHA-256 checksums"
             ) -join [Environment]::NewLine
             & gh release create $tagName @assets --repo $repo --target '${{ github.sha }}' --title "crtsys $version" --notes $notes

@@ -28,6 +28,12 @@ if ([string]::IsNullOrWhiteSpace($WorkDirectory)) {
   $WorkDirectory = Join-Path $repoRoot "artifacts\release-consumer-test\$Architecture\$Configuration"
 }
 
+$WorkDirectory = [System.IO.Path]::GetFullPath($WorkDirectory)
+$repoRootPrefix = $repoRoot.TrimEnd('\') + '\'
+if (-not $WorkDirectory.StartsWith($repoRootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+  throw "WorkDirectory must be inside the repository: $repoRoot"
+}
+
 $ReleaseDirectory = (Resolve-Path $ReleaseDirectory).Path
 $prebuiltZipPath = Join-Path $ReleaseDirectory "crtsys-$Version-prebuilt.zip"
 if (-not (Test-Path $prebuiltZipPath)) {
@@ -64,6 +70,9 @@ if ([string]::IsNullOrWhiteSpace($bundleRoot) -or -not (Test-Path (Join-Path $bu
 foreach ($requiredPath in @(
   "lib\native\$Architecture\$Configuration\crtsys.lib",
   "lib\native\$Architecture\$Configuration\Ldk.lib",
+  'share\crtsys\cmake\crtsys-config.cmake',
+  'share\crtsys\cmake\crtsys-config-version.cmake',
+  'share\crtsys\cmake\CrtSys.cmake',
   'include\ntl\driver',
   'include\.internal\adjust_link_order'
 )) {
@@ -83,7 +92,7 @@ cmake_minimum_required(VERSION 3.14 FATAL_ERROR)
 project(crtsys_release_asset_smoke LANGUAGES C CXX)
 
 set(CRTSYS_NTL_MAIN ON)
-include("$cmakeBundleRoot/cmake/CrtSys.cmake")
+find_package(crtsys CONFIG REQUIRED PATHS "$cmakeBundleRoot" NO_DEFAULT_PATH)
 
 crtsys_add_driver(crtsys_release_asset_smoke main.cpp)
 "@

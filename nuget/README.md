@@ -207,7 +207,7 @@ project into a driver project.
 
 - `crtsys-<version>-prebuilt.zip`  
   A prebuilt bundle containing headers, libraries, documentation, and CMake helpers.
-  It includes `CrtSys.cmake` for CMake-based consumers, and also carries the same native MSBuild build support files.
+  It includes `CrtSys.cmake` and `find_package(crtsys CONFIG)` support for CMake-based consumers, and also carries the same native MSBuild build support files.
 - `crtsys-<version>-SHA256SUMS.txt`  
   Checksum file for offline/manual verification.
 
