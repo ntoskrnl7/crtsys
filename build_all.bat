@@ -1,49 +1,60 @@
 @ECHO OFF
 
-SETLOCAL ENABLEDELAYEDEXPANSION
+SETLOCAL ENABLEEXTENSIONS ENABLEDELAYEDEXPANSION
 
-IF EXIST "%1/CMakeLists.txt" (
-    IF "%2" == "" (
-        (
-            START cmake -S %1 cmake -B %1/build_2017_x64 -A x64 -G "Visual Studio 15 2017"
-            START cmake -S %1 cmake -B %1/build_2017_x86 -A Win32 -G "Visual Studio 15 2017"
-            START cmake -S %1 cmake -B %1/build_2019_x64 -A x64 -G "Visual Studio 16 2019"
-            START cmake -S %1 cmake -B %1/build_2019_x86 -A Win32 -G "Visual Studio 16 2019"
-            START cmake -S %1 cmake -B %1/build_2022_x64 -A x64 -G "Visual Studio 17 2022"
-            START cmake -S %1 cmake -B %1/build_2022_x86 -A Win32 -G "Visual Studio 17 2022"
+IF "%~1"=="" GOTO :usage
 
-            START cmake -S %1 cmake -B %1/build_2017_ARM64 -A ARM64 -G "Visual Studio 15 2017"
-            START cmake -S %1 cmake -B %1/build_2017_ARM -A ARM -G "Visual Studio 15 2017"
-            START cmake -S %1 cmake -B %1/build_2019_ARM64 -A ARM64 -G "Visual Studio 16 2019"
-            START cmake -S %1 cmake -B %1/build_2019_ARM -A ARM -G "Visual Studio 16 2019"
-            START cmake -S %1 cmake -B %1/build_2022_ARM64 -A ARM64 -G "Visual Studio 17 2022"
-            START cmake -S %1 cmake -B %1/build_2022_ARM -A ARM -G "Visual Studio 17 2022"
-        ) | PAUSE
-        START build_all.bat %1 Debug
-        START build_all.bat %1 Release
-    )
-    IF /I "%2" == "Release" (
-        START CMD /C "build.bat %1 2022 x64 Release && build.bat %1 2019 x64 Release && build.bat %1 2017 x64 Release"
-        START CMD /C "build.bat %1 2022 x86 Release && build.bat %1 2019 x86 Release && build.bat %1 2017 x86 Release"
-        START CMD /C "build.bat %1 2022 ARM64 Release && build.bat %1 2019 ARM64 Release && build.bat %1 2017 ARM64 Release"
-        START CMD /C "build.bat %1 2022 ARM Release && build.bat %1 2019 ARM Release && build.bat %1 2017 ARM Release"
-    )
-    IF /I "%2" == "Debug" (
-        START "2022 x64 Debug" build.bat %1 2022 x64 Debug
-        START "2022 x86 Debug" build.bat %1 2022 x86 Debug
-        START "2019 x64 Debug" build.bat %1 2019 x64 Debug
-        START "2019 x86 Debug" build.bat %1 2019 x86 Debug
-        START "2017 x64 Debug" build.bat %1 2017 x64 Debug
-        START "2017 x86 Debug" build.bat %1 2017 x86 Debug
-        START "2022 ARM64 Debug" build.bat %1 2022 ARM64 Debug
-        START "2022 ARM Debug" build.bat %1 2022 ARM Debug
-        START "2019 ARM64 Debug" build.bat %1 2019 ARM64 Debug
-        START "2019 ARM Debug" build.bat %1 2019 ARM Debug
-        START "2017 ARM64 Debug" build.bat %1 2017 ARM64 Debug
-        START "2017 ARM Debug" build.bat %1 2017 ARM Debug
-    )
-) ELSE (
-    ECHO "%1/CMakeLists.txt not exist"
+SET "WORK_PATH=%~1"
+
+IF NOT EXIST "%WORK_PATH%\CMakeLists.txt" (
+    ECHO "%WORK_PATH%\CMakeLists.txt not exist"
+    EXIT /B 1
 )
 
-ENDLOCAL
+IF "%~2"=="" GOTO :build_default
+IF /I "%~2"=="Debug" GOTO :build_single
+IF /I "%~2"=="Release" GOTO :build_single
+
+GOTO :usage
+
+:build_default
+CALL :build_config Debug
+IF ERRORLEVEL 1 EXIT /B !ERRORLEVEL!
+
+CALL :build_config Release
+EXIT /B !ERRORLEVEL!
+
+:build_single
+CALL :build_config %~2
+EXIT /B !ERRORLEVEL!
+
+:build_config
+SET "CONFIG=%~1"
+
+FOR %%A IN (x64 x86 ARM64 ARM) DO (
+    FOR %%V IN (2022 2019 2017) DO (
+        CALL :build_one %%V %%A !CONFIG!
+        IF ERRORLEVEL 1 EXIT /B !ERRORLEVEL!
+    )
+)
+
+EXIT /B 0
+
+:build_one
+SET "VS_VERSION=%~1"
+SET "ARCH=%~2"
+SET "CONFIG=%~3"
+
+ECHO.
+ECHO ===== build.bat "%WORK_PATH%" %VS_VERSION% %ARCH% %CONFIG% =====
+CALL "%~dp0build.bat" "%WORK_PATH%" "%VS_VERSION%" "%ARCH%" "%CONFIG%"
+IF ERRORLEVEL 1 (
+    ECHO Failed: %VS_VERSION% %ARCH% %CONFIG%
+    EXIT /B !ERRORLEVEL!
+)
+
+EXIT /B 0
+
+:usage
+ECHO Usage: %~nx0 ^<path-with-CMakeLists.txt^> [Debug^|Release]
+EXIT /B 1
