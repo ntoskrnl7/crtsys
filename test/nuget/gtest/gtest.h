@@ -117,6 +117,16 @@ inline int RunAllTests() {
     }                                                                         \
   } while (false)
 
+#define EXPECT_GT(actual, expected)                                           \
+  do {                                                                        \
+    const auto& actual_value = (actual);                                      \
+    const auto& expected_value = (expected);                                  \
+    if (!(actual_value > expected_value)) {                                   \
+      ::testing::record_failure(__FILE__, __LINE__,                           \
+                                "EXPECT_GT(" #actual ", " #expected ")");   \
+    }                                                                         \
+  } while (false)
+
 #define EXPECT_STREQ(actual, expected)                                        \
   do {                                                                        \
     const auto* actual_value = (actual);                                      \
