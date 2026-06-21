@@ -42,7 +42,7 @@
       <AdditionalIncludeDirectories Condition="'$(CrtSysUseDriverSupport)' != 'true'">$(CrtSysRoot)include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <ForcedIncludeFiles Condition="'$(CrtSysUseDriverSupport)' == 'true'">$(CrtSysRoot)include\.internal\adjust_link_order;%(ForcedIncludeFiles)</ForcedIncludeFiles>
       <PreprocessorDefinitions Condition="'$(CrtSysUseDriverSupport)' == 'true'">$(CrtSysDriverPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalOptions Condition="'$(CrtSysUseDriverSupport)' == 'true'">/Zc:threadSafeInit- /Zc:__cplusplus /Zc:wchar_t %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions Condition="'$(CrtSysUseDriverSupport)' == 'true'">/Zc:__cplusplus /Zc:wchar_t %(AdditionalOptions)</AdditionalOptions>
       <AdditionalOptions Condition="'$(CrtSysUseDriverSupport)' != 'true'">/Zc:__cplusplus /Zc:wchar_t %(AdditionalOptions)</AdditionalOptions>
       <RuntimeLibrary Condition="'$(CrtSysUseDriverSupport)' == 'true'">MultiThreaded</RuntimeLibrary>
       <ExceptionHandling Condition="'$(CrtSysUseDriverSupport)' == 'true'">Sync</ExceptionHandling>

@@ -14,6 +14,9 @@ void run();
 namespace zero_initialization_test {
 void run(int argc = 5, char *[] = nullptr);
 }
+namespace static_local_initialization_test {
+void run();
+}
 //
 // cpp/lang/exceptions.cpp
 //
@@ -86,6 +89,7 @@ void cpp_std_tests() {
   //
   constant_initialization_test::run();
   zero_initialization_test::run();
+  static_local_initialization_test::run();
 #if defined(_AMD64_) && !defined(CRTSYS_USE_NTL_MAIN)
   // x64에서는 throw_test 테스트를 진행하기엔 스택이 부족합니다 :-(
   ntl::expand_stack(throw_test::run);

@@ -57,8 +57,9 @@ Known constraints:
 
 - Runtime-backed C++/CRT/STL features should be treated as `PASSIVE_LEVEL`
   facilities unless the API reference says otherwise.
-- Thread-local storage and thread-safe local static initialization are not
-  supported yet.
+- Function-local static initialization is supported for MSVC thread-safe
+  statics. General C++ `thread_local` storage is not supported as true
+  per-thread TLS.
 - Kernel stacks are small; use `ntl::expand_stack` for paths that need more
   stack, especially exception-heavy or STL-heavy paths.
 - SDK and WDK version mismatches can cause build failures. Prefer matching SDK
@@ -80,6 +81,7 @@ High-level coverage:
 
 - C++ runtime support
   - non-local static initialization
+  - function-local static initialization
   - dynamic initialization
   - exceptions
 - Microsoft STL support
@@ -338,8 +340,8 @@ fit for kernel-mode support:
 
 ## Roadmap
 
-- Expand unsupported C++ and STL feature coverage, especially thread-local
-  storage and function-local static initialization.
+- Expand unsupported C++ and STL feature coverage, especially true
+  `thread_local` storage.
 - Reduce Visual Studio 2017 compatibility gaps and keep toolset-specific
   compatibility code smaller.
 - Broaden real driver load/run CI coverage where suitable test environments are

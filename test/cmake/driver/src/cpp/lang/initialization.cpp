@@ -65,3 +65,29 @@ struct test_object {
 test_object global_object_(1);
 static test_object static_object_(2);
 } // namespace dynamic_initialization_test
+
+namespace static_local_initialization_test {
+int constructed_count;
+
+struct test_object {
+  test_object() : value(42) { ++constructed_count; }
+
+  int value;
+};
+
+test_object &instance() {
+  static test_object object;
+  return object;
+}
+
+void run() {
+  test_object &first = instance();
+  test_object &second = instance();
+
+  if (&first != &second || first.value != 42 || constructed_count != 1) {
+    std::cerr << "function-local static initialization failed\n";
+  } else {
+    std::cout << "function-local static initialized successfully\n";
+  }
+}
+} // namespace static_local_initialization_test

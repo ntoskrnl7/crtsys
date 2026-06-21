@@ -1,4 +1,7 @@
 build*/
+!nuget/build/
+!nuget/build/**
 .vscode
 .vs/
+artifacts/
 lib/

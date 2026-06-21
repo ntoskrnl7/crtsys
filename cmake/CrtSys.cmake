@@ -167,7 +167,6 @@ function(crtsys_link_prebuilt_driver_libraries _target)
     endif()
 
     target_compile_definitions(${_target} PUBLIC "_KERNEL32_" "_ITERATOR_DEBUG_LEVEL=0" "_HAS_EXCEPTIONS")
-    target_compile_options(${_target} PUBLIC "$<$<COMPILE_LANGUAGE:CXX>:/Zc:threadSafeInit->")
     target_compile_options(${_target} PUBLIC "$<$<COMPILE_LANGUAGE:C,CXX>:/MT>")
 
     if(CRTSYS_USE_LIBCNTPR)

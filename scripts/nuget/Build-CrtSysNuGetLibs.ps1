@@ -57,25 +57,24 @@ foreach ($arch in $Architecture) {
       throw "CMake build failed with exit code $LASTEXITCODE."
     }
 
-    # Pick deterministic output paths first, then fallback to recursive search.
+    # Debug libraries stay under the build tree. Release libraries are emitted
+    # to lib/<arch> by the top-level CMake target properties.
     $archLower = $arch.ToLower()
-    $crtsysCandidates = @()
-    $preferredLibPaths = @(
-      Join-Path $repoRoot "lib\$arch\crtsys.lib"
-      Join-Path $repoRoot "lib\$archLower\crtsys.lib"
+    $crtsysCandidates = @(
+      Get-ChildItem -Path $buildDir -Filter 'crtsys.lib' -Recurse -File |
+        Sort-Object FullName
     )
-    foreach ($libPath in $preferredLibPaths | Select-Object -Unique) {
-      if (Test-Path $libPath) {
-        $crtsysCandidates += Get-Item -Path $libPath
-        break
-      }
-    }
-
     if ($crtsysCandidates.Count -eq 0) {
-      $crtsysCandidates = @(
-        Get-ChildItem -Path $buildDir -Filter 'crtsys.lib' -Recurse -File |
-          Sort-Object FullName
+      $preferredLibPaths = @(
+        Join-Path $repoRoot "lib\$arch\crtsys.lib"
+        Join-Path $repoRoot "lib\$archLower\crtsys.lib"
       )
+      foreach ($libPath in $preferredLibPaths | Select-Object -Unique) {
+        if (Test-Path $libPath) {
+          $crtsysCandidates += Get-Item -Path $libPath
+          break
+        }
+      }
     }
     if ($crtsysCandidates.Count -eq 0) {
       $available = Get-ChildItem -Path $buildDir -Filter '*.lib' -Recurse -File |

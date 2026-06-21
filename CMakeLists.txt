@@ -212,11 +212,6 @@ if (UCXXRT_ENABLED)
   target_compile_options(crtsys PRIVATE "$<$<COMPILE_LANGUAGE:C,CXX>:/FI${ucxxrt_SOURCE_DIR}/ucxxrt.inl>")
 endif()
 
-#
-# TLS isn't supported yet.
-#
-target_compile_options(crtsys PUBLIC "$<$<COMPILE_LANGUAGE:CXX>:/Zc:threadSafeInit->")
-
 target_compile_options(crtsys PUBLIC "$<$<COMPILE_LANGUAGE:C,CXX>:/MT>") # "/MT$<$<CONFIG:Debug>:d>"
 # [not working] set_property(TARGET crtsys PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
