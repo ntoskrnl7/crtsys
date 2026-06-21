@@ -29,7 +29,8 @@
     [(tested)](../test/cmake/driver/src/cpp/lang/initialization.cpp#L65)
 - [ ] [Static local variables](https://en.cppreference.com/w/cpp/language/storage_duration#Static_local_variables)
   - [ ] `thread_local`
-  - [ ] function-local `static`
+  - [x] function-local `static`
+    [(tested)](../test/cmake/driver/src/cpp/lang/initialization.cpp)
 
 ### Exceptions
 

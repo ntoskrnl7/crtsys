@@ -1,6 +1,7 @@
 param(
   [string] $Version,
-  [string] $OutputDirectory
+  [string] $OutputDirectory,
+  [string] $NuGetExe
 )
 
 Set-StrictMode -Version Latest
@@ -33,10 +34,22 @@ foreach ($arch in @('x64', 'ARM64')) {
 }
 
 Write-Host "Packing crtsys $Version to $OutputDirectory"
-& dotnet pack $manifest `
-  --output $OutputDirectory `
-  --version $Version
+if ([string]::IsNullOrWhiteSpace($NuGetExe)) {
+  $nuget = Get-Command nuget -ErrorAction SilentlyContinue
+  if (-not $nuget) {
+    throw "nuget command was not found. Pass -NuGetExe or add nuget.exe to PATH."
+  }
+
+  $NuGetExe = $nuget.Source
+} else {
+  $NuGetExe = (Resolve-Path $NuGetExe).Path
+}
+
+& $NuGetExe pack $manifest `
+  -OutputDirectory $OutputDirectory `
+  -Version $Version `
+  -NonInteractive
 
 if ($LASTEXITCODE -ne 0) {
-  throw "dotnet pack failed with exit code $LASTEXITCODE."
+  throw "nuget pack failed with exit code $LASTEXITCODE."
 }

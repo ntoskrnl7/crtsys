@@ -8,6 +8,12 @@
 
 EXTERN_C DRIVER_INITIALIZE CrtSysDriverEntry;
 EXTERN_C DRIVER_UNLOAD CrtSysDriverUnload;
+EXTERN_C NTSYSAPI PVOID NTAPI RtlImageDirectoryEntryToData(
+    _In_ PVOID Base,
+    _In_ BOOLEAN MappedAsImage,
+    _In_ USHORT DirectoryEntry,
+    _Out_ PULONG Size
+    );
 
 #ifdef ALLOC_PRAGMA
 #pragma alloc_text(INIT, CrtSysDriverEntry)
@@ -138,12 +144,62 @@ PDRIVER_DISPATCH CrtsyspDispatchClose = NULL;
 #endif
 
 //
-// :-(
-// TEB Tls(gs[0x58], fs[0x18])에 직접 접근하는 코드가 존재하므로 임시로 버퍼를 설정합니다.
-// %ProgramFiles(x86)%\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.24.28314\include\pplwin.h Line:84
+// MSVC emits compiler TLS accesses for thread-safe local statics. Kernel
+// drivers do not have a user-mode TEB TLS vector, so install a driver-wide TLS
+// image initialized from the PE TLS template. This is not full per-thread TLS;
+// it is enough for compiler-managed data such as _Init_thread_epoch.
 //
-CHAR CrtSyspTlsBuffer[1024 * 1024];
-PVOID CrtSyspTlsSlots[1024] = { &CrtSyspTlsBuffer, };
+__declspec(align(16)) UCHAR CrtSyspCompilerTlsBuffer[1024 * 1024];
+PVOID CrtSyspCompilerTlsSlots[1024] = { CrtSyspCompilerTlsBuffer, };
+
+NTSTATUS
+CrtSysInitializeCompilerTlsImage (
+    _In_ PDRIVER_OBJECT DriverObject
+    )
+{
+    ULONG size = 0;
+    PIMAGE_TLS_DIRECTORY tlsDirectory =
+        (PIMAGE_TLS_DIRECTORY)RtlImageDirectoryEntryToData(
+            DriverObject->DriverStart,
+            TRUE,
+            IMAGE_DIRECTORY_ENTRY_TLS,
+            &size);
+
+    RtlZeroMemory(CrtSyspCompilerTlsBuffer, sizeof(CrtSyspCompilerTlsBuffer));
+    CrtSyspCompilerTlsSlots[0] = CrtSyspCompilerTlsBuffer;
+
+    if (tlsDirectory == NULL) {
+        return STATUS_SUCCESS;
+    }
+    if (size < sizeof(*tlsDirectory)) {
+        return STATUS_INVALID_IMAGE_FORMAT;
+    }
+
+    ULONG_PTR const rawStart =
+        (ULONG_PTR)tlsDirectory->StartAddressOfRawData;
+    ULONG_PTR const rawEnd =
+        (ULONG_PTR)tlsDirectory->EndAddressOfRawData;
+    if (rawEnd < rawStart) {
+        return STATUS_INVALID_IMAGE_FORMAT;
+    }
+
+    SIZE_T const rawSize = rawEnd - rawStart;
+    SIZE_T const zeroFillSize = (SIZE_T)tlsDirectory->SizeOfZeroFill;
+    if (rawSize > sizeof(CrtSyspCompilerTlsBuffer) ||
+        zeroFillSize > sizeof(CrtSyspCompilerTlsBuffer) - rawSize) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    if (rawSize != 0) {
+        RtlCopyMemory(CrtSyspCompilerTlsBuffer, (PVOID)rawStart, rawSize);
+    }
+
+    if (tlsDirectory->AddressOfIndex != 0) {
+        *(PULONG)(ULONG_PTR)tlsDirectory->AddressOfIndex = 0;
+    }
+
+    return STATUS_SUCCESS;
+}
 
 VOID
 CrtSysSetTebThreadLocalStoragePointer (
@@ -179,14 +235,19 @@ CrtpSetTebThreadLocalStoragePointerDpcRoutine (
 
 NTSTATUS
 CrtSysInitializeTebThreadLocalStoragePointer (
-    VOID
+    _In_ PDRIVER_OBJECT DriverObject
     )
 {
     CRTSYS_DIAGNOSTIC_BREAK();
 
+    NTSTATUS status = CrtSysInitializeCompilerTlsImage(DriverObject);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
     LONG remainingCount = KeNumberProcessors - 1;
     if (remainingCount == 0) {
-        CrtSysSetTebThreadLocalStoragePointer(&CrtSyspTlsSlots);
+        CrtSysSetTebThreadLocalStoragePointer(CrtSyspCompilerTlsSlots);
         return STATUS_SUCCESS;
     }
 #pragma warning(disable:4996)
@@ -207,10 +268,10 @@ CrtSysInitializeTebThreadLocalStoragePointer (
         }
         KeInitializeDpc(dpc, CrtpSetTebThreadLocalStoragePointerDpcRoutine, NULL);
         KeSetTargetProcessorDpc(dpc, i);
-        KeInsertQueueDpc(dpc, &CrtSyspTlsSlots, &remainingCount);
+        KeInsertQueueDpc(dpc, CrtSyspCompilerTlsSlots, &remainingCount);
         dpc++;
     }
-    CrtSysSetTebThreadLocalStoragePointer(&CrtSyspTlsSlots);
+    CrtSysSetTebThreadLocalStoragePointer(CrtSyspCompilerTlsSlots);
     while (InterlockedCompareExchange(&remainingCount, 0, 0) != 0) {
         YieldProcessor();
     }
@@ -292,7 +353,7 @@ CrtSysDriverEntry(_In_ PDRIVER_OBJECT DriverObject,
                   _In_ PUNICODE_STRING RegistryPath) {
   PAGED_CODE();
 
-  NTSTATUS status = CrtSysInitializeTebThreadLocalStoragePointer();
+  NTSTATUS status = CrtSysInitializeTebThreadLocalStoragePointer(DriverObject);
   if (!NT_SUCCESS(status)) {
     return status;
   }

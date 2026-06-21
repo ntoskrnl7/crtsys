@@ -17,7 +17,12 @@ param(
 
   [string] $WdkVersion,
 
-  [string] $WorkDirectory
+  [string] $WorkDirectory,
+
+  [string] $NuGetExe,
+
+  [ValidateSet('latest', '17', '16', '15')]
+  [string] $VisualStudioMajorVersion = 'latest'
 )
 
 Set-StrictMode -Version Latest
@@ -52,9 +57,15 @@ if (-not (Test-Path $packagePath)) {
   throw "NuGet package was not found: $packagePath"
 }
 
-$nuget = Get-Command nuget -ErrorAction SilentlyContinue
-if (-not $nuget) {
-  throw "nuget command was not found. Add NuGet/setup-nuget before running this script."
+if ([string]::IsNullOrWhiteSpace($NuGetExe)) {
+  $nuget = Get-Command nuget -ErrorAction SilentlyContinue
+  if (-not $nuget) {
+    throw "nuget command was not found. Pass -NuGetExe or add nuget.exe to PATH."
+  }
+
+  $NuGetExe = $nuget.Source
+} else {
+  $NuGetExe = (Resolve-Path $NuGetExe).Path
 }
 
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
@@ -62,20 +73,37 @@ if (-not (Test-Path $vswhere)) {
   throw "vswhere.exe was not found: $vswhere"
 }
 
-$visualStudioPath = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -property installationPath
-if ([string]::IsNullOrWhiteSpace($visualStudioPath)) {
-  throw "Visual Studio with MSBuild was not found."
-}
-
-$msbuild = Join-Path $visualStudioPath 'MSBuild\Current\Bin\MSBuild.exe'
-if (-not (Test-Path $msbuild)) {
-  throw "MSBuild.exe was not found: $msbuild"
-}
-
 $windowsKitsRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10'
 $windowsKitsIncludeRoot = Join-Path $windowsKitsRoot 'Include'
 if (-not (Test-Path $windowsKitsIncludeRoot)) {
   throw "Windows Kits include directory was not found: $windowsKitsIncludeRoot"
+}
+
+$visualStudioInstallationsJson = & $vswhere -all -products * -requires Microsoft.Component.MSBuild -format json
+$visualStudioInstallations = @(($visualStudioInstallationsJson | ConvertFrom-Json) | ForEach-Object { $_ })
+if ($VisualStudioMajorVersion -ne 'latest') {
+  $visualStudioInstallations = @(
+    $visualStudioInstallations |
+      Where-Object { ([version]$_.installationVersion).Major -eq [int]$VisualStudioMajorVersion }
+  )
+}
+
+$visualStudioInstallations = @(
+  $visualStudioInstallations |
+    Sort-Object { [version]$_.installationVersion } -Descending
+)
+if ($visualStudioInstallations.Count -eq 0) {
+  throw "Visual Studio with MSBuild was not found."
+}
+
+$visualStudioPath = $visualStudioInstallations[0].installationPath
+$msbuildCandidates = @(
+  Join-Path $visualStudioPath 'MSBuild\Current\Bin\MSBuild.exe'
+  Join-Path $visualStudioPath 'MSBuild\15.0\Bin\MSBuild.exe'
+)
+$msbuild = $msbuildCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+if ([string]::IsNullOrWhiteSpace($msbuild)) {
+  throw "MSBuild.exe was not found under: $visualStudioPath"
 }
 
 if ($isDriverConsumer -and [string]::IsNullOrWhiteSpace($WdkVersion)) {
@@ -111,6 +139,7 @@ if ($isDriverConsumer) {
 }
 
 Write-Host "Requested Windows SDK version: $WindowsSdkVersion"
+Write-Host "Resolved Visual Studio path: $visualStudioPath"
 if ($isDriverConsumer) {
   Write-Host "Resolved WDK version: $WdkVersion"
 }
@@ -137,14 +166,18 @@ New-Item -ItemType Directory -Force -Path $cmakeTestDirectory | Out-Null
 Copy-Item -Path (Join-Path $testProjectSource '*') -Destination $testProjectDirectory -Recurse -Force
 Copy-Item -Path (Join-Path $repoRoot 'test\cmake\common') -Destination $cmakeTestDirectory -Recurse -Force
 if ($isDriverConsumer) {
-  Copy-Item -Path (Join-Path $repoRoot 'test\cmake\driver') -Destination $cmakeTestDirectory -Recurse -Force
+  $driverTestDirectory = Join-Path $cmakeTestDirectory 'driver'
+  New-Item -ItemType Directory -Force -Path $driverTestDirectory | Out-Null
+  Copy-Item -Path (Join-Path $repoRoot 'test\cmake\driver\src') -Destination $driverTestDirectory -Recurse -Force
 } else {
-  Copy-Item -Path (Join-Path $repoRoot 'test\cmake\app') -Destination $cmakeTestDirectory -Recurse -Force
+  $appTestDirectory = Join-Path $cmakeTestDirectory 'app'
+  New-Item -ItemType Directory -Force -Path $appTestDirectory | Out-Null
+  Copy-Item -Path (Join-Path $repoRoot 'test\cmake\app\src') -Destination $appTestDirectory -Recurse -Force
 }
 
 $packagesDirectory = Join-Path $testProjectDirectory 'packages'
 $nlohmannJsonPackageRoot = $null
-& $nuget.Source install crtsys `
+& $NuGetExe install crtsys `
   -Version $Version `
   -Source $PackageDirectory `
   -OutputDirectory $packagesDirectory `
@@ -198,7 +231,7 @@ foreach ($requiredPath in $requiredPackagePaths) {
 
 if ($isDriverConsumer) {
   $externalPackagesDirectory = Join-Path $testProjectDirectory 'external-packages'
-  & $nuget.Source install nlohmann.json `
+  & $NuGetExe install nlohmann.json `
     -Version 3.12.0 `
     -Source https://api.nuget.org/v3/index.json `
     -OutputDirectory $externalPackagesDirectory `
