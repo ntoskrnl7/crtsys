@@ -47,9 +47,9 @@ RoInitialize (
 #if CRTSYS_USE_NTL_MAIN
 //
 // 
-// /GS 옵션을 사용하여 빌드하는 경우
-// BufferOverflowK.lib(gs_support.obj) GsDriverEntry가 포함되며
-// GsDriverEntry에서 DriverEntry를 호출하기 때문에 DriverEntry를 임의로 정의하였습니다.
+// When building with /GS, BufferOverflowK.lib(gs_support.obj) provides
+// GsDriverEntry, and GsDriverEntry calls DriverEntry. Define DriverEntry here
+// intentionally to satisfy that path.
 //
 
 EXTERN_C DRIVER_INITIALIZE DriverEntry;
@@ -75,7 +75,8 @@ DriverEntry (
     PAGED_CODE();
 
     //
-    // ntl::main을 사용하도록 빌드하였는데 DriverEntry가 빌드되는건 뭔가 잘못된것입니다.
+    // If this target was built to use ntl::main, reaching DriverEntry means
+    // something was wired incorrectly.
     // 
     CRTSYS_DIAGNOSTIC_BREAK();
 
@@ -99,7 +100,8 @@ CrtSyspInitializeForLibcntpr (
 {
     //
     // 10.0.17763.0
-    // libcntpr.lib!__ptlocinfo->lc_time_curr가 NULL로 초기화되어있기 때문에 __lc_time_curr를 직접 설정해야합니다.
+    // libcntpr.lib!__ptlocinfo->lc_time_curr is initialized to NULL, so set
+    // __lc_time_curr explicitly.
     // 
     __ptlocinfo->lc_time_curr = &__lc_time_c;
 
