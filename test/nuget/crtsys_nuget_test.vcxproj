@@ -70,8 +70,17 @@
     <ClCompile Include="..\cmake\driver\src\c\math.c" />
     <ClCompile Include="..\cmake\driver\src\cpp\lang\exceptions.cpp" />
     <ClCompile Include="..\cmake\driver\src\cpp\lang\initialization.cpp" />
+    <ClCompile Include="..\cmake\driver\src\cpp\stl\algorithm.cpp" />
+    <ClCompile Include="..\cmake\driver\src\cpp\stl\atomic.cpp" />
     <ClCompile Include="..\cmake\driver\src\cpp\stl\chrono.cpp" />
+    <ClCompile Include="..\cmake\driver\src\cpp\stl\containers.cpp" />
+    <ClCompile Include="..\cmake\driver\src\cpp\stl\exception.cpp" />
+    <ClCompile Include="..\cmake\driver\src\cpp\stl\functional.cpp" />
+    <ClCompile Include="..\cmake\driver\src\cpp\stl\memory.cpp" />
+    <ClCompile Include="..\cmake\driver\src\cpp\stl\numeric.cpp" />
+    <ClCompile Include="..\cmake\driver\src\cpp\stl\string.cpp" />
     <ClCompile Include="..\cmake\driver\src\cpp\stl\thread.cpp" />
+    <ClCompile Include="..\cmake\driver\src\cpp\stl\utility.cpp" />
     <ClCompile Include="..\cmake\driver\src\libs\nlohmann_json.cpp" />
     <ClCompile Include="..\cmake\driver\src\main.cpp" />
     <ClCompile Include="..\cmake\driver\src\ntl.cpp" />
