@@ -6,6 +6,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+
 namespace condition_variable_test {
 std::mutex m;
 std::condition_variable cv;
@@ -65,6 +66,7 @@ void run() {
 #include <mutex>
 #include <string>
 #include <thread>
+
 namespace mutex_test {
 std::map<std::string, std::string> g_pages;
 std::mutex g_pages_mutex;
@@ -98,6 +100,7 @@ void run() {
 #include <mutex>
 #include <shared_mutex>
 #include <thread>
+
 namespace shared_mutex_test {
 class ThreadSafeCounter {
 public:
@@ -153,6 +156,7 @@ void run() {
 #include <iostream>
 #include <mutex>
 #include <thread>
+
 namespace call_once_test {
 std::once_flag flag1, flag2;
 
@@ -204,6 +208,7 @@ void run() {
 #include <future>
 #include <iostream>
 #include <thread>
+
 namespace future_test {
 void run() {
   // future from a packaged_task
@@ -238,6 +243,7 @@ void run() {
 #include <numeric>
 #include <thread>
 #include <vector>
+
 namespace promise_test {
 void accumulate(std::vector<int>::iterator first,
                 std::vector<int>::iterator last,
@@ -282,6 +288,7 @@ void run() {
 #include <future>
 #include <iostream>
 #include <thread>
+
 namespace packaged_task_test {
 // unique function to avoid disambiguating the std::pow overload set
 int f(int x, int y) { return (int)std::pow(x, y); }
@@ -321,3 +328,148 @@ void run() {
   task_thread();
 }
 } // namespace packaged_task_test
+
+//
+// https://en.cppreference.com/w/cpp/thread/latch#Example
+//
+#include <array>
+#include <functional>
+#include <latch>
+#include <string>
+#include <thread>
+
+namespace latch_test {
+struct Job {
+  const std::string name;
+  std::string product{"not worked"};
+  std::thread action{};
+};
+
+void run() {
+  std::array<Job, 3> jobs{{{"Annika"}, {"Buru"}, {"Chuck"}}};
+
+  std::latch work_done{static_cast<std::ptrdiff_t>(jobs.size())};
+  std::latch start_clean_up{1};
+  auto work = [&](Job &my_job) {
+    my_job.product = my_job.name + " worked";
+    work_done.count_down();
+    start_clean_up.wait();
+    my_job.product = my_job.name + " cleaned";
+  };
+
+  std::cout << "Work is starting... ";
+  for (auto &job : jobs) {
+    job.action = std::thread{work, std::ref(job)};
+  }
+  work_done.wait();
+  std::cout << "done:\n";
+  for (const auto &job : jobs) {
+    std::cout << "  " << job.product << '\n';
+  }
+
+  std::cout << "Workers are cleaning up... ";
+  start_clean_up.count_down();
+  for (auto &job : jobs) {
+    job.action.join();
+  }
+
+  std::cout << "done:\n";
+  for (const auto &job : jobs) {
+    std::cout << "  " << job.product << '\n';
+  }
+}
+} // namespace latch_test
+
+//
+// https://en.cppreference.com/w/cpp/thread/barrier#Example
+//
+#include <array>
+#include <barrier>
+#include <iostream>
+#include <string>
+#include <syncstream>
+#include <thread>
+#include <vector>
+
+namespace barrier_test {
+void run() {
+  const auto workers = {"Anil", "Busara", "Carl"};
+  auto on_completion = []() noexcept {
+    // locking not needed here
+    static auto phase = "... done\n"
+                        "Cleaning up...\n";
+    std::cout << phase;
+    phase = "... done\n";
+  };
+
+  std::barrier sync_point(std::ssize(workers), on_completion);
+  auto work = [&](std::string name) {
+    std::string product = "  " + name + " worked\n";
+    std::osyncstream(std::cout) << product; // ok, op<< call is atomic
+    sync_point.arrive_and_wait();
+
+    product = "  " + name + " cleaned\n";
+    std::osyncstream(std::cout) << product;
+    sync_point.arrive_and_wait();
+  };
+  std::cout << "Starting...\n";
+  std::vector<std::jthread> threads;
+  threads.reserve(std::size(workers));
+  for (auto const &worker : workers) {
+    threads.emplace_back(work, worker);
+  }
+}
+} // namespace barrier_test
+
+//
+// https://en.cppreference.com/w/cpp/thread/counting_semaphore#Example
+//
+#include <atomic>
+#include <chrono>
+#include <iostream>
+#include <semaphore>
+#include <thread>
+
+namespace counting_semaphore_test {
+// global binary semaphore instances
+// object counts are set to zero
+// objects are in non-signaled state
+std::binary_semaphore smphSignalMainToThread{0}, smphSignalThreadToMain{0};
+
+void ThreadProc() {
+  // wait for a signal from the main proc
+  // by attempting to decrement the semaphore
+  smphSignalMainToThread.acquire();
+  // this call blocks until the semaphore's count
+  // is increased from the main proc
+
+  std::cout << "[thread] Got the signal\n";
+
+  // wait for 3 seconds to imitate some work
+  // being done by the thread
+  using namespace std::literals;
+  std::this_thread::sleep_for(3s);
+
+  std::cout << "[thread] Send the signal\n";
+
+  // signal the main proc back
+  smphSignalThreadToMain.release();
+}
+
+void run() {
+  // create some worker thread
+  std::thread thrWorker(ThreadProc);
+
+  std::cout << "[main] Send the signal\n";
+
+  // signal the worker thread to start working
+  // by increasing the semaphore's count
+  smphSignalMainToThread.release();
+
+  // wait until the worker thread is done doing the work
+  // by attempting to decrement the semaphore's count
+  smphSignalThreadToMain.acquire();
+  std::cout << "[main] Got the signal\n";
+  thrWorker.join();
+}
+} // namespace counting_semaphore_test

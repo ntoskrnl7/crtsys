@@ -33,13 +33,17 @@ $platformByArchitecture = @{
 }
 
 $platform = $platformByArchitecture[$Architecture]
+$generatorPlatform = $platform
+if ($Architecture -eq 'ARM') {
+  $generatorPlatform = "$platform,version=$WindowsSdkVersion"
+}
 $buildDir = Join-Path $sourceDir "build_$Architecture"
 
 $configureArgs = @(
   '-S', $sourceDir,
   '-B', $buildDir,
   '-G', 'Visual Studio 17 2022',
-  '-A', $platform,
+  '-A', $generatorPlatform,
   '-T', 'host=x64',
   "-DCMAKE_SYSTEM_VERSION=$WindowsSdkVersion",
   "-DCMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION=$WindowsSdkVersion",
@@ -47,7 +51,10 @@ $configureArgs = @(
 )
 
 if ($Project -eq 'driver' -and $NoBreakpoint) {
-  $configureArgs += '-DCRTSYS_TEST_BREAKPOINT=OFF'
+  $configureArgs += @(
+    '-DCRTSYS_TEST_BREAKPOINT=OFF',
+    '-DCRTSYS_ENABLE_DIAGNOSTIC_BREAKPOINTS=OFF'
+  )
 }
 
 Write-Host "Configuring $Project $Architecture $Configuration with Windows SDK $WindowsSdkVersion"

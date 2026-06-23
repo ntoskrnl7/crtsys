@@ -2,15 +2,53 @@
 
 [한국어 문서로 돌아가기](./ko-kr.md)
 
-이 문서는 기존 README의 `Goal` 섹션이 갖고 있던 상세 지원 현황을 보존하기
-위한 문서입니다. 체크된 항목은 구현된 항목이며, `tested` 링크가 있는 항목은
-테스트 코드 위치를 함께 표시합니다.
+이 문서는 crtsys가 지원하는 전체 STL/CRT 기능의 한계표가 아니라, 현재 kernel
+driver test에서 명시적으로 검증한 coverage matrix입니다. 목록에 없는 기능은
+곧바로 미지원이라는 뜻이 아니며, 아직 별도 driver test로 고정하지 않았다는
+의미입니다. 실제 미지원/제약이 확인된 항목은 known limitation 또는 blocker에
+따로 표시합니다.
+
+범례:
+
+- [x] Driver-test coverage 있음: `crtsys` kernel driver test에서 명시적으로
+  실행됩니다.
+- [ ] 아직 coverage 없음: 명시 driver test로 고정하지 않았거나 검토 중입니다.
+- Known limitation: 실제 미지원 의존성 또는 의미 차이가 확인된 항목입니다.
 
 여기서 coverage는 해당 기능이 구현되었고 테스트 suite에서 실행된다는 뜻입니다.
 모든 driver execution context에서 유효하다는 의미는 아닙니다. API가 더 넓은
 계약을 문서화하지 않았다면 기본값은 `PASSIVE_LEVEL`로 보세요.
 실행 문맥은 [설계 근거와 운영 경계](./ko-kr-design-rationale.md)와
 [NTL API 문서](./ko-kr-ntl-api.md)를 참고하세요.
+
+## IRQL 지원 계약
+
+아래 체크리스트는 기능 지원 현황이지, 각 기능을 모든 IRQL에서 써도 된다는
+허가가 아닙니다. 이 표는 현재 coverage에 대한 보수적인 `crtsys` 계약입니다.
+"감사된 caller context"는 해당 표현식 자체가 값-only이고 block하지 않는다는
+뜻입니다. 그래도 caller가 resident code/storage, allocation 없음, wait 없음,
+exception 없음, 유효한 WDK 문맥을 직접 보장해야 합니다. driver test는 여전히
+이 기능들을 `PASSIVE_LEVEL`에서 실행합니다.
+
+| 기능 영역 | 포함 항목 | 지원 IRQL | 비고 |
+| --- | --- | --- | --- |
+| Runtime 및 C++ 초기화 | non-local static initialization, dynamic initialization, function-local `static` | `PASSIVE_LEVEL` / driver initialization path | `crtsys` wrapper가 `DriverEntry`에서 실행합니다. 일반 C++ `thread_local`은 true per-thread TLS로 지원하지 않습니다. |
+| C++ 예외 | `throw`, `try`, function try block, `std::exception_ptr` | `PASSIVE_LEVEL` only | WDK callback 경계, spin lock 보유 구간, DPC, ISR, paging I/O 경로를 넘어 예외가 흐르게 하지 마세요. |
+| C++ RTTI | `typeid`, `dynamic_cast` | 감사된 caller context; 그 외에는 `PASSIVE_LEVEL` | 사용하는 driver target은 RTTI를 켜고 빌드해야 합니다. 대상 객체와 type metadata는 resident 상태여야 합니다. |
+| STL value-only helper | type traits, concepts, `std::array`, `std::span`, `std::string_view`, `std::bitset`, `std::pair`, `std::tuple`, `std::ratio`, `std::source_location`, `std::strong_ordering`, `std::numbers`, 단순 `std::move` / `std::exchange` / `std::invoke` / `std::reference_wrapper`, integer `std::to_chars` / `std::from_chars`, resident fixed storage 위의 순수 algorithm | 감사된 caller context; 그 외에는 `PASSIVE_LEVEL` | STL 중 `PASSIVE_LEVEL`보다 높은 곳에서 고려할 수 있는 영역은 이 정도뿐입니다. exact expression과 comparator/callback까지 감사해야 합니다. |
+| STL owning object, container, callback-heavy utility | `std::string`, container, `std::any`, `std::function`, smart pointer, `std::optional`, `std::variant`, `std::complex`, `std::valarray`, `std::filesystem::path`, 기본 `std::filesystem` file operation, `std::format`, random distribution, `std::regex`, `nlohmann::json`, allocation/throw/arbitrary user code 호출 가능성이 있는 algorithm | `PASSIVE_LEVEL` only | 생성, 소멸, 비교, hashing, allocation, deallocation, formatting, file-system I/O, user callback이 runtime path를 끌어올 수 있습니다. |
+| STL synchronization, threading, async | `std::thread`, `std::mutex`, `std::shared_mutex`, `std::condition_variable`, `std::call_once`, `std::future`, `std::promise`, `std::packaged_task` | `PASSIVE_LEVEL` only | wait, worker execution 생성, allocation, unload 이후 생존 문제가 생길 수 있습니다. |
+| STL atomic primitive | resident storage 위의 `std::atomic` / `std::atomic_flag` load, store, exchange, compare-exchange 및 C++20 wait/notify | 감사된 non-waiting operation은 `<= DISPATCH_LEVEL`; wait/notify는 `PASSIVE_LEVEL` only | wait/notify는 blocking synchronization으로 취급하세요. elevated IRQL에서 runtime-backed callback이나 allocation과 섞지 마세요. |
+| I/O stream | `std::cin`, `std::cout`, `std::cerr`, `std::clog`, wide stream 계열 | `PASSIVE_LEVEL` only | diagnostic/test 용도입니다. production hot path와 stack-sensitive path에서는 피하세요. |
+| C math 및 floating-point helper | math function, floating-point classification helper | exact helper를 별도 감사하지 않았다면 `PASSIVE_LEVEL` | floating-point state와 helper dependency는 driver context에 민감합니다. |
+| NTL entry, driver, device, RPC server helper | `ntl::main`, `ntl::driver`, `ntl::device`, `ntl::rpc::server` | `PASSIVE_LEVEL` only | initialization, teardown, device setup, IOCTL/RPC control path 용도입니다. |
+| NTL IRP view | `ntl::irp` | IRP를 넘겨준 dispatch path를 따름 | NTL device callback은 exact callback body를 별도 감사하지 않았다면 `PASSIVE_LEVEL`로 보세요. |
+| NTL status wrapper | `ntl::status` | caller context | `NTSTATUS`를 감싼 value-only wrapper입니다. |
+| NTL stack expansion | `ntl::expand_stack` | `PASSIVE_LEVEL` only | runtime-backed control-path helper입니다. hot path 회피 수단이 아닙니다. |
+| NTL ERESOURCE wrapper | `ntl::resource`, `ntl::unique_lock<ntl::resource>`, `ntl::shared_lock<ntl::resource>` | `<= APC_LEVEL` | blocking/resource-style synchronization입니다. DPC, ISR, spin-lock-held path에서 쓰지 마세요. |
+| NTL spin lock wrapper | `ntl::spin_lock`, `ntl::unique_lock<ntl::spin_lock>` | `<= DISPATCH_LEVEL` | 보유 구간은 resident, 짧고, nonblocking이어야 하며 allocation, wait, exception, stream, 임의 STL/runtime helper 호출이 없어야 합니다. |
+| NTL IRQL helper | `ntl::irql`, `ntl::raise_irql`, `ntl::raise_irql_to_dpc_level`, `ntl::raise_irql_to_synch_level` | 현재 IRQL을 명시적으로 조작 | raised scope는 최대한 작게 유지하세요. |
+| NTL RPC client | `ntl::rpc::client` | user mode, kernel IRQL 아님 | client side는 `DeviceIoControl`을 씁니다. kernel-side 안전성은 server callback 계약을 따릅니다. |
 
 ## C++ Standard
 
@@ -29,12 +67,11 @@ cppreference Example 코드를 이식한 항목은
       [(tested)](../test/cmake/driver/src/cpp/lang/initialization.cpp#L41)
   - [x] [Dynamic initialization](https://en.cppreference.com/w/cpp/language/initialization#Dynamic_initialization)
     [(tested)](../test/cmake/driver/src/cpp/lang/initialization.cpp#L56)
-- [ ] [Static local variables](https://en.cppreference.com/w/cpp/language/storage_duration#Static_local_variables)
-  - [ ] `thread_local`
-    [(disabled cppreference example)](../test/cmake/driver/src/cpp/lang/initialization.cpp#L79)
-  - [x] function-local `static`
-    [(tested)](../test/cmake/driver/src/cpp/lang/initialization.cpp#L124)
-    [(regression)](../test/cmake/driver/src/cpp/lang/initialization.cpp#L229)
+- [x] [Function-local `static` variables](https://en.cppreference.com/w/cpp/language/storage_duration#Static_local_variables)
+  [(tested)](../test/cmake/driver/src/cpp/lang/initialization.cpp#L124)
+  [(regression)](../test/cmake/driver/src/cpp/lang/initialization.cpp#L229)
+- [ ] [`thread_local`](https://en.cppreference.com/w/cpp/language/storage_duration#Thread_storage_duration)
+  [(disabled cppreference example)](../test/cmake/driver/src/cpp/lang/initialization.cpp#L79)
 
 ### Exceptions
 
@@ -47,6 +84,13 @@ cppreference Example 코드를 이식한 항목은
 - [x] [std::exception_ptr](https://en.cppreference.com/w/cpp/error/exception_ptr)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/exception.cpp)
 
+### RTTI
+
+- [x] [typeid](https://en.cppreference.com/w/cpp/language/typeid)
+  [(tested)](../test/cmake/driver/src/cpp/lang/rtti.cpp)
+- [x] [dynamic_cast](https://en.cppreference.com/w/cpp/language/dynamic_cast)
+  [(tested)](../test/cmake/driver/src/cpp/lang/rtti.cpp)
+
 ## Microsoft STL
 
 - [x] [std::accumulate](https://en.cppreference.com/w/cpp/algorithm/accumulate)
@@ -57,10 +101,18 @@ cppreference Example 코드를 이식한 항목은
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/containers.cpp)
 - [x] [std::atomic](https://en.cppreference.com/w/cpp/atomic/atomic)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/atomic.cpp)
+- [x] [std::atomic::wait/notify](https://en.cppreference.com/w/cpp/atomic/atomic/wait)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/atomic.cpp)
 - [x] [std::atomic_flag](https://en.cppreference.com/w/cpp/atomic/atomic_flag)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/atomic.cpp)
 - [x] [std::chrono](https://en.cppreference.com/w/cpp/chrono)
   [(tested)](../test/cmake/driver/src/cpp/stl/chrono.cpp#L15)
+  - C++20 timezone 경로인
+    [`std::chrono::current_zone`](https://en.cppreference.com/w/cpp/chrono/current_zone),
+    [`std::chrono::locate_zone`](https://en.cppreference.com/w/cpp/chrono/locate_zone),
+    [`std::chrono::zoned_time`](https://en.cppreference.com/w/cpp/chrono/zoned_time),
+    [`std::chrono::time_zone::get_info`](https://en.cppreference.com/w/cpp/chrono/time_zone/get_info)도
+    기본 driver build에서 실행됩니다.
 - [x] [std::any](https://en.cppreference.com/w/cpp/utility/any)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::bind](https://en.cppreference.com/w/cpp/utility/functional/bind)
@@ -74,7 +126,9 @@ cppreference Example 코드를 이식한 항목은
 - [x] [std::concepts](https://en.cppreference.com/w/cpp/concepts)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::complex](https://en.cppreference.com/w/cpp/numeric/complex)
-  [(cppreference arithmetic example)](../test/cmake/driver/src/cpp/stl/numeric.cpp)
+  산술 연산 및 [std::exp](https://en.cppreference.com/w/cpp/numeric/complex/exp),
+  [std::pow](https://en.cppreference.com/w/cpp/numeric/complex/pow)
+  [(cppreference examples)](../test/cmake/driver/src/cpp/stl/numeric.cpp)
 - [x] [std::deque](https://en.cppreference.com/w/cpp/container/deque)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/containers.cpp)
 - [x] [std::exchange](https://en.cppreference.com/w/cpp/utility/exchange)
@@ -88,7 +142,7 @@ cppreference Example 코드를 이식한 항목은
 - [x] [std::gcd](https://en.cppreference.com/w/cpp/numeric/gcd)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::from_chars](https://en.cppreference.com/cpp/utility/from_chars)
-  [(cppreference integer example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
+  [(cppreference example + floating-point checks)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::inclusive_scan](https://en.cppreference.com/w/cpp/algorithm/inclusive_scan)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::inner_product](https://en.cppreference.com/w/cpp/algorithm/inner_product)
@@ -106,8 +160,12 @@ cppreference Example 코드를 이식한 항목은
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::lcm](https://en.cppreference.com/w/cpp/numeric/lcm)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
+- [x] [std::lerp](https://en.cppreference.com/w/cpp/numeric/lerp)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::list](https://en.cppreference.com/w/cpp/container/list)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/containers.cpp)
+- [x] [std::locale](https://en.cppreference.com/w/cpp/locale/locale)
+  [(cppreference examples)](../test/cmake/driver/src/cpp/stl/locale.cpp)
 - [x] [std::map](https://en.cppreference.com/w/cpp/container/map)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/containers.cpp)
 - [x] [std::make_heap](https://en.cppreference.com/w/cpp/algorithm/make_heap)
@@ -126,8 +184,12 @@ cppreference Example 코드를 이식한 항목은
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::optional](https://en.cppreference.com/w/cpp/utility/optional)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
+- [x] [std::expected](https://en.cppreference.com/w/cpp/utility/expected)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::pair](https://en.cppreference.com/w/cpp/utility/pair)
   [(cppreference make_pair example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
+- [x] [std::pmr::monotonic_buffer_resource](https://en.cppreference.com/w/cpp/memory/monotonic_buffer_resource)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/memory.cpp)
 - [x] [std::partial_sum](https://en.cppreference.com/w/cpp/algorithm/partial_sum)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::partition](https://en.cppreference.com/w/cpp/algorithm/partition)
@@ -140,6 +202,12 @@ cppreference Example 코드를 이식한 항목은
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::ranges::sort](https://en.cppreference.com/w/cpp/algorithm/ranges/sort)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
+- [x] [std::views::zip](https://en.cppreference.com/w/cpp/ranges/zip_view),
+      [std::views::chunk](https://en.cppreference.com/w/cpp/ranges/chunk_view),
+      [std::views::slide](https://en.cppreference.com/w/cpp/ranges/slide_view),
+      [std::views::stride](https://en.cppreference.com/w/cpp/ranges/stride_view),
+      [std::views::repeat](https://en.cppreference.com/w/cpp/ranges/repeat_view)
+  [(cppreference examples)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::ratio](https://en.cppreference.com/w/cpp/numeric/ratio)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::reference_wrapper](https://en.cppreference.com/w/cpp/utility/functional/reference_wrapper)
@@ -160,6 +228,60 @@ cppreference Example 코드를 이식한 항목은
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::strong_ordering](https://en.cppreference.com/w/cpp/utility/compare/strong_ordering)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
+- [x] [std::format](https://en.cppreference.com/w/cpp/utility/format)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
+- [x] [std::regex](https://en.cppreference.com/w/cpp/regex)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/regex.cpp)
+- [x] [std::filesystem::path lexical operation](https://en.cppreference.com/w/cpp/filesystem/path/lexically_normal)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::directory_iterator](https://en.cppreference.com/w/cpp/filesystem/directory_iterator)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::recursive_directory_iterator](https://en.cppreference.com/w/cpp/filesystem/recursive_directory_iterator)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::copy_file](https://en.cppreference.com/w/cpp/filesystem/copy_file)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::copy](https://en.cppreference.com/w/cpp/filesystem/copy)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::create_directory / create_directories](https://en.cppreference.com/w/cpp/filesystem/create_directory)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::create_hard_link](https://en.cppreference.com/w/cpp/filesystem/create_hard_link)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::create_symlink / create_directory_symlink](https://en.cppreference.com/w/cpp/filesystem/create_symlink)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::read_symlink](https://en.cppreference.com/w/cpp/filesystem/read_symlink)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::copy_symlink](https://en.cppreference.com/w/cpp/filesystem/copy_symlink)
+  [(tested)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::directory_entry](https://en.cppreference.com/w/cpp/filesystem/directory_entry)
+  [(tested)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::equivalent](https://en.cppreference.com/w/cpp/filesystem/equivalent)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::file_size](https://en.cppreference.com/w/cpp/filesystem/file_size)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::hard_link_count](https://en.cppreference.com/w/cpp/filesystem/hard_link_count)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::status / symlink_status](https://en.cppreference.com/w/cpp/filesystem/status)
+  및 [exists](https://en.cppreference.com/w/cpp/filesystem/exists),
+  [is_directory](https://en.cppreference.com/w/cpp/filesystem/is_directory),
+  [is_regular_file](https://en.cppreference.com/w/cpp/filesystem/is_regular_file),
+  [is_empty](https://en.cppreference.com/w/cpp/filesystem/is_empty) 같은 file type query
+  [(cppreference examples)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::permissions](https://en.cppreference.com/w/cpp/filesystem/permissions)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::resize_file](https://en.cppreference.com/w/cpp/filesystem/resize_file)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::remove_all](https://en.cppreference.com/w/cpp/filesystem/remove)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::space](https://en.cppreference.com/w/cpp/filesystem/space)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::rename](https://en.cppreference.com/w/cpp/filesystem/rename)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::temp_directory_path](https://en.cppreference.com/w/cpp/filesystem/temp_directory_path)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::last_write_time](https://en.cppreference.com/w/cpp/filesystem/last_write_time)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::canonical / weakly_canonical](https://en.cppreference.com/w/cpp/filesystem/canonical)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] [std::string](https://en.cppreference.com/w/cpp/string/basic_string)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/string.cpp)
 - [x] [std::string_view](https://en.cppreference.com/w/cpp/string/basic_string_view)
@@ -168,10 +290,12 @@ cppreference Example 코드를 이식한 항목은
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/memory.cpp)
 - [x] [std::thread](https://en.cppreference.com/w/cpp/thread)
   [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp#L35)
+- [x] [std::jthread](https://en.cppreference.com/w/cpp/thread/jthread)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/atomic.cpp)
 - [x] [std::tuple](https://en.cppreference.com/w/cpp/utility/tuple)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::to_chars](https://en.cppreference.com/w/cpp/utility/to_chars)
-  [(cppreference integer example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::transform](https://en.cppreference.com/w/cpp/algorithm/transform)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::unique_ptr](https://en.cppreference.com/w/cpp/memory/unique_ptr)
@@ -190,6 +314,8 @@ cppreference Example 코드를 이식한 항목은
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/containers.cpp)
 - [x] [std::numbers](https://en.cppreference.com/w/cpp/numeric/constants)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
+- [x] [std::random_device](https://en.cppreference.com/w/cpp/numeric/random/random_device)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/numeric.cpp)
 - [x] [std::uniform_int_distribution](https://en.cppreference.com/w/cpp/numeric/random/uniform_int_distribution)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/numeric.cpp)
 - [x] [std::valarray::slice](https://en.cppreference.com/w/cpp/numeric/valarray/slice)
@@ -208,6 +334,13 @@ cppreference Example 코드를 이식한 항목은
   [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp#L254)
 - [x] [std::packaged_task](https://en.cppreference.com/w/cpp/thread/packaged_task)
   [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp#L318)
+- [x] [std::latch](https://en.cppreference.com/w/cpp/thread/latch)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/thread.cpp)
+- [x] [std::barrier](https://en.cppreference.com/w/cpp/thread/barrier)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/thread.cpp)
+- [x] [std::counting_semaphore](https://en.cppreference.com/w/cpp/thread/counting_semaphore)
+  및 [std::binary_semaphore](https://en.cppreference.com/w/cpp/thread/counting_semaphore)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/thread.cpp)
 - [x] [std::cin](https://en.cppreference.com/w/cpp/io/cin)
 - [x] [std::cout](https://en.cppreference.com/w/cpp/io/cout)
 - [x] [std::cerr](https://en.cppreference.com/w/cpp/io/cerr)
@@ -225,55 +358,12 @@ cppreference Example 코드를 이식한 항목은
 후보입니다. 기본 원칙은 `PASSIVE_LEVEL`에서 파일 시스템, locale, 콘솔 입력,
 미지원 C++ 런타임 의존성 없이 실행할 수 있는 예제를 우선합니다.
 
-### 남은 후속 후보
-
-- [ ] 활성 toolset 지원 검토 후 추가
-      [`std::ranges`](https://en.cppreference.com/w/cpp/ranges) C++23
-      view/adaptor 예제
-
 ### 추가 조사가 필요한 후보
 
-- [ ] [std::jthread](https://en.cppreference.com/w/cpp/thread/jthread)
-  - 현재 driver test에서는 MSVC STL atomic wait/notify ABI helper가 없어
-    막혀 있습니다.
-- [ ] [std::atomic::wait/notify](https://en.cppreference.com/w/cpp/atomic/atomic/wait)
-  - MSVC STL atomic wait/notify ABI helper의 커널 호환 구현이 필요합니다.
-- [ ] [std::expected](https://en.cppreference.com/w/cpp/utility/expected)
-  - 조건부 cppreference harness는 들어가 있지만, 현재 MSVC 14.32 toolset은
-    `<expected>`를 제공하지 않습니다.
-- [ ] [std::pmr](https://en.cppreference.com/w/cpp/memory/memory_resource)
-  - cppreference `monotonic_buffer_resource` harness는
-    `CRTSYS_ENABLE_UNSUPPORTED_PMR_TEST` 뒤에 준비되어 있습니다. 기본 driver
-    build는 `_Aligned_get_default_resource` 같은 MSVC PMR resource ABI helper가
-    없어 막혀 있습니다.
-- [ ] [std::exp](https://en.cppreference.com/w/cpp/numeric/complex/exp),
-      [std::pow](https://en.cppreference.com/w/cpp/numeric/complex/pow) 같은
-      `std::complex` 초월 함수
-  - `_Exp`, `ilogb`, `scalbn`, `copysign` 같은 MSVC math helper 심볼이
-    아직 없습니다.
-- [ ] [std::lerp](https://en.cppreference.com/w/cpp/numeric/lerp)
-  - cppreference harness는 `CRTSYS_ENABLE_UNSUPPORTED_LERP_TEST` 뒤에
-    준비되어 있습니다. MSVC의 `std::lerp(float)` 구현은 driver build에서
-    아직 없는 `fmaf` helper를 끌어올 수 있습니다.
-- [ ] [std::random_device](https://en.cppreference.com/w/cpp/numeric/random/random_device)
-  - hosted entropy API 검토가 필요할 가능성이 큽니다. 현재 테스트는
-    고정 seed를 사용합니다.
-- [ ] [std::latch](https://en.cppreference.com/w/cpp/thread/latch),
-      [std::barrier](https://en.cppreference.com/w/cpp/thread/barrier),
-      [std::counting_semaphore](https://en.cppreference.com/w/cpp/thread/counting_semaphore)
-  - 같은 atomic wait/notify ABI helper 검토가 필요할 가능성이 큽니다.
 - [ ] [thread_local](https://en.cppreference.com/w/cpp/language/storage_duration#Thread_storage_duration)
-  - compiler TLS 호환은 아직 부분적이며, cppreference storage-duration 예제는
-    기본 빌드에서 비활성화되어 있습니다.
-- [ ] [RTTI: typeid](https://en.cppreference.com/w/cpp/language/typeid)
-  및 [dynamic_cast](https://en.cppreference.com/w/cpp/language/dynamic_cast)
-  - driver test에서 RTTI를 켤지 먼저 결정해야 합니다.
-- [ ] [std::filesystem](https://en.cppreference.com/w/cpp/filesystem)
-  - 파일 시스템 및 hosted ABI 검토가 필요할 가능성이 큽니다.
-- [ ] [std::regex](https://en.cppreference.com/w/cpp/regex)
-  - allocation, locale, exception path 검토가 필요할 가능성이 큽니다.
-- [ ] [std::format](https://en.cppreference.com/w/cpp/utility/format)
-  - MSVC STL 지원 여부와 커널에 맞는 의존성 검토가 필요합니다.
+  - 일반 C++ `thread_local`은 기본 driver build에서 true per-thread TLS로
+    지원하지 않습니다. cppreference storage-duration 예제는 비활성화되어
+    있습니다.
 
 ## C Standard
 

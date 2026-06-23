@@ -26,12 +26,26 @@ test harness, typically by moving the sample `main()` body into a namespaced
 - `std::shared_ptr`: <https://en.cppreference.com/w/cpp/memory/shared_ptr>
 - `std::atomic`: <https://en.cppreference.com/w/cpp/atomic/atomic>
 - `std::atomic_flag`: <https://en.cppreference.com/w/cpp/atomic/atomic_flag>
+- `std::latch`: <https://en.cppreference.com/w/cpp/thread/latch>
+- `std::barrier`: <https://en.cppreference.com/w/cpp/thread/barrier>
+- `std::counting_semaphore` / `std::binary_semaphore`: <https://en.cppreference.com/w/cpp/thread/counting_semaphore>
 - `std::weak_ptr`: <https://en.cppreference.com/w/cpp/memory/weak_ptr>
 - `std::array`: <https://en.cppreference.com/w/cpp/container/array>
 - `std::vector`: <https://en.cppreference.com/w/cpp/container/vector>
 - `std::deque`: <https://en.cppreference.com/w/cpp/container/deque>
 - `std::list`: <https://en.cppreference.com/w/cpp/container/list>
 - `std::forward_list::insert_after`: <https://en.cppreference.com/w/cpp/container/forward_list/insert_after>
+- `std::locale`: <https://en.cppreference.com/w/cpp/locale/locale>
+- `std::locale` constructors: <https://en.cppreference.com/w/cpp/locale/locale/locale>
+- `std::has_facet`: <https://en.cppreference.com/w/cpp/locale/has_facet>
+- `std::use_facet`: <https://en.cppreference.com/w/cpp/locale/use_facet>
+- `std::numpunct`: <https://en.cppreference.com/w/cpp/locale/numpunct>
+- `std::ctype<char>`: <https://en.cppreference.com/w/cpp/locale/ctype_char>
+- `std::messages::open`: <https://en.cppreference.com/w/cpp/locale/messages/open>
+- `std::get_money`: <https://en.cppreference.com/w/cpp/io/manip/get_money>
+- `std::put_money`: <https://en.cppreference.com/w/cpp/io/manip/put_money>
+- `std::get_time`: <https://en.cppreference.com/w/cpp/io/manip/get_time>
+- `std::put_time`: <https://en.cppreference.com/w/cpp/io/manip/put_time>
 - `std::map`: <https://en.cppreference.com/w/cpp/container/map>
 - `std::set`: <https://en.cppreference.com/w/cpp/container/set>
 - `std::multiset::erase`: <https://en.cppreference.com/w/cpp/container/multiset/erase>
@@ -55,6 +69,11 @@ test harness, typically by moving the sample `main()` body into a namespaced
 - `std::binary_search`: <https://en.cppreference.com/w/cpp/algorithm/binary_search>
 - `std::ranges` filter/transform views: <https://en.cppreference.com/w/cpp/ranges>
 - `std::ranges::sort`: <https://en.cppreference.com/w/cpp/algorithm/ranges/sort>
+- `std::ranges::zip_view`: <https://en.cppreference.com/w/cpp/ranges/zip_view>
+- `std::ranges::chunk_view`: <https://en.cppreference.com/w/cpp/ranges/chunk_view>
+- `std::ranges::slide_view`: <https://en.cppreference.com/w/cpp/ranges/slide_view>
+- `std::ranges::stride_view`: <https://en.cppreference.com/w/cpp/ranges/stride_view>
+- `std::ranges::repeat_view`: <https://en.cppreference.com/w/cpp/ranges/repeat_view>
 - `std::merge`: <https://en.cppreference.com/w/cpp/algorithm/merge>
 - `std::make_heap`: <https://en.cppreference.com/w/cpp/algorithm/make_heap>
 - `std::next_permutation`: <https://en.cppreference.com/w/cpp/algorithm/next_permutation>
@@ -85,73 +104,110 @@ test harness, typically by moving the sample `main()` body into a namespaced
 - `std::derived_from` / `std::same_as`: <https://en.cppreference.com/w/cpp/concepts>
 - `std::strong_ordering`: <https://en.cppreference.com/w/cpp/utility/compare/strong_ordering>
 - `std::numbers`: <https://en.cppreference.com/w/cpp/numeric/constants>
+- `std::format`: <https://en.cppreference.com/w/cpp/utility/format/format>
+- `std::regex`: <https://en.cppreference.com/w/cpp/regex>
 - `std::distance`: <https://en.cppreference.com/w/cpp/iterator/distance>
 - `std::advance`: <https://en.cppreference.com/w/cpp/iterator/advance>
 - `std::next`: <https://en.cppreference.com/w/cpp/iterator/next>
 - `std::back_inserter`: <https://en.cppreference.com/w/cpp/iterator/back_inserter>
 - `std::complex`: <https://en.cppreference.com/w/cpp/numeric/complex>
+- `std::complex std::exp`: <https://en.cppreference.com/w/cpp/numeric/complex/exp>
+- `std::complex std::pow`: <https://en.cppreference.com/w/cpp/numeric/complex/pow>
 - `std::valarray::slice`: <https://en.cppreference.com/w/cpp/numeric/valarray/slice>
+- `std::random_device`: <https://en.cppreference.com/w/cpp/numeric/random/random_device>
 - `std::uniform_int_distribution`: <https://en.cppreference.com/w/cpp/numeric/random/uniform_int_distribution>
+- `std::chrono::current_zone`: <https://en.cppreference.com/w/cpp/chrono/current_zone>
+- `std::chrono::locate_zone`: <https://en.cppreference.com/w/cpp/chrono/locate_zone>
+- `std::chrono::zoned_time`: <https://en.cppreference.com/w/cpp/chrono/zoned_time>
+- `std::chrono::time_zone::get_info`: <https://en.cppreference.com/w/cpp/chrono/time_zone/get_info>
 - `std::unique_ptr`: <https://en.cppreference.com/w/cpp/memory/unique_ptr>
 - `std::pmr::monotonic_buffer_resource`: <https://en.cppreference.com/w/cpp/memory/monotonic_buffer_resource>
+- `std::filesystem::path` lexical operations: <https://en.cppreference.com/w/cpp/filesystem/path/lexically_normal>
+- `std::filesystem::directory_iterator`: <https://en.cppreference.com/w/cpp/filesystem/directory_iterator>
+- `std::filesystem::recursive_directory_iterator`: <https://en.cppreference.com/w/cpp/filesystem/recursive_directory_iterator>
+- `std::filesystem::copy`: <https://en.cppreference.com/w/cpp/filesystem/copy>
+- `std::filesystem::copy_file`: <https://en.cppreference.com/w/cpp/filesystem/copy_file>
+- `std::filesystem::create_directory`: <https://en.cppreference.com/w/cpp/filesystem/create_directory>
+- `std::filesystem::create_hard_link`: <https://en.cppreference.com/w/cpp/filesystem/create_hard_link>
+- `std::filesystem::create_symlink` / `std::filesystem::create_directory_symlink`: <https://en.cppreference.com/w/cpp/filesystem/create_symlink>
+- `std::filesystem::read_symlink`: <https://en.cppreference.com/w/cpp/filesystem/read_symlink>
+- `std::filesystem::copy_symlink`: <https://en.cppreference.com/w/cpp/filesystem/copy_symlink>
+- `std::filesystem::directory_entry`: <https://en.cppreference.com/w/cpp/filesystem/directory_entry>
+- `std::filesystem::equivalent`: <https://en.cppreference.com/w/cpp/filesystem/equivalent>
+- `std::filesystem::file_size`: <https://en.cppreference.com/w/cpp/filesystem/file_size>
+- `std::filesystem::hard_link_count`: <https://en.cppreference.com/w/cpp/filesystem/hard_link_count>
+- `std::filesystem::status` / `std::filesystem::symlink_status`: <https://en.cppreference.com/w/cpp/filesystem/status>
+- `std::filesystem::exists`: <https://en.cppreference.com/w/cpp/filesystem/exists>
+- `std::filesystem::is_directory`: <https://en.cppreference.com/w/cpp/filesystem/is_directory>
+- `std::filesystem::is_regular_file`: <https://en.cppreference.com/w/cpp/filesystem/is_regular_file>
+- `std::filesystem::is_empty`: <https://en.cppreference.com/w/cpp/filesystem/is_empty>
+- `std::filesystem::permissions`: <https://en.cppreference.com/w/cpp/filesystem/permissions>
+- `std::filesystem::resize_file`: <https://en.cppreference.com/w/cpp/filesystem/resize_file>
+- `std::filesystem::remove_all`: <https://en.cppreference.com/w/cpp/filesystem/remove>
+- `std::filesystem::space`: <https://en.cppreference.com/w/cpp/filesystem/space>
+- `std::filesystem::rename`: <https://en.cppreference.com/w/cpp/filesystem/rename>
+- `std::filesystem::temp_directory_path`: <https://en.cppreference.com/w/cpp/filesystem/temp_directory_path>
+- `std::filesystem::last_write_time`: <https://en.cppreference.com/w/cpp/filesystem/last_write_time>
+- `std::filesystem::canonical` / `std::filesystem::weakly_canonical`: <https://en.cppreference.com/w/cpp/filesystem/canonical>
 - `std::function`: <https://en.cppreference.com/w/cpp/utility/functional/function>
 - `std::bind`: <https://en.cppreference.com/w/cpp/utility/functional/bind>
 
-The `std::atomic` example keeps the cppreference worker logic, but the default
-kernel-driver build uses `std::thread` with explicit joins instead of
-`std::jthread`. The exact `std::jthread` form is available behind
-`CRTSYS_ENABLE_EXACT_CPPREFERENCE_JTHREAD_ATOMIC_EXAMPLE`; it currently requires
-MSVC STL atomic wait/notify ABI helpers that crtsys does not implement yet.
+The `std::atomic` example keeps the cppreference worker logic and uses the
+exact `std::jthread` form when C++20 atomic wait/notify support is available.
 
-The `std::atomic_flag` example keeps the cppreference spinlock logic, but the
-default kernel-driver build disables the optional C++20 wait/notify path for
-the same ABI-helper reason.
+The `std::atomic_flag` example keeps the cppreference spinlock logic and uses
+the optional C++20 wait/notify path when the feature-test macro is available.
+
+The `std::latch`, `std::barrier`, and semaphore examples keep the cppreference
+synchronization flow. The barrier example uses `std::osyncstream`, and the
+semaphore example keeps the original worker delay.
 
 The `std::unique_ptr` example keeps the ownership, polymorphism, custom deleter,
-array, and linked-list portions. The default kernel-driver build skips the
-hosted file I/O demo and uses a smaller linked-list size; the exact linked-list
-stress size is available behind
-`CRTSYS_ENABLE_EXACT_CPPREFERENCE_UNIQUE_PTR_STRESS_TEST`.
+array, and linked-list portions, including the hosted file I/O custom deleter,
+the locale-imbued output, and the cppreference linked-list stress size.
 
-The `std::any` example keeps the `any_cast`, bad-cast, reset, and pointer-access
-behavior. The default kernel-driver build prints known sample type names instead
-of calling `any::type().name()`, because that path requires MSVC `type_info`
-name/cleanup ABI helpers that crtsys does not implement yet.
+The locale harness ports the linked cppreference locale, facet, money, and time
+examples. The messages example does not claim hosted message-catalog support.
 
-The `std::iota` example keeps the list/iterator/shuffle structure. The default
-kernel-driver build uses a fixed `std::mt19937` seed instead of
-`std::random_device`, because the latter can depend on hosted entropy APIs.
+The `std::any` example keeps the `any_cast`, bad-cast, reset, pointer-access,
+and `any::type().name()` behavior.
 
-The `std::reference_wrapper` example uses the same fixed-seed approach for its
-shuffle step, for the same reason.
+The `std::iota` example keeps the cppreference list/iterator/shuffle structure.
 
-The `std::merge` and `std::uniform_int_distribution` examples also use fixed
-`std::mt19937` seeds instead of `std::random_device`.
+The `std::reference_wrapper` example keeps the cppreference shuffle structure.
+
+The chrono timezone tests keep the cppreference `current_zone` / `zoned_time`
+flow and add explicit `locate_zone` / `time_zone::get_info` offset checks for
+selected zones.
 
 The `std::stack::push` example keeps the cppreference BrainHack interpreter
 shape. The x64 driver-test harness invokes it through `ntl::expand_stack`
 because the example embeds a 32 KiB tape buffer in the interpreter object.
 
-The `std::to_chars` and `std::from_chars` tests currently cover the integer
-paths. Floating-point conversion examples are intentionally left out of the
-default kernel-driver run until their MSVC STL dependency surface is reviewed.
+The listed C++23 `std::views` examples are compiled into the driver test when
+the matching feature-test macro is available.
 
-The `std::expected` example is present as a conditional harness. The current
-MSVC 14.32 toolset used by the driver build does not provide `<expected>`, so
-the default run reports that the feature is unavailable.
+The `std::to_chars` test follows the cppreference example, including the
+floating-point overload calls. The `std::from_chars` test follows the
+cppreference integer example and adds floating-point overload checks for the
+same page.
 
-The `std::complex` test keeps only the arithmetic portion of the cppreference
-example by default. The transcendental portions using functions such as
-`std::pow` and `std::exp` require MSVC math helper symbols that crtsys does not
-provide yet.
+The `std::expected` example is compiled into the driver test when the
+`__cpp_lib_expected` feature-test macro is available.
 
-The `std::lerp` example is available behind
-`CRTSYS_ENABLE_UNSUPPORTED_LERP_TEST`. The default kernel-driver build disables
-it because MSVC's `std::lerp(float)` implementation can reference the `fmaf`
-helper in driver builds, which crtsys does not provide yet.
+The `std::format` example runs in the default driver build.
 
-The `std::pmr::monotonic_buffer_resource` example is available behind
-`CRTSYS_ENABLE_UNSUPPORTED_PMR_TEST` with smaller default iteration and node
-counts. The default kernel-driver build does not enable it because MSVC's PMR
-implementation requires resource ABI helpers such as
-`_Aligned_get_default_resource` that crtsys does not provide yet.
+The `std::regex` example keeps the cppreference `regex_search`, iterator, and
+`regex_replace` flow.
+
+The filesystem examples listed above are ported into the driver harness.
+The `copy_symlink` page currently has no cppreference example, so the harness
+uses a small direct check for that function.
+
+The `std::complex` test keeps the arithmetic portion of the cppreference
+example and also includes the `std::exp` and `std::pow` examples.
+
+The `std::lerp` example is enabled in the default kernel-driver build.
+
+The `std::pmr::monotonic_buffer_resource` example is compiled into the default
+driver run with the cppreference iteration and node counts.

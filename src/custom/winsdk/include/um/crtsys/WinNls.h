@@ -29,7 +29,10 @@ GetLocaleInfoW(
 
 
 // ucrt\locale\getqloc_downlevel.cpp
+#ifndef _LDK_LOCALE_ENUMPROCW_DEFINED
+#define _LDK_LOCALE_ENUMPROCW_DEFINED
 typedef BOOL (CALLBACK* LOCALE_ENUMPROCW)(LPWSTR);                                          // DEPRECATED: please use LOCALE_ENUMPROCEX
+#endif
 
 WINBASEAPI
 BOOL
@@ -41,7 +44,10 @@ EnumSystemLocalesW(
 
 
 // ucrt/inc/corecrt_internal.h
+#ifndef _LDK_LOCALE_ENUMPROCEX_DEFINED
+#define _LDK_LOCALE_ENUMPROCEX_DEFINED
 typedef BOOL (CALLBACK* LOCALE_ENUMPROCEX)(LPWSTR, DWORD, LPARAM);
+#endif
 
 // ucrt/internal/winapi_thunks.cpp
 WINBASEAPI

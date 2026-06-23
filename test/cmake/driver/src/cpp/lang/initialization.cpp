@@ -1,8 +1,9 @@
-﻿//
+//
 // https://en.cppreference.com/w/cpp/language/constant_initialization#Example
 //
 #include <array>
 #include <iostream>
+
 namespace constant_initialization_test {
 struct S {
   static const int c;
@@ -21,9 +22,9 @@ void run() {
 //
 // https://en.cppreference.com/w/cpp/language/zero_initialization#Example
 //
-
 #include <iostream>
 #include <string>
+
 namespace zero_initialization_test {
 struct A {
   int a, b, c;
@@ -51,8 +52,8 @@ void run(int argc, char *[]) {
 
 //
 // https://en.cppreference.com/w/cpp/language/initialization#Dynamic_initialization
-// (no cppreference example.)
 //
+// (no cppreference example.)
 namespace dynamic_initialization_test {
 struct test_object {
   int n;
@@ -69,14 +70,13 @@ static test_object static_object_(2);
 //
 // https://en.cppreference.com/w/cpp/language/storage_duration#Example
 //
-// This cppreference example uses thread_local, which crtsys does not currently
-// support as C++ per-thread storage. Keep the sample available as an explicit
-// opt-in test instead of running it in the default driver suite.
-//
-#if defined(CRTSYS_ENABLE_UNSUPPORTED_THREAD_LOCAL_TEST)
 #include <mutex>
 #include <thread>
+
 namespace storage_duration_example_test {
+// General C++ thread_local is intentionally not covered by the default driver
+// run. The kernel GS/FS base does not provide user-mode TEB TLS semantics here,
+// so this cppreference example is only useful as an unsupported diagnostic.
 thread_local unsigned int rage = 1;
 std::mutex cout_mutex;
 
@@ -98,7 +98,6 @@ void run() {
   b.join();
 }
 } // namespace storage_duration_example_test
-#endif
 
 #include <atomic>
 #include <chrono>

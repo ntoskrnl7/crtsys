@@ -13,6 +13,9 @@
 #if __has_include(<expected>)
 #include <expected>
 #endif
+#if __has_include(<format>)
+#include <format>
+#endif
 #include <functional>
 #include <iomanip>
 #include <iostream>
@@ -22,6 +25,7 @@
 #include <numbers>
 #include <optional>
 #include <random>
+#include <ranges>
 #include <ratio>
 #include <source_location>
 #include <stdexcept>
@@ -106,6 +110,37 @@ void run() {
 void run() { std::cout << "std::expected is not available in this toolset\n"; }
 #endif
 } // namespace expected_test
+
+//
+// https://en.cppreference.com/w/cpp/utility/format/format#Example
+//
+namespace format_test {
+template <typename... Args>
+std::string dyna_print(std::string_view rt_fmt_str, Args &&...args) {
+#if defined(__cpp_lib_format)
+  return std::vformat(rt_fmt_str, std::make_format_args(args...));
+#else
+  rt_fmt_str;
+  (args, ...);
+  return {};
+#endif
+}
+
+void run() {
+#if defined(__cpp_lib_format)
+  std::cout << std::format("Hello {}!\n", "world");
+  std::string fmt;
+  for (int i{}; i != 3; ++i) {
+    fmt += "{} "; // constructs the formatting string
+    std::cout << fmt << " : ";
+    std::cout << dyna_print(fmt, "alpha", 'Z', 3.14, "unused");
+    std::cout << '\n';
+  }
+#else
+  std::cout << "std::format is not available in this MSVC STL\n";
+#endif
+}
+} // namespace format_test
 
 //
 // https://en.cppreference.com/w/cpp/utility/tuple#Example
@@ -217,29 +252,16 @@ void run() {
 // https://en.cppreference.com/w/cpp/utility/any#Example
 //
 namespace any_test {
-template <typename T>
-void print_any_value(const char *type_name, const std::any &a) {
-#if defined(CRTSYS_ENABLE_EXACT_CPPREFERENCE_ANY_TYPE_NAME_EXAMPLE)
-  std::cout << a.type().name() << ": " << std::any_cast<T>(a) << '\n';
-#else
-  // The cppreference example uses any::type().name(). That requires MSVC
-  // type_info name/cleanup ABI helpers that crtsys does not provide yet, so
-  // the default kernel test keeps the any_cast behavior and prints the known
-  // sample type name directly.
-  std::cout << type_name << ": " << std::any_cast<T>(a) << '\n';
-#endif
-}
-
 void run() {
   std::cout << std::boolalpha;
 
   // any type
   std::any a = 1;
-  print_any_value<int>("int", a);
+  std::cout << a.type().name() << ": " << std::any_cast<int>(a) << '\n';
   a = 3.14;
-  print_any_value<double>("double", a);
+  std::cout << a.type().name() << ": " << std::any_cast<double>(a) << '\n';
   a = true;
-  print_any_value<bool>("bool", a);
+  std::cout << a.type().name() << ": " << std::any_cast<bool>(a) << '\n';
   // bad cast
   try {
     a = 1;
@@ -251,7 +273,7 @@ void run() {
   // has value
   a = 2;
   if (a.has_value()) {
-    print_any_value<int>("int", a);
+    std::cout << a.type().name() << ": " << std::any_cast<int>(a) << '\n';
   }
 
   // reset
@@ -290,9 +312,8 @@ void run() {
 // https://en.cppreference.com/w/cpp/utility/functional/reference_wrapper#Example
 //
 namespace reference_wrapper_test {
-void println(auto const rem, auto const &v) {
-  std::cout << rem;
-  for (auto const &e : v) {
+void println(auto const rem, std::ranges::range auto const &v) {
+  for (std::cout << rem; auto const &e : v) {
     std::cout << e << ' ';
   }
   std::cout << '\n';
@@ -305,22 +326,13 @@ void run() {
   // Cannot use shuffle on a list (requires random access), but can use it on a
   // vector.
   std::vector<std::reference_wrapper<int>> v(l.begin(), l.end());
-
-#if defined(CRTSYS_ENABLE_EXACT_CPPREFERENCE_RANDOM_DEVICE_EXAMPLE)
-  std::shuffle(v.begin(), v.end(), std::mt19937{std::random_device{}()});
-#else
-  // The cppreference example seeds from std::random_device. Kernel tests use a
-  // fixed seed to avoid depending on hosted entropy APIs.
-  std::shuffle(v.begin(), v.end(), std::mt19937{});
-#endif
+  std::ranges::shuffle(v, std::mt19937{std::random_device{}()});
 
   println("Contents of the list: ", l);
   println("Contents of the list, as seen through a shuffled vector: ", v);
 
   std::cout << "Doubling the values in the initial list...\n";
-  for (int &i : l) {
-    i *= 2;
-  }
+  std::ranges::for_each(l, [](int &i) { i *= 2; });
 
   println("Contents of the list, as seen through a shuffled vector: ", v);
 }
