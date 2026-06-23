@@ -136,6 +136,9 @@ void run();
 namespace format_test {
 void run();
 }
+namespace print_test {
+void run();
+}
 namespace exchange_test {
 void run();
 }
@@ -430,6 +433,8 @@ void run();
 //
 bool ntl_expand_stack_test();
 
+bool ntl_seh_try_except_test();
+
 bool ntl_irql_test();
 
 bool ntl_spin_lock_test();
@@ -586,6 +591,7 @@ void cpp_std_tests() {
   optional_test::run();
   expected_test::run();
   format_test::run();
+  print_test::run();
   tuple_test::run();
   pair_test::run();
   variant_test::run();
@@ -619,6 +625,9 @@ void cpp_std_tests() {
 void ntl_test() {
   if (!ntl_expand_stack_test()) {
     std::cerr << "ntl_expand_stack_test failed\n";
+  }
+  if (!ntl_seh_try_except_test()) {
+    std::cerr << "ntl_seh_try_except_test failed\n";
   }
   if (!ntl_irql_test()) {
     std::cerr << "ntl_irql_test failed\n";

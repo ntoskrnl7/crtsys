@@ -64,8 +64,9 @@ status 흐름이 현재 IRQL에서 유효한지는 surrounding WDK call path가 
   - `ntl::status`를 보관합니다.
   - 설명 메시지를 함께 가집니다.
 - `ntl::seh::try_except(fn, args...)`
-  - callable을 SEH 안에서 실행합니다.
-  - `{success, exception_code}`를 반환합니다.
+  - MSVC SEH `__try` / `__except` 안에서 callable을 실행합니다.
+  - 성공하면 `{true, 0}`, SEH exception을 잡으면 `GetExceptionCode()`에서 온
+    `{false, exception_code}`를 반환합니다.
 
 IRQL: C++ exception path는 `PASSIVE_LEVEL` 전용으로 취급하세요. WDK callback
 boundary, spin-lock-held region, DPC, ISR, paging I/O 경로를 exception이

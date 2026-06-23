@@ -8,23 +8,24 @@
 
 ## 위치
 
-`crtsys`는 커널 모드 C++ 런타임 기반 계층입니다. 완전한 user-mode CRT도
-아니고, 완전한 Win32 호환 레이어도 아니며, 임의의 user-mode 코드가 커널
-모드에서 안전해진다고 주장하는 프로젝트도 아닙니다.
+`crtsys`는 Windows 드라이버를 위한 커널 모드 C++ 런타임 기반 계층입니다.
+MSVC C++ runtime, CRT, STL, helper library 지원을 LDK 기반
+Windows/NTDLL-compatible API 및 ICU ABI layer와 결합하고, 그 결과로 얻은
+driver-tested surface와 execution-context contract를 문서화합니다.
 
-실제 목표는 더 좁습니다.
+실제 목표는 다음과 같습니다.
 
 ```text
-선택된 MSVC C++ / CRT / STL 경로에 필요한 런타임 기반을 제공하고,
+MSVC C++ / CRT / STL driver path에 필요한 런타임 기반을 제공하고,
 부족한 의존성을 커널 primitive 위에 매핑하며,
-지원 범위를 문서화하고 테스트할 수 있을 만큼 작게 유지한다.
+coverage surface를 명시적으로 문서화하고 테스트한다.
 ```
 
-이 구분은 중요합니다. 넓은 호환 레이어라고 말하는 순간, 일반 user-mode
-가정이 driver 안에서도 안전하다는 인상을 줄 수 있습니다. `crtsys`는 그런
-약속을 하지 않습니다. C++ 드라이버 개발의 통제된 일부를 가능하게 하되,
-IRQL, stack, pool allocation, pageable code, unload safety, verifier,
-HVCI, target OS validation 같은 WDK 규칙은 그대로 남습니다.
+이 구분은 중요합니다. `crtsys`는 알려진 driver/runtime path를 위한 runtime
+substrate 및 Windows API compatibility layer이지, 임의의 user-mode 가정을
+커널 모드로 그대로 가져와도 된다는 허가가 아닙니다. driver는 여전히 IRQL,
+stack, pool allocation, pageable code, unload safety, verifier, HVCI,
+target OS validation 같은 WDK 규칙을 따라야 합니다.
 
 ## 왜 필요한가
 
@@ -39,29 +40,39 @@ HVCI, target OS validation 같은 WDK 규칙은 그대로 남습니다.
 - stream 및 diagnostic 지원
 - driver object와 lock을 감싸는 RAII wrapper
 
-공통 런타임 계층이 없으면 각 드라이버 프로젝트가 같은 저수준 glue를
-반복해서 만들어야 합니다. `crtsys`는 그 작업을 한곳에 모으고 테스트와
-연결합니다.
+공통 런타임 계층이 없으면 각 드라이버 프로젝트가 같은 저수준 runtime
+adaptation 작업을 반복해서 만들어야 합니다. `crtsys`는 그 작업을 한곳에
+모으고 테스트와 연결합니다.
 
 ## 계층 구조
 
-의도한 구조는 다음과 같습니다.
+driver source에서 kernel primitive까지 내려가는 의도한 구조는 다음과
+같습니다.
 
 ```text
-MSVC C++ / selected CRT / selected STL
+Driver source (.sys)
         |
-crtsys compatibility glue
+        v
+MSVC C++ runtime / CRT / STL API + NTL helper
         |
-Ldk Win32 / NTDLL-style API shim
+        v
+crtsys compatibility layer
+  - 선택된 Microsoft CRT/STL/VCRT/UCRT source path
+  - kernel-mode runtime adapter 및 ABI helper
+  - driver-run coverage 및 IRQL contract
         |
-Windows kernel primitive
+        v
+LDK Windows/NTDLL-compatible API + ICU ABI substrate
         |
-.sys driver
+        v
+WDK / NT kernel primitive
 ```
 
-이 모델에서 `Ldk`는 알려진 런타임 의존성을 위한 kernel-backed API shim으로
-사용됩니다. 임의의 user-mode module을 커널 공간에서 실행하는 수단으로
-설명하지 않습니다.
+이 모델에서 `crtsys`는 MSVC runtime/STL integration, kernel-mode runtime
+adapter, 테스트된 C++ surface를 담당합니다. `Ldk`는 알려진 runtime
+dependency를 위한 kernel-backed Windows/NTDLL-compatible API 및 ICU ABI
+substrate로 사용됩니다. 임의의 user-mode module을 커널 공간에서 실행하는
+수단으로 설명하지 않습니다.
 
 ## 실행 모델
 
@@ -176,5 +187,6 @@ writable/executable mapping을 만들거나, executable memory를 patch하거나
 - `DPC-level only`
 - `test/diagnostic only`
 
-allocation, blocking, pageable code, exception, stack expansion, runtime glue가
-관련되어 있다면 왜 그런 계약이 필요한지도 API 문서에 함께 적어야 합니다.
+allocation, blocking, pageable code, exception, stack expansion, runtime
+adapter path가 관련되어 있다면 왜 그런 계약이 필요한지도 API 문서에 함께
+적어야 합니다.

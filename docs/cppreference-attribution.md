@@ -105,6 +105,7 @@ test harness, typically by moving the sample `main()` body into a namespaced
 - `std::strong_ordering`: <https://en.cppreference.com/w/cpp/utility/compare/strong_ordering>
 - `std::numbers`: <https://en.cppreference.com/w/cpp/numeric/constants>
 - `std::format`: <https://en.cppreference.com/w/cpp/utility/format/format>
+- `std::print`: <https://en.cppreference.com/w/cpp/io/print>
 - `std::regex`: <https://en.cppreference.com/w/cpp/regex>
 - `std::distance`: <https://en.cppreference.com/w/cpp/iterator/distance>
 - `std::advance`: <https://en.cppreference.com/w/cpp/iterator/advance>
@@ -195,7 +196,7 @@ same page.
 The `std::expected` example is compiled into the driver test when the
 `__cpp_lib_expected` feature-test macro is available.
 
-The `std::format` example runs in the default driver build.
+The `std::format` and `std::print` examples run in the default driver build.
 
 The `std::regex` example keeps the cppreference `regex_search`, iterator, and
 `regex_replace` flow.

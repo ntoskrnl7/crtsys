@@ -8,23 +8,24 @@ C++ support as a blanket safety guarantee.
 
 ## Position
 
-`crtsys` is a kernel-mode C++ runtime substrate. It is not a full user-mode CRT,
-not a complete Win32 compatibility layer, and not a mechanism for making
-arbitrary user-mode code safe in kernel mode.
+`crtsys` is a kernel-mode C++ runtime substrate for Windows drivers. It combines
+MSVC C++ runtime, CRT, STL, and helper-library support with an LDK-backed
+Windows/NTDLL-compatible API and ICU ABI layer, then documents the resulting
+driver-tested surface and execution-context contracts.
 
-The practical goal is narrower:
+The practical goal is:
 
 ```text
-Provide the runtime substrate needed by selected MSVC C++ / CRT / STL paths,
-map the missing dependencies onto kernel primitives, and keep the supported
-surface small enough to document and test.
+Provide the runtime substrate needed by MSVC C++ / CRT / STL driver paths,
+map missing dependencies onto kernel primitives, and keep the covered surface
+explicitly documented and tested.
 ```
 
-That distinction is important. A broad compatibility layer would imply that
-normal user-mode assumptions are safe inside a driver. `crtsys` does not make
-that claim. It enables a controlled subset of C++ driver development while the
-driver still follows WDK rules for IRQL, stack, pool allocation, pageable code,
-unload safety, verifier, HVCI, and target-OS validation.
+That distinction is important. `crtsys` is a runtime substrate and Windows API
+compatibility layer for known driver/runtime paths, not a blanket permission to
+bring arbitrary user-mode assumptions into kernel mode. The driver still follows
+WDK rules for IRQL, stack, pool allocation, pageable code, unload safety,
+verifier, HVCI, and target-OS validation.
 
 ## Why It Exists
 
@@ -40,25 +41,35 @@ often need support for:
 - RAII wrappers around driver objects and locks
 
 Without a shared runtime layer, each driver project has to recreate the same
-low-level glue. `crtsys` centralizes that work and ties it to tests.
+low-level runtime adaptation work. `crtsys` centralizes that work and ties it
+to tests.
 
 ## Layering
 
-The intended architecture is:
+The intended architecture, from driver source down to kernel primitives, is:
 
 ```text
-MSVC C++ / selected CRT / selected STL
+Driver source (.sys)
         |
-crtsys compatibility glue
+        v
+MSVC C++ runtime / CRT / STL APIs + NTL helpers
         |
-Ldk Win32 / NTDLL-style API shims
+        v
+crtsys compatibility layer
+  - selected Microsoft CRT/STL/VCRT/UCRT source paths
+  - kernel-mode runtime adapters and ABI helpers
+  - driver-run coverage and IRQL contracts
         |
-Windows kernel primitives
+        v
+LDK Windows/NTDLL-compatible API + ICU ABI substrate
         |
-.sys driver
+        v
+WDK / NT kernel primitives
 ```
 
-In this model, `Ldk` is used as a kernel-backed API shim for known runtime
+In this model, `crtsys` owns the MSVC runtime/STL integration, kernel-mode
+runtime adapters, and tested C++ surface. `Ldk` is used as a kernel-backed
+Windows/NTDLL-compatible API and ICU ABI substrate for known runtime
 dependencies. It is not presented here as a way to run arbitrary user-mode
 modules in kernel space.
 
@@ -178,5 +189,5 @@ When documenting new APIs, prefer an explicit contract such as:
 - `test/diagnostic only`
 
 The API reference should explain why the contract exists when allocation,
-blocking, pageable code, exceptions, stack expansion, or runtime glue are
-involved.
+blocking, pageable code, exceptions, stack expansion, or runtime adapter paths
+are involved.

@@ -1,6 +1,6 @@
 # crtsys
 
-**C**/C++ **R**un**t**ime support for Windows kernel drivers (`.sys`).
+Familiar MSVC C++ runtime and STL experience for Windows kernel drivers (`.sys`).
 
 [![CMake](https://github.com/ntoskrnl7/crtsys/actions/workflows/cmake.yml/badge.svg)](https://github.com/ntoskrnl7/crtsys/actions/workflows/cmake.yml)
 ![GitHub](https://img.shields.io/github/license/ntoskrnl7/crtsys)
@@ -12,93 +12,114 @@
 
 [Korean documentation](./docs/ko-kr.md)
 
-`crtsys` is an experimental runtime layer that helps Windows kernel drivers use
-C++ language features, selected Microsoft STL facilities, and small
-kernel-friendly helper abstractions. It is intended for driver projects that
-want a more familiar C++ development model without leaving the WDK/CMake build
-flow.
+`crtsys` brings MSVC CRT/STL/VCRT/UCRT source paths into Windows kernel drivers.
+Driver code keeps familiar MSVC C++ headers and STL types while runtime
+dependencies are mapped onto a kernel-mode substrate with explicit driver-test
+coverage and IRQL contracts.
 
-The project combines three pieces:
+Listed coverage means "verified by driver tests". It is not an exhaustive
+support ceiling for every header or code path that may compile or work.
 
-- CRT/STL compatibility glue for kernel-mode builds.
-- [`Ldk`](https://github.com/ntoskrnl7/ldk), which provides a subset of
-  Win32/NTDLL-like APIs used by the runtime and STL.
-- NTL, a small C++ helper layer for common driver objects and synchronization.
+## Quick Start
 
-## Design Model
+| Path | Use when | Start here |
+| --- | --- | --- |
+| NuGet / MSBuild | Visual Studio WDK driver project | `Install-Package crtsys` |
+| CMake prebuilt | Offline or pinned CI dependency | `find_package(crtsys CONFIG REQUIRED)` |
+| CMake source | Build `crtsys` with the driver | `CPMAddPackage("gh:ntoskrnl7/crtsys@<version>")` |
 
-`crtsys` is a kernel-mode C++ runtime substrate. It exists to make a controlled
-subset of MSVC C++ runtime, CRT, STL, and NTL facilities usable in Windows
-drivers while staying inside the normal WDK driver model.
+Minimal CMake consumer:
 
-It is designed primarily for driver control paths: initialization, unload,
-device setup, IOCTL/RPC handling, worker-thread coordination, ownership
-cleanup, and error handling. These paths are normally `PASSIVE_LEVEL`, with
-selected `APC_LEVEL` use where the underlying WDK APIs allow it.
+```cmake
+include(cmake/CPM.cmake)
 
-It is not a promise that arbitrary user-mode C++ code, arbitrary STL usage, or
-arbitrary Win32 assumptions are safe in kernel mode. Unless an API explicitly
-documents a broader contract, assume `PASSIVE_LEVEL`. Do not use runtime-backed
-helpers in DPC, ISR, paging I/O, spin-lock-held, or other elevated-IRQL paths
-unless that exact API is documented and tested for that context.
+set(CRTSYS_NTL_MAIN ON)
+CPMAddPackage("gh:ntoskrnl7/crtsys@<version>")
+include(${crtsys_SOURCE_DIR}/cmake/CrtSys.cmake)
 
-See [Design Rationale and Operational Boundaries](./docs/design-rationale.md)
-for the full model.
+crtsys_add_driver(my_driver src/main.cpp)
+```
 
-## Status
+With `CRTSYS_NTL_MAIN`, driver code can use the C++ entry wrapper:
 
-This project is not a full user-mode CRT, not a complete Windows compatibility
-layer, and not a replacement for careful driver design. It enables useful C++
-and STL scenarios in kernel mode, but every driver should still be tested under
-the exact Windows, WDK, SDK, Visual Studio, architecture, and verifier settings
-that it will ship with.
+```cpp
+#include <ntl/driver>
 
-Known constraints:
+ntl::status ntl::main(ntl::driver& driver,
+                      const std::wstring& registry_path) {
+  driver.on_unload([registry_path]() {
+    // driver cleanup
+  });
 
-- Runtime-backed C++/CRT/STL features should be treated as `PASSIVE_LEVEL`
-  facilities unless the API reference says otherwise.
-- Function-local static initialization is supported for MSVC thread-safe
-  statics. General C++ `thread_local` storage is not supported as true
-  per-thread TLS.
-- Kernel stacks are small; use `ntl::expand_stack` for paths that need more
-  stack, especially exception-heavy or STL-heavy paths.
-- SDK and WDK version mismatches can cause build failures. Prefer matching SDK
-  and WDK versions.
-- New Windows 11 24H2 WDK releases no longer support x86 kernel-mode driver
-  development. Use WDK 23H2 or older when x86 driver targets are required.
+  return ntl::status::ok();
+}
+```
 
-## Features
+## Runtime Stack
 
-The README keeps this section short. The detailed, test-linked checklist lives
-in the documentation directory:
+```mermaid
+flowchart TD
+    Driver["Driver code (.sys)<br/>MSVC headers + optional NTL"]
+    Runtime["MSVC CRT / UCRT / STL / VCRT<br/>source paths"]
+    CrtSys["crtsys compatibility layer<br/>runtime adapters + ABI helpers + tested contracts"]
+    LDK["LDK substrate<br/>Windows / NTDLL API + ICU ABI"]
+    Kernel["WDK / NT kernel primitives"]
 
-- [Design rationale and operational boundaries](./docs/design-rationale.md)
-- [Detailed feature coverage](./docs/feature-coverage.md)
-- [NTL API reference](./docs/ntl-api.md)
-- [NTL usage examples](./docs/usage-examples.md)
+    Driver --> Runtime --> CrtSys --> LDK --> Kernel
+```
 
-High-level coverage:
+## Capability Map
 
-- C++ runtime support
-  - non-local static initialization
-  - function-local static initialization
-  - dynamic initialization
-  - exceptions
-- Microsoft STL support
-  - time utilities
-  - threading primitives
-  - synchronization primitives
-  - async primitives
-  - stream objects
-- C runtime support
-  - CRT glue needed by the supported STL paths
-  - math helpers
-  - floating-point classification helpers
-- NTL support
-  - C++ driver entry point wrapper
-  - driver and device helpers
-  - RPC helpers
-  - IRQL and synchronization helpers
+| Surface | Driver-facing result |
+| --- | --- |
+| C++ runtime | static init, EH/SEH, RTTI, ABI |
+| CRT/UCRT | STL dependencies, math, char conversion |
+| STL | containers, ranges, filesystem, format/print, regex, locale, chrono, threading, atomics, PMR, streams, random |
+| Substrate | crtsys adapters + LDK Windows/NTDLL/ICU |
+| Evidence | driver-run matrix + cppreference + IRQL contracts |
+| Packaging | NuGet/MSBuild + prebuilt bundle + CPM.cmake |
+
+## Feature Highlights
+
+| Feature | Status | Notes |
+| --- | --- | --- |
+| C++ exceptions | Driver-tested | `throw`, `try`/`catch`, function-try-block, `std::exception_ptr` |
+| SEH handling | Driver-tested | C++ helper path for `__try` / `__except` boundary handling |
+| Static initialization | Driver-tested | non-local, dynamic, and MSVC function-local static initialization |
+| RTTI | Driver-tested | `typeid`, `dynamic_cast` |
+| STL containers / algorithms | Driver-tested | containers, algorithms, ranges, smart pointers, PMR, utility |
+| `std::format` / `std::print` | Driver-tested | formatted string/output paths |
+| `std::regex` | Driver-tested | regular expression path |
+| `std::filesystem` | Driver-tested | path, directory, copy, metadata, time, link-oriented paths covered by the matrix |
+| Concurrency | Driver-tested | thread, synchronization, async/future, atomic wait/notify |
+| Locale / chrono / charconv | Driver-tested | locale facets, timezone/chrono paths, integer and floating char conversion |
+| NTL driver helpers | Driver-tested | `ntl::main`, driver/device helpers, RPC, IRQL helpers, stack expansion |
+| `thread_local` | Not true TLS | Compiler TLS is not exposed as true per-thread kernel TLS |
+
+The detailed matrix is intentionally test-linked: it records features exercised
+by the kernel driver test suite, not the full set of headers or code paths that
+may compile or work.
+
+## Documentation
+
+| Document | Use it for |
+| --- | --- |
+| [Architecture](./docs/architecture.md) | Runtime stack, layer responsibilities, consumer paths |
+| [Design Rationale](./docs/design-rationale.md) | IRQL, pool, stack, unload, and operational boundaries |
+| [Feature Coverage](./docs/feature-coverage.md) | Driver-tested C++/CRT/STL matrix and known gaps |
+| [NTL API](./docs/ntl-api.md) | Driver helper APIs, entry wrapper, synchronization, SEH helper |
+| [Usage Examples](./docs/usage-examples.md) | Small driver-side NTL examples |
+| [CI Driver Load Tests](./docs/ci-driver-load-tests.md) | Optional self-hosted driver load/run workflow |
+
+## Operational Boundaries
+
+| Boundary | Policy |
+| --- | --- |
+| Driver model | The driver remains a normal WDK driver. Verifier, HVCI, unload safety, target OS validation, and paging rules still matter. |
+| IRQL | Runtime-backed C++/CRT/STL paths are `PASSIVE_LEVEL` unless a specific API documents a wider contract. |
+| Stack | Kernel stacks are small; use `ntl::expand_stack` for exception-heavy or STL-heavy paths. |
+| TLS | MSVC function-local statics are supported. General C++ `thread_local` is not true per-thread TLS. |
+| Toolchain | Use matching SDK/WDK versions. Use WDK 23H2 or older for x86 kernel-mode targets. |
 
 ## Requirements
 
@@ -115,9 +136,9 @@ versions such as `10.0.17763.0`, `10.0.18362.0`, `10.0.22000.0`, and
 Visual Studio 2017 has missing CRT source/header pieces for some paths, so
 `crtsys` uses selected UCXXRT compatibility code for that toolset.
 
-## Quick Start
+## CMake Quick Start
 
-Create a driver project, place CPM at `cmake/CPM.cmake`, and add `crtsys`:
+Create a driver project, add CPM at `cmake/CPM.cmake`, and add `crtsys`:
 
 ```cmake
 cmake_minimum_required(VERSION 3.14 FATAL_ERROR)
@@ -170,19 +191,16 @@ without those diagnostic breakpoints, configure with:
 cmake -S . -B build_x64 -A x64 -DCRTSYS_ENABLE_DIAGNOSTIC_BREAKPOINTS=OFF
 ```
 
-## NuGet Package
+## NuGet Package Details
 
-`crtsys` NuGet distribution is:
+`crtsys` publishes a NuGet package with native MSBuild imports and prebuilt
+driver libraries for `x64` and `ARM64` `Debug`/`Release`. The package workflow
+also builds a WDK consumer driver from the published package.
 
-- `crtsys.<version>.nupkg`: install from Visual Studio/MSBuild.
+The NuGet distribution is `crtsys.<version>.nupkg` for Visual Studio/MSBuild
+projects.
 
-Install from VS/MSBuild:
-
-```powershell
-Install-Package crtsys
-```
-
-## GitHub Release Prebuilt Bundle
+## GitHub Release Prebuilt Bundle Details
 
 GitHub Release publishes these offline-only assets:
 
@@ -190,22 +208,14 @@ GitHub Release publishes these offline-only assets:
   and prebuilt `x64/ARM64` `Debug`/`Release` libraries.
 - `crtsys-<version>-SHA256SUMS.txt`
 
-Use the prebuilt bundle for WDK CMake/offline bootstrap:
-
-```powershell
-Expand-Archive .\crtsys-<version>-prebuilt.zip .
-```
-
-```cmake
-find_package(crtsys CONFIG REQUIRED PATHS path/to/crtsys-<version>)
-crtsys_add_driver(my_driver src/main.cpp)
-```
+The prebuilt bundle is intended for CMake projects that want a checked-in or
+cached runtime package instead of fetching and building `crtsys` from source.
 
 For full packaging and publishing command details, see `nuget/README.md`.
 
 ## CMake Install
 
-Source-tree consumers can install a local CMake package:
+CMake consumers can install a local CMake package:
 
 ```bat
 cmake -S . -B build_x64 -A x64 -DCMAKE_INSTALL_PREFIX=%CD%\artifacts\install\crtsys
@@ -322,8 +332,8 @@ docs/              Additional documentation
 
 `crtsys` was created after experimenting with other kernel C++ runtime
 projects, especially UCXXRT and KTL. The design goal is to keep the CMake/WDK
-workflow practical while supporting a broad enough subset of Microsoft CRT/STL
-behavior for real driver experiments.
+workflow practical while supporting a substantial Microsoft CRT/STL surface for
+real driver experiments.
 
 The project avoids treating the Microsoft CRT/STL source as a vendored library.
 Instead, it relies on the locally installed Visual Studio/Build Tools layout
@@ -340,7 +350,7 @@ fit for kernel-mode support:
 
 ## Roadmap
 
-- Expand unsupported C++ and STL feature coverage, especially true
+- Expand driver-tested C++ and STL coverage, including investigation of true
   `thread_local` storage.
 - Reduce Visual Studio 2017 compatibility gaps and keep toolset-specific
   compatibility code smaller.
