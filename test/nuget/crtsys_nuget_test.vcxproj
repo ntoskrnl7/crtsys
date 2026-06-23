@@ -60,6 +60,7 @@
     <ClCompile>
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
+      <RuntimeTypeInfo>true</RuntimeTypeInfo>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <AdditionalIncludeDirectories>$(MSBuildThisFileDirectory);$(MSBuildThisFileDirectory)..\cmake;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>CRTSYS_TEST_NO_BREAKPOINT;CRTSYS_TEST_NLOHMANN_JSON;%(PreprocessorDefinitions)</PreprocessorDefinitions>
@@ -70,14 +71,18 @@
     <ClCompile Include="..\cmake\driver\src\c\math.c" />
     <ClCompile Include="..\cmake\driver\src\cpp\lang\exceptions.cpp" />
     <ClCompile Include="..\cmake\driver\src\cpp\lang\initialization.cpp" />
+    <ClCompile Include="..\cmake\driver\src\cpp\lang\rtti.cpp" />
     <ClCompile Include="..\cmake\driver\src\cpp\stl\algorithm.cpp" />
     <ClCompile Include="..\cmake\driver\src\cpp\stl\atomic.cpp" />
     <ClCompile Include="..\cmake\driver\src\cpp\stl\chrono.cpp" />
     <ClCompile Include="..\cmake\driver\src\cpp\stl\containers.cpp" />
     <ClCompile Include="..\cmake\driver\src\cpp\stl\exception.cpp" />
+    <ClCompile Include="..\cmake\driver\src\cpp\stl\filesystem.cpp" />
     <ClCompile Include="..\cmake\driver\src\cpp\stl\functional.cpp" />
+    <ClCompile Include="..\cmake\driver\src\cpp\stl\locale.cpp" />
     <ClCompile Include="..\cmake\driver\src\cpp\stl\memory.cpp" />
     <ClCompile Include="..\cmake\driver\src\cpp\stl\numeric.cpp" />
+    <ClCompile Include="..\cmake\driver\src\cpp\stl\regex.cpp" />
     <ClCompile Include="..\cmake\driver\src\cpp\stl\string.cpp" />
     <ClCompile Include="..\cmake\driver\src\cpp\stl\thread.cpp" />
     <ClCompile Include="..\cmake\driver\src\cpp\stl\utility.cpp" />

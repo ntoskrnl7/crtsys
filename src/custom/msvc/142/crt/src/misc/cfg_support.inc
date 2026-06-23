@@ -38,6 +38,7 @@ Return Value:
 extern
 __forceinline
 int
+__cdecl
 _guard_icall_checks_enforced (
     VOID
     )

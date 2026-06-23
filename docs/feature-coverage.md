@@ -2,15 +2,53 @@
 
 [Back to README](../README.md)
 
-This page keeps the detailed support checklist that used to live in the main
-README. Checked items are implemented and have test coverage when a `tested`
-link is attached.
+This page is a driver-tested feature coverage matrix, not an exhaustive support
+boundary. A feature missing from this list should be read as "not yet explicitly
+covered by the driver tests", not as "unsupported", unless it is called out
+under known limitations or blockers.
+
+Legend:
+
+- [x] Driver-test covered: explicitly exercised by the `crtsys` kernel driver
+  tests.
+- [ ] Not yet covered: not yet fixed by an explicit driver test, or still under
+  review.
+- Known limitation: a confirmed missing dependency or semantic difference.
 
 Coverage here means that the feature is implemented and exercised by the test
 suite. It does not mean the feature is valid in every driver execution context.
 Unless an API documents a broader contract, assume `PASSIVE_LEVEL`. See
 [Design Rationale and Operational Boundaries](./design-rationale.md) and the
 [NTL API reference](./ntl-api.md) for execution-context guidance.
+
+## IRQL Coverage Contract
+
+The checklist below is a feature-coverage list, not a blanket permission to use
+each feature at any IRQL. The table gives the conservative `crtsys` contract for
+the covered usage. "Audited caller context" means the operation itself is
+value-only and nonblocking, but the caller must still guarantee resident code
+and storage, no allocation, no waits, no exceptions, and a valid WDK context.
+The driver tests still exercise these features from `PASSIVE_LEVEL`.
+
+| Feature area | Covered items | Supported IRQL | Notes |
+| --- | --- | --- | --- |
+| Runtime and C++ initialization | Non-local static initialization, dynamic initialization, function-local `static` | `PASSIVE_LEVEL` / driver initialization path | The `crtsys` wrapper runs these paths from `DriverEntry`. General C++ `thread_local` is not supported as true per-thread TLS. |
+| C++ exceptions | `throw`, `try`, function try blocks, `std::exception_ptr` | `PASSIVE_LEVEL` only | Do not let exceptions cross WDK callback boundaries, spin-lock-held regions, DPC, ISR, or paging I/O paths. |
+| C++ RTTI | `typeid`, `dynamic_cast` | Audited caller context; otherwise `PASSIVE_LEVEL` | The consuming driver target must compile with RTTI enabled. Keep the target object and its type metadata resident. |
+| STL value-only helpers | Type traits, concepts, `std::array`, `std::span`, `std::string_view`, `std::bitset`, `std::pair`, `std::tuple`, `std::ratio`, `std::source_location`, `std::strong_ordering`, `std::numbers`, simple `std::move` / `std::exchange` / `std::invoke` / `std::reference_wrapper`, integer `std::to_chars` / `std::from_chars`, pure algorithms over resident fixed storage | Audited caller context; otherwise `PASSIVE_LEVEL` | These are the only STL areas that may be reasonable above `PASSIVE_LEVEL`, and only after the exact expression and its callbacks/comparators are audited. |
+| STL owning objects, containers, and callback-heavy utilities | `std::string`, containers, `std::any`, `std::function`, smart pointers, `std::optional`, `std::variant`, `std::complex`, `std::valarray`, `std::filesystem::path`, basic `std::filesystem` file operations, `std::format`, random distributions, `std::regex`, `nlohmann::json`, algorithms that allocate, throw, or call arbitrary user code | `PASSIVE_LEVEL` only | Construction, destruction, comparison, hashing, allocation, deallocation, formatting, file-system I/O, and user callbacks can pull in runtime paths. |
+| STL synchronization, threading, and async | `std::thread`, `std::mutex`, `std::shared_mutex`, `std::condition_variable`, `std::call_once`, `std::future`, `std::promise`, `std::packaged_task` | `PASSIVE_LEVEL` only | These paths may wait, create worker execution, allocate, or outlive unload if the caller is careless. |
+| STL atomic primitives | `std::atomic` / `std::atomic_flag` load, store, exchange, compare-exchange, and C++20 wait/notify over resident storage | `<= DISPATCH_LEVEL` for audited non-waiting operations; `PASSIVE_LEVEL` only for wait/notify | Treat wait/notify as blocking synchronization. Do not combine atomic code with runtime-backed callbacks or allocation at elevated IRQL. |
+| I/O streams | `std::cin`, `std::cout`, `std::cerr`, `std::clog`, wide stream variants | `PASSIVE_LEVEL` only | Diagnostic and test support. Avoid production hot paths and stack-sensitive paths. |
+| C math and floating-point helpers | Math functions and floating-point classification helpers | `PASSIVE_LEVEL` unless the exact helper is separately audited | Floating-point state and helper dependencies are driver-context sensitive. |
+| NTL entry, driver, device, and RPC server helpers | `ntl::main`, `ntl::driver`, `ntl::device`, `ntl::rpc::server` | `PASSIVE_LEVEL` only | Intended for initialization, teardown, device setup, and IOCTL/RPC control paths. |
+| NTL IRP view | `ntl::irp` | Follows the dispatch path that supplied the IRP | NTL device callbacks should still be treated as `PASSIVE_LEVEL` unless the exact callback body is separately audited. |
+| NTL status wrapper | `ntl::status` | Caller context | Value-only wrapper around `NTSTATUS`. |
+| NTL stack expansion | `ntl::expand_stack` | `PASSIVE_LEVEL` only | Runtime-backed control-path helper, not a hot-path escape hatch. |
+| NTL ERESOURCE wrapper | `ntl::resource`, `ntl::unique_lock<ntl::resource>`, `ntl::shared_lock<ntl::resource>` | `<= APC_LEVEL` | Blocking/resource-style synchronization. Do not use in DPC, ISR, or spin-lock-held paths. |
+| NTL spin lock wrapper | `ntl::spin_lock`, `ntl::unique_lock<ntl::spin_lock>` | `<= DISPATCH_LEVEL` | Keep held regions resident, short, nonblocking, and free of allocation, waits, exceptions, streams, and arbitrary STL/runtime helpers. |
+| NTL IRQL helpers | `ntl::irql`, `ntl::raise_irql`, `ntl::raise_irql_to_dpc_level`, `ntl::raise_irql_to_synch_level` | Explicitly manipulates current IRQL | Keep raised scopes as small as possible. |
+| NTL RPC client | `ntl::rpc::client` | User mode, not kernel IRQL | Client side uses `DeviceIoControl`; server callback contract still controls kernel-side safety. |
 
 ## C++ Standard
 
@@ -28,12 +66,11 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
       [(tested)](../test/cmake/driver/src/cpp/lang/initialization.cpp#L41)
   - [x] [Dynamic initialization](https://en.cppreference.com/w/cpp/language/initialization#Dynamic_initialization)
     [(tested)](../test/cmake/driver/src/cpp/lang/initialization.cpp#L56)
-- [ ] [Static local variables](https://en.cppreference.com/w/cpp/language/storage_duration#Static_local_variables)
-  - [ ] `thread_local`
-    [(disabled cppreference example)](../test/cmake/driver/src/cpp/lang/initialization.cpp#L79)
-  - [x] function-local `static`
-    [(tested)](../test/cmake/driver/src/cpp/lang/initialization.cpp#L124)
-    [(regression)](../test/cmake/driver/src/cpp/lang/initialization.cpp#L229)
+- [x] [Function-local `static` variables](https://en.cppreference.com/w/cpp/language/storage_duration#Static_local_variables)
+  [(tested)](../test/cmake/driver/src/cpp/lang/initialization.cpp#L124)
+  [(regression)](../test/cmake/driver/src/cpp/lang/initialization.cpp#L229)
+- [ ] [`thread_local`](https://en.cppreference.com/w/cpp/language/storage_duration#Thread_storage_duration)
+  [(disabled cppreference example)](../test/cmake/driver/src/cpp/lang/initialization.cpp#L79)
 
 ### Exceptions
 
@@ -46,6 +83,13 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
 - [x] [std::exception_ptr](https://en.cppreference.com/w/cpp/error/exception_ptr)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/exception.cpp)
 
+### RTTI
+
+- [x] [typeid](https://en.cppreference.com/w/cpp/language/typeid)
+  [(tested)](../test/cmake/driver/src/cpp/lang/rtti.cpp)
+- [x] [dynamic_cast](https://en.cppreference.com/w/cpp/language/dynamic_cast)
+  [(tested)](../test/cmake/driver/src/cpp/lang/rtti.cpp)
+
 ## Microsoft STL
 
 - [x] [std::accumulate](https://en.cppreference.com/w/cpp/algorithm/accumulate)
@@ -56,10 +100,19 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/containers.cpp)
 - [x] [std::atomic](https://en.cppreference.com/w/cpp/atomic/atomic)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/atomic.cpp)
+- [x] [std::atomic::wait/notify](https://en.cppreference.com/w/cpp/atomic/atomic/wait)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/atomic.cpp)
 - [x] [std::atomic_flag](https://en.cppreference.com/w/cpp/atomic/atomic_flag)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/atomic.cpp)
 - [x] [std::chrono](https://en.cppreference.com/w/cpp/chrono)
   [(tested)](../test/cmake/driver/src/cpp/stl/chrono.cpp#L15)
+  - C++20 timezone paths for
+    [`std::chrono::current_zone`](https://en.cppreference.com/w/cpp/chrono/current_zone),
+    [`std::chrono::locate_zone`](https://en.cppreference.com/w/cpp/chrono/locate_zone),
+    [`std::chrono::zoned_time`](https://en.cppreference.com/w/cpp/chrono/zoned_time),
+    and
+    [`std::chrono::time_zone::get_info`](https://en.cppreference.com/w/cpp/chrono/time_zone/get_info)
+    also run in the default driver build.
 - [x] [std::any](https://en.cppreference.com/w/cpp/utility/any)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::bind](https://en.cppreference.com/w/cpp/utility/functional/bind)
@@ -73,7 +126,9 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
 - [x] [std::concepts](https://en.cppreference.com/w/cpp/concepts)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::complex](https://en.cppreference.com/w/cpp/numeric/complex)
-  [(cppreference arithmetic example)](../test/cmake/driver/src/cpp/stl/numeric.cpp)
+  arithmetic plus [std::exp](https://en.cppreference.com/w/cpp/numeric/complex/exp)
+  and [std::pow](https://en.cppreference.com/w/cpp/numeric/complex/pow)
+  [(cppreference examples)](../test/cmake/driver/src/cpp/stl/numeric.cpp)
 - [x] [std::deque](https://en.cppreference.com/w/cpp/container/deque)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/containers.cpp)
 - [x] [std::exchange](https://en.cppreference.com/w/cpp/utility/exchange)
@@ -87,7 +142,7 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
 - [x] [std::gcd](https://en.cppreference.com/w/cpp/numeric/gcd)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::from_chars](https://en.cppreference.com/cpp/utility/from_chars)
-  [(cppreference integer example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
+  [(cppreference example + floating-point checks)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::inclusive_scan](https://en.cppreference.com/w/cpp/algorithm/inclusive_scan)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::inner_product](https://en.cppreference.com/w/cpp/algorithm/inner_product)
@@ -105,8 +160,12 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::lcm](https://en.cppreference.com/w/cpp/numeric/lcm)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
+- [x] [std::lerp](https://en.cppreference.com/w/cpp/numeric/lerp)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::list](https://en.cppreference.com/w/cpp/container/list)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/containers.cpp)
+- [x] [std::locale](https://en.cppreference.com/w/cpp/locale/locale)
+  [(cppreference examples)](../test/cmake/driver/src/cpp/stl/locale.cpp)
 - [x] [std::map](https://en.cppreference.com/w/cpp/container/map)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/containers.cpp)
 - [x] [std::make_heap](https://en.cppreference.com/w/cpp/algorithm/make_heap)
@@ -125,8 +184,12 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::optional](https://en.cppreference.com/w/cpp/utility/optional)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
+- [x] [std::expected](https://en.cppreference.com/w/cpp/utility/expected)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::pair](https://en.cppreference.com/w/cpp/utility/pair)
   [(cppreference make_pair example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
+- [x] [std::pmr::monotonic_buffer_resource](https://en.cppreference.com/w/cpp/memory/monotonic_buffer_resource)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/memory.cpp)
 - [x] [std::partial_sum](https://en.cppreference.com/w/cpp/algorithm/partial_sum)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::partition](https://en.cppreference.com/w/cpp/algorithm/partition)
@@ -139,6 +202,12 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::ranges::sort](https://en.cppreference.com/w/cpp/algorithm/ranges/sort)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
+- [x] [std::views::zip](https://en.cppreference.com/w/cpp/ranges/zip_view),
+      [std::views::chunk](https://en.cppreference.com/w/cpp/ranges/chunk_view),
+      [std::views::slide](https://en.cppreference.com/w/cpp/ranges/slide_view),
+      [std::views::stride](https://en.cppreference.com/w/cpp/ranges/stride_view),
+      [std::views::repeat](https://en.cppreference.com/w/cpp/ranges/repeat_view)
+  [(cppreference examples)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::ratio](https://en.cppreference.com/w/cpp/numeric/ratio)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::reference_wrapper](https://en.cppreference.com/w/cpp/utility/functional/reference_wrapper)
@@ -159,6 +228,61 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::strong_ordering](https://en.cppreference.com/w/cpp/utility/compare/strong_ordering)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
+- [x] [std::format](https://en.cppreference.com/w/cpp/utility/format)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
+- [x] [std::regex](https://en.cppreference.com/w/cpp/regex)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/regex.cpp)
+- [x] [std::filesystem::path lexical operations](https://en.cppreference.com/w/cpp/filesystem/path/lexically_normal)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::directory_iterator](https://en.cppreference.com/w/cpp/filesystem/directory_iterator)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::recursive_directory_iterator](https://en.cppreference.com/w/cpp/filesystem/recursive_directory_iterator)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::copy_file](https://en.cppreference.com/w/cpp/filesystem/copy_file)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::copy](https://en.cppreference.com/w/cpp/filesystem/copy)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::create_directory / create_directories](https://en.cppreference.com/w/cpp/filesystem/create_directory)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::create_hard_link](https://en.cppreference.com/w/cpp/filesystem/create_hard_link)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::create_symlink / create_directory_symlink](https://en.cppreference.com/w/cpp/filesystem/create_symlink)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::read_symlink](https://en.cppreference.com/w/cpp/filesystem/read_symlink)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::copy_symlink](https://en.cppreference.com/w/cpp/filesystem/copy_symlink)
+  [(tested)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::directory_entry](https://en.cppreference.com/w/cpp/filesystem/directory_entry)
+  [(tested)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::equivalent](https://en.cppreference.com/w/cpp/filesystem/equivalent)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::file_size](https://en.cppreference.com/w/cpp/filesystem/file_size)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::hard_link_count](https://en.cppreference.com/w/cpp/filesystem/hard_link_count)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::status / symlink_status](https://en.cppreference.com/w/cpp/filesystem/status)
+  and file type queries such as
+  [exists](https://en.cppreference.com/w/cpp/filesystem/exists),
+  [is_directory](https://en.cppreference.com/w/cpp/filesystem/is_directory),
+  [is_regular_file](https://en.cppreference.com/w/cpp/filesystem/is_regular_file),
+  and [is_empty](https://en.cppreference.com/w/cpp/filesystem/is_empty)
+  [(cppreference examples)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::permissions](https://en.cppreference.com/w/cpp/filesystem/permissions)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::resize_file](https://en.cppreference.com/w/cpp/filesystem/resize_file)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::remove_all](https://en.cppreference.com/w/cpp/filesystem/remove)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::space](https://en.cppreference.com/w/cpp/filesystem/space)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::rename](https://en.cppreference.com/w/cpp/filesystem/rename)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::temp_directory_path](https://en.cppreference.com/w/cpp/filesystem/temp_directory_path)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::last_write_time](https://en.cppreference.com/w/cpp/filesystem/last_write_time)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::canonical / weakly_canonical](https://en.cppreference.com/w/cpp/filesystem/canonical)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] [std::string](https://en.cppreference.com/w/cpp/string/basic_string)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/string.cpp)
 - [x] [std::string_view](https://en.cppreference.com/w/cpp/string/basic_string_view)
@@ -167,10 +291,12 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/memory.cpp)
 - [x] [std::thread](https://en.cppreference.com/w/cpp/thread)
   [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp#L35)
+- [x] [std::jthread](https://en.cppreference.com/w/cpp/thread/jthread)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/atomic.cpp)
 - [x] [std::tuple](https://en.cppreference.com/w/cpp/utility/tuple)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::to_chars](https://en.cppreference.com/w/cpp/utility/to_chars)
-  [(cppreference integer example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::transform](https://en.cppreference.com/w/cpp/algorithm/transform)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::unique_ptr](https://en.cppreference.com/w/cpp/memory/unique_ptr)
@@ -189,6 +315,8 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/containers.cpp)
 - [x] [std::numbers](https://en.cppreference.com/w/cpp/numeric/constants)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
+- [x] [std::random_device](https://en.cppreference.com/w/cpp/numeric/random/random_device)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/numeric.cpp)
 - [x] [std::uniform_int_distribution](https://en.cppreference.com/w/cpp/numeric/random/uniform_int_distribution)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/numeric.cpp)
 - [x] [std::valarray::slice](https://en.cppreference.com/w/cpp/numeric/valarray/slice)
@@ -207,6 +335,13 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp#L254)
 - [x] [std::packaged_task](https://en.cppreference.com/w/cpp/thread/packaged_task)
   [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp#L318)
+- [x] [std::latch](https://en.cppreference.com/w/cpp/thread/latch)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/thread.cpp)
+- [x] [std::barrier](https://en.cppreference.com/w/cpp/thread/barrier)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/thread.cpp)
+- [x] [std::counting_semaphore](https://en.cppreference.com/w/cpp/thread/counting_semaphore)
+  and [std::binary_semaphore](https://en.cppreference.com/w/cpp/thread/counting_semaphore)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/thread.cpp)
 - [x] [std::cin](https://en.cppreference.com/w/cpp/io/cin)
 - [x] [std::cout](https://en.cppreference.com/w/cpp/io/cout)
 - [x] [std::cerr](https://en.cppreference.com/w/cpp/io/cerr)
@@ -224,54 +359,12 @@ These unchecked items are candidates for future cppreference Example ports or
 runtime support work. Prefer examples that can run at `PASSIVE_LEVEL` without
 file-system, locale, console input, or unsupported C++ runtime dependencies.
 
-### Open Follow-Ups
-
-- [ ] Additional [`std::ranges`](https://en.cppreference.com/w/cpp/ranges)
-      C++23 view/adaptor examples after active toolset support review.
-
 ### Needs Investigation
 
-- [ ] [std::jthread](https://en.cppreference.com/w/cpp/thread/jthread)
-  - blocked in the current driver test by missing MSVC STL atomic wait/notify
-    ABI helpers.
-- [ ] [std::atomic::wait/notify](https://en.cppreference.com/w/cpp/atomic/atomic/wait)
-  - requires kernel-compatible implementations for MSVC STL atomic wait/notify
-    ABI helpers.
-- [ ] [std::expected](https://en.cppreference.com/w/cpp/utility/expected)
-  - the conditional cppreference harness is present, but the current MSVC
-    14.32 toolset does not provide `<expected>`.
-- [ ] [std::pmr](https://en.cppreference.com/w/cpp/memory/memory_resource)
-  - the cppreference `monotonic_buffer_resource` harness is available behind
-    `CRTSYS_ENABLE_UNSUPPORTED_PMR_TEST`; the default driver build is blocked
-    by missing MSVC PMR resource ABI helpers such as
-    `_Aligned_get_default_resource`.
-- [ ] `std::complex` transcendental functions such as
-      [std::exp](https://en.cppreference.com/w/cpp/numeric/complex/exp)
-      and [std::pow](https://en.cppreference.com/w/cpp/numeric/complex/pow)
-  - require missing MSVC math helper symbols such as `_Exp`, `ilogb`,
-    `scalbn`, and `copysign`.
-- [ ] [std::lerp](https://en.cppreference.com/w/cpp/numeric/lerp)
-  - the cppreference harness is available behind
-    `CRTSYS_ENABLE_UNSUPPORTED_LERP_TEST`; MSVC's `std::lerp(float)`
-    implementation can pull in the missing `fmaf` helper in driver builds.
-- [ ] [std::random_device](https://en.cppreference.com/w/cpp/numeric/random/random_device)
-  - likely needs hosted entropy API review; current tests use fixed seeds.
-- [ ] [std::latch](https://en.cppreference.com/w/cpp/thread/latch),
-      [std::barrier](https://en.cppreference.com/w/cpp/thread/barrier), and
-      [std::counting_semaphore](https://en.cppreference.com/w/cpp/thread/counting_semaphore)
-  - likely require the same atomic wait/notify ABI helper review.
 - [ ] [thread_local](https://en.cppreference.com/w/cpp/language/storage_duration#Thread_storage_duration)
-  - compiler TLS compatibility is partial; the cppreference storage-duration
-    example is still disabled by default.
-- [ ] [RTTI: typeid](https://en.cppreference.com/w/cpp/language/typeid)
-  and [dynamic_cast](https://en.cppreference.com/w/cpp/language/dynamic_cast)
-  - requires deciding whether driver tests should enable RTTI.
-- [ ] [std::filesystem](https://en.cppreference.com/w/cpp/filesystem)
-  - likely needs file-system and hosted ABI review.
-- [ ] [std::regex](https://en.cppreference.com/w/cpp/regex)
-  - likely needs allocation, locale, and exception-path review.
-- [ ] [std::format](https://en.cppreference.com/w/cpp/utility/format)
-  - needs MSVC STL support and kernel-suitable dependency review.
+  - General C++ `thread_local` is not supported as true per-thread TLS in the
+    default driver build; the cppreference storage-duration example remains
+    disabled.
 
 ## C Standard
 

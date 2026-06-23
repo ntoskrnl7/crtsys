@@ -35,6 +35,10 @@ void __cdecl _dtoul3();
 void __cdecl _dtol3();
 void __cdecl _ultod3();
 void __cdecl _ltod3();
+void __cdecl _ftoul3_legacy();
+void __cdecl _dtoul3_legacy();
+void __stdcall _ftoul3_legacy_float_to_integer();
+void __stdcall _dtoul3_legacy_double_to_integer();
 
 static void __cdecl ftol3_NaN();
 static void __cdecl ftol3_work();
@@ -384,5 +388,21 @@ __declspec(naked) void __cdecl _ltod3() {
 		addsd   xmm0, xmm1
 		ret
   }
+}
+
+__declspec(naked) void __cdecl _ftoul3_legacy() {
+  __asm { jmp _ftoul3 }
+}
+
+__declspec(naked) void __cdecl _dtoul3_legacy() {
+  __asm { jmp _dtoul3 }
+}
+
+__declspec(naked) void __stdcall _ftoul3_legacy_float_to_integer() {
+  __asm { jmp _ftoul3 }
+}
+
+__declspec(naked) void __stdcall _dtoul3_legacy_double_to_integer() {
+  __asm { jmp _dtoul3 }
 }
 #endif

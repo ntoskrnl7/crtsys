@@ -14,7 +14,7 @@ void run();
 namespace zero_initialization_test {
 void run(int argc = 5, char *[] = nullptr);
 }
-#if defined(CRTSYS_ENABLE_UNSUPPORTED_THREAD_LOCAL_TEST)
+#if CRTSYS_ENABLE_UNSUPPORTED_THREAD_LOCAL_TEST
 namespace storage_duration_example_test {
 void run();
 }
@@ -37,11 +37,23 @@ void run();
 namespace function_try_block_test {
 void run();
 }
+namespace typeid_test {
+void run();
+}
+namespace dynamic_cast_test {
+void run();
+}
 
 //
 // cpp/stl/chrono.cpp
 //
 namespace chrono_test {
+void run();
+}
+namespace chrono_current_zone_test {
+void run();
+}
+namespace chrono_time_zone_info_test {
 void run();
 }
 
@@ -67,6 +79,15 @@ namespace promise_test {
 void run();
 }
 namespace packaged_task_test {
+void run();
+}
+namespace latch_test {
+void run();
+}
+namespace barrier_test {
+void run();
+}
+namespace counting_semaphore_test {
 void run();
 }
 
@@ -112,10 +133,70 @@ void run();
 namespace expected_test {
 void run();
 }
+namespace format_test {
+void run();
+}
 namespace exchange_test {
 void run();
 }
 namespace find_test {
+void run();
+}
+namespace filesystem_path_test {
+void run();
+}
+namespace filesystem_directory_iterator_test {
+void run();
+}
+namespace filesystem_copy_file_test {
+void run();
+}
+namespace filesystem_copy_test {
+void run();
+}
+namespace filesystem_status_test {
+void run();
+}
+namespace filesystem_file_size_test {
+void run();
+}
+namespace filesystem_is_empty_test {
+void run();
+}
+namespace filesystem_resize_file_test {
+void run();
+}
+namespace filesystem_permissions_test {
+void run();
+}
+namespace filesystem_hard_link_test {
+void run();
+}
+namespace filesystem_create_symlink_test {
+void run();
+}
+namespace filesystem_read_symlink_test {
+void run();
+}
+namespace filesystem_copy_symlink_test {
+void run();
+}
+namespace filesystem_directory_entry_test {
+void run();
+}
+namespace filesystem_space_test {
+void run();
+}
+namespace filesystem_rename_test {
+void run();
+}
+namespace filesystem_temp_directory_path_test {
+void run();
+}
+namespace filesystem_last_write_time_test {
+void run();
+}
+namespace filesystem_canonical_test {
 void run();
 }
 namespace forward_list_insert_after_test {
@@ -157,11 +238,9 @@ void run();
 namespace lcm_test {
 void run();
 }
-#if defined(CRTSYS_ENABLE_UNSUPPORTED_LERP_TEST)
 namespace lerp_test {
 void run();
 }
-#endif
 namespace map_test {
 void run();
 }
@@ -201,18 +280,22 @@ void run();
 namespace priority_queue_test {
 void run();
 }
-#if defined(CRTSYS_ENABLE_UNSUPPORTED_PMR_TEST)
 namespace pmr_monotonic_buffer_resource_test {
 void run();
 }
-#endif
 namespace queue_test {
 void run();
 }
 namespace ranges_sort_test {
 void run();
 }
+namespace ranges_cxx23_adaptors_test {
+void run();
+}
 namespace ranges_views_test {
+void run();
+}
+namespace regex_test {
 void run();
 }
 namespace ratio_test {
@@ -254,6 +337,39 @@ void run();
 namespace string_view_test {
 void run();
 }
+namespace locale_test {
+void run();
+}
+namespace locale_constructor_test {
+void run();
+}
+namespace has_facet_test {
+void run();
+}
+namespace use_facet_test {
+void run();
+}
+namespace numpunct_test {
+void run();
+}
+namespace ctype_char_test {
+void run();
+}
+namespace messages_test {
+void run();
+}
+namespace money_get_test {
+void run();
+}
+namespace money_put_test {
+void run();
+}
+namespace time_get_test {
+void run();
+}
+namespace time_put_test {
+void run();
+}
 namespace tuple_test {
 void run();
 }
@@ -276,6 +392,9 @@ namespace unordered_multiset_count_test {
 void run();
 }
 namespace unordered_set_test {
+void run();
+}
+namespace random_device_test {
 void run();
 }
 namespace uniform_int_distribution_test {
@@ -336,7 +455,7 @@ void cpp_std_tests() {
   //
   constant_initialization_test::run();
   zero_initialization_test::run();
-#if defined(CRTSYS_ENABLE_UNSUPPORTED_THREAD_LOCAL_TEST)
+#if CRTSYS_ENABLE_UNSUPPORTED_THREAD_LOCAL_TEST
   storage_duration_example_test::run();
 #endif
   static_local_initialization_test::run();
@@ -357,10 +476,14 @@ void cpp_std_tests() {
   // the stack to its maximum size.
   function_try_block_test::run();
 #endif
+  typeid_test::run();
+  dynamic_cast_test::run();
   //
   // C++ STL tests.
   //
   chrono_test::run();
+  chrono_current_zone_test::run();
+  chrono_time_zone_info_test::run();
   condition_variable_test::run();
   mutex_test::run();
   shared_mutex_test::run();
@@ -368,6 +491,9 @@ void cpp_std_tests() {
   future_test::run();
   promise_test::run();
   packaged_task_test::run();
+  latch_test::run();
+  barrier_test::run();
+  counting_semaphore_test::run();
   array_test::run();
   vector_test::run();
   deque_test::run();
@@ -393,6 +519,36 @@ void cpp_std_tests() {
   priority_queue_test::run();
   string_test::run();
   string_view_test::run();
+  locale_test::run();
+  locale_constructor_test::run();
+  has_facet_test::run();
+  use_facet_test::run();
+  numpunct_test::run();
+  ctype_char_test::run();
+  messages_test::run();
+  money_get_test::run();
+  money_put_test::run();
+  time_get_test::run();
+  time_put_test::run();
+  filesystem_path_test::run();
+  filesystem_directory_iterator_test::run();
+  filesystem_copy_file_test::run();
+  filesystem_copy_test::run();
+  filesystem_status_test::run();
+  filesystem_file_size_test::run();
+  filesystem_is_empty_test::run();
+  filesystem_resize_file_test::run();
+  filesystem_permissions_test::run();
+  filesystem_hard_link_test::run();
+  filesystem_create_symlink_test::run();
+  filesystem_read_symlink_test::run();
+  filesystem_copy_symlink_test::run();
+  filesystem_directory_entry_test::run();
+  filesystem_space_test::run();
+  filesystem_rename_test::run();
+  filesystem_temp_directory_path_test::run();
+  filesystem_last_write_time_test::run();
+  filesystem_canonical_test::run();
   sort_test::run();
   find_test::run();
   transform_test::run();
@@ -401,6 +557,8 @@ void cpp_std_tests() {
   binary_search_test::run();
   ranges_views_test::run();
   ranges_sort_test::run();
+  ranges_cxx23_adaptors_test::run();
+  regex_test::run();
   merge_test::run();
   heap_test::run();
   next_permutation_test::run();
@@ -413,9 +571,7 @@ void cpp_std_tests() {
   inner_product_test::run();
   adjacent_difference_test::run();
   inclusive_scan_test::run();
-#if defined(CRTSYS_ENABLE_UNSUPPORTED_LERP_TEST)
   lerp_test::run();
-#endif
   bitset_test::run();
   popcount_test::run();
   to_chars_test::run();
@@ -429,6 +585,7 @@ void cpp_std_tests() {
   exception_ptr_test::run();
   optional_test::run();
   expected_test::run();
+  format_test::run();
   tuple_test::run();
   pair_test::run();
   variant_test::run();
@@ -445,13 +602,12 @@ void cpp_std_tests() {
   numbers_test::run();
   complex_test::run();
   valarray_slice_test::run();
+  random_device_test::run();
   uniform_int_distribution_test::run();
   function_test::run();
   bind_test::run();
   unique_ptr_test::run();
-#if defined(CRTSYS_ENABLE_UNSUPPORTED_PMR_TEST)
   pmr_monotonic_buffer_resource_test::run();
-#endif
   shared_ptr_test::run();
   weak_ptr_test::run();
 }

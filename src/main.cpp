@@ -209,7 +209,7 @@ CrtSysSetTebThreadLocalStoragePointer (
 #if _AMD64_
     __writegsqword(0x58, (ULONG_PTR)ThreadLocalStoragePointer);
 #elif _X86_
-    __writefsdword(0x18, (ULONG_PTR)ThreadLocalStoragePointer);
+    __writefsdword(0x2C, (ULONG_PTR)ThreadLocalStoragePointer);
 #elif _ARM_
     *(PVOID *)(_MoveFromCoprocessor(15, 0, 13, 0, 2) + 0x18) = ThreadLocalStoragePointer;
 #elif _ARM64_

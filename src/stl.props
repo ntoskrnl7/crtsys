@@ -24,6 +24,34 @@
     <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\pplerror.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\pplerror.cpp" />
     <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\ppltasks.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\ppltasks.cpp" />
     <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\sharedmutex.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\sharedmutex.cpp" />
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\atomic_wait.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\atomic_wait.cpp" />
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\memory_resource.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\memory_resource.cpp" />
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\fiopen.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\fiopen.cpp" />
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\filesystem.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\filesystem.cpp">
+      <PreprocessorDefinitions>_WIN32_WINNT=0x0A00;NTDDI_VERSION=0x0A000002;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\format.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\format.cpp" />
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\tzdb.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\tzdb.cpp">
+      <PreprocessorDefinitions>_WIN32_WINNT=0x0A00;NTDDI_VERSION=0x0A000004;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\syncstream.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\syncstream.cpp" />
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xrngdev.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xrngdev.cpp" />
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\charconv.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\charconv.cpp" />
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xcharconv_ryu_tables.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xcharconv_ryu_tables.cpp" />
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xcharconv_tables_float.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xcharconv_tables_float.cpp" />
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xcharconv_tables_double.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xcharconv_tables_double.cpp" />
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xvalues.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xvalues.cpp">
+      <PreprocessorDefinitions>NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xdnorm.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xdnorm.cpp">
+      <PreprocessorDefinitions>NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xdscale.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xdscale.cpp">
+      <PreprocessorDefinitions>NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xexp.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xexp.cpp">
+      <PreprocessorDefinitions>NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
     <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\syserror_import_lib.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\syserror_import_lib.cpp" />
     <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\taskscheduler.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\taskscheduler.cpp" />
     <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xnotify.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\xnotify.cpp">

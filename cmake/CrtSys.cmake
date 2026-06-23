@@ -182,7 +182,15 @@ endfunction()
 
 function(crtsys_add_driver _target)
     cmake_parse_arguments(WDK "" "WINVER" "" ${ARGN})
+
+    set(_CRTSYS_ORIGINAL_GENERATOR_PLATFORM "${CMAKE_GENERATOR_PLATFORM}")
+    if(_CRTSYS_ORIGINAL_GENERATOR_PLATFORM MATCHES "^([^,]+),")
+        set(CMAKE_GENERATOR_PLATFORM "${CMAKE_MATCH_1}")
+    endif()
+
     wdk_add_driver(${_target} ${WDK_UNPARSED_ARGUMENTS} CUSTOM_ENTRY_POINT CrtSysDriverEntry EXTENDED_CPP_FEATURES)
+
+    set(CMAKE_GENERATOR_PLATFORM "${_CRTSYS_ORIGINAL_GENERATOR_PLATFORM}")
     crtsys_scope_compile_options_to_c_cxx(${_target})
 
     crtsys_apply_driver_settings(${_target} "${_CRTSYS_ROOT}")

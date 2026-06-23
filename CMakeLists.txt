@@ -61,7 +61,10 @@ else()
   set(LDK_USE_RAISE_EXCEPTION OFF)
   set(LDK_USE_RTL_RAISE_EXCEPTION OFF)
 endif()
-CPMAddPackage("gh:ntoskrnl7/Ldk@0.7.5")
+if (NOT CRTSYS_ENABLE_DIAGNOSTIC_BREAKPOINTS)
+  set(LDK_ENABLE_DIAGNOSTIC_BREAKPOINTS OFF CACHE BOOL "Set to OFF to suppress LDK diagnostic KdBreakPoint calls")
+endif()
+CPMAddPackage("gh:ntoskrnl7/Ldk@0.7.7")
 
 CPMAddPackage("gh:ntoskrnl7/FindWDK#master")
 list(APPEND CMAKE_MODULE_PATH "${FindWDK_SOURCE_DIR}/cmake")
@@ -96,10 +99,13 @@ if("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "Win32")
     src/custom/crt/math/*.c
     )
   list(APPEND SOURCE_FILES ${MATH_SOURCE_FILES})
+  list(APPEND SOURCE_FILES src/custom/crt/tls_x86.asm)
 else()
   file(GLOB MATH_SOURCE_FILES
   src/custom/crt/math/nextafter.c
   src/custom/crt/math/fpclassify.c
+  src/custom/crt/math/fma.c
+  src/custom/crt/math/real_helpers.c
   )
   list(APPEND SOURCE_FILES ${MATH_SOURCE_FILES})
 endif()

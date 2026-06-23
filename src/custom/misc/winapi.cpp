@@ -41,33 +41,6 @@ VerifyVersionInfoW (
 WINBASEAPI
 DWORD
 WINAPI
-GetTempPathA (
-    _In_ DWORD nBufferLength,
-    _Out_writes_to_opt_(nBufferLength, return +1) LPSTR lpBuffer
-    )
-{
-    CRTSYS_DIAGNOSTIC_BREAK();
-    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
-    return 0;
-}
-
-WINBASEAPI
-UINT
-WINAPI
-GetTempFileNameA (
-    _In_ LPCSTR lpPathName, _In_ LPCSTR lpPrefixString,
-    _In_ UINT uUnique,
-    _Out_writes_(MAX_PATH) LPSTR lpTempFileName
-    )
-{
-    CRTSYS_DIAGNOSTIC_BREAK();
-    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
-    return 0;
-}
-
-WINBASEAPI
-DWORD
-WINAPI
 ResumeThread (
     _In_ HANDLE hThread
     )
@@ -124,6 +97,7 @@ SetConsoleTextAttribute (
 
 
 
+#ifndef LDK_HAS_LOCALE_NLS_APIS
 // 14.31.31103\crt\src\stl\xdateord.cpp
 WINBASEAPI
 int
@@ -162,6 +136,9 @@ GetStringTypeW (
 // ucrt/internal/winapi_thunks.cpp 
 //
 
+#endif
+
+#ifndef LDK_HAS_LOCALE_NLS_APIS
 // __acrt_GetDateFormatEx -> GetDateFormatW
 WINBASEAPI
 int
@@ -198,6 +175,9 @@ GetTimeFormatW (
     return 0;
 }
 
+#endif
+
+#ifndef LDK_HAS_LOCALE_NLS_APIS
 // __acrt_GetLocaleInfoEx -> GetLocaleInfoW
 WINBASEAPI
 int
@@ -245,6 +225,7 @@ EnumSystemLocalesW (
     SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
     return FALSE; 
 }
+#endif
 
 //
 // https://github.com/ntoskrnl7/crtsys/issues/23

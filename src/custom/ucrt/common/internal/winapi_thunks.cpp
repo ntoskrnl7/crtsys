@@ -177,14 +177,144 @@ extern "C"
 int __cdecl __acrt_GetLocaleInfoA(_locale_t const locale, int const lc_type, wchar_t const *const locale_name,
                                   LCTYPE const locale_type, void *const void_result)
 {
-    return 0;
+    UNREFERENCED_PARAMETER(locale);
+
+    if (void_result == nullptr)
+    {
+        return -1;
+    }
+
+    if (lc_type == LC_INT_TYPE)
+    {
+        DWORD value = 0;
+        const LCTYPE base_type = locale_type & ~(LOCALE_RETURN_NUMBER | LOCALE_USE_CP_ACP | LOCALE_NOUSEROVERRIDE);
+        const int actual = __acrt_GetLocaleInfoEx(
+            locale_name,
+            base_type | LOCALE_RETURN_NUMBER,
+            reinterpret_cast<LPWSTR>(&value),
+            sizeof(value) / sizeof(wchar_t));
+        if (actual == 0)
+        {
+            return -1;
+        }
+
+        if (base_type == LOCALE_IDEFAULTANSICODEPAGE || base_type == LOCALE_IDEFAULTCODEPAGE)
+        {
+            *static_cast<int*>(void_result) = static_cast<int>(value);
+        }
+        else
+        {
+            *static_cast<unsigned char*>(void_result) = static_cast<unsigned char>(value);
+        }
+        return 0;
+    }
+
+    const int wide_count = __acrt_GetLocaleInfoEx(locale_name, locale_type, nullptr, 0);
+    if (wide_count == 0)
+    {
+        return -1;
+    }
+
+    auto* const wide_result = static_cast<wchar_t*>(calloc(static_cast<size_t>(wide_count), sizeof(wchar_t)));
+    if (wide_result == nullptr)
+    {
+        return -1;
+    }
+
+    if (__acrt_GetLocaleInfoEx(locale_name, locale_type, wide_result, wide_count) == 0)
+    {
+        free(wide_result);
+        return -1;
+    }
+
+    if (lc_type == LC_WSTR_TYPE)
+    {
+        *static_cast<wchar_t**>(void_result) = wide_result;
+        return 0;
+    }
+
+    if (lc_type == LC_STR_TYPE)
+    {
+        const int char_count = __acrt_WideCharToMultiByte(
+            CP_UTF8, 0, wide_result, -1, nullptr, 0, nullptr, nullptr);
+        if (char_count == 0)
+        {
+            free(wide_result);
+            return -1;
+        }
+
+        auto* const char_result = static_cast<char*>(calloc(static_cast<size_t>(char_count), sizeof(char)));
+        if (char_result == nullptr)
+        {
+            free(wide_result);
+            return -1;
+        }
+
+        const int converted = __acrt_WideCharToMultiByte(
+            CP_UTF8, 0, wide_result, -1, char_result, char_count, nullptr, nullptr);
+        free(wide_result);
+        if (converted == 0)
+        {
+            free(char_result);
+            return -1;
+        }
+
+        *static_cast<char**>(void_result) = char_result;
+        return 0;
+    }
+
+    free(wide_result);
+    return -1;
 }
 
 extern "C" int __cdecl __acrt_LCMapStringA(_locale_t const plocinfo, PCWSTR const LocaleName, DWORD const dwMapFlags,
                                            PCCH const lpSrcStr, int const cchSrc, PCH const lpDestStr,
                                            int const cchDest, int const code_page, BOOL const bError)
 {
-    return 0;
+    UNREFERENCED_PARAMETER(plocinfo);
+    UNREFERENCED_PARAMETER(LocaleName);
+    UNREFERENCED_PARAMETER(code_page);
+    UNREFERENCED_PARAMETER(bError);
+
+    if (lpSrcStr == nullptr || cchSrc < -1 || cchDest < 0)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    int count = cchSrc;
+    if (count == -1)
+    {
+        count = static_cast<int>(strlen(lpSrcStr)) + 1;
+    }
+
+    if (lpDestStr == nullptr || cchDest == 0)
+    {
+        return count;
+    }
+
+    if (cchDest < count)
+    {
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return 0;
+    }
+
+    for (int index = 0; index < count; ++index)
+    {
+        unsigned char ch = static_cast<unsigned char>(lpSrcStr[index]);
+        if ((dwMapFlags & LCMAP_LOWERCASE) && ch >= 'A' && ch <= 'Z')
+        {
+            ch = static_cast<unsigned char>(ch - 'A' + 'a');
+        }
+        else if ((dwMapFlags & LCMAP_UPPERCASE) && ch >= 'a' && ch <= 'z')
+        {
+            ch = static_cast<unsigned char>(ch - 'a' + 'A');
+        }
+
+        lpDestStr[index] = static_cast<char>(ch);
+    }
+
+    return count;
 }
 
 extern "C" int WINAPI __acrt_MessageBoxA(
@@ -211,6 +341,36 @@ extern "C" int WINAPI __acrt_MessageBoxW(
     SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
     return 0;
     // abort(); // No fallback; callers should check availablility before calling
+}
+
+extern "C" BOOLEAN WINAPI __acrt_RtlGenRandom(
+    PVOID const buffer,
+    ULONG const buffer_count
+    )
+{
+    if (buffer == nullptr && buffer_count != 0)
+    {
+        return FALSE;
+    }
+
+    LARGE_INTEGER counter{};
+    QueryPerformanceCounter(&counter);
+
+    ULONG_PTR state =
+        static_cast<ULONG_PTR>(counter.QuadPart) ^
+        reinterpret_cast<ULONG_PTR>(buffer) ^
+        static_cast<ULONG_PTR>(buffer_count);
+
+    auto* const bytes = static_cast<unsigned char*>(buffer);
+    for (ULONG i = 0; i != buffer_count; ++i)
+    {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        bytes[i] = static_cast<unsigned char>(state >> ((i & 7) * 8));
+    }
+
+    return TRUE;
 }
 
 extern "C" bool __cdecl __acrt_can_use_vista_locale_apis()

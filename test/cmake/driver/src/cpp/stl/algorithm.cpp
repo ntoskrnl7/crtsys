@@ -21,11 +21,13 @@
 #include <limits>
 #include <list>
 #include <numeric>
+#include <optional>
 #include <random>
 #include <ranges>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <tuple>
 #include <vector>
 
 namespace sort_test {
@@ -330,6 +332,168 @@ void run() {
 }
 } // namespace ranges_sort_test
 
+namespace ranges_cxx23_adaptors_test {
+//
+// https://en.cppreference.com/w/cpp/ranges/zip_view#Example
+//
+#if defined(__cpp_lib_ranges_zip)
+void zip_view_example() {
+  auto x = std::vector{1, 2, 3, 4};
+  auto y = std::list<std::string>{"alpha", "beta", "gamma", "delta",
+                                  "epsilon"};
+  auto z = std::array{'A', 'B', 'C', 'D', 'E', 'F'};
+
+  size_t rows = 0;
+  for (std::tuple<int &, std::string &, char &> elem :
+       std::views::zip(x, y, z)) {
+    assert(std::get<0>(elem) == x[rows]);
+    std::get<2>(elem) =
+        static_cast<char>(std::get<2>(elem) + ('a' - 'A'));
+    ++rows;
+  }
+
+  assert(rows == x.size());
+  assert((z == std::array{'a', 'b', 'c', 'd', 'E', 'F'}));
+}
+#endif
+
+//
+// https://en.cppreference.com/w/cpp/ranges/chunk_view#Example
+//
+#if defined(__cpp_lib_ranges_chunk)
+void chunk_view_example() {
+  const auto v = {1, 2, 3, 4, 5, 6};
+  std::array<size_t, 7> expected_chunk_counts{6, 3, 2, 2, 2, 1, 1};
+  size_t width_index = 0;
+
+  for (const unsigned width : std::views::iota(1U, 2U + v.size())) {
+    auto const chunks = v | std::views::chunk(width);
+    size_t chunk_count = 0;
+    for (auto chunk : chunks) {
+      assert(!std::ranges::empty(chunk));
+      ++chunk_count;
+    }
+    assert(width_index < expected_chunk_counts.size());
+    assert(chunk_count == expected_chunk_counts[width_index++]);
+  }
+  assert(width_index == expected_chunk_counts.size());
+  // Release builds compile out assert(), so mark assert-only locals as used.
+  (void)expected_chunk_counts;
+  (void)width_index;
+}
+#endif
+
+//
+// https://en.cppreference.com/w/cpp/ranges/slide_view#Example
+//
+#if defined(__cpp_lib_ranges_slide)
+void slide_view_example() {
+  const auto v = {1, 2, 3, 4, 5, 6};
+  std::array<size_t, 6> expected_window_counts{6, 5, 4, 3, 2, 1};
+  size_t width_index = 0;
+
+  for (const unsigned width : std::views::iota(1U, 1U + v.size())) {
+    auto const windows = v | std::views::slide(width);
+    size_t window_count = 0;
+    for (auto window : windows) {
+      assert(!std::ranges::empty(window));
+      ++window_count;
+    }
+    assert(width_index < expected_window_counts.size());
+    assert(window_count == expected_window_counts[width_index++]);
+  }
+  assert(width_index == expected_window_counts.size());
+  // Release builds compile out assert(), so mark assert-only locals as used.
+  (void)expected_window_counts;
+  (void)width_index;
+}
+#endif
+
+//
+// https://en.cppreference.com/w/cpp/ranges/stride_view#Example
+//
+#if defined(__cpp_lib_ranges_stride)
+void stride_view_example() {
+  std::array expected_forward{1, 4, 7, 10};
+  std::array expected_reversed_after_stride{10, 7, 4, 1};
+  std::array expected_stride_after_reverse{12, 9, 6, 3};
+
+  assert(std::ranges::equal(std::views::iota(1, 13) | std::views::stride(3),
+                            expected_forward));
+  assert(std::ranges::equal(std::views::iota(1, 13) | std::views::stride(3) |
+                                std::views::reverse,
+                            expected_reversed_after_stride));
+  assert(std::ranges::equal(std::views::iota(1, 13) | std::views::reverse |
+                                std::views::stride(3),
+                            expected_stride_after_reverse));
+
+  std::string decoded;
+  for (char c :
+       std::string_view("0x0!133713337*x//42/A$@") | std::views::stride(0B11) |
+           std::views::transform([](char ch) -> char { return 0100 | ch; })) {
+    decoded.push_back(c);
+  }
+  assert(decoded == "password");
+}
+#endif
+
+//
+// https://en.cppreference.com/w/cpp/ranges/repeat_view#Example
+//
+#if defined(__cpp_lib_ranges_repeat)
+void repeat_view_example() {
+  using namespace std::literals;
+
+  int bounded_count = 0;
+  for (auto s : std::views::repeat("C++"sv, 3)) {
+    assert(s == "C++"sv);
+    ++bounded_count;
+  }
+  assert(bounded_count == 3);
+
+  int unbounded_count = 0;
+  for (auto s : std::views::repeat("I know that you know that"sv) |
+                    std::views::take(3)) {
+    assert(s == "I know that you know that"sv);
+    ++unbounded_count;
+  }
+  assert(unbounded_count == 3);
+}
+#endif
+
+void run() {
+  int exercised = 0;
+
+#if defined(__cpp_lib_ranges_zip)
+  zip_view_example();
+  ++exercised;
+#endif
+#if defined(__cpp_lib_ranges_chunk)
+  chunk_view_example();
+  ++exercised;
+#endif
+#if defined(__cpp_lib_ranges_slide)
+  slide_view_example();
+  ++exercised;
+#endif
+#if defined(__cpp_lib_ranges_stride)
+  stride_view_example();
+  ++exercised;
+#endif
+#if defined(__cpp_lib_ranges_repeat)
+  repeat_view_example();
+  ++exercised;
+#endif
+
+  if (exercised == 0) {
+    std::cout << "C++23 ranges adaptor feature-test macros are not available\n";
+  } else {
+    std::cout << "C++23 ranges adaptor cppreference examples exercised "
+              << exercised << " feature group(s)\n";
+  }
+}
+} // namespace ranges_cxx23_adaptors_test
+
 //
 // https://en.cppreference.com/w/cpp/algorithm/merge#Example
 //
@@ -341,29 +505,29 @@ auto print = [](const auto rem, const auto &v) {
 };
 
 void run() {
-  // Fill the vectors with deterministic pseudo-random numbers. The
-  // cppreference example uses std::random_device to seed the engine.
-  std::mt19937 mt{};
+  // fill the vectors with random numbers
+  std::random_device rd;
+  std::mt19937 mt(rd());
   std::uniform_int_distribution<> dis(0, 9);
 
   std::vector<int> v1(10), v2(10);
   std::generate(v1.begin(), v1.end(), std::bind(dis, std::ref(mt)));
   std::generate(v2.begin(), v2.end(), std::bind(dis, std::ref(mt)));
 
-  print("Originally:\nv1: ", v1);
+  print("Originally:\n v1: ", v1);
   print("v2: ", v2);
 
   std::sort(v1.begin(), v1.end());
   std::sort(v2.begin(), v2.end());
 
-  print("After sorting:\nv1: ", v1);
+  print("After sorting:\n v1: ", v1);
   print("v2: ", v2);
 
-  // Merge.
+  // merge
   std::vector<int> dst;
   std::merge(v1.begin(), v1.end(), v2.begin(), v2.end(),
              std::back_inserter(dst));
-  print("After merging:\ndst: ", dst);
+  print("After merging:\n dst: ", dst);
 }
 } // namespace merge_test
 
@@ -487,13 +651,7 @@ void run() {
   // Vector of iterators (to original data) is used to avoid expensive copying,
   // and because std::shuffle (below) cannot be applied to a std::list directly.
 
-#if defined(CRTSYS_ENABLE_EXACT_CPPREFERENCE_RANDOM_DEVICE_EXAMPLE)
   std::shuffle(v.begin(), v.end(), std::mt19937{std::random_device{}()});
-#else
-  // The cppreference example seeds from std::random_device. Kernel tests use a
-  // fixed seed to avoid depending on hosted entropy APIs.
-  std::shuffle(v.begin(), v.end(), std::mt19937{});
-#endif
   std::cout << "Original contents of the list l:\t";
   for (const auto &n : l) {
     std::cout << std::setw(2) << n << ' ';
@@ -683,7 +841,6 @@ void run() {
 //
 // https://en.cppreference.com/w/cpp/numeric/lerp#Example
 //
-#if defined(CRTSYS_ENABLE_UNSUPPORTED_LERP_TEST)
 namespace lerp_test {
 float naive_lerp(float a, float b, float t) { return a + t * (b - a); }
 
@@ -703,9 +860,16 @@ void run() {
   const float naive_midpoint = naive_lerp(a, b, 0.5f);
   std::cout << "std::lerp midpoint differs from naive midpoint: "
             << (midpoint != naive_midpoint) << '\n';
+
+  const double double_midpoint = std::lerp(1e16, 1.0, 0.5);
+  const long double long_double_midpoint = std::lerp(1.0L, 3.0L, 0.5L);
+  assert(std::lerp(1e16, 1.0, 0.0) == 1e16);
+  assert(long_double_midpoint == 2.0L);
+  // Release builds compile out assert(), so mark assert-only locals as used.
+  (void)long_double_midpoint;
+  std::cout << "double midpoint = " << double_midpoint << '\n';
 }
 } // namespace lerp_test
-#endif
 
 //
 // https://en.cppreference.com/w/cpp/utility/bitset#Example
@@ -788,22 +952,25 @@ void run() {
 //
 namespace to_chars_test {
 void show_to_chars(auto... format_args) {
-  const size_t buf_size = 32;
+  const size_t buf_size = 10;
   char buf[buf_size]{};
   std::to_chars_result result =
       std::to_chars(buf, buf + buf_size, format_args...);
 
-  if (result.ec == std::errc()) {
-    std::cout << std::string_view(buf, result.ptr) << '\n';
-  } else {
+  if (result.ec != std::errc()) {
     std::cout << std::make_error_code(result.ec).message() << '\n';
+  } else {
+    std::string_view str(buf, result.ptr - buf);
+    std::cout << std::quoted(str) << '\n';
   }
 }
 
 void run() {
   show_to_chars(42);
-  show_to_chars(+1234567890);
-  show_to_chars(-1234567890);
+  show_to_chars(+3.14159F);
+  show_to_chars(-3.14159, std::chars_format::fixed);
+  show_to_chars(-3.14159, std::chars_format::scientific, 3);
+  show_to_chars(3.1415926535, std::chars_format::fixed, 10);
 }
 } // namespace to_chars_test
 
@@ -811,6 +978,60 @@ void run() {
 // https://en.cppreference.com/w/cpp/utility/from_chars#Example
 //
 namespace from_chars_test {
+void run_floating_point_overloads() {
+  struct test_case {
+    std::string_view text;
+    std::chars_format format;
+    double lower;
+    double upper;
+    std::string_view rest;
+  };
+
+  //
+  // The cppreference example above is integer-focused; this block checks the
+  // floating-point overloads described on the same page.
+  //
+  for (const auto &test : {test_case{"3.14159", std::chars_format::general,
+                                     3.14158, 3.14160, ""},
+                           test_case{"-3.142e+00",
+                                     std::chars_format::scientific, -3.143,
+                                     -3.141, ""},
+                           test_case{"1.25foo", std::chars_format::general,
+                                     1.24, 1.26, "foo"},
+                           test_case{"1.25e2", std::chars_format::fixed,
+                                     1.24, 1.26, "e2"},
+                           test_case{"0x123", std::chars_format::hex, -0.1,
+                                     0.1, "x123"}}) {
+    double result{};
+    const auto [ptr, ec] = std::from_chars(
+        test.text.data(), test.text.data() + test.text.size(), result,
+        test.format);
+    // Release builds compile out assert(), so mark assert-only locals as used.
+    (void)ptr;
+    (void)ec;
+
+    assert(ec == std::errc());
+    assert(result > test.lower);
+    assert(result < test.upper);
+    assert(std::string_view(ptr, test.text.data() + test.text.size() - ptr) ==
+           test.rest);
+  }
+
+  double unchanged = 7.0;
+  const std::string_view invalid = "foo";
+  const auto [ptr, ec] =
+      std::from_chars(invalid.data(), invalid.data() + invalid.size(),
+                      unchanged, std::chars_format::general);
+  // Release builds compile out assert(), so mark assert-only locals as used.
+  (void)ptr;
+  (void)ec;
+  assert(ec == std::errc::invalid_argument);
+  assert(ptr == invalid.data());
+  assert(unchanged == 7.0);
+
+  std::cout << "floating-point from_chars assertions passed\n";
+}
+
 void run() {
   for (std::string_view const str :
        {"1234", "15 foo", "bar", " 42", "5000000000"}) {
@@ -828,5 +1049,26 @@ void run() {
       std::cout << "This number is larger than an int.\n";
     }
   }
+
+  auto to_int = [](std::string_view s) -> std::optional<int> {
+    int value{};
+#if __cpp_lib_to_chars >= 202306L
+    if (std::from_chars(s.data(), s.data() + s.size(), value))
+#else
+    if (std::from_chars(s.data(), s.data() + s.size(), value).ec ==
+        std::errc{})
+#endif
+      return value;
+    else
+      return std::nullopt;
+  };
+  assert(to_int("42") == 42);
+  assert(to_int("foo") == std::nullopt);
+#if __cpp_lib_constexpr_charconv and __cpp_lib_optional >= 202106
+  static_assert(to_int("42") == 42);
+  static_assert(to_int("foo") == std::nullopt);
+#endif
+
+  run_floating_point_overloads();
 }
 } // namespace from_chars_test

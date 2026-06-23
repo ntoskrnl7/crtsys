@@ -24,24 +24,10 @@ void run() {
   {
     acnt = 0;
     cnt = 0;
-#if defined(CRTSYS_ENABLE_EXACT_CPPREFERENCE_JTHREAD_ATOMIC_EXAMPLE)
     std::vector<std::jthread> pool;
     for (int n = 0; n < 10; ++n) {
       pool.emplace_back(f);
     }
-#else
-    // The cppreference example uses std::jthread. MSVC STL implements jthread
-    // stop-state teardown through atomic wait/notify ABI helpers that crtsys
-    // does not provide yet, so the default kernel test keeps the same worker
-    // body and joins std::thread explicitly.
-    std::vector<std::thread> pool;
-    for (int n = 0; n < 10; ++n) {
-      pool.emplace_back(f);
-    }
-    for (auto &thread : pool) {
-      thread.join();
-    }
-#endif
   }
 
   std::cout << "The atomic counter is " << acnt << '\n'
@@ -59,8 +45,7 @@ class mutex {
 public:
   void lock() noexcept {
     while (m_.test_and_set(std::memory_order_acquire))
-#if defined(__cpp_lib_atomic_wait) && __cpp_lib_atomic_wait >= 201907L &&      \
-    defined(CRTSYS_ENABLE_STL_ATOMIC_WAIT_NOTIFY_TEST)
+#if defined(__cpp_lib_atomic_wait) && __cpp_lib_atomic_wait >= 201907L
       // Since C++20, locks can be acquired only after notification in the
       // unlock, avoiding any unnecessary spinning.
       // Note that even though wait guarantees it returns only after the value
@@ -74,8 +59,7 @@ public:
   }
   void unlock() noexcept {
     m_.clear(std::memory_order_release);
-#if defined(__cpp_lib_atomic_wait) && __cpp_lib_atomic_wait >= 201907L &&      \
-    defined(CRTSYS_ENABLE_STL_ATOMIC_WAIT_NOTIFY_TEST)
+#if defined(__cpp_lib_atomic_wait) && __cpp_lib_atomic_wait >= 201907L
     m_.notify_one();
 #endif
   }

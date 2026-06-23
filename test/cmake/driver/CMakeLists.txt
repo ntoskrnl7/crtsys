@@ -53,6 +53,7 @@ if (NOT CRTSYS_TEST_NLOHMANN_JSON)
 endif()
 
 crtsys_add_driver(crtsys_test ${SOURCE_FILES})
+target_compile_options(crtsys_test PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/GR>")
 
 if (NOT CRTSYS_TEST_BREAKPOINT)
     target_compile_definitions(crtsys_test PRIVATE "CRTSYS_TEST_NO_BREAKPOINT")

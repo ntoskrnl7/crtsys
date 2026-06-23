@@ -1,13 +1,18 @@
+#define _CRT_SECURE_NO_WARNINGS
+
 //
 // https://en.cppreference.com/w/cpp/memory/shared_ptr#Example
 //
 #include <array>
 #include <chrono>
 #include <cassert>
+#include <cstdio>
 #include <cstddef>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <list>
+#include <locale>
 #include <memory>
 #include <memory_resource>
 #include <mutex>
@@ -94,7 +99,6 @@ void run() {
 //
 // https://en.cppreference.com/w/cpp/memory/monotonic_buffer_resource#Example
 //
-#if defined(CRTSYS_ENABLE_UNSUPPORTED_PMR_TEST)
 namespace pmr_monotonic_buffer_resource_test {
 template <typename Func> auto benchmark(Func test_func, int iterations) {
   const auto start = std::chrono::system_clock::now();
@@ -107,13 +111,8 @@ template <typename Func> auto benchmark(Func test_func, int iterations) {
 }
 
 void run() {
-#if defined(CRTSYS_ENABLE_EXACT_CPPREFERENCE_PMR_STRESS_TEST)
   constexpr int iterations{100};
   constexpr int total_nodes{2'00'000};
-#else
-  constexpr int iterations{4};
-  constexpr int total_nodes{128};
-#endif
 
   auto default_std_alloc = [total_nodes] {
     std::list<int> list;
@@ -138,9 +137,14 @@ void run() {
     }
   };
 
-  auto pmr_alloc_and_buf = [total_nodes] {
-    std::array<std::byte, total_nodes * 32> buffer; // enough to fit in all nodes
-    std::pmr::monotonic_buffer_resource mbr{buffer.data(), buffer.size()};
+  const auto buffer_size = static_cast<std::size_t>(total_nodes) * 32;
+  auto buffer = std::unique_ptr<std::byte[]>{new std::byte[buffer_size]};
+
+  auto pmr_alloc_and_buf = [total_nodes, buffer = buffer.get(), buffer_size] {
+    // cppreference uses a local stack buffer here:
+    // std::array<std::byte, total_nodes * 32> buffer; // enough to fit in all nodes
+    // std::pmr::monotonic_buffer_resource mbr{buffer.data(), buffer.size()};
+    std::pmr::monotonic_buffer_resource mbr{buffer, buffer_size};
     std::pmr::polymorphic_allocator<int> pa{&mbr};
     std::pmr::list<int> list{pa};
     for (int i{}; i != total_nodes; ++i) {
@@ -164,7 +168,6 @@ void run() {
             << '\n';
 }
 } // namespace pmr_monotonic_buffer_resource_test
-#endif
 
 //
 // https://en.cppreference.com/w/cpp/memory/unique_ptr#Example
@@ -188,6 +191,9 @@ std::unique_ptr<D> pass_through(std::unique_ptr<D> p) {
   p->bar();
   return p;
 }
+
+// helper function for the custom deleter demo below
+void close_file(std::FILE *fp) { std::fclose(fp); }
 
 // unique_ptr-based linked list demo
 struct List {
@@ -234,7 +240,15 @@ void run() {
   }
 
   std::cout << "\n"
-               "3) Custom deleter demo skipped in kernel-driver build\n";
+               "3) Custom deleter demo\n";
+  std::ofstream("demo.txt") << 'x'; // prepare the file to read
+  {
+    using unique_file_t = std::unique_ptr<std::FILE, decltype(&close_file)>;
+    unique_file_t fp(std::fopen("demo.txt", "r"), &close_file);
+    if (fp) {
+      std::cout << char(std::fgetc(fp.get())) << '\n';
+    }
+  } // "close_file()" called here (if "fp" is not null)
 
   std::cout << "\n"
                "4) Custom lambda expression deleter and exception safety "
@@ -259,15 +273,12 @@ void run() {
                "6) Linked list demo\n";
   {
     List wall;
-#if defined(CRTSYS_ENABLE_EXACT_CPPREFERENCE_UNIQUE_PTR_STRESS_TEST)
     const int enough{1'000'000};
-#else
-    const int enough{1'000};
-#endif
     for (int beer = 0; beer != enough; ++beer) {
       wall.push(beer);
     }
 
+    std::cout.imbue(std::locale("en_US.UTF-8"));
     std::cout << enough << " bottles of beer on the wall...\n";
   } // destroys all the beers
 }

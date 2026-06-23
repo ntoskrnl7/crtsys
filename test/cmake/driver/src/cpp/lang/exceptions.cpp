@@ -7,6 +7,7 @@
 //
 #include <iostream>
 #include <stdexcept>
+
 namespace throw_test {
 struct A {
   int n;
@@ -56,6 +57,7 @@ void run() try {
 //
 #include <iostream>
 #include <vector>
+
 namespace try_catch_test {
 void run() {
   try {
@@ -83,6 +85,7 @@ void run() {
 //
 #include <iostream>
 #include <string>
+
 namespace function_try_block_test {
 #include <iostream>
 #include <string>
