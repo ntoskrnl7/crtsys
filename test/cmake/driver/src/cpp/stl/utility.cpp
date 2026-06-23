@@ -16,6 +16,9 @@
 #if __has_include(<format>)
 #include <format>
 #endif
+#if __has_include(<print>)
+#include <print>
+#endif
 #include <functional>
 #include <iomanip>
 #include <iostream>
@@ -141,6 +144,19 @@ void run() {
 #endif
 }
 } // namespace format_test
+
+//
+// https://en.cppreference.com/w/cpp/io/print#Example
+//
+namespace print_test {
+void run() {
+#if defined(__cpp_lib_print)
+  std::print("{2} {1}{0}!\n", 23, "C++", "Hello");
+#else
+  std::cout << "std::print is not available in this MSVC STL\n";
+#endif
+}
+} // namespace print_test
 
 //
 // https://en.cppreference.com/w/cpp/utility/tuple#Example
@@ -328,13 +344,17 @@ void run() {
   std::vector<std::reference_wrapper<int>> v(l.begin(), l.end());
   std::ranges::shuffle(v, std::mt19937{std::random_device{}()});
 
-  println("Contents of the list: ", l);
-  println("Contents of the list, as seen through a shuffled vector: ", v);
+  // This file also includes <print> for the std::print example. Qualify the
+  // cppreference helper so MSVC doesn't consider std::println during ADL.
+  reference_wrapper_test::println("Contents of the list: ", l);
+  reference_wrapper_test::println(
+      "Contents of the list, as seen through a shuffled vector: ", v);
 
   std::cout << "Doubling the values in the initial list...\n";
   std::ranges::for_each(l, [](int &i) { i *= 2; });
 
-  println("Contents of the list, as seen through a shuffled vector: ", v);
+  reference_wrapper_test::println(
+      "Contents of the list, as seen through a shuffled vector: ", v);
 }
 } // namespace reference_wrapper_test
 

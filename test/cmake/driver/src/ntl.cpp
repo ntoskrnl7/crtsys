@@ -1,7 +1,19 @@
 #include <ntl/expand_stack>
+#include <ntl/except>
 
 #include <string>
 #include <utility>
+
+namespace {
+volatile NTSTATUS g_seh_test_status = STATUS_ACCESS_VIOLATION;
+using raise_status_fn = void(NTAPI *)(NTSTATUS);
+raise_status_fn volatile g_raise_status = ExRaiseStatus;
+
+__declspec(noinline) void raise_seh_test_status() {
+  const auto raise_status = g_raise_status;
+  raise_status(g_seh_test_status);
+}
+} // namespace
 
 bool ntl_expand_stack_test() {
   long result = 0;
@@ -40,6 +52,12 @@ bool ntl_expand_stack_test() {
     }
   });
   return !(t1.empty() || t2.empty() || t3.empty());
+}
+
+bool ntl_seh_try_except_test() {
+  const auto ret = ntl::seh::try_except([]() { raise_seh_test_status(); });
+  return !std::get<0>(ret) &&
+         std::get<1>(ret) == static_cast<unsigned long>(STATUS_ACCESS_VIOLATION);
 }
 
 #include <ntl/irql>
@@ -295,6 +313,13 @@ TEST(ntl_test, ntl_expand_stack_test) {
     }
   });
   EXPECT_FALSE(t1.empty() && t2.empty() && t3.empty());
+}
+
+TEST(ntl_test, ntl_seh_try_except_test) {
+  const auto ret = ntl::seh::try_except([]() { raise_seh_test_status(); });
+  EXPECT_FALSE(std::get<0>(ret));
+  EXPECT_EQ(std::get<1>(ret),
+            static_cast<unsigned long>(STATUS_ACCESS_VIOLATION));
 }
 
 TEST(ntl_test, ntl_irql_test) {

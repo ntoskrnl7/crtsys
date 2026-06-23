@@ -64,8 +64,9 @@ Header: [`include/ntl/except`](../include/ntl/except)
   - stores an `ntl::status`
   - carries an explanatory message
 - `ntl::seh::try_except(fn, args...)`
-  - runs a callable inside SEH
-  - returns `{success, exception_code}`
+  - runs a callable inside MSVC SEH using `__try` / `__except`
+  - returns `{true, 0}` on success or `{false, exception_code}` from
+    `GetExceptionCode()`
 
 IRQL: treat C++ exception paths as `PASSIVE_LEVEL` only. Do not throw across
 WDK callback boundaries, spin-lock-held regions, DPC, ISR, or paging I/O paths

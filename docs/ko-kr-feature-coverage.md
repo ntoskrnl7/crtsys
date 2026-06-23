@@ -2,22 +2,27 @@
 
 [한국어 문서로 돌아가기](./ko-kr.md)
 
-이 문서는 crtsys가 지원하는 전체 STL/CRT 기능의 한계표가 아니라, 현재 kernel
-driver test에서 명시적으로 검증한 coverage matrix입니다. 목록에 없는 기능은
-곧바로 미지원이라는 뜻이 아니며, 아직 별도 driver test로 고정하지 않았다는
-의미입니다. 실제 미지원/제약이 확인된 항목은 known limitation 또는 blocker에
-따로 표시합니다.
+이 문서는 crtsys가 지원하는 전체 STL/CRT 기능의 한계표나 부정적인 호환성
+목록이 아니라, driver-tested feature coverage matrix입니다. 여기에는
+`crtsys` kernel driver test target에 명시적으로 포함되어 실제 driver
+harness에서 실행되는 기능과 code path를 기록합니다.
+
+목록에 없는 기능은 곧바로 미지원이라는 뜻이 아니며, 아직 별도 driver test로
+고정하지 않았다는 의미입니다. 실제 미지원/제약이 확인된 항목은 known
+limitation 또는 blocker에 따로 표시합니다.
 
 범례:
 
 - [x] Driver-test coverage 있음: `crtsys` kernel driver test에서 명시적으로
   실행됩니다.
-- [ ] 아직 coverage 없음: 명시 driver test로 고정하지 않았거나 검토 중입니다.
+- [ ] 아직 coverage 없음: 명시 driver test로 아직 coverage하지 않았거나 검토
+  중입니다.
 - Known limitation: 실제 미지원 의존성 또는 의미 차이가 확인된 항목입니다.
 
-여기서 coverage는 해당 기능이 구현되었고 테스트 suite에서 실행된다는 뜻입니다.
-모든 driver execution context에서 유효하다는 의미는 아닙니다. API가 더 넓은
-계약을 문서화하지 않았다면 기본값은 `PASSIVE_LEVEL`로 보세요.
+여기서 coverage는 해당 기능이 구현되었고 driver test suite에서 실행된다는
+뜻입니다. 모든 driver execution context에서 유효하다는 의미도 아니고,
+사용 가능한 모든 MSVC STL/header path를 전부 나열한다는 뜻도 아닙니다. API가
+더 넓은 계약을 문서화하지 않았다면 기본값은 `PASSIVE_LEVEL`로 보세요.
 실행 문맥은 [설계 근거와 운영 경계](./ko-kr-design-rationale.md)와
 [NTL API 문서](./ko-kr-ntl-api.md)를 참고하세요.
 
@@ -36,7 +41,7 @@ exception 없음, 유효한 WDK 문맥을 직접 보장해야 합니다. driver 
 | C++ 예외 | `throw`, `try`, function try block, `std::exception_ptr` | `PASSIVE_LEVEL` only | WDK callback 경계, spin lock 보유 구간, DPC, ISR, paging I/O 경로를 넘어 예외가 흐르게 하지 마세요. |
 | C++ RTTI | `typeid`, `dynamic_cast` | 감사된 caller context; 그 외에는 `PASSIVE_LEVEL` | 사용하는 driver target은 RTTI를 켜고 빌드해야 합니다. 대상 객체와 type metadata는 resident 상태여야 합니다. |
 | STL value-only helper | type traits, concepts, `std::array`, `std::span`, `std::string_view`, `std::bitset`, `std::pair`, `std::tuple`, `std::ratio`, `std::source_location`, `std::strong_ordering`, `std::numbers`, 단순 `std::move` / `std::exchange` / `std::invoke` / `std::reference_wrapper`, integer `std::to_chars` / `std::from_chars`, resident fixed storage 위의 순수 algorithm | 감사된 caller context; 그 외에는 `PASSIVE_LEVEL` | STL 중 `PASSIVE_LEVEL`보다 높은 곳에서 고려할 수 있는 영역은 이 정도뿐입니다. exact expression과 comparator/callback까지 감사해야 합니다. |
-| STL owning object, container, callback-heavy utility | `std::string`, container, `std::any`, `std::function`, smart pointer, `std::optional`, `std::variant`, `std::complex`, `std::valarray`, `std::filesystem::path`, 기본 `std::filesystem` file operation, `std::format`, random distribution, `std::regex`, `nlohmann::json`, allocation/throw/arbitrary user code 호출 가능성이 있는 algorithm | `PASSIVE_LEVEL` only | 생성, 소멸, 비교, hashing, allocation, deallocation, formatting, file-system I/O, user callback이 runtime path를 끌어올 수 있습니다. |
+| STL owning object, container, callback-heavy utility | `std::string`, container, `std::any`, `std::function`, smart pointer, `std::optional`, `std::variant`, `std::complex`, `std::valarray`, `std::filesystem::path`, 기본 `std::filesystem` file operation, `std::format`, `std::print`, random distribution, `std::regex`, `nlohmann::json`, allocation/throw/arbitrary user code 호출 가능성이 있는 algorithm | `PASSIVE_LEVEL` only | 생성, 소멸, 비교, hashing, allocation, deallocation, formatting, file-system I/O, user callback이 runtime path를 끌어올 수 있습니다. |
 | STL synchronization, threading, async | `std::thread`, `std::mutex`, `std::shared_mutex`, `std::condition_variable`, `std::call_once`, `std::future`, `std::promise`, `std::packaged_task` | `PASSIVE_LEVEL` only | wait, worker execution 생성, allocation, unload 이후 생존 문제가 생길 수 있습니다. |
 | STL atomic primitive | resident storage 위의 `std::atomic` / `std::atomic_flag` load, store, exchange, compare-exchange 및 C++20 wait/notify | 감사된 non-waiting operation은 `<= DISPATCH_LEVEL`; wait/notify는 `PASSIVE_LEVEL` only | wait/notify는 blocking synchronization으로 취급하세요. elevated IRQL에서 runtime-backed callback이나 allocation과 섞지 마세요. |
 | I/O stream | `std::cin`, `std::cout`, `std::cerr`, `std::clog`, wide stream 계열 | `PASSIVE_LEVEL` only | diagnostic/test 용도입니다. production hot path와 stack-sensitive path에서는 피하세요. |
@@ -230,6 +235,8 @@ cppreference Example 코드를 이식한 항목은
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::format](https://en.cppreference.com/w/cpp/utility/format)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
+- [x] [std::print](https://en.cppreference.com/w/cpp/io/print)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::regex](https://en.cppreference.com/w/cpp/regex)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/regex.cpp)
 - [x] [std::filesystem::path lexical operation](https://en.cppreference.com/w/cpp/filesystem/path/lexically_normal)
@@ -351,6 +358,13 @@ cppreference Example 코드를 이식한 항목은
 - [x] [std::wclog](https://en.cppreference.com/w/cpp/io/clog)
 - [x] `nlohmann::json` 연동
   [(tested)](../test/cmake/driver/src/libs/nlohmann_json.cpp)
+
+## NTL
+
+- [x] `ntl::seh::try_except`
+  [(tested)](../test/cmake/driver/src/ntl.cpp)
+  - 내부적으로 MSVC `__try` / `__except`를 사용하고, 잡은 exception code를
+    반환합니다.
 
 ## 테스트 백로그
 

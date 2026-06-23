@@ -31,6 +31,7 @@
       <PreprocessorDefinitions>_WIN32_WINNT=0x0A00;NTDDI_VERSION=0x0A000002;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\format.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\format.cpp" />
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\print.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\print.cpp" />
     <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\tzdb.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\tzdb.cpp">
       <PreprocessorDefinitions>_WIN32_WINNT=0x0A00;NTDDI_VERSION=0x0A000004;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>

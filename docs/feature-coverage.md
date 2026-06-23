@@ -3,21 +3,26 @@
 [Back to README](../README.md)
 
 This page is a driver-tested feature coverage matrix, not an exhaustive support
-boundary. A feature missing from this list should be read as "not yet explicitly
-covered by the driver tests", not as "unsupported", unless it is called out
-under known limitations or blockers.
+boundary or a negative compatibility table. It records features and code paths
+that are explicitly built into the `crtsys` kernel driver test target and run
+under that driver harness.
+
+A feature missing from this list should be read as "not yet explicitly covered
+by the driver tests", not as "unsupported", unless it is called out under known
+limitations or blockers.
 
 Legend:
 
 - [x] Driver-test covered: explicitly exercised by the `crtsys` kernel driver
   tests.
-- [ ] Not yet covered: not yet fixed by an explicit driver test, or still under
-  review.
+- [ ] Not yet covered: not yet covered by an explicit driver test, or still
+  under review.
 - Known limitation: a confirmed missing dependency or semantic difference.
 
-Coverage here means that the feature is implemented and exercised by the test
-suite. It does not mean the feature is valid in every driver execution context.
-Unless an API documents a broader contract, assume `PASSIVE_LEVEL`. See
+Coverage here means that the feature is implemented and exercised by the driver
+test suite. It does not mean the feature is valid in every driver execution
+context, and it does not attempt to list every MSVC STL/header path that may be
+usable. Unless an API documents a broader contract, assume `PASSIVE_LEVEL`. See
 [Design Rationale and Operational Boundaries](./design-rationale.md) and the
 [NTL API reference](./ntl-api.md) for execution-context guidance.
 
@@ -36,7 +41,7 @@ The driver tests still exercise these features from `PASSIVE_LEVEL`.
 | C++ exceptions | `throw`, `try`, function try blocks, `std::exception_ptr` | `PASSIVE_LEVEL` only | Do not let exceptions cross WDK callback boundaries, spin-lock-held regions, DPC, ISR, or paging I/O paths. |
 | C++ RTTI | `typeid`, `dynamic_cast` | Audited caller context; otherwise `PASSIVE_LEVEL` | The consuming driver target must compile with RTTI enabled. Keep the target object and its type metadata resident. |
 | STL value-only helpers | Type traits, concepts, `std::array`, `std::span`, `std::string_view`, `std::bitset`, `std::pair`, `std::tuple`, `std::ratio`, `std::source_location`, `std::strong_ordering`, `std::numbers`, simple `std::move` / `std::exchange` / `std::invoke` / `std::reference_wrapper`, integer `std::to_chars` / `std::from_chars`, pure algorithms over resident fixed storage | Audited caller context; otherwise `PASSIVE_LEVEL` | These are the only STL areas that may be reasonable above `PASSIVE_LEVEL`, and only after the exact expression and its callbacks/comparators are audited. |
-| STL owning objects, containers, and callback-heavy utilities | `std::string`, containers, `std::any`, `std::function`, smart pointers, `std::optional`, `std::variant`, `std::complex`, `std::valarray`, `std::filesystem::path`, basic `std::filesystem` file operations, `std::format`, random distributions, `std::regex`, `nlohmann::json`, algorithms that allocate, throw, or call arbitrary user code | `PASSIVE_LEVEL` only | Construction, destruction, comparison, hashing, allocation, deallocation, formatting, file-system I/O, and user callbacks can pull in runtime paths. |
+| STL owning objects, containers, and callback-heavy utilities | `std::string`, containers, `std::any`, `std::function`, smart pointers, `std::optional`, `std::variant`, `std::complex`, `std::valarray`, `std::filesystem::path`, basic `std::filesystem` file operations, `std::format`, `std::print`, random distributions, `std::regex`, `nlohmann::json`, algorithms that allocate, throw, or call arbitrary user code | `PASSIVE_LEVEL` only | Construction, destruction, comparison, hashing, allocation, deallocation, formatting, file-system I/O, and user callbacks can pull in runtime paths. |
 | STL synchronization, threading, and async | `std::thread`, `std::mutex`, `std::shared_mutex`, `std::condition_variable`, `std::call_once`, `std::future`, `std::promise`, `std::packaged_task` | `PASSIVE_LEVEL` only | These paths may wait, create worker execution, allocate, or outlive unload if the caller is careless. |
 | STL atomic primitives | `std::atomic` / `std::atomic_flag` load, store, exchange, compare-exchange, and C++20 wait/notify over resident storage | `<= DISPATCH_LEVEL` for audited non-waiting operations; `PASSIVE_LEVEL` only for wait/notify | Treat wait/notify as blocking synchronization. Do not combine atomic code with runtime-backed callbacks or allocation at elevated IRQL. |
 | I/O streams | `std::cin`, `std::cout`, `std::cerr`, `std::clog`, wide stream variants | `PASSIVE_LEVEL` only | Diagnostic and test support. Avoid production hot paths and stack-sensitive paths. |
@@ -230,6 +235,8 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::format](https://en.cppreference.com/w/cpp/utility/format)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
+- [x] [std::print](https://en.cppreference.com/w/cpp/io/print)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::regex](https://en.cppreference.com/w/cpp/regex)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/regex.cpp)
 - [x] [std::filesystem::path lexical operations](https://en.cppreference.com/w/cpp/filesystem/path/lexically_normal)
@@ -353,11 +360,19 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
 - [x] `nlohmann::json` integration
   [(tested)](../test/cmake/driver/src/libs/nlohmann_json.cpp)
 
+## NTL
+
+- [x] `ntl::seh::try_except`
+  [(tested)](../test/cmake/driver/src/ntl.cpp)
+  - Uses MSVC `__try` / `__except` internally and returns the captured
+    exception code.
+
 ## Test Backlog
 
 These unchecked items are candidates for future cppreference Example ports or
 runtime support work. Prefer examples that can run at `PASSIVE_LEVEL` without
-file-system, locale, console input, or unsupported C++ runtime dependencies.
+hosted file-system, locale, console input, or other driver-test-hostile runtime
+dependencies.
 
 ### Needs Investigation
 
