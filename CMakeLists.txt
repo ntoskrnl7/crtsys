@@ -23,7 +23,11 @@ else()
 endif()
 
 option(CRTSYS_NTL_MAIN      "Set to ON to use ntl::main" ON)
-option(CRTSYS_USE_LIBCNTPR  "Set to ON to use libcntpr" ON)
+set(CRTSYS_DEFAULT_USE_LIBCNTPR ON)
+if("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "Win32")
+  set(CRTSYS_DEFAULT_USE_LIBCNTPR OFF)
+endif()
+option(CRTSYS_USE_LIBCNTPR  "Set to ON to use libcntpr" ${CRTSYS_DEFAULT_USE_LIBCNTPR})
 option(CRTSYS_ENABLE_DIAGNOSTIC_BREAKPOINTS "Set to OFF to suppress crtsys diagnostic KdBreakPoint calls" ON)
 option(CRTSYS_ENABLE_INSTALL "Enable crtsys install rules" ${CRTSYS_IS_TOP_LEVEL})
 
@@ -314,6 +318,7 @@ if(CRTSYS_ENABLE_INSTALL)
     FILES
       cmake/CPM.cmake
       cmake/CrtSys.cmake
+      cmake/FindWDK.cmake
       cmake/pkg-utils.cmake
       cmake/std-cxx.cmake
     DESTINATION "${CRTSYS_INSTALL_CMAKEDIR}"

@@ -22,6 +22,12 @@ Then restore and build with MSBuild:
 msbuild .\my_driver.vcxproj /restore /p:Configuration=Debug /p:Platform=x64
 ```
 
+For x86 driver projects, use the MSBuild `Win32` platform name:
+
+```powershell
+msbuild .\my_driver.vcxproj /restore /p:Configuration=Debug /p:Platform=Win32
+```
+
 For Visual Studio Package Manager Console:
 
 ```powershell
@@ -30,7 +36,7 @@ Install-Package crtsys
 
 - App projects get compatibility headers/includes.
 - Driver projects (WDK) get automatic WDK linkage for
-  `crtsys.lib` / `Ldk.lib` (x64/ARM64).
+  `crtsys.lib` / `Ldk.lib` (x86/x64/ARM64).
 
 What this NuGet package is for:
 
@@ -217,7 +223,7 @@ project into a driver project.
 - `include/` headers
 - native MSBuild props/targets (`nuget/build/native`)
 - prebuilt libs:
-  `lib/native/{x64,ARM64}/{Debug,Release}/(crtsys.lib|Ldk.lib)`
+  `lib/native/{x86,x64,ARM64}/{Debug,Release}/(crtsys.lib|Ldk.lib)`
 
 ## Release artifacts
 

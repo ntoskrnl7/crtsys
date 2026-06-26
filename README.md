@@ -237,9 +237,11 @@ cmake -S . -B build_x64 -A x64 -DCRTSYS_ENABLE_DIAGNOSTIC_BREAKPOINTS=OFF
 ## NuGet Package Details
 
 `crtsys` publishes a NuGet package with native MSBuild imports and prebuilt
-driver libraries for `x64` and `ARM64` `Debug`/`Release`. The package workflow
-also builds WDK consumer projects from the published package; the checked-in
-smoke projects live under [`test/nuget`](./test/nuget).
+driver libraries for `x86`, `x64`, and `ARM64` `Debug`/`Release`. The package
+workflow builds WDK consumer projects for `x64` and `ARM64`, and validates the
+`x86` package layout separately on GitHub-hosted runners because that image
+does not provide x86 WDK kernel libraries. The checked-in smoke projects live
+under [`test/nuget`](./test/nuget).
 
 The NuGet distribution is `crtsys.<version>.nupkg` for Visual Studio/MSBuild
 projects.
@@ -249,7 +251,7 @@ projects.
 GitHub Release publishes these offline-only assets:
 
 - `crtsys-<version>-prebuilt.zip`: headers, docs, CMake helpers,
-  and prebuilt `x64/ARM64` `Debug`/`Release` libraries.
+  and prebuilt `x86/x64/ARM64` `Debug`/`Release` libraries.
 - `crtsys-<version>-SHA256SUMS.txt`
 
 The prebuilt bundle is intended for CMake projects that want a checked-in or

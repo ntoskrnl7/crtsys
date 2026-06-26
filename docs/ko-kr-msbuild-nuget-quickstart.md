@@ -26,7 +26,7 @@ Package Manager Console에서:
 Install-Package crtsys
 ```
 
-그 다음 WDK driver project를 `x64` 또는 `ARM64`로 일반적인 방식대로 빌드합니다.
+그 다음 WDK driver project를 `x86`, `x64`, 또는 `ARM64`로 일반적인 방식대로 빌드합니다.
 
 ## Build Tools only
 
@@ -43,6 +43,12 @@ MSBuild, SDK, WDK가 잡힌 Developer PowerShell 또는 Developer Command Prompt
 
 ```powershell
 msbuild .\my_driver.vcxproj /restore /p:Configuration=Debug /p:Platform=x64
+```
+
+x86 driver project는 MSBuild platform 이름으로 `Win32`를 사용합니다.
+
+```powershell
+msbuild .\my_driver.vcxproj /restore /p:Configuration=Debug /p:Platform=Win32
 ```
 
 `ARM64`는 다음처럼 빌드합니다.
@@ -68,7 +74,7 @@ IRQL, paging, unload safety는 driver project가 책임집니다.
 
 - `crtsys_nuget_app_test.vcxproj`는 user-mode header/package 소비를 확인합니다.
 - `crtsys_nuget_test.vcxproj`는 package로부터 WDK driver test source를
-  `x64`와 `ARM64` `Debug`/`Release`에서 빌드합니다.
+  `x86`, `x64`, `ARM64` `Debug`/`Release`에서 빌드합니다.
 
 CI job도 같은 모양으로 실행할 수 있습니다.
 

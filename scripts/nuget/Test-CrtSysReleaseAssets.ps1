@@ -4,13 +4,15 @@ param(
   [Parameter(Mandatory = $true)]
   [string] $Version,
 
-  [ValidateSet('x64', 'ARM64')]
+  [ValidateSet('x86', 'x64', 'ARM64')]
   [string] $Architecture = 'x64',
 
   [ValidateSet('Debug', 'Release')]
   [string] $Configuration = 'Release',
 
   [string] $WindowsSdkVersion = '10.0.22621.0',
+
+  [switch] $SkipDriverBuild,
 
   [string] $WorkDirectory
 )
@@ -41,6 +43,7 @@ if (-not (Test-Path $prebuiltZipPath)) {
 }
 
 $platformByArchitecture = @{
+  x86 = 'Win32'
   x64 = 'x64'
   ARM64 = 'ARM64'
 }
@@ -80,6 +83,11 @@ foreach ($requiredPath in @(
   if (-not (Test-Path $fullPath)) {
     throw "Prebuilt release bundle is missing expected file: $fullPath"
   }
+}
+
+if ($SkipDriverBuild) {
+  Write-Host "Prebuilt release asset layout validation passed for $Architecture $Configuration."
+  return
 }
 
 $consumerDirectory = Join-Path $WorkDirectory 'consumer'
@@ -125,6 +133,8 @@ $configureArgs = @(
   '-G', 'Visual Studio 17 2022',
   '-A', $platform,
   '-T', 'host=x64',
+  "-DCRTSYS_WDK_VERSION=$WindowsSdkVersion",
+  "-DLDK_WDK_VERSION=$WindowsSdkVersion",
   "-DCMAKE_SYSTEM_VERSION=$WindowsSdkVersion",
   "-DCMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION=$WindowsSdkVersion"
 )

@@ -247,7 +247,7 @@ WDK consumer project도 빌드하며, 저장소의 smoke project는
 GitHub Release는 별도 오프라인 번들을 배포합니다.
 
 - `crtsys-<version>-prebuilt.zip`: 헤더, 문서, CMake 헬퍼,
-  x64/ARM64의 `Debug`/`Release` 사전 빌드 라이브러리.
+  x86/x64/ARM64의 `Debug`/`Release` 사전 빌드 라이브러리.
 - `crtsys-<version>-SHA256SUMS.txt`
 
 prebuilt bundle은 source에서 `crtsys`를 fetch/build하지 않고, CMake

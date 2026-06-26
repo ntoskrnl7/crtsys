@@ -30,7 +30,7 @@ if (-not (Test-Path $packagePath)) {
   throw "NuGet package was not found: $packagePath. Run scripts\nuget\Pack-CrtSysNuGet.ps1 first."
 }
 
-foreach ($arch in @('x64', 'ARM64')) {
+foreach ($arch in @('x86', 'x64', 'ARM64')) {
   foreach ($config in @('Debug', 'Release')) {
     foreach ($library in @('crtsys.lib', 'Ldk.lib')) {
       $requiredPath = Join-Path $stagingDirectory "lib\native\$arch\$config\$library"
@@ -96,7 +96,7 @@ Contents:
 - cmake/: CMake helpers; CrtSys.cmake links prebuilt libraries from this bundle
 - share/crtsys/cmake/: CMake package config for find_package(crtsys CONFIG)
 - build/native/: native MSBuild props and targets from the NuGet package
-- lib/native/: prebuilt crtsys.lib and Ldk.lib for x64 and ARM64, Debug and Release
+- lib/native/: prebuilt crtsys.lib and Ldk.lib for x86, x64, and ARM64, Debug and Release
 - docs/: repository documentation
 
 The prebuilt driver libraries target Visual Studio 2022 and Windows SDK/WDK

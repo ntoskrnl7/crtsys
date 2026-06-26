@@ -3,7 +3,9 @@
 The `CMake` workflow has two layers:
 
 1. GitHub-hosted `windows-2022` runners build the test app, build the x64 and
-   ARM64 drivers, test-sign the drivers, and upload artifacts.
+   ARM64 drivers, test-sign the drivers, and upload artifacts. x86 package
+   libraries/layout are validated separately because the hosted image does not
+   provide x86 WDK kernel libraries.
 2. When `workflow_dispatch` is run with `run_driver_load_tests=true`, a
    prepared self-hosted Windows runner downloads those artifacts, loads the
    signed driver, and runs the x64 test app.

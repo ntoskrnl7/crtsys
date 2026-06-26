@@ -15,7 +15,7 @@ environments that can run `msbuild /restore`.
   the CMake app test on x86, x64, and ARM64 in Debug and Release. It verifies
   that package headers can be consumed without enabling driver link settings.
 - `crtsys_nuget_test.vcxproj` builds the same WDK driver test sources as the
-  CMake driver test on x64 and ARM64 in Debug and Release. It relies on package
+  CMake driver test on x86, x64, and ARM64 in Debug and Release. It relies on package
   props/targets for `crtsys.lib`, `Ldk.lib`, include paths, forced includes,
   and the `CrtSysDriverEntry` entry point.
 

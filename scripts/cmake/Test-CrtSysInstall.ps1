@@ -60,6 +60,8 @@ function Invoke-CrtSysConsumerBuild {
     '-A', $platform,
     '-T', 'host=x64',
     "-DCRTSYS_PACKAGE_ROOT:PATH=$cmakePrefix",
+    "-DCRTSYS_WDK_VERSION:STRING=$WindowsSdkVersion",
+    "-DLDK_WDK_VERSION:STRING=$WindowsSdkVersion",
     "-DCMAKE_SYSTEM_VERSION:STRING=$WindowsSdkVersion",
     "-DCMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION:STRING=$WindowsSdkVersion"
   )
@@ -91,6 +93,8 @@ $configureArgs = @(
   '-A', $platform,
   '-T', 'host=x64',
   "-DCMAKE_INSTALL_PREFIX=$installDirectory",
+  "-DCRTSYS_WDK_VERSION=$WindowsSdkVersion",
+  "-DLDK_WDK_VERSION=$WindowsSdkVersion",
   "-DCMAKE_SYSTEM_VERSION=$WindowsSdkVersion",
   "-DCMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION=$WindowsSdkVersion"
 )
