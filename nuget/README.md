@@ -8,6 +8,22 @@ This NuGet package is for **Visual Studio/MSBuild** consumers (`crtsys.<version>
 
 ## Quick start
 
+For modern MSBuild projects, add a `PackageReference`:
+
+```xml
+<ItemGroup>
+  <PackageReference Include="crtsys" Version="<version>" />
+</ItemGroup>
+```
+
+Then restore and build with MSBuild:
+
+```powershell
+msbuild .\my_driver.vcxproj /restore /p:Configuration=Debug /p:Platform=x64
+```
+
+For Visual Studio Package Manager Console:
+
 ```powershell
 Install-Package crtsys
 ```
@@ -21,7 +37,7 @@ What this NuGet package is for:
 - Modern C++ ownership for control-plane code (`ntl::driver`, `ntl::device`,
   unload callback)
 - Small, readable status/error flow with `ntl::status`
-- Shared user↔kernel contracts from a single header source (`shared/*.hpp`)
+- Shared user/kernel contracts from a single header source (`shared/*.hpp`)
 - Reliable RAII-style lifecycle for driver resources and cleanup
 
 Example (minimal driver entry):
@@ -211,5 +227,7 @@ project into a driver project.
 - `crtsys-<version>-SHA256SUMS.txt`  
   Checksum file for offline/manual verification.
 
-For full package usage, release details, and API reference, see:
-- <https://github.com/ntoskrnl7/crtsys/blob/main/README.md>
+This package README is intentionally self-contained for nuget.org. The package
+metadata carries the project URL, repository URL, license, and release asset
+links separately, so this document avoids repository-relative documentation
+links that do not resolve on the package page.
