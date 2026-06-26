@@ -25,9 +25,32 @@ kernel-mode substrate 위에 매핑됩니다.
 
 | 경로 | 사용할 때 | 시작점 |
 | --- | --- | --- |
-| NuGet / MSBuild | Visual Studio WDK driver project | `Install-Package crtsys` |
+| NuGet / MSBuild | Visual Studio 또는 Build Tools WDK driver project | `PackageReference` 또는 `Install-Package crtsys` |
 | CMake prebuilt | offline 또는 pinned CI dependency | `find_package(crtsys CONFIG REQUIRED)` |
 | CMake source | driver와 함께 `crtsys`를 source build | `CPMAddPackage("gh:ntoskrnl7/crtsys@<version>")` |
+
+Minimal MSBuild/NuGet consumer:
+
+```xml
+<ItemGroup>
+  <PackageReference Include="crtsys" Version="<version>" />
+</ItemGroup>
+```
+
+```powershell
+msbuild .\my_driver.vcxproj /restore /p:Configuration=Debug /p:Platform=x64
+```
+
+Visual Studio Package Manager Console에서는 다음처럼 설치합니다.
+
+```powershell
+Install-Package crtsys
+```
+
+modern `PackageReference` project에서는 MSBuild restore가 가능하면
+`nuget.exe`가 필수는 아닙니다. Build Tools-only 환경도 같은
+`msbuild /restore` 경로를 사용할 수 있습니다. 자세한 내용은
+[MSBuild/NuGet 빠른 시작](./ko-kr-msbuild-nuget-quickstart.md)을 보세요.
 
 Minimal CMake consumer:
 
@@ -106,6 +129,7 @@ flowchart TD
 | 문서 | 볼 내용 |
 | --- | --- |
 | [아키텍처](./ko-kr-architecture.md) | Runtime stack, 계층별 책임, 소비 경로 |
+| [MSBuild/NuGet 빠른 시작](./ko-kr-msbuild-nuget-quickstart.md) | Visual Studio, Build Tools-only, CI package 소비 |
 | [설계 근거](./ko-kr-design-rationale.md) | IRQL, pool, stack, unload, 운영 경계 |
 | [기능 지원 현황](./ko-kr-feature-coverage.md) | Driver-tested C++/CRT/STL matrix와 known gap |
 | [NTL API](./ko-kr-ntl-api.md) | Driver helper API, entry wrapper, synchronization, SEH helper |
@@ -194,7 +218,9 @@ cmake -S . -B build_x64 -A x64 -DCRTSYS_ENABLE_DIAGNOSTIC_BREAKPOINTS=OFF
 ## NuGet 패키지 상세
 
 `crtsys`의 NuGet 배포는 Visual Studio/MSBuild 프로젝트용
-`crtsys.<version>.nupkg`입니다.
+`crtsys.<version>.nupkg`입니다. Package workflow는 게시된 package로
+WDK consumer project도 빌드하며, 저장소의 smoke project는
+[`test/nuget`](../test/nuget)에 있습니다.
 
 ## GitHub Release prebuilt 번들 상세
 

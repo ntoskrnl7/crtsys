@@ -6,6 +6,11 @@ verify the native NuGet package.
 The test script installs the generated `crtsys` package into a copied test
 tree and builds the selected project with MSBuild.
 
+These projects are the smoke-test counterpart to the public
+[MSBuild/NuGet quick start](../../docs/msbuild-nuget-quickstart.md): package
+consumption is expected to work from Visual Studio as well as Build Tools-only
+environments that can run `msbuild /restore`.
+
 - `crtsys_nuget_app_test.vcxproj` builds the same user-mode app test source as
   the CMake app test on x86, x64, and ARM64 in Debug and Release. It verifies
   that package headers can be consumed without enabling driver link settings.

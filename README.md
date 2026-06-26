@@ -24,9 +24,32 @@ support ceiling for every header or code path that may compile or work.
 
 | Path | Use when | Start here |
 | --- | --- | --- |
-| NuGet / MSBuild | Visual Studio WDK driver project | `Install-Package crtsys` |
+| NuGet / MSBuild | Visual Studio or Build Tools WDK driver project | `PackageReference` or `Install-Package crtsys` |
 | CMake prebuilt | Offline or pinned CI dependency | `find_package(crtsys CONFIG REQUIRED)` |
 | CMake source | Build `crtsys` with the driver | `CPMAddPackage("gh:ntoskrnl7/crtsys@<version>")` |
+
+Minimal MSBuild/NuGet consumer:
+
+```xml
+<ItemGroup>
+  <PackageReference Include="crtsys" Version="<version>" />
+</ItemGroup>
+```
+
+```powershell
+msbuild .\my_driver.vcxproj /restore /p:Configuration=Debug /p:Platform=x64
+```
+
+For Visual Studio Package Manager Console:
+
+```powershell
+Install-Package crtsys
+```
+
+`nuget.exe` is optional for modern `PackageReference` projects when MSBuild
+restore is available. Build Tools-only environments can use the same
+`msbuild /restore` path. See the
+[MSBuild/NuGet quick start](./docs/msbuild-nuget-quickstart.md).
 
 Minimal CMake consumer:
 
@@ -105,6 +128,7 @@ may compile or work.
 | Document | Use it for |
 | --- | --- |
 | [Architecture](./docs/architecture.md) | Runtime stack, layer responsibilities, consumer paths |
+| [MSBuild/NuGet Quick Start](./docs/msbuild-nuget-quickstart.md) | Visual Studio, Build Tools-only, and CI package consumption |
 | [Design Rationale](./docs/design-rationale.md) | IRQL, pool, stack, unload, and operational boundaries |
 | [Feature Coverage](./docs/feature-coverage.md) | Driver-tested C++/CRT/STL matrix and known gaps |
 | [NTL API](./docs/ntl-api.md) | Driver helper APIs, entry wrapper, synchronization, SEH helper |
@@ -195,7 +219,8 @@ cmake -S . -B build_x64 -A x64 -DCRTSYS_ENABLE_DIAGNOSTIC_BREAKPOINTS=OFF
 
 `crtsys` publishes a NuGet package with native MSBuild imports and prebuilt
 driver libraries for `x64` and `ARM64` `Debug`/`Release`. The package workflow
-also builds a WDK consumer driver from the published package.
+also builds WDK consumer projects from the published package; the checked-in
+smoke projects live under [`test/nuget`](./test/nuget).
 
 The NuGet distribution is `crtsys.<version>.nupkg` for Visual Studio/MSBuild
 projects.
