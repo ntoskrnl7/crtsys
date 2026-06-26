@@ -3,8 +3,8 @@
 [Back to README](../README.md)
 
 Use this path for Visual Studio or Build Tools WDK driver projects that consume
-`crtsys` as a native NuGet package. This is independent of the CMake/CPM source
-path.
+`crtsys` as a native NuGet package. This is independent of the CMake/CPM GitHub
+consumption path.
 
 ## Requirements
 

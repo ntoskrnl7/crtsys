@@ -26,7 +26,7 @@ support ceiling for every header or code path that may compile or work.
 | --- | --- | --- |
 | NuGet / MSBuild | Visual Studio or Build Tools WDK driver project | `PackageReference` or `Install-Package crtsys` |
 | CMake prebuilt | Offline or pinned CI dependency | `find_package(crtsys CONFIG REQUIRED)` |
-| CMake source | Build `crtsys` with the driver | `CPMAddPackage("gh:ntoskrnl7/crtsys@<version>")` |
+| CMake / CPM | CMake-based driver project that consumes `crtsys` from GitHub | `CPMAddPackage("gh:ntoskrnl7/crtsys@<version>")` |
 
 Minimal MSBuild/NuGet consumer:
 
@@ -51,10 +51,21 @@ restore is available. Build Tools-only environments can use the same
 `msbuild /restore` path. See the
 [MSBuild/NuGet quick start](./docs/msbuild-nuget-quickstart.md).
 
-Minimal CMake consumer:
+Minimal CMake/CPM consumer in a separate driver project:
+
+Add `CPM.cmake` to that driver project, or use your existing CPM bootstrap:
+
+```powershell
+New-Item -ItemType Directory -Force cmake
+Invoke-WebRequest `
+  https://github.com/cpm-cmake/CPM.cmake/releases/download/v0.32.0/CPM.cmake `
+  -OutFile cmake/CPM.cmake
+```
+
+Then consume `crtsys` from GitHub in the driver's `CMakeLists.txt`:
 
 ```cmake
-include(cmake/CPM.cmake)
+include("${CMAKE_CURRENT_LIST_DIR}/cmake/CPM.cmake")
 
 set(CRTSYS_NTL_MAIN ON)
 CPMAddPackage("gh:ntoskrnl7/crtsys@<version>")
@@ -162,14 +173,22 @@ Visual Studio 2017 has missing CRT source/header pieces for some paths, so
 
 ## CMake Quick Start
 
-Create a driver project, add CPM at `cmake/CPM.cmake`, and add `crtsys`:
+Create a separate driver project, add `CPM.cmake` to that project, and consume
+`crtsys` from GitHub:
+
+```powershell
+New-Item -ItemType Directory -Force cmake
+Invoke-WebRequest `
+  https://github.com/cpm-cmake/CPM.cmake/releases/download/v0.32.0/CPM.cmake `
+  -OutFile cmake/CPM.cmake
+```
 
 ```cmake
 cmake_minimum_required(VERSION 3.14 FATAL_ERROR)
 
 project(my_driver LANGUAGES C CXX)
 
-include(cmake/CPM.cmake)
+include("${CMAKE_CURRENT_LIST_DIR}/cmake/CPM.cmake")
 
 set(CRTSYS_NTL_MAIN ON)
 CPMAddPackage("gh:ntoskrnl7/crtsys@<version>")

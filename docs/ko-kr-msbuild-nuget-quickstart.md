@@ -3,7 +3,7 @@
 [README로 돌아가기](./ko-kr.md)
 
 이 경로는 `crtsys`를 native NuGet package로 소비하는 Visual Studio 또는
-Build Tools WDK driver project용입니다. CMake/CPM source 소비 경로와는
+Build Tools WDK driver project용입니다. CMake/CPM GitHub 소비 경로와는
 독립적인 사용 방식입니다.
 
 ## 요구 사항

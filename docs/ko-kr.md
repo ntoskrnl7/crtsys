@@ -27,7 +27,7 @@ kernel-mode substrate 위에 매핑됩니다.
 | --- | --- | --- |
 | NuGet / MSBuild | Visual Studio 또는 Build Tools WDK driver project | `PackageReference` 또는 `Install-Package crtsys` |
 | CMake prebuilt | offline 또는 pinned CI dependency | `find_package(crtsys CONFIG REQUIRED)` |
-| CMake source | driver와 함께 `crtsys`를 source build | `CPMAddPackage("gh:ntoskrnl7/crtsys@<version>")` |
+| CMake / CPM | GitHub에서 `crtsys`를 소비하려는 CMake 기반 driver project | `CPMAddPackage("gh:ntoskrnl7/crtsys@<version>")` |
 
 Minimal MSBuild/NuGet consumer:
 
@@ -52,10 +52,22 @@ modern `PackageReference` project에서는 MSBuild restore가 가능하면
 `msbuild /restore` 경로를 사용할 수 있습니다. 자세한 내용은
 [MSBuild/NuGet 빠른 시작](./ko-kr-msbuild-nuget-quickstart.md)을 보세요.
 
-Minimal CMake consumer:
+별도 driver project에서 사용하는 Minimal CMake/CPM consumer:
+
+먼저 그 driver project에 `CPM.cmake`를 추가하거나, 이미 쓰는 CPM bootstrap을
+사용합니다.
+
+```powershell
+New-Item -ItemType Directory -Force cmake
+Invoke-WebRequest `
+  https://github.com/cpm-cmake/CPM.cmake/releases/download/v0.32.0/CPM.cmake `
+  -OutFile cmake/CPM.cmake
+```
+
+그 다음 driver project의 `CMakeLists.txt`에서 GitHub의 `crtsys`를 소비합니다.
 
 ```cmake
-include(cmake/CPM.cmake)
+include("${CMAKE_CURRENT_LIST_DIR}/cmake/CPM.cmake")
 
 set(CRTSYS_NTL_MAIN ON)
 CPMAddPackage("gh:ntoskrnl7/crtsys@<version>")
@@ -162,14 +174,22 @@ Visual Studio 2017은 일부 CRT 소스/헤더 구성이 부족한 경로가 있
 
 ## CMake 빠른 시작
 
-드라이버 프로젝트에 `cmake/CPM.cmake`를 추가한 뒤 `crtsys`를 추가합니다.
+별도 driver project를 만들고, 그 project에 `CPM.cmake`를 추가한 뒤 GitHub의
+`crtsys`를 소비합니다.
+
+```powershell
+New-Item -ItemType Directory -Force cmake
+Invoke-WebRequest `
+  https://github.com/cpm-cmake/CPM.cmake/releases/download/v0.32.0/CPM.cmake `
+  -OutFile cmake/CPM.cmake
+```
 
 ```cmake
 cmake_minimum_required(VERSION 3.14 FATAL_ERROR)
 
 project(my_driver LANGUAGES C CXX)
 
-include(cmake/CPM.cmake)
+include("${CMAKE_CURRENT_LIST_DIR}/cmake/CPM.cmake")
 
 set(CRTSYS_NTL_MAIN ON)
 CPMAddPackage("gh:ntoskrnl7/crtsys@<version>")

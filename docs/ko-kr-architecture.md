@@ -49,8 +49,9 @@ Visual Studio/MSBuild driver project는 보통 `PackageReference`,
 `Install-Package crtsys`, `msbuild /restore` 경로로 NuGet package를
 사용합니다. 자세한 내용은 [MSBuild/NuGet 빠른 시작](./ko-kr-msbuild-nuget-quickstart.md)을
 보세요. CMake project는 GitHub Release prebuilt bundle을
-`find_package(crtsys CONFIG REQUIRED)`로 소비하거나, CPM.cmake로 `crtsys`를
-source에서 빌드할 수 있습니다.
+`find_package(crtsys CONFIG REQUIRED)`로 소비하거나, CPM.cmake와
+`CPMAddPackage("gh:ntoskrnl7/crtsys@<version>")`로 GitHub의 `crtsys`를
+직접 소비할 수 있습니다.
 
 세 경로 모두 같은 모델을 대상으로 합니다. `crtsys`는 driver에 link되고,
 driver는 정상적인 WDK driver로 남습니다.
