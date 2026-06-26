@@ -11,8 +11,13 @@
     <CrtSysLibraryConfiguration Condition="'$(CrtSysLibraryConfiguration)' == ''">Release</CrtSysLibraryConfiguration>
     <CrtSysLibDir Condition="'$(CrtSysLibDir)' == ''">$(CrtSysRoot)lib\native\$(CrtSysLibPlatform)\$(CrtSysLibraryConfiguration)\</CrtSysLibDir>
     <CrtSysUseNtlMain Condition="'$(CrtSysUseNtlMain)' == ''">true</CrtSysUseNtlMain>
-    <CrtSysDriverPreprocessorDefinitions Condition="'$(CrtSysDriverPreprocessorDefinitions)' == ''">_KERNEL32_;_ITERATOR_DEBUG_LEVEL=0;_HAS_EXCEPTIONS;CRTSYS_USE_LIBCNTPR</CrtSysDriverPreprocessorDefinitions>
+    <CrtSysUseLibcntpr Condition="'$(CrtSysUseLibcntpr)' == '' and '$(CrtSysLibPlatform)' == 'x86'">false</CrtSysUseLibcntpr>
+    <CrtSysUseLibcntpr Condition="'$(CrtSysUseLibcntpr)' == ''">true</CrtSysUseLibcntpr>
+    <CrtSysDriverPreprocessorDefinitions Condition="'$(CrtSysDriverPreprocessorDefinitions)' == ''">_KERNEL32_;_ITERATOR_DEBUG_LEVEL=0;_HAS_EXCEPTIONS</CrtSysDriverPreprocessorDefinitions>
+    <CrtSysDriverPreprocessorDefinitions Condition="'$(CrtSysUseLibcntpr)' == 'true'">$(CrtSysDriverPreprocessorDefinitions);CRTSYS_USE_LIBCNTPR</CrtSysDriverPreprocessorDefinitions>
     <CrtSysDriverPreprocessorDefinitions Condition="'$(CrtSysUseNtlMain)' == 'true'">$(CrtSysDriverPreprocessorDefinitions);CRTSYS_USE_NTL_MAIN</CrtSysDriverPreprocessorDefinitions>
+    <CrtSysDriverLibraries>crtsys.lib;Ldk.lib</CrtSysDriverLibraries>
+    <CrtSysDriverLibraries Condition="'$(CrtSysUseLibcntpr)' == 'true'">$(CrtSysDriverLibraries);libcntpr.lib</CrtSysDriverLibraries>
     <DisableKernelFlag Condition="'$(CrtSysUseDriverSupport)' == 'true'">true</DisableKernelFlag>
     <Inf2CatUseLocalTime Condition="'$(CrtSysUseDriverSupport)' == 'true' and '$(Inf2CatUseLocalTime)' == ''">true</Inf2CatUseLocalTime>
   </PropertyGroup>
@@ -22,8 +27,8 @@
       Condition="'$(CrtSysUseDriverSupport)' == 'true' and '$(CrtSysUseNtlMain)' != 'true'"
       Text="The prebuilt crtsys NuGet package currently supports the ntl::main entry point flow only. Leave CrtSysUseNtlMain set to true." />
     <Error
-      Condition="'$(CrtSysUseDriverSupport)' == 'true' and '$(CrtSysLibPlatform)' != 'x64' and '$(CrtSysLibPlatform)' != 'ARM64'"
-      Text="crtsys NuGet package contains prebuilt driver libraries for x64 and ARM64 only. Current platform is '$(Platform)'." />
+      Condition="'$(CrtSysUseDriverSupport)' == 'true' and '$(CrtSysLibPlatform)' != 'x86' and '$(CrtSysLibPlatform)' != 'x64' and '$(CrtSysLibPlatform)' != 'ARM64'"
+      Text="crtsys NuGet package contains prebuilt driver libraries for x86, x64, and ARM64 only. Current platform is '$(Platform)'." />
     <Error
       Condition="'$(CrtSysUseDriverSupport)' == 'true' and !Exists('$(CrtSysLibDir)crtsys.lib')"
       Text="crtsys.lib was not found under '$(CrtSysLibDir)'." />
@@ -49,7 +54,7 @@
     </ClCompile>
     <Link Condition="'$(CrtSysUseDriverSupport)' == 'true'">
       <AdditionalLibraryDirectories>$(CrtSysLibDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>crtsys.lib;Ldk.lib;libcntpr.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(CrtSysDriverLibraries);%(AdditionalDependencies)</AdditionalDependencies>
       <EntryPointSymbol Condition="'$(CrtSysUseNtlMain)' == 'true'">CrtSysDriverEntry</EntryPointSymbol>
       <AdditionalOptions>/FORCE:MULTIPLE %(AdditionalOptions)</AdditionalOptions>
       <TreatLinkerWarningAsErrors>false</TreatLinkerWarningAsErrors>

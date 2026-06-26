@@ -21,7 +21,7 @@ $manifest = Join-Path $repoRoot 'nuget\crtsys.nuspec'
 $stagingDirectory = Join-Path $repoRoot 'artifacts\nuget-staging'
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 
-foreach ($arch in @('x64', 'ARM64')) {
+foreach ($arch in @('x86', 'x64', 'ARM64')) {
   foreach ($config in @('Debug', 'Release')) {
     foreach ($library in @('crtsys.lib', 'Ldk.lib')) {
       $requiredPath = "lib\native\$arch\$config\$library"

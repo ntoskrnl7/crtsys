@@ -25,14 +25,49 @@ kernel-mode substrate 위에 매핑됩니다.
 
 | 경로 | 사용할 때 | 시작점 |
 | --- | --- | --- |
-| NuGet / MSBuild | Visual Studio WDK driver project | `Install-Package crtsys` |
+| NuGet / MSBuild | Visual Studio 또는 Build Tools WDK driver project | `PackageReference` 또는 `Install-Package crtsys` |
 | CMake prebuilt | offline 또는 pinned CI dependency | `find_package(crtsys CONFIG REQUIRED)` |
-| CMake source | driver와 함께 `crtsys`를 source build | `CPMAddPackage("gh:ntoskrnl7/crtsys@<version>")` |
+| CMake / CPM | GitHub에서 `crtsys`를 소비하려는 CMake 기반 driver project | `CPMAddPackage("gh:ntoskrnl7/crtsys@<version>")` |
 
-Minimal CMake consumer:
+Minimal MSBuild/NuGet consumer:
+
+```xml
+<ItemGroup>
+  <PackageReference Include="crtsys" Version="<version>" />
+</ItemGroup>
+```
+
+```powershell
+msbuild .\my_driver.vcxproj /restore /p:Configuration=Debug /p:Platform=x64
+```
+
+Visual Studio Package Manager Console에서는 다음처럼 설치합니다.
+
+```powershell
+Install-Package crtsys
+```
+
+modern `PackageReference` project에서는 MSBuild restore가 가능하면
+`nuget.exe`가 필수는 아닙니다. Build Tools-only 환경도 같은
+`msbuild /restore` 경로를 사용할 수 있습니다. 자세한 내용은
+[MSBuild/NuGet 빠른 시작](./ko-kr-msbuild-nuget-quickstart.md)을 보세요.
+
+별도 driver project에서 사용하는 Minimal CMake/CPM consumer:
+
+먼저 그 driver project에 `CPM.cmake`를 추가하거나, 이미 쓰는 CPM bootstrap을
+사용합니다.
+
+```powershell
+New-Item -ItemType Directory -Force cmake
+Invoke-WebRequest `
+  https://github.com/cpm-cmake/CPM.cmake/releases/download/v0.32.0/CPM.cmake `
+  -OutFile cmake/CPM.cmake
+```
+
+그 다음 driver project의 `CMakeLists.txt`에서 GitHub의 `crtsys`를 소비합니다.
 
 ```cmake
-include(cmake/CPM.cmake)
+include("${CMAKE_CURRENT_LIST_DIR}/cmake/CPM.cmake")
 
 set(CRTSYS_NTL_MAIN ON)
 CPMAddPackage("gh:ntoskrnl7/crtsys@<version>")
@@ -106,6 +141,7 @@ flowchart TD
 | 문서 | 볼 내용 |
 | --- | --- |
 | [아키텍처](./ko-kr-architecture.md) | Runtime stack, 계층별 책임, 소비 경로 |
+| [MSBuild/NuGet 빠른 시작](./ko-kr-msbuild-nuget-quickstart.md) | Visual Studio, Build Tools-only, CI package 소비 |
 | [설계 근거](./ko-kr-design-rationale.md) | IRQL, pool, stack, unload, 운영 경계 |
 | [기능 지원 현황](./ko-kr-feature-coverage.md) | Driver-tested C++/CRT/STL matrix와 known gap |
 | [NTL API](./ko-kr-ntl-api.md) | Driver helper API, entry wrapper, synchronization, SEH helper |
@@ -138,14 +174,22 @@ Visual Studio 2017은 일부 CRT 소스/헤더 구성이 부족한 경로가 있
 
 ## CMake 빠른 시작
 
-드라이버 프로젝트에 `cmake/CPM.cmake`를 추가한 뒤 `crtsys`를 추가합니다.
+별도 driver project를 만들고, 그 project에 `CPM.cmake`를 추가한 뒤 GitHub의
+`crtsys`를 소비합니다.
+
+```powershell
+New-Item -ItemType Directory -Force cmake
+Invoke-WebRequest `
+  https://github.com/cpm-cmake/CPM.cmake/releases/download/v0.32.0/CPM.cmake `
+  -OutFile cmake/CPM.cmake
+```
 
 ```cmake
 cmake_minimum_required(VERSION 3.14 FATAL_ERROR)
 
 project(my_driver LANGUAGES C CXX)
 
-include(cmake/CPM.cmake)
+include("${CMAKE_CURRENT_LIST_DIR}/cmake/CPM.cmake")
 
 set(CRTSYS_NTL_MAIN ON)
 CPMAddPackage("gh:ntoskrnl7/crtsys@<version>")
@@ -194,14 +238,16 @@ cmake -S . -B build_x64 -A x64 -DCRTSYS_ENABLE_DIAGNOSTIC_BREAKPOINTS=OFF
 ## NuGet 패키지 상세
 
 `crtsys`의 NuGet 배포는 Visual Studio/MSBuild 프로젝트용
-`crtsys.<version>.nupkg`입니다.
+`crtsys.<version>.nupkg`입니다. Package workflow는 게시된 package로
+WDK consumer project도 빌드하며, 저장소의 smoke project는
+[`test/nuget`](../test/nuget)에 있습니다.
 
 ## GitHub Release prebuilt 번들 상세
 
 GitHub Release는 별도 오프라인 번들을 배포합니다.
 
 - `crtsys-<version>-prebuilt.zip`: 헤더, 문서, CMake 헬퍼,
-  x64/ARM64의 `Debug`/`Release` 사전 빌드 라이브러리.
+  x86/x64/ARM64의 `Debug`/`Release` 사전 빌드 라이브러리.
 - `crtsys-<version>-SHA256SUMS.txt`
 
 prebuilt bundle은 source에서 `crtsys`를 fetch/build하지 않고, CMake

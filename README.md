@@ -24,14 +24,48 @@ support ceiling for every header or code path that may compile or work.
 
 | Path | Use when | Start here |
 | --- | --- | --- |
-| NuGet / MSBuild | Visual Studio WDK driver project | `Install-Package crtsys` |
+| NuGet / MSBuild | Visual Studio or Build Tools WDK driver project | `PackageReference` or `Install-Package crtsys` |
 | CMake prebuilt | Offline or pinned CI dependency | `find_package(crtsys CONFIG REQUIRED)` |
-| CMake source | Build `crtsys` with the driver | `CPMAddPackage("gh:ntoskrnl7/crtsys@<version>")` |
+| CMake / CPM | CMake-based driver project that consumes `crtsys` from GitHub | `CPMAddPackage("gh:ntoskrnl7/crtsys@<version>")` |
 
-Minimal CMake consumer:
+Minimal MSBuild/NuGet consumer:
+
+```xml
+<ItemGroup>
+  <PackageReference Include="crtsys" Version="<version>" />
+</ItemGroup>
+```
+
+```powershell
+msbuild .\my_driver.vcxproj /restore /p:Configuration=Debug /p:Platform=x64
+```
+
+For Visual Studio Package Manager Console:
+
+```powershell
+Install-Package crtsys
+```
+
+`nuget.exe` is optional for modern `PackageReference` projects when MSBuild
+restore is available. Build Tools-only environments can use the same
+`msbuild /restore` path. See the
+[MSBuild/NuGet quick start](./docs/msbuild-nuget-quickstart.md).
+
+Minimal CMake/CPM consumer in a separate driver project:
+
+Add `CPM.cmake` to that driver project, or use your existing CPM bootstrap:
+
+```powershell
+New-Item -ItemType Directory -Force cmake
+Invoke-WebRequest `
+  https://github.com/cpm-cmake/CPM.cmake/releases/download/v0.32.0/CPM.cmake `
+  -OutFile cmake/CPM.cmake
+```
+
+Then consume `crtsys` from GitHub in the driver's `CMakeLists.txt`:
 
 ```cmake
-include(cmake/CPM.cmake)
+include("${CMAKE_CURRENT_LIST_DIR}/cmake/CPM.cmake")
 
 set(CRTSYS_NTL_MAIN ON)
 CPMAddPackage("gh:ntoskrnl7/crtsys@<version>")
@@ -105,6 +139,7 @@ may compile or work.
 | Document | Use it for |
 | --- | --- |
 | [Architecture](./docs/architecture.md) | Runtime stack, layer responsibilities, consumer paths |
+| [MSBuild/NuGet Quick Start](./docs/msbuild-nuget-quickstart.md) | Visual Studio, Build Tools-only, and CI package consumption |
 | [Design Rationale](./docs/design-rationale.md) | IRQL, pool, stack, unload, and operational boundaries |
 | [Feature Coverage](./docs/feature-coverage.md) | Driver-tested C++/CRT/STL matrix and known gaps |
 | [NTL API](./docs/ntl-api.md) | Driver helper APIs, entry wrapper, synchronization, SEH helper |
@@ -138,14 +173,22 @@ Visual Studio 2017 has missing CRT source/header pieces for some paths, so
 
 ## CMake Quick Start
 
-Create a driver project, add CPM at `cmake/CPM.cmake`, and add `crtsys`:
+Create a separate driver project, add `CPM.cmake` to that project, and consume
+`crtsys` from GitHub:
+
+```powershell
+New-Item -ItemType Directory -Force cmake
+Invoke-WebRequest `
+  https://github.com/cpm-cmake/CPM.cmake/releases/download/v0.32.0/CPM.cmake `
+  -OutFile cmake/CPM.cmake
+```
 
 ```cmake
 cmake_minimum_required(VERSION 3.14 FATAL_ERROR)
 
 project(my_driver LANGUAGES C CXX)
 
-include(cmake/CPM.cmake)
+include("${CMAKE_CURRENT_LIST_DIR}/cmake/CPM.cmake")
 
 set(CRTSYS_NTL_MAIN ON)
 CPMAddPackage("gh:ntoskrnl7/crtsys@<version>")
@@ -194,8 +237,11 @@ cmake -S . -B build_x64 -A x64 -DCRTSYS_ENABLE_DIAGNOSTIC_BREAKPOINTS=OFF
 ## NuGet Package Details
 
 `crtsys` publishes a NuGet package with native MSBuild imports and prebuilt
-driver libraries for `x64` and `ARM64` `Debug`/`Release`. The package workflow
-also builds a WDK consumer driver from the published package.
+driver libraries for `x86`, `x64`, and `ARM64` `Debug`/`Release`. The package
+workflow builds WDK consumer projects for `x64` and `ARM64`, and validates the
+`x86` package layout separately on GitHub-hosted runners because that image
+does not provide x86 WDK kernel libraries. The checked-in smoke projects live
+under [`test/nuget`](./test/nuget).
 
 The NuGet distribution is `crtsys.<version>.nupkg` for Visual Studio/MSBuild
 projects.
@@ -205,7 +251,7 @@ projects.
 GitHub Release publishes these offline-only assets:
 
 - `crtsys-<version>-prebuilt.zip`: headers, docs, CMake helpers,
-  and prebuilt `x64/ARM64` `Debug`/`Release` libraries.
+  and prebuilt `x86/x64/ARM64` `Debug`/`Release` libraries.
 - `crtsys-<version>-SHA256SUMS.txt`
 
 The prebuilt bundle is intended for CMake projects that want a checked-in or

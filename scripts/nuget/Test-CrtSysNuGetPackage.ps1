@@ -17,6 +17,8 @@ param(
 
   [string] $WdkVersion,
 
+  [switch] $SkipDriverBuild,
+
   [string] $WorkDirectory,
 
   [string] $NuGetExe,
@@ -30,10 +32,6 @@ $ErrorActionPreference = 'Stop'
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $isDriverConsumer = $Consumer -eq 'Driver'
-
-if ($isDriverConsumer -and $Architecture -eq 'x86') {
-  throw 'The crtsys NuGet package contains prebuilt driver libraries for x64 and ARM64 only.'
-}
 
 $msbuildPlatformByArchitecture = @{
   x86 = 'Win32'
@@ -106,7 +104,7 @@ if ([string]::IsNullOrWhiteSpace($msbuild)) {
   throw "MSBuild.exe was not found under: $visualStudioPath"
 }
 
-if ($isDriverConsumer -and [string]::IsNullOrWhiteSpace($WdkVersion)) {
+if ($isDriverConsumer -and -not $SkipDriverBuild -and [string]::IsNullOrWhiteSpace($WdkVersion)) {
   $preferredWdkHeader = Join-Path $windowsKitsIncludeRoot "$WindowsSdkVersion\km\wdm.h"
   if (Test-Path $preferredWdkHeader) {
     $WdkVersion = $WindowsSdkVersion
@@ -126,7 +124,7 @@ if ($isDriverConsumer -and [string]::IsNullOrWhiteSpace($WdkVersion)) {
   }
 }
 
-if ($isDriverConsumer) {
+if ($isDriverConsumer -and -not $SkipDriverBuild) {
   $wdkHeader = Join-Path $windowsKitsIncludeRoot "$WdkVersion\km\wdm.h"
   if (-not (Test-Path $wdkHeader)) {
     throw "WDK header was not found: $wdkHeader"
@@ -140,7 +138,7 @@ if ($isDriverConsumer) {
 
 Write-Host "Requested Windows SDK version: $WindowsSdkVersion"
 Write-Host "Resolved Visual Studio path: $visualStudioPath"
-if ($isDriverConsumer) {
+if ($isDriverConsumer -and -not $SkipDriverBuild) {
   Write-Host "Resolved WDK version: $WdkVersion"
 }
 
@@ -229,7 +227,7 @@ foreach ($requiredPath in $requiredPackagePaths) {
   }
 }
 
-if ($isDriverConsumer) {
+if ($isDriverConsumer -and -not $SkipDriverBuild) {
   $externalPackagesDirectory = Join-Path $testProjectDirectory 'external-packages'
   & $NuGetExe install nlohmann.json `
     -Version 3.12.0 `
@@ -263,6 +261,11 @@ if ($isDriverConsumer) {
 $packageReadme = Get-Content -LiteralPath (Join-Path $packageRoot 'README.md') -Raw -Encoding UTF8
 if ($packageReadme -notmatch 'crtsys NuGet Package') {
   throw "Installed package README.md does not look like the NuGet package README."
+}
+
+if ($SkipDriverBuild) {
+  Write-Host "NuGet $Consumer package layout validation passed for $Architecture $Configuration."
+  return
 }
 
 $projectFile = Join-Path $testProjectDirectory $projectName

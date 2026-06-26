@@ -45,6 +45,8 @@ $configureArgs = @(
   '-G', 'Visual Studio 17 2022',
   '-A', $generatorPlatform,
   '-T', 'host=x64',
+  "-DCRTSYS_WDK_VERSION=$WindowsSdkVersion",
+  "-DLDK_WDK_VERSION=$WindowsSdkVersion",
   "-DCMAKE_SYSTEM_VERSION=$WindowsSdkVersion",
   "-DCMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION=$WindowsSdkVersion",
   '-DCMAKE_CXX_FLAGS=/MP'

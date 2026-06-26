@@ -47,10 +47,12 @@ actually been exercised under the kernel driver harness.
 
 ## Consumer Paths
 
-Visual Studio/MSBuild driver projects normally consume the NuGet package. CMake
-projects can either consume the GitHub Release prebuilt bundle through
-`find_package(crtsys CONFIG REQUIRED)` or build `crtsys` from source with
-CPM.cmake.
+Visual Studio/MSBuild driver projects normally consume the NuGet package through
+`PackageReference`, `Install-Package crtsys`, and `msbuild /restore`; see the
+[MSBuild/NuGet quick start](./msbuild-nuget-quickstart.md). CMake projects can
+either consume the GitHub Release prebuilt bundle through
+`find_package(crtsys CONFIG REQUIRED)` or consume `crtsys` directly from GitHub
+with CPM.cmake and `CPMAddPackage("gh:ntoskrnl7/crtsys@<version>")`.
 
 All three paths target the same model: `crtsys` is linked into the driver and
 the driver remains a normal WDK driver.

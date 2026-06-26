@@ -1,6 +1,6 @@
 param(
-  [ValidateSet('x64', 'ARM64')]
-  [string[]] $Architecture = @('x64', 'ARM64'),
+  [ValidateSet('x86', 'x64', 'ARM64')]
+  [string[]] $Architecture = @('x86', 'x64', 'ARM64'),
 
   [ValidateSet('Debug', 'Release')]
   [string[]] $Configuration = @('Debug', 'Release'),
@@ -19,6 +19,7 @@ if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
 }
 
 $platformByArchitecture = @{
+  x86 = 'Win32'
   x64 = 'x64'
   ARM64 = 'ARM64'
 }
@@ -26,6 +27,12 @@ $platformByArchitecture = @{
 foreach ($arch in $Architecture) {
   foreach ($config in $Configuration) {
     $platform = $platformByArchitecture[$arch]
+    $useLibcntpr = 'ON'
+    if ($arch -eq 'x86') {
+      # GitHub-hosted windows-2022 runners do not provide x86 WDK kernel libs.
+      $useLibcntpr = 'OFF'
+    }
+
     $buildDir = Join-Path $repoRoot "artifacts\build\crtsys_${arch}_$config"
     $libOutputDir = Join-Path $OutputDirectory "lib\native\$arch\$config"
 
@@ -38,11 +45,13 @@ foreach ($arch in $Architecture) {
       '-G', 'Visual Studio 17 2022',
       '-A', $platform,
       '-T', 'host=x64',
+      "-DCRTSYS_WDK_VERSION=$WindowsSdkVersion",
+      "-DLDK_WDK_VERSION=$WindowsSdkVersion",
       "-DCMAKE_SYSTEM_VERSION=$WindowsSdkVersion",
       "-DCMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION=$WindowsSdkVersion",
       '-DCMAKE_CXX_FLAGS=/MP',
       '-DCRTSYS_NTL_MAIN=ON',
-      '-DCRTSYS_USE_LIBCNTPR=ON'
+      "-DCRTSYS_USE_LIBCNTPR=$useLibcntpr"
     )
 
     Write-Host "Configuring crtsys $arch $config with Windows SDK $WindowsSdkVersion"

@@ -95,7 +95,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [x64, ARM64]
+        arch: [x86, x64, ARM64]
         config: [Debug, Release]
 
     steps:
@@ -136,6 +136,16 @@ jobs:
           dotnet-version: '10.0.x'
 
       - uses: NuGet/setup-nuget@v2
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: crtsys-nuget-libs-x86-Debug
+          path: artifacts/nuget-staging/lib/native/x86/Debug
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: crtsys-nuget-libs-x86-Release
+          path: artifacts/nuget-staging/lib/native/x86/Release
 
       - uses: actions/download-artifact@v7
         with:
@@ -208,6 +218,37 @@ jobs:
           -Configuration '${{ matrix.config }}'
           -WindowsSdkVersion '10.0.22621.0'
 
+  test-package-layout:
+    name: Validate NuGet package layout ${{ matrix.arch }} ${{ matrix.config }}
+    needs: pack
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86]
+        config: [Debug, Release]
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: NuGet/setup-nuget@v2
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: crtsys-nuget-${{ needs.pack.outputs.package_version }}
+          path: artifacts/nuget
+
+      - name: Validate package layout
+        shell: pwsh
+        run: >
+          ./scripts/nuget/Test-CrtSysNuGetPackage.ps1
+          -PackageDirectory artifacts/nuget
+          -Version '${{ needs.pack.outputs.package_version }}'
+          -Consumer Driver
+          -Architecture '${{ matrix.arch }}'
+          -Configuration '${{ matrix.config }}'
+          -SkipDriverBuild
+
   test-package-app:
     name: Test NuGet app package ${{ matrix.arch }} ${{ matrix.config }}
     needs: pack
@@ -267,9 +308,37 @@ jobs:
           -Configuration '${{ matrix.config }}'
           -WindowsSdkVersion '10.0.22621.0'
 
+  test-release-prebuilt-layout:
+    name: Validate release prebuilt layout ${{ matrix.arch }} ${{ matrix.config }}
+    needs: pack
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86]
+        config: [Debug, Release]
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: crtsys-release-assets-${{ needs.pack.outputs.package_version }}
+          path: artifacts/release
+
+      - name: Validate prebuilt release layout
+        shell: pwsh
+        run: >
+          ./scripts/nuget/Test-CrtSysReleaseAssets.ps1
+          -ReleaseDirectory artifacts/release
+          -Version '${{ needs.pack.outputs.package_version }}'
+          -Architecture '${{ matrix.arch }}'
+          -Configuration '${{ matrix.config }}'
+          -SkipDriverBuild
+
   publish:
     name: Publish NuGet
-    needs: [pack, test-package-driver, test-package-app]
+    needs: [pack, test-package-driver, test-package-layout, test-package-app]
     if: ${{ (github.event_name != 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.publish) }}
     runs-on: windows-2022
     permissions:
@@ -309,7 +378,7 @@ jobs:
 
   github-release:
     name: Upload GitHub Release Assets
-    needs: [pack, test-package-driver, test-package-app, test-release-prebuilt-cmake]
+    needs: [pack, test-package-driver, test-package-layout, test-package-app, test-release-prebuilt-cmake, test-release-prebuilt-layout]
     if: ${{ (github.event_name != 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.github_release) }}
     runs-on: windows-2022
     permissions:
@@ -351,7 +420,7 @@ jobs:
               "crtsys $version release assets."
               ""
               "- crtsys.$version.nupkg: offline NuGet package"
-              "- crtsys-$version-prebuilt.zip: headers, docs, CMake helpers/package config, native MSBuild imports, and prebuilt x64/ARM64 Debug/Release libraries"
+              "- crtsys-$version-prebuilt.zip: headers, docs, CMake helpers/package config, native MSBuild imports, and prebuilt x86/x64/ARM64 Debug/Release libraries"
               "- crtsys-$version-SHA256SUMS.txt: SHA-256 checksums"
             ) -join [Environment]::NewLine
             & gh release create $tagName @assets --repo $repo --target '${{ github.sha }}' --title "crtsys $version" --notes $notes
