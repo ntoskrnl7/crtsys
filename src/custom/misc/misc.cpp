@@ -25,25 +25,6 @@ extern "C" DECLSPEC_SELECTANY UINT_PTR
 extern "C" DECLSPEC_SELECTANY UINT_PTR
     __security_cookie_complement = ~CRTSYS_DEFAULT_SECURITY_COOKIE;
 
-#define _ROAPI_
-#include <roapi.h>
-
-EXTERN_C
-ROAPI
-_Check_return_
-HRESULT
-WINAPI
-RoInitialize (
-    _In_ RO_INIT_TYPE initType
-    )
-{
-    CRTSYS_DIAGNOSTIC_BREAK(); // untested :-(
-	UNREFERENCED_PARAMETER(initType);
-    return S_OK;
-}
-
-
-
 #if CRTSYS_USE_NTL_MAIN
 //
 // 
