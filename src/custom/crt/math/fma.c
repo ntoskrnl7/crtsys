@@ -47,7 +47,8 @@ _Check_return_ _ACRTIMP double __cdecl fma(_In_ double x, _In_ double y,
                                            _In_ double z) {
 #if defined(_M_IX86) || defined(_M_X64)
   if (crtsys_fma3_available()) {
-    return __fmadd_sd(x, y, z);
+    return _mm_cvtsd_f64(
+        _mm_fmadd_sd(_mm_set_sd(x), _mm_set_sd(y), _mm_set_sd(z)));
   }
   return x * y + z;
 #elif defined(_M_ARM64)
@@ -62,7 +63,8 @@ _Check_return_ _ACRTIMP float __cdecl fmaf(_In_ float x, _In_ float y,
                                            _In_ float z) {
 #if defined(_M_IX86) || defined(_M_X64)
   if (crtsys_fma3_available()) {
-    return __fmadd_ss(x, y, z);
+    return _mm_cvtss_f32(
+        _mm_fmadd_ss(_mm_set_ss(x), _mm_set_ss(y), _mm_set_ss(z)));
   }
   return (float)((double)x * (double)y + (double)z);
 #elif defined(_M_ARM64)
@@ -78,7 +80,8 @@ _Check_return_ _ACRTIMP long double __cdecl fmal(_In_ long double x,
                                                  _In_ long double z) {
 #if defined(_M_IX86) || defined(_M_X64)
   if (crtsys_fma3_available()) {
-    return (long double)__fmadd_sd((double)x, (double)y, (double)z);
+    return (long double)_mm_cvtsd_f64(_mm_fmadd_sd(
+        _mm_set_sd((double)x), _mm_set_sd((double)y), _mm_set_sd((double)z)));
   }
   return x * y + z;
 #elif defined(_M_ARM64)
