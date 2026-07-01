@@ -3,8 +3,6 @@
 
 #pragma once
 
-#undef DECLSPEC_IMPORT
-#define DECLSPEC_IMPORT
-#include <../um/combaseapi.h>
+#include <Ldk/combaseapi.h>
 
 #endif  // _CRTSYS_COMBASEAPI

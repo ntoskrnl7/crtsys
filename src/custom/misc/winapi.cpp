@@ -39,18 +39,6 @@ VerifyVersionInfoW (
 }
 
 WINBASEAPI
-DWORD
-WINAPI
-ResumeThread (
-    _In_ HANDLE hThread
-    )
-{
-    CRTSYS_DIAGNOSTIC_BREAK();
-    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
-    return 0;
-}
-
-WINBASEAPI
 BOOL
 WINAPI
 CreateProcessA (
@@ -95,160 +83,15 @@ SetConsoleTextAttribute (
     return FALSE;
 }
 
-
-
-#ifndef LDK_HAS_LOCALE_NLS_APIS
-// 14.31.31103\crt\src\stl\xdateord.cpp
-WINBASEAPI
-int
-WINAPI
-GetLocaleInfoEx (
-    _In_opt_ LPCWSTR lpLocaleName,
-    _In_ LCTYPE LCType,
-    _Out_writes_to_opt_(cchData, return) LPWSTR lpLCData,
-    _In_ int cchData
-    )
-{
-    CRTSYS_DIAGNOSTIC_BREAK();
-    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
-    return 0;
-}
-
-// 14.31.31103\crt\src\stl\xgetwctype.cpp
-WINBASEAPI
-BOOL
-WINAPI
-GetStringTypeW (
-    _In_ DWORD dwInfoType,
-    _In_NLS_string_(cchSrc) LPCWCH lpSrcStr,
-    _In_ int cchSrc,
-    _Out_ LPWORD lpCharType
-    )
-{
-    CRTSYS_DIAGNOSTIC_BREAK();
-    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
-    return FALSE;
-}
-
-
-
-//
-// ucrt/internal/winapi_thunks.cpp 
-//
-
-#endif
-
-#ifndef LDK_HAS_LOCALE_NLS_APIS
-// __acrt_GetDateFormatEx -> GetDateFormatW
-WINBASEAPI
-int
-WINAPI
-GetDateFormatW (
-    _In_ LCID Locale,
-    _In_ DWORD dwFlags,
-    _In_opt_ CONST SYSTEMTIME* lpDate,
-    _In_opt_ LPCWSTR lpFormat,
-    _Out_writes_opt_(cchDate) LPWSTR lpDateStr,
-    _In_ int cchDate
-    )
-{
-    CRTSYS_DIAGNOSTIC_BREAK();
-    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );  
-    return 0;
-}
-
-// __acrt_GetTimeFormatEx -> GetTimeFormatW
-WINBASEAPI
-int
-WINAPI
-GetTimeFormatW (
-    _In_ LCID Locale,
-    _In_ DWORD dwFlags,
-    _In_opt_ CONST SYSTEMTIME* lpTime,
-    _In_opt_ LPCWSTR lpFormat,
-    _Out_writes_opt_(cchTime) LPWSTR lpTimeStr,
-    _In_ int cchTime
-    )
-{
-    CRTSYS_DIAGNOSTIC_BREAK();
-    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
-    return 0;
-}
-
-#endif
-
-#ifndef LDK_HAS_LOCALE_NLS_APIS
-// __acrt_GetLocaleInfoEx -> GetLocaleInfoW
-WINBASEAPI
-int
-WINAPI
-GetLocaleInfoW (
-    _In_ LCID     Locale,
-    _In_ LCTYPE   LCType,
-    _Out_writes_opt_(cchData) LPWSTR lpLCData,
-    _In_ int      cchData
-    )
-{
-    CRTSYS_DIAGNOSTIC_BREAK();
-    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
-    return 0;
-}
-
-// __acrt_EnumSystemLocalesEx -> EnumSystemLocalesEx
-WINBASEAPI
-BOOL
-WINAPI
-EnumSystemLocalesEx (
-    _In_ LOCALE_ENUMPROCEX lpLocaleEnumProcEx,
-    _In_ DWORD dwFlags,
-    _In_ LPARAM lParam,
-    _In_opt_ LPVOID lpReserved
-    )
-{
-    CRTSYS_DIAGNOSTIC_BREAK();
-    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
-    return FALSE;
-}
-
-//
-// ucrt/locale/getqloc_downloevel.cpp (GetLcidFromLangCountry, GetLcidFromLanguage, GetLcidFromCountry)
-//
-WINBASEAPI
-BOOL
-WINAPI
-EnumSystemLocalesW (
-    _In_ LOCALE_ENUMPROCW lpLocaleEnumProc,
-    _In_ DWORD dwFlags
-    )
-{
-    CRTSYS_DIAGNOSTIC_BREAK();
-    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
-    return FALSE; 
-}
-#endif
-
 //
 // https://github.com/ntoskrnl7/crtsys/issues/23
 //
-// Windows Kits\10\Include\10.0.22621.0\winrt\wrl\wrappers\corewrappers.h
-// Microsoft Visual Studio\2022\Preview\VC\Tools\MSVC\14.34.31721\crt\src\stl\ppltasks.cpp
+// Windows SDK WRL corewrappers.h uses ReleaseMutex in MutexTraits::Unlock.
+// MSVC STL ppltasks.cpp can reach WRL/corewrappers.h on _CRT_APP or
+// UNDOCKED_WINDOWS_UCRT builds.
 //
 // MutexTraits::Lock, SemaphoreTraits::Lock
 //
-WINBASEAPI
-BOOL
-WINAPI
-ReleaseSemaphore (
-    _In_ HANDLE hSemaphore,
-    _In_ LONG lReleaseCount,
-    _Out_opt_ LPLONG lpPreviousCount
-    )
-{
-    CRTSYS_DIAGNOSTIC_BREAK();
-    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
-    return FALSE; 
-}
-
 WINBASEAPI
 BOOL
 WINAPI
@@ -259,78 +102,6 @@ ReleaseMutex (
     CRTSYS_DIAGNOSTIC_BREAK();
     SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
     return FALSE; 
-}
-
-#ifdef WINOLEAPI
-#undef WINOLEAPI
-#endif
-#ifdef WINOLEAPI_
-#undef WINOLEAPI_
-#endif
-
-#ifdef _OLE32_
-#define WINOLEAPI        STDAPI
-#define WINOLEAPI_(type) STDAPI_(type)
-#else
-
-#ifdef _68K_
-#ifndef REQUIRESAPPLEPASCAL
-#define WINOLEAPI        EXTERN_C HRESULT PASCAL
-#define WINOLEAPI_(type) EXTERN_C type PASCAL
-#else
-#define WINOLEAPI        EXTERN_C PASCAL HRESULT
-#define WINOLEAPI_(type) EXTERN_C PASCAL type
-#endif
-#else
-#define WINOLEAPI        EXTERN_C HRESULT STDAPICALLTYPE
-#define WINOLEAPI_(type) EXTERN_C type STDAPICALLTYPE
-#endif
-
-#endif
-
-_Check_return_
-WINOLEAPI
-CoGetObjectContext(
-    _In_ REFIID riid,
-    _Outptr_ LPVOID  FAR * ppv
-    )
-{
-    CRTSYS_DIAGNOSTIC_BREAK();
-    return E_NOTIMPL;
-}
-
-typedef 
-enum _APTTYPEQUALIFIER
-    {
-        APTTYPEQUALIFIER_NONE	= 0,
-        APTTYPEQUALIFIER_IMPLICIT_MTA	= 1,
-        APTTYPEQUALIFIER_NA_ON_MTA	= 2,
-        APTTYPEQUALIFIER_NA_ON_STA	= 3,
-        APTTYPEQUALIFIER_NA_ON_IMPLICIT_MTA	= 4,
-        APTTYPEQUALIFIER_NA_ON_MAINSTA	= 5,
-        APTTYPEQUALIFIER_APPLICATION_STA	= 6,
-        APTTYPEQUALIFIER_RESERVED_1	= 7
-    } 	APTTYPEQUALIFIER;
-
-typedef 
-enum _APTTYPE
-    {
-        APTTYPE_CURRENT	= -1,
-        APTTYPE_STA	= 0,
-        APTTYPE_MTA	= 1,
-        APTTYPE_NA	= 2,
-        APTTYPE_MAINSTA	= 3
-    } 	APTTYPE;
-
-_Check_return_
-WINOLEAPI
-CoGetApartmentType(
-    _Out_ APTTYPE* pAptType,
-    _Out_ APTTYPEQUALIFIER* pAptQualifier
-    )
-{
-    CRTSYS_DIAGNOSTIC_BREAK();
-    return E_NOTIMPL;
 }
 
 EXTERN_C_END

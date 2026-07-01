@@ -68,7 +68,7 @@ endif()
 if (NOT CRTSYS_ENABLE_DIAGNOSTIC_BREAKPOINTS)
   set(LDK_ENABLE_DIAGNOSTIC_BREAKPOINTS OFF CACHE BOOL "Set to OFF to suppress LDK diagnostic KdBreakPoint calls")
 endif()
-CPMAddPackage("gh:ntoskrnl7/Ldk@0.7.7")
+CPMAddPackage("gh:ntoskrnl7/Ldk@0.7.11")
 
 CPMAddPackage("gh:ntoskrnl7/FindWDK#master")
 list(APPEND CMAKE_MODULE_PATH "${FindWDK_SOURCE_DIR}/cmake")
