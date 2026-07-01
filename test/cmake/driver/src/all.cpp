@@ -90,6 +90,15 @@ void run();
 namespace counting_semaphore_test {
 void run();
 }
+namespace jthread_constructor_test {
+void run();
+}
+namespace stop_source_test {
+void run();
+}
+namespace stop_callback_test {
+void run();
+}
 
 namespace atomic_test {
 void run();
@@ -499,6 +508,9 @@ void cpp_std_tests() {
   latch_test::run();
   barrier_test::run();
   counting_semaphore_test::run();
+  jthread_constructor_test::run();
+  stop_source_test::run();
+  stop_callback_test::run();
   array_test::run();
   vector_test::run();
   deque_test::run();

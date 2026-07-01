@@ -426,8 +426,10 @@ void run() {
 //
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <iostream>
 #include <semaphore>
+#include <stop_token>
 #include <thread>
 
 namespace counting_semaphore_test {
@@ -473,3 +475,206 @@ void run() {
   thrWorker.join();
 }
 } // namespace counting_semaphore_test
+
+//
+// https://en.cppreference.com/w/cpp/thread/jthread/jthread#Example
+//
+#include <chrono>
+#include <iostream>
+#include <thread>
+#include <utility>
+
+namespace jthread_constructor_test {
+using namespace std::literals;
+
+void f1(int n) {
+  for (int i = 0; i < 5; ++i) {
+    std::cout << "Thread 1 executing\n";
+    ++n;
+    std::this_thread::sleep_for(10ms);
+  }
+}
+
+void f2(int &n) {
+  for (int i = 0; i < 5; ++i) {
+    std::cout << "Thread 2 executing\n";
+    ++n;
+    std::this_thread::sleep_for(10ms);
+  }
+}
+
+class foo {
+public:
+  void bar() {
+    for (int i = 0; i < 5; ++i) {
+      std::cout << "Thread 3 executing\n";
+      ++n;
+      std::this_thread::sleep_for(10ms);
+    }
+  }
+  int n = 0;
+};
+
+class baz {
+public:
+  void operator()() {
+    for (int i = 0; i < 5; ++i) {
+      std::cout << "Thread 4 executing\n";
+      ++n;
+      std::this_thread::sleep_for(10ms);
+    }
+  }
+  int n = 0;
+};
+
+void run() {
+  int n = 0;
+  foo f;
+  baz b;
+  std::jthread t0;                 // t0 is not a thread
+  std::jthread t1(f1, n + 1);      // pass by value
+  std::jthread t2a(f2, std::ref(n)); // pass by reference
+  std::jthread t2b(std::move(t2a)); // t2b is now running f2(). t2a is no longer a thread
+  std::jthread t3(&foo::bar, &f);  // t3 runs foo::bar() on object f
+  std::jthread t4(b);              // t4 runs baz::operator() on a copy of object b
+  t1.join();
+  t2b.join();
+  t3.join();
+  std::cout << "Final value of n is " << n << '\n';
+  std::cout << "Final value of f.n (foo::n) is " << f.n << '\n';
+  std::cout << "Final value of b.n (baz::n) is " << b.n << '\n';
+  // t4 joins on destruction
+}
+} // namespace jthread_constructor_test
+
+//
+// https://en.cppreference.com/w/cpp/thread/stop_source#Example
+//
+#include <chrono>
+#include <cstdio>
+#include <iostream>
+#include <stop_token>
+#include <thread>
+
+namespace stop_source_test {
+using namespace std::chrono_literals;
+
+void worker_fun(int id, std::stop_token stoken) {
+  for (int i = 10; i; --i) {
+    std::this_thread::sleep_for(300ms);
+    if (stoken.stop_requested()) {
+      std::printf("  worker%d is requested to stop\n", id);
+      return;
+    }
+    std::printf("  worker%d goes back to sleep\n", id);
+  }
+}
+
+void run() {
+  std::jthread threads[4];
+  std::cout << std::boolalpha;
+  auto print = [](const std::stop_source &source) {
+    std::printf("stop_source stop_possible = %s, stop_requested = %s\n",
+                source.stop_possible() ? "true" : "false",
+                source.stop_requested() ? "true" : "false");
+  };
+
+  // Common source
+  std::stop_source stop_source;
+
+  print(stop_source);
+  // Create worker threads
+  for (int i = 0; i < 4; ++i) {
+    threads[i] = std::jthread(worker_fun, i + 1, stop_source.get_token());
+  }
+
+  std::this_thread::sleep_for(500ms);
+
+  std::puts("Request stop");
+  stop_source.request_stop();
+
+  print(stop_source);
+
+  // Note: destructor of jthreads will call join so no need for explicit calls
+}
+} // namespace stop_source_test
+
+//
+// https://en.cppreference.com/w/cpp/thread/stop_callback#Example
+//
+#include <chrono>
+#include <condition_variable>
+#include <iostream>
+#include <mutex>
+#include <sstream>
+#include <thread>
+
+namespace stop_callback_test {
+using namespace std::chrono_literals;
+
+// Use a helper class for atomic std::cout streaming.
+class Writer {
+  std::ostringstream buffer;
+
+public:
+  ~Writer() { std::cout << buffer.str(); }
+
+  Writer &operator<<(auto input) {
+    buffer << input;
+    return *this;
+  }
+};
+
+void run() {
+  // A worker thread.
+  // It will wait until it is requested to stop.
+  std::jthread worker([](std::stop_token stoken) {
+    Writer() << "Worker thread's id: " << std::this_thread::get_id() << '\n';
+    std::mutex mutex;
+    std::unique_lock lock(mutex);
+    std::condition_variable_any().wait(
+        lock, stoken, [&stoken] { return stoken.stop_requested(); });
+  });
+
+  // Register a stop callback on the worker thread.
+  std::stop_callback callback(worker.get_stop_token(), [] {
+    Writer() << "Stop callback executed by thread: "
+             << std::this_thread::get_id() << '\n';
+  });
+
+  // Stop_callback objects can be destroyed prematurely to prevent execution.
+  {
+    std::stop_callback scoped_callback(worker.get_stop_token(), [] {
+      // This will not be executed.
+      Writer() << "Scoped stop callback executed by thread: "
+               << std::this_thread::get_id() << '\n';
+    });
+  }
+
+  // Demonstrate which thread executes the stop_callback and when.
+  // Define a stopper function.
+  auto stopper_func = [&worker] {
+    if (worker.request_stop()) {
+      Writer() << "Stop request executed by thread: "
+               << std::this_thread::get_id() << '\n';
+    } else {
+      Writer() << "Stop request not executed by thread: "
+               << std::this_thread::get_id() << '\n';
+    }
+  };
+
+  // Let multiple threads compete for stopping the worker thread.
+  std::jthread stopper1(stopper_func);
+  std::jthread stopper2(stopper_func);
+  stopper1.join();
+  stopper2.join();
+
+  // After a stop has already been requested,
+  // a new stop_callback executes immediately.
+  Writer() << "Main thread: " << std::this_thread::get_id() << '\n';
+  std::stop_callback callback_after_stop(worker.get_stop_token(), [] {
+    Writer() << "Stop callback executed by thread: "
+             << std::this_thread::get_id() << '\n';
+  });
+}
+} // namespace stop_callback_test
