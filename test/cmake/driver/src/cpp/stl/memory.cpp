@@ -1,5 +1,3 @@
-#define _CRT_SECURE_NO_WARNINGS
-
 //
 // https://en.cppreference.com/w/cpp/memory/shared_ptr#Example
 //

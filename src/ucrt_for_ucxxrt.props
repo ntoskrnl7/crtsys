@@ -470,10 +470,12 @@
     <Platform_Arm Condition="'$(Platform)'=='ARM' or '$(Platform)'=='ARM64'">true</Platform_Arm>
     <Platform_Arm Condition="'$(Platform_Arm)'!='true'">false</Platform_Arm>
     <Platform_Intel>!$(Platform_Arm)</Platform_Intel>
+    <CrtSysMarmasmBuildCustomizationsPath>$(VCTargetsPath)\BuildCustomizations</CrtSysMarmasmBuildCustomizationsPath>
+    <CrtSysMarmasmBuildCustomizationsPath Condition="'$(PlatformToolset)'=='v142' or '$(PlatformToolsetVersion)'=='142'">$(VCTargetsPath)\..\v160\BuildCustomizations</CrtSysMarmasmBuildCustomizationsPath>
   </PropertyGroup>
 
   <ImportGroup>
-    <Import Condition="$(Platform_Arm)" Project="$(VCTargetsPath)\BuildCustomizations\marmasm.props" />
+    <Import Condition="$(Platform_Arm)" Project="$(CrtSysMarmasmBuildCustomizationsPath)\marmasm.props" />
   </ImportGroup>
 
   <Target Name="PreprocessArmHandlers" Condition="'$(Platform)'=='ARM'" BeforeTargets="_MARMASM" Outputs="$(IntDir)handlers.pp" Inputs="$(VC_CRT_SourcePath.Split(%3B)[0])\arm\handlers.asm">
@@ -510,6 +512,6 @@
   </ItemGroup>
 
   <ImportGroup>
-    <Import Condition="$(Platform_Arm)" Project="$(VCTargetsPath)\BuildCustomizations\marmasm.targets" />
+    <Import Condition="$(Platform_Arm)" Project="$(CrtSysMarmasmBuildCustomizationsPath)\marmasm.targets" />
   </ImportGroup>
 </Project>

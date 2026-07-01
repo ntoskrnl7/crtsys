@@ -68,7 +68,7 @@ endif()
 if (NOT CRTSYS_ENABLE_DIAGNOSTIC_BREAKPOINTS)
   set(LDK_ENABLE_DIAGNOSTIC_BREAKPOINTS OFF CACHE BOOL "Set to OFF to suppress LDK diagnostic KdBreakPoint calls")
 endif()
-CPMAddPackage("gh:ntoskrnl7/Ldk@0.7.11")
+CPMAddPackage("gh:ntoskrnl7/Ldk@0.7.12")
 
 CPMAddPackage("gh:ntoskrnl7/FindWDK#master")
 list(APPEND CMAKE_MODULE_PATH "${FindWDK_SOURCE_DIR}/cmake")
@@ -214,8 +214,12 @@ endif()
 #
 # Forced Include File
 #
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/include/.internal/winsdk/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/wdk/${WDK_VERSION}/forced.h")
-  target_compile_options(crtsys PRIVATE "$<$<COMPILE_LANGUAGE:C,CXX>:/FI${CMAKE_CURRENT_SOURCE_DIR}/include/.internal/winsdk/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/wdk/${WDK_VERSION}/forced.h>")
+set(CRTSYS_WINSDK_FORCED_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/include/.internal/winsdk/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/wdk/${WDK_VERSION}/forced.h")
+if(NOT EXISTS "${CRTSYS_WINSDK_FORCED_INCLUDE}")
+  set(CRTSYS_WINSDK_FORCED_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/include/.internal/winsdk/wdk/${WDK_VERSION}/forced.h")
+endif()
+if(EXISTS "${CRTSYS_WINSDK_FORCED_INCLUDE}")
+  target_compile_options(crtsys PRIVATE "$<$<COMPILE_LANGUAGE:C,CXX>:/FI${CRTSYS_WINSDK_FORCED_INCLUDE}>")
 endif()
 target_compile_options(crtsys PRIVATE "$<$<COMPILE_LANGUAGE:C,CXX>:/FI${CMAKE_CURRENT_SOURCE_DIR}/src/crtsys.h>")
 if (UCXXRT_ENABLED)

@@ -25,10 +25,32 @@ test harness, typically by moving the sample `main()` body into a namespaced
 - `std::pair` / `std::make_pair`: <https://en.cppreference.com/w/cpp/utility/pair/make_pair>
 - `std::shared_ptr`: <https://en.cppreference.com/w/cpp/memory/shared_ptr>
 - `std::atomic`: <https://en.cppreference.com/w/cpp/atomic/atomic>
+- `std::atomic_ref`: <https://en.cppreference.com/w/cpp/atomic/atomic_ref/atomic_ref>
 - `std::atomic_flag`: <https://en.cppreference.com/w/cpp/atomic/atomic_flag>
 - `std::latch`: <https://en.cppreference.com/w/cpp/thread/latch>
 - `std::barrier`: <https://en.cppreference.com/w/cpp/thread/barrier>
 - `std::counting_semaphore` / `std::binary_semaphore`: <https://en.cppreference.com/w/cpp/thread/counting_semaphore>
+- `std::condition_variable`: <https://en.cppreference.com/w/cpp/thread/condition_variable>
+- `std::condition_variable_any::wait`: <https://en.cppreference.com/w/cpp/thread/condition_variable_any/wait>
+- `std::mutex`: <https://en.cppreference.com/w/cpp/thread/mutex>
+- `std::lock_guard`: <https://en.cppreference.com/w/cpp/thread/lock_guard>
+- `std::shared_mutex`: <https://en.cppreference.com/w/cpp/thread/shared_mutex>
+- `std::shared_lock`: <https://en.cppreference.com/w/cpp/thread/shared_lock>
+- `std::timed_mutex`: <https://en.cppreference.com/w/cpp/thread/timed_mutex>
+- `std::recursive_mutex`: <https://en.cppreference.com/w/cpp/thread/recursive_mutex>
+- `std::recursive_timed_mutex`: <https://en.cppreference.com/w/cpp/thread/recursive_timed_mutex>
+- `std::scoped_lock`: <https://en.cppreference.com/w/cpp/thread/scoped_lock>
+- `std::lock`: <https://en.cppreference.com/w/cpp/thread/lock>
+- `std::unique_lock`: <https://en.cppreference.com/w/cpp/thread/unique_lock>
+- `std::try_lock`: <https://en.cppreference.com/w/cpp/thread/try_lock>
+- `std::call_once`: <https://en.cppreference.com/w/cpp/thread/call_once>
+- `std::future`: <https://en.cppreference.com/w/cpp/thread/future>
+- `std::async`: <https://en.cppreference.com/w/cpp/thread/async>
+- `std::future::wait_until`: <https://en.cppreference.com/w/cpp/thread/future/wait_until>
+- `std::future_error`: <https://en.cppreference.com/w/cpp/thread/future_error>
+- `std::shared_future`: <https://en.cppreference.com/w/cpp/thread/shared_future>
+- `std::promise`: <https://en.cppreference.com/w/cpp/thread/promise>
+- `std::packaged_task`: <https://en.cppreference.com/w/cpp/thread/packaged_task>
 - `std::jthread`: <https://en.cppreference.com/w/cpp/thread/jthread/jthread>
 - `std::stop_source` / `std::stop_token`: <https://en.cppreference.com/w/cpp/thread/stop_source>
 - `std::stop_callback`: <https://en.cppreference.com/w/cpp/thread/stop_callback>
@@ -92,6 +114,9 @@ test harness, typically by moving the sample `main()` body into a namespaced
 - `std::lerp`: <https://en.cppreference.com/w/cpp/numeric/lerp>
 - `std::bitset`: <https://en.cppreference.com/w/cpp/utility/bitset>
 - `std::popcount`: <https://en.cppreference.com/w/cpp/numeric/popcount>
+- `std::bit_cast`: <https://en.cppreference.com/w/cpp/numeric/bit_cast>
+- `std::endian`: <https://en.cppreference.com/w/cpp/types/endian>
+- `std::byteswap`: <https://en.cppreference.com/w/cpp/numeric/byteswap>
 - `std::to_chars`: <https://en.cppreference.com/w/cpp/utility/to_chars>
 - `std::from_chars`: <https://en.cppreference.com/cpp/utility/from_chars>
 - `std::variant`: <https://en.cppreference.com/w/cpp/utility/variant>
@@ -168,6 +193,17 @@ semaphore example keeps the original worker delay.
 
 The `std::stop_source` and `std::stop_callback` examples keep the
 cppreference cooperative-cancellation flow.
+
+The `std::condition_variable_any`, `std::lock_guard`, `std::scoped_lock`,
+`std::lock`, `std::unique_lock`, `std::try_lock`, `std::recursive_mutex`,
+`std::async`, `std::future::wait_until`, and `std::shared_future` examples keep
+the cppreference synchronization flow. The driver harness shortens long
+illustrative sleep durations or loop counts where the original example uses
+second-scale delays or very large iteration counts. The `std::shared_lock`,
+`std::timed_mutex`, and `std::recursive_timed_mutex` pages have no standalone
+examples, so the harness uses small direct checks for those types. The
+`std::future_error` page demonstrates an undefined empty-future `get()` path;
+the harness uses a defined `future_already_retrieved` error path instead.
 
 The `std::unique_ptr` example keeps the ownership, polymorphism, custom deleter,
 array, and linked-list portions, including the hosted file I/O custom deleter,

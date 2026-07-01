@@ -42,8 +42,8 @@ exception 없음, 유효한 WDK 문맥을 직접 보장해야 합니다. driver 
 | C++ RTTI | `typeid`, `dynamic_cast` | 감사된 caller context; 그 외에는 `PASSIVE_LEVEL` | 사용하는 driver target은 RTTI를 켜고 빌드해야 합니다. 대상 객체와 type metadata는 resident 상태여야 합니다. |
 | STL value-only helper | type traits, concepts, `std::array`, `std::span`, `std::string_view`, `std::bitset`, `std::pair`, `std::tuple`, `std::ratio`, `std::source_location`, `std::strong_ordering`, `std::numbers`, 단순 `std::move` / `std::exchange` / `std::invoke` / `std::reference_wrapper`, integer `std::to_chars` / `std::from_chars`, resident fixed storage 위의 순수 algorithm | 감사된 caller context; 그 외에는 `PASSIVE_LEVEL` | STL 중 `PASSIVE_LEVEL`보다 높은 곳에서 고려할 수 있는 영역은 이 정도뿐입니다. exact expression과 comparator/callback까지 감사해야 합니다. |
 | STL owning object, container, callback-heavy utility | `std::string`, container, `std::any`, `std::function`, smart pointer, `std::optional`, `std::variant`, `std::complex`, `std::valarray`, `std::filesystem::path`, 기본 `std::filesystem` file operation, `std::format`, `std::print`, random distribution, `std::regex`, `nlohmann::json`, allocation/throw/arbitrary user code 호출 가능성이 있는 algorithm | `PASSIVE_LEVEL` only | 생성, 소멸, 비교, hashing, allocation, deallocation, formatting, file-system I/O, user callback이 runtime path를 끌어올 수 있습니다. |
-| STL synchronization, threading, async | `std::thread`, `std::mutex`, `std::shared_mutex`, `std::condition_variable`, `std::call_once`, `std::future`, `std::promise`, `std::packaged_task` | `PASSIVE_LEVEL` only | wait, worker execution 생성, allocation, unload 이후 생존 문제가 생길 수 있습니다. |
-| STL atomic primitive | resident storage 위의 `std::atomic` / `std::atomic_flag` load, store, exchange, compare-exchange 및 C++20 wait/notify | 감사된 non-waiting operation은 `<= DISPATCH_LEVEL`; wait/notify는 `PASSIVE_LEVEL` only | wait/notify는 blocking synchronization으로 취급하세요. elevated IRQL에서 runtime-backed callback이나 allocation과 섞지 마세요. |
+| STL synchronization, threading, async | `std::thread`, `std::mutex`, `std::shared_mutex`, `std::condition_variable`, `std::condition_variable_any`, `std::scoped_lock`, `std::lock`, `std::try_lock`, `std::call_once`, `std::future`, `std::shared_future`, `std::promise`, `std::packaged_task` | `PASSIVE_LEVEL` only | wait, worker execution 생성, allocation, unload 이후 생존 문제가 생길 수 있습니다. |
+| STL atomic primitive | resident storage 위의 `std::atomic`, `std::atomic_ref`, `std::atomic_flag` load, store, exchange, compare-exchange 및 C++20 wait/notify | 감사된 non-waiting operation은 `<= DISPATCH_LEVEL`; wait/notify는 `PASSIVE_LEVEL` only | wait/notify는 blocking synchronization으로 취급하세요. elevated IRQL에서 runtime-backed callback이나 allocation과 섞지 마세요. |
 | I/O stream | `std::cin`, `std::cout`, `std::cerr`, `std::clog`, wide stream 계열 | `PASSIVE_LEVEL` only | diagnostic/test 용도입니다. production hot path와 stack-sensitive path에서는 피하세요. |
 | C math 및 floating-point helper | math function, floating-point classification helper | exact helper를 별도 감사하지 않았다면 `PASSIVE_LEVEL` | floating-point state와 helper dependency는 driver context에 민감합니다. |
 | NTL entry, driver, device, RPC server helper | `ntl::main`, `ntl::driver`, `ntl::device`, `ntl::rpc::server` | `PASSIVE_LEVEL` only | initialization, teardown, device setup, IOCTL/RPC control path 용도입니다. |
@@ -106,6 +106,8 @@ cppreference Example 코드를 이식한 항목은
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/containers.cpp)
 - [x] [std::atomic](https://en.cppreference.com/w/cpp/atomic/atomic)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/atomic.cpp)
+- [x] [std::atomic_ref](https://en.cppreference.com/w/cpp/atomic/atomic_ref)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/atomic.cpp)
 - [x] [std::atomic::wait/notify](https://en.cppreference.com/w/cpp/atomic/atomic/wait)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/atomic.cpp)
 - [x] [std::atomic_flag](https://en.cppreference.com/w/cpp/atomic/atomic_flag)
@@ -128,6 +130,12 @@ cppreference Example 코드를 이식한 항목은
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [`<bit>` 유틸리티](https://en.cppreference.com/w/cpp/utility/bit)
   [(cppreference popcount example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
+- [x] [std::bit_cast](https://en.cppreference.com/w/cpp/numeric/bit_cast)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
+- [x] [std::endian](https://en.cppreference.com/w/cpp/types/endian)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
+- [x] [std::byteswap](https://en.cppreference.com/w/cpp/numeric/byteswap)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::concepts](https://en.cppreference.com/w/cpp/concepts)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::complex](https://en.cppreference.com/w/cpp/numeric/complex)
@@ -329,14 +337,42 @@ cppreference Example 코드를 이식한 항목은
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/numeric.cpp)
 - [x] [std::condition_variable](https://en.cppreference.com/w/cpp/thread/condition_variable)
   [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp#L35)
+- [x] [std::condition_variable_any](https://en.cppreference.com/w/cpp/thread/condition_variable_any)
+  [(cppreference wait example)](../test/cmake/driver/src/cpp/stl/thread.cpp)
 - [x] [std::mutex](https://en.cppreference.com/w/cpp/thread/mutex)
   [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp#L81)
+- [x] [std::lock_guard](https://en.cppreference.com/w/cpp/thread/lock_guard)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/thread.cpp)
 - [x] [std::shared_mutex](https://en.cppreference.com/w/cpp/thread/shared_mutex)
   [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp#L129)
+- [x] [std::shared_lock](https://en.cppreference.com/w/cpp/thread/shared_lock)
+  [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp)
+- [x] [std::timed_mutex](https://en.cppreference.com/w/cpp/thread/timed_mutex)
+  [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp)
+- [x] [std::recursive_mutex](https://en.cppreference.com/w/cpp/thread/recursive_mutex)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/thread.cpp)
+- [x] [std::recursive_timed_mutex](https://en.cppreference.com/w/cpp/thread/recursive_timed_mutex)
+  [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp)
+- [x] [std::scoped_lock](https://en.cppreference.com/w/cpp/thread/scoped_lock)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/thread.cpp)
+- [x] [std::lock](https://en.cppreference.com/w/cpp/thread/lock)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/thread.cpp)
+- [x] [std::unique_lock](https://en.cppreference.com/w/cpp/thread/unique_lock)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/thread.cpp)
+- [x] [std::try_lock](https://en.cppreference.com/w/cpp/thread/try_lock)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/thread.cpp)
 - [x] [std::call_once](https://en.cppreference.com/w/cpp/thread/call_once)
   [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp#L180)
 - [x] [std::future](https://en.cppreference.com/w/cpp/thread/future)
   [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp#L208)
+- [x] [std::async](https://en.cppreference.com/w/cpp/thread/async)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/thread.cpp)
+- [x] [std::future_status](https://en.cppreference.com/w/cpp/thread/future_status)
+  [(cppreference wait_until example)](../test/cmake/driver/src/cpp/stl/thread.cpp)
+- [x] [std::future_error](https://en.cppreference.com/w/cpp/thread/future_error)
+  [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp)
+- [x] [std::shared_future](https://en.cppreference.com/w/cpp/thread/shared_future)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/thread.cpp)
 - [x] [std::promise](https://en.cppreference.com/w/cpp/thread/promise)
   [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp#L254)
 - [x] [std::packaged_task](https://en.cppreference.com/w/cpp/thread/packaged_task)
@@ -374,8 +410,84 @@ cppreference Example 코드를 이식한 항목은
 ## 테스트 백로그
 
 아래 미체크 항목은 앞으로 cppreference Example 이식 또는 런타임 지원 작업
-후보입니다. 기본 원칙은 `PASSIVE_LEVEL`에서 파일 시스템, locale, 콘솔 입력,
-미지원 C++ 런타임 의존성 없이 실행할 수 있는 예제를 우선합니다.
+후보입니다. 명시적으로 limitation이라고 적지 않은 항목은 실패가 확인된
+목록이 아닙니다. 기본 원칙은 `PASSIVE_LEVEL`에서 파일 시스템, locale,
+콘솔 입력, 미지원 C++ 런타임 의존성 없이 실행할 수 있는 예제를
+우선합니다.
+
+### 앞으로 보강할 cppreference coverage 후보
+
+- [ ] Threading 및 synchronization
+  - [`std::shared_timed_mutex`](https://en.cppreference.com/w/cpp/thread/shared_timed_mutex)
+    및 timed shared-lock edge case
+  - 기본 예제보다 더 넓은 `std::future` / `std::shared_future` error-path
+    및 timeout edge case
+- [ ] Atomic helper
+  - [`std::atomic_thread_fence`](https://en.cppreference.com/w/cpp/atomic/atomic_thread_fence),
+    [`std::atomic_signal_fence`](https://en.cppreference.com/w/cpp/atomic/atomic_signal_fence)
+  - [`std::atomic_fetch_add`](https://en.cppreference.com/w/cpp/atomic/atomic_fetch_add),
+    [`std::atomic_compare_exchange`](https://en.cppreference.com/w/cpp/atomic/atomic_compare_exchange)
+    같은 free atomic operation
+- [ ] `<bit>` 개별 예제
+  - [`std::rotl`](https://en.cppreference.com/w/cpp/numeric/rotl),
+    [`std::rotr`](https://en.cppreference.com/w/cpp/numeric/rotr),
+    [`std::countl_zero`](https://en.cppreference.com/w/cpp/numeric/countl_zero),
+    [`std::countr_zero`](https://en.cppreference.com/w/cpp/numeric/countr_zero)
+  - [`std::has_single_bit`](https://en.cppreference.com/w/cpp/numeric/has_single_bit),
+    [`std::bit_ceil`](https://en.cppreference.com/w/cpp/numeric/bit_ceil),
+    [`std::bit_floor`](https://en.cppreference.com/w/cpp/numeric/bit_floor),
+    [`std::bit_width`](https://en.cppreference.com/w/cpp/numeric/bit_width)
+- [ ] Algorithm 및 ranges 추가 예제
+  - Binary-search 계열:
+    [`std::lower_bound`](https://en.cppreference.com/w/cpp/algorithm/lower_bound),
+    [`std::upper_bound`](https://en.cppreference.com/w/cpp/algorithm/upper_bound),
+    [`std::equal_range`](https://en.cppreference.com/w/cpp/algorithm/equal_range)
+  - Sorting/selection 계열:
+    [`std::stable_sort`](https://en.cppreference.com/w/cpp/algorithm/stable_sort),
+    [`std::nth_element`](https://en.cppreference.com/w/cpp/algorithm/nth_element),
+    [`std::partial_sort`](https://en.cppreference.com/w/cpp/algorithm/partial_sort)
+  - 아직 명시 driver 예제로 분리하지 않은 range adaptor 후보:
+    `take`, `drop`, `reverse`, `join`, `split`, `keys`, `values`,
+    `elements` 및 feature-test macro로 열리는 C++23 view들
+- [ ] Memory 및 PMR
+  - [`std::allocator_traits`](https://en.cppreference.com/w/cpp/memory/allocator_traits),
+    [`std::polymorphic_allocator`](https://en.cppreference.com/w/cpp/memory/polymorphic_allocator)
+  - [`std::pmr::unsynchronized_pool_resource`](https://en.cppreference.com/w/cpp/memory/unsynchronized_pool_resource),
+    [`std::pmr::synchronized_pool_resource`](https://en.cppreference.com/w/cpp/memory/synchronized_pool_resource),
+    [`std::pmr::null_memory_resource`](https://en.cppreference.com/w/cpp/memory/null_memory_resource),
+    [`std::pmr::new_delete_resource`](https://en.cppreference.com/w/cpp/memory/new_delete_resource)
+- [ ] Utility, functional, type support
+  - [`std::visit`](https://en.cppreference.com/w/cpp/utility/variant/visit),
+    [`std::type_index`](https://en.cppreference.com/w/cpp/types/type_index),
+    [`std::integer_sequence`](https://en.cppreference.com/w/cpp/utility/integer_sequence)
+  - [`std::not_fn`](https://en.cppreference.com/w/cpp/utility/functional/not_fn),
+    [`std::mem_fn`](https://en.cppreference.com/w/cpp/utility/functional/mem_fn),
+    [`std::bind_front`](https://en.cppreference.com/w/cpp/utility/functional/bind_front)
+- [ ] Regex, formatting, stream
+  - [`std::regex_match`](https://en.cppreference.com/w/cpp/regex/regex_match),
+    [`std::regex_iterator`](https://en.cppreference.com/w/cpp/regex/regex_iterator),
+    [`std::regex_token_iterator`](https://en.cppreference.com/w/cpp/regex/regex_token_iterator)
+  - [`std::formatter`](https://en.cppreference.com/w/cpp/utility/format/formatter)
+    customization 및 active MSVC STL에서 지원하는 range formatting 예제
+  - [`std::stringstream`](https://en.cppreference.com/w/cpp/io/basic_stringstream),
+    [`std::quoted`](https://en.cppreference.com/w/cpp/io/manip/quoted),
+    feature-test macro로 열리는 `spanstream` 같은 string-backed I/O 예제
+- [ ] Chrono
+  - Calendar/time-of-day 예제:
+    [`std::chrono::year_month_day`](https://en.cppreference.com/w/cpp/chrono/year_month_day),
+    [`std::chrono::weekday`](https://en.cppreference.com/w/cpp/chrono/weekday),
+    [`std::chrono::hh_mm_ss`](https://en.cppreference.com/w/cpp/chrono/hh_mm_ss)
+  - active MSVC STL에서 노출되는 경우 `file_clock`, `utc_clock`,
+    `tai_clock`, `gps_clock` clock conversion 예제
+- [ ] Filesystem edge coverage
+  - Path conversion 및 path relation:
+    [`std::filesystem::absolute`](https://en.cppreference.com/w/cpp/filesystem/absolute),
+    [`std::filesystem::relative`](https://en.cppreference.com/w/cpp/filesystem/relative),
+    [`std::filesystem::proximate`](https://en.cppreference.com/w/cpp/filesystem/relative),
+    [`std::filesystem::current_path`](https://en.cppreference.com/w/cpp/filesystem/current_path)
+  - 이미 coverage된 filesystem operation의 error-code overload,
+    metadata transition, recursive traversal option, negative-path 동작
+    보강
 
 ### 추가 조사가 필요한 후보
 

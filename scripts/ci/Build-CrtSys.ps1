@@ -12,6 +12,9 @@ param(
 
   [string] $WindowsSdkVersion = '10.0.22621.0',
 
+  [ValidateSet('', 'v142', 'v143')]
+  [string] $PlatformToolset = '',
+
   [switch] $NoBreakpoint
 )
 
@@ -33,18 +36,25 @@ $platformByArchitecture = @{
 }
 
 $platform = $platformByArchitecture[$Architecture]
-$generatorPlatform = $platform
-if ($Architecture -eq 'ARM') {
-  $generatorPlatform = "$platform,version=$WindowsSdkVersion"
+$generatorPlatform = "$platform,version=$WindowsSdkVersion"
+$buildDirSuffix = $Architecture
+if ($PlatformToolset) {
+  $buildDirSuffix = "${Architecture}_${PlatformToolset}"
 }
-$buildDir = Join-Path $sourceDir "build_$Architecture"
+
+$buildDir = Join-Path $sourceDir "build_$buildDirSuffix"
+
+$generatorToolset = 'host=x64'
+if ($PlatformToolset) {
+  $generatorToolset = "$PlatformToolset,host=x64"
+}
 
 $configureArgs = @(
   '-S', $sourceDir,
   '-B', $buildDir,
   '-G', 'Visual Studio 17 2022',
   '-A', $generatorPlatform,
-  '-T', 'host=x64',
+  '-T', $generatorToolset,
   "-DCRTSYS_WDK_VERSION=$WindowsSdkVersion",
   "-DLDK_WDK_VERSION=$WindowsSdkVersion",
   "-DCMAKE_SYSTEM_VERSION=$WindowsSdkVersion",
@@ -59,7 +69,11 @@ if ($Project -eq 'driver' -and $NoBreakpoint) {
   )
 }
 
-Write-Host "Configuring $Project $Architecture $Configuration with Windows SDK $WindowsSdkVersion"
+if ($PlatformToolset) {
+  Write-Host "Configuring $Project $Architecture $Configuration with Windows SDK $WindowsSdkVersion and $PlatformToolset"
+} else {
+  Write-Host "Configuring $Project $Architecture $Configuration with Windows SDK $WindowsSdkVersion"
+}
 & cmake @configureArgs
 if ($LASTEXITCODE -ne 0) {
   throw "CMake configure failed with exit code $LASTEXITCODE."

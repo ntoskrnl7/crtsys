@@ -1,4 +1,4 @@
-﻿#include <iostream>
+#include <iostream>
 
 //
 // c/math.c
@@ -63,16 +63,58 @@ void run();
 namespace condition_variable_test {
 void run();
 }
+namespace condition_variable_any_test {
+void run();
+}
 namespace mutex_test {
 void run();
 }
+namespace lock_guard_test {
+void run();
+}
 namespace shared_mutex_test {
+void run();
+}
+namespace shared_lock_test {
+void run();
+}
+namespace scoped_lock_test {
+void run();
+}
+namespace lock_test {
+void run();
+}
+namespace unique_lock_test {
+void run();
+}
+namespace recursive_mutex_test {
+void run();
+}
+namespace timed_mutex_test {
+void run();
+}
+namespace recursive_timed_mutex_test {
+void run();
+}
+namespace try_lock_test {
 void run();
 }
 namespace call_once_test {
 void run();
 }
 namespace future_test {
+void run();
+}
+namespace async_test {
+void run();
+}
+namespace future_status_test {
+void run();
+}
+namespace future_error_test {
+void run();
+}
+namespace shared_future_test {
 void run();
 }
 namespace promise_test {
@@ -103,6 +145,9 @@ void run();
 namespace atomic_test {
 void run();
 }
+namespace atomic_ref_test {
+void run();
+}
 namespace atomic_flag_test {
 void run();
 }
@@ -125,6 +170,15 @@ namespace binary_search_test {
 void run();
 }
 namespace bitset_test {
+void run();
+}
+namespace bit_cast_test {
+void run();
+}
+namespace endian_test {
+void run();
+}
+namespace byteswap_test {
 void run();
 }
 namespace concepts_test {
@@ -460,6 +514,21 @@ void c_std_tests() { math_test(); }
 #include <ntl/expand_stack>
 #endif
 
+namespace {
+template <typename Fn> void run_cppreference_test(const char *name, Fn fn) {
+  std::cout << "\n[crtsys] RUN " << name << '\n';
+  fn();
+  std::cout << "[crtsys] PASS " << name << '\n';
+}
+} // namespace
+
+#define CRTSYS_RUN_CPPREFERENCE_TEST(test_namespace)                           \
+  run_cppreference_test(#test_namespace, [] { test_namespace::run(); })
+
+#define CRTSYS_RUN_CPPREFERENCE_TEST_EXPANDED(test_namespace)                  \
+  run_cppreference_test(#test_namespace,                                      \
+                        [] { ntl::expand_stack(test_namespace::run); })
+
 //
 // C++ Standard tests.
 //
@@ -467,167 +536,185 @@ void cpp_std_tests() {
   //
   // C++ Language tests.
   //
-  constant_initialization_test::run();
-  zero_initialization_test::run();
+  CRTSYS_RUN_CPPREFERENCE_TEST(constant_initialization_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(zero_initialization_test);
 #if CRTSYS_ENABLE_UNSUPPORTED_THREAD_LOCAL_TEST
-  storage_duration_example_test::run();
+  CRTSYS_RUN_CPPREFERENCE_TEST(storage_duration_example_test);
 #endif
-  static_local_initialization_test::run();
-  static_local_regression_test::run();
+  CRTSYS_RUN_CPPREFERENCE_TEST(static_local_initialization_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(static_local_regression_test);
 #if defined(_AMD64_) && !defined(CRTSYS_USE_NTL_MAIN)
   // x64 needs more stack to run throw_test.
-  ntl::expand_stack(throw_test::run);
+  CRTSYS_RUN_CPPREFERENCE_TEST_EXPANDED(throw_test);
 #else
 #if !(defined(_X86_) && defined(UCXXRT))
   // UCXXRT x86 exception handling hangs while running this test.
-  throw_test::run();
+  CRTSYS_RUN_CPPREFERENCE_TEST(throw_test);
 #endif
 #endif
-  try_catch_test::run();
+  CRTSYS_RUN_CPPREFERENCE_TEST(try_catch_test);
 #if !(defined(_X86_) && defined(UCXXRT))
   // UCXXRT x86 exception handling can still exhaust the stack and bugcheck
   // while running this test, even after KeExpandKernelStackAndCallout expands
   // the stack to its maximum size.
-  function_try_block_test::run();
+  CRTSYS_RUN_CPPREFERENCE_TEST(function_try_block_test);
 #endif
-  typeid_test::run();
-  dynamic_cast_test::run();
+  CRTSYS_RUN_CPPREFERENCE_TEST(typeid_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(dynamic_cast_test);
   //
   // C++ STL tests.
   //
-  chrono_test::run();
-  chrono_current_zone_test::run();
-  chrono_time_zone_info_test::run();
-  condition_variable_test::run();
-  mutex_test::run();
-  shared_mutex_test::run();
-  call_once_test::run();
-  future_test::run();
-  promise_test::run();
-  packaged_task_test::run();
-  latch_test::run();
-  barrier_test::run();
-  counting_semaphore_test::run();
-  jthread_constructor_test::run();
-  stop_source_test::run();
-  stop_callback_test::run();
-  array_test::run();
-  vector_test::run();
-  deque_test::run();
-  list_test::run();
-  forward_list_insert_after_test::run();
-  span_test::run();
-  map_test::run();
-  set_test::run();
-  multiset_erase_test::run();
-  multimap_equal_range_test::run();
-  unordered_map_test::run();
-  unordered_set_test::run();
-  unordered_multiset_count_test::run();
-  unordered_multimap_equal_range_test::run();
-  queue_test::run();
+  CRTSYS_RUN_CPPREFERENCE_TEST(chrono_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(chrono_current_zone_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(chrono_time_zone_info_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(condition_variable_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(condition_variable_any_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(mutex_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(lock_guard_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(shared_mutex_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(shared_lock_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(scoped_lock_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(lock_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(unique_lock_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(recursive_mutex_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(timed_mutex_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(recursive_timed_mutex_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(try_lock_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(call_once_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(future_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(async_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(future_status_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(future_error_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(shared_future_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(promise_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(packaged_task_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(latch_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(barrier_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(counting_semaphore_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(jthread_constructor_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(stop_source_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(stop_callback_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(array_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(vector_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(deque_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(list_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(forward_list_insert_after_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(span_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(map_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(set_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(multiset_erase_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(multimap_equal_range_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(unordered_map_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(unordered_set_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(unordered_multiset_count_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(unordered_multimap_equal_range_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(queue_test);
 #if defined(_AMD64_) && !defined(CRTSYS_USE_NTL_MAIN)
   // The cppreference stack::push example embeds a 32 KiB interpreter tape.
-  ntl::expand_stack(stack_push_test::run);
+  CRTSYS_RUN_CPPREFERENCE_TEST_EXPANDED(stack_push_test);
 #else
-  stack_push_test::run();
+  CRTSYS_RUN_CPPREFERENCE_TEST(stack_push_test);
 #endif
-  stack_emplace_test::run();
-  priority_queue_test::run();
-  string_test::run();
-  string_view_test::run();
-  locale_test::run();
-  locale_constructor_test::run();
-  has_facet_test::run();
-  use_facet_test::run();
-  numpunct_test::run();
-  ctype_char_test::run();
-  messages_test::run();
-  money_get_test::run();
-  money_put_test::run();
-  time_get_test::run();
-  time_put_test::run();
-  filesystem_path_test::run();
-  filesystem_directory_iterator_test::run();
-  filesystem_copy_file_test::run();
-  filesystem_copy_test::run();
-  filesystem_status_test::run();
-  filesystem_file_size_test::run();
-  filesystem_is_empty_test::run();
-  filesystem_resize_file_test::run();
-  filesystem_permissions_test::run();
-  filesystem_hard_link_test::run();
-  filesystem_create_symlink_test::run();
-  filesystem_read_symlink_test::run();
-  filesystem_copy_symlink_test::run();
-  filesystem_directory_entry_test::run();
-  filesystem_space_test::run();
-  filesystem_rename_test::run();
-  filesystem_temp_directory_path_test::run();
-  filesystem_last_write_time_test::run();
-  filesystem_canonical_test::run();
-  sort_test::run();
-  find_test::run();
-  transform_test::run();
-  remove_test::run();
-  partition_test::run();
-  binary_search_test::run();
-  ranges_views_test::run();
-  ranges_sort_test::run();
-  ranges_cxx23_adaptors_test::run();
-  regex_test::run();
-  merge_test::run();
-  heap_test::run();
-  next_permutation_test::run();
-  accumulate_test::run();
-  iota_test::run();
-  partial_sum_test::run();
-  gcd_test::run();
-  midpoint_test::run();
-  lcm_test::run();
-  inner_product_test::run();
-  adjacent_difference_test::run();
-  inclusive_scan_test::run();
-  lerp_test::run();
-  bitset_test::run();
-  popcount_test::run();
-  to_chars_test::run();
-  from_chars_test::run();
-  iterator_distance_test::run();
-  iterator_advance_test::run();
-  iterator_next_test::run();
-  back_inserter_test::run();
-  atomic_test::run();
-  atomic_flag_test::run();
-  exception_ptr_test::run();
-  optional_test::run();
-  expected_test::run();
-  format_test::run();
-  print_test::run();
-  tuple_test::run();
-  pair_test::run();
-  variant_test::run();
-  any_test::run();
-  source_location_test::run();
-  reference_wrapper_test::run();
-  invoke_test::run();
-  exchange_test::run();
-  move_test::run();
-  is_same_test::run();
-  ratio_test::run();
-  concepts_test::run();
-  strong_ordering_test::run();
-  numbers_test::run();
-  complex_test::run();
-  valarray_slice_test::run();
-  random_device_test::run();
-  uniform_int_distribution_test::run();
-  function_test::run();
-  bind_test::run();
-  unique_ptr_test::run();
-  pmr_monotonic_buffer_resource_test::run();
-  shared_ptr_test::run();
-  weak_ptr_test::run();
+  CRTSYS_RUN_CPPREFERENCE_TEST(stack_emplace_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(priority_queue_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(string_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(string_view_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(locale_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(locale_constructor_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(has_facet_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(use_facet_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(numpunct_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(ctype_char_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(messages_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(money_get_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(money_put_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(time_get_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(time_put_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_path_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_directory_iterator_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_copy_file_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_copy_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_status_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_file_size_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_is_empty_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_resize_file_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_permissions_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_hard_link_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_create_symlink_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_read_symlink_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_copy_symlink_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_directory_entry_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_space_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_rename_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_temp_directory_path_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_last_write_time_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_canonical_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(sort_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(find_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(transform_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(remove_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(partition_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(binary_search_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(ranges_views_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(ranges_sort_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(ranges_cxx23_adaptors_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(regex_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(merge_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(heap_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(next_permutation_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(accumulate_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(iota_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(partial_sum_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(gcd_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(midpoint_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(lcm_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(inner_product_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(adjacent_difference_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(inclusive_scan_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(lerp_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(bitset_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(popcount_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(bit_cast_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(endian_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(byteswap_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(to_chars_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(from_chars_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(iterator_distance_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(iterator_advance_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(iterator_next_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(back_inserter_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(atomic_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(atomic_ref_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(atomic_flag_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(exception_ptr_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(optional_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(expected_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(format_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(print_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(tuple_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(pair_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(variant_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(any_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(source_location_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(reference_wrapper_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(invoke_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(exchange_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(move_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(is_same_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(ratio_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(concepts_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(strong_ordering_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(numbers_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(complex_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(valarray_slice_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(random_device_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(uniform_int_distribution_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(function_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(bind_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(unique_ptr_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(pmr_monotonic_buffer_resource_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(shared_ptr_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(weak_ptr_test);
 }
 
 //

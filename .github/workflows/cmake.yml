@@ -111,6 +111,40 @@ jobs:
             test/cmake/app/build_x64/Debug/crtsys_test_app.exe
             test/cmake/app/build_x64/Debug/crtsys_test_app.pdb
 
+  build-v142:
+    name: Build v142 driver ${{ matrix.arch }} Debug
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, ARM64]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show v142 toolchain
+        shell: pwsh
+        run: |
+          cmake --version
+
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installationPath = & $vswhere -latest -products * -property installationPath
+          Write-Host "Visual Studio installation: $installationPath"
+
+          Get-ChildItem (Join-Path $installationPath 'VC\Tools\MSVC') -Directory |
+            Select-Object -ExpandProperty Name
+
+      - name: Build v142 driver
+        shell: pwsh
+        run: |
+          ./scripts/ci/Build-CrtSys.ps1 `
+            -Project driver `
+            -Architecture '${{ matrix.arch }}' `
+            -Configuration Debug `
+            -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}' `
+            -PlatformToolset v142 `
+            -NoBreakpoint
+
   driver-load-test-preflight:
     name: Driver load test preflight
     if: github.event_name == 'workflow_dispatch' && inputs.run_driver_load_tests

@@ -54,6 +54,9 @@ endif()
 
 crtsys_add_driver(crtsys_test ${SOURCE_FILES})
 target_compile_options(crtsys_test PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/GR>")
+# Keep cppreference examples such as std::fopen intact while building the
+# driver test harness with /WX under older MSVC toolsets.
+target_compile_definitions(crtsys_test PRIVATE "_CRT_SECURE_NO_WARNINGS")
 
 if (NOT CRTSYS_TEST_BREAKPOINT)
     target_compile_definitions(crtsys_test PRIVATE "CRTSYS_TEST_NO_BREAKPOINT")

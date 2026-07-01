@@ -42,8 +42,8 @@ The driver tests still exercise these features from `PASSIVE_LEVEL`.
 | C++ RTTI | `typeid`, `dynamic_cast` | Audited caller context; otherwise `PASSIVE_LEVEL` | The consuming driver target must compile with RTTI enabled. Keep the target object and its type metadata resident. |
 | STL value-only helpers | Type traits, concepts, `std::array`, `std::span`, `std::string_view`, `std::bitset`, `std::pair`, `std::tuple`, `std::ratio`, `std::source_location`, `std::strong_ordering`, `std::numbers`, simple `std::move` / `std::exchange` / `std::invoke` / `std::reference_wrapper`, integer `std::to_chars` / `std::from_chars`, pure algorithms over resident fixed storage | Audited caller context; otherwise `PASSIVE_LEVEL` | These are the only STL areas that may be reasonable above `PASSIVE_LEVEL`, and only after the exact expression and its callbacks/comparators are audited. |
 | STL owning objects, containers, and callback-heavy utilities | `std::string`, containers, `std::any`, `std::function`, smart pointers, `std::optional`, `std::variant`, `std::complex`, `std::valarray`, `std::filesystem::path`, basic `std::filesystem` file operations, `std::format`, `std::print`, random distributions, `std::regex`, `nlohmann::json`, algorithms that allocate, throw, or call arbitrary user code | `PASSIVE_LEVEL` only | Construction, destruction, comparison, hashing, allocation, deallocation, formatting, file-system I/O, and user callbacks can pull in runtime paths. |
-| STL synchronization, threading, and async | `std::thread`, `std::mutex`, `std::shared_mutex`, `std::condition_variable`, `std::call_once`, `std::future`, `std::promise`, `std::packaged_task` | `PASSIVE_LEVEL` only | These paths may wait, create worker execution, allocate, or outlive unload if the caller is careless. |
-| STL atomic primitives | `std::atomic` / `std::atomic_flag` load, store, exchange, compare-exchange, and C++20 wait/notify over resident storage | `<= DISPATCH_LEVEL` for audited non-waiting operations; `PASSIVE_LEVEL` only for wait/notify | Treat wait/notify as blocking synchronization. Do not combine atomic code with runtime-backed callbacks or allocation at elevated IRQL. |
+| STL synchronization, threading, and async | `std::thread`, `std::mutex`, `std::shared_mutex`, `std::condition_variable`, `std::condition_variable_any`, `std::scoped_lock`, `std::lock`, `std::try_lock`, `std::call_once`, `std::future`, `std::shared_future`, `std::promise`, `std::packaged_task` | `PASSIVE_LEVEL` only | These paths may wait, create worker execution, allocate, or outlive unload if the caller is careless. |
+| STL atomic primitives | `std::atomic`, `std::atomic_ref`, and `std::atomic_flag` load, store, exchange, compare-exchange, and C++20 wait/notify over resident storage | `<= DISPATCH_LEVEL` for audited non-waiting operations; `PASSIVE_LEVEL` only for wait/notify | Treat wait/notify as blocking synchronization. Do not combine atomic code with runtime-backed callbacks or allocation at elevated IRQL. |
 | I/O streams | `std::cin`, `std::cout`, `std::cerr`, `std::clog`, wide stream variants | `PASSIVE_LEVEL` only | Diagnostic and test support. Avoid production hot paths and stack-sensitive paths. |
 | C math and floating-point helpers | Math functions and floating-point classification helpers | `PASSIVE_LEVEL` unless the exact helper is separately audited | Floating-point state and helper dependencies are driver-context sensitive. |
 | NTL entry, driver, device, and RPC server helpers | `ntl::main`, `ntl::driver`, `ntl::device`, `ntl::rpc::server` | `PASSIVE_LEVEL` only | Intended for initialization, teardown, device setup, and IOCTL/RPC control paths. |
@@ -105,6 +105,8 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/containers.cpp)
 - [x] [std::atomic](https://en.cppreference.com/w/cpp/atomic/atomic)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/atomic.cpp)
+- [x] [std::atomic_ref](https://en.cppreference.com/w/cpp/atomic/atomic_ref)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/atomic.cpp)
 - [x] [std::atomic::wait/notify](https://en.cppreference.com/w/cpp/atomic/atomic/wait)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/atomic.cpp)
 - [x] [std::atomic_flag](https://en.cppreference.com/w/cpp/atomic/atomic_flag)
@@ -128,6 +130,12 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [`<bit>` utilities](https://en.cppreference.com/w/cpp/utility/bit)
   [(cppreference popcount example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
+- [x] [std::bit_cast](https://en.cppreference.com/w/cpp/numeric/bit_cast)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
+- [x] [std::endian](https://en.cppreference.com/w/cpp/types/endian)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
+- [x] [std::byteswap](https://en.cppreference.com/w/cpp/numeric/byteswap)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::concepts](https://en.cppreference.com/w/cpp/concepts)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::complex](https://en.cppreference.com/w/cpp/numeric/complex)
@@ -330,14 +338,42 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/numeric.cpp)
 - [x] [std::condition_variable](https://en.cppreference.com/w/cpp/thread/condition_variable)
   [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp#L35)
+- [x] [std::condition_variable_any](https://en.cppreference.com/w/cpp/thread/condition_variable_any)
+  [(cppreference wait example)](../test/cmake/driver/src/cpp/stl/thread.cpp)
 - [x] [std::mutex](https://en.cppreference.com/w/cpp/thread/mutex)
   [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp#L81)
+- [x] [std::lock_guard](https://en.cppreference.com/w/cpp/thread/lock_guard)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/thread.cpp)
 - [x] [std::shared_mutex](https://en.cppreference.com/w/cpp/thread/shared_mutex)
   [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp#L129)
+- [x] [std::shared_lock](https://en.cppreference.com/w/cpp/thread/shared_lock)
+  [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp)
+- [x] [std::timed_mutex](https://en.cppreference.com/w/cpp/thread/timed_mutex)
+  [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp)
+- [x] [std::recursive_mutex](https://en.cppreference.com/w/cpp/thread/recursive_mutex)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/thread.cpp)
+- [x] [std::recursive_timed_mutex](https://en.cppreference.com/w/cpp/thread/recursive_timed_mutex)
+  [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp)
+- [x] [std::scoped_lock](https://en.cppreference.com/w/cpp/thread/scoped_lock)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/thread.cpp)
+- [x] [std::lock](https://en.cppreference.com/w/cpp/thread/lock)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/thread.cpp)
+- [x] [std::unique_lock](https://en.cppreference.com/w/cpp/thread/unique_lock)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/thread.cpp)
+- [x] [std::try_lock](https://en.cppreference.com/w/cpp/thread/try_lock)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/thread.cpp)
 - [x] [std::call_once](https://en.cppreference.com/w/cpp/thread/call_once)
   [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp#L180)
 - [x] [std::future](https://en.cppreference.com/w/cpp/thread/future)
   [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp#L208)
+- [x] [std::async](https://en.cppreference.com/w/cpp/thread/async)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/thread.cpp)
+- [x] [std::future_status](https://en.cppreference.com/w/cpp/thread/future_status)
+  [(cppreference wait_until example)](../test/cmake/driver/src/cpp/stl/thread.cpp)
+- [x] [std::future_error](https://en.cppreference.com/w/cpp/thread/future_error)
+  [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp)
+- [x] [std::shared_future](https://en.cppreference.com/w/cpp/thread/shared_future)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/thread.cpp)
 - [x] [std::promise](https://en.cppreference.com/w/cpp/thread/promise)
   [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp#L254)
 - [x] [std::packaged_task](https://en.cppreference.com/w/cpp/thread/packaged_task)
@@ -375,9 +411,87 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
 ## Test Backlog
 
 These unchecked items are candidates for future cppreference Example ports or
-runtime support work. Prefer examples that can run at `PASSIVE_LEVEL` without
-hosted file-system, locale, console input, or other driver-test-hostile runtime
+runtime support work. They are not known failures unless explicitly described
+as limitations. Prefer examples that can run at `PASSIVE_LEVEL` without hosted
+file-system, locale, console input, or other driver-test-hostile runtime
 dependencies.
+
+### Future cppreference Coverage Candidates
+
+- [ ] Threading and synchronization
+  - [`std::shared_timed_mutex`](https://en.cppreference.com/w/cpp/thread/shared_timed_mutex)
+    and timed shared-lock edge cases
+  - Additional `std::future` / `std::shared_future` error-path and timeout
+    edge cases beyond the default examples
+- [ ] Atomic helpers
+  - [`std::atomic_thread_fence`](https://en.cppreference.com/w/cpp/atomic/atomic_thread_fence),
+    [`std::atomic_signal_fence`](https://en.cppreference.com/w/cpp/atomic/atomic_signal_fence)
+  - Free atomic operations such as
+    [`std::atomic_fetch_add`](https://en.cppreference.com/w/cpp/atomic/atomic_fetch_add)
+    and
+    [`std::atomic_compare_exchange`](https://en.cppreference.com/w/cpp/atomic/atomic_compare_exchange)
+- [ ] `<bit>` standalone examples
+  - [`std::rotl`](https://en.cppreference.com/w/cpp/numeric/rotl),
+    [`std::rotr`](https://en.cppreference.com/w/cpp/numeric/rotr),
+    [`std::countl_zero`](https://en.cppreference.com/w/cpp/numeric/countl_zero),
+    [`std::countr_zero`](https://en.cppreference.com/w/cpp/numeric/countr_zero)
+  - [`std::has_single_bit`](https://en.cppreference.com/w/cpp/numeric/has_single_bit),
+    [`std::bit_ceil`](https://en.cppreference.com/w/cpp/numeric/bit_ceil),
+    [`std::bit_floor`](https://en.cppreference.com/w/cpp/numeric/bit_floor),
+    [`std::bit_width`](https://en.cppreference.com/w/cpp/numeric/bit_width)
+- [ ] Additional algorithms and ranges
+  - Binary-search family:
+    [`std::lower_bound`](https://en.cppreference.com/w/cpp/algorithm/lower_bound),
+    [`std::upper_bound`](https://en.cppreference.com/w/cpp/algorithm/upper_bound),
+    [`std::equal_range`](https://en.cppreference.com/w/cpp/algorithm/equal_range)
+  - Sorting/selection:
+    [`std::stable_sort`](https://en.cppreference.com/w/cpp/algorithm/stable_sort),
+    [`std::nth_element`](https://en.cppreference.com/w/cpp/algorithm/nth_element),
+    [`std::partial_sort`](https://en.cppreference.com/w/cpp/algorithm/partial_sort)
+  - Range adaptors not yet split into explicit driver examples, such as
+    `take`, `drop`, `reverse`, `join`, `split`, `keys`, `values`,
+    `elements`, and other feature-test-gated C++23 views.
+- [ ] Memory and PMR
+  - [`std::allocator_traits`](https://en.cppreference.com/w/cpp/memory/allocator_traits),
+    [`std::polymorphic_allocator`](https://en.cppreference.com/w/cpp/memory/polymorphic_allocator)
+  - [`std::pmr::unsynchronized_pool_resource`](https://en.cppreference.com/w/cpp/memory/unsynchronized_pool_resource),
+    [`std::pmr::synchronized_pool_resource`](https://en.cppreference.com/w/cpp/memory/synchronized_pool_resource),
+    [`std::pmr::null_memory_resource`](https://en.cppreference.com/w/cpp/memory/null_memory_resource),
+    [`std::pmr::new_delete_resource`](https://en.cppreference.com/w/cpp/memory/new_delete_resource)
+- [ ] Utility, functional, and type support
+  - [`std::visit`](https://en.cppreference.com/w/cpp/utility/variant/visit),
+    [`std::type_index`](https://en.cppreference.com/w/cpp/types/type_index),
+    [`std::integer_sequence`](https://en.cppreference.com/w/cpp/utility/integer_sequence)
+  - [`std::not_fn`](https://en.cppreference.com/w/cpp/utility/functional/not_fn),
+    [`std::mem_fn`](https://en.cppreference.com/w/cpp/utility/functional/mem_fn),
+    [`std::bind_front`](https://en.cppreference.com/w/cpp/utility/functional/bind_front)
+- [ ] Regex, formatting, and streams
+  - [`std::regex_match`](https://en.cppreference.com/w/cpp/regex/regex_match),
+    [`std::regex_iterator`](https://en.cppreference.com/w/cpp/regex/regex_iterator),
+    [`std::regex_token_iterator`](https://en.cppreference.com/w/cpp/regex/regex_token_iterator)
+  - [`std::formatter`](https://en.cppreference.com/w/cpp/utility/format/formatter)
+    customization and range-formatting examples where supported by the active
+    MSVC STL.
+  - String-backed I/O examples such as
+    [`std::stringstream`](https://en.cppreference.com/w/cpp/io/basic_stringstream),
+    [`std::quoted`](https://en.cppreference.com/w/cpp/io/manip/quoted),
+    and `spanstream` where feature-test macros allow it.
+- [ ] Chrono
+  - Calendar and time-of-day examples:
+    [`std::chrono::year_month_day`](https://en.cppreference.com/w/cpp/chrono/year_month_day),
+    [`std::chrono::weekday`](https://en.cppreference.com/w/cpp/chrono/weekday),
+    [`std::chrono::hh_mm_ss`](https://en.cppreference.com/w/cpp/chrono/hh_mm_ss)
+  - Clock conversion examples for `file_clock`, `utc_clock`, `tai_clock`, and
+    `gps_clock` where the active MSVC STL exposes them.
+- [ ] Filesystem edge coverage
+  - Path conversion and path relations:
+    [`std::filesystem::absolute`](https://en.cppreference.com/w/cpp/filesystem/absolute),
+    [`std::filesystem::relative`](https://en.cppreference.com/w/cpp/filesystem/relative),
+    [`std::filesystem::proximate`](https://en.cppreference.com/w/cpp/filesystem/relative),
+    [`std::filesystem::current_path`](https://en.cppreference.com/w/cpp/filesystem/current_path)
+  - More error-code overloads, metadata transitions, recursive traversal
+    options, and negative-path behavior for already-covered filesystem
+    operations.
 
 ### Needs Investigation
 
