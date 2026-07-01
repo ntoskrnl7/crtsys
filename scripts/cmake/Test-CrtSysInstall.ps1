@@ -32,6 +32,7 @@ $platformByArchitecture = @{
   ARM64 = 'ARM64'
 }
 $platform = $platformByArchitecture[$Architecture]
+$generatorPlatform = "$platform,version=$WindowsSdkVersion"
 
 $buildDirectory = Join-Path $WorkDirectory 'build'
 $installDirectory = Join-Path $WorkDirectory 'prefix'
@@ -57,7 +58,7 @@ function Invoke-CrtSysConsumerBuild {
     '-S', $consumerSourceDirectory,
     '-B', $BuildDirectory,
     '-G', 'Visual Studio 17 2022',
-    '-A', $platform,
+    '-A', $generatorPlatform,
     '-T', 'host=x64',
     "-DCRTSYS_PACKAGE_ROOT:PATH=$cmakePrefix",
     "-DCRTSYS_WDK_VERSION:STRING=$WindowsSdkVersion",
@@ -90,7 +91,7 @@ $configureArgs = @(
   '-S', $repoRoot,
   '-B', $buildDirectory,
   '-G', 'Visual Studio 17 2022',
-  '-A', $platform,
+  '-A', $generatorPlatform,
   '-T', 'host=x64',
   "-DCMAKE_INSTALL_PREFIX=$installDirectory",
   "-DCRTSYS_WDK_VERSION=$WindowsSdkVersion",

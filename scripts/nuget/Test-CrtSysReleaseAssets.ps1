@@ -48,6 +48,7 @@ $platformByArchitecture = @{
   ARM64 = 'ARM64'
 }
 $platform = $platformByArchitecture[$Architecture]
+$generatorPlatform = "$platform,version=$WindowsSdkVersion"
 
 Remove-Item -Recurse -Force -Path $WorkDirectory -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $WorkDirectory | Out-Null
@@ -131,7 +132,7 @@ $configureArgs = @(
   '-S', $consumerDirectory,
   '-B', $buildDirectory,
   '-G', 'Visual Studio 17 2022',
-  '-A', $platform,
+  '-A', $generatorPlatform,
   '-T', 'host=x64',
   "-DCRTSYS_WDK_VERSION=$WindowsSdkVersion",
   "-DLDK_WDK_VERSION=$WindowsSdkVersion",

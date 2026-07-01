@@ -36,10 +36,7 @@ $platformByArchitecture = @{
 }
 
 $platform = $platformByArchitecture[$Architecture]
-$generatorPlatform = $platform
-if ($Architecture -eq 'ARM') {
-  $generatorPlatform = "$platform,version=$WindowsSdkVersion"
-}
+$generatorPlatform = "$platform,version=$WindowsSdkVersion"
 $buildDirSuffix = $Architecture
 if ($PlatformToolset) {
   $buildDirSuffix = "${Architecture}_${PlatformToolset}"

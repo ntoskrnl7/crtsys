@@ -1,3 +1,5 @@
+#include <stdlib.h>
+
 #pragma function(_byteswap_ushort, _byteswap_ulong, _byteswap_uint64)
 
 unsigned short __cdecl _byteswap_ushort(unsigned short value) {

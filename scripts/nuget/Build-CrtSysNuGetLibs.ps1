@@ -27,6 +27,7 @@ $platformByArchitecture = @{
 foreach ($arch in $Architecture) {
   foreach ($config in $Configuration) {
     $platform = $platformByArchitecture[$arch]
+    $generatorPlatform = "$platform,version=$WindowsSdkVersion"
     $useLibcntpr = 'ON'
     if ($arch -eq 'x86') {
       # GitHub-hosted windows-2022 runners do not provide x86 WDK kernel libs.
@@ -43,7 +44,7 @@ foreach ($arch in $Architecture) {
       '-S', $repoRoot,
       '-B', $buildDir,
       '-G', 'Visual Studio 17 2022',
-      '-A', $platform,
+      '-A', $generatorPlatform,
       '-T', 'host=x64',
       "-DCRTSYS_WDK_VERSION=$WindowsSdkVersion",
       "-DLDK_WDK_VERSION=$WindowsSdkVersion",
