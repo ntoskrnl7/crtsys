@@ -43,7 +43,8 @@ void run() {
 //
 namespace atomic_ref_test {
 void run() {
-#if defined(__cpp_lib_atomic_ref) && __cpp_lib_atomic_ref >= 201806L
+#if defined(__cpp_lib_atomic_ref) && __cpp_lib_atomic_ref >= 201806L &&        \
+    (!defined(_MSC_VER) || _MSC_VER >= 1930)
   using Data = std::vector<char>;
 
   auto inc_atomically = [](Data &data) {
