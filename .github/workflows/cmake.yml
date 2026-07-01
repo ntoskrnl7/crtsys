@@ -117,10 +117,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # v142 is kept as an old-toolset smoke test. The windows-2022 hosted
-        # image mixes v142 ARM64 tasks with v170 marmasm targets, so ARM64 is
-        # covered by the main toolset matrix instead.
-        arch: [x64]
+        arch: [x64, ARM64]
 
     steps:
       - uses: actions/checkout@v4

@@ -173,8 +173,12 @@ function(crtsys_apply_driver_settings _target _root)
 
     set_property(TARGET ${_target} PROPERTY INCLUDE_DIRECTORIES "${_root}/include;${_root}/include/.internal/msvc/$(VCToolsVersion);${_root}/include/.internal/msvc/${MSVC_TOOLSET_VERSION};${_root}/include/.internal/msvc/$(VCToolsVersion)/stl;${_root}/include/.internal/msvc/${MSVC_TOOLSET_VERSION}/stl;$(VC_IncludePath);$(WindowsSDK_IncludePath);${INC_DIR_TMP}")
 
-    if(EXISTS "${_root}/include/.internal/winsdk/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/wdk/${WDK_VERSION}/forced.h")
-      target_compile_options(${_target} PRIVATE "$<$<COMPILE_LANGUAGE:C,CXX>:/FI${_root}/include/.internal/winsdk/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/wdk/${WDK_VERSION}/forced.h>")
+    set(_crtsys_winsdk_forced_include "${_root}/include/.internal/winsdk/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/wdk/${WDK_VERSION}/forced.h")
+    if(NOT EXISTS "${_crtsys_winsdk_forced_include}")
+      set(_crtsys_winsdk_forced_include "${_root}/include/.internal/winsdk/wdk/${WDK_VERSION}/forced.h")
+    endif()
+    if(EXISTS "${_crtsys_winsdk_forced_include}")
+      target_compile_options(${_target} PRIVATE "$<$<COMPILE_LANGUAGE:C,CXX>:/FI${_crtsys_winsdk_forced_include}>")
     endif()
 
     target_compile_options(${_target} PRIVATE "$<$<COMPILE_LANGUAGE:C,CXX>:/FI${_root}/include/.internal/adjust_link_order>")
