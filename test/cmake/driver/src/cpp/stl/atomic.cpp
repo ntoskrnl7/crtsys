@@ -43,6 +43,7 @@ void run() {
 //
 namespace atomic_ref_test {
 void run() {
+#if defined(__cpp_lib_atomic_ref) && __cpp_lib_atomic_ref >= 201806L
   using Data = std::vector<char>;
 
   auto inc_atomically = [](Data &data) {
@@ -78,6 +79,9 @@ void run() {
     throw std::runtime_error("unexpected atomic_ref sum");
   }
   test_run(inc_directly);
+#else
+  std::cout << "std::atomic_ref is not available in this STL\n";
+#endif
 }
 } // namespace atomic_ref_test
 
