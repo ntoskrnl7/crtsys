@@ -948,6 +948,82 @@ void run() {
 } // namespace popcount_test
 
 //
+// https://en.cppreference.com/w/cpp/numeric/bit_cast#Example
+//
+namespace bit_cast_test {
+void run() {
+  constexpr double f64v = 19880124.0;
+  constexpr auto u64v = std::bit_cast<std::uint64_t>(f64v);
+  static_assert(std::bit_cast<double>(u64v) == f64v); // round-trip
+
+  constexpr std::uint64_t u64v2 = 0x3fe9000000000000ull;
+  constexpr auto f64v2 = std::bit_cast<double>(u64v2);
+  static_assert(std::bit_cast<std::uint64_t>(f64v2) == u64v2); // round-trip
+
+  std::cout << "std::bit_cast<std::uint64_t>(" << std::fixed << f64v
+            << ") == 0x" << std::hex << u64v << '\n'
+            << "std::bit_cast<double>(0x" << std::hex << u64v2 << ") == "
+            << std::fixed << f64v2 << '\n';
+  std::cout << std::dec << std::defaultfloat;
+}
+} // namespace bit_cast_test
+
+//
+// https://en.cppreference.com/w/cpp/types/endian#Example
+//
+namespace endian_test {
+void run() {
+  if constexpr (std::endian::native == std::endian::big) {
+    std::cout << "big-endian\n";
+  } else if constexpr (std::endian::native == std::endian::little) {
+    std::cout << "little-endian\n";
+  } else {
+    std::cout << "mixed-endian\n";
+  }
+}
+} // namespace endian_test
+
+//
+// https://en.cppreference.com/w/cpp/numeric/byteswap#Example
+//
+namespace byteswap_test {
+template <std::integral T> void dump(T v, char term = '\n') {
+  std::cout << std::hex << std::uppercase << std::setfill('0')
+            << std::setw(sizeof(T) * 2) << v << " : ";
+  for (std::size_t i{}; i != sizeof(T); ++i, v >>= 8) {
+    std::cout << std::setw(2) << static_cast<unsigned>(T(0xFF) & v) << ' ';
+  }
+  std::cout << std::dec << term;
+}
+
+void run() {
+#if defined(__cpp_lib_byteswap) && __cpp_lib_byteswap >= 202110L
+  static_assert(std::byteswap('a') == 'a');
+  std::cout << "byteswap for U16:\n";
+  constexpr auto x = std::uint16_t(0xCAFE);
+  dump(x);
+  dump(std::byteswap(x));
+  static_assert(std::byteswap(x) == std::uint16_t(0xFECA));
+
+  std::cout << "\n byteswap for U32:\n";
+  constexpr auto y = std::uint32_t(0xDEADBEEFu);
+  dump(y);
+  dump(std::byteswap(y));
+  static_assert(std::byteswap(y) == std::uint32_t(0xEFBEADDEu));
+
+  std::cout << "\n byteswap for U64:\n";
+  constexpr auto z = std::uint64_t{0x0123456789ABCDEFull};
+  dump(z);
+  dump(std::byteswap(z));
+  static_assert(std::byteswap(z) == std::uint64_t{0xEFCDAB8967452301ull});
+#else
+  std::cout << "std::byteswap is not available in this STL\n";
+#endif
+  std::cout << std::nouppercase << std::setfill(' ');
+}
+} // namespace byteswap_test
+
+//
 // https://en.cppreference.com/w/cpp/utility/to_chars#Example
 //
 namespace to_chars_test {

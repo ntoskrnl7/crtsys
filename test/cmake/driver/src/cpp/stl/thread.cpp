@@ -1,6 +1,7 @@
 //
 // https://en.cppreference.com/w/cpp/thread/condition_variable#Example
 //
+#include <cassert>
 #include <condition_variable>
 #include <iostream>
 #include <mutex>
@@ -58,6 +59,68 @@ void run() {
 } // namespace condition_variable_test
 
 //
+// https://en.cppreference.com/w/cpp/thread/condition_variable_any/wait#Example
+//
+#include <chrono>
+#include <condition_variable>
+#include <iostream>
+#include <mutex>
+#include <thread>
+
+namespace condition_variable_any_test {
+std::condition_variable_any cv;
+std::mutex cv_m; // This mutex is used for three purposes:
+                 // 1) to synchronize accesses to i
+                 // 2) to synchronize accesses to std::cerr
+                 // 3) for the condition variable cv
+int i = 0;
+int finished = 0;
+
+void waits() {
+  std::unique_lock<std::mutex> lk(cv_m);
+  std::cerr << "Waiting... \n";
+  cv.wait(lk, [] { return i == 1; });
+  ++finished;
+  std::cerr << "...finished waiting. i == 1\n";
+}
+
+void signals() {
+  // cppreference sleeps for seconds; the driver harness keeps the same
+  // notify-before-ready and notify-after-ready sequence with shorter waits.
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  {
+    std::lock_guard<std::mutex> lk(cv_m);
+    std::cerr << "Notifying...\n";
+  }
+  cv.notify_all();
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  {
+    std::lock_guard<std::mutex> lk(cv_m);
+    i = 1;
+    std::cerr << "Notifying again...\n";
+  }
+  cv.notify_all();
+}
+
+void run() {
+  {
+    std::lock_guard<std::mutex> lk(cv_m);
+    i = 0;
+    finished = 0;
+  }
+
+  std::thread t1(waits), t2(waits), t3(waits), t4(signals);
+  t1.join();
+  t2.join();
+  t3.join();
+  t4.join();
+
+  assert(finished == 3);
+}
+} // namespace condition_variable_any_test
+
+//
 // https://en.cppreference.com/w/cpp/thread/mutex#Example
 //
 #include <chrono>
@@ -92,6 +155,60 @@ void run() {
   }
 }
 } // namespace mutex_test
+
+//
+// https://en.cppreference.com/w/cpp/thread/lock_guard#Example
+//
+#include <iostream>
+#include <mutex>
+#include <string_view>
+#include <syncstream>
+#include <thread>
+
+namespace lock_guard_test {
+volatile int g_i = 0;
+std::mutex g_i_mutex; // protects g_i
+
+void safe_increment(int iterations) {
+  const std::lock_guard<std::mutex> lock(g_i_mutex);
+  while (iterations-- > 0) {
+    g_i = g_i + 1;
+  }
+  std::cout << "thread #" << std::this_thread::get_id() << ", g_i: " << g_i
+            << '\n';
+
+  // g_i_mutex is automatically released when lock goes out of scope
+}
+
+void unsafe_increment(int iterations) {
+  while (iterations-- > 0) {
+    g_i = g_i + 1;
+  }
+  std::osyncstream(std::cout)
+      << "thread #" << std::this_thread::get_id() << ", g_i: " << g_i
+      << '\n';
+}
+
+void run() {
+  constexpr int iterations = 10'000;
+
+  auto test = [=](std::string_view fun_name, auto fun) {
+    g_i = 0;
+    std::cout << fun_name << ":\n before, g_i: " << g_i << '\n';
+    {
+      // cppreference uses 1'000'000 iterations; keep the same safe/unsafe
+      // increment shape with fewer iterations for the driver harness.
+      std::jthread t1(fun, iterations);
+      std::jthread t2(fun, iterations);
+    }
+    std::cout << "after, g_i: " << g_i << "\n\n";
+  };
+
+  test("safe_increment", safe_increment);
+  assert(g_i == iterations * 2);
+  test("unsafe_increment", unsafe_increment);
+}
+} // namespace lock_guard_test
 
 //
 // https://en.cppreference.com/w/cpp/thread/shared_mutex#Example
@@ -149,6 +266,429 @@ void run() {
   thread2.join();
 }
 } // namespace shared_mutex_test
+
+//
+// https://en.cppreference.com/w/cpp/thread/shared_lock
+//
+namespace shared_lock_test {
+void run() {
+  std::shared_mutex mutex;
+  int value = 0;
+
+  {
+    std::unique_lock write_lock(mutex);
+    value = 42;
+  }
+
+  std::shared_lock read_lock(mutex);
+  assert(read_lock.owns_lock());
+  assert(value == 42);
+  read_lock.unlock();
+  assert(!read_lock.owns_lock());
+  read_lock.lock();
+  assert(read_lock.owns_lock());
+}
+} // namespace shared_lock_test
+
+//
+// https://en.cppreference.com/w/cpp/thread/scoped_lock#Example
+//
+#include <chrono>
+#include <functional>
+#include <iostream>
+#include <mutex>
+#include <string>
+#include <syncstream>
+#include <thread>
+#include <vector>
+
+namespace scoped_lock_test {
+struct Employee {
+  std::vector<std::string> lunch_partners;
+  std::string id;
+  std::mutex m;
+  Employee(std::string id) : id(id) {}
+  std::string partners() const {
+    std::string ret = "Employee " + id + " has lunch partners: ";
+    for (int count{}; const auto &partner : lunch_partners) {
+      ret += (count++ ? ", " : "") + partner;
+    }
+    return ret;
+  }
+};
+
+void send_mail(Employee &, Employee &) {
+  // cppreference uses 1s to simulate messaging; keep the synchronization shape
+  // but avoid making the driver test spend seconds in this example.
+  std::this_thread::sleep_for(std::chrono::milliseconds(1));
+}
+
+void assign_lunch_partner(Employee &e1, Employee &e2) {
+  std::osyncstream synced_out(std::cout);
+  synced_out << e1.id << " and " << e2.id << " are waiting for locks"
+             << std::endl;
+  {
+    // Use std::scoped_lock to acquire two locks without worrying about
+    // other calls to assign_lunch_partner deadlocking us
+    // and it also provides a convenient RAII-style mechanism
+
+    std::scoped_lock lock(e1.m, e2.m);
+    // Equivalent code 1 (using std::lock and std::lock_guard)
+    // std::lock(e1.m, e2.m);
+    // std::lock_guard<std::mutex> lk1(e1.m, std::adopt_lock);
+    // std::lock_guard<std::mutex> lk2(e2.m, std::adopt_lock);
+    // Equivalent code 2 (if unique_locks are needed, e.g. for condition
+    // variables)
+    // std::unique_lock<std::mutex> lk1(e1.m, std::defer_lock);
+    // std::unique_lock<std::mutex> lk2(e2.m, std::defer_lock);
+    // std::lock(lk1, lk2);
+    synced_out << e1.id << " and " << e2.id << " got locks" << std::endl;
+    e1.lunch_partners.push_back(e2.id);
+    e2.lunch_partners.push_back(e1.id);
+  }
+  send_mail(e1, e2);
+  send_mail(e2, e1);
+}
+
+void run() {
+  Employee alice("Alice"), bob("Bob"), christina("Christina"), dave("Dave");
+  // Assign in parallel threads because mailing users about lunch assignments
+  // takes a long time
+  std::vector<std::thread> threads;
+  threads.emplace_back(assign_lunch_partner, std::ref(alice), std::ref(bob));
+  threads.emplace_back(assign_lunch_partner, std::ref(christina),
+                       std::ref(bob));
+  threads.emplace_back(assign_lunch_partner, std::ref(christina),
+                       std::ref(alice));
+  threads.emplace_back(assign_lunch_partner, std::ref(dave), std::ref(bob));
+  for (auto &thread : threads) {
+    thread.join();
+  }
+  std::osyncstream(std::cout) << alice.partners() << '\n'
+                              << bob.partners() << '\n'
+                              << christina.partners() << '\n'
+                              << dave.partners() << '\n';
+
+  assert(alice.lunch_partners.size() == 2);
+  assert(bob.lunch_partners.size() == 3);
+  assert(christina.lunch_partners.size() == 2);
+  assert(dave.lunch_partners.size() == 1);
+}
+} // namespace scoped_lock_test
+
+//
+// https://en.cppreference.com/w/cpp/thread/lock#Example
+//
+#include <chrono>
+#include <functional>
+#include <iostream>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+namespace lock_test {
+struct Employee {
+  Employee(std::string id) : id(id) {}
+  std::string id;
+  std::vector<std::string> lunch_partners;
+  std::mutex m;
+  std::string output() const {
+    std::string ret = "Employee " + id + " has lunch partners: ";
+    for (auto n{lunch_partners.size()}; const auto &partner : lunch_partners) {
+      ret += partner + (--n ? ", " : "");
+    }
+    return ret;
+  }
+};
+
+void send_mail(Employee &, Employee &) {
+  // cppreference uses 696ms to simulate messaging; keep the lock pattern but
+  // shorten the delay for the driver harness.
+  std::this_thread::sleep_for(std::chrono::milliseconds(1));
+}
+
+void assign_lunch_partner(Employee &e1, Employee &e2) {
+  static std::mutex io_mutex;
+  {
+    std::lock_guard<std::mutex> lk(io_mutex);
+    std::cout << e1.id << " and " << e2.id << " are waiting for locks"
+              << std::endl;
+  }
+  // Use std::lock to acquire two locks without worrying about
+  // other calls to assign_lunch_partner deadlocking us
+  {
+    std::lock(e1.m, e2.m);
+    std::lock_guard<std::mutex> lk1(e1.m, std::adopt_lock);
+    std::lock_guard<std::mutex> lk2(e2.m, std::adopt_lock);
+    // Equivalent code (if unique_locks are needed, e.g. for condition
+    // variables)
+    //  std::unique_lock<std::mutex> lk1(e1.m, std::defer_lock);
+    //  std::unique_lock<std::mutex> lk2(e2.m, std::defer_lock);
+    //  std::lock(lk1, lk2);
+    // Superior solution available in C++17
+    //  std::scoped_lock lk(e1.m, e2.m);
+    {
+      std::lock_guard<std::mutex> lk(io_mutex);
+      std::cout << e1.id << " and " << e2.id << " got locks" << std::endl;
+    }
+    e1.lunch_partners.push_back(e2.id);
+    e2.lunch_partners.push_back(e1.id);
+  }
+  send_mail(e1, e2);
+  send_mail(e2, e1);
+}
+
+void run() {
+  Employee alice("Alice"), bob("Bob"), christina("Christina"), dave("Dave");
+  // Assign in parallel threads because mailing users about lunch assignments
+  // takes a long time
+  std::vector<std::thread> threads;
+  threads.emplace_back(assign_lunch_partner, std::ref(alice), std::ref(bob));
+  threads.emplace_back(assign_lunch_partner, std::ref(christina),
+                       std::ref(bob));
+  threads.emplace_back(assign_lunch_partner, std::ref(christina),
+                       std::ref(alice));
+  threads.emplace_back(assign_lunch_partner, std::ref(dave), std::ref(bob));
+  for (auto &thread : threads) {
+    thread.join();
+  }
+
+  std::cout << alice.output() << '\n'
+            << bob.output() << '\n'
+            << christina.output() << '\n'
+            << dave.output() << '\n';
+
+  assert(alice.lunch_partners.size() == 2);
+  assert(bob.lunch_partners.size() == 3);
+  assert(christina.lunch_partners.size() == 2);
+  assert(dave.lunch_partners.size() == 1);
+}
+} // namespace lock_test
+
+//
+// https://en.cppreference.com/w/cpp/thread/unique_lock#Example
+//
+#include <functional>
+#include <iostream>
+#include <mutex>
+#include <thread>
+
+namespace unique_lock_test {
+struct Box {
+  explicit Box(int num) : num_things{num} {}
+
+  int num_things;
+  std::mutex m;
+};
+
+void transfer(Box &from, Box &to, int num) {
+  // don't actually take the locks yet
+  std::unique_lock lock1{from.m, std::defer_lock};
+  std::unique_lock lock2{to.m, std::defer_lock};
+  // lock both unique_locks without deadlock
+  std::lock(lock1, lock2);
+
+  from.num_things -= num;
+  to.num_things += num;
+
+  // "from.m" and "to.m" mutexes unlocked in unique_lock dtors
+}
+
+void run() {
+  Box acc1{100};
+  Box acc2{50};
+
+  std::thread t1{transfer, std::ref(acc1), std::ref(acc2), 10};
+  std::thread t2{transfer, std::ref(acc2), std::ref(acc1), 5};
+
+  t1.join();
+  t2.join();
+  std::cout << "acc1: " << acc1.num_things << "\n"
+            << "acc2: " << acc2.num_things << '\n';
+
+  assert(acc1.num_things == 95);
+  assert(acc2.num_things == 55);
+}
+} // namespace unique_lock_test
+
+//
+// https://en.cppreference.com/w/cpp/thread/recursive_mutex#Example
+//
+#include <iostream>
+#include <mutex>
+#include <string>
+#include <thread>
+
+namespace recursive_mutex_test {
+class X {
+  std::recursive_mutex m;
+  std::string shared;
+  int fun1_count = 0;
+  int fun2_count = 0;
+
+public:
+  void fun1() {
+    std::lock_guard<std::recursive_mutex> lk(m);
+    shared = "fun1";
+    ++fun1_count;
+    std::cout << "in fun1, shared variable is now " << shared << '\n';
+  }
+
+  void fun2() {
+    std::lock_guard<std::recursive_mutex> lk(m);
+    shared = "fun2";
+    ++fun2_count;
+    std::cout << "in fun2, shared variable is now " << shared << '\n';
+    fun1(); // recursive lock becomes useful here
+    std::cout << "back in fun2, shared variable is " << shared << '\n';
+  }
+
+  void verify() {
+    std::lock_guard<std::recursive_mutex> lk(m);
+    assert(fun1_count == 2);
+    assert(fun2_count == 1);
+  }
+};
+
+void run() {
+  X x;
+  std::thread t1(&X::fun1, &x);
+  std::thread t2(&X::fun2, &x);
+  t1.join();
+  t2.join();
+  x.verify();
+}
+} // namespace recursive_mutex_test
+
+//
+// https://en.cppreference.com/w/cpp/thread/timed_mutex
+//
+#include <chrono>
+#include <mutex>
+#include <thread>
+
+namespace timed_mutex_test {
+void run() {
+  std::timed_mutex mutex;
+  mutex.lock();
+
+  bool acquired_while_owned = true;
+  std::thread contender([&] {
+    acquired_while_owned = mutex.try_lock_for(std::chrono::milliseconds(5));
+    if (acquired_while_owned) {
+      mutex.unlock();
+    }
+  });
+  contender.join();
+  assert(!acquired_while_owned);
+
+  mutex.unlock();
+  assert(mutex.try_lock_until(std::chrono::steady_clock::now() +
+                              std::chrono::milliseconds(5)));
+  mutex.unlock();
+}
+} // namespace timed_mutex_test
+
+//
+// https://en.cppreference.com/w/cpp/thread/recursive_timed_mutex
+//
+#include <chrono>
+#include <mutex>
+#include <thread>
+
+namespace recursive_timed_mutex_test {
+void run() {
+  std::recursive_timed_mutex mutex;
+  mutex.lock();
+  assert(mutex.try_lock());
+
+  bool acquired_by_other_thread = true;
+  std::thread contender([&] {
+    acquired_by_other_thread =
+        mutex.try_lock_for(std::chrono::milliseconds(5));
+    if (acquired_by_other_thread) {
+      mutex.unlock();
+    }
+  });
+  contender.join();
+  assert(!acquired_by_other_thread);
+
+  mutex.unlock();
+  mutex.unlock();
+  assert(mutex.try_lock_until(std::chrono::steady_clock::now() +
+                              std::chrono::milliseconds(5)));
+  mutex.unlock();
+}
+} // namespace recursive_timed_mutex_test
+
+//
+// https://en.cppreference.com/w/cpp/thread/try_lock#Example
+//
+#include <chrono>
+#include <functional>
+#include <iostream>
+#include <mutex>
+#include <thread>
+#include <vector>
+
+namespace try_lock_test {
+void run() {
+  int foo_count = 0;
+  std::mutex foo_count_mutex;
+  int bar_count = 0;
+  std::mutex bar_count_mutex;
+  int overall_count = 0;
+  bool done = false;
+  std::mutex done_mutex;
+  auto increment = [](int &counter, std::mutex &m, const char *desc) {
+    for (int i = 0; i < 10; ++i) {
+      std::unique_lock<std::mutex> lock(m);
+      ++counter;
+      std::cout << desc << ": " << counter << '\n';
+      lock.unlock();
+      // cppreference sleeps for seconds; this keeps the same interleaving
+      // shape with milliseconds so the driver test remains quick.
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+  };
+  std::thread increment_foo(increment, std::ref(foo_count),
+                            std::ref(foo_count_mutex), "foo");
+  std::thread increment_bar(increment, std::ref(bar_count),
+                            std::ref(bar_count_mutex), "bar");
+  std::thread update_overall([&]() {
+    done_mutex.lock();
+    while (!done) {
+      done_mutex.unlock();
+      int result = std::try_lock(foo_count_mutex, bar_count_mutex);
+      if (result == -1) {
+        overall_count += foo_count + bar_count;
+        foo_count = 0;
+        bar_count = 0;
+        std::cout << "overall: " << overall_count << '\n';
+        foo_count_mutex.unlock();
+        bar_count_mutex.unlock();
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      done_mutex.lock();
+    }
+    done_mutex.unlock();
+  });
+  increment_foo.join();
+  increment_bar.join();
+  done_mutex.lock();
+  done = true;
+  done_mutex.unlock();
+  update_overall.join();
+
+  std::cout << "Done processing\n"
+            << "foo: " << foo_count << '\n'
+            << "bar: " << bar_count << '\n'
+            << "overall: " << overall_count << '\n';
+
+  assert(foo_count + bar_count + overall_count == 20);
+}
+} // namespace try_lock_test
 
 //
 // https://en.cppreference.com/w/cpp/thread/call_once#Example
@@ -233,6 +773,194 @@ void run() {
   t.join();
 }
 } // namespace future_test
+
+//
+// https://en.cppreference.com/w/cpp/thread/async#Example
+//
+#include <algorithm>
+#include <future>
+#include <iostream>
+#include <mutex>
+#include <numeric>
+#include <string>
+#include <vector>
+
+namespace async_test {
+std::mutex m;
+
+struct X {
+  void foo(int i, const std::string &str) {
+    std::lock_guard<std::mutex> lk(m);
+    std::cout << str << ' ' << i << '\n';
+  }
+
+  void bar(const std::string &str) {
+    std::lock_guard<std::mutex> lk(m);
+    std::cout << str << '\n';
+  }
+
+  int operator()(int i) {
+    std::lock_guard<std::mutex> lk(m);
+    std::cout << i << '\n';
+    return i + 10;
+  }
+};
+
+template <typename RandomIt> int parallel_sum(RandomIt beg, RandomIt end) {
+  auto len = end - beg;
+  if (len < 1000) {
+    return std::accumulate(beg, end, 0);
+  }
+  RandomIt mid = beg + len / 2;
+  auto handle =
+      std::async(std::launch::async, parallel_sum<RandomIt>, mid, end);
+  int sum = parallel_sum(beg, mid);
+  return sum + handle.get();
+}
+
+void run() {
+  std::vector<int> v(10000, 1);
+  const int sum = parallel_sum(v.begin(), v.end());
+  std::cout << "The sum is " << sum << '\n';
+  assert(sum == 10000);
+
+  X x;
+  // Calls (&x)->foo(42, "Hello") with default policy:
+  // may print "Hello 42" concurrently or defer execution
+  auto a1 = std::async(&X::foo, &x, 42, "Hello");
+  // Calls x.bar("world!") with deferred policy
+  // prints "world!" when a2.get() or a2.wait() is called
+  auto a2 = std::async(std::launch::deferred, &X::bar, x, "world!");
+  // Calls X()(43); with async policy
+  // prints "43" concurrently
+  auto a3 = std::async(std::launch::async, X(), 43);
+  a2.wait(); // prints "world!"
+  const int result = a3.get();
+  std::cout << result << '\n'; // prints "53"
+  assert(result == 53);
+  a1.wait();
+}
+} // namespace async_test
+
+//
+// https://en.cppreference.com/w/cpp/thread/future/wait_until#Example
+//
+#include <chrono>
+#include <future>
+#include <iostream>
+#include <thread>
+
+namespace future_status_test {
+void run() {
+  std::chrono::system_clock::time_point two_seconds_passed =
+      std::chrono::system_clock::now() + std::chrono::seconds(2);
+  // Make a future that takes 1 second to complete
+  std::promise<int> p1;
+  std::future<int> f_completes = p1.get_future();
+  std::thread([](std::promise<int> p1) {
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    p1.set_value_at_thread_exit(9);
+  }, std::move(p1))
+      .detach();
+  // Make a future that takes 5 seconds to complete
+  std::promise<int> p2;
+  std::future<int> f_times_out = p2.get_future();
+  std::thread([](std::promise<int> p2) {
+    std::this_thread::sleep_for(std::chrono::seconds(5));
+    p2.set_value_at_thread_exit(8);
+  }, std::move(p2))
+      .detach();
+
+  std::cout << "Waiting for 2 seconds..." << std::endl;
+  if (std::future_status::ready == f_completes.wait_until(two_seconds_passed))
+    std::cout << "f_completes: " << f_completes.get() << "\n";
+  else
+    std::cout << "f_completes did not complete!\n";
+
+  if (std::future_status::ready == f_times_out.wait_until(two_seconds_passed))
+    std::cout << "f_times_out: " << f_times_out.get() << "\n";
+  else
+    std::cout << "f_times_out did not complete!\n";
+
+  std::cout << "Done!\n";
+}
+} // namespace future_status_test
+
+//
+// https://en.cppreference.com/w/cpp/thread/future_error#Example
+//
+#include <future>
+#include <iostream>
+
+namespace future_error_test {
+void run() {
+  std::promise<int> promise;
+  (void)promise.get_future();
+
+  try {
+    (void)promise.get_future();
+    assert(false);
+  } catch (const std::future_error &e) {
+    // cppreference demonstrates std::future_error with an empty future get(),
+    // but that path is undefined behavior. Use the specified
+    // future_already_retrieved error path in the driver harness.
+    std::cout << "Caught a future_error with code \"" << e.code()
+              << "\"\n Message: \"" << e.what() << "\"\n";
+    assert(e.code() ==
+           std::make_error_code(std::future_errc::future_already_retrieved));
+  }
+}
+} // namespace future_error_test
+
+//
+// https://en.cppreference.com/w/cpp/thread/shared_future#Example
+//
+#include <chrono>
+#include <future>
+#include <iostream>
+
+namespace shared_future_test {
+void run() {
+  std::promise<void> ready_promise, t1_ready_promise, t2_ready_promise;
+  std::shared_future<void> ready_future(ready_promise.get_future());
+
+  std::chrono::time_point<std::chrono::high_resolution_clock> start;
+  auto fun1 = [&, ready_future]() -> std::chrono::duration<double, std::milli> {
+    t1_ready_promise.set_value();
+    ready_future.wait(); // waits for the signal from main()
+    return std::chrono::high_resolution_clock::now() - start;
+  };
+  auto fun2 = [&, ready_future]() -> std::chrono::duration<double, std::milli> {
+    t2_ready_promise.set_value();
+    ready_future.wait(); // waits for the signal from main()
+    return std::chrono::high_resolution_clock::now() - start;
+  };
+
+  auto fut1 = t1_ready_promise.get_future();
+  auto fut2 = t2_ready_promise.get_future();
+  auto result1 = std::async(std::launch::async, fun1);
+  auto result2 = std::async(std::launch::async, fun2);
+
+  // wait for the threads to become ready
+  fut1.wait();
+  fut2.wait();
+
+  // the threads are ready, start the clock
+  start = std::chrono::high_resolution_clock::now();
+
+  // signal the threads to go
+  ready_promise.set_value();
+  auto elapsed1 = result1.get();
+  auto elapsed2 = result2.get();
+  std::cout << "Thread 1 received the signal " << elapsed1.count()
+            << " ms after start\n"
+            << "Thread 2 received the signal " << elapsed2.count()
+            << " ms after start\n";
+
+  assert(elapsed1.count() >= 0);
+  assert(elapsed2.count() >= 0);
+}
+} // namespace shared_future_test
 
 //
 // https://en.cppreference.com/w/cpp/thread/promise#Example
