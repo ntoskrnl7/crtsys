@@ -29,6 +29,9 @@ test harness, typically by moving the sample `main()` body into a namespaced
 - `std::latch`: <https://en.cppreference.com/w/cpp/thread/latch>
 - `std::barrier`: <https://en.cppreference.com/w/cpp/thread/barrier>
 - `std::counting_semaphore` / `std::binary_semaphore`: <https://en.cppreference.com/w/cpp/thread/counting_semaphore>
+- `std::jthread`: <https://en.cppreference.com/w/cpp/thread/jthread/jthread>
+- `std::stop_source` / `std::stop_token`: <https://en.cppreference.com/w/cpp/thread/stop_source>
+- `std::stop_callback`: <https://en.cppreference.com/w/cpp/thread/stop_callback>
 - `std::weak_ptr`: <https://en.cppreference.com/w/cpp/memory/weak_ptr>
 - `std::array`: <https://en.cppreference.com/w/cpp/container/array>
 - `std::vector`: <https://en.cppreference.com/w/cpp/container/vector>
@@ -162,6 +165,9 @@ the optional C++20 wait/notify path when the feature-test macro is available.
 The `std::latch`, `std::barrier`, and semaphore examples keep the cppreference
 synchronization flow. The barrier example uses `std::osyncstream`, and the
 semaphore example keeps the original worker delay.
+
+The `std::stop_source` and `std::stop_callback` examples keep the
+cppreference cooperative-cancellation flow.
 
 The `std::unique_ptr` example keeps the ownership, polymorphism, custom deleter,
 array, and linked-list portions, including the hosted file I/O custom deleter,
