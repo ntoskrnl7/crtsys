@@ -112,6 +112,12 @@ cppreference Example 코드를 이식한 항목은
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/atomic.cpp)
 - [x] [std::atomic_flag](https://en.cppreference.com/w/cpp/atomic/atomic_flag)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/atomic.cpp)
+- [x] Atomic fence 및 free function:
+      [`std::atomic_thread_fence`](https://en.cppreference.com/w/cpp/atomic/atomic_thread_fence),
+      [`std::atomic_signal_fence`](https://en.cppreference.com/w/cpp/atomic/atomic_signal_fence),
+      [`std::atomic_fetch_add`](https://en.cppreference.com/w/cpp/atomic/atomic_fetch_add),
+      [`std::atomic_compare_exchange`](https://en.cppreference.com/w/cpp/atomic/atomic_compare_exchange)
+  [(cppreference example/API coverage)](../test/cmake/driver/src/cpp/stl/atomic.cpp)
 - [x] [std::chrono](https://en.cppreference.com/w/cpp/chrono)
   [(tested)](../test/cmake/driver/src/cpp/stl/chrono.cpp#L15)
   - C++20 timezone 경로인
@@ -505,12 +511,6 @@ cppreference Example 코드를 이식한 항목은
     및 timed shared-lock edge case
   - 기본 예제보다 더 넓은 `std::future` / `std::shared_future` error-path
     및 timeout edge case
-- [ ] Atomic helper
-  - [`std::atomic_thread_fence`](https://en.cppreference.com/w/cpp/atomic/atomic_thread_fence),
-    [`std::atomic_signal_fence`](https://en.cppreference.com/w/cpp/atomic/atomic_signal_fence)
-  - [`std::atomic_fetch_add`](https://en.cppreference.com/w/cpp/atomic/atomic_fetch_add),
-    [`std::atomic_compare_exchange`](https://en.cppreference.com/w/cpp/atomic/atomic_compare_exchange)
-    같은 free atomic operation
 - [ ] Ranges 추가 예제
   - 아직 명시 driver 예제로 분리하지 않은 range adaptor 후보:
     `take`, `drop`, `reverse`, `join`, `split`, `keys`, `values`,
