@@ -19,6 +19,11 @@ coverage and IRQL contracts.
 
 Listed coverage means "verified by driver tests". It is not an exhaustive
 support ceiling for every header or code path that may compile or work.
+Because `crtsys` uses MSVC CRT/STL/VCRT/UCRT source paths and LDK implements
+the Windows / NTDLL / ICU substrate those paths call into, many adjacent
+standard-library paths can be viable even before they are named in the matrix.
+The matrix is evidence of driver-run coverage, not a list of everything the
+runtime substrate can possibly support.
 
 ## Quick Start
 
@@ -132,7 +137,9 @@ flowchart TD
 
 The detailed matrix is intentionally test-linked: it records features exercised
 by the kernel driver test suite, not the full set of headers or code paths that
-may compile or work.
+may compile or work. In practice, many unlisted MSVC STL/header paths share the
+same CRT/STL and LDK substrate used by the tested paths; they should be treated
+as compatible candidates until driver-tested or called out as a limitation.
 
 ## Documentation
 

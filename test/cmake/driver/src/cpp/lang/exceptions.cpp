@@ -1,5 +1,8 @@
 ﻿#if !DBG || defined(_ARM_)
-#pragma warning(disable : 4702) // line 25
+// The cppreference throw example intentionally has a constructor catch block
+// that implicitly rethrows, so MSVC can warn about unreachable code afterward.
+#pragma warning(push)
+#pragma warning(disable : 4702)
 #endif
 
 //
@@ -107,3 +110,7 @@ void run() {
   }
 }
 } // namespace function_try_block_test
+
+#if !DBG || defined(_ARM_)
+#pragma warning(pop)
+#endif

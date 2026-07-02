@@ -2,6 +2,11 @@
 #include <math.h>
 #include <stdint.h>
 
+#if _MSC_VER >= 1930 &&                                                    \
+    (defined(_M_X64) || defined(_M_ARM64) || defined(_M_ARM64EC))
+#pragma function(log2, log2f)
+#endif
+
 _Check_return_ _ACRTIMP double __cdecl copysign(_In_ double number,
                                                 _In_ double sign) {
   union {
@@ -65,4 +70,18 @@ _Check_return_ _ACRTIMP int __cdecl ilogb(_In_ double x) {
 
 _Check_return_ _ACRTIMP double __cdecl scalbn(_In_ double x, _In_ int n) {
   return ldexp(x, n);
+}
+
+// MSVC STL <cmath> integer-overload tests can instantiate std::log2 through
+// the CRT entry point on x86 driver builds.
+_Check_return_ _ACRTIMP double __cdecl log2(_In_ double x) {
+  return log(x) * 1.44269504088896340735992468100189214;
+}
+
+_Check_return_ _ACRTIMP float __cdecl log2f(_In_ float x) {
+  return (float)log2((double)x);
+}
+
+_Check_return_ _ACRTIMP long double __cdecl log2l(_In_ long double x) {
+  return (long double)log2((double)x);
 }
