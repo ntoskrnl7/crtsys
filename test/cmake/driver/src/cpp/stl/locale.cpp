@@ -211,10 +211,11 @@ void run() {
 //
 namespace money_put_test {
 void run() {
+  long double mon = 123.45;
   std::ostringstream out;
   out.imbue(std::locale("en_US.UTF-8"));
-  out << std::showbase << "en_US: " << std::put_money(123456)
-      << " or " << std::put_money(123456, true) << '\n';
+  out << std::showbase << "en_US: " << std::put_money(mon) << " or "
+      << std::put_money(mon, true) << '\n';
   std::cout << out.str();
 }
 } // namespace money_put_test

@@ -36,7 +36,8 @@ Install-Package crtsys
 
 - App projects get compatibility headers/includes.
 - Driver projects (WDK) get automatic WDK linkage for
-  `crtsys.lib` / `Ldk.lib` (x86/x64/ARM64).
+  `crtsys.lib` / `Ldk.lib` (x86/x64/ARM/ARM64 depending on the selected
+  MSVC toolset).
 
 What this NuGet package is for:
 
@@ -221,9 +222,13 @@ project into a driver project.
 ## Contents
 
 - `include/` headers
-- native MSBuild props/targets (`nuget/build/native`)
-- prebuilt libs:
-  `lib/native/{x86,x64,ARM64}/{Debug,Release}/(crtsys.lib|Ldk.lib)`
+- native MSBuild props/targets (`build/native`)
+- prebuilt libs by MSVC toolset, architecture, and configuration:
+  `build/native/lib/native/<toolset>/{x86,x64,ARM,ARM64}/{Debug,Release}/(crtsys.lib|Ldk.lib)`.
+  For example, VS2019 uses `build/native/lib/native/v142/x64/Release`,
+  VS2022 uses `build/native/lib/native/v143/x64/Release`, and VS2026 uses
+  `build/native/lib/native/v145/x64/Release`. ARM is provided for v142/v143;
+  v145 carries x86/x64/ARM64.
 
 ## Release artifacts
 

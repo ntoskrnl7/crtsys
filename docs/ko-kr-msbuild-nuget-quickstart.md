@@ -74,7 +74,8 @@ IRQL, paging, unload safety는 driver project가 책임집니다.
 
 - `crtsys_nuget_app_test.vcxproj`는 user-mode header/package 소비를 확인합니다.
 - `crtsys_nuget_test.vcxproj`는 package로부터 WDK driver test source를
-  `x86`, `x64`, `ARM64` `Debug`/`Release`에서 빌드합니다.
+  선택한 MSVC toolset이 지원하는 package architecture의 `Debug`/`Release`에서
+  빌드합니다.
 
 CI job도 같은 모양으로 실행할 수 있습니다.
 

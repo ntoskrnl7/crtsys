@@ -4,13 +4,18 @@ param(
   [Parameter(Mandatory = $true)]
   [string] $Version,
 
-  [ValidateSet('x86', 'x64', 'ARM64')]
+  [ValidateSet('x86', 'x64', 'ARM', 'ARM64')]
   [string] $Architecture = 'x64',
 
   [ValidateSet('Debug', 'Release')]
   [string] $Configuration = 'Release',
 
+  [ValidateSet('v142', 'v143', 'v145')]
+  [string] $Toolset = 'v143',
+
   [string] $WindowsSdkVersion = '10.0.22621.0',
+
+  [string] $WdkVersion = '',
 
   [switch] $SkipDriverBuild,
 
@@ -27,7 +32,7 @@ if ([string]::IsNullOrWhiteSpace($ReleaseDirectory)) {
 }
 
 if ([string]::IsNullOrWhiteSpace($WorkDirectory)) {
-  $WorkDirectory = Join-Path $repoRoot "artifacts\release-consumer-test\$Architecture\$Configuration"
+  $WorkDirectory = Join-Path $repoRoot "artifacts\release-consumer-test\$Toolset\$Architecture\$Configuration"
 }
 
 $WorkDirectory = [System.IO.Path]::GetFullPath($WorkDirectory)
@@ -45,10 +50,19 @@ if (-not (Test-Path $prebuiltZipPath)) {
 $platformByArchitecture = @{
   x86 = 'Win32'
   x64 = 'x64'
+  ARM = 'ARM'
   ARM64 = 'ARM64'
 }
 $platform = $platformByArchitecture[$Architecture]
 $generatorPlatform = "$platform,version=$WindowsSdkVersion"
+if ([string]::IsNullOrWhiteSpace($WdkVersion)) {
+  $WdkVersion = $WindowsSdkVersion
+}
+$generatorByToolset = @{
+  v142 = 'Visual Studio 17 2022'
+  v143 = 'Visual Studio 17 2022'
+  v145 = 'Visual Studio 18 2026'
+}
 
 Remove-Item -Recurse -Force -Path $WorkDirectory -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $WorkDirectory | Out-Null
@@ -72,8 +86,8 @@ if ([string]::IsNullOrWhiteSpace($bundleRoot) -or -not (Test-Path (Join-Path $bu
 }
 
 foreach ($requiredPath in @(
-  "lib\native\$Architecture\$Configuration\crtsys.lib",
-  "lib\native\$Architecture\$Configuration\Ldk.lib",
+  "lib\native\$Toolset\$Architecture\$Configuration\crtsys.lib",
+  "lib\native\$Toolset\$Architecture\$Configuration\Ldk.lib",
   'share\crtsys\cmake\crtsys-config.cmake',
   'share\crtsys\cmake\crtsys-config-version.cmake',
   'share\crtsys\cmake\CrtSys.cmake',
@@ -127,20 +141,21 @@ ntl::status ntl::main(ntl::driver& driver,
 '@
 Set-Content -LiteralPath (Join-Path $consumerDirectory 'main.cpp') -Value $mainCpp -Encoding UTF8
 
-$buildDirectory = Join-Path $WorkDirectory "build_$Architecture"
+$buildDirectory = Join-Path $WorkDirectory "build_${Toolset}_$Architecture"
 $configureArgs = @(
   '-S', $consumerDirectory,
   '-B', $buildDirectory,
-  '-G', 'Visual Studio 17 2022',
+  '-G', $generatorByToolset[$Toolset],
   '-A', $generatorPlatform,
-  '-T', 'host=x64',
-  "-DCRTSYS_WDK_VERSION=$WindowsSdkVersion",
-  "-DLDK_WDK_VERSION=$WindowsSdkVersion",
+  '-T', $(if ($Toolset -eq 'v142') { 'v142,host=x64' } else { 'host=x64' }),
+  "-DCRTSYS_PREBUILT_TOOLSET=$Toolset",
+  "-DCRTSYS_WDK_VERSION=$WdkVersion",
+  "-DLDK_WDK_VERSION=$WdkVersion",
   "-DCMAKE_SYSTEM_VERSION=$WindowsSdkVersion",
   "-DCMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION=$WindowsSdkVersion"
 )
 
-Write-Host "Configuring prebuilt release asset consumer for $Architecture $Configuration"
+Write-Host "Configuring prebuilt release asset consumer for $Architecture $Configuration with Windows SDK $WindowsSdkVersion and WDK $WdkVersion"
 & cmake @configureArgs
 if ($LASTEXITCODE -ne 0) {
   throw "CMake configure failed with exit code $LASTEXITCODE."

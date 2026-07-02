@@ -25,7 +25,8 @@ In Package Manager Console:
 Install-Package crtsys
 ```
 
-Then build the WDK driver project normally for `x86`, `x64`, or `ARM64`.
+Then build the WDK driver project normally for `x86`, `x64`, `ARM`, or `ARM64`
+when using a package/toolset combination that carries that architecture.
 
 ## Build Tools Only
 
@@ -56,6 +57,12 @@ For `ARM64`:
 msbuild .\my_driver.vcxproj /restore /p:Configuration=Release /p:Platform=ARM64
 ```
 
+For 32-bit `ARM` on v142/v143:
+
+```powershell
+msbuild .\my_driver.vcxproj /restore /p:Configuration=Release /p:Platform=ARM
+```
+
 ## What The Package Imports
 
 The native package supplies the MSBuild props/targets needed by a WDK consumer
@@ -74,10 +81,8 @@ so package consumption is build-tested instead of only documented:
 - `crtsys_nuget_app_test.vcxproj` verifies user-mode header/package
   consumption.
 - `crtsys_nuget_test.vcxproj` builds the WDK driver test sources from the
-  package for `x64` and `ARM64` `Debug`/`Release` in GitHub-hosted CI. The
-  package still carries x86 native libraries, but hosted CI validates x86
-  package layout only because the image does not provide x86 WDK kernel
-  libraries.
+  package for every packaged architecture that the selected MSVC toolset
+  supports.
 
 A CI job can use the same shape:
 

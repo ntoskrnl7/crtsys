@@ -3,7 +3,7 @@
   <ItemDefinitionGroup>
     <ClCompile>
       <RuntimeLibrary />
-      <AdditionalIncludeDirectories>$(UniversalCRT_SourcePath.Split(%3B)[0])\\inc;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(MSBuildThisFileDirectory)custom\ucrt\$(WindowsTargetPlatformVersion)\inc;$(UniversalCRT_SourcePath.Split(%3B)[0])\\inc;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>false</ConformanceMode>
     </ClCompile>
@@ -129,6 +129,7 @@
       <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
       <ObjectFileName>$(IntDir)\ucrt\%(Directory)%(FileName).obj</ObjectFileName>
       <LanguageStandard>stdcpp14</LanguageStandard>
+      <DisableSpecificWarnings>4459</DisableSpecificWarnings>
       <CallingConvention>Cdecl</CallingConvention>
     </ClCompile>
   

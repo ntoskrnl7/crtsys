@@ -164,9 +164,9 @@ may compile or work.
 - CMake 3.14 or later
 - Git
 
-Tested toolchains include Visual Studio 2017, 2019, and 2022 with WDK/SDK
-versions such as `10.0.17763.0`, `10.0.18362.0`, `10.0.22000.0`, and
-`10.0.22621.0`.
+Tested toolchains include Visual Studio 2017, 2019, 2022, and 2026 with WDK/SDK
+versions such as `10.0.17763.0`, `10.0.18362.0`, `10.0.22000.0`,
+`10.0.22621.0`, and `10.0.26100.0`.
 
 Visual Studio 2017 has missing CRT source/header pieces for some paths, so
 `crtsys` uses selected UCXXRT compatibility code for that toolset.
@@ -237,11 +237,10 @@ cmake -S . -B build_x64 -A x64 -DCRTSYS_ENABLE_DIAGNOSTIC_BREAKPOINTS=OFF
 ## NuGet Package Details
 
 `crtsys` publishes a NuGet package with native MSBuild imports and prebuilt
-driver libraries for `x86`, `x64`, and `ARM64` `Debug`/`Release`. The package
-workflow builds WDK consumer projects for `x64` and `ARM64`, and validates the
-`x86` package layout separately on GitHub-hosted runners because that image
-does not provide x86 WDK kernel libraries. The checked-in smoke projects live
-under [`test/nuget`](./test/nuget).
+driver libraries for `x86`, `x64`, `ARM`, and `ARM64` `Debug`/`Release` on
+v142/v143, and `x86`, `x64`, and `ARM64` on v145. The package workflow builds
+WDK consumer projects for every packaged architecture that the selected toolset
+supports. The checked-in smoke projects live under [`test/nuget`](./test/nuget).
 
 The NuGet distribution is `crtsys.<version>.nupkg` for Visual Studio/MSBuild
 projects.
@@ -251,7 +250,8 @@ projects.
 GitHub Release publishes these offline-only assets:
 
 - `crtsys-<version>-prebuilt.zip`: headers, docs, CMake helpers,
-  and prebuilt `x86/x64/ARM64` `Debug`/`Release` libraries.
+  and prebuilt `x86/x64/ARM/ARM64` `Debug`/`Release` libraries under an MSVC
+  toolset-specific layout, with ARM omitted for v145.
 - `crtsys-<version>-SHA256SUMS.txt`
 
 The prebuilt bundle is intended for CMake projects that want a checked-in or
@@ -277,7 +277,8 @@ crtsys_add_driver(my_driver src/main.cpp)
 ```
 
 The install tree uses the same native library layout as the prebuilt release
-bundle: `lib/native/<arch>/<config>`.
+bundle: `lib/native/<toolset>/<arch>/<config>`, for example
+`lib/native/v143/x64/Release` or `lib/native/v145/x64/Release`.
 
 The install flow can be smoke-tested with:
 

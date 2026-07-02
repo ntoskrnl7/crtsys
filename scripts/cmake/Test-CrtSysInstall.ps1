@@ -123,8 +123,8 @@ foreach ($requiredPath in @(
   "include\.internal\adjust_link_order",
   "share\crtsys\cmake\crtsys-config.cmake",
   "share\crtsys\cmake\CrtSys.cmake",
-  "lib\native\$Architecture\$Configuration\crtsys.lib",
-  "lib\native\$Architecture\$Configuration\Ldk.lib"
+  "lib\native\v143\$Architecture\$Configuration\crtsys.lib",
+  "lib\native\v143\$Architecture\$Configuration\Ldk.lib"
 )) {
   $fullPath = Join-Path $installDirectory $requiredPath
   if (-not (Test-Path $fullPath)) {

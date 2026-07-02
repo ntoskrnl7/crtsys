@@ -9,9 +9,27 @@
     <CrtSysLibPlatform Condition="'$(CrtSysLibPlatform)' == ''">$(Platform)</CrtSysLibPlatform>
     <CrtSysLibraryConfiguration Condition="'$(CrtSysLibraryConfiguration)' == '' and ('$(Configuration)' == 'Debug' or '$(Configuration)' == 'Release')">$(Configuration)</CrtSysLibraryConfiguration>
     <CrtSysLibraryConfiguration Condition="'$(CrtSysLibraryConfiguration)' == ''">Release</CrtSysLibraryConfiguration>
-    <CrtSysLibDir Condition="'$(CrtSysLibDir)' == ''">$(CrtSysRoot)lib\native\$(CrtSysLibPlatform)\$(CrtSysLibraryConfiguration)\</CrtSysLibDir>
+    <CrtSysLibToolset Condition="'$(CrtSysLibToolset)' == '' and '$([System.String]::Copy(&quot;$(VCToolsVersion)&quot;).StartsWith(&quot;14.5&quot;))' == 'true'">v145</CrtSysLibToolset>
+    <CrtSysLibToolset Condition="'$(CrtSysLibToolset)' == '' and '$([System.String]::Copy(&quot;$(VCToolsVersion)&quot;).StartsWith(&quot;14.4&quot;))' == 'true'">v143</CrtSysLibToolset>
+    <CrtSysLibToolset Condition="'$(CrtSysLibToolset)' == '' and '$([System.String]::Copy(&quot;$(VCToolsVersion)&quot;).StartsWith(&quot;14.2&quot;))' == 'true'">v142</CrtSysLibToolset>
+    <CrtSysLibToolset Condition="'$(CrtSysLibToolset)' == '' and '$(PlatformToolsetVersion)' == '145'">v145</CrtSysLibToolset>
+    <CrtSysLibToolset Condition="'$(CrtSysLibToolset)' == '' and '$(PlatformToolsetVersion)' == '143'">v143</CrtSysLibToolset>
+    <CrtSysLibToolset Condition="'$(CrtSysLibToolset)' == '' and '$(PlatformToolsetVersion)' == '142'">v142</CrtSysLibToolset>
+    <CrtSysLibToolset Condition="'$(CrtSysLibToolset)' == '' and '$(PlatformToolset)' == 'v145'">v145</CrtSysLibToolset>
+    <CrtSysLibToolset Condition="'$(CrtSysLibToolset)' == '' and '$(PlatformToolset)' == 'v143'">v143</CrtSysLibToolset>
+    <CrtSysLibToolset Condition="'$(CrtSysLibToolset)' == '' and '$(PlatformToolset)' == 'v142'">v142</CrtSysLibToolset>
+    <CrtSysLibToolset Condition="'$(CrtSysLibToolset)' == ''">v143</CrtSysLibToolset>
+    <CrtSysAllowToolsetFallback Condition="'$(CrtSysAllowToolsetFallback)' == ''">false</CrtSysAllowToolsetFallback>
+    <CrtSysNativeLibRoot Condition="'$(CrtSysNativeLibRoot)' == '' and Exists('$(MSBuildThisFileDirectory)lib\native')">$(MSBuildThisFileDirectory)lib\native\</CrtSysNativeLibRoot>
+    <CrtSysNativeLibRoot Condition="'$(CrtSysNativeLibRoot)' == ''">$(CrtSysRoot)lib\native\</CrtSysNativeLibRoot>
+    <CrtSysHasToolsetLibLayout Condition="Exists('$(CrtSysNativeLibRoot)v142') or Exists('$(CrtSysNativeLibRoot)v143') or Exists('$(CrtSysNativeLibRoot)v145')">true</CrtSysHasToolsetLibLayout>
+    <CrtSysExactLibDir>$(CrtSysNativeLibRoot)$(CrtSysLibToolset)\$(CrtSysLibPlatform)\$(CrtSysLibraryConfiguration)\</CrtSysExactLibDir>
+    <CrtSysFallbackLibDir>$(CrtSysNativeLibRoot)v143\$(CrtSysLibPlatform)\$(CrtSysLibraryConfiguration)\</CrtSysFallbackLibDir>
+    <CrtSysLegacyLibDir>$(CrtSysNativeLibRoot)$(CrtSysLibPlatform)\$(CrtSysLibraryConfiguration)\</CrtSysLegacyLibDir>
+    <CrtSysLibDir Condition="'$(CrtSysLibDir)' == ''">$(CrtSysExactLibDir)</CrtSysLibDir>
+    <CrtSysLibDir Condition="'$(CrtSysUseDriverSupport)' == 'true' and '$(CrtSysAllowToolsetFallback)' == 'true' and '$(CrtSysLibToolset)' != 'v143' and !Exists('$(CrtSysLibDir)crtsys.lib')">$(CrtSysFallbackLibDir)</CrtSysLibDir>
+    <CrtSysLibDir Condition="'$(CrtSysUseDriverSupport)' == 'true' and '$(CrtSysHasToolsetLibLayout)' != 'true' and !Exists('$(CrtSysLibDir)crtsys.lib')">$(CrtSysLegacyLibDir)</CrtSysLibDir>
     <CrtSysUseNtlMain Condition="'$(CrtSysUseNtlMain)' == ''">true</CrtSysUseNtlMain>
-    <CrtSysUseLibcntpr Condition="'$(CrtSysUseLibcntpr)' == '' and '$(CrtSysLibPlatform)' == 'x86'">false</CrtSysUseLibcntpr>
     <CrtSysUseLibcntpr Condition="'$(CrtSysUseLibcntpr)' == ''">true</CrtSysUseLibcntpr>
     <CrtSysDriverPreprocessorDefinitions Condition="'$(CrtSysDriverPreprocessorDefinitions)' == ''">_KERNEL32_;_ITERATOR_DEBUG_LEVEL=0;_HAS_EXCEPTIONS</CrtSysDriverPreprocessorDefinitions>
     <CrtSysDriverPreprocessorDefinitions Condition="'$(CrtSysUseLibcntpr)' == 'true'">$(CrtSysDriverPreprocessorDefinitions);CRTSYS_USE_LIBCNTPR</CrtSysDriverPreprocessorDefinitions>
@@ -27,14 +45,21 @@
       Condition="'$(CrtSysUseDriverSupport)' == 'true' and '$(CrtSysUseNtlMain)' != 'true'"
       Text="The prebuilt crtsys NuGet package currently supports the ntl::main entry point flow only. Leave CrtSysUseNtlMain set to true." />
     <Error
-      Condition="'$(CrtSysUseDriverSupport)' == 'true' and '$(CrtSysLibPlatform)' != 'x86' and '$(CrtSysLibPlatform)' != 'x64' and '$(CrtSysLibPlatform)' != 'ARM64'"
-      Text="crtsys NuGet package contains prebuilt driver libraries for x86, x64, and ARM64 only. Current platform is '$(Platform)'." />
+      Condition="'$(CrtSysUseDriverSupport)' == 'true' and '$(CrtSysLibPlatform)' != 'x86' and '$(CrtSysLibPlatform)' != 'x64' and '$(CrtSysLibPlatform)' != 'ARM' and '$(CrtSysLibPlatform)' != 'ARM64'"
+      Text="crtsys NuGet package contains prebuilt driver libraries for x86, x64, ARM, and ARM64 depending on the selected MSVC toolset. Current platform is '$(Platform)'." />
+    <Error
+      Condition="'$(CrtSysUseDriverSupport)' == 'true' and '$(CrtSysExpectedLibToolset)' != '' and '$(CrtSysLibToolset)' != '$(CrtSysExpectedLibToolset)'"
+      Text="crtsys selected MSVC toolset '$(CrtSysLibToolset)', but the consumer expected '$(CrtSysExpectedLibToolset)'." />
     <Error
       Condition="'$(CrtSysUseDriverSupport)' == 'true' and !Exists('$(CrtSysLibDir)crtsys.lib')"
-      Text="crtsys.lib was not found under '$(CrtSysLibDir)'." />
+      Text="crtsys.lib was not found under '$(CrtSysLibDir)' for MSVC toolset '$(CrtSysLibToolset)'. Install a package that contains build\native\lib\native\$(CrtSysLibToolset)\$(CrtSysLibPlatform)\$(CrtSysLibraryConfiguration), or set CrtSysLibToolset explicitly." />
     <Error
       Condition="'$(CrtSysUseDriverSupport)' == 'true' and !Exists('$(CrtSysLibDir)Ldk.lib')"
-      Text="Ldk.lib was not found under '$(CrtSysLibDir)'." />
+      Text="Ldk.lib was not found under '$(CrtSysLibDir)' for MSVC toolset '$(CrtSysLibToolset)'." />
+    <Message
+      Importance="high"
+      Condition="'$(CrtSysUseDriverSupport)' == 'true'"
+      Text="crtsys NuGet package selected $(CrtSysLibDir) for MSVC toolset $(CrtSysLibToolset)." />
     <Message
       Importance="high"
       Condition="'$(CrtSysUseDriverSupport)' != 'true'"

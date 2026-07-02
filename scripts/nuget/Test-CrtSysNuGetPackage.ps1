@@ -7,11 +7,14 @@ param(
   [ValidateSet('Driver', 'App')]
   [string] $Consumer = 'Driver',
 
-  [ValidateSet('x86', 'x64', 'ARM64')]
+  [ValidateSet('x86', 'x64', 'ARM', 'ARM64')]
   [string] $Architecture = 'x64',
 
   [ValidateSet('Debug', 'Release')]
   [string] $Configuration = 'Release',
+
+  [ValidateSet('v142', 'v143', 'v145')]
+  [string] $Toolset = 'v143',
 
   [string] $WindowsSdkVersion = '10.0.22621.0',
 
@@ -23,7 +26,7 @@ param(
 
   [string] $NuGetExe,
 
-  [ValidateSet('latest', '17', '16', '15')]
+  [ValidateSet('latest', '18', '17', '16', '15')]
   [string] $VisualStudioMajorVersion = 'latest'
 )
 
@@ -36,6 +39,7 @@ $isDriverConsumer = $Consumer -eq 'Driver'
 $msbuildPlatformByArchitecture = @{
   x86 = 'Win32'
   x64 = 'x64'
+  ARM = 'ARM'
   ARM64 = 'ARM64'
 }
 $msbuildPlatform = $msbuildPlatformByArchitecture[$Architecture]
@@ -45,7 +49,7 @@ if ([string]::IsNullOrWhiteSpace($PackageDirectory)) {
 }
 
 if ([string]::IsNullOrWhiteSpace($WorkDirectory)) {
-  $WorkDirectory = Join-Path $repoRoot "artifacts\nuget-consumer-test\$Consumer\$Architecture\$Configuration"
+  $WorkDirectory = Join-Path $repoRoot "artifacts\nuget-consumer-test\$Consumer\$Toolset\$Architecture\$Configuration"
 }
 
 $PackageDirectory = (Resolve-Path $PackageDirectory).Path
@@ -130,9 +134,18 @@ if ($isDriverConsumer -and -not $SkipDriverBuild) {
     throw "WDK header was not found: $wdkHeader"
   }
 
-  $wdkKernelLibDirectory = Join-Path $windowsKitsRoot "Lib\$WdkVersion\km\$Architecture"
+  $wdkPlatformByArchitecture = @{
+    x86 = 'x86'
+    x64 = 'x64'
+    ARM = 'arm'
+    ARM64 = 'arm64'
+  }
+  $wdkKernelLibDirectory = Join-Path $windowsKitsRoot "Lib\$WdkVersion\km\$($wdkPlatformByArchitecture[$Architecture])"
   if (-not (Test-Path (Join-Path $wdkKernelLibDirectory 'ntoskrnl.lib'))) {
     throw "WDK kernel library directory is missing ntoskrnl.lib: $wdkKernelLibDirectory"
+  }
+  if (-not (Test-Path (Join-Path $wdkKernelLibDirectory 'libcntpr.lib'))) {
+    throw "WDK kernel library directory is missing libcntpr.lib: $wdkKernelLibDirectory"
   }
 }
 
@@ -214,8 +227,8 @@ $requiredPackagePaths = @(
 )
 if ($isDriverConsumer) {
   $requiredPackagePaths += @(
-    "lib\native\$Architecture\$Configuration\crtsys.lib",
-    "lib\native\$Architecture\$Configuration\Ldk.lib",
+    "build\native\lib\native\$Toolset\$Architecture\$Configuration\crtsys.lib",
+    "build\native\lib\native\$Toolset\$Architecture\$Configuration\Ldk.lib",
     'include\ntl\driver'
   )
 }
@@ -279,6 +292,8 @@ $msbuildArguments = @(
   "/p:Configuration=$Configuration",
   "/p:Platform=$msbuildPlatform",
   "/p:CrtSysPackageRoot=$packageRoot",
+  "/p:CrtSysLibToolset=$Toolset",
+  "/p:CrtSysExpectedLibToolset=$Toolset",
   '/v:minimal'
 )
 if ($isDriverConsumer) {
@@ -286,6 +301,7 @@ if ($isDriverConsumer) {
   $msbuildArguments += '/p:SignMode=Off'
   $msbuildArguments += "/p:NlohmannJsonPackageRoot=$nlohmannJsonPackageRoot"
 } else {
+  $msbuildArguments += "/p:PlatformToolset=$Toolset"
   $msbuildArguments += "/p:WindowsTargetPlatformVersion=$WindowsSdkVersion"
 }
 

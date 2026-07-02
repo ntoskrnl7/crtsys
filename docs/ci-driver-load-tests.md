@@ -2,10 +2,9 @@
 
 The `CMake` workflow has two layers:
 
-1. GitHub-hosted `windows-2022` runners build the test app, build the x64 and
-   ARM64 drivers, test-sign the drivers, and upload artifacts. x86 package
-   libraries/layout are validated separately because the hosted image does not
-   provide x86 WDK kernel libraries.
+1. GitHub-hosted runners build the test app, build the driver targets for the
+   architectures supported by each selected toolset, test-sign the drivers, and
+   upload artifacts.
 2. When `workflow_dispatch` is run with `run_driver_load_tests=true`, a
    prepared self-hosted Windows runner downloads those artifacts, loads the
    signed driver, and runs the x64 test app.
@@ -29,10 +28,10 @@ load-test job. The workflow downloads the already-built artifacts from the same
 run.
 
 The load-test job is x64 because kernel drivers must match the test machine's
-kernel architecture. Testing ARM64 drivers requires a separate Windows ARM64
-self-hosted runner and matching ARM64 test app pipeline. Testing x86 drivers
-requires a 32-bit Windows test machine; x86 kernel drivers cannot be loaded on
-x64 Windows.
+kernel architecture. Testing ARM or ARM64 drivers requires matching Windows ARM
+or ARM64 self-hosted runners and matching test app pipelines. Testing x86
+drivers requires a 32-bit Windows test machine; x86 kernel drivers cannot be
+loaded on x64 Windows.
 
 ## Enable test signing
 
@@ -86,6 +85,8 @@ The workflow will:
 
 - Run a preflight check for an online runner with the required labels.
 - Build and upload `crtsys-test-driver-x64`.
+- Build and upload `crtsys-test-driver-ARM` when the selected workflow matrix
+  includes that toolset/architecture pair.
 - Build and upload `crtsys-test-driver-ARM64`.
 - Build and upload `crtsys-test-app-x64`.
 - Download those artifacts on the self-hosted runner.

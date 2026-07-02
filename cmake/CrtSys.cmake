@@ -1,5 +1,4 @@
-# INCLUDE_DIRECTORIES $(VC_IncludePath);$(WindowsSDK_IncludePath)
-cmake_policy(SET CMP0021 OLD)
+cmake_policy(SET CMP0021 NEW)
 
 set(CMAKE_CXX_STANDARD_LIBRARIES " ")
 set(CMAKE_C_STANDARD_LIBRARIES ${CMAKE_CXX_STANDARD_LIBRARIES})
@@ -7,10 +6,6 @@ set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR};${CMAKE_MODULE_PATH}")
 
 if(NOT DEFINED CRTSYS_NTL_MAIN)
     set(CRTSYS_NTL_MAIN ON)
-endif()
-
-if(NOT DEFINED CRTSYS_USE_LIBCNTPR AND "${CMAKE_VS_PLATFORM_NAME}" STREQUAL "Win32")
-    set(CRTSYS_USE_LIBCNTPR OFF)
 endif()
 
 if(NOT DEFINED CRTSYS_USE_LIBCNTPR)
@@ -47,6 +42,101 @@ function(crtsys_scope_compile_options_to_c_cxx TARGET_NAME)
     endforeach()
 
     set_target_properties(${TARGET_NAME} PROPERTIES COMPILE_OPTIONS "${SCOPED_COMPILE_OPTIONS}")
+endfunction()
+
+function(crtsys_get_msvc_sdk_include_dirs OUT_VAR)
+    set(INCLUDE_DIRS)
+
+    if(MSVC AND CMAKE_CXX_COMPILER)
+        get_filename_component(MSVC_COMPILER_ARCH_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
+        get_filename_component(MSVC_COMPILER_HOST_DIR "${MSVC_COMPILER_ARCH_DIR}" DIRECTORY)
+        get_filename_component(MSVC_COMPILER_BIN_DIR "${MSVC_COMPILER_HOST_DIR}" DIRECTORY)
+        get_filename_component(MSVC_TOOLS_DIR "${MSVC_COMPILER_BIN_DIR}" DIRECTORY)
+        get_filename_component(MSVC_VC_DIR "${MSVC_TOOLS_DIR}/../../.." ABSOLUTE)
+
+        if(EXISTS "${MSVC_TOOLS_DIR}/include")
+            list(APPEND INCLUDE_DIRS "${MSVC_TOOLS_DIR}/include")
+        endif()
+
+        if(EXISTS "${MSVC_VC_DIR}/Auxiliary/VS/include")
+            list(APPEND INCLUDE_DIRS "${MSVC_VC_DIR}/Auxiliary/VS/include")
+        endif()
+    endif()
+
+    if(DEFINED WDK_ROOT AND DEFINED CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION)
+        foreach(SDK_INCLUDE_KIND ucrt um shared winrt cppwinrt)
+            set(SDK_INCLUDE_DIR "${WDK_ROOT}/Include/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/${SDK_INCLUDE_KIND}")
+            if(EXISTS "${SDK_INCLUDE_DIR}")
+                list(APPEND INCLUDE_DIRS "${SDK_INCLUDE_DIR}")
+            endif()
+        endforeach()
+    endif()
+
+    set(${OUT_VAR} "${INCLUDE_DIRS}" PARENT_SCOPE)
+endfunction()
+
+function(crtsys_generate_msvc_future_overlay OUT_VAR)
+    set(${OUT_VAR} "" PARENT_SCOPE)
+
+    if(NOT MSVC OR NOT CMAKE_CXX_COMPILER)
+        return()
+    endif()
+
+    get_filename_component(MSVC_COMPILER_ARCH_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    get_filename_component(MSVC_COMPILER_HOST_DIR "${MSVC_COMPILER_ARCH_DIR}" DIRECTORY)
+    get_filename_component(MSVC_COMPILER_BIN_DIR "${MSVC_COMPILER_HOST_DIR}" DIRECTORY)
+    get_filename_component(MSVC_TOOLS_DIR "${MSVC_COMPILER_BIN_DIR}" DIRECTORY)
+    set(MSVC_FUTURE_HEADER "${MSVC_TOOLS_DIR}/include/future")
+    if(NOT EXISTS "${MSVC_FUTURE_HEADER}")
+        return()
+    endif()
+
+    file(READ "${MSVC_FUTURE_HEADER}" CRTSYS_MSVC_FUTURE_CONTENT)
+
+    set(CRTSYS_FUTURE_IS_READY_SNIPPET
+"    bool _Is_ready() const noexcept {
+        return _State._Is_ready();
+    }
+
+")
+    set(CRTSYS_FUTURE_READY_OR_STORED_SNIPPET
+"    bool _Is_ready() const noexcept {
+        return _State._Is_ready();
+    }
+
+    bool _Already_has_stored_result() const noexcept {
+        return _State._Ptr() && _State._Ptr()->_Already_has_stored_result();
+    }
+
+")
+
+    string(FIND "${CRTSYS_MSVC_FUTURE_CONTENT}" "${CRTSYS_FUTURE_IS_READY_SNIPPET}" CRTSYS_FUTURE_IS_READY_INDEX)
+    if(CRTSYS_FUTURE_IS_READY_INDEX EQUAL -1)
+        message(WARNING "Unable to patch MSVC <future>: _Promise::_Is_ready shape was not recognized.")
+        return()
+    endif()
+    string(REPLACE "${CRTSYS_FUTURE_IS_READY_SNIPPET}" "${CRTSYS_FUTURE_READY_OR_STORED_SNIPPET}" CRTSYS_MSVC_FUTURE_CONTENT "${CRTSYS_MSVC_FUTURE_CONTENT}")
+
+    set(CRTSYS_FUTURE_PROMISE_DTOR_CONDITION "if (_MyPromise._Is_valid() && !_MyPromise._Is_ready())")
+    string(FIND "${CRTSYS_MSVC_FUTURE_CONTENT}" "${CRTSYS_FUTURE_PROMISE_DTOR_CONDITION}" CRTSYS_FUTURE_DTOR_INDEX)
+    if(CRTSYS_FUTURE_DTOR_INDEX EQUAL -1)
+        message(WARNING "Unable to patch MSVC <future>: promise destructor shape was not recognized.")
+        return()
+    endif()
+
+    # MSVC STL keeps set_value_at_thread_exit() states unready until the CRT
+    # thread-exit callback broadcasts. A promise destructor must not translate
+    # that already-stored-but-not-yet-ready value into broken_promise.
+    string(REPLACE
+        "${CRTSYS_FUTURE_PROMISE_DTOR_CONDITION}"
+        "if (_MyPromise._Is_valid() && !_MyPromise._Is_ready() && !_MyPromise._Already_has_stored_result())"
+        CRTSYS_MSVC_FUTURE_CONTENT
+        "${CRTSYS_MSVC_FUTURE_CONTENT}")
+
+    set(CRTSYS_MSVC_FUTURE_OVERLAY_DIR "${CMAKE_CURRENT_BINARY_DIR}/crtsys-msvc-overlay/${MSVC_TOOLSET_VERSION}")
+    file(MAKE_DIRECTORY "${CRTSYS_MSVC_FUTURE_OVERLAY_DIR}")
+    file(WRITE "${CRTSYS_MSVC_FUTURE_OVERLAY_DIR}/future" "${CRTSYS_MSVC_FUTURE_CONTENT}")
+    set(${OUT_VAR} "${CRTSYS_MSVC_FUTURE_OVERLAY_DIR}" PARENT_SCOPE)
 endfunction()
 
 # Remove Runtime Checks
@@ -146,8 +236,25 @@ function(crtsys_get_prebuilt_arch _out_arch)
     set(${_out_arch} "${_arch}" PARENT_SCOPE)
 endfunction()
 
+function(crtsys_get_prebuilt_toolset _out_toolset)
+    if(DEFINED CRTSYS_PREBUILT_TOOLSET AND NOT "${CRTSYS_PREBUILT_TOOLSET}" STREQUAL "")
+        set(_toolset "${CRTSYS_PREBUILT_TOOLSET}")
+    elseif(DEFINED MSVC_TOOLSET_VERSION)
+        set(_toolset "v${MSVC_TOOLSET_VERSION}")
+    else()
+        set(_toolset "")
+    endif()
+
+    if("${_toolset}" STREQUAL "")
+        message(FATAL_ERROR "Unable to determine the crtsys prebuilt MSVC toolset. Set CRTSYS_PREBUILT_TOOLSET to v142, v143, or v145.")
+    endif()
+
+    set(${_out_toolset} "${_toolset}" PARENT_SCOPE)
+endfunction()
+
 function(crtsys_get_prebuilt_library _out_path _library _configuration)
     crtsys_get_prebuilt_arch(_arch)
+    crtsys_get_prebuilt_toolset(_toolset)
 
     if("${_configuration}" STREQUAL "Debug")
         set(_config_dir Debug)
@@ -155,14 +262,49 @@ function(crtsys_get_prebuilt_library _out_path _library _configuration)
         set(_config_dir Release)
     endif()
 
-    set(_path "${_CRTSYS_ROOT}/lib/native/${_arch}/${_config_dir}/${_library}")
-    file(TO_CMAKE_PATH "${_path}" _path)
-    if(NOT EXISTS "${_path}")
-        set(${_out_path} "" PARENT_SCOPE)
-        return()
+    set(_has_toolset_layout FALSE)
+    foreach(_known_toolset v142 v143 v145)
+        if(EXISTS "${_CRTSYS_ROOT}/lib/native/${_known_toolset}")
+            set(_has_toolset_layout TRUE)
+        endif()
+    endforeach()
+
+    set(_candidate_paths
+        "${_CRTSYS_ROOT}/lib/native/${_toolset}/${_arch}/${_config_dir}/${_library}"
+    )
+
+    if(DEFINED CRTSYS_ALLOW_PREBUILT_TOOLSET_FALLBACK AND CRTSYS_ALLOW_PREBUILT_TOOLSET_FALLBACK)
+        list(APPEND _candidate_paths
+            "${_CRTSYS_ROOT}/lib/native/v143/${_arch}/${_config_dir}/${_library}"
+        )
     endif()
 
-    set(${_out_path} "${_path}" PARENT_SCOPE)
+    if(NOT _has_toolset_layout)
+        list(APPEND _candidate_paths
+            "${_CRTSYS_ROOT}/lib/native/${_arch}/${_config_dir}/${_library}"
+        )
+    endif()
+
+    foreach(_path IN LISTS _candidate_paths)
+        file(TO_CMAKE_PATH "${_path}" _path)
+        if(EXISTS "${_path}")
+            set(${_out_path} "${_path}" PARENT_SCOPE)
+            return()
+        endif()
+    endforeach()
+
+    if(_has_toolset_layout)
+        set(_missing_hint "Expected ${_CRTSYS_ROOT}/lib/native/${_toolset}/${_arch}/${_config_dir}/${_library}.")
+    else()
+        set(_missing_hint "Expected ${_CRTSYS_ROOT}/lib/native/${_arch}/${_config_dir}/${_library}.")
+    endif()
+
+    if("${_library}" STREQUAL "crtsys.lib")
+        message(STATUS "crtsys prebuilt library was not found for toolset ${_toolset}, platform ${_arch}, config ${_config_dir}. ${_missing_hint}")
+    endif()
+
+    set(${_out_path} "" PARENT_SCOPE)
+    return()
 endfunction()
 
 function(crtsys_apply_driver_settings _target _root)
@@ -171,7 +313,21 @@ function(crtsys_apply_driver_settings _target _root)
         set(INC_DIR_TMP "")
     endif()
 
-    set_property(TARGET ${_target} PROPERTY INCLUDE_DIRECTORIES "${_root}/include;${_root}/include/.internal/msvc/$(VCToolsVersion);${_root}/include/.internal/msvc/${MSVC_TOOLSET_VERSION};${_root}/include/.internal/msvc/$(VCToolsVersion)/stl;${_root}/include/.internal/msvc/${MSVC_TOOLSET_VERSION}/stl;$(VC_IncludePath);$(WindowsSDK_IncludePath);${INC_DIR_TMP}")
+    crtsys_get_msvc_sdk_include_dirs(_crtsys_msvc_sdk_include_dirs)
+    crtsys_generate_msvc_future_overlay(_crtsys_msvc_future_overlay_dir)
+    set(_crtsys_msvc_compat_toolset "${MSVC_TOOLSET_VERSION}")
+    if(MSVC_TOOLSET_VERSION GREATER 143)
+        set(_crtsys_msvc_compat_toolset 143)
+    endif()
+    set(_crtsys_include_dirs
+        "${_crtsys_msvc_future_overlay_dir}"
+        "${_root}/include"
+        "${_root}/include/.internal/msvc/${_crtsys_msvc_compat_toolset}"
+        "${_root}/include/.internal/msvc/${_crtsys_msvc_compat_toolset}/stl"
+        ${_crtsys_msvc_sdk_include_dirs}
+        ${INC_DIR_TMP}
+    )
+    set_property(TARGET ${_target} PROPERTY INCLUDE_DIRECTORIES ${_crtsys_include_dirs})
 
     set(_crtsys_winsdk_forced_include "${_root}/include/.internal/winsdk/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/wdk/${WDK_VERSION}/forced.h")
     if(NOT EXISTS "${_crtsys_winsdk_forced_include}")
@@ -214,7 +370,8 @@ function(crtsys_link_prebuilt_driver_libraries _target)
     elseif(_crtsys_release)
         target_link_libraries(${_target} "${_crtsys_release}" "${_ldk_release}")
     else()
-        message(FATAL_ERROR "No crtsys prebuilt libraries were found under ${_CRTSYS_ROOT}/lib/native for ${CMAKE_VS_PLATFORM_NAME}.")
+        crtsys_get_prebuilt_toolset(_toolset)
+        message(FATAL_ERROR "No crtsys prebuilt libraries were found under ${_CRTSYS_ROOT}/lib/native for ${_toolset}/${CMAKE_VS_PLATFORM_NAME}.")
     endif()
 
     target_compile_definitions(${_target} PUBLIC "_KERNEL32_" "_ITERATOR_DEBUG_LEVEL=0" "_HAS_EXCEPTIONS")
@@ -228,6 +385,10 @@ function(crtsys_link_prebuilt_driver_libraries _target)
         target_link_libraries(${_target} WDK::LIBCNTPR)
         target_compile_definitions(${_target} PUBLIC CRTSYS_USE_LIBCNTPR)
         target_link_options(${_target} PUBLIC "/FORCE:MULTIPLE")
+    endif()
+
+    if("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "Win32")
+        target_link_options(${_target} PUBLIC "/SAFESEH:NO")
     endif()
 endfunction()
 

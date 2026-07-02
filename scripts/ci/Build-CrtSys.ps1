@@ -12,7 +12,9 @@ param(
 
   [string] $WindowsSdkVersion = '10.0.22621.0',
 
-  [ValidateSet('', 'v142', 'v143')]
+  [string] $WdkVersion = '',
+
+  [ValidateSet('', 'v142', 'v143', 'v145')]
   [string] $PlatformToolset = '',
 
   [switch] $NoBreakpoint
@@ -37,6 +39,10 @@ $platformByArchitecture = @{
 
 $platform = $platformByArchitecture[$Architecture]
 $generatorPlatform = "$platform,version=$WindowsSdkVersion"
+if ([string]::IsNullOrWhiteSpace($WdkVersion)) {
+  $WdkVersion = $WindowsSdkVersion
+}
+
 $buildDirSuffix = $Architecture
 if ($PlatformToolset) {
   $buildDirSuffix = "${Architecture}_${PlatformToolset}"
@@ -45,18 +51,23 @@ if ($PlatformToolset) {
 $buildDir = Join-Path $sourceDir "build_$buildDirSuffix"
 
 $generatorToolset = 'host=x64'
+$generator = 'Visual Studio 17 2022'
 if ($PlatformToolset) {
   $generatorToolset = "$PlatformToolset,host=x64"
+  if ($PlatformToolset -eq 'v145') {
+    $generator = 'Visual Studio 18 2026'
+    $generatorToolset = 'host=x64'
+  }
 }
 
 $configureArgs = @(
   '-S', $sourceDir,
   '-B', $buildDir,
-  '-G', 'Visual Studio 17 2022',
+  '-G', $generator,
   '-A', $generatorPlatform,
   '-T', $generatorToolset,
-  "-DCRTSYS_WDK_VERSION=$WindowsSdkVersion",
-  "-DLDK_WDK_VERSION=$WindowsSdkVersion",
+  "-DCRTSYS_WDK_VERSION=$WdkVersion",
+  "-DLDK_WDK_VERSION=$WdkVersion",
   "-DCMAKE_SYSTEM_VERSION=$WindowsSdkVersion",
   "-DCMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION=$WindowsSdkVersion",
   '-DCMAKE_CXX_FLAGS=/MP'
@@ -70,9 +81,9 @@ if ($Project -eq 'driver' -and $NoBreakpoint) {
 }
 
 if ($PlatformToolset) {
-  Write-Host "Configuring $Project $Architecture $Configuration with Windows SDK $WindowsSdkVersion and $PlatformToolset"
+  Write-Host "Configuring $Project $Architecture $Configuration with Windows SDK $WindowsSdkVersion, WDK $WdkVersion, and $PlatformToolset"
 } else {
-  Write-Host "Configuring $Project $Architecture $Configuration with Windows SDK $WindowsSdkVersion"
+  Write-Host "Configuring $Project $Architecture $Configuration with Windows SDK $WindowsSdkVersion and WDK $WdkVersion"
 }
 & cmake @configureArgs
 if ($LASTEXITCODE -ne 0) {
