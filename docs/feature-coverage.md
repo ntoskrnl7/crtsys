@@ -300,8 +300,23 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] [std::string](https://en.cppreference.com/w/cpp/string/basic_string)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/string.cpp)
+- [x] String member operations:
+      [`std::string::find`](https://en.cppreference.com/w/cpp/string/basic_string/find),
+      [`std::string::substr`](https://en.cppreference.com/w/cpp/string/basic_string/substr),
+      [`std::string::starts_with`](https://en.cppreference.com/w/cpp/string/basic_string/starts_with),
+      [`std::string::ends_with`](https://en.cppreference.com/w/cpp/string/basic_string/ends_with),
+      [`std::string::contains`](https://en.cppreference.com/w/cpp/string/basic_string/contains), and
+      [`std::string::erase`](https://en.cppreference.com/w/cpp/string/basic_string/erase)
+  [(cppreference member examples)](../test/cmake/driver/src/cpp/stl/string.cpp)
 - [x] [std::string_view](https://en.cppreference.com/w/cpp/string/basic_string_view)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/string.cpp)
+- [x] String view member operations:
+      [`std::string_view::find`](https://en.cppreference.com/w/cpp/string/basic_string_view/find),
+      [`std::string_view::substr`](https://en.cppreference.com/w/cpp/string/basic_string_view/substr),
+      [`std::string_view::starts_with`](https://en.cppreference.com/w/cpp/string/basic_string_view/starts_with),
+      [`std::string_view::ends_with`](https://en.cppreference.com/w/cpp/string/basic_string_view/ends_with), and
+      [`std::string_view::contains`](https://en.cppreference.com/w/cpp/string/basic_string_view/contains)
+  [(cppreference member examples)](../test/cmake/driver/src/cpp/stl/string.cpp)
 - [x] [std::weak_ptr](https://en.cppreference.com/w/cpp/memory/weak_ptr)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/memory.cpp)
 - [x] [std::thread](https://en.cppreference.com/w/cpp/thread)

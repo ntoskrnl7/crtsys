@@ -415,7 +415,13 @@ void run();
 namespace string_test {
 void run();
 }
+namespace string_member_operations_test {
+void run();
+}
 namespace string_view_test {
+void run();
+}
+namespace string_view_member_operations_test {
 void run();
 }
 namespace locale_test {
@@ -650,7 +656,9 @@ void cpp_std_tests() {
   CRTSYS_RUN_CPPREFERENCE_TEST(stack_emplace_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(priority_queue_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(string_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(string_member_operations_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(string_view_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(string_view_member_operations_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(locale_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(locale_constructor_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(has_facet_test);
