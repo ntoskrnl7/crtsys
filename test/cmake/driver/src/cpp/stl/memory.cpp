@@ -16,8 +16,17 @@
 #include <mutex>
 #include <stdexcept>
 #include <thread>
+#include <vector>
 
 using namespace std::chrono_literals;
+
+namespace memory_test_detail {
+void expect(bool condition, const char *message) {
+  if (!condition) {
+    throw std::runtime_error(message);
+  }
+}
+} // namespace memory_test_detail
 
 namespace shared_ptr_test {
 struct Base {
@@ -166,6 +175,91 @@ void run() {
             << '\n';
 }
 } // namespace pmr_monotonic_buffer_resource_test
+
+//
+// https://en.cppreference.com/w/cpp/memory/unsynchronized_pool_resource
+// https://en.cppreference.com/w/cpp/memory/synchronized_pool_resource
+// https://en.cppreference.com/w/cpp/memory/polymorphic_allocator
+// https://en.cppreference.com/w/cpp/memory/null_memory_resource
+// https://en.cppreference.com/w/cpp/memory/new_delete_resource
+//
+namespace pmr_pool_resource_test {
+void run() {
+  // These cppreference API pages do not provide standalone "Run this code"
+  // examples. This compact driver check follows the documented API surface:
+  // pool_options, upstream_resource(), release(), polymorphic_allocator
+  // allocate/deallocate, and the standard singleton resources.
+  std::pmr::pool_options options{};
+  options.max_blocks_per_chunk = 4;
+  options.largest_required_pool_block = 128;
+
+  std::pmr::unsynchronized_pool_resource unsync_pool{
+      options, std::pmr::new_delete_resource()};
+  memory_test_detail::expect(unsync_pool.upstream_resource() ==
+                                 std::pmr::new_delete_resource(),
+                             "unsynchronized_pool_resource upstream mismatch");
+  memory_test_detail::expect(unsync_pool.options().max_blocks_per_chunk == 4,
+                             "unsynchronized_pool_resource option mismatch");
+
+  std::pmr::vector<int> values{&unsync_pool};
+  for (int i{}; i != 32; ++i) {
+    values.push_back(i);
+  }
+  memory_test_detail::expect(values.size() == 32,
+                             "unsynchronized_pool_resource vector size");
+  memory_test_detail::expect(values.front() == 0 && values.back() == 31,
+                             "unsynchronized_pool_resource vector values");
+  values.clear();
+  values.shrink_to_fit();
+  unsync_pool.release();
+
+  std::pmr::polymorphic_allocator<int> allocator{&unsync_pool};
+  int *raw = allocator.allocate(3);
+  std::allocator_traits<decltype(allocator)>::construct(allocator, raw, 7);
+  std::allocator_traits<decltype(allocator)>::construct(allocator, raw + 1, 8);
+  std::allocator_traits<decltype(allocator)>::construct(allocator, raw + 2, 9);
+  memory_test_detail::expect(raw[0] == 7 && raw[1] == 8 && raw[2] == 9,
+                             "polymorphic_allocator values mismatch");
+  std::allocator_traits<decltype(allocator)>::destroy(allocator, raw + 2);
+  std::allocator_traits<decltype(allocator)>::destroy(allocator, raw + 1);
+  std::allocator_traits<decltype(allocator)>::destroy(allocator, raw);
+  allocator.deallocate(raw, 3);
+
+  void *direct = std::pmr::new_delete_resource()->allocate(64, alignof(int));
+  std::pmr::new_delete_resource()->deallocate(direct, 64, alignof(int));
+
+  try {
+    [[maybe_unused]] void *never =
+        std::pmr::null_memory_resource()->allocate(1, alignof(int));
+    memory_test_detail::expect(false, "null_memory_resource did not throw");
+  } catch (const std::bad_alloc &) {
+  }
+
+  std::pmr::synchronized_pool_resource sync_pool{
+      options, std::pmr::new_delete_resource()};
+  memory_test_detail::expect(sync_pool.upstream_resource() ==
+                                 std::pmr::new_delete_resource(),
+                             "synchronized_pool_resource upstream mismatch");
+
+  auto worker = [&sync_pool](int base) {
+    std::pmr::vector<int> local{&sync_pool};
+    for (int i{}; i != 16; ++i) {
+      local.push_back(base + i);
+    }
+    memory_test_detail::expect(local.size() == 16,
+                               "synchronized_pool_resource vector size");
+    memory_test_detail::expect(local.front() == base &&
+                                   local.back() == base + 15,
+                               "synchronized_pool_resource vector values");
+  };
+
+  std::thread t1{worker, 100};
+  std::thread t2{worker, 200};
+  t1.join();
+  t2.join();
+  sync_pool.release();
+}
+} // namespace pmr_pool_resource_test
 
 //
 // https://en.cppreference.com/w/cpp/memory/unique_ptr#Example

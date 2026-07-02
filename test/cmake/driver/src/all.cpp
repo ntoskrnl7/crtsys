@@ -361,6 +361,9 @@ void run();
 namespace pmr_monotonic_buffer_resource_test {
 void run();
 }
+namespace pmr_pool_resource_test {
+void run();
+}
 namespace queue_test {
 void run();
 }
@@ -753,6 +756,7 @@ void cpp_std_tests() {
   CRTSYS_RUN_CPPREFERENCE_TEST(bind_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(unique_ptr_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(pmr_monotonic_buffer_resource_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(pmr_pool_resource_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(shared_ptr_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(weak_ptr_test);
 }
