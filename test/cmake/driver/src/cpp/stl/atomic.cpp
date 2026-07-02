@@ -2,11 +2,14 @@
 // https://en.cppreference.com/w/cpp/atomic/atomic#Example
 //
 #include <atomic>
+#include <cassert>
+#include <chrono>
 #include <functional>
 #include <iostream>
 #include <mutex>
 #include <numeric>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -137,3 +140,182 @@ void run() {
   }
 }
 } // namespace atomic_flag_test
+
+//
+// https://en.cppreference.com/w/cpp/atomic/atomic_thread_fence#Example
+//
+namespace atomic_thread_fence_test {
+const int num_mailboxes = 32;
+std::atomic<int> mailbox_receiver[num_mailboxes];
+std::string mailbox_data[num_mailboxes];
+
+void run() {
+  const int my_id = 7;
+
+  for (int i = 0; i < num_mailboxes; ++i) {
+    std::atomic_store_explicit(&mailbox_receiver[i], -1,
+                               std::memory_order_relaxed);
+    mailbox_data[i].clear();
+  }
+
+  // cppreference presents this as a mailbox scan pattern with writer threads.
+  // The driver harness performs one deterministic writer update and then runs
+  // the same relaxed-load plus acquire-fence reader sequence.
+  mailbox_data[3] = "message";
+  std::atomic_store_explicit(&mailbox_receiver[3], my_id,
+                             std::memory_order_release);
+
+  int processed = 0;
+  for (int i = 0; i < num_mailboxes; ++i) {
+    if (std::atomic_load_explicit(&mailbox_receiver[i],
+                                  std::memory_order_relaxed) == my_id) {
+      std::atomic_thread_fence(std::memory_order_acquire);
+      assert(mailbox_data[i] == "message");
+      ++processed;
+    }
+  }
+
+  assert(processed == 1);
+}
+} // namespace atomic_thread_fence_test
+
+//
+// https://en.cppreference.com/w/cpp/atomic/atomic_signal_fence
+//
+namespace atomic_signal_fence_test {
+void run() {
+  int value = 1;
+  std::atomic_signal_fence(std::memory_order_acq_rel);
+  value = 2;
+  std::atomic_signal_fence(std::memory_order_seq_cst);
+  assert(value == 2);
+}
+} // namespace atomic_signal_fence_test
+
+//
+// https://en.cppreference.com/w/cpp/atomic/atomic_fetch_add#Example
+//
+namespace atomic_fetch_add_test {
+using namespace std::chrono_literals;
+
+// meaning of cnt:
+//  5: readers and writer are in race. There are no active readers or writers.
+//  4...0: there are 1...5 active readers, The writer is blocked.
+// -1: writer won the race and readers are blocked.
+const int N = 5; // four concurrent readers are allowed
+std::atomic<int> cnt(N);
+
+std::vector<int> data;
+
+void reader(int id) {
+  for (;;) {
+    // lock
+    while (std::atomic_fetch_sub(&cnt, 1) <= 0) {
+      std::atomic_fetch_add(&cnt, 1);
+    }
+
+    // read
+    if (!data.empty()) {
+      std::cout << ("reader " + std::to_string(id) + " sees " +
+                    std::to_string(*data.rbegin()) + '\n');
+    }
+    if (data.size() == 25) {
+      break;
+    }
+
+    // unlock
+    std::atomic_fetch_add(&cnt, 1);
+    // pause
+    std::this_thread::sleep_for(1ms);
+  }
+}
+
+void writer() {
+  for (int n = 0; n < 25; ++n) {
+    // lock
+    while (std::atomic_fetch_sub(&cnt, N + 1) != N) {
+      std::atomic_fetch_add(&cnt, N + 1);
+    }
+
+    // write
+    data.push_back(n);
+    std::cout << "writer pushed back " << n << '\n';
+
+    // unlock
+    std::atomic_fetch_add(&cnt, N + 1);
+    // pause
+    std::this_thread::sleep_for(1ms);
+  }
+}
+
+void run() {
+  cnt = N;
+  data.clear();
+
+  std::vector<std::thread> v;
+  for (int n = 0; n < N; ++n) {
+    v.emplace_back(reader, n);
+  }
+  v.emplace_back(writer);
+
+  for (auto &t : v) {
+    t.join();
+  }
+
+  assert(data.size() == 25);
+}
+} // namespace atomic_fetch_add_test
+
+//
+// https://en.cppreference.com/w/cpp/atomic/atomic_compare_exchange#Example
+//
+namespace atomic_compare_exchange_test {
+template <class T> struct node {
+  T data;
+  node *next;
+  node(const T &data) : data(data), next(nullptr) {}
+};
+
+template <class T> class stack {
+  std::atomic<node<T> *> head{};
+
+public:
+  ~stack() {
+    // cppreference's standalone example exits after push() and does not need a
+    // cleanup path. The driver harness keeps the same push algorithm but frees
+    // nodes before driver unload.
+    node<T> *current = head.load(std::memory_order_relaxed);
+    while (current) {
+      node<T> *next = current->next;
+      delete current;
+      current = next;
+    }
+  }
+
+  void push(const T &data) {
+    node<T> *new_node = new node<T>(data);
+    // put the current value of head into new_node->next
+    new_node->next = head.load(std::memory_order_relaxed);
+    // now make new_node the new head, but if the head
+    // is no longer what's stored in new_node->next
+    // (some other thread must have inserted a node just now)
+    // then put that new head into new_node->next and try again
+    while (!std::atomic_compare_exchange_weak_explicit(
+        &head, &new_node->next, new_node, std::memory_order_release,
+        std::memory_order_relaxed)) {
+      ; // the body of the loop is empty
+    }
+    // note: the above loop is not thread-safe in at least
+    // GCC prior to 4.8.3 (bug 60272), clang prior to 2014-05-05 (bug 18899)
+    // MSVC prior to 2014-03-17 (bug 819819). See member function version for
+    // workaround
+  }
+};
+
+void run() {
+  stack<int> s;
+  s.push(1);
+  s.push(2);
+  s.push(3);
+}
+} // namespace atomic_compare_exchange_test

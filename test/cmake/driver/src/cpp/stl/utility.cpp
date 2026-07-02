@@ -1,8 +1,16 @@
 //
 // https://en.cppreference.com/w/cpp/utility/optional#Example
 //
+#if defined(_MSC_VER)
+// Release builds define NDEBUG, so assert-only cppreference verification values
+// can look unused under /WX. Keep the examples intact and silence that warning
+// only for this test translation unit.
+#pragma warning(disable : 4189)
+#endif
+
 #include <algorithm>
 #include <any>
+#include <array>
 #include <cassert>
 #include <cmath>
 #include <compare>
@@ -10,6 +18,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <charconv>
+#include <cctype>
 #if __has_include(<expected>)
 #include <expected>
 #endif
@@ -20,10 +30,13 @@
 #include <print>
 #endif
 #include <functional>
+#include <future>
 #include <iomanip>
 #include <iostream>
 #include <iterator>
 #include <list>
+#include <limits>
+#include <memory>
 #include <numeric>
 #include <numbers>
 #include <optional>
@@ -31,11 +44,19 @@
 #include <ranges>
 #include <ratio>
 #include <source_location>
+#include <sstream>
+#if defined(_HAS_CXX23) && _HAS_CXX23 && __has_include(<spanstream>)
+#include <spanstream>
+#endif
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <tuple>
+#include <typeindex>
+#include <typeinfo>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -65,6 +86,64 @@ void run() {
   }
 }
 } // namespace optional_test
+
+//
+// https://en.cppreference.com/w/cpp/utility/optional/and_then#Example
+// https://en.cppreference.com/w/cpp/utility/optional/transform#Example
+//
+namespace optional_monadic_test {
+#if defined(__cpp_lib_optional) && __cpp_lib_optional >= 202110L
+std::optional<int> to_int(std::string_view sv) {
+  int r{};
+  auto [ptr, ec]{std::from_chars(sv.data(), sv.data() + sv.size(), r)};
+  (void)ptr;
+  if (ec == std::errc()) {
+    return r;
+  } else {
+    return std::nullopt;
+  }
+}
+
+void run() {
+  using namespace std::literals;
+
+  const std::vector<std::optional<std::string>> v{
+      "1234", "15 foo", "bar", "42", "5000000000", " 5", std::nullopt,
+      "-43"};
+  const std::array<std::string, 8> expected{
+      "1235", "16", "NaN", "43", "NaN", "NaN", "NaN", "-42"};
+  std::size_t index = 0;
+
+  for (auto &&x : v | std::views::transform([](auto &&o) {
+                    // debug print the content of input optional<string>
+                    std::cout << std::left << std::setw(13)
+                              << std::quoted(o.value_or("nullopt")) << " -> ";
+                    return o
+                        // if optional is nullopt convert it to optional with "" string
+                        .or_else([] { return std::optional{""s}; })
+                        // flatmap from strings to ints (making empty optionals where it fails)
+                        .and_then(to_int)
+                        // map int to int + 1
+                        .transform([](int n) { return n + 1; })
+                        // convert back to strings
+                        .transform([](int n) { return std::to_string(n); })
+                        // replace all empty optionals that were left by
+                        // and_then and ignored by transforms with "NaN"
+                        .value_or("NaN"s);
+                  })) {
+    std::cout << x << '\n';
+    assert(index < expected.size());
+    assert(x == expected[index++]);
+  }
+  assert(index == expected.size());
+}
+#else
+void run() {
+  std::cout << "std::optional monadic operations are not available in this "
+               "MSVC STL\n";
+}
+#endif
+} // namespace optional_monadic_test
 
 //
 // https://en.cppreference.com/w/cpp/utility/expected#Example
@@ -157,6 +236,216 @@ void run() {
 #endif
 }
 } // namespace print_test
+
+#if defined(__cpp_lib_format)
+struct QuotableString : std::string_view {};
+
+template <> struct std::formatter<QuotableString, char> {
+  bool quoted = false;
+
+  template <class ParseContext>
+  constexpr ParseContext::iterator parse(ParseContext &ctx) {
+    auto it = ctx.begin();
+    if (it == ctx.end()) {
+      return it;
+    }
+
+    if (*it == '#') {
+      quoted = true;
+      ++it;
+    }
+    if (it != ctx.end() && *it != '}') {
+      throw std::format_error("Invalid format args for QuotableString.");
+    }
+
+    return it;
+  }
+
+  template <class FmtContext>
+  FmtContext::iterator format(QuotableString s, FmtContext &ctx) const {
+    std::ostringstream out;
+    if (quoted) {
+      out << std::quoted(s);
+    } else {
+      out << s;
+    }
+
+    return std::ranges::copy(std::move(out).str(), ctx.out()).out;
+  }
+};
+#endif
+
+//
+// https://en.cppreference.com/w/cpp/utility/format/formatter#Example
+//
+namespace formatter_test {
+void run() {
+#if defined(__cpp_lib_format)
+  QuotableString a("be"), a2(R"( " be " )");
+  QuotableString b("a question");
+  std::cout << std::format("To {0} or not to {0}, that is {1}.\n", a, b);
+  std::cout << std::format("To {0:} or not to {0:}, that is {1:}.\n", a, b);
+  std::cout << std::format("To {0:#} or not to {0:#}, that is {1:#}.\n", a2,
+                           b);
+#else
+  std::cout << "std::formatter is not available in this MSVC STL\n";
+#endif
+}
+} // namespace formatter_test
+
+//
+// https://en.cppreference.com/w/cpp/utility/format/range_formatter
+//
+namespace format_range_test {
+void run() {
+#if defined(__cpp_lib_format_ranges)
+  assert(std::format("{}", std::views::iota(1, 5)) == "[1, 2, 3, 4]");
+  assert(std::format("{:n}", std::views::iota(1, 5)) == "1, 2, 3, 4");
+
+  std::array ints{12, 10, 15, 14};
+  assert(std::format("{}", ints) == "[12, 10, 15, 14]");
+  assert(std::format("{::X}", ints) == "[C, A, F, E]");
+  assert(std::format("{:n:_^4}", ints) == "_12_, _10_, _15_, _14_");
+
+  std::array char_pairs{std::pair{'A', 5}, std::pair{'B', 10},
+                        std::pair{'C', 12}};
+  assert(std::format("{}", char_pairs) ==
+         "[('A', 5), ('B', 10), ('C', 12)]");
+  assert(std::format("{:m}", char_pairs) == "{'A': 5, 'B': 10, 'C': 12}");
+
+  std::array star{'S', 'T', 'A', 'R'};
+  assert(std::format("{}", star) == "['S', 'T', 'A', 'R']");
+  assert(std::format("{:s}", star) == "STAR");
+  assert(std::format("{:?s}", star) == "\"STAR\"");
+#else
+  std::cout << "std::format range formatting is not available in this MSVC STL\n";
+#endif
+}
+} // namespace format_range_test
+
+//
+// https://en.cppreference.com/w/cpp/io/manip/quoted#Example
+//
+namespace quoted_test {
+void default_delimiter() {
+  const std::string in =
+      "std::quoted() quotes this string and embedded \"quotes\" too";
+  std::stringstream ss;
+  ss << std::quoted(in);
+  std::string out;
+  ss >> std::quoted(out);
+  std::cout << "Default delimiter case:\n"
+               "read in     ["
+            << in << "]\n"
+            << "stored as   [" << ss.str() << "]\n"
+            << "written out [" << out << "]\n\n";
+}
+
+void custom_delimiter() {
+  const char delim{'$'};
+  const char escape{'%'};
+  const std::string in =
+      "std::quoted() quotes this string and embedded $quotes$ $too";
+  std::stringstream ss;
+  ss << std::quoted(in, delim, escape);
+  std::string out;
+  ss >> std::quoted(out, delim, escape);
+
+  std::cout << "Custom delimiter case:\n"
+               "read in     ["
+            << in << "]\n"
+            << "stored as   [" << ss.str() << "]\n"
+            << "written out [" << out << "]\n\n";
+}
+
+void run() {
+  default_delimiter();
+  custom_delimiter();
+}
+} // namespace quoted_test
+
+//
+// https://en.cppreference.com/w/cpp/io/basic_stringstream
+//
+namespace stringstream_test {
+void run() {
+  // The cppreference basic_stringstream page is an API reference page without
+  // a standalone Example section. Exercise the documented string-backed stream
+  // read/write behavior directly.
+  std::stringstream stream;
+  stream << 42 << ' ' << 3.5 << ' ' << "alpha";
+
+  int i{};
+  double d{};
+  std::string s;
+  stream >> i >> d >> s;
+
+  assert(i == 42);
+  assert(d == 3.5);
+  assert(s == "alpha");
+}
+} // namespace stringstream_test
+
+//
+// https://en.cppreference.com/w/cpp/io/basic_ispanstream
+// https://en.cppreference.com/w/cpp/io/basic_ospanstream
+// https://en.cppreference.com/w/cpp/io/basic_spanstream
+//
+namespace spanstream_test {
+void run() {
+#if defined(__cpp_lib_spanstream)
+  // The linked cppreference spanstream pages are API references without
+  // standalone Example sections. Exercise the documented span-backed stream
+  // read/write behavior directly.
+  std::array<char, 64> output_buffer{};
+  std::ospanstream output{std::span<char>{output_buffer}};
+  output << 42 << ' ' << "alpha";
+  const auto written = static_cast<std::size_t>(output.tellp());
+  assert((std::string_view{output_buffer.data(), written} == "42 alpha"));
+
+  std::ispanstream input{std::span<char>{output_buffer.data(), written}};
+  int number{};
+  std::string word;
+  input >> number >> word;
+  assert(number == 42);
+  assert(word == "alpha");
+
+  std::array<char, 6> io_buffer{};
+  std::spanstream stream{std::span<char>{io_buffer}};
+  stream << 7 << ' ' << "beta";
+  stream.seekg(0);
+  stream >> number >> word;
+  assert(number == 7);
+  assert(word == "beta");
+#else
+  std::cout << "std::spanstream is not available in this MSVC STL\n";
+#endif
+}
+} // namespace spanstream_test
+
+//
+// https://en.cppreference.com/w/cpp/utility/functional/move_only_function#Example
+//
+namespace move_only_function_test {
+void run() {
+#if defined(__cpp_lib_move_only_function)
+  std::packaged_task<double()> packaged_task([]() { return 3.14159; });
+
+  std::future<double> future = packaged_task.get_future();
+
+  auto lambda = [task = std::move(packaged_task)]() mutable { task(); };
+
+  // std::function<void()> function = std::move(lambda); // Error
+  std::move_only_function<void()> function = std::move(lambda); // OK
+  function();
+
+  std::cout << future.get();
+  assert(future.valid() == false);
+#else
+  std::cout << "std::move_only_function is not available in this MSVC STL\n";
+#endif
+}
+} // namespace move_only_function_test
 
 //
 // https://en.cppreference.com/w/cpp/utility/tuple#Example
@@ -263,6 +552,43 @@ void run() {
   assert(std::holds_alternative<std::string>(y)); // succeeds
 }
 } // namespace variant_test
+
+//
+// https://en.cppreference.com/w/cpp/utility/variant/visit#Example
+//
+namespace variant_visit_test {
+struct Base {};
+struct Derived : Base {};
+
+// helper type for the visitor
+template <class... Ts> struct overloads : Ts... {
+  using Ts::operator()...;
+};
+
+// the variant to visit
+using var_t = std::variant<int, std::string, Derived>;
+
+void run() {
+  const auto visitor = overloads{
+      // cppreference uses std::print/std::println and curly quotes here. Use
+      // std::cout with ASCII output so this test does not depend on <print>
+      // availability or debugger transport encoding.
+      [](int i) { std::cout << "int = " << i << '\n'; },
+      [](std::string_view s) { std::cout << "string = \"" << s << "\"\n"; },
+      [](const Base &) { std::cout << "base\n"; }};
+
+  const var_t var1 = 42, var2 = "abc", var3 = Derived();
+#if (__cpp_lib_variant >= 202306L)
+  var1.visit(visitor);
+  var2.visit(visitor);
+  var3.visit(visitor);
+#else
+  std::visit(visitor, var1);
+  std::visit(visitor, var2);
+  std::visit(visitor, var3);
+#endif
+}
+} // namespace variant_visit_test
 
 //
 // https://en.cppreference.com/w/cpp/utility/any#Example
@@ -487,6 +813,158 @@ void run() {
 } // namespace is_same_test
 
 //
+// https://en.cppreference.com/w/cpp/types/type_identity
+//
+namespace type_identity_test {
+// The cppreference type_identity page documents this in Notes rather than a
+// standalone Example section: type_identity_t blocks deduction for the second
+// parameter so the first argument decides T.
+template <class T> T bar(T a, std::type_identity_t<T> b) { return a + b; }
+
+void run() {
+#if defined(__cpp_lib_type_identity)
+  // foo(4.2, 1); // error, deduced conflicting types for 'T'
+  std::cout << bar(4.2, 1) << '\n'; // OK, calls bar<double>
+  assert(bar(4.2, 1) == 5.2);
+#else
+  std::cout << "std::type_identity is not available in this MSVC STL\n";
+#endif
+}
+} // namespace type_identity_test
+
+//
+// https://en.cppreference.com/w/cpp/utility/to_underlying#Example
+//
+namespace to_underlying_test {
+#if defined(__cpp_lib_to_underlying)
+enum class E1 : char { e };
+static_assert(std::is_same_v<char, decltype(std::to_underlying(E1::e))>);
+
+enum struct E2 : long { e };
+static_assert(std::is_same_v<long, decltype(std::to_underlying(E2::e))>);
+
+enum E3 : unsigned { e };
+static_assert(std::is_same_v<unsigned, decltype(std::to_underlying(e))>);
+#endif
+
+void run() {
+#if defined(__cpp_lib_to_underlying)
+  enum class ColorMask : std::uint32_t {
+    red = 0xFF,
+    green = (red << 8),
+    blue = (green << 8),
+    alpha = (blue << 8)
+  };
+
+  std::cout << std::hex << std::uppercase << std::setfill('0')
+            << std::setw(8) << std::to_underlying(ColorMask::red) << '\n'
+            << std::setw(8) << std::to_underlying(ColorMask::green) << '\n'
+            << std::setw(8) << std::to_underlying(ColorMask::blue) << '\n';
+  // std::underlying_type_t<ColorMask> x = ColorMask::alpha; // Error: no known conversion
+  [[maybe_unused]] std::underlying_type_t<ColorMask> y =
+      std::to_underlying(ColorMask::alpha); // OK
+  assert(y == 0xFF000000);
+  std::cout << std::dec << std::nouppercase << std::setfill(' ');
+#else
+  std::cout << "std::to_underlying is not available in this MSVC STL\n";
+#endif
+}
+} // namespace to_underlying_test
+
+//
+// https://en.cppreference.com/w/cpp/types/type_index#Example
+//
+namespace type_index_test {
+struct A {
+  virtual ~A() {}
+};
+
+struct B : A {};
+struct C : A {};
+
+void run() {
+  std::unordered_map<std::type_index, std::string> type_names;
+  type_names[std::type_index(typeid(int))] = "int";
+  type_names[std::type_index(typeid(double))] = "double";
+  type_names[std::type_index(typeid(A))] = "A";
+  type_names[std::type_index(typeid(B))] = "B";
+  type_names[std::type_index(typeid(C))] = "C";
+
+  int i;
+  double d;
+  A a;
+
+  // note that we're storing pointer to type A
+  std::unique_ptr<A> b(new B);
+  std::unique_ptr<A> c(new C);
+  std::cout << "i is " << type_names[std::type_index(typeid(i))] << '\n';
+  std::cout << "d is " << type_names[std::type_index(typeid(d))] << '\n';
+  std::cout << "a is " << type_names[std::type_index(typeid(a))] << '\n';
+  std::cout << "*b is " << type_names[std::type_index(typeid(*b))] << '\n';
+  std::cout << "*c is " << type_names[std::type_index(typeid(*c))] << '\n';
+}
+} // namespace type_index_test
+
+//
+// https://en.cppreference.com/w/cpp/utility/integer_sequence#Example
+//
+namespace integer_sequence_test {
+namespace details {
+template <typename Array, std::size_t... I>
+constexpr auto array_to_tuple_impl(const Array &a, std::index_sequence<I...>) {
+  return std::make_tuple(a[I]...);
+}
+
+template <class Ch, class Tr, class Tuple, std::size_t... Is>
+void print_tuple_impl(std::basic_ostream<Ch, Tr> &os, const Tuple &t,
+                      std::index_sequence<Is...>) {
+  ((os << (Is ? ", " : "") << std::get<Is>(t)), ...);
+}
+} // namespace details
+
+template <typename T, T... ints>
+void print_sequence(int id, std::integer_sequence<T, ints...> int_seq) {
+  std::cout << id << ") The sequence of size " << int_seq.size() << ": ";
+  ((std::cout << ints << ' '), ...);
+  std::cout << '\n';
+}
+
+template <typename T, std::size_t N,
+          typename Indx = std::make_index_sequence<N>>
+constexpr auto array_to_tuple(const std::array<T, N> &a) {
+  return details::array_to_tuple_impl(a, Indx{});
+}
+
+template <class Ch, class Tr, class... Args>
+auto &operator<<(std::basic_ostream<Ch, Tr> &os,
+                 const std::tuple<Args...> &t) {
+  os << '(';
+  details::print_tuple_impl(os, t, std::index_sequence_for<Args...>{});
+  return os << ')';
+}
+
+void run() {
+  print_sequence(1,
+                 std::integer_sequence<unsigned, 9, 2, 5, 1, 9, 1, 6>{});
+  print_sequence(2, std::make_integer_sequence<int, 12>{});
+  print_sequence(3, std::make_index_sequence<10>{});
+  print_sequence(4, std::index_sequence_for<std::ios, float, signed>{});
+
+  constexpr std::array<int, 4> array{1, 2, 3, 4};
+  auto tuple1 = array_to_tuple(array);
+  static_assert(std::is_same_v<decltype(tuple1),
+                               std::tuple<int, int, int, int>>,
+                "");
+  std::cout << "5) tuple1: " << tuple1 << '\n';
+
+  constexpr auto tuple2 =
+      array_to_tuple<int, 4, std::integer_sequence<std::size_t, 1, 0, 3, 2>>(
+          array);
+  std::cout << "6) tuple2: " << tuple2 << '\n';
+}
+} // namespace integer_sequence_test
+
+//
 // https://en.cppreference.com/w/cpp/numeric/ratio/ratio_add#Example
 //
 namespace ratio_test {
@@ -575,6 +1053,186 @@ void run() {
   print_two_way_comparison(p1, p3);
 }
 } // namespace strong_ordering_test
+
+//
+// https://en.cppreference.com/w/cpp/utility/compare/weak_ordering#Example
+//
+namespace weak_ordering_test {
+// Keep the cppreference idea of a custom weak ordering, but use a tiny ASCII
+// case-insensitive wrapper so the driver test has deterministic output.
+struct CaseInsensitiveString {
+  std::string s;
+
+  friend bool operator==(const CaseInsensitiveString &,
+                         const CaseInsensitiveString &) = default;
+
+  friend std::weak_ordering operator<=>(const CaseInsensitiveString &lhs,
+                                        const CaseInsensitiveString &rhs) {
+    const auto to_lower = [](unsigned char c) {
+      return static_cast<char>(std::tolower(c));
+    };
+
+    const auto min_size = std::min(lhs.s.size(), rhs.s.size());
+    for (std::size_t i = 0; i != min_size; ++i) {
+      const char l = to_lower(static_cast<unsigned char>(lhs.s[i]));
+      const char r = to_lower(static_cast<unsigned char>(rhs.s[i]));
+      if (l < r) {
+        return std::weak_ordering::less;
+      }
+      if (l > r) {
+        return std::weak_ordering::greater;
+      }
+    }
+
+    return lhs.s.size() <=> rhs.s.size();
+  }
+};
+
+void run() {
+  const CaseInsensitiveString a{"Alpha"};
+  const CaseInsensitiveString b{"alpha"};
+  const CaseInsensitiveString c{"beta"};
+
+  assert((a <=> b) == 0);
+  assert((a <=> c) < 0);
+  std::cout << "weak_ordering assertions passed\n";
+}
+} // namespace weak_ordering_test
+
+//
+// https://en.cppreference.com/w/cpp/utility/compare/partial_ordering#Example
+//
+namespace partial_ordering_test {
+// Keep the cppreference idea of a partially ordered value, including NaN as
+// unordered, but make the example assertion-based for the driver harness.
+struct Box {
+  double value;
+
+  friend bool operator==(Box, Box) = default;
+  friend std::partial_ordering operator<=>(Box lhs, Box rhs) {
+    return lhs.value <=> rhs.value;
+  }
+};
+
+void run() {
+  const Box a{1.0};
+  const Box b{2.0};
+  const Box nan{std::numeric_limits<double>::quiet_NaN()};
+
+  assert((a <=> b) < 0);
+  assert((nan <=> a) == std::partial_ordering::unordered);
+  std::cout << "partial_ordering assertions passed\n";
+}
+} // namespace partial_ordering_test
+
+//
+// https://en.cppreference.com/w/cpp/utility/intcmp#Example
+// https://en.cppreference.com/w/cpp/utility/in_range#Example
+//
+namespace integer_comparison_test {
+void run() {
+#if defined(__cpp_lib_integer_comparison_functions)
+#pragma warning(push)
+#pragma warning(disable : 4146)
+  // cppreference intentionally compares signed values with unsigned values to
+  // show that std::cmp_* avoids the usual arithmetic-conversion traps. Keep
+  // those operands and silence MSVC's unary-minus-on-unsigned warning locally.
+  static_assert(std::cmp_equal(-1, -1u) == false);
+  static_assert(std::cmp_not_equal(-1, -1u) == true);
+#pragma warning(pop)
+  static_assert(std::cmp_less(-1, 0u) == true);
+  static_assert(std::cmp_greater(255u, -1) == true);
+  static_assert(std::in_range<std::uint8_t>(255) == true);
+  static_assert(std::in_range<std::uint8_t>(256) == false);
+
+  std::cout << "integer comparison assertions passed\n";
+#else
+  std::cout << "integer comparison helpers are not available in this MSVC STL\n";
+#endif
+}
+} // namespace integer_comparison_test
+
+//
+// https://en.cppreference.com/w/cpp/utility/as_const#Example
+//
+namespace as_const_test {
+struct S {
+  void f() { std::cout << "non-const\n"; }
+  void f() const { std::cout << "const\n"; }
+};
+
+void run() {
+  S s;
+  s.f();
+  std::as_const(s).f();
+}
+} // namespace as_const_test
+
+//
+// https://en.cppreference.com/w/cpp/utility/apply#Example
+//
+namespace apply_test {
+// cppreference's apply page demonstrates tuple expansion. Keep the tuple
+// expansion behavior and use std::cout instead of larger formatting helpers.
+template <typename Tuple, std::size_t... I>
+void print_tuple_impl(const Tuple &t, std::index_sequence<I...>) {
+  ((std::cout << (I == 0 ? "" : ", ") << std::get<I>(t)), ...);
+}
+
+template <typename... Args> void print_tuple(const std::tuple<Args...> &t) {
+  std::cout << '(';
+  print_tuple_impl(t, std::index_sequence_for<Args...>{});
+  std::cout << ")\n";
+}
+
+void run() {
+  std::tuple t{1, 2.0, std::string{"three"}};
+  std::apply([](auto &&...args) { ((std::cout << args << ' '), ...); }, t);
+  std::cout << '\n';
+  print_tuple(t);
+}
+} // namespace apply_test
+
+//
+// https://en.cppreference.com/w/cpp/utility/make_from_tuple#Example
+//
+namespace make_from_tuple_test {
+// Compact the cppreference construction example to the constructor path that is
+// relevant for coverage: tuple elements must be forwarded into Foo's ctor.
+struct Foo {
+  Foo(int first, float second, int third)
+      : value(first + static_cast<int>(second) + third) {}
+
+  int value;
+};
+
+void run() {
+  auto tuple = std::make_tuple(42, 3.14f, 0);
+  Foo foo = std::make_from_tuple<Foo>(tuple);
+  assert(foo.value == 45);
+  std::cout << "make_from_tuple value: " << foo.value << '\n';
+}
+} // namespace make_from_tuple_test
+
+//
+// https://en.cppreference.com/w/cpp/utility/forward_like#Example
+//
+namespace forward_like_test {
+void run() {
+#if defined(__cpp_lib_forward_like)
+  // This is a feature-test-gated C++23 example. Older toolsets compile this
+  // driver too, so keep the cppreference operation behind the STL macro.
+  int value = 42;
+  static_assert(std::is_lvalue_reference_v<
+                decltype(std::forward_like<int &>(value))>);
+  static_assert(std::is_rvalue_reference_v<
+                decltype(std::forward_like<int &&>(value))>);
+  std::cout << "forward_like assertions passed\n";
+#else
+  std::cout << "std::forward_like is not available in this MSVC STL\n";
+#endif
+}
+} // namespace forward_like_test
 
 //
 // https://en.cppreference.com/w/cpp/numeric/constants#Example

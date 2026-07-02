@@ -1,6 +1,13 @@
 //
 // https://en.cppreference.com/w/cpp/filesystem/path/lexically_normal#Example
 //
+#if defined(_MSC_VER)
+// Release builds define NDEBUG, so assert-only cppreference verification values
+// can look unused under /WX. Keep the examples intact and silence that warning
+// only for this test translation unit.
+#pragma warning(disable : 4189)
+#endif
+
 #include <algorithm>
 #include <cassert>
 #include <chrono>
@@ -19,6 +26,8 @@ constexpr fs::perms write_perms =
     fs::perms::owner_write | fs::perms::group_write | fs::perms::others_write;
 
 void remove_sandbox(const fs::path &path) {
+  // Filesystem examples share a scratch directory inside one driver session;
+  // remove stale contents so reruns after debugger stops stay deterministic.
   std::error_code ec;
   fs::remove_all(path, ec);
 }
@@ -39,6 +48,46 @@ void run() {
   std::cout << "filesystem path lexical assertions passed\n";
 }
 } // namespace filesystem_path_test
+
+//
+// https://en.cppreference.com/w/cpp/filesystem/absolute
+// https://en.cppreference.com/w/cpp/filesystem/relative
+// https://en.cppreference.com/w/cpp/filesystem/current_path
+//
+namespace filesystem_path_relation_test {
+void run() {
+  const fs::path previous_current_path = fs::current_path();
+  const fs::path sandbox{"sandbox"};
+  remove_sandbox(sandbox);
+
+  assert(fs::create_directories(sandbox / "a" / "b"));
+  std::ofstream(sandbox / "a" / "file.txt").put('a');
+
+  try {
+    // cppreference documents these as current-directory-sensitive APIs. The
+    // driver harness restores current_path before returning so following
+    // filesystem examples are not affected.
+    fs::current_path(sandbox);
+
+    const fs::path absolute_file = fs::absolute("a/file.txt");
+    assert(absolute_file.is_absolute());
+    assert(fs::exists(absolute_file));
+
+    assert(fs::relative(absolute_file, fs::current_path()) ==
+           fs::path("a") / "file.txt");
+    assert(fs::proximate(absolute_file, fs::current_path()) ==
+           fs::path("a") / "file.txt");
+  } catch (...) {
+    fs::current_path(previous_current_path);
+    remove_sandbox(sandbox);
+    throw;
+  }
+
+  fs::current_path(previous_current_path);
+  remove_sandbox(sandbox);
+  std::cout << "filesystem path relation assertions passed\n";
+}
+} // namespace filesystem_path_relation_test
 
 //
 // https://en.cppreference.com/w/cpp/filesystem/directory_iterator#Example
@@ -168,6 +217,9 @@ void run() {
 // https://en.cppreference.com/w/cpp/filesystem/is_directory
 //
 namespace filesystem_status_test {
+// These linked filesystem pages document query APIs rather than one standalone
+// combined Example section, so use a small sandbox and verify the public status
+// predicates directly.
 void run() {
   const fs::path sandbox{"sandbox"};
   remove_sandbox(sandbox);
@@ -232,6 +284,8 @@ void run() {
 // https://en.cppreference.com/w/cpp/filesystem/is_empty
 //
 namespace filesystem_is_empty_test {
+// The cppreference is_empty page has no standalone Example section; create
+// explicit empty/non-empty file and directory cases in the sandbox.
 void run() {
   const fs::path sandbox{"sandbox"};
   remove_sandbox(sandbox);
@@ -277,6 +331,8 @@ void run() {
 // https://en.cppreference.com/w/cpp/filesystem/permissions
 //
 namespace filesystem_permissions_test {
+// The cppreference permissions page documents the API without a standalone
+// portable Example section; use a sandbox file and verify write-bit changes.
 bool has_write_permissions(fs::perms perms) {
   return (perms & write_perms) != fs::perms::none;
 }
@@ -387,7 +443,12 @@ void run() {
 }
 } // namespace filesystem_read_symlink_test
 
+//
+// https://en.cppreference.com/w/cpp/filesystem/copy_symlink
+//
 namespace filesystem_copy_symlink_test {
+// The cppreference copy_symlink page has no standalone Example section; create
+// a sandbox symlink and verify the copied link still resolves to the target.
 void run() {
   const fs::path sandbox{"sandbox"};
   remove_sandbox(sandbox);
@@ -411,6 +472,8 @@ void run() {
 // https://en.cppreference.com/w/cpp/filesystem/directory_entry
 //
 namespace filesystem_directory_entry_test {
+// The cppreference directory_entry page has no standalone Example section; use
+// a sandbox file to verify cached metadata, refresh(), and status forwarding.
 void run() {
   const fs::path sandbox{"sandbox"};
   remove_sandbox(sandbox);
@@ -464,6 +527,8 @@ void run() {
 //
 namespace filesystem_rename_test {
 void run() {
+  // cppreference uses relative paths. Anchor the same shape under current_path()
+  // so cleanup targets the driver test sandbox even after earlier examples.
   std::filesystem::path p = std::filesystem::current_path() / "sandbox";
   remove_sandbox(p);
   std::filesystem::create_directories(p / "from");
@@ -565,3 +630,161 @@ void run() {
   std::cout << "Deleted " << count << " files or directories.\n";
 }
 } // namespace filesystem_canonical_test
+
+//
+// https://en.cppreference.com/w/cpp/filesystem/status
+// https://en.cppreference.com/w/cpp/filesystem/equivalent
+// https://en.cppreference.com/w/cpp/filesystem/file_size
+// https://en.cppreference.com/w/cpp/filesystem/copy_file
+// https://en.cppreference.com/w/cpp/filesystem/rename
+// https://en.cppreference.com/w/cpp/filesystem/permissions
+// https://en.cppreference.com/w/cpp/filesystem/remove
+// https://en.cppreference.com/w/cpp/filesystem/resize_file
+// https://en.cppreference.com/w/cpp/filesystem/last_write_time
+// https://en.cppreference.com/w/cpp/filesystem/canonical
+//
+namespace filesystem_error_code_overload_test {
+void run() {
+  const fs::path sandbox{"sandbox_fs_error_code"};
+  remove_sandbox(sandbox);
+
+  assert(fs::create_directory(sandbox));
+  assert(fs::create_directory(sandbox / "dir"));
+  std::ofstream(sandbox / "file.txt").put('x');
+
+  std::error_code ec;
+  assert(fs::exists(sandbox / "file.txt", ec));
+  assert(!ec);
+
+  const auto st = fs::status(sandbox / "file.txt", ec);
+  assert(!ec);
+  assert(fs::is_regular_file(st));
+
+  const auto same =
+      fs::equivalent(sandbox / "file.txt", sandbox / "missing.txt", ec);
+  assert(!same);
+  assert(ec);
+
+  ec.clear();
+  // Directory size reporting is implementation-defined for std::filesystem;
+  // Windows-style providers can report a zero-sized directory without setting
+  // ec. Use a missing path for the non-throwing file_size error contract.
+  const auto bad_size = fs::file_size(sandbox / "missing-size.txt", ec);
+  assert(ec);
+  assert(bad_size == static_cast<std::uintmax_t>(-1));
+
+  ec.clear();
+  const bool copied =
+      fs::copy_file(sandbox / "missing-source.txt", sandbox / "copy.txt", ec);
+  assert(!copied);
+  assert(ec);
+
+  ec.clear();
+  fs::rename(sandbox / "missing-rename.txt", sandbox / "renamed.txt", ec);
+  assert(ec);
+
+  ec.clear();
+  fs::permissions(sandbox / "missing-permissions.txt",
+                  fs::perms::owner_read, ec);
+  assert(ec);
+
+  ec.clear();
+  const bool removed = fs::remove(sandbox / "missing-remove.txt", ec);
+  assert(!removed);
+  assert(!ec);
+
+  ec.clear();
+  const auto removed_count = fs::remove_all(sandbox / "missing-remove-all", ec);
+  assert(removed_count == 0);
+  assert(!ec);
+
+  ec.clear();
+  fs::resize_file(sandbox / "missing-resize.txt", 42, ec);
+  assert(ec);
+
+  ec.clear();
+  (void)fs::last_write_time(sandbox / "missing-time.txt", ec);
+  assert(ec);
+
+  ec.clear();
+  (void)fs::canonical(sandbox / "missing-canonical.txt", ec);
+  assert(ec);
+
+  remove_sandbox(sandbox);
+}
+} // namespace filesystem_error_code_overload_test
+
+//
+// https://en.cppreference.com/w/cpp/filesystem/directory_entry/refresh
+//
+namespace filesystem_directory_entry_refresh_test {
+void run() {
+  const fs::path sandbox{"sandbox_fs_refresh"};
+  remove_sandbox(sandbox);
+
+  assert(fs::create_directory(sandbox));
+  const fs::path target = sandbox / "entry";
+  std::ofstream(target).put('x');
+
+  std::error_code ec;
+  fs::directory_entry entry{target};
+  assert(entry.is_regular_file(ec));
+  assert(!ec);
+
+  assert(fs::remove(target));
+  assert(fs::create_directory(target));
+
+  entry.refresh(ec);
+  assert(!ec);
+  assert(entry.is_directory(ec));
+  assert(!ec);
+
+  remove_sandbox(sandbox);
+}
+} // namespace filesystem_directory_entry_refresh_test
+
+//
+// https://en.cppreference.com/w/cpp/filesystem/recursive_directory_iterator
+// https://en.cppreference.com/w/cpp/filesystem/recursive_directory_iterator/disable_recursion_pending
+// https://en.cppreference.com/w/cpp/filesystem/recursive_directory_iterator/increment
+//
+namespace filesystem_recursive_directory_options_test {
+void run() {
+  const fs::path sandbox{"sandbox_fs_recursive_options"};
+  remove_sandbox(sandbox);
+
+  assert(fs::create_directories(sandbox / "skip" / "child"));
+  assert(fs::create_directories(sandbox / "keep"));
+  std::ofstream(sandbox / "skip" / "child" / "hidden.txt").put('h');
+  std::ofstream(sandbox / "keep" / "visible.txt").put('v');
+
+  std::error_code ec;
+  std::size_t visited_files = 0;
+  for (fs::recursive_directory_iterator it{
+           sandbox, fs::directory_options::none, ec},
+       end;
+       it != end;) {
+    assert(!ec);
+
+    if (it->path().filename() == "skip") {
+      assert(it.recursion_pending());
+      it.disable_recursion_pending();
+      assert(!it.recursion_pending());
+    }
+
+    if (it->is_regular_file(ec)) {
+      assert(!ec);
+      assert(it->path().filename() != "hidden.txt");
+      ++visited_files;
+    } else {
+      assert(!ec);
+    }
+
+    it.increment(ec);
+    assert(!ec);
+  }
+
+  assert(visited_files == 1);
+  remove_sandbox(sandbox);
+}
+} // namespace filesystem_recursive_directory_options_test

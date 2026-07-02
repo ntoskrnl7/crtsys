@@ -1,6 +1,7 @@
 //
 // https://en.cppreference.com/w/cpp/utility/functional/function#Example
 //
+#include <cassert>
 #include <functional>
 #include <iostream>
 #include <memory>
@@ -139,3 +140,124 @@ void run() {
             << f6(std::make_unique<Foo>(foo)) << '\n';
 }
 } // namespace bind_test
+
+//
+// https://en.cppreference.com/w/cpp/utility/functional/not_fn#Example
+//
+namespace not_fn_test {
+bool is_same(int a, int b) noexcept { return a == b; }
+
+struct S {
+  int val;
+  bool is_same(int arg) const noexcept { return val == arg; }
+};
+
+void run() {
+  auto is_differ = std::not_fn(is_same);
+  assert(is_differ(8, 6));
+  assert(!is_differ(8, 8));
+  static_assert(noexcept(is_differ(8, 6)) == noexcept(is_same(8, 6)));
+
+  auto member_differ = std::not_fn(&S::is_same);
+  assert(member_differ(S{3}, 6));
+  assert(!member_differ(S{6}, 6));
+  static_assert(noexcept(member_differ(S{3}, 6)) ==
+                noexcept(S{3}.is_same(6)));
+
+  auto same = [](int a, int b) { return a == b; };
+  auto differ = std::not_fn(same);
+  assert(differ(1, 2));
+  assert(!differ(1, 1));
+
+#if defined(__cpp_lib_not_fn) && __cpp_lib_not_fn >= 202306L
+  auto differ_cpp26 = std::not_fn<same>();
+  assert(differ_cpp26(1, 2));
+  assert(!differ_cpp26(1, 1));
+#endif
+}
+} // namespace not_fn_test
+
+//
+// https://en.cppreference.com/w/cpp/utility/functional/mem_fn#Example
+//
+namespace mem_fn_test {
+struct Foo {
+  void display_greeting() { std::cout << "Hello, world.\n"; }
+  void display_number(int i) { std::cout << "number: " << i << '\n'; }
+  int add_xy(int x, int y) { return data + x + y; }
+  template <typename... Args> int add_many(Args... args) {
+    return data + (args + ...);
+  }
+  auto add_them(auto... args) { return data + (args + ...); }
+
+  int data = 7;
+};
+
+void run() {
+  Foo f;
+
+  auto greet = std::mem_fn(&Foo::display_greeting);
+  greet(f);
+
+  auto print_num = std::mem_fn(&Foo::display_number);
+  print_num(f, 42);
+
+  auto access_data = std::mem_fn(&Foo::data);
+  std::cout << "data: " << access_data(f) << '\n';
+
+  auto add_xy = std::mem_fn(&Foo::add_xy);
+  std::cout << "add_xy: " << add_xy(f, 1, 2) << '\n';
+
+  auto u = std::make_unique<Foo>();
+  std::cout << "access_data(u): " << access_data(u) << '\n';
+  std::cout << "add_xy(u, 1, 2): " << add_xy(u, 1, 2) << '\n';
+
+  auto add_many = std::mem_fn(&Foo::add_many<short, int, long>);
+  // Keep cppreference's plain integer literal. MSVC reports the int-to-short
+  // conversion warning under /W4 /WX while instantiating this call.
+#pragma warning(push)
+#pragma warning(disable : 4242 4244)
+  std::cout << "add_many: " << add_many(f, 1, 2, 3L) << '\n';
+#pragma warning(pop)
+
+  auto add_them = std::mem_fn(&Foo::add_them<short, int, float, double>);
+  // Keep cppreference's plain integer literal for the same reason.
+#pragma warning(push)
+#pragma warning(disable : 4242 4244)
+  std::cout << "add_them: " << add_them(f, 5, 7, 10.0f, 13.0) << '\n';
+#pragma warning(pop)
+}
+} // namespace mem_fn_test
+
+//
+// https://en.cppreference.com/w/cpp/utility/functional/bind_front#Example
+//
+namespace bind_front_test {
+int minus(int a, int b) { return a - b; }
+
+struct S {
+  int minus(int a, int b) { return a - b; }
+};
+
+void run() {
+  auto fifty_minus = std::bind_front(minus, 50);
+  assert(fifty_minus(3) == 47);
+
+  auto member_minus = std::bind_front(&S::minus, S{}, 50);
+  assert(member_minus(3) == 47);
+
+  auto lambda = [](int a, int b, int c) { return a - b - c; };
+  auto one_minus = std::bind_front(lambda, 1);
+  assert(one_minus(2, 3) == -4);
+
+#if defined(__cpp_lib_bind_front) && __cpp_lib_bind_front >= 202306L
+  auto fifty_minus_cpp26 = std::bind_front<minus>(50);
+  assert(fifty_minus_cpp26(3) == 47);
+#endif
+
+#if defined(__cpp_lib_bind_back)
+  auto minus_fifty = std::bind_back(minus, 50);
+  assert(minus_fifty(3) == -47);
+#endif
+}
+} // namespace bind_front_test

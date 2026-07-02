@@ -42,8 +42,7 @@ void run() {
   {
     std::lock_guard lk(m);
     ready = true;
-    std::cout
-        << "condition_variable_test::run() signals data ready for processing\n";
+    std::cout << "main() signals data ready for processing\n";
   }
   cv.notify_one();
 
@@ -271,6 +270,8 @@ void run() {
 // https://en.cppreference.com/w/cpp/thread/shared_lock
 //
 namespace shared_lock_test {
+// The cppreference shared_lock page has no standalone Example section; use a
+// small direct coverage check for lock/unlock ownership semantics.
 void run() {
   std::shared_mutex mutex;
   int value = 0;
@@ -289,6 +290,110 @@ void run() {
   assert(read_lock.owns_lock());
 }
 } // namespace shared_lock_test
+
+//
+// https://en.cppreference.com/w/cpp/thread/shared_timed_mutex#Example
+//
+namespace shared_timed_mutex_test {
+class R {
+  mutable std::shared_timed_mutex mut;
+  int data = 0;
+
+public:
+  R() = default;
+  explicit R(int value) : data(value) {}
+
+  R &operator=(const R &other) {
+    // requires exclusive ownership to write to *this
+    std::unique_lock<std::shared_timed_mutex> lhs(mut, std::defer_lock);
+    // requires shared ownership to read from other
+    std::shared_lock<std::shared_timed_mutex> rhs(other.mut, std::defer_lock);
+    std::lock(lhs, rhs);
+    data = other.data;
+    return *this;
+  }
+
+  int value() const {
+    std::shared_lock<std::shared_timed_mutex> lock(mut);
+    return data;
+  }
+};
+
+void run() {
+  R r;
+  R other(42);
+  // cppreference's page marks this Example as incomplete and its main() only
+  // constructs R. Call assignment once so the demonstrated locking path is
+  // actually covered by the driver test.
+  r = other;
+  assert(r.value() == 42);
+}
+} // namespace shared_timed_mutex_test
+
+//
+// https://en.cppreference.com/w/cpp/thread/shared_timed_mutex/try_lock_for
+// https://en.cppreference.com/w/cpp/thread/shared_timed_mutex/try_lock_shared_for
+// https://en.cppreference.com/w/cpp/thread/shared_timed_mutex/try_lock_shared_until
+//
+namespace shared_timed_mutex_timed_edge_test {
+template <class LockAttempt, class Unlock>
+bool eventually_locks(LockAttempt lock_attempt, Unlock unlock) {
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(50);
+  do {
+    if (lock_attempt()) {
+      unlock();
+      return true;
+    }
+    std::this_thread::yield();
+  } while (std::chrono::steady_clock::now() < deadline);
+  return false;
+}
+
+void run() {
+  std::shared_timed_mutex mutex;
+
+  mutex.lock();
+  bool shared_acquired_while_exclusive = true;
+  std::thread shared_contender([&] {
+    shared_acquired_while_exclusive =
+        mutex.try_lock_shared_for(std::chrono::milliseconds(5));
+    if (shared_acquired_while_exclusive) {
+      mutex.unlock_shared();
+    }
+  });
+  shared_contender.join();
+  assert(!shared_acquired_while_exclusive);
+  mutex.unlock();
+
+  assert(eventually_locks(
+      [&] {
+        return mutex.try_lock_shared_until(std::chrono::steady_clock::now() +
+                                           std::chrono::milliseconds(5));
+      },
+      [&] { mutex.unlock_shared(); }));
+
+  mutex.lock_shared();
+  bool exclusive_acquired_while_shared = true;
+  std::thread exclusive_contender([&] {
+    exclusive_acquired_while_shared =
+        mutex.try_lock_for(std::chrono::milliseconds(5));
+    if (exclusive_acquired_while_shared) {
+      mutex.unlock();
+    }
+  });
+  exclusive_contender.join();
+  assert(!exclusive_acquired_while_shared);
+  mutex.unlock_shared();
+
+  assert(eventually_locks(
+      [&] {
+        return mutex.try_lock_until(std::chrono::steady_clock::now() +
+                                    std::chrono::milliseconds(5));
+      },
+      [&] { mutex.unlock(); }));
+}
+} // namespace shared_timed_mutex_timed_edge_test
 
 //
 // https://en.cppreference.com/w/cpp/thread/scoped_lock#Example
@@ -569,6 +674,8 @@ void run() {
 #include <thread>
 
 namespace timed_mutex_test {
+// The cppreference timed_mutex page has no standalone Example section; use a
+// small direct coverage check for timed acquisition success/failure.
 void run() {
   std::timed_mutex mutex;
   mutex.lock();
@@ -598,6 +705,9 @@ void run() {
 #include <thread>
 
 namespace recursive_timed_mutex_test {
+// The cppreference recursive_timed_mutex page has no standalone Example
+// section; use a small direct coverage check for recursive ownership and timed
+// acquisition failure from another thread.
 void run() {
   std::recursive_timed_mutex mutex;
   mutex.lock();
@@ -775,6 +885,100 @@ void run() {
 } // namespace future_test
 
 //
+// https://en.cppreference.com/w/cpp/thread/future/valid#Example
+//
+#include <future>
+#include <iostream>
+
+namespace future_valid_test {
+void run() {
+  std::promise<void> p;
+  std::future<void> f = p.get_future();
+
+  std::cout << std::boolalpha;
+
+  std::cout << f.valid() << '\n';
+  assert(f.valid());
+  p.set_value();
+  std::cout << f.valid() << '\n';
+  assert(f.valid());
+  f.get();
+  std::cout << f.valid() << '\n';
+  assert(!f.valid());
+}
+} // namespace future_valid_test
+
+//
+// https://en.cppreference.com/w/cpp/thread/future#Example_with_exceptions
+//
+#include <future>
+#include <iostream>
+#include <stdexcept>
+#include <thread>
+
+namespace future_exception_test {
+void run() {
+  std::promise<int> p;
+  std::future<int> f = p.get_future();
+  std::thread t([&p] {
+    try {
+      // code that may throw
+      throw std::runtime_error("Example");
+    } catch (...) {
+      try {
+        // store anything thrown in the promise
+        p.set_exception(std::current_exception());
+      } catch (...) {
+      } // set_exception() may throw too
+    }
+  });
+  try {
+    std::cout << f.get();
+    assert(false);
+  } catch (const std::exception &e) {
+    std::cout << "Exception from the thread: " << e.what() << '\n';
+  }
+  t.join();
+}
+} // namespace future_exception_test
+
+//
+// https://en.cppreference.com/w/cpp/thread/promise/set_exception#Example
+//
+#include <future>
+#include <iostream>
+#include <stdexcept>
+#include <thread>
+
+namespace promise_set_exception_test {
+void run() {
+  std::promise<int> p;
+  std::future<int> f = p.get_future();
+  std::thread t([&p] {
+    try {
+      // code that may throw
+      throw std::runtime_error("Example");
+    } catch (...) {
+      try {
+        // store anything thrown in the promise
+        p.set_exception(std::current_exception());
+        // or throw a custom exception instead
+        // p.set_exception(std::make_exception_ptr(MyException("mine")));
+      } catch (...) {
+      } // set_exception() may throw too
+    }
+  });
+  try {
+    std::cout << f.get();
+    assert(false);
+  } catch (const std::exception &e) {
+    std::cout << "Exception from the thread: " << e.what() << '\n';
+  }
+  t.join();
+}
+} // namespace promise_set_exception_test
+
+//
 // https://en.cppreference.com/w/cpp/thread/async#Example
 //
 #include <algorithm>
@@ -841,6 +1045,42 @@ void run() {
   a1.wait();
 }
 } // namespace async_test
+
+//
+// https://en.cppreference.com/w/cpp/thread/future/wait_for#Example
+//
+#include <chrono>
+#include <future>
+#include <iostream>
+#include <thread>
+
+namespace future_wait_for_test {
+using namespace std::chrono_literals;
+
+void run() {
+  std::future<int> future = std::async(std::launch::async, []() {
+    std::this_thread::sleep_for(3s);
+    return 8;
+  });
+
+  std::cout << "waiting...\n";
+  std::future_status status;
+  do {
+    switch (status = future.wait_for(1s); status) {
+    case std::future_status::deferred:
+      std::cout << "deferred\n";
+      break;
+    case std::future_status::timeout:
+      std::cout << "timeout\n";
+      break;
+    case std::future_status::ready:
+      std::cout << "ready!\n";
+      break;
+    }
+  } while (status != std::future_status::ready);
+  std::cout << "result is " << future.get() << '\n';
+}
+} // namespace future_wait_for_test
 
 //
 // https://en.cppreference.com/w/cpp/thread/future/wait_until#Example
@@ -961,6 +1201,69 @@ void run() {
   assert(elapsed2.count() >= 0);
 }
 } // namespace shared_future_test
+
+//
+// https://en.cppreference.com/w/cpp/thread/shared_future/wait_for#Example
+//
+#include <chrono>
+#include <future>
+#include <iostream>
+#include <thread>
+
+namespace shared_future_wait_for_test {
+using namespace std::chrono_literals;
+
+void run() {
+  std::shared_future<int> future = std::async(std::launch::async, []() {
+    std::this_thread::sleep_for(3s);
+    return 8;
+  });
+
+  std::cout << "waiting...\n";
+  std::future_status status;
+  do {
+    switch (status = future.wait_for(1s); status) {
+    case std::future_status::deferred:
+      std::cout << "deferred\n";
+      break;
+    case std::future_status::timeout:
+      std::cout << "timeout\n";
+      break;
+    case std::future_status::ready:
+      std::cout << "ready!\n";
+      break;
+    }
+  } while (status != std::future_status::ready);
+  std::cout << "result is " << future.get() << '\n';
+}
+} // namespace shared_future_wait_for_test
+
+//
+// https://en.cppreference.com/w/cpp/thread/future/wait_for
+// https://en.cppreference.com/w/cpp/thread/shared_future/wait_for
+//
+namespace future_timeout_edge_test {
+void run() {
+  std::promise<int> promise;
+  std::future<int> future = promise.get_future();
+  assert(future.wait_for(std::chrono::milliseconds(1)) ==
+         std::future_status::timeout);
+  promise.set_value(7);
+  assert(future.wait_for(std::chrono::milliseconds(1)) ==
+         std::future_status::ready);
+  assert(future.get() == 7);
+
+  std::promise<int> shared_promise;
+  std::shared_future<int> shared_future =
+      shared_promise.get_future().share();
+  assert(shared_future.wait_for(std::chrono::milliseconds(1)) ==
+         std::future_status::timeout);
+  shared_promise.set_value(9);
+  assert(shared_future.wait_for(std::chrono::milliseconds(1)) ==
+         std::future_status::ready);
+  assert(shared_future.get() == 9);
+}
+} // namespace future_timeout_edge_test
 
 //
 // https://en.cppreference.com/w/cpp/thread/promise#Example

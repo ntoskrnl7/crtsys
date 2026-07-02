@@ -11,6 +11,13 @@ A feature missing from this list should be read as "not yet explicitly covered
 by the driver tests", not as "unsupported", unless it is called out under known
 limitations or blockers.
 
+`crtsys` does not reimplement a small, project-specific STL. It builds around
+MSVC CRT/STL/VCRT/UCRT source paths and the LDK Windows / NTDLL / ICU-compatible
+API substrate used by those paths. That means unlisted STL/header paths often
+share the same underlying runtime dependencies as the listed tests. They are
+not automatically guaranteed in every kernel context, but absence from this
+matrix is not evidence of non-support.
+
 Legend:
 
 - [x] Driver-test covered: explicitly exercised by the `crtsys` kernel driver
@@ -87,6 +94,15 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   [(tested)](../test/cmake/driver/src/cpp/lang/exceptions.cpp#L98)
 - [x] [std::exception_ptr](https://en.cppreference.com/w/cpp/error/exception_ptr)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/exception.cpp)
+- [x] Diagnostics and system-error helpers:
+      [std::uncaught_exceptions](https://en.cppreference.com/w/cpp/error/uncaught_exception),
+      [std::nested_exception](https://en.cppreference.com/w/cpp/error/nested_exception),
+      [std::throw_with_nested](https://en.cppreference.com/w/cpp/error/throw_with_nested),
+      [std::rethrow_if_nested](https://en.cppreference.com/w/cpp/error/rethrow_if_nested),
+      [std::error_code](https://en.cppreference.com/w/cpp/error/error_code),
+      [std::error_condition](https://en.cppreference.com/w/cpp/error/error_condition),
+      and [std::system_error](https://en.cppreference.com/w/cpp/error/system_error)
+  [(cppreference examples)](../test/cmake/driver/src/cpp/stl/exception.cpp)
 
 ### RTTI
 
@@ -111,6 +127,12 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/atomic.cpp)
 - [x] [std::atomic_flag](https://en.cppreference.com/w/cpp/atomic/atomic_flag)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/atomic.cpp)
+- [x] Atomic fences and free atomic operations:
+      [`std::atomic_thread_fence`](https://en.cppreference.com/w/cpp/atomic/atomic_thread_fence),
+      [`std::atomic_signal_fence`](https://en.cppreference.com/w/cpp/atomic/atomic_signal_fence),
+      [`std::atomic_fetch_add`](https://en.cppreference.com/w/cpp/atomic/atomic_fetch_add),
+      [`std::atomic_compare_exchange`](https://en.cppreference.com/w/cpp/atomic/atomic_compare_exchange)
+  [(cppreference examples and direct API coverage)](../test/cmake/driver/src/cpp/stl/atomic.cpp)
 - [x] [std::chrono](https://en.cppreference.com/w/cpp/chrono)
   [(tested)](../test/cmake/driver/src/cpp/stl/chrono.cpp#L15)
   - C++20 timezone paths for
@@ -120,16 +142,41 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
     and
     [`std::chrono::time_zone::get_info`](https://en.cppreference.com/w/cpp/chrono/time_zone/get_info)
     also run in the default driver build.
+  - C++20 calendar/time-of-day coverage includes
+    [`std::chrono::year_month_day`](https://en.cppreference.com/w/cpp/chrono/year_month_day),
+    [`std::chrono::weekday`](https://en.cppreference.com/w/cpp/chrono/weekday), and
+    [`std::chrono::hh_mm_ss`](https://en.cppreference.com/w/cpp/chrono/hh_mm_ss).
+  - C++20 clock conversion coverage includes
+    [`std::chrono::file_clock`](https://en.cppreference.com/w/cpp/chrono/file_clock),
+    [`std::chrono::utc_clock`](https://en.cppreference.com/w/cpp/chrono/utc_clock),
+    [`std::chrono::tai_clock`](https://en.cppreference.com/w/cpp/chrono/tai_clock),
+    [`std::chrono::gps_clock`](https://en.cppreference.com/w/cpp/chrono/gps_clock),
+    and [`std::chrono::clock_cast`](https://en.cppreference.com/w/cpp/chrono/clock_cast).
+  - C++20 chrono stream parsing coverage includes
+    [`std::chrono::parse`](https://en.cppreference.com/w/cpp/chrono/parse)
+    for `std::chrono::year_month_day`.
+  - Duration rounding coverage includes
+    [`std::chrono::floor`](https://en.cppreference.com/w/cpp/chrono/duration/floor),
+    [`std::chrono::round`](https://en.cppreference.com/w/cpp/chrono/duration/round),
+    and [`std::chrono::ceil`](https://en.cppreference.com/w/cpp/chrono/duration/ceil).
 - [x] [std::any](https://en.cppreference.com/w/cpp/utility/any)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::bind](https://en.cppreference.com/w/cpp/utility/functional/bind)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/functional.cpp)
+- [x] [std::not_fn](https://en.cppreference.com/w/cpp/utility/functional/not_fn),
+      [std::mem_fn](https://en.cppreference.com/w/cpp/utility/functional/mem_fn),
+      [std::bind_front](https://en.cppreference.com/w/cpp/utility/functional/bind_front)
+  [(cppreference examples)](../test/cmake/driver/src/cpp/stl/functional.cpp)
 - [x] [std::binary_search](https://en.cppreference.com/w/cpp/algorithm/binary_search)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
+- [x] [std::lower_bound](https://en.cppreference.com/w/cpp/algorithm/lower_bound),
+      [std::upper_bound](https://en.cppreference.com/w/cpp/algorithm/upper_bound),
+      [std::equal_range](https://en.cppreference.com/w/cpp/algorithm/equal_range)
+  [(cppreference examples)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::bitset](https://en.cppreference.com/w/cpp/utility/bitset)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [`<bit>` utilities](https://en.cppreference.com/w/cpp/utility/bit)
-  [(cppreference popcount example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
+  [(cppreference popcount and bit operation examples)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::bit_cast](https://en.cppreference.com/w/cpp/numeric/bit_cast)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::endian](https://en.cppreference.com/w/cpp/types/endian)
@@ -158,6 +205,13 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   [(cppreference example + floating-point checks)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::inclusive_scan](https://en.cppreference.com/w/cpp/algorithm/inclusive_scan)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
+- [x] Numeric reduce/scan algorithms:
+      [std::reduce](https://en.cppreference.com/w/cpp/algorithm/reduce),
+      [std::transform_reduce](https://en.cppreference.com/w/cpp/algorithm/transform_reduce),
+      [std::exclusive_scan](https://en.cppreference.com/w/cpp/algorithm/exclusive_scan),
+      [std::transform_inclusive_scan](https://en.cppreference.com/w/cpp/algorithm/transform_inclusive_scan),
+      and [std::transform_exclusive_scan](https://en.cppreference.com/w/cpp/algorithm/transform_exclusive_scan)
+  [(cppreference examples)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::inner_product](https://en.cppreference.com/w/cpp/algorithm/inner_product)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::advance](https://en.cppreference.com/w/cpp/iterator/advance),
@@ -171,6 +225,10 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::is_same](https://en.cppreference.com/w/cpp/types/is_same)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
+- [x] [std::type_identity](https://en.cppreference.com/w/cpp/types/type_identity),
+      [std::type_index](https://en.cppreference.com/w/cpp/types/type_index),
+      [std::integer_sequence](https://en.cppreference.com/w/cpp/utility/integer_sequence)
+  [(cppreference examples and documented-note coverage)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::lcm](https://en.cppreference.com/w/cpp/numeric/lcm)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::lerp](https://en.cppreference.com/w/cpp/numeric/lerp)
@@ -189,6 +247,8 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::move](https://en.cppreference.com/w/cpp/utility/move)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
+- [x] [std::move_only_function](https://en.cppreference.com/w/cpp/utility/functional/move_only_function)
+  [(feature-test-gated cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::multimap::equal_range](https://en.cppreference.com/w/cpp/container/multimap/equal_range)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/containers.cpp)
 - [x] [std::multiset::erase](https://en.cppreference.com/w/cpp/container/multiset/erase)
@@ -196,13 +256,39 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
 - [x] [std::next_permutation](https://en.cppreference.com/w/cpp/algorithm/next_permutation)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::optional](https://en.cppreference.com/w/cpp/utility/optional)
-  [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
+  and monadic operations
+  [`and_then`](https://en.cppreference.com/w/cpp/utility/optional/and_then),
+  [`transform`](https://en.cppreference.com/w/cpp/utility/optional/transform),
+  and `or_else`
+  [(cppreference examples)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::expected](https://en.cppreference.com/w/cpp/utility/expected)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::pair](https://en.cppreference.com/w/cpp/utility/pair)
   [(cppreference make_pair example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::pmr::monotonic_buffer_resource](https://en.cppreference.com/w/cpp/memory/monotonic_buffer_resource)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/memory.cpp)
+- [x] [std::allocator_traits::construct](https://en.cppreference.com/w/cpp/memory/allocator_traits/construct),
+      [std::pmr::null_memory_resource](https://en.cppreference.com/w/cpp/memory/null_memory_resource)
+  [(cppreference examples)](../test/cmake/driver/src/cpp/stl/memory.cpp)
+- [x] Allocator and pointer utility helpers:
+      [std::allocator](https://en.cppreference.com/w/cpp/memory/allocator),
+      [std::uses_allocator](https://en.cppreference.com/w/cpp/memory/uses_allocator),
+      [std::uses_allocator_construction_args](https://en.cppreference.com/w/cpp/memory/uses_allocator_construction_args),
+      [std::make_obj_using_allocator](https://en.cppreference.com/w/cpp/memory/make_obj_using_allocator),
+      [std::uninitialized_construct_using_allocator](https://en.cppreference.com/w/cpp/memory/uninitialized_construct_using_allocator),
+      [std::scoped_allocator_adaptor](https://en.cppreference.com/w/cpp/memory/scoped_allocator_adaptor),
+      [std::enable_shared_from_this](https://en.cppreference.com/w/cpp/memory/enable_shared_from_this),
+      [std::owner_less](https://en.cppreference.com/w/cpp/memory/owner_less),
+      [std::to_address](https://en.cppreference.com/w/cpp/memory/to_address),
+      [std::addressof](https://en.cppreference.com/w/cpp/memory/addressof),
+      [std::align](https://en.cppreference.com/w/cpp/memory/align),
+      and [std::assume_aligned](https://en.cppreference.com/w/cpp/memory/assume_aligned)
+  [(cppreference examples)](../test/cmake/driver/src/cpp/stl/memory.cpp)
+- [x] [std::polymorphic_allocator](https://en.cppreference.com/w/cpp/memory/polymorphic_allocator),
+      [std::pmr::unsynchronized_pool_resource](https://en.cppreference.com/w/cpp/memory/unsynchronized_pool_resource),
+      [std::pmr::synchronized_pool_resource](https://en.cppreference.com/w/cpp/memory/synchronized_pool_resource),
+      [std::pmr::new_delete_resource](https://en.cppreference.com/w/cpp/memory/new_delete_resource)
+  [(direct API coverage)](../test/cmake/driver/src/cpp/stl/memory.cpp)
 - [x] [std::partial_sum](https://en.cppreference.com/w/cpp/algorithm/partial_sum)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::partition](https://en.cppreference.com/w/cpp/algorithm/partition)
@@ -213,6 +299,16 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/containers.cpp)
 - [x] [`std::ranges` filter/transform views](https://en.cppreference.com/w/cpp/ranges)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
+- [x] Additional C++20 range adaptors:
+      [`std::views::take`](https://en.cppreference.com/w/cpp/ranges/take_view),
+      [`std::views::drop`](https://en.cppreference.com/w/cpp/ranges/drop_view),
+      [`std::views::reverse`](https://en.cppreference.com/w/cpp/ranges/reverse_view),
+      [`std::views::join`](https://en.cppreference.com/w/cpp/ranges/join_view),
+      [`std::views::split`](https://en.cppreference.com/w/cpp/ranges/split_view),
+      [`std::views::keys`](https://en.cppreference.com/w/cpp/ranges/keys_view),
+      [`std::views::values`](https://en.cppreference.com/w/cpp/ranges/values_view),
+      [`std::views::elements`](https://en.cppreference.com/w/cpp/ranges/elements_view)
+  [(compact driver coverage)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::ranges::sort](https://en.cppreference.com/w/cpp/algorithm/ranges/sort)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::views::zip](https://en.cppreference.com/w/cpp/ranges/zip_view),
@@ -221,6 +317,22 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
       [std::views::stride](https://en.cppreference.com/w/cpp/ranges/stride_view),
       [std::views::repeat](https://en.cppreference.com/w/cpp/ranges/repeat_view)
   [(cppreference examples)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
+- [x] Additional C++23 range adaptors:
+      [std::views::enumerate](https://en.cppreference.com/w/cpp/ranges/enumerate_view),
+      [std::views::cartesian_product](https://en.cppreference.com/w/cpp/ranges/cartesian_product_view),
+      [std::views::chunk_by](https://en.cppreference.com/w/cpp/ranges/chunk_by_view),
+      [std::views::join_with](https://en.cppreference.com/w/cpp/ranges/join_with_view),
+      [std::views::as_rvalue](https://en.cppreference.com/w/cpp/ranges/as_rvalue_view),
+      [std::views::as_const](https://en.cppreference.com/w/cpp/ranges/as_const_view)
+  [(feature-test-gated cppreference examples)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
+- [x] Additional C++23 ranges algorithms:
+      [`std::ranges::contains`](https://en.cppreference.com/w/cpp/algorithm/ranges/contains),
+      [`std::ranges::contains_subrange`](https://en.cppreference.com/w/cpp/algorithm/ranges/contains),
+      [`std::ranges::starts_with`](https://en.cppreference.com/w/cpp/algorithm/ranges/starts_with),
+      [`std::ranges::ends_with`](https://en.cppreference.com/w/cpp/algorithm/ranges/ends_with),
+      [`std::ranges::find_last`](https://en.cppreference.com/w/cpp/algorithm/ranges/find_last),
+      and [`std::ranges::fold_left`](https://en.cppreference.com/w/cpp/algorithm/ranges/fold_left)
+  [(feature-test-gated cppreference examples)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::ratio](https://en.cppreference.com/w/cpp/numeric/ratio)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::reference_wrapper](https://en.cppreference.com/w/cpp/utility/functional/reference_wrapper)
@@ -233,6 +345,46 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/memory.cpp)
 - [x] [std::sort](https://en.cppreference.com/w/cpp/algorithm/sort)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
+- [x] [std::stable_sort](https://en.cppreference.com/w/cpp/algorithm/stable_sort),
+      [std::nth_element](https://en.cppreference.com/w/cpp/algorithm/nth_element),
+      [std::partial_sort](https://en.cppreference.com/w/cpp/algorithm/partial_sort)
+  [(cppreference examples)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
+- [x] Additional non-modifying and modifying algorithms:
+      [std::all_of / any_of / none_of](https://en.cppreference.com/w/cpp/algorithm/all_any_none_of),
+      [std::count](https://en.cppreference.com/w/cpp/algorithm/count),
+      [std::mismatch](https://en.cppreference.com/w/cpp/algorithm/mismatch),
+      [std::equal](https://en.cppreference.com/w/cpp/algorithm/equal),
+      [std::copy](https://en.cppreference.com/w/cpp/algorithm/copy),
+      [std::copy_n](https://en.cppreference.com/w/cpp/algorithm/copy_n),
+      [std::copy_backward](https://en.cppreference.com/w/cpp/algorithm/copy_backward),
+      [std::move_backward](https://en.cppreference.com/w/cpp/algorithm/move_backward),
+      [std::replace](https://en.cppreference.com/w/cpp/algorithm/replace),
+      [std::fill](https://en.cppreference.com/w/cpp/algorithm/fill),
+      [std::generate](https://en.cppreference.com/w/cpp/algorithm/generate),
+      [std::unique](https://en.cppreference.com/w/cpp/algorithm/unique),
+      [std::reverse](https://en.cppreference.com/w/cpp/algorithm/reverse),
+      [std::rotate](https://en.cppreference.com/w/cpp/algorithm/rotate),
+      [std::shift_left / shift_right](https://en.cppreference.com/w/cpp/algorithm/shift),
+      and [std::sample](https://en.cppreference.com/w/cpp/algorithm/sample)
+  [(cppreference examples)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
+- [x] Additional partition/set/heap/min-max/permutation algorithms:
+      [std::partition_copy](https://en.cppreference.com/w/cpp/algorithm/partition_copy),
+      [std::stable_partition](https://en.cppreference.com/w/cpp/algorithm/stable_partition),
+      [std::is_partitioned](https://en.cppreference.com/w/cpp/algorithm/is_partitioned),
+      [std::partition_point](https://en.cppreference.com/w/cpp/algorithm/partition_point),
+      [std::includes](https://en.cppreference.com/w/cpp/algorithm/includes),
+      [std::set_union](https://en.cppreference.com/w/cpp/algorithm/set_union),
+      [std::set_intersection](https://en.cppreference.com/w/cpp/algorithm/set_intersection),
+      [std::set_difference](https://en.cppreference.com/w/cpp/algorithm/set_difference),
+      [std::set_symmetric_difference](https://en.cppreference.com/w/cpp/algorithm/set_symmetric_difference),
+      [std::inplace_merge](https://en.cppreference.com/w/cpp/algorithm/inplace_merge),
+      [std::is_heap](https://en.cppreference.com/w/cpp/algorithm/is_heap),
+      [std::minmax](https://en.cppreference.com/w/cpp/algorithm/minmax),
+      [std::clamp](https://en.cppreference.com/w/cpp/algorithm/clamp),
+      [std::minmax_element](https://en.cppreference.com/w/cpp/algorithm/minmax_element),
+      [std::prev_permutation](https://en.cppreference.com/w/cpp/algorithm/prev_permutation),
+      and [std::is_permutation](https://en.cppreference.com/w/cpp/algorithm/is_permutation)
+  [(cppreference examples)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::span](https://en.cppreference.com/w/cpp/container/span)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/containers.cpp)
 - [x] [std::stack](https://en.cppreference.com/w/cpp/container/stack)
@@ -241,18 +393,52 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::strong_ordering](https://en.cppreference.com/w/cpp/utility/compare/strong_ordering)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
+- [x] Comparison and utility helpers:
+      [std::weak_ordering](https://en.cppreference.com/w/cpp/utility/compare/weak_ordering),
+      [std::partial_ordering](https://en.cppreference.com/w/cpp/utility/compare/partial_ordering),
+      [std::cmp_* / std::in_range](https://en.cppreference.com/w/cpp/utility/intcmp),
+      [std::as_const](https://en.cppreference.com/w/cpp/utility/as_const),
+      [std::apply](https://en.cppreference.com/w/cpp/utility/apply),
+      [std::make_from_tuple](https://en.cppreference.com/w/cpp/utility/make_from_tuple),
+      and [std::forward_like](https://en.cppreference.com/w/cpp/utility/forward_like)
+  [(cppreference examples)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::format](https://en.cppreference.com/w/cpp/utility/format)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::print](https://en.cppreference.com/w/cpp/io/print)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
+- [x] [std::formatter](https://en.cppreference.com/w/cpp/utility/format/formatter)
+  customization
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
+- [x] C++23 range formatting:
+      [`std::formatter<range>`](https://en.cppreference.com/w/cpp/utility/format/ranges_formatter),
+      [`std::range_formatter`](https://en.cppreference.com/w/cpp/utility/format/range_formatter)
+  [(cppreference assertions)](../test/cmake/driver/src/cpp/stl/utility.cpp)
+- [x] [std::stringstream](https://en.cppreference.com/w/cpp/io/basic_stringstream),
+      [std::quoted](https://en.cppreference.com/w/cpp/io/manip/quoted)
+  [(cppreference example and direct stream coverage)](../test/cmake/driver/src/cpp/stl/utility.cpp)
+- [x] C++23 span-backed streams:
+      [`std::basic_ispanstream`](https://en.cppreference.com/w/cpp/io/basic_ispanstream),
+      [`std::basic_ospanstream`](https://en.cppreference.com/w/cpp/io/basic_ospanstream),
+      [`std::basic_spanstream`](https://en.cppreference.com/w/cpp/io/basic_spanstream)
+  [(direct API coverage)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::regex](https://en.cppreference.com/w/cpp/regex)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/regex.cpp)
+- [x] [std::regex_match](https://en.cppreference.com/w/cpp/regex/regex_match),
+      [std::regex_iterator](https://en.cppreference.com/w/cpp/regex/regex_iterator),
+      [std::regex_token_iterator](https://en.cppreference.com/w/cpp/regex/regex_token_iterator)
+  [(cppreference examples)](../test/cmake/driver/src/cpp/stl/regex.cpp)
 - [x] [std::filesystem::path lexical operations](https://en.cppreference.com/w/cpp/filesystem/path/lexically_normal)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::absolute](https://en.cppreference.com/w/cpp/filesystem/absolute),
+      [std::filesystem::relative / proximate](https://en.cppreference.com/w/cpp/filesystem/relative),
+      [std::filesystem::current_path](https://en.cppreference.com/w/cpp/filesystem/current_path)
+  [(direct path-relation coverage)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] [std::filesystem::directory_iterator](https://en.cppreference.com/w/cpp/filesystem/directory_iterator)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] [std::filesystem::recursive_directory_iterator](https://en.cppreference.com/w/cpp/filesystem/recursive_directory_iterator)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+  - Includes `disable_recursion_pending()` and `increment(error_code&)`
+    coverage.
 - [x] [std::filesystem::copy_file](https://en.cppreference.com/w/cpp/filesystem/copy_file)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] [std::filesystem::copy](https://en.cppreference.com/w/cpp/filesystem/copy)
@@ -269,6 +455,8 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   [(tested)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] [std::filesystem::directory_entry](https://en.cppreference.com/w/cpp/filesystem/directory_entry)
   [(tested)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+  - Includes [`directory_entry::refresh(error_code&)`](https://en.cppreference.com/w/cpp/filesystem/directory_entry/refresh)
+    after a metadata transition.
 - [x] [std::filesystem::equivalent](https://en.cppreference.com/w/cpp/filesystem/equivalent)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] [std::filesystem::file_size](https://en.cppreference.com/w/cpp/filesystem/file_size)
@@ -282,6 +470,7 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   [is_regular_file](https://en.cppreference.com/w/cpp/filesystem/is_regular_file),
   and [is_empty](https://en.cppreference.com/w/cpp/filesystem/is_empty)
   [(cppreference examples)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+  - Includes selected non-throwing `error_code&` overload coverage.
 - [x] [std::filesystem::permissions](https://en.cppreference.com/w/cpp/filesystem/permissions)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] [std::filesystem::resize_file](https://en.cppreference.com/w/cpp/filesystem/resize_file)
@@ -298,6 +487,12 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] [std::filesystem::canonical / weakly_canonical](https://en.cppreference.com/w/cpp/filesystem/canonical)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] Selected non-throwing filesystem `error_code&` overloads for
+      [`remove`](https://en.cppreference.com/w/cpp/filesystem/remove),
+      [`resize_file`](https://en.cppreference.com/w/cpp/filesystem/resize_file),
+      [`last_write_time`](https://en.cppreference.com/w/cpp/filesystem/last_write_time),
+      and [`canonical`](https://en.cppreference.com/w/cpp/filesystem/canonical)
+  [(direct negative-path coverage)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] [std::string](https://en.cppreference.com/w/cpp/string/basic_string)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/string.cpp)
 - [x] [std::string_view](https://en.cppreference.com/w/cpp/string/basic_string_view)
@@ -312,6 +507,8 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::to_chars](https://en.cppreference.com/w/cpp/utility/to_chars)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
+- [x] [std::to_underlying](https://en.cppreference.com/w/cpp/utility/to_underlying)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::transform](https://en.cppreference.com/w/cpp/algorithm/transform)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::unique_ptr](https://en.cppreference.com/w/cpp/memory/unique_ptr)
@@ -325,6 +522,8 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
 - [x] [std::unordered_set](https://en.cppreference.com/w/cpp/container/unordered_set)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/containers.cpp)
 - [x] [std::variant](https://en.cppreference.com/w/cpp/utility/variant)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
+- [x] [std::visit](https://en.cppreference.com/w/cpp/utility/variant/visit)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::vector](https://en.cppreference.com/w/cpp/container/vector)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/containers.cpp)
@@ -348,6 +547,9 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp#L129)
 - [x] [std::shared_lock](https://en.cppreference.com/w/cpp/thread/shared_lock)
   [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp)
+- [x] [std::shared_timed_mutex](https://en.cppreference.com/w/cpp/thread/shared_timed_mutex)
+  timed exclusive/shared lock paths
+  [(cppreference incomplete example plus timed edge coverage)](../test/cmake/driver/src/cpp/stl/thread.cpp)
 - [x] [std::timed_mutex](https://en.cppreference.com/w/cpp/thread/timed_mutex)
   [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp)
 - [x] [std::recursive_mutex](https://en.cppreference.com/w/cpp/thread/recursive_mutex)
@@ -366,16 +568,26 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp#L180)
 - [x] [std::future](https://en.cppreference.com/w/cpp/thread/future)
   [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp#L208)
+- [x] [std::future::valid](https://en.cppreference.com/w/cpp/thread/future/valid)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/thread.cpp)
 - [x] [std::async](https://en.cppreference.com/w/cpp/thread/async)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/thread.cpp)
+- [x] [std::future::wait_for](https://en.cppreference.com/w/cpp/thread/future/wait_for)
+  and future exception propagation
+  [(cppreference examples)](../test/cmake/driver/src/cpp/stl/thread.cpp)
 - [x] [std::future_status](https://en.cppreference.com/w/cpp/thread/future_status)
   [(cppreference wait_until example)](../test/cmake/driver/src/cpp/stl/thread.cpp)
 - [x] [std::future_error](https://en.cppreference.com/w/cpp/thread/future_error)
   [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp)
 - [x] [std::shared_future](https://en.cppreference.com/w/cpp/thread/shared_future)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/thread.cpp)
+- [x] [std::shared_future::wait_for](https://en.cppreference.com/w/cpp/thread/shared_future/wait_for)
+  and future/shared-future timeout edges
+  [(cppreference example plus timeout edge coverage)](../test/cmake/driver/src/cpp/stl/thread.cpp)
 - [x] [std::promise](https://en.cppreference.com/w/cpp/thread/promise)
   [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp#L254)
+- [x] [std::promise::set_exception](https://en.cppreference.com/w/cpp/thread/promise/set_exception)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/thread.cpp)
 - [x] [std::packaged_task](https://en.cppreference.com/w/cpp/thread/packaged_task)
   [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp#L318)
 - [x] [std::latch](https://en.cppreference.com/w/cpp/thread/latch)
@@ -418,80 +630,76 @@ dependencies.
 
 ### Future cppreference Coverage Candidates
 
-- [ ] Threading and synchronization
-  - [`std::shared_timed_mutex`](https://en.cppreference.com/w/cpp/thread/shared_timed_mutex)
-    and timed shared-lock edge cases
-  - Additional `std::future` / `std::shared_future` error-path and timeout
-    edge cases beyond the default examples
-- [ ] Atomic helpers
-  - [`std::atomic_thread_fence`](https://en.cppreference.com/w/cpp/atomic/atomic_thread_fence),
-    [`std::atomic_signal_fence`](https://en.cppreference.com/w/cpp/atomic/atomic_signal_fence)
-  - Free atomic operations such as
-    [`std::atomic_fetch_add`](https://en.cppreference.com/w/cpp/atomic/atomic_fetch_add)
-    and
-    [`std::atomic_compare_exchange`](https://en.cppreference.com/w/cpp/atomic/atomic_compare_exchange)
-- [ ] `<bit>` standalone examples
-  - [`std::rotl`](https://en.cppreference.com/w/cpp/numeric/rotl),
-    [`std::rotr`](https://en.cppreference.com/w/cpp/numeric/rotr),
-    [`std::countl_zero`](https://en.cppreference.com/w/cpp/numeric/countl_zero),
-    [`std::countr_zero`](https://en.cppreference.com/w/cpp/numeric/countr_zero)
-  - [`std::has_single_bit`](https://en.cppreference.com/w/cpp/numeric/has_single_bit),
-    [`std::bit_ceil`](https://en.cppreference.com/w/cpp/numeric/bit_ceil),
-    [`std::bit_floor`](https://en.cppreference.com/w/cpp/numeric/bit_floor),
-    [`std::bit_width`](https://en.cppreference.com/w/cpp/numeric/bit_width)
-- [ ] Additional algorithms and ranges
-  - Binary-search family:
-    [`std::lower_bound`](https://en.cppreference.com/w/cpp/algorithm/lower_bound),
-    [`std::upper_bound`](https://en.cppreference.com/w/cpp/algorithm/upper_bound),
-    [`std::equal_range`](https://en.cppreference.com/w/cpp/algorithm/equal_range)
-  - Sorting/selection:
-    [`std::stable_sort`](https://en.cppreference.com/w/cpp/algorithm/stable_sort),
-    [`std::nth_element`](https://en.cppreference.com/w/cpp/algorithm/nth_element),
-    [`std::partial_sort`](https://en.cppreference.com/w/cpp/algorithm/partial_sort)
-  - Range adaptors not yet split into explicit driver examples, such as
-    `take`, `drop`, `reverse`, `join`, `split`, `keys`, `values`,
-    `elements`, and other feature-test-gated C++23 views.
-- [ ] Memory and PMR
-  - [`std::allocator_traits`](https://en.cppreference.com/w/cpp/memory/allocator_traits),
-    [`std::polymorphic_allocator`](https://en.cppreference.com/w/cpp/memory/polymorphic_allocator)
-  - [`std::pmr::unsynchronized_pool_resource`](https://en.cppreference.com/w/cpp/memory/unsynchronized_pool_resource),
-    [`std::pmr::synchronized_pool_resource`](https://en.cppreference.com/w/cpp/memory/synchronized_pool_resource),
-    [`std::pmr::null_memory_resource`](https://en.cppreference.com/w/cpp/memory/null_memory_resource),
-    [`std::pmr::new_delete_resource`](https://en.cppreference.com/w/cpp/memory/new_delete_resource)
-- [ ] Utility, functional, and type support
-  - [`std::visit`](https://en.cppreference.com/w/cpp/utility/variant/visit),
-    [`std::type_index`](https://en.cppreference.com/w/cpp/types/type_index),
-    [`std::integer_sequence`](https://en.cppreference.com/w/cpp/utility/integer_sequence)
-  - [`std::not_fn`](https://en.cppreference.com/w/cpp/utility/functional/not_fn),
-    [`std::mem_fn`](https://en.cppreference.com/w/cpp/utility/functional/mem_fn),
-    [`std::bind_front`](https://en.cppreference.com/w/cpp/utility/functional/bind_front)
-- [ ] Regex, formatting, and streams
-  - [`std::regex_match`](https://en.cppreference.com/w/cpp/regex/regex_match),
-    [`std::regex_iterator`](https://en.cppreference.com/w/cpp/regex/regex_iterator),
-    [`std::regex_token_iterator`](https://en.cppreference.com/w/cpp/regex/regex_token_iterator)
-  - [`std::formatter`](https://en.cppreference.com/w/cpp/utility/format/formatter)
-    customization and range-formatting examples where supported by the active
-    MSVC STL.
-  - String-backed I/O examples such as
-    [`std::stringstream`](https://en.cppreference.com/w/cpp/io/basic_stringstream),
-    [`std::quoted`](https://en.cppreference.com/w/cpp/io/manip/quoted),
-    and `spanstream` where feature-test macros allow it.
-- [ ] Chrono
-  - Calendar and time-of-day examples:
-    [`std::chrono::year_month_day`](https://en.cppreference.com/w/cpp/chrono/year_month_day),
-    [`std::chrono::weekday`](https://en.cppreference.com/w/cpp/chrono/weekday),
-    [`std::chrono::hh_mm_ss`](https://en.cppreference.com/w/cpp/chrono/hh_mm_ss)
-  - Clock conversion examples for `file_clock`, `utc_clock`, `tai_clock`, and
-    `gps_clock` where the active MSVC STL exposes them.
-- [ ] Filesystem edge coverage
-  - Path conversion and path relations:
-    [`std::filesystem::absolute`](https://en.cppreference.com/w/cpp/filesystem/absolute),
-    [`std::filesystem::relative`](https://en.cppreference.com/w/cpp/filesystem/relative),
-    [`std::filesystem::proximate`](https://en.cppreference.com/w/cpp/filesystem/relative),
-    [`std::filesystem::current_path`](https://en.cppreference.com/w/cpp/filesystem/current_path)
-  - More error-code overloads, metadata transitions, recursive traversal
-    options, and negative-path behavior for already-covered filesystem
-    operations.
+- [ ] Core language examples
+  - [`lambda`](https://en.cppreference.com/w/cpp/language/lambda),
+    [`structured binding`](https://en.cppreference.com/w/cpp/language/structured_binding),
+    [`range-for`](https://en.cppreference.com/w/cpp/language/range-for),
+    [`constexpr`](https://en.cppreference.com/w/cpp/language/constexpr),
+    [`consteval`](https://en.cppreference.com/w/cpp/language/consteval),
+    [`constinit`](https://en.cppreference.com/w/cpp/language/constinit),
+    [`fold expression`](https://en.cppreference.com/w/cpp/language/fold),
+    [`CTAD`](https://en.cppreference.com/w/cpp/language/class_template_argument_deduction),
+    [`requires expression`](https://en.cppreference.com/w/cpp/language/requires),
+    [`noexcept`](https://en.cppreference.com/w/cpp/language/noexcept),
+    and [`coroutines`](https://en.cppreference.com/w/cpp/language/coroutines)
+    where the example can run without hosted assumptions.
+- [ ] Diagnostics and system-error examples
+  - C++23/C++26 stacktrace/debugging APIs when MSVC STL exposes them.
+- [ ] Utility, comparison, and type-support examples
+  - Additional type-traits examples and C++26 comparison/type-order APIs when
+    MSVC STL exposes them.
+- [ ] Memory and allocator examples
+  - C++23 [`std::out_ptr`](https://en.cppreference.com/w/cpp/memory/out_ptr)
+    and [`std::inout_ptr`](https://en.cppreference.com/w/cpp/memory/inout_ptr)
+    when the active MSVC STL exposes them.
+- [ ] Containers and views
+  - [`std::vector<bool>`](https://en.cppreference.com/w/cpp/container/vector_bool),
+    C++23 flat containers (`flat_set`, `flat_map`, `flat_multiset`,
+    `flat_multimap`) if available, [`std::mdspan`](https://en.cppreference.com/w/cpp/container/mdspan),
+    and C++26 `inplace_vector` / `hive` when MSVC STL exposes them.
+  - More member-operation examples for already-covered containers:
+    `emplace`, `erase`, `extract`, `merge`, `contains`, `insert_range`,
+    node-handle, heterogeneous lookup, and allocator-aware construction paths.
+- [ ] Algorithms and numeric algorithms
+  - Remaining search/mutation examples such as `find_end`, `find_first_of`,
+    `adjacent_find`, `search`, `search_n`, `iter_swap`, `swap_ranges`,
+    `shuffle`, `push_heap`, `pop_heap`, and `sort_heap`.
+  - Remaining numeric examples for ranges `iota`, special math functions,
+    random engines/distributions, floating-point environment, and C++26
+    checked/saturation arithmetic when available.
+- [ ] Ranges examples
+  - Range access/concepts and utility examples: `begin`/`end`, `size`,
+    `data`, `empty`, `subrange`, `view_interface`, `ref_view`,
+    `owning_view`, `from_range`, and `ranges::to`.
+  - Remaining/adaptive views: `empty_view`, `single_view`, `iota_view`,
+    `istream_view`, `take_while`, `drop_while`, `common_view`,
+    `views::counted`, `lazy_split`, `zip_transform`, `adjacent`,
+    `pairwise`, `adjacent_transform`, plus C++26 `indices`, `as_input`,
+    `concat`, `cache_latest`, and `reserve_hint` paths when available.
+- [ ] I/O, text, and locale edges
+  - [`std::basic_syncbuf`](https://en.cppreference.com/w/cpp/io/basic_syncbuf),
+    [`std::basic_osyncstream`](https://en.cppreference.com/w/cpp/io/basic_osyncstream),
+    `basic_stringbuf`, `basic_spanbuf`, `ios_base` / `basic_ios`,
+    `istream` / `ostream` manipulators, `iostream_category` / `io_errc`,
+    and file-stream examples where the driver harness can safely back them with
+    LDK file APIs.
+  - C++26 [`std::text_encoding`](https://en.cppreference.com/w/cpp/locale/text_encoding)
+    if exposed by the active MSVC STL.
+- [ ] Filesystem edge examples
+  - More `path` iterator/formatting cases, `copy_options`, `directory_options`,
+    `recursive_directory_iterator::depth/pop/recursion_pending`,
+    permission-option combinations, hard negative paths for `equivalent`,
+    `read_symlink`, `copy`, `remove`, and metadata/time/error-code overloads.
+- [ ] Concurrency edge examples
+  - `std::this_thread::get_id`, `yield`, `sleep_until`,
+    [`std::notify_all_at_thread_exit`](https://en.cppreference.com/w/cpp/thread/notify_all_at_thread_exit),
+    `condition_variable` / `condition_variable_any` `wait_for` and
+    `wait_until`, additional `timed_mutex` / `recursive_timed_mutex` timed
+    edges, `std::launch`, `future_category`, `future_errc`, hardware
+    interference-size constants, and C++26 stop-token / safe-reclamation APIs
+    when available.
+- [ ] Track new MSVC STL feature-test macros and newly published cppreference
+      examples as they appear.
 
 ### Needs Investigation
 

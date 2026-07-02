@@ -30,6 +30,8 @@ void run() {
   // output the same number again
   std::wcout << 1000.01 << L'\n';
 
+  // cppreference runs this as a standalone program. Restore global stream
+  // state because the driver harness runs many examples in one process.
   std::locale::global(previous_global);
   std::wcout.imbue(previous_wcout_locale);
 }
@@ -89,6 +91,7 @@ void run() {
             << "Does loc implement myfacet? " << std::has_facet<myfacet>(loc)
             << '\n';
 
+  // Restore stream formatting for the following examples in the same driver.
   std::cout.flags(previous_cout_flags);
 }
 } // namespace has_facet_test
@@ -127,6 +130,7 @@ void run() {
   std::cout << "locale with modified numpunct: " << std::boolalpha << true
             << ", " << false << '\n';
 
+  // Restore stream state for the following examples in the same driver.
   std::cout.imbue(previous_cout_locale);
   std::cout.flags(previous_cout_flags);
 }
@@ -171,18 +175,28 @@ void run() {
 //
 namespace messages_test {
 void run() {
-  std::locale loc("de_DE.UTF-8");
-  const std::messages<char> &facet = std::use_facet<std::messages<char>>(loc);
-  const std::messages_base::catalog cat = facet.open("sed", loc);
+  const std::locale previous_cout_locale = std::cout.getloc();
+
+  std::locale loc("de_DE.utf8");
+  std::cout.imbue(loc);
+  auto &facet = std::use_facet<std::messages<char>>(loc);
+  auto cat = facet.open("sed", loc);
 
   if (cat < 0) {
+    // cppreference runs this in a hosted environment that may provide message
+    // catalogs. Kernel driver tests currently cover the missing-catalog
+    // fallback path.
     std::cout << "Could not open german \"sed\" message catalog\n";
-    return;
+  } else {
+    std::cout << "\"No match\" in German: "
+              << facet.get(cat, 0, 0, "No match") << '\n'
+              << "\"Memory exhausted\" in German: "
+              << facet.get(cat, 0, 0, "Memory exhausted") << '\n';
+    facet.close(cat);
   }
 
-  std::cout << "\"No match\" "
-            << facet.get(cat, 0, 0, "No match") << '\n';
-  facet.close(cat);
+  // Restore stream locale for the following examples in the same driver.
+  std::cout.imbue(previous_cout_locale);
 }
 } // namespace messages_test
 
