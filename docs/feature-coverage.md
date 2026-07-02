@@ -203,6 +203,13 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   [(cppreference make_pair example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::pmr::monotonic_buffer_resource](https://en.cppreference.com/w/cpp/memory/monotonic_buffer_resource)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/memory.cpp)
+- [x] PMR pool/resource APIs:
+      [`std::pmr::unsynchronized_pool_resource`](https://en.cppreference.com/w/cpp/memory/unsynchronized_pool_resource),
+      [`std::pmr::synchronized_pool_resource`](https://en.cppreference.com/w/cpp/memory/synchronized_pool_resource),
+      [`std::pmr::polymorphic_allocator`](https://en.cppreference.com/w/cpp/memory/polymorphic_allocator),
+      [`std::pmr::null_memory_resource`](https://en.cppreference.com/w/cpp/memory/null_memory_resource),
+      [`std::pmr::new_delete_resource`](https://en.cppreference.com/w/cpp/memory/new_delete_resource)
+  [(cppreference API page coverage)](../test/cmake/driver/src/cpp/stl/memory.cpp)
 - [x] [std::partial_sum](https://en.cppreference.com/w/cpp/algorithm/partial_sum)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::partition](https://en.cppreference.com/w/cpp/algorithm/partition)
@@ -494,12 +501,7 @@ dependencies.
     `take`, `drop`, `reverse`, `join`, `split`, `keys`, `values`,
     `elements`, and other feature-test-gated C++23 views.
 - [ ] Memory and PMR
-  - [`std::allocator_traits`](https://en.cppreference.com/w/cpp/memory/allocator_traits),
-    [`std::polymorphic_allocator`](https://en.cppreference.com/w/cpp/memory/polymorphic_allocator)
-  - [`std::pmr::unsynchronized_pool_resource`](https://en.cppreference.com/w/cpp/memory/unsynchronized_pool_resource),
-    [`std::pmr::synchronized_pool_resource`](https://en.cppreference.com/w/cpp/memory/synchronized_pool_resource),
-    [`std::pmr::null_memory_resource`](https://en.cppreference.com/w/cpp/memory/null_memory_resource),
-    [`std::pmr::new_delete_resource`](https://en.cppreference.com/w/cpp/memory/new_delete_resource)
+  - [`std::allocator_traits`](https://en.cppreference.com/w/cpp/memory/allocator_traits)
 - [ ] Utility, functional, and type support
   - [`std::visit`](https://en.cppreference.com/w/cpp/utility/variant/visit),
     [`std::type_index`](https://en.cppreference.com/w/cpp/types/type_index),
