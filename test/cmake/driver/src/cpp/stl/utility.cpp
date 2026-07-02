@@ -3,6 +3,7 @@
 //
 #include <algorithm>
 #include <any>
+#include <array>
 #include <cassert>
 #include <cmath>
 #include <compare>
@@ -24,6 +25,7 @@
 #include <iostream>
 #include <iterator>
 #include <list>
+#include <memory>
 #include <numeric>
 #include <numbers>
 #include <optional>
@@ -35,7 +37,10 @@
 #include <string>
 #include <string_view>
 #include <tuple>
+#include <typeindex>
 #include <type_traits>
+#include <typeinfo>
+#include <unordered_map>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -265,6 +270,60 @@ void run() {
 } // namespace variant_test
 
 //
+// https://en.cppreference.com/w/cpp/utility/variant/visit2#Example
+//
+namespace visit_test {
+using value_t = std::variant<int, long, double, std::string>;
+
+template <class... Ts> struct overloaded : Ts... {
+  using Ts::operator()...;
+};
+template <class... Ts> overloaded(Ts...) -> overloaded<Ts...>;
+
+template <class> constexpr bool dependent_false = false;
+
+void run() {
+  std::vector<value_t> vec = {10, 15l, 1.5, "hello"};
+  for (auto &v : vec) {
+    std::visit([](auto &&arg) { std::cout << arg; }, v);
+
+    value_t w = std::visit([](auto &&arg) -> value_t { return arg + arg; }, v);
+    std::cout << ". After doubling, variant holds ";
+    std::visit(
+        [](auto &&arg) {
+          using T = std::decay_t<decltype(arg)>;
+          if constexpr (std::is_same_v<T, int>) {
+            std::cout << "int with value " << arg << '\n';
+          } else if constexpr (std::is_same_v<T, long>) {
+            std::cout << "long with value " << arg << '\n';
+          } else if constexpr (std::is_same_v<T, double>) {
+            std::cout << "double with value " << arg << '\n';
+          } else if constexpr (std::is_same_v<T, std::string>) {
+            std::cout << "std::string with value " << std::quoted(arg)
+                      << '\n';
+          } else {
+            // The cppreference example uses `static_assert(false, ...)`.
+            // Keep the same exhaustive-visitor intent while making it valid
+            // for the C++20 MSVC toolsets built by the driver matrix.
+            static_assert(dependent_false<T>, "non-exhaustive visitor!");
+          }
+        },
+        w);
+  }
+  for (auto &v : vec) {
+    std::visit(
+        overloaded{[](auto arg) { std::cout << arg << ' '; },
+                   [](double arg) { std::cout << std::fixed << arg << ' '; },
+                   [](const std::string &arg) {
+                     std::cout << std::quoted(arg) << ' ';
+                   }},
+        v);
+  }
+  std::cout << '\n';
+}
+} // namespace visit_test
+
+//
 // https://en.cppreference.com/w/cpp/utility/any#Example
 //
 namespace any_test {
@@ -303,6 +362,39 @@ void run() {
   std::cout << *i << '\n';
 }
 } // namespace any_test
+
+//
+// https://en.cppreference.com/w/cpp/types/type_index#Example
+//
+namespace type_index_test {
+struct A {
+  virtual ~A() {}
+};
+
+struct B : A {};
+struct C : A {};
+
+void run() {
+  std::unordered_map<std::type_index, std::string> type_names;
+  type_names[std::type_index(typeid(int))] = "int";
+  type_names[std::type_index(typeid(double))] = "double";
+  type_names[std::type_index(typeid(A))] = "A";
+  type_names[std::type_index(typeid(B))] = "B";
+  type_names[std::type_index(typeid(C))] = "C";
+
+  int i;
+  double d;
+  A a;
+
+  std::unique_ptr<A> b(new B);
+  std::unique_ptr<A> c(new C);
+  std::cout << "i is " << type_names[std::type_index(typeid(i))] << '\n';
+  std::cout << "d is " << type_names[std::type_index(typeid(d))] << '\n';
+  std::cout << "a is " << type_names[std::type_index(typeid(a))] << '\n';
+  std::cout << "*b is " << type_names[std::type_index(typeid(*b))] << '\n';
+  std::cout << "*c is " << type_names[std::type_index(typeid(*c))] << '\n';
+}
+} // namespace type_index_test
 
 //
 // https://en.cppreference.com/w/cpp/utility/source_location#Example
@@ -485,6 +577,61 @@ void run() {
   static_assert(!std::is_same<const int, int>());
 }
 } // namespace is_same_test
+
+//
+// https://en.cppreference.com/w/cpp/utility/integer_sequence#Example
+//
+namespace integer_sequence_test {
+namespace details {
+template <typename Array, std::size_t... I>
+constexpr auto array_to_tuple_impl(const Array &a, std::index_sequence<I...>) {
+  return std::make_tuple(a[I]...);
+}
+template <class Ch, class Tr, class Tuple, std::size_t... Is>
+void print_tuple_impl(std::basic_ostream<Ch, Tr> &os, const Tuple &t,
+                      std::index_sequence<Is...>) {
+  ((os << (Is ? ", " : "") << std::get<Is>(t)), ...);
+}
+} // namespace details
+
+template <typename T, T... ints>
+void print_sequence(int id, std::integer_sequence<T, ints...> int_seq) {
+  std::cout << id << ") The sequence of size " << int_seq.size() << ": ";
+  ((std::cout << ints << ' '), ...);
+  std::cout << '\n';
+}
+
+template <typename T, std::size_t N,
+          typename Indx = std::make_index_sequence<N>>
+constexpr auto array_to_tuple(const std::array<T, N> &a) {
+  return details::array_to_tuple_impl(a, Indx{});
+}
+template <class Ch, class Tr, class... Args>
+auto &operator<<(std::basic_ostream<Ch, Tr> &os,
+                 const std::tuple<Args...> &t) {
+  os << '(';
+  details::print_tuple_impl(os, t, std::index_sequence_for<Args...>{});
+  return os << ')';
+}
+
+void run() {
+  print_sequence(1, std::integer_sequence<unsigned, 9, 2, 5, 1, 9, 1, 6>{});
+  print_sequence(2, std::make_integer_sequence<int, 12>{});
+  print_sequence(3, std::make_index_sequence<10>{});
+  print_sequence(4, std::index_sequence_for<std::ios, float, signed>{});
+
+  constexpr std::array<int, 4> array{1, 2, 3, 4};
+  auto tuple1 = array_to_tuple(array);
+  static_assert(std::is_same_v<decltype(tuple1), std::tuple<int, int, int, int>>,
+                "");
+  std::cout << "5) tuple1: " << tuple1 << '\n';
+
+  constexpr auto tuple2 =
+      array_to_tuple<int, 4, std::integer_sequence<std::size_t, 1, 0, 3, 2>>(
+          array);
+  std::cout << "6) tuple2: " << tuple2 << '\n';
+}
+} // namespace integer_sequence_test
 
 //
 // https://en.cppreference.com/w/cpp/numeric/ratio/ratio_add#Example
