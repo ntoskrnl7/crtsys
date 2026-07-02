@@ -154,6 +154,9 @@ void run();
 namespace accumulate_test {
 void run();
 }
+namespace allocator_traits_test {
+void run();
+}
 namespace any_test {
 void run();
 }
@@ -164,6 +167,9 @@ namespace back_inserter_test {
 void run();
 }
 namespace bind_test {
+void run();
+}
+namespace bind_front_test {
 void run();
 }
 namespace binary_search_test {
@@ -286,6 +292,9 @@ void run();
 namespace inner_product_test {
 void run();
 }
+namespace integer_sequence_test {
+void run();
+}
 namespace invoke_test {
 void run();
 }
@@ -322,6 +331,9 @@ void run();
 namespace map_member_operations_test {
 void run();
 }
+namespace mem_fn_test {
+void run();
+}
 namespace merge_test {
 void run();
 }
@@ -338,6 +350,9 @@ namespace multiset_erase_test {
 void run();
 }
 namespace next_permutation_test {
+void run();
+}
+namespace not_fn_test {
 void run();
 }
 namespace optional_test {
@@ -463,6 +478,9 @@ void run();
 namespace tuple_test {
 void run();
 }
+namespace type_index_test {
+void run();
+}
 namespace to_chars_test {
 void run();
 }
@@ -488,6 +506,9 @@ namespace unordered_set_test {
 void run();
 }
 namespace unordered_set_member_operations_test {
+void run();
+}
+namespace visit_test {
 void run();
 }
 namespace random_device_test {
@@ -737,13 +758,16 @@ void cpp_std_tests() {
   CRTSYS_RUN_CPPREFERENCE_TEST(tuple_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(pair_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(variant_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(visit_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(any_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(type_index_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(source_location_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(reference_wrapper_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(invoke_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(exchange_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(move_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(is_same_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(integer_sequence_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(ratio_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(concepts_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(strong_ordering_test);
@@ -754,9 +778,13 @@ void cpp_std_tests() {
   CRTSYS_RUN_CPPREFERENCE_TEST(uniform_int_distribution_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(function_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(bind_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(not_fn_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(bind_front_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(mem_fn_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(unique_ptr_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(pmr_monotonic_buffer_resource_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(pmr_pool_resource_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(allocator_traits_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(shared_ptr_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(weak_ptr_test);
 }

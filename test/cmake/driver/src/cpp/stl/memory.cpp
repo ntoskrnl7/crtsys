@@ -262,6 +262,31 @@ void run() {
 } // namespace pmr_pool_resource_test
 
 //
+// https://en.cppreference.com/w/cpp/memory/allocator_traits
+//
+namespace allocator_traits_test {
+void run() {
+  // This cppreference API page has no standalone "Run this code" example.
+  // Exercise the allocator_traits member aliases and allocate/construct/
+  // destroy/deallocate forwarding path directly.
+  using allocator_type = std::allocator<int>;
+  using traits = std::allocator_traits<allocator_type>;
+  static_assert(std::is_same_v<traits::value_type, int>);
+  static_assert(std::is_same_v<traits::pointer, int *>);
+
+  allocator_type allocator;
+  int *raw = traits::allocate(allocator, 2);
+  traits::construct(allocator, raw, 47);
+  traits::construct(allocator, raw + 1, 53);
+  memory_test_detail::expect(raw[0] == 47 && raw[1] == 53,
+                             "allocator_traits values mismatch");
+  traits::destroy(allocator, raw + 1);
+  traits::destroy(allocator, raw);
+  traits::deallocate(allocator, raw, 2);
+}
+} // namespace allocator_traits_test
+
+//
 // https://en.cppreference.com/w/cpp/memory/unique_ptr#Example
 //
 namespace unique_ptr_test {

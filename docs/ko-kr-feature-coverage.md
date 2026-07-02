@@ -124,6 +124,8 @@ cppreference Example 코드를 이식한 항목은
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::bind](https://en.cppreference.com/w/cpp/utility/functional/bind)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/functional.cpp)
+- [x] [std::bind_front](https://en.cppreference.com/w/cpp/utility/functional/bind_front)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/functional.cpp)
 - [x] [std::binary_search](https://en.cppreference.com/w/cpp/algorithm/binary_search)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::bitset](https://en.cppreference.com/w/cpp/utility/bitset)
@@ -171,6 +173,8 @@ cppreference Example 코드를 이식한 항목은
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::is_same](https://en.cppreference.com/w/cpp/types/is_same)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
+- [x] [std::integer_sequence](https://en.cppreference.com/w/cpp/utility/integer_sequence)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::lcm](https://en.cppreference.com/w/cpp/numeric/lcm)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::lerp](https://en.cppreference.com/w/cpp/numeric/lerp)
@@ -185,6 +189,8 @@ cppreference Example 코드를 이식한 항목은
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::merge](https://en.cppreference.com/w/cpp/algorithm/merge)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
+- [x] [std::mem_fn](https://en.cppreference.com/w/cpp/utility/functional/mem_fn)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/functional.cpp)
 - [x] [std::midpoint](https://en.cppreference.com/w/cpp/numeric/midpoint)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::move](https://en.cppreference.com/w/cpp/utility/move)
@@ -195,6 +201,8 @@ cppreference Example 코드를 이식한 항목은
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/containers.cpp)
 - [x] [std::next_permutation](https://en.cppreference.com/w/cpp/algorithm/next_permutation)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
+- [x] [std::not_fn](https://en.cppreference.com/w/cpp/utility/functional/not_fn)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/functional.cpp)
 - [x] [std::optional](https://en.cppreference.com/w/cpp/utility/optional)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::expected](https://en.cppreference.com/w/cpp/utility/expected)
@@ -209,6 +217,8 @@ cppreference Example 코드를 이식한 항목은
       [`std::pmr::polymorphic_allocator`](https://en.cppreference.com/w/cpp/memory/polymorphic_allocator),
       [`std::pmr::null_memory_resource`](https://en.cppreference.com/w/cpp/memory/null_memory_resource),
       [`std::pmr::new_delete_resource`](https://en.cppreference.com/w/cpp/memory/new_delete_resource)
+  [(cppreference API page coverage)](../test/cmake/driver/src/cpp/stl/memory.cpp)
+- [x] [std::allocator_traits](https://en.cppreference.com/w/cpp/memory/allocator_traits)
   [(cppreference API page coverage)](../test/cmake/driver/src/cpp/stl/memory.cpp)
 - [x] [std::partial_sum](https://en.cppreference.com/w/cpp/algorithm/partial_sum)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
@@ -331,6 +341,8 @@ cppreference Example 코드를 이식한 항목은
   [(cppreference constructor example)](../test/cmake/driver/src/cpp/stl/thread.cpp)
 - [x] [std::tuple](https://en.cppreference.com/w/cpp/utility/tuple)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
+- [x] [std::type_index](https://en.cppreference.com/w/cpp/types/type_index)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::to_chars](https://en.cppreference.com/w/cpp/utility/to_chars)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::transform](https://en.cppreference.com/w/cpp/algorithm/transform)
@@ -346,6 +358,8 @@ cppreference Example 코드를 이식한 항목은
 - [x] [std::unordered_set](https://en.cppreference.com/w/cpp/container/unordered_set)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/containers.cpp)
 - [x] [std::variant](https://en.cppreference.com/w/cpp/utility/variant)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
+- [x] [std::visit](https://en.cppreference.com/w/cpp/utility/variant/visit2)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::vector](https://en.cppreference.com/w/cpp/container/vector)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/containers.cpp)
@@ -498,15 +512,6 @@ cppreference Example 코드를 이식한 항목은
   - 아직 명시 driver 예제로 분리하지 않은 range adaptor 후보:
     `take`, `drop`, `reverse`, `join`, `split`, `keys`, `values`,
     `elements` 및 feature-test macro로 열리는 C++23 view들
-- [ ] Memory 및 PMR
-  - [`std::allocator_traits`](https://en.cppreference.com/w/cpp/memory/allocator_traits)
-- [ ] Utility, functional, type support
-  - [`std::visit`](https://en.cppreference.com/w/cpp/utility/variant/visit),
-    [`std::type_index`](https://en.cppreference.com/w/cpp/types/type_index),
-    [`std::integer_sequence`](https://en.cppreference.com/w/cpp/utility/integer_sequence)
-  - [`std::not_fn`](https://en.cppreference.com/w/cpp/utility/functional/not_fn),
-    [`std::mem_fn`](https://en.cppreference.com/w/cpp/utility/functional/mem_fn),
-    [`std::bind_front`](https://en.cppreference.com/w/cpp/utility/functional/bind_front)
 - [ ] Regex, formatting, stream
   - [`std::regex_match`](https://en.cppreference.com/w/cpp/regex/regex_match),
     [`std::regex_iterator`](https://en.cppreference.com/w/cpp/regex/regex_iterator),

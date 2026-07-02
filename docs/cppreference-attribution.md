@@ -162,14 +162,17 @@ test harness, typically by moving the sample `main()` body into a namespaced
 - `std::to_chars`: <https://en.cppreference.com/w/cpp/utility/to_chars>
 - `std::from_chars`: <https://en.cppreference.com/cpp/utility/from_chars>
 - `std::variant`: <https://en.cppreference.com/w/cpp/utility/variant>
+- `std::visit`: <https://en.cppreference.com/w/cpp/utility/variant/visit2>
 - `std::any`: <https://en.cppreference.com/w/cpp/utility/any>
 - `std::expected`: <https://en.cppreference.com/w/cpp/utility/expected>
+- `std::type_index`: <https://en.cppreference.com/w/cpp/types/type_index>
 - `std::source_location`: <https://en.cppreference.com/w/cpp/utility/source_location>
 - `std::reference_wrapper`: <https://en.cppreference.com/w/cpp/utility/functional/reference_wrapper>
 - `std::invoke`: <https://en.cppreference.com/w/cpp/utility/functional/invoke>
 - `std::exchange`: <https://en.cppreference.com/w/cpp/utility/exchange>
 - `std::move`: <https://en.cppreference.com/w/cpp/utility/move>
 - `std::is_same`: <https://en.cppreference.com/w/cpp/types/is_same>
+- `std::integer_sequence`: <https://en.cppreference.com/w/cpp/utility/integer_sequence>
 - `std::ratio`: <https://en.cppreference.com/w/cpp/numeric/ratio>
 - `std::derived_from` / `std::same_as`: <https://en.cppreference.com/w/cpp/concepts>
 - `std::strong_ordering`: <https://en.cppreference.com/w/cpp/utility/compare/strong_ordering>
@@ -193,11 +196,15 @@ test harness, typically by moving the sample `main()` body into a namespaced
 - `std::chrono::time_zone::get_info`: <https://en.cppreference.com/w/cpp/chrono/time_zone/get_info>
 - `std::unique_ptr`: <https://en.cppreference.com/w/cpp/memory/unique_ptr>
 - `std::pmr::monotonic_buffer_resource`: <https://en.cppreference.com/w/cpp/memory/monotonic_buffer_resource>
+- `std::allocator_traits`: <https://en.cppreference.com/w/cpp/memory/allocator_traits>
 - `std::pmr::unsynchronized_pool_resource`: <https://en.cppreference.com/w/cpp/memory/unsynchronized_pool_resource>
 - `std::pmr::synchronized_pool_resource`: <https://en.cppreference.com/w/cpp/memory/synchronized_pool_resource>
 - `std::pmr::polymorphic_allocator`: <https://en.cppreference.com/w/cpp/memory/polymorphic_allocator>
 - `std::pmr::null_memory_resource`: <https://en.cppreference.com/w/cpp/memory/null_memory_resource>
 - `std::pmr::new_delete_resource`: <https://en.cppreference.com/w/cpp/memory/new_delete_resource>
+- `std::not_fn`: <https://en.cppreference.com/w/cpp/utility/functional/not_fn>
+- `std::bind_front`: <https://en.cppreference.com/w/cpp/utility/functional/bind_front>
+- `std::mem_fn`: <https://en.cppreference.com/w/cpp/utility/functional/mem_fn>
 - `std::filesystem::path` lexical operations: <https://en.cppreference.com/w/cpp/filesystem/path/lexically_normal>
 - `std::filesystem::directory_iterator`: <https://en.cppreference.com/w/cpp/filesystem/directory_iterator>
 - `std::filesystem::recursive_directory_iterator`: <https://en.cppreference.com/w/cpp/filesystem/recursive_directory_iterator>
@@ -302,5 +309,5 @@ The `std::lerp` example is enabled in the default kernel-driver build.
 The `std::pmr::monotonic_buffer_resource` example is compiled into the default
 driver run with the cppreference iteration and node counts.
 
-The PMR pool/resource checks cover cppreference API pages that do not provide
-standalone "Run this code" examples.
+The `std::allocator_traits` and PMR pool/resource checks cover cppreference API
+pages that do not provide standalone "Run this code" examples.
