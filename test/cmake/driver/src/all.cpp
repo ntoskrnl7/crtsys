@@ -310,6 +310,9 @@ void run();
 namespace map_test {
 void run();
 }
+namespace map_member_operations_test {
+void run();
+}
 namespace merge_test {
 void run();
 }
@@ -374,6 +377,9 @@ namespace remove_test {
 void run();
 }
 namespace set_test {
+void run();
+}
+namespace set_member_operations_test {
 void run();
 }
 namespace shared_ptr_test {
@@ -451,6 +457,9 @@ void run();
 namespace unordered_map_test {
 void run();
 }
+namespace unordered_map_member_operations_test {
+void run();
+}
 namespace unordered_multimap_equal_range_test {
 void run();
 }
@@ -458,6 +467,9 @@ namespace unordered_multiset_count_test {
 void run();
 }
 namespace unordered_set_test {
+void run();
+}
+namespace unordered_set_member_operations_test {
 void run();
 }
 namespace random_device_test {
@@ -473,6 +485,9 @@ namespace variant_test {
 void run();
 }
 namespace vector_test {
+void run();
+}
+namespace vector_member_operations_test {
 void run();
 }
 namespace weak_ptr_test {
@@ -596,16 +611,21 @@ void cpp_std_tests() {
   CRTSYS_RUN_CPPREFERENCE_TEST(stop_callback_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(array_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(vector_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(vector_member_operations_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(deque_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(list_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(forward_list_insert_after_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(span_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(map_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(map_member_operations_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(set_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(set_member_operations_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(multiset_erase_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(multimap_equal_range_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(unordered_map_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(unordered_map_member_operations_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(unordered_set_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(unordered_set_member_operations_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(unordered_multiset_count_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(unordered_multimap_equal_range_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(queue_test);

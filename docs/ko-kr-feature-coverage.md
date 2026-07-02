@@ -327,6 +327,16 @@ cppreference Example 코드를 이식한 항목은
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::vector](https://en.cppreference.com/w/cpp/container/vector)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/containers.cpp)
+- [x] Container member operation:
+      [`std::vector::emplace`](https://en.cppreference.com/w/cpp/container/vector/emplace),
+      [`std::vector::erase`](https://en.cppreference.com/w/cpp/container/vector/erase),
+      [`std::map::insert_or_assign`](https://en.cppreference.com/w/cpp/container/map/insert_or_assign),
+      [`std::map::try_emplace`](https://en.cppreference.com/w/cpp/container/map/try_emplace),
+      [`contains`](https://en.cppreference.com/w/cpp/container/map/contains),
+      [`extract`](https://en.cppreference.com/w/cpp/container/map/extract), and
+      [`merge`](https://en.cppreference.com/w/cpp/container/map/merge)
+      ordered/unordered associative container 경로
+  [(cppreference member examples)](../test/cmake/driver/src/cpp/stl/containers.cpp)
 - [x] [std::numbers](https://en.cppreference.com/w/cpp/numeric/constants)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::random_device](https://en.cppreference.com/w/cpp/numeric/random/random_device)

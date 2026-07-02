@@ -22,6 +22,7 @@
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace array_test {
@@ -82,6 +83,52 @@ void run() {
   std::cout << '\n';
 }
 } // namespace vector_test
+
+//
+// https://en.cppreference.com/w/cpp/container/vector/emplace#Example
+// https://en.cppreference.com/w/cpp/container/vector/erase#Example
+//
+namespace vector_member_operations_test {
+struct A {
+  std::string s;
+
+  explicit A(std::string str) : s(std::move(str)) {}
+  A(const A &) = default;
+  A(A &&) noexcept = default;
+  A &operator=(const A &) = default;
+  A &operator=(A &&) noexcept = default;
+};
+
+void run() {
+  // These two cppreference member-function examples are folded into one
+  // assert-oriented driver test to keep KD output small; the emplace copy/move
+  // and erase single/range semantics are kept.
+  std::vector<A> container;
+  container.reserve(10);
+
+  A two{"two"};
+  A three{"three"};
+
+  container.emplace(container.end(), "one");
+  container.emplace(container.end(), two);
+  container.emplace(container.end(), std::move(three));
+
+  assert(container.size() == 3);
+  assert(container[0].s == "one");
+  assert(container[1].s == "two");
+  assert(container[2].s == "three");
+
+  std::vector<int> values{0, 1, 2, 3, 4, 5, 6};
+  auto it = values.erase(values.begin() + 1);
+  assert(it != values.end());
+  assert(*it == 2);
+
+  it = values.erase(values.begin() + 2, values.begin() + 4);
+  assert(it != values.end());
+  assert(*it == 5);
+  assert((values == std::vector<int>{0, 2, 5, 6}));
+}
+} // namespace vector_member_operations_test
 
 //
 // https://en.cppreference.com/w/cpp/container/deque#Example
@@ -275,6 +322,60 @@ void run() {
 } // namespace map_test
 
 //
+// https://en.cppreference.com/w/cpp/container/map/insert_or_assign#Example
+// https://en.cppreference.com/w/cpp/container/map/try_emplace#Example
+// https://en.cppreference.com/w/cpp/container/map/contains#Example
+// https://en.cppreference.com/w/cpp/container/map/extract#Example
+// https://en.cppreference.com/w/cpp/container/map/merge#Example
+//
+namespace map_member_operations_test {
+void run() {
+  // cppreference has these as separate member-function examples. The driver
+  // harness keeps them together and assert-only so map overwrite, no-overwrite,
+  // lookup, node-handle, and merge behavior are checked without noisy output.
+  std::map<std::string, int> inventory;
+
+  const auto [cpu_it, cpu_inserted] = inventory.insert_or_assign("CPU", 10);
+  assert(cpu_inserted);
+  assert(cpu_it->second == 10);
+
+  const auto [cpu_again, cpu_inserted_again] =
+      inventory.insert_or_assign("CPU", 25);
+  assert(!cpu_inserted_again);
+  assert(cpu_again->second == 25);
+
+  const auto [gpu_it, gpu_inserted] = inventory.try_emplace("GPU", 15);
+  assert(gpu_inserted);
+  assert(gpu_it->second == 15);
+
+  const auto [gpu_again, gpu_inserted_again] =
+      inventory.try_emplace("GPU", 99);
+  assert(!gpu_inserted_again);
+  assert(gpu_again->second == 15);
+
+  assert(inventory.contains("CPU"));
+  assert(!inventory.contains("RAM"));
+
+  std::map<int, char> cont{{1, 'a'}, {2, 'b'}, {3, 'c'}};
+  auto node = cont.extract(1);
+  assert(!node.empty());
+  assert(node.key() == 1);
+  assert(node.mapped() == 'a');
+  node.key() = 4;
+  cont.insert(std::move(node));
+  assert(!cont.contains(1));
+  assert(cont.at(4) == 'a');
+
+  std::map<int, char> dst{{1, 'a'}, {2, 'b'}};
+  std::map<int, char> src{{2, 'B'}, {3, 'c'}};
+  dst.merge(src);
+  assert(dst.contains(3));
+  assert(src.contains(2));
+  assert(src.size() == 1);
+}
+} // namespace map_member_operations_test
+
+//
 // https://en.cppreference.com/w/cpp/container/set#Example
 //
 namespace set_test {
@@ -315,6 +416,38 @@ void run() {
             << characters << '\n';
 }
 } // namespace set_test
+
+//
+// https://en.cppreference.com/w/cpp/container/set/contains#Example
+// https://en.cppreference.com/w/cpp/container/set/extract#Example
+// https://en.cppreference.com/w/cpp/container/set/merge#Example
+//
+namespace set_member_operations_test {
+void run() {
+  // The linked member-function pages are compacted into one driver check;
+  // membership, node-handle key mutation, and duplicate-preserving merge
+  // behavior are the cppreference-observable parts we need here.
+  std::set<int> values{1, 2, 3};
+  assert(values.contains(2));
+  assert(!values.contains(4));
+
+  auto node = values.extract(1);
+  assert(!node.empty());
+  assert(node.value() == 1);
+  node.value() = 4;
+  values.insert(std::move(node));
+  assert(!values.contains(1));
+  assert(values.contains(4));
+
+  std::set<int> dst{1, 2};
+  std::set<int> src{2, 3, 4};
+  dst.merge(src);
+  assert(dst.contains(3));
+  assert(dst.contains(4));
+  assert(src.contains(2));
+  assert(src.size() == 1);
+}
+} // namespace set_member_operations_test
 
 //
 // https://en.cppreference.com/w/cpp/container/multiset/erase#Example
@@ -411,6 +544,37 @@ void run() {
 } // namespace unordered_map_test
 
 //
+// https://en.cppreference.com/w/cpp/container/unordered_map/contains#Example
+// https://en.cppreference.com/w/cpp/container/unordered_map/extract#Example
+// https://en.cppreference.com/w/cpp/container/unordered_map/merge#Example
+//
+namespace unordered_map_member_operations_test {
+void run() {
+  // The unordered member-function examples are assertion-based here because
+  // iteration order is intentionally unspecified.
+  std::unordered_map<int, std::string> colors{{1, "red"}, {2, "green"}};
+  assert(colors.contains(1));
+  assert(!colors.contains(3));
+
+  auto node = colors.extract(2);
+  assert(!node.empty());
+  assert(node.key() == 2);
+  assert(node.mapped() == "green");
+  node.key() = 3;
+  colors.insert(std::move(node));
+  assert(!colors.contains(2));
+  assert(colors.at(3) == "green");
+
+  std::unordered_map<int, std::string> dst{{1, "one"}, {2, "two"}};
+  std::unordered_map<int, std::string> src{{2, "TWO"}, {4, "four"}};
+  dst.merge(src);
+  assert(dst.contains(4));
+  assert(src.contains(2));
+  assert(src.size() == 1);
+}
+} // namespace unordered_map_member_operations_test
+
+//
 // https://en.cppreference.com/w/cpp/container/unordered_set#Example
 //
 namespace unordered_set_test {
@@ -436,6 +600,37 @@ void run() {
   print(mySet);
 }
 } // namespace unordered_set_test
+
+//
+// https://en.cppreference.com/w/cpp/container/unordered_set/contains#Example
+// https://en.cppreference.com/w/cpp/container/unordered_set/extract#Example
+// https://en.cppreference.com/w/cpp/container/unordered_set/merge#Example
+//
+namespace unordered_set_member_operations_test {
+void run() {
+  // Kept assert-only for the same reason as unordered_map_member_operations:
+  // cppreference-visible behavior is membership and node/merge semantics, not
+  // bucket-dependent iteration order.
+  std::unordered_set<int> values{1, 2, 3};
+  assert(values.contains(2));
+  assert(!values.contains(5));
+
+  auto node = values.extract(2);
+  assert(!node.empty());
+  assert(node.value() == 2);
+  node.value() = 5;
+  values.insert(std::move(node));
+  assert(!values.contains(2));
+  assert(values.contains(5));
+
+  std::unordered_set<int> dst{1, 2};
+  std::unordered_set<int> src{2, 3};
+  dst.merge(src);
+  assert(dst.contains(3));
+  assert(src.contains(2));
+  assert(src.size() == 1);
+}
+} // namespace unordered_set_member_operations_test
 
 //
 // https://en.cppreference.com/w/cpp/container/unordered_multiset/count#Example
