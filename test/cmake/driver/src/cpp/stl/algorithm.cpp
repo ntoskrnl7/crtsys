@@ -257,6 +257,252 @@ void run() {
 } // namespace binary_search_test
 
 //
+// https://en.cppreference.com/w/cpp/algorithm/lower_bound#Example
+//
+namespace lower_bound_test {
+struct PriceInfo {
+  double price;
+};
+
+void run() {
+  const std::vector<int> data{1, 2, 4, 5, 5, 6};
+
+  for (int i = 0; i < 8; ++i) {
+    // Search for first element x such that i <= x.
+    // cppreference prints U+2264 here; the driver test sources stay ASCII.
+    auto lower = std::lower_bound(data.begin(), data.end(), i);
+    std::cout << i << " <= ";
+    lower != data.end()
+        ? std::cout << *lower << " at index "
+                    << std::distance(data.begin(), lower)
+        : std::cout << "not found";
+    std::cout << '\n';
+  }
+
+  std::vector<PriceInfo> prices{{100.0}, {101.5}, {102.5}, {102.5}, {107.3}};
+  for (const double to_find : {102.5, 110.2}) {
+    auto prc_info = std::lower_bound(
+        prices.begin(), prices.end(), to_find,
+        [](const PriceInfo &info, double value) {
+          return info.price < value;
+        });
+    prc_info != prices.end()
+        ? std::cout << prc_info->price << " at index "
+                    << prc_info - prices.begin()
+        : std::cout << to_find << " not found";
+    std::cout << '\n';
+  }
+  using CD = std::complex<double>;
+  std::vector<CD> nums{{1, 0}, {2, 2}, {2, 1}, {3, 0}};
+  auto cmpz = [](CD x, CD y) { return x.real() < y.real(); };
+#ifdef __cpp_lib_algorithm_default_value_type
+  auto it = std::lower_bound(nums.cbegin(), nums.cend(), {2, 0}, cmpz);
+#else
+  auto it = std::lower_bound(nums.cbegin(), nums.cend(), CD{2, 0}, cmpz);
+#endif
+  assert((*it == CD{2, 2}));
+}
+} // namespace lower_bound_test
+
+//
+// https://en.cppreference.com/w/cpp/algorithm/upper_bound#Example
+//
+namespace upper_bound_test {
+struct PriceInfo {
+  double price;
+};
+
+void run() {
+  const std::vector<int> data{1, 2, 4, 5, 5, 6};
+
+  for (int i = 0; i < 7; ++i) {
+    // Search first element that is greater than i.
+    auto upper = std::upper_bound(data.begin(), data.end(), i);
+    std::cout << i << " < ";
+    upper != data.end()
+        ? std::cout << *upper << " at index "
+                    << std::distance(data.begin(), upper)
+        : std::cout << "not found";
+    std::cout << '\n';
+  }
+
+  std::vector<PriceInfo> prices{{100.0}, {101.5}, {102.5}, {102.5}, {107.3}};
+  for (double to_find : {102.5, 110.2}) {
+    auto prc_info = std::upper_bound(
+        prices.begin(), prices.end(), to_find,
+        [](double value, const PriceInfo &info) {
+          return value < info.price;
+        });
+
+    prc_info != prices.end()
+        ? std::cout << prc_info->price << " at index "
+                    << prc_info - prices.begin()
+        : std::cout << to_find << " not found";
+    std::cout << '\n';
+  }
+  using CD = std::complex<double>;
+  std::vector<CD> nums{{1, 0}, {2, 2}, {2, 1}, {3, 0}, {3, 1}};
+  auto cmpz = [](CD x, CD y) { return x.real() < y.real(); };
+#ifdef __cpp_lib_algorithm_default_value_type
+  auto it = std::upper_bound(nums.cbegin(), nums.cend(), {2, 0}, cmpz);
+#else
+  auto it = std::upper_bound(nums.cbegin(), nums.cend(), CD{2, 0}, cmpz);
+#endif
+  assert((*it == CD{3, 0}));
+}
+} // namespace upper_bound_test
+
+//
+// https://en.cppreference.com/w/cpp/algorithm/equal_range#Example
+//
+namespace equal_range_test {
+struct S {
+  int number;
+  char name;
+  // note: name is ignored by this comparison operator
+  bool operator<(const S &s) const { return number < s.number; }
+};
+
+struct Comp {
+  bool operator()(const S &s, int i) const { return s.number < i; }
+  bool operator()(int i, const S &s) const { return i < s.number; }
+};
+
+void run() {
+  // note: not ordered, only partitioned w.r.t. S defined below
+  const std::vector<S> vec{{1, 'A'}, {2, 'B'}, {2, 'C'},
+                           {2, 'D'}, {4, 'G'}, {3, 'F'}};
+  const S value{2, '?'};
+
+  std::cout << "Compare using S::operator<(): ";
+  const auto p = std::equal_range(vec.begin(), vec.end(), value);
+
+  for (auto it = p.first; it != p.second; ++it) {
+    std::cout << it->name << ' ';
+  }
+  std::cout << '\n';
+  std::cout << "Using heterogeneous comparison: ";
+  const auto p2 = std::equal_range(vec.begin(), vec.end(), 2, Comp{});
+
+  for (auto it = p2.first; it != p2.second; ++it) {
+    std::cout << it->name << ' ';
+  }
+  std::cout << '\n';
+  using CD = std::complex<double>;
+  std::vector<CD> nums{{1, 0}, {2, 2}, {2, 1}, {3, 0}, {3, 1}};
+  auto cmpz = [](CD x, CD y) { return x.real() < y.real(); };
+#ifdef __cpp_lib_algorithm_default_value_type
+  auto p3 = std::equal_range(nums.cbegin(), nums.cend(), {2, 0}, cmpz);
+#else
+  auto p3 = std::equal_range(nums.cbegin(), nums.cend(), CD{2, 0}, cmpz);
+#endif
+  for (auto it = p3.first; it != p3.second; ++it) {
+    std::cout << *it << ' ';
+  }
+  std::cout << '\n';
+}
+} // namespace equal_range_test
+
+//
+// https://en.cppreference.com/w/cpp/algorithm/stable_sort#Example
+//
+namespace stable_sort_test {
+struct Employee {
+  int age;
+  std::string name; // Does not participate in comparisons
+};
+
+bool operator<(const Employee &lhs, const Employee &rhs) {
+  return lhs.age < rhs.age;
+}
+
+// cppreference uses a bare feature-test macro; guard the identifier so older
+// MSVC /WX builds do not turn undefined-macro diagnostics into build failures.
+#if defined(__cpp_lib_constexpr_algorithms) &&                                 \
+    __cpp_lib_constexpr_algorithms >= 202306L
+consteval auto get_sorted() {
+  auto v = std::array{3, 1, 4, 1, 5, 9};
+  std::stable_sort(v.begin(), v.end());
+  return v;
+}
+static_assert(std::ranges::is_sorted(get_sorted()));
+#endif
+
+void run() {
+  std::vector<Employee> v{{108, "Zaphod"}, {32, "Arthur"}, {108, "Ford"}};
+
+  std::stable_sort(v.begin(), v.end());
+  for (const Employee &e : v) {
+    std::cout << e.age << ", " << e.name << '\n';
+  }
+}
+} // namespace stable_sort_test
+
+//
+// https://en.cppreference.com/w/cpp/algorithm/nth_element#Example
+//
+namespace nth_element_test {
+void printVec(const std::vector<int> &vec) {
+  std::cout << "v = {";
+  for (char sep[]{0, ' ', 0}; const int i : vec) {
+    std::cout << sep << i, sep[0] = ',';
+  }
+  std::cout << "};\n";
+}
+
+void run() {
+  std::vector<int> v{5, 10, 6, 4, 3, 2, 6, 7, 9, 3};
+  printVec(v);
+  auto m = v.begin() + v.size() / 2;
+  std::nth_element(v.begin(), m, v.end());
+  std::cout << "\n The median is " << v[v.size() / 2] << '\n';
+  // The consequence of the inequality of elements before/after the Nth one:
+  assert(std::accumulate(v.begin(), m, 0) < std::accumulate(m, v.end(), 0));
+  printVec(v);
+  // Note: comp function changed
+  std::nth_element(v.begin(), v.begin() + 1, v.end(), std::greater{});
+  std::cout << "\n The second largest element is " << v[1] << '\n';
+  std::cout << "The largest element is " << v[0] << '\n';
+  printVec(v);
+}
+} // namespace nth_element_test
+
+//
+// https://en.cppreference.com/w/cpp/algorithm/partial_sort#Example
+//
+namespace partial_sort_test {
+void print(const auto &s, int middle) {
+  for (int a : s) {
+    std::cout << a << ' ';
+  }
+  std::cout << '\n';
+  if (middle > 0) {
+    while (middle-- > 0) {
+      std::cout << "--";
+    }
+    std::cout << '^';
+  } else if (middle < 0) {
+    for (auto i = s.size() + middle; --i; std::cout << "  ") {
+    }
+    for (std::cout << '^'; middle++ < 0; std::cout << "--") {
+    }
+  }
+  std::cout << '\n';
+}
+
+void run() {
+  std::array<int, 10> s{5, 7, 4, 2, 8, 6, 1, 9, 0, 3};
+  print(s, 0);
+  std::partial_sort(s.begin(), s.begin() + 3, s.end());
+  print(s, 3);
+  std::partial_sort(s.rbegin(), s.rbegin() + 4, s.rend());
+  print(s, -4);
+  std::partial_sort(s.rbegin(), s.rbegin() + 5, s.rend(), std::greater{});
+  print(s, -5);
+}
+} // namespace partial_sort_test
+
+//
 // https://en.cppreference.com/w/cpp/ranges#Example
 //
 namespace ranges_views_test {
@@ -946,6 +1192,129 @@ void run() {
   static_assert(std::bit_ceil(0b1001U) == 0b10000U);
 }
 } // namespace popcount_test
+
+//
+// https://en.cppreference.com/w/cpp/numeric/rotl#Example
+//
+namespace rotl_test {
+void run() {
+  using bin = std::bitset<8>;
+  const std::uint8_t x{0b00011101};
+  std::cout << bin(x) << " <- x\n";
+  for (const int s : {0, 1, 4, 9, -1}) {
+    std::cout << bin(std::rotl(x, s)) << " <- rotl(x, " << s << ")\n";
+  }
+}
+} // namespace rotl_test
+
+//
+// https://en.cppreference.com/w/cpp/numeric/rotr#Example
+//
+namespace rotr_test {
+void run() {
+  using bin = std::bitset<8>;
+  const std::uint8_t x{0b00011101};
+  std::cout << bin(x) << " <- x\n";
+  for (const int s : {0, 1, 9, -1, 2}) {
+    std::cout << bin(std::rotr(x, s)) << " <- rotr(x, " << s << ")\n";
+  }
+}
+} // namespace rotr_test
+
+//
+// https://en.cppreference.com/w/cpp/numeric/countl_zero#Example
+//
+namespace countl_zero_test {
+void run() {
+#if defined(_MSC_VER)
+#pragma warning(push)
+// Keep cppreference's braced integer list; MSVC warns about uint8_t
+// narrowing under /WX on some toolsets.
+#pragma warning(disable : 4242 4244 4305 4309)
+#endif
+  for (const std::uint8_t i : {0, 0b11111111, 0b11110000, 0b00011110}) {
+    std::cout << "countl_zero( " << std::bitset<8>(i) << " ) = "
+              << std::countl_zero(i) << '\n';
+  }
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
+}
+} // namespace countl_zero_test
+
+//
+// https://en.cppreference.com/w/cpp/numeric/countr_zero#Example
+//
+namespace countr_zero_test {
+void run() {
+#if defined(_MSC_VER)
+#pragma warning(push)
+// Keep cppreference's braced integer list; MSVC warns about uint8_t
+// narrowing under /WX on some toolsets.
+#pragma warning(disable : 4242 4244 4305 4309)
+#endif
+  for (const std::uint8_t i : {0, 0b11111111, 0b00011100, 0b00011101}) {
+    std::cout << "countr_zero( " << std::bitset<8>(i) << " ) = "
+              << std::countr_zero(i) << '\n';
+  }
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
+}
+} // namespace countr_zero_test
+
+//
+// https://en.cppreference.com/w/cpp/numeric/has_single_bit#Example
+//
+namespace has_single_bit_test {
+void run() {
+  for (auto u{0u}; u != 0B1010; ++u) {
+    std::cout << "u = " << u << " = " << std::bitset<4>(u);
+    if (std::has_single_bit(u)) {
+      std::cout << " = 2^" << std::log2(u) << " (is power of two)";
+    }
+    std::cout << '\n';
+  }
+}
+} // namespace has_single_bit_test
+
+//
+// https://en.cppreference.com/w/cpp/numeric/bit_ceil#Example
+//
+namespace bit_ceil_test {
+void run() {
+  using bin = std::bitset<8>;
+  for (auto x{0U}; 0XA != x; ++x) {
+    std::cout << "bit_ceil( " << bin(x) << " ) = "
+              << bin(std::bit_ceil(x)) << '\n';
+  }
+}
+} // namespace bit_ceil_test
+
+//
+// https://en.cppreference.com/w/cpp/numeric/bit_floor#Example
+//
+namespace bit_floor_test {
+void run() {
+  using bin = std::bitset<8>;
+  for (unsigned x{}; x != 012; ++x) {
+    std::cout << "bit_floor( " << bin(x) << " ) = "
+              << bin(std::bit_floor(x)) << '\n';
+  }
+}
+} // namespace bit_floor_test
+
+//
+// https://en.cppreference.com/w/cpp/numeric/bit_width#Example
+//
+namespace bit_width_test {
+void run() {
+  for (unsigned x{}; x != 010; ++x) {
+    std::cout << "bit_width( " << std::bitset<4>{x}
+              << " ) = " << std::bit_width(x) << '\n';
+  }
+}
+} // namespace bit_width_test
 
 //
 // https://en.cppreference.com/w/cpp/numeric/bit_cast#Example

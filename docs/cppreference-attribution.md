@@ -134,6 +134,9 @@ test harness, typically by moving the sample `main()` body into a namespaced
 - `std::remove`: <https://en.cppreference.com/w/cpp/algorithm/remove>
 - `std::partition`: <https://en.cppreference.com/w/cpp/algorithm/partition>
 - `std::binary_search`: <https://en.cppreference.com/w/cpp/algorithm/binary_search>
+- `std::lower_bound`: <https://en.cppreference.com/w/cpp/algorithm/lower_bound>
+- `std::upper_bound`: <https://en.cppreference.com/w/cpp/algorithm/upper_bound>
+- `std::equal_range`: <https://en.cppreference.com/w/cpp/algorithm/equal_range>
 - `std::ranges` filter/transform views: <https://en.cppreference.com/w/cpp/ranges>
 - `std::ranges::sort`: <https://en.cppreference.com/w/cpp/algorithm/ranges/sort>
 - `std::ranges::zip_view`: <https://en.cppreference.com/w/cpp/ranges/zip_view>
@@ -144,6 +147,9 @@ test harness, typically by moving the sample `main()` body into a namespaced
 - `std::merge`: <https://en.cppreference.com/w/cpp/algorithm/merge>
 - `std::make_heap`: <https://en.cppreference.com/w/cpp/algorithm/make_heap>
 - `std::next_permutation`: <https://en.cppreference.com/w/cpp/algorithm/next_permutation>
+- `std::stable_sort`: <https://en.cppreference.com/w/cpp/algorithm/stable_sort>
+- `std::nth_element`: <https://en.cppreference.com/w/cpp/algorithm/nth_element>
+- `std::partial_sort`: <https://en.cppreference.com/w/cpp/algorithm/partial_sort>
 - `std::accumulate`: <https://en.cppreference.com/w/cpp/algorithm/accumulate>
 - `std::iota`: <https://en.cppreference.com/w/cpp/algorithm/iota>
 - `std::partial_sum`: <https://en.cppreference.com/w/cpp/algorithm/partial_sum>
@@ -156,6 +162,14 @@ test harness, typically by moving the sample `main()` body into a namespaced
 - `std::lerp`: <https://en.cppreference.com/w/cpp/numeric/lerp>
 - `std::bitset`: <https://en.cppreference.com/w/cpp/utility/bitset>
 - `std::popcount`: <https://en.cppreference.com/w/cpp/numeric/popcount>
+- `std::rotl`: <https://en.cppreference.com/w/cpp/numeric/rotl>
+- `std::rotr`: <https://en.cppreference.com/w/cpp/numeric/rotr>
+- `std::countl_zero`: <https://en.cppreference.com/w/cpp/numeric/countl_zero>
+- `std::countr_zero`: <https://en.cppreference.com/w/cpp/numeric/countr_zero>
+- `std::has_single_bit`: <https://en.cppreference.com/w/cpp/numeric/has_single_bit>
+- `std::bit_ceil`: <https://en.cppreference.com/w/cpp/numeric/bit_ceil>
+- `std::bit_floor`: <https://en.cppreference.com/w/cpp/numeric/bit_floor>
+- `std::bit_width`: <https://en.cppreference.com/w/cpp/numeric/bit_width>
 - `std::bit_cast`: <https://en.cppreference.com/w/cpp/numeric/bit_cast>
 - `std::endian`: <https://en.cppreference.com/w/cpp/types/endian>
 - `std::byteswap`: <https://en.cppreference.com/w/cpp/numeric/byteswap>
