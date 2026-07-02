@@ -111,6 +111,12 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/atomic.cpp)
 - [x] [std::atomic_flag](https://en.cppreference.com/w/cpp/atomic/atomic_flag)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/atomic.cpp)
+- [x] Atomic fences and free functions:
+      [`std::atomic_thread_fence`](https://en.cppreference.com/w/cpp/atomic/atomic_thread_fence),
+      [`std::atomic_signal_fence`](https://en.cppreference.com/w/cpp/atomic/atomic_signal_fence),
+      [`std::atomic_fetch_add`](https://en.cppreference.com/w/cpp/atomic/atomic_fetch_add),
+      [`std::atomic_compare_exchange`](https://en.cppreference.com/w/cpp/atomic/atomic_compare_exchange)
+  [(cppreference example/API coverage)](../test/cmake/driver/src/cpp/stl/atomic.cpp)
 - [x] [std::chrono](https://en.cppreference.com/w/cpp/chrono)
   [(tested)](../test/cmake/driver/src/cpp/stl/chrono.cpp#L15)
   - C++20 timezone paths for
@@ -506,13 +512,6 @@ dependencies.
     and timed shared-lock edge cases
   - Additional `std::future` / `std::shared_future` error-path and timeout
     edge cases beyond the default examples
-- [ ] Atomic helpers
-  - [`std::atomic_thread_fence`](https://en.cppreference.com/w/cpp/atomic/atomic_thread_fence),
-    [`std::atomic_signal_fence`](https://en.cppreference.com/w/cpp/atomic/atomic_signal_fence)
-  - Free atomic operations such as
-    [`std::atomic_fetch_add`](https://en.cppreference.com/w/cpp/atomic/atomic_fetch_add)
-    and
-    [`std::atomic_compare_exchange`](https://en.cppreference.com/w/cpp/atomic/atomic_compare_exchange)
 - [ ] Additional ranges
   - Range adaptors not yet split into explicit driver examples, such as
     `take`, `drop`, `reverse`, `join`, `split`, `keys`, `values`,

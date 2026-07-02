@@ -2,11 +2,14 @@
 // https://en.cppreference.com/w/cpp/atomic/atomic#Example
 //
 #include <atomic>
+#include <chrono>
+#include <cassert>
 #include <functional>
 #include <iostream>
 #include <mutex>
 #include <numeric>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -137,3 +140,181 @@ void run() {
   }
 }
 } // namespace atomic_flag_test
+
+//
+// https://en.cppreference.com/w/cpp/atomic/atomic_thread_fence#Example
+//
+namespace atomic_thread_fence_test {
+constexpr int num_mailboxes = 32;
+std::atomic<int> mailbox_receiver[num_mailboxes];
+std::string mailbox_data[num_mailboxes];
+
+void run() {
+  constexpr int my_id = 7;
+  for (int i = 0; i < num_mailboxes; ++i) {
+    mailbox_receiver[i].store(-1, std::memory_order_relaxed);
+    mailbox_data[i].clear();
+  }
+
+  // cppreference presents this as a snippet with "..." placeholders. The
+  // driver test supplies concrete mailbox data so the fence path is executable.
+  mailbox_data[11] = "fence-protected message";
+  std::atomic_store_explicit(&mailbox_receiver[11], my_id,
+                             std::memory_order_release);
+
+  bool observed = false;
+  for (int i = 0; i < num_mailboxes; ++i) {
+    if (std::atomic_load_explicit(&mailbox_receiver[i],
+                                  std::memory_order_relaxed) == my_id) {
+      // synchronize with just one writer
+      std::atomic_thread_fence(std::memory_order_acquire);
+      // guaranteed to observe everything done in the writer thread
+      // before the atomic_store_explicit()
+      std::cout << mailbox_data[i] << '\n';
+      observed = mailbox_data[i] == "fence-protected message";
+    }
+  }
+  assert(observed);
+}
+} // namespace atomic_thread_fence_test
+
+//
+// https://en.cppreference.com/w/cpp/atomic/atomic_signal_fence
+//
+namespace atomic_signal_fence_test {
+void run() {
+  // cppreference documents atomic_signal_fence as an API page without a
+  // standalone runnable example; keep direct API coverage here.
+  std::atomic_signal_fence(std::memory_order_seq_cst);
+  std::atomic_signal_fence(std::memory_order_acquire);
+  std::cout << "atomic_signal_fence calls completed\n";
+}
+} // namespace atomic_signal_fence_test
+
+//
+// https://en.cppreference.com/w/cpp/atomic/atomic_fetch_add#Example
+//
+namespace atomic_fetch_add_test {
+using namespace std::chrono_literals;
+// meaning of cnt:
+//  5: readers and writer are in race. There are no active readers or writers.
+//  4...0: there are 1...5 active readers, The writer is blocked.
+// -1: writer won the race and readers are blocked.
+
+const int N = 5; // four concurrent readers are allowed
+std::atomic<int> cnt(N);
+
+std::vector<int> data;
+void reader(int id) {
+  for (;;) {
+    // lock
+    while (std::atomic_fetch_sub(&cnt, 1) <= 0) {
+      std::atomic_fetch_add(&cnt, 1);
+    }
+
+    // read
+    if (!data.empty()) {
+      std::cout << ("reader " + std::to_string(id) + " sees " +
+                    std::to_string(*data.rbegin()) + '\n');
+    }
+    if (data.size() == 25) {
+      break;
+    }
+
+    // unlock
+    std::atomic_fetch_add(&cnt, 1);
+    // pause
+    std::this_thread::sleep_for(1ms);
+  }
+}
+
+void writer() {
+  for (int n = 0; n < 25; ++n) {
+    // lock
+    while (std::atomic_fetch_sub(&cnt, N + 1) != N) {
+      std::atomic_fetch_add(&cnt, N + 1);
+    }
+
+    // write
+    data.push_back(n);
+    std::cout << "writer pushed back " << n << '\n';
+
+    // unlock
+    std::atomic_fetch_add(&cnt, N + 1);
+    // pause
+    std::this_thread::sleep_for(1ms);
+  }
+}
+
+void run() {
+  cnt = N;
+  data.clear();
+
+  std::vector<std::thread> v;
+  for (int n = 0; n < N; ++n) {
+    v.emplace_back(reader, n);
+  }
+  v.emplace_back(writer);
+
+  for (auto &t : v) {
+    t.join();
+  }
+
+  if (data.size() != 25) {
+    throw std::runtime_error("unexpected atomic_fetch_add data size");
+  }
+}
+} // namespace atomic_fetch_add_test
+
+//
+// https://en.cppreference.com/w/cpp/atomic/atomic_compare_exchange#Example
+//
+namespace atomic_compare_exchange_test {
+template <class T> struct node {
+  T data;
+  node *next;
+  node(const T &data) : data(data), next(nullptr) {}
+};
+
+template <class T> class stack {
+  std::atomic<node<T> *> head{nullptr};
+
+public:
+  ~stack() {
+    node<T> *current = head.load(std::memory_order_relaxed);
+    while (current != nullptr) {
+      node<T> *next = current->next;
+      delete current;
+      current = next;
+    }
+  }
+
+  void push(const T &data) {
+    node<T> *new_node = new node<T>(data);
+    // put the current value of head into new_node->next
+    new_node->next = head.load(std::memory_order_relaxed);
+    // now make new_node the new head, but if the head
+    // is no longer what's stored in new_node->next
+    // (some other thread must have inserted a node just now)
+    // then put that new head into new_node->next and try again
+    while (!std::atomic_compare_exchange_weak_explicit(
+        &head, &new_node->next, new_node, std::memory_order_release,
+        std::memory_order_relaxed)) {
+      ; // the body of the loop is empty
+    }
+    // note: the above loop is not thread-safe in at least
+    // GCC prior to 4.8.3 (bug 60272), clang prior to 2014-05-05 (bug 18899)
+    // MSVC prior to 2014-03-17 (bug 819819). See member function version for
+    // workaround
+  }
+};
+
+void run() {
+  // cppreference's minimal program exits immediately after main(); the driver
+  // harness initializes head explicitly and frees the nodes before unload.
+  stack<int> s;
+  s.push(1);
+  s.push(2);
+  s.push(3);
+}
+} // namespace atomic_compare_exchange_test

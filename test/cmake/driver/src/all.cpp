@@ -151,6 +151,18 @@ void run();
 namespace atomic_flag_test {
 void run();
 }
+namespace atomic_thread_fence_test {
+void run();
+}
+namespace atomic_signal_fence_test {
+void run();
+}
+namespace atomic_fetch_add_test {
+void run();
+}
+namespace atomic_compare_exchange_test {
+void run();
+}
 namespace accumulate_test {
 void run();
 }
@@ -806,6 +818,10 @@ void cpp_std_tests() {
   CRTSYS_RUN_CPPREFERENCE_TEST(atomic_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(atomic_ref_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(atomic_flag_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(atomic_thread_fence_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(atomic_signal_fence_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(atomic_fetch_add_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(atomic_compare_exchange_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(exception_ptr_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(optional_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(expected_test);
