@@ -190,6 +190,9 @@ void run();
 namespace deque_test {
 void run();
 }
+namespace deque_member_operations_test {
+void run();
+}
 namespace exception_ptr_test {
 void run();
 }
@@ -268,6 +271,9 @@ void run();
 namespace forward_list_insert_after_test {
 void run();
 }
+namespace forward_list_member_operations_test {
+void run();
+}
 namespace from_chars_test {
 void run();
 }
@@ -299,6 +305,9 @@ namespace is_same_test {
 void run();
 }
 namespace list_test {
+void run();
+}
+namespace list_member_operations_test {
 void run();
 }
 namespace lcm_test {
@@ -613,8 +622,11 @@ void cpp_std_tests() {
   CRTSYS_RUN_CPPREFERENCE_TEST(vector_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(vector_member_operations_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(deque_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(deque_member_operations_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(list_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(list_member_operations_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(forward_list_insert_after_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(forward_list_member_operations_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(span_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(map_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(map_member_operations_test);

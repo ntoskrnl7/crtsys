@@ -60,8 +60,23 @@ test harness, typically by moving the sample `main()` body into a namespaced
 - `std::vector::emplace`: <https://en.cppreference.com/w/cpp/container/vector/emplace>
 - `std::vector::erase`: <https://en.cppreference.com/w/cpp/container/vector/erase>
 - `std::deque`: <https://en.cppreference.com/w/cpp/container/deque>
+- `std::deque::emplace`: <https://en.cppreference.com/w/cpp/container/deque/emplace>
+- `std::deque::erase`: <https://en.cppreference.com/w/cpp/container/deque/erase>
 - `std::list`: <https://en.cppreference.com/w/cpp/container/list>
+- `std::list::emplace`: <https://en.cppreference.com/w/cpp/container/list/emplace>
+- `std::list::erase`: <https://en.cppreference.com/w/cpp/container/list/erase>
+- `std::list::splice`: <https://en.cppreference.com/w/cpp/container/list/splice>
+- `std::list::merge`: <https://en.cppreference.com/w/cpp/container/list/merge>
+- `std::list::remove`: <https://en.cppreference.com/w/cpp/container/list/remove>
+- `std::list::sort`: <https://en.cppreference.com/w/cpp/container/list/sort>
+- `std::list::unique`: <https://en.cppreference.com/w/cpp/container/list/unique>
 - `std::forward_list::insert_after`: <https://en.cppreference.com/w/cpp/container/forward_list/insert_after>
+- `std::forward_list::erase_after`: <https://en.cppreference.com/w/cpp/container/forward_list/erase_after>
+- `std::forward_list::splice_after`: <https://en.cppreference.com/w/cpp/container/forward_list/splice_after>
+- `std::forward_list::merge`: <https://en.cppreference.com/w/cpp/container/forward_list/merge>
+- `std::forward_list::remove`: <https://en.cppreference.com/w/cpp/container/forward_list/remove>
+- `std::forward_list::sort`: <https://en.cppreference.com/w/cpp/container/forward_list/sort>
+- `std::forward_list::unique`: <https://en.cppreference.com/w/cpp/container/forward_list/unique>
 - `std::locale`: <https://en.cppreference.com/w/cpp/locale/locale>
 - `std::locale` constructors: <https://en.cppreference.com/w/cpp/locale/locale/locale>
 - `std::has_facet`: <https://en.cppreference.com/w/cpp/locale/has_facet>
