@@ -55,6 +55,9 @@ on:
 permissions:
   contents: read
 
+env:
+  CRTSYS_WINDOWS_SDK_VERSION: 10.0.22621.0
+
 jobs:
   version:
     name: Resolve package version
@@ -89,30 +92,80 @@ jobs:
           Write-Host "Package version: $version"
 
   build-libs:
-    name: Build NuGet libs ${{ matrix.arch }} ${{ matrix.config }}
+    name: Build NuGet libs ${{ matrix.vs_label }} ${{ matrix.toolset }} ${{ matrix.arch }} ${{ matrix.config }}
     needs: version
-    runs-on: windows-2022
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        arch: [x86, x64, ARM64]
+        toolset: [v142, v143, v145]
+        arch: [x86, x64, ARM, ARM64]
         config: [Debug, Release]
+        include:
+          - toolset: v142
+            vs_label: VS2019
+            runner: windows-2022
+            windows_sdk: 10.0.22621.0
+          - toolset: v143
+            vs_label: VS2022
+            runner: windows-2022
+            windows_sdk: 10.0.22621.0
+          - toolset: v145
+            vs_label: VS2026
+            runner: windows-2025-vs2026
+            windows_sdk: 10.0.26100.0
+        exclude:
+          - toolset: v145
+            arch: ARM
 
     steps:
       - uses: actions/checkout@v5
 
+      - name: Ensure WDK
+        if: ${{ matrix.toolset == 'v145' }}
+        shell: pwsh
+        run: ./scripts/nuget/Ensure-CrtSysWdk.ps1 -WindowsSdkVersion '${{ matrix.windows_sdk }}'
+
+      - name: Ensure WDK for x86
+        if: ${{ matrix.arch == 'x86' }}
+        shell: pwsh
+        run: ./scripts/nuget/Ensure-CrtSysWdk.ps1 -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}' -RequiredPlatforms x86
+
+      - name: Ensure WDK for ARM32
+        if: ${{ matrix.arch == 'ARM' && matrix.toolset != 'v145' }}
+        shell: pwsh
+        run: ./scripts/nuget/Ensure-CrtSysWdk.ps1 -WindowsSdkVersion '${{ matrix.windows_sdk }}' -RequiredPlatforms ARM
+
+      - name: Ensure WDK for ARM64 old toolsets
+        if: ${{ matrix.arch == 'ARM64' && matrix.toolset != 'v145' }}
+        shell: pwsh
+        run: ./scripts/nuget/Ensure-CrtSysWdk.ps1 -WindowsSdkVersion '${{ matrix.windows_sdk }}' -RequiredPlatforms ARM64
+
       - name: Build prebuilt libraries
         shell: pwsh
-        run: >
-          ./scripts/nuget/Build-CrtSysNuGetLibs.ps1
-          -Architecture '${{ matrix.arch }}'
-          -Configuration '${{ matrix.config }}'
-          -WindowsSdkVersion '10.0.22621.0'
+        run: |
+          $windowsSdkVersion = '${{ matrix.windows_sdk }}'
+          $wdkVersion = ''
+          if ('${{ matrix.toolset }}' -eq 'v145' -and '${{ matrix.arch }}' -eq 'x86') {
+            $wdkVersion = '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}'
+          }
+
+          $parameters = @{
+            Toolset = '${{ matrix.toolset }}'
+            Architecture = '${{ matrix.arch }}'
+            Configuration = '${{ matrix.config }}'
+            WindowsSdkVersion = $windowsSdkVersion
+          }
+          if (-not [string]::IsNullOrWhiteSpace($wdkVersion)) {
+            $parameters.WdkVersion = $wdkVersion
+          }
+
+          ./scripts/nuget/Build-CrtSysNuGetLibs.ps1 @parameters
 
       - uses: actions/upload-artifact@v7
         with:
-          name: crtsys-nuget-libs-${{ matrix.arch }}-${{ matrix.config }}
-          path: artifacts/nuget-staging/lib/native/${{ matrix.arch }}/${{ matrix.config }}
+          name: crtsys-nuget-libs-${{ matrix.toolset }}-${{ matrix.arch }}-${{ matrix.config }}
+          path: artifacts/nuget-staging/lib/native/${{ matrix.toolset }}/${{ matrix.arch }}/${{ matrix.config }}
           if-no-files-found: error
 
   pack:
@@ -139,41 +192,33 @@ jobs:
 
       - uses: actions/download-artifact@v7
         with:
-          name: crtsys-nuget-libs-x86-Debug
-          path: artifacts/nuget-staging/lib/native/x86/Debug
+          pattern: crtsys-nuget-libs-*
+          path: artifacts/downloaded-libs
 
-      - uses: actions/download-artifact@v7
-        with:
-          name: crtsys-nuget-libs-x86-Release
-          path: artifacts/nuget-staging/lib/native/x86/Release
+      - name: Stage downloaded prebuilt libraries
+        shell: pwsh
+        run: |
+          $downloadRoot = Resolve-Path artifacts/downloaded-libs
+          foreach ($artifact in Get-ChildItem -Path $downloadRoot -Directory) {
+            if ($artifact.Name -notmatch '^crtsys-nuget-libs-(v[0-9]+)-(.+)-(Debug|Release)$') {
+              throw "Unexpected prebuilt library artifact name: $($artifact.Name)"
+            }
 
-      - uses: actions/download-artifact@v7
-        with:
-          name: crtsys-nuget-libs-x64-Debug
-          path: artifacts/nuget-staging/lib/native/x64/Debug
-
-      - uses: actions/download-artifact@v7
-        with:
-          name: crtsys-nuget-libs-x64-Release
-          path: artifacts/nuget-staging/lib/native/x64/Release
-
-      - uses: actions/download-artifact@v7
-        with:
-          name: crtsys-nuget-libs-ARM64-Debug
-          path: artifacts/nuget-staging/lib/native/ARM64/Debug
-
-      - uses: actions/download-artifact@v7
-        with:
-          name: crtsys-nuget-libs-ARM64-Release
-          path: artifacts/nuget-staging/lib/native/ARM64/Release
+            $toolset = $Matches[1]
+            $arch = $Matches[2]
+            $config = $Matches[3]
+            $destination = Join-Path 'artifacts/nuget-staging/lib/native' "$toolset/$arch/$config"
+            New-Item -ItemType Directory -Force -Path $destination | Out-Null
+            Copy-Item -Path (Join-Path $artifact.FullName '*') -Destination $destination -Recurse -Force
+          }
 
       - name: Pack
         shell: pwsh
-        run: ./scripts/nuget/Pack-CrtSysNuGet.ps1 -Version '${{ steps.version.outputs.package_version }}'
+        run: ./scripts/nuget/Pack-CrtSysNuGet.ps1 -Version '${{ steps.version.outputs.package_version }}' -Toolset v142,v143,v145
 
       - name: Pack GitHub release assets
         shell: pwsh
-        run: ./scripts/nuget/Pack-CrtSysReleaseAssets.ps1 -Version '${{ steps.version.outputs.package_version }}'
+        run: ./scripts/nuget/Pack-CrtSysReleaseAssets.ps1 -Version '${{ steps.version.outputs.package_version }}' -Toolset v142,v143,v145
 
       - uses: actions/upload-artifact@v7
         with:
@@ -188,19 +233,54 @@ jobs:
           if-no-files-found: error
 
   test-package-driver:
-    name: Test NuGet driver package ${{ matrix.arch }} ${{ matrix.config }}
+    name: Test NuGet driver package ${{ matrix.vs_label }} ${{ matrix.toolset }} ${{ matrix.arch }} ${{ matrix.config }}
     needs: pack
-    runs-on: windows-2022
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        arch: [x64, ARM64]
+        toolset: [v142, v143, v145]
+        arch: [x64, ARM, ARM64]
         config: [Debug, Release]
+        include:
+          - toolset: v142
+            vs_label: VS2019
+            runner: windows-2022
+            windows_sdk: 10.0.22621.0
+            vs_major: 17
+          - toolset: v143
+            vs_label: VS2022
+            runner: windows-2022
+            windows_sdk: 10.0.22621.0
+            vs_major: 17
+          - toolset: v145
+            vs_label: VS2026
+            runner: windows-2025-vs2026
+            windows_sdk: 10.0.26100.0
+            vs_major: 18
+        exclude:
+          - toolset: v145
+            arch: ARM
 
     steps:
       - uses: actions/checkout@v5
 
       - uses: NuGet/setup-nuget@v2
+
+      - name: Ensure WDK
+        if: ${{ matrix.toolset == 'v145' }}
+        shell: pwsh
+        run: ./scripts/nuget/Ensure-CrtSysWdk.ps1 -WindowsSdkVersion '${{ matrix.windows_sdk }}'
+
+      - name: Ensure WDK for ARM32
+        if: ${{ matrix.arch == 'ARM' && matrix.toolset != 'v145' }}
+        shell: pwsh
+        run: ./scripts/nuget/Ensure-CrtSysWdk.ps1 -WindowsSdkVersion '${{ matrix.windows_sdk }}' -RequiredPlatforms ARM
+
+      - name: Ensure WDK for ARM64 old toolsets
+        if: ${{ matrix.arch == 'ARM64' && matrix.toolset != 'v145' }}
+        shell: pwsh
+        run: ./scripts/nuget/Ensure-CrtSysWdk.ps1 -WindowsSdkVersion '${{ matrix.windows_sdk }}' -RequiredPlatforms ARM64
 
       - uses: actions/download-artifact@v7
         with:
@@ -210,23 +290,35 @@ jobs:
       - name: Build package consumer test driver
         shell: pwsh
         run: >
-          ./scripts/nuget/Test-CrtSysNuGetPackage.ps1
+          ./scripts/nuget/Test-CrtSysNuGetMsBuildPackage.ps1
           -PackageDirectory artifacts/nuget
           -Version '${{ needs.pack.outputs.package_version }}'
-          -Consumer Driver
+          -Toolset '${{ matrix.toolset }}'
           -Architecture '${{ matrix.arch }}'
           -Configuration '${{ matrix.config }}'
-          -WindowsSdkVersion '10.0.22621.0'
+          -WindowsSdkVersion '${{ matrix.windows_sdk }}'
+          -VisualStudioMajorVersion '${{ matrix.vs_major }}'
 
   test-package-layout:
-    name: Validate NuGet package layout ${{ matrix.arch }} ${{ matrix.config }}
+    name: Validate NuGet package layout ${{ matrix.vs_label }} ${{ matrix.toolset }} ${{ matrix.arch }} ${{ matrix.config }}
     needs: pack
     runs-on: windows-2022
     strategy:
       fail-fast: false
       matrix:
-        arch: [x86]
+        toolset: [v142, v143, v145]
+        arch: [x86, ARM]
         config: [Debug, Release]
+        include:
+          - toolset: v142
+            vs_label: VS2019
+          - toolset: v143
+            vs_label: VS2022
+          - toolset: v145
+            vs_label: VS2026
+        exclude:
+          - toolset: v145
+            arch: ARM
 
     steps:
       - uses: actions/checkout@v5
@@ -245,19 +337,40 @@ jobs:
           -PackageDirectory artifacts/nuget
           -Version '${{ needs.pack.outputs.package_version }}'
           -Consumer Driver
+          -Toolset '${{ matrix.toolset }}'
           -Architecture '${{ matrix.arch }}'
           -Configuration '${{ matrix.config }}'
           -SkipDriverBuild
 
   test-package-app:
-    name: Test NuGet app package ${{ matrix.arch }} ${{ matrix.config }}
+    name: Test NuGet app package ${{ matrix.vs_label }} ${{ matrix.toolset }} ${{ matrix.arch }} ${{ matrix.config }}
     needs: pack
-    runs-on: windows-2022
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        arch: [x86, x64, ARM64]
+        toolset: [v142, v143, v145]
+        arch: [x86, x64, ARM, ARM64]
         config: [Debug, Release]
+        include:
+          - toolset: v142
+            vs_label: VS2019
+            runner: windows-2022
+            windows_sdk: 10.0.22621.0
+            vs_major: 17
+          - toolset: v143
+            vs_label: VS2022
+            runner: windows-2022
+            windows_sdk: 10.0.22621.0
+            vs_major: 17
+          - toolset: v145
+            vs_label: VS2026
+            runner: windows-2025-vs2026
+            windows_sdk: 10.0.26100.0
+            vs_major: 18
+        exclude:
+          - toolset: v145
+            arch: ARM
 
     steps:
       - uses: actions/checkout@v5
@@ -276,22 +389,61 @@ jobs:
           -PackageDirectory artifacts/nuget
           -Version '${{ needs.pack.outputs.package_version }}'
           -Consumer App
+          -Toolset '${{ matrix.toolset }}'
           -Architecture '${{ matrix.arch }}'
           -Configuration '${{ matrix.config }}'
-          -WindowsSdkVersion '10.0.22621.0'
+          -WindowsSdkVersion '${{ matrix.windows_sdk }}'
+          -VisualStudioMajorVersion '${{ matrix.vs_major }}'
 
   test-release-prebuilt-cmake:
-    name: Test release prebuilt CMake asset ${{ matrix.arch }} ${{ matrix.config }}
+    name: Test release prebuilt CMake asset ${{ matrix.vs_label }} ${{ matrix.toolset }} ${{ matrix.arch }} ${{ matrix.config }}
     needs: pack
-    runs-on: windows-2022
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        arch: [x64, ARM64]
+        toolset: [v142, v143, v145]
+        arch: [x86, x64, ARM, ARM64]
         config: [Debug, Release]
+        include:
+          - toolset: v142
+            vs_label: VS2019
+            runner: windows-2022
+            windows_sdk: 10.0.22621.0
+          - toolset: v143
+            vs_label: VS2022
+            runner: windows-2022
+            windows_sdk: 10.0.22621.0
+          - toolset: v145
+            vs_label: VS2026
+            runner: windows-2025-vs2026
+            windows_sdk: 10.0.26100.0
+        exclude:
+          - toolset: v145
+            arch: ARM
 
     steps:
       - uses: actions/checkout@v5
+
+      - name: Ensure WDK
+        if: ${{ matrix.toolset == 'v145' }}
+        shell: pwsh
+        run: ./scripts/nuget/Ensure-CrtSysWdk.ps1 -WindowsSdkVersion '${{ matrix.windows_sdk }}'
+
+      - name: Ensure WDK for x86
+        if: ${{ matrix.arch == 'x86' }}
+        shell: pwsh
+        run: ./scripts/nuget/Ensure-CrtSysWdk.ps1 -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}' -RequiredPlatforms x86
+
+      - name: Ensure WDK for ARM32
+        if: ${{ matrix.arch == 'ARM' && matrix.toolset != 'v145' }}
+        shell: pwsh
+        run: ./scripts/nuget/Ensure-CrtSysWdk.ps1 -WindowsSdkVersion '${{ matrix.windows_sdk }}' -RequiredPlatforms ARM
+
+      - name: Ensure WDK for ARM64 old toolsets
+        if: ${{ matrix.arch == 'ARM64' && matrix.toolset != 'v145' }}
+        shell: pwsh
+        run: ./scripts/nuget/Ensure-CrtSysWdk.ps1 -WindowsSdkVersion '${{ matrix.windows_sdk }}' -RequiredPlatforms ARM64
 
       - uses: actions/download-artifact@v7
         with:
@@ -300,23 +452,47 @@ jobs:
 
       - name: Build prebuilt release CMake consumer test
         shell: pwsh
-        run: >
-          ./scripts/nuget/Test-CrtSysReleaseAssets.ps1
-          -ReleaseDirectory artifacts/release
-          -Version '${{ needs.pack.outputs.package_version }}'
-          -Architecture '${{ matrix.arch }}'
-          -Configuration '${{ matrix.config }}'
-          -WindowsSdkVersion '10.0.22621.0'
+        run: |
+          $windowsSdkVersion = '${{ matrix.windows_sdk }}'
+          $wdkVersion = ''
+          if ('${{ matrix.arch }}' -eq 'x86') {
+            $wdkVersion = '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}'
+          }
+
+          $parameters = @{
+            ReleaseDirectory = 'artifacts/release'
+            Version = '${{ needs.pack.outputs.package_version }}'
+            Toolset = '${{ matrix.toolset }}'
+            Architecture = '${{ matrix.arch }}'
+            Configuration = '${{ matrix.config }}'
+            WindowsSdkVersion = $windowsSdkVersion
+          }
+          if (-not [string]::IsNullOrWhiteSpace($wdkVersion)) {
+            $parameters.WdkVersion = $wdkVersion
+          }
+
+          ./scripts/nuget/Test-CrtSysReleaseAssets.ps1 @parameters
 
   test-release-prebuilt-layout:
-    name: Validate release prebuilt layout ${{ matrix.arch }} ${{ matrix.config }}
+    name: Validate release prebuilt layout ${{ matrix.vs_label }} ${{ matrix.toolset }} ${{ matrix.arch }} ${{ matrix.config }}
     needs: pack
     runs-on: windows-2022
     strategy:
       fail-fast: false
       matrix:
-        arch: [x86]
+        toolset: [v142, v143, v145]
+        arch: [x86, ARM]
         config: [Debug, Release]
+        include:
+          - toolset: v142
+            vs_label: VS2019
+          - toolset: v143
+            vs_label: VS2022
+          - toolset: v145
+            vs_label: VS2026
+        exclude:
+          - toolset: v145
+            arch: ARM
 
     steps:
       - uses: actions/checkout@v5
@@ -332,6 +508,7 @@ jobs:
           ./scripts/nuget/Test-CrtSysReleaseAssets.ps1
           -ReleaseDirectory artifacts/release
           -Version '${{ needs.pack.outputs.package_version }}'
+          -Toolset '${{ matrix.toolset }}'
           -Architecture '${{ matrix.arch }}'
           -Configuration '${{ matrix.config }}'
           -SkipDriverBuild
@@ -420,7 +597,7 @@ jobs:
               "crtsys $version release assets."
               ""
               "- crtsys.$version.nupkg: offline NuGet package"
-              "- crtsys-$version-prebuilt.zip: headers, docs, CMake helpers/package config, native MSBuild imports, and prebuilt x86/x64/ARM64 Debug/Release libraries"
+              "- crtsys-$version-prebuilt.zip: headers, docs, CMake helpers/package config, native MSBuild imports, and toolset-specific prebuilt libraries (v142/v143 for x86/x64/ARM/ARM64 and v145 for x86/x64/ARM64)"
               "- crtsys-$version-SHA256SUMS.txt: SHA-256 checksums"
             ) -join [Environment]::NewLine
             & gh release create $tagName @assets --repo $repo --target '${{ github.sha }}' --title "crtsys $version" --notes $notes

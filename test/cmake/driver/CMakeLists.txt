@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.14 FATAL_ERROR)
 
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "Allow older third-party CMake projects under CMake 4.")
+
 project(crtsys_test LANGUAGES C CXX)
+
+cmake_policy(SET CMP0079 NEW)
 
 include(../../../cmake/CPM.cmake)
 
@@ -50,6 +54,13 @@ file(GLOB SOURCE_FILES
 
 if (NOT CRTSYS_TEST_NLOHMANN_JSON)
     list(REMOVE_ITEM SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/libs/nlohmann_json.cpp)
+endif()
+
+if(MSVC_VERSION GREATER_EQUAL 1950)
+    set_source_files_properties(
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/libs/nlohmann_json.cpp
+        PROPERTIES COMPILE_OPTIONS "/wd5311"
+    )
 endif()
 
 crtsys_add_driver(crtsys_test ${SOURCE_FILES})

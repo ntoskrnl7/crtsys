@@ -1,7 +1,6 @@
 cmake_minimum_required(VERSION 3.14)
 
-# INCLUDE_DIRECTORIES $(VC_IncludePath);$(WindowsSDK_IncludePath)
-cmake_policy(SET CMP0021 OLD)
+cmake_policy(SET CMP0021 NEW)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/")
 include(pkg-utils)
@@ -23,13 +22,10 @@ else()
 endif()
 
 option(CRTSYS_NTL_MAIN      "Set to ON to use ntl::main" ON)
-set(CRTSYS_DEFAULT_USE_LIBCNTPR ON)
-if("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "Win32")
-  set(CRTSYS_DEFAULT_USE_LIBCNTPR OFF)
-endif()
-option(CRTSYS_USE_LIBCNTPR  "Set to ON to use libcntpr" ${CRTSYS_DEFAULT_USE_LIBCNTPR})
+option(CRTSYS_USE_LIBCNTPR  "Set to ON to use libcntpr" ON)
 option(CRTSYS_ENABLE_DIAGNOSTIC_BREAKPOINTS "Set to OFF to suppress crtsys diagnostic KdBreakPoint calls" ON)
 option(CRTSYS_ENABLE_INSTALL "Enable crtsys install rules" ${CRTSYS_IS_TOP_LEVEL})
+set(CRTSYS_LDK_SOURCE_DIR "" CACHE PATH "Use a local LDK source tree instead of fetching the default LDK release")
 
 function(crtsys_scope_compile_options_to_c_cxx TARGET_NAME)
   get_target_property(TARGET_COMPILE_OPTIONS ${TARGET_NAME} COMPILE_OPTIONS)
@@ -45,12 +41,112 @@ function(crtsys_scope_compile_options_to_c_cxx TARGET_NAME)
   set_target_properties(${TARGET_NAME} PROPERTIES COMPILE_OPTIONS "${SCOPED_COMPILE_OPTIONS}")
 endfunction()
 
+function(crtsys_get_msvc_sdk_include_dirs OUT_VAR)
+  set(INCLUDE_DIRS)
+
+  if(MSVC AND CMAKE_CXX_COMPILER)
+    get_filename_component(MSVC_COMPILER_ARCH_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    get_filename_component(MSVC_COMPILER_HOST_DIR "${MSVC_COMPILER_ARCH_DIR}" DIRECTORY)
+    get_filename_component(MSVC_COMPILER_BIN_DIR "${MSVC_COMPILER_HOST_DIR}" DIRECTORY)
+    get_filename_component(MSVC_TOOLS_DIR "${MSVC_COMPILER_BIN_DIR}" DIRECTORY)
+    get_filename_component(MSVC_VC_DIR "${MSVC_TOOLS_DIR}/../../.." ABSOLUTE)
+
+    if(EXISTS "${MSVC_TOOLS_DIR}/include")
+      list(APPEND INCLUDE_DIRS "${MSVC_TOOLS_DIR}/include")
+    endif()
+
+    if(EXISTS "${MSVC_VC_DIR}/Auxiliary/VS/include")
+      list(APPEND INCLUDE_DIRS "${MSVC_VC_DIR}/Auxiliary/VS/include")
+    endif()
+  endif()
+
+  if(DEFINED WDK_ROOT AND DEFINED CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION)
+    foreach(SDK_INCLUDE_KIND ucrt um shared winrt cppwinrt)
+      set(SDK_INCLUDE_DIR "${WDK_ROOT}/Include/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/${SDK_INCLUDE_KIND}")
+      if(EXISTS "${SDK_INCLUDE_DIR}")
+        list(APPEND INCLUDE_DIRS "${SDK_INCLUDE_DIR}")
+      endif()
+    endforeach()
+  endif()
+
+  set(${OUT_VAR} "${INCLUDE_DIRS}" PARENT_SCOPE)
+endfunction()
+
+function(crtsys_generate_msvc_future_overlay OUT_VAR)
+  set(${OUT_VAR} "" PARENT_SCOPE)
+
+  if(NOT MSVC OR NOT CMAKE_CXX_COMPILER)
+    return()
+  endif()
+
+  get_filename_component(MSVC_COMPILER_ARCH_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
+  get_filename_component(MSVC_COMPILER_HOST_DIR "${MSVC_COMPILER_ARCH_DIR}" DIRECTORY)
+  get_filename_component(MSVC_COMPILER_BIN_DIR "${MSVC_COMPILER_HOST_DIR}" DIRECTORY)
+  get_filename_component(MSVC_TOOLS_DIR "${MSVC_COMPILER_BIN_DIR}" DIRECTORY)
+  set(MSVC_FUTURE_HEADER "${MSVC_TOOLS_DIR}/include/future")
+  if(NOT EXISTS "${MSVC_FUTURE_HEADER}")
+    return()
+  endif()
+
+  file(READ "${MSVC_FUTURE_HEADER}" CRTSYS_MSVC_FUTURE_CONTENT)
+
+  set(CRTSYS_FUTURE_IS_READY_SNIPPET
+"    bool _Is_ready() const noexcept {
+        return _State._Is_ready();
+    }
+
+")
+  set(CRTSYS_FUTURE_READY_OR_STORED_SNIPPET
+"    bool _Is_ready() const noexcept {
+        return _State._Is_ready();
+    }
+
+    bool _Already_has_stored_result() const noexcept {
+        return _State._Ptr() && _State._Ptr()->_Already_has_stored_result();
+    }
+
+")
+
+  string(FIND "${CRTSYS_MSVC_FUTURE_CONTENT}" "${CRTSYS_FUTURE_IS_READY_SNIPPET}" CRTSYS_FUTURE_IS_READY_INDEX)
+  if(CRTSYS_FUTURE_IS_READY_INDEX EQUAL -1)
+    message(WARNING "Unable to patch MSVC <future>: _Promise::_Is_ready shape was not recognized.")
+    return()
+  endif()
+  string(REPLACE "${CRTSYS_FUTURE_IS_READY_SNIPPET}" "${CRTSYS_FUTURE_READY_OR_STORED_SNIPPET}" CRTSYS_MSVC_FUTURE_CONTENT "${CRTSYS_MSVC_FUTURE_CONTENT}")
+
+  set(CRTSYS_FUTURE_PROMISE_DTOR_CONDITION "if (_MyPromise._Is_valid() && !_MyPromise._Is_ready())")
+  string(FIND "${CRTSYS_MSVC_FUTURE_CONTENT}" "${CRTSYS_FUTURE_PROMISE_DTOR_CONDITION}" CRTSYS_FUTURE_DTOR_INDEX)
+  if(CRTSYS_FUTURE_DTOR_INDEX EQUAL -1)
+    message(WARNING "Unable to patch MSVC <future>: promise destructor shape was not recognized.")
+    return()
+  endif()
+
+  # MSVC STL keeps set_value_at_thread_exit() states unready until the CRT
+  # thread-exit callback broadcasts. A promise destructor must not translate
+  # that already-stored-but-not-yet-ready value into broken_promise.
+  string(REPLACE
+    "${CRTSYS_FUTURE_PROMISE_DTOR_CONDITION}"
+    "if (_MyPromise._Is_valid() && !_MyPromise._Is_ready() && !_MyPromise._Already_has_stored_result())"
+    CRTSYS_MSVC_FUTURE_CONTENT
+    "${CRTSYS_MSVC_FUTURE_CONTENT}")
+
+  set(CRTSYS_MSVC_FUTURE_OVERLAY_DIR "${CMAKE_CURRENT_BINARY_DIR}/crtsys-msvc-overlay/${MSVC_TOOLSET_VERSION}")
+  file(MAKE_DIRECTORY "${CRTSYS_MSVC_FUTURE_OVERLAY_DIR}")
+  file(WRITE "${CRTSYS_MSVC_FUTURE_OVERLAY_DIR}/future" "${CRTSYS_MSVC_FUTURE_CONTENT}")
+  set(${OUT_VAR} "${CRTSYS_MSVC_FUTURE_OVERLAY_DIR}" PARENT_SCOPE)
+endfunction()
+
 # x64 is always set to use libcntpr. (_NLG_Notify, _NLG_Return2)
 if ("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "x64")
   set(CRTSYS_USE_LIBCNTPR ON)
 endif()
 
-if(MSVC_TOOLSET_VERSION EQUAL 142 OR MSVC_TOOLSET_VERSION EQUAL 143)
+set(CRTSYS_MSVC_COMPAT_TOOLSET_VERSION "${MSVC_TOOLSET_VERSION}")
+if(MSVC_TOOLSET_VERSION GREATER 143)
+  set(CRTSYS_MSVC_COMPAT_TOOLSET_VERSION 143)
+endif()
+
+if(MSVC_TOOLSET_VERSION GREATER_EQUAL 142)
   set(UCXXRT_ENABLED OFF)
 else()
   set(UCXXRT_ENABLED ON)
@@ -68,11 +164,17 @@ endif()
 if (NOT CRTSYS_ENABLE_DIAGNOSTIC_BREAKPOINTS)
   set(LDK_ENABLE_DIAGNOSTIC_BREAKPOINTS OFF CACHE BOOL "Set to OFF to suppress LDK diagnostic KdBreakPoint calls")
 endif()
-CPMAddPackage("gh:ntoskrnl7/Ldk@0.7.12")
+if(CRTSYS_LDK_SOURCE_DIR)
+  CPMAddPackage(NAME Ldk SOURCE_DIR "${CRTSYS_LDK_SOURCE_DIR}")
+else()
+  CPMAddPackage("gh:ntoskrnl7/Ldk@0.7.15")
+endif()
 
 CPMAddPackage("gh:ntoskrnl7/FindWDK#master")
 list(APPEND CMAKE_MODULE_PATH "${FindWDK_SOURCE_DIR}/cmake")
 find_package(WDK REQUIRED)
+crtsys_get_msvc_sdk_include_dirs(CRTSYS_MSVC_SDK_INCLUDE_DIRS)
+crtsys_generate_msvc_future_overlay(CRTSYS_MSVC_FUTURE_OVERLAY_DIR)
 
 #
 # Add source files.
@@ -104,6 +206,7 @@ if("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "Win32")
     )
   list(APPEND SOURCE_FILES ${MATH_SOURCE_FILES})
   list(APPEND SOURCE_FILES src/custom/crt/tls_x86.asm)
+  list(APPEND SOURCE_FILES src/custom/misc/stl_init_once_abi_x86.asm)
 else()
   file(GLOB MATH_SOURCE_FILES
   src/custom/crt/math/nextafter.c
@@ -165,15 +268,31 @@ crtsys_scope_compile_options_to_c_cxx(crtsys)
 #
 get_target_property(INC_DIR_TMP crtsys INCLUDE_DIRECTORIES)
 if (UCXXRT_ENABLED)
-  set_property(TARGET crtsys PROPERTY INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/src/custom/winsdk/include/um/crtsys;${Ldk_SOURCE_DIR}/include/Ldk;${ucxxrt_SOURCE_DIR}/src;${ucxxrt_SOURCE_DIR}/src/vcruntime;$(VC_IncludePath);$(WindowsSDK_IncludePath);${INC_DIR_TMP}")
+  set(CRTSYS_INCLUDE_DIRS
+    ${CRTSYS_MSVC_FUTURE_OVERLAY_DIR}
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/custom/winsdk/include/um/crtsys"
+    "${Ldk_SOURCE_DIR}/include/Ldk"
+    "${ucxxrt_SOURCE_DIR}/src"
+    "${ucxxrt_SOURCE_DIR}/src/vcruntime"
+    ${CRTSYS_MSVC_SDK_INCLUDE_DIRS}
+    ${INC_DIR_TMP}
+  )
+  set_property(TARGET crtsys PROPERTY INCLUDE_DIRECTORIES ${CRTSYS_INCLUDE_DIRS})
   target_include_directories(crtsys PRIVATE "${ucxxrt_SOURCE_DIR}")
 else()
-  set_property(TARGET crtsys PROPERTY INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/src/custom/winsdk/include/um/crtsys;${Ldk_SOURCE_DIR}/include/Ldk;$(VC_IncludePath);$(WindowsSDK_IncludePath);${INC_DIR_TMP}")
+  set(CRTSYS_INCLUDE_DIRS
+    ${CRTSYS_MSVC_FUTURE_OVERLAY_DIR}
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/custom/winsdk/include/um/crtsys"
+    "${Ldk_SOURCE_DIR}/include/Ldk"
+    ${CRTSYS_MSVC_SDK_INCLUDE_DIRS}
+    ${INC_DIR_TMP}
+  )
+  set_property(TARGET crtsys PROPERTY INCLUDE_DIRECTORIES ${CRTSYS_INCLUDE_DIRS})
 endif()
 
-target_include_directories(crtsys PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/custom/msvc/${MSVC_TOOLSET_VERSION}/include")
-target_include_directories(crtsys PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/custom/msvc/${MSVC_TOOLSET_VERSION}/crt/src/vcruntime")
-target_include_directories(crtsys PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/custom/msvc/${MSVC_TOOLSET_VERSION}/crt/src/stl")
+target_include_directories(crtsys PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/custom/msvc/${CRTSYS_MSVC_COMPAT_TOOLSET_VERSION}/include")
+target_include_directories(crtsys PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/custom/msvc/${CRTSYS_MSVC_COMPAT_TOOLSET_VERSION}/crt/src/vcruntime")
+target_include_directories(crtsys PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/custom/msvc/${CRTSYS_MSVC_COMPAT_TOOLSET_VERSION}/crt/src/stl")
 target_include_directories(crtsys BEFORE PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/custom/ucrt/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/inc")
 
 #
@@ -295,13 +414,14 @@ elseif("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "ARM")
 else()
   set(CRTSYS_NATIVE_ARCH "${CMAKE_VS_PLATFORM_NAME}")
 endif()
+set(CRTSYS_NATIVE_TOOLSET "v${MSVC_TOOLSET_VERSION}")
 
 if(CRTSYS_ENABLE_INSTALL)
   include(GNUInstallDirs)
   include(CMakePackageConfigHelpers)
 
   set(CRTSYS_INSTALL_CMAKEDIR "${CMAKE_INSTALL_DATADIR}/crtsys/cmake" CACHE STRING "crtsys CMake package install directory")
-  set(CRTSYS_INSTALL_LIBDIR "lib/native/${CRTSYS_NATIVE_ARCH}/$<CONFIG>")
+  set(CRTSYS_INSTALL_LIBDIR "lib/native/${CRTSYS_NATIVE_TOOLSET}/${CRTSYS_NATIVE_ARCH}/$<CONFIG>")
 
   set(CRTSYS_INSTALL_TARGETS crtsys)
   if(TARGET Ldk)

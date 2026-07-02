@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.14 FATAL_ERROR)
 
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "Allow older third-party CMake projects under CMake 4.")
+
 project(crtsys_test_app LANGUAGES C CXX)
 
 include(../../../cmake/CPM.cmake)

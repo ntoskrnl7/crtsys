@@ -29,6 +29,16 @@ extern "C" PVOID WINAPI __acrt_FlsGetValue(DWORD const fls_index)
     return FlsGetValue(fls_index);
 }
 
+extern "C" PVOID WINAPI __acrt_FlsGetValue2(DWORD const fls_index)
+{
+    return FlsGetValue(fls_index);
+}
+
+extern "C" bool __cdecl __acrt_tls2_supported()
+{
+    return false;
+}
+
 extern "C" BOOL WINAPI __acrt_FlsSetValue(DWORD const fls_index, PVOID const fls_data)
 {
     return FlsSetValue(fls_index, fls_data);

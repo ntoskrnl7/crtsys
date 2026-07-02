@@ -18,10 +18,11 @@ permissions:
 
 env:
   CRTSYS_WINDOWS_SDK_VERSION: 10.0.22621.0
+  CRTSYS_VS2026_WINDOWS_SDK_VERSION: 10.0.26100.0
 
 jobs:
-  build:
-    name: Build ${{ matrix.project }} ${{ matrix.arch }} ${{ matrix.config }}
+  build-vs2022:
+    name: VS2022/v143 ${{ matrix.project }} ${{ matrix.arch }} ${{ matrix.config }}
     runs-on: windows-2022
     strategy:
       fail-fast: false
@@ -34,10 +35,19 @@ jobs:
             arch: x64
             config: Debug
           - project: app
+            arch: ARM
+            config: Debug
+          - project: app
             arch: ARM64
             config: Debug
           - project: driver
+            arch: x86
+            config: Debug
+          - project: driver
             arch: x64
+            config: Debug
+          - project: driver
+            arch: ARM
             config: Debug
           - project: driver
             arch: ARM64
@@ -49,10 +59,19 @@ jobs:
             arch: x64
             config: Release
           - project: app
+            arch: ARM
+            config: Release
+          - project: app
             arch: ARM64
             config: Release
           - project: driver
+            arch: x86
+            config: Release
+          - project: driver
             arch: x64
+            config: Release
+          - project: driver
+            arch: ARM
             config: Release
           - project: driver
             arch: ARM64
@@ -61,7 +80,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Show toolchain
+      - name: Show VS2022 toolchain
         shell: pwsh
         run: |
           cmake --version
@@ -72,7 +91,17 @@ jobs:
           Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\Include" -Directory |
             Select-Object -ExpandProperty Name
 
-      - name: Build
+      - name: Ensure WDK for x86 driver build
+        if: matrix.project == 'driver' && matrix.arch == 'x86'
+        shell: pwsh
+        run: ./scripts/nuget/Ensure-CrtSysWdk.ps1 -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}' -RequiredPlatforms x86
+
+      - name: Ensure WDK for ARM32 driver build
+        if: matrix.project == 'driver' && matrix.arch == 'ARM'
+        shell: pwsh
+        run: ./scripts/nuget/Ensure-CrtSysWdk.ps1 -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}' -RequiredPlatforms ARM
+
+      - name: Build v143
         shell: pwsh
         run: |
           $parameters = @{
@@ -111,13 +140,61 @@ jobs:
             test/cmake/app/build_x64/Debug/crtsys_test_app.exe
             test/cmake/app/build_x64/Debug/crtsys_test_app.pdb
 
-  build-v142:
-    name: Build v142 driver ${{ matrix.arch }} Debug
+  build-vs2019:
+    name: VS2019/v142 ${{ matrix.project }} ${{ matrix.arch }} ${{ matrix.config }}
     runs-on: windows-2022
     strategy:
       fail-fast: false
       matrix:
-        arch: [x64, ARM64]
+        include:
+          - project: app
+            arch: x86
+            config: Debug
+          - project: app
+            arch: x64
+            config: Debug
+          - project: app
+            arch: ARM
+            config: Debug
+          - project: app
+            arch: ARM64
+            config: Debug
+          - project: driver
+            arch: x86
+            config: Debug
+          - project: driver
+            arch: x64
+            config: Debug
+          - project: driver
+            arch: ARM
+            config: Debug
+          - project: driver
+            arch: ARM64
+            config: Debug
+          - project: app
+            arch: x86
+            config: Release
+          - project: app
+            arch: x64
+            config: Release
+          - project: app
+            arch: ARM
+            config: Release
+          - project: app
+            arch: ARM64
+            config: Release
+          - project: driver
+            arch: x86
+            config: Release
+          - project: driver
+            arch: x64
+            config: Release
+          - project: driver
+            arch: ARM
+            config: Release
+          - project: driver
+            arch: ARM64
+            config: Release
 
     steps:
       - uses: actions/checkout@v4
@@ -134,16 +211,127 @@ jobs:
           Get-ChildItem (Join-Path $installationPath 'VC\Tools\MSVC') -Directory |
             Select-Object -ExpandProperty Name
 
-      - name: Build v142 driver
+      - name: Ensure WDK for x86 driver build
+        if: matrix.project == 'driver' && matrix.arch == 'x86'
+        shell: pwsh
+        run: ./scripts/nuget/Ensure-CrtSysWdk.ps1 -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}' -RequiredPlatforms x86
+
+      - name: Ensure WDK for ARM32 driver build
+        if: matrix.project == 'driver' && matrix.arch == 'ARM'
+        shell: pwsh
+        run: ./scripts/nuget/Ensure-CrtSysWdk.ps1 -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}' -RequiredPlatforms ARM
+
+      - name: Build v142
         shell: pwsh
         run: |
-          ./scripts/ci/Build-CrtSys.ps1 `
-            -Project driver `
-            -Architecture '${{ matrix.arch }}' `
-            -Configuration Debug `
-            -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}' `
-            -PlatformToolset v142 `
-            -NoBreakpoint
+          $parameters = @{
+            Project = '${{ matrix.project }}'
+            Architecture = '${{ matrix.arch }}'
+            Configuration = '${{ matrix.config }}'
+            WindowsSdkVersion = '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}'
+            PlatformToolset = 'v142'
+          }
+
+          if ($parameters.Project -eq 'driver') {
+            $parameters.NoBreakpoint = $true
+          }
+
+          ./scripts/ci/Build-CrtSys.ps1 @parameters
+
+  build-vs2026:
+    name: VS2026/v145 ${{ matrix.project }} ${{ matrix.arch }} ${{ matrix.config }}
+    runs-on: windows-2025-vs2026
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - project: app
+            arch: x86
+            config: Debug
+          - project: app
+            arch: x64
+            config: Debug
+          - project: app
+            arch: ARM64
+            config: Debug
+          - project: driver
+            arch: x86
+            config: Debug
+          - project: driver
+            arch: x64
+            config: Debug
+          - project: driver
+            arch: ARM64
+            config: Debug
+          - project: app
+            arch: x86
+            config: Release
+          - project: app
+            arch: x64
+            config: Release
+          - project: app
+            arch: ARM64
+            config: Release
+          - project: driver
+            arch: x86
+            config: Release
+          - project: driver
+            arch: x64
+            config: Release
+          - project: driver
+            arch: ARM64
+            config: Release
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show VS2026 toolchain
+        shell: pwsh
+        run: |
+          cmake --version
+
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installationPath = & $vswhere -latest -products * -property installationPath
+          Write-Host "Visual Studio installation: $installationPath"
+
+          Get-ChildItem (Join-Path $installationPath 'VC\Tools\MSVC') -Directory |
+            Select-Object -ExpandProperty Name
+
+      - name: Ensure WDK for VS2026 image
+        shell: pwsh
+        run: ./scripts/nuget/Ensure-CrtSysWdk.ps1 -WindowsSdkVersion '${{ env.CRTSYS_VS2026_WINDOWS_SDK_VERSION }}'
+
+      - name: Ensure WDK for VS2026 x86 driver build
+        if: matrix.project == 'driver' && matrix.arch == 'x86'
+        shell: pwsh
+        run: ./scripts/nuget/Ensure-CrtSysWdk.ps1 -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}' -RequiredPlatforms x86
+
+      - name: Build v145
+        shell: pwsh
+        run: |
+          $windowsSdkVersion = '${{ env.CRTSYS_VS2026_WINDOWS_SDK_VERSION }}'
+          $wdkVersion = ''
+          if ('${{ matrix.project }}' -eq 'driver' -and '${{ matrix.arch }}' -eq 'x86') {
+            $wdkVersion = '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}'
+          }
+
+          $parameters = @{
+            Project = '${{ matrix.project }}'
+            Architecture = '${{ matrix.arch }}'
+            Configuration = '${{ matrix.config }}'
+            WindowsSdkVersion = $windowsSdkVersion
+            PlatformToolset = 'v145'
+          }
+
+          if (-not [string]::IsNullOrWhiteSpace($wdkVersion)) {
+            $parameters.WdkVersion = $wdkVersion
+          }
+
+          if ($parameters.Project -eq 'driver') {
+            $parameters.NoBreakpoint = $true
+          }
+
+          ./scripts/ci/Build-CrtSys.ps1 @parameters
 
   driver-load-test-preflight:
     name: Driver load test preflight
@@ -193,7 +381,7 @@ jobs:
     name: Driver load test x64
     if: github.event_name == 'workflow_dispatch' && inputs.run_driver_load_tests
     needs:
-      - build
+      - build-vs2022
       - driver-load-test-preflight
     # Add the crtsys-driver-test label only to a self-hosted Windows x64 runner
     # that has TESTSIGNING enabled before boot.

@@ -1,6 +1,8 @@
 param(
   [string] $Version,
-  [string] $OutputDirectory
+  [string] $OutputDirectory,
+
+  [string[]] $Toolset = @('v143')
 )
 
 Set-StrictMode -Version Latest
@@ -30,16 +32,85 @@ if (-not (Test-Path $packagePath)) {
   throw "NuGet package was not found: $packagePath. Run scripts\nuget\Pack-CrtSysNuGet.ps1 first."
 }
 
-foreach ($arch in @('x86', 'x64', 'ARM64')) {
-  foreach ($config in @('Debug', 'Release')) {
-    foreach ($library in @('crtsys.lib', 'Ldk.lib')) {
-      $requiredPath = Join-Path $stagingDirectory "lib\native\$arch\$config\$library"
-      if (-not (Test-Path $requiredPath)) {
-        throw "Required prebuilt release asset file is missing: $requiredPath."
+$Toolset = @(
+  $Toolset |
+    ForEach-Object { $_ -split ',' } |
+    ForEach-Object { $_.Trim() } |
+    Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+)
+if ($Toolset.Count -eq 0) {
+  throw "At least one crtsys prebuilt MSVC toolset must be specified."
+}
+foreach ($selectedToolset in $Toolset) {
+  if (@('v142', 'v143', 'v145') -notcontains $selectedToolset) {
+    throw "Unsupported crtsys prebuilt MSVC toolset: $selectedToolset. Supported toolsets are v142, v143, and v145."
+  }
+}
+
+function Get-CrtSysPrebuiltArchitectures {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string] $ToolsetName
+  )
+
+  if ($ToolsetName -eq 'v145') {
+    return @('x86', 'x64', 'ARM64')
+  }
+
+  return @('x86', 'x64', 'ARM', 'ARM64')
+}
+
+function Remove-UnselectedStagedLibraries {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string] $NativeDirectory,
+
+    [Parameter(Mandatory = $true)]
+    [string[]] $SelectedToolsets
+  )
+
+  if (-not (Test-Path $NativeDirectory)) {
+    return
+  }
+
+  foreach ($toolsetDirectory in Get-ChildItem -Path $NativeDirectory -Directory) {
+    if ($SelectedToolsets -notcontains $toolsetDirectory.Name) {
+      Remove-Item -LiteralPath $toolsetDirectory.FullName -Recurse -Force
+      continue
+    }
+
+    $selectedArchitectures = @(Get-CrtSysPrebuiltArchitectures -ToolsetName $toolsetDirectory.Name)
+    foreach ($architectureDirectory in Get-ChildItem -Path $toolsetDirectory.FullName -Directory) {
+      if ($selectedArchitectures -notcontains $architectureDirectory.Name) {
+        Remove-Item -LiteralPath $architectureDirectory.FullName -Recurse -Force
+        continue
+      }
+
+      foreach ($configurationDirectory in Get-ChildItem -Path $architectureDirectory.FullName -Directory) {
+        if ($configurationDirectory.Name -ne 'Debug' -and $configurationDirectory.Name -ne 'Release') {
+          Remove-Item -LiteralPath $configurationDirectory.FullName -Recurse -Force
+        }
       }
     }
   }
 }
+
+foreach ($toolsetName in $Toolset) {
+  foreach ($arch in @(Get-CrtSysPrebuiltArchitectures -ToolsetName $toolsetName)) {
+    foreach ($config in @('Debug', 'Release')) {
+      foreach ($library in @('crtsys.lib', 'Ldk.lib')) {
+        $requiredPath = Join-Path $stagingDirectory "lib\native\$toolsetName\$arch\$config\$library"
+        if (-not (Test-Path $requiredPath)) {
+          throw "Required prebuilt release asset file is missing: $requiredPath."
+        }
+      }
+    }
+  }
+}
+
+Remove-UnselectedStagedLibraries `
+  -NativeDirectory (Join-Path $stagingDirectory 'lib\native') `
+  -SelectedToolsets @($Toolset)
 
 Remove-Item -Recurse -Force -Path $workDirectory -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
@@ -96,13 +167,14 @@ Contents:
 - cmake/: CMake helpers; CrtSys.cmake links prebuilt libraries from this bundle
 - share/crtsys/cmake/: CMake package config for find_package(crtsys CONFIG)
 - build/native/: native MSBuild props and targets from the NuGet package
-- lib/native/: prebuilt crtsys.lib and Ldk.lib for x86, x64, and ARM64, Debug and Release
+- lib/native/: prebuilt crtsys.lib and Ldk.lib by MSVC toolset, architecture, and configuration
 - docs/: repository documentation
 
-The prebuilt driver libraries target Visual Studio 2022 and Windows SDK/WDK
-10.0.22621.0. Validate the final driver with the Windows, WDK, SDK, Visual
-Studio, architecture, Driver Verifier, and code integrity settings that you
-ship.
+The prebuilt driver libraries are organized as
+lib/native/<toolset>/<arch>/<config>. The release bundle can include v142 and
+v143 libraries for x86, x64, ARM, and ARM64, plus v145 libraries for x86, x64,
+and ARM64. Validate the final driver with the Windows, WDK, SDK, Visual Studio,
+architecture, Driver Verifier, and code integrity settings that you ship.
 
 For Visual Studio/MSBuild consumers, the .nupkg attached to the same GitHub
 Release is usually the easiest offline install path.

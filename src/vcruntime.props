@@ -1,10 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <CrtSysMsvcCompatPlatformToolsetVersion>$(PlatformToolsetVersion)</CrtSysMsvcCompatPlatformToolsetVersion>
+    <CrtSysMsvcCompatPlatformToolsetVersion Condition="'$(PlatformToolset)'=='v145' or '$(PlatformToolsetVersion)'=='145'">143</CrtSysMsvcCompatPlatformToolsetVersion>
+  </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile>
       <RuntimeLibrary />
       <AdditionalIncludeDirectories>$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);_VCRT_WIN32_WINNT=_WIN32_WINNT;_VCRT_ALLOW_INTERNALS;_CRT_WINDOWS_USE_VISTA_TSS;_CRTIMP_ALT;_CRTBLD;_KERNELX;_HAS_EXCEPTIONS=1;_ITERATOR_DEBUG_LEVEL=0;</PreprocessorDefinitions>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_VCRT_WIN32_WINNT=_WIN32_WINNT;_VCRT_ALLOW_INTERNALS;_CRT_WINDOWS_USE_VISTA_TSS;_CRTIMP_ALT=;_CRTBLD;_KERNELX;_HAS_EXCEPTIONS=1;_ITERATOR_DEBUG_LEVEL=0;</PreprocessorDefinitions>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <ObjectFileName>$(IntDir)\%(Directory)%(FileName).obj</ObjectFileName>
     </ClCompile>
@@ -312,8 +316,8 @@
     <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\arm\gshandlereh.cpp" />
   </ItemGroup>
 
-  <Target Name="PreprocessArm64Handlers" Condition="'$(Platform)'=='ARM64'" BeforeTargets="_MARMASM" Outputs="$(IntDir)handlers.pp" Inputs="$(VC_CRT_SourcePath.Split(%3B)[0])\arm64\handlers.asm">
-    <Exec Command="cl /I$(MSBuildThisFileDirectory)\custom\msvc\$(PlatformToolsetVersion)\include /E /Tc &quot;$(VC_CRT_SourcePath.Split(%3B)[0])\arm64\handlers.asm&quot; &gt; $(IntDir)handlers.pp" />
+  <Target Name="PreprocessArm64Handlers" Condition="'$(Platform)'=='ARM64'" BeforeTargets="_MARMASM" Outputs="$(IntDir)handlers.pp" Inputs="$(VC_CRT_SourcePath.Split(%3B)[0])\arm64\handlers.asm;$(MSBuildThisFileDirectory)\custom\msvc\$(CrtSysMsvcCompatPlatformToolsetVersion)\include\arm64\arm64ASMsymbolname.h">
+    <Exec Command="cl /I$(MSBuildThisFileDirectory)\custom\msvc\$(CrtSysMsvcCompatPlatformToolsetVersion)\include /I&quot;$(WindowsSdkDir)Include\$(WindowsTargetPlatformVersion)\shared&quot; /E /Tc &quot;$(VC_CRT_SourcePath.Split(%3B)[0])\arm64\handlers.asm&quot; &gt; $(IntDir)handlers.pp" />
   </Target>
   <ItemGroup Condition="'$(Platform)'=='ARM64'">  
     <MARMASM Include="$(IntDir)handlers.pp">

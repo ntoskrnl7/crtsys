@@ -18,7 +18,7 @@
     <file src="..\LICENSE" target="LICENSE" />
     <file src="..\docs\**\*" target="docs" />
     <file src="..\include\**\*" target="include" />
-    <file src="..\artifacts\nuget-staging\lib\native\**\*" target="lib\native" />
+    <file src="..\artifacts\nuget-staging\lib\native\**\*" target="build\native\lib\native" />
 
     <file src="build\native\crtsys.props" target="build\native" />
     <file src="build\native\crtsys.targets" target="build\native" />

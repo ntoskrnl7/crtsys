@@ -247,7 +247,8 @@ WDK consumer project도 빌드하며, 저장소의 smoke project는
 GitHub Release는 별도 오프라인 번들을 배포합니다.
 
 - `crtsys-<version>-prebuilt.zip`: 헤더, 문서, CMake 헬퍼,
-  x86/x64/ARM64의 `Debug`/`Release` 사전 빌드 라이브러리.
+  toolset별 x86/x64/ARM/ARM64 `Debug`/`Release` 사전 빌드 라이브러리.
+  단, v145는 ARM을 제외하고 x86/x64/ARM64를 포함합니다.
 - `crtsys-<version>-SHA256SUMS.txt`
 
 prebuilt bundle은 source에서 `crtsys`를 fetch/build하지 않고, CMake
@@ -274,7 +275,7 @@ crtsys_add_driver(my_driver src/main.cpp)
 ```
 
 설치 트리는 GitHub Release prebuilt 번들과 같은 native library 레이아웃인
-`lib/native/<arch>/<config>`를 사용합니다.
+`lib/native/<toolset>/<arch>/<config>`를 사용합니다.
 
 install 흐름은 다음 스모크 테스트로 확인할 수 있습니다.
 
