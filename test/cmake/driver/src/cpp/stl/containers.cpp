@@ -25,6 +25,22 @@
 #include <utility>
 #include <vector>
 
+namespace container_test_detail {
+void expect(bool condition, const char *message) {
+  if (!condition) {
+    throw std::runtime_error(message);
+  }
+}
+
+template <class Container, class Expected>
+void expect_equal(const Container &actual, const Expected &expected,
+                  const char *message) {
+  if (!(actual == expected)) {
+    throw std::runtime_error(message);
+  }
+}
+} // namespace container_test_detail
+
 namespace array_test {
 void run() {
   // Construction uses aggregate initialization
@@ -151,6 +167,63 @@ void run() {
 } // namespace deque_test
 
 //
+// https://en.cppreference.com/w/cpp/container/deque/emplace#Example
+// https://en.cppreference.com/w/cpp/container/deque/erase#Example
+//
+namespace deque_member_operations_test {
+struct A {
+  std::string s;
+
+  explicit A(std::string str) : s(std::move(str)) {}
+  A(const A &) = default;
+  A(A &&) noexcept = default;
+  A &operator=(const A &) = default;
+  A &operator=(A &&) noexcept = default;
+};
+
+void run() {
+  // Fold the cppreference output examples into assertive driver checks. The
+  // covered operations and final observable container states are unchanged.
+  std::deque<A> container;
+
+  A two{"two"};
+  A three{"three"};
+  container.emplace(container.end(), "one");
+  container.emplace(container.end(), two);
+  container.emplace(container.end(), std::move(three));
+
+  container_test_detail::expect(container.size() == 3,
+                                "deque emplace size mismatch");
+  container_test_detail::expect(container[0].s == "one",
+                                "deque emplace first value mismatch");
+  container_test_detail::expect(container[1].s == "two",
+                                "deque emplace second value mismatch");
+  container_test_detail::expect(container[2].s == "three",
+                                "deque emplace third value mismatch");
+
+  std::deque<int> c{0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+  c.erase(c.begin());
+  container_test_detail::expect_equal(
+      c, std::deque<int>{1, 2, 3, 4, 5, 6, 7, 8, 9},
+      "deque erase first element mismatch");
+
+  c.erase(c.begin() + 2, c.begin() + 5);
+  container_test_detail::expect_equal(c, std::deque<int>{1, 2, 6, 7, 8, 9},
+                                      "deque erase range mismatch");
+
+  for (std::deque<int>::iterator it = c.begin(); it != c.end();) {
+    if (*it % 2 == 0) {
+      it = c.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  container_test_detail::expect_equal(c, std::deque<int>{1, 7, 9},
+                                      "deque erase loop mismatch");
+}
+} // namespace deque_member_operations_test
+
+//
 // https://en.cppreference.com/w/cpp/container/list#Example
 //
 namespace list_test {
@@ -176,6 +249,139 @@ void run() {
   std::cout << "};\n";
 }
 } // namespace list_test
+
+//
+// https://en.cppreference.com/w/cpp/container/list/emplace#Example
+// https://en.cppreference.com/w/cpp/container/list/erase#Example
+// https://en.cppreference.com/w/cpp/container/list/splice#Example
+// https://en.cppreference.com/w/cpp/container/list/merge#Example
+// https://en.cppreference.com/w/cpp/container/list/remove#Example
+// https://en.cppreference.com/w/cpp/container/list/sort#Example
+// https://en.cppreference.com/w/cpp/container/list/unique#Example
+//
+namespace list_member_operations_test {
+struct A {
+  std::string s;
+
+  explicit A(std::string str) : s(std::move(str)) {}
+  A(const A &) = default;
+  A(A &&) noexcept = default;
+  A &operator=(const A &) = default;
+  A &operator=(A &&) noexcept = default;
+};
+
+void run() {
+  // These member-function pages are separate cppreference programs. The driver
+  // harness checks their observable final states directly instead of replaying
+  // every cout line, so Release builds verify the same semantics too.
+  std::list<A> container;
+  A two{"two"};
+  A three{"three"};
+  container.emplace(container.end(), "one");
+  container.emplace(container.end(), two);
+  container.emplace(container.end(), std::move(three));
+
+  auto emplaced = container.begin();
+  container_test_detail::expect(emplaced->s == "one",
+                                "list emplace first value mismatch");
+  ++emplaced;
+  container_test_detail::expect(emplaced->s == "two",
+                                "list emplace second value mismatch");
+  ++emplaced;
+  container_test_detail::expect(emplaced->s == "three",
+                                "list emplace third value mismatch");
+
+  std::list<int> c{0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+  c.erase(c.begin());
+  container_test_detail::expect_equal(
+      c, std::list<int>{1, 2, 3, 4, 5, 6, 7, 8, 9},
+      "list erase first element mismatch");
+
+  std::list<int>::iterator range_begin = c.begin();
+  std::list<int>::iterator range_end = c.begin();
+  std::advance(range_begin, 2);
+  std::advance(range_end, 5);
+  c.erase(range_begin, range_end);
+  container_test_detail::expect_equal(c, std::list<int>{1, 2, 6, 7, 8, 9},
+                                      "list erase range mismatch");
+
+  for (std::list<int>::iterator it = c.begin(); it != c.end();) {
+    if (*it % 2 == 0) {
+      it = c.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  container_test_detail::expect_equal(c, std::list<int>{1, 7, 9},
+                                      "list erase loop mismatch");
+
+  std::list<int> list1{1, 2, 3, 4, 5};
+  std::list<int> list2{10, 20, 30, 40, 50};
+  auto it = list1.begin();
+  std::advance(it, 2);
+  list1.splice(it, list2);
+  container_test_detail::expect_equal(
+      list1, std::list<int>{1, 2, 10, 20, 30, 40, 50, 3, 4, 5},
+      "list splice whole-list mismatch");
+  container_test_detail::expect(list2.empty(),
+                                "list splice source should be empty");
+
+  list2.splice(list2.begin(), list1, it, list1.end());
+  container_test_detail::expect_equal(
+      list1, std::list<int>{1, 2, 10, 20, 30, 40, 50},
+      "list splice range destination mismatch");
+  container_test_detail::expect_equal(list2, std::list<int>{3, 4, 5},
+                                      "list splice range source mismatch");
+
+  list1 = {5, 9, 1, 3, 3};
+  list2 = {8, 7, 2, 3, 4, 4};
+  list1.sort();
+  list2.sort();
+  list1.merge(list2);
+  container_test_detail::expect_equal(
+      list1, std::list<int>{1, 2, 3, 3, 3, 4, 4, 5, 7, 8, 9},
+      "list merge mismatch");
+  container_test_detail::expect(list2.empty(),
+                                "list merge source should be empty");
+
+  std::list<int> removable = {1, 100, 2, 3, 10, 1, 11, -1, 12};
+  auto count1 = removable.remove(1);
+  auto count2 = removable.remove_if([](int n) { return n > 10; });
+  container_test_detail::expect(count1 == 2,
+                                "list remove count mismatch");
+  container_test_detail::expect(count2 == 3,
+                                "list remove_if count mismatch");
+  container_test_detail::expect_equal(removable, std::list<int>{2, 3, 10, -1},
+                                      "list remove final state mismatch");
+
+  std::list<int> sortable{8, 7, 5, 9, 0, 1, 3, 2, 6, 4};
+  sortable.sort();
+  container_test_detail::expect_equal(
+      sortable, std::list<int>{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
+      "list sort ascending mismatch");
+  sortable.sort(std::greater<int>());
+  container_test_detail::expect_equal(
+      sortable, std::list<int>{9, 8, 7, 6, 5, 4, 3, 2, 1, 0},
+      "list sort descending mismatch");
+
+  std::list<int> unique_values{1, 2, 2, 3, 3, 2, 1, 1, 2};
+  const auto unique_count1 = unique_values.unique();
+  container_test_detail::expect(unique_count1 == 3,
+                                "list unique count mismatch");
+  container_test_detail::expect_equal(
+      unique_values, std::list<int>{1, 2, 3, 2, 1, 2},
+      "list unique final state mismatch");
+
+  unique_values = {1, 2, 12, 23, 3, 2, 51, 1, 2, 2};
+  const auto unique_count2 = unique_values.unique(
+      [mod = 10](int x, int y) { return (x % mod) == (y % mod); });
+  container_test_detail::expect(unique_count2 == 4,
+                                "list unique predicate count mismatch");
+  container_test_detail::expect_equal(
+      unique_values, std::list<int>{1, 2, 23, 2, 51, 2},
+      "list unique predicate final state mismatch");
+}
+} // namespace list_member_operations_test
 
 //
 // https://en.cppreference.com/w/cpp/container/forward_list/insert_after#Example
@@ -215,6 +421,107 @@ void run() {
   print(ints);
 }
 } // namespace forward_list_insert_after_test
+
+//
+// https://en.cppreference.com/w/cpp/container/forward_list/erase_after#Example
+// https://en.cppreference.com/w/cpp/container/forward_list/splice_after#Example
+// https://en.cppreference.com/w/cpp/container/forward_list/merge#Example
+// https://en.cppreference.com/w/cpp/container/forward_list/remove#Example
+// https://en.cppreference.com/w/cpp/container/forward_list/sort#Example
+// https://en.cppreference.com/w/cpp/container/forward_list/unique#Example
+//
+namespace forward_list_member_operations_test {
+void run() {
+  // The linked cppreference examples already use compact observable sequences.
+  // This driver version verifies the same resulting lists with explicit
+  // checks, avoiding dependence on KD log formatting.
+  using F = std::forward_list<int>;
+
+  F l = {1, 2, 3, 4, 5, 6, 7, 8, 9};
+  l.erase_after(l.before_begin());
+  container_test_detail::expect_equal(l, F{2, 3, 4, 5, 6, 7, 8, 9},
+                                      "forward_list erase_after first mismatch");
+
+  auto fi = std::next(l.begin());
+  auto la = std::next(fi, 3);
+  l.erase_after(fi, la);
+  container_test_detail::expect_equal(l, F{2, 3, 6, 7, 8, 9},
+                                      "forward_list erase_after range mismatch");
+
+  F l1 = {1, 2, 3, 4, 5};
+  F l2 = {10, 11, 12};
+  l2.splice_after(l2.cbegin(), l1, l1.cbegin(), l1.cend());
+  container_test_detail::expect_equal(l1, F{1},
+                                      "forward_list splice_after open source");
+  container_test_detail::expect_equal(
+      l2, F{10, 2, 3, 4, 5, 11, 12},
+      "forward_list splice_after open destination");
+
+  F x = {1, 2, 3, 4, 5};
+  F y = {10, 11, 12};
+  x.splice_after(x.cbegin(), y);
+  container_test_detail::expect_equal(
+      x, F{1, 10, 11, 12, 2, 3, 4, 5},
+      "forward_list splice_after whole-list destination");
+  container_test_detail::expect_equal(y, F{},
+                                      "forward_list splice_after whole source");
+
+  x = {1, 2, 3, 4, 5};
+  y = {10, 11, 12};
+  x.splice_after(x.cbegin(), y, y.cbegin());
+  container_test_detail::expect_equal(
+      x, F{1, 11, 2, 3, 4, 5},
+      "forward_list splice_after single destination");
+  container_test_detail::expect_equal(y, F{10, 12},
+                                      "forward_list splice_after single source");
+
+  F merge1 = {5, 9, 1, 3, 3};
+  F merge2 = {8, 7, 2, 3, 4, 4};
+  merge1.sort();
+  merge2.sort();
+  merge1.merge(merge2);
+  container_test_detail::expect_equal(
+      merge1, F{1, 2, 3, 3, 3, 4, 4, 5, 7, 8, 9},
+      "forward_list merge mismatch");
+  container_test_detail::expect(merge2.empty(),
+                                "forward_list merge source should be empty");
+
+  F removable = {1, 100, 2, 3, 10, 1, 11, -1, 12};
+  auto count1 = removable.remove(1);
+  auto count2 = removable.remove_if([](int n) { return n > 10; });
+  container_test_detail::expect(count1 == 2,
+                                "forward_list remove count mismatch");
+  container_test_detail::expect(count2 == 3,
+                                "forward_list remove_if count mismatch");
+  container_test_detail::expect_equal(removable, F{2, 3, 10, -1},
+                                      "forward_list remove final state");
+
+  F sortable{8, 7, 5, 9, 0, 1, 3, 2, 6, 4};
+  sortable.sort();
+  container_test_detail::expect_equal(sortable, F{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
+                                      "forward_list sort ascending mismatch");
+  sortable.sort(std::greater<int>());
+  container_test_detail::expect_equal(sortable, F{9, 8, 7, 6, 5, 4, 3, 2, 1, 0},
+                                      "forward_list sort descending mismatch");
+
+  F unique_values{1, 2, 2, 3, 3, 2, 1, 1, 2};
+  const auto unique_count1 = unique_values.unique();
+  container_test_detail::expect(unique_count1 == 3,
+                                "forward_list unique count mismatch");
+  container_test_detail::expect_equal(
+      unique_values, F{1, 2, 3, 2, 1, 2},
+      "forward_list unique final state mismatch");
+
+  unique_values = {1, 2, 12, 23, 3, 2, 51, 1, 2, 2};
+  const auto unique_count2 = unique_values.unique(
+      [mod = 10](int x, int y) { return (x % mod) == (y % mod); });
+  container_test_detail::expect(unique_count2 == 4,
+                                "forward_list unique predicate count mismatch");
+  container_test_detail::expect_equal(
+      unique_values, F{1, 2, 23, 2, 51, 2},
+      "forward_list unique predicate final state mismatch");
+}
+} // namespace forward_list_member_operations_test
 
 //
 // https://en.cppreference.com/w/cpp/container/span#Example

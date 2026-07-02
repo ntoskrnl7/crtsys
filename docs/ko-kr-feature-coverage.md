@@ -337,6 +337,23 @@ cppreference Example 코드를 이식한 항목은
       [`merge`](https://en.cppreference.com/w/cpp/container/map/merge)
       ordered/unordered associative container 경로
   [(cppreference member examples)](../test/cmake/driver/src/cpp/stl/containers.cpp)
+- [x] Sequence container member operation:
+      [`std::deque::emplace`](https://en.cppreference.com/w/cpp/container/deque/emplace),
+      [`std::deque::erase`](https://en.cppreference.com/w/cpp/container/deque/erase),
+      [`std::list::emplace`](https://en.cppreference.com/w/cpp/container/list/emplace),
+      [`std::list::erase`](https://en.cppreference.com/w/cpp/container/list/erase),
+      [`std::list::splice`](https://en.cppreference.com/w/cpp/container/list/splice),
+      [`std::list::merge`](https://en.cppreference.com/w/cpp/container/list/merge),
+      [`std::list::remove`](https://en.cppreference.com/w/cpp/container/list/remove),
+      [`std::list::sort`](https://en.cppreference.com/w/cpp/container/list/sort),
+      [`std::list::unique`](https://en.cppreference.com/w/cpp/container/list/unique),
+      [`std::forward_list::erase_after`](https://en.cppreference.com/w/cpp/container/forward_list/erase_after),
+      [`std::forward_list::splice_after`](https://en.cppreference.com/w/cpp/container/forward_list/splice_after),
+      [`std::forward_list::merge`](https://en.cppreference.com/w/cpp/container/forward_list/merge),
+      [`std::forward_list::remove`](https://en.cppreference.com/w/cpp/container/forward_list/remove),
+      [`std::forward_list::sort`](https://en.cppreference.com/w/cpp/container/forward_list/sort), and
+      [`std::forward_list::unique`](https://en.cppreference.com/w/cpp/container/forward_list/unique)
+  [(cppreference member examples)](../test/cmake/driver/src/cpp/stl/containers.cpp)
 - [x] [std::numbers](https://en.cppreference.com/w/cpp/numeric/constants)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::random_device](https://en.cppreference.com/w/cpp/numeric/random/random_device)
