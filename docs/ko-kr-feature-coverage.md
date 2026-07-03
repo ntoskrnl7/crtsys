@@ -203,6 +203,13 @@ cppreference Example 코드를 이식한 항목은
   [(cppreference make_pair example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::pmr::monotonic_buffer_resource](https://en.cppreference.com/w/cpp/memory/monotonic_buffer_resource)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/memory.cpp)
+- [x] PMR pool/resource API:
+      [`std::pmr::unsynchronized_pool_resource`](https://en.cppreference.com/w/cpp/memory/unsynchronized_pool_resource),
+      [`std::pmr::synchronized_pool_resource`](https://en.cppreference.com/w/cpp/memory/synchronized_pool_resource),
+      [`std::pmr::polymorphic_allocator`](https://en.cppreference.com/w/cpp/memory/polymorphic_allocator),
+      [`std::pmr::null_memory_resource`](https://en.cppreference.com/w/cpp/memory/null_memory_resource),
+      [`std::pmr::new_delete_resource`](https://en.cppreference.com/w/cpp/memory/new_delete_resource)
+  [(cppreference API page coverage)](../test/cmake/driver/src/cpp/stl/memory.cpp)
 - [x] [std::partial_sum](https://en.cppreference.com/w/cpp/algorithm/partial_sum)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::partition](https://en.cppreference.com/w/cpp/algorithm/partition)
@@ -492,12 +499,7 @@ cppreference Example 코드를 이식한 항목은
     `take`, `drop`, `reverse`, `join`, `split`, `keys`, `values`,
     `elements` 및 feature-test macro로 열리는 C++23 view들
 - [ ] Memory 및 PMR
-  - [`std::allocator_traits`](https://en.cppreference.com/w/cpp/memory/allocator_traits),
-    [`std::polymorphic_allocator`](https://en.cppreference.com/w/cpp/memory/polymorphic_allocator)
-  - [`std::pmr::unsynchronized_pool_resource`](https://en.cppreference.com/w/cpp/memory/unsynchronized_pool_resource),
-    [`std::pmr::synchronized_pool_resource`](https://en.cppreference.com/w/cpp/memory/synchronized_pool_resource),
-    [`std::pmr::null_memory_resource`](https://en.cppreference.com/w/cpp/memory/null_memory_resource),
-    [`std::pmr::new_delete_resource`](https://en.cppreference.com/w/cpp/memory/new_delete_resource)
+  - [`std::allocator_traits`](https://en.cppreference.com/w/cpp/memory/allocator_traits)
 - [ ] Utility, functional, type support
   - [`std::visit`](https://en.cppreference.com/w/cpp/utility/variant/visit),
     [`std::type_index`](https://en.cppreference.com/w/cpp/types/type_index),

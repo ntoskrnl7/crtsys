@@ -193,6 +193,11 @@ test harness, typically by moving the sample `main()` body into a namespaced
 - `std::chrono::time_zone::get_info`: <https://en.cppreference.com/w/cpp/chrono/time_zone/get_info>
 - `std::unique_ptr`: <https://en.cppreference.com/w/cpp/memory/unique_ptr>
 - `std::pmr::monotonic_buffer_resource`: <https://en.cppreference.com/w/cpp/memory/monotonic_buffer_resource>
+- `std::pmr::unsynchronized_pool_resource`: <https://en.cppreference.com/w/cpp/memory/unsynchronized_pool_resource>
+- `std::pmr::synchronized_pool_resource`: <https://en.cppreference.com/w/cpp/memory/synchronized_pool_resource>
+- `std::pmr::polymorphic_allocator`: <https://en.cppreference.com/w/cpp/memory/polymorphic_allocator>
+- `std::pmr::null_memory_resource`: <https://en.cppreference.com/w/cpp/memory/null_memory_resource>
+- `std::pmr::new_delete_resource`: <https://en.cppreference.com/w/cpp/memory/new_delete_resource>
 - `std::filesystem::path` lexical operations: <https://en.cppreference.com/w/cpp/filesystem/path/lexically_normal>
 - `std::filesystem::directory_iterator`: <https://en.cppreference.com/w/cpp/filesystem/directory_iterator>
 - `std::filesystem::recursive_directory_iterator`: <https://en.cppreference.com/w/cpp/filesystem/recursive_directory_iterator>
@@ -296,3 +301,6 @@ The `std::lerp` example is enabled in the default kernel-driver build.
 
 The `std::pmr::monotonic_buffer_resource` example is compiled into the default
 driver run with the cppreference iteration and node counts.
+
+The PMR pool/resource checks cover cppreference API pages that do not provide
+standalone "Run this code" examples.
