@@ -500,6 +500,12 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp)
 - [x] [std::shared_future](https://en.cppreference.com/w/cpp/thread/shared_future)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/thread.cpp)
+- [x] Threading/future semantic edge checks
+  - Timed shared-lock timeout/reacquire behavior, `std::future` /
+    `std::shared_future` timeout/ready states, deferred async status,
+    `broken_promise`, and `promise_already_satisfied` error paths are covered
+    by driver semantic tests.
+  [(driver semantic test)](../test/cmake/driver/src/cpp/stl/thread.cpp)
 - [x] [std::promise](https://en.cppreference.com/w/cpp/thread/promise)
   [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp#L254)
 - [x] [std::packaged_task](https://en.cppreference.com/w/cpp/thread/packaged_task)
@@ -553,17 +559,6 @@ dependencies.
 - [ ] Chrono
   - Clock conversion examples for `file_clock`, `utc_clock`, `tai_clock`, and
     `gps_clock` where the active MSVC STL exposes them.
-
-### Future Semantic Edge Coverage
-
-These are not gaps in the imported cppreference examples. They are broader
-driver-runtime checks that would exercise error paths or timing-sensitive
-semantics beyond the simple standalone examples.
-
-- [ ] Threading and synchronization
-  - Timed shared-lock behavior.
-  - Additional `std::future` / `std::shared_future` error-path and timeout
-    behavior.
 
 ### Needs Investigation
 

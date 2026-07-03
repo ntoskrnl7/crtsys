@@ -1444,3 +1444,130 @@ void run() {
   });
 }
 } // namespace stop_callback_test
+
+//
+// Driver semantic edge coverage for thread/future paths that are already
+// covered by cppreference examples above. This intentionally avoids strict
+// elapsed-time assertions because kernel-debugged VMs can be heavily paused.
+//
+#include <atomic>
+#include <chrono>
+#include <future>
+#include <shared_mutex>
+#include <stdexcept>
+#include <thread>
+
+namespace threading_semantic_edge_test {
+namespace {
+void expect(bool condition, const char *message) {
+  if (!condition) {
+    throw std::runtime_error(message);
+  }
+}
+} // namespace
+
+void run() {
+  using namespace std::chrono_literals;
+
+  {
+    std::shared_timed_mutex mutex;
+    std::atomic<bool> writer_locked{false};
+    std::promise<void> release_writer;
+    auto release_future = release_writer.get_future();
+
+    std::thread writer([&] {
+      std::unique_lock<std::shared_timed_mutex> lock(mutex);
+      writer_locked.store(true, std::memory_order_release);
+
+      while (release_future.wait_for(0ms) != std::future_status::ready) {
+        std::this_thread::yield();
+      }
+    });
+
+    while (!writer_locked.load(std::memory_order_acquire)) {
+      std::this_thread::yield();
+    }
+
+    std::shared_lock<std::shared_timed_mutex> reader(mutex, std::defer_lock);
+    expect(!reader.try_lock_for(1ms),
+           "shared lock unexpectedly succeeded while writer held mutex");
+
+    release_writer.set_value();
+    writer.join();
+
+    expect(reader.try_lock_for(10ms),
+           "shared lock did not acquire after writer released mutex");
+    reader.unlock();
+  }
+
+  {
+    std::promise<int> promise;
+    auto future = promise.get_future();
+
+    expect(future.wait_for(0ms) == std::future_status::timeout,
+           "unfulfilled future was not timed out");
+    promise.set_value(7);
+    expect(future.wait_for(0ms) == std::future_status::ready,
+           "fulfilled future was not ready");
+    expect(future.get() == 7, "future returned unexpected value");
+  }
+
+  {
+    std::promise<int> promise;
+    auto shared = promise.get_future().share();
+
+    expect(shared.wait_for(0ms) == std::future_status::timeout,
+           "unfulfilled shared_future was not timed out");
+    promise.set_value(11);
+    expect(shared.wait_for(0ms) == std::future_status::ready,
+           "fulfilled shared_future was not ready");
+    expect(shared.get() == 11, "shared_future returned unexpected value");
+    expect(shared.get() == 11, "shared_future second get changed value");
+  }
+
+  {
+    auto deferred = std::async(std::launch::deferred, [] { return 42; });
+    expect(deferred.wait_for(0ms) == std::future_status::deferred,
+           "deferred async future did not report deferred status");
+    expect(deferred.get() == 42, "deferred async returned unexpected value");
+  }
+
+  {
+    std::future<int> future;
+    {
+      std::promise<int> promise;
+      future = promise.get_future();
+    }
+
+    bool caught = false;
+    try {
+      (void)future.get();
+    } catch (const std::future_error &e) {
+      caught = true;
+      expect(e.code() ==
+                 std::make_error_code(std::future_errc::broken_promise),
+             "broken promise reported unexpected future_error code");
+    }
+    expect(caught, "broken promise did not throw future_error");
+  }
+
+  {
+    std::promise<int> promise;
+    auto future = promise.get_future();
+    promise.set_value(1);
+
+    bool caught = false;
+    try {
+      promise.set_value(2);
+    } catch (const std::future_error &e) {
+      caught = true;
+      expect(e.code() ==
+                 std::make_error_code(
+                     std::future_errc::promise_already_satisfied),
+             "second promise set_value reported unexpected future_error code");
+    }
+    expect(caught, "second promise set_value did not throw future_error");
+    expect(future.get() == 1, "promise value changed after second set_value");
+  }
+}
+} // namespace threading_semantic_edge_test
