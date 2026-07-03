@@ -175,7 +175,49 @@ void run();
 namespace binary_search_test {
 void run();
 }
+namespace lower_bound_test {
+void run();
+}
+namespace upper_bound_test {
+void run();
+}
+namespace equal_range_test {
+void run();
+}
+namespace stable_sort_test {
+void run();
+}
+namespace nth_element_test {
+void run();
+}
+namespace partial_sort_test {
+void run();
+}
 namespace bitset_test {
+void run();
+}
+namespace rotl_test {
+void run();
+}
+namespace rotr_test {
+void run();
+}
+namespace countl_zero_test {
+void run();
+}
+namespace countr_zero_test {
+void run();
+}
+namespace has_single_bit_test {
+void run();
+}
+namespace bit_ceil_test {
+void run();
+}
+namespace bit_floor_test {
+void run();
+}
+namespace bit_width_test {
 void run();
 }
 namespace bit_cast_test {
@@ -719,6 +761,12 @@ void cpp_std_tests() {
   CRTSYS_RUN_CPPREFERENCE_TEST(remove_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(partition_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(binary_search_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(lower_bound_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(upper_bound_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(equal_range_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(stable_sort_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(nth_element_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(partial_sort_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(ranges_views_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(ranges_sort_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(ranges_cxx23_adaptors_test);
@@ -738,6 +786,14 @@ void cpp_std_tests() {
   CRTSYS_RUN_CPPREFERENCE_TEST(lerp_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(bitset_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(popcount_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(rotl_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(rotr_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(countl_zero_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(countr_zero_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(has_single_bit_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(bit_ceil_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(bit_floor_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(bit_width_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(bit_cast_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(endian_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(byteswap_test);

@@ -128,10 +128,25 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/functional.cpp)
 - [x] [std::binary_search](https://en.cppreference.com/w/cpp/algorithm/binary_search)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
+- [x] Binary-search family:
+      [`std::lower_bound`](https://en.cppreference.com/w/cpp/algorithm/lower_bound),
+      [`std::upper_bound`](https://en.cppreference.com/w/cpp/algorithm/upper_bound),
+      [`std::equal_range`](https://en.cppreference.com/w/cpp/algorithm/equal_range)
+  [(cppreference examples)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::bitset](https://en.cppreference.com/w/cpp/utility/bitset)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [`<bit>` utilities](https://en.cppreference.com/w/cpp/utility/bit)
   [(cppreference popcount example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
+- [x] `<bit>` standalone examples:
+      [`std::rotl`](https://en.cppreference.com/w/cpp/numeric/rotl),
+      [`std::rotr`](https://en.cppreference.com/w/cpp/numeric/rotr),
+      [`std::countl_zero`](https://en.cppreference.com/w/cpp/numeric/countl_zero),
+      [`std::countr_zero`](https://en.cppreference.com/w/cpp/numeric/countr_zero),
+      [`std::has_single_bit`](https://en.cppreference.com/w/cpp/numeric/has_single_bit),
+      [`std::bit_ceil`](https://en.cppreference.com/w/cpp/numeric/bit_ceil),
+      [`std::bit_floor`](https://en.cppreference.com/w/cpp/numeric/bit_floor),
+      [`std::bit_width`](https://en.cppreference.com/w/cpp/numeric/bit_width)
+  [(cppreference examples)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::bit_cast](https://en.cppreference.com/w/cpp/numeric/bit_cast)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::endian](https://en.cppreference.com/w/cpp/types/endian)
@@ -201,6 +216,11 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/containers.cpp)
 - [x] [std::next_permutation](https://en.cppreference.com/w/cpp/algorithm/next_permutation)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
+- [x] Sorting/selection algorithms:
+      [`std::stable_sort`](https://en.cppreference.com/w/cpp/algorithm/stable_sort),
+      [`std::nth_element`](https://en.cppreference.com/w/cpp/algorithm/nth_element),
+      [`std::partial_sort`](https://en.cppreference.com/w/cpp/algorithm/partial_sort)
+  [(cppreference examples)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::not_fn](https://en.cppreference.com/w/cpp/utility/functional/not_fn)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/functional.cpp)
 - [x] [std::optional](https://en.cppreference.com/w/cpp/utility/optional)
@@ -493,24 +513,7 @@ dependencies.
     [`std::atomic_fetch_add`](https://en.cppreference.com/w/cpp/atomic/atomic_fetch_add)
     and
     [`std::atomic_compare_exchange`](https://en.cppreference.com/w/cpp/atomic/atomic_compare_exchange)
-- [ ] `<bit>` standalone examples
-  - [`std::rotl`](https://en.cppreference.com/w/cpp/numeric/rotl),
-    [`std::rotr`](https://en.cppreference.com/w/cpp/numeric/rotr),
-    [`std::countl_zero`](https://en.cppreference.com/w/cpp/numeric/countl_zero),
-    [`std::countr_zero`](https://en.cppreference.com/w/cpp/numeric/countr_zero)
-  - [`std::has_single_bit`](https://en.cppreference.com/w/cpp/numeric/has_single_bit),
-    [`std::bit_ceil`](https://en.cppreference.com/w/cpp/numeric/bit_ceil),
-    [`std::bit_floor`](https://en.cppreference.com/w/cpp/numeric/bit_floor),
-    [`std::bit_width`](https://en.cppreference.com/w/cpp/numeric/bit_width)
-- [ ] Additional algorithms and ranges
-  - Binary-search family:
-    [`std::lower_bound`](https://en.cppreference.com/w/cpp/algorithm/lower_bound),
-    [`std::upper_bound`](https://en.cppreference.com/w/cpp/algorithm/upper_bound),
-    [`std::equal_range`](https://en.cppreference.com/w/cpp/algorithm/equal_range)
-  - Sorting/selection:
-    [`std::stable_sort`](https://en.cppreference.com/w/cpp/algorithm/stable_sort),
-    [`std::nth_element`](https://en.cppreference.com/w/cpp/algorithm/nth_element),
-    [`std::partial_sort`](https://en.cppreference.com/w/cpp/algorithm/partial_sort)
+- [ ] Additional ranges
   - Range adaptors not yet split into explicit driver examples, such as
     `take`, `drop`, `reverse`, `join`, `split`, `keys`, `values`,
     `elements`, and other feature-test-gated C++23 views.
