@@ -22,6 +22,18 @@ void remove_sandbox(const fs::path &path) {
   std::error_code ec;
   fs::remove_all(path, ec);
 }
+
+class scoped_current_path {
+public:
+  scoped_current_path() : old_(std::filesystem::current_path()) {}
+  ~scoped_current_path() { std::filesystem::current_path(old_); }
+
+  scoped_current_path(const scoped_current_path &) = delete;
+  scoped_current_path &operator=(const scoped_current_path &) = delete;
+
+private:
+  std::filesystem::path old_;
+};
 } // namespace
 
 namespace filesystem_path_test {
@@ -48,7 +60,11 @@ void run() {
   const fs::path sandbox{"sandbox"};
   remove_sandbox(sandbox);
 
-  assert(fs::create_directories(sandbox / "dir1" / "dir2"));
+  // The cppreference example puts checks in assert(). Our Release driver
+  // build defines NDEBUG, so calls with side effects must stay outside assert().
+  const bool created_tree = fs::create_directories(sandbox / "dir1" / "dir2");
+  (void)created_tree;
+  assert(created_tree);
   std::ofstream{sandbox / "file1.txt"};
   std::ofstream{sandbox / "file2.txt"};
 
@@ -80,7 +96,9 @@ void run() {
   assert(directory_entries == 3);
   assert(range_entries == 3);
   assert(recursive_entries == 4);
-  assert(fs::remove_all(sandbox) >= 5);
+  const auto removed_entries = fs::remove_all(sandbox);
+  (void)removed_entries;
+  assert(removed_entries >= 5);
 }
 } // namespace filesystem_directory_iterator_test
 
@@ -92,10 +110,15 @@ void run() {
   const fs::path sandbox{"sandbox"};
   remove_sandbox(sandbox);
 
-  assert(fs::create_directory(sandbox));
+  const bool created_sandbox = fs::create_directory(sandbox);
+  (void)created_sandbox;
+  assert(created_sandbox);
   std::ofstream(sandbox / "file1.txt").put('a');
 
-  assert(fs::copy_file(sandbox / "file1.txt", sandbox / "file2.txt"));
+  const bool copied_file = fs::copy_file(sandbox / "file1.txt",
+                                         sandbox / "file2.txt");
+  (void)copied_file;
+  assert(copied_file);
   // now there are two files in sandbox:
   std::cout << "file1.txt holds: "
             << std::ifstream(sandbox / "file1.txt").rdbuf() << '\n';
@@ -103,7 +126,9 @@ void run() {
             << std::ifstream(sandbox / "file2.txt").rdbuf() << '\n';
 
   // fail to copy directory
-  assert(fs::create_directory(sandbox / "abc"));
+  const bool created_abc = fs::create_directory(sandbox / "abc");
+  (void)created_abc;
+  assert(created_abc);
   bool caught_directory_copy{};
   try {
     fs::copy_file(sandbox / "abc", sandbox / "def");
@@ -127,7 +152,9 @@ void run() {
     assert(from_file2 == 'a');
   }
 
-  assert(fs::remove_all(sandbox) >= 4);
+  const auto removed_entries = fs::remove_all(sandbox);
+  (void)removed_entries;
+  assert(removed_entries >= 4);
 }
 } // namespace filesystem_copy_file_test
 
@@ -172,7 +199,9 @@ void run() {
   const fs::path sandbox{"sandbox"};
   remove_sandbox(sandbox);
 
-  assert(fs::create_directory(sandbox));
+  const bool created_sandbox = fs::create_directory(sandbox);
+  (void)created_sandbox;
+  assert(created_sandbox);
   std::ofstream(sandbox / "file.txt").put('a');
 
   std::error_code ec;
@@ -209,7 +238,9 @@ namespace filesystem_file_size_test {
 void run() {
   const fs::path sandbox{"sandbox"};
   remove_sandbox(sandbox);
-  assert(fs::create_directory(sandbox));
+  const bool created_sandbox = fs::create_directory(sandbox);
+  (void)created_sandbox;
+  assert(created_sandbox);
 
   const fs::path example = sandbox / "example.bin";
   std::ofstream(example).put('a'); // create file of size 1
@@ -235,7 +266,9 @@ namespace filesystem_is_empty_test {
 void run() {
   const fs::path sandbox{"sandbox"};
   remove_sandbox(sandbox);
-  assert(fs::create_directory(sandbox));
+  const bool created_sandbox = fs::create_directory(sandbox);
+  (void)created_sandbox;
+  assert(created_sandbox);
 
   const auto empty_file = sandbox / "empty.txt";
   std::ofstream{empty_file};
@@ -244,7 +277,9 @@ void run() {
   assert(!fs::is_empty(empty_file));
 
   const auto empty_dir = sandbox / "empty_dir";
-  assert(fs::create_directory(empty_dir));
+  const bool created_empty_dir = fs::create_directory(empty_dir);
+  (void)created_empty_dir;
+  assert(created_empty_dir);
   assert(fs::is_empty(empty_dir));
   std::ofstream(empty_dir / "file.txt").put('b');
   assert(!fs::is_empty(empty_dir));
@@ -284,7 +319,9 @@ bool has_write_permissions(fs::perms perms) {
 void run() {
   const fs::path sandbox{"sandbox"};
   remove_sandbox(sandbox);
-  assert(fs::create_directory(sandbox));
+  const bool created_sandbox = fs::create_directory(sandbox);
+  (void)created_sandbox;
+  assert(created_sandbox);
 
   const auto file = sandbox / "file.txt";
   std::ofstream(file).put('a');
@@ -414,7 +451,9 @@ namespace filesystem_directory_entry_test {
 void run() {
   const fs::path sandbox{"sandbox"};
   remove_sandbox(sandbox);
-  assert(fs::create_directory(sandbox));
+  const bool created_sandbox = fs::create_directory(sandbox);
+  (void)created_sandbox;
+  assert(created_sandbox);
 
   const auto file = sandbox / "file.txt";
   std::ofstream(file) << "ab";
@@ -489,6 +528,52 @@ void run() {
 } // namespace filesystem_temp_directory_path_test
 
 //
+// https://en.cppreference.com/w/cpp/filesystem/absolute#Example
+//
+namespace filesystem_absolute_test {
+void run() {
+  std::filesystem::path p = "foo.c";
+  std::cout << "Current path is " << std::filesystem::current_path() << '\n';
+  std::cout << "Absolute path for " << p << " is " << fs::absolute(p) << '\n';
+}
+} // namespace filesystem_absolute_test
+
+//
+// https://en.cppreference.com/w/cpp/filesystem/current_path#Example
+//
+namespace filesystem_current_path_test {
+void run() {
+  scoped_current_path restore_current_path;
+
+  std::cout << "Current path is " << fs::current_path() << '\n'; // (1)
+  fs::current_path(fs::temp_directory_path()); // (3)
+  std::cout << "Current path is " << fs::current_path() << '\n';
+
+  // cppreference is a standalone program. Restore the process-wide current
+  // path because this driver runs many examples in one process.
+}
+} // namespace filesystem_current_path_test
+
+//
+// https://en.cppreference.com/w/cpp/filesystem/relative#Example
+//
+namespace filesystem_relative_test {
+void show(std::filesystem::path x, std::filesystem::path y) {
+  std::cout << "x:\t\t " << x << "\n y:\t\t " << y << '\n'
+            << "relative(x, y):  " << std::filesystem::relative(x, y) << '\n'
+            << "proximate(x, y): " << std::filesystem::proximate(x, y)
+            << "\n\n";
+}
+
+void run() {
+  show("/a/b/c", "/a/b");
+  show("/a/c", "/a/b");
+  show("c", "/a/b");
+  show("/a/b", "c");
+}
+} // namespace filesystem_relative_test
+
+//
 // https://en.cppreference.com/w/cpp/filesystem/last_write_time#Example
 //
 namespace filesystem_last_write_time_test {
@@ -514,18 +599,6 @@ void run() {
 // https://en.cppreference.com/w/cpp/filesystem/canonical#Example
 //
 namespace filesystem_canonical_test {
-class scoped_current_path {
-public:
-  scoped_current_path() : old_(std::filesystem::current_path()) {}
-  ~scoped_current_path() { std::filesystem::current_path(old_); }
-
-  scoped_current_path(const scoped_current_path &) = delete;
-  scoped_current_path &operator=(const scoped_current_path &) = delete;
-
-private:
-  std::filesystem::path old_;
-};
-
 void run() {
   scoped_current_path restore_current_path;
 

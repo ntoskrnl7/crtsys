@@ -3,6 +3,9 @@
 //
 #include <chrono>
 #include <iostream>
+#if __has_include(<print>)
+#include <print>
+#endif
 #include <stdexcept>
 
 namespace chrono_test {
@@ -62,3 +65,59 @@ void run() {
   expect_offset("Europe/Berlin", std::chrono::hours{1});
 }
 } // namespace chrono_time_zone_info_test
+
+//
+// https://en.cppreference.com/w/cpp/chrono/year_month_day#Example
+//
+namespace chrono_year_month_day_test {
+void run() {
+  const std::chrono::time_point now{std::chrono::system_clock::now()};
+
+  const std::chrono::year_month_day ymd{
+      std::chrono::floor<std::chrono::days>(now)};
+  std::cout << "Current Year: " << static_cast<int>(ymd.year()) << ", "
+            << "Month: " << static_cast<unsigned>(ymd.month()) << ", "
+            << "Day: " << static_cast<unsigned>(ymd.day()) << "\n"
+            << "ymd: " << ymd << '\n';
+}
+} // namespace chrono_year_month_day_test
+
+//
+// https://en.cppreference.com/w/cpp/chrono/weekday#Example
+//
+namespace chrono_weekday_test {
+void run() {
+  std::chrono::weekday x{42 / 13};
+  std::cout << x++ << '\n';
+  std::cout << x << '\n';
+  std::cout << ++x << '\n';
+}
+} // namespace chrono_weekday_test
+
+//
+// https://en.cppreference.com/w/cpp/chrono/hh_mm_ss#Example
+//
+namespace chrono_hh_mm_ss_test {
+void run() {
+#if defined(__cpp_lib_print)
+  std::println("Default constructor: {}",
+               std::chrono::hh_mm_ss<std::chrono::minutes>{});
+
+  std::chrono::time_point now = std::chrono::system_clock::now();
+  std::chrono::hh_mm_ss time_of_day{
+      now - std::chrono::floor<std::chrono::days>(now)};
+  std::println("The time of day is: {}", time_of_day);
+#else
+  // cppreference uses std::println. Older MSVC STLs in the driver build can
+  // expose std::chrono::hh_mm_ss before exposing <print>, so keep the chrono
+  // object construction intact and stream the same values.
+  std::cout << "Default constructor: "
+            << std::chrono::hh_mm_ss<std::chrono::minutes>{} << '\n';
+
+  std::chrono::time_point now = std::chrono::system_clock::now();
+  std::chrono::hh_mm_ss time_of_day{
+      now - std::chrono::floor<std::chrono::days>(now)};
+  std::cout << "The time of day is: " << time_of_day << '\n';
+#endif
+}
+} // namespace chrono_hh_mm_ss_test

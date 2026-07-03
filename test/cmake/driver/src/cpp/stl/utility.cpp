@@ -33,6 +33,7 @@
 #include <ranges>
 #include <ratio>
 #include <source_location>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -149,6 +150,57 @@ void run() {
 #endif
 }
 } // namespace format_test
+
+//
+// https://en.cppreference.com/w/cpp/utility/format/formatter#Example
+//
+#if defined(__cpp_lib_format)
+struct QuotableString : std::string_view {};
+
+template <> struct std::formatter<QuotableString, char> {
+  bool quoted = false;
+  template <class ParseContext>
+  constexpr ParseContext::iterator parse(ParseContext &ctx) {
+    auto it = ctx.begin();
+    if (it == ctx.end())
+      return it;
+
+    if (*it == '#') {
+      quoted = true;
+      ++it;
+    }
+    if (it != ctx.end() && *it != '}')
+      throw std::format_error("Invalid format args for QuotableString.");
+
+    return it;
+  }
+  template <class FmtContext>
+  FmtContext::iterator format(QuotableString s, FmtContext &ctx) const {
+    std::ostringstream out;
+    if (quoted)
+      out << std::quoted(s);
+    else
+      out << s;
+
+    return std::ranges::copy(std::move(out).str(), ctx.out()).out;
+  }
+};
+#endif
+
+namespace formatter_customization_test {
+void run() {
+#if defined(__cpp_lib_format)
+  QuotableString a("be"), a2(R"( " be " )");
+  QuotableString b("a question");
+  std::cout << std::format("To {0} or not to {0}, that is {1}.\n", a, b);
+  std::cout << std::format("To {0:} or not to {0:}, that is {1:}.\n", a, b);
+  std::cout << std::format("To {0:#} or not to {0:#}, that is {1:#}.\n", a2,
+                           b);
+#else
+  std::cout << "std::formatter customization is not available in this MSVC STL\n";
+#endif
+}
+} // namespace formatter_customization_test
 
 //
 // https://en.cppreference.com/w/cpp/io/print#Example

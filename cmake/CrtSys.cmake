@@ -93,13 +93,13 @@ function(crtsys_generate_msvc_future_overlay OUT_VAR)
 
     file(READ "${MSVC_FUTURE_HEADER}" CRTSYS_MSVC_FUTURE_CONTENT)
 
-    set(CRTSYS_FUTURE_IS_READY_SNIPPET
+    set(CRTSYS_FUTURE_IS_READY_NOEXCEPT_SNIPPET
 "    bool _Is_ready() const noexcept {
         return _State._Is_ready();
     }
 
 ")
-    set(CRTSYS_FUTURE_READY_OR_STORED_SNIPPET
+    set(CRTSYS_FUTURE_READY_OR_STORED_NOEXCEPT_SNIPPET
 "    bool _Is_ready() const noexcept {
         return _State._Is_ready();
     }
@@ -109,17 +109,45 @@ function(crtsys_generate_msvc_future_overlay OUT_VAR)
     }
 
 ")
+    set(CRTSYS_FUTURE_IS_READY_SNIPPET
+"    bool _Is_ready() const {
+        return _State._Is_ready();
+    }
 
-    string(FIND "${CRTSYS_MSVC_FUTURE_CONTENT}" "${CRTSYS_FUTURE_IS_READY_SNIPPET}" CRTSYS_FUTURE_IS_READY_INDEX)
-    if(CRTSYS_FUTURE_IS_READY_INDEX EQUAL -1)
+")
+    set(CRTSYS_FUTURE_READY_OR_STORED_SNIPPET
+"    bool _Is_ready() const {
+        return _State._Is_ready();
+    }
+
+    bool _Already_has_stored_result() const {
+        return _State._Ptr() && _State._Ptr()->_Already_has_stored_result();
+    }
+
+")
+
+    set(CRTSYS_FUTURE_IS_READY_INDEX -1)
+    string(FIND "${CRTSYS_MSVC_FUTURE_CONTENT}" "${CRTSYS_FUTURE_IS_READY_NOEXCEPT_SNIPPET}" CRTSYS_FUTURE_IS_READY_NOEXCEPT_INDEX)
+    if(NOT CRTSYS_FUTURE_IS_READY_NOEXCEPT_INDEX EQUAL -1)
+        string(REPLACE "${CRTSYS_FUTURE_IS_READY_NOEXCEPT_SNIPPET}" "${CRTSYS_FUTURE_READY_OR_STORED_NOEXCEPT_SNIPPET}" CRTSYS_MSVC_FUTURE_CONTENT "${CRTSYS_MSVC_FUTURE_CONTENT}")
+    else()
+        string(FIND "${CRTSYS_MSVC_FUTURE_CONTENT}" "${CRTSYS_FUTURE_IS_READY_SNIPPET}" CRTSYS_FUTURE_IS_READY_INDEX)
+    endif()
+    if(CRTSYS_FUTURE_IS_READY_NOEXCEPT_INDEX EQUAL -1 AND CRTSYS_FUTURE_IS_READY_INDEX EQUAL -1)
         message(WARNING "Unable to patch MSVC <future>: _Promise::_Is_ready shape was not recognized.")
         return()
     endif()
-    string(REPLACE "${CRTSYS_FUTURE_IS_READY_SNIPPET}" "${CRTSYS_FUTURE_READY_OR_STORED_SNIPPET}" CRTSYS_MSVC_FUTURE_CONTENT "${CRTSYS_MSVC_FUTURE_CONTENT}")
+    if(NOT CRTSYS_FUTURE_IS_READY_INDEX EQUAL -1)
+        string(REPLACE "${CRTSYS_FUTURE_IS_READY_SNIPPET}" "${CRTSYS_FUTURE_READY_OR_STORED_SNIPPET}" CRTSYS_MSVC_FUTURE_CONTENT "${CRTSYS_MSVC_FUTURE_CONTENT}")
+    endif()
 
     set(CRTSYS_FUTURE_PROMISE_DTOR_CONDITION "if (_MyPromise._Is_valid() && !_MyPromise._Is_ready())")
+    set(CRTSYS_FUTURE_PROMISE_DTOR_AT_THREAD_EXIT_CONDITION "if (_MyPromise._Is_valid() && !_MyPromise._Is_ready() && !_MyPromise._Is_ready_at_thread_exit())")
+    set(CRTSYS_FUTURE_DTOR_INDEX -1)
+    set(CRTSYS_FUTURE_DTOR_AT_THREAD_EXIT_INDEX -1)
     string(FIND "${CRTSYS_MSVC_FUTURE_CONTENT}" "${CRTSYS_FUTURE_PROMISE_DTOR_CONDITION}" CRTSYS_FUTURE_DTOR_INDEX)
-    if(CRTSYS_FUTURE_DTOR_INDEX EQUAL -1)
+    string(FIND "${CRTSYS_MSVC_FUTURE_CONTENT}" "${CRTSYS_FUTURE_PROMISE_DTOR_AT_THREAD_EXIT_CONDITION}" CRTSYS_FUTURE_DTOR_AT_THREAD_EXIT_INDEX)
+    if(CRTSYS_FUTURE_DTOR_INDEX EQUAL -1 AND CRTSYS_FUTURE_DTOR_AT_THREAD_EXIT_INDEX EQUAL -1)
         message(WARNING "Unable to patch MSVC <future>: promise destructor shape was not recognized.")
         return()
     endif()
@@ -127,11 +155,20 @@ function(crtsys_generate_msvc_future_overlay OUT_VAR)
     # MSVC STL keeps set_value_at_thread_exit() states unready until the CRT
     # thread-exit callback broadcasts. A promise destructor must not translate
     # that already-stored-but-not-yet-ready value into broken_promise.
-    string(REPLACE
-        "${CRTSYS_FUTURE_PROMISE_DTOR_CONDITION}"
-        "if (_MyPromise._Is_valid() && !_MyPromise._Is_ready() && !_MyPromise._Already_has_stored_result())"
-        CRTSYS_MSVC_FUTURE_CONTENT
-        "${CRTSYS_MSVC_FUTURE_CONTENT}")
+    if(NOT CRTSYS_FUTURE_DTOR_AT_THREAD_EXIT_INDEX EQUAL -1)
+        string(REPLACE
+            "${CRTSYS_FUTURE_PROMISE_DTOR_AT_THREAD_EXIT_CONDITION}"
+            "if (_MyPromise._Is_valid() && !_MyPromise._Is_ready() && !_MyPromise._Is_ready_at_thread_exit() && !_MyPromise._Already_has_stored_result())"
+            CRTSYS_MSVC_FUTURE_CONTENT
+            "${CRTSYS_MSVC_FUTURE_CONTENT}")
+    endif()
+    if(NOT CRTSYS_FUTURE_DTOR_INDEX EQUAL -1)
+        string(REPLACE
+            "${CRTSYS_FUTURE_PROMISE_DTOR_CONDITION}"
+            "if (_MyPromise._Is_valid() && !_MyPromise._Is_ready() && !_MyPromise._Already_has_stored_result())"
+            CRTSYS_MSVC_FUTURE_CONTENT
+            "${CRTSYS_MSVC_FUTURE_CONTENT}")
+    endif()
 
     set(CRTSYS_MSVC_FUTURE_OVERLAY_DIR "${CMAKE_CURRENT_BINARY_DIR}/crtsys-msvc-overlay/${MSVC_TOOLSET_VERSION}")
     file(MAKE_DIRECTORY "${CRTSYS_MSVC_FUTURE_OVERLAY_DIR}")

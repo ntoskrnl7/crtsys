@@ -258,6 +258,16 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::ranges::sort](https://en.cppreference.com/w/cpp/algorithm/ranges/sort)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
+- [x] C++20 `std::ranges` adaptors:
+      [`std::views::take`](https://en.cppreference.com/w/cpp/ranges/take_view),
+      [`std::views::drop`](https://en.cppreference.com/w/cpp/ranges/drop_view),
+      [`std::views::reverse`](https://en.cppreference.com/w/cpp/ranges/reverse_view),
+      [`std::views::join`](https://en.cppreference.com/w/cpp/ranges/join_view),
+      [`std::views::split`](https://en.cppreference.com/w/cpp/ranges/split_view),
+      [`std::views::values`](https://en.cppreference.com/w/cpp/ranges/values_view),
+      [`std::views::keys`](https://en.cppreference.com/w/cpp/ranges/keys_view),
+      and [`std::views::elements`](https://en.cppreference.com/w/cpp/ranges/elements_view)
+  [(cppreference examples)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::views::zip](https://en.cppreference.com/w/cpp/ranges/zip_view),
       [std::views::chunk](https://en.cppreference.com/w/cpp/ranges/chunk_view),
       [std::views::slide](https://en.cppreference.com/w/cpp/ranges/slide_view),
@@ -282,14 +292,29 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   [(cppreference push/emplace examples)](../test/cmake/driver/src/cpp/stl/containers.cpp)
 - [x] [std::source_location](https://en.cppreference.com/w/cpp/utility/source_location)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
+- [x] [`std::chrono::year_month_day`](https://en.cppreference.com/w/cpp/chrono/year_month_day),
+      [`std::chrono::weekday`](https://en.cppreference.com/w/cpp/chrono/weekday),
+      [`std::chrono::hh_mm_ss`](https://en.cppreference.com/w/cpp/chrono/hh_mm_ss)
+  [(cppreference examples)](../test/cmake/driver/src/cpp/stl/chrono.cpp)
 - [x] [std::strong_ordering](https://en.cppreference.com/w/cpp/utility/compare/strong_ordering)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::format](https://en.cppreference.com/w/cpp/utility/format)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
+- [x] [`std::formatter`](https://en.cppreference.com/w/cpp/utility/format/formatter)
+      customization
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::print](https://en.cppreference.com/w/cpp/io/print)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::regex](https://en.cppreference.com/w/cpp/regex)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/regex.cpp)
+- [x] Regex algorithms and iterators:
+      [`std::regex_match`](https://en.cppreference.com/w/cpp/regex/regex_match),
+      [`std::regex_iterator`](https://en.cppreference.com/w/cpp/regex/regex_iterator),
+      [`std::regex_token_iterator`](https://en.cppreference.com/w/cpp/regex/regex_token_iterator)
+  [(cppreference examples)](../test/cmake/driver/src/cpp/stl/regex.cpp)
+- [x] [`std::quoted`](https://en.cppreference.com/w/cpp/io/manip/quoted)
+      with [`std::stringstream`](https://en.cppreference.com/w/cpp/io/basic_stringstream)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/streams.cpp)
 - [x] [std::filesystem::path lexical operations](https://en.cppreference.com/w/cpp/filesystem/path/lexically_normal)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] [std::filesystem::directory_iterator](https://en.cppreference.com/w/cpp/filesystem/directory_iterator)
@@ -336,6 +361,12 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
 - [x] [std::filesystem::rename](https://en.cppreference.com/w/cpp/filesystem/rename)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] [std::filesystem::temp_directory_path](https://en.cppreference.com/w/cpp/filesystem/temp_directory_path)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::absolute](https://en.cppreference.com/w/cpp/filesystem/absolute)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::current_path](https://en.cppreference.com/w/cpp/filesystem/current_path)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::relative / proximate](https://en.cppreference.com/w/cpp/filesystem/relative)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] [std::filesystem::last_write_time](https://en.cppreference.com/w/cpp/filesystem/last_write_time)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
@@ -435,6 +466,8 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/thread.cpp)
 - [x] [std::shared_mutex](https://en.cppreference.com/w/cpp/thread/shared_mutex)
   [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp#L129)
+- [x] [std::shared_timed_mutex](https://en.cppreference.com/w/cpp/thread/shared_timed_mutex)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/thread.cpp)
 - [x] [std::shared_lock](https://en.cppreference.com/w/cpp/thread/shared_lock)
   [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp)
 - [x] [std::timed_mutex](https://en.cppreference.com/w/cpp/thread/timed_mutex)
@@ -507,39 +540,27 @@ dependencies.
 
 ### Future cppreference Coverage Candidates
 
-- [ ] Threading and synchronization
-  - [`std::shared_timed_mutex`](https://en.cppreference.com/w/cpp/thread/shared_timed_mutex)
-    and timed shared-lock edge cases
-  - Additional `std::future` / `std::shared_future` error-path and timeout
-    edge cases beyond the default examples
 - [ ] Additional ranges
-  - Range adaptors not yet split into explicit driver examples, such as
-    `take`, `drop`, `reverse`, `join`, `split`, `keys`, `values`,
-    `elements`, and other feature-test-gated C++23 views.
-- [ ] Regex, formatting, and streams
-  - [`std::regex_match`](https://en.cppreference.com/w/cpp/regex/regex_match),
-    [`std::regex_iterator`](https://en.cppreference.com/w/cpp/regex/regex_iterator),
-    [`std::regex_token_iterator`](https://en.cppreference.com/w/cpp/regex/regex_token_iterator)
-  - [`std::formatter`](https://en.cppreference.com/w/cpp/utility/format/formatter)
-    customization and range-formatting examples where supported by the active
-    MSVC STL.
-  - String-backed I/O examples such as
-    [`std::stringstream`](https://en.cppreference.com/w/cpp/io/basic_stringstream),
-    [`std::quoted`](https://en.cppreference.com/w/cpp/io/manip/quoted),
-    and `spanstream` where feature-test macros allow it.
+  - Range adaptors not yet split into explicit driver examples: other
+    feature-test-gated C++23 views when the active MSVC STL exposes them.
+- [ ] Formatting and streams
+  - Range-formatting examples where supported by the active MSVC STL.
+  - `spanstream` standalone examples if cppreference publishes them.
 - [ ] Chrono
-  - Calendar and time-of-day examples:
-    [`std::chrono::year_month_day`](https://en.cppreference.com/w/cpp/chrono/year_month_day),
-    [`std::chrono::weekday`](https://en.cppreference.com/w/cpp/chrono/weekday),
-    [`std::chrono::hh_mm_ss`](https://en.cppreference.com/w/cpp/chrono/hh_mm_ss)
   - Clock conversion examples for `file_clock`, `utc_clock`, `tai_clock`, and
     `gps_clock` where the active MSVC STL exposes them.
+
+### Future Semantic Edge Coverage
+
+These are not gaps in the imported cppreference examples. They are broader
+driver-runtime checks that would exercise error paths or timing-sensitive
+semantics beyond the simple standalone examples.
+
+- [ ] Threading and synchronization
+  - Timed shared-lock behavior.
+  - Additional `std::future` / `std::shared_future` error-path and timeout
+    behavior.
 - [ ] Filesystem edge coverage
-  - Path conversion and path relations:
-    [`std::filesystem::absolute`](https://en.cppreference.com/w/cpp/filesystem/absolute),
-    [`std::filesystem::relative`](https://en.cppreference.com/w/cpp/filesystem/relative),
-    [`std::filesystem::proximate`](https://en.cppreference.com/w/cpp/filesystem/relative),
-    [`std::filesystem::current_path`](https://en.cppreference.com/w/cpp/filesystem/current_path)
   - More error-code overloads, metadata transitions, recursive traversal
     options, and negative-path behavior for already-covered filesystem
     operations.

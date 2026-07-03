@@ -39,6 +39,7 @@ test harness, typically by moving the sample `main()` body into a namespaced
 - `std::mutex`: <https://en.cppreference.com/w/cpp/thread/mutex>
 - `std::lock_guard`: <https://en.cppreference.com/w/cpp/thread/lock_guard>
 - `std::shared_mutex`: <https://en.cppreference.com/w/cpp/thread/shared_mutex>
+- `std::shared_timed_mutex`: <https://en.cppreference.com/w/cpp/thread/shared_timed_mutex>
 - `std::shared_lock`: <https://en.cppreference.com/w/cpp/thread/shared_lock>
 - `std::timed_mutex`: <https://en.cppreference.com/w/cpp/thread/timed_mutex>
 - `std::recursive_mutex`: <https://en.cppreference.com/w/cpp/thread/recursive_mutex>
@@ -148,6 +149,14 @@ test harness, typically by moving the sample `main()` body into a namespaced
 - `std::ranges::slide_view`: <https://en.cppreference.com/w/cpp/ranges/slide_view>
 - `std::ranges::stride_view`: <https://en.cppreference.com/w/cpp/ranges/stride_view>
 - `std::ranges::repeat_view`: <https://en.cppreference.com/w/cpp/ranges/repeat_view>
+- `std::ranges::take_view`: <https://en.cppreference.com/w/cpp/ranges/take_view>
+- `std::ranges::drop_view`: <https://en.cppreference.com/w/cpp/ranges/drop_view>
+- `std::ranges::reverse_view`: <https://en.cppreference.com/w/cpp/ranges/reverse_view>
+- `std::ranges::join_view`: <https://en.cppreference.com/w/cpp/ranges/join_view>
+- `std::ranges::split_view`: <https://en.cppreference.com/w/cpp/ranges/split_view>
+- `std::ranges::values_view`: <https://en.cppreference.com/w/cpp/ranges/values_view>
+- `std::ranges::keys_view`: <https://en.cppreference.com/w/cpp/ranges/keys_view>
+- `std::ranges::elements_view`: <https://en.cppreference.com/w/cpp/ranges/elements_view>
 - `std::merge`: <https://en.cppreference.com/w/cpp/algorithm/merge>
 - `std::make_heap`: <https://en.cppreference.com/w/cpp/algorithm/make_heap>
 - `std::next_permutation`: <https://en.cppreference.com/w/cpp/algorithm/next_permutation>
@@ -195,9 +204,17 @@ test harness, typically by moving the sample `main()` body into a namespaced
 - `std::derived_from` / `std::same_as`: <https://en.cppreference.com/w/cpp/concepts>
 - `std::strong_ordering`: <https://en.cppreference.com/w/cpp/utility/compare/strong_ordering>
 - `std::numbers`: <https://en.cppreference.com/w/cpp/numeric/constants>
+- `std::chrono::year_month_day`: <https://en.cppreference.com/w/cpp/chrono/year_month_day>
+- `std::chrono::weekday`: <https://en.cppreference.com/w/cpp/chrono/weekday>
+- `std::chrono::hh_mm_ss`: <https://en.cppreference.com/w/cpp/chrono/hh_mm_ss>
 - `std::format`: <https://en.cppreference.com/w/cpp/utility/format/format>
+- `std::formatter`: <https://en.cppreference.com/w/cpp/utility/format/formatter>
 - `std::print`: <https://en.cppreference.com/w/cpp/io/print>
 - `std::regex`: <https://en.cppreference.com/w/cpp/regex>
+- `std::regex_match`: <https://en.cppreference.com/w/cpp/regex/regex_match>
+- `std::regex_iterator`: <https://en.cppreference.com/w/cpp/regex/regex_iterator>
+- `std::regex_token_iterator`: <https://en.cppreference.com/w/cpp/regex/regex_token_iterator>
+- `std::quoted`: <https://en.cppreference.com/w/cpp/io/manip/quoted>
 - `std::distance`: <https://en.cppreference.com/w/cpp/iterator/distance>
 - `std::advance`: <https://en.cppreference.com/w/cpp/iterator/advance>
 - `std::next`: <https://en.cppreference.com/w/cpp/iterator/next>
@@ -248,6 +265,9 @@ test harness, typically by moving the sample `main()` body into a namespaced
 - `std::filesystem::space`: <https://en.cppreference.com/w/cpp/filesystem/space>
 - `std::filesystem::rename`: <https://en.cppreference.com/w/cpp/filesystem/rename>
 - `std::filesystem::temp_directory_path`: <https://en.cppreference.com/w/cpp/filesystem/temp_directory_path>
+- `std::filesystem::absolute`: <https://en.cppreference.com/w/cpp/filesystem/absolute>
+- `std::filesystem::current_path`: <https://en.cppreference.com/w/cpp/filesystem/current_path>
+- `std::filesystem::relative` / `std::filesystem::proximate`: <https://en.cppreference.com/w/cpp/filesystem/relative>
 - `std::filesystem::last_write_time`: <https://en.cppreference.com/w/cpp/filesystem/last_write_time>
 - `std::filesystem::canonical` / `std::filesystem::weakly_canonical`: <https://en.cppreference.com/w/cpp/filesystem/canonical>
 - `std::function`: <https://en.cppreference.com/w/cpp/utility/functional/function>
@@ -301,6 +321,14 @@ because the example embeds a 32 KiB tape buffer in the interpreter object.
 
 The listed C++23 `std::views` examples are compiled into the driver test when
 the matching feature-test macro is available.
+The `std::ranges::split_view` example is kept source-identical where the active
+STL provides `std::string_view`'s C++23 range constructor; older toolsets print
+a skip line instead of using a non-cppreference workaround.
+The `std::ranges::keys_view` and `std::ranges::elements_view` examples keep the
+same view operations; their Unicode table/letter output is transliterated to
+ASCII in the driver source to keep the test file encoding simple. The
+`keys_view` harness restores `std::cout`'s previous locale after the example
+because all cppreference examples run in one driver instance.
 
 The `std::to_chars` test follows the cppreference example, including the
 floating-point overload calls. The `std::from_chars` test follows the
@@ -312,12 +340,19 @@ The `std::expected` example is compiled into the driver test when the
 
 The `std::format` and `std::print` examples run in the default driver build.
 
-The `std::regex` example keeps the cppreference `regex_search`, iterator, and
-`regex_replace` flow.
+The `std::shared_timed_mutex` page leaves the protected resource as
+`/* data */`; the driver harness uses a small `int` so the assignment example
+can verify the copied value.
+
+The `std::regex` coverage keeps the cppreference `regex_search`,
+`regex_match`, iterator, token-iterator, and `regex_replace` flows.
 
 The filesystem examples listed above are ported into the driver harness.
 The `copy_symlink` page currently has no cppreference example, so the harness
 uses a small direct check for that function.
+The `current_path` and `canonical` examples restore the original current path
+before returning because cppreference examples are standalone programs, while
+the driver harness executes many examples in one process.
 
 The `std::complex` test keeps the arithmetic portion of the cppreference
 example and also includes the `std::exp` and `std::pow` examples.
