@@ -145,15 +145,16 @@ test harness, typically by moving the sample `main()` body into a namespaced
 - `std::ranges` filter/transform views: <https://en.cppreference.com/w/cpp/ranges>
 - `std::ranges::sort`: <https://en.cppreference.com/w/cpp/algorithm/ranges/sort>
 - `std::ranges::zip_view`: <https://en.cppreference.com/w/cpp/ranges/zip_view>
+- `std::ranges::zip_transform_view`: <https://en.cppreference.com/w/cpp/ranges/zip_transform_view>
+- `std::ranges::adjacent_view`: <https://en.cppreference.com/w/cpp/ranges/adjacent_view>
+- `std::ranges::adjacent_transform_view`: <https://en.cppreference.com/w/cpp/ranges/adjacent_transform_view>
 - `std::ranges::chunk_view`: <https://en.cppreference.com/w/cpp/ranges/chunk_view>
+- `std::ranges::chunk_by_view`: <https://en.cppreference.com/w/cpp/ranges/chunk_by_view>
 - `std::ranges::slide_view`: <https://en.cppreference.com/w/cpp/ranges/slide_view>
 - `std::ranges::stride_view`: <https://en.cppreference.com/w/cpp/ranges/stride_view>
 - `std::ranges::repeat_view`: <https://en.cppreference.com/w/cpp/ranges/repeat_view>
-- `std::ranges::chunk_by_view`: <https://en.cppreference.com/w/cpp/ranges/chunk_by_view>
 - `std::ranges::cartesian_product_view`: <https://en.cppreference.com/w/cpp/ranges/cartesian_product_view>
 - `std::ranges::join_with_view`: <https://en.cppreference.com/w/cpp/ranges/join_with_view>
-- `std::ranges::adjacent_view`: <https://en.cppreference.com/w/cpp/ranges/adjacent_view>
-- `std::ranges::adjacent_transform_view`: <https://en.cppreference.com/w/cpp/ranges/adjacent_transform_view>
 - `std::ranges::enumerate_view`: <https://en.cppreference.com/w/cpp/ranges/enumerate_view>
 - `std::ranges::take_view`: <https://en.cppreference.com/w/cpp/ranges/take_view>
 - `std::ranges::drop_view`: <https://en.cppreference.com/w/cpp/ranges/drop_view>
@@ -214,7 +215,15 @@ test harness, typically by moving the sample `main()` body into a namespaced
 - `std::chrono::weekday`: <https://en.cppreference.com/w/cpp/chrono/weekday>
 - `std::chrono::hh_mm_ss`: <https://en.cppreference.com/w/cpp/chrono/hh_mm_ss>
 - `std::chrono::clock_cast`: <https://en.cppreference.com/w/cpp/chrono/clock_cast>
+- `std::chrono::utc_clock::from_sys`: <https://en.cppreference.com/w/cpp/chrono/utc_clock/from_sys>
+- `std::chrono::utc_clock::to_sys`: <https://en.cppreference.com/w/cpp/chrono/utc_clock/to_sys>
+- `std::chrono::tai_clock::from_utc`: <https://en.cppreference.com/w/cpp/chrono/tai_clock/from_utc>
+- `std::chrono::tai_clock::to_utc`: <https://en.cppreference.com/w/cpp/chrono/tai_clock/to_utc>
+- `std::chrono::gps_clock::from_utc`: <https://en.cppreference.com/w/cpp/chrono/gps_clock/from_utc>
+- `std::chrono::gps_clock::to_utc`: <https://en.cppreference.com/w/cpp/chrono/gps_clock/to_utc>
+- `std::chrono::file_clock`: <https://en.cppreference.com/w/cpp/chrono/file_clock>
 - `std::format`: <https://en.cppreference.com/w/cpp/utility/format/format>
+- `std::range_formatter`: <https://en.cppreference.com/w/cpp/utility/format/range_formatter>
 - `std::formatter`: <https://en.cppreference.com/w/cpp/utility/format/formatter>
 - `std::range_formatter`: <https://en.cppreference.com/w/cpp/utility/format/range_formatter>
 - `std::print`: <https://en.cppreference.com/w/cpp/io/print>
@@ -324,9 +333,9 @@ The `std::reference_wrapper` example keeps the cppreference shuffle structure.
 The chrono timezone tests keep the cppreference `current_zone` / `zoned_time`
 flow and add explicit `locate_zone` / `time_zone::get_info` offset checks for
 selected zones.
-The `std::chrono::clock_cast` page currently has no standalone cppreference
-example, so the driver harness uses a small direct round-trip check for the
-documented clock conversion role.
+The chrono clock conversion test follows the linked cppreference conversion
+rules. The `clock_cast` page currently has no runnable example, and the clock
+`now()` examples are benchmark-style samples with large vector allocations.
 
 The `std::stack::push` example keeps the cppreference BrainHack interpreter
 shape. The x64 driver-test harness invokes it through `ntl::expand_stack`

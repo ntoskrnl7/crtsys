@@ -272,19 +272,18 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
       and [`std::views::elements`](https://en.cppreference.com/w/cpp/ranges/elements_view)
   [(cppreference examples)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::views::zip](https://en.cppreference.com/w/cpp/ranges/zip_view),
-      [std::views::chunk](https://en.cppreference.com/w/cpp/ranges/chunk_view),
-      [std::views::slide](https://en.cppreference.com/w/cpp/ranges/slide_view),
-      [std::views::stride](https://en.cppreference.com/w/cpp/ranges/stride_view),
-      [std::views::repeat](https://en.cppreference.com/w/cpp/ranges/repeat_view)
-  [(cppreference examples)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
-- [x] Additional C++23 `std::ranges` adaptors:
-      [std::views::chunk_by](https://en.cppreference.com/w/cpp/ranges/chunk_by_view),
-      [std::views::cartesian_product](https://en.cppreference.com/w/cpp/ranges/cartesian_product_view),
-      [std::views::join_with](https://en.cppreference.com/w/cpp/ranges/join_with_view),
+      [std::views::zip_transform](https://en.cppreference.com/w/cpp/ranges/zip_transform_view),
       [std::views::adjacent](https://en.cppreference.com/w/cpp/ranges/adjacent_view),
       [std::views::adjacent_transform](https://en.cppreference.com/w/cpp/ranges/adjacent_transform_view),
-      [std::views::enumerate](https://en.cppreference.com/w/cpp/ranges/enumerate_view)
-  [(feature-test-gated cppreference examples)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
+      [std::views::chunk](https://en.cppreference.com/w/cpp/ranges/chunk_view),
+      [std::views::chunk_by](https://en.cppreference.com/w/cpp/ranges/chunk_by_view),
+      [std::views::slide](https://en.cppreference.com/w/cpp/ranges/slide_view),
+      [std::views::stride](https://en.cppreference.com/w/cpp/ranges/stride_view),
+      [std::views::repeat](https://en.cppreference.com/w/cpp/ranges/repeat_view),
+      [std::views::cartesian_product](https://en.cppreference.com/w/cpp/ranges/cartesian_product_view),
+      [std::views::join_with](https://en.cppreference.com/w/cpp/ranges/join_with_view),
+      and [std::views::enumerate](https://en.cppreference.com/w/cpp/ranges/enumerate_view)
+  [(cppreference examples)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::ratio](https://en.cppreference.com/w/cpp/numeric/ratio)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::reference_wrapper](https://en.cppreference.com/w/cpp/utility/functional/reference_wrapper)
@@ -310,6 +309,8 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
 - [x] [std::strong_ordering](https://en.cppreference.com/w/cpp/utility/compare/strong_ordering)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::format](https://en.cppreference.com/w/cpp/utility/format)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
+- [x] [`std::range_formatter`](https://en.cppreference.com/w/cpp/utility/format/range_formatter)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [`std::formatter`](https://en.cppreference.com/w/cpp/utility/format/formatter)
       customization
