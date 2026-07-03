@@ -17,6 +17,9 @@
 #endif
 #include <forward_list>
 #include <functional>
+#if __has_include(<format>)
+#include <format>
+#endif
 #include <iomanip>
 #include <initializer_list>
 #include <iostream>
@@ -613,6 +616,168 @@ void zip_view_example() {
 #endif
 
 //
+// https://en.cppreference.com/w/cpp/ranges/zip_transform_view#Example
+//
+#if defined(__cpp_lib_ranges_zip)
+void zip_transform_view_example() {
+  auto v1 = std::vector<float>{1, 2, 3};
+  auto v2 = std::list<short>{1, 2, 3, 4};
+  auto v3 = std::to_array({1, 2, 3, 4, 5});
+
+  auto add = [](auto a, auto b, auto c) { return a + b + c; };
+
+  auto sum = std::views::zip_transform(add, v1, v2, v3);
+
+  std::vector<float> actual;
+  for (auto value : sum) {
+    actual.push_back(value);
+  }
+
+  assert((actual == std::vector<float>{3, 6, 9}));
+}
+#endif
+
+//
+// https://en.cppreference.com/w/cpp/ranges/adjacent_view#Example
+//
+#if defined(__cpp_lib_ranges_zip) && defined(__cpp_lib_format)
+void adjacent_view_example() {
+  constexpr std::array v{1, 2, 3, 4, 5, 6};
+  std::cout << "v = [1 2 3 4 5 6]\n";
+  int i = 0;
+  for (std::tuple t : v | std::views::adjacent<3>) {
+    auto [t0, t1, t2] = t;
+    std::cout << std::format("e = {:<{}}[{} {} {}]\n", "", 2 * i++, t0, t1,
+                             t2);
+  }
+}
+#endif
+
+//
+// https://en.cppreference.com/w/cpp/ranges/adjacent_transform_view#Example
+//
+#if defined(__cpp_lib_ranges_zip)
+void adjacent_transform_view_example() {
+  constexpr static std::array data{1, 2, 3, 4, 5, 6};
+  constexpr int window{3};
+
+  // cppreference declares this as `auto Fun`, then uses it to form a
+  // `constexpr auto view`. MSVC rejects the non-constexpr local in constant
+  // evaluation, so make the callable variable constexpr while keeping the same
+  // lambda and the same constexpr-view test.
+  constexpr auto Fun = [](auto... ints) { return (... + ints); };
+  // Alternatively, the Fun could be any ternary (if window == 3) callable, e.g.:
+  // auto Fun = [](int x, int y, int z) { return x + y + z; };
+  constexpr auto view = data | std::views::adjacent_transform<window>(Fun);
+
+  static_assert(view.size() == (data.size() - window + 1) &&
+                std::array{6, 9, 12, 15} ==
+                    std::array{view[0], view[1], view[2], view[3]} &&
+                view[0] == Fun(data[0], data[1], data[2]) &&
+                view[1] == Fun(data[1], data[2], data[3]) &&
+                view[2] == Fun(data[2], data[3], data[4]) &&
+                view[3] == Fun(data[3], data[4], data[5]));
+  for (int x : view)
+    std::cout << x << ' ';
+  std::cout << '\n';
+}
+#endif
+
+//
+// https://en.cppreference.com/w/cpp/ranges/chunk_by_view#Example
+//
+#if defined(__cpp_lib_ranges_chunk_by)
+void print_chunks(auto view, std::string_view separator = ", ") {
+  for (auto const subrange : view) {
+    std::cout << '[';
+    for (std::string_view prefix; auto const &elem : subrange)
+      std::cout << prefix << elem, prefix = separator;
+    std::cout << "] ";
+  }
+  std::cout << '\n';
+}
+
+void chunk_by_view_example() {
+  std::initializer_list v1 = {1, 2, 3, 1, 2, 3, 3, 3, 1, 2, 3};
+  auto fn1 = std::ranges::less{};
+  auto view1 = v1 | std::views::chunk_by(fn1);
+  print_chunks(view1);
+
+  std::initializer_list v2 = {1, 2, 3, 4, 4, 0, 2, 3, 3, 3, 2, 1};
+  auto fn2 = std::ranges::not_equal_to{};
+  auto view2 = v2 | std::views::chunk_by(fn2);
+  print_chunks(view2);
+  std::string_view v3 = "__cpp_lib_ranges_chunk_by";
+  auto fn3 = [](auto x, auto y) { return not(x == '_' or y == '_'); };
+  auto view3 = v3 | std::views::chunk_by(fn3);
+  print_chunks(view3, "");
+
+  // cppreference spells this UTF-8 text and one parameter name directly as
+  // non-ASCII. Keep the same byte sequence with escapes so this source stays
+  // ASCII while testing the same chunking path.
+  std::string_view v4 = "z\xc3\x9f\xe6\xb0\xb4\xf0\x9f\x8d\x8c";
+  auto fn4 = [](auto, auto ch) { return 128 == ((128 + 64) & ch); };
+  auto view4 = v4 | std::views::chunk_by(fn4);
+  print_chunks(view4, "");
+}
+#endif
+
+//
+// https://en.cppreference.com/w/cpp/ranges/cartesian_product_view#Example
+//
+#if defined(__cpp_lib_ranges_cartesian_product)
+void print(std::tuple<char const &, int const &, std::string const &> t,
+           int pos) {
+  const auto &[a, b, c] = t;
+  std::cout << '(' << a << ' ' << b << ' ' << c << ')'
+            << (pos % 4 ? " " : "\n");
+}
+
+void cartesian_product_view_example() {
+  const auto x = std::array{'A', 'B'};
+  const auto y = std::vector{1, 2, 3};
+  // cppreference uses Greek letters directly. Use the same UTF-8 byte
+  // sequences as escapes to keep this source file ASCII.
+  const auto z =
+      std::list<std::string>{"\xce\xb1", "\xce\xb2", "\xce\xb3", "\xce\xb4"};
+
+  for (int i{1}; auto const &tuple : std::views::cartesian_product(x, y, z))
+    print(tuple, i++);
+}
+#endif
+
+//
+// https://en.cppreference.com/w/cpp/ranges/enumerate_view#Example
+//
+#if defined(__cpp_lib_ranges_enumerate)
+void enumerate_view_example() {
+  constexpr static auto v = {'A', 'B', 'C', 'D'};
+
+  for (auto const [index, letter] : std::views::enumerate(v))
+    std::cout << '(' << index << ':' << letter << ") ";
+  std::cout << '\n';
+#if defined(__cpp_lib_ranges_to_container)
+  // create a map using the position of each element as key
+  auto m = v | std::views::enumerate | std::ranges::to<std::map>();
+
+  for (auto const [key, value] : m)
+    std::cout << '[' << key << "]:" << value << ' ';
+  std::cout << '\n';
+#endif
+
+  std::vector<int> numbers{1, 3, 5, 7};
+  // num is mutable even with const, which does not propagate to reference to
+  // make it const, use `std::views::enumerate(numbers) | std::views::as_const`
+  // or `std::views::enumerate(std::as_const(numbers))`
+  for (auto const [index, num] : std::views::enumerate(numbers)) {
+    ++num; // the type is int&
+    std::cout << numbers[index] << ' ';
+  }
+  std::cout << '\n';
+}
+#endif
+
+//
 // https://en.cppreference.com/w/cpp/ranges/chunk_view#Example
 //
 #if defined(__cpp_lib_ranges_chunk)
@@ -721,6 +886,26 @@ void run() {
 
 #if defined(__cpp_lib_ranges_zip)
   zip_view_example();
+  ++exercised;
+  zip_transform_view_example();
+  ++exercised;
+#if defined(__cpp_lib_format)
+  adjacent_view_example();
+  ++exercised;
+#endif
+  adjacent_transform_view_example();
+  ++exercised;
+#endif
+#if defined(__cpp_lib_ranges_chunk_by)
+  chunk_by_view_example();
+  ++exercised;
+#endif
+#if defined(__cpp_lib_ranges_cartesian_product)
+  cartesian_product_view_example();
+  ++exercised;
+#endif
+#if defined(__cpp_lib_ranges_enumerate)
+  enumerate_view_example();
   ++exercised;
 #endif
 #if defined(__cpp_lib_ranges_chunk)

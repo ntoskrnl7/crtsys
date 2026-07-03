@@ -68,43 +68,6 @@ void run() {
 } // namespace chrono_time_zone_info_test
 
 //
-// https://en.cppreference.com/w/cpp/chrono/clock_cast
-//
-namespace chrono_clock_conversion_test {
-void run() {
-#if defined(_MSC_VER) && _MSC_VER >= 1930
-  // cppreference currently marks the clock_cast Example section as
-  // incomplete/no-example. Keep this direct coverage aligned with the page's
-  // documented conversion role instead of inventing an output-oriented sample.
-  const auto sys = std::chrono::sys_days{
-                       std::chrono::year{2020} / std::chrono::January / 1} +
-                   std::chrono::hours{12} + std::chrono::minutes{34} +
-                   std::chrono::seconds{56};
-
-  const auto utc = std::chrono::clock_cast<std::chrono::utc_clock>(sys);
-  const auto tai = std::chrono::clock_cast<std::chrono::tai_clock>(utc);
-  const auto gps = std::chrono::clock_cast<std::chrono::gps_clock>(utc);
-  const auto file = std::chrono::clock_cast<std::chrono::file_clock>(sys);
-
-  assert(std::chrono::clock_cast<std::chrono::system_clock>(utc) == sys);
-  assert(std::chrono::clock_cast<std::chrono::utc_clock>(tai) == utc);
-  assert(std::chrono::clock_cast<std::chrono::utc_clock>(gps) == utc);
-  assert(std::chrono::clock_cast<std::chrono::system_clock>(file) == sys);
-
-  // Release builds compile out assert(), so mark assert-only locals as used.
-  (void)sys;
-  (void)utc;
-  (void)tai;
-  (void)gps;
-  (void)file;
-  std::cout << "chrono clock_cast conversions exercised\n";
-#else
-  std::cout << "std::chrono::clock_cast is not available in this MSVC STL\n";
-#endif
-}
-} // namespace chrono_clock_conversion_test
-
-//
 // https://en.cppreference.com/w/cpp/chrono/year_month_day#Example
 //
 namespace chrono_year_month_day_test {
@@ -159,3 +122,54 @@ void run() {
 #endif
 }
 } // namespace chrono_hh_mm_ss_test
+
+//
+// https://en.cppreference.com/w/cpp/chrono/clock_cast
+// https://en.cppreference.com/w/cpp/chrono/utc_clock/from_sys
+// https://en.cppreference.com/w/cpp/chrono/utc_clock/to_sys
+// https://en.cppreference.com/w/cpp/chrono/tai_clock/from_utc
+// https://en.cppreference.com/w/cpp/chrono/tai_clock/to_utc
+// https://en.cppreference.com/w/cpp/chrono/gps_clock/from_utc
+// https://en.cppreference.com/w/cpp/chrono/gps_clock/to_utc
+// https://en.cppreference.com/w/cpp/chrono/file_clock
+//
+namespace chrono_clock_conversion_test {
+void expect(bool condition, const char *message) {
+  if (!condition) {
+    throw std::runtime_error(message);
+  }
+}
+
+void run() {
+  using namespace std::chrono;
+
+  // cppreference has no clock_cast example. The clock now() examples allocate
+  // large benchmark vectors, so this driver test uses the conversion equations
+  // from the linked cppreference pages with one fixed instant.
+  const sys_seconds sys = sys_days{2018y / January / 1};
+  const utc_seconds utc = utc_clock::from_sys(sys);
+  const tai_seconds tai = tai_clock::from_utc(utc);
+  const gps_seconds gps = gps_clock::from_utc(utc);
+  const file_time<seconds> file = clock_cast<file_clock>(sys);
+
+  std::cout << "sys seconds: " << sys.time_since_epoch().count() << '\n'
+            << "utc seconds: " << utc.time_since_epoch().count() << '\n'
+            << "tai seconds: " << tai.time_since_epoch().count() << '\n'
+            << "gps seconds: " << gps.time_since_epoch().count() << '\n'
+            << "file seconds: " << file.time_since_epoch().count() << '\n';
+
+  expect(utc_clock::to_sys(utc) == sys, "utc_clock round-trip failed");
+  expect(tai_clock::to_utc(tai) == utc, "tai_clock round-trip failed");
+  expect(gps_clock::to_utc(gps) == utc, "gps_clock round-trip failed");
+
+  expect(clock_cast<utc_clock>(sys) == utc, "system_clock to utc_clock failed");
+  expect(clock_cast<system_clock>(utc) == sys,
+         "utc_clock to system_clock failed");
+  expect(clock_cast<tai_clock>(utc) == tai, "utc_clock to tai_clock failed");
+  expect(clock_cast<utc_clock>(tai) == utc, "tai_clock to utc_clock failed");
+  expect(clock_cast<gps_clock>(utc) == gps, "utc_clock to gps_clock failed");
+  expect(clock_cast<utc_clock>(gps) == utc, "gps_clock to utc_clock failed");
+  expect(clock_cast<system_clock>(file) == sys,
+         "file_clock to system_clock failed");
+}
+} // namespace chrono_clock_conversion_test

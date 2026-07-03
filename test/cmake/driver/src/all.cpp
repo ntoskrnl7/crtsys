@@ -56,9 +56,6 @@ void run();
 namespace chrono_time_zone_info_test {
 void run();
 }
-namespace chrono_clock_conversion_test {
-void run();
-}
 namespace chrono_year_month_day_test {
 void run();
 }
@@ -66,6 +63,9 @@ namespace chrono_weekday_test {
 void run();
 }
 namespace chrono_hh_mm_ss_test {
+void run();
+}
+namespace chrono_clock_conversion_test {
 void run();
 }
 
@@ -280,10 +280,10 @@ void run();
 namespace format_test {
 void run();
 }
-namespace formatter_customization_test {
+namespace format_ranges_test {
 void run();
 }
-namespace format_ranges_test {
+namespace formatter_customization_test {
 void run();
 }
 namespace print_test {
@@ -762,10 +762,10 @@ void cpp_std_tests() {
   CRTSYS_RUN_CPPREFERENCE_TEST(chrono_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(chrono_current_zone_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(chrono_time_zone_info_test);
-  CRTSYS_RUN_CPPREFERENCE_TEST(chrono_clock_conversion_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(chrono_year_month_day_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(chrono_weekday_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(chrono_hh_mm_ss_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(chrono_clock_conversion_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(condition_variable_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(condition_variable_any_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(mutex_test);
@@ -937,8 +937,8 @@ void cpp_std_tests() {
   CRTSYS_RUN_CPPREFERENCE_TEST(optional_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(expected_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(format_test);
-  CRTSYS_RUN_CPPREFERENCE_TEST(formatter_customization_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(format_ranges_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(formatter_customization_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(print_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(tuple_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(pair_test);
