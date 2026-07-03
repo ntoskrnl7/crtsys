@@ -126,6 +126,10 @@ cppreference Example 코드를 이식한 항목은
     [`std::chrono::zoned_time`](https://en.cppreference.com/w/cpp/chrono/zoned_time),
     [`std::chrono::time_zone::get_info`](https://en.cppreference.com/w/cpp/chrono/time_zone/get_info)도
     기본 driver build에서 실행됩니다.
+  - [`std::chrono::clock_cast`](https://en.cppreference.com/w/cpp/chrono/clock_cast)
+    coverage는 active MSVC STL에서 해당 clock을 노출하는 경우
+    `system_clock`, `file_clock`, `utc_clock`, `tai_clock`, `gps_clock`
+    round trip을 확인합니다.
 - [x] [std::any](https://en.cppreference.com/w/cpp/utility/any)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::bind](https://en.cppreference.com/w/cpp/utility/functional/bind)
@@ -274,6 +278,14 @@ cppreference Example 코드를 이식한 항목은
       [std::views::stride](https://en.cppreference.com/w/cpp/ranges/stride_view),
       [std::views::repeat](https://en.cppreference.com/w/cpp/ranges/repeat_view)
   [(cppreference examples)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
+- [x] C++23 `std::ranges` 추가 adaptor:
+      [std::views::chunk_by](https://en.cppreference.com/w/cpp/ranges/chunk_by_view),
+      [std::views::cartesian_product](https://en.cppreference.com/w/cpp/ranges/cartesian_product_view),
+      [std::views::join_with](https://en.cppreference.com/w/cpp/ranges/join_with_view),
+      [std::views::adjacent](https://en.cppreference.com/w/cpp/ranges/adjacent_view),
+      [std::views::adjacent_transform](https://en.cppreference.com/w/cpp/ranges/adjacent_transform_view),
+      [std::views::enumerate](https://en.cppreference.com/w/cpp/ranges/enumerate_view)
+  [(feature-test-gated cppreference examples)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::ratio](https://en.cppreference.com/w/cpp/numeric/ratio)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::reference_wrapper](https://en.cppreference.com/w/cpp/utility/functional/reference_wrapper)
@@ -303,6 +315,9 @@ cppreference Example 코드를 이식한 항목은
 - [x] [`std::formatter`](https://en.cppreference.com/w/cpp/utility/format/formatter)
       customization
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
+- [x] [`std::range_formatter`](https://en.cppreference.com/w/cpp/utility/format/range_formatter)
+      range-format specification snippet
+  [(cppreference snippets)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::print](https://en.cppreference.com/w/cpp/io/print)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::regex](https://en.cppreference.com/w/cpp/regex)
@@ -314,6 +329,9 @@ cppreference Example 코드를 이식한 항목은
   [(cppreference examples)](../test/cmake/driver/src/cpp/stl/regex.cpp)
 - [x] [`std::quoted`](https://en.cppreference.com/w/cpp/io/manip/quoted)
       및 [`std::stringstream`](https://en.cppreference.com/w/cpp/io/basic_stringstream)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/streams.cpp)
+- [x] [`std::spanstream`](https://en.cppreference.com/w/cpp/io/basic_spanstream)
+      / [`basic_spanstream::span`](https://en.cppreference.com/w/cpp/io/basic_spanstream/span)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/streams.cpp)
 - [x] [std::filesystem::path lexical operation](https://en.cppreference.com/w/cpp/filesystem/path/lexically_normal)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
@@ -539,15 +557,9 @@ cppreference Example 코드를 이식한 항목은
 
 ### 앞으로 보강할 cppreference coverage 후보
 
-- [ ] Ranges 추가 예제
-  - 아직 명시 driver 예제로 분리하지 않은 후보: active MSVC STL에서
-    feature-test macro로 열리는 다른 C++23 view들
-- [ ] Formatting 및 stream
-  - active MSVC STL에서 지원하는 range formatting 예제
-  - cppreference에 `spanstream` standalone Example이 생기면 추가
-- [ ] Chrono
-  - active MSVC STL에서 노출되는 경우 `file_clock`, `utc_clock`,
-    `tai_clock`, `gps_clock` clock conversion 예제
+현재 이 문서에 큐로 남겨둔 구체적인 cppreference standalone Example 후보는
+없습니다. 새로 이식할 driver-safe 예제가 정해지면 이곳에 링크 단위로
+추가합니다.
 
 ### 앞으로 보강할 semantic edge coverage
 

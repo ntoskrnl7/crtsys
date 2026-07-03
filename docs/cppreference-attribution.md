@@ -149,6 +149,12 @@ test harness, typically by moving the sample `main()` body into a namespaced
 - `std::ranges::slide_view`: <https://en.cppreference.com/w/cpp/ranges/slide_view>
 - `std::ranges::stride_view`: <https://en.cppreference.com/w/cpp/ranges/stride_view>
 - `std::ranges::repeat_view`: <https://en.cppreference.com/w/cpp/ranges/repeat_view>
+- `std::ranges::chunk_by_view`: <https://en.cppreference.com/w/cpp/ranges/chunk_by_view>
+- `std::ranges::cartesian_product_view`: <https://en.cppreference.com/w/cpp/ranges/cartesian_product_view>
+- `std::ranges::join_with_view`: <https://en.cppreference.com/w/cpp/ranges/join_with_view>
+- `std::ranges::adjacent_view`: <https://en.cppreference.com/w/cpp/ranges/adjacent_view>
+- `std::ranges::adjacent_transform_view`: <https://en.cppreference.com/w/cpp/ranges/adjacent_transform_view>
+- `std::ranges::enumerate_view`: <https://en.cppreference.com/w/cpp/ranges/enumerate_view>
 - `std::ranges::take_view`: <https://en.cppreference.com/w/cpp/ranges/take_view>
 - `std::ranges::drop_view`: <https://en.cppreference.com/w/cpp/ranges/drop_view>
 - `std::ranges::reverse_view`: <https://en.cppreference.com/w/cpp/ranges/reverse_view>
@@ -207,14 +213,18 @@ test harness, typically by moving the sample `main()` body into a namespaced
 - `std::chrono::year_month_day`: <https://en.cppreference.com/w/cpp/chrono/year_month_day>
 - `std::chrono::weekday`: <https://en.cppreference.com/w/cpp/chrono/weekday>
 - `std::chrono::hh_mm_ss`: <https://en.cppreference.com/w/cpp/chrono/hh_mm_ss>
+- `std::chrono::clock_cast`: <https://en.cppreference.com/w/cpp/chrono/clock_cast>
 - `std::format`: <https://en.cppreference.com/w/cpp/utility/format/format>
 - `std::formatter`: <https://en.cppreference.com/w/cpp/utility/format/formatter>
+- `std::range_formatter`: <https://en.cppreference.com/w/cpp/utility/format/range_formatter>
 - `std::print`: <https://en.cppreference.com/w/cpp/io/print>
 - `std::regex`: <https://en.cppreference.com/w/cpp/regex>
 - `std::regex_match`: <https://en.cppreference.com/w/cpp/regex/regex_match>
 - `std::regex_iterator`: <https://en.cppreference.com/w/cpp/regex/regex_iterator>
 - `std::regex_token_iterator`: <https://en.cppreference.com/w/cpp/regex/regex_token_iterator>
 - `std::quoted`: <https://en.cppreference.com/w/cpp/io/manip/quoted>
+- `std::basic_spanstream`: <https://en.cppreference.com/w/cpp/io/basic_spanstream>
+- `std::basic_spanstream::span`: <https://en.cppreference.com/w/cpp/io/basic_spanstream/span>
 - `std::distance`: <https://en.cppreference.com/w/cpp/iterator/distance>
 - `std::advance`: <https://en.cppreference.com/w/cpp/iterator/advance>
 - `std::next`: <https://en.cppreference.com/w/cpp/iterator/next>
@@ -314,6 +324,9 @@ The `std::reference_wrapper` example keeps the cppreference shuffle structure.
 The chrono timezone tests keep the cppreference `current_zone` / `zoned_time`
 flow and add explicit `locate_zone` / `time_zone::get_info` offset checks for
 selected zones.
+The `std::chrono::clock_cast` page currently has no standalone cppreference
+example, so the driver harness uses a small direct round-trip check for the
+documented clock conversion role.
 
 The `std::stack::push` example keeps the cppreference BrainHack interpreter
 shape. The x64 driver-test harness invokes it through `ntl::expand_stack`
@@ -321,6 +334,10 @@ because the example embeds a 32 KiB tape buffer in the interpreter object.
 
 The listed C++23 `std::views` examples are compiled into the driver test when
 the matching feature-test macro is available.
+Additional C++23 views are also compiled when exposed by the active MSVC STL:
+`std::views::chunk_by`, `std::views::cartesian_product`,
+`std::views::join_with`, `std::views::adjacent`,
+`std::views::adjacent_transform`, and `std::views::enumerate`.
 The `std::ranges::split_view` example is kept source-identical where the active
 STL provides `std::string_view`'s C++23 range constructor; older toolsets print
 a skip line instead of using a non-cppreference workaround.
@@ -329,6 +346,9 @@ same view operations; their Unicode table/letter output is transliterated to
 ASCII in the driver source to keep the test file encoding simple. The
 `keys_view` harness restores `std::cout`'s previous locale after the example
 because all cppreference examples run in one driver instance.
+The `std::views::chunk_by` and `std::views::cartesian_product` examples keep the
+same range operations and output shape; direct Unicode spellings are represented
+with escaped UTF-8 bytes so the driver source file stays ASCII.
 
 The `std::to_chars` test follows the cppreference example, including the
 floating-point overload calls. The `std::from_chars` test follows the
@@ -338,7 +358,12 @@ same page.
 The `std::expected` example is compiled into the driver test when the
 `__cpp_lib_expected` feature-test macro is available.
 
-The `std::format` and `std::print` examples run in the default driver build.
+The `std::format`, `std::range_formatter`, and `std::print` examples run in the
+default driver build when the active MSVC STL exposes the corresponding
+feature-test macros.
+
+The `std::basic_spanstream::span` example runs when the active MSVC STL exposes
+`__cpp_lib_spanstream`.
 
 The `std::shared_timed_mutex` page leaves the protected resource as
 `/* data */`; the driver harness uses a small `int` so the assignment example

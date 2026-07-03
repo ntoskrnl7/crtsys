@@ -56,6 +56,9 @@ void run();
 namespace chrono_time_zone_info_test {
 void run();
 }
+namespace chrono_clock_conversion_test {
+void run();
+}
 namespace chrono_year_month_day_test {
 void run();
 }
@@ -277,6 +280,9 @@ void run();
 namespace formatter_customization_test {
 void run();
 }
+namespace format_ranges_test {
+void run();
+}
 namespace print_test {
 void run();
 }
@@ -454,6 +460,9 @@ void run();
 namespace quoted_test {
 void run();
 }
+namespace spanstream_test {
+void run();
+}
 namespace pmr_monotonic_buffer_resource_test {
 void run();
 }
@@ -467,6 +476,9 @@ namespace ranges_sort_test {
 void run();
 }
 namespace ranges_cxx23_adaptors_test {
+void run();
+}
+namespace ranges_additional_cxx23_adaptors_test {
 void run();
 }
 namespace ranges_take_view_test {
@@ -735,6 +747,7 @@ void cpp_std_tests() {
   CRTSYS_RUN_CPPREFERENCE_TEST(chrono_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(chrono_current_zone_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(chrono_time_zone_info_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(chrono_clock_conversion_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(chrono_year_month_day_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(chrono_weekday_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(chrono_hh_mm_ss_test);
@@ -849,6 +862,7 @@ void cpp_std_tests() {
   CRTSYS_RUN_CPPREFERENCE_TEST(ranges_views_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(ranges_sort_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(ranges_cxx23_adaptors_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(ranges_additional_cxx23_adaptors_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(ranges_take_view_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(ranges_drop_view_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(ranges_reverse_view_test);
@@ -862,6 +876,7 @@ void cpp_std_tests() {
   CRTSYS_RUN_CPPREFERENCE_TEST(regex_iterator_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(regex_token_iterator_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(quoted_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(spanstream_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(merge_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(heap_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(next_permutation_test);
@@ -906,6 +921,7 @@ void cpp_std_tests() {
   CRTSYS_RUN_CPPREFERENCE_TEST(expected_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(format_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(formatter_customization_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(format_ranges_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(print_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(tuple_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(pair_test);

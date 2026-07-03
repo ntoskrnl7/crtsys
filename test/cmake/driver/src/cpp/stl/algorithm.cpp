@@ -12,6 +12,9 @@
 #include <cstdint>
 #include <cmath>
 #include <deque>
+#if __has_include(<format>)
+#include <format>
+#endif
 #include <forward_list>
 #include <functional>
 #include <iomanip>
@@ -24,6 +27,9 @@
 #include <map>
 #include <numeric>
 #include <optional>
+#if __has_include(<print>)
+#include <print>
+#endif
 #include <random>
 #include <ranges>
 #include <string>
@@ -555,28 +561,29 @@ void run() {
   namespace ranges = std::ranges;
 
   ranges::sort(s);
-  print("Sort using the default operator<", s);
+  ranges_sort_test::print("Sort using the default operator<", s);
   ranges::sort(s, ranges::greater());
-  print("Sort using a standard library compare function object", s);
+  ranges_sort_test::print("Sort using a standard library compare function object",
+                          s);
 
   struct {
     bool operator()(int a, int b) const { return a < b; }
   } customLess;
 
   ranges::sort(s.begin(), s.end(), customLess);
-  print("Sort using a custom function object", s);
+  ranges_sort_test::print("Sort using a custom function object", s);
 
   ranges::sort(s, [](int a, int b) { return a > b; });
-  print("Sort using a lambda expression", s);
+  ranges_sort_test::print("Sort using a lambda expression", s);
 
   Particle particles[]{{"Electron", 0.511}, {"Muon", 105.66},
                        {"Tau", 1776.86},   {"Positron", 0.511},
                        {"Proton", 938.27}, {"Neutron", 939.57}};
 
   ranges::sort(particles, {}, &Particle::name);
-  print("\n Sort by name using a projection", particles, '\n');
+  ranges_sort_test::print("\n Sort by name using a projection", particles, '\n');
   ranges::sort(particles, {}, &Particle::mass);
-  print("Sort by mass using a projection", particles, '\n');
+  ranges_sort_test::print("Sort by mass using a projection", particles, '\n');
 }
 } // namespace ranges_sort_test
 
@@ -741,6 +748,202 @@ void run() {
   }
 }
 } // namespace ranges_cxx23_adaptors_test
+
+namespace ranges_additional_cxx23_adaptors_test {
+//
+// https://en.cppreference.com/w/cpp/ranges/chunk_by_view#Example
+//
+#if defined(__cpp_lib_ranges_chunk_by)
+void print_chunks(auto view, std::string_view separator = ", ") {
+  for (auto const subrange : view) {
+    std::cout << '[';
+    for (std::string_view prefix; auto const &elem : subrange)
+      std::cout << prefix << elem, prefix = separator;
+    std::cout << "] ";
+  }
+  std::cout << '\n';
+}
+
+void chunk_by_view_example() {
+  std::initializer_list v1 = {1, 2, 3, 1, 2, 3, 3, 3, 1, 2, 3};
+  auto fn1 = std::ranges::less{};
+  auto view1 = v1 | std::views::chunk_by(fn1);
+  print_chunks(view1);
+
+  std::initializer_list v2 = {1, 2, 3, 4, 4, 0, 2, 3, 3, 3, 2, 1};
+  auto fn2 = std::ranges::not_equal_to{};
+  auto view2 = v2 | std::views::chunk_by(fn2);
+  print_chunks(view2);
+
+  std::string_view v3 = "__cpp_lib_ranges_chunk_by";
+  auto fn3 = [](auto x, auto y) { return not(x == '_' or y == '_'); };
+  auto view3 = v3 | std::views::chunk_by(fn3);
+  print_chunks(view3, "");
+
+  // cppreference uses direct UTF-8 spelling and a non-ASCII parameter name in
+  // this final subexample. Keep this source file ASCII by spelling the same
+  // UTF-8 bytes with octal escapes and using an ASCII parameter name.
+  std::string_view v4 = "\172\303\237\346\260\264\360\237\215\214";
+  auto fn4 = [](auto, auto byte) {
+    return 128 == ((128 + 64) & static_cast<unsigned char>(byte));
+  };
+  auto view4 = v4 | std::views::chunk_by(fn4);
+  print_chunks(view4, "");
+}
+#endif
+
+//
+// https://en.cppreference.com/w/cpp/ranges/cartesian_product_view#Example
+//
+#if defined(__cpp_lib_ranges_cartesian_product)
+void cartesian_product_print(
+    std::tuple<char const &, int const &, std::string const &> t, int pos) {
+  const auto &[a, b, c] = t;
+  std::cout << '(' << a << ' ' << b << ' ' << c << ')'
+            << (pos % 4 ? " " : "\n");
+}
+
+void cartesian_product_view_example() {
+  const auto x = std::array{'A', 'B'};
+  const auto y = std::vector{1, 2, 3};
+  // cppreference uses direct Greek letters. Keep this source file ASCII by
+  // spelling the same UTF-8 byte sequences with octal escapes.
+  const auto z = std::list<std::string>{"\316\261", "\316\262", "\316\263",
+                                        "\316\264"};
+
+  for (int i{1}; auto const &tuple :
+       std::views::cartesian_product(x, y, z))
+    cartesian_product_print(tuple, i++);
+}
+#endif
+
+//
+// https://en.cppreference.com/w/cpp/ranges/join_with_view#Example
+//
+#if defined(__cpp_lib_ranges_join_with) && defined(__cpp_lib_print)
+void join_with_view_example() {
+  std::list<std::string_view> v{"_", "cpp",  "lib",
+                                "ranges", "join", "with"};
+  std::println("{:s}", v | std::views::join_with('_'));
+}
+#endif
+
+//
+// https://en.cppreference.com/w/cpp/ranges/adjacent_view#Example
+//
+#if defined(__cpp_lib_ranges_zip) && defined(__cpp_lib_format)
+void adjacent_view_example() {
+  constexpr std::array v{1, 2, 3, 4, 5, 6};
+  std::cout << "v = [1 2 3 4 5 6]\n";
+
+  for (int i{}; std::tuple t : v | std::views::adjacent<3>) {
+    auto [t0, t1, t2] = t;
+    std::cout << std::format("e = {:<{}}[{} {} {}]\n", "", 2 * i++, t0, t1,
+                             t2);
+  }
+}
+#endif
+
+//
+// https://en.cppreference.com/w/cpp/ranges/adjacent_transform_view#Example
+//
+#if defined(__cpp_lib_ranges_zip)
+void adjacent_transform_view_example() {
+  constexpr static std::array data{1, 2, 3, 4, 5, 6};
+  constexpr int window{3};
+
+  auto Fun = [](auto... ints) { return (... + ints); };
+  // Alternatively, the Fun could be any ternary (if window == 3) callable, e.g.:
+  // auto Fun = [](int x, int y, int z) { return x + y + z; };
+  // cppreference declares this view constexpr and checks it with static_assert.
+  // MSVC v143 rejects constant evaluation of this adjacent_transform closure, so
+  // keep the range expression intact and perform the same checks at runtime.
+  auto view = data | std::views::adjacent_transform<window>(Fun);
+  const std::array expected{6, 9, 12, 15};
+  const std::array actual{view[0], view[1], view[2], view[3]};
+
+  assert(view.size() == (data.size() - window + 1) &&
+         expected == actual &&
+         view[0] == Fun(data[0], data[1], data[2]) &&
+         view[1] == Fun(data[1], data[2], data[3]) &&
+         view[2] == Fun(data[2], data[3], data[4]) &&
+         view[3] == Fun(data[3], data[4], data[5]));
+  // Release builds compile out assert(), so mark assert-only locals as used.
+  (void)expected;
+  (void)actual;
+  for (int x : view)
+    std::cout << x << ' ';
+  std::cout << '\n';
+}
+#endif
+
+//
+// https://en.cppreference.com/w/cpp/ranges/enumerate_view#Example
+//
+#if defined(__cpp_lib_ranges_enumerate)
+void enumerate_view_example() {
+  constexpr static auto v = {'A', 'B', 'C', 'D'};
+
+  for (auto const [index, letter] : std::views::enumerate(v))
+    std::cout << '(' << index << ':' << letter << ") ";
+  std::cout << '\n';
+#if __cpp_lib_ranges_to_container
+  // create a map using the position of each element as key
+  auto m = v | std::views::enumerate | std::ranges::to<std::map>();
+
+  for (auto const [key, value] : m)
+    std::cout << '[' << key << "]:" << value << ' ';
+  std::cout << '\n';
+#endif
+
+  std::vector<int> numbers{1, 3, 5, 7};
+  // num is mutable even with const, which does not propagate to reference to
+  // make it const, use `std::views::enumerate(numbers) | std::views::as_const`
+  // or `std::views::enumerate(std::as_const(numbers))`
+  for (auto const [index, num] : std::views::enumerate(numbers)) {
+    ++num; // the type is int&
+    std::cout << numbers[index] << ' ';
+  }
+  std::cout << '\n';
+}
+#endif
+
+void run() {
+  int exercised = 0;
+
+#if defined(__cpp_lib_ranges_chunk_by)
+  chunk_by_view_example();
+  ++exercised;
+#endif
+#if defined(__cpp_lib_ranges_cartesian_product)
+  cartesian_product_view_example();
+  ++exercised;
+#endif
+#if defined(__cpp_lib_ranges_join_with) && defined(__cpp_lib_print)
+  join_with_view_example();
+  ++exercised;
+#endif
+#if defined(__cpp_lib_ranges_zip) && defined(__cpp_lib_format)
+  adjacent_view_example();
+  ++exercised;
+#endif
+#if defined(__cpp_lib_ranges_zip)
+  adjacent_transform_view_example();
+  ++exercised;
+#endif
+#if defined(__cpp_lib_ranges_enumerate)
+  enumerate_view_example();
+  ++exercised;
+#endif
+
+  if (exercised == 0) {
+    std::cout << "Additional C++23 ranges feature-test macros are not available\n";
+  } else {
+    std::cout << "Additional C++23 ranges cppreference examples exercised "
+              << exercised << " feature group(s)\n";
+  }
+}
+} // namespace ranges_additional_cxx23_adaptors_test
 
 //
 // https://en.cppreference.com/w/cpp/ranges/take_view#Example
@@ -1252,15 +1455,15 @@ void println(auto comment, const auto &sequence) {
 void run() {
   // Default implementation: the difference between two adjacent items.
   std::vector v{4, 6, 9, 13, 18, 19, 19, 15, 10};
-  println("Initially, v = ", v);
+  adjacent_difference_test::println("Initially, v = ", v);
   std::adjacent_difference(v.begin(), v.end(), v.begin());
-  println("Modified v = ", v);
+  adjacent_difference_test::println("Modified v = ", v);
 
   // Fibonacci.
   std::array<int, 10> a{1};
   std::adjacent_difference(a.begin(), std::prev(a.end()), std::next(a.begin()),
                            std::plus<>{});
-  println("Fibonacci, a = ", a);
+  adjacent_difference_test::println("Fibonacci, a = ", a);
 }
 } // namespace adjacent_difference_test
 
