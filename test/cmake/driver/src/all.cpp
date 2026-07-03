@@ -358,6 +358,9 @@ void run();
 namespace filesystem_canonical_test {
 void run();
 }
+namespace filesystem_semantic_edge_test {
+void run();
+}
 namespace forward_list_insert_after_test {
 void run();
 }
@@ -700,6 +703,12 @@ template <typename Fn> void run_cppreference_test(const char *name, Fn fn) {
   fn();
   std::cout << "[crtsys] PASS " << name << '\n';
 }
+
+template <typename Fn> void run_driver_semantic_test(const char *name, Fn fn) {
+  std::cout << "\n[crtsys] RUN " << name << " (driver semantic)\n";
+  fn();
+  std::cout << "[crtsys] PASS " << name << '\n';
+}
 } // namespace
 
 #define CRTSYS_RUN_CPPREFERENCE_TEST(test_namespace)                           \
@@ -708,6 +717,9 @@ template <typename Fn> void run_cppreference_test(const char *name, Fn fn) {
 #define CRTSYS_RUN_CPPREFERENCE_TEST_EXPANDED(test_namespace)                  \
   run_cppreference_test(#test_namespace,                                      \
                         [] { ntl::expand_stack(test_namespace::run); })
+
+#define CRTSYS_RUN_DRIVER_SEMANTIC_TEST(test_namespace)                        \
+  run_driver_semantic_test(#test_namespace, [] { test_namespace::run(); })
 
 //
 // C++ Standard tests.
@@ -847,6 +859,7 @@ void cpp_std_tests() {
   CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_relative_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_last_write_time_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_canonical_test);
+  CRTSYS_RUN_DRIVER_SEMANTIC_TEST(filesystem_semantic_edge_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(sort_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(find_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(transform_test);

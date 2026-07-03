@@ -389,6 +389,10 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] [std::filesystem::canonical / weakly_canonical](https://en.cppreference.com/w/cpp/filesystem/canonical)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] `std::filesystem` semantic edge checks
+  - Error-code overloads, metadata refresh after file changes, and recursive
+    traversal pruning are covered by driver semantic tests.
+  [(driver semantic test)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] [std::string](https://en.cppreference.com/w/cpp/string/basic_string)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/string.cpp)
 - [x] String member operations:
@@ -570,10 +574,6 @@ semantics beyond the simple standalone examples.
   - Timed shared-lock behavior.
   - Additional `std::future` / `std::shared_future` error-path and timeout
     behavior.
-- [ ] Filesystem edge coverage
-  - More error-code overloads, metadata transitions, recursive traversal
-    options, and negative-path behavior for already-covered filesystem
-    operations.
 
 ### Needs Investigation
 

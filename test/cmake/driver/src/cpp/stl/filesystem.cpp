@@ -638,3 +638,108 @@ void run() {
   std::cout << "Deleted " << count << " files or directories.\n";
 }
 } // namespace filesystem_canonical_test
+
+namespace filesystem_semantic_edge_test {
+void run() {
+  const fs::path sandbox{"sandbox"};
+  remove_sandbox(sandbox);
+
+  const bool created_sandbox = fs::create_directory(sandbox);
+  (void)created_sandbox;
+  assert(created_sandbox);
+
+  std::error_code ec;
+  const fs::path missing = sandbox / "missing.txt";
+  const fs::path target = sandbox / "target.txt";
+
+  const bool copied_missing = fs::copy_file(missing, target, ec);
+  (void)copied_missing;
+  assert(!copied_missing);
+  assert(ec);
+
+  bool caught_copy_error{};
+  try {
+    fs::copy_file(missing, target);
+  } catch (const fs::filesystem_error &ex) {
+    caught_copy_error = true;
+    assert(ex.code());
+    std::cout << "copy_file missing source reported: " << ex.what() << '\n';
+  }
+  assert(caught_copy_error);
+  // Release builds compile out assert(), so mark assert-only locals as used.
+  (void)caught_copy_error;
+
+  ec.clear();
+  fs::rename(missing, target, ec);
+  assert(ec);
+
+  ec.clear();
+  const bool removed_missing = fs::remove(missing, ec);
+  (void)removed_missing;
+  assert(!ec);
+  assert(!removed_missing);
+
+  const fs::path metadata_file = sandbox / "metadata.txt";
+  std::ofstream(metadata_file) << "ab";
+  fs::directory_entry entry{metadata_file};
+  assert(entry.exists());
+  assert(entry.is_regular_file());
+  assert(entry.file_size() == 2);
+
+  fs::resize_file(metadata_file, 5, ec);
+  assert(!ec);
+  entry.refresh(ec);
+  assert(!ec);
+  assert(entry.file_size() == 5);
+
+  fs::remove(metadata_file, ec);
+  assert(!ec);
+  entry.refresh(ec);
+  assert(!entry.exists());
+
+  fs::create_directories(sandbox / "a" / "b");
+  fs::create_directory(sandbox / "c");
+  std::ofstream(sandbox / "root.txt").put('r');
+  std::ofstream(sandbox / "a" / "one.txt").put('1');
+  std::ofstream(sandbox / "a" / "b" / "two.txt").put('2');
+  std::ofstream(sandbox / "c" / "three.txt").put('3');
+
+  std::uintmax_t full_recursive_entries{};
+  for (auto it = fs::recursive_directory_iterator{sandbox};
+       it != fs::recursive_directory_iterator{}; ++it) {
+    ++full_recursive_entries;
+  }
+  assert(full_recursive_entries == 7);
+  // Release builds compile out assert(), so mark assert-only locals as used.
+  (void)full_recursive_entries;
+
+  bool saw_pruned_dir{};
+  bool saw_pruned_child{};
+  bool saw_sibling_child{};
+  std::uintmax_t pruned_recursive_entries{};
+  for (auto it = fs::recursive_directory_iterator{sandbox};
+       it != fs::recursive_directory_iterator{}; ++it) {
+    if (it->path().filename() == "a") {
+      saw_pruned_dir = true;
+      it.disable_recursion_pending();
+    }
+    saw_pruned_child = saw_pruned_child || it->path().filename() == "two.txt";
+    saw_sibling_child =
+        saw_sibling_child || it->path().filename() == "three.txt";
+    ++pruned_recursive_entries;
+  }
+
+  assert(saw_pruned_dir);
+  assert(!saw_pruned_child);
+  assert(saw_sibling_child);
+  assert(pruned_recursive_entries == 4);
+  // Release builds compile out assert(), so mark assert-only locals as used.
+  (void)saw_pruned_dir;
+  (void)saw_pruned_child;
+  (void)saw_sibling_child;
+  (void)pruned_recursive_entries;
+
+  remove_sandbox(sandbox);
+  std::cout << "filesystem semantic edge assertions passed\n";
+}
+} // namespace filesystem_semantic_edge_test
