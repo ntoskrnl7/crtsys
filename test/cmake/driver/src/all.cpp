@@ -156,6 +156,9 @@ void run();
 namespace stop_callback_test {
 void run();
 }
+namespace threading_semantic_edge_test {
+void run();
+}
 
 namespace atomic_test {
 void run();
@@ -791,6 +794,7 @@ void cpp_std_tests() {
   CRTSYS_RUN_CPPREFERENCE_TEST(jthread_constructor_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(stop_source_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(stop_callback_test);
+  CRTSYS_RUN_DRIVER_SEMANTIC_TEST(threading_semantic_edge_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(array_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(vector_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(vector_member_operations_test);

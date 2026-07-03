@@ -517,6 +517,12 @@ cppreference Example 코드를 이식한 항목은
   [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp)
 - [x] [std::shared_future](https://en.cppreference.com/w/cpp/thread/shared_future)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/thread.cpp)
+- [x] Threading/future semantic edge check
+  - timed shared-lock timeout/reacquire 동작, `std::future` /
+    `std::shared_future` timeout/ready 상태, deferred async 상태,
+    `broken_promise`, `promise_already_satisfied` error path를 driver
+    semantic test로 검증합니다.
+  [(driver semantic test)](../test/cmake/driver/src/cpp/stl/thread.cpp)
 - [x] [std::promise](https://en.cppreference.com/w/cpp/thread/promise)
   [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp#L254)
 - [x] [std::packaged_task](https://en.cppreference.com/w/cpp/thread/packaged_task)
@@ -564,16 +570,6 @@ cppreference Example 코드를 이식한 항목은
 현재 이 문서에 큐로 남겨둔 구체적인 cppreference standalone Example 후보는
 없습니다. 새로 이식할 driver-safe 예제가 정해지면 이곳에 링크 단위로
 추가합니다.
-
-### 앞으로 보강할 semantic edge coverage
-
-아래 항목은 cppreference 예제를 덜 넣었다는 뜻이 아닙니다. 이미 가져온
-standalone 예제보다 더 넓은 driver-runtime error path나 timing-sensitive
-동작을 별도 검증으로 보강하자는 후보입니다.
-
-- [ ] Threading 및 synchronization
-  - timed shared-lock 동작
-  - `std::future` / `std::shared_future` error-path 및 timeout 동작
 
 ### 추가 조사가 필요한 후보
 
