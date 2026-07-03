@@ -371,6 +371,10 @@ cppreference Example 코드를 이식한 항목은
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] [std::filesystem::canonical / weakly_canonical](https://en.cppreference.com/w/cpp/filesystem/canonical)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] `std::filesystem` semantic edge check
+  - Error-code overload, file 변경 후 metadata refresh, recursive traversal
+    pruning은 driver semantic test로 검증합니다.
+  [(driver semantic test)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] [std::string](https://en.cppreference.com/w/cpp/string/basic_string)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/string.cpp)
 - [x] String member operation:
@@ -558,10 +562,6 @@ standalone 예제보다 더 넓은 driver-runtime error path나 timing-sensitive
 - [ ] Threading 및 synchronization
   - timed shared-lock 동작
   - `std::future` / `std::shared_future` error-path 및 timeout 동작
-- [ ] Filesystem edge coverage
-  - 이미 coverage된 filesystem operation의 error-code overload,
-    metadata transition, recursive traversal option, negative-path 동작
-    보강
 
 ### 추가 조사가 필요한 후보
 
