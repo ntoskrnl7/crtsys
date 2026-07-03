@@ -1,6 +1,7 @@
 //
 // https://en.cppreference.com/w/cpp/chrono#Example
 //
+#include <cassert>
 #include <chrono>
 #include <iostream>
 #if __has_include(<print>)
@@ -65,6 +66,43 @@ void run() {
   expect_offset("Europe/Berlin", std::chrono::hours{1});
 }
 } // namespace chrono_time_zone_info_test
+
+//
+// https://en.cppreference.com/w/cpp/chrono/clock_cast
+//
+namespace chrono_clock_conversion_test {
+void run() {
+#if defined(_MSC_VER) && _MSC_VER >= 1930
+  // cppreference currently marks the clock_cast Example section as
+  // incomplete/no-example. Keep this direct coverage aligned with the page's
+  // documented conversion role instead of inventing an output-oriented sample.
+  const auto sys = std::chrono::sys_days{
+                       std::chrono::year{2020} / std::chrono::January / 1} +
+                   std::chrono::hours{12} + std::chrono::minutes{34} +
+                   std::chrono::seconds{56};
+
+  const auto utc = std::chrono::clock_cast<std::chrono::utc_clock>(sys);
+  const auto tai = std::chrono::clock_cast<std::chrono::tai_clock>(utc);
+  const auto gps = std::chrono::clock_cast<std::chrono::gps_clock>(utc);
+  const auto file = std::chrono::clock_cast<std::chrono::file_clock>(sys);
+
+  assert(std::chrono::clock_cast<std::chrono::system_clock>(utc) == sys);
+  assert(std::chrono::clock_cast<std::chrono::utc_clock>(tai) == utc);
+  assert(std::chrono::clock_cast<std::chrono::utc_clock>(gps) == utc);
+  assert(std::chrono::clock_cast<std::chrono::system_clock>(file) == sys);
+
+  // Release builds compile out assert(), so mark assert-only locals as used.
+  (void)sys;
+  (void)utc;
+  (void)tai;
+  (void)gps;
+  (void)file;
+  std::cout << "chrono clock_cast conversions exercised\n";
+#else
+  std::cout << "std::chrono::clock_cast is not available in this MSVC STL\n";
+#endif
+}
+} // namespace chrono_clock_conversion_test
 
 //
 // https://en.cppreference.com/w/cpp/chrono/year_month_day#Example

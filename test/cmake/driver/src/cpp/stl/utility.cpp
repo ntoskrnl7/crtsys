@@ -203,6 +203,46 @@ void run() {
 } // namespace formatter_customization_test
 
 //
+// https://en.cppreference.com/w/cpp/utility/format/range_formatter#Range_format_specification
+//
+namespace format_ranges_test {
+void run() {
+#if defined(__cpp_lib_format_ranges) && __cpp_lib_format_ranges >= 202207L
+  namespace views = std::views;
+
+  assert(std::format("{}", views::iota(1, 5)) == "[1, 2, 3, 4]");
+  assert(std::format("{:n}", views::iota(1, 5)) == "1, 2, 3, 4");
+
+  std::array ints{12, 10, 15, 14};
+  assert(std::format("{}", ints) == "[12, 10, 15, 14]");
+  assert(std::format("{::X}", ints) == "[C, A, F, E]");
+  assert(std::format("{:n:_^4}", ints) == "_12_, _10_, _15_, _14_");
+
+  std::array char_pairs{std::pair{'A', 5}, std::pair{'B', 10},
+                        std::pair{'C', 12}};
+
+  assert(std::format("{}", char_pairs) ==
+         "[('A', 5), ('B', 10), ('C', 12)]");
+  assert(std::format("{:m}", char_pairs) == "{'A': 5, 'B': 10, 'C': 12}");
+
+  std::array star{'S', 'T', 'A', 'R'};
+
+  assert(std::format("{}", star) == "['S', 'T', 'A', 'R']");
+  assert(std::format("{:s}", star) == "STAR");
+  assert(std::format("{:?s}", star) == "\"STAR\"");
+
+  // Release builds compile out assert(), so mark assert-only locals as used.
+  (void)ints;
+  (void)char_pairs;
+  (void)star;
+  std::cout << "std::format range formatting examples exercised\n";
+#else
+  std::cout << "std::format range formatting is not available in this MSVC STL\n";
+#endif
+}
+} // namespace format_ranges_test
+
+//
 // https://en.cppreference.com/w/cpp/io/print#Example
 //
 namespace print_test {

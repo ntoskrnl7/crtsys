@@ -126,6 +126,9 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
     and
     [`std::chrono::time_zone::get_info`](https://en.cppreference.com/w/cpp/chrono/time_zone/get_info)
     also run in the default driver build.
+  - [`std::chrono::clock_cast`](https://en.cppreference.com/w/cpp/chrono/clock_cast)
+    coverage checks `system_clock`, `file_clock`, `utc_clock`, `tai_clock`,
+    and `gps_clock` round trips where the active MSVC STL exposes those clocks.
 - [x] [std::any](https://en.cppreference.com/w/cpp/utility/any)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::bind](https://en.cppreference.com/w/cpp/utility/functional/bind)
@@ -274,6 +277,14 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
       [std::views::stride](https://en.cppreference.com/w/cpp/ranges/stride_view),
       [std::views::repeat](https://en.cppreference.com/w/cpp/ranges/repeat_view)
   [(cppreference examples)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
+- [x] Additional C++23 `std::ranges` adaptors:
+      [std::views::chunk_by](https://en.cppreference.com/w/cpp/ranges/chunk_by_view),
+      [std::views::cartesian_product](https://en.cppreference.com/w/cpp/ranges/cartesian_product_view),
+      [std::views::join_with](https://en.cppreference.com/w/cpp/ranges/join_with_view),
+      [std::views::adjacent](https://en.cppreference.com/w/cpp/ranges/adjacent_view),
+      [std::views::adjacent_transform](https://en.cppreference.com/w/cpp/ranges/adjacent_transform_view),
+      [std::views::enumerate](https://en.cppreference.com/w/cpp/ranges/enumerate_view)
+  [(feature-test-gated cppreference examples)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::ratio](https://en.cppreference.com/w/cpp/numeric/ratio)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::reference_wrapper](https://en.cppreference.com/w/cpp/utility/functional/reference_wrapper)
@@ -303,6 +314,9 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
 - [x] [`std::formatter`](https://en.cppreference.com/w/cpp/utility/format/formatter)
       customization
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
+- [x] [`std::range_formatter`](https://en.cppreference.com/w/cpp/utility/format/range_formatter)
+      range-format specification snippets
+  [(cppreference snippets)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::print](https://en.cppreference.com/w/cpp/io/print)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::regex](https://en.cppreference.com/w/cpp/regex)
@@ -314,6 +328,9 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   [(cppreference examples)](../test/cmake/driver/src/cpp/stl/regex.cpp)
 - [x] [`std::quoted`](https://en.cppreference.com/w/cpp/io/manip/quoted)
       with [`std::stringstream`](https://en.cppreference.com/w/cpp/io/basic_stringstream)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/streams.cpp)
+- [x] [`std::spanstream`](https://en.cppreference.com/w/cpp/io/basic_spanstream)
+      / [`basic_spanstream::span`](https://en.cppreference.com/w/cpp/io/basic_spanstream/span)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/streams.cpp)
 - [x] [std::filesystem::path lexical operations](https://en.cppreference.com/w/cpp/filesystem/path/lexically_normal)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
@@ -540,15 +557,8 @@ dependencies.
 
 ### Future cppreference Coverage Candidates
 
-- [ ] Additional ranges
-  - Range adaptors not yet split into explicit driver examples: other
-    feature-test-gated C++23 views when the active MSVC STL exposes them.
-- [ ] Formatting and streams
-  - Range-formatting examples where supported by the active MSVC STL.
-  - `spanstream` standalone examples if cppreference publishes them.
-- [ ] Chrono
-  - Clock conversion examples for `file_clock`, `utc_clock`, `tai_clock`, and
-    `gps_clock` where the active MSVC STL exposes them.
+No concrete standalone cppreference Example candidate remains queued here. Add
+specific links here when a new driver-safe example is selected for porting.
 
 ### Future Semantic Edge Coverage
 
