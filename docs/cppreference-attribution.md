@@ -27,6 +27,10 @@ test harness, typically by moving the sample `main()` body into a namespaced
 - `std::atomic`: <https://en.cppreference.com/w/cpp/atomic/atomic>
 - `std::atomic_ref`: <https://en.cppreference.com/w/cpp/atomic/atomic_ref/atomic_ref>
 - `std::atomic_flag`: <https://en.cppreference.com/w/cpp/atomic/atomic_flag>
+- `std::atomic_thread_fence`: <https://en.cppreference.com/w/cpp/atomic/atomic_thread_fence>
+- `std::atomic_signal_fence`: <https://en.cppreference.com/w/cpp/atomic/atomic_signal_fence>
+- `std::atomic_fetch_add`: <https://en.cppreference.com/w/cpp/atomic/atomic_fetch_add>
+- `std::atomic_compare_exchange`: <https://en.cppreference.com/w/cpp/atomic/atomic_compare_exchange>
 - `std::latch`: <https://en.cppreference.com/w/cpp/thread/latch>
 - `std::barrier`: <https://en.cppreference.com/w/cpp/thread/barrier>
 - `std::counting_semaphore` / `std::binary_semaphore`: <https://en.cppreference.com/w/cpp/thread/counting_semaphore>
