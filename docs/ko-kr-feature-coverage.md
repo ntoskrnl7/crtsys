@@ -258,6 +258,16 @@ cppreference Example 코드를 이식한 항목은
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::ranges::sort](https://en.cppreference.com/w/cpp/algorithm/ranges/sort)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
+- [x] C++20 `std::ranges` adaptor:
+      [`std::views::take`](https://en.cppreference.com/w/cpp/ranges/take_view),
+      [`std::views::drop`](https://en.cppreference.com/w/cpp/ranges/drop_view),
+      [`std::views::reverse`](https://en.cppreference.com/w/cpp/ranges/reverse_view),
+      [`std::views::join`](https://en.cppreference.com/w/cpp/ranges/join_view),
+      [`std::views::split`](https://en.cppreference.com/w/cpp/ranges/split_view),
+      [`std::views::values`](https://en.cppreference.com/w/cpp/ranges/values_view),
+      [`std::views::keys`](https://en.cppreference.com/w/cpp/ranges/keys_view),
+      [`std::views::elements`](https://en.cppreference.com/w/cpp/ranges/elements_view)
+  [(cppreference examples)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::views::zip](https://en.cppreference.com/w/cpp/ranges/zip_view),
       [std::views::chunk](https://en.cppreference.com/w/cpp/ranges/chunk_view),
       [std::views::slide](https://en.cppreference.com/w/cpp/ranges/slide_view),
@@ -282,14 +292,29 @@ cppreference Example 코드를 이식한 항목은
   [(cppreference push/emplace examples)](../test/cmake/driver/src/cpp/stl/containers.cpp)
 - [x] [std::source_location](https://en.cppreference.com/w/cpp/utility/source_location)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
+- [x] [`std::chrono::year_month_day`](https://en.cppreference.com/w/cpp/chrono/year_month_day),
+      [`std::chrono::weekday`](https://en.cppreference.com/w/cpp/chrono/weekday),
+      [`std::chrono::hh_mm_ss`](https://en.cppreference.com/w/cpp/chrono/hh_mm_ss)
+  [(cppreference examples)](../test/cmake/driver/src/cpp/stl/chrono.cpp)
 - [x] [std::strong_ordering](https://en.cppreference.com/w/cpp/utility/compare/strong_ordering)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::format](https://en.cppreference.com/w/cpp/utility/format)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
+- [x] [`std::formatter`](https://en.cppreference.com/w/cpp/utility/format/formatter)
+      customization
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::print](https://en.cppreference.com/w/cpp/io/print)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::regex](https://en.cppreference.com/w/cpp/regex)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/regex.cpp)
+- [x] Regex algorithm 및 iterator:
+      [`std::regex_match`](https://en.cppreference.com/w/cpp/regex/regex_match),
+      [`std::regex_iterator`](https://en.cppreference.com/w/cpp/regex/regex_iterator),
+      [`std::regex_token_iterator`](https://en.cppreference.com/w/cpp/regex/regex_token_iterator)
+  [(cppreference examples)](../test/cmake/driver/src/cpp/stl/regex.cpp)
+- [x] [`std::quoted`](https://en.cppreference.com/w/cpp/io/manip/quoted)
+      및 [`std::stringstream`](https://en.cppreference.com/w/cpp/io/basic_stringstream)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/streams.cpp)
 - [x] [std::filesystem::path lexical operation](https://en.cppreference.com/w/cpp/filesystem/path/lexically_normal)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] [std::filesystem::directory_iterator](https://en.cppreference.com/w/cpp/filesystem/directory_iterator)
@@ -335,6 +360,12 @@ cppreference Example 코드를 이식한 항목은
 - [x] [std::filesystem::rename](https://en.cppreference.com/w/cpp/filesystem/rename)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] [std::filesystem::temp_directory_path](https://en.cppreference.com/w/cpp/filesystem/temp_directory_path)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::absolute](https://en.cppreference.com/w/cpp/filesystem/absolute)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::current_path](https://en.cppreference.com/w/cpp/filesystem/current_path)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [std::filesystem::relative / proximate](https://en.cppreference.com/w/cpp/filesystem/relative)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] [std::filesystem::last_write_time](https://en.cppreference.com/w/cpp/filesystem/last_write_time)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
@@ -434,6 +465,8 @@ cppreference Example 코드를 이식한 항목은
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/thread.cpp)
 - [x] [std::shared_mutex](https://en.cppreference.com/w/cpp/thread/shared_mutex)
   [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp#L129)
+- [x] [std::shared_timed_mutex](https://en.cppreference.com/w/cpp/thread/shared_timed_mutex)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/thread.cpp)
 - [x] [std::shared_lock](https://en.cppreference.com/w/cpp/thread/shared_lock)
   [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp)
 - [x] [std::timed_mutex](https://en.cppreference.com/w/cpp/thread/timed_mutex)
@@ -506,37 +539,26 @@ cppreference Example 코드를 이식한 항목은
 
 ### 앞으로 보강할 cppreference coverage 후보
 
-- [ ] Threading 및 synchronization
-  - [`std::shared_timed_mutex`](https://en.cppreference.com/w/cpp/thread/shared_timed_mutex)
-    및 timed shared-lock edge case
-  - 기본 예제보다 더 넓은 `std::future` / `std::shared_future` error-path
-    및 timeout edge case
 - [ ] Ranges 추가 예제
-  - 아직 명시 driver 예제로 분리하지 않은 range adaptor 후보:
-    `take`, `drop`, `reverse`, `join`, `split`, `keys`, `values`,
-    `elements` 및 feature-test macro로 열리는 C++23 view들
-- [ ] Regex, formatting, stream
-  - [`std::regex_match`](https://en.cppreference.com/w/cpp/regex/regex_match),
-    [`std::regex_iterator`](https://en.cppreference.com/w/cpp/regex/regex_iterator),
-    [`std::regex_token_iterator`](https://en.cppreference.com/w/cpp/regex/regex_token_iterator)
-  - [`std::formatter`](https://en.cppreference.com/w/cpp/utility/format/formatter)
-    customization 및 active MSVC STL에서 지원하는 range formatting 예제
-  - [`std::stringstream`](https://en.cppreference.com/w/cpp/io/basic_stringstream),
-    [`std::quoted`](https://en.cppreference.com/w/cpp/io/manip/quoted),
-    feature-test macro로 열리는 `spanstream` 같은 string-backed I/O 예제
+  - 아직 명시 driver 예제로 분리하지 않은 후보: active MSVC STL에서
+    feature-test macro로 열리는 다른 C++23 view들
+- [ ] Formatting 및 stream
+  - active MSVC STL에서 지원하는 range formatting 예제
+  - cppreference에 `spanstream` standalone Example이 생기면 추가
 - [ ] Chrono
-  - Calendar/time-of-day 예제:
-    [`std::chrono::year_month_day`](https://en.cppreference.com/w/cpp/chrono/year_month_day),
-    [`std::chrono::weekday`](https://en.cppreference.com/w/cpp/chrono/weekday),
-    [`std::chrono::hh_mm_ss`](https://en.cppreference.com/w/cpp/chrono/hh_mm_ss)
   - active MSVC STL에서 노출되는 경우 `file_clock`, `utc_clock`,
     `tai_clock`, `gps_clock` clock conversion 예제
+
+### 앞으로 보강할 semantic edge coverage
+
+아래 항목은 cppreference 예제를 덜 넣었다는 뜻이 아닙니다. 이미 가져온
+standalone 예제보다 더 넓은 driver-runtime error path나 timing-sensitive
+동작을 별도 검증으로 보강하자는 후보입니다.
+
+- [ ] Threading 및 synchronization
+  - timed shared-lock 동작
+  - `std::future` / `std::shared_future` error-path 및 timeout 동작
 - [ ] Filesystem edge coverage
-  - Path conversion 및 path relation:
-    [`std::filesystem::absolute`](https://en.cppreference.com/w/cpp/filesystem/absolute),
-    [`std::filesystem::relative`](https://en.cppreference.com/w/cpp/filesystem/relative),
-    [`std::filesystem::proximate`](https://en.cppreference.com/w/cpp/filesystem/relative),
-    [`std::filesystem::current_path`](https://en.cppreference.com/w/cpp/filesystem/current_path)
   - 이미 coverage된 filesystem operation의 error-code overload,
     metadata transition, recursive traversal option, negative-path 동작
     보강

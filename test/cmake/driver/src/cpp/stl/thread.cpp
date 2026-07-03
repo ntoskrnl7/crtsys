@@ -268,6 +268,44 @@ void run() {
 } // namespace shared_mutex_test
 
 //
+// https://en.cppreference.com/w/cpp/thread/shared_timed_mutex#Example
+//
+namespace shared_timed_mutex_test {
+class R {
+  mutable std::shared_timed_mutex mut;
+  // cppreference leaves the protected resource as "/* data */"; the driver
+  // harness uses a small int so the copied value can be checked.
+  int data = 0;
+
+public:
+  R() = default;
+  explicit R(int value) : data(value) {}
+
+  R &operator=(const R &other) {
+    // requires exclusive ownership to write to *this
+    std::unique_lock<std::shared_timed_mutex> lhs(mut, std::defer_lock);
+    // requires shared ownership to read from other
+    std::shared_lock<std::shared_timed_mutex> rhs(other.mut, std::defer_lock);
+    std::lock(lhs, rhs);
+    data = other.data;
+    return *this;
+  }
+
+  int value() const {
+    std::shared_lock<std::shared_timed_mutex> lock(mut);
+    return data;
+  }
+};
+
+void run() {
+  R r;
+  R other{42};
+  r = other;
+  assert(r.value() == 42);
+}
+} // namespace shared_timed_mutex_test
+
+//
 // https://en.cppreference.com/w/cpp/thread/shared_lock
 //
 namespace shared_lock_test {

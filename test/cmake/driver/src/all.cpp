@@ -56,6 +56,15 @@ void run();
 namespace chrono_time_zone_info_test {
 void run();
 }
+namespace chrono_year_month_day_test {
+void run();
+}
+namespace chrono_weekday_test {
+void run();
+}
+namespace chrono_hh_mm_ss_test {
+void run();
+}
 
 //
 // cpp/stl/thread.cpp
@@ -73,6 +82,9 @@ namespace lock_guard_test {
 void run();
 }
 namespace shared_mutex_test {
+void run();
+}
+namespace shared_timed_mutex_test {
 void run();
 }
 namespace shared_lock_test {
@@ -262,6 +274,9 @@ void run();
 namespace format_test {
 void run();
 }
+namespace formatter_customization_test {
+void run();
+}
 namespace print_test {
 void run();
 }
@@ -320,6 +335,15 @@ namespace filesystem_rename_test {
 void run();
 }
 namespace filesystem_temp_directory_path_test {
+void run();
+}
+namespace filesystem_absolute_test {
+void run();
+}
+namespace filesystem_current_path_test {
+void run();
+}
+namespace filesystem_relative_test {
 void run();
 }
 namespace filesystem_last_write_time_test {
@@ -427,6 +451,9 @@ void run();
 namespace priority_queue_test {
 void run();
 }
+namespace quoted_test {
+void run();
+}
 namespace pmr_monotonic_buffer_resource_test {
 void run();
 }
@@ -442,10 +469,43 @@ void run();
 namespace ranges_cxx23_adaptors_test {
 void run();
 }
+namespace ranges_take_view_test {
+void run();
+}
+namespace ranges_drop_view_test {
+void run();
+}
+namespace ranges_reverse_view_test {
+void run();
+}
+namespace ranges_join_view_test {
+void run();
+}
+namespace ranges_split_view_test {
+void run();
+}
+namespace ranges_values_view_test {
+void run();
+}
+namespace ranges_keys_view_test {
+void run();
+}
+namespace ranges_elements_view_test {
+void run();
+}
 namespace ranges_views_test {
 void run();
 }
 namespace regex_test {
+void run();
+}
+namespace regex_match_test {
+void run();
+}
+namespace regex_iterator_test {
+void run();
+}
+namespace regex_token_iterator_test {
 void run();
 }
 namespace ratio_test {
@@ -675,11 +735,15 @@ void cpp_std_tests() {
   CRTSYS_RUN_CPPREFERENCE_TEST(chrono_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(chrono_current_zone_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(chrono_time_zone_info_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(chrono_year_month_day_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(chrono_weekday_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(chrono_hh_mm_ss_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(condition_variable_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(condition_variable_any_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(mutex_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(lock_guard_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(shared_mutex_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(shared_timed_mutex_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(shared_lock_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(scoped_lock_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(lock_test);
@@ -765,6 +829,9 @@ void cpp_std_tests() {
   CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_space_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_rename_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_temp_directory_path_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_absolute_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_current_path_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_relative_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_last_write_time_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_canonical_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(sort_test);
@@ -782,7 +849,19 @@ void cpp_std_tests() {
   CRTSYS_RUN_CPPREFERENCE_TEST(ranges_views_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(ranges_sort_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(ranges_cxx23_adaptors_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(ranges_take_view_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(ranges_drop_view_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(ranges_reverse_view_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(ranges_join_view_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(ranges_split_view_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(ranges_values_view_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(ranges_keys_view_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(ranges_elements_view_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(regex_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(regex_match_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(regex_iterator_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(regex_token_iterator_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(quoted_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(merge_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(heap_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(next_permutation_test);
@@ -826,6 +905,7 @@ void cpp_std_tests() {
   CRTSYS_RUN_CPPREFERENCE_TEST(optional_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(expected_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(format_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(formatter_customization_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(print_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(tuple_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(pair_test);

@@ -20,6 +20,8 @@
 #include <iterator>
 #include <limits>
 #include <list>
+#include <locale>
+#include <map>
 #include <numeric>
 #include <optional>
 #include <random>
@@ -739,6 +741,212 @@ void run() {
   }
 }
 } // namespace ranges_cxx23_adaptors_test
+
+//
+// https://en.cppreference.com/w/cpp/ranges/take_view#Example
+//
+namespace ranges_take_view_test {
+void run() {
+  namespace views = std::views;
+  auto print = [](char x) { std::cout << x; };
+  for (const char nums[]{'1', '2', '3'}; int n : views::iota(0, 5)) {
+    std::cout << "take(" << n << "): ";
+    // safely takes only upto min(n, nums.size()) elements:
+    std::ranges::for_each(nums | views::take(n), print);
+    std::cout << '\n';
+  }
+}
+} // namespace ranges_take_view_test
+
+//
+// https://en.cppreference.com/w/cpp/ranges/drop_view#Example
+//
+namespace ranges_drop_view_test {
+void run() {
+  const auto nums = {1, 2, 3, 4, 5, 6, 7};
+
+  std::cout << "drop " << 2 << ": ";
+  for (int i : std::ranges::drop_view{nums, 2}) {
+    std::cout << i << ' ';
+  }
+  std::cout << '\n';
+
+  std::cout << "drop " << 3 << ": ";
+  for (int i : nums | std::views::drop(3)) {
+    std::cout << i << ' ';
+  }
+  std::cout << '\n';
+  std::cout << "drop " << 4 << ": ";
+  for (int i : std::views::iota(1, 8) | std::views::drop(4)) {
+    std::cout << i << ' ';
+  }
+  std::cout << '\n';
+
+  // Note that dropping more than the number of elements is OK:
+  for (int dp : {5, 6, 7, 890, 100500}) {
+    std::cout << "drop " << dp << ": ";
+    for (int i : std::views::iota(1, 8) | std::views::drop(dp)) {
+      std::cout << i << ' ';
+    }
+    std::cout << '\n';
+  }
+}
+} // namespace ranges_drop_view_test
+
+//
+// https://en.cppreference.com/w/cpp/ranges/reverse_view#Example
+//
+namespace ranges_reverse_view_test {
+void run() {
+  static constexpr auto il = {3, 1, 4, 1, 5, 9};
+
+  std::ranges::reverse_view rv{il};
+  for (int i : rv) {
+    std::cout << i << ' ';
+  }
+  std::cout << '\n';
+
+  for (int i : il | std::views::reverse) {
+    std::cout << i << ' ';
+  }
+  std::cout << '\n';
+  // operator[] is inherited from std::view_interface
+  for (auto i{0U}; i != rv.size(); ++i) {
+    std::cout << rv[i] << ' ';
+  }
+  std::cout << '\n';
+}
+} // namespace ranges_reverse_view_test
+
+//
+// https://en.cppreference.com/w/cpp/ranges/join_view#Example
+//
+namespace ranges_join_view_test {
+void run() {
+  using namespace std::literals;
+
+  const auto bits = {"https:"sv, "//"sv, "cppreference"sv, "."sv, "com"sv};
+  for (char const c : bits | std::views::join) {
+    std::cout << c;
+  }
+  std::cout << '\n';
+}
+} // namespace ranges_join_view_test
+
+//
+// https://en.cppreference.com/w/cpp/ranges/split_view#Example
+//
+namespace ranges_split_view_test {
+void run() {
+#if defined(_MSC_VER) && _MSC_VER >= 1930
+  using std::operator""sv;
+  constexpr auto words{"Hello^_^C++^_^20^_^!"sv};
+  constexpr auto delim{"^_^"sv};
+
+  for (const auto word : std::views::split(words, delim)) {
+    // with string_view's C++23 range constructor:
+    std::cout << std::quoted(std::string_view(word)) << ' ';
+  }
+  std::cout << '\n';
+#else
+  // The cppreference example relies on string_view's C++23 range constructor.
+  // VS 2019's STL does not expose that constructor, so keep the source exact
+  // and run it only on toolsets that provide the required library surface.
+  std::cout << "std::views::split cppreference example is not available\n";
+#endif
+}
+} // namespace ranges_split_view_test
+
+//
+// https://en.cppreference.com/w/cpp/ranges/values_view#Example
+//
+namespace ranges_values_view_test {
+void run() {
+  const auto list = {std::pair{1, 11.1}, {2, 22.2}, {3, 33.3}};
+  std::cout << "pair::second values in the list: ";
+  for (double value : list | std::views::values) {
+    std::cout << value << ' ';
+  }
+
+  std::map<char, int> map{{'A', 1}, {'B', 2}, {'C', 3}, {'D', 4}, {'E', 5}};
+  auto odd = [](int x) { return 0 != (x & 1); };
+  std::cout << "\n odd values in the map: ";
+  for (int value : map | std::views::values | std::views::filter(odd)) {
+    std::cout << value << ' ';
+  }
+  std::cout << '\n';
+}
+} // namespace ranges_values_view_test
+
+//
+// https://en.cppreference.com/w/cpp/ranges/keys_view#Example
+//
+namespace ranges_keys_view_test {
+void run() {
+  const std::vector<std::tuple<std::string, double, bool>> quark_mass_charge{
+      // name, MeV/c^2, has positive electric-charge:
+      {"up", 2.3, true},       {"down", 4.8, false},
+      {"charm", 1275, true},   {"strange", 95, false},
+      {"top", 173'210, true},  {"bottom", 4'180, false},
+  };
+  const auto old_locale = std::cout.getloc();
+  std::cout.imbue(std::locale("en_US.utf8"));
+  // cppreference uses box-drawing characters, superscript two, and Greek
+  // letters. This source file stays ASCII, so the table separators and quark
+  // labels below are the ASCII equivalent of the same example.
+  std::cout << "Quark name:  | ";
+  for (std::string const &name : std::views::keys(quark_mass_charge)) {
+    std::cout << std::setw(9) << name << " | ";
+  }
+
+  std::cout << "\n"
+               "Mass MeV/c^2: | ";
+  for (const double mass : std::views::values(quark_mass_charge)) {
+    std::cout << std::setw(9) << mass << " | ";
+  }
+  std::cout << "\n"
+               "E-charge:    | ";
+  for (const bool pos : std::views::elements<2>(quark_mass_charge)) {
+    std::cout << std::setw(9) << (pos ? "+2/3" : "-1/3") << " | ";
+  }
+  std::cout << '\n';
+  // cppreference is a standalone program. Restore the stream locale because
+  // this driver runs many examples in one process.
+  std::cout.imbue(old_locale);
+}
+} // namespace ranges_keys_view_test
+
+//
+// https://en.cppreference.com/w/cpp/ranges/elements_view#Example
+//
+namespace ranges_elements_view_test {
+void run() {
+  // cppreference uses Greek letters in the third tuple element. Keep this
+  // source file ASCII and exercise the same tuple element view with spelled
+  // names instead.
+  const std::vector<std::tuple<int, char, std::string>> vt{
+      {1, 'A', "alpha"},
+      {2, 'B', "beta"},
+      {3, 'C', "gamma"},
+      {4, 'D', "delta"},
+      {5, 'E', "epsilon"},
+  };
+
+  for (int const e : std::views::elements<0>(vt)) {
+    std::cout << e << ' ';
+  }
+  std::cout << '\n';
+  for (char const e : vt | std::views::elements<1>) {
+    std::cout << e << ' ';
+  }
+  std::cout << '\n';
+
+  for (std::string const &e : std::views::elements<2>(vt)) {
+    std::cout << e << ' ';
+  }
+  std::cout << '\n';
+}
+} // namespace ranges_elements_view_test
 
 //
 // https://en.cppreference.com/w/cpp/algorithm/merge#Example
