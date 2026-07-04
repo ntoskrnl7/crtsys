@@ -1,0 +1,220 @@
+#include <algorithm>
+#include <cerrno>
+#include <cstdio>
+#include <cstring>
+#include <cwchar>
+#include <direct.h>
+#include <fcntl.h>
+#include <io.h>
+#include <iostream>
+#include <stdexcept>
+#include <string>
+#include <sys/stat.h>
+
+namespace crt_file_state_semantic_test {
+namespace {
+constexpr char sandbox[] = "crtsys_crt_file_state";
+constexpr wchar_t wide_sandbox[] = L"crtsys_crt_file_state";
+constexpr char nested[] = "crtsys_crt_file_state\\nested";
+constexpr wchar_t wide_nested[] = L"crtsys_crt_file_state\\nested";
+constexpr char data_path[] = "crtsys_crt_file_state\\data.txt";
+constexpr wchar_t wide_data_path[] = L"crtsys_crt_file_state\\data.txt";
+constexpr char dup_path[] = "crtsys_crt_file_state\\dup.txt";
+constexpr char dup_target_path[] = "crtsys_crt_file_state\\dup_target.txt";
+constexpr char find_a_path[] = "crtsys_crt_file_state\\find_a.txt";
+constexpr char find_b_path[] = "crtsys_crt_file_state\\find_b.log";
+constexpr char find_pattern[] = "crtsys_crt_file_state\\find_*.txt";
+
+void expect(bool condition, const char *message) {
+  if (!condition) {
+    throw std::runtime_error(message);
+  }
+}
+
+bool contains(const char *text, const char *needle) {
+  return std::strstr(text, needle) != nullptr;
+}
+
+bool contains(const wchar_t *text, const wchar_t *needle) {
+  return std::wcsstr(text, needle) != nullptr;
+}
+
+class current_directory_guard {
+public:
+  current_directory_guard() {
+    expect(_getcwd(original_, sizeof(original_)) != nullptr,
+           "_getcwd guard failed");
+  }
+
+  ~current_directory_guard() { (void)_chdir(original_); }
+
+  current_directory_guard(const current_directory_guard &) = delete;
+  current_directory_guard &operator=(const current_directory_guard &) = delete;
+
+private:
+  char original_[512]{};
+};
+
+void remove_tree() {
+  (void)_unlink(data_path);
+  (void)_unlink(dup_path);
+  (void)_unlink(dup_target_path);
+  (void)_unlink(find_a_path);
+  (void)_unlink(find_b_path);
+  (void)_rmdir(nested);
+  (void)_rmdir(sandbox);
+}
+
+void create_file_with_payload(const char *path, const char *payload) {
+  const int handle =
+      _open(path, _O_CREAT | _O_TRUNC | _O_RDWR | _O_BINARY,
+            _S_IREAD | _S_IWRITE);
+  expect(handle != -1, "_open create failed");
+  const auto length = static_cast<unsigned>(std::strlen(payload));
+  expect(_write(handle, payload, length) == static_cast<int>(length),
+         "_write payload failed");
+  expect(_close(handle) == 0, "_close created file failed");
+}
+
+void verify_stat_access_and_fullpath() {
+  create_file_with_payload(data_path, "abcdef");
+
+  struct _stat64 stat_result {};
+  expect(_stat64(data_path, &stat_result) == 0, "_stat64 failed");
+  expect((stat_result.st_mode & _S_IFREG) != 0, "_stat64 did not report file");
+  expect(stat_result.st_size == 6, "_stat64 returned unexpected size");
+
+  struct _stat64 wide_stat_result {};
+  expect(_wstat64(wide_data_path, &wide_stat_result) == 0, "_wstat64 failed");
+  expect(wide_stat_result.st_size == stat_result.st_size,
+         "_wstat64 returned unexpected size");
+
+  errno = 0;
+  expect(_access(data_path, 0) == 0, "_access existence failed");
+  expect(_access(data_path, 4) == 0, "_access read failed");
+  expect(_waccess(wide_data_path, 0) == 0, "_waccess existence failed");
+
+  char full_path[512]{};
+  expect(_fullpath(full_path, data_path, sizeof(full_path)) != nullptr,
+         "_fullpath failed");
+  expect(contains(full_path, sandbox), "_fullpath missed sandbox component");
+
+  wchar_t wide_full_path[512]{};
+  expect(_wfullpath(wide_full_path, wide_data_path,
+                    sizeof(wide_full_path) / sizeof(wide_full_path[0])) !=
+             nullptr,
+         "_wfullpath failed");
+  expect(contains(wide_full_path, wide_sandbox),
+         "_wfullpath missed sandbox component");
+
+  errno = 0;
+  expect(_access("crtsys_crt_file_state\\missing.txt", 0) == -1,
+         "_access unexpectedly found missing file");
+  expect(errno != 0, "_access missing file did not set errno");
+}
+
+void verify_current_directory_state() {
+  char cwd_before[512]{};
+  expect(_getcwd(cwd_before, sizeof(cwd_before)) != nullptr,
+         "_getcwd before chdir failed");
+
+  expect(_chdir(sandbox) == 0, "_chdir sandbox failed");
+
+  char cwd_inside[512]{};
+  expect(_getcwd(cwd_inside, sizeof(cwd_inside)) != nullptr,
+         "_getcwd inside sandbox failed");
+  expect(contains(cwd_inside, sandbox), "_getcwd missed sandbox component");
+
+  expect(_wchdir(L"nested") == 0, "_wchdir nested failed");
+
+  wchar_t wide_cwd_inside[512]{};
+  expect(_wgetcwd(wide_cwd_inside,
+                  sizeof(wide_cwd_inside) / sizeof(wide_cwd_inside[0])) !=
+             nullptr,
+         "_wgetcwd inside nested failed");
+  expect(contains(wide_cwd_inside, L"nested"),
+         "_wgetcwd missed nested component");
+
+  expect(_wchdir(L"..") == 0, "_wchdir parent failed");
+  expect(_chdir(cwd_before) == 0, "_chdir restore failed");
+}
+
+void verify_lowio_handle_state() {
+  create_file_with_payload(dup_path, "abcdef");
+
+  const int source = _open(dup_path, _O_RDWR | _O_BINARY);
+  expect(source != -1, "_open dup source failed");
+  expect(_commit(source) == 0, "_commit failed");
+  expect(_chsize_s(source, 10) == 0, "_chsize_s grow failed");
+
+  struct _stat64 source_stat {};
+  expect(_fstat64(source, &source_stat) == 0, "_fstat64 grow failed");
+  expect(source_stat.st_size == 10, "_fstat64 grow returned unexpected size");
+
+  expect(_chsize_s(source, 2) == 0, "_chsize_s shrink failed");
+  expect(_fstat64(source, &source_stat) == 0, "_fstat64 shrink failed");
+  expect(source_stat.st_size == 2, "_fstat64 shrink returned unexpected size");
+
+  const int duplicate = _dup(source);
+  expect(duplicate != -1, "_dup failed");
+  expect(_lseek(duplicate, 0, SEEK_SET) == 0, "_lseek duplicate failed");
+
+  char read_back[3]{};
+  expect(_read(duplicate, read_back, 2) == 2, "_read duplicate failed");
+  expect(std::memcmp(read_back, "ab", 2) == 0,
+         "_read duplicate returned unexpected bytes");
+
+  const int target =
+      _open(dup_target_path, _O_CREAT | _O_TRUNC | _O_RDWR | _O_BINARY,
+            _S_IREAD | _S_IWRITE);
+  expect(target != -1, "_open dup target failed");
+  expect(_dup2(source, target) == 0, "_dup2 failed");
+  expect(_lseek(target, 0, SEEK_SET) == 0, "_lseek dup2 target failed");
+
+  char dup2_read_back[3]{};
+  expect(_read(target, dup2_read_back, 2) == 2, "_read dup2 target failed");
+  expect(std::memcmp(dup2_read_back, "ab", 2) == 0,
+         "_read dup2 target returned unexpected bytes");
+
+  expect(_close(target) == 0, "_close dup2 target failed");
+  expect(_close(duplicate) == 0, "_close duplicate failed");
+  expect(_close(source) == 0, "_close source failed");
+}
+
+void verify_findfirst_findnext() {
+  create_file_with_payload(find_a_path, "a");
+  create_file_with_payload(find_b_path, "b");
+
+  struct __finddata64_t data {};
+  const intptr_t handle = _findfirst64(find_pattern, &data);
+  expect(handle != -1, "_findfirst64 failed");
+
+  bool saw_a = std::strcmp(data.name, "find_a.txt") == 0;
+  int count = 1;
+  while (_findnext64(handle, &data) == 0) {
+    saw_a = saw_a || std::strcmp(data.name, "find_a.txt") == 0;
+    ++count;
+  }
+
+  expect(_findclose(handle) == 0, "_findclose failed");
+  expect(saw_a, "_findfirst64/_findnext64 missed find_a.txt");
+  expect(count == 1, "_findfirst64/_findnext64 matched unexpected entries");
+}
+} // namespace
+
+void run() {
+  current_directory_guard cwd_guard;
+  remove_tree();
+
+  expect(_mkdir(sandbox) == 0, "_mkdir sandbox failed");
+  expect(_wmkdir(wide_nested) == 0, "_wmkdir nested failed");
+
+  verify_stat_access_and_fullpath();
+  verify_current_directory_state();
+  verify_lowio_handle_state();
+  verify_findfirst_findnext();
+
+  remove_tree();
+  std::cout << "CRT file/process-state semantic assertions passed\n";
+}
+} // namespace crt_file_state_semantic_test
