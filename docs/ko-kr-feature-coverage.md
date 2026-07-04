@@ -398,6 +398,13 @@ cppreference Example 코드를 이식한 항목은
     `_write` / `_lseek` / `_close` 경로를 성공 케이스와 missing file error
     path로 검증합니다.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/cstdio.cpp)
+- [x] CRT file/process-state semantic check
+  - `_stat64` / `_wstat64` / `_fstat64`, `_access` / `_waccess`,
+    `_fullpath` / `_wfullpath`, `_getcwd` / `_wgetcwd`, `_chdir` / `_wchdir`,
+    `_findfirst64` / `_findnext64`, `_dup` / `_dup2`, `_commit`,
+    `_chsize_s` 경로를 LDK가 제공하는 current-directory, file-handle,
+    enumeration, metadata substrate 기준으로 검증합니다.
+  [(driver semantic test)](../test/cmake/driver/src/cpp/stl/cstdio_file_state.cpp)
 - [x] CRT environment semantic check
   - `getenv` / `getenv_s` / `_dupenv_s` 및 wide `_wgetenv` / `_wgetenv_s` /
     `_wdupenv_s` 경로를 CRT-managed environment variable 기준으로

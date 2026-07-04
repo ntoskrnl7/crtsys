@@ -399,6 +399,13 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
     `_write` / `_lseek` / `_close` paths are covered with success and missing
     file error paths.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/cstdio.cpp)
+- [x] CRT file/process-state semantic checks
+  - `_stat64` / `_wstat64` / `_fstat64`, `_access` / `_waccess`,
+    `_fullpath` / `_wfullpath`, `_getcwd` / `_wgetcwd`, `_chdir` / `_wchdir`,
+    `_findfirst64` / `_findnext64`, `_dup` / `_dup2`, `_commit`, and
+    `_chsize_s` paths are covered against the LDK-backed current-directory,
+    file-handle, enumeration, and metadata substrate.
+  [(driver semantic test)](../test/cmake/driver/src/cpp/stl/cstdio_file_state.cpp)
 - [x] CRT environment semantic checks
   - `getenv` / `getenv_s` / `_dupenv_s` and wide `_wgetenv` / `_wgetenv_s` /
     `_wdupenv_s` paths are covered through CRT-managed environment variables.
