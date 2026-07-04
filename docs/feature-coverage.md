@@ -212,6 +212,11 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/containers.cpp)
 - [x] [std::locale](https://en.cppreference.com/w/cpp/locale/locale)
   [(cppreference examples)](../test/cmake/driver/src/cpp/stl/locale.cpp)
+- [x] NLS and text conversion semantic checks
+  - `MultiByteToWideChar`, `WideCharToMultiByte`, `GetStringTypeW`, and
+    `LCMapStringEx` paths are covered with UTF-8 round-trip and invalid
+    sequence error cases.
+  [(driver semantic test)](../test/cmake/driver/src/cpp/stl/nls.cpp)
 - [x] [std::map](https://en.cppreference.com/w/cpp/container/map)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/containers.cpp)
 - [x] [std::make_heap](https://en.cppreference.com/w/cpp/algorithm/make_heap)

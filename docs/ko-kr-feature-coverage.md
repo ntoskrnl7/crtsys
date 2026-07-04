@@ -213,6 +213,11 @@ cppreference Example 코드를 이식한 항목은
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/containers.cpp)
 - [x] [std::locale](https://en.cppreference.com/w/cpp/locale/locale)
   [(cppreference examples)](../test/cmake/driver/src/cpp/stl/locale.cpp)
+- [x] NLS and text conversion semantic check
+  - `MultiByteToWideChar`, `WideCharToMultiByte`, `GetStringTypeW`,
+    `LCMapStringEx` 경로를 UTF-8 round trip 및 invalid sequence error
+    case로 검증합니다.
+  [(driver semantic test)](../test/cmake/driver/src/cpp/stl/nls.cpp)
 - [x] [std::map](https://en.cppreference.com/w/cpp/container/map)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/containers.cpp)
 - [x] [std::make_heap](https://en.cppreference.com/w/cpp/algorithm/make_heap)
