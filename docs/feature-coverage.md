@@ -414,7 +414,8 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
     `_fullpath` / `_wfullpath`, `_getcwd` / `_wgetcwd`, `_chdir` / `_wchdir`,
     `_findfirst64` / `_findnext64`, `_dup` / `_dup2`, `_commit`, and
     `_chsize_s` paths are covered against the LDK-backed current-directory,
-    file-handle, enumeration, and metadata substrate.
+    file-handle, enumeration, and metadata substrate. `GetModuleFileNameA/W`
+    and `_get_pgmptr` / `_get_wpgmptr` cover CRT program-path state.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/cstdio_file_state.cpp)
 - [x] CRT environment semantic checks
   - `getenv` / `getenv_s` / `_dupenv_s` and wide `_wgetenv` / `_wgetenv_s` /

@@ -364,6 +364,21 @@ static NTSTATUS CrtSyspInitializeEnvironment() {
   return STATUS_SUCCESS;
 }
 
+static NTSTATUS CrtSyspInitializeProgramPathState() {
+  // MSVC's exe startup configures argv and the _pgmptr/_wpgmptr program-path
+  // globals before user code. Kernel drivers do not have a process command
+  // line, but GetModuleFileName-backed program-path state is still meaningful.
+  if (_configure_narrow_argv(_crt_argv_unexpanded_arguments) != 0) {
+    return STATUS_UNSUCCESSFUL;
+  }
+
+  if (_configure_wide_argv(_crt_argv_unexpanded_arguments) != 0) {
+    return STATUS_UNSUCCESSFUL;
+  }
+
+  return STATUS_SUCCESS;
+}
+
 EXTERN_C
 NTSTATUS
 CrtSysDriverEntry(_In_ PDRIVER_OBJECT DriverObject,
@@ -419,6 +434,12 @@ CrtSysDriverEntry(_In_ PDRIVER_OBJECT DriverObject,
 
   __scrt_current_native_startup_state =
       __scrt_native_startup_state::initializing;
+
+  status = CrtSyspInitializeProgramPathState();
+  if (!NT_SUCCESS(status)) {
+    CrtSysDriverUnload(DriverObject);
+    return status;
+  }
 
   status = CrtSyspInitializeEnvironment();
   if (!NT_SUCCESS(status)) {
