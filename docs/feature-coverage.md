@@ -404,6 +404,11 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
     `_wdupenv_s` paths are covered through CRT-managed environment variables.
     `_putenv_s` / `_wputenv_s` add, update, and delete paths are also covered.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/cstdlib.cpp)
+- [x] Error and diagnostics semantic checks
+  - `GetLastError`, `FormatMessageA/W`, `std::system_category`,
+    `std::system_error`, `errno`, `_get_errno`, and `_get_doserrno` paths are
+    covered through Win32 and CRT failure cases.
+  [(driver semantic test)](../test/cmake/driver/src/cpp/stl/diagnostics.cpp)
 - [x] [std::string](https://en.cppreference.com/w/cpp/string/basic_string)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/string.cpp)
 - [x] String member operations:

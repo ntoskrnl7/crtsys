@@ -404,6 +404,11 @@ cppreference Example 코드를 이식한 항목은
     검증합니다. `_putenv_s` / `_wputenv_s`의 add, update, delete 경로도
     함께 검증합니다.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/cstdlib.cpp)
+- [x] Error and diagnostics semantic check
+  - `GetLastError`, `FormatMessageA/W`, `std::system_category`,
+    `std::system_error`, `errno`, `_get_errno`, `_get_doserrno` 경로를
+    Win32 및 CRT failure case 기준으로 검증합니다.
+  [(driver semantic test)](../test/cmake/driver/src/cpp/stl/diagnostics.cpp)
 - [x] [std::string](https://en.cppreference.com/w/cpp/string/basic_string)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/string.cpp)
 - [x] String member operation:
