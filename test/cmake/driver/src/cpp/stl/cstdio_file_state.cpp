@@ -10,6 +10,7 @@
 #include <stdexcept>
 #include <string>
 #include <sys/stat.h>
+#include <Windows.h>
 
 namespace crt_file_state_semantic_test {
 namespace {
@@ -200,6 +201,45 @@ void verify_findfirst_findnext() {
   expect(saw_a, "_findfirst64/_findnext64 missed find_a.txt");
   expect(count == 1, "_findfirst64/_findnext64 matched unexpected entries");
 }
+
+void verify_module_filename_state() {
+  char module_path[MAX_PATH]{};
+  const DWORD module_length =
+      GetModuleFileNameA(nullptr, module_path,
+                         static_cast<DWORD>(sizeof(module_path)));
+  expect(module_length != 0, "GetModuleFileNameA failed");
+  expect(module_length < sizeof(module_path),
+         "GetModuleFileNameA unexpectedly truncated");
+  expect(contains(module_path, "crtsys_test"),
+         "GetModuleFileNameA did not report the test driver image");
+  expect(contains(module_path, ".sys"),
+         "GetModuleFileNameA did not report a driver image path");
+
+  wchar_t wide_module_path[MAX_PATH]{};
+  const DWORD wide_module_length = GetModuleFileNameW(
+      nullptr, wide_module_path,
+      static_cast<DWORD>(sizeof(wide_module_path) / sizeof(wide_module_path[0])));
+  expect(wide_module_length != 0, "GetModuleFileNameW failed");
+  expect(wide_module_length <
+             sizeof(wide_module_path) / sizeof(wide_module_path[0]),
+         "GetModuleFileNameW unexpectedly truncated");
+  expect(contains(wide_module_path, L"crtsys_test"),
+         "GetModuleFileNameW did not report the test driver image");
+  expect(contains(wide_module_path, L".sys"),
+         "GetModuleFileNameW did not report a driver image path");
+
+  char *pgmptr{};
+  expect(_get_pgmptr(&pgmptr) == 0, "_get_pgmptr failed");
+  expect(pgmptr != nullptr, "_get_pgmptr returned null");
+  expect(std::strcmp(pgmptr, module_path) == 0,
+         "_get_pgmptr does not match GetModuleFileNameA");
+
+  wchar_t *wide_pgmptr{};
+  expect(_get_wpgmptr(&wide_pgmptr) == 0, "_get_wpgmptr failed");
+  expect(wide_pgmptr != nullptr, "_get_wpgmptr returned null");
+  expect(std::wcscmp(wide_pgmptr, wide_module_path) == 0,
+         "_get_wpgmptr does not match GetModuleFileNameW");
+}
 } // namespace
 
 void run() {
@@ -213,6 +253,7 @@ void run() {
   verify_current_directory_state();
   verify_lowio_handle_state();
   verify_findfirst_findnext();
+  verify_module_filename_state();
 
   remove_tree();
   std::cout << "CRT file/process-state semantic assertions passed\n";
