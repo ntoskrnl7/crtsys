@@ -364,6 +364,12 @@ void run();
 namespace filesystem_semantic_edge_test {
 void run();
 }
+namespace crt_file_io_semantic_test {
+void run();
+}
+namespace crt_environment_semantic_test {
+void run();
+}
 namespace forward_list_insert_after_test {
 void run();
 }
@@ -864,6 +870,8 @@ void cpp_std_tests() {
   CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_last_write_time_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_canonical_test);
   CRTSYS_RUN_DRIVER_SEMANTIC_TEST(filesystem_semantic_edge_test);
+  CRTSYS_RUN_DRIVER_SEMANTIC_TEST(crt_file_io_semantic_test);
+  CRTSYS_RUN_DRIVER_SEMANTIC_TEST(crt_environment_semantic_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(sort_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(find_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(transform_test);

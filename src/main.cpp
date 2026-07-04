@@ -14,6 +14,8 @@ EXTERN_C NTSYSAPI PVOID NTAPI RtlImageDirectoryEntryToData(
     _In_ USHORT DirectoryEntry,
     _Out_ PULONG Size
     );
+EXTERN_C int __cdecl _initialize_narrow_environment();
+EXTERN_C int __cdecl _initialize_wide_environment();
 
 #ifdef ALLOC_PRAGMA
 #pragma alloc_text(INIT, CrtSysDriverEntry)
@@ -347,6 +349,21 @@ NPAGED_LOOKASIDE_LIST lookaside;
 } // namespace detail
 } // namespace ntl
 
+static NTSTATUS CrtSyspInitializeEnvironment() {
+  // MSVC's exe startup initializes the selected UCRT environment before
+  // running C initializers. crtsys owns the driver startup sequence, so do the
+  // equivalent work explicitly before exposing getenv/_putenv_s to user code.
+  if (_initialize_narrow_environment() < 0) {
+    return STATUS_UNSUCCESSFUL;
+  }
+
+  if (_initialize_wide_environment() < 0) {
+    return STATUS_UNSUCCESSFUL;
+  }
+
+  return STATUS_SUCCESS;
+}
+
 EXTERN_C
 NTSTATUS
 CrtSysDriverEntry(_In_ PDRIVER_OBJECT DriverObject,
@@ -402,6 +419,12 @@ CrtSysDriverEntry(_In_ PDRIVER_OBJECT DriverObject,
 
   __scrt_current_native_startup_state =
       __scrt_native_startup_state::initializing;
+
+  status = CrtSyspInitializeEnvironment();
+  if (!NT_SUCCESS(status)) {
+    CrtSysDriverUnload(DriverObject);
+    return status;
+  }
 
   if (_initterm_e(__xi_a, __xi_z) != 0) {
     CrtSysDriverUnload(DriverObject);
