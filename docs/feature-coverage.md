@@ -129,6 +129,11 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   - [`std::chrono::clock_cast`](https://en.cppreference.com/w/cpp/chrono/clock_cast)
     coverage checks `system_clock`, `file_clock`, `utc_clock`, `tai_clock`,
     and `gps_clock` round trips where the active MSVC STL exposes those clocks.
+- [x] CRT time semantic checks
+  - `_time64`, `_ftime64_s`, `gmtime_s`, `localtime_s`, `_tzset`,
+    `strftime`, and `wcsftime` paths are covered against the LDK-backed system
+    time and timezone substrate.
+  [(driver semantic test)](../test/cmake/driver/src/cpp/stl/ctime.cpp)
 - [x] [std::any](https://en.cppreference.com/w/cpp/utility/any)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::bind](https://en.cppreference.com/w/cpp/utility/functional/bind)
