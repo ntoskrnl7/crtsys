@@ -130,6 +130,11 @@ cppreference Example 코드를 이식한 항목은
     coverage는 active MSVC STL에서 해당 clock을 노출하는 경우
     `system_clock`, `file_clock`, `utc_clock`, `tai_clock`, `gps_clock`
     round trip을 확인합니다.
+- [x] CRT time semantic check
+  - `_time64`, `_ftime64_s`, `gmtime_s`, `localtime_s`, `_tzset`,
+    `strftime`, `wcsftime` 경로를 LDK가 제공하는 system time 및 timezone
+    substrate 기준으로 검증합니다.
+  [(driver semantic test)](../test/cmake/driver/src/cpp/stl/ctime.cpp)
 - [x] [std::any](https://en.cppreference.com/w/cpp/utility/any)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::bind](https://en.cppreference.com/w/cpp/utility/functional/bind)

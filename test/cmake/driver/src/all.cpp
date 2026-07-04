@@ -68,6 +68,9 @@ void run();
 namespace chrono_clock_conversion_test {
 void run();
 }
+namespace crt_time_semantic_test {
+void run();
+}
 
 //
 // cpp/stl/thread.cpp
@@ -772,6 +775,7 @@ void cpp_std_tests() {
   CRTSYS_RUN_CPPREFERENCE_TEST(chrono_weekday_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(chrono_hh_mm_ss_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(chrono_clock_conversion_test);
+  CRTSYS_RUN_DRIVER_SEMANTIC_TEST(crt_time_semantic_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(condition_variable_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(condition_variable_any_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(mutex_test);

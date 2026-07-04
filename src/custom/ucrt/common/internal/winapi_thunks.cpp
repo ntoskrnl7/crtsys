@@ -49,6 +49,11 @@ extern "C" BOOL WINAPI __acrt_AreFileApisANSI()
     return AreFileApisANSI();
 }
 
+extern "C" void WINAPI __acrt_GetSystemTimePreciseAsFileTime(LPFILETIME const system_time_as_file_time)
+{
+    GetSystemTimeAsFileTime(system_time_as_file_time);
+}
+
 extern "C"
 _Success_(return != 0)
 int __cdecl __acrt_MultiByteToWideChar(
