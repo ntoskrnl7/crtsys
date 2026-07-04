@@ -393,6 +393,17 @@ cppreference Example 코드를 이식한 항목은
   - Error-code overload, file 변경 후 metadata refresh, recursive traversal
     pruning은 driver semantic test로 검증합니다.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] CRT stdio / lowio file I/O semantic check
+  - `fopen` / `fread` / `fwrite` / `fseek` / `ftell` 및 `_open` / `_read` /
+    `_write` / `_lseek` / `_close` 경로를 성공 케이스와 missing file error
+    path로 검증합니다.
+  [(driver semantic test)](../test/cmake/driver/src/cpp/stl/cstdio.cpp)
+- [x] CRT environment semantic check
+  - `getenv` / `getenv_s` / `_dupenv_s` 및 wide `_wgetenv` / `_wgetenv_s` /
+    `_wdupenv_s` 경로를 CRT-managed environment variable 기준으로
+    검증합니다. `_putenv_s` / `_wputenv_s`의 add, update, delete 경로도
+    함께 검증합니다.
+  [(driver semantic test)](../test/cmake/driver/src/cpp/stl/cstdlib.cpp)
 - [x] [std::string](https://en.cppreference.com/w/cpp/string/basic_string)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/string.cpp)
 - [x] String member operation:
@@ -564,6 +575,24 @@ cppreference Example 코드를 이식한 항목은
 목록이 아닙니다. 기본 원칙은 `PASSIVE_LEVEL`에서 파일 시스템, locale,
 콘솔 입력, 미지원 C++ 런타임 의존성 없이 실행할 수 있는 예제를
 우선합니다.
+
+### OS substrate coverage 우선순위
+
+앞으로의 coverage는 MSVC CRT/STL이 hosted Windows process에서 기대하는
+Win32 / NTDLL / UCRT / ICU 표면을 실제로 밟는 테스트를 우선합니다. 순수
+header algorithm이나 value utility도 의미는 있지만, LDK가 받쳐주는
+runtime substrate를 증명하는 테스트보다 우선순위는 낮습니다.
+
+| 우선순위 | 영역 | 우선 볼 항목 | 의미 |
+| --- | --- | --- | --- |
+| P0 | `std::filesystem` 및 CRT file I/O | `copy_options`, directory traversal option, symlink/hard-link edge case, metadata/status transition, `error_code` overload, stdio/lowio file handle | path normalization, file handle, directory enumeration, reparse point, file metadata, current/temp directory 상태, Win32 error mapping을 검증합니다. |
+| P0 | Time 및 chrono OS path | `system_clock`, `file_clock`, file timestamp round trip, timezone lookup, invalid-zone/error path, tzdb/ICU를 밟는 formatting path | system time, file time, registry/timezone data, ICU/tzdb shim, MSVC STL chrono ABI helper를 검증합니다. |
+| P0 | Locale, NLS, text conversion | named/user locale, `GetLocaleInfo` 기반 facet, `ctype`/`collate`, UTF-8/multibyte conversion, `time_get`/`time_put`, `money_get`/`money_put` | NLS table, code page, locale data, ICU 기반 동작, UCRT conversion helper를 검증합니다. |
+| P1 | Threading, wait, async | wait/notify timeout/error path, condition-variable wake ordering, future/promise broken-promise 및 thread-exit path, latch/barrier/semaphore semantics | LDK `WaitOnAddress`, keyed event, SRW/condition-variable 동작, thread handle, unload-sensitive lifetime rule을 검증합니다. |
+| P1 | Error 및 diagnostics path | `std::system_error`, `std::error_code`, `FormatMessageA/W`, `GetLastError`/`errno` propagation, filesystem exception message | NTSTATUS/Win32 error mapping과 message-resource lookup 품질을 검증합니다. |
+| P1 | Environment, module, process state | `getenv`/`_putenv`, duplicated environment string, current directory, module filename, process-parameter 스타일 CRT initialization state | LDK PEB/process-parameter emulation과 CRT startup assumption을 검증합니다. |
+| P2 | Loader/resource integration | resource lookup, DLL/module discovery path, ICU 및 message-resource provider 동작 | CRT/STL path가 hosted loader/resource semantics를 기대하는 경우에 유용합니다. |
+| P2 | Console/debug output | stream/stdout/stderr failure path, `std::print`, `OutputDebugString`, output throttling behavior | console/debug-output policy를 검증합니다. production hot path와는 분리해서 봅니다. |
 
 ### 앞으로 보강할 cppreference coverage 후보
 
