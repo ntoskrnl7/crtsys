@@ -51,7 +51,7 @@ extern "C" BOOL WINAPI __acrt_AreFileApisANSI()
 
 extern "C" void WINAPI __acrt_GetSystemTimePreciseAsFileTime(LPFILETIME const system_time_as_file_time)
 {
-    GetSystemTimeAsFileTime(system_time_as_file_time);
+    GetSystemTimePreciseAsFileTime(system_time_as_file_time);
 }
 
 extern "C"
