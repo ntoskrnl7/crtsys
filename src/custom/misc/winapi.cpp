@@ -8,36 +8,6 @@
 
 EXTERN_C_START
 
-//
-// for google test
-//
-
-WINBASEAPI
-BOOL
-WINAPI
-VerifyVersionInfoW (
-    _Inout_ PVOID lpVersionInformation,
-    _In_ DWORD dwTypeMask,
-    _In_ DWORDLONG dwlConditionMask
-    )
-{
-    if (lpVersionInformation == NULL) {
-        SetLastError( ERROR_INVALID_PARAMETER );
-        return FALSE;
-    }
-
-    NTSTATUS Status = RtlVerifyVersionInfo(
-        reinterpret_cast<PRTL_OSVERSIONINFOEXW>( lpVersionInformation ),
-        dwTypeMask,
-        dwlConditionMask );
-    if (! NT_SUCCESS( Status )) {
-        SetLastError( RtlNtStatusToDosError( Status ) );
-        return FALSE;
-    }
-
-    return TRUE;
-}
-
 WINBASEAPI
 BOOL
 WINAPI
