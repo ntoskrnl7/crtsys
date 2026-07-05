@@ -53,25 +53,4 @@ SetConsoleTextAttribute (
     return FALSE;
 }
 
-//
-// https://github.com/ntoskrnl7/crtsys/issues/23
-//
-// Windows SDK WRL corewrappers.h uses ReleaseMutex in MutexTraits::Unlock.
-// MSVC STL ppltasks.cpp can reach WRL/corewrappers.h on _CRT_APP or
-// UNDOCKED_WINDOWS_UCRT builds.
-//
-// MutexTraits::Lock, SemaphoreTraits::Lock
-//
-WINBASEAPI
-BOOL
-WINAPI
-ReleaseMutex (
-    _In_ HANDLE hMutex
-    )
-{
-    CRTSYS_DIAGNOSTIC_BREAK();
-    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
-    return FALSE; 
-}
-
 EXTERN_C_END
