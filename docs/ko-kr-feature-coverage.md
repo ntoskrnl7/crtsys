@@ -416,9 +416,10 @@ cppreference Example 코드를 이식한 항목은
     `_fullpath` / `_wfullpath`, `_getcwd` / `_wgetcwd`, `_chdir` / `_wchdir`,
     `_findfirst64` / `_findnext64`, `_dup` / `_dup2`, `_commit`,
     `_chsize_s` 경로를 LDK가 제공하는 current-directory, file-handle,
-    enumeration, metadata substrate 기준으로 검증합니다.
-    `GetModuleFileNameA/W`와 `_get_pgmptr` / `_get_wpgmptr`는 CRT program-path
-    state를 검증합니다.
+    enumeration, metadata substrate 기준으로 검증합니다. CRT
+    current-directory state는 `std::filesystem::current_path`와 교차
+    검증합니다. `GetModuleFileNameA/W`와 `_get_pgmptr` / `_get_wpgmptr`는
+    CRT program-path state를 검증합니다.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/cstdio_file_state.cpp)
 - [x] CRT environment semantic check
   - `getenv` / `getenv_s` / `_dupenv_s` 및 wide `_wgetenv` / `_wgetenv_s` /
