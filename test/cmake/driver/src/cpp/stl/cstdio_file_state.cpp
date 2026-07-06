@@ -4,6 +4,7 @@
 #include <cstring>
 #include <cwchar>
 #include <direct.h>
+#include <filesystem>
 #include <fcntl.h>
 #include <io.h>
 #include <iostream>
@@ -118,6 +119,9 @@ void verify_current_directory_state() {
   char cwd_before[512]{};
   expect(_getcwd(cwd_before, sizeof(cwd_before)) != nullptr,
          "_getcwd before chdir failed");
+  const auto filesystem_cwd_before = std::filesystem::current_path();
+  expect(std::filesystem::equivalent(filesystem_cwd_before, cwd_before),
+         "std::filesystem::current_path and _getcwd disagree before chdir");
 
   expect(_chdir(sandbox) == 0, "_chdir sandbox failed");
 
@@ -125,6 +129,9 @@ void verify_current_directory_state() {
   expect(_getcwd(cwd_inside, sizeof(cwd_inside)) != nullptr,
          "_getcwd inside sandbox failed");
   expect(contains(cwd_inside, sandbox), "_getcwd missed sandbox component");
+  expect(std::filesystem::equivalent(std::filesystem::current_path(),
+                                     cwd_inside),
+         "std::filesystem::current_path did not observe _chdir");
 
   expect(_wchdir(L"nested") == 0, "_wchdir nested failed");
 
@@ -135,9 +142,29 @@ void verify_current_directory_state() {
          "_wgetcwd inside nested failed");
   expect(contains(wide_cwd_inside, L"nested"),
          "_wgetcwd missed nested component");
+  expect(std::filesystem::equivalent(std::filesystem::current_path(),
+                                     wide_cwd_inside),
+         "std::filesystem::current_path did not observe _wchdir");
 
   expect(_wchdir(L"..") == 0, "_wchdir parent failed");
   expect(_chdir(cwd_before) == 0, "_chdir restore failed");
+
+  std::filesystem::current_path(filesystem_cwd_before / sandbox);
+  char cwd_after_filesystem_set[512]{};
+  expect(_getcwd(cwd_after_filesystem_set, sizeof(cwd_after_filesystem_set)) !=
+             nullptr,
+         "_getcwd after std::filesystem::current_path failed");
+  expect(contains(cwd_after_filesystem_set, sandbox),
+         "_getcwd did not observe std::filesystem::current_path");
+
+  char full_path_from_filesystem_cwd[512]{};
+  expect(_fullpath(full_path_from_filesystem_cwd, "data.txt",
+                   sizeof(full_path_from_filesystem_cwd)) != nullptr,
+         "_fullpath after std::filesystem::current_path failed");
+  expect(contains(full_path_from_filesystem_cwd, sandbox),
+         "_fullpath did not use std::filesystem current path");
+
+  std::filesystem::current_path(filesystem_cwd_before);
 }
 
 void verify_lowio_handle_state() {
