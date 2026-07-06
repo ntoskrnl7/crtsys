@@ -10,7 +10,7 @@ EXTERN_C DRIVER_UNLOAD DriverUnload;
 #pragma alloc_text(PAGE, DriverUnload)
 #endif
 
-void test_all();
+int test_all();
 
 #include <gtest/gtest.h>
 
@@ -32,7 +32,10 @@ ntl::status ntl::main(ntl::driver &driver, const std::wstring &registry_path) {
 
   std::wcout << "load (registry_path :" << registry_path << ")\n";
 
-  test_all();
+  const int driver_test_failures = test_all();
+  if (driver_test_failures != 0) {
+    return status(STATUS_UNSUCCESSFUL);
+  }
 
   struct test_extension {
     test_extension() : val(0), create_count(0), close_count(0) {
@@ -127,7 +130,10 @@ DriverEntry (
   KdBreakPoint();
 #endif
 
-  test_all();
+  const int driver_test_failures = test_all();
+  if (driver_test_failures != 0) {
+    return STATUS_UNSUCCESSFUL;
+  }
 
   DriverObject->DriverUnload = DriverUnload;
 
