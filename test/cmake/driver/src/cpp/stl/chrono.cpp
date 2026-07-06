@@ -68,6 +68,37 @@ void run() {
 } // namespace chrono_time_zone_info_test
 
 //
+// https://en.cppreference.com/w/cpp/chrono/get_tzdb
+// https://en.cppreference.com/w/cpp/chrono/locate_zone
+//
+namespace chrono_time_zone_error_test {
+void run() {
+  const auto &tzdb = std::chrono::get_tzdb();
+  const auto *utc = tzdb.locate_zone("UTC");
+  if (utc == nullptr) {
+    throw std::runtime_error("std::chrono::get_tzdb UTC lookup failed");
+  }
+  const auto utc_info =
+      utc->get_info(std::chrono::system_clock::time_point{});
+  if (utc_info.offset != std::chrono::seconds{0}) {
+    throw std::runtime_error("std::chrono::get_tzdb UTC offset failed");
+  }
+
+  bool invalid_zone_threw = false;
+  try {
+    (void)std::chrono::locate_zone("Etc/Definitely_Not_A_Time_Zone");
+  } catch (const std::runtime_error &ex) {
+    invalid_zone_threw = true;
+    std::cout << "invalid timezone rejected: " << ex.what() << '\n';
+  }
+
+  if (!invalid_zone_threw) {
+    throw std::runtime_error("std::chrono::locate_zone accepted invalid zone");
+  }
+}
+} // namespace chrono_time_zone_error_test
+
+//
 // https://en.cppreference.com/w/cpp/chrono/year_month_day#Example
 //
 namespace chrono_year_month_day_test {
