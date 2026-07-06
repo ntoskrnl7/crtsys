@@ -126,6 +126,9 @@ cppreference Example 코드를 이식한 항목은
     [`std::chrono::zoned_time`](https://en.cppreference.com/w/cpp/chrono/zoned_time),
     [`std::chrono::time_zone::get_info`](https://en.cppreference.com/w/cpp/chrono/time_zone/get_info)도
     기본 driver build에서 실행됩니다.
+    [`std::chrono::get_tzdb`](https://en.cppreference.com/w/cpp/chrono/get_tzdb)와
+    invalid-zone `std::chrono::locate_zone` error path는 driver semantic
+    test로 검증합니다.
   - [`std::chrono::clock_cast`](https://en.cppreference.com/w/cpp/chrono/clock_cast)
     coverage는 active MSVC STL에서 해당 clock을 노출하는 경우
     `system_clock`, `file_clock`, `utc_clock`, `tai_clock`, `gps_clock`

@@ -126,6 +126,9 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
     and
     [`std::chrono::time_zone::get_info`](https://en.cppreference.com/w/cpp/chrono/time_zone/get_info)
     also run in the default driver build.
+    [`std::chrono::get_tzdb`](https://en.cppreference.com/w/cpp/chrono/get_tzdb)
+    and invalid-zone `std::chrono::locate_zone` error paths are covered by a
+    driver semantic test.
   - [`std::chrono::clock_cast`](https://en.cppreference.com/w/cpp/chrono/clock_cast)
     coverage checks `system_clock`, `file_clock`, `utc_clock`, `tai_clock`,
     and `gps_clock` round trips where the active MSVC STL exposes those clocks.
