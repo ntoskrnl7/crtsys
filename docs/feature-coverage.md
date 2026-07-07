@@ -216,9 +216,9 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
 - [x] [std::locale](https://en.cppreference.com/w/cpp/locale/locale)
   [(cppreference examples)](../test/cmake/driver/src/cpp/stl/locale.cpp)
 - [x] NLS and text conversion semantic checks
-  - `MultiByteToWideChar`, `WideCharToMultiByte`, `GetStringTypeW`, and
-    `LCMapStringEx` paths are covered with UTF-8 round-trip and invalid
-    sequence error cases.
+  - `MultiByteToWideChar`, `WideCharToMultiByte`, `GetStringTypeW`,
+    `LCMapStringEx`, and filesystem UTF-8 path round-trip paths are covered
+    with invalid sequence error cases.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/nls.cpp)
 - [x] [std::map](https://en.cppreference.com/w/cpp/container/map)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/containers.cpp)
@@ -512,6 +512,8 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::random_device](https://en.cppreference.com/w/cpp/numeric/random/random_device)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/numeric.cpp)
+- [x] CRT `rand_s`
+  [(driver semantic test)](../test/cmake/driver/src/cpp/stl/cstdlib.cpp)
 - [x] [std::uniform_int_distribution](https://en.cppreference.com/w/cpp/numeric/random/uniform_int_distribution)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/numeric.cpp)
 - [x] [std::valarray::slice](https://en.cppreference.com/w/cpp/numeric/valarray/slice)

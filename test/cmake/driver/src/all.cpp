@@ -1,4 +1,10 @@
+#include <exception>
 #include <iostream>
+#include <stdexcept>
+
+#ifndef CRTSYS_ENABLE_FAILURE_HARNESS_SELF_TEST
+#define CRTSYS_ENABLE_FAILURE_HARNESS_SELF_TEST 0
+#endif
 
 //
 // c/math.c
@@ -379,6 +385,9 @@ void run();
 namespace crt_environment_semantic_test {
 void run();
 }
+namespace crt_random_semantic_test {
+void run();
+}
 namespace error_diagnostics_semantic_test {
 void run();
 }
@@ -711,29 +720,65 @@ bool ntl_spin_lock_test();
 
 bool ntl_resource_test();
 
+namespace {
+int g_driver_test_failures = 0;
+
+void record_test_failure(const char *name, const char *message) {
+  ++g_driver_test_failures;
+  std::cerr << "[crtsys] FAIL " << name << ": " << message << '\n';
+}
+
+template <typename Fn> void run_cppreference_test(const char *name, Fn fn) {
+  std::cout << "\n[crtsys] RUN " << name << '\n';
+  try {
+    fn();
+    std::cout << "[crtsys] PASS " << name << '\n';
+  } catch (const std::exception &e) {
+    record_test_failure(name, e.what());
+  } catch (...) {
+    record_test_failure(name, "unknown C++ exception");
+  }
+}
+
+template <typename Fn> void run_driver_semantic_test(const char *name, Fn fn) {
+  std::cout << "\n[crtsys] RUN " << name << " (driver semantic)\n";
+  try {
+    fn();
+    std::cout << "[crtsys] PASS " << name << '\n';
+  } catch (const std::exception &e) {
+    record_test_failure(name, e.what());
+  } catch (...) {
+    record_test_failure(name, "unknown C++ exception");
+  }
+}
+
+template <typename Fn> void run_boolean_test(const char *name, Fn fn) {
+  std::cout << "\n[crtsys] RUN " << name << " (boolean)\n";
+  try {
+    if (fn()) {
+      std::cout << "[crtsys] PASS " << name << '\n';
+    } else {
+      record_test_failure(name, "returned false");
+    }
+  } catch (const std::exception &e) {
+    record_test_failure(name, e.what());
+  } catch (...) {
+    record_test_failure(name, "unknown C++ exception");
+  }
+}
+} // namespace
+
 //
 // C Standard tests.
 //
-void c_std_tests() { math_test(); }
+void c_std_tests() {
+  run_driver_semantic_test("math_test", [] { math_test(); });
+}
 
 #if defined(_AMD64_) && !defined(CRTSYS_USE_NTL_MAIN)
 // x64 needs more stack to run throw_test.
 #include <ntl/expand_stack>
 #endif
-
-namespace {
-template <typename Fn> void run_cppreference_test(const char *name, Fn fn) {
-  std::cout << "\n[crtsys] RUN " << name << '\n';
-  fn();
-  std::cout << "[crtsys] PASS " << name << '\n';
-}
-
-template <typename Fn> void run_driver_semantic_test(const char *name, Fn fn) {
-  std::cout << "\n[crtsys] RUN " << name << " (driver semantic)\n";
-  fn();
-  std::cout << "[crtsys] PASS " << name << '\n';
-}
-} // namespace
 
 #define CRTSYS_RUN_CPPREFERENCE_TEST(test_namespace)                           \
   run_cppreference_test(#test_namespace, [] { test_namespace::run(); })
@@ -890,6 +935,7 @@ void cpp_std_tests() {
   CRTSYS_RUN_DRIVER_SEMANTIC_TEST(crt_file_io_semantic_test);
   CRTSYS_RUN_DRIVER_SEMANTIC_TEST(crt_file_state_semantic_test);
   CRTSYS_RUN_DRIVER_SEMANTIC_TEST(crt_environment_semantic_test);
+  CRTSYS_RUN_DRIVER_SEMANTIC_TEST(crt_random_semantic_test);
   CRTSYS_RUN_DRIVER_SEMANTIC_TEST(error_diagnostics_semantic_test);
   CRTSYS_RUN_DRIVER_SEMANTIC_TEST(nls_conversion_semantic_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(sort_test);
@@ -1007,27 +1053,34 @@ void cpp_std_tests() {
 //
 
 void ntl_test() {
-  if (!ntl_expand_stack_test()) {
-    std::cerr << "ntl_expand_stack_test failed\n";
-  }
-  if (!ntl_seh_try_except_test()) {
-    std::cerr << "ntl_seh_try_except_test failed\n";
-  }
-  if (!ntl_irql_test()) {
-    std::cerr << "ntl_irql_test failed\n";
-  }
-  if (!ntl_spin_lock_test()) {
-    std::cerr << "ntl_spin_lock_test failed\n";
-  }
-  if (!ntl_resource_test()) {
-    std::cerr << "ntl_resource_test failed\n";
-  }
+  run_boolean_test("ntl_expand_stack_test", ntl_expand_stack_test);
+  run_boolean_test("ntl_seh_try_except_test", ntl_seh_try_except_test);
+  run_boolean_test("ntl_irql_test", ntl_irql_test);
+  run_boolean_test("ntl_spin_lock_test", ntl_spin_lock_test);
+  run_boolean_test("ntl_resource_test", ntl_resource_test);
 }
 
-void test_all() {
+int test_all() {
+  g_driver_test_failures = 0;
+
+#if CRTSYS_ENABLE_FAILURE_HARNESS_SELF_TEST
+  // Default-off sanity check for the harness itself: the driver should report a
+  // failed test and return STATUS_UNSUCCESSFUL instead of bugchecking.
+  run_driver_semantic_test("failure_harness_self_test", [] {
+    throw std::runtime_error("intentional failure harness self-test");
+  });
+#endif
+
   ntl_test();
 
   c_std_tests();
 
   cpp_std_tests();
+
+  if (g_driver_test_failures != 0) {
+    std::cerr << "[crtsys] driver test failures: " << g_driver_test_failures
+              << '\n';
+  }
+
+  return g_driver_test_failures;
 }

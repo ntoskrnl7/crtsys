@@ -1,3 +1,8 @@
+#ifndef _CRT_RAND_S
+// MSVC exposes rand_s from stdlib.h only when this extension gate is enabled.
+#define _CRT_RAND_S
+#endif
+
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -206,3 +211,19 @@ void run() {
   std::cout << "CRT environment semantic assertions passed\n";
 }
 } // namespace crt_environment_semantic_test
+
+namespace crt_random_semantic_test {
+namespace {
+void expect(bool condition, const char *message) {
+  if (!condition) {
+    throw std::runtime_error(message);
+  }
+}
+} // namespace
+
+void run() {
+  unsigned int value = 0;
+  expect(::rand_s(&value) == 0, "rand_s failed");
+  std::cout << "CRT random semantic assertions passed\n";
+}
+} // namespace crt_random_semantic_test

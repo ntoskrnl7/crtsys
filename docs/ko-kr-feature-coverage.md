@@ -218,8 +218,8 @@ cppreference Example 코드를 이식한 항목은
   [(cppreference examples)](../test/cmake/driver/src/cpp/stl/locale.cpp)
 - [x] NLS and text conversion semantic check
   - `MultiByteToWideChar`, `WideCharToMultiByte`, `GetStringTypeW`,
-    `LCMapStringEx` 경로를 UTF-8 round trip 및 invalid sequence error
-    case로 검증합니다.
+    `LCMapStringEx`, filesystem UTF-8 path round trip 경로를 invalid
+    sequence error case와 함께 검증합니다.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/nls.cpp)
 - [x] [std::map](https://en.cppreference.com/w/cpp/container/map)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/containers.cpp)
@@ -512,6 +512,8 @@ cppreference Example 코드를 이식한 항목은
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::random_device](https://en.cppreference.com/w/cpp/numeric/random/random_device)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/numeric.cpp)
+- [x] CRT `rand_s`
+  [(driver semantic test)](../test/cmake/driver/src/cpp/stl/cstdlib.cpp)
 - [x] [std::uniform_int_distribution](https://en.cppreference.com/w/cpp/numeric/random/uniform_int_distribution)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/numeric.cpp)
 - [x] [std::valarray::slice](https://en.cppreference.com/w/cpp/numeric/valarray/slice)

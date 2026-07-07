@@ -363,29 +363,7 @@ extern "C" BOOLEAN WINAPI __acrt_RtlGenRandom(
     ULONG const buffer_count
     )
 {
-    if (buffer == nullptr && buffer_count != 0)
-    {
-        return FALSE;
-    }
-
-    LARGE_INTEGER counter{};
-    QueryPerformanceCounter(&counter);
-
-    ULONG_PTR state =
-        static_cast<ULONG_PTR>(counter.QuadPart) ^
-        reinterpret_cast<ULONG_PTR>(buffer) ^
-        static_cast<ULONG_PTR>(buffer_count);
-
-    auto* const bytes = static_cast<unsigned char*>(buffer);
-    for (ULONG i = 0; i != buffer_count; ++i)
-    {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        bytes[i] = static_cast<unsigned char>(state >> ((i & 7) * 8));
-    }
-
-    return TRUE;
+    return SystemFunction036(buffer, buffer_count);
 }
 
 extern "C" bool __cdecl __acrt_can_use_vista_locale_apis()

@@ -411,6 +411,12 @@ function(crtsys_link_prebuilt_driver_libraries _target)
         message(FATAL_ERROR "No crtsys prebuilt libraries were found under ${_CRTSYS_ROOT}/lib/native for ${_toolset}/${CMAKE_VS_PLATFORM_NAME}.")
     endif()
 
+    if(NOT TARGET WDK::CNG)
+        message(FATAL_ERROR "WDK::CNG is required for crtsys prebuilt driver support.")
+    endif()
+
+    target_link_libraries(${_target} WDK::CNG)
+
     target_compile_definitions(${_target} PUBLIC "_KERNEL32_" "_ITERATOR_DEBUG_LEVEL=0" "_HAS_EXCEPTIONS")
     target_compile_options(${_target} PUBLIC "$<$<COMPILE_LANGUAGE:C,CXX>:/MT>")
 

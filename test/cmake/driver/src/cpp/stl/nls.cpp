@@ -2,8 +2,11 @@
 
 #include <cstring>
 #include <cwchar>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
+#include <string>
 
 namespace nls_conversion_semantic_test {
 namespace {
@@ -13,19 +16,54 @@ void expect(bool condition, const char *message) {
   }
 }
 
+std::string utf8_sample() {
+  const char bytes[] = {
+      'A',
+      static_cast<char>(0xe2),
+      static_cast<char>(0x82),
+      static_cast<char>(0xac),
+      static_cast<char>(0xed),
+      static_cast<char>(0x95),
+      static_cast<char>(0x9c),
+      '\0',
+  };
+
+  return bytes;
+}
+
+std::filesystem::path path_from_utf8(const std::string &value) {
+#if defined(__cpp_char8_t)
+  std::u8string utf8;
+  utf8.reserve(value.size());
+  for (const unsigned char ch : value) {
+    utf8.push_back(static_cast<char8_t>(ch));
+  }
+  return std::filesystem::path{utf8};
+#else
+  return std::filesystem::u8path(value);
+#endif
+}
+
+std::string path_to_utf8(const std::filesystem::path &path) {
+  const auto value = path.u8string();
+#if defined(__cpp_char8_t)
+  return std::string{reinterpret_cast<const char *>(value.data()),
+                     value.size()};
+#else
+  return value;
+#endif
+}
+
 void verify_utf8_roundtrip() {
-  const char utf8[] = {
-      'A', static_cast<char>(0xe2), static_cast<char>(0x82),
-      static_cast<char>(0xac), static_cast<char>(0xed),
-      static_cast<char>(0x95), static_cast<char>(0x9c), '\0'};
+  const std::string utf8 = utf8_sample();
 
   const int required = MultiByteToWideChar(
-      CP_UTF8, MB_ERR_INVALID_CHARS, utf8, -1, nullptr, 0);
+      CP_UTF8, MB_ERR_INVALID_CHARS, utf8.c_str(), -1, nullptr, 0);
   expect(required == 4, "MultiByteToWideChar required length mismatch");
 
   wchar_t wide[4]{};
   const int converted = MultiByteToWideChar(
-      CP_UTF8, MB_ERR_INVALID_CHARS, utf8, -1, wide,
+      CP_UTF8, MB_ERR_INVALID_CHARS, utf8.c_str(), -1, wide,
       static_cast<int>(sizeof(wide) / sizeof(wide[0])));
   expect(converted == required, "MultiByteToWideChar conversion failed");
   expect(wide[0] == L'A', "UTF-8 roundtrip ASCII mismatch");
@@ -39,9 +77,9 @@ void verify_utf8_roundtrip() {
   const int bytes = WideCharToMultiByte(
       CP_UTF8, WC_ERR_INVALID_CHARS, wide, -1, roundtrip,
       static_cast<int>(sizeof(roundtrip)), nullptr, nullptr);
-  expect(bytes == static_cast<int>(sizeof(utf8)),
+  expect(bytes == static_cast<int>(utf8.size() + 1),
          "WideCharToMultiByte byte length mismatch");
-  expect(std::memcmp(roundtrip, utf8, sizeof(utf8)) == 0,
+  expect(std::memcmp(roundtrip, utf8.c_str(), utf8.size() + 1) == 0,
          "WideCharToMultiByte bytes mismatch");
 }
 
@@ -87,6 +125,32 @@ void verify_character_type_and_mapping() {
   expect(std::wcscmp(upper, L"CRTSYS") == 0,
          "LCMapStringEx uppercase value mismatch");
 }
+
+void verify_filesystem_utf8_path_roundtrip() {
+  namespace fs = std::filesystem;
+
+  const fs::path sandbox = "crtsys-nls-path-sandbox";
+  std::error_code ec;
+  fs::remove_all(sandbox, ec);
+  expect(fs::create_directory(sandbox), "create UTF-8 path sandbox failed");
+
+  const std::string utf8_filename = std::string{"hangul-"} +
+                                    static_cast<char>(0xed) +
+                                    static_cast<char>(0x95) +
+                                    static_cast<char>(0x9c) + ".txt";
+  const fs::path file = sandbox / path_from_utf8(utf8_filename);
+
+  std::ofstream(file).put('x');
+  expect(fs::exists(file), "UTF-8 filesystem path create failed");
+  expect(path_to_utf8(file.filename()) == utf8_filename,
+         "filesystem path UTF-8 filename roundtrip mismatch");
+  expect(file.filename().wstring().find(static_cast<wchar_t>(0xd55c)) !=
+             std::wstring::npos,
+         "filesystem path wide filename missed Hangul");
+
+  fs::remove(file);
+  fs::remove(sandbox);
+}
 } // namespace
 
 void run() {
@@ -94,6 +158,7 @@ void run() {
   verify_invalid_utf8_errors();
   verify_invalid_utf16_errors();
   verify_character_type_and_mapping();
+  verify_filesystem_utf8_path_roundtrip();
   std::cout << "NLS conversion semantic assertions passed\n";
 }
 } // namespace nls_conversion_semantic_test

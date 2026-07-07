@@ -204,7 +204,7 @@ endif()
 if(CRTSYS_LDK_SOURCE_DIR)
   CPMAddPackage(NAME Ldk SOURCE_DIR "${CRTSYS_LDK_SOURCE_DIR}")
 else()
-  CPMAddPackage("gh:ntoskrnl7/Ldk@0.7.18")
+  CPMAddPackage("gh:ntoskrnl7/Ldk@0.7.19")
 endif()
 
 CPMAddPackage("gh:ntoskrnl7/FindWDK#master")
