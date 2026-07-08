@@ -112,7 +112,7 @@ extern "C" LCID WINAPI __acrt_LocaleNameToLCID(
 
 extern "C" BOOL WINAPI __acrt_IsValidLocaleName(LPCWSTR const locale_name)
 {
-    return IsValidLocale(__acrt_LocaleNameToLCID(locale_name, 0), LCID_INSTALLED);
+    return IsValidLocaleName(locale_name);
 }
 
 
@@ -185,7 +185,7 @@ extern "C" int WINAPI __acrt_GetLocaleInfoEx(
     int     const data_count
     )
 {
-    return GetLocaleInfoW(__acrt_LocaleNameToLCID(locale_name, 0), lc_type, data, data_count);
+    return GetLocaleInfoEx(locale_name, lc_type, data, data_count);
 }
 
 extern "C"
@@ -287,9 +287,6 @@ extern "C" int __cdecl __acrt_LCMapStringA(_locale_t const plocinfo, PCWSTR cons
                                            int const cchDest, int const code_page, BOOL const bError)
 {
     UNREFERENCED_PARAMETER(plocinfo);
-    UNREFERENCED_PARAMETER(LocaleName);
-    UNREFERENCED_PARAMETER(code_page);
-    UNREFERENCED_PARAMETER(bError);
 
     if (lpSrcStr == nullptr || cchSrc < -1 || cchDest < 0)
     {
@@ -297,39 +294,73 @@ extern "C" int __cdecl __acrt_LCMapStringA(_locale_t const plocinfo, PCWSTR cons
         return 0;
     }
 
-    int count = cchSrc;
-    if (count == -1)
+    const DWORD mb_flags = bError ? MB_ERR_INVALID_CHARS : 0;
+    const int wide_source_count = MultiByteToWideChar(
+        code_page, mb_flags, lpSrcStr, cchSrc, nullptr, 0);
+    if (wide_source_count == 0)
     {
-        count = static_cast<int>(strlen(lpSrcStr)) + 1;
-    }
-
-    if (lpDestStr == nullptr || cchDest == 0)
-    {
-        return count;
-    }
-
-    if (cchDest < count)
-    {
-        SetLastError(ERROR_INSUFFICIENT_BUFFER);
         return 0;
     }
 
-    for (int index = 0; index < count; ++index)
+    auto* const wide_source = static_cast<wchar_t*>(
+        calloc(static_cast<size_t>(wide_source_count), sizeof(wchar_t)));
+    if (wide_source == nullptr)
     {
-        unsigned char ch = static_cast<unsigned char>(lpSrcStr[index]);
-        if ((dwMapFlags & LCMAP_LOWERCASE) && ch >= 'A' && ch <= 'Z')
-        {
-            ch = static_cast<unsigned char>(ch - 'A' + 'a');
-        }
-        else if ((dwMapFlags & LCMAP_UPPERCASE) && ch >= 'a' && ch <= 'z')
-        {
-            ch = static_cast<unsigned char>(ch - 'a' + 'A');
-        }
-
-        lpDestStr[index] = static_cast<char>(ch);
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return 0;
     }
 
-    return count;
+    if (MultiByteToWideChar(code_page, mb_flags, lpSrcStr, cchSrc,
+                            wide_source, wide_source_count) == 0)
+    {
+        free(wide_source);
+        return 0;
+    }
+
+    const LCID locale = __acrt_LocaleNameToLCID(LocaleName, 0);
+
+    if (dwMapFlags & LCMAP_SORTKEY)
+    {
+        const int result = LCMapStringW(
+            locale, dwMapFlags, wide_source, wide_source_count,
+            reinterpret_cast<LPWSTR>(lpDestStr), cchDest);
+        free(wide_source);
+        return result;
+    }
+
+    const int wide_dest_count = LCMapStringW(
+        locale, dwMapFlags, wide_source, wide_source_count, nullptr, 0);
+    if (wide_dest_count == 0)
+    {
+        free(wide_source);
+        return 0;
+    }
+
+    auto* const wide_dest = static_cast<wchar_t*>(
+        calloc(static_cast<size_t>(wide_dest_count), sizeof(wchar_t)));
+    if (wide_dest == nullptr)
+    {
+        free(wide_source);
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return 0;
+    }
+
+    if (LCMapStringW(locale, dwMapFlags, wide_source, wide_source_count,
+                     wide_dest, wide_dest_count) == 0)
+    {
+        free(wide_dest);
+        free(wide_source);
+        return 0;
+    }
+
+    const DWORD wc_flags = bError ? WC_ERR_INVALID_CHARS : 0;
+    const int result = WideCharToMultiByte(
+        code_page, wc_flags, wide_dest, wide_dest_count, lpDestStr, cchDest,
+        nullptr, nullptr);
+
+    free(wide_dest);
+    free(wide_source);
+    return result;
 }
 
 extern "C" int WINAPI __acrt_MessageBoxA(

@@ -7,8 +7,10 @@
 #include <cstdint>
 #include <filesystem>
 #include <format>
+#include <functional>
 #include <fstream>
 #include <iostream>
+#include <string>
 #include <system_error>
 
 namespace fs = std::filesystem;
@@ -51,6 +53,154 @@ void run() {
   std::cout << "filesystem path lexical assertions passed\n";
 }
 } // namespace filesystem_path_test
+
+//
+// https://en.cppreference.com/w/cpp/filesystem/path/filename#Example
+// https://en.cppreference.com/w/cpp/filesystem/path/stem#Example
+// https://en.cppreference.com/w/cpp/filesystem/path/extension#Example
+// https://en.cppreference.com/w/cpp/filesystem/path/parent_path#Example
+// https://en.cppreference.com/w/cpp/filesystem/path/root_path#Example
+// https://en.cppreference.com/w/cpp/filesystem/path/relative_path#Example
+//
+namespace filesystem_path_decomposition_test {
+void run() {
+  const fs::path path = R"(C:\Users\Alice\Documents\archive.tar.gz)";
+
+  std::cout << "root_name: " << path.root_name() << '\n'
+            << "root_directory: " << path.root_directory() << '\n'
+            << "root_path: " << path.root_path() << '\n'
+            << "relative_path: " << path.relative_path() << '\n'
+            << "parent_path: " << path.parent_path() << '\n'
+            << "filename: " << path.filename() << '\n'
+            << "stem: " << path.stem() << '\n'
+            << "extension: " << path.extension() << '\n';
+
+  assert(path.root_name() == "C:");
+  assert(path.root_directory() == R"(\)");
+  assert(path.root_path() == R"(C:\)");
+  assert(path.relative_path() == R"(Users\Alice\Documents\archive.tar.gz)");
+  assert(path.parent_path() == R"(C:\Users\Alice\Documents)");
+  assert(path.filename() == "archive.tar.gz");
+  assert(path.stem() == "archive.tar");
+  assert(path.extension() == ".gz");
+
+  fs::path repeated{"archive.tar.gz"};
+  assert(repeated.stem() == "archive.tar");
+  repeated = repeated.stem();
+  assert(repeated.stem() == "archive");
+  assert(repeated.extension() == ".tar");
+
+  std::cout << "filesystem path decomposition assertions passed\n";
+}
+} // namespace filesystem_path_decomposition_test
+
+//
+// https://en.cppreference.com/w/cpp/filesystem/path/append#Example
+// https://en.cppreference.com/w/cpp/filesystem/path/concat#Example
+// https://en.cppreference.com/w/cpp/filesystem/path/remove_filename#Example
+// https://en.cppreference.com/w/cpp/filesystem/path/replace_filename#Example
+// https://en.cppreference.com/w/cpp/filesystem/path/replace_extension#Example
+// https://en.cppreference.com/w/cpp/filesystem/path/make_preferred#Example
+//
+namespace filesystem_path_modifier_test {
+void run() {
+  fs::path appended{"C:"};
+  appended /= "Users";
+  appended /= "Alice";
+  appended /= "notes.txt";
+  assert(appended == R"(C:Users\Alice\notes.txt)");
+
+  fs::path concatenated{"C:"};
+  concatenated += R"(\Users)";
+  concatenated += R"(\Alice)";
+  concatenated += R"(\notes.txt)";
+  assert(concatenated == R"(C:\Users\Alice\notes.txt)");
+
+  fs::path removed = concatenated;
+  removed.remove_filename();
+  assert(removed == R"(C:\Users\Alice\)");
+
+  fs::path replaced = removed;
+  replaced.replace_filename("todo.md");
+  assert(replaced == R"(C:\Users\Alice\todo.md)");
+
+  replaced.replace_extension(".txt");
+  assert(replaced.filename() == "todo.txt");
+
+  fs::path preferred{"C:/Users/Alice/todo.txt"};
+  preferred.make_preferred();
+  assert(preferred == R"(C:\Users\Alice\todo.txt)");
+
+  fs::path swapped{"swap.txt"};
+  swapped.swap(replaced);
+  assert(swapped.filename() == "todo.txt");
+  assert(replaced == "swap.txt");
+
+  std::cout << "filesystem path modifier assertions passed\n";
+}
+} // namespace filesystem_path_modifier_test
+
+//
+// https://en.cppreference.com/w/cpp/filesystem/path/iterator#Example
+// https://en.cppreference.com/w/cpp/filesystem/path/string#Example
+// https://en.cppreference.com/w/cpp/filesystem/path/native#Example
+//
+namespace filesystem_path_observer_iterator_test {
+void run() {
+  const fs::path path = R"(C:\Users\Alice\notes.txt)";
+
+  std::cout << "path: " << path << '\n'
+            << "string path: " << path.string() << '\n'
+            << "generic string path: " << path.generic_string() << '\n';
+
+  assert(path.native().find(L"notes.txt") != std::wstring::npos);
+  assert(path.string().find("notes.txt") != std::string::npos);
+  assert(path.generic_string().find("notes.txt") != std::string::npos);
+
+  bool saw_root_name{};
+  bool saw_users{};
+  bool saw_filename{};
+  for (const auto &part : path) {
+    std::cout << part << '\n';
+    saw_root_name = saw_root_name || part == "C:";
+    saw_users = saw_users || part == "Users";
+    saw_filename = saw_filename || part == "notes.txt";
+  }
+
+  assert(saw_root_name);
+  assert(saw_users);
+  assert(saw_filename);
+
+  std::cout << "filesystem path observer/iterator assertions passed\n";
+}
+} // namespace filesystem_path_observer_iterator_test
+
+//
+// https://en.cppreference.com/w/cpp/filesystem/path/compare#Example
+// https://en.cppreference.com/w/cpp/filesystem/path/hash#Example
+//
+namespace filesystem_path_compare_hash_test {
+void run() {
+  const fs::path a = R"(C:\Users\Alice\a.txt)";
+  const fs::path b = R"(C:\Users\Alice\b.txt)";
+  const fs::path a2 = R"(C:\Users\Alice\a.txt)";
+
+  assert(a.compare(b) < 0);
+  assert(a.compare(a2) == 0);
+// cppreference demonstrates std::hash<filesystem::path>. Older MSVC STL
+// versions used by the v142 build predate the LWG 3657 resolution and do not
+// expose a usable std::hash<path>, so only those builds fall back to the
+// equivalent filesystem::hash_value path.
+#if defined(_MSC_VER) && _MSC_VER < 1930
+  assert(fs::hash_value(a) == fs::hash_value(a2));
+#else
+  assert(std::hash<fs::path>{}(a) == std::hash<fs::path>{}(a2));
+  assert(std::hash<fs::path>{}(a) == fs::hash_value(a));
+#endif
+
+  std::cout << "filesystem path compare/hash assertions passed\n";
+}
+} // namespace filesystem_path_compare_hash_test
 
 //
 // https://en.cppreference.com/w/cpp/filesystem/directory_iterator#Example
@@ -157,6 +307,54 @@ void run() {
   assert(removed_entries >= 4);
 }
 } // namespace filesystem_copy_file_test
+
+//
+// https://en.cppreference.com/w/cpp/filesystem/copy_options
+//
+namespace filesystem_copy_options_test {
+void run() {
+  const fs::path sandbox{"sandbox"};
+  remove_sandbox(sandbox);
+
+  const bool created_sandbox = fs::create_directory(sandbox);
+  (void)created_sandbox;
+  assert(created_sandbox);
+
+  const fs::path from = sandbox / "from.txt";
+  const fs::path to = sandbox / "to.txt";
+
+  std::ofstream(from) << "new";
+  std::ofstream(to) << "old";
+
+  const bool skipped = fs::copy_file(from, to, fs::copy_options::skip_existing);
+  (void)skipped;
+  assert(!skipped);
+  {
+    std::string value;
+    std::ifstream(to) >> value;
+    assert(value == "old");
+  }
+
+  const bool overwritten =
+      fs::copy_file(from, to, fs::copy_options::overwrite_existing);
+  (void)overwritten;
+  assert(overwritten);
+  {
+    std::string value;
+    std::ifstream(to) >> value;
+    assert(value == "new");
+  }
+
+  fs::last_write_time(from, fs::last_write_time(to) + 1s);
+  const bool updated =
+      fs::copy_file(from, to, fs::copy_options::update_existing);
+  (void)updated;
+  assert(updated);
+
+  remove_sandbox(sandbox);
+  std::cout << "filesystem copy_options assertions passed\n";
+}
+} // namespace filesystem_copy_options_test
 
 //
 // https://en.cppreference.com/w/cpp/filesystem/copy#Example
@@ -476,6 +674,49 @@ void run() {
 } // namespace filesystem_directory_entry_test
 
 //
+// https://en.cppreference.com/w/cpp/filesystem/directory_entry/assign
+// https://en.cppreference.com/w/cpp/filesystem/directory_entry/replace_filename
+// https://en.cppreference.com/w/cpp/filesystem/directory_entry/refresh
+//
+namespace filesystem_directory_entry_modifier_test {
+void run() {
+  const fs::path sandbox{"sandbox"};
+  remove_sandbox(sandbox);
+  const bool created_sandbox = fs::create_directory(sandbox);
+  (void)created_sandbox;
+  assert(created_sandbox);
+
+  const auto first = sandbox / "first.txt";
+  const auto second = sandbox / "second.txt";
+  std::ofstream(first) << "one";
+  std::ofstream(second) << "two";
+
+  fs::directory_entry entry;
+  entry.assign(first);
+  assert(entry.exists());
+  assert(entry.path().filename() == "first.txt");
+
+  entry.replace_filename("second.txt");
+  assert(entry.exists());
+  assert(entry.path().filename() == "second.txt");
+  assert(entry.file_size() == 3);
+
+  fs::resize_file(second, 5);
+  entry.refresh();
+  assert(entry.file_size() == 5);
+
+  std::error_code ec;
+  fs::remove(second, ec);
+  assert(!ec);
+  entry.refresh(ec);
+  assert(!entry.exists());
+
+  remove_sandbox(sandbox);
+  std::cout << "filesystem directory_entry modifier assertions passed\n";
+}
+} // namespace filesystem_directory_entry_modifier_test
+
+//
 // https://en.cppreference.com/w/cpp/filesystem/space#Example
 //
 namespace filesystem_space_test {
@@ -517,6 +758,33 @@ void run() {
   std::cout << "filesystem rename completed\n";
 }
 } // namespace filesystem_rename_test
+
+//
+// https://en.cppreference.com/w/cpp/filesystem/remove#Example
+//
+namespace filesystem_remove_test {
+void run() {
+  const fs::path sandbox{"sandbox"};
+  remove_sandbox(sandbox);
+
+  fs::create_directories(sandbox / "subdir");
+  std::ofstream(sandbox / "subdir" / "file.txt").put('x');
+  std::ofstream(sandbox / "single.txt").put('y');
+
+  const bool removed_file = fs::remove(sandbox / "single.txt");
+  (void)removed_file;
+  assert(removed_file);
+  assert(!fs::exists(sandbox / "single.txt"));
+
+  const auto removed_tree = fs::remove_all(sandbox / "subdir");
+  (void)removed_tree;
+  assert(removed_tree == 2);
+  assert(!fs::exists(sandbox / "subdir"));
+
+  remove_sandbox(sandbox);
+  std::cout << "filesystem remove assertions passed\n";
+}
+} // namespace filesystem_remove_test
 
 //
 // https://en.cppreference.com/w/cpp/filesystem/temp_directory_path#Example
@@ -640,6 +908,21 @@ void run() {
 } // namespace filesystem_canonical_test
 
 namespace filesystem_semantic_edge_test {
+namespace {
+void expect(bool condition, const char *message) {
+  if (!condition) {
+    throw std::runtime_error(message);
+  }
+}
+
+void expect_error_equivalent(const std::error_code &left,
+                             const std::error_code &right,
+                             const char *message) {
+  expect(left.category() == right.category(), message);
+  expect(left.value() == right.value(), message);
+}
+} // namespace
+
 void run() {
   const fs::path sandbox{"sandbox"};
   remove_sandbox(sandbox);
@@ -654,24 +937,92 @@ void run() {
 
   const bool copied_missing = fs::copy_file(missing, target, ec);
   (void)copied_missing;
-  assert(!copied_missing);
-  assert(ec);
+  expect(!copied_missing, "copy_file missing source unexpectedly succeeded");
+  expect(static_cast<bool>(ec),
+         "copy_file missing source did not report error_code");
+  const std::error_code copy_missing_code = ec;
 
   bool caught_copy_error{};
   try {
     fs::copy_file(missing, target);
   } catch (const fs::filesystem_error &ex) {
     caught_copy_error = true;
-    assert(ex.code());
+    expect_error_equivalent(ex.code(), copy_missing_code,
+                            "copy_file throwing/error_code mismatch");
+    expect(ex.path1() == missing, "copy_file exception path1 mismatch");
     std::cout << "copy_file missing source reported: " << ex.what() << '\n';
   }
-  assert(caught_copy_error);
-  // Release builds compile out assert(), so mark assert-only locals as used.
-  (void)caught_copy_error;
+  expect(caught_copy_error, "copy_file missing source did not throw");
+
+  const fs::path source = sandbox / "source.txt";
+  const fs::path existing = sandbox / "existing.txt";
+  std::ofstream(source) << "source";
+  std::ofstream(existing) << "existing";
+
+  ec.clear();
+  const bool copied_existing = fs::copy_file(source, existing, ec);
+  expect(!copied_existing, "copy_file existing target unexpectedly succeeded");
+  expect(static_cast<bool>(ec),
+         "copy_file existing target did not report error_code");
+  const std::error_code copy_existing_code = ec;
+
+  bool caught_existing_error{};
+  try {
+    fs::copy_file(source, existing);
+  } catch (const fs::filesystem_error &ex) {
+    caught_existing_error = true;
+    expect_error_equivalent(ex.code(), copy_existing_code,
+                            "copy_file existing throwing/error_code mismatch");
+    expect(ex.path1() == source, "copy_file existing exception path1 mismatch");
+    expect(ex.path2() == existing, "copy_file existing exception path2 mismatch");
+  }
+  expect(caught_existing_error, "copy_file existing target did not throw");
+
+  const fs::path directory_as_source = sandbox / "directory_source";
+  fs::create_directory(directory_as_source);
+  ec.clear();
+  const bool copied_directory = fs::copy_file(directory_as_source, target, ec);
+  expect(!copied_directory, "copy_file directory source unexpectedly succeeded");
+  expect(static_cast<bool>(ec),
+         "copy_file directory source did not report error_code");
+  const std::error_code copy_directory_code = ec;
+
+  bool caught_directory_error{};
+  try {
+    fs::copy_file(directory_as_source, target);
+  } catch (const fs::filesystem_error &ex) {
+    caught_directory_error = true;
+    expect_error_equivalent(ex.code(), copy_directory_code,
+                            "copy_file directory throwing/error_code mismatch");
+    expect(ex.path1() == directory_as_source,
+           "copy_file directory exception path1 mismatch");
+  }
+  expect(caught_directory_error, "copy_file directory source did not throw");
 
   ec.clear();
   fs::rename(missing, target, ec);
-  assert(ec);
+  expect(static_cast<bool>(ec),
+         "rename missing source did not report error_code");
+  const std::error_code rename_missing_code = ec;
+
+  bool caught_rename_error{};
+  try {
+    fs::rename(missing, target);
+  } catch (const fs::filesystem_error &ex) {
+    caught_rename_error = true;
+    expect_error_equivalent(ex.code(), rename_missing_code,
+                            "rename throwing/error_code mismatch");
+    expect(ex.path1() == missing, "rename exception path1 mismatch");
+    expect(ex.path2() == target, "rename exception path2 mismatch");
+  }
+  expect(caught_rename_error, "rename missing source did not throw");
+
+  fs::remove(source, ec);
+  expect(!ec, "cleanup source file failed");
+  fs::remove(existing, ec);
+  expect(!ec, "cleanup existing file failed");
+  fs::remove_all(directory_as_source, ec);
+  expect(!ec, "cleanup directory source failed");
 
   ec.clear();
   const bool removed_missing = fs::remove(missing, ec);

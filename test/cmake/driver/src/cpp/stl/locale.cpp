@@ -10,6 +10,7 @@
 #include <iostream>
 #include <locale>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -255,3 +256,40 @@ void run() {
   std::cout << std::put_time(&t, "%Y-%m-%d %H:%M:%S") << '\n';
 }
 } // namespace time_put_test
+
+namespace locale_nls_semantic_test {
+namespace {
+void expect(bool condition, const char *message) {
+  if (!condition) {
+    throw std::runtime_error(message);
+  }
+}
+} // namespace
+
+void run() {
+  const std::locale en_us("en_US.UTF-8");
+
+  const auto &ctype = std::use_facet<std::ctype<char>>(en_us);
+  expect(ctype.is(std::ctype_base::alpha, 'A'),
+         "en_US ctype did not classify A as alpha");
+  expect(ctype.is(std::ctype_base::digit, '7'),
+         "en_US ctype did not classify 7 as digit");
+  expect(ctype.toupper('a') == 'A', "en_US ctype toupper mismatch");
+  expect(ctype.tolower('Z') == 'z', "en_US ctype tolower mismatch");
+
+  const auto &collate = std::use_facet<std::collate<char>>(en_us);
+  expect(collate.compare("abc", "abc" + 3, "abd", "abd" + 3) < 0,
+         "en_US collate ordering mismatch");
+
+  const auto &punct = std::use_facet<std::numpunct<char>>(en_us);
+  expect(punct.decimal_point() == '.', "en_US numpunct decimal mismatch");
+  expect(!punct.grouping().empty(), "en_US numpunct grouping was empty");
+
+  const std::locale de_de("de_DE.UTF-8");
+  const auto &money = std::use_facet<std::moneypunct<char, true>>(de_de);
+  expect(!money.curr_symbol().empty(),
+         "de_DE moneypunct international currency symbol was empty");
+
+  std::cout << "locale/NLS semantic assertions passed\n";
+}
+} // namespace locale_nls_semantic_test

@@ -19,6 +19,9 @@ coverage and IRQL contracts.
 
 Listed coverage means "verified by driver tests". It is not an exhaustive
 support ceiling for every header or code path that may compile or work.
+Because `crtsys` uses MSVC CRT/STL source paths over the LDK Windows/NTDLL/ICU
+substrate, adjacent unlisted overloads and header paths often work too; the
+matrix records explicit evidence, not the outer limit of the usable surface.
 
 ## Quick Start
 

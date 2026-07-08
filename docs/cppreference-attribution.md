@@ -211,6 +211,9 @@ test harness, typically by moving the sample `main()` body into a namespaced
 - `std::derived_from` / `std::same_as`: <https://en.cppreference.com/w/cpp/concepts>
 - `std::strong_ordering`: <https://en.cppreference.com/w/cpp/utility/compare/strong_ordering>
 - `std::numbers`: <https://en.cppreference.com/w/cpp/numeric/constants>
+- `std::chrono::system_clock::now`: <https://en.cppreference.com/w/cpp/chrono/system_clock/now>
+- `std::chrono::system_clock::to_time_t`: <https://en.cppreference.com/w/cpp/chrono/system_clock/to_time_t>
+- `std::chrono::system_clock::from_time_t`: <https://en.cppreference.com/w/cpp/chrono/system_clock/from_time_t>
 - `std::chrono::year_month_day`: <https://en.cppreference.com/w/cpp/chrono/year_month_day>
 - `std::chrono::weekday`: <https://en.cppreference.com/w/cpp/chrono/weekday>
 - `std::chrono::hh_mm_ss`: <https://en.cppreference.com/w/cpp/chrono/hh_mm_ss>
@@ -222,6 +225,10 @@ test harness, typically by moving the sample `main()` body into a namespaced
 - `std::chrono::gps_clock::from_utc`: <https://en.cppreference.com/w/cpp/chrono/gps_clock/from_utc>
 - `std::chrono::gps_clock::to_utc`: <https://en.cppreference.com/w/cpp/chrono/gps_clock/to_utc>
 - `std::chrono::file_clock`: <https://en.cppreference.com/w/cpp/chrono/file_clock>
+- `std::chrono::file_clock::now`: <https://en.cppreference.com/w/cpp/chrono/file_clock/now>
+- `std::chrono::time_zone::to_local`: <https://en.cppreference.com/w/cpp/chrono/time_zone/to_local>
+- `std::chrono::time_zone::to_sys`: <https://en.cppreference.com/w/cpp/chrono/time_zone/to_sys>
+- `std::chrono::get_tzdb_list`: <https://en.cppreference.com/w/cpp/chrono/get_tzdb_list>
 - `std::format`: <https://en.cppreference.com/w/cpp/utility/format/format>
 - `std::range_formatter`: <https://en.cppreference.com/w/cpp/utility/format/range_formatter>
 - `std::formatter`: <https://en.cppreference.com/w/cpp/utility/format/formatter>
@@ -232,6 +239,19 @@ test harness, typically by moving the sample `main()` body into a namespaced
 - `std::regex_iterator`: <https://en.cppreference.com/w/cpp/regex/regex_iterator>
 - `std::regex_token_iterator`: <https://en.cppreference.com/w/cpp/regex/regex_token_iterator>
 - `std::quoted`: <https://en.cppreference.com/w/cpp/io/manip/quoted>
+- `std::basic_filebuf`: <https://en.cppreference.com/w/cpp/io/basic_filebuf>
+- `std::basic_filebuf::open`: <https://en.cppreference.com/w/cpp/io/basic_filebuf/open>
+- `std::basic_filebuf::is_open`: <https://en.cppreference.com/w/cpp/io/basic_filebuf/is_open>
+- `std::basic_filebuf::seekoff`: <https://en.cppreference.com/w/cpp/io/basic_filebuf/seekoff>
+- `std::basic_filebuf::seekpos`: <https://en.cppreference.com/w/cpp/io/basic_filebuf/seekpos>
+- `std::basic_filebuf::underflow`: <https://en.cppreference.com/w/cpp/io/basic_filebuf/underflow>
+- `std::basic_ifstream`: <https://en.cppreference.com/w/cpp/io/basic_ifstream>
+- `std::basic_ifstream::is_open`: <https://en.cppreference.com/w/cpp/io/basic_ifstream/is_open>
+- `std::basic_ofstream`: <https://en.cppreference.com/w/cpp/io/basic_ofstream>
+- `std::basic_ofstream` constructors: <https://en.cppreference.com/w/cpp/io/basic_ofstream/basic_ofstream>
+- `std::basic_fstream`: <https://en.cppreference.com/w/cpp/io/basic_fstream>
+- `std::basic_fstream::open`: <https://en.cppreference.com/w/cpp/io/basic_fstream/open>
+- `std::basic_fstream::is_open`: <https://en.cppreference.com/w/cpp/io/basic_fstream/is_open>
 - `std::basic_spanstream`: <https://en.cppreference.com/w/cpp/io/basic_spanstream>
 - `std::basic_spanstream::span`: <https://en.cppreference.com/w/cpp/io/basic_spanstream/span>
 - `std::distance`: <https://en.cppreference.com/w/cpp/iterator/distance>
@@ -260,16 +280,37 @@ test harness, typically by moving the sample `main()` body into a namespaced
 - `std::bind_front`: <https://en.cppreference.com/w/cpp/utility/functional/bind_front>
 - `std::mem_fn`: <https://en.cppreference.com/w/cpp/utility/functional/mem_fn>
 - `std::filesystem::path` lexical operations: <https://en.cppreference.com/w/cpp/filesystem/path/lexically_normal>
+- `std::filesystem::path::filename`: <https://en.cppreference.com/w/cpp/filesystem/path/filename>
+- `std::filesystem::path::stem`: <https://en.cppreference.com/w/cpp/filesystem/path/stem>
+- `std::filesystem::path::extension`: <https://en.cppreference.com/w/cpp/filesystem/path/extension>
+- `std::filesystem::path::parent_path`: <https://en.cppreference.com/w/cpp/filesystem/path/parent_path>
+- `std::filesystem::path::root_path`: <https://en.cppreference.com/w/cpp/filesystem/path/root_path>
+- `std::filesystem::path::relative_path`: <https://en.cppreference.com/w/cpp/filesystem/path/relative_path>
+- `std::filesystem::path::append`: <https://en.cppreference.com/w/cpp/filesystem/path/append>
+- `std::filesystem::path::concat`: <https://en.cppreference.com/w/cpp/filesystem/path/concat>
+- `std::filesystem::path::remove_filename`: <https://en.cppreference.com/w/cpp/filesystem/path/remove_filename>
+- `std::filesystem::path::replace_filename`: <https://en.cppreference.com/w/cpp/filesystem/path/replace_filename>
+- `std::filesystem::path::replace_extension`: <https://en.cppreference.com/w/cpp/filesystem/path/replace_extension>
+- `std::filesystem::path::make_preferred`: <https://en.cppreference.com/w/cpp/filesystem/path/make_preferred>
+- `std::filesystem::path::iterator`: <https://en.cppreference.com/w/cpp/filesystem/path/iterator>
+- `std::filesystem::path::string`: <https://en.cppreference.com/w/cpp/filesystem/path/string>
+- `std::filesystem::path::native`: <https://en.cppreference.com/w/cpp/filesystem/path/native>
+- `std::filesystem::path::compare`: <https://en.cppreference.com/w/cpp/filesystem/path/compare>
+- `std::filesystem::path` hashing: <https://en.cppreference.com/w/cpp/filesystem/path/hash>
 - `std::filesystem::directory_iterator`: <https://en.cppreference.com/w/cpp/filesystem/directory_iterator>
 - `std::filesystem::recursive_directory_iterator`: <https://en.cppreference.com/w/cpp/filesystem/recursive_directory_iterator>
 - `std::filesystem::copy`: <https://en.cppreference.com/w/cpp/filesystem/copy>
 - `std::filesystem::copy_file`: <https://en.cppreference.com/w/cpp/filesystem/copy_file>
+- `std::filesystem::copy_options`: <https://en.cppreference.com/w/cpp/filesystem/copy_options>
 - `std::filesystem::create_directory`: <https://en.cppreference.com/w/cpp/filesystem/create_directory>
 - `std::filesystem::create_hard_link`: <https://en.cppreference.com/w/cpp/filesystem/create_hard_link>
 - `std::filesystem::create_symlink` / `std::filesystem::create_directory_symlink`: <https://en.cppreference.com/w/cpp/filesystem/create_symlink>
 - `std::filesystem::read_symlink`: <https://en.cppreference.com/w/cpp/filesystem/read_symlink>
 - `std::filesystem::copy_symlink`: <https://en.cppreference.com/w/cpp/filesystem/copy_symlink>
 - `std::filesystem::directory_entry`: <https://en.cppreference.com/w/cpp/filesystem/directory_entry>
+- `std::filesystem::directory_entry::assign`: <https://en.cppreference.com/w/cpp/filesystem/directory_entry/assign>
+- `std::filesystem::directory_entry::replace_filename`: <https://en.cppreference.com/w/cpp/filesystem/directory_entry/replace_filename>
+- `std::filesystem::directory_entry::refresh`: <https://en.cppreference.com/w/cpp/filesystem/directory_entry/refresh>
 - `std::filesystem::equivalent`: <https://en.cppreference.com/w/cpp/filesystem/equivalent>
 - `std::filesystem::file_size`: <https://en.cppreference.com/w/cpp/filesystem/file_size>
 - `std::filesystem::hard_link_count`: <https://en.cppreference.com/w/cpp/filesystem/hard_link_count>
@@ -335,7 +376,9 @@ flow and add explicit `locate_zone` / `time_zone::get_info` offset checks for
 selected zones.
 The chrono clock conversion test follows the linked cppreference conversion
 rules. The `clock_cast` page currently has no runnable example, and the clock
-`now()` examples are benchmark-style samples with large vector allocations.
+`now()` examples are benchmark-style samples with large vector allocations, so
+the driver harness keeps the same clock/OS-time APIs while avoiding the
+benchmark allocation body.
 
 The `std::stack::push` example keeps the cppreference BrainHack interpreter
 shape. The x64 driver-test harness invokes it through `ntl::expand_stack`
@@ -373,6 +416,16 @@ feature-test macros.
 
 The `std::basic_spanstream::span` example runs when the active MSVC STL exposes
 `__cpp_lib_spanstream`.
+
+The file stream examples keep the cppreference payloads and stream operations,
+but map fixed example filenames such as `test.bin` and `test.txt` into per-test
+sandbox directories so the kernel driver harness can run them repeatedly and
+clean up deterministically.
+
+The `std::basic_filebuf::underflow` example compares the no-argument
+`istream::get()` result against `char_traits<char>::eof()` explicitly; on MSVC
+that EOF value is truthy as an `int_type`, so the cppreference `while
+(stream.get())` loop can otherwise run forever.
 
 The `std::shared_timed_mutex` page leaves the protected resource as
 `/* data */`; the driver harness uses a small `int` so the assignment example

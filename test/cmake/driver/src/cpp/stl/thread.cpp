@@ -1464,11 +1464,149 @@ void expect(bool condition, const char *message) {
     throw std::runtime_error(message);
   }
 }
+
+void verify_condition_variable_edges() {
+  using namespace std::chrono_literals;
+
+  {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool ready = false;
+
+    std::unique_lock<std::mutex> lock(mutex);
+    expect(!cv.wait_for(lock, 1ms, [&] { return ready; }),
+           "condition_variable wait_for predicate unexpectedly succeeded");
+    ready = true;
+    expect(cv.wait_for(lock, 1ms, [&] { return ready; }),
+           "condition_variable wait_for predicate missed ready state");
+  }
+
+  {
+    std::mutex mutex;
+    std::condition_variable cv;
+    int stage = 0;
+    std::promise<void> waiter_ready;
+    auto waiter_ready_future = waiter_ready.get_future();
+
+    std::thread waiter([&] {
+      std::unique_lock<std::mutex> lock(mutex);
+      waiter_ready.set_value();
+      cv.wait(lock, [&] { return stage == 1; });
+      stage = 2;
+    });
+
+    waiter_ready_future.wait();
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      stage = 1;
+    }
+    cv.notify_one();
+    waiter.join();
+
+    expect(stage == 2, "condition_variable notify_one did not wake waiter");
+  }
+
+  {
+    std::mutex mutex;
+    std::condition_variable_any cv;
+    bool ready = false;
+
+    std::unique_lock<std::mutex> lock(mutex);
+    expect(!cv.wait_for(lock, 1ms, [&] { return ready; }),
+           "condition_variable_any wait_for predicate unexpectedly succeeded");
+    ready = true;
+    expect(cv.wait_for(lock, 1ms, [&] { return ready; }),
+           "condition_variable_any wait_for predicate missed ready state");
+  }
+}
+
+void verify_future_edges() {
+  using namespace std::chrono_literals;
+
+  {
+    std::promise<int> promise;
+    auto future = promise.get_future();
+    promise.set_exception(
+        std::make_exception_ptr(std::runtime_error("expected failure")));
+
+    bool caught = false;
+    try {
+      (void)future.get();
+    } catch (const std::runtime_error &e) {
+      caught = true;
+      expect(std::string{e.what()} == "expected failure",
+             "set_exception propagated unexpected runtime_error");
+    }
+    expect(caught, "set_exception future did not throw runtime_error");
+  }
+
+  {
+    std::promise<int> promise;
+    auto future = promise.get_future();
+    std::thread worker([promise = std::move(promise)]() mutable {
+      promise.set_value_at_thread_exit(23);
+    });
+    worker.join();
+    expect(future.wait_for(0ms) == std::future_status::ready,
+           "set_value_at_thread_exit future was not ready after thread exit");
+    expect(future.get() == 23,
+           "set_value_at_thread_exit returned unexpected value");
+  }
+}
+
+void verify_latch_barrier_semaphore_edges() {
+  using namespace std::chrono_literals;
+
+  {
+    std::latch latch{2};
+    expect(!latch.try_wait(), "latch was ready before count_down");
+    latch.count_down();
+    expect(!latch.try_wait(), "latch was ready after partial count_down");
+    latch.count_down();
+    expect(latch.try_wait(), "latch was not ready after final count_down");
+  }
+
+  {
+    std::atomic<int> completions{0};
+    std::barrier barrier{2, [&]() noexcept {
+                            completions.fetch_add(1, std::memory_order_relaxed);
+                          }};
+
+    std::thread worker([&] {
+      barrier.arrive_and_wait();
+      barrier.arrive_and_wait();
+    });
+
+    barrier.arrive_and_wait();
+    expect(completions.load(std::memory_order_relaxed) == 1,
+           "barrier completion did not run after first phase");
+    barrier.arrive_and_wait();
+    worker.join();
+    expect(completions.load(std::memory_order_relaxed) == 2,
+           "barrier completion did not run after second phase");
+  }
+
+  {
+    std::counting_semaphore<2> semaphore{0};
+    expect(!semaphore.try_acquire_for(1ms),
+           "counting_semaphore unexpectedly acquired at count zero");
+
+    semaphore.release(2);
+    expect(semaphore.try_acquire(), "counting_semaphore first acquire failed");
+    expect(semaphore.try_acquire(), "counting_semaphore second acquire failed");
+    expect(!semaphore.try_acquire_for(1ms),
+           "counting_semaphore acquired more permits than released");
+  }
+}
 } // namespace
 
 void run() {
   using namespace std::chrono_literals;
 
+  std::cout << "threading semantic edge: condition variables\n";
+  verify_condition_variable_edges();
+
+  std::cout << "threading semantic edge: shared timed mutex\n";
   {
     std::shared_timed_mutex mutex;
     std::atomic<bool> writer_locked{false};
@@ -1500,6 +1638,7 @@ void run() {
     reader.unlock();
   }
 
+  std::cout << "threading semantic edge: future states\n";
   {
     std::promise<int> promise;
     auto future = promise.get_future();
@@ -1569,5 +1708,12 @@ void run() {
     expect(caught, "second promise set_value did not throw future_error");
     expect(future.get() == 1, "promise value changed after second set_value");
   }
+
+  std::cout << "threading semantic edge: future exceptions/thread exit\n";
+  verify_future_edges();
+  std::cout << "threading semantic edge: latch/barrier/semaphore\n";
+  verify_latch_barrier_semaphore_edges();
+
+  std::cout << "threading semantic edge assertions passed\n";
 }
 } // namespace threading_semantic_edge_test

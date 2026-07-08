@@ -11,6 +11,16 @@ harness에서 실행되는 기능과 code path를 기록합니다.
 고정하지 않았다는 의미입니다. 실제 미지원/제약이 확인된 항목은 known
 limitation 또는 blocker에 따로 표시합니다.
 
+실제로 사용할 수 있는 표면은 아래 표보다 넓은 경우가 많습니다. `crtsys`는
+MSVC CRT/STL source path를 사용하고, 그 경로가 필요로 하는 Win32/NTDLL/ICU
+의존성은 LDK를 통해 kernel-mode substrate로 연결합니다. 그래서 matrix에
+개별 행이 없는 인접 header 함수나 overload도 별도 테스트 없이 동작하는
+경우가 많습니다. 이 matrix는 의도적으로 증거 목록입니다. 대표적인
+cppreference 예제, kernel-sensitive runtime path, 회귀가 쉬운 동작, LDK
+substrate를 실제로 밟는 API를 명시 테스트로 고정합니다. 목록에 없는 경로를
+사용할 때도 일반 kernel code와 같은 driver-context 감사를 적용하고, 해당
+경로가 드라이버에서 중요해지면 harness test를 추가하는 방식이 좋습니다.
+
 범례:
 
 - [x] Driver-test coverage 있음: `crtsys` kernel driver test에서 명시적으로
@@ -93,6 +103,10 @@ cppreference Example 코드를 이식한 항목은
 
 - [x] [typeid](https://en.cppreference.com/w/cpp/language/typeid)
   [(tested)](../test/cmake/driver/src/cpp/lang/rtti.cpp)
+- [x] `std::type_info::name`
+  - 기본 타입, class, struct, enum 이름을 driver semantic test로
+    검증합니다.
+  [(driver semantic test)](../test/cmake/driver/src/cpp/lang/rtti.cpp)
 - [x] [dynamic_cast](https://en.cppreference.com/w/cpp/language/dynamic_cast)
   [(tested)](../test/cmake/driver/src/cpp/lang/rtti.cpp)
 
@@ -126,9 +140,17 @@ cppreference Example 코드를 이식한 항목은
     [`std::chrono::zoned_time`](https://en.cppreference.com/w/cpp/chrono/zoned_time),
     [`std::chrono::time_zone::get_info`](https://en.cppreference.com/w/cpp/chrono/time_zone/get_info)도
     기본 driver build에서 실행됩니다.
-    [`std::chrono::get_tzdb`](https://en.cppreference.com/w/cpp/chrono/get_tzdb)와
-    invalid-zone `std::chrono::locate_zone` error path는 driver semantic
-    test로 검증합니다.
+    [`std::chrono::get_tzdb`](https://en.cppreference.com/w/cpp/chrono/get_tzdb) /
+    [`std::chrono::get_tzdb_list`](https://en.cppreference.com/w/cpp/chrono/get_tzdb_list)와
+    invalid-zone `std::chrono::locate_zone` error path도 검증합니다.
+  - [`std::chrono::system_clock::to_time_t`](https://en.cppreference.com/w/cpp/chrono/system_clock/to_time_t),
+    [`std::chrono::system_clock::from_time_t`](https://en.cppreference.com/w/cpp/chrono/system_clock/from_time_t),
+    [`std::chrono::file_clock::now`](https://en.cppreference.com/w/cpp/chrono/file_clock/now),
+    `time_zone::to_local` / `time_zone::to_sys`는 OS time semantic test로
+    검증합니다.
+  - File timestamp round trip은 `std::filesystem::last_write_time` get/set 및
+    missing-file error path를 통해 `std::chrono::file_clock` /
+    `system_clock` 변환을 검증합니다.
   - [`std::chrono::clock_cast`](https://en.cppreference.com/w/cpp/chrono/clock_cast)
     coverage는 active MSVC STL에서 해당 clock을 노출하는 경우
     `system_clock`, `file_clock`, `utc_clock`, `tai_clock`, `gps_clock`
@@ -216,10 +238,18 @@ cppreference Example 코드를 이식한 항목은
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/containers.cpp)
 - [x] [std::locale](https://en.cppreference.com/w/cpp/locale/locale)
   [(cppreference examples)](../test/cmake/driver/src/cpp/stl/locale.cpp)
+- [x] Locale facet semantic check
+  - named `std::locale`의 ctype, collate, numpunct, moneypunct facet을
+    LDK 기반 locale/NLS substrate 기준으로 검증합니다.
+  [(driver semantic test)](../test/cmake/driver/src/cpp/stl/locale.cpp)
 - [x] NLS and text conversion semantic check
   - `MultiByteToWideChar`, `WideCharToMultiByte`, `GetStringTypeW`,
-    `LCMapStringEx`, filesystem UTF-8 path round trip 경로를 invalid
-    sequence error case와 함께 검증합니다.
+    `LCMapStringEx`, CP_ACP / UTF-8 round trip, insufficient-buffer 및
+    invalid-sequence error case, UCRT `mbtowc` / `wctomb` / `mbstowcs` /
+    `mbstowcs_s` / `wcstombs` / `wcstombs_s` / `mbrtowc` / `wcrtomb`, C++ UTF
+    conversion 함수 `mbrtoc16` / `c16rtomb` / `mbrtoc32` / `c32rtomb`,
+    filesystem UTF-8 path create/read/copy/rename/enumeration 경로를
+    검증합니다.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/nls.cpp)
 - [x] [std::map](https://en.cppreference.com/w/cpp/container/map)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/containers.cpp)
@@ -343,16 +373,30 @@ cppreference Example 코드를 이식한 항목은
 - [x] [`std::quoted`](https://en.cppreference.com/w/cpp/io/manip/quoted)
       및 [`std::stringstream`](https://en.cppreference.com/w/cpp/io/basic_stringstream)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/streams.cpp)
+- [x] 파일 스트림 클래스:
+      [`std::basic_filebuf`](https://en.cppreference.com/w/cpp/io/basic_filebuf),
+      [`std::ifstream`](https://en.cppreference.com/w/cpp/io/basic_ifstream),
+      [`std::ofstream`](https://en.cppreference.com/w/cpp/io/basic_ofstream),
+      [`std::fstream`](https://en.cppreference.com/w/cpp/io/basic_fstream)
+      및 `basic_filebuf::open`, `is_open`, `seekoff`, `seekpos`,
+      `underflow`, `basic_ifstream::is_open`, `basic_fstream::open` /
+      `is_open` 파일 지향 예제
+  [(cppreference examples)](../test/cmake/driver/src/cpp/stl/streams.cpp)
 - [x] [`std::spanstream`](https://en.cppreference.com/w/cpp/io/basic_spanstream)
       / [`basic_spanstream::span`](https://en.cppreference.com/w/cpp/io/basic_spanstream/span)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/streams.cpp)
 - [x] [std::filesystem::path lexical operation](https://en.cppreference.com/w/cpp/filesystem/path/lexically_normal)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] `std::filesystem::path` decomposition, modifier, observer, iterator,
+      compare, hashing
+  [(cppreference examples)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] [std::filesystem::directory_iterator](https://en.cppreference.com/w/cpp/filesystem/directory_iterator)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] [std::filesystem::recursive_directory_iterator](https://en.cppreference.com/w/cpp/filesystem/recursive_directory_iterator)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] [std::filesystem::copy_file](https://en.cppreference.com/w/cpp/filesystem/copy_file)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [`std::filesystem::copy_options`](https://en.cppreference.com/w/cpp/filesystem/copy_options)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] [std::filesystem::copy](https://en.cppreference.com/w/cpp/filesystem/copy)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
@@ -367,6 +411,7 @@ cppreference Example 코드를 이식한 항목은
 - [x] [std::filesystem::copy_symlink](https://en.cppreference.com/w/cpp/filesystem/copy_symlink)
   [(tested)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] [std::filesystem::directory_entry](https://en.cppreference.com/w/cpp/filesystem/directory_entry)
+      및 `assign`, `replace_filename`, `refresh`
   [(tested)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] [std::filesystem::equivalent](https://en.cppreference.com/w/cpp/filesystem/equivalent)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
@@ -385,7 +430,8 @@ cppreference Example 코드를 이식한 항목은
 - [x] [std::filesystem::resize_file](https://en.cppreference.com/w/cpp/filesystem/resize_file)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] [std::filesystem::remove_all](https://en.cppreference.com/w/cpp/filesystem/remove)
-  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+      / `remove`
+  [(cppreference examples)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] [std::filesystem::space](https://en.cppreference.com/w/cpp/filesystem/space)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] [std::filesystem::rename](https://en.cppreference.com/w/cpp/filesystem/rename)
@@ -403,34 +449,41 @@ cppreference Example 코드를 이식한 항목은
 - [x] [std::filesystem::canonical / weakly_canonical](https://en.cppreference.com/w/cpp/filesystem/canonical)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] `std::filesystem` semantic edge check
-  - Error-code overload, file 변경 후 metadata refresh, recursive traversal
-    pruning은 driver semantic test로 검증합니다.
+  - Error-code overload, throwing overload parity, missing/existing/directory
+    negative path, file 변경 후 metadata refresh, recursive traversal pruning은
+    driver semantic test로 검증합니다.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] CRT stdio / lowio file I/O semantic check
   - `fopen` / `fread` / `fwrite` / `fseek` / `ftell` 및 `_open` / `_read` /
-    `_write` / `_lseek` / `_close` 경로를 성공 케이스와 missing file error
-    path로 검증합니다.
+    `_write` / `_lseek` / `_close`, `remove` 경로를 success,
+    missing-file, invalid-descriptor, read-only descriptor, `errno` /
+    `_doserrno` propagation 기준으로 검증합니다.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/cstdio.cpp)
 - [x] CRT file/process-state semantic check
-  - `_stat64` / `_wstat64` / `_fstat64`, `_access` / `_waccess`,
+  - `_stat` / `_stat64` / `_wstat64`, `_fstat` / `_fstat64`,
+    `_access` / `_waccess`,
     `_fullpath` / `_wfullpath`, `_getcwd` / `_wgetcwd`, `_chdir` / `_wchdir`,
-    `_findfirst64` / `_findnext64`, `_dup` / `_dup2`, `_commit`,
-    `_chsize_s` 경로를 LDK가 제공하는 current-directory, file-handle,
-    enumeration, metadata substrate 기준으로 검증합니다. CRT
-    current-directory state는 `std::filesystem::current_path`와 교차
-    검증합니다. `GetModuleFileNameA/W`와 `_get_pgmptr` / `_get_wpgmptr`는
-    CRT program-path state를 검증합니다.
+    `_findfirst` / `_findnext`, `_findfirst64` / `_findnext64`,
+    `_dup` / `_dup2`, `_commit`, `_chsize`, `_chsize_s` 경로를 LDK가
+    제공하는 current-directory, file-handle, enumeration, metadata
+    substrate 기준으로 검증합니다. CRT current-directory state는
+    `std::filesystem::current_path`와 교차 검증합니다.
+    `GetModuleFileNameA/W`와 `_get_pgmptr` / `_get_wpgmptr`는 CRT
+    program-path state를 검증합니다.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/cstdio_file_state.cpp)
 - [x] CRT environment semantic check
   - `getenv` / `getenv_s` / `_dupenv_s` 및 wide `_wgetenv` / `_wgetenv_s` /
     `_wdupenv_s` 경로를 CRT-managed environment variable 기준으로
-    검증합니다. `_putenv_s` / `_wputenv_s`의 add, update, delete 경로도
+    검증합니다. `_putenv_s` / `_wputenv_s`의 add, update, delete 경로와
+    `GetEnvironmentVariableA/W`를 통한 Win32 environment visibility도
     함께 검증합니다.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/cstdlib.cpp)
 - [x] Error and diagnostics semantic check
   - `GetLastError`, `FormatMessageA/W`, `std::system_category`,
-    `std::system_error`, `errno`, `_get_errno`, `_get_doserrno` 경로를
-    Win32 및 CRT failure case 기준으로 검증합니다.
+    `std::generic_category`, `std::system_error`, `errno`, `_get_errno`,
+    `_get_doserrno`, default error-condition mapping,
+    `FormatMessageA/W` failure-edge 경로를 Win32 및 CRT failure case 기준으로
+    검증합니다.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/diagnostics.cpp)
 - [x] [std::string](https://en.cppreference.com/w/cpp/string/basic_string)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/string.cpp)
@@ -513,7 +566,10 @@ cppreference Example 코드를 이식한 항목은
 - [x] [std::random_device](https://en.cppreference.com/w/cpp/numeric/random/random_device)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/numeric.cpp)
 - [x] CRT `rand_s`
-  [(driver semantic test)](../test/cmake/driver/src/cpp/stl/cstdlib.cpp)
+  - `rand_s`와 `std::random_device` repeated-call sanity check로 LDK
+    `SystemFunction036` 기반 UCRT random provider 경로를 검증합니다.
+  [(driver semantic tests)](../test/cmake/driver/src/cpp/stl/cstdlib.cpp),
+  [(random_device semantic test)](../test/cmake/driver/src/cpp/stl/numeric.cpp)
 - [x] [std::uniform_int_distribution](https://en.cppreference.com/w/cpp/numeric/random/uniform_int_distribution)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/numeric.cpp)
 - [x] [std::valarray::slice](https://en.cppreference.com/w/cpp/numeric/valarray/slice)
@@ -559,10 +615,12 @@ cppreference Example 코드를 이식한 항목은
 - [x] [std::shared_future](https://en.cppreference.com/w/cpp/thread/shared_future)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/thread.cpp)
 - [x] Threading/future semantic edge check
-  - timed shared-lock timeout/reacquire 동작, `std::future` /
-    `std::shared_future` timeout/ready 상태, deferred async 상태,
-    `broken_promise`, `promise_already_satisfied` error path를 driver
-    semantic test로 검증합니다.
+  - timed shared-lock timeout/reacquire 동작,
+    `std::condition_variable` / `std::condition_variable_any` timeout 및
+    predicate wake 동작, `std::future` / `std::shared_future` timeout/ready
+    상태, deferred async 상태, `set_exception`, `set_value_at_thread_exit`,
+    `broken_promise`, `promise_already_satisfied`, latch/barrier/semaphore
+    state transition을 driver semantic test로 검증합니다.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/thread.cpp)
 - [x] [std::promise](https://en.cppreference.com/w/cpp/thread/promise)
   [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp#L254)
