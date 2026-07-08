@@ -10,6 +10,7 @@
 #include <cwchar>
 #include <iostream>
 #include <stdexcept>
+#include <Windows.h>
 
 namespace crt_environment_semantic_test {
 namespace {
@@ -84,12 +85,59 @@ void expect_missing(const wchar_t *name, const char *message) {
   }
 }
 
+void expect_win32_environment_value(const char *name, const char *expected) {
+  char buffer[260]{};
+  SetLastError(ERROR_SUCCESS);
+  const DWORD length =
+      GetEnvironmentVariableA(name, buffer, static_cast<DWORD>(sizeof(buffer)));
+  expect(length != 0, "GetEnvironmentVariableA failed");
+  expect(length < sizeof(buffer), "GetEnvironmentVariableA truncated");
+  expect(std::strcmp(buffer, expected) == 0,
+         "GetEnvironmentVariableA returned unexpected value");
+}
+
+void expect_win32_environment_value(const wchar_t *name,
+                                    const wchar_t *expected) {
+  wchar_t buffer[260]{};
+  SetLastError(ERROR_SUCCESS);
+  const DWORD length = GetEnvironmentVariableW(
+      name, buffer, static_cast<DWORD>(sizeof(buffer) / sizeof(buffer[0])));
+  expect(length != 0, "GetEnvironmentVariableW failed");
+  expect(length < sizeof(buffer) / sizeof(buffer[0]),
+         "GetEnvironmentVariableW truncated");
+  expect(std::wcscmp(buffer, expected) == 0,
+         "GetEnvironmentVariableW returned unexpected value");
+}
+
+void expect_win32_environment_missing(const char *name, const char *message) {
+  char buffer[4]{};
+  SetLastError(ERROR_SUCCESS);
+  const DWORD length =
+      GetEnvironmentVariableA(name, buffer, static_cast<DWORD>(sizeof(buffer)));
+  if (length != 0 || GetLastError() != ERROR_ENVVAR_NOT_FOUND) {
+    throw std::runtime_error(message);
+  }
+}
+
+void expect_win32_environment_missing(const wchar_t *name, const char *message) {
+  wchar_t buffer[4]{};
+  SetLastError(ERROR_SUCCESS);
+  const DWORD length = GetEnvironmentVariableW(
+      name, buffer, static_cast<DWORD>(sizeof(buffer) / sizeof(buffer[0])));
+  if (length != 0 || GetLastError() != ERROR_ENVVAR_NOT_FOUND) {
+    throw std::runtime_error(message);
+  }
+}
+
 void verify_narrow_environment(const char *missing_variable_name,
                                const char *mutation_variable_name) {
   expect(_putenv_s(mutation_variable_name, "") == 0,
          "_putenv_s missing delete failed");
   expect_missing(mutation_variable_name,
                  "_putenv_s missing delete created the variable");
+  expect_win32_environment_missing(
+      mutation_variable_name,
+      "_putenv_s missing delete left Win32 environment state");
 
   expect(_putenv_s(mutation_variable_name, "alpha") == 0,
          "_putenv_s alpha failed");
@@ -98,6 +146,7 @@ void verify_narrow_environment(const char *missing_variable_name,
          "_putenv_s alpha was not visible through getenv");
   expect(std::strcmp(raw_value, "alpha") == 0,
          "_putenv_s alpha returned unexpected value");
+  expect_win32_environment_value(mutation_variable_name, "alpha");
 
   size_t required = 0;
   expect(getenv_s(&required, nullptr, 0, mutation_variable_name) == 0,
@@ -136,11 +185,16 @@ void verify_narrow_environment(const char *missing_variable_name,
   expect(std::strcmp(read_environment(mutation_variable_name),
                      "alpha-beta-gamma-long-value") == 0,
          "_putenv_s long update returned unexpected value");
+  expect_win32_environment_value(mutation_variable_name,
+                                 "alpha-beta-gamma-long-value");
 
   expect(_putenv_s(mutation_variable_name, "") == 0,
          "_putenv_s delete failed");
   expect_missing(mutation_variable_name,
                  "_putenv_s delete left the variable visible");
+  expect_win32_environment_missing(
+      mutation_variable_name,
+      "_putenv_s delete left Win32 environment state");
 }
 
 void verify_wide_environment(const wchar_t *wide_missing_variable_name,
@@ -149,6 +203,9 @@ void verify_wide_environment(const wchar_t *wide_missing_variable_name,
          "_wputenv_s missing delete failed");
   expect_missing(wide_mutation_variable_name,
                  "_wputenv_s missing delete created the variable");
+  expect_win32_environment_missing(
+      wide_mutation_variable_name,
+      "_wputenv_s missing delete left Win32 environment state");
 
   expect(_wputenv_s(wide_mutation_variable_name, L"wide") == 0,
          "_wputenv_s wide failed");
@@ -157,6 +214,7 @@ void verify_wide_environment(const wchar_t *wide_missing_variable_name,
          "_wputenv_s wide was not visible through _wgetenv");
   expect(std::wcscmp(raw_value, L"wide") == 0,
          "_wputenv_s wide returned unexpected value");
+  expect_win32_environment_value(wide_mutation_variable_name, L"wide");
 
   size_t required = 0;
   expect(_wgetenv_s(&required, nullptr, 0, wide_mutation_variable_name) == 0,
@@ -196,11 +254,16 @@ void verify_wide_environment(const wchar_t *wide_missing_variable_name,
   expect(std::wcscmp(read_environment(wide_mutation_variable_name),
                      L"wide-alpha-beta-gamma-long-value") == 0,
          "_wputenv_s long update returned unexpected value");
+  expect_win32_environment_value(wide_mutation_variable_name,
+                                 L"wide-alpha-beta-gamma-long-value");
 
   expect(_wputenv_s(wide_mutation_variable_name, L"") == 0,
          "_wputenv_s delete failed");
   expect_missing(wide_mutation_variable_name,
                  "_wputenv_s delete left the variable visible");
+  expect_win32_environment_missing(
+      wide_mutation_variable_name,
+      "_wputenv_s delete left Win32 environment state");
 }
 } // namespace
 
@@ -222,8 +285,18 @@ void expect(bool condition, const char *message) {
 } // namespace
 
 void run() {
-  unsigned int value = 0;
-  expect(::rand_s(&value) == 0, "rand_s failed");
+  unsigned int values[8]{};
+  bool saw_nonzero = false;
+  bool saw_difference = false;
+
+  for (unsigned int &value : values) {
+    expect(::rand_s(&value) == 0, "rand_s failed");
+    saw_nonzero = saw_nonzero || value != 0;
+    saw_difference = saw_difference || value != values[0];
+  }
+
+  expect(saw_nonzero, "rand_s returned only zero samples");
+  expect(saw_difference, "rand_s returned repeated identical samples");
   std::cout << "CRT random semantic assertions passed\n";
 }
 } // namespace crt_random_semantic_test

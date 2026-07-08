@@ -46,6 +46,9 @@ void run();
 namespace typeid_test {
 void run();
 }
+namespace type_info_name_test {
+void run();
+}
 namespace dynamic_cast_test {
 void run();
 }
@@ -65,6 +68,18 @@ void run();
 namespace chrono_time_zone_error_test {
 void run();
 }
+namespace chrono_system_clock_time_t_test {
+void run();
+}
+namespace chrono_file_clock_now_test {
+void run();
+}
+namespace chrono_time_zone_conversion_test {
+void run();
+}
+namespace chrono_tzdb_list_test {
+void run();
+}
 namespace chrono_year_month_day_test {
 void run();
 }
@@ -75,6 +90,9 @@ namespace chrono_hh_mm_ss_test {
 void run();
 }
 namespace chrono_clock_conversion_test {
+void run();
+}
+namespace chrono_file_timestamp_semantic_test {
 void run();
 }
 namespace crt_time_semantic_test {
@@ -310,10 +328,25 @@ void run();
 namespace filesystem_path_test {
 void run();
 }
+namespace filesystem_path_decomposition_test {
+void run();
+}
+namespace filesystem_path_modifier_test {
+void run();
+}
+namespace filesystem_path_observer_iterator_test {
+void run();
+}
+namespace filesystem_path_compare_hash_test {
+void run();
+}
 namespace filesystem_directory_iterator_test {
 void run();
 }
 namespace filesystem_copy_file_test {
+void run();
+}
+namespace filesystem_copy_options_test {
 void run();
 }
 namespace filesystem_copy_test {
@@ -349,10 +382,16 @@ void run();
 namespace filesystem_directory_entry_test {
 void run();
 }
+namespace filesystem_directory_entry_modifier_test {
+void run();
+}
 namespace filesystem_space_test {
 void run();
 }
 namespace filesystem_rename_test {
+void run();
+}
+namespace filesystem_remove_test {
 void run();
 }
 namespace filesystem_temp_directory_path_test {
@@ -496,6 +535,39 @@ void run();
 namespace quoted_test {
 void run();
 }
+namespace filebuf_underflow_test {
+void run();
+}
+namespace filebuf_open_test {
+void run();
+}
+namespace filebuf_is_open_test {
+void run();
+}
+namespace filebuf_seekoff_test {
+void run();
+}
+namespace filebuf_seekpos_test {
+void run();
+}
+namespace ifstream_test {
+void run();
+}
+namespace ifstream_is_open_test {
+void run();
+}
+namespace ofstream_constructor_test {
+void run();
+}
+namespace fstream_test {
+void run();
+}
+namespace fstream_open_test {
+void run();
+}
+namespace fstream_is_open_test {
+void run();
+}
 namespace spanstream_test {
 void run();
 }
@@ -637,6 +709,9 @@ void run();
 namespace time_put_test {
 void run();
 }
+namespace locale_nls_semantic_test {
+void run();
+}
 namespace tuple_test {
 void run();
 }
@@ -674,6 +749,9 @@ namespace visit_test {
 void run();
 }
 namespace random_device_test {
+void run();
+}
+namespace random_device_semantic_test {
 void run();
 }
 namespace uniform_int_distribution_test {
@@ -821,6 +899,7 @@ void cpp_std_tests() {
   CRTSYS_RUN_CPPREFERENCE_TEST(function_try_block_test);
 #endif
   CRTSYS_RUN_CPPREFERENCE_TEST(typeid_test);
+  CRTSYS_RUN_DRIVER_SEMANTIC_TEST(type_info_name_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(dynamic_cast_test);
   //
   // C++ STL tests.
@@ -829,10 +908,15 @@ void cpp_std_tests() {
   CRTSYS_RUN_CPPREFERENCE_TEST(chrono_current_zone_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(chrono_time_zone_info_test);
   CRTSYS_RUN_DRIVER_SEMANTIC_TEST(chrono_time_zone_error_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(chrono_system_clock_time_t_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(chrono_file_clock_now_test);
+  CRTSYS_RUN_DRIVER_SEMANTIC_TEST(chrono_time_zone_conversion_test);
+  CRTSYS_RUN_DRIVER_SEMANTIC_TEST(chrono_tzdb_list_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(chrono_year_month_day_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(chrono_weekday_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(chrono_hh_mm_ss_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(chrono_clock_conversion_test);
+  CRTSYS_RUN_DRIVER_SEMANTIC_TEST(chrono_file_timestamp_semantic_test);
   CRTSYS_RUN_DRIVER_SEMANTIC_TEST(crt_time_semantic_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(condition_variable_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(condition_variable_any_test);
@@ -909,9 +993,15 @@ void cpp_std_tests() {
   CRTSYS_RUN_CPPREFERENCE_TEST(money_put_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(time_get_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(time_put_test);
+  CRTSYS_RUN_DRIVER_SEMANTIC_TEST(locale_nls_semantic_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_path_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_path_decomposition_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_path_modifier_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_path_observer_iterator_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_path_compare_hash_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_directory_iterator_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_copy_file_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_copy_options_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_copy_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_status_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_file_size_test);
@@ -923,8 +1013,10 @@ void cpp_std_tests() {
   CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_read_symlink_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_copy_symlink_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_directory_entry_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_directory_entry_modifier_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_space_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_rename_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_remove_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_temp_directory_path_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_absolute_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(filesystem_current_path_test);
@@ -967,6 +1059,17 @@ void cpp_std_tests() {
   CRTSYS_RUN_CPPREFERENCE_TEST(regex_iterator_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(regex_token_iterator_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(quoted_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(filebuf_underflow_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(filebuf_open_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(filebuf_is_open_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(filebuf_seekoff_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(filebuf_seekpos_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(ifstream_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(ifstream_is_open_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(ofstream_constructor_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(fstream_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(fstream_open_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(fstream_is_open_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(spanstream_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(merge_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(heap_test);
@@ -1034,6 +1137,7 @@ void cpp_std_tests() {
   CRTSYS_RUN_CPPREFERENCE_TEST(complex_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(valarray_slice_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(random_device_test);
+  CRTSYS_RUN_DRIVER_SEMANTIC_TEST(random_device_semantic_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(uniform_int_distribution_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(function_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(bind_test);

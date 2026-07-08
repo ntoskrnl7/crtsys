@@ -20,6 +20,10 @@ kernel-mode substrate 위에 매핑됩니다.
 
 목록에 있다는 것은 "driver test로 검증됨"이라는 뜻입니다. compile되거나
 동작할 수 있는 모든 header/code path의 상한선을 뜻하지 않습니다.
+`crtsys`는 MSVC CRT/STL source path를 LDK Windows/NTDLL/ICU substrate 위에서
+사용하므로, matrix에 따로 적히지 않은 인접 overload와 header path도 동작하는
+경우가 많습니다. Matrix는 사용 가능한 표면의 한계가 아니라 명시 검증 증거를
+기록합니다.
 
 ## Quick Start
 

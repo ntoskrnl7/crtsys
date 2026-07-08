@@ -212,12 +212,11 @@
     <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\std_exception.cpp" />
     <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\std_nothrow.cpp" />
     <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\std_type_info_static.cpp" />
-    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\std_type_info.cpp">
-      <!-- :-( __unDName function is not implemented yet. -->
-      <ExcludedFromBuild>true</ExcludedFromBuild>
-    </ClCompile>
+    <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\std_type_info.cpp" />
     <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\undname.cxx">
-      <!-- :-( __unDName function is not implemented yet. -->
+      <!-- The shipped MSVC source needs private undname.hxx/undname.inl files
+           that are not installed with the CRT source package. crtsys provides
+           the __unDName entry point in custom/msvc/common/crt/src/vcruntime. -->
       <ExcludedFromBuild>true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="$(VC_CRT_SourcePath.Split(%3B)[0])\vcruntime\thread_locale.cpp" />

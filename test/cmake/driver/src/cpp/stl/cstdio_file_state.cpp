@@ -25,6 +25,7 @@ constexpr char dup_path[] = "crtsys_crt_file_state\\dup.txt";
 constexpr char dup_target_path[] = "crtsys_crt_file_state\\dup_target.txt";
 constexpr char find_a_path[] = "crtsys_crt_file_state\\find_a.txt";
 constexpr char find_b_path[] = "crtsys_crt_file_state\\find_b.log";
+constexpr char find_legacy_path[] = "crtsys_crt_file_state\\find_legacy.txt";
 constexpr char find_pattern[] = "crtsys_crt_file_state\\find_*.txt";
 
 void expect(bool condition, const char *message) {
@@ -63,6 +64,7 @@ void remove_tree() {
   (void)_unlink(dup_target_path);
   (void)_unlink(find_a_path);
   (void)_unlink(find_b_path);
+  (void)_unlink(find_legacy_path);
   (void)_rmdir(nested);
   (void)_rmdir(sandbox);
 }
@@ -85,6 +87,13 @@ void verify_stat_access_and_fullpath() {
   expect(_stat64(data_path, &stat_result) == 0, "_stat64 failed");
   expect((stat_result.st_mode & _S_IFREG) != 0, "_stat64 did not report file");
   expect(stat_result.st_size == 6, "_stat64 returned unexpected size");
+
+  struct _stat legacy_stat_result {};
+  expect(_stat(data_path, &legacy_stat_result) == 0, "_stat failed");
+  expect((legacy_stat_result.st_mode & _S_IFREG) != 0,
+         "_stat did not report file");
+  expect(legacy_stat_result.st_size == stat_result.st_size,
+         "_stat returned unexpected size");
 
   struct _stat64 wide_stat_result {};
   expect(_wstat64(wide_data_path, &wide_stat_result) == 0, "_wstat64 failed");
@@ -179,9 +188,26 @@ void verify_lowio_handle_state() {
   expect(_fstat64(source, &source_stat) == 0, "_fstat64 grow failed");
   expect(source_stat.st_size == 10, "_fstat64 grow returned unexpected size");
 
+  struct _stat legacy_source_stat {};
+  expect(_fstat(source, &legacy_source_stat) == 0, "_fstat grow failed");
+  expect(legacy_source_stat.st_size == 10,
+         "_fstat grow returned unexpected size");
+
   expect(_chsize_s(source, 2) == 0, "_chsize_s shrink failed");
   expect(_fstat64(source, &source_stat) == 0, "_fstat64 shrink failed");
   expect(source_stat.st_size == 2, "_fstat64 shrink returned unexpected size");
+
+  // Exercise the legacy lowio entry as well as _chsize_s. The secure variant is
+  // preferred for new code, but hosted CRT callers may still use _chsize.
+  expect(_chsize(source, 4) == 0, "_chsize grow failed");
+  expect(_fstat(source, &legacy_source_stat) == 0, "_fstat after _chsize failed");
+  expect(legacy_source_stat.st_size == 4,
+         "_fstat after _chsize returned unexpected size");
+  expect(_chsize(source, 2) == 0, "_chsize shrink failed");
+  expect(_fstat(source, &legacy_source_stat) == 0,
+         "_fstat after _chsize shrink failed");
+  expect(legacy_source_stat.st_size == 2,
+         "_fstat after _chsize shrink returned unexpected size");
 
   const int duplicate = _dup(source);
   expect(duplicate != -1, "_dup failed");
@@ -212,6 +238,7 @@ void verify_lowio_handle_state() {
 void verify_findfirst_findnext() {
   create_file_with_payload(find_a_path, "a");
   create_file_with_payload(find_b_path, "b");
+  create_file_with_payload(find_legacy_path, "legacy");
 
   struct __finddata64_t data {};
   const intptr_t handle = _findfirst64(find_pattern, &data);
@@ -226,7 +253,29 @@ void verify_findfirst_findnext() {
 
   expect(_findclose(handle) == 0, "_findclose failed");
   expect(saw_a, "_findfirst64/_findnext64 missed find_a.txt");
-  expect(count == 1, "_findfirst64/_findnext64 matched unexpected entries");
+  expect(count == 2, "_findfirst64/_findnext64 matched unexpected entries");
+
+  struct _finddata_t legacy_data {};
+  const intptr_t legacy_handle = _findfirst(find_pattern, &legacy_data);
+  expect(legacy_handle != -1, "_findfirst failed");
+
+  bool legacy_saw_a = std::strcmp(legacy_data.name, "find_a.txt") == 0;
+  bool legacy_saw_legacy =
+      std::strcmp(legacy_data.name, "find_legacy.txt") == 0;
+  int legacy_count = 1;
+  while (_findnext(legacy_handle, &legacy_data) == 0) {
+    legacy_saw_a =
+        legacy_saw_a || std::strcmp(legacy_data.name, "find_a.txt") == 0;
+    legacy_saw_legacy =
+        legacy_saw_legacy ||
+        std::strcmp(legacy_data.name, "find_legacy.txt") == 0;
+    ++legacy_count;
+  }
+
+  expect(_findclose(legacy_handle) == 0, "_findclose legacy failed");
+  expect(legacy_saw_a, "_findfirst/_findnext missed find_a.txt");
+  expect(legacy_saw_legacy, "_findfirst/_findnext missed find_legacy.txt");
+  expect(legacy_count == 2, "_findfirst/_findnext matched unexpected entries");
 }
 
 void verify_module_filename_state() {

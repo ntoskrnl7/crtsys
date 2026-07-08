@@ -11,6 +11,16 @@ A feature missing from this list should be read as "not yet explicitly covered
 by the driver tests", not as "unsupported", unless it is called out under known
 limitations or blockers.
 
+In practice, the usable surface is often wider than the rows below. `crtsys`
+uses MSVC CRT/STL source paths and maps their Win32/NTDLL/ICU dependencies
+through LDK, so many adjacent header functions and overloads work without a
+dedicated row in this matrix. The matrix is intentionally an evidence list:
+we add explicit tests for representative cppreference examples, kernel-sensitive
+runtime paths, regression-prone behavior, and APIs that exercise the LDK
+substrate. Rely on unlisted paths with the same driver-context audit you would
+apply to any kernel code, and add a harness test when a path becomes important
+to your driver.
+
 Legend:
 
 - [x] Driver-test covered: explicitly exercised by the `crtsys` kernel driver
@@ -92,6 +102,9 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
 
 - [x] [typeid](https://en.cppreference.com/w/cpp/language/typeid)
   [(tested)](../test/cmake/driver/src/cpp/lang/rtti.cpp)
+- [x] `std::type_info::name`
+  - Basic, class, struct, and enum names are covered by a driver semantic test.
+  [(driver semantic test)](../test/cmake/driver/src/cpp/lang/rtti.cpp)
 - [x] [dynamic_cast](https://en.cppreference.com/w/cpp/language/dynamic_cast)
   [(tested)](../test/cmake/driver/src/cpp/lang/rtti.cpp)
 
@@ -127,8 +140,16 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
     [`std::chrono::time_zone::get_info`](https://en.cppreference.com/w/cpp/chrono/time_zone/get_info)
     also run in the default driver build.
     [`std::chrono::get_tzdb`](https://en.cppreference.com/w/cpp/chrono/get_tzdb)
-    and invalid-zone `std::chrono::locate_zone` error paths are covered by a
-    driver semantic test.
+    / [`std::chrono::get_tzdb_list`](https://en.cppreference.com/w/cpp/chrono/get_tzdb_list)
+    and invalid-zone `std::chrono::locate_zone` error paths are covered.
+  - [`std::chrono::system_clock::to_time_t`](https://en.cppreference.com/w/cpp/chrono/system_clock/to_time_t),
+    [`std::chrono::system_clock::from_time_t`](https://en.cppreference.com/w/cpp/chrono/system_clock/from_time_t),
+    [`std::chrono::file_clock::now`](https://en.cppreference.com/w/cpp/chrono/file_clock/now),
+    and `time_zone::to_local` / `time_zone::to_sys` are covered by OS-time
+    semantic tests.
+  - File timestamp round trips cover `std::chrono::file_clock` /
+    `system_clock` conversion through `std::filesystem::last_write_time`
+    get/set and missing-file error paths.
   - [`std::chrono::clock_cast`](https://en.cppreference.com/w/cpp/chrono/clock_cast)
     coverage checks `system_clock`, `file_clock`, `utc_clock`, `tai_clock`,
     and `gps_clock` round trips where the active MSVC STL exposes those clocks.
@@ -215,10 +236,18 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/containers.cpp)
 - [x] [std::locale](https://en.cppreference.com/w/cpp/locale/locale)
   [(cppreference examples)](../test/cmake/driver/src/cpp/stl/locale.cpp)
+- [x] Locale facet semantic checks
+  - Named `std::locale` ctype, collate, numpunct, and moneypunct facets are
+    covered against the LDK-backed locale/NLS substrate.
+  [(driver semantic test)](../test/cmake/driver/src/cpp/stl/locale.cpp)
 - [x] NLS and text conversion semantic checks
   - `MultiByteToWideChar`, `WideCharToMultiByte`, `GetStringTypeW`,
-    `LCMapStringEx`, and filesystem UTF-8 path round-trip paths are covered
-    with invalid sequence error cases.
+    `LCMapStringEx`, CP_ACP / UTF-8 round trips, insufficient-buffer and
+    invalid-sequence error cases, UCRT `mbtowc` / `wctomb` / `mbstowcs` /
+    `mbstowcs_s` / `wcstombs` / `wcstombs_s` / `mbrtowc` / `wcrtomb`, C++ UTF
+    conversion functions `mbrtoc16` / `c16rtomb` / `mbrtoc32` / `c32rtomb`,
+    and filesystem UTF-8 path create/read/copy/rename/enumeration paths are
+    covered.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/nls.cpp)
 - [x] [std::map](https://en.cppreference.com/w/cpp/container/map)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/containers.cpp)
@@ -343,16 +372,30 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
 - [x] [`std::quoted`](https://en.cppreference.com/w/cpp/io/manip/quoted)
       with [`std::stringstream`](https://en.cppreference.com/w/cpp/io/basic_stringstream)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/streams.cpp)
+- [x] File stream classes:
+      [`std::basic_filebuf`](https://en.cppreference.com/w/cpp/io/basic_filebuf),
+      [`std::ifstream`](https://en.cppreference.com/w/cpp/io/basic_ifstream),
+      [`std::ofstream`](https://en.cppreference.com/w/cpp/io/basic_ofstream),
+      [`std::fstream`](https://en.cppreference.com/w/cpp/io/basic_fstream)
+      plus file-oriented examples for `basic_filebuf::open`, `is_open`,
+      `seekoff`, `seekpos`, and `underflow`, `basic_ifstream::is_open`,
+      and `basic_fstream::open` / `is_open`
+  [(cppreference examples)](../test/cmake/driver/src/cpp/stl/streams.cpp)
 - [x] [`std::spanstream`](https://en.cppreference.com/w/cpp/io/basic_spanstream)
       / [`basic_spanstream::span`](https://en.cppreference.com/w/cpp/io/basic_spanstream/span)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/streams.cpp)
 - [x] [std::filesystem::path lexical operations](https://en.cppreference.com/w/cpp/filesystem/path/lexically_normal)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] `std::filesystem::path` decomposition, modifiers, observers, iteration,
+      compare, and hashing
+  [(cppreference examples)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] [std::filesystem::directory_iterator](https://en.cppreference.com/w/cpp/filesystem/directory_iterator)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] [std::filesystem::recursive_directory_iterator](https://en.cppreference.com/w/cpp/filesystem/recursive_directory_iterator)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] [std::filesystem::copy_file](https://en.cppreference.com/w/cpp/filesystem/copy_file)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+- [x] [`std::filesystem::copy_options`](https://en.cppreference.com/w/cpp/filesystem/copy_options)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] [std::filesystem::copy](https://en.cppreference.com/w/cpp/filesystem/copy)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
@@ -367,6 +410,7 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
 - [x] [std::filesystem::copy_symlink](https://en.cppreference.com/w/cpp/filesystem/copy_symlink)
   [(tested)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] [std::filesystem::directory_entry](https://en.cppreference.com/w/cpp/filesystem/directory_entry)
+      including `assign`, `replace_filename`, and `refresh`
   [(tested)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] [std::filesystem::equivalent](https://en.cppreference.com/w/cpp/filesystem/equivalent)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
@@ -386,7 +430,8 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
 - [x] [std::filesystem::resize_file](https://en.cppreference.com/w/cpp/filesystem/resize_file)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] [std::filesystem::remove_all](https://en.cppreference.com/w/cpp/filesystem/remove)
-  [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
+      / `remove`
+  [(cppreference examples)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] [std::filesystem::space](https://en.cppreference.com/w/cpp/filesystem/space)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] [std::filesystem::rename](https://en.cppreference.com/w/cpp/filesystem/rename)
@@ -404,33 +449,39 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
 - [x] [std::filesystem::canonical / weakly_canonical](https://en.cppreference.com/w/cpp/filesystem/canonical)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] `std::filesystem` semantic edge checks
-  - Error-code overloads, metadata refresh after file changes, and recursive
+  - Error-code overloads, throwing overload parity, missing/existing/directory
+    negative paths, metadata refresh after file changes, and recursive
     traversal pruning are covered by driver semantic tests.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] CRT stdio / lowio file I/O semantic checks
   - `fopen` / `fread` / `fwrite` / `fseek` / `ftell` and `_open` / `_read` /
-    `_write` / `_lseek` / `_close` paths are covered with success and missing
-    file error paths.
+    `_write` / `_lseek` / `_close` and `remove` paths are covered with success,
+    missing-file, invalid-descriptor, read-only descriptor, and `errno` /
+    `_doserrno` propagation checks.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/cstdio.cpp)
 - [x] CRT file/process-state semantic checks
-  - `_stat64` / `_wstat64` / `_fstat64`, `_access` / `_waccess`,
+  - `_stat` / `_stat64` / `_wstat64`, `_fstat` / `_fstat64`,
+    `_access` / `_waccess`,
     `_fullpath` / `_wfullpath`, `_getcwd` / `_wgetcwd`, `_chdir` / `_wchdir`,
-    `_findfirst64` / `_findnext64`, `_dup` / `_dup2`, `_commit`, and
-    `_chsize_s` paths are covered against the LDK-backed current-directory,
-    file-handle, enumeration, and metadata substrate. CRT current-directory
-    state is cross-checked against `std::filesystem::current_path`.
+    `_findfirst` / `_findnext`, `_findfirst64` / `_findnext64`,
+    `_dup` / `_dup2`, `_commit`, `_chsize`, and `_chsize_s` paths are covered
+    against the LDK-backed current-directory, file-handle, enumeration, and
+    metadata substrate. CRT current-directory state is cross-checked against
+    `std::filesystem::current_path`.
     `GetModuleFileNameA/W` and `_get_pgmptr` / `_get_wpgmptr` cover CRT
     program-path state.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/cstdio_file_state.cpp)
 - [x] CRT environment semantic checks
   - `getenv` / `getenv_s` / `_dupenv_s` and wide `_wgetenv` / `_wgetenv_s` /
     `_wdupenv_s` paths are covered through CRT-managed environment variables.
-    `_putenv_s` / `_wputenv_s` add, update, and delete paths are also covered.
+    `_putenv_s` / `_wputenv_s` add, update, and delete paths are also covered,
+    including visibility through `GetEnvironmentVariableA/W`.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/cstdlib.cpp)
 - [x] Error and diagnostics semantic checks
   - `GetLastError`, `FormatMessageA/W`, `std::system_category`,
-    `std::system_error`, `errno`, `_get_errno`, and `_get_doserrno` paths are
-    covered through Win32 and CRT failure cases.
+    `std::generic_category`, `std::system_error`, `errno`, `_get_errno`,
+    `_get_doserrno`, default error-condition mapping, and `FormatMessageA/W`
+    failure-edge paths are covered through Win32 and CRT failure cases.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/diagnostics.cpp)
 - [x] [std::string](https://en.cppreference.com/w/cpp/string/basic_string)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/string.cpp)
@@ -513,7 +564,10 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
 - [x] [std::random_device](https://en.cppreference.com/w/cpp/numeric/random/random_device)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/numeric.cpp)
 - [x] CRT `rand_s`
-  [(driver semantic test)](../test/cmake/driver/src/cpp/stl/cstdlib.cpp)
+  - `rand_s` and `std::random_device` repeated-call sanity checks cover the
+    UCRT random provider path backed by LDK `SystemFunction036`.
+  [(driver semantic tests)](../test/cmake/driver/src/cpp/stl/cstdlib.cpp),
+  [(random_device semantic test)](../test/cmake/driver/src/cpp/stl/numeric.cpp)
 - [x] [std::uniform_int_distribution](https://en.cppreference.com/w/cpp/numeric/random/uniform_int_distribution)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/numeric.cpp)
 - [x] [std::valarray::slice](https://en.cppreference.com/w/cpp/numeric/valarray/slice)
@@ -559,10 +613,12 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
 - [x] [std::shared_future](https://en.cppreference.com/w/cpp/thread/shared_future)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/thread.cpp)
 - [x] Threading/future semantic edge checks
-  - Timed shared-lock timeout/reacquire behavior, `std::future` /
-    `std::shared_future` timeout/ready states, deferred async status,
-    `broken_promise`, and `promise_already_satisfied` error paths are covered
-    by driver semantic tests.
+  - Timed shared-lock timeout/reacquire behavior, `std::condition_variable` /
+    `std::condition_variable_any` timeout and predicate wake behavior,
+    `std::future` / `std::shared_future` timeout/ready states, deferred async
+    status, `set_exception`, `set_value_at_thread_exit`, `broken_promise`,
+    `promise_already_satisfied`, and latch/barrier/semaphore state transitions
+    are covered by driver semantic tests.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/thread.cpp)
 - [x] [std::promise](https://en.cppreference.com/w/cpp/thread/promise)
   [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp#L254)

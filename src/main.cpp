@@ -16,6 +16,8 @@ EXTERN_C NTSYSAPI PVOID NTAPI RtlImageDirectoryEntryToData(
     );
 EXTERN_C int __cdecl _initialize_narrow_environment();
 EXTERN_C int __cdecl _initialize_wide_environment();
+void __cdecl __scrt_initialize_type_info();
+void __cdecl __scrt_uninitialize_type_info();
 
 #ifdef ALLOC_PRAGMA
 #pragma alloc_text(INIT, CrtSysDriverEntry)
@@ -153,6 +155,7 @@ PDRIVER_DISPATCH CrtsyspDispatchClose = NULL;
 //
 __declspec(align(16)) UCHAR CrtSyspCompilerTlsBuffer[1024 * 1024];
 PVOID CrtSyspCompilerTlsSlots[1024] = { CrtSyspCompilerTlsBuffer, };
+BOOLEAN CrtSyspTypeInfoInitialized = FALSE;
 
 NTSTATUS
 CrtSysInitializeCompilerTlsImage (
@@ -431,6 +434,8 @@ CrtSysDriverEntry(_In_ PDRIVER_OBJECT DriverObject,
     LdkTerminate();
     return STATUS_FAILED_DRIVER_ENTRY;
   }
+  __scrt_initialize_type_info();
+  CrtSyspTypeInfoInitialized = TRUE;
 
   __scrt_current_native_startup_state =
       __scrt_native_startup_state::initializing;
@@ -516,6 +521,10 @@ CrtSysDriverUnload (
 #endif
 
     _cexit();
+    if (CrtSyspTypeInfoInitialized) {
+      __scrt_uninitialize_type_info();
+      CrtSyspTypeInfoInitialized = FALSE;
+    }
 
     __scrt_uninitialize_crt(
 #if DBG

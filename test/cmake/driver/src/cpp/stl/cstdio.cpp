@@ -6,12 +6,14 @@
 #include <iostream>
 #include <stdexcept>
 #include <sys/stat.h>
+#include <Windows.h>
 
 namespace crt_file_io_semantic_test {
 namespace {
 constexpr char file_path[] = "crtsys_stdio_lowio.tmp";
 constexpr char missing_stdio_path[] = "crtsys_stdio_missing.tmp";
 constexpr char missing_lowio_path[] = "crtsys_lowio_missing.tmp";
+constexpr char missing_remove_path[] = "crtsys_remove_missing.tmp";
 
 void expect(bool condition, const char *message) {
   if (!condition) {
@@ -23,6 +25,13 @@ void remove_test_files() {
   std::remove(file_path);
   std::remove(missing_stdio_path);
   _unlink(missing_lowio_path);
+  std::remove(missing_remove_path);
+}
+
+void expect_doserrno(unsigned long expected, const char *message) {
+  unsigned long captured{};
+  expect(_get_doserrno(&captured) == 0, "_get_doserrno failed");
+  expect(captured == expected, message);
 }
 } // namespace
 
@@ -30,9 +39,12 @@ void run() {
   remove_test_files();
 
   errno = 0;
+  _doserrno = 0;
   std::FILE *missing_stdio = std::fopen(missing_stdio_path, "rb");
   expect(missing_stdio == nullptr, "fopen unexpectedly opened missing file");
-  expect(errno != 0, "fopen missing file did not set errno");
+  expect(errno == ENOENT, "fopen missing file errno mismatch");
+  expect_doserrno(ERROR_FILE_NOT_FOUND,
+                  "fopen missing file _doserrno mismatch");
 
   std::FILE *fp = std::fopen(file_path, "wb+");
   expect(fp != nullptr, "fopen wb+ failed");
@@ -65,9 +77,20 @@ void run() {
   expect(_close(fh) == 0, "_close failed");
 
   errno = 0;
+  _doserrno = 0;
   const int missing_fh = _open(missing_lowio_path, _O_RDONLY | _O_BINARY);
   expect(missing_fh == -1, "_open unexpectedly opened missing file");
-  expect(errno != 0, "_open missing file did not set errno");
+  expect(errno == ENOENT, "_open missing file errno mismatch");
+  expect_doserrno(ERROR_FILE_NOT_FOUND,
+                  "_open missing file _doserrno mismatch");
+
+  errno = 0;
+  _doserrno = 0;
+  expect(std::remove(missing_remove_path) != 0,
+         "remove unexpectedly removed missing file");
+  expect(errno == ENOENT, "remove missing file errno mismatch");
+  expect_doserrno(ERROR_FILE_NOT_FOUND,
+                  "remove missing file _doserrno mismatch");
 
   expect(std::remove(file_path) == 0, "remove failed");
   std::cout << "CRT stdio/lowio file I/O semantic assertions passed\n";

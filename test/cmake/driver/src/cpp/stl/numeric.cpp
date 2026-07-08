@@ -9,6 +9,7 @@
 #include <iterator>
 #include <map>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <valarray>
 #include <vector>
@@ -154,6 +155,35 @@ void run() {
   }
 }
 } // namespace random_device_test
+
+namespace random_device_semantic_test {
+namespace {
+void expect(bool condition, const char *message) {
+  if (!condition) {
+    throw std::runtime_error(message);
+  }
+}
+} // namespace
+
+void run() {
+  std::random_device rd;
+  const auto min = rd.min();
+  const auto max = rd.max();
+  expect(min < max, "random_device reported an invalid range");
+
+  std::random_device::result_type samples[8]{};
+  bool saw_difference = false;
+  for (auto &sample : samples) {
+    sample = rd();
+    expect(sample <= max,
+           "random_device sample was outside its advertised range");
+    saw_difference = saw_difference || sample != samples[0];
+  }
+
+  expect(saw_difference, "random_device returned repeated identical samples");
+  std::cout << "random_device semantic assertions passed\n";
+}
+} // namespace random_device_semantic_test
 
 //
 // https://en.cppreference.com/w/cpp/numeric/random/uniform_int_distribution#Example

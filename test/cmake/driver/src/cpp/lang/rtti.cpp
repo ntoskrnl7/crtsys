@@ -1,5 +1,7 @@
 #include <cassert>
+#include <cstring>
 #include <iostream>
+#include <stdexcept>
 #include <typeinfo>
 
 namespace typeid_test {
@@ -23,6 +25,30 @@ void run() {
   std::cout << "typeid resolved the dynamic type\n";
 }
 } // namespace typeid_test
+
+namespace type_info_name_test {
+struct sample_struct {};
+class sample_class {};
+enum class sample_enum { value };
+
+void expect_name(const std::type_info &info, const char *expected) {
+  const char *const actual = info.name();
+  if (std::strcmp(actual, expected) != 0) {
+    std::cout << "type_info::name mismatch, expected '" << expected
+              << "', actual '" << actual << "'\n";
+    throw std::runtime_error("type_info::name mismatch");
+  }
+}
+
+void run() {
+  expect_name(typeid(int), "int");
+  expect_name(typeid(sample_struct), "struct type_info_name_test::sample_struct");
+  expect_name(typeid(sample_class), "class type_info_name_test::sample_class");
+  expect_name(typeid(sample_enum), "enum type_info_name_test::sample_enum");
+
+  std::cout << "type_info::name returned readable MSVC-style names\n";
+}
+} // namespace type_info_name_test
 
 namespace dynamic_cast_test {
 struct root {

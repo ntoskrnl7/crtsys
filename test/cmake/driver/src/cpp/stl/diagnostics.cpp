@@ -66,6 +66,42 @@ void verify_win32_last_error_and_messages() {
          "system_error what() message mismatch");
 }
 
+void verify_format_message_failure_edges() {
+  char small_buffer[4]{};
+  SetLastError(ERROR_SUCCESS);
+  const DWORD small_written =
+      FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM |
+                         FORMAT_MESSAGE_IGNORE_INSERTS,
+                     nullptr, ERROR_ACCESS_DENIED, 0, small_buffer,
+                     static_cast<DWORD>(sizeof(small_buffer)), nullptr);
+  expect(small_written == 0, "FormatMessageA small buffer unexpectedly worked");
+  expect(GetLastError() == ERROR_INSUFFICIENT_BUFFER,
+         "FormatMessageA small buffer last-error mismatch");
+
+  wchar_t wide_small_buffer[4]{};
+  SetLastError(ERROR_SUCCESS);
+  const DWORD wide_small_written = FormatMessageW(
+      FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr,
+      ERROR_ACCESS_DENIED, 0, wide_small_buffer,
+      static_cast<DWORD>(sizeof(wide_small_buffer) / sizeof(wide_small_buffer[0])),
+      nullptr);
+  expect(wide_small_written == 0,
+         "FormatMessageW small buffer unexpectedly worked");
+  expect(GetLastError() == ERROR_INSUFFICIENT_BUFFER,
+         "FormatMessageW small buffer last-error mismatch");
+
+  char unknown_buffer[128]{};
+  SetLastError(ERROR_SUCCESS);
+  const DWORD unknown_written =
+      FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM |
+                         FORMAT_MESSAGE_IGNORE_INSERTS,
+                     nullptr, 0xe000ffffu, 0, unknown_buffer,
+                     static_cast<DWORD>(sizeof(unknown_buffer)), nullptr);
+  expect(unknown_written == 0, "FormatMessageA unknown message unexpectedly worked");
+  expect(GetLastError() == ERROR_MR_MID_NOT_FOUND,
+         "FormatMessageA unknown message last-error mismatch");
+}
+
 void verify_lowio_errno_and_doserrno() {
   errno = 0;
   _doserrno = 0;
@@ -89,11 +125,48 @@ void verify_lowio_errno_and_doserrno() {
              std::string::npos,
          "system_category file-not-found message mismatch");
 }
+
+void verify_error_category_mapping() {
+  const std::error_code generic_not_found{
+      static_cast<int>(std::errc::no_such_file_or_directory),
+      std::generic_category()};
+  expect(generic_not_found.category() == std::generic_category(),
+         "generic no-such-file category mismatch");
+  expect(generic_not_found.default_error_condition() ==
+             std::make_error_condition(std::errc::no_such_file_or_directory),
+         "generic no-such-file condition mismatch");
+  expect(!generic_not_found.message().empty(),
+         "generic no-such-file message was empty");
+
+  const std::error_code system_not_found{ERROR_FILE_NOT_FOUND,
+                                         std::system_category()};
+  expect(system_not_found.category() == std::system_category(),
+         "system file-not-found category mismatch");
+  expect(system_not_found.default_error_condition() ==
+             std::make_error_condition(std::errc::no_such_file_or_directory),
+         "system file-not-found condition mismatch");
+  expect(system_not_found != generic_not_found,
+         "system and generic file-not-found error_codes unexpectedly matched");
+
+  const std::error_code system_access_denied{ERROR_ACCESS_DENIED,
+                                             std::system_category()};
+  expect(system_access_denied.default_error_condition() ==
+             std::make_error_condition(std::errc::permission_denied),
+         "system access-denied condition mismatch");
+
+  const std::error_code system_already_exists{ERROR_ALREADY_EXISTS,
+                                              std::system_category()};
+  expect(system_already_exists.default_error_condition() ==
+             std::make_error_condition(std::errc::file_exists),
+         "system already-exists condition mismatch");
+}
 } // namespace
 
 void run() {
   verify_win32_last_error_and_messages();
+  verify_format_message_failure_edges();
   verify_lowio_errno_and_doserrno();
+  verify_error_category_mapping();
   std::cout << "error diagnostics semantic assertions passed\n";
 }
 } // namespace error_diagnostics_semantic_test
