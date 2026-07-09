@@ -481,6 +481,12 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
     `_putenv_s` / `_wputenv_s` add, update, and delete paths are also covered,
     including visibility through `GetEnvironmentVariableA/W`.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/cstdlib.cpp)
+- [x] CRT runtime-state semantic checks
+  - `_get_fmode` / `_set_fmode`, `_query_new_mode` / `_set_new_mode`,
+    `_get_errno` / `_set_errno`, and `_get_doserrno` / `_set_doserrno` are
+    covered as CRT process/runtime state. The test restores the original state
+    before returning so later driver tests see the startup defaults.
+  [(driver semantic test)](../test/cmake/driver/src/cpp/stl/cstdlib.cpp)
 - [x] Error and diagnostics semantic checks
   - `GetLastError`, `FormatMessageA/W`, `std::system_category`,
     `std::generic_category`, `std::system_error`, `errno`, `_get_errno`,
@@ -680,7 +686,7 @@ priority than tests that prove the LDK-backed runtime substrate.
 | P0 | Locale, NLS, and text conversion | named/user locales, `GetLocaleInfo`-backed facets, `ctype`/`collate`, UTF-8/multibyte conversion, `time_get`/`time_put`, `money_get`/`money_put` | Exercises NLS tables, code pages, locale data, ICU-backed behavior, and UCRT conversion helpers. |
 | P1 | Threading, waits, and async | wait/notify timeout/error paths, condition-variable wake ordering, future/promise broken-promise and thread-exit paths, latch/barrier/semaphore semantics | Exercises LDK `WaitOnAddress`, keyed events, SRW/condition-variable behavior, thread handles, and unload-sensitive lifetime rules. |
 | P1 | Error and diagnostics paths | `std::system_error`, `std::error_code`, `FormatMessageA/W`, `GetLastError`/`errno` propagation, filesystem exception messages | Exercises NTSTATUS/Win32 error mapping and message-resource lookup quality. |
-| P1 | Environment, module, and process state | `getenv`/`_putenv`, duplicated environment strings, current directory, module filename, process-parameter style CRT initialization state | Exercises LDK PEB/process-parameter emulation and CRT startup assumptions. |
+| P2 | Additional process/runtime state | Startup-argument edge cases, invalid-parameter policy, `atexit`/`onexit` state, and other CRT startup/shutdown state not already covered above | Useful when a new MSVC CRT path starts depending on a process-global runtime state that is not yet exercised. |
 | P2 | Loader/resource integration | resource lookup, DLL/module discovery paths, ICU and message-resource provider behavior | Useful when a CRT/STL path expects hosted loader/resource semantics. |
 | P2 | Console/debug output | stream/stdout/stderr failure paths, `std::print`, `OutputDebugString`, output throttling behavior | Exercises console and debug-output policy; keep these out of production hot paths. |
 

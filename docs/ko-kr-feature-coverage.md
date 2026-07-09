@@ -481,6 +481,12 @@ cppreference Example 코드를 이식한 항목은
     `GetEnvironmentVariableA/W`를 통한 Win32 environment visibility도
     함께 검증합니다.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/cstdlib.cpp)
+- [x] CRT runtime-state semantic check
+  - `_get_fmode` / `_set_fmode`, `_query_new_mode` / `_set_new_mode`,
+    `_get_errno` / `_set_errno`, `_get_doserrno` / `_set_doserrno`를 CRT
+    process/runtime state 기준으로 검증합니다. 테스트가 끝나기 전에 원래
+    상태를 복구하여 뒤의 driver test가 startup default를 보도록 합니다.
+  [(driver semantic test)](../test/cmake/driver/src/cpp/stl/cstdlib.cpp)
 - [x] Error and diagnostics semantic check
   - `GetLastError`, `FormatMessageA/W`, `std::system_category`,
     `std::generic_category`, `std::system_error`, `errno`, `_get_errno`,
@@ -681,7 +687,7 @@ runtime substrate를 증명하는 테스트보다 우선순위는 낮습니다.
 | P0 | Locale, NLS, text conversion | named/user locale, `GetLocaleInfo` 기반 facet, `ctype`/`collate`, UTF-8/multibyte conversion, `time_get`/`time_put`, `money_get`/`money_put` | NLS table, code page, locale data, ICU 기반 동작, UCRT conversion helper를 검증합니다. |
 | P1 | Threading, wait, async | wait/notify timeout/error path, condition-variable wake ordering, future/promise broken-promise 및 thread-exit path, latch/barrier/semaphore semantics | LDK `WaitOnAddress`, keyed event, SRW/condition-variable 동작, thread handle, unload-sensitive lifetime rule을 검증합니다. |
 | P1 | Error 및 diagnostics path | `std::system_error`, `std::error_code`, `FormatMessageA/W`, `GetLastError`/`errno` propagation, filesystem exception message | NTSTATUS/Win32 error mapping과 message-resource lookup 품질을 검증합니다. |
-| P1 | Environment, module, process state | `getenv`/`_putenv`, duplicated environment string, current directory, module filename, process-parameter 스타일 CRT initialization state | LDK PEB/process-parameter emulation과 CRT startup assumption을 검증합니다. |
+| P2 | Additional process/runtime state | startup argument edge case, invalid-parameter policy, `atexit`/`onexit` state, 위에서 아직 검증하지 않은 CRT startup/shutdown state | 새 MSVC CRT path가 아직 검증하지 않은 process-global runtime state에 의존하기 시작할 때 유용합니다. |
 | P2 | Loader/resource integration | resource lookup, DLL/module discovery path, ICU 및 message-resource provider 동작 | CRT/STL path가 hosted loader/resource semantics를 기대하는 경우에 유용합니다. |
 | P2 | Console/debug output | stream/stdout/stderr failure path, `std::print`, `OutputDebugString`, output throttling behavior | console/debug-output policy를 검증합니다. production hot path와는 분리해서 봅니다. |
 

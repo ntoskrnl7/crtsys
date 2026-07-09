@@ -424,6 +424,9 @@ void run();
 namespace crt_environment_semantic_test {
 void run();
 }
+namespace crt_runtime_state_semantic_test {
+void run();
+}
 namespace crt_random_semantic_test {
 void run();
 }
@@ -1027,6 +1030,7 @@ void cpp_std_tests() {
   CRTSYS_RUN_DRIVER_SEMANTIC_TEST(crt_file_io_semantic_test);
   CRTSYS_RUN_DRIVER_SEMANTIC_TEST(crt_file_state_semantic_test);
   CRTSYS_RUN_DRIVER_SEMANTIC_TEST(crt_environment_semantic_test);
+  CRTSYS_RUN_DRIVER_SEMANTIC_TEST(crt_runtime_state_semantic_test);
   CRTSYS_RUN_DRIVER_SEMANTIC_TEST(crt_random_semantic_test);
   CRTSYS_RUN_DRIVER_SEMANTIC_TEST(error_diagnostics_semantic_test);
   CRTSYS_RUN_DRIVER_SEMANTIC_TEST(nls_conversion_semantic_test);
