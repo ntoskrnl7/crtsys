@@ -407,14 +407,55 @@ void verify_character_type_and_mapping() {
   expect((types[1] & C1_DIGIT) != 0, "GetStringTypeW digit mismatch");
   expect((types[2] & C1_SPACE) != 0, "GetStringTypeW space mismatch");
 
+  WORD invariant_types[3]{};
+  expect(GetStringTypeExW(LOCALE_INVARIANT, CT_CTYPE1, chars, 3,
+                          invariant_types) != FALSE,
+         "GetStringTypeExW invariant locale failed");
+  expect((invariant_types[0] & C1_UPPER) != 0,
+         "GetStringTypeExW uppercase mismatch");
+  expect((invariant_types[1] & C1_DIGIT) != 0,
+         "GetStringTypeExW digit mismatch");
+  expect((invariant_types[2] & C1_SPACE) != 0,
+         "GetStringTypeExW space mismatch");
+
   const wchar_t lower[] = L"crtsys";
   wchar_t upper[8]{};
+  const int required = LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_UPPERCASE,
+                                     lower, -1, nullptr, 0, nullptr, nullptr,
+                                     0);
+  expect(required == 7, "LCMapStringEx uppercase query length mismatch");
+
   const int mapped = LCMapStringEx(
       LOCALE_NAME_INVARIANT, LCMAP_UPPERCASE, lower, -1, upper,
       static_cast<int>(sizeof(upper) / sizeof(upper[0])), nullptr, nullptr, 0);
   expect(mapped == 7, "LCMapStringEx uppercase length mismatch");
   expect(std::wcscmp(upper, L"CRTSYS") == 0,
          "LCMapStringEx uppercase value mismatch");
+
+  wchar_t too_small_upper[3]{};
+  SetLastError(ERROR_SUCCESS);
+  const int small_map = LCMapStringEx(
+      LOCALE_NAME_INVARIANT, LCMAP_UPPERCASE, lower, -1, too_small_upper,
+      static_cast<int>(std::size(too_small_upper)), nullptr, nullptr, 0);
+  expect(small_map == 0, "LCMapStringEx unexpectedly accepted small buffer");
+  expect(GetLastError() == ERROR_INSUFFICIENT_BUFFER,
+         "LCMapStringEx small-buffer error mismatch");
+
+  const int case_insensitive_compare =
+      CompareStringEx(LOCALE_NAME_INVARIANT, NORM_IGNORECASE, L"kernel", -1,
+                      L"KERNEL", -1, nullptr, nullptr, 0);
+  expect(case_insensitive_compare == CSTR_EQUAL,
+         "CompareStringEx case-insensitive equality mismatch");
+
+  const int ordinal_ignore_case =
+      CompareStringOrdinal(L"kernel", -1, L"KERNEL", -1, TRUE);
+  expect(ordinal_ignore_case == CSTR_EQUAL,
+         "CompareStringOrdinal ignore-case equality mismatch");
+
+  const int ordinal_case_sensitive =
+      CompareStringOrdinal(L"kernel", -1, L"KERNEL", -1, FALSE);
+  expect(ordinal_case_sensitive != CSTR_EQUAL,
+         "CompareStringOrdinal case-sensitive comparison mismatch");
 }
 
 void verify_filesystem_utf8_path_roundtrip() {

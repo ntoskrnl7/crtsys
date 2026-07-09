@@ -1,6 +1,8 @@
 #include <algorithm>
 #include <cerrno>
+#include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cwchar>
 #include <direct.h>
@@ -32,6 +34,44 @@ void expect(bool condition, const char *message) {
   if (!condition) {
     throw std::runtime_error(message);
   }
+}
+
+void expect_errno(int expected, const char *message) {
+  if (errno != expected) {
+    throw std::runtime_error(std::string{message} + ": " +
+                             std::to_string(errno));
+  }
+}
+
+int invalid_parameter_hits{};
+
+void __cdecl capture_invalid_parameter(const wchar_t *, const wchar_t *,
+                                       const wchar_t *, unsigned int,
+                                       uintptr_t) {
+  ++invalid_parameter_hits;
+}
+
+class invalid_parameter_guard {
+public:
+  invalid_parameter_guard()
+      : previous_(_set_invalid_parameter_handler(capture_invalid_parameter)) {
+    invalid_parameter_hits = 0;
+  }
+
+  ~invalid_parameter_guard() { (void)_set_invalid_parameter_handler(previous_); }
+
+  invalid_parameter_guard(const invalid_parameter_guard &) = delete;
+  invalid_parameter_guard &operator=(const invalid_parameter_guard &) = delete;
+
+  int hits() const { return invalid_parameter_hits; }
+
+private:
+  _invalid_parameter_handler previous_;
+};
+
+void expect_invalid_parameter_hit(const invalid_parameter_guard &guard,
+                                  int previous_hits, const char *message) {
+  expect(guard.hits() == previous_hits + 1, message);
 }
 
 bool contains(const char *text, const char *needle) {
@@ -208,15 +248,18 @@ void verify_lowio_handle_state() {
          "_fstat after _chsize shrink failed");
   expect(legacy_source_stat.st_size == 2,
          "_fstat after _chsize shrink returned unexpected size");
+  expect(_filelength(source) == 2, "_filelength after shrink failed");
 
   const int duplicate = _dup(source);
   expect(duplicate != -1, "_dup failed");
   expect(_lseek(duplicate, 0, SEEK_SET) == 0, "_lseek duplicate failed");
+  expect(_tell(duplicate) == 0, "_tell duplicate failed");
 
   char read_back[3]{};
   expect(_read(duplicate, read_back, 2) == 2, "_read duplicate failed");
   expect(std::memcmp(read_back, "ab", 2) == 0,
          "_read duplicate returned unexpected bytes");
+  expect(_tell(duplicate) == 2, "_tell after duplicate read failed");
 
   const int target =
       _open(dup_target_path, _O_CREAT | _O_TRUNC | _O_RDWR | _O_BINARY,
@@ -233,6 +276,74 @@ void verify_lowio_handle_state() {
   expect(_close(target) == 0, "_close dup2 target failed");
   expect(_close(duplicate) == 0, "_close duplicate failed");
   expect(_close(source) == 0, "_close source failed");
+
+  errno = 0;
+  const int exclusive =
+      _open(dup_path, _O_CREAT | _O_EXCL | _O_RDWR | _O_BINARY,
+            _S_IREAD | _S_IWRITE);
+  expect(exclusive == -1, "_open exclusive unexpectedly replaced file");
+  expect_errno(EEXIST, "_open exclusive errno mismatch");
+
+  const int append = _open(dup_path, _O_WRONLY | _O_APPEND | _O_BINARY);
+  expect(append != -1, "_open append failed");
+  expect(_lseek(append, 0, SEEK_SET) == 0, "_lseek append failed");
+  expect(_write(append, "XY", 2) == 2, "_write append failed");
+  expect(_close(append) == 0, "_close append failed");
+
+  const int appended_read = _open(dup_path, _O_RDONLY | _O_BINARY);
+  expect(appended_read != -1, "_open appended readback failed");
+  char appended[5]{};
+  expect(_read(appended_read, appended, 4) == 4,
+         "_read appended readback failed");
+  expect(std::memcmp(appended, "abXY", 4) == 0,
+         "_O_APPEND did not append at end of file");
+  expect(_close(appended_read) == 0, "_close appended readback failed");
+
+  // UCRT lowio treats an invalid file descriptor as an invalid-parameter
+  // contract violation before returning -1/EBADF. The default handler calls
+  // Watson/fast-fail, which would bugcheck a kernel test driver, so this block
+  // installs a temporary handler and verifies both parts of the UCRT contract.
+  invalid_parameter_guard invalid_guard;
+  char invalid_buffer[1]{};
+  int previous_hits = invalid_guard.hits();
+  errno = 0;
+  expect(_read(-1, invalid_buffer, sizeof(invalid_buffer)) == -1,
+         "_read invalid descriptor unexpectedly succeeded");
+  expect_invalid_parameter_hit(invalid_guard, previous_hits,
+                               "_read invalid descriptor missed handler");
+  expect_errno(EBADF, "_read invalid descriptor errno mismatch");
+
+  previous_hits = invalid_guard.hits();
+  errno = 0;
+  expect(_write(-1, invalid_buffer, sizeof(invalid_buffer)) == -1,
+         "_write invalid descriptor unexpectedly succeeded");
+  expect_invalid_parameter_hit(invalid_guard, previous_hits,
+                               "_write invalid descriptor missed handler");
+  expect_errno(EBADF, "_write invalid descriptor errno mismatch");
+
+  previous_hits = invalid_guard.hits();
+  errno = 0;
+  expect(_lseek(-1, 0, SEEK_SET) == -1,
+         "_lseek invalid descriptor unexpectedly succeeded");
+  expect_invalid_parameter_hit(invalid_guard, previous_hits,
+                               "_lseek invalid descriptor missed handler");
+  expect_errno(EBADF, "_lseek invalid descriptor errno mismatch");
+
+  previous_hits = invalid_guard.hits();
+  errno = 0;
+  expect(_commit(-1) == -1, "_commit invalid descriptor unexpectedly succeeded");
+  expect_invalid_parameter_hit(invalid_guard, previous_hits,
+                               "_commit invalid descriptor missed handler");
+  expect_errno(EBADF, "_commit invalid descriptor errno mismatch");
+
+  struct _stat64 invalid_stat {};
+  previous_hits = invalid_guard.hits();
+  errno = 0;
+  expect(_fstat64(-1, &invalid_stat) == -1,
+         "_fstat64 invalid descriptor unexpectedly succeeded");
+  expect_invalid_parameter_hit(invalid_guard, previous_hits,
+                               "_fstat64 invalid descriptor missed handler");
+  expect_errno(EBADF, "_fstat64 invalid descriptor errno mismatch");
 }
 
 void verify_findfirst_findnext() {
@@ -276,6 +387,13 @@ void verify_findfirst_findnext() {
   expect(legacy_saw_a, "_findfirst/_findnext missed find_a.txt");
   expect(legacy_saw_legacy, "_findfirst/_findnext missed find_legacy.txt");
   expect(legacy_count == 2, "_findfirst/_findnext matched unexpected entries");
+
+  struct __finddata64_t missing_data {};
+  errno = 0;
+  const intptr_t missing_handle =
+      _findfirst64("crtsys_crt_file_state\\missing_*.txt", &missing_data);
+  expect(missing_handle == -1, "_findfirst64 unexpectedly found missing files");
+  expect_errno(ENOENT, "_findfirst64 missing-pattern errno mismatch");
 }
 
 void verify_module_filename_state() {

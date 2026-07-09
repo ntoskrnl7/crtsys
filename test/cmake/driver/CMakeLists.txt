@@ -8,7 +8,7 @@ cmake_policy(SET CMP0079 NEW)
 
 include(../../../cmake/CPM.cmake)
 
-option(CRTSYS_TEST_BREAKPOINT "Break into the kernel debugger when the test driver loads" ON)
+option(CRTSYS_TEST_BREAKPOINT "Break into the kernel debugger when the test driver loads" OFF)
 option(CRTSYS_ENABLE_FAILURE_HARNESS_SELF_TEST "Enable an intentional driver-test failure to verify exception capture" OFF)
 
 set(CRTSYS_NTL_MAIN ON)
