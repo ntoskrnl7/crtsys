@@ -146,7 +146,8 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
     [`std::chrono::system_clock::from_time_t`](https://en.cppreference.com/w/cpp/chrono/system_clock/from_time_t),
     [`std::chrono::file_clock::now`](https://en.cppreference.com/w/cpp/chrono/file_clock/now),
     and `time_zone::to_local` / `time_zone::to_sys` are covered by OS-time
-    semantic tests.
+    semantic tests, including `UTC` / `Etc/UTC` alias lookup and
+    `time_zone::get_info(local_time)` unique-mapping checks.
   - File timestamp round trips cover `std::chrono::file_clock` /
     `system_clock` conversion through `std::filesystem::last_write_time`
     get/set and missing-file error paths.
@@ -242,7 +243,8 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/locale.cpp)
 - [x] NLS and text conversion semantic checks
   - `MultiByteToWideChar`, `WideCharToMultiByte`, `GetStringTypeW`,
-    `LCMapStringEx`, CP_ACP / UTF-8 round trips, insufficient-buffer and
+    `GetStringTypeExW`, `LCMapStringEx`, `CompareStringEx`,
+    `CompareStringOrdinal`, CP_ACP / UTF-8 round trips, insufficient-buffer and
     invalid-sequence error cases, UCRT `mbtowc` / `wctomb` / `mbstowcs` /
     `mbstowcs_s` / `wcstombs` / `wcstombs_s` / `mbrtowc` / `wcrtomb`, C++ UTF
     conversion functions `mbrtoc16` / `c16rtomb` / `mbrtoc32` / `c32rtomb`,
@@ -464,9 +466,11 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
     `_access` / `_waccess`,
     `_fullpath` / `_wfullpath`, `_getcwd` / `_wgetcwd`, `_chdir` / `_wchdir`,
     `_findfirst` / `_findnext`, `_findfirst64` / `_findnext64`,
-    `_dup` / `_dup2`, `_commit`, `_chsize`, and `_chsize_s` paths are covered
-    against the LDK-backed current-directory, file-handle, enumeration, and
-    metadata substrate. CRT current-directory state is cross-checked against
+    `_dup` / `_dup2`, `_tell`, `_filelength`, `_commit`, `_chsize`, and
+    `_chsize_s` paths are covered against the LDK-backed current-directory,
+    file-handle, enumeration, and metadata substrate. `_O_EXCL`, `_O_APPEND`,
+    invalid-descriptor, and missing-glob failure paths are also checked. CRT
+    current-directory state is cross-checked against
     `std::filesystem::current_path`.
     `GetModuleFileNameA/W` and `_get_pgmptr` / `_get_wpgmptr` cover CRT
     program-path state.

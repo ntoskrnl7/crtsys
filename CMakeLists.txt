@@ -23,7 +23,7 @@ endif()
 
 option(CRTSYS_NTL_MAIN      "Set to ON to use ntl::main" ON)
 option(CRTSYS_USE_LIBCNTPR  "Set to ON to use libcntpr" ON)
-option(CRTSYS_ENABLE_DIAGNOSTIC_BREAKPOINTS "Set to OFF to suppress crtsys diagnostic KdBreakPoint calls" ON)
+option(CRTSYS_ENABLE_DIAGNOSTIC_BREAKPOINTS "Set to ON to enable crtsys diagnostic KdBreakPoint calls" OFF)
 option(CRTSYS_ENABLE_INSTALL "Enable crtsys install rules" ${CRTSYS_IS_TOP_LEVEL})
 set(CRTSYS_LDK_SOURCE_DIR "" CACHE PATH "Use a local LDK source tree instead of fetching the default LDK release")
 
@@ -204,7 +204,7 @@ endif()
 if(CRTSYS_LDK_SOURCE_DIR)
   CPMAddPackage(NAME Ldk SOURCE_DIR "${CRTSYS_LDK_SOURCE_DIR}")
 else()
-  CPMAddPackage("gh:ntoskrnl7/Ldk@0.7.20")
+  CPMAddPackage("gh:ntoskrnl7/Ldk@0.7.21")
 endif()
 
 CPMAddPackage("gh:ntoskrnl7/FindWDK#master")

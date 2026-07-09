@@ -147,7 +147,8 @@ cppreference Example 코드를 이식한 항목은
     [`std::chrono::system_clock::from_time_t`](https://en.cppreference.com/w/cpp/chrono/system_clock/from_time_t),
     [`std::chrono::file_clock::now`](https://en.cppreference.com/w/cpp/chrono/file_clock/now),
     `time_zone::to_local` / `time_zone::to_sys`는 OS time semantic test로
-    검증합니다.
+    검증합니다. `UTC` / `Etc/UTC` alias lookup 및
+    `time_zone::get_info(local_time)` unique-mapping도 확인합니다.
   - File timestamp round trip은 `std::filesystem::last_write_time` get/set 및
     missing-file error path를 통해 `std::chrono::file_clock` /
     `system_clock` 변환을 검증합니다.
@@ -244,7 +245,8 @@ cppreference Example 코드를 이식한 항목은
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/locale.cpp)
 - [x] NLS and text conversion semantic check
   - `MultiByteToWideChar`, `WideCharToMultiByte`, `GetStringTypeW`,
-    `LCMapStringEx`, CP_ACP / UTF-8 round trip, insufficient-buffer 및
+    `GetStringTypeExW`, `LCMapStringEx`, `CompareStringEx`,
+    `CompareStringOrdinal`, CP_ACP / UTF-8 round trip, insufficient-buffer 및
     invalid-sequence error case, UCRT `mbtowc` / `wctomb` / `mbstowcs` /
     `mbstowcs_s` / `wcstombs` / `wcstombs_s` / `mbrtowc` / `wcrtomb`, C++ UTF
     conversion 함수 `mbrtoc16` / `c16rtomb` / `mbrtoc32` / `c32rtomb`,
@@ -464,10 +466,11 @@ cppreference Example 코드를 이식한 항목은
     `_access` / `_waccess`,
     `_fullpath` / `_wfullpath`, `_getcwd` / `_wgetcwd`, `_chdir` / `_wchdir`,
     `_findfirst` / `_findnext`, `_findfirst64` / `_findnext64`,
-    `_dup` / `_dup2`, `_commit`, `_chsize`, `_chsize_s` 경로를 LDK가
-    제공하는 current-directory, file-handle, enumeration, metadata
-    substrate 기준으로 검증합니다. CRT current-directory state는
-    `std::filesystem::current_path`와 교차 검증합니다.
+    `_dup` / `_dup2`, `_tell`, `_filelength`, `_commit`, `_chsize`,
+    `_chsize_s` 경로를 LDK가 제공하는 current-directory, file-handle,
+    enumeration, metadata substrate 기준으로 검증합니다. `_O_EXCL`,
+    `_O_APPEND`, invalid-descriptor, missing-glob failure path도 확인합니다.
+    CRT current-directory state는 `std::filesystem::current_path`와 교차 검증합니다.
     `GetModuleFileNameA/W`와 `_get_pgmptr` / `_get_wpgmptr`는 CRT
     program-path state를 검증합니다.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/cstdio_file_state.cpp)

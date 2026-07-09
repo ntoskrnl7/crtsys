@@ -203,11 +203,36 @@ void expect_conversion(const char *name, std::chrono::seconds offset) {
          "time_zone::to_sys did not invert to_local");
 }
 
+void expect_local_info(const char *name, std::chrono::seconds offset) {
+  using namespace std::chrono;
+
+  const auto *zone = locate_zone(name);
+  const local_seconds local = local_days{2024y / July / 1} + 9h + 30min;
+  const auto info = zone->get_info(local);
+
+  std::cout << zone->name() << " local offset " << info.first.offset.count()
+            << "s, result " << static_cast<int>(info.result) << '\n';
+
+  expect(info.result == local_info::unique,
+         "time_zone::get_info(local_time) did not report a unique mapping");
+  expect(info.first.offset == offset,
+         "time_zone::get_info(local_time) returned unexpected offset");
+  expect(zone->to_local(zone->to_sys(local)) == local,
+         "time_zone local/sys round-trip failed");
+}
+
 void run() {
   expect_conversion("UTC", std::chrono::seconds{0});
+  expect_conversion("Etc/UTC", std::chrono::seconds{0});
   expect_conversion("Asia/Seoul", std::chrono::hours{9});
   expect_conversion("America/New_York", -std::chrono::hours{5});
   expect_conversion("Europe/Berlin", std::chrono::hours{1});
+
+  expect_local_info("UTC", std::chrono::seconds{0});
+  expect_local_info("Etc/UTC", std::chrono::seconds{0});
+  expect_local_info("Asia/Seoul", std::chrono::hours{9});
+  expect_local_info("America/New_York", -std::chrono::hours{5});
+  expect_local_info("Europe/Berlin", std::chrono::hours{1});
 }
 } // namespace chrono_time_zone_conversion_test
 
@@ -231,6 +256,7 @@ void run() {
 
   expect(&front == &tzdb, "get_tzdb_list front does not match get_tzdb");
   expect(tzdb.locate_zone("UTC") != nullptr, "tzdb UTC lookup failed");
+  expect(tzdb.locate_zone("Etc/UTC") != nullptr, "tzdb Etc/UTC lookup failed");
   expect(tzdb.locate_zone("Asia/Seoul") != nullptr,
          "tzdb Asia/Seoul lookup failed");
   expect(tzdb.locate_zone("America/New_York") != nullptr,
