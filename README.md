@@ -123,6 +123,7 @@ flowchart TD
 | C++ exceptions | Driver-tested | `throw`, `try`/`catch`, function-try-block, `std::exception_ptr` |
 | SEH handling | Driver-tested | C++ helper path for `__try` / `__except` boundary handling |
 | Static initialization | Driver-tested | non-local, dynamic, and MSVC function-local static initialization |
+| Multi-driver compiler TLS | Driver-tested | distinct MSVC `_tls_index` values across crtsys-linked drivers so runtime TLS slots do not collide |
 | RTTI | Driver-tested | `typeid`, `dynamic_cast` |
 | STL containers / algorithms | Driver-tested | containers, algorithms, ranges, smart pointers, PMR, utility |
 | `std::format` / `std::print` | Driver-tested | formatted string/output paths |
@@ -131,7 +132,7 @@ flowchart TD
 | Concurrency | Driver-tested | thread, synchronization, async/future, atomic wait/notify |
 | Locale / chrono / charconv | Driver-tested | locale facets, timezone/chrono paths, integer and floating char conversion |
 | NTL driver helpers | Driver-tested | `ntl::main`, driver/device helpers, RPC, IRQL helpers, stack expansion |
-| `thread_local` | Not true TLS | Compiler TLS is not exposed as true per-thread kernel TLS |
+| `thread_local` | Unsupported for user variables | Kernel GS is processor-local KPCR, not user-mode TEB; user-declared `thread_local` would not be per-thread storage |
 
 The detailed matrix is intentionally test-linked: it records features exercised
 by the kernel driver test suite, not the full set of headers or code paths that
@@ -156,7 +157,7 @@ may compile or work.
 | Driver model | The driver remains a normal WDK driver. Verifier, HVCI, unload safety, target OS validation, and paging rules still matter. |
 | IRQL | Runtime-backed C++/CRT/STL paths are `PASSIVE_LEVEL` unless a specific API documents a wider contract. |
 | Stack | Kernel stacks are small; use `ntl::expand_stack` for exception-heavy or STL-heavy paths. |
-| TLS | MSVC function-local statics are supported. General C++ `thread_local` is not true per-thread TLS. |
+| TLS | MSVC function-local statics are supported, including multi-driver compiler TLS slot isolation. That supported path isolates runtime compiler TLS slots between driver images. It does not make user-declared `thread_local T value` safe: in kernel mode the GS-based TLS assumption points at processor-local KPCR state, not a per-thread user-mode TEB. |
 | Toolchain | Use matching SDK/WDK versions. Use WDK 23H2 or older for x86 kernel-mode targets. |
 
 ## Requirements
@@ -400,8 +401,8 @@ fit for kernel-mode support:
 
 ## Roadmap
 
-- Expand driver-tested C++ and STL coverage, including investigation of true
-  `thread_local` storage.
+- Expand driver-tested C++ and STL coverage while keeping true `thread_local`
+  listed as unsupported unless a safe kernel-mode design exists.
 - Reduce Visual Studio 2017 compatibility gaps and keep toolset-specific
   compatibility code smaller.
 - Broaden real driver load/run CI coverage where suitable test environments are

@@ -45,6 +45,30 @@ This is why the coverage matrix is tied to driver tests instead of a separate
 compatibility vocabulary. It records the standard C++/CRT/STL paths that have
 actually been exercised under the kernel driver harness.
 
+## Multi-Driver Runtime State
+
+`crtsys` is linked as a static runtime substrate, so two different drivers can
+carry two different copies of the crtsys runtime in one kernel session. Runtime
+state that models process-wide or loader-wide user-mode behavior must therefore
+avoid per-image collisions.
+
+For MSVC compiler TLS state, crtsys uses a shared kernel section that holds one
+system-space TLS slot vector and a slot allocator. Each crtsys-linked driver
+gets a distinct MSVC `_tls_index` and stores its own compiler TLS image buffer
+in that shared vector. This keeps runtime paths such as thread-safe
+function-local `static` initialization from colliding when multiple
+crtsys-linked drivers are loaded.
+
+This guarantee is driver-image isolation, not per-thread storage semantics. It
+prevents two crtsys-linked drivers from sharing the same compiler TLS slot, but
+it does not make compiler TLS values distinct for each kernel thread.
+Put differently, this is `_tls_index` collision avoidance across driver images.
+It is not a GS/TEB-style TLS implementation where the same user-declared
+variable has separate storage on each thread. In kernel mode, the GS-based TLS
+assumption is tied to processor-local KPCR state, not a user-mode TEB for each
+thread. User code must not rely on `thread_local T value` as C++ per-thread
+storage.
+
 ## Consumer Paths
 
 Visual Studio/MSBuild driver projects normally consume the NuGet package through

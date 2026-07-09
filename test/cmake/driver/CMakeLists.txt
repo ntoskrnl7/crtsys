@@ -89,3 +89,23 @@ target_include_directories(crtsys_test PRIVATE ${CMAKE_CURRENT_LIST_DIR}/..)
 
 include(../../../cmake/std-cxx.cmake)
 set_std_cxx_latest(crtsys_test)
+
+crtsys_add_driver(crtsys_multi_a multi_instance/driver.cpp)
+target_compile_definitions(crtsys_multi_a PRIVATE "CRTSYS_MULTI_INSTANCE_ID=1")
+target_include_directories(crtsys_multi_a PRIVATE ${CMAKE_CURRENT_LIST_DIR}/..)
+set_std_cxx_latest(crtsys_multi_a)
+
+crtsys_add_driver(crtsys_multi_b multi_instance/driver.cpp)
+target_compile_definitions(crtsys_multi_b PRIVATE "CRTSYS_MULTI_INSTANCE_ID=2")
+target_include_directories(crtsys_multi_b PRIVATE ${CMAKE_CURRENT_LIST_DIR}/..)
+set_std_cxx_latest(crtsys_multi_b)
+
+add_executable(crtsys_multi_probe multi_instance/probe.cpp)
+target_include_directories(crtsys_multi_probe PRIVATE ${CMAKE_CURRENT_LIST_DIR}/..)
+target_compile_options(
+    crtsys_multi_probe
+    PRIVATE
+        "$<$<CONFIG:Debug>:/MTd>"
+        "$<$<NOT:$<CONFIG:Debug>>:/MT>"
+)
+set_std_cxx_latest(crtsys_multi_probe)
