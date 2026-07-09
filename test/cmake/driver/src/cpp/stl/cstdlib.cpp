@@ -3,12 +3,15 @@
 #define _CRT_RAND_S
 #endif
 
+#include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cwchar>
+#include <fcntl.h>
 #include <iostream>
+#include <new.h>
 #include <stdexcept>
 #include <Windows.h>
 
@@ -274,6 +277,108 @@ void run() {
   std::cout << "CRT environment semantic assertions passed\n";
 }
 } // namespace crt_environment_semantic_test
+
+namespace crt_runtime_state_semantic_test {
+namespace {
+void expect(bool condition, const char *message) {
+  if (!condition) {
+    throw std::runtime_error(message);
+  }
+}
+
+class runtime_state_guard {
+public:
+  runtime_state_guard() {
+    expect(_get_fmode(&fmode_) == 0, "_get_fmode snapshot failed");
+    expect(_get_errno(&errno_) == 0, "_get_errno snapshot failed");
+    expect(_get_doserrno(&doserrno_) == 0, "_get_doserrno snapshot failed");
+    new_mode_ = _query_new_mode();
+  }
+
+  ~runtime_state_guard() {
+    (void)_set_fmode(fmode_);
+    (void)_set_new_mode(new_mode_);
+    (void)_set_errno(errno_);
+    (void)_set_doserrno(doserrno_);
+  }
+
+  runtime_state_guard(const runtime_state_guard &) = delete;
+  runtime_state_guard &operator=(const runtime_state_guard &) = delete;
+
+private:
+  int fmode_{};
+  int errno_{};
+  unsigned long doserrno_{};
+  int new_mode_{};
+};
+
+void expect_errno_value(int expected, const char *message) {
+  int value{};
+  expect(_get_errno(&value) == 0, "_get_errno failed");
+  expect(value == expected, message);
+  expect(errno == expected, "errno macro value mismatch");
+}
+
+void expect_doserrno_value(unsigned long expected, const char *message) {
+  unsigned long value{};
+  expect(_get_doserrno(&value) == 0, "_get_doserrno failed");
+  expect(value == expected, message);
+}
+
+void verify_file_mode_state() {
+  int mode{};
+  expect(_get_fmode(&mode) == 0, "_get_fmode failed");
+
+  expect(_set_fmode(_O_BINARY) == 0, "_set_fmode binary failed");
+  expect(_get_fmode(&mode) == 0, "_get_fmode after binary failed");
+  expect(mode == _O_BINARY, "_get_fmode did not observe binary mode");
+
+  expect(_set_fmode(_O_TEXT) == 0, "_set_fmode text failed");
+  expect(_get_fmode(&mode) == 0, "_get_fmode after text failed");
+  expect(mode == _O_TEXT, "_get_fmode did not observe text mode");
+}
+
+void verify_new_mode_state() {
+  const int original = _query_new_mode();
+  expect(original == 0 || original == 1, "_query_new_mode returned bad value");
+
+  const int old_after_enable = _set_new_mode(1);
+  expect(old_after_enable == original, "_set_new_mode enable old value mismatch");
+  expect(_query_new_mode() == 1, "_query_new_mode did not observe enabled mode");
+
+  const int old_after_disable = _set_new_mode(0);
+  expect(old_after_disable == 1, "_set_new_mode disable old value mismatch");
+  expect(_query_new_mode() == 0,
+         "_query_new_mode did not observe disabled mode");
+}
+
+void verify_errno_state() {
+  expect(_set_errno(EACCES) == 0, "_set_errno EACCES failed");
+  expect_errno_value(EACCES, "_get_errno EACCES mismatch");
+
+  expect(_set_errno(ENOENT) == 0, "_set_errno ENOENT failed");
+  expect_errno_value(ENOENT, "_get_errno ENOENT mismatch");
+
+  expect(_set_doserrno(ERROR_ACCESS_DENIED) == 0,
+         "_set_doserrno ERROR_ACCESS_DENIED failed");
+  expect_doserrno_value(ERROR_ACCESS_DENIED,
+                        "_get_doserrno ERROR_ACCESS_DENIED mismatch");
+
+  expect(_set_doserrno(ERROR_PATH_NOT_FOUND) == 0,
+         "_set_doserrno ERROR_PATH_NOT_FOUND failed");
+  expect_doserrno_value(ERROR_PATH_NOT_FOUND,
+                        "_get_doserrno ERROR_PATH_NOT_FOUND mismatch");
+}
+} // namespace
+
+void run() {
+  runtime_state_guard guard;
+  verify_file_mode_state();
+  verify_new_mode_state();
+  verify_errno_state();
+  std::cout << "CRT runtime-state semantic assertions passed\n";
+}
+} // namespace crt_runtime_state_semantic_test
 
 namespace crt_random_semantic_test {
 namespace {
