@@ -133,7 +133,7 @@ $wdkPlatformByArchitecture = @{
   ARM64 = 'arm64'
 }
 $wdkKernelLibDirectory = Join-Path $windowsKitsRoot "Lib\$WdkVersion\km\$($wdkPlatformByArchitecture[$Architecture])"
-foreach ($requiredLib in @('ntoskrnl.lib', 'hal.lib', 'wmilib.lib', 'libcntpr.lib', 'cng.lib')) {
+foreach ($requiredLib in @('ntoskrnl.lib', 'hal.lib', 'wmilib.lib', 'libcntpr.lib', 'cng.lib', 'aux_klib.lib')) {
   if (-not (Test-Path (Join-Path $wdkKernelLibDirectory $requiredLib))) {
     throw "WDK kernel library directory is missing $requiredLib`: $wdkKernelLibDirectory"
   }

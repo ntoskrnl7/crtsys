@@ -234,10 +234,7 @@ void run() { std::cout << "std::mdspan is not available in this STL\n"; }
 namespace stacktrace_test {
 #if defined(__cpp_lib_stacktrace) && __cpp_lib_stacktrace >= 202011L
 int nested_func(int c) {
-  auto trace = std::stacktrace::current();
-  std::cout << "stacktrace frames: " << trace.size() << '\n';
-  cxx_latest_detail::expect(!trace.empty(),
-                            "std::stacktrace::current returned no frames");
+  std::cout << std::stacktrace::current() << '\n';
   return c + 1;
 }
 
@@ -253,6 +250,52 @@ void run() {
 void run() { std::cout << "std::stacktrace is not available in this STL\n"; }
 #endif
 } // namespace stacktrace_test
+
+namespace stacktrace_semantic_test {
+#if defined(__cpp_lib_stacktrace) && __cpp_lib_stacktrace >= 202011L
+std::stacktrace capture_trace() {
+  auto trace = std::stacktrace::current();
+  cxx_latest_detail::expect(!trace.empty(),
+                            "std::stacktrace::current returned no frames");
+  return trace;
+}
+
+void run() {
+  auto trace = capture_trace();
+  std::cout << "stacktrace frames: " << trace.size() << '\n';
+  const auto trace_text = std::to_string(trace);
+  std::cout << "stacktrace text size: " << trace_text.size() << '\n';
+  const auto &entry = trace[0];
+  std::cout << "stacktrace entry description: " << entry.description() << '\n';
+  std::cout << "stacktrace entry source_file: " << entry.source_file() << '\n';
+  std::cout << "stacktrace entry source_line: " << entry.source_line() << '\n';
+  std::cout << "stacktrace first entry: " << std::to_string(trace[0])
+            << '\n';
+  std::cout << "stacktrace last entry: "
+            << std::to_string(trace[trace.size() - 1]) << '\n';
+
+  const auto description = entry.description();
+  cxx_latest_detail::expect(description.find("+0x") != std::string::npos,
+                            "stacktrace description missing module offset");
+  cxx_latest_detail::expect(std::to_string(entry).find("+0x") !=
+                                std::string::npos,
+                            "stacktrace entry string missing module offset");
+  cxx_latest_detail::expect(trace_text.find("0> ") != std::string::npos,
+                            "stacktrace text missing first frame");
+  cxx_latest_detail::expect(trace_text.find("+0x") != std::string::npos,
+                            "stacktrace text missing module offset");
+  if (trace.size() > 1) {
+    const auto last_prefix =
+        std::to_string(static_cast<unsigned long long>(trace.size() - 1)) +
+        "> ";
+    cxx_latest_detail::expect(trace_text.find(last_prefix) != std::string::npos,
+                              "stacktrace text missing last frame");
+  }
+}
+#else
+void run() { std::cout << "std::stacktrace is not available in this STL\n"; }
+#endif
+} // namespace stacktrace_semantic_test
 
 //
 // https://en.cppreference.com/w/cpp/algorithm/execution_policy_tag#Example

@@ -147,6 +147,9 @@ if ($isDriverConsumer -and -not $SkipDriverBuild) {
   if (-not (Test-Path (Join-Path $wdkKernelLibDirectory 'libcntpr.lib'))) {
     throw "WDK kernel library directory is missing libcntpr.lib: $wdkKernelLibDirectory"
   }
+  if (-not (Test-Path (Join-Path $wdkKernelLibDirectory 'aux_klib.lib'))) {
+    throw "WDK kernel library directory is missing aux_klib.lib: $wdkKernelLibDirectory"
+  }
 }
 
 Write-Host "Requested Windows SDK version: $WindowsSdkVersion"

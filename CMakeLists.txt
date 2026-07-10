@@ -339,6 +339,7 @@ target_include_directories(crtsys BEFORE PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/sr
 # link libraries
 #
 target_link_libraries(crtsys PRIVATE $<BUILD_INTERFACE:Ldk>)
+target_link_libraries(crtsys PRIVATE WDK::AUX_KLIB)
 if(CRTSYS_USE_LIBCNTPR)
   target_link_libraries(crtsys PRIVATE WDK::LIBCNTPR)
 endif()

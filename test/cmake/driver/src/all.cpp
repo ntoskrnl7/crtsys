@@ -808,6 +808,9 @@ void run();
 namespace stacktrace_test {
 void run();
 }
+namespace stacktrace_semantic_test {
+void run();
+}
 namespace execution_policy_test {
 void run();
 }
@@ -1175,6 +1178,7 @@ void cpp_std_tests() {
   CRTSYS_RUN_CPPREFERENCE_TEST(generator_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(mdspan_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(stacktrace_test);
+  CRTSYS_RUN_DRIVER_SEMANTIC_TEST(stacktrace_semantic_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(execution_policy_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(flat_map_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(flat_set_test);

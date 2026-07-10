@@ -414,8 +414,11 @@ function(crtsys_link_prebuilt_driver_libraries _target)
     if(NOT TARGET WDK::CNG)
         message(FATAL_ERROR "WDK::CNG is required for crtsys prebuilt driver support.")
     endif()
+    if(NOT TARGET WDK::AUX_KLIB)
+        message(FATAL_ERROR "WDK::AUX_KLIB is required for crtsys prebuilt driver support.")
+    endif()
 
-    target_link_libraries(${_target} WDK::CNG)
+    target_link_libraries(${_target} WDK::CNG WDK::AUX_KLIB)
 
     target_compile_definitions(${_target} PUBLIC "_KERNEL32_" "_ITERATOR_DEBUG_LEVEL=0" "_HAS_EXCEPTIONS")
     target_compile_options(${_target} PUBLIC "$<$<COMPILE_LANGUAGE:C,CXX>:/MT>")

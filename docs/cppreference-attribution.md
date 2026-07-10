@@ -422,9 +422,10 @@ The `std::noop_coroutine`, `std::generator`, `std::mdspan`, and
 MSVC STL exposes the corresponding feature-test macros. The `std::mdspan`
 harness uses `std::print` like the cppreference example when the active STL
 exposes it, and falls back only for older toolsets that expose `mdspan` without
-`print`. The `std::stacktrace` harness validates `std::stacktrace::current()`
-and frame capture; the kernel ABI shim intentionally avoids user-mode DbgEng
-symbol resolution.
+`print`. The `std::stacktrace` cppreference example is kept separate from a
+driver semantic check that validates kernel `module+offset` formatting. The
+kernel ABI shim intentionally avoids user-mode DbgEng/PDB source-line
+resolution.
 
 The execution-policy example keeps the `std::execution::seq`, `unseq`, `par`,
 and `par_unseq` sort calls, but reduces the original benchmark-sized random
