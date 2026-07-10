@@ -1,4 +1,6 @@
 #include <cerrno>
+#include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <io.h>
@@ -11,11 +13,41 @@
 namespace error_diagnostics_semantic_test {
 namespace {
 constexpr char missing_path[] = "crtsys_error_diagnostics_missing.tmp";
+int invalid_parameter_hits{};
 
 void expect(bool condition, const char *message) {
   if (!condition) {
     throw std::runtime_error(message);
   }
+}
+
+void __cdecl capture_invalid_parameter(const wchar_t *, const wchar_t *,
+                                       const wchar_t *, unsigned int,
+                                       uintptr_t) {
+  ++invalid_parameter_hits;
+}
+
+class invalid_parameter_guard {
+public:
+  invalid_parameter_guard()
+      : previous_(_set_invalid_parameter_handler(capture_invalid_parameter)) {
+    invalid_parameter_hits = 0;
+  }
+
+  ~invalid_parameter_guard() { (void)_set_invalid_parameter_handler(previous_); }
+
+  invalid_parameter_guard(const invalid_parameter_guard &) = delete;
+  invalid_parameter_guard &operator=(const invalid_parameter_guard &) = delete;
+
+  int hits() const { return invalid_parameter_hits; }
+
+private:
+  _invalid_parameter_handler previous_;
+};
+
+void expect_invalid_parameter_hit(const invalid_parameter_guard &guard,
+                                  int previous_hits, const char *message) {
+  expect(guard.hits() == previous_hits + 1, message);
 }
 
 std::string format_system_message_a(DWORD error) {
@@ -126,6 +158,32 @@ void verify_lowio_errno_and_doserrno() {
          "system_category file-not-found message mismatch");
 }
 
+void verify_invalid_parameter_diagnostics() {
+  invalid_parameter_guard guard;
+
+  int previous_hits = guard.hits();
+  errno = 0;
+  expect(_get_errno(nullptr) == EINVAL,
+         "_get_errno(nullptr) did not return EINVAL");
+  expect_invalid_parameter_hit(guard, previous_hits,
+                               "_get_errno(nullptr) missed handler");
+
+  previous_hits = guard.hits();
+  errno = 0;
+  expect(_get_doserrno(nullptr) == EINVAL,
+         "_get_doserrno(nullptr) did not return EINVAL");
+  expect_invalid_parameter_hit(guard, previous_hits,
+                               "_get_doserrno(nullptr) missed handler");
+
+  previous_hits = guard.hits();
+  errno = 0;
+  expect(strerror_s(nullptr, 0, EINVAL) == EINVAL,
+         "strerror_s(nullptr) did not return EINVAL");
+  expect_invalid_parameter_hit(guard, previous_hits,
+                               "strerror_s(nullptr) missed handler");
+  expect(errno == EINVAL, "strerror_s(nullptr) errno mismatch");
+}
+
 void verify_error_category_mapping() {
   const std::error_code generic_not_found{
       static_cast<int>(std::errc::no_such_file_or_directory),
@@ -166,6 +224,7 @@ void run() {
   verify_win32_last_error_and_messages();
   verify_format_message_failure_edges();
   verify_lowio_errno_and_doserrno();
+  verify_invalid_parameter_diagnostics();
   verify_error_category_mapping();
   std::cout << "error diagnostics semantic assertions passed\n";
 }

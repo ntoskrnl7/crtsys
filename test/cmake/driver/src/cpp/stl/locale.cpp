@@ -6,6 +6,7 @@
 #include <codecvt>
 #include <cstddef>
 #include <ctime>
+#include <cwchar>
 #include <iomanip>
 #include <iostream>
 #include <locale>
@@ -280,6 +281,42 @@ void run() {
   const auto &collate = std::use_facet<std::collate<char>>(en_us);
   expect(collate.compare("abc", "abc" + 3, "abd", "abd" + 3) < 0,
          "en_US collate ordering mismatch");
+  const std::string abc_key = collate.transform("abc", "abc" + 3);
+  const std::string abd_key = collate.transform("abd", "abd" + 3);
+  expect(abc_key < abd_key, "en_US collate transform ordering mismatch");
+  expect(collate.hash("abc", "abc" + 3) == collate.hash("abc", "abc" + 3),
+         "en_US collate hash was not stable");
+  expect(collate.compare("abc", "abc" + 3, "abc", "abc" + 3) == 0,
+         "en_US collate equality mismatch");
+
+  const auto &wide_collate = std::use_facet<std::collate<wchar_t>>(en_us);
+  expect(wide_collate.compare(L"abc", L"abc" + 3, L"abd", L"abd" + 3) < 0,
+         "en_US wide collate ordering mismatch");
+  const std::wstring wide_abc_key =
+      wide_collate.transform(L"abc", L"abc" + 3);
+  const std::wstring wide_abd_key =
+      wide_collate.transform(L"abd", L"abd" + 3);
+  expect(wide_abc_key < wide_abd_key,
+         "en_US wide collate transform ordering mismatch");
+  expect(wide_collate.hash(L"abc", L"abc" + 3) ==
+             wide_collate.hash(L"abc", L"abc" + 3),
+         "en_US wide collate hash was not stable");
+
+  const auto &codecvt =
+      std::use_facet<std::codecvt<wchar_t, char, std::mbstate_t>>(en_us);
+  std::mbstate_t state{};
+  const wchar_t wide_source[] = L"A";
+  const wchar_t *wide_next{};
+  char narrow_buffer[8]{};
+  char *narrow_next{};
+  const auto out_result =
+      codecvt.out(state, wide_source, wide_source + 1, wide_next,
+                  narrow_buffer, narrow_buffer + sizeof(narrow_buffer),
+                  narrow_next);
+  expect(out_result == std::codecvt_base::ok, "en_US codecvt out failed");
+  expect(wide_next == wide_source + 1, "en_US codecvt out did not consume");
+  expect(narrow_next == narrow_buffer + 1 && narrow_buffer[0] == 'A',
+         "en_US codecvt out value mismatch");
 
   const auto &punct = std::use_facet<std::numpunct<char>>(en_us);
   expect(punct.decimal_point() == '.', "en_US numpunct decimal mismatch");

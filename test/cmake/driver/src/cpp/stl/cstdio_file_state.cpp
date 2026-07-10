@@ -27,6 +27,7 @@ constexpr wchar_t wide_data_path[] = L"crtsys_crt_file_state\\data.txt";
 constexpr char dup_path[] = "crtsys_crt_file_state\\dup.txt";
 constexpr char dup_target_path[] = "crtsys_crt_file_state\\dup_target.txt";
 constexpr char mode_path[] = "crtsys_crt_file_state\\mode.txt";
+constexpr char binary_mode_path[] = "crtsys_crt_file_state\\binary_mode.txt";
 constexpr char find_a_path[] = "crtsys_crt_file_state\\find_a.txt";
 constexpr char find_b_path[] = "crtsys_crt_file_state\\find_b.log";
 constexpr char find_legacy_path[] = "crtsys_crt_file_state\\find_legacy.txt";
@@ -105,6 +106,7 @@ void remove_tree() {
   (void)_unlink(dup_path);
   (void)_unlink(dup_target_path);
   (void)_unlink(mode_path);
+  (void)_unlink(binary_mode_path);
   (void)_unlink(find_a_path);
   (void)_unlink(find_b_path);
   (void)_unlink(find_legacy_path);
@@ -323,13 +325,66 @@ void verify_lowio_handle_state() {
       _open(mode_path, _O_CREAT | _O_TRUNC | _O_RDWR | _O_TEXT,
             _S_IREAD | _S_IWRITE);
   expect(mode_handle != -1, "_open text mode file failed");
-  expect(_setmode(mode_handle, _O_BINARY) == _O_TEXT,
+  expect(_write(mode_handle, "T\n", 2) == 2, "_write text mode failed");
+  expect(_close(mode_handle) == 0, "_close text mode file failed");
+
+  const int mode_read = _open(mode_path, _O_RDONLY | _O_BINARY);
+  expect(mode_read != -1, "_open text mode readback failed");
+  char translated_text[4]{};
+  expect(_read(mode_read, translated_text, sizeof(translated_text)) == 3,
+         "_read text mode readback failed");
+  expect(std::memcmp(translated_text, "T\r\n", 3) == 0,
+         "_O_TEXT did not write CRLF to disk");
+  expect(_close(mode_read) == 0, "_close text mode readback failed");
+
+  const int binary_mode_handle =
+      _open(binary_mode_path, _O_CREAT | _O_TRUNC | _O_RDWR | _O_BINARY,
+            _S_IREAD | _S_IWRITE);
+  expect(binary_mode_handle != -1, "_open binary mode file failed");
+  expect(_write(binary_mode_handle, "B\n", 2) == 2,
+         "_write binary mode failed");
+  expect(_close(binary_mode_handle) == 0, "_close binary mode file failed");
+
+  const int binary_mode_read = _open(binary_mode_path, _O_RDONLY | _O_BINARY);
+  expect(binary_mode_read != -1, "_open binary mode readback failed");
+  char binary_text[3]{};
+  expect(_read(binary_mode_read, binary_text, sizeof(binary_text)) == 2,
+         "_read binary mode readback failed");
+  expect(std::memcmp(binary_text, "B\n", 2) == 0,
+         "_O_BINARY unexpectedly translated newline");
+  expect(_close(binary_mode_read) == 0, "_close binary mode readback failed");
+
+  const int mode_toggle =
+      _open(mode_path, _O_CREAT | _O_TRUNC | _O_RDWR | _O_TEXT,
+            _S_IREAD | _S_IWRITE);
+  expect(mode_toggle != -1, "_open text/binary toggle file failed");
+  expect(_setmode(mode_toggle, _O_BINARY) == _O_TEXT,
          "_setmode binary did not return previous text mode");
-  expect(_write(mode_handle, "A\nB", 3) == 3,
+  expect(_write(mode_toggle, "A\nB", 3) == 3,
          "_write after _setmode binary failed");
-  expect(_setmode(mode_handle, _O_TEXT) == _O_BINARY,
+  expect(_setmode(mode_toggle, _O_TEXT) == _O_BINARY,
          "_setmode text did not return previous binary mode");
-  expect(_close(mode_handle) == 0, "_close text/binary mode file failed");
+
+  {
+    invalid_parameter_guard setmode_invalid_guard;
+    int previous_hits = setmode_invalid_guard.hits();
+    errno = 0;
+    expect(_setmode(-1, _O_BINARY) == -1,
+           "_setmode invalid descriptor unexpectedly succeeded");
+    expect_invalid_parameter_hit(
+        setmode_invalid_guard, previous_hits,
+        "_setmode invalid descriptor missed handler");
+    expect_errno(EBADF, "_setmode invalid descriptor errno mismatch");
+
+    previous_hits = setmode_invalid_guard.hits();
+    errno = 0;
+    expect(_setmode(mode_toggle, 0x7fff) == -1,
+           "_setmode invalid mode unexpectedly succeeded");
+    expect_invalid_parameter_hit(setmode_invalid_guard, previous_hits,
+                                 "_setmode invalid mode missed handler");
+    expect_errno(EINVAL, "_setmode invalid mode errno mismatch");
+  }
+  expect(_close(mode_toggle) == 0, "_close text/binary toggle file failed");
 
   const int old_umask = _umask(0);
   expect(old_umask != -1, "_umask read failed");
@@ -433,6 +488,12 @@ void verify_findfirst_findnext() {
 }
 
 void verify_module_filename_state() {
+  const HMODULE module = GetModuleHandleA(nullptr);
+  expect(module != nullptr, "GetModuleHandleA(nullptr) failed");
+  const HMODULE wide_module = GetModuleHandleW(nullptr);
+  expect(wide_module != nullptr, "GetModuleHandleW(nullptr) failed");
+  expect(module == wide_module, "GetModuleHandleA/W(nullptr) mismatch");
+
   char module_path[MAX_PATH]{};
   const DWORD module_length =
       GetModuleFileNameA(nullptr, module_path,

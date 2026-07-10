@@ -250,9 +250,10 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
 - [x] [std::locale](https://en.cppreference.com/w/cpp/locale/locale)
   [(cppreference examples)](../test/cmake/driver/src/cpp/stl/locale.cpp)
 - [x] Locale facet semantic checks
-  - Named `std::locale` ctype, collate, numpunct, and moneypunct facets are
-    covered against the LDK-backed locale/NLS substrate, including grouped
-    numeric parsing through the locale facets.
+  - Named `std::locale` ctype, collate compare/transform/hash, wide collate,
+    codecvt, numpunct, and moneypunct facets are covered against the
+    LDK-backed locale/NLS substrate, including grouped numeric parsing through
+    the locale facets.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/locale.cpp)
 - [x] NLS and text conversion semantic checks
   - `MultiByteToWideChar`, `WideCharToMultiByte`, `GetStringTypeA/W`,
@@ -395,7 +396,8 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
       plus file-oriented examples for `basic_filebuf::open`, `is_open`,
       `seekoff`, `seekpos`, and `underflow`, `basic_ifstream::is_open`,
       and `basic_fstream::open` / `is_open`. Additional driver semantic
-      coverage checks `std::fstream` in-place update and append-mode writes.
+      coverage checks `std::fstream` in-place update, append-mode writes,
+      exception-mask open failures, and EOF/fail/clear state transitions.
   [(cppreference examples)](../test/cmake/driver/src/cpp/stl/streams.cpp)
 - [x] [`std::spanstream`](https://en.cppreference.com/w/cpp/io/basic_spanstream)
       / [`basic_spanstream::span`](https://en.cppreference.com/w/cpp/io/basic_spanstream/span)
@@ -486,14 +488,15 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
     `_findfirst` / `_findnext`, `_findfirst64` / `_findnext64`,
     `_dup` / `_dup2`, `_tell`, `_telli64`, `_filelength`, `_filelengthi64`,
     `_lseeki64`, `_commit`, `_chsize`, `_chsize_s`, `_eof`, `_locking`,
-    `_setmode`, `_get_osfhandle`, and `_umask` paths are covered against the
+    `_setmode`, text/binary newline translation, `_get_osfhandle`, and
+    `_umask` paths are covered against the
     LDK-backed current-directory,
     file-handle, enumeration, and metadata substrate. `_O_EXCL`, `_O_APPEND`,
-    invalid-descriptor, and missing-glob failure paths are also checked. CRT
-    current-directory state is cross-checked against
-    `std::filesystem::current_path`.
-    `GetModuleFileNameA/W` and `_get_pgmptr` / `_get_wpgmptr` cover CRT
-    program-path state.
+    invalid `_setmode`, invalid-descriptor, and missing-glob failure paths are
+    also checked. CRT current-directory state is cross-checked against
+    `std::filesystem::current_path`. `GetModuleHandleA/W`,
+    `GetModuleFileNameA/W`, and `_get_pgmptr` / `_get_wpgmptr` cover CRT
+    program-path and module-handle state.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/cstdio_file_state.cpp)
 - [x] CRT environment semantic checks
   - `getenv` / `getenv_s` / `_dupenv_s` and wide `_wgetenv` / `_wgetenv_s` /
@@ -504,14 +507,18 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
 - [x] CRT runtime-state semantic checks
   - `_get_fmode` / `_set_fmode`, `_query_new_mode` / `_set_new_mode`,
     `_get_errno` / `_set_errno`, and `_get_doserrno` / `_set_doserrno` are
-    covered as CRT process/runtime state. The test restores the original state
-    before returning so later driver tests see the startup defaults.
+    covered as CRT process/runtime state. Invalid-parameter handler contracts
+    for `_get_errno`, `_get_doserrno`, and `strerror_s` are also checked. The
+    test restores the original state before returning so later driver tests see
+    the startup defaults.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/cstdlib.cpp)
 - [x] Error and diagnostics semantic checks
   - `GetLastError`, `FormatMessageA/W`, `std::system_category`,
     `std::generic_category`, `std::system_error`, `errno`, `_get_errno`,
     `_get_doserrno`, default error-condition mapping, and `FormatMessageA/W`
     failure-edge paths are covered through Win32 and CRT failure cases.
+    Invalid-parameter handler paths are covered for selected CRT diagnostics
+    APIs.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/diagnostics.cpp)
 - [x] [std::string](https://en.cppreference.com/w/cpp/string/basic_string)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/string.cpp)

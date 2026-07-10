@@ -536,6 +536,39 @@ void run() {
     input >> value;
     expect(value == "aZcD", "fstream semantic final readback mismatch");
   }
+
+  {
+    std::ifstream missing;
+    missing.exceptions(std::ios::failbit);
+    bool threw = false;
+    try {
+      missing.open(sandbox.path() / "missing.txt", std::ios::binary);
+    } catch (const std::ios_base::failure &) {
+      threw = true;
+    }
+    expect(threw, "ifstream exception mask did not throw on missing file");
+    expect(missing.fail(), "ifstream missing-file failbit was not set");
+    missing.clear();
+    expect(missing.good(), "ifstream clear did not reset missing-file state");
+  }
+
+  {
+    std::ifstream input{filename, std::ios::binary};
+    expect(input.is_open(), "fstream semantic eof input open failed");
+    input.exceptions(std::ios::badbit);
+
+    char ch{};
+    int chars = 0;
+    while (input.get(ch)) {
+      ++chars;
+    }
+    expect(chars == 4, "ifstream eof path read unexpected byte count");
+    expect(input.eof(), "ifstream eofbit was not set");
+    expect(input.fail(), "ifstream failbit was not set after EOF read");
+    expect(!input.bad(), "ifstream badbit unexpectedly set after EOF read");
+    input.clear();
+    expect(input.good(), "ifstream clear did not reset EOF/fail state");
+  }
 }
 } // namespace fstream_semantic_edge_test
 
