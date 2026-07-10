@@ -168,8 +168,9 @@ cppreference Example 코드를 이식한 항목은
     round trip을 확인합니다.
 - [x] CRT time semantic check
   - `_time64`, `_ftime64_s`, `gmtime_s`, `localtime_s`, `_tzset`,
-    `strftime`, `wcsftime` 경로를 LDK가 제공하는 system time 및 timezone
-    substrate 기준으로 검증합니다.
+    `strftime`, `wcsftime`, `asctime_s`, `_ctime64_s`, `mktime`,
+    `difftime` 경로를 LDK가 제공하는 system time 및 timezone substrate
+    기준으로 검증합니다.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/ctime.cpp)
 - [x] [std::any](https://en.cppreference.com/w/cpp/utility/any)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
@@ -251,17 +252,18 @@ cppreference Example 코드를 이식한 항목은
   [(cppreference examples)](../test/cmake/driver/src/cpp/stl/locale.cpp)
 - [x] Locale facet semantic check
   - named `std::locale`의 ctype, collate, numpunct, moneypunct facet을
-    LDK 기반 locale/NLS substrate 기준으로 검증합니다.
+    LDK 기반 locale/NLS substrate 기준으로 검증하며, locale facet 기반
+    grouped numeric parsing도 확인합니다.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/locale.cpp)
 - [x] NLS and text conversion semantic check
   - `MultiByteToWideChar`, `WideCharToMultiByte`, `GetStringTypeW`,
     `GetStringTypeExW`, `LCMapStringEx`, `CompareStringEx`,
     `CompareStringOrdinal`, CP_ACP / UTF-8 round trip, insufficient-buffer 및
-    invalid-sequence error case, UCRT `mbtowc` / `wctomb` / `mbstowcs` /
-    `mbstowcs_s` / `wcstombs` / `wcstombs_s` / `mbrtowc` / `wcrtomb`, C++ UTF
-    conversion 함수 `mbrtoc16` / `c16rtomb` / `mbrtoc32` / `c32rtomb`,
-    filesystem UTF-8 path create/read/copy/rename/enumeration 경로를
-    검증합니다.
+    invalid-sequence / invalid-flag error case, UCRT `mbtowc` / `wctomb` /
+    `mbstowcs` / `mbstowcs_s` / `wcstombs` / `wcstombs_s` / `mbrtowc` /
+    `wcrtomb`, C++ UTF conversion 함수 `mbrtoc16` / `c16rtomb` /
+    `mbrtoc32` / `c32rtomb`, filesystem UTF-8 path
+    create/read/copy/rename/enumeration 경로를 검증합니다.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/nls.cpp)
 - [x] [std::map](https://en.cppreference.com/w/cpp/container/map)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/containers.cpp)
@@ -469,15 +471,19 @@ cppreference Example 코드를 이식한 항목은
   - `fopen` / `fread` / `fwrite` / `fseek` / `ftell` 및 `_open` / `_read` /
     `_write` / `_lseek` / `_close`, `remove` 경로를 success,
     missing-file, invalid-descriptor, read-only descriptor, `errno` /
-    `_doserrno` propagation 기준으로 검증합니다.
+    `_doserrno` propagation 기준으로 검증합니다. `setvbuf`,
+    `fgetpos` / `fsetpos`, `ungetc`, `tmpfile`, `tmpnam_s`, `_tempnam`,
+    `freopen`, wide stdio(`_wfopen`, `fputwc`, `fputws`, `fgetwc`, `fgetws`)도
+    driver semantic test에서 실행합니다.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/cstdio.cpp)
 - [x] CRT file/process-state semantic check
   - `_stat` / `_stat64` / `_wstat64`, `_fstat` / `_fstat64`,
     `_access` / `_waccess`,
     `_fullpath` / `_wfullpath`, `_getcwd` / `_wgetcwd`, `_chdir` / `_wchdir`,
     `_findfirst` / `_findnext`, `_findfirst64` / `_findnext64`,
-    `_dup` / `_dup2`, `_tell`, `_filelength`, `_commit`, `_chsize`,
-    `_chsize_s` 경로를 LDK가 제공하는 current-directory, file-handle,
+    `_dup` / `_dup2`, `_tell`, `_telli64`, `_filelength`, `_filelengthi64`,
+    `_lseeki64`, `_commit`, `_chsize`, `_chsize_s`, `_eof`, `_locking`,
+    `_umask` 경로를 LDK가 제공하는 current-directory, file-handle,
     enumeration, metadata substrate 기준으로 검증합니다. `_O_EXCL`,
     `_O_APPEND`, invalid-descriptor, missing-glob failure path도 확인합니다.
     CRT current-directory state는 `std::filesystem::current_path`와 교차 검증합니다.

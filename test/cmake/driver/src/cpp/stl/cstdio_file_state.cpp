@@ -12,6 +12,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <sys/locking.h>
 #include <sys/stat.h>
 #include <Windows.h>
 
@@ -249,6 +250,18 @@ void verify_lowio_handle_state() {
   expect(legacy_source_stat.st_size == 2,
          "_fstat after _chsize shrink returned unexpected size");
   expect(_filelength(source) == 2, "_filelength after shrink failed");
+  expect(_filelengthi64(source) == 2, "_filelengthi64 after shrink failed");
+
+  expect(_lseeki64(source, 0, SEEK_SET) == 0, "_lseeki64 set failed");
+  expect(_telli64(source) == 0, "_telli64 after seek set failed");
+  expect(_eof(source) == 0, "_eof before end failed");
+  expect(_lseeki64(source, 0, SEEK_END) == 2, "_lseeki64 end failed");
+  expect(_telli64(source) == 2, "_telli64 at end failed");
+  expect(_eof(source) != 0, "_eof at end failed");
+  expect(_lseeki64(source, 0, SEEK_SET) == 0, "_lseeki64 reset failed");
+
+  expect(_locking(source, _LK_NBLCK, 1) == 0, "_locking lock failed");
+  expect(_locking(source, _LK_UNLCK, 1) == 0, "_locking unlock failed");
 
   const int duplicate = _dup(source);
   expect(duplicate != -1, "_dup failed");
@@ -298,6 +311,10 @@ void verify_lowio_handle_state() {
   expect(std::memcmp(appended, "abXY", 4) == 0,
          "_O_APPEND did not append at end of file");
   expect(_close(appended_read) == 0, "_close appended readback failed");
+
+  const int old_umask = _umask(0);
+  expect(old_umask != -1, "_umask read failed");
+  expect(_umask(old_umask) != -1, "_umask restore failed");
 
   // UCRT lowio treats an invalid file descriptor as an invalid-parameter
   // contract violation before returning -1/EBADF. The default handler calls

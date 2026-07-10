@@ -236,6 +236,35 @@ void verify_invalid_utf16_errors() {
          "invalid UTF-16 last-error mismatch");
 }
 
+void verify_invalid_codepage_flags() {
+  const char narrow[] = "A";
+  wchar_t wide[4]{};
+
+  SetLastError(ERROR_SUCCESS);
+  constexpr DWORD invalid_mb_utf8_flag = 0x10;
+  const int mb_result =
+      MultiByteToWideChar(CP_UTF8, invalid_mb_utf8_flag, narrow, -1, wide,
+                          static_cast<int>(std::size(wide)));
+  expect(mb_result == 0,
+         "MultiByteToWideChar unexpectedly accepted invalid UTF-8 flags");
+  expect(GetLastError() == ERROR_INVALID_FLAGS,
+         "MultiByteToWideChar invalid-flag error mismatch");
+
+  const wchar_t wide_text[] = L"A";
+  char bytes[4]{};
+
+  SetLastError(ERROR_SUCCESS);
+  constexpr DWORD invalid_wc_utf8_flag = 0x100;
+  const int wc_result =
+      WideCharToMultiByte(CP_UTF8, invalid_wc_utf8_flag, wide_text, -1, bytes,
+                          static_cast<int>(std::size(bytes)), nullptr,
+                          nullptr);
+  expect(wc_result == 0,
+         "WideCharToMultiByte unexpectedly accepted invalid UTF-8 flags");
+  expect(GetLastError() == ERROR_INVALID_FLAGS,
+         "WideCharToMultiByte invalid-flag error mismatch");
+}
+
 void verify_ucrt_c_locale_multibyte() {
   c_locale_guard locale_guard;
   expect(std::setlocale(LC_ALL, "C") != nullptr, "setlocale C failed");
@@ -517,6 +546,7 @@ void run() {
   verify_utf8_roundtrip();
   verify_invalid_utf8_errors();
   verify_invalid_utf16_errors();
+  verify_invalid_codepage_flags();
   verify_ucrt_c_locale_multibyte();
   verify_ucrt_utf8_multibyte();
   verify_cuchar_utf8_conversions();
