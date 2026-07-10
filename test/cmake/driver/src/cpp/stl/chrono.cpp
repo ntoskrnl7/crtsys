@@ -266,6 +266,70 @@ void run() {
 }
 } // namespace chrono_tzdb_list_test
 
+namespace chrono_time_zone_edge_test {
+void expect(bool condition, const char *message) {
+  if (!condition) {
+    throw std::runtime_error(message);
+  }
+}
+
+void expect_current_zone_round_trip() {
+  using namespace std::chrono;
+
+  const auto *current = current_zone();
+  expect(current != nullptr, "current_zone returned null");
+  expect(!current->name().empty(), "current_zone returned an empty name");
+
+  const auto *by_name = locate_zone(current->name());
+  expect(by_name != nullptr, "current_zone name could not be located");
+  expect(by_name->name() == current->name(),
+         "current_zone locate-by-name mismatch");
+
+  const sys_seconds now = floor<seconds>(system_clock::now());
+  const zoned_time<seconds> zoned{current, now};
+  expect(zoned.get_time_zone() == current,
+         "zoned_time did not retain current_zone pointer");
+  expect(zoned.get_sys_time() == now, "zoned_time sys_time mismatch");
+
+  const auto info = current->get_info(now);
+  std::cout << "current zone " << current->name() << " offset "
+            << info.offset.count() << "s, abbrev " << info.abbrev << '\n';
+  expect(!info.abbrev.empty(), "current_zone abbreviation was empty");
+  expect(info.offset > -24h && info.offset < 24h,
+         "current_zone offset is outside a one-day range");
+}
+
+void expect_unique_local_round_trip(const char *name,
+                                    std::chrono::seconds offset) {
+  using namespace std::chrono;
+
+  const auto *zone = locate_zone(name);
+  const local_seconds local = local_days{2024y / January / 15} + 10h + 11min;
+  const sys_seconds earliest = zone->to_sys(local, choose::earliest);
+  const sys_seconds latest = zone->to_sys(local, choose::latest);
+
+  std::cout << zone->name() << " choose round-trip "
+            << earliest.time_since_epoch().count() << '\n';
+
+  expect(earliest == latest,
+         "fixed-offset local time produced different choose results");
+  expect(zone->to_local(earliest) == local,
+         "time_zone choose round-trip did not recover local time");
+  expect(earliest.time_since_epoch() == local.time_since_epoch() - offset,
+         "time_zone choose round-trip returned unexpected offset");
+}
+
+void run() {
+  expect_current_zone_round_trip();
+  expect_unique_local_round_trip("UTC", std::chrono::seconds{0});
+  expect_unique_local_round_trip("Etc/UTC", std::chrono::seconds{0});
+  expect_unique_local_round_trip("Asia/Seoul", std::chrono::hours{9});
+  expect_unique_local_round_trip("America/New_York", -std::chrono::hours{5});
+  expect_unique_local_round_trip("Europe/Berlin", std::chrono::hours{1});
+  std::cout << "chrono timezone edge assertions passed\n";
+}
+} // namespace chrono_time_zone_edge_test
+
 //
 // https://en.cppreference.com/w/cpp/chrono/year_month_day#Example
 //

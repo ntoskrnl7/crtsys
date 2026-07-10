@@ -80,6 +80,9 @@ void run();
 namespace chrono_tzdb_list_test {
 void run();
 }
+namespace chrono_time_zone_edge_test {
+void run();
+}
 namespace chrono_year_month_day_test {
 void run();
 }
@@ -918,6 +921,7 @@ void cpp_std_tests() {
   CRTSYS_RUN_CPPREFERENCE_TEST(chrono_file_clock_now_test);
   CRTSYS_RUN_DRIVER_SEMANTIC_TEST(chrono_time_zone_conversion_test);
   CRTSYS_RUN_DRIVER_SEMANTIC_TEST(chrono_tzdb_list_test);
+  CRTSYS_RUN_DRIVER_SEMANTIC_TEST(chrono_time_zone_edge_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(chrono_year_month_day_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(chrono_weekday_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(chrono_hh_mm_ss_test);
