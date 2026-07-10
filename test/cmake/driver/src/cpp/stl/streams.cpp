@@ -491,6 +491,54 @@ void run() {
 }
 } // namespace fstream_is_open_test
 
+namespace fstream_semantic_edge_test {
+void run() {
+  stream_sandbox sandbox{"crtsys-stream-fstream-semantic-sandbox"};
+  const auto filename = sandbox.path() / "update.txt";
+
+  {
+    std::fstream stream{filename, std::ios::in | std::ios::out |
+                                      std::ios::trunc | std::ios::binary};
+    expect(stream.is_open(), "fstream semantic update open failed");
+    stream << "abc";
+    expect(static_cast<bool>(stream), "fstream semantic initial write failed");
+    stream.seekp(1);
+    stream.put('Z');
+    stream.flush();
+    expect(static_cast<bool>(stream), "fstream semantic overwrite failed");
+    stream.seekg(0);
+
+    std::string value;
+    stream >> value;
+    expect(value == "aZc", "fstream semantic overwrite value mismatch");
+  }
+
+  {
+    std::fstream stream{filename,
+                        std::ios::in | std::ios::out | std::ios::app |
+                            std::ios::binary};
+    expect(stream.is_open(), "fstream semantic append open failed");
+    stream.seekp(0);
+    stream << 'D';
+    stream.flush();
+    expect(static_cast<bool>(stream), "fstream semantic append write failed");
+    stream.seekg(0);
+
+    std::string value;
+    stream >> value;
+    expect(value == "aZcD", "fstream semantic append value mismatch");
+  }
+
+  {
+    std::ifstream input{filename, std::ios::binary};
+    expect(input.is_open(), "fstream semantic readback open failed");
+    std::string value;
+    input >> value;
+    expect(value == "aZcD", "fstream semantic final readback mismatch");
+  }
+}
+} // namespace fstream_semantic_edge_test
+
 //
 // https://en.cppreference.com/w/cpp/io/basic_spanstream/span#Example
 //

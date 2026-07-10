@@ -571,6 +571,9 @@ void run();
 namespace fstream_is_open_test {
 void run();
 }
+namespace fstream_semantic_edge_test {
+void run();
+}
 namespace spanstream_test {
 void run();
 }
@@ -1074,6 +1077,7 @@ void cpp_std_tests() {
   CRTSYS_RUN_CPPREFERENCE_TEST(fstream_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(fstream_open_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(fstream_is_open_test);
+  CRTSYS_RUN_DRIVER_SEMANTIC_TEST(fstream_semantic_edge_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(spanstream_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(merge_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(heap_test);

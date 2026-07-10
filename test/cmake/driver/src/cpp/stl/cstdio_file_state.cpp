@@ -26,6 +26,7 @@ constexpr char data_path[] = "crtsys_crt_file_state\\data.txt";
 constexpr wchar_t wide_data_path[] = L"crtsys_crt_file_state\\data.txt";
 constexpr char dup_path[] = "crtsys_crt_file_state\\dup.txt";
 constexpr char dup_target_path[] = "crtsys_crt_file_state\\dup_target.txt";
+constexpr char mode_path[] = "crtsys_crt_file_state\\mode.txt";
 constexpr char find_a_path[] = "crtsys_crt_file_state\\find_a.txt";
 constexpr char find_b_path[] = "crtsys_crt_file_state\\find_b.log";
 constexpr char find_legacy_path[] = "crtsys_crt_file_state\\find_legacy.txt";
@@ -103,6 +104,7 @@ void remove_tree() {
   (void)_unlink(data_path);
   (void)_unlink(dup_path);
   (void)_unlink(dup_target_path);
+  (void)_unlink(mode_path);
   (void)_unlink(find_a_path);
   (void)_unlink(find_b_path);
   (void)_unlink(find_legacy_path);
@@ -222,6 +224,11 @@ void verify_lowio_handle_state() {
 
   const int source = _open(dup_path, _O_RDWR | _O_BINARY);
   expect(source != -1, "_open dup source failed");
+  const intptr_t os_handle = _get_osfhandle(source);
+  expect(os_handle != -1, "_get_osfhandle failed");
+  expect(GetFileType(reinterpret_cast<HANDLE>(os_handle)) == FILE_TYPE_DISK,
+         "_get_osfhandle did not expose a disk file handle");
+
   expect(_commit(source) == 0, "_commit failed");
   expect(_chsize_s(source, 10) == 0, "_chsize_s grow failed");
 
@@ -311,6 +318,18 @@ void verify_lowio_handle_state() {
   expect(std::memcmp(appended, "abXY", 4) == 0,
          "_O_APPEND did not append at end of file");
   expect(_close(appended_read) == 0, "_close appended readback failed");
+
+  const int mode_handle =
+      _open(mode_path, _O_CREAT | _O_TRUNC | _O_RDWR | _O_TEXT,
+            _S_IREAD | _S_IWRITE);
+  expect(mode_handle != -1, "_open text mode file failed");
+  expect(_setmode(mode_handle, _O_BINARY) == _O_TEXT,
+         "_setmode binary did not return previous text mode");
+  expect(_write(mode_handle, "A\nB", 3) == 3,
+         "_write after _setmode binary failed");
+  expect(_setmode(mode_handle, _O_TEXT) == _O_BINARY,
+         "_setmode text did not return previous binary mode");
+  expect(_close(mode_handle) == 0, "_close text/binary mode file failed");
 
   const int old_umask = _umask(0);
   expect(old_umask != -1, "_umask read failed");

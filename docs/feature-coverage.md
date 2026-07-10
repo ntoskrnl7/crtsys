@@ -166,9 +166,10 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
     and `gps_clock` round trips where the active MSVC STL exposes those clocks.
 - [x] CRT time semantic checks
   - `_time64`, `_ftime64_s`, `gmtime_s`, `localtime_s`, `_tzset`,
-    `strftime`, `wcsftime`, `asctime_s`, `_ctime64_s`, `mktime`, and
-    `difftime` paths are covered against the LDK-backed system time and
-    timezone substrate.
+    `_get_timezone`, `_get_daylight`, `_get_tzname`, `strftime`, `wcsftime`,
+    `asctime_s`, `_ctime64_s`, `mktime`, `_mkgmtime64`, and `difftime` paths
+    are covered against the LDK-backed system time and timezone substrate.
+    `strftime` small-buffer failure is also covered.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/ctime.cpp)
 - [x] [std::any](https://en.cppreference.com/w/cpp/utility/any)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
@@ -254,8 +255,8 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
     numeric parsing through the locale facets.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/locale.cpp)
 - [x] NLS and text conversion semantic checks
-  - `MultiByteToWideChar`, `WideCharToMultiByte`, `GetStringTypeW`,
-    `GetStringTypeExW`, `LCMapStringEx`, `CompareStringEx`,
+  - `MultiByteToWideChar`, `WideCharToMultiByte`, `GetStringTypeA/W`,
+    `GetStringTypeExW`, `LCMapStringEx` upper/lower mapping, `CompareStringEx`,
     `CompareStringOrdinal`, CP_ACP / UTF-8 round trips, insufficient-buffer and
     invalid-sequence / invalid-flag error cases, UCRT `mbtowc` / `wctomb` /
     `mbstowcs` / `mbstowcs_s` / `wcstombs` / `wcstombs_s` / `mbrtowc` /
@@ -393,7 +394,8 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
       [`std::fstream`](https://en.cppreference.com/w/cpp/io/basic_fstream)
       plus file-oriented examples for `basic_filebuf::open`, `is_open`,
       `seekoff`, `seekpos`, and `underflow`, `basic_ifstream::is_open`,
-      and `basic_fstream::open` / `is_open`
+      and `basic_fstream::open` / `is_open`. Additional driver semantic
+      coverage checks `std::fstream` in-place update and append-mode writes.
   [(cppreference examples)](../test/cmake/driver/src/cpp/stl/streams.cpp)
 - [x] [`std::spanstream`](https://en.cppreference.com/w/cpp/io/basic_spanstream)
       / [`basic_spanstream::span`](https://en.cppreference.com/w/cpp/io/basic_spanstream/span)
@@ -472,8 +474,10 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
     `_write` / `_lseek` / `_close` and `remove` paths are covered with success,
     missing-file, invalid-descriptor, read-only descriptor, and `errno` /
     `_doserrno` propagation checks. `setvbuf`, `fgetpos` / `fsetpos`,
-    `ungetc`, `tmpfile`, `tmpnam_s`, `_tempnam`, `freopen`, and wide stdio
-    (`_wfopen`, `fputwc`, `fputws`, `fgetwc`, `fgetws`) are also exercised.
+    `ungetc`, `tmpfile`, `tmpnam_s`, `_tempnam`, `freopen`,
+    append/update stdio modes, EOF/error/`clearerr` state transitions, and
+    wide stdio (`_wfopen`, `fputwc`, `fputws`, `fgetwc`, `fgetws`) are also
+    exercised.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/cstdio.cpp)
 - [x] CRT file/process-state semantic checks
   - `_stat` / `_stat64` / `_wstat64`, `_fstat` / `_fstat64`,
@@ -481,8 +485,9 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
     `_fullpath` / `_wfullpath`, `_getcwd` / `_wgetcwd`, `_chdir` / `_wchdir`,
     `_findfirst` / `_findnext`, `_findfirst64` / `_findnext64`,
     `_dup` / `_dup2`, `_tell`, `_telli64`, `_filelength`, `_filelengthi64`,
-    `_lseeki64`, `_commit`, `_chsize`, `_chsize_s`, `_eof`, `_locking`, and
-    `_umask` paths are covered against the LDK-backed current-directory,
+    `_lseeki64`, `_commit`, `_chsize`, `_chsize_s`, `_eof`, `_locking`,
+    `_setmode`, `_get_osfhandle`, and `_umask` paths are covered against the
+    LDK-backed current-directory,
     file-handle, enumeration, and metadata substrate. `_O_EXCL`, `_O_APPEND`,
     invalid-descriptor, and missing-glob failure paths are also checked. CRT
     current-directory state is cross-checked against
