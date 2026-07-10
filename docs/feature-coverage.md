@@ -152,6 +152,9 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
     [`std::chrono::get_tzdb`](https://en.cppreference.com/w/cpp/chrono/get_tzdb)
     / [`std::chrono::get_tzdb_list`](https://en.cppreference.com/w/cpp/chrono/get_tzdb_list)
     and invalid-zone `std::chrono::locate_zone` error paths are covered.
+    Additional driver semantic checks cover current-zone locate-by-name,
+    `zoned_time` sys-time retention, fixed-offset `choose::earliest` /
+    `choose::latest` local-time round trips, and timezone abbreviation bounds.
   - [`std::chrono::system_clock::to_time_t`](https://en.cppreference.com/w/cpp/chrono/system_clock/to_time_t),
     [`std::chrono::system_clock::from_time_t`](https://en.cppreference.com/w/cpp/chrono/system_clock/from_time_t),
     [`std::chrono::file_clock::now`](https://en.cppreference.com/w/cpp/chrono/file_clock/now),
@@ -169,7 +172,8 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
     `_get_timezone`, `_get_daylight`, `_get_tzname`, `strftime`, `wcsftime`,
     `asctime_s`, `_ctime64_s`, `mktime`, `_mkgmtime64`, and `difftime` paths
     are covered against the LDK-backed system time and timezone substrate.
-    `strftime` small-buffer failure is also covered.
+    `TZ=UTC0` and `TZ=KST-9` timezone round trips plus `strftime` /
+    `wcsftime` small-buffer failure are also covered.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/ctime.cpp)
 - [x] [std::any](https://en.cppreference.com/w/cpp/utility/any)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
@@ -517,8 +521,9 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
     `std::generic_category`, `std::system_error`, `errno`, `_get_errno`,
     `_get_doserrno`, default error-condition mapping, and `FormatMessageA/W`
     failure-edge paths are covered through Win32 and CRT failure cases.
-    Invalid-parameter handler paths are covered for selected CRT diagnostics
-    APIs.
+    `FORMAT_MESSAGE_ALLOCATE_BUFFER`, `LocalFree`, `std::filesystem_error`
+    message quality, and selected invalid-parameter handler paths are also
+    covered.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/diagnostics.cpp)
 - [x] [std::string](https://en.cppreference.com/w/cpp/string/basic_string)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/string.cpp)

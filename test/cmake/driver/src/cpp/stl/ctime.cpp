@@ -83,6 +83,12 @@ void verify_utc_formatting() {
   expect(std::strftime(too_small, sizeof(too_small), "%Y-%m-%d", &utc) == 0,
          "strftime unexpectedly accepted a small buffer");
 
+  wchar_t wide_too_small[4]{};
+  expect(std::wcsftime(wide_too_small,
+                       sizeof(wide_too_small) / sizeof(wide_too_small[0]),
+                       L"%Y-%m-%d", &utc) == 0,
+         "wcsftime unexpectedly accepted a small buffer");
+
   char asctime_buffer[26]{};
   expect(asctime_s(asctime_buffer, sizeof(asctime_buffer), &utc) == 0,
          "asctime_s UTC epoch failed");
@@ -143,12 +149,58 @@ void verify_tzset_localtime() {
          "mktime normalized weekday mismatch");
   expect(std::difftime(60, 10) == 50.0, "difftime result mismatch");
 }
+
+void verify_positive_timezone_offset() {
+  timezone_guard guard;
+
+  expect(_putenv_s("TZ", "KST-9") == 0, "_putenv_s KST TZ failed");
+  _tzset();
+
+  long timezone_seconds{};
+  expect(_get_timezone(&timezone_seconds) == 0,
+         "_get_timezone KST failed");
+  expect(timezone_seconds == -9 * 60 * 60,
+         "_get_timezone KST value mismatch");
+
+  int daylight{};
+  expect(_get_daylight(&daylight) == 0, "_get_daylight KST failed");
+  expect(daylight == 0, "_get_daylight KST value mismatch");
+
+  char timezone_name[32]{};
+  size_t timezone_name_length{};
+  expect(_get_tzname(&timezone_name_length, timezone_name,
+                     sizeof(timezone_name), 0) == 0,
+         "_get_tzname KST standard name failed");
+  expect(std::strcmp(timezone_name, "KST") == 0,
+         "_get_tzname KST standard name mismatch");
+
+  const __time64_t epoch{};
+  tm local{};
+  expect(localtime_s(&local, &epoch) == 0, "localtime_s KST epoch failed");
+  expect(local.tm_year == 70, "localtime_s KST epoch year mismatch");
+  expect(local.tm_mon == 0, "localtime_s KST epoch month mismatch");
+  expect(local.tm_mday == 1, "localtime_s KST epoch day mismatch");
+  expect(local.tm_hour == 9, "localtime_s KST epoch hour mismatch");
+
+  char formatted[64]{};
+  expect(std::strftime(formatted, sizeof(formatted), "%Y-%m-%d %H:%M:%S %Z",
+                       &local) != 0,
+         "strftime KST epoch failed");
+  expect(std::strcmp(formatted, "1970-01-01 09:00:00 KST") == 0,
+         "strftime KST epoch value mismatch");
+
+  tm roundtrip = local;
+  expect(std::mktime(&roundtrip) == 0, "mktime KST epoch failed");
+  expect(roundtrip.tm_wday == local.tm_wday,
+         "mktime KST normalized weekday mismatch");
+}
 } // namespace
 
 void run() {
   verify_current_time();
   verify_utc_formatting();
   verify_tzset_localtime();
+  verify_positive_timezone_offset();
   std::cout << "CRT time semantic assertions passed\n";
 }
 } // namespace crt_time_semantic_test

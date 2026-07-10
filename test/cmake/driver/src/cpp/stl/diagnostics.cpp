@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fcntl.h>
 #include <io.h>
 #include <iostream>
@@ -13,6 +14,10 @@
 namespace error_diagnostics_semantic_test {
 namespace {
 constexpr char missing_path[] = "crtsys_error_diagnostics_missing.tmp";
+constexpr char missing_filesystem_path[] =
+    "crtsys_error_diagnostics_missing_fs.tmp";
+constexpr char filesystem_target_path[] =
+    "crtsys_error_diagnostics_target.tmp";
 int invalid_parameter_hits{};
 
 void expect(bool condition, const char *message) {
@@ -134,6 +139,40 @@ void verify_format_message_failure_edges() {
          "FormatMessageA unknown message last-error mismatch");
 }
 
+void verify_allocated_format_messages() {
+  char *allocated{};
+  const DWORD written =
+      FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM |
+                         FORMAT_MESSAGE_ALLOCATE_BUFFER |
+                         FORMAT_MESSAGE_IGNORE_INSERTS,
+                     nullptr, ERROR_FILE_NOT_FOUND, 0,
+                     reinterpret_cast<LPSTR>(&allocated), 0, nullptr);
+  expect(written != 0, "FormatMessageA allocate-buffer failed");
+  expect(allocated != nullptr, "FormatMessageA allocate-buffer returned null");
+  const std::string allocated_message{allocated, written};
+  expect(LocalFree(allocated) == nullptr,
+         "LocalFree failed for FormatMessageA buffer");
+  expect(allocated_message.find("cannot find the file") != std::string::npos,
+         "FormatMessageA allocated message mismatch");
+
+  wchar_t *wide_allocated{};
+  const DWORD wide_written =
+      FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM |
+                         FORMAT_MESSAGE_ALLOCATE_BUFFER |
+                         FORMAT_MESSAGE_IGNORE_INSERTS,
+                     nullptr, ERROR_ACCESS_DENIED, 0,
+                     reinterpret_cast<LPWSTR>(&wide_allocated), 0, nullptr);
+  expect(wide_written != 0, "FormatMessageW allocate-buffer failed");
+  expect(wide_allocated != nullptr,
+         "FormatMessageW allocate-buffer returned null");
+  const std::wstring wide_allocated_message{wide_allocated, wide_written};
+  expect(LocalFree(wide_allocated) == nullptr,
+         "LocalFree failed for FormatMessageW buffer");
+  expect(wide_allocated_message.find(L"Access is denied") !=
+             std::wstring::npos,
+         "FormatMessageW allocated message mismatch");
+}
+
 void verify_lowio_errno_and_doserrno() {
   errno = 0;
   _doserrno = 0;
@@ -156,6 +195,42 @@ void verify_lowio_errno_and_doserrno() {
   expect(file_not_found.message().find("cannot find the file") !=
              std::string::npos,
          "system_category file-not-found message mismatch");
+}
+
+void verify_filesystem_error_messages() {
+  namespace fs = std::filesystem;
+
+  std::error_code cleanup_ec;
+  fs::remove(missing_filesystem_path, cleanup_ec);
+  fs::remove(filesystem_target_path, cleanup_ec);
+
+  std::error_code ec;
+  const bool copied =
+      fs::copy_file(missing_filesystem_path, filesystem_target_path, ec);
+  expect(!copied, "copy_file unexpectedly copied a missing file");
+  expect(static_cast<bool>(ec), "copy_file missing file did not set error_code");
+  expect(ec.default_error_condition() ==
+             std::make_error_condition(std::errc::no_such_file_or_directory),
+         "copy_file missing file condition mismatch");
+
+  bool threw = false;
+  try {
+    (void)fs::copy_file(missing_filesystem_path, filesystem_target_path);
+  } catch (const fs::filesystem_error &ex) {
+    threw = true;
+    expect(ex.code().default_error_condition() ==
+               std::make_error_condition(std::errc::no_such_file_or_directory),
+           "filesystem_error missing file condition mismatch");
+    expect(ex.path1() == fs::path{missing_filesystem_path},
+           "filesystem_error missing file path1 mismatch");
+    const std::string what = ex.what();
+    expect(what.find("unknown error") == std::string::npos,
+           "filesystem_error reported unknown error");
+    expect(what.find("cannot find") != std::string::npos ||
+               what.find("not find") != std::string::npos,
+           "filesystem_error message did not include the Win32 message");
+  }
+  expect(threw, "copy_file throwing overload did not throw");
 }
 
 void verify_invalid_parameter_diagnostics() {
@@ -223,7 +298,9 @@ void verify_error_category_mapping() {
 void run() {
   verify_win32_last_error_and_messages();
   verify_format_message_failure_edges();
+  verify_allocated_format_messages();
   verify_lowio_errno_and_doserrno();
+  verify_filesystem_error_messages();
   verify_invalid_parameter_diagnostics();
   verify_error_category_mapping();
   std::cout << "error diagnostics semantic assertions passed\n";

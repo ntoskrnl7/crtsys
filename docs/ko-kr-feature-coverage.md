@@ -153,6 +153,9 @@ cppreference Example 코드를 이식한 항목은
     [`std::chrono::get_tzdb`](https://en.cppreference.com/w/cpp/chrono/get_tzdb) /
     [`std::chrono::get_tzdb_list`](https://en.cppreference.com/w/cpp/chrono/get_tzdb_list)와
     invalid-zone `std::chrono::locate_zone` error path도 검증합니다.
+    추가 driver semantic check는 current-zone name lookup, `zoned_time`의
+    sys-time 유지, fixed-offset `choose::earliest` / `choose::latest`
+    local-time round trip, timezone abbreviation 경계를 검증합니다.
   - [`std::chrono::system_clock::to_time_t`](https://en.cppreference.com/w/cpp/chrono/system_clock/to_time_t),
     [`std::chrono::system_clock::from_time_t`](https://en.cppreference.com/w/cpp/chrono/system_clock/from_time_t),
     [`std::chrono::file_clock::now`](https://en.cppreference.com/w/cpp/chrono/file_clock/now),
@@ -171,7 +174,8 @@ cppreference Example 코드를 이식한 항목은
     `_get_timezone`, `_get_daylight`, `_get_tzname`, `strftime`, `wcsftime`,
     `asctime_s`, `_ctime64_s`, `mktime`, `_mkgmtime64`, `difftime` 경로를
     LDK가 제공하는 system time 및 timezone substrate 기준으로 검증합니다.
-    `strftime` small-buffer failure도 확인합니다.
+    `TZ=UTC0` 및 `TZ=KST-9` timezone round trip과 `strftime` / `wcsftime`
+    small-buffer failure도 확인합니다.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/ctime.cpp)
 - [x] [std::any](https://en.cppreference.com/w/cpp/utility/any)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
@@ -518,7 +522,8 @@ cppreference Example 코드를 이식한 항목은
     `std::generic_category`, `std::system_error`, `errno`, `_get_errno`,
     `_get_doserrno`, default error-condition mapping,
     `FormatMessageA/W` failure-edge, invalid-parameter handler 경로를 Win32
-    및 CRT failure case 기준으로 검증합니다.
+    및 CRT failure case 기준으로 검증합니다. `FORMAT_MESSAGE_ALLOCATE_BUFFER`,
+    `LocalFree`, `std::filesystem_error` message quality도 확인합니다.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/diagnostics.cpp)
 - [x] [std::string](https://en.cppreference.com/w/cpp/string/basic_string)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/string.cpp)
