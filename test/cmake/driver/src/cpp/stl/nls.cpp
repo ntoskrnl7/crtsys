@@ -428,6 +428,18 @@ void verify_cuchar_utf8_conversions() {
 }
 
 void verify_character_type_and_mapping() {
+  const char narrow_chars[] = {'A', '1', ' ', '\0'};
+  WORD narrow_types[3]{};
+  expect(GetStringTypeA(LOCALE_INVARIANT, CT_CTYPE1, narrow_chars, 3,
+                        narrow_types) != FALSE,
+         "GetStringTypeA invariant locale failed");
+  expect((narrow_types[0] & C1_UPPER) != 0,
+         "GetStringTypeA uppercase mismatch");
+  expect((narrow_types[1] & C1_DIGIT) != 0,
+         "GetStringTypeA digit mismatch");
+  expect((narrow_types[2] & C1_SPACE) != 0,
+         "GetStringTypeA space mismatch");
+
   const wchar_t chars[] = {L'A', L'1', L' ', L'\0'};
   WORD types[3]{};
   expect(GetStringTypeW(CT_CTYPE1, chars, 3, types) != FALSE,
@@ -460,6 +472,17 @@ void verify_character_type_and_mapping() {
   expect(mapped == 7, "LCMapStringEx uppercase length mismatch");
   expect(std::wcscmp(upper, L"CRTSYS") == 0,
          "LCMapStringEx uppercase value mismatch");
+
+  const wchar_t mixed[] = L"CrTsYs";
+  wchar_t lower_mapped[8]{};
+  const int lower_count =
+      LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE, mixed, -1,
+                    lower_mapped,
+                    static_cast<int>(std::size(lower_mapped)), nullptr,
+                    nullptr, 0);
+  expect(lower_count == 7, "LCMapStringEx lowercase length mismatch");
+  expect(std::wcscmp(lower_mapped, L"crtsys") == 0,
+         "LCMapStringEx lowercase value mismatch");
 
   wchar_t too_small_upper[3]{};
   SetLastError(ERROR_SUCCESS);

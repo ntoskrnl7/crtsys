@@ -168,9 +168,10 @@ cppreference Example 코드를 이식한 항목은
     round trip을 확인합니다.
 - [x] CRT time semantic check
   - `_time64`, `_ftime64_s`, `gmtime_s`, `localtime_s`, `_tzset`,
-    `strftime`, `wcsftime`, `asctime_s`, `_ctime64_s`, `mktime`,
-    `difftime` 경로를 LDK가 제공하는 system time 및 timezone substrate
-    기준으로 검증합니다.
+    `_get_timezone`, `_get_daylight`, `_get_tzname`, `strftime`, `wcsftime`,
+    `asctime_s`, `_ctime64_s`, `mktime`, `_mkgmtime64`, `difftime` 경로를
+    LDK가 제공하는 system time 및 timezone substrate 기준으로 검증합니다.
+    `strftime` small-buffer failure도 확인합니다.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/ctime.cpp)
 - [x] [std::any](https://en.cppreference.com/w/cpp/utility/any)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
@@ -251,13 +252,14 @@ cppreference Example 코드를 이식한 항목은
 - [x] [std::locale](https://en.cppreference.com/w/cpp/locale/locale)
   [(cppreference examples)](../test/cmake/driver/src/cpp/stl/locale.cpp)
 - [x] Locale facet semantic check
-  - named `std::locale`의 ctype, collate, numpunct, moneypunct facet을
-    LDK 기반 locale/NLS substrate 기준으로 검증하며, locale facet 기반
-    grouped numeric parsing도 확인합니다.
+  - named `std::locale`의 ctype, collate compare/transform/hash, wide
+    collate, codecvt, numpunct, moneypunct facet을 LDK 기반 locale/NLS
+    substrate 기준으로 검증하며, locale facet 기반 grouped numeric
+    parsing도 확인합니다.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/locale.cpp)
 - [x] NLS and text conversion semantic check
-  - `MultiByteToWideChar`, `WideCharToMultiByte`, `GetStringTypeW`,
-    `GetStringTypeExW`, `LCMapStringEx`, `CompareStringEx`,
+  - `MultiByteToWideChar`, `WideCharToMultiByte`, `GetStringTypeA/W`,
+    `GetStringTypeExW`, `LCMapStringEx` upper/lower mapping, `CompareStringEx`,
     `CompareStringOrdinal`, CP_ACP / UTF-8 round trip, insufficient-buffer 및
     invalid-sequence / invalid-flag error case, UCRT `mbtowc` / `wctomb` /
     `mbstowcs` / `mbstowcs_s` / `wcstombs` / `wcstombs_s` / `mbrtowc` /
@@ -394,7 +396,9 @@ cppreference Example 코드를 이식한 항목은
       [`std::fstream`](https://en.cppreference.com/w/cpp/io/basic_fstream)
       및 `basic_filebuf::open`, `is_open`, `seekoff`, `seekpos`,
       `underflow`, `basic_ifstream::is_open`, `basic_fstream::open` /
-      `is_open` 파일 지향 예제
+      `is_open` 파일 지향 예제. 추가 driver semantic coverage는
+      `std::fstream` in-place update, append-mode write, exception-mask open
+      failure, EOF/fail/clear state transition을 확인합니다.
   [(cppreference examples)](../test/cmake/driver/src/cpp/stl/streams.cpp)
 - [x] [`std::spanstream`](https://en.cppreference.com/w/cpp/io/basic_spanstream)
       / [`basic_spanstream::span`](https://en.cppreference.com/w/cpp/io/basic_spanstream/span)
@@ -473,8 +477,9 @@ cppreference Example 코드를 이식한 항목은
     missing-file, invalid-descriptor, read-only descriptor, `errno` /
     `_doserrno` propagation 기준으로 검증합니다. `setvbuf`,
     `fgetpos` / `fsetpos`, `ungetc`, `tmpfile`, `tmpnam_s`, `_tempnam`,
-    `freopen`, wide stdio(`_wfopen`, `fputwc`, `fputws`, `fgetwc`, `fgetws`)도
-    driver semantic test에서 실행합니다.
+    `freopen`, append/update stdio mode, EOF/error/`clearerr` state transition,
+    wide stdio(`_wfopen`, `fputwc`, `fputws`, `fgetwc`, `fgetws`)도 driver
+    semantic test에서 실행합니다.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/cstdio.cpp)
 - [x] CRT file/process-state semantic check
   - `_stat` / `_stat64` / `_wstat64`, `_fstat` / `_fstat64`,
@@ -483,12 +488,15 @@ cppreference Example 코드를 이식한 항목은
     `_findfirst` / `_findnext`, `_findfirst64` / `_findnext64`,
     `_dup` / `_dup2`, `_tell`, `_telli64`, `_filelength`, `_filelengthi64`,
     `_lseeki64`, `_commit`, `_chsize`, `_chsize_s`, `_eof`, `_locking`,
-    `_umask` 경로를 LDK가 제공하는 current-directory, file-handle,
-    enumeration, metadata substrate 기준으로 검증합니다. `_O_EXCL`,
-    `_O_APPEND`, invalid-descriptor, missing-glob failure path도 확인합니다.
+    `_setmode`, text/binary newline translation, `_get_osfhandle`, `_umask`
+    경로를 LDK가 제공하는
+    current-directory, file-handle, enumeration, metadata substrate 기준으로
+    검증합니다. `_O_EXCL`,
+    `_O_APPEND`, invalid `_setmode`, invalid-descriptor,
+    missing-glob failure path도 확인합니다.
     CRT current-directory state는 `std::filesystem::current_path`와 교차 검증합니다.
-    `GetModuleFileNameA/W`와 `_get_pgmptr` / `_get_wpgmptr`는 CRT
-    program-path state를 검증합니다.
+    `GetModuleHandleA/W`, `GetModuleFileNameA/W`와 `_get_pgmptr` /
+    `_get_wpgmptr`는 CRT program-path 및 module-handle state를 검증합니다.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/cstdio_file_state.cpp)
 - [x] CRT environment semantic check
   - `getenv` / `getenv_s` / `_dupenv_s` 및 wide `_wgetenv` / `_wgetenv_s` /
@@ -500,15 +508,17 @@ cppreference Example 코드를 이식한 항목은
 - [x] CRT runtime-state semantic check
   - `_get_fmode` / `_set_fmode`, `_query_new_mode` / `_set_new_mode`,
     `_get_errno` / `_set_errno`, `_get_doserrno` / `_set_doserrno`를 CRT
-    process/runtime state 기준으로 검증합니다. 테스트가 끝나기 전에 원래
-    상태를 복구하여 뒤의 driver test가 startup default를 보도록 합니다.
+    process/runtime state 기준으로 검증합니다. `_get_errno`,
+    `_get_doserrno`, `strerror_s`의 invalid-parameter handler contract도
+    확인합니다. 테스트가 끝나기 전에 원래 상태를 복구하여 뒤의 driver
+    test가 startup default를 보도록 합니다.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/cstdlib.cpp)
 - [x] Error and diagnostics semantic check
   - `GetLastError`, `FormatMessageA/W`, `std::system_category`,
     `std::generic_category`, `std::system_error`, `errno`, `_get_errno`,
     `_get_doserrno`, default error-condition mapping,
-    `FormatMessageA/W` failure-edge 경로를 Win32 및 CRT failure case 기준으로
-    검증합니다.
+    `FormatMessageA/W` failure-edge, invalid-parameter handler 경로를 Win32
+    및 CRT failure case 기준으로 검증합니다.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/diagnostics.cpp)
 - [x] [std::string](https://en.cppreference.com/w/cpp/string/basic_string)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/string.cpp)

@@ -79,6 +79,10 @@ void verify_utc_formatting() {
   expect(std::wcscmp(wide_formatted, L"1970-01-01 00:00:00") == 0,
          "wcsftime UTC epoch value mismatch");
 
+  char too_small[4]{};
+  expect(std::strftime(too_small, sizeof(too_small), "%Y-%m-%d", &utc) == 0,
+         "strftime unexpectedly accepted a small buffer");
+
   char asctime_buffer[26]{};
   expect(asctime_s(asctime_buffer, sizeof(asctime_buffer), &utc) == 0,
          "asctime_s UTC epoch failed");
@@ -90,6 +94,9 @@ void verify_utc_formatting() {
          "_ctime64_s UTC epoch failed");
   expect(std::strstr(ctime_buffer, "1970") != nullptr,
          "_ctime64_s UTC epoch did not include year");
+
+  tm roundtrip = utc;
+  expect(_mkgmtime64(&roundtrip) == 0, "_mkgmtime64 UTC epoch failed");
 }
 
 void verify_tzset_localtime() {
@@ -97,6 +104,23 @@ void verify_tzset_localtime() {
 
   expect(_putenv_s("TZ", "UTC0") == 0, "_putenv_s TZ failed");
   _tzset();
+
+  long timezone_seconds{};
+  expect(_get_timezone(&timezone_seconds) == 0, "_get_timezone failed");
+  expect(timezone_seconds == 0, "_get_timezone UTC0 value mismatch");
+
+  int daylight{};
+  expect(_get_daylight(&daylight) == 0, "_get_daylight failed");
+  expect(daylight == 0, "_get_daylight UTC0 value mismatch");
+
+  char timezone_name[32]{};
+  size_t timezone_name_length{};
+  expect(_get_tzname(&timezone_name_length, timezone_name,
+                     sizeof(timezone_name), 0) == 0,
+         "_get_tzname standard name failed");
+  expect(timezone_name_length > 1, "_get_tzname returned empty standard name");
+  expect(std::strstr(timezone_name, "UTC") != nullptr,
+         "_get_tzname standard name mismatch");
 
   const __time64_t epoch{};
   tm local{};

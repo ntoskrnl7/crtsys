@@ -20,6 +20,8 @@ constexpr char missing_remove_path[] = "crtsys_remove_missing.tmp";
 constexpr char freopen_first_path[] = "crtsys_stdio_freopen_first.tmp";
 constexpr char freopen_second_path[] = "crtsys_stdio_freopen_second.tmp";
 constexpr char position_path[] = "crtsys_stdio_position.tmp";
+constexpr char append_update_path[] = "crtsys_stdio_append_update.tmp";
+constexpr char eof_error_path[] = "crtsys_stdio_eof_error.tmp";
 constexpr wchar_t wide_stdio_path[] = L"crtsys_stdio_wide.tmp";
 
 void expect(bool condition, const char *message) {
@@ -36,6 +38,8 @@ void remove_test_files() {
   std::remove(freopen_first_path);
   std::remove(freopen_second_path);
   std::remove(position_path);
+  std::remove(append_update_path);
+  std::remove(eof_error_path);
   _wunlink(wide_stdio_path);
 }
 
@@ -71,6 +75,63 @@ void verify_stdio_position_and_buffering() {
   expect(std::fgetc(fp) == 'b', "fgetc after ungetc failed");
 
   expect(std::fclose(fp) == 0, "fclose position file failed");
+}
+
+void verify_stdio_append_update_and_error_state() {
+  {
+    std::FILE *fp = std::fopen(append_update_path, "wb");
+    expect(fp != nullptr, "fopen append seed failed");
+    expect(std::fputs("alpha", fp) >= 0, "append seed write failed");
+    expect(std::fclose(fp) == 0, "append seed close failed");
+  }
+
+  std::FILE *append = std::fopen(append_update_path, "ab+");
+  expect(append != nullptr, "fopen append update failed");
+  expect(std::fseek(append, 0, SEEK_SET) == 0, "append fseek begin failed");
+  expect(std::fputs("!", append) >= 0, "append write failed");
+  expect(std::fflush(append) == 0, "append fflush failed");
+  expect(std::fseek(append, 0, SEEK_SET) == 0, "append rewind failed");
+
+  char append_read[8]{};
+  expect(std::fread(append_read, 1, 6, append) == 6,
+         "append readback failed");
+  expect(std::memcmp(append_read, "alpha!", 6) == 0,
+         "append mode did not write at end");
+  expect(std::fclose(append) == 0, "append close failed");
+
+  std::FILE *update = std::fopen(append_update_path, "rb+");
+  expect(update != nullptr, "fopen update failed");
+  expect(std::fseek(update, 1, SEEK_SET) == 0, "update fseek failed");
+  expect(std::fputc('Z', update) == 'Z', "update fputc failed");
+  expect(std::fflush(update) == 0, "update fflush failed");
+  expect(std::fseek(update, 0, SEEK_SET) == 0, "update rewind failed");
+
+  char update_read[8]{};
+  expect(std::fread(update_read, 1, 6, update) == 6,
+         "update readback failed");
+  expect(std::memcmp(update_read, "aZpha!", 6) == 0,
+         "update mode did not overwrite in place");
+
+  expect(std::fgetc(update) == EOF, "EOF read did not return EOF");
+  expect(std::feof(update) != 0, "feof was not set after EOF");
+  expect(std::ferror(update) == 0, "ferror set during EOF path");
+  std::clearerr(update);
+  expect(std::feof(update) == 0, "clearerr did not clear EOF");
+  expect(std::fclose(update) == 0, "update close failed");
+
+  std::FILE *readonly = std::fopen(eof_error_path, "wb");
+  expect(readonly != nullptr, "fopen error seed failed");
+  expect(std::fputs("readonly", readonly) >= 0, "error seed write failed");
+  expect(std::fclose(readonly) == 0, "error seed close failed");
+
+  readonly = std::fopen(eof_error_path, "rb");
+  expect(readonly != nullptr, "fopen readonly failed");
+  expect(std::fputc('x', readonly) == EOF,
+         "write to readonly stream unexpectedly succeeded");
+  expect(std::ferror(readonly) != 0, "ferror was not set after write error");
+  std::clearerr(readonly);
+  expect(std::ferror(readonly) == 0, "clearerr did not clear error state");
+  expect(std::fclose(readonly) == 0, "readonly close failed");
 }
 
 void verify_stdio_reopen_and_temporary_files() {
@@ -195,6 +256,7 @@ void run() {
                   "remove missing file _doserrno mismatch");
 
   verify_stdio_position_and_buffering();
+  verify_stdio_append_update_and_error_state();
   verify_stdio_reopen_and_temporary_files();
   verify_wide_stdio();
 
