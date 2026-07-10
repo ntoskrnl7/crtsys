@@ -78,6 +78,18 @@ void verify_utc_formatting() {
          "wcsftime UTC epoch failed");
   expect(std::wcscmp(wide_formatted, L"1970-01-01 00:00:00") == 0,
          "wcsftime UTC epoch value mismatch");
+
+  char asctime_buffer[26]{};
+  expect(asctime_s(asctime_buffer, sizeof(asctime_buffer), &utc) == 0,
+         "asctime_s UTC epoch failed");
+  expect(std::strcmp(asctime_buffer, "Thu Jan  1 00:00:00 1970\n") == 0,
+         "asctime_s UTC epoch value mismatch");
+
+  char ctime_buffer[26]{};
+  expect(_ctime64_s(ctime_buffer, sizeof(ctime_buffer), &epoch) == 0,
+         "_ctime64_s UTC epoch failed");
+  expect(std::strstr(ctime_buffer, "1970") != nullptr,
+         "_ctime64_s UTC epoch did not include year");
 }
 
 void verify_tzset_localtime() {
@@ -100,6 +112,12 @@ void verify_tzset_localtime() {
          "strftime local UTC epoch failed");
   expect(std::strcmp(formatted, "1970-01-01 00:00:00") == 0,
          "strftime local UTC epoch value mismatch");
+
+  tm roundtrip = local;
+  expect(std::mktime(&roundtrip) == 0, "mktime UTC epoch failed");
+  expect(roundtrip.tm_wday == local.tm_wday,
+         "mktime normalized weekday mismatch");
+  expect(std::difftime(60, 10) == 50.0, "difftime result mismatch");
 }
 } // namespace
 

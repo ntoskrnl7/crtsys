@@ -166,8 +166,9 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
     and `gps_clock` round trips where the active MSVC STL exposes those clocks.
 - [x] CRT time semantic checks
   - `_time64`, `_ftime64_s`, `gmtime_s`, `localtime_s`, `_tzset`,
-    `strftime`, and `wcsftime` paths are covered against the LDK-backed system
-    time and timezone substrate.
+    `strftime`, `wcsftime`, `asctime_s`, `_ctime64_s`, `mktime`, and
+    `difftime` paths are covered against the LDK-backed system time and
+    timezone substrate.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/ctime.cpp)
 - [x] [std::any](https://en.cppreference.com/w/cpp/utility/any)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
@@ -249,17 +250,18 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   [(cppreference examples)](../test/cmake/driver/src/cpp/stl/locale.cpp)
 - [x] Locale facet semantic checks
   - Named `std::locale` ctype, collate, numpunct, and moneypunct facets are
-    covered against the LDK-backed locale/NLS substrate.
+    covered against the LDK-backed locale/NLS substrate, including grouped
+    numeric parsing through the locale facets.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/locale.cpp)
 - [x] NLS and text conversion semantic checks
   - `MultiByteToWideChar`, `WideCharToMultiByte`, `GetStringTypeW`,
     `GetStringTypeExW`, `LCMapStringEx`, `CompareStringEx`,
     `CompareStringOrdinal`, CP_ACP / UTF-8 round trips, insufficient-buffer and
-    invalid-sequence error cases, UCRT `mbtowc` / `wctomb` / `mbstowcs` /
-    `mbstowcs_s` / `wcstombs` / `wcstombs_s` / `mbrtowc` / `wcrtomb`, C++ UTF
-    conversion functions `mbrtoc16` / `c16rtomb` / `mbrtoc32` / `c32rtomb`,
-    and filesystem UTF-8 path create/read/copy/rename/enumeration paths are
-    covered.
+    invalid-sequence / invalid-flag error cases, UCRT `mbtowc` / `wctomb` /
+    `mbstowcs` / `mbstowcs_s` / `wcstombs` / `wcstombs_s` / `mbrtowc` /
+    `wcrtomb`, C++ UTF conversion functions `mbrtoc16` / `c16rtomb` /
+    `mbrtoc32` / `c32rtomb`, and filesystem UTF-8 path
+    create/read/copy/rename/enumeration paths are covered.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/nls.cpp)
 - [x] [std::map](https://en.cppreference.com/w/cpp/container/map)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/containers.cpp)
@@ -469,15 +471,18 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   - `fopen` / `fread` / `fwrite` / `fseek` / `ftell` and `_open` / `_read` /
     `_write` / `_lseek` / `_close` and `remove` paths are covered with success,
     missing-file, invalid-descriptor, read-only descriptor, and `errno` /
-    `_doserrno` propagation checks.
+    `_doserrno` propagation checks. `setvbuf`, `fgetpos` / `fsetpos`,
+    `ungetc`, `tmpfile`, `tmpnam_s`, `_tempnam`, `freopen`, and wide stdio
+    (`_wfopen`, `fputwc`, `fputws`, `fgetwc`, `fgetws`) are also exercised.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/cstdio.cpp)
 - [x] CRT file/process-state semantic checks
   - `_stat` / `_stat64` / `_wstat64`, `_fstat` / `_fstat64`,
     `_access` / `_waccess`,
     `_fullpath` / `_wfullpath`, `_getcwd` / `_wgetcwd`, `_chdir` / `_wchdir`,
     `_findfirst` / `_findnext`, `_findfirst64` / `_findnext64`,
-    `_dup` / `_dup2`, `_tell`, `_filelength`, `_commit`, `_chsize`, and
-    `_chsize_s` paths are covered against the LDK-backed current-directory,
+    `_dup` / `_dup2`, `_tell`, `_telli64`, `_filelength`, `_filelengthi64`,
+    `_lseeki64`, `_commit`, `_chsize`, `_chsize_s`, `_eof`, `_locking`, and
+    `_umask` paths are covered against the LDK-backed current-directory,
     file-handle, enumeration, and metadata substrate. `_O_EXCL`, `_O_APPEND`,
     invalid-descriptor, and missing-glob failure paths are also checked. CRT
     current-directory state is cross-checked against

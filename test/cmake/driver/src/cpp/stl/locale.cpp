@@ -285,6 +285,13 @@ void run() {
   expect(punct.decimal_point() == '.', "en_US numpunct decimal mismatch");
   expect(!punct.grouping().empty(), "en_US numpunct grouping was empty");
 
+  std::istringstream grouped_number("1,234");
+  grouped_number.imbue(en_us);
+  int parsed_number{};
+  grouped_number >> parsed_number;
+  expect(!grouped_number.fail() && parsed_number == 1234,
+         "en_US num_get grouping parse failed");
+
   const std::locale de_de("de_DE.UTF-8");
   const auto &money = std::use_facet<std::moneypunct<char, true>>(de_de);
   expect(!money.curr_symbol().empty(),

@@ -178,6 +178,14 @@ extern "C" int WINAPI __acrt_GetTimeFormatEx(
     return GetTimeFormatW(__acrt_LocaleNameToLCID(locale_name, 0), flags, time, format, buffer, buffer_count);
 }
 
+extern "C" int WINAPI __acrt_GetTempPath2W(
+    DWORD const buffer_length,
+    LPWSTR const buffer
+    )
+{
+    return static_cast<int>(GetTempPath2W(buffer_length, buffer));
+}
+
 extern "C" int WINAPI __acrt_GetLocaleInfoEx(
     LPCWSTR const locale_name,
     LCTYPE  const lc_type,
@@ -188,12 +196,67 @@ extern "C" int WINAPI __acrt_GetLocaleInfoEx(
     return GetLocaleInfoEx(locale_name, lc_type, data, data_count);
 }
 
+static int __cdecl CrtSyspGetLocaleInfoA(
+    _locale_t const locale,
+    LPCWSTR const locale_name,
+    LCTYPE const locale_type,
+    LPSTR const result,
+    int const result_size
+    )
+{
+    if (locale == nullptr || locale->locinfo == nullptr)
+    {
+        return 0;
+    }
+
+    struct CrtSyspLocaleDataPrefix
+    {
+        __crt_locale_data_public _public;
+    };
+
+    int const code_page = static_cast<int>(
+        reinterpret_cast<CrtSyspLocaleDataPrefix const*>(locale->locinfo)
+            ->_public._locale_lc_codepage);
+
+    // Match the UCRT locale/GetLocaleInfoA.cpp contract: LC_STR_TYPE results
+    // are encoded in the active locale code page. MSVC STL later decodes these
+    // strings with the same _Cvtvec; returning UTF-8 here corrupts non-UTF-8
+    // locales such as ko-KR/CP949.
+    int const wide_count = __acrt_GetLocaleInfoEx(locale_name, locale_type, nullptr, 0);
+    if (wide_count == 0)
+    {
+        return 0;
+    }
+
+    auto* const wide_result =
+        static_cast<wchar_t*>(calloc(static_cast<size_t>(wide_count), sizeof(wchar_t)));
+    if (wide_result == nullptr)
+    {
+        return 0;
+    }
+
+    int narrow_count = 0;
+    if (__acrt_GetLocaleInfoEx(locale_name, locale_type, wide_result, wide_count) != 0)
+    {
+        narrow_count = __acrt_WideCharToMultiByte(
+            static_cast<UINT>(code_page),
+            0,
+            wide_result,
+            -1,
+            result_size != 0 ? result : nullptr,
+            result_size,
+            nullptr,
+            nullptr);
+    }
+
+    free(wide_result);
+    return narrow_count;
+}
+
 extern "C"
 int __cdecl __acrt_GetLocaleInfoA(_locale_t const locale, int const lc_type, wchar_t const *const locale_name,
                                   LCTYPE const locale_type, void *const void_result)
 {
-    UNREFERENCED_PARAMETER(locale);
-
     if (void_result == nullptr)
     {
         return -1;
@@ -224,6 +287,33 @@ int __cdecl __acrt_GetLocaleInfoA(_locale_t const locale, int const lc_type, wch
         return 0;
     }
 
+    if (lc_type == LC_STR_TYPE)
+    {
+        const int char_count =
+            CrtSyspGetLocaleInfoA(locale, locale_name, locale_type, nullptr, 0);
+        if (char_count == 0)
+        {
+            return -1;
+        }
+
+        auto* const char_result = static_cast<char*>(calloc(static_cast<size_t>(char_count), sizeof(char)));
+        if (char_result == nullptr)
+        {
+            return -1;
+        }
+
+        const int converted =
+            CrtSyspGetLocaleInfoA(locale, locale_name, locale_type, char_result, char_count);
+        if (converted == 0)
+        {
+            free(char_result);
+            return -1;
+        }
+
+        *static_cast<char**>(void_result) = char_result;
+        return 0;
+    }
+
     const int wide_count = __acrt_GetLocaleInfoEx(locale_name, locale_type, nullptr, 0);
     if (wide_count == 0)
     {
@@ -245,36 +335,6 @@ int __cdecl __acrt_GetLocaleInfoA(_locale_t const locale, int const lc_type, wch
     if (lc_type == LC_WSTR_TYPE)
     {
         *static_cast<wchar_t**>(void_result) = wide_result;
-        return 0;
-    }
-
-    if (lc_type == LC_STR_TYPE)
-    {
-        const int char_count = __acrt_WideCharToMultiByte(
-            CP_UTF8, 0, wide_result, -1, nullptr, 0, nullptr, nullptr);
-        if (char_count == 0)
-        {
-            free(wide_result);
-            return -1;
-        }
-
-        auto* const char_result = static_cast<char*>(calloc(static_cast<size_t>(char_count), sizeof(char)));
-        if (char_result == nullptr)
-        {
-            free(wide_result);
-            return -1;
-        }
-
-        const int converted = __acrt_WideCharToMultiByte(
-            CP_UTF8, 0, wide_result, -1, char_result, char_count, nullptr, nullptr);
-        free(wide_result);
-        if (converted == 0)
-        {
-            free(char_result);
-            return -1;
-        }
-
-        *static_cast<char**>(void_result) = char_result;
         return 0;
     }
 
