@@ -36,6 +36,8 @@ test harness, typically by moving the sample `main()` body into a namespaced
 - `std::counting_semaphore` / `std::binary_semaphore`: <https://en.cppreference.com/w/cpp/thread/counting_semaphore>
 - `std::condition_variable`: <https://en.cppreference.com/w/cpp/thread/condition_variable>
 - `std::condition_variable_any::wait`: <https://en.cppreference.com/w/cpp/thread/condition_variable_any/wait>
+- `std::noop_coroutine`: <https://en.cppreference.com/w/cpp/coroutine/noop_coroutine>
+- `std::generator`: <https://en.cppreference.com/w/cpp/coroutine/generator>
 - `std::mutex`: <https://en.cppreference.com/w/cpp/thread/mutex>
 - `std::lock_guard`: <https://en.cppreference.com/w/cpp/thread/lock_guard>
 - `std::shared_mutex`: <https://en.cppreference.com/w/cpp/thread/shared_mutex>
@@ -94,12 +96,14 @@ test harness, typically by moving the sample `main()` body into a namespaced
 - `std::get_time`: <https://en.cppreference.com/w/cpp/io/manip/get_time>
 - `std::put_time`: <https://en.cppreference.com/w/cpp/io/manip/put_time>
 - `std::map`: <https://en.cppreference.com/w/cpp/container/map>
+- `std::flat_map`: <https://en.cppreference.com/w/cpp/container/flat_map>
 - `std::map::insert_or_assign`: <https://en.cppreference.com/w/cpp/container/map/insert_or_assign>
 - `std::map::try_emplace`: <https://en.cppreference.com/w/cpp/container/map/try_emplace>
 - `std::map::contains`: <https://en.cppreference.com/w/cpp/container/map/contains>
 - `std::map::extract`: <https://en.cppreference.com/w/cpp/container/map/extract>
 - `std::map::merge`: <https://en.cppreference.com/w/cpp/container/map/merge>
 - `std::set`: <https://en.cppreference.com/w/cpp/container/set>
+- `std::flat_set`: <https://en.cppreference.com/w/cpp/container/flat_set>
 - `std::set::contains`: <https://en.cppreference.com/w/cpp/container/set/contains>
 - `std::set::extract`: <https://en.cppreference.com/w/cpp/container/set/extract>
 - `std::set::merge`: <https://en.cppreference.com/w/cpp/container/set/merge>
@@ -120,6 +124,7 @@ test harness, typically by moving the sample `main()` body into a namespaced
 - `std::stack::emplace`: <https://en.cppreference.com/w/cpp/container/stack/emplace>
 - `std::priority_queue`: <https://en.cppreference.com/w/cpp/container/priority_queue>
 - `std::span`: <https://en.cppreference.com/w/cpp/container/span>
+- `std::mdspan`: <https://en.cppreference.com/w/cpp/container/mdspan>
 - `std::string`: <https://en.cppreference.com/w/cpp/string/basic_string>
 - `std::string::find`: <https://en.cppreference.com/w/cpp/string/basic_string/find>
 - `std::string::substr`: <https://en.cppreference.com/w/cpp/string/basic_string/substr>
@@ -134,6 +139,7 @@ test harness, typically by moving the sample `main()` body into a namespaced
 - `std::string_view::ends_with`: <https://en.cppreference.com/w/cpp/string/basic_string_view/ends_with>
 - `std::string_view::contains`: <https://en.cppreference.com/w/cpp/string/basic_string_view/contains>
 - `std::sort`: <https://en.cppreference.com/w/cpp/algorithm/sort>
+- Execution policies: <https://en.cppreference.com/w/cpp/algorithm/execution_policy_tag>
 - `std::find`: <https://en.cppreference.com/w/cpp/algorithm/find>
 - `std::transform`: <https://en.cppreference.com/w/cpp/algorithm/transform>
 - `std::remove`: <https://en.cppreference.com/w/cpp/algorithm/remove>
@@ -201,6 +207,7 @@ test harness, typically by moving the sample `main()` body into a namespaced
 - `std::expected`: <https://en.cppreference.com/w/cpp/utility/expected>
 - `std::type_index`: <https://en.cppreference.com/w/cpp/types/type_index>
 - `std::source_location`: <https://en.cppreference.com/w/cpp/utility/source_location>
+- `std::stacktrace`: <https://en.cppreference.com/w/cpp/utility/basic_stacktrace>
 - `std::reference_wrapper`: <https://en.cppreference.com/w/cpp/utility/functional/reference_wrapper>
 - `std::invoke`: <https://en.cppreference.com/w/cpp/utility/functional/invoke>
 - `std::exchange`: <https://en.cppreference.com/w/cpp/utility/exchange>
@@ -409,6 +416,24 @@ same page.
 
 The `std::expected` example is compiled into the driver test when the
 `__cpp_lib_expected` feature-test macro is available.
+
+The `std::noop_coroutine`, `std::generator`, `std::mdspan`, and
+`std::stacktrace` examples are compiled into the driver test when the active
+MSVC STL exposes the corresponding feature-test macros. The `std::mdspan`
+harness uses `std::print` like the cppreference example when the active STL
+exposes it, and falls back only for older toolsets that expose `mdspan` without
+`print`. The `std::stacktrace` harness validates `std::stacktrace::current()`
+and frame capture; the kernel ABI shim intentionally avoids user-mode DbgEng
+symbol resolution.
+
+The execution-policy example keeps the `std::execution::seq`, `unseq`, `par`,
+and `par_unseq` sort calls, but reduces the original benchmark-sized random
+input to deterministic smaller input so the kernel driver test does not become
+a timing benchmark or large allocation stress test.
+
+The `std::flat_map` and `std::flat_set` pages currently do not provide
+standalone "Run this code" examples, so the harness uses small direct API
+checks when the active MSVC STL exposes those headers.
 
 The `std::format`, `std::range_formatter`, and `std::print` examples run in the
 default driver build when the active MSVC STL exposes the corresponding

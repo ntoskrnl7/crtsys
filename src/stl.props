@@ -22,6 +22,7 @@
       <CompileAs>CompileAsCpp</CompileAs>
     </ClCompile>
     <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\pplerror.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\pplerror.cpp" />
+    <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\parallel_algorithms.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\parallel_algorithms.cpp" />
     <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\ppltasks.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\ppltasks.cpp" />
     <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\sharedmutex.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\sharedmutex.cpp" />
     <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\atomic_wait.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\atomic_wait.cpp" />

@@ -133,7 +133,7 @@ cppreference Example 코드를 이식한 항목은
 - [x] [std::atomic_ref](https://en.cppreference.com/w/cpp/atomic/atomic_ref)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/atomic.cpp)
 - [x] [std::atomic::wait/notify](https://en.cppreference.com/w/cpp/atomic/atomic/wait)
-  [(cppreference example)](../test/cmake/driver/src/cpp/stl/atomic.cpp)
+  [(cppreference example + driver semantic test)](../test/cmake/driver/src/cpp/stl/atomic.cpp)
 - [x] [std::atomic_flag](https://en.cppreference.com/w/cpp/atomic/atomic_flag)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/atomic.cpp)
 - [x] Atomic fence 및 free function:
@@ -273,6 +273,8 @@ cppreference Example 코드를 이식한 항목은
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/nls.cpp)
 - [x] [std::map](https://en.cppreference.com/w/cpp/container/map)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/containers.cpp)
+- [x] [`std::flat_map`](https://en.cppreference.com/w/cpp/container/flat_map)
+  [(feature-test-gated API coverage)](../test/cmake/driver/src/cpp/stl/cxx_latest.cpp)
 - [x] [std::make_heap](https://en.cppreference.com/w/cpp/algorithm/make_heap)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::merge](https://en.cppreference.com/w/cpp/algorithm/merge)
@@ -357,16 +359,24 @@ cppreference Example 코드를 이식한 항목은
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::set](https://en.cppreference.com/w/cpp/container/set)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/containers.cpp)
+- [x] [`std::flat_set`](https://en.cppreference.com/w/cpp/container/flat_set)
+  [(feature-test-gated API coverage)](../test/cmake/driver/src/cpp/stl/cxx_latest.cpp)
 - [x] [std::shared_ptr](https://en.cppreference.com/w/cpp/memory/shared_ptr)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/memory.cpp)
 - [x] [std::sort](https://en.cppreference.com/w/cpp/algorithm/sort)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
+- [x] [Execution policies / parallel algorithms](https://en.cppreference.com/w/cpp/algorithm/execution_policy_tag)
+  [(feature-test-gated cppreference example)](../test/cmake/driver/src/cpp/stl/cxx_latest.cpp)
 - [x] [std::span](https://en.cppreference.com/w/cpp/container/span)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/containers.cpp)
+- [x] [std::mdspan](https://en.cppreference.com/w/cpp/container/mdspan)
+  [(feature-test-gated cppreference example)](../test/cmake/driver/src/cpp/stl/cxx_latest.cpp)
 - [x] [std::stack](https://en.cppreference.com/w/cpp/container/stack)
   [(cppreference push/emplace examples)](../test/cmake/driver/src/cpp/stl/containers.cpp)
 - [x] [std::source_location](https://en.cppreference.com/w/cpp/utility/source_location)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
+- [x] [std::stacktrace](https://en.cppreference.com/w/cpp/utility/basic_stacktrace)
+  [(feature-test-gated cppreference example)](../test/cmake/driver/src/cpp/stl/cxx_latest.cpp)
 - [x] [`std::chrono::year_month_day`](https://en.cppreference.com/w/cpp/chrono/year_month_day),
       [`std::chrono::weekday`](https://en.cppreference.com/w/cpp/chrono/weekday),
       [`std::chrono::hh_mm_ss`](https://en.cppreference.com/w/cpp/chrono/hh_mm_ss)
@@ -550,6 +560,10 @@ cppreference Example 코드를 이식한 항목은
   [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp#L35)
 - [x] [std::jthread](https://en.cppreference.com/w/cpp/thread/jthread)
   [(cppreference constructor example)](../test/cmake/driver/src/cpp/stl/thread.cpp)
+- [x] Coroutine library:
+      [`std::noop_coroutine`](https://en.cppreference.com/w/cpp/coroutine/noop_coroutine)
+      and [`std::generator`](https://en.cppreference.com/w/cpp/coroutine/generator)
+  [(feature-test-gated cppreference examples)](../test/cmake/driver/src/cpp/stl/cxx_latest.cpp)
 - [x] [std::tuple](https://en.cppreference.com/w/cpp/utility/tuple)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::type_index](https://en.cppreference.com/w/cpp/types/type_index)
@@ -740,6 +754,12 @@ runtime substrate를 증명하는 테스트보다 우선순위는 낮습니다.
     않게 하는 routing입니다. `thread_local int x`를 thread-local로 만들어주는
     기능은 아닙니다. kernel mode에서 GS 기반 TLS 모델은 각 thread의
     user-mode TEB가 아니라 processor-local KPCR에 묶입니다.
+- [ ] [`std::inplace_vector`](https://en.cppreference.com/w/cpp/container/inplace_vector)
+  - 현재 driver-test matrix에서 사용하는 active MSVC STL toolset은 아직
+    이 header를 노출하지 않으므로 driver test를 컴파일하지 않습니다.
+- [ ] [`std::hive`](https://en.cppreference.com/w/cpp/container/hive)
+  - 현재 driver-test matrix에서 사용하는 active MSVC STL toolset은 아직
+    이 header를 노출하지 않으므로 driver test를 컴파일하지 않습니다.
 
 ## C Standard
 

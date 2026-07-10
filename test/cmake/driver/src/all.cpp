@@ -202,6 +202,9 @@ void run();
 namespace atomic_flag_test {
 void run();
 }
+namespace atomic_wait_notify_semantic_test {
+void run();
+}
 namespace atomic_thread_fence_test {
 void run();
 }
@@ -793,6 +796,27 @@ void run();
 namespace numbers_test {
 void run();
 }
+namespace coroutine_noop_test {
+void run();
+}
+namespace generator_test {
+void run();
+}
+namespace mdspan_test {
+void run();
+}
+namespace stacktrace_test {
+void run();
+}
+namespace execution_policy_test {
+void run();
+}
+namespace flat_map_test {
+void run();
+}
+namespace flat_set_test {
+void run();
+}
 
 //
 // ntl_test.cpp
@@ -1118,6 +1142,7 @@ void cpp_std_tests() {
   CRTSYS_RUN_CPPREFERENCE_TEST(atomic_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(atomic_ref_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(atomic_flag_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(atomic_wait_notify_semantic_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(atomic_thread_fence_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(atomic_signal_fence_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(atomic_fetch_add_test);
@@ -1146,6 +1171,13 @@ void cpp_std_tests() {
   CRTSYS_RUN_CPPREFERENCE_TEST(concepts_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(strong_ordering_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(numbers_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(coroutine_noop_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(generator_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(mdspan_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(stacktrace_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(execution_policy_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(flat_map_test);
+  CRTSYS_RUN_CPPREFERENCE_TEST(flat_set_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(complex_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(valarray_slice_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(random_device_test);

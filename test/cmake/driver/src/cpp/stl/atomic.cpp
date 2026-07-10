@@ -142,6 +142,107 @@ void run() {
 } // namespace atomic_flag_test
 
 //
+// Driver semantic edge coverage for the C++20 atomic wait/notify path already
+// covered by the cppreference atomic_flag example above. These checks exercise
+// the value-change wakeup path used by MSVC STL's WaitOnAddress-backed atomics.
+//
+namespace atomic_wait_notify_semantic_test {
+namespace {
+void expect(bool condition, const char *message) {
+  if (!condition) {
+    throw std::runtime_error(message);
+  }
+}
+} // namespace
+
+void run() {
+#if defined(__cpp_lib_atomic_wait) && __cpp_lib_atomic_wait >= 201907L
+  {
+    std::atomic<int> value{0};
+    std::atomic<bool> waiter_entered{false};
+    std::atomic<int> observed{-1};
+
+    std::thread waiter([&] {
+      waiter_entered.store(true, std::memory_order_release);
+      value.wait(0, std::memory_order_acquire);
+      observed.store(value.load(std::memory_order_acquire),
+                     std::memory_order_release);
+    });
+
+    while (!waiter_entered.load(std::memory_order_acquire)) {
+      std::this_thread::yield();
+    }
+
+    value.store(1, std::memory_order_release);
+    value.notify_one();
+    waiter.join();
+
+    expect(observed.load(std::memory_order_acquire) == 1,
+           "atomic::wait did not observe notify_one value change");
+  }
+
+  {
+    std::atomic<int> value{0};
+    std::atomic<int> waiters_entered{0};
+    std::atomic<int> waiters_observed{0};
+
+    auto wait_for_two = [&] {
+      waiters_entered.fetch_add(1, std::memory_order_release);
+      value.wait(0, std::memory_order_acquire);
+      if (value.load(std::memory_order_acquire) == 2) {
+        waiters_observed.fetch_add(1, std::memory_order_release);
+      }
+    };
+
+    std::thread first(wait_for_two);
+    std::thread second(wait_for_two);
+
+    while (waiters_entered.load(std::memory_order_acquire) != 2) {
+      std::this_thread::yield();
+    }
+
+    value.store(2, std::memory_order_release);
+    value.notify_all();
+
+    first.join();
+    second.join();
+
+    expect(waiters_observed.load(std::memory_order_acquire) == 2,
+           "atomic::notify_all did not wake both waiters");
+  }
+
+  {
+    std::atomic<int> value{0};
+    std::atomic<bool> waiter_entered{false};
+    std::atomic<int> observed{-1};
+
+    std::thread waiter([&] {
+      waiter_entered.store(true, std::memory_order_release);
+      std::atomic_wait_explicit(&value, 0, std::memory_order_acquire);
+      observed.store(value.load(std::memory_order_acquire),
+                     std::memory_order_release);
+    });
+
+    while (!waiter_entered.load(std::memory_order_acquire)) {
+      std::this_thread::yield();
+    }
+
+    value.store(3, std::memory_order_release);
+    std::atomic_notify_one(&value);
+    waiter.join();
+
+    expect(observed.load(std::memory_order_acquire) == 3,
+           "atomic_wait_explicit did not observe atomic_notify_one");
+  }
+
+  std::cout << "atomic wait/notify semantic edge assertions passed\n";
+#else
+  std::cout << "std::atomic wait/notify is not available in this STL\n";
+#endif
+}
+} // namespace atomic_wait_notify_semantic_test
+
+//
 // https://en.cppreference.com/w/cpp/atomic/atomic_thread_fence#Example
 //
 namespace atomic_thread_fence_test {
