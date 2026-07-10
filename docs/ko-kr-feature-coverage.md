@@ -47,7 +47,7 @@ exception 없음, 유효한 WDK 문맥을 직접 보장해야 합니다. driver 
 
 | 기능 영역 | 포함 항목 | 지원 IRQL | 비고 |
 | --- | --- | --- | --- |
-| Runtime 및 C++ 초기화 | non-local static initialization, dynamic initialization, function-local `static` | `PASSIVE_LEVEL` / driver initialization path | `crtsys` wrapper가 `DriverEntry`에서 실행합니다. 일반 C++ `thread_local`은 true per-thread TLS로 지원하지 않습니다. |
+| Runtime 및 C++ 초기화 | non-local static initialization, dynamic initialization, function-local `static` | `PASSIVE_LEVEL` / driver initialization path | `crtsys` wrapper가 `DriverEntry`에서 실행합니다. MSVC compiler TLS slot은 여러 crtsys-linked driver 사이에서 격리됩니다. 이것은 runtime slot 격리이지 사용자 `thread_local` 지원이 아닙니다. kernel GS는 thread별 user-mode TEB가 아니라 processor-local KPCR입니다. |
 | C++ 예외 | `throw`, `try`, function try block, `std::exception_ptr` | `PASSIVE_LEVEL` only | WDK callback 경계, spin lock 보유 구간, DPC, ISR, paging I/O 경로를 넘어 예외가 흐르게 하지 마세요. |
 | C++ RTTI | `typeid`, `dynamic_cast` | 감사된 caller context; 그 외에는 `PASSIVE_LEVEL` | 사용하는 driver target은 RTTI를 켜고 빌드해야 합니다. 대상 객체와 type metadata는 resident 상태여야 합니다. |
 | STL value-only helper | type traits, concepts, `std::array`, `std::span`, `std::string_view`, `std::bitset`, `std::pair`, `std::tuple`, `std::ratio`, `std::source_location`, `std::strong_ordering`, `std::numbers`, 단순 `std::move` / `std::exchange` / `std::invoke` / `std::reference_wrapper`, integer `std::to_chars` / `std::from_chars`, resident fixed storage 위의 순수 algorithm | 감사된 caller context; 그 외에는 `PASSIVE_LEVEL` | STL 중 `PASSIVE_LEVEL`보다 높은 곳에서 고려할 수 있는 영역은 이 정도뿐입니다. exact expression과 comparator/callback까지 감사해야 합니다. |
@@ -85,6 +85,16 @@ cppreference Example 코드를 이식한 항목은
 - [x] [Function-local `static` variables](https://en.cppreference.com/w/cpp/language/storage_duration#Static_local_variables)
   [(tested)](../test/cmake/driver/src/cpp/lang/initialization.cpp#L124)
   [(regression)](../test/cmake/driver/src/cpp/lang/initialization.cpp#L229)
+- [x] Multi-driver compiler TLS slot isolation
+  - 여러 crtsys-linked driver image가 동시에 load되어도 thread-safe
+    function-local `static` initialization 같은 runtime path에서 사용하는
+    MSVC compiler TLS `_tls_index`가 서로 충돌하지 않습니다. 보장하는 것은
+    module/driver-image 격리입니다. shared slot vector가 각 driver image의
+    `_tls_index`를 그 driver의 compiler TLS image buffer에 매핑합니다. 이것은
+    driver image 사이의 runtime slot 격리입니다. 사용자 `thread_local T value`
+    를 안전하게 만드는 기능은 아닙니다. kernel mode에서 GS 기반 TLS 가정은
+    thread별 user-mode TEB가 아니라 processor-local KPCR 쪽에 걸립니다.
+  [(multi-driver regression)](../test/cmake/driver/multi_instance/driver.cpp)
 - [ ] [`thread_local`](https://en.cppreference.com/w/cpp/language/storage_duration#Thread_storage_duration)
   [(disabled cppreference example)](../test/cmake/driver/src/cpp/lang/initialization.cpp#L79)
 
@@ -702,7 +712,13 @@ runtime substrate를 증명하는 테스트보다 우선순위는 낮습니다.
 - [ ] [thread_local](https://en.cppreference.com/w/cpp/language/storage_duration#Thread_storage_duration)
   - 일반 C++ `thread_local`은 기본 driver build에서 true per-thread TLS로
     지원하지 않습니다. cppreference storage-duration 예제는 비활성화되어
-    있습니다.
+    있습니다. 위의 multi-driver compiler TLS slot isolation은 MSVC runtime
+    path를 위한 driver-image slot 분리이지, user variable에 대한 per-thread
+    storage semantics가 아닙니다. 즉, 제공하는 것은 여러 crtsys-linked driver가
+    같은 compiler TLS slot index를 공유해서 서로의 runtime state를 덮어쓰지
+    않게 하는 routing입니다. `thread_local int x`를 thread-local로 만들어주는
+    기능은 아닙니다. kernel mode에서 GS 기반 TLS 모델은 각 thread의
+    user-mode TEB가 아니라 processor-local KPCR에 묶입니다.
 
 ## C Standard
 

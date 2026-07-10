@@ -126,6 +126,7 @@ flowchart TD
 | C++ exceptions | Driver-tested | `throw`, `try`/`catch`, function-try-block, `std::exception_ptr` |
 | SEH handling | Driver-tested | `__try` / `__except` boundary 처리를 위한 C++ helper path |
 | Static initialization | Driver-tested | non-local, dynamic, MSVC function-local static initialization |
+| Multi-driver compiler TLS | Driver-tested | 여러 crtsys-linked driver가 각자 고유 MSVC `_tls_index`를 받아 runtime TLS slot 충돌을 피함 |
 | RTTI | Driver-tested | `typeid`, `dynamic_cast` |
 | STL containers / algorithms | Driver-tested | container, algorithm, range, smart pointer, PMR, utility |
 | `std::format` / `std::print` | Driver-tested | formatted string/output path |
@@ -134,7 +135,7 @@ flowchart TD
 | Concurrency | Driver-tested | thread, synchronization, async/future, atomic wait/notify |
 | Locale / chrono / charconv | Driver-tested | locale facet, timezone/chrono path, integer/floating char conversion |
 | NTL driver helpers | Driver-tested | `ntl::main`, driver/device helper, RPC, IRQL helper, stack expansion |
-| `thread_local` | Not true TLS | compiler TLS는 true per-thread kernel TLS로 노출하지 않음 |
+| `thread_local` | 사용자 변수 용도 미지원 | kernel GS는 user-mode TEB가 아니라 processor-local KPCR이므로 사용자 `thread_local`은 thread별 storage가 아님 |
 
 상세 matrix는 의도적으로 test-linked 형태입니다. Kernel driver test suite에서
 실행한 기능을 기록하며, compile되거나 동작할 수 있는 모든 header/code path의
@@ -159,7 +160,7 @@ flowchart TD
 | Driver model | Driver는 정상적인 WDK driver로 남습니다. Verifier, HVCI, unload safety, target OS validation, paging rule은 여전히 중요합니다. |
 | IRQL | Runtime-backed C++/CRT/STL path는 특정 API가 더 넓은 계약을 문서화하지 않는 한 `PASSIVE_LEVEL`입니다. |
 | Stack | Kernel stack은 작습니다. exception-heavy 또는 STL-heavy path에는 `ntl::expand_stack` 사용을 고려하세요. |
-| TLS | MSVC function-local static은 지원합니다. 일반 C++ `thread_local`은 true per-thread TLS가 아닙니다. |
+| TLS | MSVC function-local static은 지원하며, multi-driver compiler TLS slot isolation을 포함합니다. 이 지원 경로는 driver image 사이의 runtime compiler TLS slot 충돌을 막습니다. 그러나 사용자가 선언한 `thread_local T value`를 안전하게 만드는 기능은 아닙니다. kernel mode에서 GS 기반 TLS 가정은 thread별 user-mode TEB가 아니라 processor-local KPCR 쪽에 걸립니다. |
 | Toolchain | SDK/WDK 버전을 맞추는 것이 좋습니다. x86 kernel-mode target은 WDK 23H2 이하를 사용하세요. |
 
 ## 요구 사항
@@ -380,8 +381,8 @@ docs/              추가 문서
 
 ## 로드맵
 
-- driver-tested C++ 및 STL coverage를 넓힙니다. true `thread_local`
-  storage는 별도 검토 항목입니다.
+- driver-tested C++ 및 STL coverage를 넓힙니다. true `thread_local`은 안전한
+  kernel-mode 설계가 생기기 전까지 미지원 항목으로 둡니다.
 - Visual Studio 2017 호환성 간격을 줄이고 toolset별 호환 코드를 더
   작게 유지합니다.
 - 적절한 테스트 환경이 준비되는 범위에서 실제 드라이버 로드/실행 CI

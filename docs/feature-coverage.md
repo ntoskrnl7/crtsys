@@ -47,7 +47,7 @@ The driver tests still exercise these features from `PASSIVE_LEVEL`.
 
 | Feature area | Covered items | Supported IRQL | Notes |
 | --- | --- | --- | --- |
-| Runtime and C++ initialization | Non-local static initialization, dynamic initialization, function-local `static` | `PASSIVE_LEVEL` / driver initialization path | The `crtsys` wrapper runs these paths from `DriverEntry`. General C++ `thread_local` is not supported as true per-thread TLS. |
+| Runtime and C++ initialization | Non-local static initialization, dynamic initialization, function-local `static` | `PASSIVE_LEVEL` / driver initialization path | The `crtsys` wrapper runs these paths from `DriverEntry`. MSVC compiler TLS slots are isolated across multiple crtsys-linked drivers. This is runtime slot isolation, not user `thread_local`: kernel GS is processor-local KPCR, not a per-thread user-mode TEB. |
 | C++ exceptions | `throw`, `try`, function try blocks, `std::exception_ptr` | `PASSIVE_LEVEL` only | Do not let exceptions cross WDK callback boundaries, spin-lock-held regions, DPC, ISR, or paging I/O paths. |
 | C++ RTTI | `typeid`, `dynamic_cast` | Audited caller context; otherwise `PASSIVE_LEVEL` | The consuming driver target must compile with RTTI enabled. Keep the target object and its type metadata resident. |
 | STL value-only helpers | Type traits, concepts, `std::array`, `std::span`, `std::string_view`, `std::bitset`, `std::pair`, `std::tuple`, `std::ratio`, `std::source_location`, `std::strong_ordering`, `std::numbers`, simple `std::move` / `std::exchange` / `std::invoke` / `std::reference_wrapper`, integer `std::to_chars` / `std::from_chars`, pure algorithms over resident fixed storage | Audited caller context; otherwise `PASSIVE_LEVEL` | These are the only STL areas that may be reasonable above `PASSIVE_LEVEL`, and only after the exact expression and its callbacks/comparators are audited. |
@@ -84,6 +84,16 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
 - [x] [Function-local `static` variables](https://en.cppreference.com/w/cpp/language/storage_duration#Static_local_variables)
   [(tested)](../test/cmake/driver/src/cpp/lang/initialization.cpp#L124)
   [(regression)](../test/cmake/driver/src/cpp/lang/initialization.cpp#L229)
+- [x] Multi-driver compiler TLS slot isolation
+  - Multiple crtsys-linked driver images can load at the same time without
+    colliding on MSVC compiler TLS `_tls_index` values used by runtime paths
+    such as thread-safe function-local `static` initialization. The guarantee
+    is module/driver-image isolation: a shared slot vector maps each driver
+    image's `_tls_index` to that driver's compiler TLS image buffer. This
+    supported path is runtime slot isolation between driver images. It does not
+    make user-declared `thread_local T value` safe because kernel-mode GS is
+    processor-local KPCR state, not a per-thread user-mode TEB.
+  [(multi-driver regression)](../test/cmake/driver/multi_instance/driver.cpp)
 - [ ] [`thread_local`](https://en.cppreference.com/w/cpp/language/storage_duration#Thread_storage_duration)
   [(disabled cppreference example)](../test/cmake/driver/src/cpp/lang/initialization.cpp#L79)
 
@@ -700,7 +710,13 @@ specific links here when a new driver-safe example is selected for porting.
 - [ ] [thread_local](https://en.cppreference.com/w/cpp/language/storage_duration#Thread_storage_duration)
   - General C++ `thread_local` is not supported as true per-thread TLS in the
     default driver build; the cppreference storage-duration example remains
-    disabled.
+    disabled. The multi-driver compiler TLS slot isolation above provides
+    driver-image slot separation for MSVC runtime paths, not per-thread storage
+    semantics for user variables. In other words, it routes each crtsys-linked
+    driver image to its own compiler TLS slot so runtime state does not collide.
+    It does not make `thread_local int x` thread-local: in kernel mode, the
+    GS-based TLS model is tied to processor-local KPCR state rather than a
+    user-mode TEB for each thread.
 
 ## C Standard
 
