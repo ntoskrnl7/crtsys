@@ -374,8 +374,10 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::stacktrace](https://en.cppreference.com/w/cpp/utility/basic_stacktrace)
   [(feature-test-gated cppreference example)](../test/cmake/driver/src/cpp/stl/cxx_latest.cpp)
-  - The kernel ABI captures frames and formats entries as `module+offset`.
-    Source file and line lookup is intentionally left to debugger/PDB tooling.
+  - The kernel ABI captures frames and formats entries as
+    `module!function+offset` when a matching PDB is available at
+    `PASSIVE_LEVEL`; otherwise it falls back to `module+offset`. Source file
+    and line lookup is still reported as empty/zero.
 - [x] [`std::chrono::year_month_day`](https://en.cppreference.com/w/cpp/chrono/year_month_day),
       [`std::chrono::weekday`](https://en.cppreference.com/w/cpp/chrono/weekday),
       [`std::chrono::hh_mm_ss`](https://en.cppreference.com/w/cpp/chrono/hh_mm_ss)

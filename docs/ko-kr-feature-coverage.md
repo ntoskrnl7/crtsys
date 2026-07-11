@@ -377,8 +377,10 @@ cppreference Example 코드를 이식한 항목은
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::stacktrace](https://en.cppreference.com/w/cpp/utility/basic_stacktrace)
   [(feature-test-gated cppreference example)](../test/cmake/driver/src/cpp/stl/cxx_latest.cpp)
-  - kernel ABI는 frame을 캡처하고 entry를 `module+offset` 형태로
-    포맷합니다. source file/line 조회는 debugger/PDB tooling 영역으로 둡니다.
+  - kernel ABI는 frame을 캡처하고, 매칭되는 PDB가 `PASSIVE_LEVEL`에서
+    접근 가능하면 entry를 `module!function+offset` 형태로 포맷합니다.
+    PDB가 없거나 맞지 않으면 `module+offset`으로 fallback합니다.
+    source file/line은 아직 empty/zero로 보고합니다.
 - [x] [`std::chrono::year_month_day`](https://en.cppreference.com/w/cpp/chrono/year_month_day),
       [`std::chrono::weekday`](https://en.cppreference.com/w/cpp/chrono/weekday),
       [`std::chrono::hh_mm_ss`](https://en.cppreference.com/w/cpp/chrono/hh_mm_ss)
