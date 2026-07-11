@@ -267,7 +267,8 @@ cppreference Example 코드를 이식한 항목은
     `CompareStringOrdinal`, CP_ACP / UTF-8 round trip, insufficient-buffer 및
     invalid-sequence / invalid-flag error case, UCRT `mbtowc` / `wctomb` /
     `mbstowcs` / `mbstowcs_s` / `wcstombs` / `wcstombs_s` / `mbrtowc` /
-    `wcrtomb`, C++ UTF conversion 함수 `mbrtoc16` / `c16rtomb` /
+    `wcrtomb`, CRT collation transform `strcoll` / `strxfrm` / `wcscoll` /
+    `wcsxfrm`, C++ UTF conversion 함수 `mbrtoc16` / `c16rtomb` /
     `mbrtoc32` / `c32rtomb`, filesystem UTF-8 path
     create/read/copy/rename/enumeration 경로를 검증합니다.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/nls.cpp)

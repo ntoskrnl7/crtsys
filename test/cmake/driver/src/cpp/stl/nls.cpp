@@ -386,6 +386,80 @@ void verify_ucrt_utf8_multibyte() {
   expect(errno == EILSEQ, "UTF-8 mbrtowc invalid errno mismatch");
 }
 
+void verify_ucrt_collation_transforms() {
+  c_locale_guard locale_guard;
+  expect(std::setlocale(LC_ALL, "C") != nullptr, "setlocale C failed");
+
+  expect(std::strcoll("alpha", "alpha") == 0, "C strcoll equality failed");
+  expect(std::strcoll("alpha", "beta") < 0, "C strcoll ordering failed");
+
+  char alpha_key[16]{};
+  char beta_key[16]{};
+  const auto alpha_key_length =
+      std::strxfrm(alpha_key, "alpha", std::size(alpha_key));
+  const auto beta_key_length =
+      std::strxfrm(beta_key, "beta", std::size(beta_key));
+  expect(alpha_key_length == 5, "C strxfrm alpha length mismatch");
+  expect(beta_key_length == 4, "C strxfrm beta length mismatch");
+  expect(std::strcmp(alpha_key, beta_key) < 0,
+         "C strxfrm ordering mismatch");
+
+  expect(std::wcscoll(L"alpha", L"alpha") == 0,
+         "C wcscoll equality failed");
+  expect(std::wcscoll(L"alpha", L"beta") < 0,
+         "C wcscoll ordering failed");
+
+  wchar_t wide_alpha_key[16]{};
+  wchar_t wide_beta_key[16]{};
+  const auto wide_alpha_key_length =
+      std::wcsxfrm(wide_alpha_key, L"alpha", std::size(wide_alpha_key));
+  const auto wide_beta_key_length =
+      std::wcsxfrm(wide_beta_key, L"beta", std::size(wide_beta_key));
+  expect(wide_alpha_key_length == 5, "C wcsxfrm alpha length mismatch");
+  expect(wide_beta_key_length == 4, "C wcsxfrm beta length mismatch");
+  expect(std::wcscmp(wide_alpha_key, wide_beta_key) < 0,
+         "C wcsxfrm ordering mismatch");
+
+  const char *locale_name = nullptr;
+  for (const char *candidate :
+       {"en-US.utf8", "en-US.UTF-8", ".UTF8", ".UTF-8", ".65001"}) {
+    locale_name = std::setlocale(LC_ALL, candidate);
+    if (locale_name != nullptr) {
+      break;
+    }
+  }
+
+  expect(locale_name != nullptr, "setlocale collation UTF-8 failed");
+  expect(std::strcoll("driver", "driver") == 0,
+         "UTF-8 strcoll equality failed");
+  expect(std::strcoll("driver", "kernel") < 0,
+         "UTF-8 strcoll ordering failed");
+  expect(std::wcscoll(L"driver", L"driver") == 0,
+         "UTF-8 wcscoll equality failed");
+  expect(std::wcscoll(L"driver", L"kernel") < 0,
+         "UTF-8 wcscoll ordering failed");
+
+  char driver_key[32]{};
+  char kernel_key[32]{};
+  expect(std::strxfrm(driver_key, "driver", std::size(driver_key)) > 0,
+         "UTF-8 strxfrm driver failed");
+  expect(std::strxfrm(kernel_key, "kernel", std::size(kernel_key)) > 0,
+         "UTF-8 strxfrm kernel failed");
+  expect(std::strcmp(driver_key, kernel_key) < 0,
+         "UTF-8 strxfrm ordering mismatch");
+
+  wchar_t wide_driver_key[32]{};
+  wchar_t wide_kernel_key[32]{};
+  expect(std::wcsxfrm(wide_driver_key, L"driver",
+                      std::size(wide_driver_key)) > 0,
+         "UTF-8 wcsxfrm driver failed");
+  expect(std::wcsxfrm(wide_kernel_key, L"kernel",
+                      std::size(wide_kernel_key)) > 0,
+         "UTF-8 wcsxfrm kernel failed");
+  expect(std::wcscmp(wide_driver_key, wide_kernel_key) < 0,
+         "UTF-8 wcsxfrm ordering mismatch");
+}
+
 void verify_cuchar_utf8_conversions() {
   // MSVC UCRT's <uchar.h> conversion entry points are implemented as UTF-8
   // conversions independently of the process C locale.
@@ -572,6 +646,7 @@ void run() {
   verify_invalid_codepage_flags();
   verify_ucrt_c_locale_multibyte();
   verify_ucrt_utf8_multibyte();
+  verify_ucrt_collation_transforms();
   verify_cuchar_utf8_conversions();
   verify_character_type_and_mapping();
   verify_filesystem_utf8_path_roundtrip();
