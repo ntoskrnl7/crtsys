@@ -423,6 +423,36 @@ extern "C" int __cdecl __acrt_LCMapStringA(_locale_t const plocinfo, PCWSTR cons
     return result;
 }
 
+extern "C" int WINAPI __acrt_CompareStringEx(
+    LPCWSTR const locale_name,
+    DWORD const flags,
+    LPCWCH const string1,
+    int const string1_count,
+    LPCWCH const string2,
+    int const string2_count,
+    LPNLSVERSIONINFO const version,
+    LPVOID const reserved,
+    LPARAM const param)
+{
+    return CompareStringEx(locale_name, flags, string1, string1_count, string2,
+                           string2_count, version, reserved, param);
+}
+
+extern "C" int WINAPI __acrt_LCMapStringEx(
+    LPCWSTR const locale_name,
+    DWORD const flags,
+    LPCWSTR const source,
+    int const source_count,
+    LPWSTR const destination,
+    int const destination_count,
+    LPNLSVERSIONINFO const version,
+    LPVOID const reserved,
+    LPARAM const sort_handle)
+{
+    return LCMapStringEx(locale_name, flags, source, source_count, destination,
+                         destination_count, version, reserved, sort_handle);
+}
+
 extern "C" int WINAPI __acrt_MessageBoxA(
     HWND   const hwnd,
     LPCSTR const text,

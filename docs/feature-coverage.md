@@ -265,7 +265,8 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
     `CompareStringOrdinal`, CP_ACP / UTF-8 round trips, insufficient-buffer and
     invalid-sequence / invalid-flag error cases, UCRT `mbtowc` / `wctomb` /
     `mbstowcs` / `mbstowcs_s` / `wcstombs` / `wcstombs_s` / `mbrtowc` /
-    `wcrtomb`, C++ UTF conversion functions `mbrtoc16` / `c16rtomb` /
+    `wcrtomb`, CRT collation transforms `strcoll` / `strxfrm` / `wcscoll` /
+    `wcsxfrm`, C++ UTF conversion functions `mbrtoc16` / `c16rtomb` /
     `mbrtoc32` / `c32rtomb`, and filesystem UTF-8 path
     create/read/copy/rename/enumeration paths are covered.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/nls.cpp)
