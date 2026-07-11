@@ -1,11 +1,17 @@
 /**
  * @file work_item
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
  * @brief PASSIVE_LEVEL work item helpers.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
  */
 #pragma once
 
+#include "event"
+#include "irql"
 #include "status"
 
+#include <atomic>
 #include <type_traits>
 #include <utility>
 
@@ -15,35 +21,53 @@
 
 namespace ntl {
 
+/**
+ * @brief RAII wrapper around WORK_QUEUE_ITEM.
+ *
+ * queue() may be called up to DISPATCH_LEVEL. wait() and the destructor's
+ * implicit wait path require PASSIVE_LEVEL.
+ */
 class work_item {
 public:
   using routine_type = void (*)(void *) noexcept;
 
+  /**
+   * @brief Creates a work item descriptor.
+   * @param routine Non-throwing C callback invoked by the system worker.
+   * @param context Opaque callback context.
+   * @param queue_type WDK work queue used by ExQueueWorkItem.
+   */
   work_item(routine_type routine, void *context = nullptr,
             WORK_QUEUE_TYPE queue_type = DelayedWorkQueue) noexcept
-      : routine_(routine), context_(context), queue_type_(queue_type) {
-    KeInitializeEvent(&completed_, NotificationEvent, TRUE);
-  }
+      : routine_(routine), context_(context), queue_type_(queue_type) {}
 
   work_item(const work_item &) = delete;
   work_item &operator=(const work_item &) = delete;
   work_item(work_item &&) = delete;
   work_item &operator=(work_item &&) = delete;
 
+  /**
+   * @brief Waits for queued work during destruction when running at PASSIVE_LEVEL.
+   */
   ~work_item() {
-    if (queued() && KeGetCurrentIrql() == PASSIVE_LEVEL)
+    if (queued() && ntl::current_irql() == ntl::irql::passive)
       (void)wait();
   }
 
+  /**
+   * @brief Queues the work item.
+   * @return STATUS_SUCCESS, STATUS_DEVICE_BUSY, or STATUS_INVALID_DEVICE_STATE.
+   */
   ntl::status queue() noexcept {
-    if (!routine_ || KeGetCurrentIrql() > DISPATCH_LEVEL)
-      return STATUS_INVALID_DEVICE_STATE;
+    if (!routine_ || ntl::current_irql() > ntl::irql::dispatch)
+      return ntl::status{STATUS_INVALID_DEVICE_STATE};
 
-    if (InterlockedCompareExchange(&queued_, 1, 0) != 0)
-      return STATUS_DEVICE_BUSY;
+    LONG expected = 0;
+    if (!queued_.compare_exchange_strong(expected, 1))
+      return ntl::status{STATUS_DEVICE_BUSY};
 
-    completion_status_ = STATUS_PENDING;
-    KeClearEvent(&completed_);
+    completion_status_.store(STATUS_PENDING);
+    completed_.clear();
 
 #ifdef _MSC_VER
 #pragma warning(push)
@@ -55,24 +79,32 @@ public:
 #pragma warning(pop)
 #endif
 
-    return STATUS_SUCCESS;
+    return ntl::status{STATUS_SUCCESS};
   }
 
+  /**
+   * @brief Waits for the queued work item to finish.
+   * @note This function must be called at PASSIVE_LEVEL.
+   */
   ntl::status wait() noexcept {
-    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
-      return STATUS_INVALID_DEVICE_STATE;
+    if (ntl::current_irql() != ntl::irql::passive)
+      return ntl::status{STATUS_INVALID_DEVICE_STATE};
 
-    (void)KeWaitForSingleObject(&completed_, Executive, KernelMode, FALSE,
-                                nullptr);
-    return completion_status_;
+    (void)completed_.wait();
+    return ntl::status{completion_status_.load()};
   }
 
-  bool queued() const noexcept {
-    return InterlockedCompareExchange(
-               const_cast<volatile LONG *>(&queued_), 0, 0) != 0;
-  }
+  /**
+   * @brief Returns true while the work item is queued or executing.
+   */
+  bool queued() const noexcept { return queued_.load() != 0; }
 
-  ntl::status last_status() const noexcept { return completion_status_; }
+  /**
+   * @brief Returns the completion status captured from the worker callback.
+   */
+  ntl::status last_status() const noexcept {
+    return ntl::status{completion_status_.load()};
+  }
 
 private:
   static void NTAPI invoke(void *context) noexcept {
@@ -85,15 +117,15 @@ private:
       status = GetExceptionCode();
     }
 
-    self->completion_status_ = status;
-    InterlockedExchange(&self->queued_, 0);
-    KeSetEvent(&self->completed_, IO_NO_INCREMENT, FALSE);
+    self->completion_status_.store(status);
+    self->queued_.store(0);
+    self->completed_.set();
   }
 
   WORK_QUEUE_ITEM item_{};
-  KEVENT completed_{};
-  volatile LONG queued_ = 0;
-  volatile NTSTATUS completion_status_ = STATUS_SUCCESS;
+  ntl::event completed_{ntl::event_type::notification, true};
+  std::atomic<LONG> queued_{0};
+  std::atomic<NTSTATUS> completion_status_{STATUS_SUCCESS};
   routine_type routine_ = nullptr;
   void *context_ = nullptr;
   WORK_QUEUE_TYPE queue_type_ = DelayedWorkQueue;
@@ -101,6 +133,11 @@ private:
 
 template <typename Callable> class passive_work_item {
 public:
+  /**
+   * @brief Stores a callable inline and runs it on a system worker thread.
+   * @param callable Callable object executed at PASSIVE_LEVEL.
+   * @param queue_type WDK work queue used by ExQueueWorkItem.
+   */
   explicit passive_work_item(Callable callable,
                              WORK_QUEUE_TYPE queue_type = DelayedWorkQueue)
       : callable_(std::move(callable)),
@@ -111,9 +148,24 @@ public:
   passive_work_item(passive_work_item &&) = delete;
   passive_work_item &operator=(passive_work_item &&) = delete;
 
+  /**
+   * @brief Queues the stored callable.
+   */
   ntl::status queue() noexcept { return item_.queue(); }
+
+  /**
+   * @brief Waits until the callable finishes executing.
+   */
   ntl::status wait() noexcept { return item_.wait(); }
+
+  /**
+   * @brief Returns true while the work item is queued or executing.
+   */
   bool queued() const noexcept { return item_.queued(); }
+
+  /**
+   * @brief Returns the completion status captured from the worker callback.
+   */
   ntl::status last_status() const noexcept { return item_.last_status(); }
 
 private:

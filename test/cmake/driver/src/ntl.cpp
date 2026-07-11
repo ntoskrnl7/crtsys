@@ -1,3 +1,4 @@
+#include <ntl/event>
 #include <ntl/expand_stack>
 #include <ntl/except>
 #include <ntl/irql>
@@ -8,6 +9,7 @@
 #include <ntl/work_item>
 
 #include <memory_resource>
+#include <atomic>
 #include <numeric>
 #include <string>
 #include <utility>
@@ -52,21 +54,20 @@ void delete_symbolic_link_if_present(const std::wstring &link_name) {
 }
 
 struct work_item_test_context {
-  volatile LONG value = 0;
-  KEVENT release;
+  std::atomic<long> value{0};
+  ntl::event release{ntl::event_type::notification, false};
 };
 
 void work_item_test_routine(void *context) noexcept {
   auto *const state = static_cast<work_item_test_context *>(context);
-  if (KeGetCurrentIrql() == PASSIVE_LEVEL)
-    InterlockedExchange(&state->value, 41);
+  if (ntl::current_irql() == ntl::irql::passive)
+    state->value.store(41);
 }
 
 void blocking_work_item_test_routine(void *context) noexcept {
   auto *const state = static_cast<work_item_test_context *>(context);
-  (void)KeWaitForSingleObject(&state->release, Executive, KernelMode, FALSE,
-                              nullptr);
-  InterlockedExchange(&state->value, 43);
+  (void)state->release.wait();
+  state->value.store(43);
 }
 } // namespace
 
@@ -525,22 +526,58 @@ bool ntl_symbolic_link_test() {
   return true;
 }
 
+bool ntl_event_test() {
+  ntl::event notification;
+  if (notification.signaled())
+    return false;
+
+  notification.set();
+  if (!notification.signaled())
+    return false;
+
+  notification.clear();
+  if (notification.signaled())
+    return false;
+
+  notification.set();
+  if (!notification.wait().is_ok())
+    return false;
+  if (!notification.signaled())
+    return false;
+
+  notification.reset();
+  if (notification.signaled())
+    return false;
+
+  ntl::event synchronization(ntl::event_type::synchronization, true);
+  if (!synchronization.wait().is_ok())
+    return false;
+  if (synchronization.signaled())
+    return false;
+
+  LARGE_INTEGER zero_timeout{};
+  if (static_cast<NTSTATUS>(synchronization.wait(&zero_timeout)) !=
+      STATUS_TIMEOUT)
+    return false;
+
+  return true;
+}
+
 bool ntl_work_item_test() {
   work_item_test_context raw_context;
-  KeInitializeEvent(&raw_context.release, NotificationEvent, FALSE);
 
   ntl::work_item raw_item(work_item_test_routine, &raw_context);
   if (!raw_item.queue().is_ok())
     return false;
   if (!raw_item.wait().is_ok())
     return false;
-  if (raw_context.value != 41)
+  if (raw_context.value.load() != 41)
     return false;
 
-  volatile LONG typed_value = 0;
+  std::atomic<long> typed_value{0};
   ntl::passive_work_item typed_item([&] {
-    if (KeGetCurrentIrql() == PASSIVE_LEVEL)
-      InterlockedExchange(&typed_value, 42);
+    if (ntl::current_irql() == ntl::irql::passive)
+      typed_value.store(42);
   });
 
   {
@@ -548,11 +585,10 @@ bool ntl_work_item_test() {
     if (!typed_item.queue().is_ok())
       return false;
   }
-  if (!typed_item.wait().is_ok() || typed_value != 42)
+  if (!typed_item.wait().is_ok() || typed_value.load() != 42)
     return false;
 
   work_item_test_context blocking_context;
-  KeInitializeEvent(&blocking_context.release, NotificationEvent, FALSE);
 
   ntl::work_item blocking_item(blocking_work_item_test_routine,
                                &blocking_context);
@@ -561,11 +597,11 @@ bool ntl_work_item_test() {
   if (blocking_item.queue().is_ok())
     return false;
 
-  KeSetEvent(&blocking_context.release, IO_NO_INCREMENT, FALSE);
+  blocking_context.release.set();
   if (!blocking_item.wait().is_ok())
     return false;
 
-  return blocking_context.value == 43 && !blocking_item.queued();
+  return blocking_context.value.load() == 43 && !blocking_item.queued();
 }
 
 //
@@ -763,6 +799,10 @@ TEST(ntl_test, ntl_lookaside_list_test) {
 
 TEST(ntl_test, ntl_symbolic_link_test) {
   EXPECT_TRUE(ntl_symbolic_link_test());
+}
+
+TEST(ntl_test, ntl_event_test) {
+  EXPECT_TRUE(ntl_event_test());
 }
 
 TEST(ntl_test, ntl_work_item_test) {

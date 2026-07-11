@@ -1,28 +1,53 @@
 /**
  * @file status
- * @author jungkwang.lee (ntoskrnl7@google.com)
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
  * @brief NTSTATUS
  *
- * @copyright Copyright (c) 2022 NT Template Library Authoers.
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
  *
  */
 #pragma once
 
+#include <ntddk.h>
 #include <ntstatus.h>
 
 namespace ntl {
+/**
+ * @brief Small value wrapper around NTSTATUS.
+ */
 class status {
 public:
+  /**
+   * @brief Stores an NTSTATUS value.
+   */
   status(NTSTATUS status) : status_(status) {}
 
+  /**
+   * @brief Returns true for NT_SUCCESS status values.
+   */
   bool is_ok() const { return NT_SUCCESS(status_); }
+  /**
+   * @brief Returns true for informational status values.
+   */
   bool is_info() const { return NT_INFORMATION(status_); }
+  /**
+   * @brief Returns true for warning status values.
+   */
   bool is_warn() const { return NT_WARNING(status_); }
+  /**
+   * @brief Returns true for error status values.
+   */
   bool is_err() const { return NT_ERROR(status_); }
 
+  /**
+   * @brief Converts back to the native NTSTATUS value.
+   */
   operator NTSTATUS() const { return status_; }
 
-  static status ok() { return STATUS_SUCCESS; }
+  /**
+   * @brief Returns STATUS_SUCCESS.
+   */
+  static status ok() { return status{STATUS_SUCCESS}; }
 
 private:
   NTSTATUS status_;

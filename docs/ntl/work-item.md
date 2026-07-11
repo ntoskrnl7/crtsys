@@ -3,7 +3,7 @@
 [Back to NTL docs](./README.md)
 
 `ntl::work_item` is a small C++ wrapper over WDK `WORK_QUEUE_ITEM` and
-`ExQueueWorkItem`.
+`ExQueueWorkItem`. It uses `ntl::event` internally to track completion.
 
 Use it when driver code needs to defer a small unit of work to a system worker
 thread that runs at `PASSIVE_LEVEL`.

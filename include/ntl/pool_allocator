@@ -1,6 +1,9 @@
 /**
  * @file pool_allocator
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
  * @brief Kernel pool-backed STL and PMR allocators.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
  */
 #pragma once
 
@@ -19,50 +22,81 @@
 namespace ntl {
 
 enum class pool_kind {
+  /// NonPagedPoolNx on legacy WDKs, or POOL_FLAG_NON_PAGED with Pool2.
   nonpaged,
+  /// PagedPool on legacy WDKs, or POOL_FLAG_PAGED with Pool2.
   paged,
+  /// Executable nonpaged pool for code/data paths that explicitly require it.
   nonpaged_execute,
 };
 
 enum class pool_option : unsigned long long {
+  /// No additional allocation option.
   none = 0,
+  /// Charge the allocation quota when supported by the target WDK path.
   use_quota = 1ull << 0,
+  /// Request uninitialized memory when ExAllocatePool2 is available.
   uninitialized = 1ull << 1,
+  /// Request session pool when ExAllocatePool2 is available.
   session = 1ull << 2,
+  /// Request cache-aligned pool.
   cache_aligned = 1ull << 3,
+  /// Raise on allocation failure when the target WDK path supports it.
   raise_on_failure = 1ull << 4,
+  /// Request special pool when ExAllocatePool2 is available.
   special_pool = 1ull << 5,
 };
 
+/**
+ * @brief Combines two pool option sets.
+ */
 constexpr pool_option operator|(pool_option lhs, pool_option rhs) noexcept {
   return static_cast<pool_option>(static_cast<unsigned long long>(lhs) |
                                   static_cast<unsigned long long>(rhs));
 }
 
+/**
+ * @brief Intersects two pool option sets.
+ */
 constexpr pool_option operator&(pool_option lhs, pool_option rhs) noexcept {
   return static_cast<pool_option>(static_cast<unsigned long long>(lhs) &
                                   static_cast<unsigned long long>(rhs));
 }
 
+/**
+ * @brief Inverts a pool option set.
+ */
 constexpr pool_option operator~(pool_option value) noexcept {
   return static_cast<pool_option>(~static_cast<unsigned long long>(value));
 }
 
+/**
+ * @brief Adds options to an existing pool option set.
+ */
 constexpr pool_option &operator|=(pool_option &lhs, pool_option rhs) noexcept {
   lhs = lhs | rhs;
   return lhs;
 }
 
+/**
+ * @brief Keeps only matching options in an existing pool option set.
+ */
 constexpr pool_option &operator&=(pool_option &lhs, pool_option rhs) noexcept {
   lhs = lhs & rhs;
   return lhs;
 }
 
+/**
+ * @brief Tests whether a pool option set contains an option.
+ */
 constexpr bool has_pool_option(pool_option options,
                                pool_option option) noexcept {
   return (static_cast<unsigned long long>(options & option) != 0);
 }
 
+/**
+ * @brief Builds a native pool tag from four characters.
+ */
 constexpr ULONG pool_tag(char a, char b, char c, char d) noexcept {
   return static_cast<ULONG>(static_cast<unsigned char>(a)) |
          (static_cast<ULONG>(static_cast<unsigned char>(b)) << 8) |
@@ -70,6 +104,9 @@ constexpr ULONG pool_tag(char a, char b, char c, char d) noexcept {
          (static_cast<ULONG>(static_cast<unsigned char>(d)) << 24);
 }
 
+/**
+ * @brief Builds a native pool tag from a four-character string literal.
+ */
 template <std::size_t N>
 constexpr ULONG pool_tag(const char (&tag)[N]) noexcept {
   static_assert(N == 5,
@@ -77,6 +114,7 @@ constexpr ULONG pool_tag(const char (&tag)[N]) noexcept {
   return pool_tag(tag[0], tag[1], tag[2], tag[3]);
 }
 
+/// Default NTL pool tag used by raw pool helpers and allocators.
 inline constexpr ULONG default_pool_tag = pool_tag("NTLp");
 
 namespace detail {
@@ -217,6 +255,10 @@ inline void free_pool_bytes(void *pointer, ULONG tag) noexcept {
 
 } // namespace detail
 
+/**
+ * @brief Allocates raw bytes from kernel pool.
+ * @return Pointer to the allocated bytes, or nullptr on failure.
+ */
 inline void *allocate_pool(std::size_t bytes,
                            pool_kind kind = pool_kind::nonpaged,
                            pool_option options = pool_option::none,
@@ -225,6 +267,9 @@ inline void *allocate_pool(std::size_t bytes,
                                      options, tag);
 }
 
+/**
+ * @brief Allocates raw bytes from kernel pool using a string-literal tag.
+ */
 template <std::size_t N>
 inline void *allocate_pool(std::size_t bytes, pool_kind kind,
                            pool_option options,
@@ -232,12 +277,18 @@ inline void *allocate_pool(std::size_t bytes, pool_kind kind,
   return allocate_pool(bytes, kind, options, pool_tag(tag));
 }
 
+/**
+ * @brief Allocates raw bytes from kernel pool with no extra options.
+ */
 template <std::size_t N>
 inline void *allocate_pool(std::size_t bytes, pool_kind kind,
                            const char (&tag)[N]) noexcept {
   return allocate_pool(bytes, kind, pool_option::none, pool_tag(tag));
 }
 
+/**
+ * @brief Allocates raw bytes from nonpaged pool using a string-literal tag.
+ */
 template <std::size_t N>
 inline void *allocate_pool(std::size_t bytes,
                            const char (&tag)[N]) noexcept {
@@ -245,22 +296,41 @@ inline void *allocate_pool(std::size_t bytes,
                        pool_tag(tag));
 }
 
+/**
+ * @brief Frees raw bytes allocated by allocate_pool.
+ */
 inline void free_pool(void *pointer, ULONG tag = default_pool_tag) noexcept {
   detail::free_pool_bytes(pointer, tag);
 }
 
+/**
+ * @brief Frees raw bytes allocated with a string-literal tag.
+ */
 template <std::size_t N>
 inline void free_pool(void *pointer, const char (&tag)[N]) noexcept {
   free_pool(pointer, pool_tag(tag));
 }
 
+/**
+ * @brief Deleter for pool_ptr and pool_buffer.
+ * @tparam T Object type stored in pool.
+ */
 template <class T> class pool_deleter {
 public:
+  /**
+   * @brief Creates a deleter that frees with a native pool tag.
+   */
   constexpr pool_deleter(ULONG tag = default_pool_tag) noexcept : tag_(tag) {}
 
+  /**
+   * @brief Creates a deleter that frees with a string-literal tag.
+   */
   template <std::size_t N>
   constexpr pool_deleter(const char (&tag)[N]) noexcept : tag_(pool_tag(tag)) {}
 
+  /**
+   * @brief Destroys the object and frees its pool allocation.
+   */
   void operator()(T *pointer) const noexcept {
     if (!pointer) {
       return;
@@ -270,6 +340,9 @@ public:
     detail::free_pool_bytes(pointer, tag_);
   }
 
+  /**
+   * @brief Returns the pool tag used for deallocation.
+   */
   constexpr ULONG tag() const noexcept { return tag_; }
 
 private:
@@ -278,25 +351,46 @@ private:
 
 template <> class pool_deleter<void> {
 public:
+  /**
+   * @brief Creates a byte-buffer deleter that frees with a native pool tag.
+   */
   constexpr pool_deleter(ULONG tag = default_pool_tag) noexcept : tag_(tag) {}
 
+  /**
+   * @brief Creates a byte-buffer deleter that frees with a string-literal tag.
+   */
   template <std::size_t N>
   constexpr pool_deleter(const char (&tag)[N]) noexcept : tag_(pool_tag(tag)) {}
 
+  /**
+   * @brief Frees the raw pool allocation.
+   */
   void operator()(void *pointer) const noexcept {
     detail::free_pool_bytes(pointer, tag_);
   }
 
+  /**
+   * @brief Returns the pool tag used for deallocation.
+   */
   constexpr ULONG tag() const noexcept { return tag_; }
 
 private:
   ULONG tag_;
 };
 
+/**
+ * @brief unique_ptr alias for objects allocated from kernel pool.
+ */
 template <class T> using pool_ptr = std::unique_ptr<T, pool_deleter<T>>;
 
+/**
+ * @brief unique_ptr alias for untyped pool buffers.
+ */
 using pool_buffer = pool_ptr<void>;
 
+/**
+ * @brief Allocates a raw byte buffer and returns it as RAII pool_buffer.
+ */
 inline pool_buffer make_pool_buffer(std::size_t bytes,
                                     pool_kind kind = pool_kind::nonpaged,
                                     pool_option options = pool_option::none,
@@ -305,6 +399,9 @@ inline pool_buffer make_pool_buffer(std::size_t bytes,
                      pool_deleter<void>{tag}};
 }
 
+/**
+ * @brief Allocates a raw byte buffer using a string-literal tag.
+ */
 template <std::size_t N>
 inline pool_buffer make_pool_buffer(std::size_t bytes, pool_kind kind,
                                     pool_option options,
@@ -312,12 +409,18 @@ inline pool_buffer make_pool_buffer(std::size_t bytes, pool_kind kind,
   return make_pool_buffer(bytes, kind, options, pool_tag(tag));
 }
 
+/**
+ * @brief Allocates a raw byte buffer with no extra options.
+ */
 template <std::size_t N>
 inline pool_buffer make_pool_buffer(std::size_t bytes, pool_kind kind,
                                     const char (&tag)[N]) noexcept {
   return make_pool_buffer(bytes, kind, pool_option::none, pool_tag(tag));
 }
 
+/**
+ * @brief Allocates a nonpaged raw byte buffer using a string-literal tag.
+ */
 template <std::size_t N>
 inline pool_buffer make_pool_buffer(std::size_t bytes,
                                     const char (&tag)[N]) noexcept {
@@ -325,6 +428,9 @@ inline pool_buffer make_pool_buffer(std::size_t bytes,
                           pool_tag(tag));
 }
 
+/**
+ * @brief Constructs an object in kernel pool and returns a pool_ptr.
+ */
 template <class T, class... Args>
 [[nodiscard]] pool_ptr<T> make_pool(pool_kind kind, pool_option options,
                                     ULONG tag, Args &&...args) {
@@ -350,6 +456,9 @@ template <class T, class... Args>
   }
 }
 
+/**
+ * @brief Constructs an object in kernel pool using a string-literal tag.
+ */
 template <class T, std::size_t N, class... Args>
 [[nodiscard]] pool_ptr<T> make_pool(pool_kind kind, pool_option options,
                                     const char (&tag)[N], Args &&...args) {
@@ -357,6 +466,9 @@ template <class T, std::size_t N, class... Args>
                       std::forward<Args>(args)...);
 }
 
+/**
+ * @brief Constructs an object in kernel pool with no extra options.
+ */
 template <class T, std::size_t N, class... Args>
 [[nodiscard]] pool_ptr<T> make_pool(pool_kind kind, const char (&tag)[N],
                                     Args &&...args) {
@@ -364,12 +476,22 @@ template <class T, std::size_t N, class... Args>
                       std::forward<Args>(args)...);
 }
 
+/**
+ * @brief Constructs an object in nonpaged pool using a string-literal tag.
+ */
 template <class T, std::size_t N, class... Args>
 [[nodiscard]] pool_ptr<T> make_pool(const char (&tag)[N], Args &&...args) {
   return make_pool<T>(pool_kind::nonpaged, pool_option::none, pool_tag(tag),
                       std::forward<Args>(args)...);
 }
 
+/**
+ * @brief STL allocator backed by WDK pool allocation APIs.
+ * @tparam T Allocated object type.
+ * @tparam Kind Pool kind used for allocations.
+ * @tparam Options Pool allocation options.
+ * @tparam Tag Native pool tag.
+ */
 template <class T, pool_kind Kind = pool_kind::nonpaged,
           pool_option Options = pool_option::none,
           ULONG Tag = default_pool_tag>
@@ -385,11 +507,20 @@ public:
     using other = pool_allocator<U, Kind, Options, Tag>;
   };
 
+  /**
+   * @brief Creates a stateless pool allocator.
+   */
   pool_allocator() noexcept = default;
 
+  /**
+   * @brief Converts from another value_type with the same pool policy.
+   */
   template <class U>
   pool_allocator(const pool_allocator<U, Kind, Options, Tag> &) noexcept {}
 
+  /**
+   * @brief Allocates storage for count objects.
+   */
   [[nodiscard]] T *allocate(size_type count) {
     static_assert(alignof(T) <= MEMORY_ALLOCATION_ALIGNMENT,
                   "ntl::pool_allocator supports WDK pool alignment only");
@@ -408,19 +539,37 @@ public:
     return static_cast<T *>(pointer);
   }
 
+  /**
+   * @brief Frees storage allocated by this allocator.
+   */
   void deallocate(T *pointer, size_type) noexcept {
     detail::free_pool_bytes(pointer, Tag);
   }
 
+  /**
+   * @brief Returns the largest count this allocator can request.
+   */
   [[nodiscard]] constexpr size_type max_size() const noexcept {
     return (std::numeric_limits<size_type>::max)() / sizeof(T);
   }
 
+  /**
+   * @brief Returns the pool kind encoded in this allocator type.
+   */
   static constexpr pool_kind kind() noexcept { return Kind; }
+  /**
+   * @brief Returns the pool options encoded in this allocator type.
+   */
   static constexpr pool_option options() noexcept { return Options; }
+  /**
+   * @brief Returns the pool tag encoded in this allocator type.
+   */
   static constexpr ULONG tag() noexcept { return Tag; }
 };
 
+/**
+ * @brief Compares allocator policies.
+ */
 template <class T, class U, pool_kind LKind, pool_option LOptions, ULONG LTag,
           pool_kind RKind, pool_option ROptions, ULONG RTag>
 constexpr bool operator==(
@@ -429,6 +578,9 @@ constexpr bool operator==(
   return LKind == RKind && LOptions == ROptions && LTag == RTag;
 }
 
+/**
+ * @brief Compares allocator policies.
+ */
 template <class T, class U, pool_kind LKind, pool_option LOptions, ULONG LTag,
           pool_kind RKind, pool_option ROptions, ULONG RTag>
 constexpr bool operator!=(
@@ -437,34 +589,61 @@ constexpr bool operator!=(
   return !(lhs == rhs);
 }
 
+/**
+ * @brief Convenience alias for nonpaged pool STL allocators.
+ */
 template <class T, ULONG Tag = default_pool_tag>
 using nonpaged_pool_allocator =
     pool_allocator<T, pool_kind::nonpaged, pool_option::none, Tag>;
 
+/**
+ * @brief Convenience alias for paged pool STL allocators.
+ */
 template <class T, ULONG Tag = default_pool_tag>
 using paged_pool_allocator =
     pool_allocator<T, pool_kind::paged, pool_option::none, Tag>;
 
 namespace pmr {
 
+/**
+ * @brief PMR memory_resource backed by WDK pool allocation APIs.
+ */
 class pool_resource : public std::pmr::memory_resource {
 public:
+  /**
+   * @brief Creates a PMR pool resource with a native pool tag.
+   */
   explicit pool_resource(pool_kind kind = pool_kind::nonpaged,
                          pool_option options = pool_option::none,
                          ULONG tag = default_pool_tag) noexcept
       : kind_(kind), options_(options), tag_(tag) {}
 
+  /**
+   * @brief Creates a PMR pool resource with a string-literal tag.
+   */
   template <std::size_t N>
   explicit pool_resource(pool_kind kind, pool_option options,
                          const char (&tag)[N]) noexcept
       : pool_resource(kind, options, pool_tag(tag)) {}
 
+  /**
+   * @brief Creates a PMR pool resource with no extra options.
+   */
   template <std::size_t N>
   explicit pool_resource(pool_kind kind, const char (&tag)[N]) noexcept
       : pool_resource(kind, pool_option::none, pool_tag(tag)) {}
 
+  /**
+   * @brief Returns the pool kind used by this resource.
+   */
   pool_kind kind() const noexcept { return kind_; }
+  /**
+   * @brief Returns the pool options used by this resource.
+   */
   pool_option options() const noexcept { return options_; }
+  /**
+   * @brief Returns the pool tag used by this resource.
+   */
   ULONG tag() const noexcept { return tag_; }
 
 private:
@@ -492,11 +671,17 @@ private:
   ULONG tag_;
 };
 
+/**
+ * @brief Returns a process-local nonpaged PMR pool resource.
+ */
 inline std::pmr::memory_resource *nonpaged_pool_resource() noexcept {
   static pool_resource resource{pool_kind::nonpaged};
   return &resource;
 }
 
+/**
+ * @brief Returns a process-local paged PMR pool resource.
+ */
 inline std::pmr::memory_resource *paged_pool_resource() noexcept {
   static pool_resource resource{pool_kind::paged};
   return &resource;

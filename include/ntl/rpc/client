@@ -1,11 +1,12 @@
 /**
  * @file rpc
- * @author jungkwang.lee (ntoskrnl7@google.com)
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
  * @brief rpc client
  *
- * @copyright Copyright (c) 2022 NT Template Library Authoers.
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
  *
  */
+#pragma once
 
 #include "common"
 
@@ -16,18 +17,36 @@
 #if defined(NTL_USER_MODE)
 namespace ntl {
 namespace rpc {
+/**
+ * @brief User-mode helper for invoking an NTL RPC device.
+ */
 class client {
 public:
+  /**
+   * @brief Opens the named NTL RPC device.
+   * @param rpc_name Kernel device name without the \\Device prefix.
+   * @param out_buffer_size Temporary output buffer size for non-void calls.
+   */
   client(const std::wstring &rpc_name, size_t out_buffer_size = 4096)
       : handle_(::CreateFileW(
             (L"\\\\?\\Global\\GLOBALROOT\\Device\\" + rpc_name).c_str(),
             GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL)),
         out_buffer_size_(out_buffer_size) {}
+  /**
+   * @brief Closes the RPC device handle.
+   */
   ~client() {
     if (handle_ != INVALID_HANDLE_VALUE)
       ::CloseHandle(handle_);
   }
 
+  /**
+   * @brief Invokes a registered RPC callback by function index.
+   * @param index Function code embedded into the device control request.
+   * @param args Serializable callback arguments.
+   * @return Deserialized callback return value for non-void calls.
+   * @throws std::runtime_error if the device handle or DeviceIoControl fails.
+   */
   template <typename Ret, typename... Args>
   Ret invoke(uint64_t index, Args &&... args) {
     if (handle_ == INVALID_HANDLE_VALUE)
@@ -71,15 +90,24 @@ private:
 #define NTL_RPC_BEGIN(_rpc_name_) namespace _rpc_name_ {
 #define NTL_RPC_END(_rpc_name_) }
 
+/**
+ * @brief Declares a zero-argument user-mode RPC wrapper with an explicit ID.
+ */
 #define NTL_ADD_CALLBACK_ID_0(_rpc_name_, _id_, _ret_, _name_, ...)            \
   static const int _name_##_0_index = (_id_);                                  \
   inline _ret_ _name_() {                                                      \
     return ntl::rpc::client(L#_rpc_name_).invoke<_ret_>((_id_));               \
   }
 
+/**
+ * @brief Declares a zero-argument user-mode RPC wrapper using __LINE__ as ID.
+ */
 #define NTL_ADD_CALLBACK_0(_rpc_name_, _ret_, _name_, ...)                     \
   NTL_ADD_CALLBACK_ID_0(_rpc_name_, __LINE__, _ret_, _name_, __VA_ARGS__)
 
+/**
+ * @brief Declares a one-argument user-mode RPC wrapper with an explicit ID.
+ */
 #define NTL_ADD_CALLBACK_ID_1(_rpc_name_, _id_, _ret_, _name_, _arg0_type_,    \
                               _arg0_name_, ...)                                \
   static const int _name_##_1_index = (_id_);                                  \
@@ -88,11 +116,17 @@ private:
         .invoke<_ret_>((_id_), std::forward<_arg0_type_>(_arg0_name_));        \
   }
 
+/**
+ * @brief Declares a one-argument user-mode RPC wrapper using __LINE__ as ID.
+ */
 #define NTL_ADD_CALLBACK_1(_rpc_name_, _ret_, _name_, _arg0_type_,             \
                            _arg0_name_, ...)                                   \
   NTL_ADD_CALLBACK_ID_1(_rpc_name_, __LINE__, _ret_, _name_, _arg0_type_,      \
                         _arg0_name_, __VA_ARGS__)
 
+/**
+ * @brief Declares a two-argument user-mode RPC wrapper with an explicit ID.
+ */
 #define NTL_ADD_CALLBACK_ID_2(_rpc_name_, _id_, _ret_, _name_, _arg0_type_,    \
                               _arg0_name_, _arg1_type_, _arg1_name_, ...)      \
   static const int _name_##_2_index = (_id_);                                  \
@@ -102,11 +136,17 @@ private:
                        std::forward<_arg1_type_>(_arg1_name_));                \
   }
 
+/**
+ * @brief Declares a two-argument user-mode RPC wrapper using __LINE__ as ID.
+ */
 #define NTL_ADD_CALLBACK_2(_rpc_name_, _ret_, _name_, _arg0_type_,             \
                            _arg0_name_, _arg1_type_, _arg1_name_, ...)         \
   NTL_ADD_CALLBACK_ID_2(_rpc_name_, __LINE__, _ret_, _name_, _arg0_type_,      \
                         _arg0_name_, _arg1_type_, _arg1_name_, __VA_ARGS__)
 
+/**
+ * @brief Declares a three-argument user-mode RPC wrapper with an explicit ID.
+ */
 #define NTL_ADD_CALLBACK_ID_3(_rpc_name_, _id_, _ret_, _name_, _arg0_type_,    \
                               _arg0_name_, _arg1_type_, _arg1_name_,           \
                               _arg2_type_, _arg2_name_, ...)                   \
@@ -119,6 +159,9 @@ private:
                        std::forward<_arg2_type_>(_arg2_name_));                \
   }
 
+/**
+ * @brief Declares a three-argument user-mode RPC wrapper using __LINE__ as ID.
+ */
 #define NTL_ADD_CALLBACK_3(_rpc_name_, _ret_, _name_, _arg0_type_,             \
                            _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_, \
                            _arg2_name_, ...)                                   \
@@ -126,6 +169,9 @@ private:
                         _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_,    \
                         _arg2_name_, __VA_ARGS__)
 
+/**
+ * @brief Declares a four-argument user-mode RPC wrapper with an explicit ID.
+ */
 #define NTL_ADD_CALLBACK_ID_4(_rpc_name_, _id_, _ret_, _name_, _arg0_type_,    \
                               _arg0_name_, _arg1_type_, _arg1_name_,           \
                               _arg2_type_, _arg2_name_, _arg3_type_,           \
@@ -140,6 +186,9 @@ private:
                        std::forward<_arg3_type_>(_arg3_name_));                \
   }
 
+/**
+ * @brief Declares a four-argument user-mode RPC wrapper using __LINE__ as ID.
+ */
 #define NTL_ADD_CALLBACK_4(_rpc_name_, _ret_, _name_, _arg0_type_,             \
                            _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_, \
                            _arg2_name_, _arg3_type_, _arg3_name_, ...)         \
@@ -147,6 +196,9 @@ private:
                         _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_,    \
                         _arg2_name_, _arg3_type_, _arg3_name_, __VA_ARGS__)
 
+/**
+ * @brief Declares a five-argument user-mode RPC wrapper with an explicit ID.
+ */
 #define NTL_ADD_CALLBACK_ID_5(_rpc_name_, _id_, _ret_, _name_, _arg0_type_,    \
                               _arg0_name_, _arg1_type_, _arg1_name_,           \
                               _arg2_type_, _arg2_name_, _arg3_type_,           \
@@ -163,6 +215,9 @@ private:
                        std::forward<_arg4_type_>(_arg4_name_));                \
   }
 
+/**
+ * @brief Declares a five-argument user-mode RPC wrapper using __LINE__ as ID.
+ */
 #define NTL_ADD_CALLBACK_5(_rpc_name_, _ret_, _name_, _arg0_type_,             \
                            _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_, \
                            _arg2_name_, _arg3_type_, _arg3_name_, _arg4_type_, \

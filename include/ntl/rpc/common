@@ -1,9 +1,9 @@
 /**
  * @file common
- * @author jungkwang.lee (ntoskrnl7@google.com)
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
  * @brief rpc common
  *
- * @copyright Copyright (c) 2022 NT Template Library Authoers.
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
  *
  */
 
@@ -25,8 +25,14 @@
 
 #define FILE_DEVICE_NTL_RPC 60000
 
+/**
+ * @brief Builds the IOCTL code used for an NTL RPC function index.
+ */
 #define NTL_RPC_DEVICE_CTL(_idx_)                                              \
   ((DWORD)CTL_CODE(FILE_DEVICE_NTL_RPC, _idx_, METHOD_BUFFERED,                \
                    FILE_ANY_ACCESS))
 
+/**
+ * @brief Preserves comma-containing argument lists inside RPC macros.
+ */
 #define NTL_RPC_ARG_PACK(...) __VA_ARGS__

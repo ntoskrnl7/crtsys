@@ -1,0 +1,125 @@
+/**
+ * @file event
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief KEVENT wrapper.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include <ntddk.h>
+
+#include "status"
+
+namespace ntl {
+
+enum class event_type {
+  /// Manual-reset event; remains signaled until reset or cleared.
+  notification,
+  /// Auto-reset event; one waiter consumes the signaled state.
+  synchronization,
+};
+
+/**
+ * @brief Converts an NTL event type to the native WDK EVENT_TYPE value.
+ */
+inline EVENT_TYPE to_native_event_type(event_type type) noexcept {
+  switch (type) {
+  case event_type::notification:
+    return NotificationEvent;
+  case event_type::synchronization:
+    return SynchronizationEvent;
+  }
+
+  return NotificationEvent;
+}
+
+class event {
+public:
+  /**
+   * @brief Initializes a kernel event object.
+   * @param type Notification or synchronization event semantics.
+   * @param initial_state Whether the event starts signaled.
+   */
+  explicit event(event_type type = event_type::notification,
+                 bool initial_state = false) noexcept {
+    KeInitializeEvent(&event_, to_native_event_type(type),
+                      initial_state ? TRUE : FALSE);
+  }
+
+  event(const event &) = delete;
+  event &operator=(const event &) = delete;
+  event(event &&) = delete;
+  event &operator=(event &&) = delete;
+
+  /**
+   * @brief Returns the native KEVENT pointer.
+   */
+  KEVENT *native() noexcept { return &event_; }
+  /**
+   * @brief Returns the native KEVENT pointer.
+   */
+  const KEVENT *native() const noexcept { return &event_; }
+
+  /**
+   * @brief Sets the event to the signaled state.
+   * @return The previous event state returned by KeSetEvent.
+   */
+  LONG set(KPRIORITY increment = IO_NO_INCREMENT,
+           bool wait = false) noexcept {
+    return KeSetEvent(&event_, increment, wait ? TRUE : FALSE);
+  }
+
+  /**
+   * @brief Resets the event to the non-signaled state.
+   * @return The previous event state returned by KeResetEvent.
+   */
+  LONG reset() noexcept { return KeResetEvent(&event_); }
+
+  /**
+   * @brief Clears the event to the non-signaled state.
+   */
+  void clear() noexcept { KeClearEvent(&event_); }
+
+  /**
+   * @brief Reads the current event state.
+   */
+  LONG read_state() const noexcept {
+    return KeReadStateEvent(const_cast<KEVENT *>(&event_));
+  }
+
+  /**
+   * @brief Returns true when the event is currently signaled.
+   */
+  bool signaled() const noexcept { return read_state() != 0; }
+
+  /**
+   * @brief Waits for the event using the common kernel-mode defaults.
+   * @param timeout Optional relative or absolute timeout.
+   * @return STATUS_SUCCESS, STATUS_TIMEOUT, or another wait status.
+   * @note Must be called at an IRQL valid for KeWaitForSingleObject.
+   */
+  ntl::status wait(LARGE_INTEGER *timeout = nullptr) noexcept {
+    return wait(Executive, KernelMode, false, timeout);
+  }
+
+  /**
+   * @brief Waits for the event using explicit WDK wait parameters.
+   * @param wait_reason WDK wait reason passed to KeWaitForSingleObject.
+   * @param wait_mode KernelMode or UserMode wait mode.
+   * @param alertable Whether the wait is alertable.
+   * @param timeout Optional relative or absolute timeout.
+   * @return STATUS_SUCCESS, STATUS_TIMEOUT, or another wait status.
+   */
+  ntl::status wait(KWAIT_REASON wait_reason, KPROCESSOR_MODE wait_mode,
+                   bool alertable,
+                   LARGE_INTEGER *timeout = nullptr) noexcept {
+    return ntl::status{KeWaitForSingleObject(
+        &event_, wait_reason, wait_mode, alertable ? TRUE : FALSE, timeout)};
+  }
+
+private:
+  KEVENT event_{};
+};
+
+} // namespace ntl

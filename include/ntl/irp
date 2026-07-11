@@ -1,3 +1,10 @@
+/**
+ * @file irp
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Lightweight IRP wrapper for NTL dispatch callbacks.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
 #pragma once
 
 #ifndef _NTDDK_
@@ -5,28 +12,58 @@
 #endif
 
 namespace ntl {
+/**
+ * @brief Non-owning view over a WDM IRP.
+ */
 class irp {
 public:
+  /**
+   * @brief Wraps a native PIRP without taking ownership.
+   */
   explicit irp(PIRP irp) noexcept : irp_(irp) {}
 
+  /**
+   * @brief Returns the native PIRP.
+   */
   PIRP get() const noexcept { return irp_; }
+  /**
+   * @brief Returns the native PIRP.
+   */
   PIRP operator->() const noexcept { return irp_; }
 
+  /**
+   * @brief Returns the current stack location.
+   */
   PIO_STACK_LOCATION stack_location() const noexcept {
     return IoGetCurrentIrpStackLocation(irp_);
   }
 
+  /**
+   * @brief Returns the current major function.
+   */
   UCHAR major_function() const noexcept {
     return stack_location()->MajorFunction;
   }
 
+  /**
+   * @brief Returns IoStatus.Status.
+   */
   NTSTATUS status() const noexcept { return irp_->IoStatus.Status; }
+  /**
+   * @brief Sets IoStatus.Status.
+   */
   void status(NTSTATUS value) noexcept { irp_->IoStatus.Status = value; }
 
+  /**
+   * @brief Returns IoStatus.Information.
+   */
   ULONG_PTR information() const noexcept {
     return irp_->IoStatus.Information;
   }
 
+  /**
+   * @brief Sets IoStatus.Information.
+   */
   void information(ULONG_PTR value) noexcept {
     irp_->IoStatus.Information = value;
   }

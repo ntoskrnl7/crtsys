@@ -1,6 +1,9 @@
 /**
  * @file lookaside_list
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
  * @brief Fixed-size kernel lookaside cache wrapper.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
  */
 #pragma once
 
@@ -58,6 +61,13 @@ constexpr bool lookaside_depth_supported(USHORT depth) noexcept {
 
 } // namespace detail
 
+/**
+ * @brief Fixed-size object cache backed by LOOKASIDE_LIST_EX.
+ * @tparam T Cached object type.
+ * @tparam Kind Pool kind used for backing allocations.
+ * @tparam Options Supported pool options for the lookaside list.
+ * @tparam Tag Native pool tag.
+ */
 template <class T, pool_kind Kind = pool_kind::nonpaged,
           pool_option Options = pool_option::none,
           ULONG Tag = default_pool_tag>
@@ -73,11 +83,23 @@ class lookaside_list {
                 "raise_on_failure options");
 
 public:
+  /**
+   * @brief Deleter that returns objects to their owning lookaside list.
+   */
   class deleter {
   public:
+    /**
+     * @brief Creates an empty deleter.
+     */
     constexpr deleter() noexcept : list_(nullptr) {}
+    /**
+     * @brief Creates a deleter bound to a lookaside list.
+     */
     explicit constexpr deleter(lookaside_list &list) noexcept : list_(&list) {}
 
+    /**
+     * @brief Destroys and returns an object to the owning lookaside list.
+     */
     void operator()(T *pointer) const noexcept {
       if (pointer && list_) {
         list_->destroy(pointer);
@@ -88,8 +110,15 @@ public:
     lookaside_list *list_;
   };
 
+  /**
+   * @brief Unique pointer type that returns objects to this lookaside list.
+   */
   using pointer = std::unique_ptr<T, deleter>;
 
+  /**
+   * @brief Initializes the lookaside list.
+   * @param depth Optional WDK lookaside depth, or 0 for the system default.
+   */
   explicit lookaside_list(USHORT depth = 0) {
     if (!detail::lookaside_depth_supported(depth)) {
       throw ntl::exception(STATUS_INVALID_PARAMETER,
@@ -106,6 +135,9 @@ public:
     }
   }
 
+  /**
+   * @brief Deletes the lookaside list.
+   */
   ~lookaside_list() { ExDeleteLookasideListEx(&list_); }
 
   lookaside_list(const lookaside_list &) = delete;
@@ -113,16 +145,25 @@ public:
   lookaside_list(lookaside_list &&) = delete;
   lookaside_list &operator=(lookaside_list &&) = delete;
 
+  /**
+   * @brief Allocates raw storage for one T from the lookaside list.
+   */
   [[nodiscard]] T *allocate() noexcept {
     return static_cast<T *>(ExAllocateFromLookasideListEx(&list_));
   }
 
+  /**
+   * @brief Returns raw storage to the lookaside list.
+   */
   void free(T *pointer) noexcept {
     if (pointer) {
       ExFreeToLookasideListEx(&list_, pointer);
     }
   }
 
+  /**
+   * @brief Constructs T in lookaside storage and returns an RAII pointer.
+   */
   template <class... Args> [[nodiscard]] pointer make(Args &&...args) {
     T *const storage = allocate();
     if (!storage) {
@@ -138,6 +179,9 @@ public:
     }
   }
 
+  /**
+   * @brief Destroys T and returns its storage to the lookaside list.
+   */
   void destroy(T *pointer) noexcept {
     if (!pointer) {
       return;
@@ -147,13 +191,31 @@ public:
     free(pointer);
   }
 
+  /**
+   * @brief Flushes cached entries from the lookaside list.
+   */
   void flush() noexcept { ExFlushLookasideListEx(&list_); }
 
+  /**
+   * @brief Returns the native LOOKASIDE_LIST_EX pointer.
+   */
   LOOKASIDE_LIST_EX *native_handle() noexcept { return &list_; }
+  /**
+   * @brief Returns the native LOOKASIDE_LIST_EX pointer.
+   */
   const LOOKASIDE_LIST_EX *native_handle() const noexcept { return &list_; }
 
+  /**
+   * @brief Returns the pool kind encoded in this lookaside list type.
+   */
   static constexpr pool_kind kind() noexcept { return Kind; }
+  /**
+   * @brief Returns the pool options encoded in this lookaside list type.
+   */
   static constexpr pool_option options() noexcept { return Options; }
+  /**
+   * @brief Returns the pool tag encoded in this lookaside list type.
+   */
   static constexpr ULONG tag() noexcept { return Tag; }
 
 private:
