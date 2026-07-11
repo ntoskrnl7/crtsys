@@ -424,8 +424,8 @@ harness uses `std::print` like the cppreference example when the active STL
 exposes it, and falls back only for older toolsets that expose `mdspan` without
 `print`. The `std::stacktrace` cppreference example is kept separate from a
 driver semantic check that validates kernel `module+offset` formatting. The
-kernel ABI shim intentionally avoids user-mode DbgEng/PDB source-line
-resolution.
+kernel ABI shim intentionally avoids user-mode DbgEng while reading matching
+PDB CodeView records directly for function and source-line diagnostics.
 
 The execution-policy example keeps the `std::execution::seq`, `unseq`, `par`,
 and `par_unseq` sort calls, but reduces the original benchmark-sized random
