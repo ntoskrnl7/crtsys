@@ -1,0 +1,163 @@
+/**
+ * @file lookaside_list
+ * @brief Fixed-size kernel lookaside cache wrapper.
+ */
+#pragma once
+
+#ifndef _NTDDK_
+#include <wdm.h>
+#endif
+
+#include "except"
+#include "pool_allocator"
+
+#include <cstddef>
+#include <memory>
+#include <new>
+#include <type_traits>
+#include <utility>
+
+namespace ntl {
+namespace detail {
+
+constexpr bool lookaside_options_supported(pool_option options) noexcept {
+  return !has_pool_option(options, pool_option::use_quota) &&
+         !has_pool_option(options, pool_option::uninitialized) &&
+         !has_pool_option(options, pool_option::session) &&
+         !has_pool_option(options, pool_option::special_pool);
+}
+
+constexpr POOL_TYPE to_lookaside_pool_type(pool_kind kind,
+                                           pool_option options) noexcept {
+  const bool cache_aligned =
+      has_pool_option(options, pool_option::cache_aligned);
+
+  switch (kind) {
+  case pool_kind::nonpaged:
+    return cache_aligned ? NonPagedPoolNxCacheAligned : NonPagedPoolNx;
+  case pool_kind::paged:
+    return cache_aligned ? PagedPoolCacheAligned : PagedPool;
+  case pool_kind::nonpaged_execute:
+    return cache_aligned ? NonPagedPoolCacheAligned : NonPagedPoolExecute;
+  }
+
+  return NonPagedPoolNx;
+}
+
+constexpr ULONG to_lookaside_flags(pool_option options) noexcept {
+  return has_pool_option(options, pool_option::raise_on_failure)
+             ? EX_LOOKASIDE_LIST_EX_FLAGS_RAISE_ON_FAIL
+             : 0;
+}
+
+constexpr bool lookaside_depth_supported(USHORT depth) noexcept {
+  return depth == 0 ||
+         (depth >= EX_MAXIMUM_LOOKASIDE_DEPTH_BASE &&
+          depth <= EX_MAXIMUM_LOOKASIDE_DEPTH_LIMIT);
+}
+
+} // namespace detail
+
+template <class T, pool_kind Kind = pool_kind::nonpaged,
+          pool_option Options = pool_option::none,
+          ULONG Tag = default_pool_tag>
+class lookaside_list {
+  static_assert(!std::is_void<T>::value,
+                "ntl::lookaside_list<T> requires an object type");
+  static_assert(!std::is_array<T>::value,
+                "ntl::lookaside_list<T> does not manage arrays");
+  static_assert(alignof(T) <= MEMORY_ALLOCATION_ALIGNMENT,
+                "ntl::lookaside_list supports WDK pool alignment only");
+  static_assert(detail::lookaside_options_supported(Options),
+                "ntl::lookaside_list supports only none, cache_aligned, and "
+                "raise_on_failure options");
+
+public:
+  class deleter {
+  public:
+    constexpr deleter() noexcept : list_(nullptr) {}
+    explicit constexpr deleter(lookaside_list &list) noexcept : list_(&list) {}
+
+    void operator()(T *pointer) const noexcept {
+      if (pointer && list_) {
+        list_->destroy(pointer);
+      }
+    }
+
+  private:
+    lookaside_list *list_;
+  };
+
+  using pointer = std::unique_ptr<T, deleter>;
+
+  explicit lookaside_list(USHORT depth = 0) {
+    if (!detail::lookaside_depth_supported(depth)) {
+      throw ntl::exception(STATUS_INVALID_PARAMETER,
+                           "lookaside depth must be 0 or within the WDK "
+                           "EX_MAXIMUM_LOOKASIDE_DEPTH range.");
+    }
+
+    const NTSTATUS status = ExInitializeLookasideListEx(
+        &list_, nullptr, nullptr,
+        detail::to_lookaside_pool_type(Kind, Options),
+        detail::to_lookaside_flags(Options), sizeof(T), Tag, depth);
+    if (!NT_SUCCESS(status)) {
+      throw ntl::exception(status, "ExInitializeLookasideListEx failed.");
+    }
+  }
+
+  ~lookaside_list() { ExDeleteLookasideListEx(&list_); }
+
+  lookaside_list(const lookaside_list &) = delete;
+  lookaside_list &operator=(const lookaside_list &) = delete;
+  lookaside_list(lookaside_list &&) = delete;
+  lookaside_list &operator=(lookaside_list &&) = delete;
+
+  [[nodiscard]] T *allocate() noexcept {
+    return static_cast<T *>(ExAllocateFromLookasideListEx(&list_));
+  }
+
+  void free(T *pointer) noexcept {
+    if (pointer) {
+      ExFreeToLookasideListEx(&list_, pointer);
+    }
+  }
+
+  template <class... Args> [[nodiscard]] pointer make(Args &&...args) {
+    T *const storage = allocate();
+    if (!storage) {
+      throw std::bad_alloc();
+    }
+
+    try {
+      return pointer{new (storage) T(std::forward<Args>(args)...),
+                     deleter{*this}};
+    } catch (...) {
+      free(storage);
+      throw;
+    }
+  }
+
+  void destroy(T *pointer) noexcept {
+    if (!pointer) {
+      return;
+    }
+
+    pointer->~T();
+    free(pointer);
+  }
+
+  void flush() noexcept { ExFlushLookasideListEx(&list_); }
+
+  LOOKASIDE_LIST_EX *native_handle() noexcept { return &list_; }
+  const LOOKASIDE_LIST_EX *native_handle() const noexcept { return &list_; }
+
+  static constexpr pool_kind kind() noexcept { return Kind; }
+  static constexpr pool_option options() noexcept { return Options; }
+  static constexpr ULONG tag() noexcept { return Tag; }
+
+private:
+  LOOKASIDE_LIST_EX list_{};
+};
+
+} // namespace ntl

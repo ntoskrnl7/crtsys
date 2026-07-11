@@ -60,6 +60,8 @@ The driver tests still exercise these features from `PASSIVE_LEVEL`.
 | NTL IRP view | `ntl::irp` | Follows the dispatch path that supplied the IRP | NTL device callbacks should still be treated as `PASSIVE_LEVEL` unless the exact callback body is separately audited. |
 | NTL status wrapper | `ntl::status` | Caller context | Value-only wrapper around `NTSTATUS`. |
 | NTL stack expansion | `ntl::expand_stack` | `PASSIVE_LEVEL` only | Runtime-backed control-path helper, not a hot-path escape hatch. |
+| NTL pool ownership and allocator | `ntl::pool_ptr`, `ntl::pool_buffer`, `ntl::pool_allocator`, `ntl::nonpaged_pool_allocator`, `ntl::paged_pool_allocator`, `ntl::pmr::pool_resource` | Raw nonpaged pool follows WDK pool rules; object construction/destruction and STL/PMR usage are `PASSIVE_LEVEL` unless separately audited | Exposes WDK pool kind/options to RAII ownership helpers, STL-compatible allocators, and PMR resource types. |
+| NTL lookaside list | `ntl::lookaside_list` | Raw nonpaged allocate/free follows WDK lookaside rules; object construction/destruction is `PASSIVE_LEVEL` unless separately audited | Wraps `LOOKASIDE_LIST_EX` for fixed-size kernel object caches while keeping pool kind/tag visible. |
 | NTL ERESOURCE wrapper | `ntl::resource`, `ntl::unique_lock<ntl::resource>`, `ntl::shared_lock<ntl::resource>` | `<= APC_LEVEL` | Blocking/resource-style synchronization. Do not use in DPC, ISR, or spin-lock-held paths. |
 | NTL spin lock wrapper | `ntl::spin_lock`, `ntl::unique_lock<ntl::spin_lock>` | `<= DISPATCH_LEVEL` | Keep held regions resident, short, nonblocking, and free of allocation, waits, exceptions, streams, and arbitrary STL/runtime helpers. |
 | NTL IRQL helpers | `ntl::irql`, `ntl::raise_irql`, `ntl::raise_irql_to_dpc_level`, `ntl::raise_irql_to_synch_level` | Explicitly manipulates current IRQL | Keep raised scopes as small as possible. |
@@ -784,6 +786,19 @@ NTL provides C++ helpers for driver code. See the
 - [x] `ntl::expand_stack`
   [(tested)](../test/cmake/driver/src/ntl.cpp#L6)
 - [x] `ntl::status`
+- [x] `ntl::pool_ptr` / `ntl::pool_allocator`
+  - [x] raw pool allocation and RAII pool buffer ownership
+  - [x] pool-backed object construction/destruction with `ntl::pool_ptr<T>`
+  - [x] `std::vector` with nonpaged and paged pool allocators
+  - [x] `std::pmr::vector` with `ntl::pmr::pool_resource`
+    [(tested)](../test/cmake/driver/src/ntl.cpp)
+    [(docs)](./ntl/pool-allocator.md)
+- [x] `ntl::lookaside_list`
+  - [x] raw nonpaged lookaside allocation and explicit construction
+  - [x] RAII object creation/move/reset/destruction
+  - [x] paged and cache-aligned nonpaged lookaside list construction
+    [(tested)](../test/cmake/driver/src/ntl.cpp)
+    [(docs)](./ntl/lookaside-list.md)
 - [x] `ntl::driver`
   - [x] unload callback
     [(tested)](../test/cmake/driver/src/main.cpp#L73)

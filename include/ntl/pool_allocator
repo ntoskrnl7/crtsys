@@ -1,0 +1,508 @@
+/**
+ * @file pool_allocator
+ * @brief Kernel pool-backed STL and PMR allocators.
+ */
+#pragma once
+
+#ifndef _NTDDK_
+#include <wdm.h>
+#endif
+
+#include <cstddef>
+#include <limits>
+#include <memory>
+#include <memory_resource>
+#include <new>
+#include <type_traits>
+#include <utility>
+
+namespace ntl {
+
+enum class pool_kind {
+  nonpaged,
+  paged,
+  nonpaged_execute,
+};
+
+enum class pool_option : unsigned long long {
+  none = 0,
+  use_quota = 1ull << 0,
+  uninitialized = 1ull << 1,
+  session = 1ull << 2,
+  cache_aligned = 1ull << 3,
+  raise_on_failure = 1ull << 4,
+  special_pool = 1ull << 5,
+};
+
+constexpr pool_option operator|(pool_option lhs, pool_option rhs) noexcept {
+  return static_cast<pool_option>(static_cast<unsigned long long>(lhs) |
+                                  static_cast<unsigned long long>(rhs));
+}
+
+constexpr pool_option operator&(pool_option lhs, pool_option rhs) noexcept {
+  return static_cast<pool_option>(static_cast<unsigned long long>(lhs) &
+                                  static_cast<unsigned long long>(rhs));
+}
+
+constexpr pool_option operator~(pool_option value) noexcept {
+  return static_cast<pool_option>(~static_cast<unsigned long long>(value));
+}
+
+constexpr pool_option &operator|=(pool_option &lhs, pool_option rhs) noexcept {
+  lhs = lhs | rhs;
+  return lhs;
+}
+
+constexpr pool_option &operator&=(pool_option &lhs, pool_option rhs) noexcept {
+  lhs = lhs & rhs;
+  return lhs;
+}
+
+constexpr bool has_pool_option(pool_option options,
+                               pool_option option) noexcept {
+  return (static_cast<unsigned long long>(options & option) != 0);
+}
+
+constexpr ULONG pool_tag(char a, char b, char c, char d) noexcept {
+  return static_cast<ULONG>(static_cast<unsigned char>(a)) |
+         (static_cast<ULONG>(static_cast<unsigned char>(b)) << 8) |
+         (static_cast<ULONG>(static_cast<unsigned char>(c)) << 16) |
+         (static_cast<ULONG>(static_cast<unsigned char>(d)) << 24);
+}
+
+template <std::size_t N>
+constexpr ULONG pool_tag(const char (&tag)[N]) noexcept {
+  static_assert(N == 5,
+                "pool tag string literal must contain exactly four characters");
+  return pool_tag(tag[0], tag[1], tag[2], tag[3]);
+}
+
+inline constexpr ULONG default_pool_tag = pool_tag("NTLp");
+
+namespace detail {
+
+#if defined(POOL_FLAG_NON_PAGED) && defined(NTDDI_VERSION) &&                 \
+    defined(NTDDI_WIN10_VB) && (NTDDI_VERSION >= NTDDI_WIN10_VB)
+#define NTL_HAS_EX_ALLOCATE_POOL2 1
+#else
+#define NTL_HAS_EX_ALLOCATE_POOL2 0
+#endif
+
+#if NTL_HAS_EX_ALLOCATE_POOL2
+inline constexpr bool pool_uses_ex_allocate_pool2 = true;
+#else
+inline constexpr bool pool_uses_ex_allocate_pool2 = false;
+#endif
+
+inline bool pool_alignment_supported(std::size_t alignment) noexcept {
+  return alignment <= MEMORY_ALLOCATION_ALIGNMENT;
+}
+
+#if NTL_HAS_EX_ALLOCATE_POOL2
+inline POOL_FLAGS to_pool_flags(pool_kind kind, pool_option options) noexcept {
+  POOL_FLAGS flags{};
+
+  switch (kind) {
+  case pool_kind::nonpaged:
+    flags |= POOL_FLAG_NON_PAGED;
+    break;
+  case pool_kind::paged:
+    flags |= POOL_FLAG_PAGED;
+    break;
+  case pool_kind::nonpaged_execute:
+    flags |= POOL_FLAG_NON_PAGED_EXECUTE;
+    break;
+  }
+
+  if (has_pool_option(options, pool_option::use_quota)) {
+    flags |= POOL_FLAG_USE_QUOTA;
+  }
+  if (has_pool_option(options, pool_option::uninitialized)) {
+    flags |= POOL_FLAG_UNINITIALIZED;
+  }
+  if (has_pool_option(options, pool_option::session)) {
+    flags |= POOL_FLAG_SESSION;
+  }
+  if (has_pool_option(options, pool_option::cache_aligned)) {
+    flags |= POOL_FLAG_CACHE_ALIGNED;
+  }
+  if (has_pool_option(options, pool_option::raise_on_failure)) {
+    flags |= POOL_FLAG_RAISE_ON_FAILURE;
+  }
+  if (has_pool_option(options, pool_option::special_pool)) {
+    flags |= POOL_FLAG_SPECIAL_POOL;
+  }
+
+  return flags;
+}
+#else
+inline bool to_legacy_pool_type(pool_kind kind, pool_option options,
+                                POOL_TYPE &pool_type) noexcept {
+  if (has_pool_option(options, pool_option::use_quota) ||
+      has_pool_option(options, pool_option::uninitialized) ||
+      has_pool_option(options, pool_option::session) ||
+      has_pool_option(options, pool_option::special_pool)) {
+    return false;
+  }
+
+  const bool cache_aligned =
+      has_pool_option(options, pool_option::cache_aligned);
+
+  switch (kind) {
+  case pool_kind::nonpaged:
+    pool_type = cache_aligned ? NonPagedPoolNxCacheAligned : NonPagedPoolNx;
+    break;
+  case pool_kind::paged:
+    pool_type = cache_aligned ? PagedPoolCacheAligned : PagedPool;
+    break;
+  case pool_kind::nonpaged_execute:
+    pool_type = cache_aligned ? NonPagedPoolCacheAligned : NonPagedPoolExecute;
+    break;
+  }
+
+#if defined(POOL_RAISE_IF_ALLOCATION_FAILURE)
+  if (has_pool_option(options, pool_option::raise_on_failure)) {
+    pool_type = static_cast<POOL_TYPE>(pool_type |
+                                       POOL_RAISE_IF_ALLOCATION_FAILURE);
+  }
+#else
+  if (has_pool_option(options, pool_option::raise_on_failure)) {
+    return false;
+  }
+#endif
+
+  return true;
+}
+#endif
+
+inline void *allocate_pool_bytes(std::size_t bytes, std::size_t alignment,
+                                 pool_kind kind, pool_option options,
+                                 ULONG tag) noexcept {
+  if (!pool_alignment_supported(alignment)) {
+    return nullptr;
+  }
+
+  const auto allocation_size = bytes == 0 ? std::size_t{1} : bytes;
+
+#if NTL_HAS_EX_ALLOCATE_POOL2
+  return ExAllocatePool2(to_pool_flags(kind, options), allocation_size, tag);
+#else
+  POOL_TYPE pool_type{};
+  if (!to_legacy_pool_type(kind, options, pool_type)) {
+    return nullptr;
+  }
+
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4996) // Legacy WDK fallback when ExAllocatePool2 is absent.
+#endif
+  return ExAllocatePoolWithTag(pool_type, allocation_size, tag);
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+#endif
+}
+
+inline void free_pool_bytes(void *pointer, ULONG tag) noexcept {
+  if (!pointer) {
+    return;
+  }
+
+#if NTL_HAS_EX_ALLOCATE_POOL2
+  ExFreePool2(pointer, tag, nullptr, 0);
+#else
+  ExFreePoolWithTag(pointer, tag);
+#endif
+}
+
+} // namespace detail
+
+inline void *allocate_pool(std::size_t bytes,
+                           pool_kind kind = pool_kind::nonpaged,
+                           pool_option options = pool_option::none,
+                           ULONG tag = default_pool_tag) noexcept {
+  return detail::allocate_pool_bytes(bytes, MEMORY_ALLOCATION_ALIGNMENT, kind,
+                                     options, tag);
+}
+
+template <std::size_t N>
+inline void *allocate_pool(std::size_t bytes, pool_kind kind,
+                           pool_option options,
+                           const char (&tag)[N]) noexcept {
+  return allocate_pool(bytes, kind, options, pool_tag(tag));
+}
+
+template <std::size_t N>
+inline void *allocate_pool(std::size_t bytes, pool_kind kind,
+                           const char (&tag)[N]) noexcept {
+  return allocate_pool(bytes, kind, pool_option::none, pool_tag(tag));
+}
+
+template <std::size_t N>
+inline void *allocate_pool(std::size_t bytes,
+                           const char (&tag)[N]) noexcept {
+  return allocate_pool(bytes, pool_kind::nonpaged, pool_option::none,
+                       pool_tag(tag));
+}
+
+inline void free_pool(void *pointer, ULONG tag = default_pool_tag) noexcept {
+  detail::free_pool_bytes(pointer, tag);
+}
+
+template <std::size_t N>
+inline void free_pool(void *pointer, const char (&tag)[N]) noexcept {
+  free_pool(pointer, pool_tag(tag));
+}
+
+template <class T> class pool_deleter {
+public:
+  constexpr pool_deleter(ULONG tag = default_pool_tag) noexcept : tag_(tag) {}
+
+  template <std::size_t N>
+  constexpr pool_deleter(const char (&tag)[N]) noexcept : tag_(pool_tag(tag)) {}
+
+  void operator()(T *pointer) const noexcept {
+    if (!pointer) {
+      return;
+    }
+
+    pointer->~T();
+    detail::free_pool_bytes(pointer, tag_);
+  }
+
+  constexpr ULONG tag() const noexcept { return tag_; }
+
+private:
+  ULONG tag_;
+};
+
+template <> class pool_deleter<void> {
+public:
+  constexpr pool_deleter(ULONG tag = default_pool_tag) noexcept : tag_(tag) {}
+
+  template <std::size_t N>
+  constexpr pool_deleter(const char (&tag)[N]) noexcept : tag_(pool_tag(tag)) {}
+
+  void operator()(void *pointer) const noexcept {
+    detail::free_pool_bytes(pointer, tag_);
+  }
+
+  constexpr ULONG tag() const noexcept { return tag_; }
+
+private:
+  ULONG tag_;
+};
+
+template <class T> using pool_ptr = std::unique_ptr<T, pool_deleter<T>>;
+
+using pool_buffer = pool_ptr<void>;
+
+inline pool_buffer make_pool_buffer(std::size_t bytes,
+                                    pool_kind kind = pool_kind::nonpaged,
+                                    pool_option options = pool_option::none,
+                                    ULONG tag = default_pool_tag) noexcept {
+  return pool_buffer{allocate_pool(bytes, kind, options, tag),
+                     pool_deleter<void>{tag}};
+}
+
+template <std::size_t N>
+inline pool_buffer make_pool_buffer(std::size_t bytes, pool_kind kind,
+                                    pool_option options,
+                                    const char (&tag)[N]) noexcept {
+  return make_pool_buffer(bytes, kind, options, pool_tag(tag));
+}
+
+template <std::size_t N>
+inline pool_buffer make_pool_buffer(std::size_t bytes, pool_kind kind,
+                                    const char (&tag)[N]) noexcept {
+  return make_pool_buffer(bytes, kind, pool_option::none, pool_tag(tag));
+}
+
+template <std::size_t N>
+inline pool_buffer make_pool_buffer(std::size_t bytes,
+                                    const char (&tag)[N]) noexcept {
+  return make_pool_buffer(bytes, pool_kind::nonpaged, pool_option::none,
+                          pool_tag(tag));
+}
+
+template <class T, class... Args>
+[[nodiscard]] pool_ptr<T> make_pool(pool_kind kind, pool_option options,
+                                    ULONG tag, Args &&...args) {
+  static_assert(!std::is_void<T>::value,
+                "ntl::make_pool<T> requires an object type");
+  static_assert(!std::is_array<T>::value,
+                "ntl::make_pool<T> does not construct arrays");
+  static_assert(alignof(T) <= MEMORY_ALLOCATION_ALIGNMENT,
+                "ntl::make_pool supports WDK pool alignment only");
+
+  void *const storage =
+      detail::allocate_pool_bytes(sizeof(T), alignof(T), kind, options, tag);
+  if (!storage) {
+    throw std::bad_alloc();
+  }
+
+  try {
+    return pool_ptr<T>{new (storage) T(std::forward<Args>(args)...),
+                       pool_deleter<T>{tag}};
+  } catch (...) {
+    detail::free_pool_bytes(storage, tag);
+    throw;
+  }
+}
+
+template <class T, std::size_t N, class... Args>
+[[nodiscard]] pool_ptr<T> make_pool(pool_kind kind, pool_option options,
+                                    const char (&tag)[N], Args &&...args) {
+  return make_pool<T>(kind, options, pool_tag(tag),
+                      std::forward<Args>(args)...);
+}
+
+template <class T, std::size_t N, class... Args>
+[[nodiscard]] pool_ptr<T> make_pool(pool_kind kind, const char (&tag)[N],
+                                    Args &&...args) {
+  return make_pool<T>(kind, pool_option::none, pool_tag(tag),
+                      std::forward<Args>(args)...);
+}
+
+template <class T, std::size_t N, class... Args>
+[[nodiscard]] pool_ptr<T> make_pool(const char (&tag)[N], Args &&...args) {
+  return make_pool<T>(pool_kind::nonpaged, pool_option::none, pool_tag(tag),
+                      std::forward<Args>(args)...);
+}
+
+template <class T, pool_kind Kind = pool_kind::nonpaged,
+          pool_option Options = pool_option::none,
+          ULONG Tag = default_pool_tag>
+class pool_allocator {
+public:
+  using value_type = T;
+  using size_type = std::size_t;
+  using difference_type = std::ptrdiff_t;
+  using propagate_on_container_move_assignment = std::true_type;
+  using is_always_equal = std::true_type;
+
+  template <class U> struct rebind {
+    using other = pool_allocator<U, Kind, Options, Tag>;
+  };
+
+  pool_allocator() noexcept = default;
+
+  template <class U>
+  pool_allocator(const pool_allocator<U, Kind, Options, Tag> &) noexcept {}
+
+  [[nodiscard]] T *allocate(size_type count) {
+    static_assert(alignof(T) <= MEMORY_ALLOCATION_ALIGNMENT,
+                  "ntl::pool_allocator supports WDK pool alignment only");
+
+    if (count > max_size()) {
+      throw std::bad_array_new_length();
+    }
+
+    void *const pointer =
+        detail::allocate_pool_bytes(count * sizeof(T), alignof(T), Kind,
+                                    Options, Tag);
+    if (!pointer) {
+      throw std::bad_alloc();
+    }
+
+    return static_cast<T *>(pointer);
+  }
+
+  void deallocate(T *pointer, size_type) noexcept {
+    detail::free_pool_bytes(pointer, Tag);
+  }
+
+  [[nodiscard]] constexpr size_type max_size() const noexcept {
+    return (std::numeric_limits<size_type>::max)() / sizeof(T);
+  }
+
+  static constexpr pool_kind kind() noexcept { return Kind; }
+  static constexpr pool_option options() noexcept { return Options; }
+  static constexpr ULONG tag() noexcept { return Tag; }
+};
+
+template <class T, class U, pool_kind LKind, pool_option LOptions, ULONG LTag,
+          pool_kind RKind, pool_option ROptions, ULONG RTag>
+constexpr bool operator==(
+    const pool_allocator<T, LKind, LOptions, LTag> &,
+    const pool_allocator<U, RKind, ROptions, RTag> &) noexcept {
+  return LKind == RKind && LOptions == ROptions && LTag == RTag;
+}
+
+template <class T, class U, pool_kind LKind, pool_option LOptions, ULONG LTag,
+          pool_kind RKind, pool_option ROptions, ULONG RTag>
+constexpr bool operator!=(
+    const pool_allocator<T, LKind, LOptions, LTag> &lhs,
+    const pool_allocator<U, RKind, ROptions, RTag> &rhs) noexcept {
+  return !(lhs == rhs);
+}
+
+template <class T, ULONG Tag = default_pool_tag>
+using nonpaged_pool_allocator =
+    pool_allocator<T, pool_kind::nonpaged, pool_option::none, Tag>;
+
+template <class T, ULONG Tag = default_pool_tag>
+using paged_pool_allocator =
+    pool_allocator<T, pool_kind::paged, pool_option::none, Tag>;
+
+namespace pmr {
+
+class pool_resource : public std::pmr::memory_resource {
+public:
+  explicit pool_resource(pool_kind kind = pool_kind::nonpaged,
+                         pool_option options = pool_option::none,
+                         ULONG tag = default_pool_tag) noexcept
+      : kind_(kind), options_(options), tag_(tag) {}
+
+  template <std::size_t N>
+  explicit pool_resource(pool_kind kind, pool_option options,
+                         const char (&tag)[N]) noexcept
+      : pool_resource(kind, options, pool_tag(tag)) {}
+
+  template <std::size_t N>
+  explicit pool_resource(pool_kind kind, const char (&tag)[N]) noexcept
+      : pool_resource(kind, pool_option::none, pool_tag(tag)) {}
+
+  pool_kind kind() const noexcept { return kind_; }
+  pool_option options() const noexcept { return options_; }
+  ULONG tag() const noexcept { return tag_; }
+
+private:
+  void *do_allocate(std::size_t bytes, std::size_t alignment) override {
+    void *const pointer =
+        detail::allocate_pool_bytes(bytes, alignment, kind_, options_, tag_);
+    if (!pointer) {
+      throw std::bad_alloc();
+    }
+
+    return pointer;
+  }
+
+  void do_deallocate(void *pointer, std::size_t, std::size_t) override {
+    detail::free_pool_bytes(pointer, tag_);
+  }
+
+  bool do_is_equal(const std::pmr::memory_resource &other) const
+      noexcept override {
+    return this == &other;
+  }
+
+  pool_kind kind_;
+  pool_option options_;
+  ULONG tag_;
+};
+
+inline std::pmr::memory_resource *nonpaged_pool_resource() noexcept {
+  static pool_resource resource{pool_kind::nonpaged};
+  return &resource;
+}
+
+inline std::pmr::memory_resource *paged_pool_resource() noexcept {
+  static pool_resource resource{pool_kind::paged};
+  return &resource;
+}
+
+} // namespace pmr
+} // namespace ntl
+
+#undef NTL_HAS_EX_ALLOCATE_POOL2

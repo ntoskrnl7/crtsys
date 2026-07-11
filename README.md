@@ -131,7 +131,7 @@ flowchart TD
 | `std::filesystem` | Driver-tested | path, directory, copy, metadata, time, link-oriented paths covered by the matrix |
 | Concurrency | Driver-tested | thread, synchronization, async/future, atomic wait/notify |
 | Locale / chrono / charconv | Driver-tested | locale facets, timezone/chrono paths, integer and floating char conversion |
-| NTL driver helpers | Driver-tested | `ntl::main`, driver/device helpers, RPC, IRQL helpers, stack expansion |
+| NTL driver helpers | Driver-tested | `ntl::main`, driver/device helpers, RPC, IRQL helpers, pool allocators, stack expansion |
 | `thread_local` | Unsupported for user variables | Kernel GS is processor-local KPCR, not user-mode TEB; user-declared `thread_local` would not be per-thread storage |
 
 The detailed matrix is intentionally test-linked: it records features exercised
@@ -146,7 +146,7 @@ may compile or work.
 | [MSBuild/NuGet Quick Start](./docs/msbuild-nuget-quickstart.md) | Visual Studio, Build Tools-only, and CI package consumption |
 | [Design Rationale](./docs/design-rationale.md) | IRQL, pool, stack, unload, and operational boundaries |
 | [Feature Coverage](./docs/feature-coverage.md) | Driver-tested C++/CRT/STL matrix and known gaps |
-| [NTL API](./docs/ntl-api.md) | Driver helper APIs, entry wrapper, synchronization, SEH helper |
+| [NTL API](./docs/ntl/README.md) | Driver helper APIs, entry wrapper, synchronization, pool allocators, SEH helper |
 | [Usage Examples](./docs/usage-examples.md) | Small driver-side NTL examples |
 | [CI Driver Load Tests](./docs/ci-driver-load-tests.md) | Optional self-hosted driver load/run workflow |
 
