@@ -1,8 +1,13 @@
 #include <ntl/expand_stack>
 #include <ntl/except>
+#include <ntl/lookaside_list>
+#include <ntl/pool_allocator>
 
+#include <memory_resource>
+#include <numeric>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace {
 volatile NTSTATUS g_seh_test_status = STATUS_ACCESS_VIOLATION;
@@ -13,6 +18,29 @@ __declspec(noinline) void raise_seh_test_status() {
   const auto raise_status = g_raise_status;
   raise_status(g_seh_test_status);
 }
+
+long g_pool_test_object_count = 0;
+long g_lookaside_test_object_count = 0;
+
+struct pool_test_object {
+  explicit pool_test_object(int value) : value(value) {
+    ++g_pool_test_object_count;
+  }
+
+  ~pool_test_object() { --g_pool_test_object_count; }
+
+  int value;
+};
+
+struct lookaside_test_object {
+  explicit lookaside_test_object(int value) : value(value) {
+    ++g_lookaside_test_object_count;
+  }
+
+  ~lookaside_test_object() { --g_lookaside_test_object_count; }
+
+  int value;
+};
 } // namespace
 
 bool ntl_expand_stack_test() {
@@ -266,6 +294,174 @@ bool ntl_resource_test() {
   return res3.locked_shared();
 }
 
+bool ntl_pool_allocator_test() {
+  g_pool_test_object_count = 0;
+
+  void *const raw = ntl::allocate_pool(128, ntl::pool_kind::nonpaged,
+                                       ntl::pool_option::none, "NTLr");
+  if (!raw)
+    return false;
+  ntl::free_pool(raw, "NTLr");
+
+  void *const raw_multichar =
+      ntl::allocate_pool(64, ntl::pool_kind::nonpaged, ntl::pool_option::none,
+                         'mLTN');
+  if (!raw_multichar)
+    return false;
+  ntl::free_pool(raw_multichar, 'mLTN');
+
+  auto buffer = ntl::make_pool_buffer(96, ntl::pool_kind::nonpaged,
+                                      ntl::pool_option::none, "NTLb");
+  if (!buffer)
+    return false;
+  void *const released_buffer = buffer.release();
+  if (!released_buffer)
+    return false;
+  ntl::free_pool(released_buffer, "NTLb");
+
+  auto scoped_buffer = ntl::make_pool_buffer(32, ntl::pool_kind::nonpaged,
+                                             ntl::pool_option::none, 'bLTN');
+  if (!scoped_buffer)
+    return false;
+  scoped_buffer.reset();
+
+  {
+    auto object = ntl::make_pool<pool_test_object>(
+        ntl::pool_kind::nonpaged, ntl::pool_option::none, "NTLo", 21);
+    if (!object || object->value != 21 || g_pool_test_object_count != 1)
+      return false;
+
+    auto moved_object = std::move(object);
+    if (object || !moved_object || moved_object->value != 21)
+      return false;
+
+    pool_test_object *const released_object = moved_object.release();
+    if (!released_object || g_pool_test_object_count != 1)
+      return false;
+    ntl::pool_deleter<pool_test_object>{"NTLo"}(released_object);
+    if (g_pool_test_object_count != 0)
+      return false;
+
+    auto reset_object = ntl::make_pool<pool_test_object>("NTLq", 22);
+    if (!reset_object || g_pool_test_object_count != 1)
+      return false;
+    reset_object.reset();
+    if (g_pool_test_object_count != 0)
+      return false;
+  }
+
+  constexpr auto vector_tag = ntl::pool_tag("NTLv");
+  std::vector<int, ntl::nonpaged_pool_allocator<int, vector_tag>> values;
+  values.reserve(4);
+  values.push_back(1);
+  values.push_back(2);
+  values.push_back(3);
+  values.push_back(4);
+  if (std::accumulate(values.begin(), values.end(), 0) != 10)
+    return false;
+
+  constexpr auto paged_tag = ntl::pool_tag("NTLg");
+  std::vector<int, ntl::paged_pool_allocator<int, paged_tag>> paged_values;
+  paged_values.assign({5, 6, 7});
+  if (paged_values.size() != 3 || paged_values[2] != 7)
+    return false;
+
+  using cache_allocator =
+      ntl::pool_allocator<int, ntl::pool_kind::nonpaged,
+                          ntl::pool_option::cache_aligned, 'cLTN'>;
+  std::vector<int, cache_allocator> cache_values;
+  cache_values.emplace_back(42);
+  if (cache_values.front() != 42)
+    return false;
+
+  using string_tag_allocator =
+      ntl::pool_allocator<int, ntl::pool_kind::nonpaged,
+                          ntl::pool_option::none, ntl::pool_tag("NTLs")>;
+  std::vector<int, string_tag_allocator> string_tag_values;
+  string_tag_values.assign({13, 14});
+  if (string_tag_values[0] != 13 || string_tag_values[1] != 14)
+    return false;
+
+  const auto options =
+      ntl::pool_option::cache_aligned | ntl::pool_option::raise_on_failure;
+  if (!ntl::has_pool_option(options, ntl::pool_option::cache_aligned))
+    return false;
+  if (ntl::has_pool_option(options, ntl::pool_option::special_pool))
+    return false;
+
+  std::pmr::vector<int> pmr_values{ntl::pmr::nonpaged_pool_resource()};
+  pmr_values.resize(3);
+  pmr_values[0] = 8;
+  pmr_values[1] = 9;
+  pmr_values[2] = 10;
+  if (std::accumulate(pmr_values.begin(), pmr_values.end(), 0) != 27)
+    return false;
+
+  ntl::pmr::pool_resource paged_resource{
+      ntl::pool_kind::paged, ntl::pool_option::none, "NTLp"};
+  std::pmr::vector<int> paged_pmr_values{&paged_resource};
+  paged_pmr_values.push_back(11);
+  paged_pmr_values.push_back(12);
+  return paged_pmr_values[0] == 11 && paged_pmr_values[1] == 12;
+}
+
+bool ntl_lookaside_list_test() {
+  g_lookaside_test_object_count = 0;
+
+  using nonpaged_list =
+      ntl::lookaside_list<lookaside_test_object, ntl::pool_kind::nonpaged,
+                          ntl::pool_option::none, ntl::pool_tag("NTLl")>;
+  nonpaged_list list;
+
+  lookaside_test_object *const raw = list.allocate();
+  if (!raw)
+    return false;
+  new (raw) lookaside_test_object{31};
+  if (raw->value != 31 || g_lookaside_test_object_count != 1)
+    return false;
+  list.destroy(raw);
+  if (g_lookaside_test_object_count != 0)
+    return false;
+
+  auto object = list.make(32);
+  if (!object || object->value != 32 || g_lookaside_test_object_count != 1)
+    return false;
+
+  auto moved_object = std::move(object);
+  if (object || !moved_object || moved_object->value != 32)
+    return false;
+  moved_object.reset();
+  if (g_lookaside_test_object_count != 0)
+    return false;
+
+  using paged_list =
+      ntl::lookaside_list<lookaside_test_object, ntl::pool_kind::paged,
+                          ntl::pool_option::none, ntl::pool_tag("NTLg")>;
+  paged_list paged;
+  auto paged_object = paged.make(33);
+  if (!paged_object || paged_object->value != 33 ||
+      g_lookaside_test_object_count != 1)
+    return false;
+  paged_object.reset();
+  if (g_lookaside_test_object_count != 0)
+    return false;
+
+  using cache_aligned_list =
+      ntl::lookaside_list<lookaside_test_object, ntl::pool_kind::nonpaged,
+                          ntl::pool_option::cache_aligned, 'lLTN'>;
+  cache_aligned_list cache_aligned;
+  auto cached_object = cache_aligned.make(34);
+  if (!cached_object || cached_object->value != 34 ||
+      g_lookaside_test_object_count != 1)
+    return false;
+  cached_object.reset();
+
+  list.flush();
+  paged.flush();
+  cache_aligned.flush();
+  return g_lookaside_test_object_count == 0;
+}
+
 //
 // Google Test.
 //
@@ -449,4 +645,12 @@ TEST(ntl_test, ntl_resource_test) {
   EXPECT_TRUE(lk7.owns_lock());
   EXPECT_TRUE(res3.locked());
   EXPECT_TRUE(res3.locked_shared());
+}
+
+TEST(ntl_test, ntl_pool_allocator_test) {
+  EXPECT_TRUE(ntl_pool_allocator_test());
+}
+
+TEST(ntl_test, ntl_lookaside_list_test) {
+  EXPECT_TRUE(ntl_lookaside_list_test());
 }
