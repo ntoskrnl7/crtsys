@@ -1,0 +1,108 @@
+/**
+ * @file symbolic_link
+ * @brief RAII wrapper for WDK symbolic link objects.
+ */
+#pragma once
+
+#include "except"
+#include "status"
+#include "unicode_string"
+
+#include <string>
+#include <utility>
+
+#ifndef _NTDDK_
+#include <wdm.h>
+#endif
+
+namespace ntl {
+
+class symbolic_link {
+public:
+  symbolic_link() = default;
+
+  symbolic_link(std::wstring link_name, std::wstring target_name) {
+    const auto result = create(std::move(link_name), std::move(target_name));
+    if (!result.is_ok())
+      throw ntl::exception(result, "IoCreateSymbolicLink failed.");
+  }
+
+  symbolic_link(const symbolic_link &) = delete;
+  symbolic_link &operator=(const symbolic_link &) = delete;
+
+  symbolic_link(symbolic_link &&other) noexcept { *this = std::move(other); }
+
+  symbolic_link &operator=(symbolic_link &&other) noexcept {
+    if (this == &other)
+      return *this;
+
+    reset();
+    link_name_ = std::move(other.link_name_);
+    target_name_ = std::move(other.target_name_);
+    active_ = other.active_;
+    other.active_ = false;
+    return *this;
+  }
+
+  ~symbolic_link() { reset(); }
+
+  ntl::status create(std::wstring link_name, std::wstring target_name) {
+    reset();
+
+    ntl::unicode_string native_link_name(link_name);
+    ntl::unicode_string native_target_name(target_name);
+    const auto result =
+        IoCreateSymbolicLink(&*native_link_name, &*native_target_name);
+    if (!NT_SUCCESS(result))
+      return result;
+
+    link_name_ = std::move(link_name);
+    target_name_ = std::move(target_name);
+    active_ = true;
+    return result;
+  }
+
+  ntl::status close() noexcept {
+    if (!active_)
+      return ntl::status::ok();
+
+    ntl::unicode_string native_link_name(link_name_);
+    const auto result = IoDeleteSymbolicLink(&*native_link_name);
+    if (NT_SUCCESS(result)) {
+      active_ = false;
+      link_name_.clear();
+      target_name_.clear();
+    }
+    return result;
+  }
+
+  void reset() noexcept {
+    if (!active_)
+      return;
+
+    ntl::unicode_string native_link_name(link_name_);
+    (void)IoDeleteSymbolicLink(&*native_link_name);
+    active_ = false;
+    link_name_.clear();
+    target_name_.clear();
+  }
+
+  std::wstring release() {
+    active_ = false;
+    target_name_.clear();
+    return std::move(link_name_);
+  }
+
+  bool valid() const noexcept { return active_; }
+  explicit operator bool() const noexcept { return valid(); }
+
+  const std::wstring &name() const noexcept { return link_name_; }
+  const std::wstring &target_name() const noexcept { return target_name_; }
+
+private:
+  std::wstring link_name_;
+  std::wstring target_name_;
+  bool active_ = false;
+};
+
+} // namespace ntl

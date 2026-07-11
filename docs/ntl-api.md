@@ -20,6 +20,7 @@ The detailed API reference is split by topic:
 | [Synchronization](./ntl/synchronization.md) | `ntl::irql`, spin locks, ERESOURCE wrapper |
 | [Pool allocator](./ntl/pool-allocator.md) | Kernel pool-backed ownership helpers, STL allocators, PMR resources, pool tags, IRQL rules |
 | [Lookaside list](./ntl/lookaside-list.md) | Fixed-size kernel object cache wrapper over `LOOKASIDE_LIST_EX` |
+| [Symbolic link](./ntl/symbolic-link.md) | RAII wrapper over `IoCreateSymbolicLink` / `IoDeleteSymbolicLink` |
 | [Unicode string](./ntl/unicode-string.md) | Adapting `std::wstring` storage to `UNICODE_STRING` |
 
 For end-to-end driver/app snippets, see [NTL usage examples](./usage-examples.md).

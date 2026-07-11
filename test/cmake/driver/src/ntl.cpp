@@ -2,6 +2,8 @@
 #include <ntl/except>
 #include <ntl/lookaside_list>
 #include <ntl/pool_allocator>
+#include <ntl/symbolic_link>
+#include <ntl/unicode_string>
 
 #include <memory_resource>
 #include <numeric>
@@ -41,6 +43,11 @@ struct lookaside_test_object {
 
   int value;
 };
+
+void delete_symbolic_link_if_present(const std::wstring &link_name) {
+  ntl::unicode_string native_link_name(link_name);
+  (void)IoDeleteSymbolicLink(&*native_link_name);
+}
 } // namespace
 
 bool ntl_expand_stack_test() {
@@ -462,6 +469,44 @@ bool ntl_lookaside_list_test() {
   return g_lookaside_test_object_count == 0;
 }
 
+bool ntl_symbolic_link_test() {
+  const std::wstring link_name = L"\\DosDevices\\CrtSysNtlSymbolicLinkTest";
+  const std::wstring target_name =
+      L"\\Device\\CrtSysNtlSymbolicLinkTarget";
+
+  delete_symbolic_link_if_present(link_name);
+
+  {
+    ntl::symbolic_link link(link_name, target_name);
+    if (!link || link.name() != link_name ||
+        link.target_name() != target_name)
+      return false;
+
+    ntl::symbolic_link moved(std::move(link));
+    if (link || !moved || moved.name() != link_name)
+      return false;
+
+    if (!moved.close().is_ok() || moved)
+      return false;
+  }
+
+  {
+    ntl::symbolic_link scoped(link_name, target_name);
+    if (!scoped)
+      return false;
+  }
+
+  {
+    ntl::symbolic_link released(link_name, target_name);
+    const auto released_name = released.release();
+    if (released || released_name != link_name)
+      return false;
+    delete_symbolic_link_if_present(released_name);
+  }
+
+  return true;
+}
+
 //
 // Google Test.
 //
@@ -653,4 +698,8 @@ TEST(ntl_test, ntl_pool_allocator_test) {
 
 TEST(ntl_test, ntl_lookaside_list_test) {
   EXPECT_TRUE(ntl_lookaside_list_test());
+}
+
+TEST(ntl_test, ntl_symbolic_link_test) {
+  EXPECT_TRUE(ntl_symbolic_link_test());
 }

@@ -20,6 +20,7 @@ Use these pages when you want more detail than the compact
 | [Synchronization](./synchronization.md) | `ntl::irql`, spin locks, ERESOURCE wrapper, and lock helpers |
 | [Pool allocator](./pool-allocator.md) | Kernel pool-backed ownership helpers, STL allocators, PMR resources, pool tags, and IRQL rules |
 | [Lookaside list](./lookaside-list.md) | Fixed-size kernel object cache wrapper over `LOOKASIDE_LIST_EX` |
+| [Symbolic link](./symbolic-link.md) | RAII wrapper over `IoCreateSymbolicLink` / `IoDeleteSymbolicLink` |
 | [Unicode string](./unicode-string.md) | Adapting `std::wstring` storage to `UNICODE_STRING` |
 
 ## Context Rules
