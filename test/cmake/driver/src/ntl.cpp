@@ -4,12 +4,14 @@
 #include <ntl/irql>
 #include <ntl/lookaside_list>
 #include <ntl/pool_allocator>
+#include <ntl/result>
 #include <ntl/symbolic_link>
 #include <ntl/unicode_string>
 #include <ntl/work_item>
 
 #include <memory_resource>
 #include <atomic>
+#include <memory>
 #include <numeric>
 #include <string>
 #include <utility>
@@ -488,6 +490,90 @@ bool ntl_lookaside_list_test() {
   return g_lookaside_test_object_count == 0;
 }
 
+bool ntl_result_test() {
+  auto value = ntl::result<int>::success(21);
+  if (!value || !value.has_value() || value.value() != 21 || *value != 21)
+    return false;
+  if (static_cast<NTSTATUS>(value.status()) != STATUS_SUCCESS)
+    return false;
+
+  *value = 22;
+  if (value.value_or(1) != 22)
+    return false;
+
+  const auto direct = ntl::result<std::wstring>::success(L"result");
+  if (!direct || direct->size() != 6 || direct.value() != L"result")
+    return false;
+
+  auto moved = ntl::ok(std::make_unique<int>(42));
+  if (!moved || !moved.value() || *moved.value() != 42)
+    return false;
+
+  auto buffer_result = ntl::try_make_pool_buffer(
+      48, ntl::pool_kind::nonpaged, ntl::pool_option::none, "NTRb");
+  if (!buffer_result || !buffer_result->get())
+    return false;
+  buffer_result->reset();
+
+  const auto object_count_before = g_pool_test_object_count;
+  auto object_result = ntl::try_make_pool<pool_test_object>(
+      ntl::pool_kind::nonpaged, ntl::pool_option::none, "NTRo", 23);
+  if (!object_result || !object_result->get() ||
+      (*object_result)->value != 23)
+    return false;
+  object_result->reset();
+  if (g_pool_test_object_count != object_count_before)
+    return false;
+
+  auto failure =
+      ntl::result<int>::failure(STATUS_OBJECT_NAME_NOT_FOUND);
+  if (failure || failure.has_value() || failure.value_or(7) != 7)
+    return false;
+  if (static_cast<NTSTATUS>(failure.status()) !=
+      STATUS_OBJECT_NAME_NOT_FOUND)
+    return false;
+
+  bool caught_value_exception = false;
+  try {
+    (void)failure.value();
+  } catch (const ntl::exception &e) {
+    caught_value_exception =
+        static_cast<NTSTATUS>(e.get_status()) ==
+        STATUS_OBJECT_NAME_NOT_FOUND;
+  }
+  if (!caught_value_exception)
+    return false;
+
+  ntl::result<int> unexpected_failure =
+      ntl::unexpected(STATUS_INVALID_PARAMETER);
+  if (unexpected_failure ||
+      static_cast<NTSTATUS>(unexpected_failure.status()) !=
+          STATUS_INVALID_PARAMETER)
+    return false;
+
+  auto void_success = ntl::ok();
+  if (!void_success || !void_success.has_value())
+    return false;
+  void_success.value();
+
+  ntl::result<void> void_failure =
+      ntl::unexpected(STATUS_ACCESS_DENIED);
+  if (void_failure || void_failure.has_value())
+    return false;
+  if (static_cast<NTSTATUS>(void_failure.status()) != STATUS_ACCESS_DENIED)
+    return false;
+
+  bool caught_void_exception = false;
+  try {
+    void_failure.value();
+  } catch (const ntl::exception &e) {
+    caught_void_exception =
+        static_cast<NTSTATUS>(e.get_status()) == STATUS_ACCESS_DENIED;
+  }
+
+  return caught_void_exception;
+}
+
 bool ntl_symbolic_link_test() {
   const std::wstring link_name = L"\\DosDevices\\CrtSysNtlSymbolicLinkTest";
   const std::wstring target_name =
@@ -512,6 +598,15 @@ bool ntl_symbolic_link_test() {
   {
     ntl::symbolic_link scoped(link_name, target_name);
     if (!scoped)
+      return false;
+  }
+
+  {
+    auto result_link = ntl::try_create_symbolic_link(link_name, target_name);
+    if (!result_link || !result_link->valid() ||
+        result_link->name() != link_name)
+      return false;
+    if (!result_link->close().is_ok())
       return false;
   }
 
@@ -795,6 +890,10 @@ TEST(ntl_test, ntl_pool_allocator_test) {
 
 TEST(ntl_test, ntl_lookaside_list_test) {
   EXPECT_TRUE(ntl_lookaside_list_test());
+}
+
+TEST(ntl_test, ntl_result_test) {
+  EXPECT_TRUE(ntl_result_test());
 }
 
 TEST(ntl_test, ntl_symbolic_link_test) {

@@ -7,6 +7,8 @@
  */
 #pragma once
 
+#include "result"
+
 #ifndef _NTDDK_
 #include <wdm.h>
 #endif
@@ -400,6 +402,20 @@ inline pool_buffer make_pool_buffer(std::size_t bytes,
 }
 
 /**
+ * @brief Allocates a raw byte buffer and returns NTSTATUS on allocation failure.
+ */
+[[nodiscard]] inline ntl::result<pool_buffer>
+try_make_pool_buffer(std::size_t bytes, pool_kind kind = pool_kind::nonpaged,
+                     pool_option options = pool_option::none,
+                     ULONG tag = default_pool_tag) noexcept {
+  void *const storage = allocate_pool(bytes, kind, options, tag);
+  if (!storage)
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+
+  return pool_buffer{storage, pool_deleter<void>{tag}};
+}
+
+/**
  * @brief Allocates a raw byte buffer using a string-literal tag.
  */
 template <std::size_t N>
@@ -407,6 +423,16 @@ inline pool_buffer make_pool_buffer(std::size_t bytes, pool_kind kind,
                                     pool_option options,
                                     const char (&tag)[N]) noexcept {
   return make_pool_buffer(bytes, kind, options, pool_tag(tag));
+}
+
+/**
+ * @brief Allocates a raw byte buffer using a string-literal tag and result.
+ */
+template <std::size_t N>
+[[nodiscard]] inline ntl::result<pool_buffer>
+try_make_pool_buffer(std::size_t bytes, pool_kind kind, pool_option options,
+                     const char (&tag)[N]) noexcept {
+  return try_make_pool_buffer(bytes, kind, options, pool_tag(tag));
 }
 
 /**
@@ -419,6 +445,16 @@ inline pool_buffer make_pool_buffer(std::size_t bytes, pool_kind kind,
 }
 
 /**
+ * @brief Allocates a raw byte buffer with no extra options and result.
+ */
+template <std::size_t N>
+[[nodiscard]] inline ntl::result<pool_buffer>
+try_make_pool_buffer(std::size_t bytes, pool_kind kind,
+                     const char (&tag)[N]) noexcept {
+  return try_make_pool_buffer(bytes, kind, pool_option::none, pool_tag(tag));
+}
+
+/**
  * @brief Allocates a nonpaged raw byte buffer using a string-literal tag.
  */
 template <std::size_t N>
@@ -426,6 +462,16 @@ inline pool_buffer make_pool_buffer(std::size_t bytes,
                                     const char (&tag)[N]) noexcept {
   return make_pool_buffer(bytes, pool_kind::nonpaged, pool_option::none,
                           pool_tag(tag));
+}
+
+/**
+ * @brief Allocates a nonpaged raw byte buffer using a string-literal tag and result.
+ */
+template <std::size_t N>
+[[nodiscard]] inline ntl::result<pool_buffer>
+try_make_pool_buffer(std::size_t bytes, const char (&tag)[N]) noexcept {
+  return try_make_pool_buffer(bytes, pool_kind::nonpaged, pool_option::none,
+                              pool_tag(tag));
 }
 
 /**
@@ -483,6 +529,67 @@ template <class T, std::size_t N, class... Args>
 [[nodiscard]] pool_ptr<T> make_pool(const char (&tag)[N], Args &&...args) {
   return make_pool<T>(pool_kind::nonpaged, pool_option::none, pool_tag(tag),
                       std::forward<Args>(args)...);
+}
+
+/**
+ * @brief Constructs an object in kernel pool and returns NTSTATUS on allocation failure.
+ *
+ * Object-construction exceptions still propagate after freeing the temporary
+ * pool storage; only pool allocation failure is represented as NTSTATUS.
+ */
+template <class T, class... Args>
+[[nodiscard]] ntl::result<pool_ptr<T>>
+try_make_pool(pool_kind kind, pool_option options, ULONG tag, Args &&...args) {
+  static_assert(!std::is_void<T>::value,
+                "ntl::try_make_pool<T> requires an object type");
+  static_assert(!std::is_array<T>::value,
+                "ntl::try_make_pool<T> does not construct arrays");
+  static_assert(alignof(T) <= MEMORY_ALLOCATION_ALIGNMENT,
+                "ntl::try_make_pool supports WDK pool alignment only");
+
+  void *const storage =
+      detail::allocate_pool_bytes(sizeof(T), alignof(T), kind, options, tag);
+  if (!storage)
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+
+  try {
+    return pool_ptr<T>{new (storage) T(std::forward<Args>(args)...),
+                       pool_deleter<T>{tag}};
+  } catch (...) {
+    detail::free_pool_bytes(storage, tag);
+    throw;
+  }
+}
+
+/**
+ * @brief Constructs an object in kernel pool using a string-literal tag and result.
+ */
+template <class T, std::size_t N, class... Args>
+[[nodiscard]] ntl::result<pool_ptr<T>>
+try_make_pool(pool_kind kind, pool_option options, const char (&tag)[N],
+              Args &&...args) {
+  return try_make_pool<T>(kind, options, pool_tag(tag),
+                          std::forward<Args>(args)...);
+}
+
+/**
+ * @brief Constructs an object in kernel pool with no extra options and result.
+ */
+template <class T, std::size_t N, class... Args>
+[[nodiscard]] ntl::result<pool_ptr<T>>
+try_make_pool(pool_kind kind, const char (&tag)[N], Args &&...args) {
+  return try_make_pool<T>(kind, pool_option::none, pool_tag(tag),
+                          std::forward<Args>(args)...);
+}
+
+/**
+ * @brief Constructs an object in nonpaged pool using a string-literal tag and result.
+ */
+template <class T, std::size_t N, class... Args>
+[[nodiscard]] ntl::result<pool_ptr<T>> try_make_pool(const char (&tag)[N],
+                                                     Args &&...args) {
+  return try_make_pool<T>(pool_kind::nonpaged, pool_option::none,
+                          pool_tag(tag), std::forward<Args>(args)...);
 }
 
 /**

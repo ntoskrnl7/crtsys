@@ -50,11 +50,17 @@ ntl::status ntl::main(ntl::driver &driver, const std::wstring &registry_path) {
     int close_count;
   };
 
-  auto test_dev =
-      driver.create_device<test_extension>(ntl::device_options()
-                                               .name(TEST_DEVICE_NAME)
-                                               .type(FILE_DEVICE_UNKNOWN)
-                                               .exclusive());
+  auto test_device_options = ntl::device_options()
+                                 .name(TEST_DEVICE_NAME)
+                                 .type(FILE_DEVICE_UNKNOWN)
+                                 .exclusive();
+  auto test_dev_result =
+      driver.try_create_device<test_extension>(test_device_options);
+  if (!test_dev_result) {
+    return test_dev_result.status();
+  }
+
+  auto test_dev = std::move(test_dev_result).value();
   if (test_dev) {
     test_dev->extension().val = 100;
     test_dev->extension().inc();

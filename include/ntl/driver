@@ -17,6 +17,7 @@
 
 #include "device"
 #include "except"
+#include "result"
 #include "status"
 #include "unicode_string"
 #include <algorithm>
@@ -69,6 +70,25 @@ public:
    */
   template <typename Extension>
   std::shared_ptr<device<Extension>> create_device(device_options &opts) {
+    auto created = try_create_device<Extension>(opts);
+    if (!created)
+      throw detail::driver::make_exception(created.status());
+
+    return std::move(created).value();
+  }
+
+  /**
+   * @brief Creates a WDM device object and returns NTSTATUS on creation failure.
+   * @param opts Device creation options.
+   * @return Shared owner for the created NTL device wrapper, or failure status.
+   *
+   * This is the NTSTATUS-oriented counterpart to create_device(). C++ object
+   * construction/allocation exceptions still propagate after cleaning up the
+   * native DEVICE_OBJECT.
+   */
+  template <typename Extension>
+  ntl::result<std::shared_ptr<device<Extension>>>
+  try_create_device(device_options &opts) {
     PDEVICE_OBJECT dev = NULL;
     status s = [&dev, &opts, this]() {
       ULONG extension_size =
@@ -83,17 +103,35 @@ public:
       }
     }();
     if (s.is_err())
-      throw detail::driver::make_exception(s);
+      return ntl::unexpected(s);
 
-    new (dev->DeviceExtension) detail::device::extension_data_t<Extension>();
+    bool extension_constructed = false;
+    bool device_owner_transferred = false;
 
-    auto ptr =
-        std::make_shared<device<Extension>>(device<Extension>(dev, opts));
+    try {
+      new (dev->DeviceExtension) detail::device::extension_data_t<Extension>();
+      extension_constructed = true;
 
-    dispatchers_.insert({dev, &ptr->dispatchers()});
-    ClearFlag(dev->Flags, DO_DEVICE_INITIALIZING);
+      auto ptr =
+          std::make_shared<device<Extension>>(device<Extension>(dev, opts));
+      device_owner_transferred = true;
 
-    return ptr;
+      dispatchers_.insert({dev, &ptr->dispatchers()});
+      ClearFlag(dev->Flags, DO_DEVICE_INITIALIZING);
+
+      return ntl::ok(std::move(ptr));
+    } catch (...) {
+      if (!device_owner_transferred) {
+        if (extension_constructed) {
+          using extension_data =
+              detail::device::extension_data_t<Extension>;
+          reinterpret_cast<extension_data *>(dev->DeviceExtension)
+              ->~extension_data();
+        }
+        IoDeleteDevice(dev);
+      }
+      throw;
+    }
   }
 
   /**

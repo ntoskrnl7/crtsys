@@ -47,6 +47,10 @@ API:
 - `create_device<Extension>(device_options&)`
   - creates an `ntl::device<Extension>`
   - constructs the extension object in the device extension area
+- `try_create_device<Extension>(device_options&)`
+  - creates an `ntl::device<Extension>`
+  - returns `ntl::result<std::shared_ptr<ntl::device<Extension>>>` with the
+    `IoCreateDevice` status instead of throwing for creation failure
 - `on_unload(callback)`
   - registers a C++ unload callback
 - `name() const`
@@ -68,6 +72,18 @@ device.extension().open_count = 0;
 driver.on_unload([device = std::move(device)]() mutable {
   device.detach();
 });
+```
+
+Use `try_create_device` when the initialization path should preserve
+`NTSTATUS` without converting `IoCreateDevice` failure into an exception:
+
+```cpp
+auto device = driver.try_create_device<device_extension>(options);
+if (!device) {
+  return device.status();
+}
+
+(*device)->extension().open_count = 0;
 ```
 
 IRQL: `PASSIVE_LEVEL`. The helper uses C++ objects and containers and is

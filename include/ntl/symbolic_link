@@ -8,6 +8,7 @@
 #pragma once
 
 #include "except"
+#include "result"
 #include "status"
 #include "unicode_string"
 
@@ -154,5 +155,19 @@ private:
   std::wstring target_name_;
   bool active_ = false;
 };
+
+/**
+ * @brief Creates a symbolic-link owner or returns the IoCreateSymbolicLink status.
+ */
+[[nodiscard]] inline ntl::result<symbolic_link>
+try_create_symbolic_link(std::wstring link_name, std::wstring target_name) {
+  symbolic_link link;
+  const auto creation_status =
+      link.create(std::move(link_name), std::move(target_name));
+  if (!creation_status.is_ok())
+    return ntl::unexpected(creation_status);
+
+  return ntl::ok(std::move(link));
+}
 
 } // namespace ntl
