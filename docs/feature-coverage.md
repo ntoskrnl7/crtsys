@@ -58,7 +58,7 @@ The driver tests still exercise these features from `PASSIVE_LEVEL`.
 | C math and floating-point helpers | Math functions and floating-point classification helpers | `PASSIVE_LEVEL` unless the exact helper is separately audited | Floating-point state and helper dependencies are driver-context sensitive. |
 | NTL entry, driver, device, and RPC server helpers | `ntl::main`, `ntl::driver`, `ntl::device`, `ntl::rpc::server` | `PASSIVE_LEVEL` only | Intended for initialization, teardown, device setup, and IOCTL/RPC control paths. |
 | NTL IRP view | `ntl::irp` | Follows the dispatch path that supplied the IRP | NTL device callbacks should still be treated as `PASSIVE_LEVEL` unless the exact callback body is separately audited. |
-| NTL status wrapper | `ntl::status` | Caller context | Value-only wrapper around `NTSTATUS`. |
+| NTL status/result wrapper | `ntl::status`, `ntl::result<T>`, `ntl::result<void>` | Caller context for status checks; contained value and failed `value()` path follow their own contracts | Value/status helpers for preserving `NTSTATUS` while writing C++ control-path code. |
 | NTL stack expansion | `ntl::expand_stack` | `PASSIVE_LEVEL` only | Runtime-backed control-path helper, not a hot-path escape hatch. |
 | NTL pool ownership and allocator | `ntl::pool_ptr`, `ntl::pool_buffer`, `ntl::pool_allocator`, `ntl::nonpaged_pool_allocator`, `ntl::paged_pool_allocator`, `ntl::pmr::pool_resource` | Raw nonpaged pool follows WDK pool rules; object construction/destruction and STL/PMR usage are `PASSIVE_LEVEL` unless separately audited | Exposes WDK pool kind/options to RAII ownership helpers, STL-compatible allocators, and PMR resource types. |
 | NTL lookaside list | `ntl::lookaside_list` | Raw nonpaged allocate/free follows WDK lookaside rules; object construction/destruction is `PASSIVE_LEVEL` unless separately audited | Wraps `LOOKASIDE_LIST_EX` for fixed-size kernel object caches while keeping pool kind/tag visible. |
@@ -791,6 +791,13 @@ NTL provides C++ helpers for driver code. See the
 - [x] `ntl::expand_stack`
   [(tested)](../test/cmake/driver/src/ntl.cpp#L6)
 - [x] `ntl::status`
+- [x] `ntl::result<T>` / `ntl::result<void>`
+  - [x] value result, explicit `unexpected(status)` failure, `value_or`,
+        failed `value()` exception, void success/failure paths, pool result
+        factories, device result creation, and symbolic-link result factory
+        creation
+    [(tested)](../test/cmake/driver/src/ntl.cpp)
+    [(docs)](./ntl/result.md)
 - [x] `ntl::pool_ptr` / `ntl::pool_allocator`
   - [x] raw pool allocation and RAII pool buffer ownership
   - [x] pool-backed object construction/destruction with `ntl::pool_ptr<T>`
@@ -821,6 +828,7 @@ NTL provides C++ helpers for driver code. See the
     [(tested)](../test/cmake/driver/src/ntl.cpp)
     [(docs)](./ntl/work-item.md)
 - [x] `ntl::driver`
+  - [x] `driver.try_create_device` result-returning device creation path
   - [x] unload callback
     [(tested)](../test/cmake/driver/src/main.cpp#L73)
   - [x] device creation

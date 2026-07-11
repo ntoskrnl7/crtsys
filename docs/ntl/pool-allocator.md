@@ -45,6 +45,18 @@ if (!buffer) {
 }
 ```
 
+RAII cleanup with `NTSTATUS` propagation:
+
+```cpp
+auto buffer = ntl::try_make_pool_buffer(128,
+                                        ntl::pool_kind::nonpaged,
+                                        ntl::pool_option::none,
+                                        "BUF3");
+if (!buffer) {
+  return buffer.status();
+}
+```
+
 Object allocation with construction and destruction:
 
 ```cpp
@@ -55,6 +67,17 @@ struct packet_state {
 
 auto state = ntl::make_pool<packet_state>("PKTs", 42);
 state->id += 1;
+```
+
+Object allocation without converting allocation failure into `std::bad_alloc`:
+
+```cpp
+auto state = ntl::try_make_pool<packet_state>("PKTr", 42);
+if (!state) {
+  return state.status();
+}
+
+(*state)->id += 1;
 ```
 
 Nonpaged STL vector:
@@ -209,8 +232,12 @@ packets.reserve(64);
 - `ntl::pool_buffer`
 - `ntl::make_pool<T>(kind, options, tag, args...)`
 - `ntl::make_pool<T>("TAGx", args...)`
+- `ntl::try_make_pool<T>(kind, options, tag, args...)`
+- `ntl::try_make_pool<T>("TAGx", args...)`
 - `ntl::make_pool_buffer(bytes, kind, options, tag)`
 - `ntl::make_pool_buffer(bytes, "TAGx")`
+- `ntl::try_make_pool_buffer(bytes, kind, options, tag)`
+- `ntl::try_make_pool_buffer(bytes, "TAGx")`
 - `ntl::pool_allocator<T, Kind, Options, Tag>`
 - `ntl::nonpaged_pool_allocator<T, Tag>`
 - `ntl::paged_pool_allocator<T, Tag>`
@@ -232,7 +259,9 @@ The driver test suite exercises:
 - raw nonpaged allocation/free with string tags
 - raw nonpaged allocation/free with WDK-style multi-character tags
 - `ntl::pool_buffer` release/reset cleanup
+- `ntl::try_make_pool_buffer` allocation with `ntl::result`
 - `ntl::pool_ptr<T>` construction, move, release, reset, and destruction
+- `ntl::try_make_pool<T>` allocation with `ntl::result`
 - `std::vector` with nonpaged and paged pool allocators
 - template tags via both `ntl::pool_tag("TAGx")` and `'xGAT'`
 - `std::pmr::vector` with `ntl::pmr::pool_resource`

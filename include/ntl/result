@@ -1,0 +1,288 @@
+/**
+ * @file result
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief NTSTATUS-backed value-or-error result type.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ *
+ */
+#pragma once
+
+#include "except"
+#include "status"
+
+#include <ntstatus.h>
+#include <optional>
+#include <type_traits>
+#include <utility>
+
+namespace ntl {
+/**
+ * @brief Explicit wrapper for constructing failed ntl::result objects.
+ */
+class unexpected_status {
+public:
+  /**
+   * @brief Stores the failure NTSTATUS.
+   * @param status Native NTSTATUS value to preserve.
+   */
+  explicit unexpected_status(NTSTATUS status) noexcept : status_(status) {}
+
+  /**
+   * @brief Returns the stored status wrapper.
+   */
+  ntl::status status() const noexcept { return status_; }
+
+private:
+  ntl::status status_;
+};
+
+/**
+ * @brief Creates an explicit failed-result marker.
+ * @param status Native NTSTATUS value to preserve.
+ */
+inline unexpected_status unexpected(NTSTATUS status) noexcept {
+  return unexpected_status{status};
+}
+
+/**
+ * @brief Creates an explicit failed-result marker.
+ * @param status NTL status value to preserve.
+ */
+inline unexpected_status unexpected(ntl::status status) noexcept {
+  return unexpected(static_cast<NTSTATUS>(status));
+}
+
+/**
+ * @brief Holds either a value of T or an NTSTATUS failure.
+ * @tparam T Value type produced by a driver helper.
+ *
+ * This is intentionally small: it is not a full std::expected replacement.
+ * It preserves NTSTATUS in code paths that should not throw by default, while
+ * still offering value() for exception-oriented control paths.
+ */
+template <class T> class result {
+public:
+  using value_type = T;
+
+  /**
+   * @brief Creates an empty result with STATUS_UNSUCCESSFUL.
+   */
+  result() noexcept : value_(), status_(STATUS_UNSUCCESSFUL) {}
+
+  /**
+   * @brief Creates a successful result from a value.
+   */
+  result(const T &value) : value_(value), status_(STATUS_SUCCESS) {}
+
+  /**
+   * @brief Creates a successful result from a value.
+   */
+  result(T &&value) noexcept(std::is_nothrow_move_constructible_v<T>)
+      : value_(std::move(value)), status_(STATUS_SUCCESS) {}
+
+  /**
+   * @brief Creates a failed result.
+   */
+  result(unexpected_status unexpected) noexcept
+      : value_(), status_(unexpected.status()) {}
+
+  /**
+   * @brief Constructs a successful result in place.
+   * @param args Arguments forwarded to T's constructor.
+   */
+  template <class... Args> static result success(Args &&... args) {
+    result r;
+    r.value_.emplace(std::forward<Args>(args)...);
+    r.status_ = ntl::status{STATUS_SUCCESS};
+    return r;
+  }
+
+  /**
+   * @brief Constructs a failed result.
+   * @param status Native NTSTATUS value to preserve.
+   */
+  static result failure(NTSTATUS status) noexcept {
+    return result{unexpected(status)};
+  }
+
+  /**
+   * @brief Constructs a failed result.
+   * @param status NTL status value to preserve.
+   */
+  static result failure(ntl::status status) noexcept {
+    return result{unexpected(status)};
+  }
+
+  /**
+   * @brief Returns true when a value is present.
+   */
+  bool has_value() const noexcept { return value_.has_value(); }
+
+  /**
+   * @brief Returns true when a value is present.
+   */
+  explicit operator bool() const noexcept { return has_value(); }
+
+  /**
+   * @brief Returns STATUS_SUCCESS for value results, or the preserved failure.
+   */
+  ntl::status status() const noexcept {
+    return value_ ? ntl::status{STATUS_SUCCESS} : status_;
+  }
+
+  /**
+   * @brief Returns the stored value or throws ntl::exception.
+   */
+  T &value() & {
+    if (!value_)
+      throw ntl::exception(status_, "ntl::result has no value.");
+    return *value_;
+  }
+
+  /**
+   * @brief Returns the stored value or throws ntl::exception.
+   */
+  const T &value() const & {
+    if (!value_)
+      throw ntl::exception(status_, "ntl::result has no value.");
+    return *value_;
+  }
+
+  /**
+   * @brief Moves the stored value or throws ntl::exception.
+   */
+  T &&value() && {
+    if (!value_)
+      throw ntl::exception(status_, "ntl::result has no value.");
+    return std::move(*value_);
+  }
+
+  /**
+   * @brief Returns the stored value without checking.
+   */
+  T &operator*() & noexcept { return *value_; }
+
+  /**
+   * @brief Returns the stored value without checking.
+   */
+  const T &operator*() const & noexcept { return *value_; }
+
+  /**
+   * @brief Moves the stored value without checking.
+   */
+  T &&operator*() && noexcept { return std::move(*value_); }
+
+  /**
+   * @brief Returns a pointer to the stored value.
+   */
+  T *operator->() noexcept { return &*value_; }
+
+  /**
+   * @brief Returns a pointer to the stored value.
+   */
+  const T *operator->() const noexcept { return &*value_; }
+
+  /**
+   * @brief Returns the stored value or a fallback copy.
+   */
+  template <class U> T value_or(U &&fallback) const & {
+    return value_ ? *value_ : static_cast<T>(std::forward<U>(fallback));
+  }
+
+  /**
+   * @brief Moves the stored value or returns a fallback.
+   */
+  template <class U> T value_or(U &&fallback) && {
+    return value_ ? std::move(*value_)
+                  : static_cast<T>(std::forward<U>(fallback));
+  }
+
+private:
+  std::optional<T> value_;
+  ntl::status status_;
+};
+
+/**
+ * @brief NTSTATUS result specialization for operations that produce no value.
+ */
+template <> class result<void> {
+public:
+  using value_type = void;
+
+  /**
+   * @brief Creates a successful void result.
+   */
+  result() noexcept : status_(STATUS_SUCCESS) {}
+
+  /**
+   * @brief Creates a failed void result.
+   */
+  result(unexpected_status unexpected) noexcept
+      : status_(unexpected.status()) {}
+
+  /**
+   * @brief Constructs a successful void result.
+   * @param status Success NTSTATUS to preserve.
+   */
+  static result success(NTSTATUS status = STATUS_SUCCESS) noexcept {
+    result r;
+    r.status_ = ntl::status{status};
+    return r;
+  }
+
+  /**
+   * @brief Constructs a failed void result.
+   * @param status Native NTSTATUS value to preserve.
+   */
+  static result failure(NTSTATUS status) noexcept {
+    return result{unexpected(status)};
+  }
+
+  /**
+   * @brief Constructs a failed void result.
+   * @param status NTL status value to preserve.
+   */
+  static result failure(ntl::status status) noexcept {
+    return result{unexpected(status)};
+  }
+
+  /**
+   * @brief Returns true when status() is NT_SUCCESS.
+   */
+  bool has_value() const noexcept { return status_.is_ok(); }
+
+  /**
+   * @brief Returns true when status() is NT_SUCCESS.
+   */
+  explicit operator bool() const noexcept { return has_value(); }
+
+  /**
+   * @brief Returns the preserved NTSTATUS wrapper.
+   */
+  ntl::status status() const noexcept { return status_; }
+
+  /**
+   * @brief Throws ntl::exception if the result is failed.
+   */
+  void value() const {
+    if (!has_value())
+      throw ntl::exception(status_, "ntl::result<void> has no value.");
+  }
+
+private:
+  ntl::status status_;
+};
+
+/**
+ * @brief Creates a successful result from a value.
+ */
+template <class T> result<std::decay_t<T>> ok(T &&value) {
+  return result<std::decay_t<T>>::success(std::forward<T>(value));
+}
+
+/**
+ * @brief Creates a successful void result.
+ */
+inline result<void> ok() noexcept { return result<void>::success(); }
+} // namespace ntl

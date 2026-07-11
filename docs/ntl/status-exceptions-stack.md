@@ -4,7 +4,8 @@
 
 This page covers small runtime-facing helpers that are useful in driver control
 paths: `ntl::status`, `ntl::exception`, `ntl::seh::try_except`, and
-`ntl::expand_stack`.
+`ntl::expand_stack`. For value-or-status returns, see
+[`ntl::result`](./result.md).
 
 ## `ntl::status`
 
@@ -40,6 +41,14 @@ ntl::status create_control_device(ntl::driver& driver) {
 
 IRQL: value-only operations do not allocate or wait. The surrounding WDK call
 path still determines whether a given status flow is valid at the current IRQL.
+
+## Result
+
+Header: [`include/ntl/result`](../../include/ntl/result)
+
+`ntl::result<T>` is documented separately in [NTL Result](./result.md). Use it
+when a helper should return a value on success and preserve an `NTSTATUS` on
+failure.
 
 ## Exceptions
 

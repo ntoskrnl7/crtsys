@@ -15,7 +15,8 @@ The detailed API reference is split by topic:
 | --- | --- |
 | [Context and IRQL](./ntl/context.md) | Shared IRQL language and execution-context rules |
 | [Status, exceptions, and stack expansion](./ntl/status-exceptions-stack.md) | `ntl::status`, `ntl::exception`, SEH boundary helper, `ntl::expand_stack` |
-| [Driver, device, and IRP helpers](./ntl/driver-device-irp.md) | `ntl::main`, `ntl::driver`, `ntl::device`, dispatch callbacks, `ntl::irp` |
+| [Result](./ntl/result.md) | `ntl::result<T>`, `ntl::result<void>`, `ntl::unexpected`, `ntl::ok`, result-returning factory helpers |
+| [Driver, device, and IRP helpers](./ntl/driver-device-irp.md) | `ntl::main`, `ntl::driver`, `ntl::device`, `try_create_device`, dispatch callbacks, `ntl::irp` |
 | [RPC](./ntl/rpc.md) | RPC schema macros, server lifetime, user-mode client calls |
 | [Synchronization](./ntl/synchronization.md) | `ntl::irql`, spin locks, ERESOURCE wrapper |
 | [Event](./ntl/event.md) | `KEVENT` wrapper for notification/synchronization events |

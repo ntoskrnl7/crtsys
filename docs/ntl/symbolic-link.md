@@ -36,11 +36,25 @@ ntl::status ntl::main(ntl::driver& driver,
 }
 ```
 
+If you prefer NTSTATUS-style control flow over constructor exceptions, use the
+factory helper:
+
+```cpp
+auto link = ntl::try_create_symbolic_link(L"\\DosDevices\\demo",
+                                          L"\\Device\\demo");
+if (!link) {
+  return link.status();
+}
+```
+
 ## API
 
 - `symbolic_link(std::wstring link_name, std::wstring target_name)`
   - creates the symbolic link
   - throws `ntl::exception` if `IoCreateSymbolicLink` fails
+- `try_create_symbolic_link(link_name, target_name)`
+  - creates the symbolic link
+  - returns `ntl::result<symbolic_link>` with the `IoCreateSymbolicLink` status
 - `create(link_name, target_name)`
   - deletes any currently owned link, then creates a new one
   - returns `ntl::status`
