@@ -253,12 +253,86 @@ void run() { std::cout << "std::stacktrace is not available in this STL\n"; }
 
 namespace stacktrace_semantic_test {
 #if defined(__cpp_lib_stacktrace) && __cpp_lib_stacktrace >= 202011L
+#if defined(CRTSYS_ENABLE_STACKTRACE_TEST_HOOKS)
+extern "C" void __cdecl
+__crtsys_stacktrace_test_set_pdb_mode(unsigned int mode) noexcept;
+
+enum class stacktrace_test_pdb_mode : unsigned int {
+  normal = 0,
+  missing_pdb = 1,
+  mismatched_identity = 2,
+};
+
+class scoped_stacktrace_test_pdb_mode {
+public:
+  explicit scoped_stacktrace_test_pdb_mode(stacktrace_test_pdb_mode mode) {
+    __crtsys_stacktrace_test_set_pdb_mode(static_cast<unsigned int>(mode));
+  }
+
+  scoped_stacktrace_test_pdb_mode(const scoped_stacktrace_test_pdb_mode &) =
+      delete;
+  scoped_stacktrace_test_pdb_mode &
+  operator=(const scoped_stacktrace_test_pdb_mode &) = delete;
+
+  ~scoped_stacktrace_test_pdb_mode() {
+    __crtsys_stacktrace_test_set_pdb_mode(
+        static_cast<unsigned int>(stacktrace_test_pdb_mode::normal));
+  }
+};
+#endif
+
 std::stacktrace capture_trace() {
   auto trace = std::stacktrace::current();
   cxx_latest_detail::expect(!trace.empty(),
                             "std::stacktrace::current returned no frames");
   return trace;
 }
+
+void expect_module_offset_entry(const std::stacktrace &trace,
+                                const char *scenario) {
+  cxx_latest_detail::expect(!trace.empty(), scenario);
+
+  const auto &entry = trace[0];
+  const auto description = entry.description();
+  const auto entry_text = std::to_string(entry);
+  cxx_latest_detail::expect(description.find("+0x") != std::string::npos,
+                            scenario);
+  cxx_latest_detail::expect(entry_text.find("+0x") != std::string::npos,
+                            scenario);
+}
+
+#if defined(CRTSYS_ENABLE_STACKTRACE_TEST_HOOKS)
+void expect_pdb_fallback(const std::stacktrace &trace, const char *scenario) {
+  expect_module_offset_entry(trace, scenario);
+
+  const auto &entry = trace[0];
+  cxx_latest_detail::expect(entry.description().find('!') == std::string::npos,
+                            scenario);
+  cxx_latest_detail::expect(entry.source_file().empty(), scenario);
+  cxx_latest_detail::expect(entry.source_line() == 0, scenario);
+}
+
+void verify_forced_pdb_fallbacks() {
+  {
+    scoped_stacktrace_test_pdb_mode mode{
+        stacktrace_test_pdb_mode::missing_pdb};
+    const auto trace = capture_trace();
+    std::cout << "stacktrace forced missing-PDB entry: "
+              << std::to_string(trace[0]) << '\n';
+    expect_pdb_fallback(trace, "stacktrace missing-PDB fallback mismatch");
+  }
+
+  {
+    scoped_stacktrace_test_pdb_mode mode{
+        stacktrace_test_pdb_mode::mismatched_identity};
+    const auto trace = capture_trace();
+    std::cout << "stacktrace forced mismatched-PDB entry: "
+              << std::to_string(trace[0]) << '\n';
+    expect_pdb_fallback(trace,
+                        "stacktrace mismatched-PDB fallback mismatch");
+  }
+}
+#endif
 
 void run() {
   auto trace = capture_trace();
@@ -276,12 +350,7 @@ void run() {
   std::cout << "stacktrace last entry: "
             << std::to_string(trace[trace.size() - 1]) << '\n';
 
-  const auto description = entry.description();
-  cxx_latest_detail::expect(description.find("+0x") != std::string::npos,
-                            "stacktrace description missing module offset");
-  cxx_latest_detail::expect(std::to_string(entry).find("+0x") !=
-                                std::string::npos,
-                            "stacktrace entry string missing module offset");
+  expect_module_offset_entry(trace, "stacktrace module offset missing");
   cxx_latest_detail::expect(trace_text.find("0> ") != std::string::npos,
                             "stacktrace text missing first frame");
   cxx_latest_detail::expect(trace_text.find("+0x") != std::string::npos,
@@ -300,6 +369,10 @@ void run() {
     cxx_latest_detail::expect(trace_text.find(last_prefix) != std::string::npos,
                               "stacktrace text missing last frame");
   }
+
+#if defined(CRTSYS_ENABLE_STACKTRACE_TEST_HOOKS)
+  verify_forced_pdb_fallbacks();
+#endif
 }
 #else
 void run() { std::cout << "std::stacktrace is not available in this STL\n"; }

@@ -379,7 +379,8 @@ are tracked in the [cppreference attribution note](./cppreference-attribution.md
     `PASSIVE_LEVEL`; otherwise it falls back to `module+offset`. When the
     matching PDB has CodeView line records, `source_file()` and
     `source_line()` report the source location; otherwise they fall back to
-    empty/zero.
+    empty/zero. The source driver test also forces missing-PDB and
+    mismatched-PDB identity paths to verify that fallback behavior.
 - [x] [`std::chrono::year_month_day`](https://en.cppreference.com/w/cpp/chrono/year_month_day),
       [`std::chrono::weekday`](https://en.cppreference.com/w/cpp/chrono/weekday),
       [`std::chrono::hh_mm_ss`](https://en.cppreference.com/w/cpp/chrono/hh_mm_ss)

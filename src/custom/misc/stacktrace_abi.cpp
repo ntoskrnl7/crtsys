@@ -92,6 +92,21 @@ struct stacktrace_format_context {
   bool have_modules{};
 };
 
+#if defined(CRTSYS_ENABLE_STACKTRACE_TEST_HOOKS)
+enum class stacktrace_test_pdb_mode : unsigned int {
+  normal = 0,
+  missing_pdb = 1,
+  mismatched_identity = 2,
+};
+
+volatile unsigned int g_stacktrace_test_pdb_mode =
+    static_cast<unsigned int>(stacktrace_test_pdb_mode::normal);
+
+stacktrace_test_pdb_mode stacktrace_current_test_pdb_mode() noexcept {
+  return static_cast<stacktrace_test_pdb_mode>(g_stacktrace_test_pdb_mode);
+}
+#endif
+
 size_t stacktrace_copy_text(char *data, size_t size, void *context) noexcept {
   const auto *text = static_cast<const stacktrace_text *>(context);
   const size_t bytes_to_copy = (std::min)(size, text->size);
@@ -1396,6 +1411,13 @@ bool stacktrace_load_pdb_symbols(const AUX_MODULE_EXTENDED_INFO &module,
     return false;
   }
 
+#if defined(CRTSYS_ENABLE_STACKTRACE_TEST_HOOKS)
+  if (stacktrace_current_test_pdb_mode() ==
+      stacktrace_test_pdb_mode::missing_pdb) {
+    return false;
+  }
+#endif
+
   const void *image_base = module.BasicInfo.ImageBase;
   std::string rsds_name;
   stacktrace_pdb_identity identity{};
@@ -1404,6 +1426,14 @@ bool stacktrace_load_pdb_symbols(const AUX_MODULE_EXTENDED_INFO &module,
       !stacktrace_get_pe_sections(image_base, sections)) {
     return false;
   }
+
+#if defined(CRTSYS_ENABLE_STACKTRACE_TEST_HOOKS)
+  if (stacktrace_current_test_pdb_mode() ==
+      stacktrace_test_pdb_mode::mismatched_identity) {
+    identity.guid[0] ^= 0xff;
+    ++identity.age;
+  }
+#endif
 
   for (const auto &candidate : stacktrace_pdb_candidates(module, rsds_name)) {
     std::vector<std::uint8_t> pdb;
@@ -1613,6 +1643,12 @@ unsigned int stacktrace_source_line_number(const void *address) {
 } // namespace
 
 extern "C" {
+#if defined(CRTSYS_ENABLE_STACKTRACE_TEST_HOOKS)
+void __cdecl __crtsys_stacktrace_test_set_pdb_mode(unsigned int mode) noexcept {
+  g_stacktrace_test_pdb_mode = mode;
+}
+#endif
+
 unsigned short __stdcall
 __std_stacktrace_capture(unsigned long frames_to_skip,
                          unsigned long frames_to_capture, void **back_trace,
