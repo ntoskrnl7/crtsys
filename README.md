@@ -131,7 +131,7 @@ flowchart TD
 | `std::filesystem` | Driver-tested | path, directory, copy, metadata, time, link-oriented paths covered by the matrix |
 | Concurrency | Driver-tested | thread, synchronization, async/future, atomic wait/notify |
 | Locale / chrono / charconv | Driver-tested | locale facets, timezone/chrono paths, integer and floating char conversion |
-| NTL driver helpers | Driver-tested | `ntl::main`, driver/device helpers, RPC, IRQL helpers, pool allocators, stack expansion |
+| NTL driver helpers | Driver-tested | `ntl::main`, driver/device helpers, symbolic link/event/work item RAII, RPC, IRQL helpers, pool allocators, stack expansion |
 | `thread_local` | Unsupported for user variables | Kernel GS is processor-local KPCR, not user-mode TEB; user-declared `thread_local` would not be per-thread storage |
 
 The detailed matrix is intentionally test-linked: it records features exercised

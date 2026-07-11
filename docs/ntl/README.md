@@ -18,8 +18,11 @@ Use these pages when you want more detail than the compact
 | [Driver, device, and IRP helpers](./driver-device-irp.md) | `ntl::main`, `ntl::driver`, `ntl::device`, dispatch callbacks, and `ntl::irp` |
 | [RPC](./rpc.md) | Kernel/user RPC schema macros, server lifetime, client calls, and stable callback IDs |
 | [Synchronization](./synchronization.md) | `ntl::irql`, spin locks, ERESOURCE wrapper, and lock helpers |
+| [Event](./event.md) | `KEVENT` wrapper for notification/synchronization events |
+| [Work item](./work-item.md) | Deferring resident work to a `PASSIVE_LEVEL` system worker thread |
 | [Pool allocator](./pool-allocator.md) | Kernel pool-backed ownership helpers, STL allocators, PMR resources, pool tags, and IRQL rules |
 | [Lookaside list](./lookaside-list.md) | Fixed-size kernel object cache wrapper over `LOOKASIDE_LIST_EX` |
+| [Symbolic link](./symbolic-link.md) | RAII wrapper over `IoCreateSymbolicLink` / `IoDeleteSymbolicLink` |
 | [Unicode string](./unicode-string.md) | Adapting `std::wstring` storage to `UNICODE_STRING` |
 
 ## Context Rules

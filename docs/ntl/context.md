@@ -33,6 +33,9 @@ Examples:
   teardown helper: `PASSIVE_LEVEL`.
 - `ntl::spin_lock::lock_at_dpc_level` maps to a spin-lock path and requires the
   caller to already be at `DISPATCH_LEVEL`.
+- `ntl::work_item::queue` maps to a WDK work-item queue operation and may be
+  called at `<= DISPATCH_LEVEL`, but `wait()` and any runtime-heavy callback
+  ownership remain `PASSIVE_LEVEL` concerns.
 - `ntl::allocate_pool(..., ntl::pool_kind::nonpaged, ...)` can follow WDK pool
   rules for raw allocation, but a `std::vector` that uses the allocator is still
   a C++ container and should be treated as `PASSIVE_LEVEL` unless audited.

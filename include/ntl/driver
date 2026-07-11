@@ -1,9 +1,9 @@
 /**
  * @file driver
- * @author jungkwang.lee (ntoskrnl7@google.com)
- * @brief
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Driver object facade for NTL-style DriverEntry code.
  *
- * @copyright Copyright (c) 2022 NT Template Library Authoers.
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
  *
  */
 #pragma once
@@ -45,6 +45,9 @@ inline ntl::exception make_exception(NTSTATUS status) {
 } // namespace driver
 } // namespace detail
 
+/**
+ * @brief Wraps DRIVER_OBJECT state and owns NTL-created devices.
+ */
 class driver {
   friend class driver_initializer;
   friend class driver_unload_invoker;
@@ -58,6 +61,12 @@ private:
 public:
   using unload_routine = std::function<void()>;
 
+  /**
+   * @brief Creates a WDM device object with an optional C++ extension payload.
+   * @param opts Device creation options.
+   * @return Shared owner for the created NTL device wrapper.
+   * @throw ntl::exception when IoCreateDevice fails.
+   */
   template <typename Extension>
   std::shared_ptr<device<Extension>> create_device(device_options &opts) {
     PDEVICE_OBJECT dev = NULL;
@@ -87,8 +96,14 @@ public:
     return ptr;
   }
 
+  /**
+   * @brief Registers a C++ unload callback.
+   */
   void on_unload(unload_routine &&f) { unload_routine_ = f; }
 
+  /**
+   * @brief Returns the native driver object name.
+   */
   const std::wstring &name() const { return name_; }
 
 protected:
@@ -112,5 +127,10 @@ private:
 // warning C4007: 'main' : must be '__cdecl'
 #pragma warning(disable : 4007)
 #endif
+/**
+ * @brief User-provided NTL driver entry point.
+ * @param driver NTL driver facade.
+ * @param registry_path Service registry path.
+ */
 status main(driver &driver, const std::wstring &registry_path);
 } // namespace ntl

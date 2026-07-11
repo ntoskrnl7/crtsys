@@ -1,9 +1,9 @@
 /**
  * @file server
- * @author jungkwang.lee (ntoskrnl7@google.com)
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
  * @brief rpc server
  *
- * @copyright Copyright (c) 2022 NT Template Library Authoers.
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
  *
  */
 
@@ -13,6 +13,9 @@
 
 #include <ntl/driver>
 
+/**
+ * @brief Starts a kernel-mode RPC namespace and dispatch lambda.
+ */
 #define NTL_RPC_BEGIN(_rpc_name_)                                              \
   namespace _rpc_name_ {                                                       \
   std::shared_ptr<ntl::rpc::server> init(ntl::driver &driver) {                \
@@ -20,12 +23,18 @@
         ntl::device_options().name(L#_rpc_name_).type(FILE_DEVICE_NTL_RPC));   \
     dev->on_device_control([](const ntl::device_control::code &code, const ntl::device_control::in_buffer &in_buffer, ntl::device_control::out_buffer &out_buffer) {
 
+/**
+ * @brief Ends a kernel-mode RPC namespace and returns the server object.
+ */
 #define NTL_RPC_END(_rpc_name_)                                                \
   });                                                                          \
   return std::make_shared<ntl::rpc::server>(dev);                              \
   }                                                                            \
   }
 
+/**
+ * @brief Registers a zero-argument kernel-mode RPC callback with an explicit ID.
+ */
 #define NTL_ADD_CALLBACK_ID_0(_rpc_name_, _id_, _ret_, _name_, ...)            \
   if (code.function() == (_id_)) {                                             \
     auto _name_ = []() -> _ret_ __VA_ARGS__;                                   \
@@ -39,9 +48,15 @@
     return;                                                                    \
   }
 
+/**
+ * @brief Registers a zero-argument kernel-mode RPC callback using __LINE__ as ID.
+ */
 #define NTL_ADD_CALLBACK_0(_rpc_name_, _ret_, _name_, ...)                     \
   NTL_ADD_CALLBACK_ID_0(_rpc_name_, __LINE__, _ret_, _name_, __VA_ARGS__)
 
+/**
+ * @brief Registers a one-argument kernel-mode RPC callback with an explicit ID.
+ */
 #define NTL_ADD_CALLBACK_ID_1(_rpc_name_, _id_, _ret_, _name_, _arg0_type_,    \
                               _arg0_name_, ...)                                \
   if (code.function() == (_id_)) {                                             \
@@ -65,11 +80,17 @@
     return;                                                                    \
   }
 
+/**
+ * @brief Registers a one-argument kernel-mode RPC callback using __LINE__ as ID.
+ */
 #define NTL_ADD_CALLBACK_1(_rpc_name_, _ret_, _name_, _arg0_type_,             \
                            _arg0_name_, ...)                                   \
   NTL_ADD_CALLBACK_ID_1(_rpc_name_, __LINE__, _ret_, _name_, _arg0_type_,      \
                         _arg0_name_, __VA_ARGS__)
 
+/**
+ * @brief Registers a two-argument kernel-mode RPC callback with an explicit ID.
+ */
 #define NTL_ADD_CALLBACK_ID_2(_rpc_name_, _id_, _ret_, _name_, _arg0_type_,    \
                               _arg0_name_, _arg1_type_, _arg1_name_, ...)      \
   if (code.function() == (_id_)) {                                             \
@@ -97,11 +118,17 @@
     return;                                                                    \
   }
 
+/**
+ * @brief Registers a two-argument kernel-mode RPC callback using __LINE__ as ID.
+ */
 #define NTL_ADD_CALLBACK_2(_rpc_name_, _ret_, _name_, _arg0_type_,             \
                            _arg0_name_, _arg1_type_, _arg1_name_, ...)         \
   NTL_ADD_CALLBACK_ID_2(_rpc_name_, __LINE__, _ret_, _name_, _arg0_type_,      \
                         _arg0_name_, _arg1_type_, _arg1_name_, __VA_ARGS__)
 
+/**
+ * @brief Registers a three-argument kernel-mode RPC callback with an explicit ID.
+ */
 #define NTL_ADD_CALLBACK_ID_3(_rpc_name_, _id_, _ret_, _name_, _arg0_type_,    \
                               _arg0_name_, _arg1_type_, _arg1_name_,           \
                               _arg2_type_, _arg2_name_, ...)                   \
@@ -134,6 +161,9 @@
     return;                                                                    \
   }
 
+/**
+ * @brief Registers a three-argument kernel-mode RPC callback using __LINE__ as ID.
+ */
 #define NTL_ADD_CALLBACK_3(_rpc_name_, _ret_, _name_, _arg0_type_,             \
                            _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_, \
                            _arg2_name_, ...)                                   \
@@ -141,6 +171,9 @@
                         _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_,    \
                         _arg2_name_, __VA_ARGS__)
 
+/**
+ * @brief Registers a four-argument kernel-mode RPC callback with an explicit ID.
+ */
 #define NTL_ADD_CALLBACK_ID_4(_rpc_name_, _id_, _ret_, _name_, _arg0_type_,    \
                               _arg0_name_, _arg1_type_, _arg1_name_,           \
                               _arg2_type_, _arg2_name_, _arg3_type_,           \
@@ -178,6 +211,9 @@
     return;                                                                    \
   }
 
+/**
+ * @brief Registers a four-argument kernel-mode RPC callback using __LINE__ as ID.
+ */
 #define NTL_ADD_CALLBACK_4(_rpc_name_, _ret_, _name_, _arg0_type_,             \
                            _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_, \
                            _arg2_name_, _arg3_type_, _arg3_name_, ...)         \
@@ -185,6 +221,9 @@
                         _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_,    \
                         _arg2_name_, _arg3_type_, _arg3_name_, __VA_ARGS__)
 
+/**
+ * @brief Registers a five-argument kernel-mode RPC callback with an explicit ID.
+ */
 #define NTL_ADD_CALLBACK_ID_5(_rpc_name_, _id_, _ret_, _name_, _arg0_type_,    \
                               _arg0_name_, _arg1_type_, _arg1_name_,           \
                               _arg2_type_, _arg2_name_, _arg3_type_,           \
@@ -225,6 +264,9 @@
     return;                                                                    \
   }
 
+/**
+ * @brief Registers a five-argument kernel-mode RPC callback using __LINE__ as ID.
+ */
 #define NTL_ADD_CALLBACK_5(_rpc_name_, _ret_, _name_, _arg0_type_,             \
                            _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_, \
                            _arg2_name_, _arg3_type_, _arg3_name_, _arg4_type_, \
@@ -239,12 +281,24 @@
 #else  // !defined(NTL_USER_MODE)
 namespace ntl {
 namespace rpc {
+/**
+ * @brief Owns the device object backing a kernel-mode NTL RPC endpoint.
+ */
 class server {
 public:
+  /**
+   * @brief Keeps the RPC device alive for the server lifetime.
+   */
   server(std::shared_ptr<device<void>> &device) : dev_(device) {}
 
+  /**
+   * @brief Transfers RPC server ownership.
+   */
   server(server &&other) { *this = std::move(other); }
 
+  /**
+   * @brief Transfers RPC server ownership.
+   */
   server &operator=(server &&rhs) {
     dev_ = std::move(rhs.dev_);
     return *this;

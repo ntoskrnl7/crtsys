@@ -1,9 +1,9 @@
 /**
  * @file except
- * @author jungkwang.lee (ntoskrnl7@google.com)
- * @brief
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief NTSTATUS-backed C++ exception and SEH boundary helpers.
  *
- * @copyright Copyright (c) 2022 NT Template Library Authoers.
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
  *
  */
 #pragma once
@@ -17,14 +17,29 @@
 #include <utility>
 
 namespace ntl {
+/**
+ * @brief C++ exception type carrying an NTSTATUS value.
+ */
 class exception : public std::exception {
 public:
+  /**
+   * @brief Creates an exception from a native NTSTATUS value.
+   */
   explicit exception(NTSTATUS status, const std::string &message)
       : status_(status), message_(message) {}
+  /**
+   * @brief Creates an exception from an ntl::status value.
+   */
   explicit exception(status status, const std::string &message)
       : status_(status), message_(message) {}
 
+  /**
+   * @brief Returns the stored NTSTATUS wrapper.
+   */
   const status &get_status() const { return status_; }
+  /**
+   * @brief Returns the diagnostic message.
+   */
   const char *what() const noexcept override { return message_.c_str(); }
 
 private:
@@ -33,6 +48,12 @@ private:
 };
 
 namespace seh {
+/**
+ * @brief Executes a callable under __try/__except.
+ * @param f Callable to execute.
+ * @param args Arguments forwarded to the callable.
+ * @return {true, 0} on normal completion, or {false, exception_code}.
+ */
 template <class Fn, class... Args>
 inline std::tuple<bool, unsigned long> try_except(Fn &&f, Args &&... args) {
   auto code = [&]() -> unsigned long {

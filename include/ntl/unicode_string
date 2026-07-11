@@ -1,9 +1,9 @@
 /**
  * @file unicode_string
- * @author jungkwang.lee (ntoskrnl7@google.com)
- * @brief
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief std::wstring-backed UNICODE_STRING adapter.
  *
- * @copyright Copyright (c) 2022 NT Template Library Authoers.
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
  *
  */
 #pragma once
@@ -15,23 +15,42 @@
 #endif
 
 namespace ntl {
+/**
+ * @brief Owns or references wide string storage exposed as UNICODE_STRING.
+ */
 class unicode_string {
 public:
+  /**
+   * @brief Takes ownership of a wide string and exposes it as UNICODE_STRING.
+   */
   unicode_string(std::wstring &&str) : str_(std::move(str)) {
     value_.Buffer = &str_[0];
     value_.MaximumLength = value_.Length = (USHORT)str_.size() * sizeof(WCHAR);
   }
+  /**
+   * @brief Copies a wide string and exposes it as UNICODE_STRING.
+   */
   unicode_string(const std::wstring &str) : str_(str) {
     value_.Buffer = &str_[0];
     value_.MaximumLength = value_.Length = (USHORT)str_.size() * sizeof(WCHAR);
   }
+  /**
+   * @brief References an existing mutable wide string as UNICODE_STRING.
+   * @note The caller must keep the referenced string alive.
+   */
   unicode_string(std::wstring &str) {
     value_.Buffer = &str[0];
     value_.MaximumLength = value_.Length = (USHORT)str.size() * sizeof(WCHAR);
   }
 
+  /**
+   * @brief Returns the owned string storage.
+   */
   const std::wstring &c_str() const { return str_; }
 
+  /**
+   * @brief Returns the native UNICODE_STRING object.
+   */
   UNICODE_STRING &operator*() { return value_; }
 
 private:

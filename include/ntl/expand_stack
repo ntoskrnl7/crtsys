@@ -1,9 +1,9 @@
 /**
  * @file expand_stack
- * @author jungkwang.lee (ntoskrnl7@google.com)
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
  * @brief KeExpandKernelStackAndCalloutEx Helper features.
  *
- * @copyright Copyright (c) 2022 NT Template Library Authoers.
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
  *
  */
 #pragma once
@@ -139,37 +139,83 @@ inline ntl::exception make_exception(NTSTATUS status) {
 
 static const size_t expand_stack_size_max = MAXIMUM_EXPANSION_SIZE;
 
+/**
+ * @brief Options for KeExpandKernelStackAndCalloutEx based invocation.
+ */
 struct expand_stack_options {
+  /**
+   * @brief Uses the maximum supported expansion size and waits for completion.
+   */
   expand_stack_options()
       : stack_size_(expand_stack_size_max), wait_(true),
         ignore_failure_(false) {}
+  /**
+   * @brief Sets the requested expanded stack size.
+   * @param stack_size Bytes requested for the expanded kernel stack.
+   * @throws std::invalid_argument if stack_size exceeds the WDK maximum.
+   */
   expand_stack_options(size_t stack_size)
       : stack_size_(stack_size), wait_(true), ignore_failure_(false) {
     validate();
   }
+  /**
+   * @brief Sets the requested stack size and wait policy.
+   * @param stack_size Bytes requested for the expanded kernel stack.
+   * @param wait Passed to KeExpandKernelStackAndCalloutEx.
+   * @throws std::invalid_argument if stack_size exceeds the WDK maximum.
+   */
   expand_stack_options(size_t stack_size, bool wait)
       : stack_size_(stack_size), wait_(wait), ignore_failure_(false) {
     validate();
   }
+  /**
+   * @brief Sets all expansion options.
+   * @param stack_size Bytes requested for the expanded kernel stack.
+   * @param wait Passed to KeExpandKernelStackAndCalloutEx.
+   * @param ignore_failure Runs the callable on the current stack if expansion
+   * fails.
+   * @throws std::invalid_argument if stack_size exceeds the WDK maximum.
+   */
   expand_stack_options(size_t stack_size, bool wait, bool ignore_failure)
       : stack_size_(stack_size), wait_(wait), ignore_failure_(ignore_failure) {
     validate();
   }
 
+  /**
+   * @brief Updates the requested expanded stack size.
+   * @param stack_size Bytes requested for the expanded kernel stack.
+   * @return This options object.
+   * @throws std::invalid_argument if stack_size exceeds the WDK maximum.
+   */
   expand_stack_options &stack_size(size_t stack_size) {
     stack_size_ = stack_size;
     validate();
     return *this;
   }
+  /**
+   * @brief Updates the wait policy.
+   * @param wait Passed to KeExpandKernelStackAndCalloutEx.
+   * @return This options object.
+   */
   expand_stack_options &wait(bool wait) {
     wait_ = wait;
     return *this;
   }
+  /**
+   * @brief Allows fallback to the current stack when expansion fails.
+   * @param ignore_failure True to run the callable even if stack expansion
+   * fails.
+   * @return This options object.
+   */
   expand_stack_options &ignore_failure(bool ignore_failure) {
     ignore_failure_ = ignore_failure;
     return *this;
   }
 
+  /**
+   * @brief Validates option values.
+   * @throws std::invalid_argument if stack_size_ exceeds the WDK maximum.
+   */
   void validate() const {
     if (stack_size_ > expand_stack_size_max)
       throw std::invalid_argument(
@@ -180,6 +226,14 @@ struct expand_stack_options {
   bool ignore_failure_;
 };
 
+/**
+ * @brief Invokes a callable on an expanded kernel stack.
+ * @param opts Stack expansion options.
+ * @param f Callable to invoke.
+ * @param args Arguments forwarded to the callable.
+ * @return The callable result for non-void callables.
+ * @throws ntl::exception when stack expansion fails and fallback is disabled.
+ */
 template <class Fn, class... Args>
 inline NTL_INVOKE_RESULT(Fn, Args...)
     expand_stack(expand_stack_options &&opts, Fn &&f, Args &&... args) {
@@ -225,6 +279,13 @@ inline NTL_INVOKE_RESULT(Fn, Args...)
   }
 }
 
+/**
+ * @brief Invokes a callable with default stack expansion options.
+ * @param f Callable to invoke.
+ * @param args Arguments forwarded to the callable.
+ * @return The callable result for non-void callables.
+ * @throws ntl::exception when stack expansion fails.
+ */
 template <class Fn, class... Args>
 inline NTL_INVOKE_RESULT(Fn, Args...) expand_stack(Fn &&f, Args &&... args) {
   return expand_stack<Fn, Args...>(expand_stack_options{}, std::forward<Fn>(f),

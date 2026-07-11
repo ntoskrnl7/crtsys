@@ -154,3 +154,21 @@ device.on_device_control([](ntl::irp& request) {
 
 IRQL: `PASSIVE_LEVEL` unless a specific dispatch path has been audited and
 documented otherwise. The wrapper uses C++ callbacks and ownership helpers.
+
+## Symbolic Link
+
+Header: [`include/ntl/symbolic_link`](../../include/ntl/symbolic_link)
+
+`ntl::symbolic_link` owns a WDK symbolic link created by
+`IoCreateSymbolicLink` and deletes it with `IoDeleteSymbolicLink`.
+
+Example:
+
+```cpp
+ntl::symbolic_link link(L"\\DosDevices\\demo", L"\\Device\\demo");
+```
+
+Move it into the unload callback together with the device object when the link
+should live for the driver lifetime.
+
+IRQL: `PASSIVE_LEVEL`.

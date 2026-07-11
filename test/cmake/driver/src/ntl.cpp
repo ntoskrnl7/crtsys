@@ -1,9 +1,15 @@
+#include <ntl/event>
 #include <ntl/expand_stack>
 #include <ntl/except>
+#include <ntl/irql>
 #include <ntl/lookaside_list>
 #include <ntl/pool_allocator>
+#include <ntl/symbolic_link>
+#include <ntl/unicode_string>
+#include <ntl/work_item>
 
 #include <memory_resource>
+#include <atomic>
 #include <numeric>
 #include <string>
 #include <utility>
@@ -41,6 +47,28 @@ struct lookaside_test_object {
 
   int value;
 };
+
+void delete_symbolic_link_if_present(const std::wstring &link_name) {
+  ntl::unicode_string native_link_name(link_name);
+  (void)IoDeleteSymbolicLink(&*native_link_name);
+}
+
+struct work_item_test_context {
+  std::atomic<long> value{0};
+  ntl::event release{ntl::event_type::notification, false};
+};
+
+void work_item_test_routine(void *context) noexcept {
+  auto *const state = static_cast<work_item_test_context *>(context);
+  if (ntl::current_irql() == ntl::irql::passive)
+    state->value.store(41);
+}
+
+void blocking_work_item_test_routine(void *context) noexcept {
+  auto *const state = static_cast<work_item_test_context *>(context);
+  (void)state->release.wait();
+  state->value.store(43);
+}
 } // namespace
 
 bool ntl_expand_stack_test() {
@@ -87,8 +115,6 @@ bool ntl_seh_try_except_test() {
   return !std::get<0>(ret) &&
          std::get<1>(ret) == static_cast<unsigned long>(STATUS_ACCESS_VIOLATION);
 }
-
-#include <ntl/irql>
 
 bool ntl_irql_test() {
   auto old_irql = ntl::current_irql();
@@ -462,6 +488,122 @@ bool ntl_lookaside_list_test() {
   return g_lookaside_test_object_count == 0;
 }
 
+bool ntl_symbolic_link_test() {
+  const std::wstring link_name = L"\\DosDevices\\CrtSysNtlSymbolicLinkTest";
+  const std::wstring target_name =
+      L"\\Device\\CrtSysNtlSymbolicLinkTarget";
+
+  delete_symbolic_link_if_present(link_name);
+
+  {
+    ntl::symbolic_link link(link_name, target_name);
+    if (!link || link.name() != link_name ||
+        link.target_name() != target_name)
+      return false;
+
+    ntl::symbolic_link moved(std::move(link));
+    if (link || !moved || moved.name() != link_name)
+      return false;
+
+    if (!moved.close().is_ok() || moved)
+      return false;
+  }
+
+  {
+    ntl::symbolic_link scoped(link_name, target_name);
+    if (!scoped)
+      return false;
+  }
+
+  {
+    ntl::symbolic_link released(link_name, target_name);
+    const auto released_name = released.release();
+    if (released || released_name != link_name)
+      return false;
+    delete_symbolic_link_if_present(released_name);
+  }
+
+  return true;
+}
+
+bool ntl_event_test() {
+  ntl::event notification;
+  if (notification.signaled())
+    return false;
+
+  notification.set();
+  if (!notification.signaled())
+    return false;
+
+  notification.clear();
+  if (notification.signaled())
+    return false;
+
+  notification.set();
+  if (!notification.wait().is_ok())
+    return false;
+  if (!notification.signaled())
+    return false;
+
+  notification.reset();
+  if (notification.signaled())
+    return false;
+
+  ntl::event synchronization(ntl::event_type::synchronization, true);
+  if (!synchronization.wait().is_ok())
+    return false;
+  if (synchronization.signaled())
+    return false;
+
+  LARGE_INTEGER zero_timeout{};
+  if (static_cast<NTSTATUS>(synchronization.wait(&zero_timeout)) !=
+      STATUS_TIMEOUT)
+    return false;
+
+  return true;
+}
+
+bool ntl_work_item_test() {
+  work_item_test_context raw_context;
+
+  ntl::work_item raw_item(work_item_test_routine, &raw_context);
+  if (!raw_item.queue().is_ok())
+    return false;
+  if (!raw_item.wait().is_ok())
+    return false;
+  if (raw_context.value.load() != 41)
+    return false;
+
+  std::atomic<long> typed_value{0};
+  ntl::passive_work_item typed_item([&] {
+    if (ntl::current_irql() == ntl::irql::passive)
+      typed_value.store(42);
+  });
+
+  {
+    auto raised_irql = ntl::raise_irql_to_dpc_level();
+    if (!typed_item.queue().is_ok())
+      return false;
+  }
+  if (!typed_item.wait().is_ok() || typed_value.load() != 42)
+    return false;
+
+  work_item_test_context blocking_context;
+
+  ntl::work_item blocking_item(blocking_work_item_test_routine,
+                               &blocking_context);
+  if (!blocking_item.queue().is_ok())
+    return false;
+  if (blocking_item.queue().is_ok())
+    return false;
+
+  blocking_context.release.set();
+  if (!blocking_item.wait().is_ok())
+    return false;
+
+  return blocking_context.value.load() == 43 && !blocking_item.queued();
+}
+
 //
 // Google Test.
 //
@@ -653,4 +795,16 @@ TEST(ntl_test, ntl_pool_allocator_test) {
 
 TEST(ntl_test, ntl_lookaside_list_test) {
   EXPECT_TRUE(ntl_lookaside_list_test());
+}
+
+TEST(ntl_test, ntl_symbolic_link_test) {
+  EXPECT_TRUE(ntl_symbolic_link_test());
+}
+
+TEST(ntl_test, ntl_event_test) {
+  EXPECT_TRUE(ntl_event_test());
+}
+
+TEST(ntl_test, ntl_work_item_test) {
+  EXPECT_TRUE(ntl_work_item_test());
 }

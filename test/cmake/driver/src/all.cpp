@@ -838,6 +838,12 @@ bool ntl_pool_allocator_test();
 
 bool ntl_lookaside_list_test();
 
+bool ntl_symbolic_link_test();
+
+bool ntl_event_test();
+
+bool ntl_work_item_test();
+
 namespace {
 int g_driver_test_failures = 0;
 
@@ -1216,6 +1222,9 @@ void ntl_test() {
   run_boolean_test("ntl_resource_test", ntl_resource_test);
   run_boolean_test("ntl_pool_allocator_test", ntl_pool_allocator_test);
   run_boolean_test("ntl_lookaside_list_test", ntl_lookaside_list_test);
+  run_boolean_test("ntl_symbolic_link_test", ntl_symbolic_link_test);
+  run_boolean_test("ntl_event_test", ntl_event_test);
+  run_boolean_test("ntl_work_item_test", ntl_work_item_test);
 }
 
 int test_all() {

@@ -62,6 +62,9 @@ The driver tests still exercise these features from `PASSIVE_LEVEL`.
 | NTL stack expansion | `ntl::expand_stack` | `PASSIVE_LEVEL` only | Runtime-backed control-path helper, not a hot-path escape hatch. |
 | NTL pool ownership and allocator | `ntl::pool_ptr`, `ntl::pool_buffer`, `ntl::pool_allocator`, `ntl::nonpaged_pool_allocator`, `ntl::paged_pool_allocator`, `ntl::pmr::pool_resource` | Raw nonpaged pool follows WDK pool rules; object construction/destruction and STL/PMR usage are `PASSIVE_LEVEL` unless separately audited | Exposes WDK pool kind/options to RAII ownership helpers, STL-compatible allocators, and PMR resource types. |
 | NTL lookaside list | `ntl::lookaside_list` | Raw nonpaged allocate/free follows WDK lookaside rules; object construction/destruction is `PASSIVE_LEVEL` unless separately audited | Wraps `LOOKASIDE_LIST_EX` for fixed-size kernel object caches while keeping pool kind/tag visible. |
+| NTL symbolic link wrapper | `ntl::symbolic_link` | `PASSIVE_LEVEL` | RAII wrapper over `IoCreateSymbolicLink` / `IoDeleteSymbolicLink` for driver setup and teardown paths. |
+| NTL event wrapper | `ntl::event` | Follows `KEVENT`; blocking `wait()` is `PASSIVE_LEVEL` in NTL usage | Wraps notification and synchronization event setup, signal/reset/clear, state query, and wait. |
+| NTL work item wrapper | `ntl::work_item`, `ntl::passive_work_item` | `queue()` `<= DISPATCH_LEVEL`; `wait()` and worker callback ownership are `PASSIVE_LEVEL` | Defers resident work to a system worker thread running at `PASSIVE_LEVEL`. |
 | NTL ERESOURCE wrapper | `ntl::resource`, `ntl::unique_lock<ntl::resource>`, `ntl::shared_lock<ntl::resource>` | `<= APC_LEVEL` | Blocking/resource-style synchronization. Do not use in DPC, ISR, or spin-lock-held paths. |
 | NTL spin lock wrapper | `ntl::spin_lock`, `ntl::unique_lock<ntl::spin_lock>` | `<= DISPATCH_LEVEL` | Keep held regions resident, short, nonblocking, and free of allocation, waits, exceptions, streams, and arbitrary STL/runtime helpers. |
 | NTL IRQL helpers | `ntl::irql`, `ntl::raise_irql`, `ntl::raise_irql_to_dpc_level`, `ntl::raise_irql_to_synch_level` | Explicitly manipulates current IRQL | Keep raised scopes as small as possible. |
@@ -801,6 +804,22 @@ NTL provides C++ helpers for driver code. See the
   - [x] paged and cache-aligned nonpaged lookaside list construction
     [(tested)](../test/cmake/driver/src/ntl.cpp)
     [(docs)](./ntl/lookaside-list.md)
+- [x] `ntl::symbolic_link`
+  - [x] create, move, close, scope cleanup, and release/manual-delete paths
+    [(tested)](../test/cmake/driver/src/ntl.cpp)
+    [(docs)](./ntl/symbolic-link.md)
+- [x] `ntl::event`
+  - [x] notification event set/clear/reset/wait state
+  - [x] synchronization event auto-reset wait behavior
+    [(tested)](../test/cmake/driver/src/ntl.cpp)
+    [(docs)](./ntl/event.md)
+- [x] `ntl::work_item` / `ntl::passive_work_item`
+  - [x] raw context work item queue/wait path
+  - [x] callable work item queued from `DISPATCH_LEVEL` and executed at
+        `PASSIVE_LEVEL`
+  - [x] duplicate queue rejection while a work item is still pending
+    [(tested)](../test/cmake/driver/src/ntl.cpp)
+    [(docs)](./ntl/work-item.md)
 - [x] `ntl::driver`
   - [x] unload callback
     [(tested)](../test/cmake/driver/src/main.cpp#L73)

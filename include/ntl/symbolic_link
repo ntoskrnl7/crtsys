@@ -1,0 +1,158 @@
+/**
+ * @file symbolic_link
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief RAII wrapper for WDK symbolic link objects.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "except"
+#include "status"
+#include "unicode_string"
+
+#include <string>
+#include <utility>
+
+#ifndef _NTDDK_
+#include <wdm.h>
+#endif
+
+namespace ntl {
+
+/**
+ * @brief RAII owner for an IoCreateSymbolicLink/IoDeleteSymbolicLink pair.
+ */
+class symbolic_link {
+public:
+  /**
+   * @brief Creates an empty symbolic-link owner.
+   */
+  symbolic_link() = default;
+
+  /**
+   * @brief Creates a symbolic link immediately.
+   * @param link_name DOS-device symbolic link name.
+   * @param target_name Kernel target path.
+   * @throw ntl::exception when IoCreateSymbolicLink fails.
+   */
+  symbolic_link(std::wstring link_name, std::wstring target_name) {
+    const auto result = create(std::move(link_name), std::move(target_name));
+    if (!result.is_ok())
+      throw ntl::exception(result, "IoCreateSymbolicLink failed.");
+  }
+
+  symbolic_link(const symbolic_link &) = delete;
+  symbolic_link &operator=(const symbolic_link &) = delete;
+
+  /**
+   * @brief Transfers symbolic-link ownership from another object.
+   */
+  symbolic_link(symbolic_link &&other) noexcept { *this = std::move(other); }
+
+  /**
+   * @brief Transfers symbolic-link ownership from another object.
+   */
+  symbolic_link &operator=(symbolic_link &&other) noexcept {
+    if (this == &other)
+      return *this;
+
+    reset();
+    link_name_ = std::move(other.link_name_);
+    target_name_ = std::move(other.target_name_);
+    active_ = other.active_;
+    other.active_ = false;
+    return *this;
+  }
+
+  /**
+   * @brief Deletes the owned symbolic link, if any.
+   */
+  ~symbolic_link() { reset(); }
+
+  /**
+   * @brief Replaces the current link with a newly-created symbolic link.
+   * @return The IoCreateSymbolicLink status.
+   */
+  ntl::status create(std::wstring link_name, std::wstring target_name) {
+    reset();
+
+    ntl::unicode_string native_link_name(link_name);
+    ntl::unicode_string native_target_name(target_name);
+    const auto result =
+        IoCreateSymbolicLink(&*native_link_name, &*native_target_name);
+    if (!NT_SUCCESS(result))
+      return ntl::status{result};
+
+    link_name_ = std::move(link_name);
+    target_name_ = std::move(target_name);
+    active_ = true;
+    return ntl::status{result};
+  }
+
+  /**
+   * @brief Deletes the owned symbolic link and clears ownership.
+   */
+  ntl::status close() noexcept {
+    if (!active_)
+      return ntl::status::ok();
+
+    ntl::unicode_string native_link_name(link_name_);
+    const auto result = IoDeleteSymbolicLink(&*native_link_name);
+    if (NT_SUCCESS(result)) {
+      active_ = false;
+      link_name_.clear();
+      target_name_.clear();
+    }
+    return ntl::status{result};
+  }
+
+  /**
+   * @brief Deletes the owned symbolic link, ignoring delete errors.
+   */
+  void reset() noexcept {
+    if (!active_)
+      return;
+
+    ntl::unicode_string native_link_name(link_name_);
+    (void)IoDeleteSymbolicLink(&*native_link_name);
+    active_ = false;
+    link_name_.clear();
+    target_name_.clear();
+  }
+
+  /**
+   * @brief Releases ownership without deleting the symbolic link.
+   * @return The symbolic link name that remains registered.
+   */
+  std::wstring release() {
+    active_ = false;
+    target_name_.clear();
+    return std::move(link_name_);
+  }
+
+  /**
+   * @brief Returns true if this object owns a registered symbolic link.
+   */
+  bool valid() const noexcept { return active_; }
+  /**
+   * @brief Returns true if this object owns a registered symbolic link.
+   */
+  explicit operator bool() const noexcept { return valid(); }
+
+  /**
+   * @brief Returns the symbolic link name.
+   */
+  const std::wstring &name() const noexcept { return link_name_; }
+  /**
+   * @brief Returns the target name used to create the symbolic link.
+   */
+  const std::wstring &target_name() const noexcept { return target_name_; }
+
+private:
+  std::wstring link_name_;
+  std::wstring target_name_;
+  bool active_ = false;
+};
+
+} // namespace ntl

@@ -1,9 +1,9 @@
 /**
  * @file device
- * @author jungkwang.lee (ntoskrnl7@google.com)
- * @brief
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief RAII wrapper and dispatch helpers for WDM device objects.
  *
- * @copyright Copyright (c) 2022 NT Template Library Authoers.
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
  *
  */
 #pragma once
@@ -26,11 +26,26 @@ namespace close {
 using dispatch_fn = std::function<void(irp &)>;
 } // namespace close
 namespace device_control {
+/**
+ * @brief Decodes a CTL_CODE value passed to an IRP_MJ_DEVICE_CONTROL handler.
+ */
 struct code {
+  /**
+   * @brief Wraps a native CTL_CODE value.
+   */
   code(ULONG code) : value(code) {}
 
+  /**
+   * @brief Returns the CTL_CODE device type field.
+   */
   auto device_type() const { return DEVICE_TYPE_FROM_CTL_CODE(value); }
+  /**
+   * @brief Returns the CTL_CODE transfer method field.
+   */
   auto method() const { return METHOD_FROM_CTL_CODE(value); }
+  /**
+   * @brief Returns the CTL_CODE function field.
+   */
   auto function() const { return IoGetFunctionCodeFromCtlCode(value); }
   bool operator==(const code &rhs) const { return value == rhs.value; }
   bool operator==(ULONG rhs) const { return value == rhs; }
@@ -39,13 +54,25 @@ struct code {
   ULONG value;
 };
 
+/**
+ * @brief Read-only input buffer view for device-control dispatchers.
+ */
 struct in_buffer {
+  /**
+   * @brief Creates an input-buffer view.
+   */
   in_buffer(const void *ptr, size_t size) : ptr(ptr), size(size) {}
   const void *ptr;
   size_t size;
 };
 
+/**
+ * @brief Writable output buffer view for device-control dispatchers.
+ */
 struct out_buffer {
+  /**
+   * @brief Creates an output-buffer view.
+   */
   out_buffer(void *ptr, size_t size) : ptr(ptr), size(size) {}
   void *ptr;
   size_t size;
@@ -114,23 +141,44 @@ class device_options {
   friend class driver;
 
 public:
+  /**
+   * @brief Creates default FILE_DEVICE_UNKNOWN, non-exclusive options.
+   */
   device_options() : type_(FILE_DEVICE_UNKNOWN), exclusive_(false) {}
 
+  /**
+   * @brief Sets the device name without the "\\Device\\" prefix.
+   */
   device_options &name(const std::wstring &name) {
     name_ = name;
     return *this;
   }
+  /**
+   * @brief Sets the WDM device type.
+   */
   device_options &type(device_type type) {
     type_ = type;
     return *this;
   }
+  /**
+   * @brief Sets whether the device is exclusive.
+   */
   device_options &exclusive(bool exclusive = true) {
     exclusive_ = exclusive;
     return *this;
   }
 
+  /**
+   * @brief Returns the configured device name.
+   */
   const std::wstring &name() const { return name_; }
+  /**
+   * @brief Returns the configured device type.
+   */
   device_type type() const { return type_; }
+  /**
+   * @brief Returns whether the device is exclusive.
+   */
   bool is_exclusive() const { return exclusive_; }
 
 private:
@@ -139,6 +187,10 @@ private:
   bool exclusive_;
 };
 
+/**
+ * @brief Owns a WDM DEVICE_OBJECT and its C++ dispatch callbacks.
+ * @tparam Extension Optional device extension payload type.
+ */
 template <typename Extension>
 class device : public detail::device::extension_t<Extension> {
   friend class device_dispatch_invoker;
@@ -153,19 +205,31 @@ private:
   device(const device &) = delete;
 
 public:
+  /**
+   * @brief Creates an empty device owner.
+   */
   device() : object_(nullptr) {}
 
+  /**
+   * @brief Transfers device ownership from another object.
+   */
   device(device &&other)
       : detail::device::extension_t<Extension>(other.object_) {
     *this = std::move(other);
   }
 
+  /**
+   * @brief Transfers device ownership from another object.
+   */
   device &operator=(device &&rhs) {
     object_ = rhs.detach();
     name_.swap(rhs.name_);
     return *this;
   }
 
+  /**
+   * @brief Deletes the owned DEVICE_OBJECT.
+   */
   ~device() {
     auto obj = detach();
     if (obj) {
@@ -182,33 +246,51 @@ protected:
   }
 
 public:
+  /**
+   * @brief Registers an IRP_MJ_CREATE callback.
+   */
   device &on_create(create::dispatch_fn &&f) {
     dispatchers().on_create = f;
     return *this;
   }
 
+  /**
+   * @brief Registers an IRP_MJ_CLOSE callback.
+   */
   device &on_close(close::dispatch_fn &&f) {
     dispatchers().on_close = f;
     return *this;
   }
 
+  /**
+   * @brief Registers an IRP_MJ_DEVICE_CONTROL callback.
+   */
   device &on_device_control(device_control::dispatch_fn &&f) {
     dispatchers().on_device_control = f;
     return *this;
   }
 
+  /**
+   * @brief Returns the NTL device name.
+   */
   const std::wstring &name() const {
     if (!object_)
       throw std::runtime_error("invalid device object.");
     return name_;
   }
 
+  /**
+   * @brief Returns the native device type.
+   */
   device_type type() const {
     if (!object_)
       throw std::runtime_error("invalid device object.");
     return object_->DeviceType;
   }
 
+  /**
+   * @brief Releases ownership of the native DEVICE_OBJECT.
+   */
   PDEVICE_OBJECT detach() {
     return reinterpret_cast<PDEVICE_OBJECT>(
         InterlockedExchangePointer(reinterpret_cast<PVOID *>(&object_), NULL));
