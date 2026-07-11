@@ -206,6 +206,12 @@ if(CRTSYS_LDK_SOURCE_DIR)
 else()
   CPMAddPackage("gh:ntoskrnl7/Ldk@0.7.23")
 endif()
+CPMAddPackage(
+  NAME raw_pdb
+  GITHUB_REPOSITORY MolecularMatters/raw_pdb
+  GIT_TAG 43cc59b7037238ad84e1d5abe10711a06d998fa0
+  DOWNLOAD_ONLY YES
+)
 
 CPMAddPackage("gh:ntoskrnl7/FindWDK#master")
 list(APPEND CMAKE_MODULE_PATH "${FindWDK_SOURCE_DIR}/cmake")
@@ -236,6 +242,16 @@ file(GLOB SOURCE_FILES
   src/custom/ucrt/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/*.cpp
   src/custom/ucrt/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/*/*.cpp  
   )
+
+file(GLOB RAW_PDB_SOURCE_FILES
+  ${raw_pdb_SOURCE_DIR}/src/*.cpp
+  )
+list(APPEND SOURCE_FILES ${RAW_PDB_SOURCE_FILES})
+set_source_files_properties(
+  ${RAW_PDB_SOURCE_FILES}
+  PROPERTIES
+    COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:CXX>:/FI${CMAKE_CURRENT_SOURCE_DIR}/src/custom/misc/raw_pdb_kernel_compat.h>"
+)
 
 if("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "Win32")
   file(GLOB MATH_SOURCE_FILES
@@ -334,6 +350,7 @@ target_include_directories(crtsys PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/custo
 target_include_directories(crtsys PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/custom/msvc/${CRTSYS_MSVC_COMPAT_TOOLSET_VERSION}/crt/src/vcruntime")
 target_include_directories(crtsys PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/custom/msvc/${CRTSYS_MSVC_COMPAT_TOOLSET_VERSION}/crt/src/stl")
 target_include_directories(crtsys BEFORE PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/custom/ucrt/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/inc")
+target_include_directories(crtsys PRIVATE "${raw_pdb_SOURCE_DIR}/src")
 
 #
 # link libraries
