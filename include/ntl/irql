@@ -6,6 +6,7 @@
  * @copyright Copyright (c) 2022 NT Template Library Authoers.
  *
  */
+#pragma once
 
 #ifndef _NTDDK_
 #include <wdm.h>

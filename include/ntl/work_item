@@ -1,0 +1,132 @@
+/**
+ * @file work_item
+ * @brief PASSIVE_LEVEL work item helpers.
+ */
+#pragma once
+
+#include "status"
+
+#include <type_traits>
+#include <utility>
+
+#ifndef _NTDDK_
+#include <wdm.h>
+#endif
+
+namespace ntl {
+
+class work_item {
+public:
+  using routine_type = void (*)(void *) noexcept;
+
+  work_item(routine_type routine, void *context = nullptr,
+            WORK_QUEUE_TYPE queue_type = DelayedWorkQueue) noexcept
+      : routine_(routine), context_(context), queue_type_(queue_type) {
+    KeInitializeEvent(&completed_, NotificationEvent, TRUE);
+  }
+
+  work_item(const work_item &) = delete;
+  work_item &operator=(const work_item &) = delete;
+  work_item(work_item &&) = delete;
+  work_item &operator=(work_item &&) = delete;
+
+  ~work_item() {
+    if (queued() && KeGetCurrentIrql() == PASSIVE_LEVEL)
+      (void)wait();
+  }
+
+  ntl::status queue() noexcept {
+    if (!routine_ || KeGetCurrentIrql() > DISPATCH_LEVEL)
+      return STATUS_INVALID_DEVICE_STATE;
+
+    if (InterlockedCompareExchange(&queued_, 1, 0) != 0)
+      return STATUS_DEVICE_BUSY;
+
+    completion_status_ = STATUS_PENDING;
+    KeClearEvent(&completed_);
+
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4996) // Device-independent wrapper over WORK_QUEUE_ITEM.
+#endif
+    ExInitializeWorkItem(&item_, &work_item::invoke, this);
+    ExQueueWorkItem(&item_, queue_type_);
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+
+    return STATUS_SUCCESS;
+  }
+
+  ntl::status wait() noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return STATUS_INVALID_DEVICE_STATE;
+
+    (void)KeWaitForSingleObject(&completed_, Executive, KernelMode, FALSE,
+                                nullptr);
+    return completion_status_;
+  }
+
+  bool queued() const noexcept {
+    return InterlockedCompareExchange(
+               const_cast<volatile LONG *>(&queued_), 0, 0) != 0;
+  }
+
+  ntl::status last_status() const noexcept { return completion_status_; }
+
+private:
+  static void NTAPI invoke(void *context) noexcept {
+    auto *const self = static_cast<work_item *>(context);
+    NTSTATUS status = STATUS_SUCCESS;
+
+    __try {
+      self->routine_(self->context_);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+      status = GetExceptionCode();
+    }
+
+    self->completion_status_ = status;
+    InterlockedExchange(&self->queued_, 0);
+    KeSetEvent(&self->completed_, IO_NO_INCREMENT, FALSE);
+  }
+
+  WORK_QUEUE_ITEM item_{};
+  KEVENT completed_{};
+  volatile LONG queued_ = 0;
+  volatile NTSTATUS completion_status_ = STATUS_SUCCESS;
+  routine_type routine_ = nullptr;
+  void *context_ = nullptr;
+  WORK_QUEUE_TYPE queue_type_ = DelayedWorkQueue;
+};
+
+template <typename Callable> class passive_work_item {
+public:
+  explicit passive_work_item(Callable callable,
+                             WORK_QUEUE_TYPE queue_type = DelayedWorkQueue)
+      : callable_(std::move(callable)),
+        item_(&passive_work_item::invoke, this, queue_type) {}
+
+  passive_work_item(const passive_work_item &) = delete;
+  passive_work_item &operator=(const passive_work_item &) = delete;
+  passive_work_item(passive_work_item &&) = delete;
+  passive_work_item &operator=(passive_work_item &&) = delete;
+
+  ntl::status queue() noexcept { return item_.queue(); }
+  ntl::status wait() noexcept { return item_.wait(); }
+  bool queued() const noexcept { return item_.queued(); }
+  ntl::status last_status() const noexcept { return item_.last_status(); }
+
+private:
+  static void invoke(void *context) noexcept {
+    auto *const self = static_cast<passive_work_item *>(context);
+    self->callable_();
+  }
+
+  Callable callable_;
+  work_item item_;
+};
+
+template <typename Callable>
+passive_work_item(Callable) -> passive_work_item<Callable>;
+
+} // namespace ntl

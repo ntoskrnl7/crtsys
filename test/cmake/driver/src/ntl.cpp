@@ -1,9 +1,11 @@
 #include <ntl/expand_stack>
 #include <ntl/except>
+#include <ntl/irql>
 #include <ntl/lookaside_list>
 #include <ntl/pool_allocator>
 #include <ntl/symbolic_link>
 #include <ntl/unicode_string>
+#include <ntl/work_item>
 
 #include <memory_resource>
 #include <numeric>
@@ -47,6 +49,24 @@ struct lookaside_test_object {
 void delete_symbolic_link_if_present(const std::wstring &link_name) {
   ntl::unicode_string native_link_name(link_name);
   (void)IoDeleteSymbolicLink(&*native_link_name);
+}
+
+struct work_item_test_context {
+  volatile LONG value = 0;
+  KEVENT release;
+};
+
+void work_item_test_routine(void *context) noexcept {
+  auto *const state = static_cast<work_item_test_context *>(context);
+  if (KeGetCurrentIrql() == PASSIVE_LEVEL)
+    InterlockedExchange(&state->value, 41);
+}
+
+void blocking_work_item_test_routine(void *context) noexcept {
+  auto *const state = static_cast<work_item_test_context *>(context);
+  (void)KeWaitForSingleObject(&state->release, Executive, KernelMode, FALSE,
+                              nullptr);
+  InterlockedExchange(&state->value, 43);
 }
 } // namespace
 
@@ -94,8 +114,6 @@ bool ntl_seh_try_except_test() {
   return !std::get<0>(ret) &&
          std::get<1>(ret) == static_cast<unsigned long>(STATUS_ACCESS_VIOLATION);
 }
-
-#include <ntl/irql>
 
 bool ntl_irql_test() {
   auto old_irql = ntl::current_irql();
@@ -507,6 +525,49 @@ bool ntl_symbolic_link_test() {
   return true;
 }
 
+bool ntl_work_item_test() {
+  work_item_test_context raw_context;
+  KeInitializeEvent(&raw_context.release, NotificationEvent, FALSE);
+
+  ntl::work_item raw_item(work_item_test_routine, &raw_context);
+  if (!raw_item.queue().is_ok())
+    return false;
+  if (!raw_item.wait().is_ok())
+    return false;
+  if (raw_context.value != 41)
+    return false;
+
+  volatile LONG typed_value = 0;
+  ntl::passive_work_item typed_item([&] {
+    if (KeGetCurrentIrql() == PASSIVE_LEVEL)
+      InterlockedExchange(&typed_value, 42);
+  });
+
+  {
+    auto raised_irql = ntl::raise_irql_to_dpc_level();
+    if (!typed_item.queue().is_ok())
+      return false;
+  }
+  if (!typed_item.wait().is_ok() || typed_value != 42)
+    return false;
+
+  work_item_test_context blocking_context;
+  KeInitializeEvent(&blocking_context.release, NotificationEvent, FALSE);
+
+  ntl::work_item blocking_item(blocking_work_item_test_routine,
+                               &blocking_context);
+  if (!blocking_item.queue().is_ok())
+    return false;
+  if (blocking_item.queue().is_ok())
+    return false;
+
+  KeSetEvent(&blocking_context.release, IO_NO_INCREMENT, FALSE);
+  if (!blocking_item.wait().is_ok())
+    return false;
+
+  return blocking_context.value == 43 && !blocking_item.queued();
+}
+
 //
 // Google Test.
 //
@@ -702,4 +763,8 @@ TEST(ntl_test, ntl_lookaside_list_test) {
 
 TEST(ntl_test, ntl_symbolic_link_test) {
   EXPECT_TRUE(ntl_symbolic_link_test());
+}
+
+TEST(ntl_test, ntl_work_item_test) {
+  EXPECT_TRUE(ntl_work_item_test());
 }

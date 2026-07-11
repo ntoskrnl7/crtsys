@@ -18,6 +18,7 @@ The detailed API reference is split by topic:
 | [Driver, device, and IRP helpers](./ntl/driver-device-irp.md) | `ntl::main`, `ntl::driver`, `ntl::device`, dispatch callbacks, `ntl::irp` |
 | [RPC](./ntl/rpc.md) | RPC schema macros, server lifetime, user-mode client calls |
 | [Synchronization](./ntl/synchronization.md) | `ntl::irql`, spin locks, ERESOURCE wrapper |
+| [Work item](./ntl/work-item.md) | Deferring resident work to a `PASSIVE_LEVEL` system worker thread |
 | [Pool allocator](./ntl/pool-allocator.md) | Kernel pool-backed ownership helpers, STL allocators, PMR resources, pool tags, IRQL rules |
 | [Lookaside list](./ntl/lookaside-list.md) | Fixed-size kernel object cache wrapper over `LOOKASIDE_LIST_EX` |
 | [Symbolic link](./ntl/symbolic-link.md) | RAII wrapper over `IoCreateSymbolicLink` / `IoDeleteSymbolicLink` |
