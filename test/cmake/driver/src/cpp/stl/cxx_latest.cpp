@@ -266,9 +266,11 @@ void run() {
   const auto trace_text = std::to_string(trace);
   std::cout << "stacktrace text size: " << trace_text.size() << '\n';
   const auto &entry = trace[0];
+  const auto source_file = entry.source_file();
+  const auto source_line = entry.source_line();
   std::cout << "stacktrace entry description: " << entry.description() << '\n';
-  std::cout << "stacktrace entry source_file: " << entry.source_file() << '\n';
-  std::cout << "stacktrace entry source_line: " << entry.source_line() << '\n';
+  std::cout << "stacktrace entry source_file: " << source_file << '\n';
+  std::cout << "stacktrace entry source_line: " << source_line << '\n';
   std::cout << "stacktrace first entry: " << std::to_string(trace[0])
             << '\n';
   std::cout << "stacktrace last entry: "
@@ -284,6 +286,13 @@ void run() {
                             "stacktrace text missing first frame");
   cxx_latest_detail::expect(trace_text.find("+0x") != std::string::npos,
                             "stacktrace text missing module offset");
+  if (!source_file.empty()) {
+    cxx_latest_detail::expect(source_file.find("cxx_latest.cpp") !=
+                                  std::string::npos,
+                              "stacktrace source_file is unexpected");
+    cxx_latest_detail::expect(source_line != 0,
+                              "stacktrace source_line is missing");
+  }
   if (trace.size() > 1) {
     const auto last_prefix =
         std::to_string(static_cast<unsigned long long>(trace.size() - 1)) +

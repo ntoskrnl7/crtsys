@@ -380,7 +380,9 @@ cppreference Example 코드를 이식한 항목은
   - kernel ABI는 frame을 캡처하고, 매칭되는 PDB가 `PASSIVE_LEVEL`에서
     접근 가능하면 entry를 `module!function+offset` 형태로 포맷합니다.
     PDB가 없거나 맞지 않으면 `module+offset`으로 fallback합니다.
-    source file/line은 아직 empty/zero로 보고합니다.
+    매칭되는 PDB에 CodeView line record가 있으면 `source_file()`과
+    `source_line()`도 source 위치를 보고하고, 없으면 empty/zero로
+    fallback합니다.
 - [x] [`std::chrono::year_month_day`](https://en.cppreference.com/w/cpp/chrono/year_month_day),
       [`std::chrono::weekday`](https://en.cppreference.com/w/cpp/chrono/weekday),
       [`std::chrono::hh_mm_ss`](https://en.cppreference.com/w/cpp/chrono/hh_mm_ss)

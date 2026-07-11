@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <utility>
 #include <vector>
 
 extern "C" {
@@ -39,9 +40,33 @@ struct stacktrace_pdb_symbol {
   std::string name;
 };
 
+struct stacktrace_pdb_line {
+  std::uint32_t rva;
+  std::uint32_t end_rva;
+  std::uint32_t line;
+  std::string file;
+};
+
 struct stacktrace_pdb_identity {
   std::uint8_t guid[16];
   std::uint32_t age;
+};
+
+struct stacktrace_pdb_stream_ref {
+  std::uint32_t size;
+  std::vector<std::uint32_t> blocks;
+};
+
+struct stacktrace_pdb_module_info {
+  std::uint16_t stream_index;
+  std::uint32_t symbol_bytes;
+  std::uint32_t c11_bytes;
+  std::uint32_t c13_bytes;
+};
+
+struct stacktrace_pdb_file_checksum {
+  std::uint32_t checksum_offset;
+  std::string file;
 };
 
 struct stacktrace_pdb_cache {
@@ -49,6 +74,7 @@ struct stacktrace_pdb_cache {
   bool attempted{};
   bool loaded{};
   std::vector<stacktrace_pdb_symbol> symbols;
+  std::vector<stacktrace_pdb_line> lines;
 };
 
 struct stacktrace_format_context {
@@ -427,14 +453,15 @@ bool stacktrace_msf_copy_stream(const std::vector<std::uint8_t> &pdb,
                                           0, stream.data(), stream_size);
 }
 
-// Minimal PDB/MSF reader for std::stacktrace diagnostics. It validates the
-// RSDS GUID/age and reads CodeView procedure records from module streams.
-bool stacktrace_pdb_parse_symbols(
-    const std::vector<std::uint8_t> &pdb,
-    const stacktrace_pdb_identity &expected_identity,
-    const std::vector<stacktrace_pe_section> &sections,
-    std::vector<stacktrace_pdb_symbol> &symbols) {
-  symbols.clear();
+size_t stacktrace_align4(size_t value) {
+  return (value + 3) & ~static_cast<size_t>(3);
+}
+
+bool stacktrace_pdb_read_stream_directory(
+    const std::vector<std::uint8_t> &pdb, std::uint32_t &block_size,
+    std::vector<stacktrace_pdb_stream_ref> &streams) {
+  block_size = 0;
+  streams.clear();
 
   static constexpr char msf70_magic[] =
       "Microsoft C/C++ MSF 7.00\r\n\x1a""DS\0\0\0";
@@ -443,7 +470,6 @@ bool stacktrace_pdb_parse_symbols(
     return false;
   }
 
-  std::uint32_t block_size = 0;
   std::uint32_t num_blocks = 0;
   std::uint32_t directory_bytes = 0;
   std::uint32_t block_map_block = 0;
@@ -513,11 +539,12 @@ bool stacktrace_pdb_parse_symbols(
               stream_sizes.size() * sizeof(std::uint32_t));
   offset += stream_sizes.size() * sizeof(std::uint32_t);
 
-  bool identity_matches = false;
+  streams.reserve(stream_count);
   for (std::uint32_t stream_index = 0; stream_index != stream_count;
        ++stream_index) {
     const std::uint32_t stream_size = stream_sizes[stream_index];
     if (stream_size == 0 || stream_size == 0xffffffffu) {
+      streams.push_back({stream_size, {}});
       continue;
     }
 
@@ -531,86 +558,542 @@ bool stacktrace_pdb_parse_symbols(
                 blocks.size() * sizeof(std::uint32_t));
     offset += blocks.size() * sizeof(std::uint32_t);
 
-    if (stream_index == 1) {
-      std::uint8_t info[28]{};
-      if (stream_size < sizeof(info) ||
-          !stacktrace_msf_read_stream_bytes(pdb, block_size, blocks,
-                                            stream_size, 0, info,
-                                            sizeof(info))) {
-        return false;
-      }
+    streams.push_back({stream_size, std::move(blocks)});
+  }
 
-      std::uint32_t age = 0;
-      std::memcpy(&age, info + 8, sizeof(age));
-      identity_matches =
-          age == expected_identity.age &&
-          std::memcmp(info + 12, expected_identity.guid,
-                      sizeof(expected_identity.guid)) == 0;
-      if (!identity_matches) {
-        return false;
-      }
+  return streams.size() == stream_count;
+}
+
+bool stacktrace_pdb_copy_stream(
+    const std::vector<std::uint8_t> &pdb, std::uint32_t block_size,
+    const std::vector<stacktrace_pdb_stream_ref> &streams,
+    std::uint32_t stream_index, std::vector<std::uint8_t> &stream) {
+  stream.clear();
+  if (stream_index >= streams.size()) {
+    return false;
+  }
+
+  const auto &ref = streams[stream_index];
+  if (ref.size == 0 || ref.size == 0xffffffffu) {
+    return false;
+  }
+
+  return stacktrace_msf_copy_stream(pdb, block_size, ref.blocks, ref.size,
+                                    stream);
+}
+
+bool stacktrace_pdb_validate_identity(
+    const std::vector<std::uint8_t> &pdb, std::uint32_t block_size,
+    const std::vector<stacktrace_pdb_stream_ref> &streams,
+    const stacktrace_pdb_identity &expected_identity) {
+  if (streams.size() <= 1 || streams[1].size < 28) {
+    return false;
+  }
+
+  std::uint8_t info[28]{};
+  if (!stacktrace_msf_read_stream_bytes(pdb, block_size, streams[1].blocks,
+                                        streams[1].size, 0, info,
+                                        sizeof(info))) {
+    return false;
+  }
+
+  std::uint32_t age = 0;
+  std::memcpy(&age, info + 8, sizeof(age));
+  return age == expected_identity.age &&
+         std::memcmp(info + 12, expected_identity.guid,
+                     sizeof(expected_identity.guid)) == 0;
+}
+
+bool stacktrace_pdb_read_cstr(const std::vector<std::uint8_t> &data,
+                              size_t offset, std::string &value) {
+  value.clear();
+  if (offset >= data.size()) {
+    return false;
+  }
+
+  const char *text = reinterpret_cast<const char *>(data.data() + offset);
+  const size_t max_size = data.size() - offset;
+  const size_t size = stacktrace_bounded_strlen(text, max_size);
+  if (size == max_size) {
+    return false;
+  }
+
+  value.assign(text, size);
+  return true;
+}
+
+bool stacktrace_pdb_skip_serialized_bitset(const std::vector<std::uint8_t> &data,
+                                           size_t &offset) {
+  std::uint32_t word_count = 0;
+  if (!stacktrace_read_unaligned(data.data(), data.size(), offset,
+                                 &word_count)) {
+    return false;
+  }
+  offset += sizeof(word_count);
+
+  const size_t bytes = static_cast<size_t>(word_count) * sizeof(std::uint32_t);
+  if (bytes > data.size() - offset) {
+    return false;
+  }
+
+  offset += bytes;
+  return true;
+}
+
+bool stacktrace_pdb_find_named_stream(
+    const std::vector<std::uint8_t> &pdb, std::uint32_t block_size,
+    const std::vector<stacktrace_pdb_stream_ref> &streams, const char *name,
+    std::uint32_t &stream_index) {
+  stream_index = 0;
+
+  std::vector<std::uint8_t> pdb_stream;
+  if (!stacktrace_pdb_copy_stream(pdb, block_size, streams, 1, pdb_stream) ||
+      pdb_stream.size() < 32) {
+    return false;
+  }
+
+  std::uint32_t string_bytes = 0;
+  if (!stacktrace_read_unaligned(pdb_stream.data(), pdb_stream.size(), 28,
+                                 &string_bytes) ||
+      string_bytes > pdb_stream.size() - 32) {
+    return false;
+  }
+
+  const size_t strings_offset = 32;
+  size_t offset = strings_offset + string_bytes;
+  std::uint32_t entry_count = 0;
+  std::uint32_t capacity = 0;
+  if (!stacktrace_read_unaligned(pdb_stream.data(), pdb_stream.size(), offset,
+                                 &entry_count)) {
+    return false;
+  }
+  offset += sizeof(entry_count);
+
+  if (!stacktrace_read_unaligned(pdb_stream.data(), pdb_stream.size(), offset,
+                                 &capacity)) {
+    return false;
+  }
+  offset += sizeof(capacity);
+  (void)capacity;
+
+  if (entry_count > 4096 ||
+      !stacktrace_pdb_skip_serialized_bitset(pdb_stream, offset) ||
+      !stacktrace_pdb_skip_serialized_bitset(pdb_stream, offset) ||
+      static_cast<size_t>(entry_count) * sizeof(std::uint32_t) * 2 >
+          pdb_stream.size() - offset) {
+    return false;
+  }
+
+  const auto *strings = pdb_stream.data() + strings_offset;
+  for (std::uint32_t index = 0; index != entry_count; ++index) {
+    std::uint32_t name_offset = 0;
+    std::uint32_t value = 0;
+    std::memcpy(&name_offset, pdb_stream.data() + offset, sizeof(name_offset));
+    offset += sizeof(name_offset);
+    std::memcpy(&value, pdb_stream.data() + offset, sizeof(value));
+    offset += sizeof(value);
+
+    if (name_offset >= string_bytes) {
       continue;
     }
 
-    std::uint32_t signature = 0;
-    if (stream_size < sizeof(signature) ||
-        !stacktrace_msf_read_stream_bytes(pdb, block_size, blocks, stream_size,
-                                          0, &signature, sizeof(signature)) ||
-        signature != 4) {
+    const char *entry_name =
+        reinterpret_cast<const char *>(strings + name_offset);
+    const size_t max_name = string_bytes - name_offset;
+    const size_t entry_name_size =
+        stacktrace_bounded_strlen(entry_name, max_name);
+    if (entry_name_size == max_name) {
       continue;
     }
 
-    std::vector<std::uint8_t> stream;
-    if (!stacktrace_msf_copy_stream(pdb, block_size, blocks, stream_size,
-                                    stream)) {
-      continue;
-    }
-
-    size_t record_offset = sizeof(signature);
-    while (record_offset + sizeof(std::uint16_t) * 2 <= stream.size()) {
-      std::uint16_t record_length = 0;
-      std::uint16_t record_kind = 0;
-      std::memcpy(&record_length, stream.data() + record_offset,
-                  sizeof(record_length));
-      std::memcpy(&record_kind, stream.data() + record_offset + 2,
-                  sizeof(record_kind));
-
-      const size_t record_start = record_offset + sizeof(std::uint16_t) * 2;
-      if (record_length < sizeof(record_kind) ||
-          record_start > stream.size() ||
-          record_length - sizeof(record_kind) > stream.size() - record_start) {
-        break;
-      }
-
-      const size_t record_data_size = record_length - sizeof(record_kind);
-      if ((record_kind == 0x1110 || record_kind == 0x1111) &&
-          record_data_size > 35) {
-        std::uint32_t procedure_length = 0;
-        std::uint32_t code_offset = 0;
-        std::uint16_t segment = 0;
-        const auto *record = stream.data() + record_start;
-        std::memcpy(&procedure_length, record + 12, sizeof(procedure_length));
-        std::memcpy(&code_offset, record + 28, sizeof(code_offset));
-        std::memcpy(&segment, record + 32, sizeof(segment));
-
-        if (segment != 0 && segment <= sections.size()) {
-          const char *name = reinterpret_cast<const char *>(record + 35);
-          const size_t name_max = record_data_size - 35;
-          const size_t name_size = stacktrace_bounded_strlen(name, name_max);
-          if (name_size != 0 && name_size != name_max) {
-            const auto rva = sections[segment - 1].rva + code_offset;
-            symbols.push_back(
-                {rva, procedure_length, std::string(name, name_size)});
-          }
-        }
-      }
-
-      record_offset = record_start + (record_length - sizeof(record_kind));
-      record_offset = (record_offset + 3) & ~static_cast<size_t>(3);
+    if (std::strlen(name) == entry_name_size &&
+        std::memcmp(entry_name, name, entry_name_size) == 0) {
+      stream_index = value;
+      return true;
     }
   }
 
-  return identity_matches && !symbols.empty();
+  return false;
+}
+
+bool stacktrace_pdb_read_names(
+    const std::vector<std::uint8_t> &pdb, std::uint32_t block_size,
+    const std::vector<stacktrace_pdb_stream_ref> &streams,
+    std::vector<std::uint8_t> &names) {
+  names.clear();
+
+  std::uint32_t names_stream_index = 0;
+  if (!stacktrace_pdb_find_named_stream(pdb, block_size, streams, "/names",
+                                        names_stream_index)) {
+    return false;
+  }
+
+  std::vector<std::uint8_t> stream;
+  if (!stacktrace_pdb_copy_stream(pdb, block_size, streams, names_stream_index,
+                                  stream) ||
+      stream.size() < 12) {
+    return false;
+  }
+
+  std::uint32_t signature = 0;
+  std::uint32_t version = 0;
+  std::uint32_t string_bytes = 0;
+  std::memcpy(&signature, stream.data(), sizeof(signature));
+  std::memcpy(&version, stream.data() + 4, sizeof(version));
+  std::memcpy(&string_bytes, stream.data() + 8, sizeof(string_bytes));
+
+  if (signature != 0xeffeeffeu || version != 1 ||
+      string_bytes > stream.size() - 12) {
+    return false;
+  }
+
+  names.assign(stream.begin() + 12, stream.begin() + 12 + string_bytes);
+  return true;
+}
+
+bool stacktrace_pdb_read_modules(const std::vector<std::uint8_t> &dbi,
+                                 std::vector<stacktrace_pdb_module_info> &modules) {
+  modules.clear();
+  if (dbi.size() < 64) {
+    return false;
+  }
+
+  std::int32_t module_info_size = 0;
+  if (!stacktrace_read_unaligned(dbi.data(), dbi.size(), 24,
+                                 &module_info_size) ||
+      module_info_size <= 0 ||
+      static_cast<size_t>(module_info_size) > dbi.size() - 64) {
+    return false;
+  }
+
+  size_t offset = 64;
+  const size_t end = 64 + static_cast<size_t>(module_info_size);
+  while (offset + 64 <= end) {
+    std::uint16_t stream_index = 0;
+    std::uint32_t symbol_bytes = 0;
+    std::uint32_t c11_bytes = 0;
+    std::uint32_t c13_bytes = 0;
+    std::memcpy(&stream_index, dbi.data() + offset + 34,
+                sizeof(stream_index));
+    std::memcpy(&symbol_bytes, dbi.data() + offset + 36,
+                sizeof(symbol_bytes));
+    std::memcpy(&c11_bytes, dbi.data() + offset + 40, sizeof(c11_bytes));
+    std::memcpy(&c13_bytes, dbi.data() + offset + 44, sizeof(c13_bytes));
+    modules.push_back({stream_index, symbol_bytes, c11_bytes, c13_bytes});
+
+    const size_t names_offset = offset + 64;
+    const void *first_end = std::memchr(dbi.data() + names_offset, '\0',
+                                        end - names_offset);
+    if (first_end == nullptr) {
+      break;
+    }
+
+    const size_t second_start =
+        static_cast<const std::uint8_t *>(first_end) - dbi.data() + 1;
+    if (second_start >= end) {
+      break;
+    }
+
+    const void *second_end = std::memchr(dbi.data() + second_start, '\0',
+                                         end - second_start);
+    if (second_end == nullptr) {
+      break;
+    }
+
+    offset = stacktrace_align4(
+        static_cast<const std::uint8_t *>(second_end) - dbi.data() + 1);
+  }
+
+  return !modules.empty();
+}
+
+void stacktrace_pdb_parse_symbol_records(
+    const std::vector<std::uint8_t> &stream,
+    const std::vector<stacktrace_pe_section> &sections, size_t symbol_bytes,
+    std::vector<stacktrace_pdb_symbol> &symbols) {
+  if (symbol_bytes > stream.size()) {
+    symbol_bytes = stream.size();
+  }
+
+  if (symbol_bytes < sizeof(std::uint32_t)) {
+    return;
+  }
+
+  std::uint32_t signature = 0;
+  std::memcpy(&signature, stream.data(), sizeof(signature));
+  if (signature != 4) {
+    return;
+  }
+
+  size_t record_offset = sizeof(signature);
+  while (record_offset + sizeof(std::uint16_t) * 2 <= symbol_bytes) {
+    std::uint16_t record_length = 0;
+    std::uint16_t record_kind = 0;
+    std::memcpy(&record_length, stream.data() + record_offset,
+                sizeof(record_length));
+    std::memcpy(&record_kind, stream.data() + record_offset + 2,
+                sizeof(record_kind));
+
+    const size_t record_start = record_offset + sizeof(std::uint16_t) * 2;
+    if (record_length < sizeof(record_kind) || record_start > symbol_bytes ||
+        record_length - sizeof(record_kind) > symbol_bytes - record_start) {
+      break;
+    }
+
+    const size_t record_data_size = record_length - sizeof(record_kind);
+    if ((record_kind == 0x1110 || record_kind == 0x1111) &&
+        record_data_size > 35) {
+      std::uint32_t procedure_length = 0;
+      std::uint32_t code_offset = 0;
+      std::uint16_t segment = 0;
+      const auto *record = stream.data() + record_start;
+      std::memcpy(&procedure_length, record + 12, sizeof(procedure_length));
+      std::memcpy(&code_offset, record + 28, sizeof(code_offset));
+      std::memcpy(&segment, record + 32, sizeof(segment));
+
+      if (segment != 0 && segment <= sections.size()) {
+        const char *name = reinterpret_cast<const char *>(record + 35);
+        const size_t name_max = record_data_size - 35;
+        const size_t name_size = stacktrace_bounded_strlen(name, name_max);
+        if (name_size != 0 && name_size != name_max) {
+          const auto rva = sections[segment - 1].rva + code_offset;
+          symbols.push_back(
+              {rva, procedure_length, std::string(name, name_size)});
+        }
+      }
+    }
+
+    record_offset = record_start + (record_length - sizeof(record_kind));
+    record_offset = stacktrace_align4(record_offset);
+  }
+}
+
+const std::string *stacktrace_pdb_find_checksum_file(
+    const std::vector<stacktrace_pdb_file_checksum> &files,
+    std::uint32_t checksum_offset) {
+  for (const auto &file : files) {
+    if (file.checksum_offset == checksum_offset) {
+      return &file.file;
+    }
+  }
+  return nullptr;
+}
+
+void stacktrace_pdb_parse_file_checksums(
+    const std::uint8_t *payload, size_t payload_size,
+    const std::vector<std::uint8_t> &names,
+    std::vector<stacktrace_pdb_file_checksum> &files) {
+  size_t offset = 0;
+  while (offset + 6 <= payload_size) {
+    const auto checksum_offset = static_cast<std::uint32_t>(offset);
+    std::uint32_t name_offset = 0;
+    std::memcpy(&name_offset, payload + offset, sizeof(name_offset));
+    const std::uint8_t checksum_size = payload[offset + 4];
+
+    const size_t entry_size = stacktrace_align4(6 + checksum_size);
+    if (entry_size == 0 || entry_size > payload_size - offset) {
+      break;
+    }
+
+    std::string file;
+    if (stacktrace_pdb_read_cstr(names, name_offset, file) && !file.empty()) {
+      files.push_back({checksum_offset, std::move(file)});
+    }
+
+    offset += entry_size;
+  }
+}
+
+void stacktrace_pdb_parse_line_subsection(
+    const std::uint8_t *payload, size_t payload_size,
+    const std::vector<stacktrace_pe_section> &sections,
+    const std::vector<stacktrace_pdb_file_checksum> &files,
+    std::vector<stacktrace_pdb_line> &lines) {
+  if (payload_size < 12) {
+    return;
+  }
+
+  std::uint32_t code_offset = 0;
+  std::uint16_t segment = 0;
+  std::uint16_t flags = 0;
+  std::uint32_t code_size = 0;
+  std::memcpy(&code_offset, payload, sizeof(code_offset));
+  std::memcpy(&segment, payload + 4, sizeof(segment));
+  std::memcpy(&flags, payload + 6, sizeof(flags));
+  std::memcpy(&code_size, payload + 8, sizeof(code_size));
+
+  if (segment == 0 || segment > sections.size() || code_size == 0) {
+    return;
+  }
+
+  const auto base_rva = sections[segment - 1].rva + code_offset;
+  size_t block_offset = 12;
+  while (block_offset + 12 <= payload_size) {
+    std::uint32_t checksum_offset = 0;
+    std::uint32_t line_count = 0;
+    std::uint32_t block_size = 0;
+    std::memcpy(&checksum_offset, payload + block_offset,
+                sizeof(checksum_offset));
+    std::memcpy(&line_count, payload + block_offset + 4,
+                sizeof(line_count));
+    std::memcpy(&block_size, payload + block_offset + 8,
+                sizeof(block_size));
+
+    if (block_size < 12 || block_size > payload_size - block_offset) {
+      break;
+    }
+
+    const auto *file = stacktrace_pdb_find_checksum_file(files, checksum_offset);
+    const size_t entries_offset = block_offset + 12;
+    const size_t entries_bytes = static_cast<size_t>(line_count) * 8;
+    if (entries_bytes <= block_size - 12 && file != nullptr &&
+        !file->empty()) {
+      for (std::uint32_t index = 0; index != line_count; ++index) {
+        std::uint32_t line_offset = 0;
+        std::uint32_t line_flags = 0;
+        std::memcpy(&line_offset, payload + entries_offset + index * 8,
+                    sizeof(line_offset));
+        std::memcpy(&line_flags, payload + entries_offset + index * 8 + 4,
+                    sizeof(line_flags));
+
+        const auto line = line_flags & 0x00ffffffu;
+        if (line == 0 || line_offset >= code_size) {
+          continue;
+        }
+
+        std::uint32_t next_offset = code_size;
+        if (index + 1 != line_count) {
+          std::memcpy(&next_offset,
+                      payload + entries_offset + (index + 1) * 8,
+                      sizeof(next_offset));
+          if (next_offset <= line_offset || next_offset > code_size) {
+            next_offset = line_offset + 1;
+          }
+        }
+
+        lines.push_back(
+            {base_rva + line_offset, base_rva + next_offset, line, *file});
+      }
+    }
+
+    block_offset += block_size;
+    (void) flags;
+  }
+}
+
+void stacktrace_pdb_parse_c13(
+    const std::vector<std::uint8_t> &stream,
+    const stacktrace_pdb_module_info &module,
+    const std::vector<stacktrace_pe_section> &sections,
+    const std::vector<std::uint8_t> &names,
+    std::vector<stacktrace_pdb_line> &lines) {
+  if (module.c13_bytes == 0 || names.empty()) {
+    return;
+  }
+
+  const size_t c13_start =
+      static_cast<size_t>(module.symbol_bytes) + module.c11_bytes;
+  if (c13_start >= stream.size()) {
+    return;
+  }
+
+  const size_t c13_end =
+      (std::min)(stream.size(), c13_start + static_cast<size_t>(module.c13_bytes));
+
+  std::vector<stacktrace_pdb_file_checksum> files;
+  for (size_t offset = c13_start; offset + 8 <= c13_end;) {
+    std::uint32_t kind = 0;
+    std::uint32_t length = 0;
+    std::memcpy(&kind, stream.data() + offset, sizeof(kind));
+    std::memcpy(&length, stream.data() + offset + 4, sizeof(length));
+
+    const size_t payload_offset = offset + 8;
+    if (length > c13_end - payload_offset) {
+      break;
+    }
+
+    if (kind == 0xf4) {
+      stacktrace_pdb_parse_file_checksums(stream.data() + payload_offset,
+                                          length, names, files);
+    }
+
+    offset = payload_offset + stacktrace_align4(length);
+  }
+
+  if (files.empty()) {
+    return;
+  }
+
+  for (size_t offset = c13_start; offset + 8 <= c13_end;) {
+    std::uint32_t kind = 0;
+    std::uint32_t length = 0;
+    std::memcpy(&kind, stream.data() + offset, sizeof(kind));
+    std::memcpy(&length, stream.data() + offset + 4, sizeof(length));
+
+    const size_t payload_offset = offset + 8;
+    if (length > c13_end - payload_offset) {
+      break;
+    }
+
+    if (kind == 0xf2) {
+      stacktrace_pdb_parse_line_subsection(stream.data() + payload_offset,
+                                           length, sections, files, lines);
+    }
+
+    offset = payload_offset + stacktrace_align4(length);
+  }
+}
+
+// Minimal PDB/MSF reader for std::stacktrace diagnostics. It validates the
+// RSDS GUID/age and reads CodeView procedure/line records from module streams.
+bool stacktrace_pdb_parse_debug_info(
+    const std::vector<std::uint8_t> &pdb,
+    const stacktrace_pdb_identity &expected_identity,
+    const std::vector<stacktrace_pe_section> &sections,
+    std::vector<stacktrace_pdb_symbol> &symbols,
+    std::vector<stacktrace_pdb_line> &lines) {
+  symbols.clear();
+  lines.clear();
+
+  std::uint32_t block_size = 0;
+  std::vector<stacktrace_pdb_stream_ref> streams;
+  if (!stacktrace_pdb_read_stream_directory(pdb, block_size, streams) ||
+      !stacktrace_pdb_validate_identity(pdb, block_size, streams,
+                                        expected_identity)) {
+    return false;
+  }
+
+  std::vector<std::uint8_t> names;
+  stacktrace_pdb_read_names(pdb, block_size, streams, names);
+
+  std::vector<std::uint8_t> dbi;
+  std::vector<stacktrace_pdb_module_info> modules;
+  if (!stacktrace_pdb_copy_stream(pdb, block_size, streams, 3, dbi) ||
+      !stacktrace_pdb_read_modules(dbi, modules)) {
+    return false;
+  }
+
+  for (const auto &module : modules) {
+    std::vector<std::uint8_t> stream;
+    if (!stacktrace_pdb_copy_stream(pdb, block_size, streams,
+                                    module.stream_index, stream)) {
+      continue;
+    }
+
+    stacktrace_pdb_parse_symbol_records(stream, sections, module.symbol_bytes,
+                                        symbols);
+    stacktrace_pdb_parse_c13(stream, module, sections, names, lines);
+  }
+
+  std::sort(symbols.begin(), symbols.end(),
+            [](const auto &left, const auto &right) {
+              return left.rva < right.rva;
+            });
+  std::sort(lines.begin(), lines.end(), [](const auto &left, const auto &right) {
+    return left.rva < right.rva;
+  });
+
+  return !symbols.empty() || !lines.empty();
 }
 
 std::vector<std::string> stacktrace_pdb_candidates(
@@ -656,6 +1139,7 @@ bool stacktrace_load_pdb_symbols(const AUX_MODULE_EXTENDED_INFO &module,
   cache.attempted = true;
   cache.loaded = false;
   cache.symbols.clear();
+  cache.lines.clear();
 
   if (KeGetCurrentIrql() != PASSIVE_LEVEL) {
     return false;
@@ -676,7 +1160,8 @@ bool stacktrace_load_pdb_symbols(const AUX_MODULE_EXTENDED_INFO &module,
       continue;
     }
 
-    if (stacktrace_pdb_parse_symbols(pdb, identity, sections, cache.symbols)) {
+    if (stacktrace_pdb_parse_debug_info(pdb, identity, sections, cache.symbols,
+                                        cache.lines)) {
       cache.loaded = true;
       return true;
     }
@@ -712,6 +1197,21 @@ const stacktrace_pdb_symbol *stacktrace_find_pdb_symbol(
 
     if (best == nullptr || symbol.rva > best->rva) {
       best = &symbol;
+    }
+  }
+  return best;
+}
+
+const stacktrace_pdb_line *stacktrace_find_pdb_line(
+    const stacktrace_pdb_cache &cache, std::uint32_t rva) {
+  const stacktrace_pdb_line *best = nullptr;
+  for (const auto &line : cache.lines) {
+    if (rva < line.rva || rva >= line.end_rva) {
+      continue;
+    }
+
+    if (best == nullptr || line.rva > best->rva) {
+      best = &line;
     }
   }
   return best;
@@ -773,6 +1273,33 @@ bool stacktrace_format_module_offset(
   return false;
 }
 
+const stacktrace_pdb_line *stacktrace_source_line_entry(
+    const void *address, stacktrace_format_context &context) {
+  const auto address_value = reinterpret_cast<std::uintptr_t>(address);
+
+  for (const auto &module : context.modules) {
+    const auto base = reinterpret_cast<std::uintptr_t>(module.BasicInfo.ImageBase);
+    const auto end = base + module.ImageSize;
+    if (address_value < base || address_value >= end) {
+      continue;
+    }
+
+    stacktrace_pdb_cache *cache = stacktrace_get_pdb_cache(context, module);
+    if (cache != nullptr && !cache->attempted) {
+      stacktrace_load_pdb_symbols(module, *cache);
+    }
+
+    if (cache == nullptr || !cache->loaded) {
+      return nullptr;
+    }
+
+    return stacktrace_find_pdb_line(
+        *cache, static_cast<std::uint32_t>(address_value - base));
+  }
+
+  return nullptr;
+}
+
 void stacktrace_format_address(const void *address, char *buffer,
                                size_t buffer_size,
                                stacktrace_format_context *context) {
@@ -801,6 +1328,37 @@ void stacktrace_fill_address(const void *address, void *string,
     stacktrace_fill_text(string, fill, buffer, static_cast<size_t>(count));
   }
 }
+
+void stacktrace_fill_source_file(const void *address, void *string,
+                                 _Stacktrace_string_fill fill) {
+  stacktrace_format_context context;
+  context.have_modules = stacktrace_query_modules(context.modules);
+
+  if (context.have_modules) {
+    if (const auto *line = stacktrace_source_line_entry(address, context)) {
+      if (!line->file.empty()) {
+        stacktrace_fill_text(string, fill, line->file.data(),
+                             line->file.size());
+        return;
+      }
+    }
+  }
+
+  stacktrace_fill_cstr(string, fill, "");
+}
+
+unsigned int stacktrace_source_line_number(const void *address) {
+  stacktrace_format_context context;
+  context.have_modules = stacktrace_query_modules(context.modules);
+
+  if (context.have_modules) {
+    if (const auto *line = stacktrace_source_line_entry(address, context)) {
+      return line->line;
+    }
+  }
+
+  return 0;
+}
 } // namespace
 
 extern "C" {
@@ -823,13 +1381,14 @@ void __stdcall __std_stacktrace_description(const void *address, void *string,
   stacktrace_fill_address(address, string, fill);
 }
 
-void __stdcall __std_stacktrace_source_file(const void *, void *string,
+void __stdcall __std_stacktrace_source_file(const void *address, void *string,
                                             _Stacktrace_string_fill fill) {
-  stacktrace_fill_cstr(string, fill, "");
+  stacktrace_fill_source_file(address, string, fill);
 }
 
-unsigned int __stdcall __std_stacktrace_source_line(const void *) noexcept {
-  return 0;
+unsigned int __stdcall __std_stacktrace_source_line(
+    const void *address) noexcept {
+  return stacktrace_source_line_number(address);
 }
 
 void __stdcall __std_stacktrace_to_string(const void *const *addresses,
