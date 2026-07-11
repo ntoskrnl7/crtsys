@@ -120,6 +120,15 @@ bool ntl_seh_try_except_test() {
 
 bool ntl_irql_test() {
   auto old_irql = ntl::current_irql();
+  if (!ntl::is_passive_level())
+    return false;
+  if (!ntl::is_irql_at_most(ntl::irql::passive))
+    return false;
+  if (!ntl::require_passive_level().is_ok())
+    return false;
+  if (!ntl::require_irql_at_most(ntl::irql::passive).is_ok())
+    return false;
+
   {
     auto raised_irql = ntl::raise_irql(ntl::irql::apc);
 
@@ -127,6 +136,20 @@ bool ntl_irql_test() {
       return false;
 
     if (ntl::current_irql() != ntl::irql::apc)
+      return false;
+    if (ntl::is_passive_level())
+      return false;
+    if (!ntl::is_irql_at_most(ntl::irql::apc))
+      return false;
+    if (ntl::is_irql_at_most(ntl::irql::passive))
+      return false;
+    if (static_cast<NTSTATUS>(ntl::require_passive_level()) !=
+        STATUS_INVALID_DEVICE_STATE)
+      return false;
+    if (static_cast<NTSTATUS>(ntl::require_irql_at_most(ntl::irql::passive)) !=
+        STATUS_INVALID_DEVICE_STATE)
+      return false;
+    if (!ntl::require_irql_at_most(ntl::irql::apc).is_ok())
       return false;
   }
   if (ntl::current_irql() != old_irql)
@@ -140,6 +163,15 @@ bool ntl_irql_test() {
 
     if (ntl::current_irql() != ntl::irql::dispatch)
       return false;
+    if (ntl::is_irql_at_most(ntl::irql::apc))
+      return false;
+    if (!ntl::is_irql_at_most(ntl::irql::dispatch))
+      return false;
+    if (static_cast<NTSTATUS>(ntl::require_irql_at_most(ntl::irql::apc)) !=
+        STATUS_INVALID_DEVICE_STATE)
+      return false;
+    if (!ntl::require_irql_at_most(ntl::irql::dispatch).is_ok())
+      return false;
   }
   old_irql = ntl::current_irql();
   {
@@ -147,7 +179,8 @@ bool ntl_irql_test() {
     if (old_irql != raised_irql.old())
       return false;
   }
-  return (ntl::current_irql() == old_irql);
+  return ntl::current_irql() == old_irql &&
+         ntl::require_passive_level().is_ok();
 }
 
 #include <ntl/spin_lock>
@@ -757,10 +790,24 @@ TEST(ntl_test, ntl_seh_try_except_test) {
 
 TEST(ntl_test, ntl_irql_test) {
   auto old_irql = ntl::current_irql();
+  EXPECT_TRUE(ntl::is_passive_level());
+  EXPECT_TRUE(ntl::is_irql_at_most(ntl::irql::passive));
+  EXPECT_TRUE(ntl::require_passive_level().is_ok());
+  EXPECT_TRUE(ntl::require_irql_at_most(ntl::irql::passive).is_ok());
+
   {
     auto raised_irql = ntl::raise_irql(ntl::irql::apc);
     EXPECT_EQ(old_irql, raised_irql.old());
     EXPECT_EQ(ntl::current_irql(), ntl::irql::apc);
+    EXPECT_FALSE(ntl::is_passive_level());
+    EXPECT_TRUE(ntl::is_irql_at_most(ntl::irql::apc));
+    EXPECT_FALSE(ntl::is_irql_at_most(ntl::irql::passive));
+    EXPECT_EQ(static_cast<NTSTATUS>(ntl::require_passive_level()),
+              STATUS_INVALID_DEVICE_STATE);
+    EXPECT_EQ(static_cast<NTSTATUS>(
+                  ntl::require_irql_at_most(ntl::irql::passive)),
+              STATUS_INVALID_DEVICE_STATE);
+    EXPECT_TRUE(ntl::require_irql_at_most(ntl::irql::apc).is_ok());
   }
   EXPECT_EQ(ntl::current_irql(), old_irql);
 
@@ -770,9 +817,15 @@ TEST(ntl_test, ntl_irql_test) {
     EXPECT_EQ(old_irql, raised_irql.old());
 
     EXPECT_EQ(ntl::current_irql(), ntl::irql::dispatch);
+    EXPECT_FALSE(ntl::is_irql_at_most(ntl::irql::apc));
+    EXPECT_TRUE(ntl::is_irql_at_most(ntl::irql::dispatch));
+    EXPECT_EQ(static_cast<NTSTATUS>(ntl::require_irql_at_most(ntl::irql::apc)),
+              STATUS_INVALID_DEVICE_STATE);
+    EXPECT_TRUE(ntl::require_irql_at_most(ntl::irql::dispatch).is_ok());
   }
 
   EXPECT_EQ(ntl::current_irql(), old_irql);
+  EXPECT_TRUE(ntl::require_passive_level().is_ok());
 }
 
 TEST(ntl_test, ntl_spin_lock_test) {
