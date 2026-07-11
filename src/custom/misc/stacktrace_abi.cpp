@@ -11,6 +11,15 @@
 #include <utility>
 #include <vector>
 
+#include "raw_pdb_kernel_compat.h"
+#include "PDB.h"
+#include "PDB_DBIStream.h"
+#include "PDB_InfoStream.h"
+#include "PDB_ModuleInfoStream.h"
+#include "PDB_NamesStream.h"
+#include "PDB_RawFile.h"
+#include "PDB_Util.h"
+
 extern "C" {
 using _Stacktrace_string_fill_callback =
     size_t(__stdcall *)(char *Data, size_t Size, void *Context) noexcept;
@@ -1044,6 +1053,243 @@ void stacktrace_pdb_parse_c13(
   }
 }
 
+bool stacktrace_section_offset_to_rva(
+    const std::vector<stacktrace_pe_section> &sections, std::uint16_t section,
+    std::uint32_t offset, std::uint32_t &rva) {
+  if (section == 0 || section > sections.size()) {
+    return false;
+  }
+
+  const auto &pe_section = sections[section - 1];
+  if (offset >= pe_section.size) {
+    return false;
+  }
+
+  rva = pe_section.rva + offset;
+  return true;
+}
+
+bool stacktrace_raw_pdb_identity_matches(
+    const PDB::InfoStream &info_stream,
+    const stacktrace_pdb_identity &expected_identity) {
+  const auto *header = info_stream.GetHeader();
+  return header != nullptr && header->age == expected_identity.age &&
+         std::memcmp(&header->guid, expected_identity.guid,
+                     sizeof(expected_identity.guid)) == 0;
+}
+
+template <class ProcedureRecord>
+void stacktrace_raw_pdb_add_procedure(
+    const ProcedureRecord &procedure,
+    const PDB::CodeView::DBI::RecordHeader &header,
+    const std::vector<stacktrace_pe_section> &sections,
+    std::vector<stacktrace_pdb_symbol> &symbols) {
+  std::uint32_t rva = 0;
+  if (!stacktrace_section_offset_to_rva(sections, procedure.section,
+                                        procedure.offset, rva)) {
+    return;
+  }
+
+  const size_t name_size = PDB::GetNameLength(header, procedure);
+  if (name_size == 0) {
+    return;
+  }
+
+  symbols.push_back(
+      {rva, procedure.codeSize, std::string(procedure.name, name_size)});
+}
+
+void stacktrace_raw_pdb_parse_symbols(
+    const PDB::RawFile &raw_file, const PDB::ModuleInfoStream::Module &module,
+    const std::vector<stacktrace_pe_section> &sections,
+    std::vector<stacktrace_pdb_symbol> &symbols) {
+  if (!module.HasSymbolStream()) {
+    return;
+  }
+
+  const PDB::ModuleSymbolStream symbol_stream =
+      module.CreateSymbolStream(raw_file);
+  symbol_stream.ForEachSymbol([&sections, &symbols](
+                                  const PDB::CodeView::DBI::Record *record) {
+    using PDB::CodeView::DBI::SymbolRecordKind;
+    switch (record->header.kind) {
+    case SymbolRecordKind::S_LPROC32:
+      stacktrace_raw_pdb_add_procedure(record->data.S_LPROC32, record->header,
+                                       sections, symbols);
+      break;
+    case SymbolRecordKind::S_GPROC32:
+      stacktrace_raw_pdb_add_procedure(record->data.S_GPROC32, record->header,
+                                       sections, symbols);
+      break;
+    case SymbolRecordKind::S_LPROC32_ID:
+      stacktrace_raw_pdb_add_procedure(record->data.S_LPROC32_ID,
+                                       record->header, sections, symbols);
+      break;
+    case SymbolRecordKind::S_GPROC32_ID:
+      stacktrace_raw_pdb_add_procedure(record->data.S_GPROC32_ID,
+                                       record->header, sections, symbols);
+      break;
+    case SymbolRecordKind::S_LPROC32_DPC:
+      stacktrace_raw_pdb_add_procedure(record->data.S_LPROC32_DPC,
+                                       record->header, sections, symbols);
+      break;
+    case SymbolRecordKind::S_LPROC32_DPC_ID:
+      stacktrace_raw_pdb_add_procedure(record->data.S_LPROC32_DPC_ID,
+                                       record->header, sections, symbols);
+      break;
+    default:
+      break;
+    }
+  });
+}
+
+const char *stacktrace_raw_pdb_find_file(
+    const std::vector<stacktrace_pdb_file_checksum> &files,
+    std::uint32_t checksum_offset) {
+  for (const auto &file : files) {
+    if (file.checksum_offset == checksum_offset) {
+      return file.file.c_str();
+    }
+  }
+  return nullptr;
+}
+
+void stacktrace_raw_pdb_parse_lines(
+    const PDB::RawFile &raw_file, const PDB::InfoStream &info_stream,
+    const PDB::ModuleInfoStream::Module &module,
+    const std::vector<stacktrace_pe_section> &sections,
+    std::vector<stacktrace_pdb_line> &lines) {
+  if (!info_stream.HasNamesStream() || !module.HasLineStream()) {
+    return;
+  }
+
+  const PDB::NamesStream names_stream = info_stream.CreateNamesStream(raw_file);
+  const PDB::ModuleLineStream line_stream = module.CreateLineStream(raw_file);
+  std::vector<stacktrace_pdb_file_checksum> files;
+
+  line_stream.ForEachSection(
+      [&line_stream, &names_stream, &files](
+          const PDB::CodeView::DBI::LineSection *section) {
+        if (section->header.kind !=
+            PDB::CodeView::DBI::DebugSubsectionKind::S_FILECHECKSUMS) {
+          return;
+        }
+
+        const auto *base =
+            reinterpret_cast<const std::uint8_t *>(&section->checksumHeader);
+        line_stream.ForEachFileChecksum(
+            section, [&names_stream, &files,
+                      base](const PDB::CodeView::DBI::FileChecksumHeader
+                                *checksum) {
+              const auto checksum_offset = static_cast<std::uint32_t>(
+                  reinterpret_cast<const std::uint8_t *>(checksum) - base);
+              const char *filename =
+                  names_stream.GetFilename(checksum->filenameOffset);
+              if (filename != nullptr && filename[0] != '\0') {
+                files.push_back({checksum_offset, filename});
+              }
+            });
+      });
+
+  if (files.empty()) {
+    return;
+  }
+
+  line_stream.ForEachSection(
+      [&line_stream, &sections, &files, &lines](
+          const PDB::CodeView::DBI::LineSection *section) {
+        if (section->header.kind !=
+            PDB::CodeView::DBI::DebugSubsectionKind::S_LINES) {
+          return;
+        }
+
+        std::uint32_t base_rva = 0;
+        if (!stacktrace_section_offset_to_rva(
+                sections, section->linesHeader.sectionIndex,
+                section->linesHeader.sectionOffset, base_rva) ||
+            section->linesHeader.codeSize == 0) {
+          return;
+        }
+
+        line_stream.ForEachLinesBlock(
+            section, [&section, base_rva, &files, &lines](
+                         const PDB::CodeView::DBI::LinesFileBlockHeader
+                             *block_header,
+                         const PDB::CodeView::DBI::Line *block_lines,
+                         const PDB::CodeView::DBI::Column *block_columns) {
+              (void)block_columns;
+              const char *file = stacktrace_raw_pdb_find_file(
+                  files, block_header->fileChecksumOffset);
+              if (file == nullptr || file[0] == '\0') {
+                return;
+              }
+
+              for (std::uint32_t index = 0; index != block_header->numLines;
+                   ++index) {
+                const auto &line = block_lines[index];
+                if (line.linenumStart == 0 ||
+                    line.offset >= section->linesHeader.codeSize) {
+                  continue;
+                }
+
+                std::uint32_t next_offset = section->linesHeader.codeSize;
+                if (index + 1 != block_header->numLines) {
+                  next_offset = block_lines[index + 1].offset;
+                  if (next_offset <= line.offset ||
+                      next_offset > section->linesHeader.codeSize) {
+                    next_offset = line.offset + 1;
+                  }
+                }
+
+                lines.push_back({base_rva + line.offset,
+                                 base_rva + next_offset, line.linenumStart,
+                                 file});
+              }
+            });
+      });
+}
+
+bool stacktrace_pdb_parse_debug_info_raw_pdb(
+    const std::vector<std::uint8_t> &pdb,
+    const stacktrace_pdb_identity &expected_identity,
+    const std::vector<stacktrace_pe_section> &sections,
+    std::vector<stacktrace_pdb_symbol> &symbols,
+    std::vector<stacktrace_pdb_line> &lines) {
+  symbols.clear();
+  lines.clear();
+
+  if (PDB::ValidateFile(pdb.data(), pdb.size()) != PDB::ErrorCode::Success) {
+    return false;
+  }
+
+  PDB::RawFile raw_file = PDB::CreateRawFile(pdb.data());
+  const PDB::InfoStream info_stream(raw_file);
+  if (!stacktrace_raw_pdb_identity_matches(info_stream, expected_identity) ||
+      PDB::HasValidDBIStream(raw_file) != PDB::ErrorCode::Success) {
+    return false;
+  }
+
+  const PDB::DBIStream dbi_stream = PDB::CreateDBIStream(raw_file);
+  const PDB::ModuleInfoStream module_stream =
+      dbi_stream.CreateModuleInfoStream(raw_file);
+  const auto modules = module_stream.GetModules();
+  for (const auto &module : modules) {
+    stacktrace_raw_pdb_parse_symbols(raw_file, module, sections, symbols);
+    stacktrace_raw_pdb_parse_lines(raw_file, info_stream, module, sections,
+                                   lines);
+  }
+
+  std::sort(symbols.begin(), symbols.end(),
+            [](const auto &left, const auto &right) {
+              return left.rva < right.rva;
+            });
+  std::sort(lines.begin(), lines.end(), [](const auto &left, const auto &right) {
+    return left.rva < right.rva;
+  });
+
+  return !symbols.empty() || !lines.empty();
+}
+
 // Minimal PDB/MSF reader for std::stacktrace diagnostics. It validates the
 // RSDS GUID/age and reads CodeView procedure/line records from module streams.
 bool stacktrace_pdb_parse_debug_info(
@@ -1054,6 +1300,11 @@ bool stacktrace_pdb_parse_debug_info(
     std::vector<stacktrace_pdb_line> &lines) {
   symbols.clear();
   lines.clear();
+
+  if (stacktrace_pdb_parse_debug_info_raw_pdb(pdb, expected_identity, sections,
+                                              symbols, lines)) {
+    return true;
+  }
 
   std::uint32_t block_size = 0;
   std::vector<stacktrace_pdb_stream_ref> streams;
