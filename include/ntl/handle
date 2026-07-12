@@ -1,0 +1,258 @@
+/**
+ * @file handle
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief RAII wrappers for kernel handles and referenced kernel objects.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "result"
+#include "status"
+
+#include <ntddk.h>
+#include <type_traits>
+#include <utility>
+
+namespace ntl {
+
+/**
+ * @brief RAII owner for a kernel HANDLE that must be closed with ZwClose.
+ *
+ * This helper is intentionally named for kernel handles. It is not a
+ * user-mode CloseHandle wrapper.
+ */
+class unique_kernel_handle {
+public:
+  /**
+   * @brief Creates an empty handle owner.
+   */
+  unique_kernel_handle() noexcept = default;
+
+  /**
+   * @brief Takes ownership of a native kernel handle.
+   * @param handle Handle to close with ZwClose.
+   */
+  explicit unique_kernel_handle(HANDLE handle) noexcept : handle_(handle) {}
+
+  unique_kernel_handle(const unique_kernel_handle &) = delete;
+  unique_kernel_handle &operator=(const unique_kernel_handle &) = delete;
+
+  /**
+   * @brief Transfers handle ownership from another object.
+   */
+  unique_kernel_handle(unique_kernel_handle &&other) noexcept
+      : handle_(other.release()) {}
+
+  /**
+   * @brief Transfers handle ownership from another object.
+   */
+  unique_kernel_handle &operator=(unique_kernel_handle &&other) noexcept {
+    if (this == &other)
+      return *this;
+
+    reset();
+    handle_ = other.release();
+    return *this;
+  }
+
+  /**
+   * @brief Closes the owned handle, ignoring close failure.
+   */
+  ~unique_kernel_handle() { reset(); }
+
+  /**
+   * @brief Returns true when a non-null handle is owned.
+   */
+  bool valid() const noexcept { return handle_ != nullptr; }
+
+  /**
+   * @brief Returns true when a non-null handle is owned.
+   */
+  explicit operator bool() const noexcept { return valid(); }
+
+  /**
+   * @brief Returns the owned native handle without releasing it.
+   */
+  HANDLE get() const noexcept { return handle_; }
+
+  /**
+   * @brief Closes the owned handle and reports the ZwClose status.
+   *
+   * The handle is cleared only when ZwClose succeeds. Use reset() for
+   * destructor-style cleanup that ignores close failure.
+   */
+  ntl::status close() noexcept {
+    if (!handle_)
+      return ntl::status::ok();
+
+    const auto status = ZwClose(handle_);
+    if (NT_SUCCESS(status))
+      handle_ = nullptr;
+    return ntl::status{status};
+  }
+
+  /**
+   * @brief Closes the current handle, ignoring failure, and optionally adopts another.
+   * @param handle Replacement handle to own.
+   */
+  void reset(HANDLE handle = nullptr) noexcept {
+    if (handle_)
+      (void)ZwClose(handle_);
+    handle_ = handle;
+  }
+
+  /**
+   * @brief Releases ownership without closing the handle.
+   * @return The previously owned handle.
+   */
+  HANDLE release() noexcept {
+    HANDLE handle = handle_;
+    handle_ = nullptr;
+    return handle;
+  }
+
+  /**
+   * @brief Clears current ownership and returns a PHANDLE for WDK out-params.
+   */
+  PHANDLE put() noexcept {
+    reset();
+    return &handle_;
+  }
+
+private:
+  HANDLE handle_ = nullptr;
+};
+
+/**
+ * @brief RAII owner for an object-manager reference.
+ * @tparam Pointer Native WDK pointer type such as PFILE_OBJECT or PKEVENT.
+ *
+ * The wrapper calls ObDereferenceObject for the owned pointer. It does not
+ * close handles; use unique_kernel_handle for HANDLE ownership.
+ */
+template <class Pointer = PVOID> class unique_object {
+  static_assert(std::is_pointer<Pointer>::value,
+                "ntl::unique_object expects a native pointer type.");
+
+public:
+  using pointer = Pointer;
+  using element_type = std::remove_pointer_t<Pointer>;
+
+  /**
+   * @brief Creates an empty object-reference owner.
+   */
+  unique_object() noexcept = default;
+
+  /**
+   * @brief Takes ownership of an object-manager reference.
+   * @param object Pointer that must later be released with ObDereferenceObject.
+   */
+  explicit unique_object(pointer object) noexcept : object_(object) {}
+
+  unique_object(const unique_object &) = delete;
+  unique_object &operator=(const unique_object &) = delete;
+
+  /**
+   * @brief Transfers object-reference ownership from another object.
+   */
+  unique_object(unique_object &&other) noexcept : object_(other.release()) {}
+
+  /**
+   * @brief Transfers object-reference ownership from another object.
+   */
+  unique_object &operator=(unique_object &&other) noexcept {
+    if (this == &other)
+      return *this;
+
+    reset();
+    object_ = other.release();
+    return *this;
+  }
+
+  /**
+   * @brief Dereferences the owned object, if any.
+   */
+  ~unique_object() { reset(); }
+
+  /**
+   * @brief Returns true when an object reference is owned.
+   */
+  bool valid() const noexcept { return object_ != nullptr; }
+
+  /**
+   * @brief Returns true when an object reference is owned.
+   */
+  explicit operator bool() const noexcept { return valid(); }
+
+  /**
+   * @brief Returns the owned object pointer without releasing it.
+   */
+  pointer get() const noexcept { return object_; }
+
+  /**
+   * @brief Returns the owned object pointer for member access.
+   */
+  template <class U = element_type,
+            std::enable_if_t<!std::is_void<U>::value, int> = 0>
+  pointer operator->() const noexcept {
+    return object_;
+  }
+
+  /**
+   * @brief Returns a reference to the owned object.
+   */
+  template <class U = element_type,
+            std::enable_if_t<!std::is_void<U>::value, int> = 0>
+  U &operator*() const noexcept {
+    return *object_;
+  }
+
+  /**
+   * @brief Dereferences the current object and optionally adopts another.
+   * @param object Replacement object reference to own.
+   */
+  void reset(pointer object = nullptr) noexcept {
+    if (object_)
+      ObDereferenceObject(object_);
+    object_ = object;
+  }
+
+  /**
+   * @brief Releases ownership without dereferencing the object.
+   * @return The previously owned object pointer.
+   */
+  pointer release() noexcept {
+    pointer object = object_;
+    object_ = nullptr;
+    return object;
+  }
+
+private:
+  pointer object_ = nullptr;
+};
+
+/**
+ * @brief References an object by handle and returns an RAII owner.
+ * @tparam Pointer Native WDK pointer type to store in unique_object.
+ * @param handle Kernel handle to reference.
+ * @param desired_access Access mask passed to ObReferenceObjectByHandle.
+ * @param object_type Optional WDK object type, such as *ExEventObjectType.
+ * @param access_mode Access mode passed to ObReferenceObjectByHandle.
+ */
+template <class Pointer = PVOID>
+[[nodiscard]] ntl::result<unique_object<Pointer>>
+try_reference_object_by_handle(HANDLE handle, ACCESS_MASK desired_access,
+                               POBJECT_TYPE object_type = nullptr,
+                               KPROCESSOR_MODE access_mode = KernelMode) noexcept {
+  PVOID object = nullptr;
+  const auto status =
+      ObReferenceObjectByHandle(handle, desired_access, object_type,
+                                access_mode, &object, nullptr);
+  if (!NT_SUCCESS(status))
+    return ntl::unexpected(status);
+
+  return ntl::ok(unique_object<Pointer>{static_cast<Pointer>(object)});
+}
+
+} // namespace ntl

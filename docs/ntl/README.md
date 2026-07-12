@@ -16,6 +16,7 @@ Use these pages when you want more detail than the compact
 | [Context and IRQL](./context.md) | Shared IRQL language and how to read NTL execution-context notes |
 | [Status, exceptions, and stack expansion](./status-exceptions-stack.md) | `ntl::status`, `ntl::exception`, SEH boundary helper, and `ntl::expand_stack` |
 | [Result](./result.md) | `NTSTATUS`-backed value-or-error helper for driver control paths |
+| [Handle and object ownership](./ownership.md) | `ZwClose` handle ownership and `ObDereferenceObject` reference ownership |
 | [Driver, device, and IRP helpers](./driver-device-irp.md) | `ntl::main`, `ntl::driver`, `ntl::device`, dispatch callbacks, and `ntl::irp` |
 | [RPC](./rpc.md) | Kernel/user RPC schema macros, server lifetime, client calls, and stable callback IDs |
 | [Synchronization](./synchronization.md) | `ntl::irql`, IRQL query/contract helpers, spin locks, ERESOURCE wrapper, and lock helpers |
