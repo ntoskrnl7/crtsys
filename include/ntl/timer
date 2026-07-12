@@ -1,0 +1,258 @@
+/**
+ * @file timer
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief KTIMER and KDPC wrappers.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "status"
+
+#ifndef _NTDDK_
+#include <wdm.h>
+#endif
+
+namespace ntl {
+
+/**
+ * @brief KTIMER reset semantics.
+ */
+enum class timer_type {
+  /// Manual-reset timer; remains signaled until explicitly reset by setting it.
+  notification,
+  /// Auto-reset timer; one waiter consumes the signaled state.
+  synchronization,
+};
+
+/**
+ * @brief Converts an NTL timer type to the native WDK TIMER_TYPE value.
+ */
+inline TIMER_TYPE to_native_timer_type(timer_type type) noexcept {
+  switch (type) {
+  case timer_type::notification:
+    return NotificationTimer;
+  case timer_type::synchronization:
+    return SynchronizationTimer;
+  }
+
+  return NotificationTimer;
+}
+
+/**
+ * @brief Creates a relative timer due time from milliseconds.
+ * @param milliseconds Relative delay in milliseconds.
+ * @return Negative 100ns-based LARGE_INTEGER for KeSetTimer/KeSetTimerEx.
+ */
+inline LARGE_INTEGER relative_due_time_ms(LONGLONG milliseconds) noexcept {
+  LARGE_INTEGER due_time{};
+  due_time.QuadPart = -(milliseconds * 10000);
+  return due_time;
+}
+
+/**
+ * @brief RAII-friendly wrapper around KDPC.
+ *
+ * The callback runs in the DPC environment. Keep the callback resident, short,
+ * nonblocking, and free of arbitrary C++ runtime/STL usage.
+ */
+class kdpc {
+public:
+  /**
+   * @brief KDPC callback shape used by NTL.
+   * @param context User context stored in the KDPC object.
+   * @param system_argument1 First argument supplied by KeInsertQueueDpc or timer.
+   * @param system_argument2 Second argument supplied by KeInsertQueueDpc or timer.
+   */
+  using routine_type =
+      void (*)(void *context, void *system_argument1,
+               void *system_argument2) noexcept;
+
+  /**
+   * @brief Initializes an empty KDPC object.
+   */
+  kdpc() noexcept { initialize(nullptr, nullptr); }
+
+  /**
+   * @brief Initializes a KDPC object with a callback and context.
+   * @param routine Non-throwing callback invoked when the DPC runs.
+   * @param context User context passed to the callback.
+   */
+  explicit kdpc(routine_type routine, void *context = nullptr) noexcept {
+    initialize(routine, context);
+  }
+
+  kdpc(const kdpc &) = delete;
+  kdpc &operator=(const kdpc &) = delete;
+  kdpc(kdpc &&) = delete;
+  kdpc &operator=(kdpc &&) = delete;
+
+  /**
+   * @brief Attempts to remove a queued DPC during destruction.
+   *
+   * If the DPC is already running, the owner must still synchronize with the
+   * callback before releasing callback state.
+   */
+  ~kdpc() { (void)cancel(); }
+
+  /**
+   * @brief Reinitializes the KDPC callback and context.
+   * @param routine Non-throwing callback invoked when the DPC runs.
+   * @param context User context passed to the callback.
+   */
+  void initialize(routine_type routine, void *context = nullptr) noexcept {
+    routine_ = routine;
+    context_ = context;
+    KeInitializeDpc(&dpc_, &kdpc::invoke, this);
+  }
+
+  /**
+   * @brief Returns the native KDPC pointer.
+   */
+  KDPC *native() noexcept { return &dpc_; }
+
+  /**
+   * @brief Returns the native KDPC pointer.
+   */
+  const KDPC *native() const noexcept { return &dpc_; }
+
+  /**
+   * @brief Queues the DPC directly.
+   * @param system_argument1 First DPC argument.
+   * @param system_argument2 Second DPC argument.
+   * @return true if the DPC was inserted, false if it was already queued.
+   */
+  bool queue(void *system_argument1 = nullptr,
+             void *system_argument2 = nullptr) noexcept {
+    return KeInsertQueueDpc(&dpc_, system_argument1, system_argument2) != FALSE;
+  }
+
+  /**
+   * @brief Attempts to remove a queued DPC.
+   * @return true if the DPC was removed before execution.
+   */
+  bool cancel() noexcept { return KeRemoveQueueDpc(&dpc_) != FALSE; }
+
+private:
+  static void NTAPI invoke(KDPC *, void *deferred_context,
+                           void *system_argument1,
+                           void *system_argument2) noexcept {
+    auto *const self = static_cast<kdpc *>(deferred_context);
+    if (self->routine_)
+      self->routine_(self->context_, system_argument1, system_argument2);
+  }
+
+  KDPC dpc_{};
+  routine_type routine_ = nullptr;
+  void *context_ = nullptr;
+};
+
+/**
+ * @brief RAII wrapper around KTIMER.
+ *
+ * Destruction cancels the timer. If a timer DPC has already been queued or is
+ * running, the owner must still synchronize with that callback before releasing
+ * callback state.
+ */
+class timer {
+public:
+  /**
+   * @brief Initializes a kernel timer object.
+   * @param type Notification or synchronization timer semantics.
+   */
+  explicit timer(timer_type type = timer_type::notification) noexcept {
+    KeInitializeTimerEx(&timer_, to_native_timer_type(type));
+  }
+
+  timer(const timer &) = delete;
+  timer &operator=(const timer &) = delete;
+  timer(timer &&) = delete;
+  timer &operator=(timer &&) = delete;
+
+  /**
+   * @brief Cancels the timer during destruction.
+   */
+  ~timer() { (void)cancel(); }
+
+  /**
+   * @brief Returns the native KTIMER pointer.
+   */
+  KTIMER *native() noexcept { return &timer_; }
+
+  /**
+   * @brief Returns the native KTIMER pointer.
+   */
+  const KTIMER *native() const noexcept { return &timer_; }
+
+  /**
+   * @brief Sets a one-shot timer.
+   * @param due_time Absolute or relative WDK due time.
+   * @param callback Optional DPC to queue when the timer expires.
+   * @return true if the timer was already queued before this call.
+   */
+  bool set_once(LARGE_INTEGER due_time, kdpc *callback = nullptr) noexcept {
+    return KeSetTimer(&timer_, due_time,
+                      callback ? callback->native() : nullptr) != FALSE;
+  }
+
+  /**
+   * @brief Sets a periodic timer.
+   * @param due_time Absolute or relative WDK due time.
+   * @param period_ms Period in milliseconds after the first expiration.
+   * @param callback Optional DPC to queue when the timer expires.
+   * @return true if the timer was already queued before this call.
+   */
+  bool set_periodic(LARGE_INTEGER due_time, LONG period_ms,
+                    kdpc *callback = nullptr) noexcept {
+    return KeSetTimerEx(&timer_, due_time, period_ms,
+                        callback ? callback->native() : nullptr) != FALSE;
+  }
+
+  /**
+   * @brief Cancels the timer.
+   * @return true if the timer was queued and has been canceled.
+   */
+  bool cancel() noexcept { return KeCancelTimer(&timer_) != FALSE; }
+
+  /**
+   * @brief Reads the current signaled state.
+   */
+  LONG read_state() const noexcept {
+    return KeReadStateTimer(const_cast<KTIMER *>(&timer_));
+  }
+
+  /**
+   * @brief Returns true when the timer is currently signaled.
+   */
+  bool signaled() const noexcept { return read_state() != 0; }
+
+  /**
+   * @brief Waits for the timer using common kernel-mode defaults.
+   * @param timeout Optional relative or absolute timeout.
+   * @return STATUS_SUCCESS, STATUS_TIMEOUT, or another wait status.
+   * @note Must be called at an IRQL valid for KeWaitForSingleObject.
+   */
+  ntl::status wait(LARGE_INTEGER *timeout = nullptr) noexcept {
+    return wait(Executive, KernelMode, false, timeout);
+  }
+
+  /**
+   * @brief Waits for the timer using explicit WDK wait parameters.
+   * @param wait_reason WDK wait reason passed to KeWaitForSingleObject.
+   * @param wait_mode KernelMode or UserMode wait mode.
+   * @param alertable Whether the wait is alertable.
+   * @param timeout Optional relative or absolute timeout.
+   * @return STATUS_SUCCESS, STATUS_TIMEOUT, or another wait status.
+   */
+  ntl::status wait(KWAIT_REASON wait_reason, KPROCESSOR_MODE wait_mode,
+                   bool alertable,
+                   LARGE_INTEGER *timeout = nullptr) noexcept {
+    return ntl::status{KeWaitForSingleObject(
+        &timer_, wait_reason, wait_mode, alertable ? TRUE : FALSE, timeout)};
+  }
+
+private:
+  KTIMER timer_{};
+};
+
+} // namespace ntl

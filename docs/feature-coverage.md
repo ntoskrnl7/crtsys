@@ -66,6 +66,7 @@ The driver tests still exercise these features from `PASSIVE_LEVEL`.
 | NTL lookaside list | `ntl::lookaside_list` | Raw nonpaged allocate/free follows WDK lookaside rules; object construction/destruction is `PASSIVE_LEVEL` unless separately audited | Wraps `LOOKASIDE_LIST_EX` for fixed-size kernel object caches while keeping pool kind/tag visible. |
 | NTL symbolic link wrapper | `ntl::symbolic_link` | `PASSIVE_LEVEL` | RAII wrapper over `IoCreateSymbolicLink` / `IoDeleteSymbolicLink` for driver setup and teardown paths. |
 | NTL event wrapper | `ntl::event` | Follows `KEVENT`; blocking `wait()` is `PASSIVE_LEVEL` in NTL usage | Wraps notification and synchronization event setup, signal/reset/clear, state query, and wait. |
+| NTL timer and DPC wrappers | `ntl::timer`, `ntl::kdpc`, `relative_due_time_ms` | Timer setup/cancel follows WDK timer rules; timer waits are `PASSIVE_LEVEL` in NTL usage; DPC callbacks run at `DISPATCH_LEVEL` | Wraps one-shot timers, periodic timers, direct DPC queueing, and timer DPC callbacks. Keep DPC callbacks resident, short, nonblocking, and free of arbitrary STL/CRT work. |
 | NTL work item wrapper | `ntl::work_item`, `ntl::passive_work_item` | `queue()` `<= DISPATCH_LEVEL`; `wait()` and worker callback ownership are `PASSIVE_LEVEL` | Defers resident work to a system worker thread running at `PASSIVE_LEVEL`. |
 | NTL ERESOURCE wrapper | `ntl::resource`, `ntl::unique_lock<ntl::resource>`, `ntl::shared_lock<ntl::resource>` | `<= APC_LEVEL` | Blocking/resource-style synchronization. Do not use in DPC, ISR, or spin-lock-held paths. |
 | NTL spin lock wrapper | `ntl::spin_lock`, `ntl::unique_lock<ntl::spin_lock>` | `<= DISPATCH_LEVEL` | Keep held regions resident, short, nonblocking, and free of allocation, waits, exceptions, streams, and arbitrary STL/runtime helpers. |
@@ -837,6 +838,13 @@ NTL provides C++ helpers for driver code. See the
   - [x] synchronization event auto-reset wait behavior
     [(tested)](../test/cmake/driver/src/ntl.cpp)
     [(docs)](./ntl/event.md)
+- [x] `ntl::timer` / `ntl::kdpc`
+  - [x] direct DPC queue and callback argument forwarding
+  - [x] one-shot synchronization timer wait
+  - [x] one-shot timer with DPC callback
+  - [x] periodic timer setup/cancel path
+    [(tested)](../test/cmake/driver/src/ntl.cpp)
+    [(docs)](./ntl/timer.md)
 - [x] `ntl::work_item` / `ntl::passive_work_item`
   - [x] raw context work item queue/wait path
   - [x] callable work item queued from `DISPATCH_LEVEL` and executed at
