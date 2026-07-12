@@ -67,6 +67,7 @@ The driver tests still exercise these features from `PASSIVE_LEVEL`.
 | NTL symbolic link wrapper | `ntl::symbolic_link` | `PASSIVE_LEVEL` | RAII wrapper over `IoCreateSymbolicLink` / `IoDeleteSymbolicLink` for driver setup and teardown paths. |
 | NTL event wrapper | `ntl::event` | Follows `KEVENT`; blocking `wait()` is `PASSIVE_LEVEL` in NTL usage | Wraps notification and synchronization event setup, signal/reset/clear, state query, and wait. |
 | NTL timer and DPC wrappers | `ntl::timer`, `ntl::kdpc`, `relative_due_time_ms` | Timer setup/cancel follows WDK timer rules; timer waits are `PASSIVE_LEVEL` in NTL usage; DPC callbacks run at `DISPATCH_LEVEL` | Wraps one-shot timers, periodic timers, direct DPC queueing, and timer DPC callbacks. Keep DPC callbacks resident, short, nonblocking, and free of arbitrary STL/CRT work. |
+| NTL system thread wrapper | `ntl::system_thread` | `PASSIVE_LEVEL` | Wraps `PsCreateSystemThread` as a native WDK thread-handle owner. Use `std::thread` for standard C++ threading; use this when driver code needs `NTSTATUS`, `OBJECT_ATTRIBUTES`, `CLIENT_ID`, or explicit `ZwClose` ownership. |
 | NTL work item wrapper | `ntl::work_item`, `ntl::passive_work_item` | `queue()` `<= DISPATCH_LEVEL`; `wait()` and worker callback ownership are `PASSIVE_LEVEL` | Defers resident work to a system worker thread running at `PASSIVE_LEVEL`. |
 | NTL ERESOURCE wrapper | `ntl::resource`, `ntl::unique_lock<ntl::resource>`, `ntl::shared_lock<ntl::resource>` | `<= APC_LEVEL` | Blocking/resource-style synchronization. Do not use in DPC, ISR, or spin-lock-held paths. |
 | NTL spin lock wrapper | `ntl::spin_lock`, `ntl::unique_lock<ntl::spin_lock>` | `<= DISPATCH_LEVEL` | Keep held regions resident, short, nonblocking, and free of allocation, waits, exceptions, streams, and arbitrary STL/runtime helpers. |
@@ -845,6 +846,13 @@ NTL provides C++ helpers for driver code. See the
   - [x] periodic timer setup/cancel path
     [(tested)](../test/cmake/driver/src/ntl.cpp)
     [(docs)](./ntl/timer.md)
+- [x] `ntl::system_thread`
+  - [x] `PsCreateSystemThread` creation through `ntl::result`
+  - [x] thread routine execution at `PASSIVE_LEVEL`
+  - [x] `join()` wait and handle close
+  - [x] move, release, adopt ownership paths
+    [(tested)](../test/cmake/driver/src/ntl.cpp)
+    [(docs)](./ntl/system-thread.md)
 - [x] `ntl::work_item` / `ntl::passive_work_item`
   - [x] raw context work item queue/wait path
   - [x] callable work item queued from `DISPATCH_LEVEL` and executed at

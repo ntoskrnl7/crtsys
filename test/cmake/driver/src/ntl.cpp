@@ -8,6 +8,7 @@
 #include <ntl/registry>
 #include <ntl/result>
 #include <ntl/symbolic_link>
+#include <ntl/system_thread>
 #include <ntl/timer>
 #include <ntl/unicode_string>
 #include <ntl/work_item>
@@ -83,6 +84,11 @@ struct timer_dpc_test_context {
   ntl::irql observed_irql = ntl::irql::passive;
 };
 
+struct system_thread_test_context {
+  volatile LONG value = 0;
+  ntl::irql observed_irql = ntl::irql::dispatch;
+};
+
 void timer_dpc_test_routine(void *context, void *system_argument1,
                             void *system_argument2) noexcept {
   auto *const state = static_cast<timer_dpc_test_context *>(context);
@@ -91,6 +97,13 @@ void timer_dpc_test_routine(void *context, void *system_argument1,
   state->observed_irql = ntl::current_irql();
   InterlockedIncrement(&state->count);
   state->fired.set();
+}
+
+void system_thread_test_routine(void *context) {
+  auto *const state = static_cast<system_thread_test_context *>(context);
+  state->observed_irql = ntl::current_irql();
+  InterlockedExchange(&state->value, 42);
+  PsTerminateSystemThread(STATUS_SUCCESS);
 }
 
 void work_item_test_routine(void *context) noexcept {
@@ -935,6 +948,44 @@ bool ntl_timer_dpc_test() {
   return !cancel_timer.signaled();
 }
 
+bool ntl_system_thread_test() {
+  system_thread_test_context context;
+  auto created = ntl::system_thread::create(system_thread_test_routine,
+                                            &context);
+  if (!created || !created->get())
+    return false;
+
+  ntl::system_thread thread(std::move(*created));
+  auto timeout = ntl::relative_due_time_ms(5000);
+  if (static_cast<NTSTATUS>(thread.join(&timeout)) != STATUS_SUCCESS)
+    return false;
+  if (thread || context.value != 42 ||
+      context.observed_irql != ntl::irql::passive)
+    return false;
+
+  system_thread_test_context moved_context;
+  auto moved_created = ntl::system_thread::create(system_thread_test_routine,
+                                                  &moved_context);
+  if (!moved_created || !moved_created->get())
+    return false;
+
+  ntl::system_thread moved_thread(std::move(*moved_created));
+  if (!moved_thread)
+    return false;
+
+  HANDLE const released_handle = moved_thread.release();
+  if (moved_thread || !released_handle)
+    return false;
+
+  ntl::system_thread adopted_thread(released_handle);
+  timeout = ntl::relative_due_time_ms(5000);
+  if (static_cast<NTSTATUS>(adopted_thread.join(&timeout)) != STATUS_SUCCESS)
+    return false;
+
+  return !adopted_thread && moved_context.value == 42 &&
+         moved_context.observed_irql == ntl::irql::passive;
+}
+
 bool ntl_work_item_test() {
   work_item_test_context raw_context;
 
@@ -1211,6 +1262,10 @@ TEST(ntl_test, ntl_event_test) {
 
 TEST(ntl_test, ntl_timer_dpc_test) {
   EXPECT_TRUE(ntl_timer_dpc_test());
+}
+
+TEST(ntl_test, ntl_system_thread_test) {
+  EXPECT_TRUE(ntl_system_thread_test());
 }
 
 TEST(ntl_test, ntl_work_item_test) {

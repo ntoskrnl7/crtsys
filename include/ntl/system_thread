@@ -1,0 +1,167 @@
+/**
+ * @file system_thread
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief PsCreateSystemThread ownership helper.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "handle"
+#include "result"
+#include "status"
+
+#ifndef _NTDDK_
+#include <wdm.h>
+#endif
+
+#include <utility>
+
+extern "C" NTSYSAPI NTSTATUS NTAPI
+ZwWaitForSingleObject(HANDLE Handle, BOOLEAN Alertable,
+                      PLARGE_INTEGER Timeout);
+
+namespace ntl {
+
+/**
+ * @brief RAII owner for a kernel system thread handle.
+ *
+ * The wrapper owns only the thread handle returned by PsCreateSystemThread. It
+ * does not forcibly stop the thread. Call join() before releasing callback state
+ * that the thread routine can still touch.
+ */
+class system_thread {
+public:
+  /**
+   * @brief WDK system-thread routine shape.
+   */
+  using routine_type = PKSTART_ROUTINE;
+
+  /**
+   * @brief Creates an empty thread handle owner.
+   */
+  system_thread() noexcept = default;
+
+  /**
+   * @brief Takes ownership of an already-created system thread handle.
+   * @param handle Thread handle to close with ZwClose.
+   */
+  explicit system_thread(HANDLE handle) noexcept : handle_(handle) {}
+
+  system_thread(const system_thread &) = delete;
+  system_thread &operator=(const system_thread &) = delete;
+
+  /**
+   * @brief Transfers thread-handle ownership from another object.
+   */
+  system_thread(system_thread &&other) noexcept
+      : handle_(std::move(other.handle_)) {}
+
+  /**
+   * @brief Transfers thread-handle ownership from another object.
+   */
+  system_thread &operator=(system_thread &&other) noexcept {
+    if (this == &other)
+      return *this;
+
+    handle_ = std::move(other.handle_);
+    return *this;
+  }
+
+  /**
+   * @brief Closes the handle, if still owned.
+   *
+   * Closing the handle does not terminate the system thread.
+   */
+  ~system_thread() = default;
+
+  /**
+   * @brief Creates a kernel system thread.
+   * @param routine Routine invoked by the system thread.
+   * @param context Opaque routine context.
+   * @param desired_access Access mask for the returned thread handle.
+   * @param object_attributes Optional native object attributes.
+   * @param process_handle Optional process handle; nullptr creates a system process thread.
+   * @param client_id Optional client ID output.
+   * @return A system_thread owner or the PsCreateSystemThread failure status.
+   */
+  [[nodiscard]] static ntl::result<system_thread>
+  create(routine_type routine, void *context = nullptr,
+         ACCESS_MASK desired_access = SYNCHRONIZE,
+         POBJECT_ATTRIBUTES object_attributes = nullptr,
+         HANDLE process_handle = nullptr,
+         PCLIENT_ID client_id = nullptr) noexcept {
+    if (!routine)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+
+    ntl::unique_kernel_handle handle;
+    const auto status = PsCreateSystemThread(
+        handle.put(), desired_access, object_attributes, process_handle,
+        client_id, routine, context);
+    if (!NT_SUCCESS(status))
+      return ntl::unexpected(status);
+
+    return ntl::ok(system_thread{handle.release()});
+  }
+
+  /**
+   * @brief Returns true when a thread handle is owned.
+   */
+  bool valid() const noexcept { return static_cast<bool>(handle_); }
+
+  /**
+   * @brief Returns true when a thread handle is owned.
+   */
+  explicit operator bool() const noexcept { return valid(); }
+
+  /**
+   * @brief Returns the owned native thread handle without releasing it.
+   */
+  HANDLE get() const noexcept { return handle_.get(); }
+
+  /**
+   * @brief Waits for the system thread to terminate.
+   * @param timeout Optional relative or absolute timeout.
+   * @return STATUS_SUCCESS, STATUS_TIMEOUT, or another wait status.
+   * @note Must be called at an IRQL valid for ZwWaitForSingleObject.
+   */
+  ntl::status wait(LARGE_INTEGER *timeout = nullptr) noexcept {
+    if (!handle_)
+      return ntl::status{STATUS_INVALID_DEVICE_STATE};
+
+    return ntl::status{ZwWaitForSingleObject(handle_.get(), FALSE, timeout)};
+  }
+
+  /**
+   * @brief Waits for termination and closes the thread handle on success.
+   * @param timeout Optional relative or absolute timeout.
+   * @return Wait status, or close status if wait succeeded but ZwClose failed.
+   */
+  ntl::status join(LARGE_INTEGER *timeout = nullptr) noexcept {
+    const auto wait_status = wait(timeout);
+    if (static_cast<NTSTATUS>(wait_status) != STATUS_SUCCESS)
+      return wait_status;
+
+    return handle_.close();
+  }
+
+  /**
+   * @brief Closes the owned thread handle without waiting for thread exit.
+   */
+  ntl::status close() noexcept { return handle_.close(); }
+
+  /**
+   * @brief Closes the current thread handle, ignoring close failure.
+   */
+  void reset(HANDLE handle = nullptr) noexcept { handle_.reset(handle); }
+
+  /**
+   * @brief Releases ownership without closing the thread handle.
+   */
+  HANDLE release() noexcept { return handle_.release(); }
+
+private:
+  ntl::unique_kernel_handle handle_;
+};
+
+} // namespace ntl

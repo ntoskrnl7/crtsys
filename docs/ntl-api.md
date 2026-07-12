@@ -23,6 +23,7 @@ The detailed API reference is split by topic:
 | [Synchronization](./ntl/synchronization.md) | `ntl::irql`, IRQL contract helpers, spin locks, ERESOURCE wrapper |
 | [Event](./ntl/event.md) | `KEVENT` wrapper for notification/synchronization events |
 | [Timer and DPC](./ntl/timer.md) | `ntl::timer`, `ntl::kdpc`, one-shot timers, periodic timers, direct DPC queueing |
+| [System thread](./ntl/system-thread.md) | `ntl::system_thread`, `PsCreateSystemThread`, `join`, native thread-handle ownership |
 | [Work item](./ntl/work-item.md) | Deferring resident work to a `PASSIVE_LEVEL` system worker thread |
 | [Pool allocator](./ntl/pool-allocator.md) | Kernel pool-backed ownership helpers, STL allocators, PMR resources, pool tags, IRQL rules |
 | [Lookaside list](./ntl/lookaside-list.md) | Fixed-size kernel object cache wrapper over `LOOKASIDE_LIST_EX` |
