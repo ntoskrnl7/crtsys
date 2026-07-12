@@ -8,6 +8,8 @@
  */
 #pragma once
 
+#include "status"
+
 #include <ntddk.h>
 
 namespace ntl {
@@ -92,22 +94,58 @@ private:
 /**
  * @brief Raises to an explicit KIRQL and returns an RAII guard.
  */
-raised_irql raise_irql(KIRQL irql) {
+inline raised_irql raise_irql(KIRQL irql) {
   return raised_irql{static_cast<ntl::irql>(irql)};
 }
 
 /**
  * @brief Raises to DISPATCH_LEVEL and returns an RAII guard.
  */
-raised_irql raise_irql_to_dpc_level() { return raised_irql{to_dpc_level}; }
+inline raised_irql raise_irql_to_dpc_level() {
+  return raised_irql{to_dpc_level};
+}
 
 /**
  * @brief Raises to SYNCH_LEVEL and returns an RAII guard.
  */
-raised_irql raise_irql_to_synch_level() { return raised_irql{to_synch_level}; }
+inline raised_irql raise_irql_to_synch_level() {
+  return raised_irql{to_synch_level};
+}
 
 /**
  * @brief Returns the current processor IRQL.
  */
-ntl::irql current_irql() { return static_cast<ntl::irql>(KeGetCurrentIrql()); }
+inline ntl::irql current_irql() {
+  return static_cast<ntl::irql>(KeGetCurrentIrql());
+}
+
+/**
+ * @brief Returns true when the current processor is running at PASSIVE_LEVEL.
+ */
+inline bool is_passive_level() noexcept {
+  return current_irql() == ntl::irql::passive;
+}
+
+/**
+ * @brief Returns true when the current processor IRQL is at or below maximum.
+ */
+inline bool is_irql_at_most(ntl::irql maximum) noexcept {
+  return static_cast<KIRQL>(current_irql()) <= static_cast<KIRQL>(maximum);
+}
+
+/**
+ * @brief Requires PASSIVE_LEVEL and returns STATUS_INVALID_DEVICE_STATE otherwise.
+ */
+inline ntl::status require_passive_level() noexcept {
+  return is_passive_level() ? ntl::status::ok()
+                            : ntl::status{STATUS_INVALID_DEVICE_STATE};
+}
+
+/**
+ * @brief Requires current IRQL to be at or below maximum.
+ */
+inline ntl::status require_irql_at_most(ntl::irql maximum) noexcept {
+  return is_irql_at_most(maximum) ? ntl::status::ok()
+                                  : ntl::status{STATUS_INVALID_DEVICE_STATE};
+}
 } // namespace ntl

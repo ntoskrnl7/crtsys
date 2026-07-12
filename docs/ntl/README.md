@@ -18,7 +18,7 @@ Use these pages when you want more detail than the compact
 | [Result](./result.md) | `NTSTATUS`-backed value-or-error helper for driver control paths |
 | [Driver, device, and IRP helpers](./driver-device-irp.md) | `ntl::main`, `ntl::driver`, `ntl::device`, dispatch callbacks, and `ntl::irp` |
 | [RPC](./rpc.md) | Kernel/user RPC schema macros, server lifetime, client calls, and stable callback IDs |
-| [Synchronization](./synchronization.md) | `ntl::irql`, spin locks, ERESOURCE wrapper, and lock helpers |
+| [Synchronization](./synchronization.md) | `ntl::irql`, IRQL query/contract helpers, spin locks, ERESOURCE wrapper, and lock helpers |
 | [Event](./event.md) | `KEVENT` wrapper for notification/synchronization events |
 | [Work item](./work-item.md) | Deferring resident work to a `PASSIVE_LEVEL` system worker thread |
 | [Pool allocator](./pool-allocator.md) | Kernel pool-backed ownership helpers, STL allocators, PMR resources, pool tags, and IRQL rules |

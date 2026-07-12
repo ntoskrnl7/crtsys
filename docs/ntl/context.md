@@ -24,6 +24,10 @@ decision for the exact operation in question.
 If an NTL helper owns C++ objects, stores callbacks, uses STL containers, can
 throw, or may allocate, treat it as `PASSIVE_LEVEL`.
 
+Use `ntl::require_passive_level()` or `ntl::require_irql_at_most()` at API
+boundaries when the driver should report an `NTSTATUS` instead of relying on a
+comment-only contract.
+
 If an NTL helper is a thin wrapper over a WDK primitive, follow the primitive's
 native contract and the extra notes on the topic page.
 

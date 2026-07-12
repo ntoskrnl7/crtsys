@@ -118,6 +118,7 @@ set(CRTSYS_NTL_MAIN ON)
 find_package(crtsys CONFIG REQUIRED PATHS "$cmakeBundleRoot" NO_DEFAULT_PATH)
 
 crtsys_add_driver(crtsys_release_asset_smoke main.cpp)
+target_compile_features(crtsys_release_asset_smoke PRIVATE cxx_std_17)
 "@
 Set-Content -LiteralPath (Join-Path $consumerDirectory 'CMakeLists.txt') -Value $cmakeLists -Encoding UTF8
 

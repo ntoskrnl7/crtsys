@@ -18,6 +18,10 @@ Helpers:
 - `ntl::raise_irql_to_dpc_level()`
 - `ntl::raise_irql_to_synch_level()`
 - `ntl::current_irql()`
+- `ntl::is_passive_level()`
+- `ntl::is_irql_at_most(maximum)`
+- `ntl::require_passive_level()`
+- `ntl::require_irql_at_most(maximum)`
 
 Example:
 
@@ -26,8 +30,24 @@ auto raised = ntl::raise_irql_to_dpc_level();
 // Do a short audited DPC-level operation here.
 ```
 
+Contract check example:
+
+```cpp
+ntl::status query_runtime_backed_state() {
+  auto s = ntl::require_passive_level();
+  if (!s.is_ok()) {
+    return s;
+  }
+
+  // Safe place for code documented as PASSIVE_LEVEL-only.
+  return ntl::status::ok();
+}
+```
+
 IRQL: these helpers explicitly manipulate or observe IRQL. Keep raised scopes
-as small as possible.
+as small as possible. `require_passive_level()` and
+`require_irql_at_most()` return `STATUS_INVALID_DEVICE_STATE` when the current
+IRQL violates the requested contract; they do not throw.
 
 ## Spin Lock
 
