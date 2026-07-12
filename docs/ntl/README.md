@@ -24,6 +24,7 @@ Use these pages when you want more detail than the compact
 | [Event](./event.md) | `KEVENT` wrapper for notification/synchronization events |
 | [Timer and DPC](./timer.md) | `KTIMER` and `KDPC` wrappers for one-shot timers, periodic timers, and DPC queueing |
 | [System thread](./system-thread.md) | `PsCreateSystemThread` helper with `NTSTATUS` results and `ZwClose` handle ownership |
+| [Wait helpers](./wait.md) | Common timeout and wait-status helpers for event, timer, and system-thread wrappers |
 | [Work item](./work-item.md) | Deferring resident work to a `PASSIVE_LEVEL` system worker thread |
 | [Passive executor](./passive-executor.md) | Inline-or-defer policy for running callables at `PASSIVE_LEVEL` |
 | [Pool allocator](./pool-allocator.md) | Kernel pool-backed ownership helpers, STL allocators, PMR resources, pool tags, and IRQL rules |

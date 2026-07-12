@@ -24,6 +24,7 @@ The detailed API reference is split by topic:
 | [Event](./ntl/event.md) | `KEVENT` wrapper for notification/synchronization events |
 | [Timer and DPC](./ntl/timer.md) | `ntl::timer`, `ntl::kdpc`, one-shot timers, periodic timers, direct DPC queueing |
 | [System thread](./ntl/system-thread.md) | `ntl::system_thread`, `PsCreateSystemThread`, `join`, native thread-handle ownership |
+| [Wait helpers](./ntl/wait.md) | `ntl::zero_timeout`, `ntl::relative_timeout_ms`, `ntl::try_wait`, `ntl::wait_for` |
 | [Work item](./ntl/work-item.md) | Deferring resident work to a `PASSIVE_LEVEL` system worker thread |
 | [Passive executor](./ntl/passive-executor.md) | `ntl::passive_executor`, inline PASSIVE execution, detached nonpaged work posting |
 | [Pool allocator](./ntl/pool-allocator.md) | Kernel pool-backed ownership helpers, STL allocators, PMR resources, pool tags, IRQL rules |

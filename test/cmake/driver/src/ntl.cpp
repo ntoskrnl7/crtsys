@@ -12,6 +12,7 @@
 #include <ntl/system_thread>
 #include <ntl/timer>
 #include <ntl/unicode_string>
+#include <ntl/wait>
 #include <ntl/work_item>
 
 #include <memory_resource>
@@ -83,6 +84,16 @@ struct passive_executor_test_context {
   std::atomic<ntl::irql> observed_irql{ntl::irql::dispatch};
 };
 
+struct dpc_passive_executor_test_context {
+  ntl::event dpc_completed{ntl::event_type::notification, false};
+  ntl::event passive_completed{ntl::event_type::notification, false};
+  ntl::passive_executor *executor = nullptr;
+  std::atomic<long> value{0};
+  std::atomic<NTSTATUS> post_status{STATUS_UNSUCCESSFUL};
+  std::atomic<ntl::irql> dpc_irql{ntl::irql::passive};
+  std::atomic<ntl::irql> passive_irql{ntl::irql::dispatch};
+};
+
 struct timer_dpc_test_context {
   ntl::event fired{ntl::event_type::notification, false};
   std::atomic<long> count{0};
@@ -104,6 +115,27 @@ void timer_dpc_test_routine(void *context, void *system_argument1,
   state->observed_irql.store(ntl::current_irql());
   state->count.fetch_add(1);
   state->fired.set();
+}
+
+void dpc_to_passive_executor_test_routine(void *context, void *,
+                                          void *) noexcept {
+  auto *const state =
+      static_cast<dpc_passive_executor_test_context *>(context);
+  state->dpc_irql.store(ntl::current_irql());
+
+  if (!state->executor) {
+    state->post_status.store(STATUS_INVALID_DEVICE_STATE);
+    state->dpc_completed.set();
+    return;
+  }
+
+  const auto status = state->executor->post([state] {
+    state->passive_irql.store(ntl::current_irql());
+    state->value.store(15);
+    state->passive_completed.set();
+  });
+  state->post_status.store(static_cast<NTSTATUS>(status));
+  state->dpc_completed.set();
 }
 
 void system_thread_test_routine(void *context) {
@@ -993,6 +1025,40 @@ bool ntl_system_thread_test() {
          moved_context.observed_irql.load() == ntl::irql::passive;
 }
 
+bool ntl_wait_helpers_test() {
+  ntl::event notification;
+  const auto first_probe = ntl::try_wait(notification);
+  if (!ntl::wait_timed_out(first_probe))
+    return false;
+
+  notification.set();
+  if (!ntl::wait_signaled(ntl::try_wait(notification)))
+    return false;
+
+  ntl::timer synchronization_timer(ntl::timer_type::synchronization);
+  if (synchronization_timer.set_once(ntl::relative_timeout_ms(10)))
+    return false;
+  if (!ntl::wait_signaled(ntl::wait_for(synchronization_timer, 1000)))
+    return false;
+  if (ntl::wait_signaled(ntl::try_wait(synchronization_timer)))
+    return false;
+
+  system_thread_test_context thread_context;
+  auto created = ntl::system_thread::create(system_thread_test_routine,
+                                            &thread_context);
+  if (!created || !created->get())
+    return false;
+
+  ntl::system_thread thread(std::move(*created));
+  if (!ntl::wait_signaled(ntl::wait_for(thread, 5000)))
+    return false;
+  if (!thread.close().is_ok())
+    return false;
+
+  return thread_context.value.load() == 42 &&
+         thread_context.observed_irql.load() == ntl::irql::passive;
+}
+
 bool ntl_work_item_test() {
   work_item_test_context raw_context;
 
@@ -1077,6 +1143,25 @@ bool ntl_passive_executor_test() {
     return false;
   if (deferred_context.value.load() != 13 ||
       deferred_context.observed_irql.load() != ntl::irql::passive)
+    return false;
+
+  dpc_passive_executor_test_context dpc_context;
+  dpc_context.executor = &executor;
+  ntl::kdpc dpc(dpc_to_passive_executor_test_routine, &dpc_context);
+  if (!dpc.queue())
+    return false;
+  timeout = ntl::relative_due_time_ms(5000);
+  if (!dpc_context.dpc_completed.wait(&timeout).is_ok())
+    return false;
+  if (static_cast<NTSTATUS>(dpc_context.post_status.load()) !=
+      STATUS_SUCCESS)
+    return false;
+  timeout = ntl::relative_due_time_ms(5000);
+  if (!dpc_context.passive_completed.wait(&timeout).is_ok())
+    return false;
+  if (dpc_context.dpc_irql.load() != ntl::irql::dispatch ||
+      dpc_context.passive_irql.load() != ntl::irql::passive ||
+      dpc_context.value.load() != 15)
     return false;
 
   std::atomic<long> owned_value{0};
@@ -1329,6 +1414,10 @@ TEST(ntl_test, ntl_timer_dpc_test) {
 
 TEST(ntl_test, ntl_system_thread_test) {
   EXPECT_TRUE(ntl_system_thread_test());
+}
+
+TEST(ntl_test, ntl_wait_helpers_test) {
+  EXPECT_TRUE(ntl_wait_helpers_test());
 }
 
 TEST(ntl_test, ntl_work_item_test) {

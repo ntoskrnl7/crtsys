@@ -1,0 +1,72 @@
+/**
+ * @file wait
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Common wait helpers for NTL waitable wrappers.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "status"
+
+#ifndef _NTDDK_
+#include <wdm.h>
+#endif
+
+namespace ntl {
+
+/**
+ * @brief Creates a zero timeout for nonblocking wait probes.
+ */
+inline LARGE_INTEGER zero_timeout() noexcept {
+  LARGE_INTEGER timeout{};
+  timeout.QuadPart = 0;
+  return timeout;
+}
+
+/**
+ * @brief Creates a relative wait timeout from milliseconds.
+ * @param milliseconds Relative delay in milliseconds.
+ * @return Negative 100ns-based LARGE_INTEGER for WDK wait APIs.
+ */
+inline LARGE_INTEGER relative_timeout_ms(LONGLONG milliseconds) noexcept {
+  LARGE_INTEGER timeout{};
+  timeout.QuadPart = -(milliseconds * 10000);
+  return timeout;
+}
+
+/**
+ * @brief Returns true when a wait status completed by signal.
+ */
+inline bool wait_signaled(ntl::status status) noexcept {
+  return static_cast<NTSTATUS>(status) == STATUS_SUCCESS;
+}
+
+/**
+ * @brief Returns true when a wait status completed by timeout.
+ */
+inline bool wait_timed_out(ntl::status status) noexcept {
+  return static_cast<NTSTATUS>(status) == STATUS_TIMEOUT;
+}
+
+/**
+ * @brief Performs a nonblocking wait probe.
+ * @param waitable NTL object exposing wait(LARGE_INTEGER*).
+ */
+template <class Waitable> ntl::status try_wait(Waitable &waitable) noexcept {
+  auto timeout = ntl::zero_timeout();
+  return waitable.wait(&timeout);
+}
+
+/**
+ * @brief Waits for a relative millisecond timeout.
+ * @param waitable NTL object exposing wait(LARGE_INTEGER*).
+ * @param milliseconds Relative timeout in milliseconds.
+ */
+template <class Waitable>
+ntl::status wait_for(Waitable &waitable, LONGLONG milliseconds) noexcept {
+  auto timeout = ntl::relative_timeout_ms(milliseconds);
+  return waitable.wait(&timeout);
+}
+
+} // namespace ntl

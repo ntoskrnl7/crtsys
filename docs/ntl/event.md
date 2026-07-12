@@ -10,6 +10,9 @@ sequence at each call site.
 
 Header: [`include/ntl/event`](../../include/ntl/event)
 
+For common timeout helpers such as `ntl::try_wait()` and `ntl::wait_for()`, see
+[`ntl::wait`](./wait.md).
+
 ## Example
 
 ```cpp

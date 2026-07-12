@@ -169,6 +169,50 @@ you want to reuse the handle or control the output buffer size.
 
 The driver must be loaded before the app can open the RPC device.
 
+## DPC To Passive Worker
+
+DPC and timer callbacks run at elevated IRQL. They should stay short and avoid
+arbitrary STL/CRT work. A common pattern is to let the DPC capture resident
+state and use `ntl::passive_executor` for the real work.
+
+```cpp
+#include <atomic>
+#include <ntl/event>
+#include <ntl/passive_executor>
+#include <ntl/timer>
+#include <ntl/wait>
+
+struct cleanup_context {
+  ntl::passive_executor executor;
+  ntl::event completed;
+  std::atomic<long> value = 0;
+};
+
+void on_timer_dpc(void* context, void*, void*) noexcept {
+  auto* state = static_cast<cleanup_context*>(context);
+
+  // The DPC remains tiny. The lambda runs later at PASSIVE_LEVEL.
+  (void)state->executor.post([state] {
+    state->value.store(42);
+    state->completed.set();
+  });
+}
+
+cleanup_context state;
+ntl::kdpc dpc(on_timer_dpc, &state);
+ntl::timer timer;
+
+timer.set_once(ntl::relative_due_time_ms(10), &dpc);
+
+auto timeout = ntl::relative_timeout_ms(1000);
+(void)state.completed.wait(&timeout);
+```
+
+The context, executor, DPC, timer, and any captured objects must remain valid
+until the timer/DPC has been canceled or drained and the passive work has
+completed. This is still normal WDK lifetime management; NTL only makes the
+ownership and handoff shape easier to express.
+
 ## Raw IOCTL Skeleton
 
 RPC is only a convenience layer. You can still expose a normal device and handle

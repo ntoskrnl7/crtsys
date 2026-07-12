@@ -8,6 +8,7 @@
 #pragma once
 
 #include "status"
+#include "wait"
 
 #ifndef _NTDDK_
 #include <wdm.h>
@@ -45,9 +46,7 @@ inline TIMER_TYPE to_native_timer_type(timer_type type) noexcept {
  * @return Negative 100ns-based LARGE_INTEGER for KeSetTimer/KeSetTimerEx.
  */
 inline LARGE_INTEGER relative_due_time_ms(LONGLONG milliseconds) noexcept {
-  LARGE_INTEGER due_time{};
-  due_time.QuadPart = -(milliseconds * 10000);
-  return due_time;
+  return ntl::relative_timeout_ms(milliseconds);
 }
 
 /**

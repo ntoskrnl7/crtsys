@@ -68,6 +68,7 @@ The driver tests still exercise these features from `PASSIVE_LEVEL`.
 | NTL event wrapper | `ntl::event` | Follows `KEVENT`; blocking `wait()` is `PASSIVE_LEVEL` in NTL usage | Wraps notification and synchronization event setup, signal/reset/clear, state query, and wait. |
 | NTL timer and DPC wrappers | `ntl::timer`, `ntl::kdpc`, `relative_due_time_ms` | Timer setup/cancel follows WDK timer rules; timer waits are `PASSIVE_LEVEL` in NTL usage; DPC callbacks run at `DISPATCH_LEVEL` | Wraps one-shot timers, periodic timers, direct DPC queueing, and timer DPC callbacks. Keep DPC callbacks resident, short, nonblocking, and free of arbitrary STL/CRT work. |
 | NTL system thread wrapper | `ntl::system_thread` | `PASSIVE_LEVEL` | Wraps `PsCreateSystemThread` as a native WDK thread-handle owner. Use `std::thread` for standard C++ threading; use this when driver code needs `NTSTATUS`, `OBJECT_ATTRIBUTES`, `CLIENT_ID`, or explicit `ZwClose` ownership. |
+| NTL wait helpers | `ntl::try_wait`, `ntl::wait_for`, `ntl::zero_timeout`, `ntl::relative_timeout_ms` | Follows the waited object's native contract; blocking waits are `PASSIVE_LEVEL` in NTL usage | Shared timeout and status-classification helpers for event, timer, and system-thread wrappers. |
 | NTL work item / passive executor | `ntl::work_item`, `ntl::passive_work_item`, `ntl::passive_executor` | `queue()` / `post()` `<= DISPATCH_LEVEL`; `wait()` / `queue_and_wait()` are `PASSIVE_LEVEL` | Defers resident work to a system worker thread running at `PASSIVE_LEVEL`; executor can run inline when already passive. |
 | NTL ERESOURCE wrapper | `ntl::resource`, `ntl::unique_lock<ntl::resource>`, `ntl::shared_lock<ntl::resource>` | `<= APC_LEVEL` | Blocking/resource-style synchronization. Do not use in DPC, ISR, or spin-lock-held paths. |
 | NTL spin lock wrapper | `ntl::spin_lock`, `ntl::unique_lock<ntl::spin_lock>` | `<= DISPATCH_LEVEL` | Keep held regions resident, short, nonblocking, and free of allocation, waits, exceptions, streams, and arbitrary STL/runtime helpers. |
@@ -853,6 +854,12 @@ NTL provides C++ helpers for driver code. See the
   - [x] move, release, adopt ownership paths
     [(tested)](../test/cmake/driver/src/ntl.cpp)
     [(docs)](./ntl/system-thread.md)
+- [x] `ntl::wait`
+  - [x] zero-timeout `try_wait`
+  - [x] `wait_signaled` / `wait_timed_out` classification
+  - [x] `wait_for` with timer and system-thread wrappers
+    [(tested)](../test/cmake/driver/src/ntl.cpp)
+    [(docs)](./ntl/wait.md)
 - [x] `ntl::work_item` / `ntl::passive_work_item`
   - [x] raw context work item queue/wait path
   - [x] callable work item queued from `DISPATCH_LEVEL` and executed at
@@ -864,6 +871,7 @@ NTL provides C++ helpers for driver code. See the
   - [x] inline execution at `PASSIVE_LEVEL`
   - [x] detached nonpaged work posting
   - [x] raised-IRQL `execute()` deferral
+  - [x] DPC callback handoff through `post()`
   - [x] caller-owned work item `queue_and_wait()`
     [(tested)](../test/cmake/driver/src/ntl.cpp)
     [(docs)](./ntl/passive-executor.md)

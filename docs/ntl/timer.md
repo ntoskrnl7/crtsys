@@ -30,17 +30,19 @@ if (!wait_status.is_ok()) {
 
 `ntl::relative_due_time_ms(ms)` returns the negative 100ns-based `LARGE_INTEGER`
 format used by `KeSetTimer` and `KeSetTimerEx` for relative due times.
+`ntl::relative_timeout_ms(ms)` in [`ntl::wait`](./wait.md) uses the same
+relative timeout encoding for wait calls.
 
 ## Timer With DPC
 
 ```cpp
 struct timer_context {
-  volatile LONG fired = 0;
+  std::atomic<long> fired = 0;
 };
 
 void on_timer(void* context, void*, void*) noexcept {
   auto* state = static_cast<timer_context*>(context);
-  InterlockedIncrement(&state->fired);
+  state->fired.fetch_add(1);
 }
 
 timer_context state;
@@ -86,6 +88,7 @@ synchronization before its state is released.
 
 - `ntl::timer_type`
 - `ntl::relative_due_time_ms(milliseconds)`
+- `ntl::relative_timeout_ms(milliseconds)` from [`ntl::wait`](./wait.md)
 - `ntl::kdpc`
   - `kdpc(routine, context)`
   - `initialize(routine, context)`
@@ -110,7 +113,8 @@ synchronization before its state is released.
 - DPC callbacks run at `DISPATCH_LEVEL`. Do not allocate paged memory, block,
   throw, call streams, or run arbitrary STL/CRT code from the callback.
 - If DPC work needs STL/CRT, capture only the minimal state in the DPC and queue
-  an [`ntl::work_item`](./work-item.md) or other PASSIVE_LEVEL path.
+  an [`ntl::passive_executor`](./passive-executor.md),
+  [`ntl::work_item`](./work-item.md), or other PASSIVE_LEVEL path.
 
 ## Driver Test Coverage
 
