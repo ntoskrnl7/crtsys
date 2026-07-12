@@ -1,6 +1,7 @@
 #include <ntl/event>
 #include <ntl/expand_stack>
 #include <ntl/except>
+#include <ntl/handle>
 #include <ntl/irql>
 #include <ntl/lookaside_list>
 #include <ntl/pool_allocator>
@@ -16,6 +17,11 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+extern "C" NTSYSAPI NTSTATUS NTAPI
+ZwCreateEvent(_Out_ PHANDLE EventHandle, _In_ ACCESS_MASK DesiredAccess,
+              _In_opt_ POBJECT_ATTRIBUTES ObjectAttributes,
+              _In_ EVENT_TYPE EventType, _In_ BOOLEAN InitialState);
 
 namespace {
 volatile NTSTATUS g_seh_test_status = STATUS_ACCESS_VIOLATION;
@@ -607,6 +613,51 @@ bool ntl_result_test() {
   return caught_void_exception;
 }
 
+bool ntl_handle_object_test() {
+  ntl::unique_kernel_handle handle;
+  const auto create_status =
+      ZwCreateEvent(handle.put(), EVENT_MODIFY_STATE | SYNCHRONIZE, nullptr,
+                    NotificationEvent, FALSE);
+  if (!NT_SUCCESS(create_status) || !handle)
+    return false;
+
+  auto event_ref = ntl::try_reference_object_by_handle<PKEVENT>(
+      handle.get(), EVENT_MODIFY_STATE, *ExEventObjectType);
+  if (!event_ref || !event_ref->get())
+    return false;
+
+  ntl::unique_object<PKEVENT> event_object(std::move(*event_ref));
+  if (!event_object || KeReadStateEvent(event_object.get()) != 0)
+    return false;
+
+  KeSetEvent(event_object.get(), IO_NO_INCREMENT, FALSE);
+  if (KeReadStateEvent(event_object.get()) == 0)
+    return false;
+
+  ntl::unique_object<PKEVENT> moved_object(std::move(event_object));
+  if (event_object || !moved_object)
+    return false;
+
+  PKEVENT const released_object = moved_object.release();
+  if (moved_object || !released_object)
+    return false;
+  ObDereferenceObject(released_object);
+
+  ntl::unique_kernel_handle moved_handle(std::move(handle));
+  if (handle || !moved_handle)
+    return false;
+
+  HANDLE const released_handle = moved_handle.release();
+  if (moved_handle || !released_handle)
+    return false;
+
+  ntl::unique_kernel_handle adopted_handle(released_handle);
+  if (!adopted_handle.close().is_ok() || adopted_handle)
+    return false;
+
+  return true;
+}
+
 bool ntl_symbolic_link_test() {
   const std::wstring link_name = L"\\DosDevices\\CrtSysNtlSymbolicLinkTest";
   const std::wstring target_name =
@@ -947,6 +998,10 @@ TEST(ntl_test, ntl_lookaside_list_test) {
 
 TEST(ntl_test, ntl_result_test) {
   EXPECT_TRUE(ntl_result_test());
+}
+
+TEST(ntl_test, ntl_handle_object_test) {
+  EXPECT_TRUE(ntl_handle_object_test());
 }
 
 TEST(ntl_test, ntl_symbolic_link_test) {
