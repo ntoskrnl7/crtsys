@@ -23,7 +23,9 @@ Use these pages when you want more detail than the compact
 | [Synchronization](./synchronization.md) | `ntl::irql`, IRQL query/contract helpers, spin locks, ERESOURCE wrapper, and lock helpers |
 | [Event](./event.md) | `KEVENT` wrapper for notification/synchronization events |
 | [Timer and DPC](./timer.md) | `KTIMER` and `KDPC` wrappers for one-shot timers, periodic timers, and DPC queueing |
+| [System thread](./system-thread.md) | `PsCreateSystemThread` helper with `NTSTATUS` results and `ZwClose` handle ownership |
 | [Work item](./work-item.md) | Deferring resident work to a `PASSIVE_LEVEL` system worker thread |
+| [Passive executor](./passive-executor.md) | Inline-or-defer policy for running callables at `PASSIVE_LEVEL` |
 | [Pool allocator](./pool-allocator.md) | Kernel pool-backed ownership helpers, STL allocators, PMR resources, pool tags, and IRQL rules |
 | [Lookaside list](./lookaside-list.md) | Fixed-size kernel object cache wrapper over `LOOKASIDE_LIST_EX` |
 | [Symbolic link](./symbolic-link.md) | RAII wrapper over `IoCreateSymbolicLink` / `IoDeleteSymbolicLink` |
