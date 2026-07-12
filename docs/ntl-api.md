@@ -25,6 +25,7 @@ The detailed API reference is split by topic:
 | [Timer and DPC](./ntl/timer.md) | `ntl::timer`, `ntl::kdpc`, one-shot timers, periodic timers, direct DPC queueing |
 | [System thread](./ntl/system-thread.md) | `ntl::system_thread`, `PsCreateSystemThread`, `join`, native thread-handle ownership |
 | [Work item](./ntl/work-item.md) | Deferring resident work to a `PASSIVE_LEVEL` system worker thread |
+| [Passive executor](./ntl/passive-executor.md) | `ntl::passive_executor`, inline PASSIVE execution, detached nonpaged work posting |
 | [Pool allocator](./ntl/pool-allocator.md) | Kernel pool-backed ownership helpers, STL allocators, PMR resources, pool tags, IRQL rules |
 | [Lookaside list](./ntl/lookaside-list.md) | Fixed-size kernel object cache wrapper over `LOOKASIDE_LIST_EX` |
 | [Symbolic link](./ntl/symbolic-link.md) | RAII wrapper over `IoCreateSymbolicLink` / `IoDeleteSymbolicLink` |

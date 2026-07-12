@@ -8,6 +8,9 @@
 Use it when driver code needs to defer a small unit of work to a system worker
 thread that runs at `PASSIVE_LEVEL`.
 
+If you want an inline-or-defer policy instead of direct work-item ownership,
+use [`ntl::passive_executor`](./passive-executor.md).
+
 Header: [`include/ntl/work_item`](../../include/ntl/work_item)
 
 ## Raw Context Form

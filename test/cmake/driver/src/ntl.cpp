@@ -4,6 +4,7 @@
 #include <ntl/handle>
 #include <ntl/irql>
 #include <ntl/lookaside_list>
+#include <ntl/passive_executor>
 #include <ntl/pool_allocator>
 #include <ntl/registry>
 #include <ntl/result>
@@ -76,33 +77,39 @@ struct work_item_test_context {
   ntl::event release{ntl::event_type::notification, false};
 };
 
+struct passive_executor_test_context {
+  ntl::event completed{ntl::event_type::notification, false};
+  std::atomic<long> value{0};
+  std::atomic<ntl::irql> observed_irql{ntl::irql::dispatch};
+};
+
 struct timer_dpc_test_context {
   ntl::event fired{ntl::event_type::notification, false};
-  volatile LONG count = 0;
-  void *system_argument1 = nullptr;
-  void *system_argument2 = nullptr;
-  ntl::irql observed_irql = ntl::irql::passive;
+  std::atomic<long> count{0};
+  std::atomic<void *> system_argument1{nullptr};
+  std::atomic<void *> system_argument2{nullptr};
+  std::atomic<ntl::irql> observed_irql{ntl::irql::passive};
 };
 
 struct system_thread_test_context {
-  volatile LONG value = 0;
-  ntl::irql observed_irql = ntl::irql::dispatch;
+  std::atomic<long> value{0};
+  std::atomic<ntl::irql> observed_irql{ntl::irql::dispatch};
 };
 
 void timer_dpc_test_routine(void *context, void *system_argument1,
                             void *system_argument2) noexcept {
   auto *const state = static_cast<timer_dpc_test_context *>(context);
-  state->system_argument1 = system_argument1;
-  state->system_argument2 = system_argument2;
-  state->observed_irql = ntl::current_irql();
-  InterlockedIncrement(&state->count);
+  state->system_argument1.store(system_argument1);
+  state->system_argument2.store(system_argument2);
+  state->observed_irql.store(ntl::current_irql());
+  state->count.fetch_add(1);
   state->fired.set();
 }
 
 void system_thread_test_routine(void *context) {
   auto *const state = static_cast<system_thread_test_context *>(context);
-  state->observed_irql = ntl::current_irql();
-  InterlockedExchange(&state->value, 42);
+  state->observed_irql.store(ntl::current_irql());
+  state->value.store(42);
   PsTerminateSystemThread(STATUS_SUCCESS);
 }
 
@@ -903,11 +910,11 @@ bool ntl_timer_dpc_test() {
   auto timeout = ntl::relative_due_time_ms(1000);
   if (!direct_context.fired.wait(&timeout).is_ok())
     return false;
-  if (direct_context.count != 1 ||
-      direct_context.system_argument1 != direct_arg1 ||
-      direct_context.system_argument2 != &direct_context)
+  if (direct_context.count.load() != 1 ||
+      direct_context.system_argument1.load() != direct_arg1 ||
+      direct_context.system_argument2.load() != &direct_context)
     return false;
-  if (direct_context.observed_irql != ntl::irql::dispatch)
+  if (direct_context.observed_irql.load() != ntl::irql::dispatch)
     return false;
 
   ntl::timer synchronization_timer(ntl::timer_type::synchronization);
@@ -930,8 +937,8 @@ bool ntl_timer_dpc_test() {
   timeout = ntl::relative_due_time_ms(1000);
   if (!timer_context.fired.wait(&timeout).is_ok())
     return false;
-  if (timer_context.count != 1 ||
-      timer_context.observed_irql != ntl::irql::dispatch)
+  if (timer_context.count.load() != 1 ||
+      timer_context.observed_irql.load() != ntl::irql::dispatch)
     return false;
 
   ntl::timer cancel_timer;
@@ -959,8 +966,8 @@ bool ntl_system_thread_test() {
   auto timeout = ntl::relative_due_time_ms(5000);
   if (static_cast<NTSTATUS>(thread.join(&timeout)) != STATUS_SUCCESS)
     return false;
-  if (thread || context.value != 42 ||
-      context.observed_irql != ntl::irql::passive)
+  if (thread || context.value.load() != 42 ||
+      context.observed_irql.load() != ntl::irql::passive)
     return false;
 
   system_thread_test_context moved_context;
@@ -982,8 +989,8 @@ bool ntl_system_thread_test() {
   if (static_cast<NTSTATUS>(adopted_thread.join(&timeout)) != STATUS_SUCCESS)
     return false;
 
-  return !adopted_thread && moved_context.value == 42 &&
-         moved_context.observed_irql == ntl::irql::passive;
+  return !adopted_thread && moved_context.value.load() == 42 &&
+         moved_context.observed_irql.load() == ntl::irql::passive;
 }
 
 bool ntl_work_item_test() {
@@ -1025,6 +1032,62 @@ bool ntl_work_item_test() {
     return false;
 
   return blocking_context.value.load() == 43 && !blocking_item.queued();
+}
+
+bool ntl_passive_executor_test() {
+  ntl::passive_executor executor{DelayedWorkQueue, "NTLe"};
+
+  passive_executor_test_context inline_context;
+  if (!executor.execute([&] {
+        inline_context.observed_irql.store(ntl::current_irql());
+        inline_context.value.store(11);
+      }).is_ok())
+    return false;
+  if (inline_context.value.load() != 11 ||
+      inline_context.observed_irql.load() != ntl::irql::passive)
+    return false;
+
+  passive_executor_test_context posted_context;
+  if (!executor.post([state = &posted_context] {
+        state->observed_irql.store(ntl::current_irql());
+        state->value.store(12);
+        state->completed.set();
+      }).is_ok())
+    return false;
+  auto timeout = ntl::relative_due_time_ms(5000);
+  if (!posted_context.completed.wait(&timeout).is_ok())
+    return false;
+  if (posted_context.value.load() != 12 ||
+      posted_context.observed_irql.load() != ntl::irql::passive)
+    return false;
+
+  passive_executor_test_context deferred_context;
+  {
+    auto raised_irql = ntl::raise_irql_to_dpc_level();
+    const auto status = executor.execute([state = &deferred_context] {
+      state->observed_irql.store(ntl::current_irql());
+      state->value.store(13);
+      state->completed.set();
+    });
+    if (!status.is_ok())
+      return false;
+  }
+  timeout = ntl::relative_due_time_ms(5000);
+  if (!deferred_context.completed.wait(&timeout).is_ok())
+    return false;
+  if (deferred_context.value.load() != 13 ||
+      deferred_context.observed_irql.load() != ntl::irql::passive)
+    return false;
+
+  std::atomic<long> owned_value{0};
+  auto owned_item = executor.make_work_item([&] {
+    if (ntl::current_irql() == ntl::irql::passive)
+      owned_value.store(14);
+  });
+  if (!executor.queue_and_wait(owned_item).is_ok())
+    return false;
+
+  return owned_value.load() == 14;
 }
 
 //
@@ -1270,4 +1333,8 @@ TEST(ntl_test, ntl_system_thread_test) {
 
 TEST(ntl_test, ntl_work_item_test) {
   EXPECT_TRUE(ntl_work_item_test());
+}
+
+TEST(ntl_test, ntl_passive_executor_test) {
+  EXPECT_TRUE(ntl_passive_executor_test());
 }

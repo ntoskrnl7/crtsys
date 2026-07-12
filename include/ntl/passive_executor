@@ -1,0 +1,195 @@
+/**
+ * @file passive_executor
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief PASSIVE_LEVEL execution policy helper.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "irql"
+#include "pool_allocator"
+#include "status"
+#include "work_item"
+
+#include <cstddef>
+#include <type_traits>
+#include <utility>
+
+namespace ntl {
+namespace detail {
+
+template <class Callable> class passive_executor_task {
+public:
+  template <class Fn>
+  passive_executor_task(WORK_QUEUE_TYPE queue_type, ULONG tag, Fn &&callable)
+      : callable_(std::forward<Fn>(callable)), queue_type_(queue_type),
+        tag_(tag) {}
+
+  passive_executor_task(const passive_executor_task &) = delete;
+  passive_executor_task &operator=(const passive_executor_task &) = delete;
+  passive_executor_task(passive_executor_task &&) = delete;
+  passive_executor_task &operator=(passive_executor_task &&) = delete;
+
+  ntl::status queue() noexcept {
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4996) // Device-independent wrapper over WORK_QUEUE_ITEM.
+#endif
+    ExInitializeWorkItem(&item_, &passive_executor_task::invoke, this);
+    ExQueueWorkItem(&item_, queue_type_);
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+    return ntl::status{STATUS_SUCCESS};
+  }
+
+private:
+  static void NTAPI invoke(void *context) noexcept {
+    auto *const self = static_cast<passive_executor_task *>(context);
+    const ULONG tag = self->tag_;
+
+    try {
+      self->callable_();
+    } catch (...) {
+      // Detached execution has no caller-visible result channel. Keep the
+      // system worker thread alive if a callable violates the no-throw rule.
+    }
+
+    ntl::pool_deleter<passive_executor_task>{tag}(self);
+  }
+
+  Callable callable_;
+  WORK_QUEUE_ITEM item_{};
+  WORK_QUEUE_TYPE queue_type_ = DelayedWorkQueue;
+  ULONG tag_ = ntl::default_pool_tag;
+};
+
+} // namespace detail
+
+/**
+ * @brief Policy object for running work at PASSIVE_LEVEL.
+ *
+ * `ntl::work_item` is the low-level queued work object. `ntl::passive_executor`
+ * is the policy layer: execute inline when already at PASSIVE_LEVEL, or post a
+ * detached nonpaged work item when the caller is at a higher IRQL that can
+ * still queue work.
+ */
+class passive_executor {
+public:
+  /**
+   * @brief Creates an executor for a WDK work queue.
+   * @param queue_type WDK queue used for deferred work.
+   * @param tag Pool tag used for detached callable storage.
+   */
+  explicit passive_executor(WORK_QUEUE_TYPE queue_type = DelayedWorkQueue,
+                            ULONG tag = ntl::default_pool_tag) noexcept
+      : queue_type_(queue_type), tag_(tag) {}
+
+  /**
+   * @brief Creates an executor using a four-character string-literal pool tag.
+   */
+  template <std::size_t N>
+  explicit passive_executor(WORK_QUEUE_TYPE queue_type,
+                            const char (&tag)[N]) noexcept
+      : passive_executor(queue_type, ntl::pool_tag(tag)) {}
+
+  /**
+   * @brief Returns the WDK work queue used for deferred work.
+   */
+  WORK_QUEUE_TYPE queue_type() const noexcept { return queue_type_; }
+
+  /**
+   * @brief Returns the pool tag used for detached callable storage.
+   */
+  ULONG tag() const noexcept { return tag_; }
+
+  /**
+   * @brief Executes inline at PASSIVE_LEVEL, otherwise posts detached work.
+   *
+   * If the caller is already at PASSIVE_LEVEL, the callable runs before this
+   * function returns. If the caller is above PASSIVE_LEVEL but at or below
+   * DISPATCH_LEVEL, the callable is copied/moved into nonpaged pool and queued
+   * to a system worker thread.
+   */
+  template <class Callable>
+  ntl::status execute(Callable &&callable) const noexcept {
+    if (ntl::current_irql() == ntl::irql::passive) {
+      try {
+        std::forward<Callable>(callable)();
+      } catch (...) {
+        return ntl::status{STATUS_UNSUCCESSFUL};
+      }
+
+      return ntl::status{STATUS_SUCCESS};
+    }
+
+    return post(std::forward<Callable>(callable));
+  }
+
+  /**
+   * @brief Posts detached work to a PASSIVE_LEVEL worker thread.
+   */
+  template <class Callable>
+  ntl::status post(Callable &&callable) const noexcept {
+    if (ntl::current_irql() > ntl::irql::dispatch)
+      return ntl::status{STATUS_INVALID_DEVICE_STATE};
+
+    using task_type =
+        detail::passive_executor_task<std::decay_t<Callable>>;
+
+    try {
+      auto task = ntl::try_make_pool<task_type>(
+          ntl::pool_kind::nonpaged, ntl::pool_option::none, tag_, queue_type_,
+          tag_, std::forward<Callable>(callable));
+      if (!task)
+        return task.status();
+
+      task_type *const raw_task = task->release();
+      return raw_task->queue();
+    } catch (...) {
+      return ntl::status{STATUS_UNSUCCESSFUL};
+    }
+  }
+
+  /**
+   * @brief Queues caller-owned passive work.
+   */
+  template <class Callable>
+  ntl::status queue(ntl::passive_work_item<Callable> &item) const noexcept {
+    return item.queue();
+  }
+
+  /**
+   * @brief Queues caller-owned passive work and waits for completion.
+   * @note This function is PASSIVE_LEVEL only.
+   */
+  template <class Callable>
+  ntl::status queue_and_wait(
+      ntl::passive_work_item<Callable> &item) const noexcept {
+    if (ntl::current_irql() != ntl::irql::passive)
+      return ntl::status{STATUS_INVALID_DEVICE_STATE};
+
+    const auto queue_status = item.queue();
+    if (!queue_status.is_ok())
+      return queue_status;
+
+    return item.wait();
+  }
+
+  /**
+   * @brief Creates a caller-owned passive work item using this executor's queue.
+   */
+  template <class Callable>
+  ntl::passive_work_item<std::decay_t<Callable>>
+  make_work_item(Callable &&callable) const {
+    return ntl::passive_work_item<std::decay_t<Callable>>{
+        std::forward<Callable>(callable), queue_type_};
+  }
+
+private:
+  WORK_QUEUE_TYPE queue_type_ = DelayedWorkQueue;
+  ULONG tag_ = ntl::default_pool_tag;
+};
+
+} // namespace ntl
