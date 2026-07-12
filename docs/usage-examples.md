@@ -37,10 +37,23 @@ When `CRTSYS_NTL_MAIN` is enabled, implement `ntl::main` instead of writing
 ```cpp
 #include <string>
 #include <ntl/driver>
+#include <ntl/registry>
 
 ntl::status ntl::main(ntl::driver& driver,
                       const std::wstring& registry_path) {
-  (void)registry_path;
+  unsigned long flags = 0;
+  auto parameters = ntl::try_open_driver_parameters(registry_path);
+  if (parameters) {
+    auto configured_flags = parameters->query_dword(L"Flags");
+    if (configured_flags) {
+      flags = *configured_flags;
+    }
+  } else if (static_cast<NTSTATUS>(parameters.status()) !=
+             STATUS_OBJECT_NAME_NOT_FOUND) {
+    return parameters.status();
+  }
+
+  (void)flags;
 
   driver.on_unload([] {
     // Release driver-owned objects here.

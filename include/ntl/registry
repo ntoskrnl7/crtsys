@@ -1,0 +1,406 @@
+/**
+ * @file registry
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief RAII and result helpers for Zw registry keys and values.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "handle"
+#include "result"
+#include "status"
+
+#include <cstdint>
+#include <cstring>
+#include <string>
+#include <utility>
+#include <vector>
+
+#ifndef _NTDDK_
+#include <wdm.h>
+#endif
+
+namespace ntl {
+
+/**
+ * @brief ZwCreateKey disposition value.
+ */
+enum class registry_disposition : ULONG {
+  created_new_key = REG_CREATED_NEW_KEY,
+  opened_existing_key = REG_OPENED_EXISTING_KEY,
+};
+
+/**
+ * @brief Raw registry value data returned by ZwQueryValueKey.
+ */
+struct registry_value {
+  /**
+   * @brief Native REG_* value type.
+   */
+  ULONG type = REG_NONE;
+
+  /**
+   * @brief Raw value payload bytes.
+   */
+  std::vector<std::uint8_t> data;
+};
+
+/**
+ * @brief RAII owner for a Zw registry key handle.
+ *
+ * The key handle is closed with ntl::unique_kernel_handle. Helper methods are
+ * intended for PASSIVE_LEVEL driver setup, configuration, and teardown paths.
+ */
+class registry_key {
+public:
+  /**
+   * @brief Creates an empty registry key owner.
+   */
+  registry_key() noexcept = default;
+
+  /**
+   * @brief Takes ownership of an already-open key handle.
+   * @param handle Native key handle to close with ZwClose.
+   */
+  explicit registry_key(HANDLE handle) noexcept : handle_(handle) {}
+
+  /**
+   * @brief Takes ownership from a unique kernel handle.
+   * @param handle Handle owner to move from.
+   */
+  explicit registry_key(ntl::unique_kernel_handle &&handle) noexcept
+      : handle_(std::move(handle)) {}
+
+  registry_key(const registry_key &) = delete;
+  registry_key &operator=(const registry_key &) = delete;
+
+  /**
+   * @brief Transfers registry key ownership from another object.
+   */
+  registry_key(registry_key &&) noexcept = default;
+
+  /**
+   * @brief Transfers registry key ownership from another object.
+   */
+  registry_key &operator=(registry_key &&) noexcept = default;
+
+  /**
+   * @brief Opens an existing registry key.
+   * @param key_path Native registry path, for example
+   * `\\Registry\\Machine\\System\\CurrentControlSet\\Services\\name`.
+   * @param desired_access Access mask passed to ZwOpenKey.
+   * @param attributes Object attributes flags.
+   */
+  [[nodiscard]] static ntl::result<registry_key>
+  open(const std::wstring &key_path, ACCESS_MASK desired_access = KEY_READ,
+       ULONG attributes = OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE) {
+    UNICODE_STRING native_path{};
+    RtlInitUnicodeString(&native_path, key_path.c_str());
+
+    OBJECT_ATTRIBUTES object_attributes{};
+    InitializeObjectAttributes(&object_attributes, &native_path, attributes,
+                               nullptr, nullptr);
+
+    ntl::unique_kernel_handle handle;
+    const auto status =
+        ZwOpenKey(handle.put(), desired_access, &object_attributes);
+    if (!NT_SUCCESS(status))
+      return ntl::unexpected(status);
+
+    return ntl::ok(registry_key{std::move(handle)});
+  }
+
+  /**
+   * @brief Creates or opens a registry key.
+   * @param key_path Native registry path.
+   * @param desired_access Access mask passed to ZwCreateKey.
+   * @param create_options Registry create options such as REG_OPTION_VOLATILE.
+   * @param disposition Optional ZwCreateKey disposition output.
+   * @param attributes Object attributes flags.
+   */
+  [[nodiscard]] static ntl::result<registry_key>
+  create(const std::wstring &key_path,
+         ACCESS_MASK desired_access = KEY_READ | KEY_WRITE,
+         ULONG create_options = REG_OPTION_NON_VOLATILE,
+         registry_disposition *disposition = nullptr,
+         ULONG attributes = OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE) {
+    UNICODE_STRING native_path{};
+    RtlInitUnicodeString(&native_path, key_path.c_str());
+
+    OBJECT_ATTRIBUTES object_attributes{};
+    InitializeObjectAttributes(&object_attributes, &native_path, attributes,
+                               nullptr, nullptr);
+
+    ULONG native_disposition = 0;
+    ntl::unique_kernel_handle handle;
+    const auto status =
+        ZwCreateKey(handle.put(), desired_access, &object_attributes, 0,
+                    nullptr, create_options, &native_disposition);
+    if (!NT_SUCCESS(status))
+      return ntl::unexpected(status);
+
+    if (disposition)
+      *disposition = static_cast<registry_disposition>(native_disposition);
+
+    return ntl::ok(registry_key{std::move(handle)});
+  }
+
+  /**
+   * @brief Returns true when a key handle is owned.
+   */
+  bool valid() const noexcept { return static_cast<bool>(handle_); }
+
+  /**
+   * @brief Returns true when a key handle is owned.
+   */
+  explicit operator bool() const noexcept { return valid(); }
+
+  /**
+   * @brief Returns the native key handle without releasing it.
+   */
+  HANDLE get() const noexcept { return handle_.get(); }
+
+  /**
+   * @brief Closes the key handle and reports the ZwClose status.
+   */
+  ntl::status close() noexcept { return handle_.close(); }
+
+  /**
+   * @brief Closes the current key handle, ignoring close failure.
+   */
+  void reset() noexcept { handle_.reset(); }
+
+  /**
+   * @brief Releases ownership without closing the key handle.
+   */
+  HANDLE release() noexcept { return handle_.release(); }
+
+  /**
+   * @brief Returns a PHANDLE for Zw out-parameters after clearing ownership.
+   */
+  PHANDLE put() noexcept { return handle_.put(); }
+
+  /**
+   * @brief Deletes the owned registry key.
+   */
+  ntl::status delete_key() noexcept {
+    if (!handle_)
+      return ntl::status{STATUS_INVALID_HANDLE};
+    return ntl::status{ZwDeleteKey(handle_.get())};
+  }
+
+  /**
+   * @brief Deletes a value from the owned key.
+   * @param value_name Value name to delete.
+   */
+  ntl::status delete_value(const std::wstring &value_name) const noexcept {
+    if (!handle_)
+      return ntl::status{STATUS_INVALID_HANDLE};
+
+    UNICODE_STRING native_name{};
+    RtlInitUnicodeString(&native_name, value_name.c_str());
+    return ntl::status{ZwDeleteValueKey(handle_.get(), &native_name)};
+  }
+
+  /**
+   * @brief Queries a raw registry value.
+   * @param value_name Value name to query.
+   */
+  [[nodiscard]] ntl::result<registry_value>
+  query_value(const std::wstring &value_name) const {
+    if (!handle_)
+      return ntl::unexpected(STATUS_INVALID_HANDLE);
+
+    UNICODE_STRING native_name{};
+    RtlInitUnicodeString(&native_name, value_name.c_str());
+
+    ULONG required_bytes = 0;
+    auto status =
+        ZwQueryValueKey(handle_.get(), &native_name, KeyValuePartialInformation,
+                        nullptr, 0, &required_bytes);
+    if (status != STATUS_BUFFER_TOO_SMALL &&
+        status != STATUS_BUFFER_OVERFLOW && !NT_SUCCESS(status)) {
+      return ntl::unexpected(status);
+    }
+
+    if (required_bytes < sizeof(KEY_VALUE_PARTIAL_INFORMATION))
+      return ntl::unexpected(STATUS_INFO_LENGTH_MISMATCH);
+
+    std::vector<std::uint8_t> buffer(required_bytes);
+    status =
+        ZwQueryValueKey(handle_.get(), &native_name, KeyValuePartialInformation,
+                        buffer.data(), required_bytes, &required_bytes);
+    if (!NT_SUCCESS(status))
+      return ntl::unexpected(status);
+
+    const auto *const info =
+        reinterpret_cast<const KEY_VALUE_PARTIAL_INFORMATION *>(buffer.data());
+    const auto *const begin =
+        reinterpret_cast<const std::uint8_t *>(info->Data);
+    registry_value value;
+    value.type = info->Type;
+    value.data.assign(begin, begin + info->DataLength);
+    return ntl::ok(std::move(value));
+  }
+
+  /**
+   * @brief Queries a REG_DWORD value.
+   */
+  [[nodiscard]] ntl::result<std::uint32_t>
+  query_dword(const std::wstring &value_name) const {
+    auto value = query_value(value_name);
+    if (!value)
+      return ntl::unexpected(value.status());
+    if (value->type != REG_DWORD || value->data.size() != sizeof(std::uint32_t))
+      return ntl::unexpected(STATUS_OBJECT_TYPE_MISMATCH);
+
+    std::uint32_t result = 0;
+    std::memcpy(&result, value->data.data(), sizeof(result));
+    return ntl::ok(result);
+  }
+
+  /**
+   * @brief Queries a REG_QWORD value.
+   */
+  [[nodiscard]] ntl::result<std::uint64_t>
+  query_qword(const std::wstring &value_name) const {
+    auto value = query_value(value_name);
+    if (!value)
+      return ntl::unexpected(value.status());
+    if (value->type != REG_QWORD || value->data.size() != sizeof(std::uint64_t))
+      return ntl::unexpected(STATUS_OBJECT_TYPE_MISMATCH);
+
+    std::uint64_t result = 0;
+    std::memcpy(&result, value->data.data(), sizeof(result));
+    return ntl::ok(result);
+  }
+
+  /**
+   * @brief Queries a REG_SZ or REG_EXPAND_SZ value.
+   */
+  [[nodiscard]] ntl::result<std::wstring>
+  query_string(const std::wstring &value_name) const {
+    auto value = query_value(value_name);
+    if (!value)
+      return ntl::unexpected(value.status());
+    if (value->type != REG_SZ && value->type != REG_EXPAND_SZ)
+      return ntl::unexpected(STATUS_OBJECT_TYPE_MISMATCH);
+    if ((value->data.size() % sizeof(wchar_t)) != 0)
+      return ntl::unexpected(STATUS_DATA_ERROR);
+
+    const auto *const text =
+        reinterpret_cast<const wchar_t *>(value->data.data());
+    std::wstring result(text, text + value->data.size() / sizeof(wchar_t));
+    while (!result.empty() && result.back() == L'\0')
+      result.pop_back();
+    return ntl::ok(std::move(result));
+  }
+
+  /**
+   * @brief Queries a REG_BINARY value.
+   */
+  [[nodiscard]] ntl::result<std::vector<std::uint8_t>>
+  query_binary(const std::wstring &value_name) const {
+    auto value = query_value(value_name);
+    if (!value)
+      return ntl::unexpected(value.status());
+    if (value->type != REG_BINARY)
+      return ntl::unexpected(STATUS_OBJECT_TYPE_MISMATCH);
+
+    return ntl::ok(std::move(value->data));
+  }
+
+  /**
+   * @brief Sets a raw registry value.
+   * @param value_name Value name to set.
+   * @param type Native REG_* value type.
+   * @param data Pointer to the value payload.
+   * @param bytes Payload length in bytes.
+   */
+  ntl::status set_value(const std::wstring &value_name, ULONG type,
+                        const void *data, ULONG bytes) const noexcept {
+    if (!handle_)
+      return ntl::status{STATUS_INVALID_HANDLE};
+
+    UNICODE_STRING native_name{};
+    RtlInitUnicodeString(&native_name, value_name.c_str());
+    return ntl::status{ZwSetValueKey(handle_.get(), &native_name, 0, type,
+                                     const_cast<void *>(data), bytes)};
+  }
+
+  /**
+   * @brief Sets a REG_DWORD value.
+   */
+  ntl::status set_dword(const std::wstring &value_name,
+                        std::uint32_t value) const noexcept {
+    return set_value(value_name, REG_DWORD, &value, sizeof(value));
+  }
+
+  /**
+   * @brief Sets a REG_QWORD value.
+   */
+  ntl::status set_qword(const std::wstring &value_name,
+                        std::uint64_t value) const noexcept {
+    return set_value(value_name, REG_QWORD, &value, sizeof(value));
+  }
+
+  /**
+   * @brief Sets a REG_SZ value, including the terminating NUL.
+   */
+  ntl::status set_string(const std::wstring &value_name,
+                         const std::wstring &value) const noexcept {
+    return set_value(value_name, REG_SZ, value.c_str(),
+                     static_cast<ULONG>((value.size() + 1) * sizeof(wchar_t)));
+  }
+
+  /**
+   * @brief Sets a REG_EXPAND_SZ value, including the terminating NUL.
+   */
+  ntl::status set_expand_string(const std::wstring &value_name,
+                                const std::wstring &value) const noexcept {
+    return set_value(value_name, REG_EXPAND_SZ, value.c_str(),
+                     static_cast<ULONG>((value.size() + 1) * sizeof(wchar_t)));
+  }
+
+  /**
+   * @brief Sets a REG_BINARY value.
+   */
+  ntl::status set_binary(const std::wstring &value_name,
+                         const std::vector<std::uint8_t> &value) const noexcept {
+    return set_value(value_name, REG_BINARY,
+                     value.empty() ? nullptr : value.data(),
+                     static_cast<ULONG>(value.size()));
+  }
+
+private:
+  ntl::unique_kernel_handle handle_;
+};
+
+/**
+ * @brief Opens a driver's `Parameters` key below the service registry path.
+ * @param registry_path RegistryPath passed to DriverEntry/ntl::main.
+ * @param desired_access Access mask passed to ZwOpenKey.
+ */
+[[nodiscard]] inline ntl::result<registry_key>
+try_open_driver_parameters(const std::wstring &registry_path,
+                           ACCESS_MASK desired_access = KEY_READ) {
+  return registry_key::open(registry_path + L"\\Parameters", desired_access);
+}
+
+/**
+ * @brief Opens a driver's `Parameters` key below the service registry path.
+ *
+ * Prefer try_open_driver_parameters in new code. This spelling is kept as a
+ * compact alias because opening a key already returns ntl::result<registry_key>.
+ *
+ * @param registry_path RegistryPath passed to DriverEntry/ntl::main.
+ * @param desired_access Access mask passed to ZwOpenKey.
+ */
+[[nodiscard]] inline ntl::result<registry_key>
+open_driver_parameters(const std::wstring &registry_path,
+                       ACCESS_MASK desired_access = KEY_READ) {
+  return try_open_driver_parameters(registry_path, desired_access);
+}
+
+} // namespace ntl

@@ -80,6 +80,9 @@ is naturally represented by `NTSTATUS`:
 - `ntl::try_make_pool<T>(...) -> ntl::result<ntl::pool_ptr<T>>`
 - `ntl::driver::try_create_device<T>(...) -> ntl::result<std::shared_ptr<ntl::device<T>>>`
 - `ntl::try_create_symbolic_link(...) -> ntl::result<ntl::symbolic_link>`
+- `ntl::registry_key::open(...) -> ntl::result<ntl::registry_key>`
+- `ntl::registry_key::create(...) -> ntl::result<ntl::registry_key>`
+- `ntl::try_open_driver_parameters(...) -> ntl::result<ntl::registry_key>`
 
 This keeps simple status-only operations as `ntl::status`, exception-oriented
 constructors as constructors, and value-producing factory paths as

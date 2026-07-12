@@ -5,6 +5,7 @@
 #include <ntl/irql>
 #include <ntl/lookaside_list>
 #include <ntl/pool_allocator>
+#include <ntl/registry>
 #include <ntl/result>
 #include <ntl/symbolic_link>
 #include <ntl/unicode_string>
@@ -12,6 +13,7 @@
 
 #include <memory_resource>
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <numeric>
 #include <string>
@@ -59,6 +61,12 @@ struct lookaside_test_object {
 void delete_symbolic_link_if_present(const std::wstring &link_name) {
   ntl::unicode_string native_link_name(link_name);
   (void)IoDeleteSymbolicLink(&*native_link_name);
+}
+
+void delete_registry_key_if_present(const std::wstring &key_path) {
+  auto key = ntl::registry_key::open(key_path, DELETE);
+  if (key)
+    (void)key->delete_key();
 }
 
 struct work_item_test_context {
@@ -658,6 +666,115 @@ bool ntl_handle_object_test() {
   return true;
 }
 
+bool ntl_registry_test() {
+  const std::wstring key_path =
+      L"\\Registry\\Machine\\Software\\CrtSysNtlRegistryTest";
+  const std::wstring parameters_path = key_path + L"\\Parameters";
+  delete_registry_key_if_present(parameters_path);
+  delete_registry_key_if_present(key_path);
+
+  ntl::registry_disposition disposition{};
+  auto created =
+      ntl::registry_key::create(key_path, KEY_READ | KEY_WRITE | DELETE,
+                                REG_OPTION_VOLATILE, &disposition);
+  if (!created ||
+      disposition != ntl::registry_disposition::created_new_key)
+    return false;
+
+  ntl::registry_key key(std::move(*created));
+  if (!key)
+    return false;
+
+  if (!key.set_dword(L"Flags", 0x12345678).is_ok())
+    return false;
+  auto flags = key.query_dword(L"Flags");
+  if (!flags || *flags != 0x12345678)
+    return false;
+
+  if (!key.set_qword(L"Large", 0x1122334455667788ull).is_ok())
+    return false;
+  auto large = key.query_qword(L"Large");
+  if (!large || *large != 0x1122334455667788ull)
+    return false;
+
+  if (!key.set_string(L"Name", L"crtsys").is_ok())
+    return false;
+  auto name = key.query_string(L"Name");
+  if (!name || *name != L"crtsys")
+    return false;
+
+  if (!key.set_expand_string(L"Path", L"%SystemRoot%\\System32").is_ok())
+    return false;
+  auto path = key.query_string(L"Path");
+  if (!path || *path != L"%SystemRoot%\\System32")
+    return false;
+
+  const std::vector<std::uint8_t> bytes{1, 2, 3, 4, 5};
+  if (!key.set_binary(L"Bytes", bytes).is_ok())
+    return false;
+  auto queried_bytes = key.query_binary(L"Bytes");
+  if (!queried_bytes || *queried_bytes != bytes)
+    return false;
+
+  auto raw_name = key.query_value(L"Name");
+  if (!raw_name || raw_name->type != REG_SZ || raw_name->data.empty())
+    return false;
+
+  auto parameters = ntl::registry_key::create(parameters_path,
+                                             KEY_READ | KEY_WRITE | DELETE,
+                                             REG_OPTION_VOLATILE);
+  if (!parameters)
+    return false;
+  if (!parameters->set_dword(L"Enabled", 1).is_ok())
+    return false;
+  if (!parameters->close().is_ok())
+    return false;
+
+  auto opened_parameters = ntl::try_open_driver_parameters(key_path);
+  if (!opened_parameters)
+    return false;
+  auto enabled = opened_parameters->query_dword(L"Enabled");
+  if (!enabled || *enabled != 1)
+    return false;
+  if (!opened_parameters->delete_key().is_ok())
+    return false;
+  if (!opened_parameters->close().is_ok())
+    return false;
+
+  if (!key.delete_value(L"Flags").is_ok())
+    return false;
+  auto missing_value = key.query_dword(L"Flags");
+  if (missing_value ||
+      static_cast<NTSTATUS>(missing_value.status()) !=
+          STATUS_OBJECT_NAME_NOT_FOUND)
+    return false;
+
+  ntl::registry_key moved(std::move(key));
+  if (key || !moved)
+    return false;
+
+  HANDLE const released = moved.release();
+  if (moved || !released)
+    return false;
+
+  ntl::registry_key adopted(released);
+  if (!adopted.close().is_ok() || adopted)
+    return false;
+
+  auto opened = ntl::registry_key::open(key_path, KEY_READ | DELETE);
+  if (!opened)
+    return false;
+  if (!opened->delete_key().is_ok())
+    return false;
+  if (!opened->close().is_ok())
+    return false;
+
+  auto missing_key = ntl::registry_key::open(key_path, KEY_READ);
+  return !missing_key &&
+         static_cast<NTSTATUS>(missing_key.status()) ==
+             STATUS_OBJECT_NAME_NOT_FOUND;
+}
+
 bool ntl_symbolic_link_test() {
   const std::wstring link_name = L"\\DosDevices\\CrtSysNtlSymbolicLinkTest";
   const std::wstring target_name =
@@ -1002,6 +1119,10 @@ TEST(ntl_test, ntl_result_test) {
 
 TEST(ntl_test, ntl_handle_object_test) {
   EXPECT_TRUE(ntl_handle_object_test());
+}
+
+TEST(ntl_test, ntl_registry_test) {
+  EXPECT_TRUE(ntl_registry_test());
 }
 
 TEST(ntl_test, ntl_symbolic_link_test) {

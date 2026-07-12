@@ -21,10 +21,24 @@ Example:
 
 ```cpp
 #include <ntl/driver>
+#include <ntl/registry>
 
 ntl::status ntl::main(ntl::driver& driver,
                       const std::wstring& registry_path) {
-  (void)registry_path;
+  ULONG flags = 0;
+
+  auto parameters = ntl::try_open_driver_parameters(registry_path);
+  if (parameters) {
+    auto configured_flags = parameters->query_dword(L"Flags");
+    if (configured_flags) {
+      flags = *configured_flags;
+    }
+  } else if (static_cast<NTSTATUS>(parameters.status()) !=
+             STATUS_OBJECT_NAME_NOT_FOUND) {
+    return parameters.status();
+  }
+
+  (void)flags;
 
   driver.on_unload([] {
     // Release driver-owned objects here.
@@ -35,6 +49,10 @@ ntl::status ntl::main(ntl::driver& driver,
 ```
 
 IRQL: `PASSIVE_LEVEL`.
+
+`registry_path` is the service key path supplied by the I/O manager. Use
+[`ntl::try_open_driver_parameters`](./registry.md) when the driver has optional
+configuration values below the standard `Parameters` subkey.
 
 ## Driver Object
 
