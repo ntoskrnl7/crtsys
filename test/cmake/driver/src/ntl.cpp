@@ -8,6 +8,7 @@
 #include <ntl/registry>
 #include <ntl/result>
 #include <ntl/symbolic_link>
+#include <ntl/timer>
 #include <ntl/unicode_string>
 #include <ntl/work_item>
 
@@ -73,6 +74,24 @@ struct work_item_test_context {
   std::atomic<long> value{0};
   ntl::event release{ntl::event_type::notification, false};
 };
+
+struct timer_dpc_test_context {
+  ntl::event fired{ntl::event_type::notification, false};
+  volatile LONG count = 0;
+  void *system_argument1 = nullptr;
+  void *system_argument2 = nullptr;
+  ntl::irql observed_irql = ntl::irql::passive;
+};
+
+void timer_dpc_test_routine(void *context, void *system_argument1,
+                            void *system_argument2) noexcept {
+  auto *const state = static_cast<timer_dpc_test_context *>(context);
+  state->system_argument1 = system_argument1;
+  state->system_argument2 = system_argument2;
+  state->observed_irql = ntl::current_irql();
+  InterlockedIncrement(&state->count);
+  state->fired.set();
+}
 
 void work_item_test_routine(void *context) noexcept {
   auto *const state = static_cast<work_item_test_context *>(context);
@@ -859,6 +878,63 @@ bool ntl_event_test() {
   return true;
 }
 
+bool ntl_timer_dpc_test() {
+  timer_dpc_test_context direct_context;
+  ntl::kdpc direct_dpc(timer_dpc_test_routine, &direct_context);
+  void *const direct_arg1 =
+      reinterpret_cast<void *>(static_cast<ULONG_PTR>(0x1234));
+
+  if (!direct_dpc.queue(direct_arg1, &direct_context))
+    return false;
+
+  auto timeout = ntl::relative_due_time_ms(1000);
+  if (!direct_context.fired.wait(&timeout).is_ok())
+    return false;
+  if (direct_context.count != 1 ||
+      direct_context.system_argument1 != direct_arg1 ||
+      direct_context.system_argument2 != &direct_context)
+    return false;
+  if (direct_context.observed_irql != ntl::irql::dispatch)
+    return false;
+
+  ntl::timer synchronization_timer(ntl::timer_type::synchronization);
+  if (synchronization_timer.set_once(ntl::relative_due_time_ms(10)))
+    return false;
+
+  timeout = ntl::relative_due_time_ms(1000);
+  if (!synchronization_timer.wait(&timeout).is_ok())
+    return false;
+  if (synchronization_timer.signaled())
+    return false;
+
+  timer_dpc_test_context timer_context;
+  ntl::kdpc timer_dpc(timer_dpc_test_routine, &timer_context);
+  ntl::timer notification_timer;
+
+  if (notification_timer.set_once(ntl::relative_due_time_ms(10), &timer_dpc))
+    return false;
+
+  timeout = ntl::relative_due_time_ms(1000);
+  if (!timer_context.fired.wait(&timeout).is_ok())
+    return false;
+  if (timer_context.count != 1 ||
+      timer_context.observed_irql != ntl::irql::dispatch)
+    return false;
+
+  ntl::timer cancel_timer;
+  if (cancel_timer.set_periodic(ntl::relative_due_time_ms(1000), 50))
+    return false;
+  if (!cancel_timer.cancel())
+    return false;
+
+  LARGE_INTEGER zero_timeout{};
+  if (static_cast<NTSTATUS>(cancel_timer.wait(&zero_timeout)) !=
+      STATUS_TIMEOUT)
+    return false;
+
+  return !cancel_timer.signaled();
+}
+
 bool ntl_work_item_test() {
   work_item_test_context raw_context;
 
@@ -1131,6 +1207,10 @@ TEST(ntl_test, ntl_symbolic_link_test) {
 
 TEST(ntl_test, ntl_event_test) {
   EXPECT_TRUE(ntl_event_test());
+}
+
+TEST(ntl_test, ntl_timer_dpc_test) {
+  EXPECT_TRUE(ntl_timer_dpc_test());
 }
 
 TEST(ntl_test, ntl_work_item_test) {
