@@ -61,6 +61,7 @@ The driver tests still exercise these features from `PASSIVE_LEVEL`.
 | NTL status/result wrapper | `ntl::status`, `ntl::result<T>`, `ntl::result<void>` | Caller context for status checks; contained value and failed `value()` path follow their own contracts | Value/status helpers for preserving `NTSTATUS` while writing C++ control-path code. |
 | NTL stack expansion | `ntl::expand_stack` | `PASSIVE_LEVEL` only | Runtime-backed control-path helper, not a hot-path escape hatch. |
 | NTL handle/object ownership | `ntl::unique_kernel_handle`, `ntl::unique_object`, `try_reference_object_by_handle` | `PASSIVE_LEVEL` unless the exact WDK primitive documents a wider contract | Separates `ZwClose` handle ownership from `ObDereferenceObject` reference ownership. |
+| NTL registry helper | `ntl::registry_key`, `ntl::registry_value`, `try_open_driver_parameters`, `open_driver_parameters` | `PASSIVE_LEVEL` only | Wraps Zw registry key handles with RAII and typed `REG_*` value query/set helpers for driver configuration paths. |
 | NTL pool ownership and allocator | `ntl::pool_ptr`, `ntl::pool_buffer`, `ntl::pool_allocator`, `ntl::nonpaged_pool_allocator`, `ntl::paged_pool_allocator`, `ntl::pmr::pool_resource` | Raw nonpaged pool follows WDK pool rules; object construction/destruction and STL/PMR usage are `PASSIVE_LEVEL` unless separately audited | Exposes WDK pool kind/options to RAII ownership helpers, STL-compatible allocators, and PMR resource types. |
 | NTL lookaside list | `ntl::lookaside_list` | Raw nonpaged allocate/free follows WDK lookaside rules; object construction/destruction is `PASSIVE_LEVEL` unless separately audited | Wraps `LOOKASIDE_LIST_EX` for fixed-size kernel object caches while keeping pool kind/tag visible. |
 | NTL symbolic link wrapper | `ntl::symbolic_link` | `PASSIVE_LEVEL` | RAII wrapper over `IoCreateSymbolicLink` / `IoDeleteSymbolicLink` for driver setup and teardown paths. |
@@ -805,6 +806,15 @@ NTL provides C++ helpers for driver code. See the
         through `try_reference_object_by_handle`
     [(tested)](../test/cmake/driver/src/ntl.cpp)
     [(docs)](./ntl/ownership.md)
+- [x] `ntl::registry_key`
+  - [x] volatile key create/open/delete paths
+  - [x] `try_open_driver_parameters` `RegistryPath\\Parameters` open path
+  - [x] typed `REG_DWORD`, `REG_QWORD`, `REG_SZ`, `REG_EXPAND_SZ`, and
+        `REG_BINARY` query/set paths
+  - [x] value delete, missing-value status, move, release, adopt, and close
+        ownership paths
+    [(tested)](../test/cmake/driver/src/ntl.cpp)
+    [(docs)](./ntl/registry.md)
 - [x] `ntl::pool_ptr` / `ntl::pool_allocator`
   - [x] raw pool allocation and RAII pool buffer ownership
   - [x] pool-backed object construction/destruction with `ntl::pool_ptr<T>`

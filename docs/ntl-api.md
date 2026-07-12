@@ -17,6 +17,7 @@ The detailed API reference is split by topic:
 | [Status, exceptions, and stack expansion](./ntl/status-exceptions-stack.md) | `ntl::status`, `ntl::exception`, SEH boundary helper, `ntl::expand_stack` |
 | [Result](./ntl/result.md) | `ntl::result<T>`, `ntl::result<void>`, `ntl::unexpected`, `ntl::ok`, result-returning factory helpers |
 | [Handle and object ownership](./ntl/ownership.md) | `ntl::unique_kernel_handle`, `ntl::unique_object`, `try_reference_object_by_handle` |
+| [Registry](./ntl/registry.md) | `ntl::registry_key`, `ntl::registry_value`, `try_open_driver_parameters`, typed registry value query/set helpers |
 | [Driver, device, and IRP helpers](./ntl/driver-device-irp.md) | `ntl::main`, `ntl::driver`, `ntl::device`, `try_create_device`, dispatch callbacks, `ntl::irp` |
 | [RPC](./ntl/rpc.md) | RPC schema macros, server lifetime, user-mode client calls |
 | [Synchronization](./ntl/synchronization.md) | `ntl::irql`, IRQL contract helpers, spin locks, ERESOURCE wrapper |
