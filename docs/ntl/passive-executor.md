@@ -42,6 +42,33 @@ if (!status.is_ok()) {
 }
 ```
 
+## DPC To PASSIVE_LEVEL Handoff
+
+DPC callbacks run at `DISPATCH_LEVEL`. Keep the DPC short: capture only resident
+state, then post the runtime-heavy work to a passive executor.
+
+```cpp
+struct dpc_context {
+  ntl::passive_executor* executor = nullptr;
+  ntl::event completed;
+  std::atomic<long> value = 0;
+};
+
+void on_dpc(void* context, void*, void*) noexcept {
+  auto* state = static_cast<dpc_context*>(context);
+
+  (void)state->executor->post([state] {
+    // This runs later on a system worker thread at PASSIVE_LEVEL.
+    state->value.store(42);
+    state->completed.set();
+  });
+}
+```
+
+The executor and captured state must remain valid until the posted work has
+completed. Driver unload paths should cancel/drain the source of DPCs and wait
+for the posted passive work before freeing the state or unloading code.
+
 ## API
 
 - `ntl::passive_executor(queue_type = DelayedWorkQueue, tag = default_pool_tag)`
@@ -76,4 +103,5 @@ The driver test covers:
 - inline `execute()` at `PASSIVE_LEVEL`
 - detached `post()` running on a worker thread at `PASSIVE_LEVEL`
 - `execute()` from raised IRQL deferring to a worker thread
+- DPC callback handoff through `post()`
 - caller-owned `passive_work_item` through `queue_and_wait()`

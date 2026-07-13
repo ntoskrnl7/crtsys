@@ -7,6 +7,9 @@ Header: [`include/ntl/system_thread`](../../include/ntl/system_thread)
 `ntl::system_thread` owns the handle returned by `PsCreateSystemThread` and
 closes that handle with `ZwClose`. It does not forcibly stop the thread.
 
+For shared timeout helpers such as `ntl::wait_for(thread, milliseconds)`, see
+[`ntl::wait`](./wait.md).
+
 Use it when driver code needs a native kernel system thread but still wants
 clear C++ ownership for the returned thread handle.
 
@@ -14,12 +17,12 @@ clear C++ ownership for the returned thread handle.
 
 ```cpp
 struct worker_context {
-  volatile LONG value = 0;
+  std::atomic<long> value = 0;
 };
 
 void worker(void* context) {
   auto* state = static_cast<worker_context*>(context);
-  InterlockedExchange(&state->value, 42);
+  state->value.store(42);
   PsTerminateSystemThread(STATUS_SUCCESS);
 }
 
