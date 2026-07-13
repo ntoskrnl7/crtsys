@@ -35,6 +35,10 @@ kernel-mode substrate 위에 매핑됩니다.
 
 Minimal MSBuild/NuGet consumer:
 
+Visual Studio에서는 driver project를 우클릭하고 **Manage NuGet Packages...**를
+선택합니다. 사용하는 package source에서 **crtsys**를 검색해서 WDK driver
+project에 설치한 뒤 평소처럼 빌드합니다.
+
 ```xml
 <ItemGroup>
   <PackageReference Include="crtsys" Version="<version>" />

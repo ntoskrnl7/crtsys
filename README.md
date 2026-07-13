@@ -33,6 +33,10 @@ matrix records explicit evidence, not the outer limit of the usable surface.
 
 Minimal MSBuild/NuGet consumer:
 
+In Visual Studio, right-click the driver project and choose
+**Manage NuGet Packages...**. Search for **crtsys** in the package source you
+use, install it into the WDK driver project, then build the project normally.
+
 ```xml
 <ItemGroup>
   <PackageReference Include="crtsys" Version="<version>" />
@@ -43,7 +47,7 @@ Minimal MSBuild/NuGet consumer:
 msbuild .\my_driver.vcxproj /restore /p:Configuration=Debug /p:Platform=x64
 ```
 
-For Visual Studio Package Manager Console:
+For Visual Studio Package Manager Console, the same install is:
 
 ```powershell
 Install-Package crtsys
