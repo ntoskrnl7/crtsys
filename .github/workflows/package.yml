@@ -516,25 +516,33 @@ jobs:
   publish:
     name: Publish NuGet
     needs: [pack, test-package-driver, test-package-layout, test-package-app]
-    if: ${{ (github.event_name != 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.publish) }}
     runs-on: windows-2022
     permissions:
       contents: read
       id-token: write
 
     steps:
+      - name: NuGet publish disabled
+        if: ${{ !((github.event_name != 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.publish)) }}
+        shell: pwsh
+        run: Write-Host 'NuGet publishing is disabled for this run.'
+
       - uses: actions/checkout@v5
+        if: ${{ (github.event_name != 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.publish) }}
 
       - uses: actions/setup-dotnet@v5
+        if: ${{ (github.event_name != 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.publish) }}
         with:
           dotnet-version: '10.0.x'
 
       - uses: actions/download-artifact@v7
+        if: ${{ (github.event_name != 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.publish) }}
         with:
           name: crtsys-nuget-${{ needs.pack.outputs.package_version }}
           path: artifacts/nuget
 
       - name: Validate NuGet trusted publishing user
+        if: ${{ (github.event_name != 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.publish) }}
         shell: pwsh
         run: |
           if ([string]::IsNullOrWhiteSpace('${{ vars.NUGET_TRUSTED_PUBLISHING_USER }}')) {
@@ -542,12 +550,14 @@ jobs:
           }
 
       - name: NuGet login
+        if: ${{ (github.event_name != 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.publish) }}
         uses: NuGet/login@v1
         id: nuget-login
         with:
           user: ${{ vars.NUGET_TRUSTED_PUBLISHING_USER }}
 
       - name: Publish to nuget.org
+        if: ${{ (github.event_name != 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.publish) }}
         shell: pwsh
         env:
           NUGET_API_KEY: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
@@ -556,20 +566,27 @@ jobs:
   github-release:
     name: Upload GitHub Release Assets
     needs: [pack, test-package-driver, test-package-layout, test-package-app, test-release-prebuilt-cmake, test-release-prebuilt-layout]
-    if: ${{ (github.event_name != 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.github_release) }}
     runs-on: windows-2022
     permissions:
       contents: write
 
     steps:
+      - name: GitHub Release upload disabled
+        if: ${{ !((github.event_name != 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.github_release)) }}
+        shell: pwsh
+        run: Write-Host 'GitHub Release asset upload is disabled for this run.'
+
       - uses: actions/checkout@v5
+        if: ${{ (github.event_name != 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.github_release) }}
 
       - uses: actions/download-artifact@v7
+        if: ${{ (github.event_name != 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.github_release) }}
         with:
           name: crtsys-release-assets-${{ needs.pack.outputs.package_version }}
           path: artifacts/release
 
       - name: Create or update GitHub release
+        if: ${{ (github.event_name != 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.github_release) }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
