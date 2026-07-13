@@ -9,10 +9,20 @@ review.
 
 For tested source, see:
 
+- complete NTL sample driver: [`examples/ntl-driver`](../examples/ntl-driver)
+- complete NTL RPC sample driver:
+  [`examples/ntl-rpc-driver`](../examples/ntl-rpc-driver)
 - shared RPC schema: [`test/cmake/common/rpc.hpp`](../test/cmake/common/rpc.hpp)
 - driver side: [`test/cmake/driver/src/main.cpp`](../test/cmake/driver/src/main.cpp)
 - app side: [`test/cmake/app/src/main.cpp`](../test/cmake/app/src/main.cpp)
 - NuGet consumer projects: [`test/nuget`](../test/nuget)
+
+The sample driver is the best starting point when you want one compact project
+that shows `ntl::main`, registry `Parameters`, device endpoint ownership,
+typed IOCTLs, remove locks, passive work, and pool-backed PMR together.
+Both `examples/ntl-driver` and `examples/ntl-rpc-driver` include Visual Studio
+solutions that consume `crtsys` through NuGet, plus CMake projects for source
+tree builds.
 
 ## Build Shape
 
@@ -72,6 +82,9 @@ contract.
 The RPC helper generates a matching kernel server and user-mode client from one
 shared schema header. The driver includes `<ntl/rpc/server>` before the schema;
 the app includes `<ntl/rpc/client>` before the same schema.
+
+For a buildable driver/app pair, see
+[`examples/ntl-rpc-driver`](../examples/ntl-rpc-driver).
 
 The compact `NTL_ADD_CALLBACK_N` macros use `__LINE__` as the callback ID. This
 keeps small internal or test schemas easy to write, but it also means the schema
@@ -279,26 +292,27 @@ If the callback needs extension state, avoid capturing the owning
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <winioctl.h>
+#include <ntl/handle>
 #include "shared/demo_ioctl.hpp"
 
 int wmain() {
-  HANDLE device = CreateFileW(
+  ntl::unique_handle device{CreateFileW(
       L"\\\\?\\Global\\GLOBALROOT\\Device\\" DEMO_DEVICE_NAME,
       GENERIC_READ | GENERIC_WRITE,
       0,
       nullptr,
       OPEN_EXISTING,
       0,
-      nullptr);
+      nullptr)};
 
-  if (device == INVALID_HANDLE_VALUE)
+  if (!device)
     return 1;
 
   char request[] = "hello";
   char reply[sizeof request] = {};
   DWORD returned = 0;
 
-  const BOOL ok = DeviceIoControl(device,
+  const BOOL ok = DeviceIoControl(device.get(),
                                   DEMO_IOCTL_ECHO,
                                   request,
                                   sizeof request,
@@ -307,7 +321,6 @@ int wmain() {
                                   &returned,
                                   nullptr);
 
-  CloseHandle(device);
   return ok ? 0 : 1;
 }
 ```

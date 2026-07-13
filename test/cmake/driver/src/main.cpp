@@ -64,7 +64,7 @@ ntl::status ntl::main(ntl::driver &driver, const std::wstring &registry_path) {
   auto test_endpoint =
       std::make_shared<ntl::device_endpoint<test_extension>>(
           std::move(test_endpoint_result).value());
-  auto test_dev = test_endpoint->device_owner();
+  auto test_dev = test_endpoint->device();
   if (test_dev) {
     test_dev->extension().val = 100;
     test_dev->extension().inc();
@@ -114,7 +114,7 @@ ntl::status ntl::main(ntl::driver &driver, const std::wstring &registry_path) {
 
   driver.on_unload([registry_path, test_endpoint,
                     rpc_svr = test_rpc::init(driver)]() mutable {
-    auto test_dev = test_endpoint->device_owner();
+    auto test_dev = test_endpoint->device();
     if (test_dev)
       std::wcout << L"delete device :" << test_dev->name() << " - "
                  << test_dev->extension().val << L'\n';

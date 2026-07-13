@@ -2,22 +2,66 @@
 
 [Back to NTL docs](./README.md)
 
-NTL separates two WDK ownership models that are easy to confuse:
+NTL uses the same `ntl::unique_handle` name for native handle ownership in both
+build modes:
 
-- `ntl::unique_kernel_handle` owns a native `HANDLE` and closes it with
-  `ZwClose`.
+- in user-mode builds, `ntl::unique_handle` closes with `CloseHandle`
+- in kernel builds, `ntl::unique_handle` closes with `ZwClose`
 - `ntl::unique_object<Pointer>` owns an object-manager reference and releases
   it with `ObDereferenceObject`.
 
+The name is shared because app-side and driver-side code both work with native
+`HANDLE` values, but the close primitive is selected by the build environment.
+Referenced object pointers remain separate because their lifetime is not handle
+ownership.
+
 Header: [`include/ntl/handle`](../../include/ntl/handle)
+
+## User-Mode Handles
+
+Use `ntl::unique_handle` in user-mode companion apps that open a driver device
+with `CreateFileW`, call `DeviceIoControl`, or use other Win32 APIs returning
+handles closed by `CloseHandle`.
+
+```cpp
+ntl::unique_handle device{
+    CreateFileW(LR"(\\.\MyDevice)",
+                GENERIC_READ | GENERIC_WRITE,
+                0,
+                nullptr,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                nullptr)};
+if (!device) {
+  return GetLastError();
+}
+
+// device closes automatically with CloseHandle.
+```
+
+API:
+
+- `unique_handle()`
+- `unique_handle(HANDLE handle)`
+- move construction / move assignment
+- `get()`
+- `put()`
+  - clears current ownership and returns `HANDLE*` for Win32 out-parameters
+- `close()`
+  - closes with `CloseHandle` and returns `true` on success
+- `reset(handle = nullptr)`
+  - closes the old handle, ignores close failure, and optionally adopts another
+- `release()`
+  - detaches ownership without closing
+- `valid()` / `operator bool()`
 
 ## Kernel Handles
 
-Use `ntl::unique_kernel_handle` for handles returned by Zw/Nt-style kernel
+Use `ntl::unique_handle` for handles returned by Zw/Nt-style kernel
 APIs when the handle must be closed with `ZwClose`.
 
 ```cpp
-ntl::unique_kernel_handle event_handle;
+ntl::unique_handle event_handle;
 auto status = ZwCreateEvent(event_handle.put(),
                             EVENT_MODIFY_STATE | SYNCHRONIZE,
                             nullptr,
@@ -32,8 +76,8 @@ if (!NT_SUCCESS(status)) {
 
 API:
 
-- `unique_kernel_handle()`
-- `unique_kernel_handle(HANDLE handle)`
+- `unique_handle()`
+- `unique_handle(HANDLE handle)`
 - move construction / move assignment
 - `get()`
 - `put()`
@@ -45,6 +89,12 @@ API:
 - `release()`
   - detaches ownership without closing
 - `valid()` / `operator bool()`
+
+Prefer handles created with `OBJ_KERNEL_HANDLE` for driver-owned kernel handles.
+If a handle came from user mode, first decide whether the driver really owns
+that handle. Many IOCTL paths should reference the object with
+`ObReferenceObjectByHandle` and then use `ntl::unique_object<Pointer>` for the
+object reference instead of closing the user-provided handle.
 
 ## Object References
 
@@ -104,6 +154,6 @@ object-manager operations, not DPC/ISR helpers.
 
 ## Notes
 
-Do not use `unique_kernel_handle` for referenced object pointers, and do not use
-`unique_object` for `HANDLE` values. The two wrappers intentionally keep those
+Do not use `unique_object` for `HANDLE` values, and do not use `unique_handle`
+for object-manager reference pointers. The wrappers intentionally keep those
 ownership models separate.

@@ -1,0 +1,30 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "crtsys_ntl_sample", "crtsys_ntl_sample.vcxproj", "{E55E05D8-59F5-4B95-8EE0-E56F4C04BB6D}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "crtsys_ntl_sample_app", "crtsys_ntl_sample_app.vcxproj", "{A0D26A77-040E-4C12-9C4D-7B22A1950CE7}"
+	ProjectSection(ProjectDependencies) = postProject
+		{E55E05D8-59F5-4B95-8EE0-E56F4C04BB6D} = {E55E05D8-59F5-4B95-8EE0-E56F4C04BB6D}
+	EndProjectSection
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|x64 = Debug|x64
+		Release|x64 = Release|x64
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{E55E05D8-59F5-4B95-8EE0-E56F4C04BB6D}.Debug|x64.ActiveCfg = Debug|x64
+		{E55E05D8-59F5-4B95-8EE0-E56F4C04BB6D}.Debug|x64.Build.0 = Debug|x64
+		{E55E05D8-59F5-4B95-8EE0-E56F4C04BB6D}.Release|x64.ActiveCfg = Release|x64
+		{E55E05D8-59F5-4B95-8EE0-E56F4C04BB6D}.Release|x64.Build.0 = Release|x64
+		{A0D26A77-040E-4C12-9C4D-7B22A1950CE7}.Debug|x64.ActiveCfg = Debug|x64
+		{A0D26A77-040E-4C12-9C4D-7B22A1950CE7}.Debug|x64.Build.0 = Debug|x64
+		{A0D26A77-040E-4C12-9C4D-7B22A1950CE7}.Release|x64.ActiveCfg = Release|x64
+		{A0D26A77-040E-4C12-9C4D-7B22A1950CE7}.Release|x64.Build.0 = Release|x64
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+EndGlobal

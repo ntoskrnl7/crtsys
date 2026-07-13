@@ -9,6 +9,7 @@
 #pragma once
 
 #include "common"
+#include "../handle"
 
 #include <stdexcept>
 #include <string>
@@ -32,13 +33,6 @@ public:
             (L"\\\\?\\Global\\GLOBALROOT\\Device\\" + rpc_name).c_str(),
             GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL)),
         out_buffer_size_(out_buffer_size) {}
-  /**
-   * @brief Closes the RPC device handle.
-   */
-  ~client() {
-    if (handle_ != INVALID_HANDLE_VALUE)
-      ::CloseHandle(handle_);
-  }
 
   /**
    * @brief Invokes a registered RPC callback by function index.
@@ -49,7 +43,7 @@ public:
    */
   template <typename Ret, typename... Args>
   Ret invoke(uint64_t index, Args &&... args) {
-    if (handle_ == INVALID_HANDLE_VALUE)
+    if (!handle_)
       throw std::runtime_error("invalid handle");
 
     std::vector<uint8_t> in_buffer;
@@ -59,14 +53,14 @@ public:
     DWORD returned = 0;
 #pragma warning(disable : 4984)
     if constexpr (std::is_void_v<Ret>) {
-      if (!::DeviceIoControl(handle_, NTL_RPC_DEVICE_CTL(index),
+      if (!::DeviceIoControl(handle_.get(), NTL_RPC_DEVICE_CTL(index),
                              in_buffer.empty() ? NULL : &in_buffer[0],
                              (DWORD)in_buffer.size(), NULL, 0, &returned, NULL))
         throw std::runtime_error("failed to DeviceIoControl (index : " +
                                  std::to_string(index) + ")");
     } else {
       std::vector<uint8_t> out_buffer(out_buffer_size_);
-      if (!::DeviceIoControl(handle_, NTL_RPC_DEVICE_CTL(index),
+      if (!::DeviceIoControl(handle_.get(), NTL_RPC_DEVICE_CTL(index),
                              in_buffer.empty() ? NULL : &in_buffer[0],
                              (DWORD)in_buffer.size(), &out_buffer[0],
                              (DWORD)out_buffer.size(), &returned, NULL))
@@ -81,7 +75,7 @@ public:
   }
 
 private:
-  HANDLE handle_;
+  ntl::unique_handle handle_;
   size_t out_buffer_size_;
 };
 } // namespace rpc

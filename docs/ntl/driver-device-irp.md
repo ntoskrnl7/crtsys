@@ -133,14 +133,14 @@ ntl::device_options options;
 options.name(L"demo").type(FILE_DEVICE_UNKNOWN);
 
 auto endpoint_result = ntl::try_create_device_endpoint<device_extension>(
-    driver, options, L"\\DosDevices\\demo");
+    driver, options);
 if (!endpoint_result) {
   return endpoint_result.status();
 }
 
 auto endpoint = std::make_shared<ntl::device_endpoint<device_extension>>(
     std::move(*endpoint_result));
-endpoint->device_object().extension().open_count = 0;
+endpoint->device_ref().extension().open_count = 0;
 
 // driver.on_unload stores std::function<void()>, so capture a copyable owner
 // for the move-only endpoint object.
@@ -151,15 +151,24 @@ driver.on_unload([endpoint] {
 
 API:
 
+- `try_create_device_endpoint<Extension>(driver, options)`
+  - creates the device through `driver.try_create_device`
+  - creates `\\DosDevices\\` + `options.name()` targeting
+    `\\Device\\` + `options.name()`
+  - returns `ntl::result<ntl::device_endpoint<Extension>>`
 - `try_create_device_endpoint<Extension>(driver, options, link_name)`
   - creates the device through `driver.try_create_device`
   - creates `link_name` targeting `\\Device\\` + `options.name()`
   - returns `ntl::result<ntl::device_endpoint<Extension>>`
+- `create_device_endpoint<Extension>(driver, options)`
+  - throws `ntl::exception` on creation failure
 - `create_device_endpoint<Extension>(driver, options, link_name)`
   - throws `ntl::exception` on creation failure
-- `device_endpoint<Extension>::device_owner()`
+- `dos_device_name(short_name)`
+- `device_target_name(short_name)`
+- `device_endpoint<Extension>::device()`
   - returns the shared `ntl::device<Extension>` owner
-- `device_endpoint<Extension>::device_object()`
+- `device_endpoint<Extension>::device_ref()`
   - returns the referenced device wrapper
 - `device_endpoint<Extension>::link()`
 - `device_endpoint<Extension>::reset()`
@@ -168,7 +177,9 @@ API:
 - `device_endpoint<Extension>::valid()` / `operator bool()`
 
 `device_options::name()` is the short device name without the `\\Device\\`
-prefix. The endpoint factory builds the native target path from that name.
+prefix. The endpoint factory builds the native target path from that name. The
+two-argument endpoint factory also builds the usual DOS link name from that
+same short name, so the common case only needs the device name once.
 The endpoint itself is move-only because it owns a symbolic link. If it must
 live inside `driver.on_unload()`, hold it through a copyable owner such as
 `std::shared_ptr`.

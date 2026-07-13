@@ -46,9 +46,6 @@ ntl::status ntl::main(ntl::driver& driver,
 The helper does not create the key. Use `registry_key::create` when a driver
 needs to create its own volatile or persistent test/configuration key.
 
-`open_driver_parameters` is kept as a compact alias. New examples use the
-`try_` spelling to match other NTL helpers that return `ntl::result<T>`.
-
 `ntl::driver_config` is a small convenience wrapper around the same
 `Parameters` key. It keeps the underlying `registry_key` visible through
 `key()`, and adds default-returning helpers for optional settings:
@@ -133,7 +130,7 @@ Available setters:
 ## Ownership
 
 `registry_key` owns a native key handle through
-[`ntl::unique_kernel_handle`](./ownership.md). It supports move, `close()`,
+[`ntl::unique_handle`](./ownership.md). It supports move, `close()`,
 `reset()`, `release()`, and `put()` for WDK out-parameters.
 
 ```cpp

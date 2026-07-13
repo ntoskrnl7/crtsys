@@ -19,10 +19,17 @@ struct ping_reply {
   ULONG value;
 };
 
-using ioctl_ping =
-    ntl::ioctl<FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED,
-               FILE_READ_DATA | FILE_WRITE_DATA,
-               ping_request, ping_reply>;
+struct ping_contract {
+  using input_type = ping_request;
+  using output_type = ping_reply;
+
+  static constexpr ULONG device_type = FILE_DEVICE_UNKNOWN;
+  static constexpr ULONG function = 0x801;
+  static constexpr ULONG method = METHOD_BUFFERED;
+  static constexpr ULONG access = FILE_READ_DATA | FILE_WRITE_DATA;
+};
+
+using ioctl_ping = ntl::ioctl_from_contract<ping_contract>;
 
 device.on_device_control([](const ntl::device_control::code& code,
                             const ntl::device_control::in_buffer& in,
@@ -48,8 +55,9 @@ device.on_device_control([](const ntl::device_control::code& code,
 ## API Summary
 
 - `ntl::ioctl<DeviceType, Function, Method, Access, Input, Output>`
+- `ntl::ioctl_from_contract<Contract>`
 - `Ioctl::code`
-- `Ioctl::device_control_code()`
+- `Ioctl::control_code()`
 - `ntl::is_ioctl<Ioctl>(code)`
 - `ntl::ioctl_input_as<Ioctl>(in_buffer)`
 - `ntl::ioctl_write_output<Ioctl>(out_buffer, value)`
@@ -57,6 +65,10 @@ device.on_device_control([](const ntl::device_control::code& code,
 The input and output helper functions require trivially copyable payload types.
 Use `void` for the input or output type when an IOCTL has no typed payload in
 that direction.
+
+`ioctl_from_contract` is intended for shared app/driver contract headers. Keep
+the raw `CTL_CODE` fields and payload types in one contract type, then let the
+driver derive the NTL descriptor from that type.
 
 ## IRQL
 
@@ -69,6 +81,7 @@ contract.
 The driver test suite exercises:
 
 - compile-time `CTL_CODE` agreement
+- shared contract to typed descriptor mapping
 - runtime code matching and mismatch
 - typed input view
 - typed output write
