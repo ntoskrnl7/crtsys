@@ -2,6 +2,7 @@
 #include <ntl/expand_stack>
 #include <ntl/except>
 #include <ntl/device>
+#include <ntl/device_endpoint>
 #include <ntl/handle>
 #include <ntl/irp>
 #include <ntl/irql>

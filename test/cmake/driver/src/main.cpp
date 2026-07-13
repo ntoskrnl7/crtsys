@@ -16,6 +16,7 @@ int test_all();
 
 #if CRTSYS_USE_NTL_MAIN
 #include <iostream>
+#include <ntl/device_endpoint>
 #include <ntl/driver>
 
 #include <ntl/rpc/server>
@@ -54,13 +55,16 @@ ntl::status ntl::main(ntl::driver &driver, const std::wstring &registry_path) {
                                  .name(TEST_DEVICE_NAME)
                                  .type(FILE_DEVICE_UNKNOWN)
                                  .exclusive();
-  auto test_dev_result =
-      driver.try_create_device<test_extension>(test_device_options);
-  if (!test_dev_result) {
-    return test_dev_result.status();
+  auto test_endpoint_result = ntl::try_create_device_endpoint<test_extension>(
+      driver, test_device_options, L"\\DosDevices\\CrtSysTestDevice");
+  if (!test_endpoint_result) {
+    return test_endpoint_result.status();
   }
 
-  auto test_dev = std::move(test_dev_result).value();
+  auto test_endpoint =
+      std::make_shared<ntl::device_endpoint<test_extension>>(
+          std::move(test_endpoint_result).value());
+  auto test_dev = test_endpoint->device_owner();
   if (test_dev) {
     test_dev->extension().val = 100;
     test_dev->extension().inc();
@@ -108,11 +112,13 @@ ntl::status ntl::main(ntl::driver &driver, const std::wstring &registry_path) {
     });
   }
 
-  driver.on_unload([registry_path, test_dev,
+  driver.on_unload([registry_path, test_endpoint,
                     rpc_svr = test_rpc::init(driver)]() mutable {
+    auto test_dev = test_endpoint->device_owner();
     if (test_dev)
       std::wcout << L"delete device :" << test_dev->name() << " - "
                  << test_dev->extension().val << L'\n';
+    test_endpoint->reset();
     std::wcout << L"unload driver (registry_path :" << registry_path << L")\n";
   });
 

@@ -1,0 +1,189 @@
+/**
+ * @file device_endpoint
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Combined RAII owner for an NTL device and its DOS symbolic link.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ *
+ */
+#pragma once
+
+#include "device"
+#include "driver"
+#include "except"
+#include "result"
+#include "status"
+#include "symbolic_link"
+
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <utility>
+
+namespace ntl {
+namespace detail {
+namespace device_endpoint {
+inline std::wstring make_device_target_name(const std::wstring &device_name) {
+  return L"\\Device\\" + device_name;
+}
+} // namespace device_endpoint
+} // namespace detail
+
+/**
+ * @brief Owns a device object and the DOS-device symbolic link that exposes it.
+ * @tparam Extension Optional device extension payload type.
+ *
+ * The symbolic link is released before the device object so user-mode opens stop
+ * resolving to the device before the device object itself is deleted.
+ */
+template <class Extension> class device_endpoint {
+public:
+  /**
+   * @brief Creates an empty endpoint owner.
+   */
+  device_endpoint() = default;
+
+  /**
+   * @brief Takes ownership of an already-created device and symbolic link.
+   * @param device Shared owner returned by ntl::driver::try_create_device.
+   * @param link Symbolic-link owner that targets the device.
+   */
+  device_endpoint(std::shared_ptr<device<Extension>> device,
+                  symbolic_link link) noexcept
+      : device_(std::move(device)), link_(std::move(link)) {}
+
+  device_endpoint(const device_endpoint &) = delete;
+  device_endpoint &operator=(const device_endpoint &) = delete;
+
+  /**
+   * @brief Transfers endpoint ownership.
+   */
+  device_endpoint(device_endpoint &&other) noexcept
+      : device_(std::move(other.device_)), link_(std::move(other.link_)) {}
+
+  /**
+   * @brief Transfers endpoint ownership.
+   */
+  device_endpoint &operator=(device_endpoint &&other) noexcept {
+    if (this == &other)
+      return *this;
+
+    reset();
+    device_ = std::move(other.device_);
+    link_ = std::move(other.link_);
+    return *this;
+  }
+
+  /**
+   * @brief Releases the link, then the device.
+   */
+  ~device_endpoint() { reset(); }
+
+  /**
+   * @brief Deletes the symbolic link and releases the device owner.
+   */
+  void reset() noexcept {
+    link_.reset();
+    device_.reset();
+  }
+
+  /**
+   * @brief Returns true if both the device and symbolic link are owned.
+   */
+  bool valid() const noexcept { return device_ != nullptr && link_.valid(); }
+
+  /**
+   * @brief Returns true if both the device and symbolic link are owned.
+   */
+  explicit operator bool() const noexcept { return valid(); }
+
+  /**
+   * @brief Returns the shared device owner.
+   */
+  std::shared_ptr<device<Extension>> device_owner() const noexcept {
+    return device_;
+  }
+
+  /**
+   * @brief Returns the owned NTL device.
+   * @throw std::runtime_error if this endpoint is empty.
+   */
+  device<Extension> &device_object() const {
+    if (!device_)
+      throw std::runtime_error("invalid device endpoint.");
+    return *device_;
+  }
+
+  /**
+   * @brief Returns the symbolic-link owner.
+   */
+  symbolic_link &link() noexcept { return link_; }
+
+  /**
+   * @brief Returns the symbolic-link owner.
+   */
+  const symbolic_link &link() const noexcept { return link_; }
+
+  /**
+   * @brief Returns the DOS symbolic-link name.
+   */
+  const std::wstring &link_name() const noexcept { return link_.name(); }
+
+  /**
+   * @brief Returns the kernel target path used by the symbolic link.
+   */
+  const std::wstring &target_name() const noexcept {
+    return link_.target_name();
+  }
+
+private:
+  std::shared_ptr<device<Extension>> device_;
+  symbolic_link link_;
+};
+
+/**
+ * @brief Creates a device and a DOS-device symbolic link as one RAII endpoint.
+ * @param driver Driver facade used to create the WDM device object.
+ * @param opts Device creation options. opts.name() must not be empty and must
+ *             be the short device name without the "\\Device\\" prefix.
+ * @param link_name DOS-device symbolic link name, such as "\\DosDevices\\demo".
+ * @return Endpoint owner, or the IoCreateDevice/IoCreateSymbolicLink status.
+ */
+template <class Extension>
+[[nodiscard]] ntl::result<device_endpoint<Extension>>
+try_create_device_endpoint(driver &driver, device_options &opts,
+                           std::wstring link_name) {
+  if (opts.name().empty())
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+
+  auto created_device = driver.try_create_device<Extension>(opts);
+  if (!created_device)
+    return ntl::unexpected(created_device.status());
+
+  auto device_owner = std::move(created_device).value();
+  auto created_link = ntl::try_create_symbolic_link(
+      std::move(link_name),
+      detail::device_endpoint::make_device_target_name(opts.name()));
+  if (!created_link)
+    return ntl::unexpected(created_link.status());
+
+  return ntl::ok(device_endpoint<Extension>{std::move(device_owner),
+                                            std::move(created_link).value()});
+}
+
+/**
+ * @brief Creates a device endpoint or throws ntl::exception on native failure.
+ */
+template <class Extension>
+[[nodiscard]] device_endpoint<Extension>
+create_device_endpoint(driver &driver, device_options &opts,
+                       std::wstring link_name) {
+  auto endpoint =
+      try_create_device_endpoint<Extension>(driver, opts, std::move(link_name));
+  if (!endpoint)
+    throw ntl::exception(endpoint.status(), "device endpoint creation failed.");
+
+  return std::move(endpoint).value();
+}
+
+} // namespace ntl
