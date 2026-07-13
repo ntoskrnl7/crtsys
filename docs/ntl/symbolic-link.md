@@ -14,7 +14,6 @@ Header: [`include/ntl/symbolic_link`](../../include/ntl/symbolic_link)
 
 ```cpp
 #include <ntl/driver>
-#include <ntl/device_endpoint>
 #include <ntl/symbolic_link>
 
 ntl::status ntl::main(ntl::driver& driver,
@@ -23,11 +22,14 @@ ntl::status ntl::main(ntl::driver& driver,
 
   ntl::device_options options;
   options.name(L"demo").type(FILE_DEVICE_UNKNOWN);
-  auto endpoint = std::make_shared<ntl::device_endpoint<void>>(
-      ntl::create_device_endpoint<void>(driver, options, L"\\DosDevices\\demo"));
+  auto device = driver.create_device<void>(options);
 
-  driver.on_unload([endpoint] {
-    endpoint->reset();
+  auto link = std::make_shared<ntl::symbolic_link>(L"\\DosDevices\\demo",
+                                                   L"\\Device\\demo");
+
+  driver.on_unload([device, link] {
+    // Capturing device keeps the DEVICE_OBJECT alive until unload.
+    link->reset();
   });
 
   return ntl::status::ok();
@@ -81,4 +83,5 @@ pass to `IoCreateSymbolicLink`, such as `\\DosDevices\\name` for the link and
 For the common "create a device and expose it through a DOS-device link" case,
 prefer [`ntl::device_endpoint`](./driver-device-irp.md#device-endpoint). It
 keeps `device_options::name()` as the short name and builds the `\\Device\\...`
-target path for the symbolic link.
+target path for the symbolic link, while also keeping the link-before-device
+teardown order in one owner.

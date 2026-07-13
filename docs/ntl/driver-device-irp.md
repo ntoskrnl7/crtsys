@@ -132,18 +132,20 @@ struct device_extension {
 ntl::device_options options;
 options.name(L"demo").type(FILE_DEVICE_UNKNOWN);
 
-auto endpoint = ntl::try_create_device_endpoint<device_extension>(
+auto endpoint_result = ntl::try_create_device_endpoint<device_extension>(
     driver, options, L"\\DosDevices\\demo");
-if (!endpoint) {
-  return endpoint.status();
+if (!endpoint_result) {
+  return endpoint_result.status();
 }
 
+auto endpoint = std::make_shared<ntl::device_endpoint<device_extension>>(
+    std::move(*endpoint_result));
 endpoint->device_object().extension().open_count = 0;
 
-auto endpoint_owner =
-    std::make_shared<ntl::device_endpoint<device_extension>>(std::move(*endpoint));
-driver.on_unload([endpoint_owner] {
-  endpoint_owner->reset();
+// driver.on_unload stores std::function<void()>, so capture a copyable owner
+// for the move-only endpoint object.
+driver.on_unload([endpoint] {
+  endpoint->reset();
 });
 ```
 
@@ -167,9 +169,9 @@ API:
 
 `device_options::name()` is the short device name without the `\\Device\\`
 prefix. The endpoint factory builds the native target path from that name.
-Because `driver.on_unload()` stores a `std::function<void()>`, move-only
-endpoint owners should be held through `std::shared_ptr` when captured by the
-unload callback.
+The endpoint itself is move-only because it owns a symbolic link. If it must
+live inside `driver.on_unload()`, hold it through a copyable owner such as
+`std::shared_ptr`.
 
 IRQL: `PASSIVE_LEVEL`.
 
