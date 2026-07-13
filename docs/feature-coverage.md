@@ -57,19 +57,22 @@ The driver tests still exercise these features from `PASSIVE_LEVEL`.
 | I/O streams | `std::cin`, `std::cout`, `std::cerr`, `std::clog`, wide stream variants | `PASSIVE_LEVEL` only | Diagnostic and test support. Avoid production hot paths and stack-sensitive paths. |
 | C math and floating-point helpers | Math functions and floating-point classification helpers | `PASSIVE_LEVEL` unless the exact helper is separately audited | Floating-point state and helper dependencies are driver-context sensitive. |
 | NTL entry, driver, device, and RPC server helpers | `ntl::main`, `ntl::driver`, `ntl::device`, `ntl::rpc::server` | `PASSIVE_LEVEL` only | Intended for initialization, teardown, device setup, and IOCTL/RPC control paths. |
-| NTL IRP view | `ntl::irp`, `ntl::device_control::in_buffer`, `ntl::device_control::out_buffer` | Follows the dispatch path that supplied the IRP | NTL device callbacks should still be treated as `PASSIVE_LEVEL` unless the exact callback body is separately audited. |
+| NTL IRP view and typed IOCTL helper | `ntl::irp`, `ntl::device_control::in_buffer`, `ntl::device_control::out_buffer`, `ntl::ioctl` | Follows the dispatch path that supplied the IRP | NTL device callbacks should still be treated as `PASSIVE_LEVEL` unless the exact callback body is separately audited. |
 | NTL status/result wrapper | `ntl::status`, `ntl::result<T>`, `ntl::result<void>` | Caller context for status checks; contained value and failed `value()` path follow their own contracts | Value/status helpers for preserving `NTSTATUS` while writing C++ control-path code. |
 | NTL stack expansion | `ntl::expand_stack` | `PASSIVE_LEVEL` only | Runtime-backed control-path helper, not a hot-path escape hatch. |
 | NTL handle/object ownership | `ntl::unique_kernel_handle`, `ntl::unique_object`, `try_reference_object_by_handle` | `PASSIVE_LEVEL` unless the exact WDK primitive documents a wider contract | Separates `ZwClose` handle ownership from `ObDereferenceObject` reference ownership. |
-| NTL registry helper | `ntl::registry_key`, `ntl::registry_value`, `try_open_driver_parameters`, `open_driver_parameters` | `PASSIVE_LEVEL` only | Wraps Zw registry key handles with RAII and typed `REG_*` value query/set helpers for driver configuration paths. |
+| NTL registry helper | `ntl::registry_key`, `ntl::registry_value`, `ntl::driver_config`, `try_open_driver_parameters`, `open_driver_parameters` | `PASSIVE_LEVEL` only | Wraps Zw registry key handles with RAII and typed `REG_*` value query/set/default helpers for driver configuration paths. |
 | NTL pool ownership and allocator | `ntl::pool_ptr`, `ntl::pool_buffer`, `ntl::pool_allocator`, `ntl::nonpaged_pool_allocator`, `ntl::paged_pool_allocator`, `ntl::pmr::pool_resource` | Raw nonpaged pool follows WDK pool rules; object construction/destruction and STL/PMR usage are `PASSIVE_LEVEL` unless separately audited | Exposes WDK pool kind/options to RAII ownership helpers, STL-compatible allocators, and PMR resource types. |
 | NTL lookaside list | `ntl::lookaside_list` | Raw nonpaged allocate/free follows WDK lookaside rules; object construction/destruction is `PASSIVE_LEVEL` unless separately audited | Wraps `LOOKASIDE_LIST_EX` for fixed-size kernel object caches while keeping pool kind/tag visible. |
+| NTL MDL helper | `ntl::mdl` | Follows the underlying WDK MDL/page-locking primitive | Owns MDLs allocated by `IoAllocateMdl` and exposes nonpaged-pool description, page locking, mapping, and release paths. |
 | NTL symbolic link wrapper | `ntl::symbolic_link` | `PASSIVE_LEVEL` | RAII wrapper over `IoCreateSymbolicLink` / `IoDeleteSymbolicLink` for driver setup and teardown paths. |
+| NTL PnP device-interface wrapper | `ntl::device_interface_link`, `try_register_device_interface` | `PASSIVE_LEVEL` PnP/control path | Owns the symbolic link returned by `IoRegisterDeviceInterface`; generic tests cover empty-owner safety because real registration requires a valid PDO. |
 | NTL event wrapper | `ntl::event` | Follows `KEVENT`; blocking `wait()` is `PASSIVE_LEVEL` in NTL usage | Wraps notification and synchronization event setup, signal/reset/clear, state query, and wait. |
 | NTL timer and DPC wrappers | `ntl::timer`, `ntl::kdpc`, `relative_due_time_ms` | Timer setup/cancel follows WDK timer rules; timer waits are `PASSIVE_LEVEL` in NTL usage; DPC callbacks run at `DISPATCH_LEVEL` | Wraps one-shot timers, periodic timers, direct DPC queueing, and timer DPC callbacks. Keep DPC callbacks resident, short, nonblocking, and free of arbitrary STL/CRT work. |
 | NTL system thread wrapper | `ntl::system_thread` | `PASSIVE_LEVEL` | Wraps `PsCreateSystemThread` as a native WDK thread-handle owner. Use `std::thread` for standard C++ threading; use this when driver code needs `NTSTATUS`, `OBJECT_ATTRIBUTES`, `CLIENT_ID`, or explicit `ZwClose` ownership. |
 | NTL wait helpers | `ntl::try_wait`, `ntl::wait_for`, `ntl::zero_timeout`, `ntl::relative_timeout_ms` | Follows the waited object's native contract; blocking waits are `PASSIVE_LEVEL` in NTL usage | Shared timeout and status-classification helpers for event, timer, and system-thread wrappers. |
 | NTL work item / passive executor | `ntl::work_item`, `ntl::passive_work_item`, `ntl::passive_executor` | `queue()` / `post()` `<= DISPATCH_LEVEL`; `wait()` / `queue_and_wait()` are `PASSIVE_LEVEL` | Defers resident work to a system worker thread running at `PASSIVE_LEVEL`; executor can run inline when already passive. |
+| NTL remove lock | `ntl::remove_lock`, `ntl::remove_lock_guard` | Follows WDK `IO_REMOVE_LOCK`; waiting teardown path must be able to wait | RAII guard for dispatch/remove/unload synchronization. |
 | NTL ERESOURCE wrapper | `ntl::resource`, `ntl::unique_lock<ntl::resource>`, `ntl::shared_lock<ntl::resource>` | `<= APC_LEVEL` | Blocking/resource-style synchronization. Do not use in DPC, ISR, or spin-lock-held paths. |
 | NTL spin lock wrapper | `ntl::spin_lock`, `ntl::unique_lock<ntl::spin_lock>` | `<= DISPATCH_LEVEL` | Keep held regions resident, short, nonblocking, and free of allocation, waits, exceptions, streams, and arbitrary STL/runtime helpers. |
 | NTL IRQL helpers | `ntl::irql`, `ntl::current_irql`, `ntl::is_passive_level`, `ntl::is_irql_at_most`, `ntl::require_passive_level`, `ntl::require_irql_at_most`, `ntl::raise_irql`, `ntl::raise_irql_to_dpc_level`, `ntl::raise_irql_to_synch_level` | Query helpers follow caller context; require helpers return status; raise helpers explicitly manipulate current IRQL | Keep raised scopes as small as possible. |
@@ -812,6 +815,7 @@ NTL provides C++ helpers for driver code. See the
 - [x] `ntl::registry_key`
   - [x] volatile key create/open/delete paths
   - [x] `try_open_driver_parameters` `RegistryPath\\Parameters` open path
+  - [x] `ntl::driver_config` optional setting defaults
   - [x] typed `REG_DWORD`, `REG_QWORD`, `REG_SZ`, `REG_EXPAND_SZ`, and
         `REG_BINARY` query/set paths
   - [x] value delete, missing-value status, move, release, adopt, and close
@@ -827,14 +831,25 @@ NTL provides C++ helpers for driver code. See the
     [(docs)](./ntl/pool-allocator.md)
 - [x] `ntl::lookaside_list`
   - [x] raw nonpaged lookaside allocation and explicit construction
-  - [x] RAII object creation/move/reset/destruction
+  - [x] RAII object creation, `try_make`, move, reset, and destruction
   - [x] paged and cache-aligned nonpaged lookaside list construction
     [(tested)](../test/cmake/driver/src/ntl.cpp)
     [(docs)](./ntl/lookaside-list.md)
+- [x] `ntl::mdl`
+  - [x] MDL allocation, nonpaged-pool description, system-address lookup,
+        move, release/manual free, and empty-owner error path
+    [(tested)](../test/cmake/driver/src/ntl.cpp)
+    [(docs)](./ntl/mdl.md)
 - [x] `ntl::symbolic_link`
   - [x] create, move, close, scope cleanup, and release/manual-delete paths
     [(tested)](../test/cmake/driver/src/ntl.cpp)
     [(docs)](./ntl/symbolic-link.md)
+- [x] `ntl::device_interface_link`
+  - [x] empty-owner safety path
+  - Real `IoRegisterDeviceInterface` registration requires a valid PnP PDO and
+    is left to a PnP driver integration test.
+    [(tested)](../test/cmake/driver/src/ntl.cpp)
+    [(docs)](./ntl/device-interface.md)
 - [x] `ntl::event`
   - [x] notification event set/clear/reset/wait state
   - [x] synchronization event auto-reset wait behavior
@@ -860,6 +875,11 @@ NTL provides C++ helpers for driver code. See the
   - [x] `wait_for` with timer and system-thread wrappers
     [(tested)](../test/cmake/driver/src/ntl.cpp)
     [(docs)](./ntl/wait.md)
+- [x] `ntl::remove_lock`
+  - [x] acquire, guard move/reset, multiple acquired references,
+        `release_and_wait`, and post-remove acquire rejection
+    [(tested)](../test/cmake/driver/src/ntl.cpp)
+    [(docs)](./ntl/remove-lock.md)
 - [x] `ntl::work_item` / `ntl::passive_work_item`
   - [x] raw context work item queue/wait path
   - [x] callable work item queued from `DISPATCH_LEVEL` and executed at
@@ -886,6 +906,14 @@ NTL provides C++ helpers for driver code. See the
     [(tested)](../test/cmake/driver/src/main.cpp#L33)
   - [x] `ntl::irp` result helpers and typed device-control buffer helpers
     [(tested)](../test/cmake/driver/src/main.cpp#L64)
+  - [x] `ntl::ioctl` typed IOCTL descriptor and input/output helpers
+    [(tested)](../test/cmake/driver/src/ntl.cpp)
+    [(docs)](./ntl/ioctl.md)
+  - [x] practical device-control dispatch pattern combining typed IOCTL,
+        remove-lock guard, MDL scratch storage, output byte reporting, and
+        teardown rejection
+    [(tested)](../test/cmake/driver/src/ntl.cpp)
+    [(docs)](./ntl/device-control-pattern.md)
   - [x] `IRP_MJ_CREATE`
     [(app test)](../test/cmake/app/src/main.cpp#L77)
   - [x] `IRP_MJ_CLOSE`

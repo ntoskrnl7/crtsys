@@ -248,6 +248,15 @@ trivially-copyable request payloads. `out_buffer` provides
 `write(value)` for reporting an exact output byte count through
 `IoStatus.Information`.
 
+For IOCTLs with fixed trivially-copyable request and reply payloads, use
+[`ntl::ioctl`](./ioctl.md) to tie the `CTL_CODE` value to those payload types.
+That keeps the raw IOCTL number visible while reducing repeated size checks in
+dispatch code.
+
+For a complete dispatch-body pattern that combines typed IOCTLs,
+`ntl::remove_lock`, `ntl::mdl`, and output byte-count reporting, see
+[`Device-control pattern`](./device-control-pattern.md).
+
 Example:
 
 ```cpp

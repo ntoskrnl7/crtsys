@@ -1,0 +1,198 @@
+/**
+ * @file mdl
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief RAII wrapper for MDL ownership and mapping helpers.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#ifndef _NTDDK_
+#include <wdm.h>
+#endif
+
+#include "result"
+
+#include <cstddef>
+
+namespace ntl {
+
+/**
+ * @brief Owns an MDL allocated by IoAllocateMdl.
+ */
+class mdl {
+public:
+  /**
+   * @brief Creates an empty MDL owner.
+   */
+  mdl() noexcept = default;
+
+  /**
+   * @brief Takes ownership of an existing PMDL.
+   */
+  explicit mdl(PMDL native_mdl) noexcept : mdl_(native_mdl) {}
+
+  mdl(const mdl &) = delete;
+  mdl &operator=(const mdl &) = delete;
+
+  /**
+   * @brief Transfers MDL ownership.
+   */
+  mdl(mdl &&other) noexcept
+      : mdl_(other.release()), pages_locked_(other.pages_locked_) {
+    other.pages_locked_ = false;
+  }
+
+  /**
+   * @brief Transfers MDL ownership.
+   */
+  mdl &operator=(mdl &&other) noexcept {
+    if (this == &other)
+      return *this;
+
+    reset();
+    mdl_ = other.release();
+    pages_locked_ = other.pages_locked_;
+    other.pages_locked_ = false;
+    return *this;
+  }
+
+  /**
+   * @brief Unlocks locked pages, then frees the MDL.
+   */
+  ~mdl() { reset(); }
+
+  /**
+   * @brief Allocates an MDL for a virtual-address range.
+   */
+  [[nodiscard]] static ntl::result<mdl>
+  allocate(void *virtual_address, ULONG length,
+           bool secondary_buffer = false, bool charge_quota = false,
+           PIRP irp = nullptr) noexcept {
+    PMDL native_mdl =
+        IoAllocateMdl(virtual_address, length, secondary_buffer, charge_quota,
+                      irp);
+    if (!native_mdl)
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+
+    return ntl::ok(mdl{native_mdl});
+  }
+
+  /**
+   * @brief Returns true when an MDL is owned.
+   */
+  explicit operator bool() const noexcept { return mdl_ != nullptr; }
+
+  /**
+   * @brief Returns the owned PMDL.
+   */
+  PMDL get() const noexcept { return mdl_; }
+
+  /**
+   * @brief Returns the owned PMDL.
+   */
+  PMDL operator->() const noexcept { return mdl_; }
+
+  /**
+   * @brief Releases ownership without freeing the MDL.
+   */
+  PMDL release() noexcept {
+    PMDL native_mdl = mdl_;
+    mdl_ = nullptr;
+    pages_locked_ = false;
+    return native_mdl;
+  }
+
+  /**
+   * @brief Frees the MDL after unlocking locked pages, if any.
+   */
+  void reset(PMDL native_mdl = nullptr) noexcept {
+    if (mdl_) {
+      if (pages_locked_)
+        MmUnlockPages(mdl_);
+      IoFreeMdl(mdl_);
+    }
+    mdl_ = native_mdl;
+    pages_locked_ = false;
+  }
+
+  /**
+   * @brief Describes nonpaged memory with this MDL.
+   */
+  void build_for_nonpaged_pool() noexcept {
+    if (mdl_)
+      MmBuildMdlForNonPagedPool(mdl_);
+  }
+
+  /**
+   * @brief Locks pageable/user pages described by this MDL.
+   */
+  [[nodiscard]] ntl::result<void>
+  probe_and_lock_pages(KPROCESSOR_MODE access_mode,
+                       LOCK_OPERATION operation) noexcept {
+    if (!mdl_)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+
+    __try {
+      MmProbeAndLockPages(mdl_, access_mode, operation);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+      return ntl::unexpected(GetExceptionCode());
+    }
+
+    pages_locked_ = true;
+    return ntl::ok();
+  }
+
+  /**
+   * @brief Unlocks pages locked by probe_and_lock_pages.
+   */
+  void unlock_pages() noexcept {
+    if (mdl_ && pages_locked_) {
+      MmUnlockPages(mdl_);
+      pages_locked_ = false;
+    }
+  }
+
+  /**
+   * @brief Maps the MDL into system address space.
+   */
+  [[nodiscard]] ntl::result<void *>
+  system_address(MM_PAGE_PRIORITY priority = NormalPagePriority) const
+      noexcept {
+    if (!mdl_)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+
+    void *const address = MmGetSystemAddressForMdlSafe(mdl_, priority);
+    if (!address)
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+
+    return ntl::ok(address);
+  }
+
+  /**
+   * @brief Returns MmGetMdlByteCount for the owned MDL.
+   */
+  ULONG byte_count() const noexcept {
+    return mdl_ ? MmGetMdlByteCount(mdl_) : 0;
+  }
+
+  /**
+   * @brief Returns MmGetMdlByteOffset for the owned MDL.
+   */
+  ULONG byte_offset() const noexcept {
+    return mdl_ ? MmGetMdlByteOffset(mdl_) : 0;
+  }
+
+  /**
+   * @brief Returns MmGetMdlVirtualAddress for the owned MDL.
+   */
+  void *virtual_address() const noexcept {
+    return mdl_ ? MmGetMdlVirtualAddress(mdl_) : nullptr;
+  }
+
+private:
+  PMDL mdl_ = nullptr;
+  bool pages_locked_ = false;
+};
+
+} // namespace ntl

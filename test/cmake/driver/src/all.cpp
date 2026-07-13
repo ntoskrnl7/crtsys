@@ -840,11 +840,35 @@ bool ntl_lookaside_list_test();
 
 bool ntl_result_test();
 
+bool ntl_irp_device_control_helpers_test();
+
+bool ntl_ioctl_test();
+
+bool ntl_device_control_pipeline_test();
+
+bool ntl_mdl_test();
+
+bool ntl_remove_lock_test();
+
+bool ntl_device_interface_test();
+
+bool ntl_handle_object_test();
+
+bool ntl_registry_test();
+
 bool ntl_symbolic_link_test();
 
 bool ntl_event_test();
 
+bool ntl_timer_dpc_test();
+
+bool ntl_system_thread_test();
+
+bool ntl_wait_helpers_test();
+
 bool ntl_work_item_test();
+
+bool ntl_passive_executor_test();
 
 namespace {
 int g_driver_test_failures = 0;
@@ -1225,9 +1249,23 @@ void ntl_test() {
   run_boolean_test("ntl_pool_allocator_test", ntl_pool_allocator_test);
   run_boolean_test("ntl_lookaside_list_test", ntl_lookaside_list_test);
   run_boolean_test("ntl_result_test", ntl_result_test);
+  run_boolean_test("ntl_irp_device_control_helpers_test",
+                   ntl_irp_device_control_helpers_test);
+  run_boolean_test("ntl_ioctl_test", ntl_ioctl_test);
+  run_boolean_test("ntl_device_control_pipeline_test",
+                   ntl_device_control_pipeline_test);
+  run_boolean_test("ntl_mdl_test", ntl_mdl_test);
+  run_boolean_test("ntl_remove_lock_test", ntl_remove_lock_test);
+  run_boolean_test("ntl_device_interface_test", ntl_device_interface_test);
+  run_boolean_test("ntl_handle_object_test", ntl_handle_object_test);
+  run_boolean_test("ntl_registry_test", ntl_registry_test);
   run_boolean_test("ntl_symbolic_link_test", ntl_symbolic_link_test);
   run_boolean_test("ntl_event_test", ntl_event_test);
+  run_boolean_test("ntl_timer_dpc_test", ntl_timer_dpc_test);
+  run_boolean_test("ntl_system_thread_test", ntl_system_thread_test);
+  run_boolean_test("ntl_wait_helpers_test", ntl_wait_helpers_test);
   run_boolean_test("ntl_work_item_test", ntl_work_item_test);
+  run_boolean_test("ntl_passive_executor_test", ntl_passive_executor_test);
 }
 
 int test_all() {
