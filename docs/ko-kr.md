@@ -27,6 +27,11 @@ kernel-mode substrate 위에 매핑됩니다.
 
 ## Quick Start
 
+Visual Studio WDK driver project에서는 NuGet package UI로 `crtsys`를 설치하는
+경로가 가장 일반적입니다.
+
+![Visual Studio NuGet package UI에서 crtsys를 설치하는 화면](./assets/visual-studio-nuget-package-ui-ko-kr.gif)
+
 | 경로 | 사용할 때 | 시작점 |
 | --- | --- | --- |
 | NuGet / MSBuild | Visual Studio 또는 Build Tools WDK driver project | `PackageReference` 또는 `Install-Package crtsys` |

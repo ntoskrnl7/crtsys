@@ -25,6 +25,11 @@ matrix records explicit evidence, not the outer limit of the usable surface.
 
 ## Quick Start
 
+For the common Visual Studio WDK driver-project workflow, install `crtsys` from
+the NuGet package UI:
+
+![Visual Studio NuGet package UI installing crtsys](./docs/assets/visual-studio-nuget-package-ui.gif)
+
 | Path | Use when | Start here |
 | --- | --- | --- |
 | NuGet / MSBuild | Visual Studio or Build Tools WDK driver project | `PackageReference` or `Install-Package crtsys` |
