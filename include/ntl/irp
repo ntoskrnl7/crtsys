@@ -68,6 +68,33 @@ public:
     irp_->IoStatus.Information = value;
   }
 
+  /**
+   * @brief Sets the IRP status and information fields together.
+   * @param status_value NTSTATUS to return from the dispatch path.
+   * @param information_value IoStatus.Information value for bytes/results.
+   * @note This does not call IoCompleteRequest. The NTL dispatch invoker
+   * completes the IRP after the registered callback returns.
+   */
+  void set_result(NTSTATUS status_value,
+                  ULONG_PTR information_value = 0) noexcept {
+    status(status_value);
+    information(information_value);
+  }
+
+  /**
+   * @brief Marks the IRP as successful.
+   * @param information_value IoStatus.Information value for bytes/results.
+   */
+  void succeed(ULONG_PTR information_value = 0) noexcept {
+    set_result(STATUS_SUCCESS, information_value);
+  }
+
+  /**
+   * @brief Marks the IRP as failed and clears IoStatus.Information.
+   * @param status_value Failure NTSTATUS to return from the dispatch path.
+   */
+  void fail(NTSTATUS status_value) noexcept { set_result(status_value, 0); }
+
 private:
   PIRP irp_;
 };
