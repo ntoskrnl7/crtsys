@@ -25,6 +25,11 @@ matrix records explicit evidence, not the outer limit of the usable surface.
 
 ## Quick Start
 
+For the common Visual Studio WDK driver-project workflow, install `crtsys` from
+the NuGet package UI:
+
+![Visual Studio NuGet package UI installing crtsys](./docs/assets/visual-studio-nuget-package-ui.gif)
+
 | Path | Use when | Start here |
 | --- | --- | --- |
 | NuGet / MSBuild | Visual Studio or Build Tools WDK driver project | `PackageReference` or `Install-Package crtsys` |
@@ -32,6 +37,10 @@ matrix records explicit evidence, not the outer limit of the usable surface.
 | CMake / CPM | CMake-based driver project that consumes `crtsys` from GitHub | `CPMAddPackage("gh:ntoskrnl7/crtsys@<version>")` |
 
 Minimal MSBuild/NuGet consumer:
+
+In Visual Studio, right-click the driver project and choose
+**Manage NuGet Packages...**. Search for **crtsys** in the package source you
+use, install it into the WDK driver project, then build the project normally.
 
 ```xml
 <ItemGroup>
@@ -43,7 +52,7 @@ Minimal MSBuild/NuGet consumer:
 msbuild .\my_driver.vcxproj /restore /p:Configuration=Debug /p:Platform=x64
 ```
 
-For Visual Studio Package Manager Console:
+For Visual Studio Package Manager Console, the same install is:
 
 ```powershell
 Install-Package crtsys

@@ -27,6 +27,11 @@ kernel-mode substrate 위에 매핑됩니다.
 
 ## Quick Start
 
+Visual Studio WDK driver project에서는 NuGet package UI로 `crtsys`를 설치하는
+경로가 가장 일반적입니다.
+
+![Visual Studio NuGet package UI에서 crtsys를 설치하는 화면](./assets/visual-studio-nuget-package-ui-ko-kr.gif)
+
 | 경로 | 사용할 때 | 시작점 |
 | --- | --- | --- |
 | NuGet / MSBuild | Visual Studio 또는 Build Tools WDK driver project | `PackageReference` 또는 `Install-Package crtsys` |
@@ -34,6 +39,10 @@ kernel-mode substrate 위에 매핑됩니다.
 | CMake / CPM | GitHub에서 `crtsys`를 소비하려는 CMake 기반 driver project | `CPMAddPackage("gh:ntoskrnl7/crtsys@<version>")` |
 
 Minimal MSBuild/NuGet consumer:
+
+Visual Studio에서는 driver project를 우클릭하고 **Manage NuGet Packages...**를
+선택합니다. 사용하는 package source에서 **crtsys**를 검색해서 WDK driver
+project에 설치한 뒤 평소처럼 빌드합니다.
 
 ```xml
 <ItemGroup>
