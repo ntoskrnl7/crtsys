@@ -10,9 +10,11 @@
 
 #include "except"
 #include "irp"
+#include <cstring>
 #include <functional>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 
 #ifndef _NTDDK_
 #include <wdm.h>
@@ -62,6 +64,27 @@ struct in_buffer {
    * @brief Creates an input-buffer view.
    */
   in_buffer(const void *ptr, size_t size) : ptr(ptr), size(size) {}
+
+  /**
+   * @brief Returns true when at least bytes bytes are readable.
+   */
+  bool can_read(size_t bytes) const noexcept {
+    return ptr != nullptr && size >= bytes;
+  }
+
+  /**
+   * @brief Interprets the input as a trivially-copyable object if it fits.
+   * @return Pointer to the object view, or nullptr when the buffer is too small.
+   */
+  template <class T> const T *as() const noexcept {
+    static_assert(std::is_trivially_copyable<T>::value,
+                  "ntl::device_control::in_buffer::as requires a "
+                  "trivially-copyable type");
+    if (!can_read(sizeof(T)))
+      return nullptr;
+    return reinterpret_cast<const T *>(ptr);
+  }
+
   const void *ptr;
   size_t size;
 };
@@ -74,6 +97,57 @@ struct out_buffer {
    * @brief Creates an output-buffer view.
    */
   out_buffer(void *ptr, size_t size) : ptr(ptr), size(size) {}
+
+  /**
+   * @brief Returns true when at least bytes bytes are writable.
+   */
+  bool can_write(size_t bytes) const noexcept {
+    return ptr != nullptr && size >= bytes;
+  }
+
+  /**
+   * @brief Clears the reported output size.
+   */
+  void clear() noexcept { size = 0; }
+
+  /**
+   * @brief Interprets the output as a trivially-copyable object if it fits.
+   * @return Pointer to the object view, or nullptr when the buffer is too small.
+   */
+  template <class T> T *as() noexcept {
+    static_assert(std::is_trivially_copyable<T>::value,
+                  "ntl::device_control::out_buffer::as requires a "
+                  "trivially-copyable type");
+    if (!can_write(sizeof(T)))
+      return nullptr;
+    return reinterpret_cast<T *>(ptr);
+  }
+
+  /**
+   * @brief Copies raw bytes into the output buffer and reports that byte count.
+   * @return true when the bytes were copied; false when the buffer is too small.
+   */
+  bool write_bytes(const void *source, size_t bytes) noexcept {
+    if (source == nullptr || !can_write(bytes)) {
+      clear();
+      return false;
+    }
+    std::memcpy(ptr, source, bytes);
+    size = bytes;
+    return true;
+  }
+
+  /**
+   * @brief Writes a trivially-copyable object and reports sizeof(T) bytes.
+   * @return true when the object was copied; false when the buffer is too small.
+   */
+  template <class T> bool write(const T &value) noexcept {
+    static_assert(std::is_trivially_copyable<T>::value,
+                  "ntl::device_control::out_buffer::write requires a "
+                  "trivially-copyable type");
+    return write_bytes(&value, sizeof(T));
+  }
+
   void *ptr;
   size_t size;
 };

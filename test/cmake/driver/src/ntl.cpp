@@ -1,7 +1,9 @@
 #include <ntl/event>
 #include <ntl/expand_stack>
 #include <ntl/except>
+#include <ntl/device>
 #include <ntl/handle>
+#include <ntl/irp>
 #include <ntl/irql>
 #include <ntl/lookaside_list>
 #include <ntl/passive_executor>
@@ -17,6 +19,7 @@
 
 #include <memory_resource>
 #include <atomic>
+#include <cstring>
 #include <cstdint>
 #include <memory>
 #include <numeric>
@@ -690,6 +693,71 @@ bool ntl_result_test() {
   }
 
   return caught_void_exception;
+}
+
+struct device_control_helper_payload {
+  ULONG value;
+};
+
+bool ntl_irp_device_control_helpers_test() {
+  IRP raw_irp{};
+  ntl::irp request(&raw_irp);
+
+  request.succeed(12);
+  if (request.status() != STATUS_SUCCESS || request.information() != 12)
+    return false;
+
+  request.fail(STATUS_INVALID_PARAMETER);
+  if (request.status() != STATUS_INVALID_PARAMETER ||
+      request.information() != 0)
+    return false;
+
+  request.set_result(STATUS_BUFFER_TOO_SMALL, 4);
+  if (request.status() != STATUS_BUFFER_TOO_SMALL ||
+      request.information() != 4)
+    return false;
+
+  const device_control_helper_payload input{0x12345678};
+  ntl::device_control::in_buffer in(&input, sizeof(input));
+  if (!in.can_read(sizeof(input)))
+    return false;
+  const auto *typed_input = in.as<device_control_helper_payload>();
+  if (!typed_input || typed_input->value != input.value)
+    return false;
+
+  ntl::device_control::in_buffer short_in(&input, sizeof(input) - 1);
+  if (short_in.can_read(sizeof(input)) || short_in.as<device_control_helper_payload>())
+    return false;
+
+  alignas(device_control_helper_payload) unsigned char output[sizeof(input)]{};
+  ntl::device_control::out_buffer out(output, sizeof(output));
+  const device_control_helper_payload reply{0x87654321};
+  if (!out.can_write(sizeof(reply)) || !out.write(reply) ||
+      out.size != sizeof(reply))
+    return false;
+  const auto *written = reinterpret_cast<const device_control_helper_payload *>(
+      output);
+  if (written->value != reply.value)
+    return false;
+  auto *typed_output = out.as<device_control_helper_payload>();
+  if (!typed_output || typed_output->value != reply.value)
+    return false;
+
+  unsigned char small_output[sizeof(reply) - 1]{};
+  ntl::device_control::out_buffer small(small_output, sizeof(small_output));
+  if (small.write(reply) || small.size != 0)
+    return false;
+
+  char text[8]{};
+  ntl::device_control::out_buffer text_out(text, sizeof(text));
+  constexpr char expected[] = "ok";
+  if (!text_out.write_bytes(expected, sizeof(expected)) ||
+      text_out.size != sizeof(expected) ||
+      std::memcmp(text, expected, sizeof(expected)) != 0)
+    return false;
+
+  text_out.clear();
+  return text_out.size == 0;
 }
 
 bool ntl_handle_object_test() {
@@ -1390,6 +1458,10 @@ TEST(ntl_test, ntl_lookaside_list_test) {
 
 TEST(ntl_test, ntl_result_test) {
   EXPECT_TRUE(ntl_result_test());
+}
+
+TEST(ntl_test, ntl_irp_device_control_helpers_test) {
+  EXPECT_TRUE(ntl_irp_device_control_helpers_test());
 }
 
 TEST(ntl_test, ntl_handle_object_test) {

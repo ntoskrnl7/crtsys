@@ -69,12 +69,12 @@ ntl::status ntl::main(ntl::driver &driver, const std::wstring &registry_path) {
     test_dev->on_create([test_dev_weak](ntl::irp &irp) {
       if (auto test_dev = test_dev_weak.lock())
         test_dev->extension().create_count++;
-      irp.information(0);
+      irp.succeed();
     });
     test_dev->on_close([test_dev_weak](ntl::irp &irp) {
       if (auto test_dev = test_dev_weak.lock())
         test_dev->extension().close_count++;
-      irp.information(0);
+      irp.succeed();
     });
     test_dev->on_device_control([test_dev_weak](
                                     const ntl::device_control::code &code,
@@ -86,23 +86,23 @@ ntl::status ntl::main(ntl::driver &driver, const std::wstring &registry_path) {
         std::string actual(reinterpret_cast<const char *>(in.ptr), in.size);
         if (actual != "hello")
           std::cout << "[FAILED] expect : hello, actual : " << actual << '\n';
-        if (out.ptr) {
-          strcpy_s(reinterpret_cast<char *>(out.ptr), out.size, "world");
-        } else {
-          std::cout << "[FAILED] out_buffer == null\n";
+        constexpr char reply[] = "world";
+        if (!out.write_bytes(reply, sizeof(reply))) {
+          std::cout << "[FAILED] out_buffer is too small\n";
         }
       } else if (code == TEST_DEVICE_STATE_CTL) {
-        if (out.ptr && out.size >= sizeof(test_device_state)) {
-          auto state = reinterpret_cast<test_device_state *>(out.ptr);
-          state->create_count = 0;
-          state->close_count = 0;
-          if (auto test_dev = test_dev_weak.lock()) {
-            state->create_count = test_dev->extension().create_count;
-            state->close_count = test_dev->extension().close_count;
-          }
-          out.size = sizeof(test_device_state);
-        } else {
+        test_device_state state{};
+        if (auto test_dev = test_dev_weak.lock()) {
+          state.create_count = test_dev->extension().create_count;
+          state.close_count = test_dev->extension().close_count;
+        }
+        if (!out.write(state)) {
           std::cout << "[FAILED] state out_buffer is too small\n";
+          out.clear();
+        } else {
+          auto *written = out.as<test_device_state>();
+          if (written && written->create_count != state.create_count)
+            std::cout << "[FAILED] state write verification failed\n";
         }
       }
     });

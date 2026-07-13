@@ -57,7 +57,7 @@ The driver tests still exercise these features from `PASSIVE_LEVEL`.
 | I/O streams | `std::cin`, `std::cout`, `std::cerr`, `std::clog`, wide stream variants | `PASSIVE_LEVEL` only | Diagnostic and test support. Avoid production hot paths and stack-sensitive paths. |
 | C math and floating-point helpers | Math functions and floating-point classification helpers | `PASSIVE_LEVEL` unless the exact helper is separately audited | Floating-point state and helper dependencies are driver-context sensitive. |
 | NTL entry, driver, device, and RPC server helpers | `ntl::main`, `ntl::driver`, `ntl::device`, `ntl::rpc::server` | `PASSIVE_LEVEL` only | Intended for initialization, teardown, device setup, and IOCTL/RPC control paths. |
-| NTL IRP view | `ntl::irp` | Follows the dispatch path that supplied the IRP | NTL device callbacks should still be treated as `PASSIVE_LEVEL` unless the exact callback body is separately audited. |
+| NTL IRP view | `ntl::irp`, `ntl::device_control::in_buffer`, `ntl::device_control::out_buffer` | Follows the dispatch path that supplied the IRP | NTL device callbacks should still be treated as `PASSIVE_LEVEL` unless the exact callback body is separately audited. |
 | NTL status/result wrapper | `ntl::status`, `ntl::result<T>`, `ntl::result<void>` | Caller context for status checks; contained value and failed `value()` path follow their own contracts | Value/status helpers for preserving `NTSTATUS` while writing C++ control-path code. |
 | NTL stack expansion | `ntl::expand_stack` | `PASSIVE_LEVEL` only | Runtime-backed control-path helper, not a hot-path escape hatch. |
 | NTL handle/object ownership | `ntl::unique_kernel_handle`, `ntl::unique_object`, `try_reference_object_by_handle` | `PASSIVE_LEVEL` unless the exact WDK primitive documents a wider contract | Separates `ZwClose` handle ownership from `ObDereferenceObject` reference ownership. |
@@ -884,6 +884,8 @@ NTL provides C++ helpers for driver code. See the
 - [x] `ntl::device`
   - [x] device extension
     [(tested)](../test/cmake/driver/src/main.cpp#L33)
+  - [x] `ntl::irp` result helpers and typed device-control buffer helpers
+    [(tested)](../test/cmake/driver/src/main.cpp#L64)
   - [x] `IRP_MJ_CREATE`
     [(app test)](../test/cmake/app/src/main.cpp#L77)
   - [x] `IRP_MJ_CLOSE`

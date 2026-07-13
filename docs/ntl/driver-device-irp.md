@@ -122,15 +122,21 @@ API:
 - `major_function() const`
 - `status() const` / `status(NTSTATUS)`
 - `information() const` / `information(ULONG_PTR)`
+- `set_result(NTSTATUS, ULONG_PTR = 0)`
+- `succeed(ULONG_PTR = 0)`
+- `fail(NTSTATUS)`
 
 Example:
 
 ```cpp
 device.on_create([](ntl::irp& request) {
-  request.status(STATUS_SUCCESS);
-  request.information(0);
+  request.succeed();
 });
 ```
+
+`set_result`, `succeed`, and `fail` set `IoStatus.Status` and
+`IoStatus.Information`. They do not call `IoCompleteRequest`; the NTL dispatch
+invoker completes the IRP after the callback returns.
 
 IRQL: follows the dispatch routine that supplied the IRP.
 
@@ -168,21 +174,37 @@ Device control helper types:
 - `ntl::device_control::out_buffer`
 - `ntl::device_control::dispatch_fn`
 
+`in_buffer` provides `can_read(bytes)` and `as<T>()` for
+trivially-copyable request payloads. `out_buffer` provides
+`can_write(bytes)`, `clear()`, `as<T>()`, `write_bytes(ptr, bytes)`, and
+`write(value)` for reporting an exact output byte count through
+`IoStatus.Information`.
+
 Example:
 
 ```cpp
-device.on_device_control([](ntl::irp& request) {
-  auto* stack = request.stack_location();
-  const auto code = stack->Parameters.DeviceIoControl.IoControlCode;
+struct demo_reply {
+  ULONG value;
+};
 
+device.on_device_control([](const ntl::device_control::code& code,
+                            const ntl::device_control::in_buffer& in,
+                            ntl::device_control::out_buffer& out) {
   if (code != DEMO_IOCTL_PING) {
-    request.status(STATUS_INVALID_DEVICE_REQUEST);
-    request.information(0);
+    out.clear();
     return;
   }
 
-  request.status(STATUS_SUCCESS);
-  request.information(0);
+  const auto* request = in.as<ULONG>();
+  if (!request) {
+    out.clear();
+    return;
+  }
+
+  demo_reply reply{*request + 1};
+  if (!out.write(reply)) {
+    out.clear();
+  }
 });
 ```
 
