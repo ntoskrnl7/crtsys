@@ -22,6 +22,8 @@ MSBuild restore가 가능하면 `msbuild /restore`로 충분합니다. `nuget.ex
 
 Visual Studio에서는 NuGet package UI를 사용하는 것이 가장 쉽습니다.
 
+![Visual Studio NuGet package UI에서 crtsys를 설치하는 화면](./assets/visual-studio-nuget-package-ui.gif)
+
 1. WDK driver solution을 엽니다.
 2. driver project를 우클릭하고 **Manage NuGet Packages...**를 선택합니다.
 3. `crtsys` package가 있는 package source를 선택합니다.

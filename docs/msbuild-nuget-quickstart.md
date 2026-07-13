@@ -21,6 +21,8 @@ older `packages.config` flows or scripts that explicitly call `nuget restore`.
 
 The easiest path in Visual Studio is the NuGet package UI:
 
+![Visual Studio NuGet package UI installing crtsys](./assets/visual-studio-nuget-package-ui.gif)
+
 1. Open the WDK driver solution.
 2. Right-click the driver project and choose **Manage NuGet Packages...**.
 3. Select the package source that contains `crtsys`.
