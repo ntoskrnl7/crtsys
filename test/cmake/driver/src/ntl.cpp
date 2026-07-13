@@ -3,13 +3,17 @@
 #include <ntl/except>
 #include <ntl/device>
 #include <ntl/device_endpoint>
+#include <ntl/device_interface>
 #include <ntl/handle>
+#include <ntl/ioctl>
 #include <ntl/irp>
 #include <ntl/irql>
 #include <ntl/lookaside_list>
+#include <ntl/mdl>
 #include <ntl/passive_executor>
 #include <ntl/pool_allocator>
 #include <ntl/registry>
+#include <ntl/remove_lock>
 #include <ntl/result>
 #include <ntl/symbolic_link>
 #include <ntl/system_thread>
@@ -64,6 +68,23 @@ struct lookaside_test_object {
   ~lookaside_test_object() { --g_lookaside_test_object_count; }
 
   int value;
+};
+
+struct ioctl_test_input {
+  std::uint32_t value;
+};
+
+struct ioctl_test_output {
+  std::uint32_t value;
+};
+
+struct ioctl_pipeline_input {
+  std::uint32_t value;
+};
+
+struct ioctl_pipeline_output {
+  std::uint32_t value;
+  std::uint32_t checksum;
 };
 
 void delete_symbolic_link_if_present(const std::wstring &link_name) {
@@ -590,6 +611,14 @@ bool ntl_lookaside_list_test() {
   if (g_lookaside_test_object_count != 0)
     return false;
 
+  auto try_object = list.try_make(35);
+  if (!try_object || !try_object->get() || (*try_object)->value != 35 ||
+      g_lookaside_test_object_count != 1)
+    return false;
+  try_object->reset();
+  if (g_lookaside_test_object_count != 0)
+    return false;
+
   using paged_list =
       ntl::lookaside_list<lookaside_test_object, ntl::pool_kind::paged,
                           ntl::pool_option::none, ntl::pool_tag("NTLg")>;
@@ -773,6 +802,248 @@ bool ntl_irp_device_control_helpers_test() {
   return text_out.size == 0;
 }
 
+using ntl_test_ioctl =
+    ntl::ioctl<FILE_DEVICE_UNKNOWN, 0x810, METHOD_BUFFERED,
+               FILE_READ_DATA | FILE_WRITE_DATA, ioctl_test_input,
+               ioctl_test_output>;
+
+using ntl_pipeline_ioctl =
+    ntl::ioctl<FILE_DEVICE_UNKNOWN, 0x812, METHOD_BUFFERED,
+               FILE_READ_DATA | FILE_WRITE_DATA, ioctl_pipeline_input,
+               ioctl_pipeline_output>;
+
+bool ntl_ioctl_test() {
+  constexpr ULONG expected_code =
+      CTL_CODE(FILE_DEVICE_UNKNOWN, 0x810, METHOD_BUFFERED,
+               FILE_READ_DATA | FILE_WRITE_DATA);
+
+  static_assert(ntl_test_ioctl::code == expected_code,
+                "typed IOCTL descriptor must match CTL_CODE");
+  static_assert(
+      std::is_same<ntl_test_ioctl::input_type, ioctl_test_input>::value,
+      "typed IOCTL input payload mismatch");
+  static_assert(
+      std::is_same<ntl_test_ioctl::output_type, ioctl_test_output>::value,
+      "typed IOCTL output payload mismatch");
+
+  const auto code = ntl_test_ioctl::device_control_code();
+  if (!ntl::is_ioctl<ntl_test_ioctl>(code) ||
+      ntl::is_ioctl<ntl_test_ioctl>(
+          ntl::device_control::code{CTL_CODE(FILE_DEVICE_UNKNOWN, 0x811,
+                                             METHOD_BUFFERED,
+                                             FILE_READ_DATA)}))
+    return false;
+
+  const ioctl_test_input input{0x1234};
+  ntl::device_control::in_buffer in(&input, sizeof(input));
+  const auto *typed_input = ntl::ioctl_input_as<ntl_test_ioctl>(in);
+  if (!typed_input || typed_input->value != input.value)
+    return false;
+
+  ioctl_test_output storage{};
+  ntl::device_control::out_buffer out(&storage, sizeof(storage));
+  const ioctl_test_output output{typed_input->value + 1};
+  if (!ntl::ioctl_write_output<ntl_test_ioctl>(out, output) ||
+      out.size != sizeof(output) || storage.value != 0x1235)
+    return false;
+
+  unsigned char short_storage[sizeof(ioctl_test_output) - 1]{};
+  ntl::device_control::out_buffer short_out(short_storage,
+                                            sizeof(short_storage));
+  return !ntl::ioctl_write_output<ntl_test_ioctl>(short_out, output) &&
+         short_out.size == 0;
+}
+
+struct ioctl_pipeline_dispatch {
+  ntl::remove_lock remove_lock{ntl::pool_tag("NTPp")};
+  std::uint32_t handled_count = 0;
+
+  NTSTATUS handle(const ntl::device_control::code &code,
+                  const ntl::device_control::in_buffer &in,
+                  ntl::device_control::out_buffer &out,
+                  void *irp_tag) noexcept {
+    auto guard = remove_lock.acquire(irp_tag);
+    if (!guard) {
+      out.clear();
+      return static_cast<NTSTATUS>(guard.status());
+    }
+
+    if (!ntl::is_ioctl<ntl_pipeline_ioctl>(code)) {
+      out.clear();
+      return STATUS_INVALID_DEVICE_REQUEST;
+    }
+
+    const auto *request = ntl::ioctl_input_as<ntl_pipeline_ioctl>(in);
+    if (!request) {
+      out.clear();
+      return STATUS_INVALID_PARAMETER;
+    }
+
+    alignas(ioctl_pipeline_output) unsigned char scratch_storage[sizeof(
+        ioctl_pipeline_output)]{};
+    auto scratch = ntl::mdl::allocate(scratch_storage, sizeof(scratch_storage));
+    if (!scratch) {
+      out.clear();
+      return static_cast<NTSTATUS>(scratch.status());
+    }
+
+    scratch->build_for_nonpaged_pool();
+    auto scratch_address = scratch->system_address();
+    if (!scratch_address) {
+      out.clear();
+      return static_cast<NTSTATUS>(scratch_address.status());
+    }
+
+    auto *reply = reinterpret_cast<ioctl_pipeline_output *>(*scratch_address);
+    reply->value = request->value + 1;
+    reply->checksum = request->value ^ 0xa5a5a5a5u;
+
+    if (!ntl::ioctl_write_output<ntl_pipeline_ioctl>(out, *reply)) {
+      out.clear();
+      return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    ++handled_count;
+    return STATUS_SUCCESS;
+  }
+
+  void begin_teardown() noexcept { remove_lock.release_and_wait(this); }
+};
+
+bool ntl_device_control_pipeline_test() {
+  ioctl_pipeline_dispatch dispatch;
+
+  const ioctl_pipeline_input input{0x12345678};
+  ioctl_pipeline_output output{};
+  ntl::device_control::in_buffer in(&input, sizeof(input));
+  ntl::device_control::out_buffer out(&output, sizeof(output));
+
+  auto status =
+      dispatch.handle(ntl_pipeline_ioctl::device_control_code(), in, out,
+                      reinterpret_cast<void *>(0x1000));
+  if (status != STATUS_SUCCESS || out.size != sizeof(output) ||
+      output.value != input.value + 1 ||
+      output.checksum != (input.value ^ 0xa5a5a5a5u) ||
+      dispatch.handled_count != 1)
+    return false;
+
+  output = {};
+  ntl::device_control::out_buffer wrong_out(&output, sizeof(output));
+  status = dispatch.handle(
+      ntl::device_control::code{CTL_CODE(FILE_DEVICE_UNKNOWN, 0x813,
+                                         METHOD_BUFFERED, FILE_READ_DATA)},
+      in, wrong_out, reinterpret_cast<void *>(0x1001));
+  if (status != STATUS_INVALID_DEVICE_REQUEST || wrong_out.size != 0 ||
+      dispatch.handled_count != 1)
+    return false;
+
+  ntl::device_control::in_buffer short_in(&input, sizeof(input) - 1);
+  ntl::device_control::out_buffer short_input_out(&output, sizeof(output));
+  status = dispatch.handle(ntl_pipeline_ioctl::device_control_code(), short_in,
+                           short_input_out,
+                           reinterpret_cast<void *>(0x1002));
+  if (status != STATUS_INVALID_PARAMETER || short_input_out.size != 0 ||
+      dispatch.handled_count != 1)
+    return false;
+
+  unsigned char small_output[sizeof(ioctl_pipeline_output) - 1]{};
+  ntl::device_control::out_buffer small_out(small_output,
+                                            sizeof(small_output));
+  status = dispatch.handle(ntl_pipeline_ioctl::device_control_code(), in,
+                           small_out, reinterpret_cast<void *>(0x1003));
+  if (status != STATUS_BUFFER_TOO_SMALL || small_out.size != 0 ||
+      dispatch.handled_count != 1)
+    return false;
+
+  dispatch.begin_teardown();
+
+  ntl::device_control::out_buffer teardown_out(&output, sizeof(output));
+  status = dispatch.handle(ntl_pipeline_ioctl::device_control_code(), in,
+                           teardown_out,
+                           reinterpret_cast<void *>(0x1004));
+  return status == STATUS_DELETE_PENDING && teardown_out.size == 0 &&
+         dispatch.handled_count == 1;
+}
+
+bool ntl_mdl_test() {
+  alignas(16) unsigned char buffer[64]{};
+  buffer[0] = 0x5a;
+
+  auto native_mdl = ntl::mdl::allocate(buffer, sizeof(buffer));
+  if (!native_mdl || !*native_mdl || native_mdl->get() == nullptr)
+    return false;
+  if (native_mdl->byte_count() != sizeof(buffer) ||
+      native_mdl->virtual_address() != buffer)
+    return false;
+
+  native_mdl->build_for_nonpaged_pool();
+  auto system_address = native_mdl->system_address();
+  if (!system_address || *system_address != buffer)
+    return false;
+
+  ntl::mdl moved(std::move(*native_mdl));
+  if (*native_mdl || !moved || moved.byte_count() != sizeof(buffer))
+    return false;
+
+  PMDL const released = moved.release();
+  if (moved || released == nullptr)
+    return false;
+  IoFreeMdl(released);
+
+  ntl::mdl empty;
+  auto invalid_address = empty.system_address();
+  return !invalid_address &&
+         static_cast<NTSTATUS>(invalid_address.status()) ==
+             STATUS_INVALID_PARAMETER;
+}
+
+bool ntl_remove_lock_test() {
+  ntl::remove_lock lock{ntl::pool_tag("NTRm")};
+
+  auto first = lock.acquire(reinterpret_cast<void *>(1));
+  if (!first || !*first)
+    return false;
+
+  ntl::remove_lock_guard moved(std::move(*first));
+  if (*first || !moved)
+    return false;
+
+  auto second = lock.acquire(reinterpret_cast<void *>(2));
+  if (!second || !*second)
+    return false;
+  second->reset();
+  if (*second)
+    return false;
+
+  moved.reset();
+
+  auto third = lock.acquire(reinterpret_cast<void *>(3));
+  if (!third || !*third)
+    return false;
+  third->reset();
+
+  lock.release_and_wait(nullptr);
+
+  auto after_remove = lock.acquire(reinterpret_cast<void *>(4));
+  return !after_remove &&
+         static_cast<NTSTATUS>(after_remove.status()) ==
+             STATUS_DELETE_PENDING;
+}
+
+bool ntl_device_interface_test() {
+  ntl::device_interface_link link;
+  if (link || !link.name().empty())
+    return false;
+
+  if (static_cast<NTSTATUS>(link.enable()) != STATUS_INVALID_PARAMETER)
+    return false;
+  if (static_cast<NTSTATUS>(link.disable()) != STATUS_INVALID_PARAMETER)
+    return false;
+
+  link.reset();
+  return !link;
+}
+
 bool ntl_handle_object_test() {
   ntl::unique_kernel_handle handle;
   const auto create_status =
@@ -888,6 +1159,21 @@ bool ntl_registry_test() {
   auto enabled = opened_parameters->query_dword(L"Enabled");
   if (!enabled || *enabled != 1)
     return false;
+  {
+    auto config = ntl::driver_config::open(key_path, KEY_READ | KEY_WRITE);
+    if (!config)
+      return false;
+    if (config->dword_or(L"Enabled", 0) != 1)
+      return false;
+    if (config->dword_or(L"MissingDword", 7) != 7)
+      return false;
+    if (!config->key().set_string(L"Mode", L"fast").is_ok())
+      return false;
+    if (config->string_or(L"Mode", L"slow") != L"fast")
+      return false;
+    if (config->string_or(L"MissingString", L"default") != L"default")
+      return false;
+  }
   if (!opened_parameters->delete_key().is_ok())
     return false;
   if (!opened_parameters->close().is_ok())
@@ -1475,6 +1761,26 @@ TEST(ntl_test, ntl_result_test) {
 
 TEST(ntl_test, ntl_irp_device_control_helpers_test) {
   EXPECT_TRUE(ntl_irp_device_control_helpers_test());
+}
+
+TEST(ntl_test, ntl_ioctl_test) {
+  EXPECT_TRUE(ntl_ioctl_test());
+}
+
+TEST(ntl_test, ntl_device_control_pipeline_test) {
+  EXPECT_TRUE(ntl_device_control_pipeline_test());
+}
+
+TEST(ntl_test, ntl_mdl_test) {
+  EXPECT_TRUE(ntl_mdl_test());
+}
+
+TEST(ntl_test, ntl_remove_lock_test) {
+  EXPECT_TRUE(ntl_remove_lock_test());
+}
+
+TEST(ntl_test, ntl_device_interface_test) {
+  EXPECT_TRUE(ntl_device_interface_test());
 }
 
 TEST(ntl_test, ntl_handle_object_test) {

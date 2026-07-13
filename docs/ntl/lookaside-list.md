@@ -32,6 +32,11 @@ packet_cache packets;
 
 auto packet = packets.make(42);
 packet->id += 1;
+
+auto packet_result = packets.try_make(43);
+if (!packet_result) {
+  return packet_result.status();
+}
 ```
 
 Raw allocation and explicit construction:
@@ -78,6 +83,7 @@ using aligned_cache =
 - `allocate()`
 - `free(pointer)`
 - `make(args...)`
+- `try_make(args...)`
 - `destroy(pointer)`
 - `flush()`
 - `native_handle()`
@@ -85,6 +91,9 @@ using aligned_cache =
 `make(args...)` returns a move-only RAII pointer. The lookaside list must outlive
 all pointers created from it because the pointer deleter returns objects to that
 specific list.
+
+`try_make(args...)` returns `ntl::result<pointer>` instead of throwing. Use it
+when a driver initialization path wants to preserve `NTSTATUS` flow.
 
 The WDK recommends passing `0` for `depth`. If you pass an explicit nonzero
 depth, it must be within the WDK `EX_MAXIMUM_LOOKASIDE_DEPTH_*` range. Small
@@ -121,7 +130,7 @@ Do not keep RAII objects alive past the `lookaside_list` that created them.
 The driver test suite exercises:
 
 - raw nonpaged allocate/construct/destroy/free
-- RAII object creation, move, reset, and destruction
+- RAII object creation, `try_make`, move, reset, and destruction
 - paged lookaside list construction
 - cache-aligned nonpaged lookaside list construction
 - explicit `flush()`

@@ -1,0 +1,79 @@
+/**
+ * @file ioctl
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Typed IOCTL code and device-control buffer helpers.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#ifndef _NTDDK_
+#include <wdm.h>
+#endif
+
+#include "device"
+
+#include <type_traits>
+
+namespace ntl {
+
+/**
+ * @brief Compile-time IOCTL descriptor that ties a CTL_CODE to payload types.
+ * @tparam DeviceType CTL_CODE device type.
+ * @tparam Function CTL_CODE function number.
+ * @tparam Method CTL_CODE transfer method.
+ * @tparam Access CTL_CODE required access bits.
+ * @tparam Input Input payload type, or void for no typed input.
+ * @tparam Output Output payload type, or void for no typed output.
+ */
+template <ULONG DeviceType, ULONG Function, ULONG Method, ULONG Access,
+          class Input = void, class Output = void>
+struct ioctl {
+  using input_type = Input;
+  using output_type = Output;
+
+  static constexpr ULONG device_type = DeviceType;
+  static constexpr ULONG function = Function;
+  static constexpr ULONG method = Method;
+  static constexpr ULONG access = Access;
+  static constexpr ULONG code = CTL_CODE(DeviceType, Function, Method, Access);
+
+  /**
+   * @brief Returns the descriptor as ntl::device_control::code.
+   */
+  static constexpr ntl::device_control::code device_control_code() noexcept {
+    return ntl::device_control::code{code};
+  }
+};
+
+/**
+ * @brief Returns true when a runtime device-control code matches an IOCTL type.
+ */
+template <class Ioctl>
+constexpr bool is_ioctl(ntl::device_control::code code) noexcept {
+  return code.value == Ioctl::code;
+}
+
+/**
+ * @brief Reads an IOCTL input payload from a device-control input buffer.
+ */
+template <class Ioctl>
+const typename Ioctl::input_type *
+ioctl_input_as(const ntl::device_control::in_buffer &buffer) noexcept {
+  static_assert(!std::is_void<typename Ioctl::input_type>::value,
+                "This IOCTL has no typed input payload.");
+  return buffer.template as<typename Ioctl::input_type>();
+}
+
+/**
+ * @brief Writes an IOCTL output payload to a device-control output buffer.
+ */
+template <class Ioctl>
+bool ioctl_write_output(ntl::device_control::out_buffer &buffer,
+                        const typename Ioctl::output_type &value) noexcept {
+  static_assert(!std::is_void<typename Ioctl::output_type>::value,
+                "This IOCTL has no typed output payload.");
+  return buffer.template write<typename Ioctl::output_type>(value);
+}
+
+} // namespace ntl

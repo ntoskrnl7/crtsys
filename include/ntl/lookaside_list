@@ -180,6 +180,34 @@ public:
   }
 
   /**
+   * @brief Constructs T in lookaside storage and returns NTSTATUS on failure.
+   *
+   * Constructor exceptions are translated to a conservative NTSTATUS so callers
+   * can keep kernel-style result flow when desired.
+   */
+  template <class... Args>
+  [[nodiscard]] ntl::result<pointer> try_make(Args &&...args) noexcept {
+    T *const storage = allocate();
+    if (!storage) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+
+    try {
+      return ntl::ok(pointer{new (storage) T(std::forward<Args>(args)...),
+                             deleter{*this}});
+    } catch (const ntl::exception &e) {
+      free(storage);
+      return ntl::unexpected(e.get_status());
+    } catch (const std::bad_alloc &) {
+      free(storage);
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      free(storage);
+      return ntl::unexpected(STATUS_UNSUCCESSFUL);
+    }
+  }
+
+  /**
    * @brief Destroys T and returns its storage to the lookaside list.
    */
   void destroy(T *pointer) noexcept {

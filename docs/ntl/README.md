@@ -19,8 +19,12 @@ Use these pages when you want more detail than the compact
 | [Handle and object ownership](./ownership.md) | `ZwClose` handle ownership and `ObDereferenceObject` reference ownership |
 | [Registry](./registry.md) | RAII wrapper for Zw registry keys, driver `Parameters` lookup, and typed value query/set helpers |
 | [Driver, device, and IRP helpers](./driver-device-irp.md) | `ntl::main`, `ntl::driver`, `ntl::device`, `ntl::device_endpoint`, dispatch callbacks, and `ntl::irp` |
+| [Device-control pattern](./device-control-pattern.md) | Practical `IOCTL` dispatch pattern using typed IOCTLs, remove locks, MDLs, and output reporting |
+| [Typed IOCTL helper](./ioctl.md) | Compile-time `CTL_CODE` descriptors tied to request/reply payload types |
+| [Device interface](./device-interface.md) | PnP `IoRegisterDeviceInterface` ownership and enable/disable helper |
 | [RPC](./rpc.md) | Kernel/user RPC schema macros, server lifetime, client calls, and stable callback IDs |
 | [Synchronization](./synchronization.md) | `ntl::irql`, IRQL query/contract helpers, spin locks, ERESOURCE wrapper, and lock helpers |
+| [Remove lock](./remove-lock.md) | `IO_REMOVE_LOCK` RAII guard for dispatch/remove/unload synchronization |
 | [Event](./event.md) | `KEVENT` wrapper for notification/synchronization events |
 | [Timer and DPC](./timer.md) | `KTIMER` and `KDPC` wrappers for one-shot timers, periodic timers, and DPC queueing |
 | [System thread](./system-thread.md) | `PsCreateSystemThread` helper with `NTSTATUS` results and `ZwClose` handle ownership |
@@ -29,6 +33,7 @@ Use these pages when you want more detail than the compact
 | [Passive executor](./passive-executor.md) | Inline-or-defer policy for running callables at `PASSIVE_LEVEL` |
 | [Pool allocator](./pool-allocator.md) | Kernel pool-backed ownership helpers, STL allocators, PMR resources, pool tags, and IRQL rules |
 | [Lookaside list](./lookaside-list.md) | Fixed-size kernel object cache wrapper over `LOOKASIDE_LIST_EX` |
+| [MDL helper](./mdl.md) | RAII ownership for MDLs allocated by `IoAllocateMdl` |
 | [Symbolic link](./symbolic-link.md) | RAII wrapper over `IoCreateSymbolicLink` / `IoDeleteSymbolicLink` |
 | [Unicode string](./unicode-string.md) | Adapting `std::wstring` storage to `UNICODE_STRING` |
 

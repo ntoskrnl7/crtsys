@@ -378,6 +378,157 @@ private:
 };
 
 /**
+ * @brief Convenience reader for a driver's `Parameters` registry key.
+ *
+ * This helper is a small layer over registry_key for driver configuration
+ * paths. It keeps the underlying key visible through key(), but makes optional
+ * settings easy to read with default values.
+ */
+class driver_config {
+public:
+  /**
+   * @brief Creates an empty config reader.
+   */
+  driver_config() = default;
+
+  /**
+   * @brief Takes ownership of an opened Parameters key.
+   * @param key Registry key owner.
+   */
+  explicit driver_config(registry_key key) noexcept
+      : key_(std::move(key)) {}
+
+  driver_config(const driver_config &) = delete;
+  driver_config &operator=(const driver_config &) = delete;
+  driver_config(driver_config &&) noexcept = default;
+  driver_config &operator=(driver_config &&) noexcept = default;
+
+  /**
+   * @brief Opens the driver's existing Parameters key.
+   * @param registry_path RegistryPath passed to DriverEntry/ntl::main.
+   * @param desired_access Access mask passed to ZwOpenKey.
+   */
+  [[nodiscard]] static ntl::result<driver_config>
+  open(const std::wstring &registry_path,
+       ACCESS_MASK desired_access = KEY_READ) {
+    auto key = registry_key::open(registry_path + L"\\Parameters",
+                                  desired_access);
+    if (!key)
+      return ntl::unexpected(key.status());
+
+    return ntl::ok(driver_config{std::move(*key)});
+  }
+
+  /**
+   * @brief Creates or opens the driver's Parameters key.
+   * @param registry_path RegistryPath passed to DriverEntry/ntl::main.
+   * @param desired_access Access mask passed to ZwCreateKey.
+   * @param create_options Registry create options.
+   * @param disposition Optional ZwCreateKey disposition output.
+   */
+  [[nodiscard]] static ntl::result<driver_config>
+  create(const std::wstring &registry_path,
+         ACCESS_MASK desired_access = KEY_READ | KEY_WRITE,
+         ULONG create_options = REG_OPTION_NON_VOLATILE,
+         registry_disposition *disposition = nullptr) {
+    auto key = registry_key::create(registry_path + L"\\Parameters",
+                                    desired_access, create_options,
+                                    disposition);
+    if (!key)
+      return ntl::unexpected(key.status());
+
+    return ntl::ok(driver_config{std::move(*key)});
+  }
+
+  /**
+   * @brief Returns true when a Parameters key is owned.
+   */
+  explicit operator bool() const noexcept { return static_cast<bool>(key_); }
+
+  /**
+   * @brief Returns the underlying registry key owner.
+   */
+  registry_key &key() noexcept { return key_; }
+
+  /**
+   * @brief Returns the underlying registry key owner.
+   */
+  const registry_key &key() const noexcept { return key_; }
+
+  /**
+   * @brief Queries a DWORD setting.
+   */
+  [[nodiscard]] ntl::result<std::uint32_t>
+  query_dword(const std::wstring &value_name) const {
+    return key_.query_dword(value_name);
+  }
+
+  /**
+   * @brief Queries a QWORD setting.
+   */
+  [[nodiscard]] ntl::result<std::uint64_t>
+  query_qword(const std::wstring &value_name) const {
+    return key_.query_qword(value_name);
+  }
+
+  /**
+   * @brief Queries a string setting.
+   */
+  [[nodiscard]] ntl::result<std::wstring>
+  query_string(const std::wstring &value_name) const {
+    return key_.query_string(value_name);
+  }
+
+  /**
+   * @brief Queries a binary setting.
+   */
+  [[nodiscard]] ntl::result<std::vector<std::uint8_t>>
+  query_binary(const std::wstring &value_name) const {
+    return key_.query_binary(value_name);
+  }
+
+  /**
+   * @brief Reads a DWORD setting or returns a fallback value.
+   */
+  std::uint32_t dword_or(const std::wstring &value_name,
+                         std::uint32_t fallback) const {
+    auto value = query_dword(value_name);
+    return value ? *value : fallback;
+  }
+
+  /**
+   * @brief Reads a QWORD setting or returns a fallback value.
+   */
+  std::uint64_t qword_or(const std::wstring &value_name,
+                         std::uint64_t fallback) const {
+    auto value = query_qword(value_name);
+    return value ? *value : fallback;
+  }
+
+  /**
+   * @brief Reads a string setting or returns a fallback value.
+   */
+  std::wstring string_or(const std::wstring &value_name,
+                         std::wstring fallback) const {
+    auto value = query_string(value_name);
+    return value ? std::move(*value) : std::move(fallback);
+  }
+
+  /**
+   * @brief Reads a binary setting or returns fallback bytes.
+   */
+  std::vector<std::uint8_t>
+  binary_or(const std::wstring &value_name,
+            std::vector<std::uint8_t> fallback) const {
+    auto value = query_binary(value_name);
+    return value ? std::move(*value) : std::move(fallback);
+  }
+
+private:
+  registry_key key_;
+};
+
+/**
  * @brief Opens a driver's `Parameters` key below the service registry path.
  * @param registry_path RegistryPath passed to DriverEntry/ntl::main.
  * @param desired_access Access mask passed to ZwOpenKey.

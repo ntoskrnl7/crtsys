@@ -1,0 +1,176 @@
+/**
+ * @file device_interface
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief RAII wrapper for PnP device-interface symbolic links.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#ifndef _NTDDK_
+#include <wdm.h>
+#endif
+
+#include "result"
+#include "status"
+
+#include <string>
+#include <utility>
+
+namespace ntl {
+
+/**
+ * @brief Owns a symbolic link returned by IoRegisterDeviceInterface.
+ *
+ * This is for PnP device interfaces. The device object passed to register_link
+ * must be a physical device object accepted by IoRegisterDeviceInterface.
+ */
+class device_interface_link {
+public:
+  /**
+   * @brief Creates an empty device-interface owner.
+   */
+  device_interface_link() noexcept = default;
+
+  device_interface_link(const device_interface_link &) = delete;
+  device_interface_link &operator=(const device_interface_link &) = delete;
+
+  /**
+   * @brief Transfers device-interface ownership.
+   */
+  device_interface_link(device_interface_link &&other) noexcept
+      : symbolic_link_(other.symbolic_link_), enabled_(other.enabled_) {
+    other.symbolic_link_ = {};
+    other.enabled_ = false;
+  }
+
+  /**
+   * @brief Transfers device-interface ownership.
+   */
+  device_interface_link &operator=(device_interface_link &&other) noexcept {
+    if (this == &other)
+      return *this;
+
+    reset();
+    symbolic_link_ = other.symbolic_link_;
+    enabled_ = other.enabled_;
+    other.symbolic_link_ = {};
+    other.enabled_ = false;
+    return *this;
+  }
+
+  /**
+   * @brief Disables the interface if needed, then frees the symbolic link.
+   */
+  ~device_interface_link() { reset(); }
+
+  /**
+   * @brief Returns true when a symbolic link is owned.
+   */
+  explicit operator bool() const noexcept {
+    return symbolic_link_.Buffer != nullptr;
+  }
+
+  /**
+   * @brief Returns the native symbolic-link string.
+   */
+  const UNICODE_STRING &native_name() const noexcept { return symbolic_link_; }
+
+  /**
+   * @brief Returns the symbolic-link name as std::wstring.
+   */
+  std::wstring name() const {
+    if (!symbolic_link_.Buffer)
+      return {};
+    return std::wstring(symbolic_link_.Buffer,
+                        symbolic_link_.Length / sizeof(wchar_t));
+  }
+
+  /**
+   * @brief Enables the device interface.
+   */
+  ntl::status enable() noexcept { return set_enabled(true); }
+
+  /**
+   * @brief Disables the device interface.
+   */
+  ntl::status disable() noexcept { return set_enabled(false); }
+
+  /**
+   * @brief Sets the device-interface enabled state.
+   */
+  ntl::status set_enabled(bool enabled) noexcept {
+    if (!symbolic_link_.Buffer)
+      return ntl::status{STATUS_INVALID_PARAMETER};
+
+    const auto status =
+        IoSetDeviceInterfaceState(&symbolic_link_, enabled ? TRUE : FALSE);
+    if (NT_SUCCESS(status))
+      enabled_ = enabled;
+    return ntl::status{status};
+  }
+
+  /**
+   * @brief Releases the symbolic link without disabling or freeing it.
+   */
+  UNICODE_STRING release() noexcept {
+    UNICODE_STRING released = symbolic_link_;
+    symbolic_link_ = {};
+    enabled_ = false;
+    return released;
+  }
+
+  /**
+   * @brief Disables and frees the symbolic link, if owned.
+   */
+  void reset() noexcept {
+    if (!symbolic_link_.Buffer)
+      return;
+
+    if (enabled_)
+      (void)IoSetDeviceInterfaceState(&symbolic_link_, FALSE);
+    RtlFreeUnicodeString(&symbolic_link_);
+    symbolic_link_ = {};
+    enabled_ = false;
+  }
+
+private:
+  friend ntl::result<device_interface_link>
+  try_register_device_interface(PDEVICE_OBJECT physical_device_object,
+                                const GUID &interface_guid,
+                                const wchar_t *reference_string);
+
+  explicit device_interface_link(UNICODE_STRING symbolic_link) noexcept
+      : symbolic_link_(symbolic_link) {}
+
+  UNICODE_STRING symbolic_link_{};
+  bool enabled_ = false;
+};
+
+/**
+ * @brief Registers a PnP device interface.
+ * @param physical_device_object PDO accepted by IoRegisterDeviceInterface.
+ * @param interface_guid Interface class GUID.
+ * @param reference_string Optional reference string.
+ */
+[[nodiscard]] inline ntl::result<device_interface_link>
+try_register_device_interface(PDEVICE_OBJECT physical_device_object,
+                              const GUID &interface_guid,
+                              const wchar_t *reference_string = nullptr) {
+  UNICODE_STRING reference{};
+  UNICODE_STRING *reference_ptr = nullptr;
+  if (reference_string) {
+    RtlInitUnicodeString(&reference, reference_string);
+    reference_ptr = &reference;
+  }
+
+  UNICODE_STRING symbolic_link{};
+  const auto status = IoRegisterDeviceInterface(
+      physical_device_object, &interface_guid, reference_ptr, &symbolic_link);
+  if (!NT_SUCCESS(status))
+    return ntl::unexpected(status);
+
+  return ntl::ok(device_interface_link{symbolic_link});
+}
+
+} // namespace ntl

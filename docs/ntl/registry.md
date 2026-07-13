@@ -49,6 +49,27 @@ needs to create its own volatile or persistent test/configuration key.
 `open_driver_parameters` is kept as a compact alias. New examples use the
 `try_` spelling to match other NTL helpers that return `ntl::result<T>`.
 
+`ntl::driver_config` is a small convenience wrapper around the same
+`Parameters` key. It keeps the underlying `registry_key` visible through
+`key()`, and adds default-returning helpers for optional settings:
+
+```cpp
+auto config = ntl::driver_config::open(registry_path);
+if (!config) {
+  if (static_cast<NTSTATUS>(config.status()) ==
+      STATUS_OBJECT_NAME_NOT_FOUND) {
+    return ntl::status::ok();
+  }
+  return config.status();
+}
+
+const auto queue_depth = config->dword_or(L"QueueDepth", 32);
+const auto mode = config->string_or(L"Mode", L"default");
+```
+
+Use `driver_config::create(registry_path, ...)` when test or setup code needs
+to create the `Parameters` key.
+
 ## Querying Values
 
 ```cpp
@@ -71,6 +92,13 @@ Typed query helpers validate the `REG_*` type and return `ntl::result<T>`:
 - `query_string(name) -> ntl::result<std::wstring>`
 - `query_binary(name) -> ntl::result<std::vector<std::uint8_t>>`
 - `query_value(name) -> ntl::result<ntl::registry_value>`
+
+`driver_config` forwards the same typed query helpers and also provides:
+
+- `dword_or(name, fallback)`
+- `qword_or(name, fallback)`
+- `string_or(name, fallback)`
+- `binary_or(name, fallback)`
 
 `query_string` accepts `REG_SZ` and `REG_EXPAND_SZ` and trims trailing NUL
 characters. It does not expand environment variables.
@@ -132,5 +160,6 @@ The driver test covers:
 - volatile key create/open/delete
 - `REG_DWORD`, `REG_QWORD`, `REG_SZ`, `REG_EXPAND_SZ`, and `REG_BINARY`
 - raw `query_value`
+- `driver_config` default-returning reads
 - value deletion and missing-value status
 - move, release, adopt, and close ownership paths

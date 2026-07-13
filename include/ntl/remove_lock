@@ -1,0 +1,170 @@
+/**
+ * @file remove_lock
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief RAII wrapper for IO_REMOVE_LOCK.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#ifndef _NTDDK_
+#include <wdm.h>
+#endif
+
+#include "pool_allocator"
+#include "result"
+#include "status"
+
+#include <utility>
+
+namespace ntl {
+
+class remove_lock;
+
+/**
+ * @brief RAII release guard returned by remove_lock::acquire.
+ */
+class remove_lock_guard {
+public:
+  /**
+   * @brief Creates an empty guard.
+   */
+  remove_lock_guard() noexcept = default;
+
+  remove_lock_guard(const remove_lock_guard &) = delete;
+  remove_lock_guard &operator=(const remove_lock_guard &) = delete;
+
+  /**
+   * @brief Transfers the acquired remove-lock reference.
+   */
+  remove_lock_guard(remove_lock_guard &&other) noexcept
+      : owner_(other.owner_), tag_(other.tag_) {
+    other.owner_ = nullptr;
+    other.tag_ = nullptr;
+  }
+
+  /**
+   * @brief Transfers the acquired remove-lock reference.
+   */
+  remove_lock_guard &operator=(remove_lock_guard &&other) noexcept {
+    if (this == &other)
+      return *this;
+
+    reset();
+    owner_ = other.owner_;
+    tag_ = other.tag_;
+    other.owner_ = nullptr;
+    other.tag_ = nullptr;
+    return *this;
+  }
+
+  /**
+   * @brief Releases the acquired remove-lock reference.
+   */
+  ~remove_lock_guard() { reset(); }
+
+  /**
+   * @brief Returns true when this guard owns an acquired reference.
+   */
+  explicit operator bool() const noexcept { return owner_ != nullptr; }
+
+  /**
+   * @brief Releases the acquired reference, if any.
+   */
+  void reset() noexcept;
+
+private:
+  friend class remove_lock;
+
+  remove_lock_guard(remove_lock &owner, void *tag) noexcept
+      : owner_(&owner), tag_(tag) {}
+
+  remove_lock *owner_ = nullptr;
+  void *tag_ = nullptr;
+};
+
+/**
+ * @brief Wrapper for IO_REMOVE_LOCK used to block unload/remove races.
+ *
+ * Acquire a guard for each dispatch path that must finish before remove/unload.
+ * Then call release_and_wait from the remove/unload path after the object stops
+ * accepting new work.
+ */
+class remove_lock {
+public:
+  /**
+   * @brief Initializes the native remove lock.
+   * @param tag Pool-style debugging tag for the lock.
+   * @param max_locked_minutes Native MaxLockedMinutes argument.
+   * @param high_watermark Native HighWatermark argument.
+   */
+  explicit remove_lock(ULONG tag = default_pool_tag,
+                       ULONG max_locked_minutes = 0,
+                       ULONG high_watermark = 0) noexcept {
+    IoInitializeRemoveLock(&lock_, tag, max_locked_minutes, high_watermark);
+  }
+
+  remove_lock(const remove_lock &) = delete;
+  remove_lock &operator=(const remove_lock &) = delete;
+  remove_lock(remove_lock &&) = delete;
+  remove_lock &operator=(remove_lock &&) = delete;
+
+  /**
+   * @brief Acquires the remove lock and returns an RAII guard.
+   * @param tag Caller-defined tracking tag, commonly an IRP pointer.
+   */
+  [[nodiscard]] ntl::result<remove_lock_guard>
+  acquire(void *tag = nullptr) noexcept {
+    if (InterlockedCompareExchange(&removing_, 0, 0) != 0)
+      return ntl::unexpected(STATUS_DELETE_PENDING);
+
+    const auto status = IoAcquireRemoveLock(&lock_, tag);
+    if (!NT_SUCCESS(status))
+      return ntl::unexpected(status);
+
+    return ntl::ok(remove_lock_guard{*this, tag});
+  }
+
+  /**
+   * @brief Releases one acquired reference.
+   * @param tag The tag used for acquire.
+   */
+  void release(void *tag = nullptr) noexcept {
+    IoReleaseRemoveLock(&lock_, tag);
+  }
+
+  /**
+   * @brief Releases the remove path reference and waits for outstanding guards.
+   * @param tag Caller-defined tracking tag.
+   */
+  void release_and_wait(void *tag = nullptr) noexcept {
+    if (InterlockedCompareExchange(&removing_, 1, 0) != 0)
+      return;
+
+    const auto status = IoAcquireRemoveLock(&lock_, tag);
+    if (!NT_SUCCESS(status))
+      return;
+
+    IoReleaseRemoveLockAndWait(&lock_, tag);
+  }
+
+  /**
+   * @brief Returns the native remove-lock storage.
+   */
+  IO_REMOVE_LOCK *native_handle() noexcept { return &lock_; }
+
+private:
+  IO_REMOVE_LOCK lock_{};
+  volatile LONG removing_ = 0;
+};
+
+inline void remove_lock_guard::reset() noexcept {
+  if (!owner_)
+    return;
+
+  owner_->release(tag_);
+  owner_ = nullptr;
+  tag_ = nullptr;
+}
+
+} // namespace ntl
