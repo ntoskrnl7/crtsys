@@ -77,6 +77,7 @@ Result-returning variants are added where a helper creates a value and failure
 is naturally represented by `NTSTATUS`:
 
 - `ntl::try_make_pool_buffer(...) -> ntl::result<ntl::pool_buffer>`
+- `ntl::try_allocate_pool(...) -> ntl::result<void*>`
 - `ntl::try_make_pool<T>(...) -> ntl::result<ntl::pool_ptr<T>>`
 - `ntl::driver::try_create_device<T>(...) -> ntl::result<std::shared_ptr<ntl::device<T>>>`
 - `ntl::try_create_symbolic_link(...) -> ntl::result<ntl::symbolic_link>`

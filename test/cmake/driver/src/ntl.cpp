@@ -452,6 +452,12 @@ bool ntl_pool_allocator_test() {
     return false;
   ntl::free_pool(raw, "NTLr");
 
+  auto raw_result = ntl::try_allocate_pool(
+      80, ntl::pool_kind::nonpaged, ntl::pool_option::none, "NTRr");
+  if (!raw_result || !raw_result.value())
+    return false;
+  ntl::free_pool(raw_result.value(), "NTRr");
+
   void *const raw_multichar =
       ntl::allocate_pool(64, ntl::pool_kind::nonpaged, ntl::pool_option::none,
                          'mLTN');
@@ -635,6 +641,12 @@ bool ntl_result_test() {
   if (!buffer_result || !buffer_result->get())
     return false;
   buffer_result->reset();
+
+  auto raw_result = ntl::try_allocate_pool(
+      24, ntl::pool_kind::nonpaged, ntl::pool_option::none, "NTRr");
+  if (!raw_result || !raw_result.value())
+    return false;
+  ntl::free_pool(raw_result.value(), "NTRr");
 
   const auto object_count_before = g_pool_test_object_count;
   auto object_result = ntl::try_make_pool<pool_test_object>(

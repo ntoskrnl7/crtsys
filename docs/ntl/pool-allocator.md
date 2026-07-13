@@ -33,13 +33,27 @@ if (!buffer) {
 ntl::free_pool(buffer, "BUF1");
 ```
 
+Raw nonpaged allocation with `NTSTATUS` propagation:
+
+```cpp
+auto buffer = ntl::try_allocate_pool(128,
+                                     ntl::pool_kind::nonpaged,
+                                     ntl::pool_option::none,
+                                     "BUF2");
+if (!buffer) {
+  return buffer.status();
+}
+
+ntl::free_pool(buffer.value(), "BUF2");
+```
+
 Raw nonpaged allocation with RAII cleanup:
 
 ```cpp
 auto buffer = ntl::make_pool_buffer(128,
                                     ntl::pool_kind::nonpaged,
                                     ntl::pool_option::none,
-                                    "BUF2");
+                                    "BUF3");
 if (!buffer) {
   return STATUS_INSUFFICIENT_RESOURCES;
 }
@@ -51,7 +65,7 @@ RAII cleanup with `NTSTATUS` propagation:
 auto buffer = ntl::try_make_pool_buffer(128,
                                         ntl::pool_kind::nonpaged,
                                         ntl::pool_option::none,
-                                        "BUF3");
+                                        "BUF4");
 if (!buffer) {
   return buffer.status();
 }
@@ -166,6 +180,12 @@ to read in code:
 ```cpp
 auto* p = ntl::allocate_pool(64, "BUF2");
 ntl::free_pool(p, "BUF2");
+
+auto r = ntl::try_allocate_pool(64, "BUF3");
+if (!r) {
+  return r.status();
+}
+ntl::free_pool(r.value(), "BUF3");
 ```
 
 For allocator template arguments, C++14-compatible code cannot pass `"BUF2"` as
@@ -225,6 +245,10 @@ packets.reserve(64);
 - `ntl::allocate_pool(bytes, kind, options, "TAGx")`
 - `ntl::allocate_pool(bytes, kind, "TAGx")`
 - `ntl::allocate_pool(bytes, "TAGx")`
+- `ntl::try_allocate_pool(bytes, kind, options, tag)`
+- `ntl::try_allocate_pool(bytes, kind, options, "TAGx")`
+- `ntl::try_allocate_pool(bytes, kind, "TAGx")`
+- `ntl::try_allocate_pool(bytes, "TAGx")`
 - `ntl::free_pool(pointer, tag)`
 - `ntl::free_pool(pointer, "TAGx")`
 - `ntl::pool_deleter<T>`
@@ -257,6 +281,7 @@ compatibility while still letting newer targets expose richer pool flags.
 The driver test suite exercises:
 
 - raw nonpaged allocation/free with string tags
+- raw nonpaged allocation/free with `ntl::result<void*>`
 - raw nonpaged allocation/free with WDK-style multi-character tags
 - `ntl::pool_buffer` release/reset cleanup
 - `ntl::try_make_pool_buffer` allocation with `ntl::result`
