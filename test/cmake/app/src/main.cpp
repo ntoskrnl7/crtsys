@@ -124,6 +124,22 @@ TEST(ntl_device, device_io_control) {
   }
 }
 
+TEST(ntl_device, opens_through_dos_device_symbolic_link) {
+  HANDLE hDevice =
+      CreateFileW(L"\\\\.\\CrtSysTestDevice", GENERIC_READ | GENERIC_WRITE, 0,
+                  NULL, OPEN_EXISTING, 0, NULL);
+  EXPECT_NE(hDevice, INVALID_HANDLE_VALUE);
+
+  if (hDevice != INVALID_HANDLE_VALUE) {
+    DWORD bytes_returned = 0;
+    test_device_state state = {};
+    EXPECT_TRUE(DeviceIoControl(hDevice, TEST_DEVICE_STATE_CTL, NULL, 0,
+                                &state, sizeof(state), &bytes_returned, NULL));
+    EXPECT_EQ(bytes_returned, sizeof(state));
+    EXPECT_TRUE(CloseHandle(hDevice));
+  }
+}
+
 int main() {
   testing::InitGoogleTest();
   return RUN_ALL_TESTS();
