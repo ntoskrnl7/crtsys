@@ -21,15 +21,15 @@ ntl::status ntl::main(ntl::driver& driver,
   (void)registry_path;
 
   ntl::device_options options;
-  options.name(L"\\Device\\demo").type(FILE_DEVICE_UNKNOWN);
+  options.name(L"demo").type(FILE_DEVICE_UNKNOWN);
   auto device = driver.create_device<void>(options);
 
-  ntl::symbolic_link link(L"\\DosDevices\\demo", L"\\Device\\demo");
+  auto link = std::make_shared<ntl::symbolic_link>(L"\\DosDevices\\demo",
+                                                   L"\\Device\\demo");
 
-  driver.on_unload([device = std::move(device),
-                    link = std::move(link)]() mutable {
-    link.reset();
-    device.detach();
+  driver.on_unload([device, link] {
+    // Capturing device keeps the DEVICE_OBJECT alive until unload.
+    link->reset();
   });
 
   return ntl::status::ok();
@@ -79,3 +79,9 @@ or ISR helper.
 The wrapper does not hide the WDK naming model. Pass the native names you would
 pass to `IoCreateSymbolicLink`, such as `\\DosDevices\\name` for the link and
 `\\Device\\name` for the target.
+
+For the common "create a device and expose it through a DOS-device link" case,
+prefer [`ntl::device_endpoint`](./driver-device-irp.md#device-endpoint). It
+keeps `device_options::name()` as the short name and builds the `\\Device\\...`
+target path for the symbolic link, while also keeping the link-before-device
+teardown order in one owner.

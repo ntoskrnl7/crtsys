@@ -270,6 +270,25 @@ inline void *allocate_pool(std::size_t bytes,
 }
 
 /**
+ * @brief Allocates raw bytes from kernel pool and returns NTSTATUS on failure.
+ * @return Successful result containing the allocated pointer, or
+ * STATUS_INSUFFICIENT_RESOURCES.
+ *
+ * The caller owns the returned pointer and must release it with free_pool using
+ * the same tag. Prefer make_pool_buffer when RAII ownership is practical.
+ */
+[[nodiscard]] inline ntl::result<void *>
+try_allocate_pool(std::size_t bytes, pool_kind kind = pool_kind::nonpaged,
+                  pool_option options = pool_option::none,
+                  ULONG tag = default_pool_tag) noexcept {
+  void *const storage = allocate_pool(bytes, kind, options, tag);
+  if (!storage)
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+
+  return ntl::ok(storage);
+}
+
+/**
  * @brief Allocates raw bytes from kernel pool using a string-literal tag.
  */
 template <std::size_t N>
@@ -277,6 +296,16 @@ inline void *allocate_pool(std::size_t bytes, pool_kind kind,
                            pool_option options,
                            const char (&tag)[N]) noexcept {
   return allocate_pool(bytes, kind, options, pool_tag(tag));
+}
+
+/**
+ * @brief Allocates raw bytes from kernel pool using a string-literal tag and result.
+ */
+template <std::size_t N>
+[[nodiscard]] inline ntl::result<void *>
+try_allocate_pool(std::size_t bytes, pool_kind kind, pool_option options,
+                  const char (&tag)[N]) noexcept {
+  return try_allocate_pool(bytes, kind, options, pool_tag(tag));
 }
 
 /**
@@ -289,6 +318,16 @@ inline void *allocate_pool(std::size_t bytes, pool_kind kind,
 }
 
 /**
+ * @brief Allocates raw bytes from kernel pool with no extra options and result.
+ */
+template <std::size_t N>
+[[nodiscard]] inline ntl::result<void *>
+try_allocate_pool(std::size_t bytes, pool_kind kind,
+                  const char (&tag)[N]) noexcept {
+  return try_allocate_pool(bytes, kind, pool_option::none, pool_tag(tag));
+}
+
+/**
  * @brief Allocates raw bytes from nonpaged pool using a string-literal tag.
  */
 template <std::size_t N>
@@ -296,6 +335,16 @@ inline void *allocate_pool(std::size_t bytes,
                            const char (&tag)[N]) noexcept {
   return allocate_pool(bytes, pool_kind::nonpaged, pool_option::none,
                        pool_tag(tag));
+}
+
+/**
+ * @brief Allocates raw bytes from nonpaged pool using a string-literal tag and result.
+ */
+template <std::size_t N>
+[[nodiscard]] inline ntl::result<void *> try_allocate_pool(
+    std::size_t bytes, const char (&tag)[N]) noexcept {
+  return try_allocate_pool(bytes, pool_kind::nonpaged, pool_option::none,
+                           pool_tag(tag));
 }
 
 /**

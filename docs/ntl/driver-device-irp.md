@@ -82,7 +82,7 @@ struct device_extension {
 };
 
 ntl::device_options options;
-options.name(L"\\Device\\demo").type(FILE_DEVICE_UNKNOWN);
+options.name(L"demo").type(FILE_DEVICE_UNKNOWN);
 
 auto device = driver.create_device<device_extension>(options);
 device.extension().open_count = 0;
@@ -106,6 +106,74 @@ if (!device) {
 
 IRQL: `PASSIVE_LEVEL`. The helper uses C++ objects and containers and is
 intended for driver initialization, unload registration, and setup paths.
+
+## Device Endpoint
+
+Header: [`include/ntl/device_endpoint`](../../include/ntl/device_endpoint)
+
+`ntl::device_endpoint<Extension>` owns both an `ntl::device<Extension>` and the
+DOS-device symbolic link that exposes it. It deletes the link before releasing
+the device object, which is the usual unload order for a named control device.
+
+Use it when a driver wants the common pair:
+
+- `\\Device\\name`
+- `\\DosDevices\\name`
+
+Example:
+
+```cpp
+#include <ntl/device_endpoint>
+
+struct device_extension {
+  ULONG open_count = 0;
+};
+
+ntl::device_options options;
+options.name(L"demo").type(FILE_DEVICE_UNKNOWN);
+
+auto endpoint_result = ntl::try_create_device_endpoint<device_extension>(
+    driver, options, L"\\DosDevices\\demo");
+if (!endpoint_result) {
+  return endpoint_result.status();
+}
+
+auto endpoint = std::make_shared<ntl::device_endpoint<device_extension>>(
+    std::move(*endpoint_result));
+endpoint->device_object().extension().open_count = 0;
+
+// driver.on_unload stores std::function<void()>, so capture a copyable owner
+// for the move-only endpoint object.
+driver.on_unload([endpoint] {
+  endpoint->reset();
+});
+```
+
+API:
+
+- `try_create_device_endpoint<Extension>(driver, options, link_name)`
+  - creates the device through `driver.try_create_device`
+  - creates `link_name` targeting `\\Device\\` + `options.name()`
+  - returns `ntl::result<ntl::device_endpoint<Extension>>`
+- `create_device_endpoint<Extension>(driver, options, link_name)`
+  - throws `ntl::exception` on creation failure
+- `device_endpoint<Extension>::device_owner()`
+  - returns the shared `ntl::device<Extension>` owner
+- `device_endpoint<Extension>::device_object()`
+  - returns the referenced device wrapper
+- `device_endpoint<Extension>::link()`
+- `device_endpoint<Extension>::reset()`
+- `device_endpoint<Extension>::link_name()`
+- `device_endpoint<Extension>::target_name()`
+- `device_endpoint<Extension>::valid()` / `operator bool()`
+
+`device_options::name()` is the short device name without the `\\Device\\`
+prefix. The endpoint factory builds the native target path from that name.
+The endpoint itself is move-only because it owns a symbolic link. If it must
+live inside `driver.on_unload()`, hold it through a copyable owner such as
+`std::shared_ptr`.
+
+IRQL: `PASSIVE_LEVEL`.
 
 ## IRP View
 
