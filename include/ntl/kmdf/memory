@@ -1,0 +1,161 @@
+/**
+ * @file memory
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief KMDF memory-object and buffer-range facades.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ *
+ */
+#pragma once
+
+#include "../pool_allocator"
+#include "../result"
+#include "../status"
+#include "object_attributes"
+
+#include <cstddef>
+#include <type_traits>
+#include "detail/wdf"
+
+namespace ntl::kmdf {
+/** @brief Describes a byte range within a WDF memory object. */
+class memory_offset {
+public:
+  /** @brief Creates a range beginning at offset and spanning length bytes. */
+  constexpr memory_offset(size_t offset, size_t length = 0) noexcept
+      : value_{offset, length} {}
+
+  /** @brief Returns the first byte offset. */
+  constexpr size_t offset() const noexcept { return value_.BufferOffset; }
+
+  /** @brief Returns the byte count, or zero for the remaining buffer. */
+  constexpr size_t length() const noexcept { return value_.BufferLength; }
+
+  /** @brief Returns the mutable native range used by WDF format APIs. */
+  PWDFMEMORY_OFFSET native() noexcept { return &value_; }
+
+private:
+  WDFMEMORY_OFFSET value_{};
+};
+
+/**
+ * @brief Non-owning facade for a WDFMEMORY object.
+ *
+ * WDF owns the object and releases it according to its configured parent.
+ * A preallocated memory object's backing buffer must remain valid for at least
+ * as long as the WDFMEMORY object.
+ */
+class memory {
+public:
+  /** @brief Creates an empty memory facade. */
+  memory() noexcept = default;
+
+  /** @brief Wraps a WDF memory object without taking ownership. */
+  explicit memory(WDFMEMORY object) noexcept : object_(object) {}
+
+  /**
+   * @brief Allocates a WDF-owned memory buffer.
+   * @param size_bytes Number of bytes to allocate; must be nonzero.
+   * @param pool_type Native pool type accepted by WdfMemoryCreate.
+   * @param tag Four-character pool tag in native ULONG form.
+   * @param attributes Optional WDF parent and object attributes.
+   */
+  static ntl::result<memory>
+  try_allocate(size_t size_bytes, POOL_TYPE pool_type = NonPagedPoolNx,
+               ULONG tag = ntl::pool_tag("NTLm"),
+               object_attributes *attributes = nullptr) noexcept {
+    WDFMEMORY object = WDF_NO_HANDLE;
+    const NTSTATUS result =
+        WdfMemoryCreate(attributes ? attributes->native() : nullptr, pool_type,
+                        tag, size_bytes, &object, nullptr);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return ntl::ok(memory{object});
+  }
+
+  /** @brief Allocates a WDF-owned memory buffer with a string pool tag. */
+  template <size_t N>
+  static ntl::result<memory>
+  try_allocate(size_t size_bytes, POOL_TYPE pool_type, const char (&tag)[N],
+               object_attributes *attributes = nullptr) noexcept {
+    return try_allocate(size_bytes, pool_type, ntl::pool_tag(tag), attributes);
+  }
+
+  /**
+   * @brief Creates a WDF object around caller-owned storage.
+   * @note The backing buffer must outlive the resulting WDFMEMORY object.
+   */
+  static ntl::result<memory>
+  try_preallocated(void *buffer, size_t size_bytes,
+                   object_attributes *attributes = nullptr) noexcept {
+    WDFMEMORY object = WDF_NO_HANDLE;
+    const NTSTATUS result = WdfMemoryCreatePreallocated(
+        attributes ? attributes->native() : nullptr, buffer, size_bytes,
+        &object);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return ntl::ok(memory{object});
+  }
+
+  /**
+   * @brief Rebinds a preallocated WDF memory object to caller-owned storage.
+   * @note This is valid only for memory created by try_preallocated().
+   */
+  ntl::status try_assign(void *buffer, size_t size_bytes) const noexcept {
+    return WdfMemoryAssignBuffer(object_, buffer, size_bytes);
+  }
+
+  /** @brief Copies caller bytes into this memory object. */
+  ntl::status try_copy_from(size_t destination_offset, const void *source,
+                            size_t size_bytes) const noexcept {
+    // WDF reads SourceBuffer, but older WDKs declare that parameter as PVOID.
+    return WdfMemoryCopyFromBuffer(object_, destination_offset,
+                                   const_cast<void *>(source), size_bytes);
+  }
+
+  /** @brief Copies bytes from this memory object into caller storage. */
+  ntl::status try_copy_to(size_t source_offset, void *destination,
+                          size_t size_bytes) const noexcept {
+    return WdfMemoryCopyToBuffer(object_, source_offset, destination,
+                                 size_bytes);
+  }
+
+  /** @brief Returns the backing buffer and optionally its byte size. */
+  void *data(size_t *size_bytes = nullptr) const noexcept {
+    return object_ ? WdfMemoryGetBuffer(object_, size_bytes) : nullptr;
+  }
+
+  /** @brief Returns the backing buffer as T elements. */
+  template <class T> T *data() const noexcept {
+    static_assert(!std::is_void_v<T>, "memory element type cannot be void");
+    return static_cast<T *>(data());
+  }
+
+  /** @brief Returns the backing buffer size in bytes. */
+  size_t size_bytes() const noexcept {
+    size_t size = 0;
+    (void)data(&size);
+    return size;
+  }
+
+  /** @brief Returns the number of complete T elements in the buffer. */
+  template <class T> size_t size() const noexcept {
+    static_assert(!std::is_void_v<T>, "memory element type cannot be void");
+    return size_bytes() / sizeof(T);
+  }
+
+  /** @brief Returns the native WDF memory object. */
+  WDFMEMORY native_handle() const noexcept { return object_; }
+
+  /** @brief Returns the generic native WDF object. */
+  WDFOBJECT native_object() const noexcept {
+    return reinterpret_cast<WDFOBJECT>(object_);
+  }
+
+  /** @brief Returns true when a WDF memory object is present. */
+  explicit operator bool() const noexcept { return object_ != WDF_NO_HANDLE; }
+
+private:
+  WDFMEMORY object_ = WDF_NO_HANDLE;
+};
+} // namespace ntl::kmdf

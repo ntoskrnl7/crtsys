@@ -5,6 +5,7 @@
 #include <ntl/kmdf/all>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <format>
@@ -84,6 +85,45 @@ constexpr auto child_compare_callback =
   (void)list->find(child);
   auto iteration = list->iterate();
   (void)iteration.next();
+}
+
+ntl::status verify_request_memory_surface(ntl::kmdf::device device) noexcept {
+  ntl::kmdf::object_attributes memory_attributes;
+  memory_attributes.parent(device);
+
+  auto allocated = ntl::kmdf::memory::try_allocate(
+      sizeof(std::uint32_t) * 4, NonPagedPoolNx, "NTLm",
+      &memory_attributes);
+  if (!allocated)
+    return allocated.status();
+
+  constexpr std::array<std::uint32_t, 4> source{10, 20, 30, 40};
+  std::array<std::uint32_t, 4> destination{};
+  ntl::status status =
+      allocated->try_copy_from(0, source.data(), sizeof(source));
+  if (status.is_err())
+    return status;
+  status = allocated->try_copy_to(0, destination.data(), sizeof(destination));
+  if (status.is_err())
+    return status;
+  if (destination != source ||
+      allocated->size<std::uint32_t>() != source.size())
+    return STATUS_DATA_ERROR;
+
+  auto target = ntl::kmdf::io_target::try_create(device);
+  if (!target)
+    return target.status();
+  if (target->owner().native_handle() != device.native_handle())
+    return STATUS_DATA_ERROR;
+
+  // Driver-created requests are deleted by driver_request when not sent.
+  auto request =
+      ntl::kmdf::driver_request::try_create(device.default_io_target());
+  if (!request)
+    return request.status();
+
+  DbgPrint("[crtsys KMDF sample] request/memory surface verified\n");
+  return STATUS_SUCCESS;
 }
 
 void complete_transform(device_state &state,
@@ -190,6 +230,10 @@ ntl::status create_control_device(const ntl::kmdf::driver &driver) {
     return identity.status();
   if (device.context<device_identity>().value != 0x4B4D4446u)
     return STATUS_DATA_ERROR;
+
+  status = verify_request_memory_surface(device);
+  if (status.is_err())
+    return status;
 
   status = device.try_create_symbolic_link(
       std::wstring(L"\\DosDevices\\CrtSysKmdfNtlSample"));

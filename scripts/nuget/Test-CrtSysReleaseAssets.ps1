@@ -279,8 +279,28 @@ ntl::status ntl::kmdf::main(driver_builder& builder,
           return created.status();
         }
 
-        ntl::status status =
-            created.value().try_create_interface(sample_interface);
+        ntl::kmdf::object_attributes memory_attributes;
+        memory_attributes.parent(created.value());
+        auto transfer = ntl::kmdf::memory::try_allocate(
+            sizeof(ULONG) * 4, NonPagedPoolNx, "NTLm",
+            &memory_attributes);
+        if (!transfer) {
+          return transfer.status();
+        }
+        ULONG sample_data[4]{1, 2, 3, 4};
+        ntl::status status = transfer->try_copy_from(
+            0, sample_data, sizeof(sample_data));
+        if (status.is_err()) {
+          return status;
+        }
+
+        auto outgoing = ntl::kmdf::driver_request::try_create(
+            created->default_io_target());
+        if (!outgoing) {
+          return outgoing.status();
+        }
+
+        status = created.value().try_create_interface(sample_interface);
         if (status.is_err()) {
           return status;
         }

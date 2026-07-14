@@ -17,6 +17,9 @@ non-owning `ntl::file` view of the native `FILE_OBJECT`. Driver setup also
 creates a parented KMDF work item and passive timer: the work item is flushed
 to prove PASSIVE_LEVEL execution, while the timer exercises WDF-owned deferred
 callback lifetime.
+During device setup the sample also allocates parented `WDFMEMORY`, verifies
+buffer copies, creates a general I/O target, and creates then automatically
+deletes an unsent `ntl::kmdf::driver_request`.
 
 ## Visual Studio and NuGet
 
