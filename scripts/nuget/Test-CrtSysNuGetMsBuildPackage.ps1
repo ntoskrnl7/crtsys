@@ -790,8 +790,21 @@ constexpr auto sample_usb_reader_failure =
 
   pnp_power_callbacks pnp;
   pnp.on_prepare_hardware<
-         +[](ntl::kmdf::device, resource_list,
-             resource_list) noexcept -> NTSTATUS { return STATUS_SUCCESS; }>()
+         +[](ntl::kmdf::device, resource_list raw,
+             resource_list translated) noexcept -> NTSTATUS {
+           if (raw.origin() != resource_origin::raw ||
+               translated.origin() != resource_origin::translated) {
+             return STATUS_INVALID_PARAMETER;
+           }
+           for (const resource_descriptor descriptor : translated) {
+             (void)descriptor.memory();
+             (void)descriptor.port();
+             (void)descriptor.interrupt();
+             (void)descriptor.dma();
+             (void)descriptor.connection();
+           }
+           return STATUS_SUCCESS;
+         }>()
       .on_release_hardware<
           +[](ntl::kmdf::device,
               resource_list) noexcept -> NTSTATUS { return STATUS_SUCCESS; }>()
@@ -864,6 +877,22 @@ constexpr auto sample_usb_reader_failure =
           +[](ntl::kmdf::device, bool, bool) noexcept -> NTSTATUS {
             return STATUS_SUCCESS;
           }>();
+
+  idle_policy idle(IdleCannotWakeFromS0);
+  idle.timeout(1000, DriverManagedIdleTimeout)
+      .user_control(IdleDoNotAllowUserControl)
+      .enabled(true)
+      .power_up_on_system_wake(WdfUseDefault)
+      .exclude_d3_cold(WdfUseDefault);
+  (void)idle.try_apply(device);
+
+  wake_policy wake;
+  wake.device_state(PowerDeviceMaximum)
+      .user_control(WakeDoNotAllowUserControl)
+      .enabled(false)
+      .arm_for_armed_children()
+      .indicate_child_wake();
+  (void)wake.try_apply(device);
 }
 }
 
