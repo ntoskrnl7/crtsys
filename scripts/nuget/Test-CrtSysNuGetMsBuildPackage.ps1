@@ -523,6 +523,69 @@ struct sample_additional_context {
   io_target target = device.default_io_target();
   send_options options;
   options.ignore_target_state().timeout(WDF_REL_TIMEOUT_IN_MS(100));
+
+  object_attributes memory_attributes;
+  memory_attributes.parent(device);
+  auto allocated_memory = memory::try_allocate(
+      sizeof(ULONG) * 4, NonPagedPoolNx, "NTLm", &memory_attributes);
+  ULONG backing_storage[4]{};
+  auto preallocated_memory = memory::try_preallocated(
+      backing_storage, sizeof(backing_storage), &memory_attributes);
+  memory_offset buffer_range(sizeof(ULONG), sizeof(ULONG) * 2);
+  if (allocated_memory && preallocated_memory) {
+    (void)allocated_memory->try_copy_from(
+        0, backing_storage, sizeof(backing_storage));
+    (void)allocated_memory->try_copy_to(
+        0, backing_storage, sizeof(backing_storage));
+    (void)preallocated_memory->try_assign(
+        backing_storage, sizeof(backing_storage));
+    (void)allocated_memory->data<ULONG>();
+    (void)allocated_memory->size<ULONG>();
+  }
+
+  auto created_target = io_target::try_create(device);
+  auto open_params = io_target_open_params::existing_device(
+      WdfDeviceWdmGetDeviceObject(device.native_handle()));
+  open_params
+      .on_query_remove<
+          +[](ntl::kmdf::io_target) noexcept -> NTSTATUS {
+            return STATUS_SUCCESS;
+          }>()
+      .on_remove_canceled<+[](ntl::kmdf::io_target) noexcept {}>()
+      .on_remove_complete<+[](ntl::kmdf::io_target) noexcept {}>();
+  if (created_target) {
+    (void)created_target->try_open(open_params);
+  }
+
+  auto synchronous_request = driver_request::try_create(target);
+  if (synchronous_request && allocated_memory) {
+    auto owned = std::move(synchronous_request).value();
+    (void)owned.try_change_target(target);
+    (void)owned.try_format_read(target, allocated_memory.value(),
+                                &buffer_range);
+    (void)owned.try_format_write(target, allocated_memory.value(),
+                                 &buffer_range);
+    (void)owned.try_format_ioctl(target, 0, allocated_memory.value(),
+                                 allocated_memory.value(), &buffer_range,
+                                 &buffer_range);
+    (void)owned.try_format_internal_ioctl_others(
+        target, 0, allocated_memory.value(), allocated_memory.value(),
+        allocated_memory.value(), &buffer_range, &buffer_range,
+        &buffer_range);
+    (void)owned.try_allocate_timer();
+    send_options synchronous_options;
+    synchronous_options.synchronous();
+    (void)owned.try_send_and_wait(target, &synchronous_options);
+  }
+
+  auto asynchronous_request = driver_request::try_create(target);
+  if (asynchronous_request) {
+    auto owned = std::move(asynchronous_request).value();
+    (void)std::move(owned).try_send<
+        +[](ntl::kmdf::driver_request, ntl::kmdf::io_target,
+            ntl::kmdf::completion_params, void*) noexcept {}>(target);
+  }
+
   request.on_completion<
       +[](ntl::kmdf::request, ntl::kmdf::io_target,
           ntl::kmdf::completion_params, void*) noexcept {}>();

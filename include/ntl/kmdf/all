@@ -17,6 +17,7 @@
 #include "interrupt"
 #include "io_queue"
 #include "io_target"
+#include "memory"
 #include "object_attributes"
 #include "pnp"
 #include "property"

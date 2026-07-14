@@ -47,11 +47,12 @@ ntl::status ntl::kmdf::main(driver_builder& builder,
 }
 ```
 
-`driver`, `device`, `file`, `io_queue`, `io_target`, `request`, `interrupt`,
-`timer`, `work_item`, and `child_list` are non-owning facades. WDF retains
-native object ownership and applies the configured parent-child lifetime
-rules. `registry_key` is the exception: it is a move-only owner that closes
-its `WDFKEY` at `PASSIVE_LEVEL`.
+`driver`, `device`, `file`, `io_queue`, `io_target`, `request`, `memory`,
+`interrupt`, `timer`, `work_item`, and `child_list` are non-owning facades.
+WDF retains native object ownership and applies the configured parent-child
+lifetime rules. `registry_key` and `driver_request` are move-only owners:
+`registry_key` closes its `WDFKEY`, while `driver_request` deletes an unsent
+driver-created `WDFREQUEST`.
 
 ## Plug And Play Device
 
@@ -302,9 +303,82 @@ if (status.is_err()) {
 
 Successful send transfers control to WDF until the completion callback.
 Failed send leaves the original request facade usable. `send_options`
-deliberately models asynchronous ownership-preserving options; synchronous and
-send-and-forget modes remain available through native WDF APIs because they
-have different completion contracts.
+supports both asynchronous transfer and synchronous waiting. A successful
+asynchronous send empties the source `request`; a synchronous send retains it
+so the caller can complete the original queue request after the lower target
+finishes. Send-and-forget remains a native WDF escape hatch because it has a
+different ownership contract.
+
+## WDF Memory And Driver-Created Requests
+
+`memory` wraps `WDFMEMORY`. `try_allocate()` creates WDF-owned storage and
+`try_preallocated()` wraps caller-owned storage. The facade is non-owning, so
+give long-lived memory an explicit WDF parent. A preallocated buffer must
+outlive the WDF memory object that refers to it.
+
+```cpp
+ntl::kmdf::object_attributes attributes;
+attributes.parent(device);
+
+auto transfer = ntl::kmdf::memory::try_allocate(
+    4096, NonPagedPoolNx, "Xfer", &attributes);
+if (!transfer)
+  return transfer.status();
+
+std::array<std::byte, 16> header{};
+auto status = transfer->try_copy_from(0, header.data(), header.size());
+```
+
+`request` represents a request delivered by a WDF queue and is completed or
+forwarded. `driver_request` instead owns a request created by the driver with
+`WdfRequestCreate`. Destroying an unsent `driver_request` calls
+`WdfObjectDelete`; it must not call `request::complete()`.
+
+```cpp
+auto target = device.default_io_target();
+auto created = ntl::kmdf::driver_request::try_create(target);
+if (!created)
+  return created.status();
+
+auto outgoing = std::move(created).value();
+auto status = outgoing.try_format_ioctl(
+    target, IOCTL_SAMPLE_QUERY, input_memory, output_memory);
+if (status.is_err())
+  return status;
+
+ntl::kmdf::send_options options;
+options.timeout(WDF_REL_TIMEOUT_IN_MS(1000));
+status = outgoing.try_allocate_timer();
+if (status.is_err())
+  return status;
+return outgoing.try_send_and_wait(target, &options);
+```
+
+For asynchronous sends, `driver_request::try_send()` transfers ownership to
+the completion path. The default overload deletes the request after
+completion. A typed completion callback receives a new `driver_request` owner
+and can inspect, reuse, and resend it; otherwise its destructor deletes it.
+Synchronous and send-and-forget options are rejected by the asynchronous
+overload so ownership cannot silently change.
+
+The formatting surface covers read, write, IOCTL, internal IOCTL, and the
+three-argument internal-IOCTL form. `try_allocate_timer()` exposes
+`WdfRequestAllocateTimer` for reliable timed sends without a timer allocation
+failure in the send path.
+
+Drivers can create and open a non-default target with `io_target::try_create()`
+and `io_target_open_params`. The target object remains WDF-owned:
+
+```cpp
+auto created_target = ntl::kmdf::io_target::try_create(device);
+if (!created_target)
+  return created_target.status();
+
+ntl::unicode_string name(L"\\Device\\SampleTarget");
+auto open = ntl::kmdf::io_target_open_params::open_by_name(
+    &*name, GENERIC_READ | GENERIC_WRITE);
+auto status = created_target->try_open(open);
+```
 
 ## Interrupts
 

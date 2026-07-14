@@ -12,6 +12,8 @@
 #include "../status"
 #include "callback"
 #include "io_target"
+#include "memory"
+#include "object_attributes"
 
 #include <cstddef>
 #include <type_traits>
@@ -19,6 +21,30 @@
 #include "detail/wdf"
 
 namespace ntl::kmdf {
+/** @brief Builder for WDF_REQUEST_REUSE_PARAMS. */
+class request_reuse_params {
+public:
+  /** @brief Resets a completed request to the supplied NTSTATUS. */
+  explicit request_reuse_params(NTSTATUS status = STATUS_SUCCESS) noexcept {
+    WDF_REQUEST_REUSE_PARAMS_INIT(&value_, WDF_REQUEST_REUSE_NO_FLAGS, status);
+  }
+
+  /**
+   * @brief Replaces the IRP of a request created by WdfRequestCreateFromIrp.
+   * @note The original request must have been created with frees_irp=false.
+   */
+  request_reuse_params &new_irp(PIRP irp) noexcept {
+    WDF_REQUEST_REUSE_PARAMS_SET_NEW_IRP(&value_, irp);
+    return *this;
+  }
+
+  /** @brief Returns mutable native reuse parameters. */
+  PWDF_REQUEST_REUSE_PARAMS native() noexcept { return &value_; }
+
+private:
+  WDF_REQUEST_REUSE_PARAMS value_{};
+};
+
 /**
  * @brief Non-owning typed view of a WDF request buffer.
  * @tparam T Element type exposed by the view.
@@ -156,6 +182,100 @@ public:
   }
 
   /**
+   * @brief Reinitializes a completed request.
+   * @warning Reusing a request received from WDF clears its cancel flag and
+   * can prevent the originating driver from canceling the underlying IRP.
+   */
+  ntl::status try_reuse(request_reuse_params &params) const noexcept {
+    return WdfRequestReuse(handle_, params.native());
+  }
+
+  /**
+   * @brief Reinitializes a completed request with the supplied status.
+   * @warning Reusing a request received from WDF clears its cancel flag.
+   */
+  ntl::status try_reuse(NTSTATUS status = STATUS_SUCCESS) const noexcept {
+    request_reuse_params params(status);
+    return try_reuse(params);
+  }
+
+  /** @brief Changes the target of a driver-created request. */
+  ntl::status try_change_target(const io_target &target) const noexcept {
+    return WdfRequestChangeTarget(handle_, target.native_handle());
+  }
+
+  /** @brief Preallocates the timer required by a timed request send. */
+  ntl::status try_allocate_timer() const noexcept {
+    return WdfRequestAllocateTimer(handle_);
+  }
+
+  /**
+   * @brief Formats this request with the type of its current I/O stack entry.
+   * @note Intended for requests received from WDF and sent down unchanged.
+   */
+  void format_current_type() const noexcept {
+    WdfRequestFormatRequestUsingCurrentType(handle_);
+  }
+
+  /** @brief Formats a read request for an I/O target. */
+  ntl::status try_format_read(const io_target &target, memory output = {},
+                              memory_offset *output_offset = nullptr,
+                              LONGLONG *device_offset = nullptr) const noexcept {
+    return WdfIoTargetFormatRequestForRead(
+        target.native_handle(), handle_, output.native_handle(),
+        output_offset ? output_offset->native() : nullptr, device_offset);
+  }
+
+  /** @brief Formats a write request for an I/O target. */
+  ntl::status try_format_write(const io_target &target, memory input = {},
+                               memory_offset *input_offset = nullptr,
+                               LONGLONG *device_offset = nullptr) const noexcept {
+    return WdfIoTargetFormatRequestForWrite(
+        target.native_handle(), handle_, input.native_handle(),
+        input_offset ? input_offset->native() : nullptr, device_offset);
+  }
+
+  /** @brief Formats a device-control request for an I/O target. */
+  ntl::status try_format_ioctl(
+      const io_target &target, ULONG code, memory input = {},
+      memory output = {}, memory_offset *input_offset = nullptr,
+      memory_offset *output_offset = nullptr) const noexcept {
+    return WdfIoTargetFormatRequestForIoctl(
+        target.native_handle(), handle_, code, input.native_handle(),
+        input_offset ? input_offset->native() : nullptr,
+        output.native_handle(),
+        output_offset ? output_offset->native() : nullptr);
+  }
+
+  /** @brief Formats an internal device-control request for an I/O target. */
+  ntl::status try_format_internal_ioctl(
+      const io_target &target, ULONG code, memory input = {},
+      memory output = {}, memory_offset *input_offset = nullptr,
+      memory_offset *output_offset = nullptr) const noexcept {
+    return WdfIoTargetFormatRequestForInternalIoctl(
+        target.native_handle(), handle_, code, input.native_handle(),
+        input_offset ? input_offset->native() : nullptr,
+        output.native_handle(),
+        output_offset ? output_offset->native() : nullptr);
+  }
+
+  /** @brief Formats an internal IOCTL with three nonstandard arguments. */
+  ntl::status try_format_internal_ioctl_others(
+      const io_target &target, ULONG code, memory argument1 = {},
+      memory argument2 = {}, memory argument4 = {},
+      memory_offset *argument1_offset = nullptr,
+      memory_offset *argument2_offset = nullptr,
+      memory_offset *argument4_offset = nullptr) const noexcept {
+    return WdfIoTargetFormatRequestForInternalIoctlOthers(
+        target.native_handle(), handle_, code, argument1.native_handle(),
+        argument1_offset ? argument1_offset->native() : nullptr,
+        argument2.native_handle(),
+        argument2_offset ? argument2_offset->native() : nullptr,
+        argument4.native_handle(),
+        argument4_offset ? argument4_offset->native() : nullptr);
+  }
+
+  /**
    * @brief Registers an allocation-free typed send-completion callback.
    * @tparam Callback Non-capturing
    * `void(request, io_target, completion_params, void*) noexcept` callback.
@@ -189,7 +309,8 @@ public:
                        send_options *options = nullptr) && noexcept {
     if (WdfRequestSend(handle_, target.native_handle(),
                        options ? options->native() : nullptr)) {
-      handle_ = nullptr;
+      if (!options || !options->is_synchronous())
+        handle_ = nullptr;
       return ntl::status::ok();
     }
     return WdfRequestGetStatus(handle_);
@@ -223,6 +344,21 @@ public:
     return WdfRequestIsCanceled(handle_) != FALSE;
   }
 
+  /** @brief Returns the current framework request status. */
+  ntl::status current_status() const noexcept {
+    return WdfRequestGetStatus(handle_);
+  }
+
+  /** @brief Returns the current request information value. */
+  ULONG_PTR information() const noexcept {
+    return WdfRequestGetInformation(handle_);
+  }
+
+  /** @brief Replaces the current request information value. */
+  void information(ULONG_PTR value) const noexcept {
+    WdfRequestSetInformation(handle_, value);
+  }
+
   /**
    * @brief Completes the request without output information.
    * @param completion_status Request completion status.
@@ -252,5 +388,238 @@ public:
 
 private:
   WDFREQUEST handle_ = nullptr;
+};
+
+/**
+ * @brief Move-only owner for a driver-created WDF request object.
+ *
+ * Unlike a request delivered by a WDF queue, a request created with
+ * WdfRequestCreate must be deleted rather than completed. This owner calls
+ * WdfObjectDelete unless asynchronous sending transfers ownership to its
+ * completion callback.
+ */
+class driver_request {
+public:
+  driver_request(const driver_request &) = delete;
+  driver_request &operator=(const driver_request &) = delete;
+
+  /** @brief Transfers ownership of a driver-created request. */
+  driver_request(driver_request &&other) noexcept
+      : handle_(std::exchange(other.handle_, nullptr)) {}
+
+  /** @brief Deletes any current request and takes another request. */
+  driver_request &operator=(driver_request &&other) noexcept {
+    if (this != &other) {
+      reset();
+      handle_ = std::exchange(other.handle_, nullptr);
+    }
+    return *this;
+  }
+
+  /** @brief Deletes the request object when ownership was not transferred. */
+  ~driver_request() { reset(); }
+
+  /** @brief Creates an unformatted request without a fixed target. */
+  static ntl::result<driver_request>
+  try_create(object_attributes *attributes = nullptr) noexcept {
+    return try_create_impl(WDF_NO_HANDLE, attributes);
+  }
+
+  /** @brief Creates an unformatted request validated for an I/O target. */
+  static ntl::result<driver_request>
+  try_create(const io_target &target,
+             object_attributes *attributes = nullptr) noexcept {
+    return try_create_impl(target.native_handle(), attributes);
+  }
+
+  /**
+   * @brief Creates a framework request around a caller-supplied IRP.
+   * @param irp Native IRP to wrap.
+   * @param frees_irp True when WDF must free the IRP with the request.
+   */
+  static ntl::result<driver_request>
+  try_create_from_irp(PIRP irp, bool frees_irp,
+                      object_attributes *attributes = nullptr) noexcept {
+    WDFREQUEST handle = WDF_NO_HANDLE;
+    const NTSTATUS result = WdfRequestCreateFromIrp(
+        attributes ? attributes->native() : nullptr, irp,
+        frees_irp ? TRUE : FALSE, &handle);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return ntl::ok(driver_request{handle});
+  }
+
+  /** @brief Reinitializes a completed request for another operation. */
+  ntl::status try_reuse(request_reuse_params &params) const noexcept {
+    return WdfRequestReuse(handle_, params.native());
+  }
+
+  /** @brief Reinitializes a completed request with the supplied status. */
+  ntl::status try_reuse(NTSTATUS status = STATUS_SUCCESS) const noexcept {
+    request_reuse_params params(status);
+    return try_reuse(params);
+  }
+
+  /** @brief Changes the request's destination target. */
+  ntl::status try_change_target(const io_target &target) const noexcept {
+    return WdfRequestChangeTarget(handle_, target.native_handle());
+  }
+
+  /** @brief Preallocates the timer required by a timed request send. */
+  ntl::status try_allocate_timer() const noexcept {
+    return WdfRequestAllocateTimer(handle_);
+  }
+
+  /** @brief Formats a read request for an I/O target. */
+  ntl::status try_format_read(const io_target &target, memory output = {},
+                              memory_offset *output_offset = nullptr,
+                              LONGLONG *device_offset = nullptr) const noexcept {
+    return request{handle_}.try_format_read(target, output, output_offset,
+                                            device_offset);
+  }
+
+  /** @brief Formats a write request for an I/O target. */
+  ntl::status try_format_write(const io_target &target, memory input = {},
+                               memory_offset *input_offset = nullptr,
+                               LONGLONG *device_offset = nullptr) const noexcept {
+    return request{handle_}.try_format_write(target, input, input_offset,
+                                             device_offset);
+  }
+
+  /** @brief Formats a device-control request for an I/O target. */
+  ntl::status try_format_ioctl(
+      const io_target &target, ULONG code, memory input = {},
+      memory output = {}, memory_offset *input_offset = nullptr,
+      memory_offset *output_offset = nullptr) const noexcept {
+    return request{handle_}.try_format_ioctl(target, code, input, output,
+                                             input_offset, output_offset);
+  }
+
+  /** @brief Formats an internal device-control request for an I/O target. */
+  ntl::status try_format_internal_ioctl(
+      const io_target &target, ULONG code, memory input = {},
+      memory output = {}, memory_offset *input_offset = nullptr,
+      memory_offset *output_offset = nullptr) const noexcept {
+    return request{handle_}.try_format_internal_ioctl(
+        target, code, input, output, input_offset, output_offset);
+  }
+
+  /** @brief Formats an internal IOCTL with three nonstandard arguments. */
+  ntl::status try_format_internal_ioctl_others(
+      const io_target &target, ULONG code, memory argument1 = {},
+      memory argument2 = {}, memory argument4 = {},
+      memory_offset *argument1_offset = nullptr,
+      memory_offset *argument2_offset = nullptr,
+      memory_offset *argument4_offset = nullptr) const noexcept {
+    return request{handle_}.try_format_internal_ioctl_others(
+        target, code, argument1, argument2, argument4, argument1_offset,
+        argument2_offset, argument4_offset);
+  }
+
+  /**
+   * @brief Sends asynchronously and deletes the request after completion.
+   * @note Synchronous and send-and-forget options are rejected.
+   */
+  ntl::status try_send(const io_target &target,
+                       send_options *options = nullptr) && noexcept {
+    return try_send_impl(
+        target, options,
+        +[](WDFREQUEST native_request, WDFIOTARGET,
+            PWDF_REQUEST_COMPLETION_PARAMS, WDFCONTEXT) noexcept {
+          WdfObjectDelete(native_request);
+        },
+        nullptr);
+  }
+
+  /**
+   * @brief Sends asynchronously and transfers ownership to a typed callback.
+   * @tparam Callback Non-capturing
+   * `void(driver_request, io_target, completion_params, void*) noexcept`.
+   *
+   * The callback receives a new owner. It may reuse and resend the request;
+   * otherwise its destructor deletes the WDF request object.
+   */
+  template <auto Callback>
+  ntl::status try_send(const io_target &target, void *context = nullptr,
+                       send_options *options = nullptr) && noexcept {
+    return try_send_impl(
+        target, options,
+        +[](WDFREQUEST native_request, WDFIOTARGET native_target,
+            PWDF_REQUEST_COMPLETION_PARAMS native_params,
+            WDFCONTEXT native_context) noexcept {
+          detail::invoke_callback<Callback>(
+              driver_request{native_request}, io_target{native_target},
+              completion_params{native_params}, native_context);
+        },
+        context);
+  }
+
+  /**
+   * @brief Sends synchronously while retaining ownership of the request.
+   * @return Completion status reported by WdfRequestGetStatus.
+   */
+  ntl::status try_send_and_wait(const io_target &target,
+                                send_options *options = nullptr) & noexcept {
+    send_options effective = options ? *options : send_options{};
+    effective.synchronous();
+    (void)WdfRequestSend(handle_, target.native_handle(), effective.native());
+    return WdfRequestGetStatus(handle_);
+  }
+
+  /** @brief Returns the current framework request status. */
+  ntl::status current_status() const noexcept {
+    return WdfRequestGetStatus(handle_);
+  }
+
+  /** @brief Returns the native request handle. */
+  WDFREQUEST native_handle() const noexcept { return handle_; }
+
+  /** @brief Releases ownership without deleting the WDF request. */
+  WDFREQUEST release() noexcept {
+    return std::exchange(handle_, nullptr);
+  }
+
+  /** @brief Returns true while this object owns a WDF request. */
+  explicit operator bool() const noexcept { return handle_ != WDF_NO_HANDLE; }
+
+private:
+  explicit driver_request(WDFREQUEST handle) noexcept : handle_(handle) {}
+
+  static ntl::result<driver_request>
+  try_create_impl(WDFIOTARGET target,
+                  object_attributes *attributes) noexcept {
+    WDFREQUEST handle = WDF_NO_HANDLE;
+    const NTSTATUS result = WdfRequestCreate(
+        attributes ? attributes->native() : nullptr, target, &handle);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return ntl::ok(driver_request{handle});
+  }
+
+  ntl::status
+  try_send_impl(const io_target &target, send_options *options,
+                PFN_WDF_REQUEST_COMPLETION_ROUTINE completion,
+                void *context) noexcept {
+    const ULONG incompatible = WDF_REQUEST_SEND_OPTION_SYNCHRONOUS |
+                               WDF_REQUEST_SEND_OPTION_SEND_AND_FORGET;
+    if (options && (options->flags() & incompatible) != 0)
+      return STATUS_INVALID_PARAMETER;
+
+    WdfRequestSetCompletionRoutine(handle_, completion, context);
+    if (WdfRequestSend(handle_, target.native_handle(),
+                       options ? options->native() : nullptr)) {
+      handle_ = nullptr;
+      return ntl::status::ok();
+    }
+    return WdfRequestGetStatus(handle_);
+  }
+
+  void reset() noexcept {
+    if (handle_ != WDF_NO_HANDLE)
+      WdfObjectDelete(handle_);
+    handle_ = nullptr;
+  }
+
+  WDFREQUEST handle_ = WDF_NO_HANDLE;
 };
 } // namespace ntl::kmdf

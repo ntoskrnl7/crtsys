@@ -7,12 +7,16 @@
  */
 #pragma once
 
+#include "../result"
 #include "../status"
+#include "callback"
+#include "object_attributes"
 
 #include "detail/wdf"
 
 namespace ntl::kmdf {
 class device;
+class io_target_open_params;
 
 /** @brief Read-only view of KMDF request completion parameters. */
 class completion_params {
@@ -62,6 +66,23 @@ public:
     return *this;
   }
 
+  /** @brief Selects synchronous request sending. */
+  send_options &synchronous(bool enabled = true) noexcept {
+    if (enabled)
+      value_.Flags |= WDF_REQUEST_SEND_OPTION_SYNCHRONOUS;
+    else
+      value_.Flags &= ~WDF_REQUEST_SEND_OPTION_SYNCHRONOUS;
+    return *this;
+  }
+
+  /** @brief Reports whether synchronous sending is selected. */
+  bool is_synchronous() const noexcept {
+    return (value_.Flags & WDF_REQUEST_SEND_OPTION_SYNCHRONOUS) != 0;
+  }
+
+  /** @brief Returns the selected native WDF send flags. */
+  ULONG flags() const noexcept { return value_.Flags; }
+
   /** @brief Returns the mutable native send options. */
   PWDF_REQUEST_SEND_OPTIONS native() noexcept { return &value_; }
 
@@ -78,8 +99,37 @@ public:
   /** @brief Wraps an I/O target without taking ownership. */
   explicit io_target(WDFIOTARGET handle) noexcept : handle_(handle) {}
 
+  /**
+   * @brief Creates an I/O target parented according to WDF attributes.
+   * @return Non-owning target facade or WdfIoTargetCreate failure status.
+   */
+  static ntl::result<io_target>
+  try_create(const device &owner,
+             object_attributes *attributes = nullptr) noexcept;
+
+  /** @brief Opens a created I/O target at PASSIVE_LEVEL. */
+  ntl::status try_open(io_target_open_params &params) const noexcept;
+
+  /** @brief Closes a target in response to query-remove at PASSIVE_LEVEL. */
+  void close_for_query_remove() const noexcept {
+    WdfIoTargetCloseForQueryRemove(handle_);
+  }
+
+  /** @brief Closes an opened target at PASSIVE_LEVEL. */
+  void close() const noexcept { WdfIoTargetClose(handle_); }
+
   /** @brief Starts a previously stopped I/O target. */
   ntl::status try_start() const noexcept { return WdfIoTargetStart(handle_); }
+
+  /** @brief Stops the target and applies an action to requests already sent. */
+  void stop(WDF_IO_TARGET_SENT_IO_ACTION action) const noexcept {
+    WdfIoTargetStop(handle_, action);
+  }
+
+  /** @brief Purges queued and sent requests using the selected policy. */
+  void purge(WDF_IO_TARGET_PURGE_IO_ACTION action) const noexcept {
+    WdfIoTargetPurge(handle_, action);
+  }
 
   /** @brief Returns the target's current framework state. */
   WDF_IO_TARGET_STATE state() const noexcept {
@@ -99,11 +149,151 @@ private:
   WDFIOTARGET handle_ = WDF_NO_HANDLE;
 };
 
+/** @brief Builder for WDF_IO_TARGET_OPEN_PARAMS. */
+class io_target_open_params {
+public:
+  /** @brief Opens an existing device object and optional file object. */
+  static io_target_open_params
+  existing_device(PDEVICE_OBJECT device,
+                  PFILE_OBJECT file = nullptr) noexcept {
+    io_target_open_params params;
+    WDF_IO_TARGET_OPEN_PARAMS_INIT_EXISTING_DEVICE(&params.value_, device);
+    params.value_.TargetFileObject = file;
+    return params;
+  }
+
+  /** @brief Opens an existing named target. The name storage is borrowed. */
+  static io_target_open_params
+  open_by_name(PCUNICODE_STRING name, ACCESS_MASK desired_access) noexcept {
+    io_target_open_params params;
+    WDF_IO_TARGET_OPEN_PARAMS_INIT_OPEN_BY_NAME(&params.value_, name,
+                                                desired_access);
+    return params;
+  }
+
+  /** @brief Creates or opens a named target. The name storage is borrowed. */
+  static io_target_open_params
+  create_by_name(PCUNICODE_STRING name, ACCESS_MASK desired_access) noexcept {
+    io_target_open_params params;
+    WDF_IO_TARGET_OPEN_PARAMS_INIT_CREATE_BY_NAME(&params.value_, name,
+                                                  desired_access);
+    return params;
+  }
+
+  /** @brief Reopens a target previously closed for query-remove. */
+  static io_target_open_params reopen() noexcept {
+    io_target_open_params params;
+    WDF_IO_TARGET_OPEN_PARAMS_INIT_REOPEN(&params.value_);
+    return params;
+  }
+
+  /** @brief Sets FILE_SHARE_* flags for a named target. */
+  io_target_open_params &share_access(ULONG value) noexcept {
+    value_.ShareAccess = value;
+    return *this;
+  }
+
+  /** @brief Sets FILE_ATTRIBUTE_* flags for a named target. */
+  io_target_open_params &file_attributes(ULONG value) noexcept {
+    value_.FileAttributes = value;
+    return *this;
+  }
+
+  /** @brief Sets FILE_* create disposition for a named target. */
+  io_target_open_params &create_disposition(ULONG value) noexcept {
+    value_.CreateDisposition = value;
+    return *this;
+  }
+
+  /** @brief Sets ZwCreateFile-compatible create options. */
+  io_target_open_params &create_options(ULONG value) noexcept {
+    value_.CreateOptions = value;
+    return *this;
+  }
+
+  /** @brief Supplies borrowed extended-attribute storage. */
+  io_target_open_params &extended_attributes(void *buffer,
+                                             ULONG size_bytes) noexcept {
+    value_.EaBuffer = buffer;
+    value_.EaBufferLength = size_bytes;
+    return *this;
+  }
+
+  /** @brief Supplies a borrowed allocation-size value for create-by-name. */
+  io_target_open_params &allocation_size(LONGLONG &value) noexcept {
+    value_.AllocationSize = &value;
+    return *this;
+  }
+
+  /**
+   * @brief Registers the PnP query-remove callback.
+   * @tparam Callback Non-capturing `NTSTATUS(io_target) noexcept` callback.
+   */
+  template <auto Callback> io_target_open_params &on_query_remove() noexcept {
+    value_.EvtIoTargetQueryRemove =
+        +[](WDFIOTARGET target) noexcept -> NTSTATUS {
+      return detail::invoke_status_callback<Callback>(io_target{target});
+    };
+    return *this;
+  }
+
+  /**
+   * @brief Registers the remove-canceled callback.
+   * @tparam Callback Non-capturing `void(io_target) noexcept` callback.
+   */
+  template <auto Callback>
+  io_target_open_params &on_remove_canceled() noexcept {
+    value_.EvtIoTargetRemoveCanceled = +[](WDFIOTARGET target) noexcept {
+      detail::invoke_callback<Callback>(io_target{target});
+    };
+    return *this;
+  }
+
+  /**
+   * @brief Registers the remove-complete callback.
+   * @tparam Callback Non-capturing `void(io_target) noexcept` callback.
+   */
+  template <auto Callback>
+  io_target_open_params &on_remove_complete() noexcept {
+    value_.EvtIoTargetRemoveComplete = +[](WDFIOTARGET target) noexcept {
+      detail::invoke_callback<Callback>(io_target{target});
+    };
+    return *this;
+  }
+
+  /** @brief Returns create/open result information for named targets. */
+  ULONG file_information() const noexcept { return value_.FileInformation; }
+
+  /** @brief Returns mutable native open parameters. */
+  PWDF_IO_TARGET_OPEN_PARAMS native() noexcept { return &value_; }
+
+private:
+  io_target_open_params() noexcept = default;
+  WDF_IO_TARGET_OPEN_PARAMS value_{};
+};
+
 } // namespace ntl::kmdf
 
 #include "device"
 
 namespace ntl::kmdf {
+inline ntl::result<io_target>
+io_target::try_create(const device &owner,
+                      object_attributes *attributes) noexcept {
+  WDFIOTARGET handle = WDF_NO_HANDLE;
+  const NTSTATUS result = WdfIoTargetCreate(
+      owner.native_handle(), attributes ? attributes->native() : nullptr,
+      &handle);
+  if (!NT_SUCCESS(result))
+    return ntl::unexpected(result);
+  return ntl::ok(io_target{handle});
+}
+
+inline ntl::status
+io_target::try_open(io_target_open_params &params) const noexcept {
+  return WdfIoTargetOpen(handle_, params.native());
+}
+
 inline device io_target::owner() const noexcept {
   return device{WdfIoTargetGetDevice(handle_)};
 }
