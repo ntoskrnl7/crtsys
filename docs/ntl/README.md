@@ -14,6 +14,7 @@ For buildable samples, see:
 - [NTL typed IOCTL sample driver](../../examples/ntl-driver)
 - [NTL RPC sample driver](../../examples/ntl-rpc-driver)
 - [NTL KMDF DMA driver template](../../examples/kmdf-dma-ntl-driver)
+- [NTL KMDF USB driver template](../../examples/kmdf-usb-ntl-driver)
 
 ## Topics
 
@@ -26,7 +27,7 @@ For buildable samples, see:
 | [File object facades](./file-object.md) | Non-owning `PFILE_OBJECT` and `WDFFILEOBJECT` views and their ownership boundary |
 | [Registry](./registry.md) | RAII wrapper for Zw registry keys, driver `Parameters` lookup, and typed value query/set helpers |
 | [Driver, device, and IRP helpers](./driver-device-irp.md) | `ntl::main`, `ntl::driver`, `ntl::device`, `ntl::device_endpoint`, dispatch callbacks, and `ntl::irp` |
-| [KMDF helpers](./kmdf.md) | Optional `ntl::kmdf::main`, C++ contexts, typed I/O and DMA, interrupt/timer/work-item, child-list, registry, and device-property facades |
+| [KMDF helpers](./kmdf.md) | Optional `ntl::kmdf::main`, C++ contexts, typed I/O, DMA and USB, interrupt/timer/work-item, child-list, registry, and device-property facades |
 | [Device-control pattern](./device-control-pattern.md) | Practical `IOCTL` dispatch pattern using typed IOCTLs, remove locks, MDLs, and output reporting |
 | [Typed IOCTL helper](./ioctl.md) | Compile-time `CTL_CODE` descriptors tied to request/reply payload types |
 | [Device interface](./device-interface.md) | PnP `IoRegisterDeviceInterface` ownership and enable/disable helper |

@@ -21,6 +21,17 @@ env:
   CRTSYS_VS2026_WINDOWS_SDK_VERSION: 10.0.26100.0
 
 jobs:
+  validate-example-projects:
+    name: Validate Visual Studio example projects
+    runs-on: windows-2022
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Validate shared package consumption
+        shell: pwsh
+        run: ./scripts/ci/Test-CrtSysExampleProjects.ps1
+
   build-vs2022:
     name: VS2022/v143 ${{ matrix.project }} ${{ matrix.arch }} ${{ matrix.config }}
     runs-on: windows-2022

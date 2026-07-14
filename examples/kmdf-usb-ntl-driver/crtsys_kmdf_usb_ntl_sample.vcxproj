@@ -13,28 +13,40 @@
   <PropertyGroup Label="Globals">
     <BaseIntermediateOutputPath>$(MSBuildThisFileDirectory)obj\$(MSBuildProjectName)\</BaseIntermediateOutputPath>
     <MSBuildProjectExtensionsPath>$(BaseIntermediateOutputPath)</MSBuildProjectExtensionsPath>
-    <ProjectGuid>{975DB540-B4A7-49F6-853A-685F1AA87E13}</ProjectGuid>
-    <RootNamespace>CrtSysKmdfNtlSampleApp</RootNamespace>
-    <ProjectName>crtsys_kmdf_ntl_sample_app</ProjectName>
+    <ProjectGuid>{2CDA301B-C686-4A02-863A-76F130C3DB48}</ProjectGuid>
+    <RootNamespace>CrtSysKmdfUsbNtlSample</RootNamespace>
+    <ProjectName>crtsys_kmdf_usb_ntl_sample</ProjectName>
     <WindowsTargetPlatformVersion Condition="'$(VisualStudioVersion)' == '18.0'">10.0.28000.0</WindowsTargetPlatformVersion>
     <WindowsTargetPlatformVersion Condition="'$(WindowsTargetPlatformVersion)' == ''">10.0</WindowsTargetPlatformVersion>
+    <_NT_TARGET_VERSION>0xA000006</_NT_TARGET_VERSION>
+    <SkipPackageVerification Condition="'$(VisualStudioVersion)' == '18.0'">true</SkipPackageVerification>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Label="Configuration" Condition="'$(Configuration)'=='Debug'">
-    <ConfigurationType>Application</ConfigurationType>
+    <TargetVersion>Windows10</TargetVersion>
     <UseDebugLibraries>true</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
-    <CharacterSet>Unicode</CharacterSet>
+    <DriverTargetPlatform>Desktop</DriverTargetPlatform>
+    <DriverType>KMDF</DriverType>
+    <KmdfVersion>1.15</KmdfVersion>
+    <CrtSysUseNtlKmdfMain>true</CrtSysUseNtlKmdfMain>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <ConfigurationType>Driver</ConfigurationType>
+    <SignMode>TestSign</SignMode>
   </PropertyGroup>
   <PropertyGroup Label="Configuration" Condition="'$(Configuration)'=='Release'">
-    <ConfigurationType>Application</ConfigurationType>
+    <TargetVersion>Windows10</TargetVersion>
     <UseDebugLibraries>false</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
-    <CharacterSet>Unicode</CharacterSet>
+    <DriverTargetPlatform>Desktop</DriverTargetPlatform>
+    <DriverType>KMDF</DriverType>
+    <KmdfVersion>1.15</KmdfVersion>
+    <CrtSysUseNtlKmdfMain>true</CrtSysUseNtlKmdfMain>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <ConfigurationType>Driver</ConfigurationType>
+    <SignMode>TestSign</SignMode>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <PropertyGroup>
-    <TargetName>crtsys_kmdf_ntl_sample_app</TargetName>
+    <TargetName>crtsys_kmdf_usb_ntl_sample</TargetName>
   </PropertyGroup>
   <ImportGroup Label="PropertySheets">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="Exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" />
@@ -42,22 +54,30 @@
   <ItemDefinitionGroup>
     <ClCompile>
       <AdditionalIncludeDirectories>$(MSBuildThisFileDirectory)shared;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <ExceptionHandling>Sync</ExceptionHandling>
-      <LanguageStandard>stdcpplatest</LanguageStandard>
-      <RuntimeLibrary Condition="'$(Configuration)'=='Debug'">MultiThreadedDebug</RuntimeLibrary>
-      <RuntimeLibrary Condition="'$(Configuration)'=='Release'">MultiThreaded</RuntimeLibrary>
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
+      <LanguageStandard>stdcpplatest</LanguageStandard>
     </ClCompile>
+    <DriverSign>
+      <FileDigestAlgorithm>sha256</FileDigestAlgorithm>
+    </DriverSign>
   </ItemDefinitionGroup>
   <ItemGroup Condition="'$(CrtSysUsePackageReference)' == 'true'">
     <PackageReference Include="crtsys" Version="$(CrtSysPackageVersion)" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="app\main.cpp" />
+    <ClCompile Include="driver\main.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="shared\kmdf_ntl_ioctl.hpp" />
+    <ClInclude Include="shared\kmdf_usb_ntl_ioctl.hpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <Inf Include="crtsys_kmdf_usb_ntl_sample.inf" />
+  </ItemGroup>
+  <ItemGroup>
+    <FilesToPackage Include="$(TargetPath)">
+      <PackageRelativeDirectory></PackageRelativeDirectory>
+    </FilesToPackage>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

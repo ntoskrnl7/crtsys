@@ -453,6 +453,62 @@ The buildable [KMDF DMA driver template](../../examples/kmdf-dma-ntl-driver)
 shows the complete request, scatter/gather programming, interrupt-DPC
 completion, transaction release, and request-completion flow.
 
+## USB
+
+`usb_device`, `usb_interface`, and `usb_pipe` are non-owning typed facades over
+KMDF USB objects. Create and configure the target in
+`EvtDevicePrepareHardware`, start a configured continuous reader in
+`EvtDeviceD0Entry`, and stop it in `EvtDeviceD0Exit`:
+
+```cpp
+auto usb = ntl::kmdf::usb_device::try_create(device);
+if (!usb)
+  return usb.status();
+
+auto selection = ntl::kmdf::usb_select_config::single_interface();
+auto status = usb->try_select(selection);
+if (status.is_err())
+  return status;
+
+auto interface = selection.configured_interface();
+ntl::kmdf::usb_pipe_information info;
+auto pipe = interface.pipe_at(0, &info);
+```
+
+USB target creation, descriptor retrieval, configuration selection, and the
+synchronous transfer helpers require `PASSIVE_LEVEL`. The asynchronous
+formatting helpers only prepare a WDF request and are valid through
+`DISPATCH_LEVEL`; send the formatted request through `usb_device::target()` or
+`usb_pipe::target()`.
+
+The continuous-reader callback may run at `DISPATCH_LEVEL`. It must use only
+operations valid at the actual callback IRQL and must not call the general
+PASSIVE_LEVEL CRT/STL surface. Defer such work to a KMDF work item or another
+passive callback. The reader-failure callback runs at `PASSIVE_LEVEL`:
+
+```cpp
+constexpr auto on_packet =
+    +[](ntl::kmdf::usb_pipe, ntl::kmdf::memory buffer,
+        size_t transferred, void* context) noexcept {
+      auto& count = *static_cast<std::atomic_uint32_t*>(context);
+      count.fetch_add(1, std::memory_order_relaxed);
+      // Do not perform PASSIVE_LEVEL-only STL/CRT work here.
+    };
+
+auto reader =
+    ntl::kmdf::usb_continuous_reader_config::with_completion<on_packet>(
+        packet_size, &packet_count);
+status = input_pipe.try_configure_reader(reader);
+```
+
+Package builds instantiate the USB device, interface, pipe, synchronous and
+formatted-transfer, and continuous-reader surfaces for every supported
+toolset and architecture. Runtime USB validation requires a device whose
+descriptor and endpoint protocol match the driver. The buildable
+[KMDF USB driver template](../../examples/kmdf-usb-ntl-driver) deliberately
+uses a placeholder hardware ID so it cannot be installed accidentally for an
+unrelated USB device.
+
 ## Interrupts
 
 `interrupt_config` installs compile-time callbacks without dynamic allocation.
