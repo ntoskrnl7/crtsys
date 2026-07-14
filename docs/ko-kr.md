@@ -160,6 +160,8 @@ flowchart TD
 | [기능 지원 현황](./ko-kr-feature-coverage.md) | Driver-tested C++/CRT/STL matrix와 known gap |
 | [NTL API](./ko-kr-ntl-api.md) | Driver helper API, entry wrapper, synchronization, SEH helper |
 | [사용 예제](./ko-kr-usage-examples.md) | Driver-side NTL 예제 |
+| [NTL sample driver](../examples/ntl-driver) | Visual Studio/NuGet 및 CMake로 빌드 가능한 typed IOCTL driver/app 예제 |
+| [NTL RPC sample driver](../examples/ntl-rpc-driver) | Visual Studio/NuGet 및 CMake로 빌드 가능한 shared RPC schema driver/app 예제 |
 | [CI driver load tests](./ci-driver-load-tests.md) | optional self-hosted driver load/run workflow |
 
 ## Operational Boundaries

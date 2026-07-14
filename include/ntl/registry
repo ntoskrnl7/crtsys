@@ -49,7 +49,8 @@ struct registry_value {
 /**
  * @brief RAII owner for a Zw registry key handle.
  *
- * The key handle is closed with ntl::unique_kernel_handle. Helper methods are
+ * The key handle is closed with ntl::unique_handle, which maps to ZwClose in
+ * kernel builds. Helper methods are
  * intended for PASSIVE_LEVEL driver setup, configuration, and teardown paths.
  */
 class registry_key {
@@ -66,10 +67,10 @@ public:
   explicit registry_key(HANDLE handle) noexcept : handle_(handle) {}
 
   /**
-   * @brief Takes ownership from a unique kernel handle.
+   * @brief Takes ownership from a unique native handle.
    * @param handle Handle owner to move from.
    */
-  explicit registry_key(ntl::unique_kernel_handle &&handle) noexcept
+  explicit registry_key(ntl::unique_handle &&handle) noexcept
       : handle_(std::move(handle)) {}
 
   registry_key(const registry_key &) = delete;
@@ -102,7 +103,7 @@ public:
     InitializeObjectAttributes(&object_attributes, &native_path, attributes,
                                nullptr, nullptr);
 
-    ntl::unique_kernel_handle handle;
+    ntl::unique_handle handle;
     const auto status =
         ZwOpenKey(handle.put(), desired_access, &object_attributes);
     if (!NT_SUCCESS(status))
@@ -133,7 +134,7 @@ public:
                                nullptr, nullptr);
 
     ULONG native_disposition = 0;
-    ntl::unique_kernel_handle handle;
+    ntl::unique_handle handle;
     const auto status =
         ZwCreateKey(handle.put(), desired_access, &object_attributes, 0,
                     nullptr, create_options, &native_disposition);
@@ -374,7 +375,7 @@ public:
   }
 
 private:
-  ntl::unique_kernel_handle handle_;
+  ntl::unique_handle handle_;
 };
 
 /**
@@ -537,21 +538,6 @@ private:
 try_open_driver_parameters(const std::wstring &registry_path,
                            ACCESS_MASK desired_access = KEY_READ) {
   return registry_key::open(registry_path + L"\\Parameters", desired_access);
-}
-
-/**
- * @brief Opens a driver's `Parameters` key below the service registry path.
- *
- * Prefer try_open_driver_parameters in new code. This spelling is kept as a
- * compact alias because opening a key already returns ntl::result<registry_key>.
- *
- * @param registry_path RegistryPath passed to DriverEntry/ntl::main.
- * @param desired_access Access mask passed to ZwOpenKey.
- */
-[[nodiscard]] inline ntl::result<registry_key>
-open_driver_parameters(const std::wstring &registry_path,
-                       ACCESS_MASK desired_access = KEY_READ) {
-  return try_open_driver_parameters(registry_path, desired_access);
 }
 
 } // namespace ntl

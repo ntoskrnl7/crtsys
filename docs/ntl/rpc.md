@@ -5,6 +5,9 @@
 NTL RPC generates matching kernel server and user-mode client stubs around
 `DeviceIoControl`. Serialization uses `zpp::serializer`.
 
+For a buildable driver/app pair, see
+[`examples/ntl-rpc-driver`](../../examples/ntl-rpc-driver).
+
 Headers:
 
 - [`include/ntl/rpc/common`](../../include/ntl/rpc/common)
@@ -41,6 +44,10 @@ schema formatting or reordering.
 
 // Include after <ntl/rpc/server> in the driver and after <ntl/rpc/client> in
 // the user-mode app.
+//
+// The callback bodies below are server-side code. They run in the kernel
+// driver when this header is included after <ntl/rpc/server>. The user-mode
+// include path sees matching wrapper declarations instead.
 
 NTL_RPC_BEGIN(demo_rpc)
 
@@ -60,6 +67,10 @@ For types with commas, such as `std::map<int, int>`, wrap the type with
 serialization function. The tested `point` class in
 [`test/cmake/common/rpc.hpp`](../../test/cmake/common/rpc.hpp) shows the
 pattern.
+
+Do not put user-mode-only code in callback bodies. Even though the schema file
+is shared, the callback bodies are part of the kernel RPC server. Keep them on
+the same IRQL and lifetime contract as other driver device-control callbacks.
 
 ## Kernel Server
 

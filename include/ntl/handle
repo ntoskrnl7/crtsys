@@ -1,53 +1,102 @@
 /**
  * @file handle
  * @author jungkwang.lee (ntoskrnl7@gmail.com)
- * @brief RAII wrappers for kernel handles and referenced kernel objects.
+ * @brief RAII wrappers for native handles and referenced kernel objects.
  *
  * @copyright Copyright (c) 2022 NT Template Library Authors.
  */
 #pragma once
 
+#if defined(_DDK_DRIVER_) || defined(_NTDDK_)
+#define NTL_HANDLE_KERNEL_MODE
+#else
+#ifndef NTL_USER_MODE
+#define NTL_USER_MODE
+#endif
+#define NTL_HANDLE_USER_MODE
+#endif
+
+#if defined(NTL_HANDLE_KERNEL_MODE)
 #include "result"
 #include "status"
-
 #include <ntddk.h>
+#else
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 #include <type_traits>
 #include <utility>
 
 namespace ntl {
 
 /**
- * @brief RAII owner for a kernel HANDLE that must be closed with ZwClose.
- *
- * This helper is intentionally named for kernel handles. It is not a
- * user-mode CloseHandle wrapper.
+ * @brief Mode-specific HANDLE close behavior for ntl::unique_handle.
  */
-class unique_kernel_handle {
+namespace detail {
+
+#if defined(NTL_HANDLE_KERNEL_MODE)
+struct unique_handle_traits {
+  using close_result = ntl::status;
+
+  static bool valid(HANDLE handle) noexcept { return handle != nullptr; }
+
+  static close_result closed_success() noexcept { return ntl::status::ok(); }
+
+  static close_result close(HANDLE handle) noexcept {
+    return ntl::status{ZwClose(handle)};
+  }
+
+  static bool succeeded(close_result result) noexcept { return result.is_ok(); }
+};
+#else
+struct unique_handle_traits {
+  using close_result = bool;
+
+  static bool valid(HANDLE handle) noexcept {
+    return handle != nullptr && handle != INVALID_HANDLE_VALUE;
+  }
+
+  static close_result closed_success() noexcept { return true; }
+
+  static close_result close(HANDLE handle) noexcept {
+    return ::CloseHandle(handle) != FALSE;
+  }
+
+  static bool succeeded(close_result result) noexcept { return result; }
+};
+#endif
+
+template <class Traits> class basic_unique_handle {
 public:
+  using close_result = typename Traits::close_result;
+
   /**
    * @brief Creates an empty handle owner.
    */
-  unique_kernel_handle() noexcept = default;
+  basic_unique_handle() noexcept = default;
 
   /**
-   * @brief Takes ownership of a native kernel handle.
-   * @param handle Handle to close with ZwClose.
+   * @brief Takes ownership of a native handle.
+   * @param handle Handle to close with the build-mode close primitive.
    */
-  explicit unique_kernel_handle(HANDLE handle) noexcept : handle_(handle) {}
+  explicit basic_unique_handle(HANDLE handle) noexcept : handle_(handle) {}
 
-  unique_kernel_handle(const unique_kernel_handle &) = delete;
-  unique_kernel_handle &operator=(const unique_kernel_handle &) = delete;
+  basic_unique_handle(const basic_unique_handle &) = delete;
+  basic_unique_handle &operator=(const basic_unique_handle &) = delete;
 
   /**
    * @brief Transfers handle ownership from another object.
    */
-  unique_kernel_handle(unique_kernel_handle &&other) noexcept
+  basic_unique_handle(basic_unique_handle &&other) noexcept
       : handle_(other.release()) {}
 
   /**
    * @brief Transfers handle ownership from another object.
    */
-  unique_kernel_handle &operator=(unique_kernel_handle &&other) noexcept {
+  basic_unique_handle &operator=(basic_unique_handle &&other) noexcept {
     if (this == &other)
       return *this;
 
@@ -59,15 +108,15 @@ public:
   /**
    * @brief Closes the owned handle, ignoring close failure.
    */
-  ~unique_kernel_handle() { reset(); }
+  ~basic_unique_handle() { reset(); }
 
   /**
-   * @brief Returns true when a non-null handle is owned.
+   * @brief Returns true when a valid native handle is owned.
    */
-  bool valid() const noexcept { return handle_ != nullptr; }
+  bool valid() const noexcept { return Traits::valid(handle_); }
 
   /**
-   * @brief Returns true when a non-null handle is owned.
+   * @brief Returns true when a valid native handle is owned.
    */
   explicit operator bool() const noexcept { return valid(); }
 
@@ -77,19 +126,24 @@ public:
   HANDLE get() const noexcept { return handle_; }
 
   /**
-   * @brief Closes the owned handle and reports the ZwClose status.
+   * @brief Closes the owned handle and reports the build-mode close result.
    *
-   * The handle is cleared only when ZwClose succeeds. Use reset() for
-   * destructor-style cleanup that ignores close failure.
+   * The handle is cleared only when close succeeds. Use reset() for
+   * destructor-style cleanup that ignores close failure. In user mode the
+   * result type is bool; in kernel mode it is ntl::status.
    */
-  ntl::status close() noexcept {
-    if (!handle_)
-      return ntl::status::ok();
-
-    const auto status = ZwClose(handle_);
-    if (NT_SUCCESS(status))
+  close_result close() noexcept {
+    if (!valid()) {
       handle_ = nullptr;
-    return ntl::status{status};
+      return Traits::closed_success();
+    }
+
+    const auto result = Traits::close(handle_);
+    if (!Traits::succeeded(result))
+      return result;
+
+    handle_ = nullptr;
+    return result;
   }
 
   /**
@@ -97,8 +151,8 @@ public:
    * @param handle Replacement handle to own.
    */
   void reset(HANDLE handle = nullptr) noexcept {
-    if (handle_)
-      (void)ZwClose(handle_);
+    if (valid())
+      (void)Traits::close(handle_);
     handle_ = handle;
   }
 
@@ -107,15 +161,15 @@ public:
    * @return The previously owned handle.
    */
   HANDLE release() noexcept {
-    HANDLE handle = handle_;
+    const HANDLE handle = handle_;
     handle_ = nullptr;
     return handle;
   }
 
   /**
-   * @brief Clears current ownership and returns a PHANDLE for WDK out-params.
+   * @brief Clears current ownership and returns a HANDLE* for native out-params.
    */
-  PHANDLE put() noexcept {
+  HANDLE *put() noexcept {
     reset();
     return &handle_;
   }
@@ -124,12 +178,24 @@ private:
   HANDLE handle_ = nullptr;
 };
 
+} // namespace detail
+
+/**
+ * @brief RAII owner for a native HANDLE.
+ *
+ * In user mode this wrapper closes with CloseHandle. In kernel mode it closes
+ * with ZwClose and should normally own handles created with OBJ_KERNEL_HANDLE.
+ * Keep referenced object pointers in ntl::unique_object instead.
+ */
+using unique_handle = detail::basic_unique_handle<detail::unique_handle_traits>;
+
+#if defined(NTL_HANDLE_KERNEL_MODE)
 /**
  * @brief RAII owner for an object-manager reference.
  * @tparam Pointer Native WDK pointer type such as PFILE_OBJECT or PKEVENT.
  *
  * The wrapper calls ObDereferenceObject for the owned pointer. It does not
- * close handles; use unique_kernel_handle for HANDLE ownership.
+ * close handles; use unique_handle for HANDLE ownership.
  */
 template <class Pointer = PVOID> class unique_object {
   static_assert(std::is_pointer<Pointer>::value,
@@ -255,4 +321,9 @@ try_reference_object_by_handle(HANDLE handle, ACCESS_MASK desired_access,
   return ntl::ok(unique_object<Pointer>{static_cast<Pointer>(object)});
 }
 
+#endif // defined(NTL_HANDLE_KERNEL_MODE)
+
 } // namespace ntl
+
+#undef NTL_HANDLE_KERNEL_MODE
+#undef NTL_HANDLE_USER_MODE

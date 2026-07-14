@@ -157,6 +157,8 @@ may compile or work.
 | [Feature Coverage](./docs/feature-coverage.md) | Driver-tested C++/CRT/STL matrix and known gaps |
 | [NTL API](./docs/ntl/README.md) | Driver helper APIs, entry wrapper, synchronization, pool allocators, SEH helper |
 | [Usage Examples](./docs/usage-examples.md) | Small driver-side NTL examples |
+| [NTL sample driver](./examples/ntl-driver) | Complete Visual Studio/NuGet and CMake driver sample using `ntl::main`, device endpoint, typed IOCTLs, remove lock, registry config, passive executor, and pool-backed PMR |
+| [NTL RPC sample driver](./examples/ntl-rpc-driver) | Complete Visual Studio/NuGet and CMake driver/app pair using the shared NTL RPC schema |
 | [CI Driver Load Tests](./docs/ci-driver-load-tests.md) | Optional self-hosted driver load/run workflow |
 
 ## Operational Boundaries
@@ -379,6 +381,7 @@ WinDbg, or your normal kernel debugging setup.
 
 ```text
 cmake/             CMake helpers, including CrtSys.cmake
+examples/          Small buildable sample projects
 include/ntl/       NTL C++ helper headers
 include/.internal/ Internal version and toolchain compatibility headers
 src/               crtsys runtime and CRT/STL compatibility code

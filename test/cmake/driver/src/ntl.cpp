@@ -802,10 +802,17 @@ bool ntl_irp_device_control_helpers_test() {
   return text_out.size == 0;
 }
 
-using ntl_test_ioctl =
-    ntl::ioctl<FILE_DEVICE_UNKNOWN, 0x810, METHOD_BUFFERED,
-               FILE_READ_DATA | FILE_WRITE_DATA, ioctl_test_input,
-               ioctl_test_output>;
+struct ntl_test_ioctl_contract {
+  using input_type = ioctl_test_input;
+  using output_type = ioctl_test_output;
+
+  static constexpr ULONG device_type = FILE_DEVICE_UNKNOWN;
+  static constexpr ULONG function = 0x810;
+  static constexpr ULONG method = METHOD_BUFFERED;
+  static constexpr ULONG access = FILE_READ_DATA | FILE_WRITE_DATA;
+};
+
+using ntl_test_ioctl = ntl::ioctl_from_contract<ntl_test_ioctl_contract>;
 
 using ntl_pipeline_ioctl =
     ntl::ioctl<FILE_DEVICE_UNKNOWN, 0x812, METHOD_BUFFERED,
@@ -826,7 +833,7 @@ bool ntl_ioctl_test() {
       std::is_same<ntl_test_ioctl::output_type, ioctl_test_output>::value,
       "typed IOCTL output payload mismatch");
 
-  const auto code = ntl_test_ioctl::device_control_code();
+  const auto code = ntl_test_ioctl::control_code();
   if (!ntl::is_ioctl<ntl_test_ioctl>(code) ||
       ntl::is_ioctl<ntl_test_ioctl>(
           ntl::device_control::code{CTL_CODE(FILE_DEVICE_UNKNOWN, 0x811,
@@ -919,7 +926,7 @@ bool ntl_device_control_pipeline_test() {
   ntl::device_control::out_buffer out(&output, sizeof(output));
 
   auto status =
-      dispatch.handle(ntl_pipeline_ioctl::device_control_code(), in, out,
+      dispatch.handle(ntl_pipeline_ioctl::control_code(), in, out,
                       reinterpret_cast<void *>(0x1000));
   if (status != STATUS_SUCCESS || out.size != sizeof(output) ||
       output.value != input.value + 1 ||
@@ -939,7 +946,7 @@ bool ntl_device_control_pipeline_test() {
 
   ntl::device_control::in_buffer short_in(&input, sizeof(input) - 1);
   ntl::device_control::out_buffer short_input_out(&output, sizeof(output));
-  status = dispatch.handle(ntl_pipeline_ioctl::device_control_code(), short_in,
+  status = dispatch.handle(ntl_pipeline_ioctl::control_code(), short_in,
                            short_input_out,
                            reinterpret_cast<void *>(0x1002));
   if (status != STATUS_INVALID_PARAMETER || short_input_out.size != 0 ||
@@ -949,7 +956,7 @@ bool ntl_device_control_pipeline_test() {
   unsigned char small_output[sizeof(ioctl_pipeline_output) - 1]{};
   ntl::device_control::out_buffer small_out(small_output,
                                             sizeof(small_output));
-  status = dispatch.handle(ntl_pipeline_ioctl::device_control_code(), in,
+  status = dispatch.handle(ntl_pipeline_ioctl::control_code(), in,
                            small_out, reinterpret_cast<void *>(0x1003));
   if (status != STATUS_BUFFER_TOO_SMALL || small_out.size != 0 ||
       dispatch.handled_count != 1)
@@ -958,7 +965,7 @@ bool ntl_device_control_pipeline_test() {
   dispatch.begin_teardown();
 
   ntl::device_control::out_buffer teardown_out(&output, sizeof(output));
-  status = dispatch.handle(ntl_pipeline_ioctl::device_control_code(), in,
+  status = dispatch.handle(ntl_pipeline_ioctl::control_code(), in,
                            teardown_out,
                            reinterpret_cast<void *>(0x1004));
   return status == STATUS_DELETE_PENDING && teardown_out.size == 0 &&
@@ -1045,7 +1052,7 @@ bool ntl_device_interface_test() {
 }
 
 bool ntl_handle_object_test() {
-  ntl::unique_kernel_handle handle;
+  ntl::unique_handle handle;
   const auto create_status =
       ZwCreateEvent(handle.put(), EVENT_MODIFY_STATE | SYNCHRONIZE, nullptr,
                     NotificationEvent, FALSE);
@@ -1074,7 +1081,7 @@ bool ntl_handle_object_test() {
     return false;
   ObDereferenceObject(released_object);
 
-  ntl::unique_kernel_handle moved_handle(std::move(handle));
+  ntl::unique_handle moved_handle(std::move(handle));
   if (handle || !moved_handle)
     return false;
 
@@ -1082,7 +1089,7 @@ bool ntl_handle_object_test() {
   if (moved_handle || !released_handle)
     return false;
 
-  ntl::unique_kernel_handle adopted_handle(released_handle);
+  ntl::unique_handle adopted_handle(released_handle);
   if (!adopted_handle.close().is_ok() || adopted_handle)
     return false;
 
@@ -1217,6 +1224,10 @@ bool ntl_symbolic_link_test() {
   const std::wstring link_name = L"\\DosDevices\\CrtSysNtlSymbolicLinkTest";
   const std::wstring target_name =
       L"\\Device\\CrtSysNtlSymbolicLinkTarget";
+
+  if (ntl::dos_device_name(L"CrtSysNtlSymbolicLinkTest") != link_name ||
+      ntl::device_target_name(L"CrtSysNtlSymbolicLinkTarget") != target_name)
+    return false;
 
   delete_symbolic_link_if_present(link_name);
 

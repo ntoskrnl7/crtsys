@@ -41,10 +41,23 @@ struct ioctl {
   /**
    * @brief Returns the descriptor as ntl::device_control::code.
    */
-  static constexpr ntl::device_control::code device_control_code() noexcept {
+  static constexpr ntl::device_control::code control_code() noexcept {
     return ntl::device_control::code{code};
   }
 };
+
+/**
+ * @brief Builds an ntl::ioctl descriptor from a shared contract type.
+ *
+ * A contract type defines device_type, function, method, access, input_type,
+ * and output_type. This lets a shared app/driver header keep the raw IOCTL
+ * identity in one place while driver code still gets typed NTL helpers.
+ */
+template <class Contract>
+using ioctl_from_contract =
+    ioctl<Contract::device_type, Contract::function, Contract::method,
+          Contract::access, typename Contract::input_type,
+          typename Contract::output_type>;
 
 /**
  * @brief Returns true when a runtime device-control code matches an IOCTL type.

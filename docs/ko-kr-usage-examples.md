@@ -221,26 +221,27 @@ driver처럼 `std::weak_ptr`를 capture하는 편이 안전합니다.
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <winioctl.h>
+#include <ntl/handle>
 #include "shared/demo_ioctl.hpp"
 
 int wmain() {
-  HANDLE device = CreateFileW(
+  ntl::unique_handle device{CreateFileW(
       L"\\\\?\\Global\\GLOBALROOT\\Device\\" DEMO_DEVICE_NAME,
       GENERIC_READ | GENERIC_WRITE,
       0,
       nullptr,
       OPEN_EXISTING,
       0,
-      nullptr);
+      nullptr)};
 
-  if (device == INVALID_HANDLE_VALUE)
+  if (!device)
     return 1;
 
   char request[] = "hello";
   char reply[sizeof request] = {};
   DWORD returned = 0;
 
-  const BOOL ok = DeviceIoControl(device,
+  const BOOL ok = DeviceIoControl(device.get(),
                                   DEMO_IOCTL_ECHO,
                                   request,
                                   sizeof request,
@@ -249,7 +250,6 @@ int wmain() {
                                   &returned,
                                   nullptr);
 
-  CloseHandle(device);
   return ok ? 0 : 1;
 }
 ```

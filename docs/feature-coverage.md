@@ -60,8 +60,8 @@ The driver tests still exercise these features from `PASSIVE_LEVEL`.
 | NTL IRP view and typed IOCTL helper | `ntl::irp`, `ntl::device_control::in_buffer`, `ntl::device_control::out_buffer`, `ntl::ioctl` | Follows the dispatch path that supplied the IRP | NTL device callbacks should still be treated as `PASSIVE_LEVEL` unless the exact callback body is separately audited. |
 | NTL status/result wrapper | `ntl::status`, `ntl::result<T>`, `ntl::result<void>` | Caller context for status checks; contained value and failed `value()` path follow their own contracts | Value/status helpers for preserving `NTSTATUS` while writing C++ control-path code. |
 | NTL stack expansion | `ntl::expand_stack` | `PASSIVE_LEVEL` only | Runtime-backed control-path helper, not a hot-path escape hatch. |
-| NTL handle/object ownership | `ntl::unique_kernel_handle`, `ntl::unique_object`, `try_reference_object_by_handle` | `PASSIVE_LEVEL` unless the exact WDK primitive documents a wider contract | Separates `ZwClose` handle ownership from `ObDereferenceObject` reference ownership. |
-| NTL registry helper | `ntl::registry_key`, `ntl::registry_value`, `ntl::driver_config`, `try_open_driver_parameters`, `open_driver_parameters` | `PASSIVE_LEVEL` only | Wraps Zw registry key handles with RAII and typed `REG_*` value query/set/default helpers for driver configuration paths. |
+| NTL handle/object ownership | `ntl::unique_handle`, `ntl::unique_object`, `try_reference_object_by_handle` | `unique_handle` maps to `CloseHandle` in user mode and `ZwClose` in kernel mode; object helpers are `PASSIVE_LEVEL` unless the exact WDK primitive documents a wider contract | Separates HANDLE ownership from `ObDereferenceObject` reference ownership while keeping the API name stable across build modes. |
+| NTL registry helper | `ntl::registry_key`, `ntl::registry_value`, `ntl::driver_config`, `try_open_driver_parameters` | `PASSIVE_LEVEL` only | Wraps Zw registry key handles with RAII and typed `REG_*` value query/set/default helpers for driver configuration paths. |
 | NTL pool ownership and allocator | `ntl::pool_ptr`, `ntl::pool_buffer`, `ntl::pool_allocator`, `ntl::nonpaged_pool_allocator`, `ntl::paged_pool_allocator`, `ntl::pmr::pool_resource` | Raw nonpaged pool follows WDK pool rules; object construction/destruction and STL/PMR usage are `PASSIVE_LEVEL` unless separately audited | Exposes WDK pool kind/options to RAII ownership helpers, STL-compatible allocators, and PMR resource types. |
 | NTL lookaside list | `ntl::lookaside_list` | Raw nonpaged allocate/free follows WDK lookaside rules; object construction/destruction is `PASSIVE_LEVEL` unless separately audited | Wraps `LOOKASIDE_LIST_EX` for fixed-size kernel object caches while keeping pool kind/tag visible. |
 | NTL MDL helper | `ntl::mdl` | Follows the underlying WDK MDL/page-locking primitive | Owns MDLs allocated by `IoAllocateMdl` and exposes nonpaged-pool description, page locking, mapping, and release paths. |
@@ -806,8 +806,9 @@ NTL provides C++ helpers for driver code. See the
         creation
     [(tested)](../test/cmake/driver/src/ntl.cpp)
     [(docs)](./ntl/result.md)
-- [x] `ntl::unique_kernel_handle` / `ntl::unique_object`
-  - [x] kernel handle close, move, release, and adopt paths
+- [x] `ntl::unique_handle` / `ntl::unique_object`
+  - [x] user-mode `CloseHandle` ownership for companion apps
+  - [x] kernel-mode `ZwClose` handle close, move, release, and adopt paths
   - [x] object-manager reference ownership from `ObReferenceObjectByHandle`
         through `try_reference_object_by_handle`
     [(tested)](../test/cmake/driver/src/ntl.cpp)

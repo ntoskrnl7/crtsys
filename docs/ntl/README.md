@@ -9,6 +9,11 @@ kernel object model visible.
 Use these pages when you want more detail than the compact
 [NTL API reference](../ntl-api.md).
 
+For buildable samples, see:
+
+- [NTL typed IOCTL sample driver](../../examples/ntl-driver)
+- [NTL RPC sample driver](../../examples/ntl-rpc-driver)
+
 ## Topics
 
 | Topic | Use it for |
@@ -16,7 +21,7 @@ Use these pages when you want more detail than the compact
 | [Context and IRQL](./context.md) | Shared IRQL language and how to read NTL execution-context notes |
 | [Status, exceptions, and stack expansion](./status-exceptions-stack.md) | `ntl::status`, `ntl::exception`, SEH boundary helper, and `ntl::expand_stack` |
 | [Result](./result.md) | `NTSTATUS`-backed value-or-error helper for driver control paths |
-| [Handle and object ownership](./ownership.md) | `ZwClose` handle ownership and `ObDereferenceObject` reference ownership |
+| [Handle and object ownership](./ownership.md) | Win32 `CloseHandle`, kernel `ZwClose`, and `ObDereferenceObject` ownership |
 | [Registry](./registry.md) | RAII wrapper for Zw registry keys, driver `Parameters` lookup, and typed value query/set helpers |
 | [Driver, device, and IRP helpers](./driver-device-irp.md) | `ntl::main`, `ntl::driver`, `ntl::device`, `ntl::device_endpoint`, dispatch callbacks, and `ntl::irp` |
 | [Device-control pattern](./device-control-pattern.md) | Practical `IOCTL` dispatch pattern using typed IOCTLs, remove locks, MDLs, and output reporting |

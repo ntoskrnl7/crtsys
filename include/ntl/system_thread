@@ -94,7 +94,7 @@ public:
     if (!routine)
       return ntl::unexpected(STATUS_INVALID_PARAMETER);
 
-    ntl::unique_kernel_handle handle;
+    ntl::unique_handle handle;
     const auto status = PsCreateSystemThread(
         handle.put(), desired_access, object_attributes, process_handle,
         client_id, routine, context);
@@ -161,7 +161,7 @@ public:
   HANDLE release() noexcept { return handle_.release(); }
 
 private:
-  ntl::unique_kernel_handle handle_;
+  ntl::unique_handle handle_;
 };
 
 } // namespace ntl
