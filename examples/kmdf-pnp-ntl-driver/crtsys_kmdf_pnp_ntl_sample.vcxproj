@@ -20,8 +20,6 @@
     <WindowsTargetPlatformVersion Condition="'$(WindowsTargetPlatformVersion)' == ''">10.0</WindowsTargetPlatformVersion>
     <!-- Keep imports compatible with the Windows Driver RS5 runtime baseline. -->
     <_NT_TARGET_VERSION>0xA000006</_NT_TARGET_VERSION>
-    <CrtSysPackageVersion Condition="'$(CrtSysPackageVersion)' == ''">*</CrtSysPackageVersion>
-    <RestoreProjectStyle>PackageReference</RestoreProjectStyle>
     <!-- VS2026 WDK 28000 omits the x86 InfVerif.dll requested by its MSBuild task. -->
     <SkipPackageVerification Condition="'$(VisualStudioVersion)' == '18.0'">true</SkipPackageVerification>
   </PropertyGroup>
@@ -66,7 +64,7 @@
       <FileDigestAlgorithm>sha256</FileDigestAlgorithm>
     </DriverSign>
   </ItemDefinitionGroup>
-  <ItemGroup>
+  <ItemGroup Condition="'$(CrtSysUsePackageReference)' == 'true'">
     <PackageReference Include="crtsys" Version="$(CrtSysPackageVersion)" />
   </ItemGroup>
   <ItemGroup>

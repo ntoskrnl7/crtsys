@@ -13,9 +13,9 @@
   <PropertyGroup Label="Globals">
     <BaseIntermediateOutputPath>$(MSBuildThisFileDirectory)obj\$(MSBuildProjectName)\</BaseIntermediateOutputPath>
     <MSBuildProjectExtensionsPath>$(BaseIntermediateOutputPath)</MSBuildProjectExtensionsPath>
-    <ProjectGuid>{975DB540-B4A7-49F6-853A-685F1AA87E13}</ProjectGuid>
-    <RootNamespace>CrtSysKmdfNtlSampleApp</RootNamespace>
-    <ProjectName>crtsys_kmdf_ntl_sample_app</ProjectName>
+    <ProjectGuid>{051426E1-F657-42EE-8B91-0022F444D9F0}</ProjectGuid>
+    <RootNamespace>CrtSysKmdfUsbNtlSampleApp</RootNamespace>
+    <ProjectName>crtsys_kmdf_usb_ntl_sample_app</ProjectName>
     <WindowsTargetPlatformVersion Condition="'$(VisualStudioVersion)' == '18.0'">10.0.28000.0</WindowsTargetPlatformVersion>
     <WindowsTargetPlatformVersion Condition="'$(WindowsTargetPlatformVersion)' == ''">10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
@@ -23,18 +23,20 @@
   <PropertyGroup Label="Configuration" Condition="'$(Configuration)'=='Debug'">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset Condition="'$(VisualStudioVersion)' == '18.0'">v145</PlatformToolset>
+    <PlatformToolset Condition="'$(PlatformToolset)' == ''">v143</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Label="Configuration" Condition="'$(Configuration)'=='Release'">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset Condition="'$(VisualStudioVersion)' == '18.0'">v145</PlatformToolset>
+    <PlatformToolset Condition="'$(PlatformToolset)' == ''">v143</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <PropertyGroup>
-    <TargetName>crtsys_kmdf_ntl_sample_app</TargetName>
+    <TargetName>crtsys_kmdf_usb_ntl_sample_app</TargetName>
   </PropertyGroup>
   <ImportGroup Label="PropertySheets">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="Exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" />
@@ -49,6 +51,9 @@
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
     </ClCompile>
+    <Link>
+      <AdditionalDependencies>setupapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
   </ItemDefinitionGroup>
   <ItemGroup Condition="'$(CrtSysUsePackageReference)' == 'true'">
     <PackageReference Include="crtsys" Version="$(CrtSysPackageVersion)" />
@@ -57,7 +62,7 @@
     <ClCompile Include="app\main.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="shared\kmdf_ntl_ioctl.hpp" />
+    <ClInclude Include="shared\kmdf_usb_ntl_ioctl.hpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

@@ -1,0 +1,58 @@
+[Version]
+Signature="$WINDOWS NT$"
+Class=USBDevice
+ClassGuid={88bae032-5a81-49f0-bc3d-a4ff138216d6}
+Provider=%ProviderName%
+CatalogFile=crtsys_kmdf_usb_ntl_sample.cat
+DriverVer=06/21/2006,1.0.0.0
+PnpLockdown=1
+
+[DestinationDirs]
+DefaultDestDir=13
+
+[SourceDisksNames]
+1=%DiskName%,,,
+
+[SourceDisksFiles]
+crtsys_kmdf_usb_ntl_sample.sys=1
+
+[Manufacturer]
+%ProviderName%=Models,NTamd64.10.0...16299,NTarm64.10.0...16299,NTx86.10.0...16299
+
+; Replace USB\VID_FFFF&PID_FFFF with the target device's actual hardware ID.
+[Models.NTamd64.10.0...16299]
+%DeviceDescription%=Device_Install,USB\VID_FFFF&PID_FFFF
+
+[Models.NTarm64.10.0...16299]
+%DeviceDescription%=Device_Install,USB\VID_FFFF&PID_FFFF
+
+[Models.NTx86.10.0...16299]
+%DeviceDescription%=Device_Install,USB\VID_FFFF&PID_FFFF
+
+[Device_Install.NT]
+CopyFiles=DriverCopyFiles
+
+[DriverCopyFiles]
+crtsys_kmdf_usb_ntl_sample.sys
+
+[Device_Install.NT.Services]
+AddService=crtsys_kmdf_usb_ntl_sample,0x00000002,Service_Install
+
+[Service_Install]
+DisplayName=%ServiceDescription%
+ServiceType=1
+StartType=3
+ErrorControl=1
+ServiceBinary=%13%\crtsys_kmdf_usb_ntl_sample.sys
+
+[Device_Install.NT.Wdf]
+KmdfService=crtsys_kmdf_usb_ntl_sample,Kmdf_Install
+
+[Kmdf_Install]
+KmdfLibraryVersion=1.15
+
+[Strings]
+ProviderName="crtsys"
+DeviceDescription="crtsys NTL KMDF USB sample"
+ServiceDescription="crtsys NTL KMDF USB sample driver"
+DiskName="crtsys NTL KMDF USB sample installation media"

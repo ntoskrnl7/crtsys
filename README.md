@@ -187,6 +187,7 @@ may compile or work.
 | [NTL RPC sample driver](./examples/ntl-rpc-driver) | Complete Visual Studio/NuGet and CMake driver/app pair using the shared NTL RPC schema |
 | [NTL KMDF sample](./examples/kmdf-ntl-driver) | `ntl::kmdf::main`, C++ WDF contexts, typed file/queue/request and deferred callbacks, and STL in passive KMDF callbacks |
 | [NTL KMDF DMA template](./examples/kmdf-dma-ntl-driver) | Buildable PnP packet-DMA transaction, scatter/gather, common-buffer, and interrupt-DPC integration template for real hardware |
+| [NTL KMDF USB template](./examples/kmdf-usb-ntl-driver) | Buildable PnP USB device/interface/pipe and continuous-reader template with a user-mode inspection app |
 | [CI Driver Load Tests](./docs/ci-driver-load-tests.md) | Optional self-hosted driver load/run workflow |
 
 ## Operational Boundaries

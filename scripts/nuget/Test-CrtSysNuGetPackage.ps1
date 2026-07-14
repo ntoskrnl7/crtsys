@@ -239,6 +239,7 @@ if ($isDriverConsumer) {
     'include\ntl\kmdf\timer',
     'include\ntl\kmdf\work_item',
     'include\ntl\kmdf\dma',
+    'include\ntl\kmdf\usb',
     'include\ntl\kmdf\child_list',
     'include\ntl\kmdf\registry',
     'include\ntl\kmdf\property'

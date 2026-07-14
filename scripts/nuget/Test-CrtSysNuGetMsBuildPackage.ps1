@@ -233,6 +233,7 @@ foreach ($requiredPath in @(
   'include\ntl\driver',
   'include\ntl\kmdf\driver',
   'include\ntl\kmdf\dma',
+  'include\ntl\kmdf\usb',
   "build\native\lib\native\$Toolset\$Architecture\$Configuration\crtsys.lib",
   "build\native\lib\native\$Toolset\$Architecture\$Configuration\Ldk.lib"
 )) {
@@ -498,6 +499,14 @@ constexpr auto sample_program_dma =
       return true;
     };
 
+constexpr auto sample_usb_reader =
+    +[](ntl::kmdf::usb_pipe, ntl::kmdf::memory, size_t,
+        void*) noexcept {};
+
+constexpr auto sample_usb_reader_failure =
+    +[](ntl::kmdf::usb_pipe, ntl::status,
+        USBD_STATUS) noexcept { return false; };
+
 [[maybe_unused]] void compile_typed_callback_surface(
     ntl::kmdf::device device, ntl::kmdf::device_init& init,
     ntl::kmdf::io_queue queue, ntl::kmdf::request request) {
@@ -644,6 +653,41 @@ constexpr auto sample_program_dma =
       (void)transaction->current_transfer_length();
       transaction->transfer_info(nullptr, nullptr);
     }
+  }
+
+  usb_device_create_config usb_create_config;
+  auto usb = usb_device::try_create(device, usb_create_config);
+  if (usb) {
+    (void)usb->try_information();
+    (void)usb->descriptor();
+    auto selection = usb_select_config::single_interface();
+    (void)usb->try_select(selection);
+
+    auto interface = selection.configured_interface();
+    auto setting = usb_interface_setting::index(0);
+    (void)interface.try_select(setting);
+    usb_pipe_information pipe_information;
+    auto pipe = interface.pipe_at(0, &pipe_information);
+
+    UCHAR bytes[64]{};
+    auto descriptor = usb_memory_descriptor::buffer(bytes, sizeof(bytes));
+    (void)pipe.try_read(&descriptor);
+    (void)pipe.try_write(&descriptor);
+
+    auto usb_request = driver_request::try_create(pipe.target());
+    auto usb_memory = memory::try_preallocated(bytes, sizeof(bytes));
+    if (usb_request && usb_memory) {
+      auto owned = std::move(usb_request).value();
+      (void)pipe.try_format_read(owned, usb_memory.value());
+      auto setup = usb_control_setup_packet::vendor(
+          BmRequestDeviceToHost, BmRequestToDevice, 1, 0, 0);
+      (void)usb->try_format_control(owned, setup, usb_memory.value());
+    }
+
+    auto reader = usb_continuous_reader_config::with_completion<
+        sample_usb_reader>(sizeof(bytes));
+    reader.on_failure<sample_usb_reader_failure>().pending_reads(1);
+    (void)pipe.try_configure_reader(reader);
   }
 
   request.on_completion<

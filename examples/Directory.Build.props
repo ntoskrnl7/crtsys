@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <CrtSysRepositoryRoot Condition="'$(CrtSysRepositoryRoot)' == ''">$([MSBuild]::NormalizeDirectory('$(MSBuildThisFileDirectory)', '..'))</CrtSysRepositoryRoot>
+    <CrtSysDevelopmentPackageRoot Condition="'$(CrtSysDevelopmentPackageRoot)' == ''">$(CrtSysRepositoryRoot)artifacts\development-package\</CrtSysDevelopmentPackageRoot>
+    <CrtSysPackageRoot Condition="'$(CrtSysPackageRoot)' == '' and Exists('$(CrtSysDevelopmentPackageRoot)build\native\crtsys.props')">$(CrtSysDevelopmentPackageRoot)</CrtSysPackageRoot>
+    <CrtSysUsePackageReference Condition="'$(CrtSysPackageRoot)' == ''">true</CrtSysUsePackageReference>
+    <CrtSysUsePackageReference Condition="'$(CrtSysUsePackageReference)' == ''">false</CrtSysUsePackageReference>
+    <CrtSysPackageVersion Condition="'$(CrtSysPackageVersion)' == ''">*</CrtSysPackageVersion>
+    <ExcludeRestorePackageImports Condition="'$(CrtSysPackageRoot)' != ''">true</ExcludeRestorePackageImports>
+    <RestoreProjectStyle Condition="'$(RestoreProjectStyle)' == ''">PackageReference</RestoreProjectStyle>
+  </PropertyGroup>
+
+  <Import Project="$(CrtSysPackageRoot)build\native\crtsys.props" Condition="Exists('$(CrtSysPackageRoot)build\native\crtsys.props')" />
+</Project>

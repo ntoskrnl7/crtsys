@@ -18,8 +18,6 @@
     <ProjectName>crtsys_kmdf_pnp_ntl_sample_app</ProjectName>
     <WindowsTargetPlatformVersion Condition="'$(VisualStudioVersion)' == '18.0'">10.0.28000.0</WindowsTargetPlatformVersion>
     <WindowsTargetPlatformVersion Condition="'$(WindowsTargetPlatformVersion)' == ''">10.0</WindowsTargetPlatformVersion>
-    <CrtSysPackageVersion Condition="'$(CrtSysPackageVersion)' == ''">*</CrtSysPackageVersion>
-    <RestoreProjectStyle>PackageReference</RestoreProjectStyle>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Label="Configuration" Condition="'$(Configuration)'=='Debug'">
@@ -57,7 +55,7 @@
       <AdditionalDependencies>setupapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
-  <ItemGroup>
+  <ItemGroup Condition="'$(CrtSysUsePackageReference)' == 'true'">
     <PackageReference Include="crtsys" Version="$(CrtSysPackageVersion)" />
   </ItemGroup>
   <ItemGroup>

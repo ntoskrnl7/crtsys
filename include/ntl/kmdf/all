@@ -25,4 +25,5 @@
 #include "registry"
 #include "request"
 #include "timer"
+#include "usb"
 #include "work_item"

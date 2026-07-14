@@ -99,6 +99,7 @@ foreach ($requiredPath in @(
   'include\ntl\kmdf\timer',
   'include\ntl\kmdf\work_item',
   'include\ntl\kmdf\dma',
+  'include\ntl\kmdf\usb',
   'include\ntl\kmdf\child_list',
   'include\ntl\kmdf\registry',
   'include\ntl\kmdf\property',
@@ -241,6 +242,14 @@ constexpr auto sample_program_dma =
         WDF_DMA_DIRECTION,
         ntl::kmdf::scatter_gather_list) noexcept { return true; };
 
+constexpr auto sample_usb_reader =
+    +[](ntl::kmdf::usb_pipe, ntl::kmdf::memory, size_t,
+        void*) noexcept {};
+
+constexpr auto sample_usb_reader_failure =
+    +[](ntl::kmdf::usb_pipe, ntl::status,
+        USBD_STATUS) noexcept { return false; };
+
 [[maybe_unused]] void compile_dma_surface(
     ntl::kmdf::device device, ntl::kmdf::request request) {
   using namespace ntl::kmdf;
@@ -271,6 +280,46 @@ constexpr auto sample_program_dma =
         nullptr, static_cast<void*>(dma_buffer), sizeof(dma_buffer),
         WdfDmaDirectionReadFromDevice);
   }
+}
+
+[[maybe_unused]] void compile_usb_surface(ntl::kmdf::device device) {
+  using namespace ntl::kmdf;
+
+  usb_device_create_config create_config;
+  auto usb = usb_device::try_create(device, create_config);
+  if (!usb)
+    return;
+
+  (void)usb->try_information();
+  (void)usb->descriptor();
+  auto selection = usb_select_config::single_interface();
+  (void)usb->try_select(selection);
+
+  auto interface = selection.configured_interface();
+  auto setting = usb_interface_setting::index(0);
+  (void)interface.try_select(setting);
+  usb_pipe_information pipe_information;
+  auto pipe = interface.pipe_at(0, &pipe_information);
+
+  UCHAR bytes[64]{};
+  auto descriptor = usb_memory_descriptor::buffer(bytes, sizeof(bytes));
+  (void)pipe.try_read(&descriptor);
+  (void)pipe.try_write(&descriptor);
+
+  auto request = driver_request::try_create(pipe.target());
+  auto transfer = memory::try_preallocated(bytes, sizeof(bytes));
+  if (request && transfer) {
+    auto owned = std::move(request).value();
+    (void)pipe.try_format_read(owned, transfer.value());
+    auto setup = usb_control_setup_packet::vendor(
+        BmRequestDeviceToHost, BmRequestToDevice, 1, 0, 0);
+    (void)usb->try_format_control(owned, setup, transfer.value());
+  }
+
+  auto reader = usb_continuous_reader_config::with_completion<
+      sample_usb_reader>(sizeof(bytes));
+  reader.on_failure<sample_usb_reader_failure>().pending_reads(1);
+  (void)pipe.try_configure_reader(reader);
 }
 }
 

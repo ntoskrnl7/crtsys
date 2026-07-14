@@ -1,0 +1,736 @@
+/**
+ * @file usb
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Typed KMDF USB device, interface, pipe, and reader helpers.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ *
+ */
+#pragma once
+
+#include "callback"
+#include "device"
+#include "io_target"
+#include "memory"
+#include "object_attributes"
+#include "request"
+
+#include "../result"
+#include "../status"
+
+#include "detail/wdf"
+
+#if defined(_MSC_VER)
+#pragma warning(push)
+// Keep warnings owned by older WDK USB headers from leaking into /WX users.
+#pragma warning(disable : 4471)
+#endif
+
+#include <usb.h>
+#include <usbdlib.h>
+#include <wdfusb.h>
+
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
+
+#include <cstddef>
+
+namespace ntl::kmdf {
+class usb_device;
+class usb_interface;
+class usb_pipe;
+
+namespace detail {
+template <auto Callback>
+void invoke_usb_reader_completion(WDFUSBPIPE pipe, WDFMEMORY buffer,
+                                  size_t transferred,
+                                  WDFCONTEXT context) noexcept;
+
+template <auto Callback>
+BOOLEAN invoke_usb_reader_failure(WDFUSBPIPE pipe, NTSTATUS status,
+                                  USBD_STATUS usbd_status) noexcept;
+} // namespace detail
+
+/** @brief Builder for a standard, class, vendor, or feature USB setup packet.
+ */
+class usb_control_setup_packet {
+public:
+  /** @brief Creates a standard USB control-transfer setup packet. */
+  static usb_control_setup_packet
+  standard(WDF_USB_BMREQUEST_DIRECTION direction,
+           WDF_USB_BMREQUEST_RECIPIENT recipient, BYTE request, USHORT value,
+           USHORT index) noexcept {
+    usb_control_setup_packet packet;
+    WDF_USB_CONTROL_SETUP_PACKET_INIT(&packet.value_, direction, recipient,
+                                      request, value, index);
+    return packet;
+  }
+
+  /** @brief Creates a class-specific USB control-transfer setup packet. */
+  static usb_control_setup_packet
+  class_request(WDF_USB_BMREQUEST_DIRECTION direction,
+                WDF_USB_BMREQUEST_RECIPIENT recipient, BYTE request,
+                USHORT value, USHORT index) noexcept {
+    usb_control_setup_packet packet;
+    WDF_USB_CONTROL_SETUP_PACKET_INIT_CLASS(&packet.value_, direction,
+                                            recipient, request, value, index);
+    return packet;
+  }
+
+  /** @brief Creates a vendor-specific USB control-transfer setup packet. */
+  static usb_control_setup_packet vendor(WDF_USB_BMREQUEST_DIRECTION direction,
+                                         WDF_USB_BMREQUEST_RECIPIENT recipient,
+                                         BYTE request, USHORT value,
+                                         USHORT index) noexcept {
+    usb_control_setup_packet packet;
+    WDF_USB_CONTROL_SETUP_PACKET_INIT_VENDOR(&packet.value_, direction,
+                                             recipient, request, value, index);
+    return packet;
+  }
+
+  /** @brief Creates a SET_FEATURE or CLEAR_FEATURE setup packet. */
+  static usb_control_setup_packet feature(WDF_USB_BMREQUEST_RECIPIENT recipient,
+                                          USHORT selector, USHORT index,
+                                          bool set) noexcept {
+    usb_control_setup_packet packet;
+    WDF_USB_CONTROL_SETUP_PACKET_INIT_FEATURE(
+        &packet.value_, recipient, selector, index, set ? TRUE : FALSE);
+    return packet;
+  }
+
+  /** @brief Creates a GET_STATUS setup packet. */
+  static usb_control_setup_packet
+  get_status(WDF_USB_BMREQUEST_RECIPIENT recipient, USHORT index) noexcept {
+    usb_control_setup_packet packet;
+    WDF_USB_CONTROL_SETUP_PACKET_INIT_GET_STATUS(&packet.value_, recipient,
+                                                 index);
+    return packet;
+  }
+
+  /** @brief Returns the mutable native setup packet. */
+  PWDF_USB_CONTROL_SETUP_PACKET native() noexcept { return &value_; }
+
+  /** @brief Returns the native setup packet. */
+  const WDF_USB_CONTROL_SETUP_PACKET &native_value() const noexcept {
+    return value_;
+  }
+
+private:
+  WDF_USB_CONTROL_SETUP_PACKET value_{};
+};
+
+/** @brief Borrowed storage descriptor for synchronous WDF USB operations. */
+class usb_memory_descriptor {
+public:
+  /** @brief Describes caller-owned contiguous storage. */
+  static usb_memory_descriptor buffer(void *data, ULONG size_bytes) noexcept {
+    usb_memory_descriptor descriptor;
+    WDF_MEMORY_DESCRIPTOR_INIT_BUFFER(&descriptor.value_, data, size_bytes);
+    return descriptor;
+  }
+
+  /** @brief Describes an MDL and the usable byte count. */
+  static usb_memory_descriptor mdl(PMDL value, ULONG size_bytes) noexcept {
+    usb_memory_descriptor descriptor;
+    WDF_MEMORY_DESCRIPTOR_INIT_MDL(&descriptor.value_, value, size_bytes);
+    return descriptor;
+  }
+
+  /**
+   * @brief Describes a WDF memory object and optional range.
+   * @note The memory_offset object must outlive the synchronous call.
+   */
+  static usb_memory_descriptor
+  from_memory(memory value, memory_offset *offset = nullptr) noexcept {
+    usb_memory_descriptor descriptor;
+    WDF_MEMORY_DESCRIPTOR_INIT_HANDLE(&descriptor.value_, value.native_handle(),
+                                      offset ? offset->native() : nullptr);
+    return descriptor;
+  }
+
+  /** @brief Returns the mutable native memory descriptor. */
+  PWDF_MEMORY_DESCRIPTOR native() noexcept { return &value_; }
+
+private:
+  WDF_MEMORY_DESCRIPTOR value_{};
+};
+
+/** @brief Value wrapper for WDF_USB_DEVICE_INFORMATION. */
+class usb_device_information {
+public:
+  /** @brief Initializes an empty device-information result. */
+  usb_device_information() noexcept {
+    WDF_USB_DEVICE_INFORMATION_INIT(&value_);
+  }
+
+  /** @brief Returns the USB stack and controller information. */
+  const USBD_VERSION_INFORMATION &usbd_version() const noexcept {
+    return value_.UsbdVersionInformation;
+  }
+
+  /** @brief Returns WDF_USB_DEVICE_TRAIT_* flags. */
+  ULONG traits() const noexcept { return value_.Traits; }
+
+  /** @brief Reports whether the device is self powered. */
+  bool is_self_powered() const noexcept {
+    return (traits() & WDF_USB_DEVICE_TRAIT_SELF_POWERED) != 0;
+  }
+
+  /** @brief Reports whether the device supports remote wake. */
+  bool is_remote_wake_capable() const noexcept {
+    return (traits() & WDF_USB_DEVICE_TRAIT_REMOTE_WAKE_CAPABLE) != 0;
+  }
+
+  /** @brief Reports whether the device is operating at high speed. */
+  bool is_high_speed() const noexcept {
+    return (traits() & WDF_USB_DEVICE_TRAIT_AT_HIGH_SPEED) != 0;
+  }
+
+  /** @brief Returns the mutable native information structure. */
+  PWDF_USB_DEVICE_INFORMATION native() noexcept { return &value_; }
+
+private:
+  WDF_USB_DEVICE_INFORMATION value_{};
+};
+
+/** @brief Value wrapper for WDF_USB_PIPE_INFORMATION. */
+class usb_pipe_information {
+public:
+  /** @brief Initializes an empty pipe-information result. */
+  usb_pipe_information() noexcept { WDF_USB_PIPE_INFORMATION_INIT(&value_); }
+
+  /** @brief Returns the endpoint's maximum packet size. */
+  ULONG maximum_packet_size() const noexcept {
+    return value_.MaximumPacketSize;
+  }
+
+  /** @brief Returns the endpoint address from the descriptor. */
+  UCHAR endpoint_address() const noexcept { return value_.EndpointAddress; }
+
+  /** @brief Returns the endpoint polling interval. */
+  UCHAR interval() const noexcept { return value_.Interval; }
+
+  /** @brief Returns the alternate-setting index. */
+  UCHAR setting_index() const noexcept { return value_.SettingIndex; }
+
+  /** @brief Returns the control, bulk, interrupt, or isochronous pipe type. */
+  WDF_USB_PIPE_TYPE type() const noexcept { return value_.PipeType; }
+
+  /** @brief Returns the framework's maximum transfer size. */
+  ULONG maximum_transfer_size() const noexcept {
+    return value_.MaximumTransferSize;
+  }
+
+  /** @brief Reports whether the endpoint transfers data to the host. */
+  bool is_in() const noexcept {
+    return WDF_USB_PIPE_DIRECTION_IN(value_.EndpointAddress) != FALSE;
+  }
+
+  /** @brief Reports whether the endpoint transfers data from the host. */
+  bool is_out() const noexcept {
+    return WDF_USB_PIPE_DIRECTION_OUT(value_.EndpointAddress) != FALSE;
+  }
+
+  /** @brief Returns the mutable native pipe-information structure. */
+  PWDF_USB_PIPE_INFORMATION native() noexcept { return &value_; }
+
+private:
+  WDF_USB_PIPE_INFORMATION value_{};
+};
+
+/** @brief Builder for WDF_USB_DEVICE_CREATE_CONFIG. */
+class usb_device_create_config {
+public:
+  /** @brief Selects the USB client contract used by the device object. */
+  explicit usb_device_create_config(
+      ULONG contract_version = USBD_CLIENT_CONTRACT_VERSION_602) noexcept {
+    WDF_USB_DEVICE_CREATE_CONFIG_INIT(&value_, contract_version);
+  }
+
+  /** @brief Returns the mutable native creation configuration. */
+  PWDF_USB_DEVICE_CREATE_CONFIG native() noexcept { return &value_; }
+
+private:
+  WDF_USB_DEVICE_CREATE_CONFIG value_{};
+};
+
+/** @brief Builder for selecting one or more USB interfaces. */
+class usb_select_config {
+public:
+  /** @brief Selects the first configuration and its single interface. */
+  static usb_select_config single_interface() noexcept {
+    usb_select_config config;
+    WDF_USB_DEVICE_SELECT_CONFIG_PARAMS_INIT_SINGLE_INTERFACE(&config.value_);
+    return config;
+  }
+
+  /** @brief Selects all interfaces with their default alternate settings. */
+  static usb_select_config multiple_interfaces() noexcept {
+    usb_select_config config;
+    WDF_USB_DEVICE_SELECT_CONFIG_PARAMS_INIT_MULTIPLE_INTERFACES(&config.value_,
+                                                                 0, nullptr);
+    return config;
+  }
+
+  /** @brief Selects explicit interface and alternate-setting pairs. */
+  static usb_select_config
+  interface_pairs(UCHAR count, PWDF_USB_INTERFACE_SETTING_PAIR pairs) noexcept {
+    usb_select_config config;
+    WDF_USB_DEVICE_SELECT_CONFIG_PARAMS_INIT_MULTIPLE_INTERFACES(&config.value_,
+                                                                 count, pairs);
+    return config;
+  }
+
+  /** @brief Deconfigures the USB device. */
+  static usb_select_config deconfigure() noexcept {
+    usb_select_config config;
+    WDF_USB_DEVICE_SELECT_CONFIG_PARAMS_INIT_DECONFIG(&config.value_);
+    return config;
+  }
+
+  /** @brief Returns the interface selected by single_interface(). */
+  usb_interface configured_interface() const noexcept;
+
+  /** @brief Returns the number of pipes selected for a single interface. */
+  UCHAR configured_pipe_count() const noexcept {
+    return value_.Types.SingleInterface.NumberConfiguredPipes;
+  }
+
+  /** @brief Returns the number of interfaces configured by WDF. */
+  UCHAR configured_interface_count() const noexcept {
+    return value_.Types.MultiInterface.NumberOfConfiguredInterfaces;
+  }
+
+  /** @brief Returns the mutable native selection parameters. */
+  PWDF_USB_DEVICE_SELECT_CONFIG_PARAMS native() noexcept { return &value_; }
+
+private:
+  WDF_USB_DEVICE_SELECT_CONFIG_PARAMS value_{};
+};
+
+/** @brief Non-owning facade for a WDFUSBDEVICE. */
+class usb_device {
+public:
+  /** @brief Creates an empty USB-device facade. */
+  usb_device() noexcept = default;
+
+  /** @brief Wraps a native USB device without taking ownership. */
+  explicit usb_device(WDFUSBDEVICE object) noexcept : object_(object) {}
+
+  /** @brief Creates and opens a WDF USB device at PASSIVE_LEVEL. */
+  static ntl::result<usb_device>
+  try_create(const device &owner, usb_device_create_config &config,
+             object_attributes *attributes = nullptr) noexcept {
+    WDFUSBDEVICE object = WDF_NO_HANDLE;
+    const NTSTATUS result = WdfUsbTargetDeviceCreateWithParameters(
+        owner.native_handle(), config.native(),
+        attributes ? attributes->native() : nullptr, &object);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return ntl::ok(usb_device{object});
+  }
+
+  /** @brief Creates a USB device with the Windows 8+ client contract. */
+  static ntl::result<usb_device>
+  try_create(const device &owner,
+             object_attributes *attributes = nullptr) noexcept {
+    usb_device_create_config config;
+    return try_create(owner, config, attributes);
+  }
+
+  /** @brief Retrieves USB stack information at IRQL <= DISPATCH_LEVEL. */
+  ntl::result<usb_device_information> try_information() const noexcept {
+    usb_device_information information;
+    const NTSTATUS result =
+        WdfUsbTargetDeviceRetrieveInformation(object_, information.native());
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return ntl::ok(information);
+  }
+
+  /** @brief Returns the USB device descriptor at PASSIVE_LEVEL. */
+  USB_DEVICE_DESCRIPTOR descriptor() const noexcept {
+    USB_DEVICE_DESCRIPTOR value{};
+    WdfUsbTargetDeviceGetDeviceDescriptor(object_, &value);
+    return value;
+  }
+
+  /** @brief Selects a USB configuration at PASSIVE_LEVEL. */
+  ntl::status
+  try_select(usb_select_config &config,
+             object_attributes *pipe_attributes = nullptr) const noexcept {
+    return WdfUsbTargetDeviceSelectConfig(
+        object_, pipe_attributes ? pipe_attributes->native() : nullptr,
+        config.native());
+  }
+
+  /** @brief Returns the number of USB interfaces at IRQL <= DISPATCH_LEVEL. */
+  UCHAR interface_count() const noexcept {
+    return WdfUsbTargetDeviceGetNumInterfaces(object_);
+  }
+
+  /** @brief Returns an interface by zero-based index. */
+  usb_interface interface_at(UCHAR index) const noexcept;
+
+  /**
+   * @brief Formats, but does not send, a USB control request.
+   * @note Valid at IRQL <= DISPATCH_LEVEL. Send the request to target().
+   */
+  template <class Request>
+  ntl::status
+  try_format_control(const Request &request, usb_control_setup_packet &setup,
+                     memory transfer = {},
+                     memory_offset *offset = nullptr) const noexcept {
+    return WdfUsbTargetDeviceFormatRequestForControlTransfer(
+        object_, request.native_handle(), setup.native(),
+        transfer.native_handle(), offset ? offset->native() : nullptr);
+  }
+
+  /** @brief Sends a USB control transfer synchronously at PASSIVE_LEVEL. */
+  ntl::status
+  try_control_transfer(usb_control_setup_packet &setup,
+                       usb_memory_descriptor *transfer = nullptr,
+                       ULONG *bytes_transferred = nullptr,
+                       send_options *options = nullptr) const noexcept {
+    return WdfUsbTargetDeviceSendControlTransferSynchronously(
+        object_, WDF_NO_HANDLE, options ? options->native() : nullptr,
+        setup.native(), transfer ? transfer->native() : nullptr,
+        bytes_transferred);
+  }
+
+  /** @brief Reports whether the USB target is connected at PASSIVE_LEVEL. */
+  ntl::status try_check_connected() const noexcept {
+    return WdfUsbTargetDeviceIsConnectedSynchronous(object_);
+  }
+
+  /** @brief Returns the generic I/O target used to send USB requests. */
+  io_target target() const noexcept {
+    return io_target{WdfUsbTargetDeviceGetIoTarget(object_)};
+  }
+
+  /** @brief Returns the native WDF USB device. */
+  WDFUSBDEVICE native_object() const noexcept { return object_; }
+
+  /** @brief Returns true when a native USB device is present. */
+  explicit operator bool() const noexcept { return object_ != WDF_NO_HANDLE; }
+
+private:
+  WDFUSBDEVICE object_ = WDF_NO_HANDLE;
+};
+
+/** @brief Builder for selecting a USB interface alternate setting. */
+class usb_interface_setting {
+public:
+  /** @brief Selects an alternate setting by index. */
+  static usb_interface_setting index(UCHAR value) noexcept {
+    usb_interface_setting setting;
+    WDF_USB_INTERFACE_SELECT_SETTING_PARAMS_INIT_SETTING(&setting.value_,
+                                                         value);
+    return setting;
+  }
+
+  /** @brief Selects an alternate setting by interface descriptor. */
+  static usb_interface_setting
+  descriptor(PUSB_INTERFACE_DESCRIPTOR value) noexcept {
+    usb_interface_setting setting;
+    WDF_USB_INTERFACE_SELECT_SETTING_PARAMS_INIT_DESCRIPTOR(&setting.value_,
+                                                            value);
+    return setting;
+  }
+
+  /** @brief Returns mutable native selection parameters. */
+  PWDF_USB_INTERFACE_SELECT_SETTING_PARAMS native() noexcept { return &value_; }
+
+private:
+  WDF_USB_INTERFACE_SELECT_SETTING_PARAMS value_{};
+};
+
+/** @brief Non-owning facade for a WDFUSBINTERFACE. */
+class usb_interface {
+public:
+  /** @brief Creates an empty USB-interface facade. */
+  usb_interface() noexcept = default;
+
+  /** @brief Wraps a native USB interface without taking ownership. */
+  explicit usb_interface(WDFUSBINTERFACE object) noexcept : object_(object) {}
+
+  /** @brief Returns the descriptor interface number. */
+  BYTE number() const noexcept {
+    return WdfUsbInterfaceGetInterfaceNumber(object_);
+  }
+
+  /** @brief Returns the number of alternate settings. */
+  BYTE setting_count() const noexcept {
+    return WdfUsbInterfaceGetNumSettings(object_);
+  }
+
+  /** @brief Returns the active alternate-setting index. */
+  BYTE configured_setting() const noexcept {
+    return WdfUsbInterfaceGetConfiguredSettingIndex(object_);
+  }
+
+  /** @brief Returns the number of endpoints in an alternate setting. */
+  BYTE endpoint_count(UCHAR setting_index) const noexcept {
+    return WdfUsbInterfaceGetNumEndpoints(object_, setting_index);
+  }
+
+  /** @brief Returns an interface descriptor for an alternate setting. */
+  USB_INTERFACE_DESCRIPTOR descriptor(UCHAR setting_index) const noexcept {
+    USB_INTERFACE_DESCRIPTOR value{};
+    WdfUsbInterfaceGetDescriptor(object_, setting_index, &value);
+    return value;
+  }
+
+  /** @brief Selects an alternate setting at PASSIVE_LEVEL. */
+  ntl::status
+  try_select(usb_interface_setting &setting,
+             object_attributes *pipe_attributes = nullptr) const noexcept {
+    return WdfUsbInterfaceSelectSetting(
+        object_, pipe_attributes ? pipe_attributes->native() : nullptr,
+        setting.native());
+  }
+
+  /** @brief Returns the number of pipes in the selected setting. */
+  BYTE configured_pipe_count() const noexcept {
+    return WdfUsbInterfaceGetNumConfiguredPipes(object_);
+  }
+
+  /** @brief Returns a configured pipe and optionally fills its information. */
+  usb_pipe pipe_at(UCHAR index,
+                   usb_pipe_information *information = nullptr) const noexcept;
+
+  /** @brief Returns the native WDF USB interface. */
+  WDFUSBINTERFACE native_object() const noexcept { return object_; }
+
+  /** @brief Returns true when a native USB interface is present. */
+  explicit operator bool() const noexcept { return object_ != WDF_NO_HANDLE; }
+
+private:
+  WDFUSBINTERFACE object_ = WDF_NO_HANDLE;
+};
+
+/** @brief Builder for a KMDF USB continuous reader. */
+class usb_continuous_reader_config {
+public:
+  /**
+   * @brief Creates a reader configuration with a typed completion callback.
+   * @tparam Callback Non-capturing
+   * `void(usb_pipe, memory, size_t, void*) noexcept` callback.
+   */
+  template <auto Callback>
+  static usb_continuous_reader_config
+  with_completion(size_t transfer_length, void *context = nullptr) noexcept {
+    usb_continuous_reader_config config;
+    WDF_USB_CONTINUOUS_READER_CONFIG_INIT(
+        &config.value_,
+        +[](WDFUSBPIPE native_pipe, WDFMEMORY native_memory, size_t transferred,
+            WDFCONTEXT native_context) noexcept {
+          detail::invoke_usb_reader_completion<Callback>(
+              native_pipe, native_memory, transferred, native_context);
+        },
+        context, transfer_length);
+    return config;
+  }
+
+  /** @brief Reserves bytes before and after each transfer buffer. */
+  usb_continuous_reader_config &padding(size_t header,
+                                        size_t trailer) noexcept {
+    value_.HeaderLength = header;
+    value_.TrailerLength = trailer;
+    return *this;
+  }
+
+  /** @brief Selects the number of concurrent reads; zero uses WDF's default. */
+  usb_continuous_reader_config &pending_reads(UCHAR count) noexcept {
+    value_.NumPendingReads = count;
+    return *this;
+  }
+
+  /** @brief Applies attributes to framework-created reader buffers. */
+  usb_continuous_reader_config &
+  buffer_attributes(object_attributes &attributes) noexcept {
+    value_.BufferAttributes = attributes.native();
+    return *this;
+  }
+
+  /**
+   * @brief Registers a PASSIVE_LEVEL reader-failure callback.
+   * @tparam Callback Non-capturing
+   * `bool(usb_pipe, ntl::status, USBD_STATUS) noexcept` callback.
+   */
+  template <auto Callback> usb_continuous_reader_config &on_failure() noexcept {
+    value_.EvtUsbTargetPipeReadersFailed =
+        +[](WDFUSBPIPE native_pipe, NTSTATUS status,
+            USBD_STATUS usbd_status) noexcept -> BOOLEAN {
+      return detail::invoke_usb_reader_failure<Callback>(native_pipe, status,
+                                                         usbd_status);
+    };
+    return *this;
+  }
+
+  /** @brief Returns the mutable native reader configuration. */
+  PWDF_USB_CONTINUOUS_READER_CONFIG native() noexcept { return &value_; }
+
+private:
+  WDF_USB_CONTINUOUS_READER_CONFIG value_{};
+};
+
+/** @brief Non-owning facade for a WDFUSBPIPE. */
+class usb_pipe {
+public:
+  /** @brief Creates an empty USB-pipe facade. */
+  usb_pipe() noexcept = default;
+
+  /** @brief Wraps a native USB pipe without taking ownership. */
+  explicit usb_pipe(WDFUSBPIPE object) noexcept : object_(object) {}
+
+  /** @brief Returns current pipe information. */
+  usb_pipe_information information() const noexcept {
+    usb_pipe_information value;
+    WdfUsbTargetPipeGetInformation(object_, value.native());
+    return value;
+  }
+
+  /** @brief Reports whether this is an input endpoint. */
+  bool is_in() const noexcept {
+    return WdfUsbTargetPipeIsInEndpoint(object_) != FALSE;
+  }
+
+  /** @brief Reports whether this is an output endpoint. */
+  bool is_out() const noexcept {
+    return WdfUsbTargetPipeIsOutEndpoint(object_) != FALSE;
+  }
+
+  /** @brief Returns the control, bulk, interrupt, or isochronous pipe type. */
+  WDF_USB_PIPE_TYPE type() const noexcept {
+    return WdfUsbTargetPipeGetType(object_);
+  }
+
+  /** @brief Disables WDF's maximum-packet-size buffer check. */
+  void allow_partial_packets() const noexcept {
+    WdfUsbTargetPipeSetNoMaximumPacketSizeCheck(object_);
+  }
+
+  /**
+   * @brief Formats, but does not send, an input-pipe read request.
+   * @note Valid at IRQL <= DISPATCH_LEVEL. Send the request to target().
+   */
+  template <class Request>
+  ntl::status try_format_read(const Request &request, memory output = {},
+                              memory_offset *offset = nullptr) const noexcept {
+    return WdfUsbTargetPipeFormatRequestForRead(
+        object_, request.native_handle(), output.native_handle(),
+        offset ? offset->native() : nullptr);
+  }
+
+  /**
+   * @brief Formats, but does not send, an output-pipe write request.
+   * @note Valid at IRQL <= DISPATCH_LEVEL. Send the request to target().
+   */
+  template <class Request>
+  ntl::status try_format_write(const Request &request, memory input = {},
+                               memory_offset *offset = nullptr) const noexcept {
+    return WdfUsbTargetPipeFormatRequestForWrite(
+        object_, request.native_handle(), input.native_handle(),
+        offset ? offset->native() : nullptr);
+  }
+
+  /** @brief Reads synchronously from an input pipe at PASSIVE_LEVEL. */
+  ntl::status try_read(usb_memory_descriptor *output = nullptr,
+                       ULONG *bytes_read = nullptr,
+                       send_options *options = nullptr) const noexcept {
+    return WdfUsbTargetPipeReadSynchronously(
+        object_, WDF_NO_HANDLE, options ? options->native() : nullptr,
+        output ? output->native() : nullptr, bytes_read);
+  }
+
+  /** @brief Writes synchronously to an output pipe at PASSIVE_LEVEL. */
+  ntl::status try_write(usb_memory_descriptor *input = nullptr,
+                        ULONG *bytes_written = nullptr,
+                        send_options *options = nullptr) const noexcept {
+    return WdfUsbTargetPipeWriteSynchronously(
+        object_, WDF_NO_HANDLE, options ? options->native() : nullptr,
+        input ? input->native() : nullptr, bytes_written);
+  }
+
+  /** @brief Configures an input-pipe continuous reader. */
+  ntl::status
+  try_configure_reader(usb_continuous_reader_config &config) const noexcept {
+    return WdfUsbTargetPipeConfigContinuousReader(object_, config.native());
+  }
+
+  /** @brief Aborts pending pipe requests synchronously at PASSIVE_LEVEL. */
+  ntl::status try_abort(send_options *options = nullptr) const noexcept {
+    return WdfUsbTargetPipeAbortSynchronously(
+        object_, WDF_NO_HANDLE, options ? options->native() : nullptr);
+  }
+
+  /** @brief Resets the pipe synchronously at PASSIVE_LEVEL. */
+  ntl::status try_reset(send_options *options = nullptr) const noexcept {
+    return WdfUsbTargetPipeResetSynchronously(
+        object_, WDF_NO_HANDLE, options ? options->native() : nullptr);
+  }
+
+  /** @brief Starts this pipe I/O target, including a configured reader. */
+  ntl::status try_start() const noexcept { return target().try_start(); }
+
+  /** @brief Stops this pipe I/O target using the supplied request policy. */
+  void stop(WDF_IO_TARGET_SENT_IO_ACTION action) const noexcept {
+    target().stop(action);
+  }
+
+  /** @brief Purges this pipe I/O target using the supplied request policy. */
+  void purge(WDF_IO_TARGET_PURGE_IO_ACTION action) const noexcept {
+    target().purge(action);
+  }
+
+  /** @brief Returns the generic target used to send formatted requests. */
+  io_target target() const noexcept {
+    return io_target{WdfUsbTargetPipeGetIoTarget(object_)};
+  }
+
+  /** @brief Returns the native WDF USB pipe. */
+  WDFUSBPIPE native_object() const noexcept { return object_; }
+
+  /** @brief Returns true when a native USB pipe is present. */
+  explicit operator bool() const noexcept { return object_ != WDF_NO_HANDLE; }
+
+private:
+  WDFUSBPIPE object_ = WDF_NO_HANDLE;
+};
+
+inline usb_interface usb_select_config::configured_interface() const noexcept {
+  return usb_interface{value_.Types.SingleInterface.ConfiguredUsbInterface};
+}
+
+inline usb_interface usb_device::interface_at(UCHAR index) const noexcept {
+  return usb_interface{WdfUsbTargetDeviceGetInterface(object_, index)};
+}
+
+inline usb_pipe
+usb_interface::pipe_at(UCHAR index,
+                       usb_pipe_information *information) const noexcept {
+  return usb_pipe{WdfUsbInterfaceGetConfiguredPipe(
+      object_, index, information ? information->native() : nullptr)};
+}
+
+namespace detail {
+template <auto Callback>
+void invoke_usb_reader_completion(WDFUSBPIPE pipe, WDFMEMORY buffer,
+                                  size_t transferred,
+                                  WDFCONTEXT context) noexcept {
+  invoke_callback<Callback>(usb_pipe{pipe}, memory{buffer}, transferred,
+                            context);
+}
+
+template <auto Callback>
+BOOLEAN invoke_usb_reader_failure(WDFUSBPIPE pipe, NTSTATUS status,
+                                  USBD_STATUS usbd_status) noexcept {
+  return invoke_boolean_callback<Callback>(usb_pipe{pipe}, ntl::status{status},
+                                           usbd_status)
+             ? TRUE
+             : FALSE;
+}
+} // namespace detail
+} // namespace ntl::kmdf
