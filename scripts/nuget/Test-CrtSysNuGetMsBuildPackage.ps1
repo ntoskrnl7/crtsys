@@ -232,6 +232,7 @@ foreach ($requiredPath in @(
   'build\native\crtsys.targets',
   'include\ntl\driver',
   'include\ntl\kmdf\driver',
+  'include\ntl\kmdf\dma',
   "build\native\lib\native\$Toolset\$Architecture\$Configuration\crtsys.lib",
   "build\native\lib\native\$Toolset\$Architecture\$Configuration\Ldk.lib"
 )) {
@@ -489,6 +490,14 @@ struct sample_additional_context {
   ULONG value;
 };
 
+constexpr auto sample_program_dma =
+    +[](ntl::kmdf::dma_transaction, ntl::kmdf::device, void*,
+        WDF_DMA_DIRECTION,
+        ntl::kmdf::scatter_gather_list list) noexcept {
+      (void)list.at(0);
+      return true;
+    };
+
 [[maybe_unused]] void compile_typed_callback_surface(
     ntl::kmdf::device device, ntl::kmdf::device_init& init,
     ntl::kmdf::io_queue queue, ntl::kmdf::request request) {
@@ -584,6 +593,57 @@ struct sample_additional_context {
     (void)std::move(owned).try_send<
         +[](ntl::kmdf::driver_request, ntl::kmdf::io_target,
             ntl::kmdf::completion_params, void*) noexcept {}>(target);
+  }
+
+  dma_enabler_config dma_config(WdfDmaProfileScatterGather64,
+                                1024 * 1024);
+  dma_config
+      .on_fill<+[](dma_enabler) noexcept -> NTSTATUS {
+        return STATUS_SUCCESS;
+      }>()
+      .on_flush<+[](dma_enabler) noexcept -> NTSTATUS {
+        return STATUS_SUCCESS;
+      }>()
+      .on_enable<+[](dma_enabler) noexcept -> NTSTATUS {
+        return STATUS_SUCCESS;
+      }>()
+      .on_disable<+[](dma_enabler) noexcept -> NTSTATUS {
+        return STATUS_SUCCESS;
+      }>();
+  auto dma = dma_enabler::try_create(device, dma_config);
+  if (dma) {
+    PHYSICAL_ADDRESS device_address{};
+    dma_system_profile_config system_profile(
+        device_address, Width8Bits, nullptr);
+    system_profile.demand_mode().looped_transfer();
+    (void)dma->try_configure_system_profile(
+        system_profile, WdfDmaDirectionWriteToDevice);
+
+    common_buffer_config common_config(15);
+    auto common = common_buffer::try_create(
+        dma.value(), 4096, common_config);
+    if (common) {
+      (void)common->data<ULONG>();
+      (void)common->logical_address();
+      (void)common->size_bytes();
+    }
+
+    auto transaction = dma_transaction::try_create(dma.value());
+    if (transaction) {
+      (void)transaction->try_initialize_request<sample_program_dma>(
+          request, WdfDmaDirectionWriteToDevice);
+      UCHAR dma_buffer[64]{};
+      (void)transaction->try_initialize<sample_program_dma>(
+          nullptr, static_cast<void*>(dma_buffer), sizeof(dma_buffer),
+          WdfDmaDirectionWriteToDevice);
+      (void)transaction->try_initialize<sample_program_dma>(
+          nullptr, size_t{0}, sizeof(dma_buffer),
+          WdfDmaDirectionWriteToDevice);
+      (void)transaction->try_execute();
+      (void)transaction->bytes_transferred();
+      (void)transaction->current_transfer_length();
+      transaction->transfer_info(nullptr, nullptr);
+    }
   }
 
   request.on_completion<

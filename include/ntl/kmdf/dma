@@ -1,0 +1,510 @@
+/**
+ * @file dma
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Typed KMDF DMA enabler, common-buffer, and transaction helpers.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ *
+ */
+#pragma once
+
+#include "callback"
+#include "device"
+#include "object_attributes"
+#include "request"
+
+#include "../result"
+#include "../status"
+
+#include <cstddef>
+#include "detail/wdf"
+
+namespace ntl::kmdf {
+class dma_enabler_config;
+class dma_system_profile_config;
+
+/** @brief Non-owning facade for a WDFDMAENABLER. */
+class dma_enabler {
+public:
+  /** @brief Creates an empty DMA-enabler facade. */
+  dma_enabler() noexcept = default;
+
+  /** @brief Wraps a native DMA enabler without taking ownership. */
+  explicit dma_enabler(WDFDMAENABLER object) noexcept : object_(object) {}
+
+  /** @brief Creates a DMA enabler for a WDF device at PASSIVE_LEVEL. */
+  static ntl::result<dma_enabler>
+  try_create(const device &owner, dma_enabler_config &config,
+             object_attributes *attributes = nullptr) noexcept;
+
+  /** @brief Returns the configured maximum transfer length in bytes. */
+  size_t maximum_length() const noexcept {
+    return WdfDmaEnablerGetMaximumLength(object_);
+  }
+
+  /** @brief Returns the maximum scatter/gather element count. */
+  size_t maximum_scatter_gather_elements() const noexcept {
+    return WdfDmaEnablerGetMaximumScatterGatherElements(object_);
+  }
+
+  /** @brief Sets the maximum scatter/gather element count at PASSIVE_LEVEL. */
+  void maximum_scatter_gather_elements(size_t value) const noexcept {
+    WdfDmaEnablerSetMaximumScatterGatherElements(object_, value);
+  }
+
+  /** @brief Returns the maximum fragment length for a DMA direction. */
+  size_t fragment_length(WDF_DMA_DIRECTION direction) const noexcept {
+    return WdfDmaEnablerGetFragmentLength(object_, direction);
+  }
+
+  /** @brief Returns the underlying WDM DMA adapter for a direction. */
+  PDMA_ADAPTER wdm_adapter(WDF_DMA_DIRECTION direction) const noexcept {
+    return WdfDmaEnablerWdmGetDmaAdapter(object_, direction);
+  }
+
+  /** @brief Configures one direction of a system-mode DMA profile. */
+  ntl::status
+  try_configure_system_profile(dma_system_profile_config &config,
+                               WDF_DMA_DIRECTION direction) const noexcept;
+
+  /** @brief Returns the native WDF DMA enabler object. */
+  WDFDMAENABLER native_object() const noexcept { return object_; }
+
+  /** @brief Returns true when a native DMA enabler is present. */
+  explicit operator bool() const noexcept { return object_ != WDF_NO_HANDLE; }
+
+private:
+  WDFDMAENABLER object_ = WDF_NO_HANDLE;
+};
+
+/** @brief Builder for WDF_DMA_ENABLER_CONFIG. */
+class dma_enabler_config {
+public:
+  /** @brief Configures a DMA profile and maximum transfer length. */
+  dma_enabler_config(WDF_DMA_PROFILE profile,
+                     size_t maximum_length) noexcept {
+    WDF_DMA_ENABLER_CONFIG_INIT(&value_, profile, maximum_length);
+  }
+
+  /** @brief Registers the DMA fill callback at PASSIVE_LEVEL. */
+  template <auto Callback> dma_enabler_config &on_fill() noexcept {
+    value_.EvtDmaEnablerFill = +[](WDFDMAENABLER native) noexcept -> NTSTATUS {
+      return detail::invoke_status_callback<Callback>(dma_enabler{native});
+    };
+    return *this;
+  }
+
+  /** @brief Registers the DMA flush callback at PASSIVE_LEVEL. */
+  template <auto Callback> dma_enabler_config &on_flush() noexcept {
+    value_.EvtDmaEnablerFlush = +[](WDFDMAENABLER native) noexcept -> NTSTATUS {
+      return detail::invoke_status_callback<Callback>(dma_enabler{native});
+    };
+    return *this;
+  }
+
+  /** @brief Registers the DMA enable callback at PASSIVE_LEVEL. */
+  template <auto Callback> dma_enabler_config &on_enable() noexcept {
+    value_.EvtDmaEnablerEnable = +[](WDFDMAENABLER native) noexcept -> NTSTATUS {
+      return detail::invoke_status_callback<Callback>(dma_enabler{native});
+    };
+    return *this;
+  }
+
+  /** @brief Registers the DMA disable callback at PASSIVE_LEVEL. */
+  template <auto Callback> dma_enabler_config &on_disable() noexcept {
+    value_.EvtDmaEnablerDisable =
+        +[](WDFDMAENABLER native) noexcept -> NTSTATUS {
+      return detail::invoke_status_callback<Callback>(dma_enabler{native});
+    };
+    return *this;
+  }
+
+  /** @brief Registers self-managed-I/O start for the DMA enabler. */
+  template <auto Callback>
+  dma_enabler_config &on_self_managed_io_start() noexcept {
+    value_.EvtDmaEnablerSelfManagedIoStart =
+        +[](WDFDMAENABLER native) noexcept -> NTSTATUS {
+      return detail::invoke_status_callback<Callback>(dma_enabler{native});
+    };
+    return *this;
+  }
+
+  /** @brief Registers self-managed-I/O stop for the DMA enabler. */
+  template <auto Callback>
+  dma_enabler_config &on_self_managed_io_stop() noexcept {
+    value_.EvtDmaEnablerSelfManagedIoStop =
+        +[](WDFDMAENABLER native) noexcept -> NTSTATUS {
+      return detail::invoke_status_callback<Callback>(dma_enabler{native});
+    };
+    return *this;
+  }
+
+  /** @brief Overrides the DMA address width in bits. */
+  dma_enabler_config &address_width(ULONG value) noexcept {
+    value_.AddressWidthOverride = value;
+    return *this;
+  }
+
+  /** @brief Overrides the WDM DMA interface version. */
+  dma_enabler_config &wdm_dma_version(ULONG value) noexcept {
+    value_.WdmDmaVersionOverride = value;
+    return *this;
+  }
+
+  /** @brief Enables or disables scatter/gather-list preallocation. */
+  dma_enabler_config &scatter_gather_preallocation(bool enabled) noexcept {
+    if (enabled)
+      value_.Flags &= ~WDF_DMA_ENABLER_CONFIG_NO_SGLIST_PREALLOCATION;
+    else
+      value_.Flags |= WDF_DMA_ENABLER_CONFIG_NO_SGLIST_PREALLOCATION;
+    return *this;
+  }
+
+  /** @brief Returns the mutable native DMA-enabler configuration. */
+  PWDF_DMA_ENABLER_CONFIG native() noexcept { return &value_; }
+
+private:
+  WDF_DMA_ENABLER_CONFIG value_{};
+};
+
+inline ntl::result<dma_enabler>
+dma_enabler::try_create(const device &owner, dma_enabler_config &config,
+                        object_attributes *attributes) noexcept {
+  WDFDMAENABLER object = WDF_NO_HANDLE;
+  const NTSTATUS result = WdfDmaEnablerCreate(
+      owner.native_handle(), config.native(),
+      attributes ? attributes->native() : nullptr, &object);
+  if (!NT_SUCCESS(result))
+    return ntl::unexpected(result);
+  return ntl::ok(dma_enabler{object});
+}
+
+/** @brief Builder for system-mode WDF DMA profile configuration. */
+class dma_system_profile_config {
+public:
+  /** @brief Configures the device register, width, and DMA resource. */
+  dma_system_profile_config(
+      PHYSICAL_ADDRESS device_address, DMA_WIDTH width,
+      PCM_PARTIAL_RESOURCE_DESCRIPTOR descriptor) noexcept {
+    WDF_DMA_SYSTEM_PROFILE_CONFIG_INIT(&value_, device_address, width,
+                                       descriptor);
+  }
+
+  /** @brief Enables demand-mode DMA. */
+  dma_system_profile_config &demand_mode(bool enabled = true) noexcept {
+    value_.DemandMode = enabled ? TRUE : FALSE;
+    return *this;
+  }
+
+  /** @brief Enables a looped system-mode transfer. */
+  dma_system_profile_config &looped_transfer(bool enabled = true) noexcept {
+    value_.LoopedTransfer = enabled ? TRUE : FALSE;
+    return *this;
+  }
+
+  /** @brief Returns the mutable native system-profile configuration. */
+  PWDF_DMA_SYSTEM_PROFILE_CONFIG native() noexcept { return &value_; }
+
+private:
+  WDF_DMA_SYSTEM_PROFILE_CONFIG value_{};
+};
+
+inline ntl::status dma_enabler::try_configure_system_profile(
+    dma_system_profile_config &config,
+    WDF_DMA_DIRECTION direction) const noexcept {
+  return WdfDmaEnablerConfigureSystemProfile(object_,
+                                             config.native(), direction);
+}
+
+/** @brief Builder for WDF common-buffer alignment configuration. */
+class common_buffer_config {
+public:
+  /** @brief Sets the native alignment mask, such as 15 for 16-byte alignment. */
+  explicit common_buffer_config(ULONG alignment_requirement) noexcept {
+    WDF_COMMON_BUFFER_CONFIG_INIT(&value_, alignment_requirement);
+  }
+
+  /** @brief Returns the mutable native common-buffer configuration. */
+  PWDF_COMMON_BUFFER_CONFIG native() noexcept { return &value_; }
+
+private:
+  WDF_COMMON_BUFFER_CONFIG value_{};
+};
+
+/** @brief Non-owning facade for memory shared by a driver and DMA device. */
+class common_buffer {
+public:
+  /** @brief Creates an empty common-buffer facade. */
+  common_buffer() noexcept = default;
+
+  /** @brief Wraps a native common buffer without taking ownership. */
+  explicit common_buffer(WDFCOMMONBUFFER object) noexcept : object_(object) {}
+
+  /**
+   * @brief Creates a common buffer at PASSIVE_LEVEL.
+   * @note WDF requires attributes to have no explicit ParentObject.
+   */
+  static ntl::result<common_buffer>
+  try_create(const dma_enabler &enabler, size_t size_bytes,
+             object_attributes *attributes = nullptr) noexcept {
+    WDFCOMMONBUFFER object = WDF_NO_HANDLE;
+    const NTSTATUS result = WdfCommonBufferCreate(
+        enabler.native_object(), size_bytes,
+        attributes ? attributes->native() : nullptr, &object);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return ntl::ok(common_buffer{object});
+  }
+
+  /**
+   * @brief Creates a common buffer with an explicit alignment mask.
+   * @note WDF requires attributes to have no explicit ParentObject.
+   */
+  static ntl::result<common_buffer>
+  try_create(const dma_enabler &enabler, size_t size_bytes,
+             common_buffer_config &config,
+             object_attributes *attributes = nullptr) noexcept {
+    WDFCOMMONBUFFER object = WDF_NO_HANDLE;
+    const NTSTATUS result = WdfCommonBufferCreateWithConfig(
+        enabler.native_object(), size_bytes, config.native(),
+        attributes ? attributes->native() : nullptr, &object);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return ntl::ok(common_buffer{object});
+  }
+
+  /** @brief Returns the driver-accessible virtual address. */
+  void *data() const noexcept {
+    return WdfCommonBufferGetAlignedVirtualAddress(object_);
+  }
+
+  /** @brief Returns the driver-accessible virtual address as T objects. */
+  template <class T> T *data() const noexcept {
+    return static_cast<T *>(data());
+  }
+
+  /** @brief Returns the device-visible logical address. */
+  PHYSICAL_ADDRESS logical_address() const noexcept {
+    return WdfCommonBufferGetAlignedLogicalAddress(object_);
+  }
+
+  /** @brief Returns the buffer length in bytes. */
+  size_t size_bytes() const noexcept {
+    return WdfCommonBufferGetLength(object_);
+  }
+
+  /** @brief Returns the native common-buffer object. */
+  WDFCOMMONBUFFER native_object() const noexcept { return object_; }
+
+  /** @brief Returns true when a native common buffer is present. */
+  explicit operator bool() const noexcept { return object_ != WDF_NO_HANDLE; }
+
+private:
+  WDFCOMMONBUFFER object_ = WDF_NO_HANDLE;
+};
+
+/** @brief Read-only view of a DMA scatter/gather list. */
+class scatter_gather_list {
+public:
+  /** @brief Wraps a native scatter/gather list without taking ownership. */
+  explicit scatter_gather_list(PSCATTER_GATHER_LIST value) noexcept
+      : value_(value) {}
+
+  /** @brief Returns the number of scatter/gather elements. */
+  ULONG size() const noexcept { return value_ ? value_->NumberOfElements : 0; }
+
+  /** @brief Returns one scatter/gather element, or nullptr if out of range. */
+  const SCATTER_GATHER_ELEMENT *at(ULONG index) const noexcept {
+    return value_ && index < value_->NumberOfElements
+               ? &value_->Elements[index]
+               : nullptr;
+  }
+
+  /** @brief Returns the native scatter/gather list. */
+  PSCATTER_GATHER_LIST native() const noexcept { return value_; }
+
+private:
+  PSCATTER_GATHER_LIST value_ = nullptr;
+};
+
+/** @brief Result of reporting one DMA transfer to WDF. */
+struct dma_completion_result {
+  /** @brief True when the transaction has no more transfers to program. */
+  bool transaction_complete;
+
+  /** @brief WDF status produced while advancing or completing the transfer. */
+  ntl::status status;
+};
+
+/**
+ * @brief Non-owning facade for a WDF DMA transaction.
+ *
+ * A completed transaction must be released for reuse or deleted. The facade
+ * does not delete the WDF object automatically because active DMA state is
+ * commonly retained in a device context across interrupt callbacks.
+ */
+class dma_transaction {
+public:
+  /** @brief Creates an empty DMA-transaction facade. */
+  dma_transaction() noexcept = default;
+
+  /** @brief Wraps a native DMA transaction without taking ownership. */
+  explicit dma_transaction(WDFDMATRANSACTION object) noexcept
+      : object_(object) {}
+
+  /** @brief Creates a DMA transaction for an enabler. */
+  static ntl::result<dma_transaction>
+  try_create(const dma_enabler &enabler,
+             object_attributes *attributes = nullptr) noexcept {
+    WDFDMATRANSACTION object = WDF_NO_HANDLE;
+    const NTSTATUS result = WdfDmaTransactionCreate(
+        enabler.native_object(), attributes ? attributes->native() : nullptr,
+        &object);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return ntl::ok(dma_transaction{object});
+  }
+
+  /**
+   * @brief Initializes a DMA transaction from a framework request.
+   * @tparam Callback Non-capturing program callback with signature
+   * `bool(dma_transaction, device, void*, WDF_DMA_DIRECTION,
+   * scatter_gather_list) noexcept`.
+   */
+  template <auto Callback, class Request>
+  ntl::status try_initialize_request(const Request &request,
+                                     WDF_DMA_DIRECTION direction) const
+      noexcept {
+    return WdfDmaTransactionInitializeUsingRequest(
+        object_, request.native_handle(), program_callback<Callback>(),
+        direction);
+  }
+
+  /** @brief Initializes a DMA transaction from an MDL and virtual address. */
+  template <auto Callback>
+  ntl::status try_initialize(PMDL mdl, void *virtual_address,
+                             size_t size_bytes,
+                             WDF_DMA_DIRECTION direction) const noexcept {
+    return WdfDmaTransactionInitialize(object_, program_callback<Callback>(),
+                                       direction, mdl, virtual_address,
+                                       size_bytes);
+  }
+
+  /** @brief Initializes a DMA transaction from an MDL byte range. */
+  template <auto Callback>
+  ntl::status try_initialize(PMDL mdl, size_t offset, size_t size_bytes,
+                             WDF_DMA_DIRECTION direction) const noexcept {
+    return WdfDmaTransactionInitializeUsingOffset(
+        object_, program_callback<Callback>(), direction, mdl, offset,
+        size_bytes);
+  }
+
+  /** @brief Starts the initialized transaction. */
+  ntl::status try_execute(void *context = nullptr) const noexcept {
+    return WdfDmaTransactionExecute(object_, context);
+  }
+
+  /** @brief Reports completion of the current programmed transfer. */
+  dma_completion_result complete_transfer() const noexcept {
+    NTSTATUS status = STATUS_SUCCESS;
+    const bool complete =
+        WdfDmaTransactionDmaCompleted(object_, &status) != FALSE;
+    return {complete, status};
+  }
+
+  /** @brief Reports a partial transfer length to WDF. */
+  dma_completion_result complete_transfer(size_t transferred_bytes) const
+      noexcept {
+    NTSTATUS status = STATUS_SUCCESS;
+    const bool complete = WdfDmaTransactionDmaCompletedWithLength(
+                              object_, transferred_bytes, &status) != FALSE;
+    return {complete, status};
+  }
+
+  /** @brief Ends the transaction with a final transferred length. */
+  dma_completion_result complete_final(size_t transferred_bytes) const
+      noexcept {
+    NTSTATUS status = STATUS_SUCCESS;
+    const bool complete = WdfDmaTransactionDmaCompletedFinal(
+                              object_, transferred_bytes, &status) != FALSE;
+    return {complete, status};
+  }
+
+  /** @brief Releases transfer resources so this object can be reinitialized. */
+  ntl::status try_release() const noexcept {
+    return WdfDmaTransactionRelease(object_);
+  }
+
+  /** @brief Deletes a transaction that will not be reused. */
+  void destroy() noexcept {
+    if (object_ != WDF_NO_HANDLE) {
+      WdfObjectDelete(reinterpret_cast<WDFOBJECT>(object_));
+      object_ = WDF_NO_HANDLE;
+    }
+  }
+
+  /** @brief Requests cancellation of a queued DMA transaction. */
+  bool cancel() const noexcept {
+    return WdfDmaTransactionCancel(object_) != FALSE;
+  }
+
+  /** @brief Enables immediate execution when supported by the profile. */
+  void immediate_execution(bool enabled = true) const noexcept {
+    WdfDmaTransactionSetImmediateExecution(object_, enabled ? TRUE : FALSE);
+  }
+
+  /** @brief Sets the transaction's maximum transfer length. */
+  void maximum_length(size_t value) const noexcept {
+    WdfDmaTransactionSetMaximumLength(object_, value);
+  }
+
+  /** @brief Returns bytes transferred by completed fragments. */
+  size_t bytes_transferred() const noexcept {
+    return WdfDmaTransactionGetBytesTransferred(object_);
+  }
+
+  /** @brief Returns the current programmed transfer length. */
+  size_t current_transfer_length() const noexcept {
+    return WdfDmaTransactionGetCurrentDmaTransferLength(object_);
+  }
+
+  /** @brief Returns the request associated during request initialization. */
+  request associated_request() const noexcept {
+    return request{WdfDmaTransactionGetRequest(object_)};
+  }
+
+  /** @brief Returns the device associated with this transaction. */
+  device owner() const noexcept {
+    return device{WdfDmaTransactionGetDevice(object_)};
+  }
+
+  /** @brief Returns map-register and scatter/gather-element counts. */
+  void transfer_info(ULONG *map_registers,
+                     ULONG *scatter_gather_elements) const noexcept {
+    WdfDmaTransactionGetTransferInfo(object_, map_registers,
+                                     scatter_gather_elements);
+  }
+
+  /** @brief Returns the native DMA transaction object. */
+  WDFDMATRANSACTION native_object() const noexcept { return object_; }
+
+  /** @brief Returns true when a native DMA transaction is present. */
+  explicit operator bool() const noexcept { return object_ != WDF_NO_HANDLE; }
+
+private:
+  template <auto Callback>
+  static PFN_WDF_PROGRAM_DMA program_callback() noexcept {
+    return +[](WDFDMATRANSACTION native_transaction, WDFDEVICE native_device,
+               WDFCONTEXT native_context, WDF_DMA_DIRECTION direction,
+               PSCATTER_GATHER_LIST native_list) noexcept -> BOOLEAN {
+      return detail::invoke_boolean_callback<Callback>(
+                 dma_transaction{native_transaction}, device{native_device},
+                 native_context, direction, scatter_gather_list{native_list})
+                 ? TRUE
+                 : FALSE;
+    };
+  }
+
+  WDFDMATRANSACTION object_ = WDF_NO_HANDLE;
+};
+} // namespace ntl::kmdf

@@ -98,6 +98,7 @@ foreach ($requiredPath in @(
   'include\ntl\kmdf\driver',
   'include\ntl\kmdf\timer',
   'include\ntl\kmdf\work_item',
+  'include\ntl\kmdf\dma',
   'include\ntl\kmdf\child_list',
   'include\ntl\kmdf\registry',
   'include\ntl\kmdf\property',
@@ -234,6 +235,43 @@ namespace {
 constexpr GUID sample_interface = {
     0x3dfc4dc0, 0x6d61, 0x4a97,
     {0xa1, 0x10, 0x2a, 0xa8, 0x2f, 0x96, 0x87, 0xe1}};
+
+constexpr auto sample_program_dma =
+    +[](ntl::kmdf::dma_transaction, ntl::kmdf::device, void*,
+        WDF_DMA_DIRECTION,
+        ntl::kmdf::scatter_gather_list) noexcept { return true; };
+
+[[maybe_unused]] void compile_dma_surface(
+    ntl::kmdf::device device, ntl::kmdf::request request) {
+  using namespace ntl::kmdf;
+
+  dma_enabler_config config(WdfDmaProfileScatterGather64, 1024 * 1024);
+  config.on_enable<+[](dma_enabler) noexcept -> NTSTATUS {
+    return STATUS_SUCCESS;
+  }>();
+  auto enabler = dma_enabler::try_create(device, config);
+  if (!enabler)
+    return;
+
+  PHYSICAL_ADDRESS device_address{};
+  dma_system_profile_config system_profile(
+      device_address, Width8Bits, nullptr);
+  (void)enabler->try_configure_system_profile(
+      system_profile, WdfDmaDirectionReadFromDevice);
+
+  common_buffer_config aligned(15);
+  (void)common_buffer::try_create(enabler.value(), 4096, aligned);
+
+  auto transaction = dma_transaction::try_create(enabler.value());
+  if (transaction) {
+    (void)transaction->try_initialize_request<sample_program_dma>(
+        request, WdfDmaDirectionReadFromDevice);
+    UCHAR dma_buffer[64]{};
+    (void)transaction->try_initialize<sample_program_dma>(
+        nullptr, static_cast<void*>(dma_buffer), sizeof(dma_buffer),
+        WdfDmaDirectionReadFromDevice);
+  }
+}
 }
 
 ntl::status ntl::kmdf::main(driver_builder& builder,
