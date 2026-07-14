@@ -1,0 +1,202 @@
+/**
+ * @file file
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Typed KMDF file-object callbacks and file facade.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "callback"
+#include "device"
+#include "object_attributes"
+#include "request"
+
+#include "../file"
+
+#include <string_view>
+#include <type_traits>
+#include <utility>
+#include "detail/wdf"
+
+namespace ntl::kmdf {
+/** @brief Non-owning facade for a WDFFILEOBJECT. */
+class file {
+public:
+  /** @brief Creates an empty file facade. */
+  file() noexcept = default;
+
+  /** @brief Wraps a WDF file object without taking ownership. */
+  explicit file(WDFFILEOBJECT object) noexcept : object_(object) {}
+
+  /** @brief Returns the name associated with this file object. */
+  std::wstring_view name() const noexcept {
+    if (!object_)
+      return {};
+    PCUNICODE_STRING value = WdfFileObjectGetFileName(object_);
+    if (!value || !value->Buffer)
+      return {};
+    return {value->Buffer, value->Length / sizeof(wchar_t)};
+  }
+
+  /** @brief Returns the WDF device that owns this file object. */
+  device owner() const noexcept {
+    return device{object_ ? WdfFileObjectGetDevice(object_) : WDF_NO_HANDLE};
+  }
+
+  /** @brief Returns a non-owning facade for the underlying FILE_OBJECT. */
+  ntl::file wdm() const noexcept {
+    return ntl::file{object_ ? WdfFileObjectWdmGetFileObject(object_)
+                             : nullptr};
+  }
+
+  /** @brief Returns this file object's constructed C++ context. */
+  template <class T> T &context() const noexcept {
+    return detail::get_context<T>(reinterpret_cast<WDFOBJECT>(object_));
+  }
+
+  /** @brief Returns this file object's context, or nullptr when absent. */
+  template <class T> T *try_context() const noexcept {
+    return detail::try_get_context<T>(reinterpret_cast<WDFOBJECT>(object_));
+  }
+
+  /** @brief Allocates and constructs an additional typed file context. */
+  template <class T, class... Args>
+  ntl::result<T *> try_emplace_context(Args &&...args) const noexcept {
+    return object{reinterpret_cast<WDFOBJECT>(object_)}
+        .template try_emplace_context<T>(std::forward<Args>(args)...);
+  }
+
+  /** @brief Returns the native WDFFILEOBJECT. */
+  WDFFILEOBJECT native_object() const noexcept { return object_; }
+
+  /** @brief Returns true when a native file object is present. */
+  explicit operator bool() const noexcept { return object_ != WDF_NO_HANDLE; }
+
+private:
+  WDFFILEOBJECT object_ = WDF_NO_HANDLE;
+};
+
+/**
+ * @brief Configures typed KMDF file-object callbacks.
+ * @tparam Context Optional C++ context constructed for each opened file.
+ *
+ * A non-void context must be nothrow default-constructible and destructible.
+ * Its lifetime follows the WDFFILEOBJECT lifetime rather than the create,
+ * cleanup, or close request lifetime.
+ */
+template <class Context = void> class file_config {
+public:
+  /** @brief Initializes file-object callbacks to null. */
+  file_config() noexcept {
+    WDF_FILEOBJECT_CONFIG_INIT(&value_, nullptr, nullptr, nullptr);
+    if constexpr (!std::is_void_v<Context>)
+      attributes_.template prepare_context<Context>();
+  }
+
+  /**
+   * @brief Registers a typed file-create callback.
+   * @tparam Callback Non-capturing
+   * `void(device, request, file) noexcept` callback.
+   */
+  template <auto Callback> file_config &on_create() noexcept {
+    if constexpr (!std::is_void_v<Context>) {
+      static_assert(std::is_nothrow_default_constructible_v<Context>,
+                    "KMDF file contexts must be nothrow default-constructible");
+    }
+
+    value_.EvtDeviceFileCreate = +[](WDFDEVICE native_device,
+                                     WDFREQUEST native_request,
+                                     WDFFILEOBJECT native_file) noexcept {
+      if constexpr (!std::is_void_v<Context>) {
+        if (!detail::try_get_context<Context>(
+                reinterpret_cast<WDFOBJECT>(native_file))) {
+          detail::construct_context<Context>(
+              reinterpret_cast<WDFOBJECT>(native_file), nullptr, nullptr);
+        }
+      }
+      detail::invoke_callback<Callback>(
+          device{native_device}, request{native_request}, file{native_file});
+    };
+    return *this;
+  }
+
+  /**
+   * @brief Registers a typed file-cleanup callback.
+   * @tparam Callback Non-capturing `void(file) noexcept` callback.
+   */
+  template <auto Callback> file_config &on_cleanup() noexcept {
+    value_.EvtFileCleanup = +[](WDFFILEOBJECT native_file) noexcept {
+      detail::invoke_callback<Callback>(file{native_file});
+    };
+    return *this;
+  }
+
+  /**
+   * @brief Registers a typed file-close callback.
+   * @tparam Callback Non-capturing `void(file) noexcept` callback.
+   */
+  template <auto Callback> file_config &on_close() noexcept {
+    value_.EvtFileClose = +[](WDFFILEOBJECT native_file) noexcept {
+      detail::invoke_callback<Callback>(file{native_file});
+    };
+    return *this;
+  }
+
+  /** @brief Configures framework forwarding of cleanup and close requests. */
+  file_config &auto_forward_cleanup_close(WDF_TRI_STATE value) noexcept {
+    value_.AutoForwardCleanupClose = value;
+    return *this;
+  }
+
+  /** @brief Selects how WDF represents file objects. */
+  file_config &object_class(WDF_FILEOBJECT_CLASS value) noexcept {
+    value_.FileObjectClass = value;
+    return *this;
+  }
+
+  /** @brief Sets the execution level for callbacks on each file object. */
+  file_config &execution_level(WDF_EXECUTION_LEVEL value) noexcept {
+    attributes_.execution_level(value);
+    return *this;
+  }
+
+  /** @brief Sets the synchronization scope for each file object. */
+  file_config &synchronization_scope(WDF_SYNCHRONIZATION_SCOPE value) noexcept {
+    attributes_.synchronization_scope(value);
+    return *this;
+  }
+
+  /** @brief Returns the mutable native configuration. */
+  PWDF_FILEOBJECT_CONFIG native() noexcept { return &value_; }
+
+  /**
+   * @brief Returns native attributes used for each WDF file object.
+   *
+   * For a managed context, do not replace ContextTypeInfo or the cleanup and
+   * destroy callbacks installed by NTL.
+   */
+  PWDF_OBJECT_ATTRIBUTES native_attributes() noexcept {
+    return attributes_.native();
+  }
+
+private:
+  WDF_FILEOBJECT_CONFIG value_{};
+  object_attributes attributes_;
+};
+
+template <class Context>
+device_init &device_init::file_objects(file_config<Context> &config) noexcept {
+  WdfDeviceInitSetFileObjectConfig(value_, config.native(),
+                                   config.native_attributes());
+  return *this;
+}
+
+template <class Context>
+control_device_init &
+control_device_init::file_objects(file_config<Context> &config) noexcept {
+  WdfDeviceInitSetFileObjectConfig(value_, config.native(),
+                                   config.native_attributes());
+  return *this;
+}
+} // namespace ntl::kmdf

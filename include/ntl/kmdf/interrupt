@@ -1,0 +1,299 @@
+/**
+ * @file interrupt
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Typed KMDF interrupt configuration and synchronization helpers.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "callback"
+#include "device"
+#include "object_attributes"
+
+#include "../result"
+#include "../status"
+
+#include <utility>
+#include "detail/wdf"
+
+namespace ntl::kmdf {
+class interrupt_config;
+
+/** @brief Non-owning facade for a WDFINTERRUPT. */
+class interrupt {
+public:
+  /** @brief Creates an empty interrupt facade. */
+  interrupt() noexcept = default;
+
+  /** @brief Wraps a WDF interrupt object without taking ownership. */
+  explicit interrupt(WDFINTERRUPT object) noexcept : object_(object) {}
+
+  /** @brief Creates an interrupt associated with a WDF device. */
+  static ntl::result<interrupt>
+  try_create(const device &owner, interrupt_config &config,
+             object_attributes *attributes = nullptr) noexcept;
+
+  /**
+   * @brief Creates an interrupt with a managed C++ context.
+   * @tparam Context Context object constructed in WDF-owned storage.
+   */
+  template <class Context, class... Args>
+  static ntl::result<interrupt>
+  try_create(const device &owner, interrupt_config &config,
+             object_attributes *attributes, Args &&...args) noexcept;
+
+  /** @brief Queues the configured EvtInterruptDpc callback. */
+  bool queue_dpc() const noexcept {
+    return WdfInterruptQueueDpcForIsr(object_) != FALSE;
+  }
+
+  /** @brief Queues the configured passive EvtInterruptWorkItem callback. */
+  bool queue_work_item() const noexcept {
+    return WdfInterruptQueueWorkItemForIsr(object_) != FALSE;
+  }
+
+  /**
+   * @brief Runs a callback while synchronized with the interrupt.
+   * @tparam Callback Non-capturing `bool(interrupt, void*) noexcept` callback.
+   * @param context Opaque callback context.
+   */
+  template <auto Callback>
+  bool synchronize(void *context = nullptr) const noexcept {
+    return WdfInterruptSynchronize(
+               object_,
+               +[](WDFINTERRUPT native_interrupt,
+                   WDFCONTEXT native_context) noexcept -> BOOLEAN {
+                 return detail::invoke_boolean_callback<Callback>(
+                            interrupt{native_interrupt}, native_context)
+                            ? TRUE
+                            : FALSE;
+               },
+               context) != FALSE;
+  }
+
+  /** @brief Acquires the framework interrupt lock. */
+  void acquire_lock() const noexcept { WdfInterruptAcquireLock(object_); }
+
+  /** @brief Releases the framework interrupt lock. */
+  void release_lock() const noexcept { WdfInterruptReleaseLock(object_); }
+
+  /** @brief Returns the WDF device associated with the interrupt. */
+  device owner() const noexcept {
+    return device{WdfInterruptGetDevice(object_)};
+  }
+
+  /** @brief Returns this interrupt object's constructed C++ context. */
+  template <class T> T &context() const noexcept {
+    return detail::get_context<T>(reinterpret_cast<WDFOBJECT>(object_));
+  }
+
+  /** @brief Returns this interrupt object's context, or nullptr when absent. */
+  template <class T> T *try_context() const noexcept {
+    return detail::try_get_context<T>(reinterpret_cast<WDFOBJECT>(object_));
+  }
+
+  /** @brief Allocates and constructs an additional typed interrupt context. */
+  template <class T, class... Args>
+  ntl::result<T *> try_emplace_context(Args &&...args) const noexcept {
+    return ntl::kmdf::object{reinterpret_cast<WDFOBJECT>(object_)}
+        .template try_emplace_context<T>(std::forward<Args>(args)...);
+  }
+
+  /** @brief Returns the underlying WDM interrupt object, if connected. */
+  PKINTERRUPT wdm_object() const noexcept {
+    return WdfInterruptWdmGetInterrupt(object_);
+  }
+
+  /** @brief Returns the native WDFINTERRUPT. */
+  WDFINTERRUPT native_object() const noexcept { return object_; }
+
+  /** @brief Returns true when a native interrupt object is present. */
+  explicit operator bool() const noexcept { return object_ != WDF_NO_HANDLE; }
+
+private:
+  WDFINTERRUPT object_ = WDF_NO_HANDLE;
+};
+
+/** @brief Scope guard for WdfInterruptAcquireLock/ReleaseLock. */
+class interrupt_lock {
+public:
+  /** @brief Acquires the interrupt lock. */
+  explicit interrupt_lock(const interrupt &value) noexcept : value_(value) {
+    value_.acquire_lock();
+  }
+
+  interrupt_lock(const interrupt_lock &) = delete;
+  interrupt_lock &operator=(const interrupt_lock &) = delete;
+
+  /** @brief Releases the interrupt lock. */
+  ~interrupt_lock() { value_.release_lock(); }
+
+private:
+  interrupt value_;
+};
+
+/** @brief Initializes and configures WDF_INTERRUPT_CONFIG. */
+class interrupt_config {
+public:
+  /**
+   * @brief Creates a configuration with its required ISR callback.
+   * @tparam Callback Non-capturing `bool(interrupt, ULONG) noexcept` callback.
+   */
+  template <auto Callback> static interrupt_config with_isr() noexcept {
+    return interrupt_config{
+        +[](WDFINTERRUPT native_interrupt,
+            ULONG message_id) noexcept -> BOOLEAN {
+          return detail::invoke_boolean_callback<Callback>(
+                     interrupt{native_interrupt}, message_id)
+                     ? TRUE
+                     : FALSE;
+        }};
+  }
+
+  /**
+   * @brief Registers the ISR callback.
+   * @tparam Callback Non-capturing `bool(interrupt, ULONG) noexcept` callback.
+   *
+   * The callback runs at DIRQL unless passive_handling(true) is selected.
+   */
+  template <auto Callback> interrupt_config &on_isr() noexcept {
+    value_.EvtInterruptIsr = +[](WDFINTERRUPT native_interrupt,
+                                 ULONG message_id) noexcept -> BOOLEAN {
+      return detail::invoke_boolean_callback<Callback>(
+                 interrupt{native_interrupt}, message_id)
+                 ? TRUE
+                 : FALSE;
+    };
+    return *this;
+  }
+
+  /**
+   * @brief Registers the DISPATCH_LEVEL interrupt DPC callback.
+   * @tparam Callback Non-capturing `void(interrupt, object) noexcept` callback.
+   */
+  template <auto Callback> interrupt_config &on_dpc() noexcept {
+    value_.EvtInterruptDpc = +[](WDFINTERRUPT native_interrupt,
+                                 WDFOBJECT associated_object) noexcept {
+      detail::invoke_callback<Callback>(interrupt{native_interrupt},
+                                        object{associated_object});
+    };
+    return *this;
+  }
+
+  /**
+   * @brief Registers the PASSIVE_LEVEL interrupt work-item callback.
+   * @tparam Callback Non-capturing `void(interrupt, object) noexcept` callback.
+   */
+  template <auto Callback> interrupt_config &on_work_item() noexcept {
+    value_.EvtInterruptWorkItem = +[](WDFINTERRUPT native_interrupt,
+                                      WDFOBJECT associated_object) noexcept {
+      detail::invoke_callback<Callback>(interrupt{native_interrupt},
+                                        object{associated_object});
+    };
+    return *this;
+  }
+
+  /** @brief Registers the hardware-enable callback. */
+  template <auto Callback> interrupt_config &on_enable() noexcept {
+    value_.EvtInterruptEnable =
+        +[](WDFINTERRUPT native_interrupt,
+            WDFDEVICE native_device) noexcept -> NTSTATUS {
+      return detail::invoke_status_callback<Callback>(
+          interrupt{native_interrupt}, device{native_device});
+    };
+    return *this;
+  }
+
+  /** @brief Registers the hardware-disable callback. */
+  template <auto Callback> interrupt_config &on_disable() noexcept {
+    value_.EvtInterruptDisable =
+        +[](WDFINTERRUPT native_interrupt,
+            WDFDEVICE native_device) noexcept -> NTSTATUS {
+      return detail::invoke_status_callback<Callback>(
+          interrupt{native_interrupt}, device{native_device});
+    };
+    return *this;
+  }
+
+  /** @brief Configures whether the interrupt vector can be shared. */
+  interrupt_config &share_vector(WDF_TRI_STATE value) noexcept {
+    value_.ShareVector = value;
+    return *this;
+  }
+
+  /** @brief Configures floating-point state preservation for callbacks. */
+  interrupt_config &floating_save(bool enabled = true) noexcept {
+    value_.FloatingSave = enabled ? TRUE : FALSE;
+    return *this;
+  }
+
+  /** @brief Configures WDF callback serialization. */
+  interrupt_config &automatic_serialization(bool enabled = true) noexcept {
+    value_.AutomaticSerialization = enabled ? TRUE : FALSE;
+    return *this;
+  }
+
+  /** @brief Selects PASSIVE_LEVEL instead of DIRQL interrupt handling. */
+  interrupt_config &passive_handling(bool enabled = true) noexcept {
+    value_.PassiveHandling = enabled ? TRUE : FALSE;
+    return *this;
+  }
+
+  /** @brief Configures wake-capable interrupt behavior. */
+  interrupt_config &can_wake_device(bool enabled = true) noexcept {
+    value_.CanWakeDevice = enabled ? TRUE : FALSE;
+    return *this;
+  }
+
+  /** @brief Supplies raw and translated interrupt resource descriptors. */
+  interrupt_config &
+  resources(PCM_PARTIAL_RESOURCE_DESCRIPTOR raw,
+            PCM_PARTIAL_RESOURCE_DESCRIPTOR translated) noexcept {
+    value_.InterruptRaw = raw;
+    value_.InterruptTranslated = translated;
+    return *this;
+  }
+
+  /** @brief Returns the mutable native interrupt configuration. */
+  PWDF_INTERRUPT_CONFIG native() noexcept { return &value_; }
+
+private:
+  explicit interrupt_config(PFN_WDF_INTERRUPT_ISR callback) noexcept {
+    WDF_INTERRUPT_CONFIG_INIT(&value_, callback, nullptr);
+  }
+
+  WDF_INTERRUPT_CONFIG value_{};
+};
+
+inline ntl::result<interrupt>
+interrupt::try_create(const device &owner, interrupt_config &config,
+                      object_attributes *attributes) noexcept {
+  WDFINTERRUPT object = WDF_NO_HANDLE;
+  const NTSTATUS result =
+      WdfInterruptCreate(owner.native_handle(), config.native(),
+                         attributes ? attributes->native() : nullptr, &object);
+  if (!NT_SUCCESS(result))
+    return ntl::unexpected(result);
+  return ntl::ok(interrupt{object});
+}
+
+template <class Context, class... Args>
+ntl::result<interrupt>
+interrupt::try_create(const device &owner, interrupt_config &config,
+                      object_attributes *attributes, Args &&...args) noexcept {
+  object_attributes local_attributes;
+  object_attributes &effective = attributes ? *attributes : local_attributes;
+  effective.template prepare_context<Context>();
+
+  WDFINTERRUPT object = WDF_NO_HANDLE;
+  const NTSTATUS result = WdfInterruptCreate(
+      owner.native_handle(), config.native(), effective.native(), &object);
+  if (!NT_SUCCESS(result))
+    return ntl::unexpected(result);
+
+  effective.template construct_context<Context>(
+      reinterpret_cast<WDFOBJECT>(object), std::forward<Args>(args)...);
+  return ntl::ok(interrupt{object});
+}
+} // namespace ntl::kmdf

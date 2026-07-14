@@ -1,0 +1,256 @@
+/**
+ * @file request
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Typed KMDF request-buffer and completion helpers.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ *
+ */
+#pragma once
+
+#include "../result"
+#include "../status"
+#include "callback"
+#include "io_target"
+
+#include <cstddef>
+#include <type_traits>
+#include <utility>
+#include "detail/wdf"
+
+namespace ntl::kmdf {
+/**
+ * @brief Non-owning typed view of a WDF request buffer.
+ * @tparam T Element type exposed by the view.
+ */
+template <class T> class request_buffer {
+public:
+  using value_type = T;
+
+  /**
+   * @brief Creates a typed buffer view.
+   * @param data First typed element.
+   * @param size_bytes Size reported by WDF in bytes.
+   */
+  request_buffer(T *data, size_t size_bytes) noexcept
+      : data_(data), size_bytes_(size_bytes) {}
+
+  /**
+   * @brief Returns the first typed element.
+   */
+  T *data() const noexcept { return data_; }
+
+  /**
+   * @brief Returns the WDF-reported buffer size in bytes.
+   */
+  size_t size_bytes() const noexcept { return size_bytes_; }
+
+  /**
+   * @brief Returns the number of complete T elements in the buffer.
+   */
+  size_t size() const noexcept {
+    return size_bytes_ / sizeof(std::remove_const_t<T>);
+  }
+
+  /**
+   * @brief Returns the first typed element.
+   */
+  T &operator*() const noexcept { return *data_; }
+
+  /**
+   * @brief Returns the first typed element pointer.
+   */
+  T *operator->() const noexcept { return data_; }
+
+private:
+  T *data_;
+  size_t size_bytes_;
+};
+
+/**
+ * @brief Non-owning facade for a WDFREQUEST callback argument.
+ */
+class request {
+public:
+  /**
+   * @brief Wraps a native request without taking ownership.
+   * @param handle Native KMDF request handle.
+   */
+  explicit request(WDFREQUEST handle) noexcept : handle_(handle) {}
+
+  request(const request &) = delete;
+  request &operator=(const request &) = delete;
+
+  /** @brief Transfers the right to act on a request facade. */
+  request(request &&other) noexcept
+      : handle_(std::exchange(other.handle_, nullptr)) {}
+
+  /** @brief Transfers the right to act on a request facade. */
+  request &operator=(request &&other) noexcept {
+    if (this != &other)
+      handle_ = std::exchange(other.handle_, nullptr);
+    return *this;
+  }
+
+  /**
+   * @brief Retrieves a typed input buffer.
+   * @tparam T Required input object type.
+   * @return Read-only typed buffer view or the WDF failure status.
+   */
+  template <class T>
+  ntl::result<request_buffer<const T>> try_input_buffer() const noexcept {
+    void *data = nullptr;
+    size_t size_bytes = 0;
+    const NTSTATUS result =
+        WdfRequestRetrieveInputBuffer(handle_, sizeof(T), &data, &size_bytes);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return ntl::ok(
+        request_buffer<const T>{static_cast<const T *>(data), size_bytes});
+  }
+
+  /**
+   * @brief Retrieves a typed output buffer.
+   * @tparam T Required output object type.
+   * @return Mutable typed buffer view or the WDF failure status.
+   */
+  template <class T>
+  ntl::result<request_buffer<T>> try_output_buffer() const noexcept {
+    void *data = nullptr;
+    size_t size_bytes = 0;
+    const NTSTATUS result =
+        WdfRequestRetrieveOutputBuffer(handle_, sizeof(T), &data, &size_bytes);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return ntl::ok(request_buffer<T>{static_cast<T *>(data), size_bytes});
+  }
+
+  /**
+   * @brief Forwards this request to another driver-owned queue.
+   * @param destination Destination queue owned by the same driver.
+   * @return WdfRequestForwardToIoQueue status.
+   *
+   * On success, ownership returns to WDF and this facade must not be used
+   * until WDF presents the request again.
+   */
+  template <class Queue>
+  ntl::status try_forward_to(const Queue &destination) && noexcept {
+    const NTSTATUS result =
+        WdfRequestForwardToIoQueue(handle_, destination.native_handle());
+    if (NT_SUCCESS(result))
+      handle_ = nullptr;
+    return result;
+  }
+
+  /**
+   * @brief Requeues this request on the queue from which it was delivered.
+   * @return WdfRequestRequeue status.
+   *
+   * On success, ownership returns to WDF.
+   */
+  ntl::status try_requeue() && noexcept {
+    const NTSTATUS result = WdfRequestRequeue(handle_);
+    if (NT_SUCCESS(result))
+      handle_ = nullptr;
+    return result;
+  }
+
+  /**
+   * @brief Registers an allocation-free typed send-completion callback.
+   * @tparam Callback Non-capturing
+   * `void(request, io_target, completion_params, void*) noexcept` callback.
+   * @param context Opaque caller context returned to the callback.
+   */
+  template <auto Callback>
+  request &on_completion(void *context = nullptr) noexcept {
+    WdfRequestSetCompletionRoutine(
+        handle_,
+        +[](WDFREQUEST native_request, WDFIOTARGET native_target,
+            PWDF_REQUEST_COMPLETION_PARAMS native_params,
+            WDFCONTEXT native_context) noexcept {
+          detail::invoke_callback<Callback>(
+              request{native_request}, io_target{native_target},
+              completion_params{native_params}, native_context);
+        },
+        context);
+    return *this;
+  }
+
+  /**
+   * @brief Sends this request to a KMDF I/O target.
+   * @param target Destination target.
+   * @param options Optional asynchronous send options.
+   * @return Success after WDF takes ownership, or WdfRequestGetStatus.
+   *
+   * On success this facade is empty until WDF invokes the registered
+   * completion callback. On failure the caller still controls the request.
+   */
+  ntl::status try_send(const io_target &target,
+                       send_options *options = nullptr) && noexcept {
+    if (WdfRequestSend(handle_, target.native_handle(),
+                       options ? options->native() : nullptr)) {
+      handle_ = nullptr;
+      return ntl::status::ok();
+    }
+    return WdfRequestGetStatus(handle_);
+  }
+
+  /**
+   * @brief Registers a typed KMDF cancellation callback.
+   * @tparam Callback Non-capturing `void(request) noexcept` callback.
+   * @return WdfRequestMarkCancelableEx status.
+   */
+  template <auto Callback> ntl::status try_mark_cancelable() const noexcept {
+    return WdfRequestMarkCancelableEx(
+        handle_, +[](WDFREQUEST native_request) noexcept {
+          detail::invoke_callback<Callback>(request{native_request});
+        });
+  }
+
+  /**
+   * @brief Removes cancellation registration before request completion.
+   * @return WdfRequestUnmarkCancelable status.
+   */
+  ntl::status try_unmark_cancelable() const noexcept {
+    return WdfRequestUnmarkCancelable(handle_);
+  }
+
+  /**
+   * @brief Reports whether WDF has canceled the request.
+   * @return True when the request is canceled.
+   */
+  bool is_canceled() const noexcept {
+    return WdfRequestIsCanceled(handle_) != FALSE;
+  }
+
+  /**
+   * @brief Completes the request without output information.
+   * @param completion_status Request completion status.
+   */
+  void complete(NTSTATUS completion_status) noexcept {
+    WdfRequestComplete(handle_, completion_status);
+    handle_ = nullptr;
+  }
+
+  /**
+   * @brief Completes the request and reports transferred bytes.
+   * @param completion_status Request completion status.
+   * @param information Number of bytes transferred.
+   */
+  void complete(NTSTATUS completion_status, ULONG_PTR information) noexcept {
+    WdfRequestCompleteWithInformation(handle_, completion_status, information);
+    handle_ = nullptr;
+  }
+
+  /**
+   * @brief Returns the native WDF request handle.
+   */
+  WDFREQUEST native_handle() const noexcept { return handle_; }
+
+  /** @brief Returns true while the caller may act on this request. */
+  explicit operator bool() const noexcept { return handle_ != WDF_NO_HANDLE; }
+
+private:
+  WDFREQUEST handle_ = nullptr;
+};
+} // namespace ntl::kmdf

@@ -2,7 +2,7 @@
 
 #include <stdio.h>
 
-void ___crtsys_crt_io_link_order_dummy()
+void __stdcall ___crtsys_crt_io_link_order_dummy()
 {
 }
 

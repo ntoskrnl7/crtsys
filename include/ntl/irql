@@ -53,8 +53,8 @@ struct to_synch_level_t {
   explicit to_synch_level_t() = default;
 };
 
-_INLINE_VAR constexpr to_dpc_level_t to_dpc_level{};
-_INLINE_VAR constexpr to_synch_level_t to_synch_level{};
+inline constexpr to_dpc_level_t to_dpc_level{};
+inline constexpr to_synch_level_t to_synch_level{};
 
 /**
  * @brief Raises IRQL and restores the previous level when destroyed.

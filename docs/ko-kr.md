@@ -104,6 +104,31 @@ ntl::status ntl::main(ntl::driver& driver,
 }
 ```
 
+### WDM과 KMDF driver model
+
+NuGet package는 WDK project의 기존 `DriverType` 설정을 읽습니다. KMDF project는
+기본적으로 일반 `DriverEntry`와 `WdfDriverCreate` 호출을 그대로 유지합니다.
+NTL 방식의 진입점을 원하면 `CrtSysUseNtlKmdfMain=true`로 설정하고
+`ntl::kmdf::main`을 구현할 수 있습니다. 두 방식 모두 PnP, power, queue, request,
+object lifetime, dispatch 처리를 WDF가 소유하며, crtsys는 WDF 시작/unload 경로
+전후의 C++ runtime 수명만 관리합니다.
+
+직접 `DriverEntry`를 정의하는 일반 WDM project는 다음 property를 사용합니다.
+
+```xml
+<CrtSysUseNtlMain>false</CrtSysUseNtlMain>
+```
+
+CMake에서는 기존 helper에서 일반 KMDF 또는 NTL KMDF 진입점을 선택합니다.
+
+```cmake
+crtsys_add_driver(my_kmdf_driver KMDF 1.15 src/main.cpp)
+crtsys_add_driver(my_ntl_kmdf_driver KMDF 1.15 NTL src/main.cpp)
+```
+
+전체 동작은 [NTL KMDF driver/app 예제](../examples/kmdf-ntl-driver)에서 확인할
+수 있으며, API 계약은 [NTL KMDF 가이드](./ntl/kmdf.md)에 정리되어 있습니다.
+
 ## Runtime Stack
 
 ```mermaid
@@ -162,13 +187,14 @@ flowchart TD
 | [사용 예제](./ko-kr-usage-examples.md) | Driver-side NTL 예제 |
 | [NTL sample driver](../examples/ntl-driver) | Visual Studio/NuGet 및 CMake로 빌드 가능한 typed IOCTL driver/app 예제 |
 | [NTL RPC sample driver](../examples/ntl-rpc-driver) | Visual Studio/NuGet 및 CMake로 빌드 가능한 shared RPC schema driver/app 예제 |
+| [NTL KMDF 예제](../examples/kmdf-ntl-driver) | `ntl::kmdf::main`, C++ WDF context, typed file/queue/request와 deferred callback, passive callback 안의 STL 사용을 보여주는 driver/app 예제 |
 | [CI driver load tests](./ci-driver-load-tests.md) | optional self-hosted driver load/run workflow |
 
 ## Operational Boundaries
 
 | 경계 | 정책 |
 | --- | --- |
-| Driver model | Driver는 정상적인 WDK driver로 남습니다. Verifier, HVCI, unload safety, target OS validation, paging rule은 여전히 중요합니다. |
+| Driver model | WDM과 KMDF project는 정상적인 WDK driver로 남습니다. KMDF에서는 PnP, power, queue, request, dispatch를 WDF가 계속 소유합니다. Verifier, HVCI, unload safety, target OS validation, paging rule은 여전히 중요합니다. |
 | IRQL | Runtime-backed C++/CRT/STL path는 특정 API가 더 넓은 계약을 문서화하지 않는 한 `PASSIVE_LEVEL`입니다. |
 | Stack | Kernel stack은 작습니다. exception-heavy 또는 STL-heavy path에는 `ntl::expand_stack` 사용을 고려하세요. |
 | TLS | MSVC function-local static은 지원하며, multi-driver compiler TLS slot isolation을 포함합니다. 이 지원 경로는 driver image 사이의 runtime compiler TLS slot 충돌을 막습니다. 그러나 사용자가 선언한 `thread_local T value`를 안전하게 만드는 기능은 아닙니다. kernel mode에서 GS 기반 TLS 가정은 thread별 user-mode TEB가 아니라 processor-local KPCR 쪽에 걸립니다. |
@@ -182,8 +208,16 @@ flowchart TD
 - CMake 3.14 이상
 - Git
 
-테스트된 toolchain에는 Visual Studio 2017, 2019, 2022와 `10.0.17763.0`,
-`10.0.18362.0`, `10.0.22000.0`, `10.0.22621.0` SDK/WDK 계열이 포함됩니다.
+테스트된 toolchain에는 Visual Studio 2017, 2019, 2022, 2026과
+`10.0.17763.0`, `10.0.18362.0`, `10.0.22000.0`, `10.0.22621.0`,
+`10.0.26100.0`, `10.0.28000.0` SDK/WDK 계열이 포함됩니다.
+
+Visual Studio 2026(`v145`) 검증은 x64와 ARM64에서 SDK/WDK
+`10.0.28000.0` 조합을 포함합니다. WDK `10.0.28000.0`은 x86 kernel-mode
+library를 제공하지 않으므로 v145 x86 구성은 SDK `10.0.28000.0`과 WDK
+`10.0.22621.0`을 함께 사용합니다. LDK `0.7.24`와 SDK/WDK
+`10.0.28000.0`으로 clean build한 v145 x64 Debug driver는 VM에서
+load, run, unload 검증도 통과했습니다.
 
 Visual Studio 2017은 일부 CRT 소스/헤더 구성이 부족한 경로가 있어서,
 해당 toolset에서는 일부 UCXXRT 호환 코드를 사용합니다.

@@ -1,0 +1,274 @@
+/**
+ * @file io_queue
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief KMDF I/O queue configuration and handle facades.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ *
+ */
+#pragma once
+
+#include "../result"
+#include "callback"
+#include "device"
+#include "object_attributes"
+#include "request"
+
+#include "detail/wdf"
+
+namespace ntl::kmdf {
+class io_queue_config;
+
+/** @brief Non-owning facade for a WDFQUEUE handle. */
+class io_queue {
+public:
+  /** @brief Creates an empty queue facade. */
+  io_queue() noexcept = default;
+
+  /** @brief Wraps a WDF queue handle without taking ownership. */
+  explicit io_queue(WDFQUEUE handle) noexcept : handle_(handle) {}
+
+  /**
+   * @brief Creates an I/O queue for a device.
+   * @return Non-owning queue facade or WdfIoQueueCreate failure status.
+   */
+  static ntl::result<io_queue>
+  try_create(const device &owner, io_queue_config &config,
+             object_attributes *attributes = nullptr) noexcept;
+
+  /** @brief Starts dispatching requests from this queue. */
+  void start() const noexcept { WdfIoQueueStart(handle_); }
+
+  /** @brief Stops dispatching asynchronously without a completion callback. */
+  void stop() const noexcept {
+    WdfIoQueueStop(handle_, WDF_NO_EVENT_CALLBACK, nullptr);
+  }
+
+  /**
+   * @brief Stops dispatching asynchronously and invokes a typed callback.
+   * @tparam Callback Non-capturing `void(io_queue, void*) noexcept` callback.
+   */
+  template <auto Callback> void stop(void *context = nullptr) const noexcept {
+    WdfIoQueueStop(handle_, queue_state_callback<Callback>(), context);
+  }
+
+  /** @brief Stops dispatching and waits for delivered requests to complete. */
+  void stop_and_wait() const noexcept { WdfIoQueueStopSynchronously(handle_); }
+
+  /** @brief Drains requests asynchronously without a completion callback. */
+  void drain() const noexcept {
+    WdfIoQueueDrain(handle_, WDF_NO_EVENT_CALLBACK, nullptr);
+  }
+
+  /**
+   * @brief Drains requests asynchronously and invokes a typed callback.
+   * @tparam Callback Non-capturing `void(io_queue, void*) noexcept` callback.
+   */
+  template <auto Callback> void drain(void *context = nullptr) const noexcept {
+    WdfIoQueueDrain(handle_, queue_state_callback<Callback>(), context);
+  }
+
+  /** @brief Drains queued requests and waits for delivered requests. */
+  void drain_and_wait() const noexcept {
+    WdfIoQueueDrainSynchronously(handle_);
+  }
+
+  /** @brief Purges requests asynchronously without a completion callback. */
+  void purge() const noexcept {
+    WdfIoQueuePurge(handle_, WDF_NO_EVENT_CALLBACK, nullptr);
+  }
+
+  /**
+   * @brief Purges requests asynchronously and invokes a typed callback.
+   * @tparam Callback Non-capturing `void(io_queue, void*) noexcept` callback.
+   */
+  template <auto Callback> void purge(void *context = nullptr) const noexcept {
+    WdfIoQueuePurge(handle_, queue_state_callback<Callback>(), context);
+  }
+
+  /** @brief Cancels queued requests and waits for delivered requests. */
+  void purge_and_wait() const noexcept {
+    WdfIoQueuePurgeSynchronously(handle_);
+  }
+
+  /** @brief Stops and purges without a completion callback. */
+  void stop_and_purge() const noexcept {
+    WdfIoQueueStopAndPurge(handle_, WDF_NO_EVENT_CALLBACK, nullptr);
+  }
+
+  /**
+   * @brief Stops and purges asynchronously and invokes a typed callback.
+   * @tparam Callback Non-capturing `void(io_queue, void*) noexcept` callback.
+   */
+  template <auto Callback>
+  void stop_and_purge(void *context = nullptr) const noexcept {
+    WdfIoQueueStopAndPurge(handle_, queue_state_callback<Callback>(), context);
+  }
+
+  /** @brief Stops, purges, and waits for delivered requests. */
+  void stop_and_purge_and_wait() const noexcept {
+    WdfIoQueueStopAndPurgeSynchronously(handle_);
+  }
+
+  /** @brief Returns native queue state and optional request counts. */
+  WDF_IO_QUEUE_STATE state(ULONG *queued_requests = nullptr,
+                           ULONG *driver_requests = nullptr) const noexcept {
+    return WdfIoQueueGetState(handle_, queued_requests, driver_requests);
+  }
+
+  /** @brief Returns the native WDF queue handle. */
+  WDFQUEUE native_handle() const noexcept { return handle_; }
+
+  /** @brief Returns the WDF device that owns this queue. */
+  device owner() const noexcept { return device{WdfIoQueueGetDevice(handle_)}; }
+
+  /** @brief Returns true when a native handle is present. */
+  explicit operator bool() const noexcept { return handle_ != WDF_NO_HANDLE; }
+
+private:
+  template <auto Callback>
+  static PFN_WDF_IO_QUEUE_STATE queue_state_callback() noexcept {
+    return +[](WDFQUEUE native_queue, WDFCONTEXT context) noexcept {
+      detail::invoke_callback<Callback>(io_queue{native_queue}, context);
+    };
+  }
+
+  WDFQUEUE handle_ = WDF_NO_HANDLE;
+};
+
+/** @brief Initializes and configures WDF_IO_QUEUE_CONFIG. */
+class io_queue_config {
+public:
+  /** @brief Creates a queue configuration. */
+  explicit io_queue_config(WDF_IO_QUEUE_DISPATCH_TYPE dispatch,
+                           bool default_queue = true) noexcept {
+    if (default_queue)
+      WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(&value_, dispatch);
+    else
+      WDF_IO_QUEUE_CONFIG_INIT(&value_, dispatch);
+  }
+
+  /** @brief Registers a typed EvtIoDeviceControl callback. */
+  template <auto Callback> io_queue_config &on_device_control() noexcept {
+    value_.EvtIoDeviceControl = +[](WDFQUEUE native_queue,
+                                    WDFREQUEST native_request,
+                                    size_t output_length, size_t input_length,
+                                    ULONG control_code) noexcept {
+      detail::invoke_callback<Callback>(io_queue{native_queue},
+                                        request{native_request}, output_length,
+                                        input_length, control_code);
+    };
+    return *this;
+  }
+
+  /** @brief Registers a typed EvtIoInternalDeviceControl callback. */
+  template <auto Callback>
+  io_queue_config &on_internal_device_control() noexcept {
+    value_.EvtIoInternalDeviceControl =
+        +[](WDFQUEUE native_queue, WDFREQUEST native_request,
+            size_t output_length, size_t input_length,
+            ULONG control_code) noexcept {
+          detail::invoke_callback<Callback>(
+              io_queue{native_queue}, request{native_request}, output_length,
+              input_length, control_code);
+        };
+    return *this;
+  }
+
+  /** @brief Registers a typed EvtIoRead callback. */
+  template <auto Callback> io_queue_config &on_read() noexcept {
+    value_.EvtIoRead = +[](WDFQUEUE native_queue, WDFREQUEST native_request,
+                           size_t length) noexcept {
+      detail::invoke_callback<Callback>(io_queue{native_queue},
+                                        request{native_request}, length);
+    };
+    return *this;
+  }
+
+  /** @brief Registers a typed EvtIoWrite callback. */
+  template <auto Callback> io_queue_config &on_write() noexcept {
+    value_.EvtIoWrite = +[](WDFQUEUE native_queue, WDFREQUEST native_request,
+                            size_t length) noexcept {
+      detail::invoke_callback<Callback>(io_queue{native_queue},
+                                        request{native_request}, length);
+    };
+    return *this;
+  }
+
+  /** @brief Registers a typed EvtIoDefault callback. */
+  template <auto Callback> io_queue_config &on_default() noexcept {
+    value_.EvtIoDefault =
+        +[](WDFQUEUE native_queue, WDFREQUEST native_request) noexcept {
+          detail::invoke_callback<Callback>(io_queue{native_queue},
+                                            request{native_request});
+        };
+    return *this;
+  }
+
+  /** @brief Registers a typed EvtIoStop callback. */
+  template <auto Callback> io_queue_config &on_stop() noexcept {
+    value_.EvtIoStop = +[](WDFQUEUE native_queue, WDFREQUEST native_request,
+                           ULONG action_flags) noexcept {
+      detail::invoke_callback<Callback>(io_queue{native_queue},
+                                        request{native_request}, action_flags);
+    };
+    return *this;
+  }
+
+  /** @brief Registers a typed EvtIoResume callback. */
+  template <auto Callback> io_queue_config &on_resume() noexcept {
+    value_.EvtIoResume =
+        +[](WDFQUEUE native_queue, WDFREQUEST native_request) noexcept {
+          detail::invoke_callback<Callback>(io_queue{native_queue},
+                                            request{native_request});
+        };
+    return *this;
+  }
+
+  /** @brief Registers a typed EvtIoCanceledOnQueue callback. */
+  template <auto Callback> io_queue_config &on_canceled() noexcept {
+    value_.EvtIoCanceledOnQueue =
+        +[](WDFQUEUE native_queue, WDFREQUEST native_request) noexcept {
+          detail::invoke_callback<Callback>(io_queue{native_queue},
+                                            request{native_request});
+        };
+    return *this;
+  }
+
+  /** @brief Sets the queue power-management policy. */
+  io_queue_config &power_managed(WDF_TRI_STATE value) noexcept {
+    value_.PowerManaged = value;
+    return *this;
+  }
+
+  /** @brief Configures whether zero-length requests reach callbacks. */
+  io_queue_config &allow_zero_length(bool enabled = true) noexcept {
+    value_.AllowZeroLengthRequests = enabled ? TRUE : FALSE;
+    return *this;
+  }
+
+  /** @brief Limits requests presented by a parallel queue. */
+  io_queue_config &parallel_requests(ULONG count) noexcept {
+    value_.Settings.Parallel.NumberOfPresentedRequests = count;
+    return *this;
+  }
+
+  /** @brief Returns the mutable native queue configuration. */
+  PWDF_IO_QUEUE_CONFIG native() noexcept { return &value_; }
+
+private:
+  WDF_IO_QUEUE_CONFIG value_{};
+};
+
+inline ntl::result<io_queue>
+io_queue::try_create(const device &owner, io_queue_config &config,
+                     object_attributes *attributes) noexcept {
+  WDFQUEUE handle = WDF_NO_HANDLE;
+  const NTSTATUS result =
+      WdfIoQueueCreate(owner.native_handle(), config.native(),
+                       attributes ? attributes->native() : nullptr, &handle);
+  if (!NT_SUCCESS(result))
+    return ntl::unexpected(result);
+  return ntl::ok(io_queue{handle});
+}
+} // namespace ntl::kmdf

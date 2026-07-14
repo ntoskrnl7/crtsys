@@ -117,7 +117,7 @@ struct at_dpc_level_lock_t {
   explicit at_dpc_level_lock_t() = default;
 };
 
-_INLINE_VAR constexpr at_dpc_level_lock_t at_dpc_level_lock{};
+inline constexpr at_dpc_level_lock_t at_dpc_level_lock{};
 
 template <class Lockable> class unique_lock;
 

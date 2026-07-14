@@ -4,7 +4,10 @@ This directory contains Visual Studio/MSBuild consumer projects used by CI to
 verify the native NuGet package.
 
 The test script installs the generated `crtsys` package into a copied test
-tree and builds the selected project with MSBuild.
+tree and builds the selected project with MSBuild. When either project is
+opened directly in Visual Studio without an explicit `CrtSysPackageRoot`, it
+uses `PackageReference` to restore the latest stable package so include paths,
+forced includes, IntelliSense, and linking are configured normally.
 
 These projects are the smoke-test counterpart to the public
 [MSBuild/NuGet quick start](../../docs/msbuild-nuget-quickstart.md): package

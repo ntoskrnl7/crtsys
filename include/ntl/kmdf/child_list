@@ -1,0 +1,430 @@
+/**
+ * @file child_list
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Typed KMDF dynamic child-list descriptions and operations.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "callback"
+#include "device"
+#include "object_attributes"
+
+#include "../result"
+#include "../status"
+
+#include <cstddef>
+#include <type_traits>
+#include <utility>
+#include "detail/wdf"
+
+namespace ntl::kmdf {
+template <class Identification, class Address> class child_list_config;
+class child_list_iteration;
+
+/**
+ * @brief Typed storage accepted by KMDF child-identification APIs.
+ * @tparam Payload Self-contained, trivially copyable value that uniquely
+ * identifies a child. It must not own or refer to external storage unless the
+ * caller replaces KMDF's native copy, duplicate, and cleanup callbacks.
+ */
+template <class Payload> struct child_identification {
+  static_assert(std::is_trivially_copyable_v<Payload>,
+                "KMDF child identification payloads must be trivially "
+                "copyable.");
+  static_assert(std::is_standard_layout_v<Payload>,
+                "KMDF child identification payloads must have standard "
+                "layout.");
+
+  /** @brief Creates a zero-initialized description. */
+  child_identification() noexcept {
+    WDF_CHILD_IDENTIFICATION_DESCRIPTION_HEADER_INIT(&header, sizeof(*this));
+  }
+
+  /** @brief Creates a description containing a payload value. */
+  explicit child_identification(const Payload &value) noexcept
+      : child_identification() {
+    payload = value;
+  }
+
+  /** @brief Returns the native identification-description header. */
+  PWDF_CHILD_IDENTIFICATION_DESCRIPTION_HEADER native() noexcept {
+    return &header;
+  }
+
+  /** @brief Returns the native identification-description header. */
+  PWDF_CHILD_IDENTIFICATION_DESCRIPTION_HEADER native() const noexcept {
+    return const_cast<PWDF_CHILD_IDENTIFICATION_DESCRIPTION_HEADER>(&header);
+  }
+
+  WDF_CHILD_IDENTIFICATION_DESCRIPTION_HEADER header{};
+  Payload payload{};
+};
+
+/**
+ * @brief Typed storage accepted by KMDF child-address APIs.
+ * @tparam Payload Self-contained, trivially copyable value describing a
+ * child's current address. It must not own or refer to external storage unless
+ * the caller replaces KMDF's native copy, duplicate, and cleanup callbacks.
+ */
+template <class Payload> struct child_address {
+  static_assert(std::is_trivially_copyable_v<Payload>,
+                "KMDF child address payloads must be trivially copyable.");
+  static_assert(std::is_standard_layout_v<Payload>,
+                "KMDF child address payloads must have standard layout.");
+
+  /** @brief Creates a zero-initialized address description. */
+  child_address() noexcept {
+    WDF_CHILD_ADDRESS_DESCRIPTION_HEADER_INIT(&header, sizeof(*this));
+  }
+
+  /** @brief Creates an address description containing a payload value. */
+  explicit child_address(const Payload &value) noexcept : child_address() {
+    payload = value;
+  }
+
+  /** @brief Returns the native address-description header. */
+  PWDF_CHILD_ADDRESS_DESCRIPTION_HEADER native() noexcept { return &header; }
+
+  /** @brief Returns the native address-description header. */
+  PWDF_CHILD_ADDRESS_DESCRIPTION_HEADER native() const noexcept {
+    return const_cast<PWDF_CHILD_ADDRESS_DESCRIPTION_HEADER>(&header);
+  }
+
+  WDF_CHILD_ADDRESS_DESCRIPTION_HEADER header{};
+  Payload payload{};
+};
+
+static_assert(offsetof(child_identification<ULONG>, header) == 0,
+              "The WDF identification header must be the first member.");
+static_assert(offsetof(child_address<ULONG>, header) == 0,
+              "The WDF address header must be the first member.");
+
+/** @brief Selects a child-list configuration without address descriptions. */
+struct no_child_address {};
+
+/** @brief Result returned when looking up a PDO by identification. */
+struct child_lookup {
+  device value;
+  WDF_CHILD_LIST_RETRIEVE_DEVICE_STATUS status =
+      WdfChildListRetrieveDeviceUndefined;
+
+  /** @brief Returns true when KMDF returned a PDO. */
+  explicit operator bool() const noexcept { return static_cast<bool>(value); }
+};
+
+/** @brief Non-owning facade for a WDFCHILDLIST object. */
+class child_list {
+public:
+  /** @brief Creates an empty child-list facade. */
+  child_list() noexcept = default;
+
+  /** @brief Wraps a WDF child list without taking ownership. */
+  explicit child_list(WDFCHILDLIST object) noexcept : object_(object) {}
+
+  /** @brief Returns an FDO's framework-created default child list. */
+  static child_list default_for(const device &owner) noexcept {
+    return child_list{WdfFdoGetDefaultChildList(owner.native_handle())};
+  }
+
+  /** @brief Creates an additional dynamic child list for a device. */
+  template <class Identification, class Address>
+  static ntl::result<child_list>
+  try_create(const device &owner,
+             child_list_config<Identification, Address> &config,
+             object_attributes *attributes = nullptr) noexcept;
+
+  /** @brief Creates a dynamic child list with a managed C++ context. */
+  template <class Context, class Identification, class Address, class... Args>
+  static ntl::result<child_list>
+  try_create(const device &owner,
+             child_list_config<Identification, Address> &config,
+             object_attributes *attributes, Args &&...args) noexcept;
+
+  /** @brief Returns the device that owns this child list. */
+  device owner() const noexcept {
+    return device{WdfChildListGetDevice(object_)};
+  }
+
+  /** @brief Starts a child-enumeration scan transaction. */
+  void begin_scan() const noexcept { WdfChildListBeginScan(object_); }
+
+  /** @brief Ends a scan and marks unreported children as missing. */
+  void end_scan() const noexcept { WdfChildListEndScan(object_); }
+
+  /** @brief Adds a child or updates it as currently present. */
+  template <class Identification>
+  ntl::status add_or_update(const child_identification<Identification>
+                                &identification) const noexcept {
+    return WdfChildListAddOrUpdateChildDescriptionAsPresent(
+        object_, identification.native(), nullptr);
+  }
+
+  /** @brief Adds a child or updates its identification and address. */
+  template <class Identification, class Address>
+  ntl::status
+  add_or_update(const child_identification<Identification> &identification,
+                const child_address<Address> &address) const noexcept {
+    return WdfChildListAddOrUpdateChildDescriptionAsPresent(
+        object_, identification.native(), address.native());
+  }
+
+  /** @brief Marks the identified child as missing. */
+  template <class Identification>
+  ntl::status mark_missing(const child_identification<Identification>
+                               &identification) const noexcept {
+    return WdfChildListUpdateChildDescriptionAsMissing(object_,
+                                                       identification.native());
+  }
+
+  /** @brief Marks every known child as present. */
+  void mark_all_present() const noexcept {
+    WdfChildListUpdateAllChildDescriptionsAsPresent(object_);
+  }
+
+  /** @brief Requests safe removal of the identified child PDO. */
+  template <class Identification>
+  bool request_eject(const child_identification<Identification> &identification)
+      const noexcept {
+    return WdfChildListRequestChildEject(object_, identification.native()) !=
+           FALSE;
+  }
+
+  /** @brief Looks up the PDO and reports the KMDF retrieval state. */
+  template <class Identification>
+  child_lookup find(const child_identification<Identification> &identification)
+      const noexcept {
+    WDF_CHILD_RETRIEVE_INFO info{};
+    WDF_CHILD_RETRIEVE_INFO_INIT(&info, identification.native());
+    return {device{WdfChildListRetrievePdo(object_, &info)}, info.Status};
+  }
+
+  /** @brief Retrieves the current address for an identified child. */
+  template <class Identification, class Address>
+  ntl::status
+  retrieve_address(const child_identification<Identification> &identification,
+                   child_address<Address> &address) const noexcept {
+    return WdfChildListRetrieveAddressDescription(
+        object_, identification.native(), address.native());
+  }
+
+  /** @brief Begins RAII child iteration for the selected child states. */
+  child_list_iteration
+  iterate(ULONG flags = WdfRetrievePresentChildren) const noexcept;
+
+  /** @brief Returns this child list's constructed C++ context. */
+  template <class T> T &context() const noexcept {
+    return detail::get_context<T>(reinterpret_cast<WDFOBJECT>(object_));
+  }
+
+  /** @brief Returns this child list's context, or nullptr when absent. */
+  template <class T> T *try_context() const noexcept {
+    return detail::try_get_context<T>(reinterpret_cast<WDFOBJECT>(object_));
+  }
+
+  /** @brief Returns the native WDF child-list object. */
+  WDFCHILDLIST native_object() const noexcept { return object_; }
+
+  /** @brief Returns true when a native child-list object is present. */
+  explicit operator bool() const noexcept { return object_ != WDF_NO_HANDLE; }
+
+private:
+  WDFCHILDLIST object_ = WDF_NO_HANDLE;
+};
+
+/**
+ * @brief Typed WDF_CHILD_LIST_CONFIG builder.
+ *
+ * Payloads are intentionally restricted to trivially copyable standard-layout
+ * values so KMDF's default byte-copy and byte-compare behavior is correct.
+ */
+template <class Identification, class Address = no_child_address>
+class child_list_config {
+public:
+  using identification_type = child_identification<Identification>;
+  using address_type = child_address<Address>;
+  static constexpr bool has_address =
+      !std::is_same_v<Address, no_child_address>;
+
+  /**
+   * @brief Creates a configuration with its required child-creation callback.
+   * @tparam Callback Non-capturing
+   * `NTSTATUS(child_list, const identification_type&, device_init) noexcept`
+   * callback.
+   */
+  template <auto Callback> static child_list_config with_create() noexcept {
+    return child_list_config{
+        +[](WDFCHILDLIST native_list,
+            PWDF_CHILD_IDENTIFICATION_DESCRIPTION_HEADER native_id,
+            PWDFDEVICE_INIT native_init) noexcept -> NTSTATUS {
+          const auto &id =
+              *reinterpret_cast<const identification_type *>(native_id);
+          return detail::invoke_status_callback<Callback>(
+              child_list{native_list}, id, device_init{native_init});
+        }};
+  }
+
+  /** @brief Registers the callback that materializes a child PDO. */
+  template <auto Callback> child_list_config &on_create() noexcept {
+    value_.EvtChildListCreateDevice =
+        +[](WDFCHILDLIST native_list,
+            PWDF_CHILD_IDENTIFICATION_DESCRIPTION_HEADER native_id,
+            PWDFDEVICE_INIT native_init) noexcept -> NTSTATUS {
+      const auto &id =
+          *reinterpret_cast<const identification_type *>(native_id);
+      return detail::invoke_status_callback<Callback>(
+          child_list{native_list}, id, device_init{native_init});
+    };
+    return *this;
+  }
+
+  /** @brief Registers the callback that scans for currently present children.
+   */
+  template <auto Callback> child_list_config &on_scan() noexcept {
+    value_.EvtChildListScanForChildren =
+        +[](WDFCHILDLIST native_list) noexcept {
+          detail::invoke_callback<Callback>(child_list{native_list});
+        };
+    return *this;
+  }
+
+  /** @brief Registers a typed identification comparison callback. */
+  template <auto Callback> child_list_config &on_compare() noexcept {
+    value_.EvtChildListIdentificationDescriptionCompare =
+        +[](WDFCHILDLIST native_list,
+            PWDF_CHILD_IDENTIFICATION_DESCRIPTION_HEADER native_first,
+            PWDF_CHILD_IDENTIFICATION_DESCRIPTION_HEADER native_second) noexcept
+        -> BOOLEAN {
+      const auto &first =
+          *reinterpret_cast<const identification_type *>(native_first);
+      const auto &second =
+          *reinterpret_cast<const identification_type *>(native_second);
+      return detail::invoke_boolean_callback<Callback>(child_list{native_list},
+                                                       first, second)
+                 ? TRUE
+                 : FALSE;
+    };
+    return *this;
+  }
+
+  /** @brief Registers a child reenumeration callback for address changes. */
+  template <auto Callback> child_list_config &on_reenumerated() noexcept {
+    static_assert(has_address,
+                  "Child reenumeration requires an address description.");
+    value_.EvtChildListDeviceReenumerated =
+        +[](WDFCHILDLIST native_list, WDFDEVICE native_old_device,
+            PWDF_CHILD_ADDRESS_DESCRIPTION_HEADER native_old_address,
+            PWDF_CHILD_ADDRESS_DESCRIPTION_HEADER native_new_address) noexcept
+        -> BOOLEAN {
+      const auto &old_address =
+          *reinterpret_cast<const address_type *>(native_old_address);
+      auto &new_address = *reinterpret_cast<address_type *>(native_new_address);
+      return detail::invoke_boolean_callback<Callback>(
+                 child_list{native_list}, device{native_old_device},
+                 old_address, new_address)
+                 ? TRUE
+                 : FALSE;
+    };
+    return *this;
+  }
+
+  /** @brief Returns the mutable native child-list configuration. */
+  PWDF_CHILD_LIST_CONFIG native() noexcept { return &value_; }
+
+private:
+  explicit child_list_config(PFN_WDF_CHILD_LIST_CREATE_DEVICE callback) noexcept {
+    WDF_CHILD_LIST_CONFIG_INIT(&value_, sizeof(identification_type), callback);
+    if constexpr (has_address)
+      value_.AddressDescriptionSize = sizeof(address_type);
+  }
+
+  WDF_CHILD_LIST_CONFIG value_{};
+};
+
+/** @brief RAII scope for WdfChildListBeginIteration/EndIteration. */
+class child_list_iteration {
+public:
+  child_list_iteration(const child_list_iteration &) = delete;
+  child_list_iteration &operator=(const child_list_iteration &) = delete;
+  child_list_iteration(child_list_iteration &&) = delete;
+  child_list_iteration &operator=(child_list_iteration &&) = delete;
+
+  /** @brief Ends the active child-list iteration. */
+  ~child_list_iteration() {
+    WdfChildListEndIteration(list_.native_object(), &iterator_);
+  }
+
+  /**
+   * @brief Retrieves the next child device.
+   * @return Device facade, or STATUS_NO_MORE_ENTRIES at the end.
+   */
+  ntl::result<device> next() noexcept {
+    WDFDEVICE native_device = WDF_NO_HANDLE;
+    const NTSTATUS result = WdfChildListRetrieveNextDevice(
+        list_.native_object(), &iterator_, &native_device, nullptr);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return ntl::ok(device{native_device});
+  }
+
+private:
+  friend class child_list;
+
+  child_list_iteration(child_list list, ULONG flags) noexcept : list_(list) {
+    WDF_CHILD_LIST_ITERATOR_INIT(&iterator_, flags);
+    WdfChildListBeginIteration(list_.native_object(), &iterator_);
+  }
+
+  child_list list_;
+  WDF_CHILD_LIST_ITERATOR iterator_{};
+};
+
+inline child_list_iteration child_list::iterate(ULONG flags) const noexcept {
+  return child_list_iteration{*this, flags};
+}
+
+template <class Identification, class Address>
+ntl::result<child_list>
+child_list::try_create(const device &owner,
+                       child_list_config<Identification, Address> &config,
+                       object_attributes *attributes) noexcept {
+  WDFCHILDLIST object = WDF_NO_HANDLE;
+  const NTSTATUS result =
+      WdfChildListCreate(owner.native_handle(), config.native(),
+                         attributes ? attributes->native() : nullptr, &object);
+  if (!NT_SUCCESS(result))
+    return ntl::unexpected(result);
+  return ntl::ok(child_list{object});
+}
+
+template <class Context, class Identification, class Address, class... Args>
+ntl::result<child_list>
+child_list::try_create(const device &owner,
+                       child_list_config<Identification, Address> &config,
+                       object_attributes *attributes, Args &&...args) noexcept {
+  object_attributes local_attributes;
+  object_attributes &effective = attributes ? *attributes : local_attributes;
+  effective.template prepare_context<Context>();
+
+  WDFCHILDLIST object = WDF_NO_HANDLE;
+  const NTSTATUS result = WdfChildListCreate(
+      owner.native_handle(), config.native(), effective.native(), &object);
+  if (!NT_SUCCESS(result))
+    return ntl::unexpected(result);
+
+  effective.template construct_context<Context>(
+      reinterpret_cast<WDFOBJECT>(object), std::forward<Args>(args)...);
+  return ntl::ok(child_list{object});
+}
+
+template <class Identification, class Address>
+device_init &device_init::default_child_list(
+    child_list_config<Identification, Address> &config,
+    object_attributes *attributes) noexcept {
+  WdfFdoInitSetDefaultChildListConfig(native_handle(), config.native(),
+                                      attributes ? attributes->native()
+                                                 : nullptr);
+  return *this;
+}
+} // namespace ntl::kmdf

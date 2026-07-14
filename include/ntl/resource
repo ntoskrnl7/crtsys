@@ -188,7 +188,7 @@ struct adopt_critical_region_t {
   explicit adopt_critical_region_t() = default;
 };
 
-_INLINE_VAR constexpr adopt_critical_region_t adopt_critical_region{};
+inline constexpr adopt_critical_region_t adopt_critical_region{};
 
 template <class Lockable> class unique_lock;
 template <class Lockable> class shared_lock;

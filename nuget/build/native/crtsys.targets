@@ -7,6 +7,8 @@
     <CrtSysUseDriverSupport Condition="'$(CrtSysUseDriverSupport)' == ''">false</CrtSysUseDriverSupport>
     <CrtSysLibPlatform Condition="'$(CrtSysLibPlatform)' == '' and '$(Platform)' == 'Win32'">x86</CrtSysLibPlatform>
     <CrtSysLibPlatform Condition="'$(CrtSysLibPlatform)' == ''">$(Platform)</CrtSysLibPlatform>
+    <CrtSysEntryPointSuffix Condition="'$(CrtSysEntryPointSuffix)' == '' and '$(CrtSysLibPlatform)' == 'x86'">@8</CrtSysEntryPointSuffix>
+    <CrtSysEntryPointSuffix Condition="'$(CrtSysEntryPointSuffix)' == ''"></CrtSysEntryPointSuffix>
     <CrtSysLibraryConfiguration Condition="'$(CrtSysLibraryConfiguration)' == '' and ('$(Configuration)' == 'Debug' or '$(Configuration)' == 'Release')">$(Configuration)</CrtSysLibraryConfiguration>
     <CrtSysLibraryConfiguration Condition="'$(CrtSysLibraryConfiguration)' == ''">Release</CrtSysLibraryConfiguration>
     <CrtSysLibToolset Condition="'$(CrtSysLibToolset)' == '' and '$([System.String]::Copy(&quot;$(VCToolsVersion)&quot;).StartsWith(&quot;14.5&quot;))' == 'true'">v145</CrtSysLibToolset>
@@ -29,11 +31,17 @@
     <CrtSysLibDir Condition="'$(CrtSysLibDir)' == ''">$(CrtSysExactLibDir)</CrtSysLibDir>
     <CrtSysLibDir Condition="'$(CrtSysUseDriverSupport)' == 'true' and '$(CrtSysAllowToolsetFallback)' == 'true' and '$(CrtSysLibToolset)' != 'v143' and !Exists('$(CrtSysLibDir)crtsys.lib')">$(CrtSysFallbackLibDir)</CrtSysLibDir>
     <CrtSysLibDir Condition="'$(CrtSysUseDriverSupport)' == 'true' and '$(CrtSysHasToolsetLibLayout)' != 'true' and !Exists('$(CrtSysLibDir)crtsys.lib')">$(CrtSysLegacyLibDir)</CrtSysLibDir>
+    <CrtSysIsKmdf Condition="'$(DriverType)' == 'KMDF'">true</CrtSysIsKmdf>
+    <CrtSysIsKmdf Condition="'$(CrtSysIsKmdf)' == ''">false</CrtSysIsKmdf>
+    <CrtSysUseNtlKmdfMain Condition="'$(CrtSysUseNtlKmdfMain)' == ''">false</CrtSysUseNtlKmdfMain>
+    <CrtSysUseNtlMain Condition="'$(CrtSysUseNtlMain)' == '' and '$(CrtSysIsKmdf)' == 'true'">false</CrtSysUseNtlMain>
     <CrtSysUseNtlMain Condition="'$(CrtSysUseNtlMain)' == ''">true</CrtSysUseNtlMain>
     <CrtSysUseLibcntpr Condition="'$(CrtSysUseLibcntpr)' == ''">true</CrtSysUseLibcntpr>
     <CrtSysDriverPreprocessorDefinitions Condition="'$(CrtSysDriverPreprocessorDefinitions)' == ''">_KERNEL32_;_ITERATOR_DEBUG_LEVEL=0;_HAS_EXCEPTIONS</CrtSysDriverPreprocessorDefinitions>
     <CrtSysDriverPreprocessorDefinitions Condition="'$(CrtSysUseLibcntpr)' == 'true'">$(CrtSysDriverPreprocessorDefinitions);CRTSYS_USE_LIBCNTPR</CrtSysDriverPreprocessorDefinitions>
     <CrtSysDriverPreprocessorDefinitions Condition="'$(CrtSysUseNtlMain)' == 'true'">$(CrtSysDriverPreprocessorDefinitions);CRTSYS_USE_NTL_MAIN</CrtSysDriverPreprocessorDefinitions>
+    <CrtSysDriverPreprocessorDefinitions Condition="'$(CrtSysUseNtlKmdfMain)' == 'true'">$(CrtSysDriverPreprocessorDefinitions);CRTSYS_USE_NTL_KMDF_MAIN</CrtSysDriverPreprocessorDefinitions>
+    <CrtSysDriverPreprocessorDefinitions Condition="'$(CrtSysIsKmdf)' == 'true'">$(CrtSysDriverPreprocessorDefinitions);CRTSYS_USE_KMDF</CrtSysDriverPreprocessorDefinitions>
     <CrtSysDriverLibraries>crtsys.lib;Ldk.lib;cng.lib;aux_klib.lib</CrtSysDriverLibraries>
     <CrtSysDriverLibraries Condition="'$(CrtSysUseLibcntpr)' == 'true'">$(CrtSysDriverLibraries);libcntpr.lib</CrtSysDriverLibraries>
     <DisableKernelFlag Condition="'$(CrtSysUseDriverSupport)' == 'true'">true</DisableKernelFlag>
@@ -42,8 +50,11 @@
 
   <Target Name="CrtSysValidateNativePackage" BeforeTargets="PrepareForBuild">
     <Error
-      Condition="'$(CrtSysUseDriverSupport)' == 'true' and '$(CrtSysUseNtlMain)' != 'true'"
-      Text="The prebuilt crtsys NuGet package currently supports the ntl::main entry point flow only. Leave CrtSysUseNtlMain set to true." />
+      Condition="'$(CrtSysUseDriverSupport)' == 'true' and '$(CrtSysIsKmdf)' == 'true' and '$(CrtSysUseNtlMain)' == 'true'"
+      Text="KMDF projects cannot enable the WDM-only CrtSysUseNtlMain property. Use CrtSysUseNtlKmdfMain instead." />
+    <Error
+      Condition="'$(CrtSysUseDriverSupport)' == 'true' and '$(CrtSysUseNtlKmdfMain)' == 'true' and '$(CrtSysIsKmdf)' != 'true'"
+      Text="CrtSysUseNtlKmdfMain requires a KMDF driver project." />
     <Error
       Condition="'$(CrtSysUseDriverSupport)' == 'true' and '$(CrtSysLibPlatform)' != 'x86' and '$(CrtSysLibPlatform)' != 'x64' and '$(CrtSysLibPlatform)' != 'ARM' and '$(CrtSysLibPlatform)' != 'ARM64'"
       Text="crtsys NuGet package contains prebuilt driver libraries for x86, x64, ARM, and ARM64 depending on the selected MSVC toolset. Current platform is '$(Platform)'." />
@@ -80,7 +91,11 @@
     <Link Condition="'$(CrtSysUseDriverSupport)' == 'true'">
       <AdditionalLibraryDirectories>$(CrtSysLibDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>$(CrtSysDriverLibraries);%(AdditionalDependencies)</AdditionalDependencies>
-      <EntryPointSymbol Condition="'$(CrtSysUseNtlMain)' == 'true'">CrtSysDriverEntry</EntryPointSymbol>
+      <EntryPointSymbol Condition="'$(CrtSysIsKmdf)' == 'true' and '$(CrtSysUseNtlKmdfMain)' == 'true'">CrtSysNtlKmdfDriverEntry$(CrtSysEntryPointSuffix)</EntryPointSymbol>
+      <EntryPointSymbol Condition="'$(CrtSysIsKmdf)' == 'true' and '$(CrtSysUseNtlKmdfMain)' != 'true'">CrtSysKmdfDriverEntry$(CrtSysEntryPointSuffix)</EntryPointSymbol>
+      <EntryPointSymbol Condition="'$(CrtSysIsKmdf)' != 'true' and '$(CrtSysUseNtlMain)' == 'true'">CrtSysDriverEntry$(CrtSysEntryPointSuffix)</EntryPointSymbol>
+      <EntryPointSymbol Condition="'$(CrtSysIsKmdf)' != 'true' and '$(CrtSysUseNtlMain)' != 'true'">CrtSysWdmDriverEntry$(CrtSysEntryPointSuffix)</EntryPointSymbol>
+      <ImageHasSafeExceptionHandlers Condition="'$(CrtSysLibPlatform)' == 'x86'">false</ImageHasSafeExceptionHandlers>
       <AdditionalOptions>/FORCE:MULTIPLE %(AdditionalOptions)</AdditionalOptions>
       <TreatLinkerWarningAsErrors>false</TreatLinkerWarningAsErrors>
     </Link>

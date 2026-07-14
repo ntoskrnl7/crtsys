@@ -1,0 +1,428 @@
+/**
+ * @file pnp
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief KMDF Plug and Play and power callback configuration facades.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ *
+ */
+#pragma once
+
+#include "callback"
+#include "device"
+
+#include "detail/wdf"
+
+namespace ntl::kmdf {
+/** @brief Non-owning facade for a KMDF resource list. */
+class resource_list {
+public:
+  /** @brief Wraps a native resource list without taking ownership. */
+  explicit resource_list(WDFCMRESLIST handle) noexcept : handle_(handle) {}
+
+  /** @brief Returns the number of resource descriptors. */
+  ULONG size() const noexcept { return WdfCmResourceListGetCount(handle_); }
+
+  /** @brief Returns a resource descriptor, or nullptr for an invalid index. */
+  PCM_PARTIAL_RESOURCE_DESCRIPTOR at(ULONG index) const noexcept {
+    return WdfCmResourceListGetDescriptor(handle_, index);
+  }
+
+  /** @brief Returns the native resource-list handle. */
+  WDFCMRESLIST native_handle() const noexcept { return handle_; }
+
+private:
+  WDFCMRESLIST handle_;
+};
+
+/**
+ * @brief Initializes and configures WDF_PNPPOWER_EVENT_CALLBACKS.
+ *
+ * Typed callbacks receive non-owning NTL facades. Native WDF configuration
+ * remains available through native().
+ */
+class pnp_power_callbacks {
+public:
+  /** @brief Initializes all PnP and power callbacks to WDF defaults. */
+  pnp_power_callbacks() noexcept {
+    WDF_PNPPOWER_EVENT_CALLBACKS_INIT(&value_);
+  }
+
+  /**
+   * @brief Registers EvtDevicePrepareHardware.
+   * @tparam Callback Typed noexcept callback.
+   * @return This callback configuration.
+   */
+  template <auto Callback>
+  pnp_power_callbacks &on_prepare_hardware() noexcept {
+    value_.EvtDevicePrepareHardware =
+        +[](WDFDEVICE native_device, WDFCMRESLIST native_raw,
+            WDFCMRESLIST native_translated) noexcept -> NTSTATUS {
+      return detail::invoke_status_callback<Callback>(
+          device{native_device}, resource_list{native_raw},
+          resource_list{native_translated});
+    };
+    return *this;
+  }
+
+  /**
+   * @brief Registers EvtDeviceReleaseHardware.
+   * @tparam Callback Typed noexcept callback.
+   * @return This callback configuration.
+   */
+  template <auto Callback>
+  pnp_power_callbacks &on_release_hardware() noexcept {
+    value_.EvtDeviceReleaseHardware =
+        +[](WDFDEVICE native_device,
+            WDFCMRESLIST native_translated) noexcept -> NTSTATUS {
+      return detail::invoke_status_callback<Callback>(
+          device{native_device}, resource_list{native_translated});
+    };
+    return *this;
+  }
+
+  /**
+   * @brief Registers EvtDeviceD0Entry.
+   * @tparam Callback Typed noexcept callback.
+   * @return This callback configuration.
+   */
+  template <auto Callback> pnp_power_callbacks &on_d0_entry() noexcept {
+    value_.EvtDeviceD0Entry =
+        +[](WDFDEVICE native_device,
+            WDF_POWER_DEVICE_STATE previous_state) noexcept -> NTSTATUS {
+      return detail::invoke_status_callback<Callback>(device{native_device},
+                                                       previous_state);
+    };
+    return *this;
+  }
+
+  /**
+   * @brief Registers EvtDeviceD0EntryPostInterruptsEnabled.
+   * @tparam Callback Typed noexcept callback.
+   * @return This callback configuration.
+   */
+  template <auto Callback>
+  pnp_power_callbacks &on_d0_entry_post_interrupts_enabled() noexcept {
+    value_.EvtDeviceD0EntryPostInterruptsEnabled =
+        +[](WDFDEVICE native_device,
+            WDF_POWER_DEVICE_STATE previous_state) noexcept -> NTSTATUS {
+      return detail::invoke_status_callback<Callback>(device{native_device},
+                                                       previous_state);
+    };
+    return *this;
+  }
+
+  /**
+   * @brief Registers EvtDeviceD0Exit.
+   * @tparam Callback Typed noexcept callback.
+   * @return This callback configuration.
+   */
+  template <auto Callback> pnp_power_callbacks &on_d0_exit() noexcept {
+    value_.EvtDeviceD0Exit =
+        +[](WDFDEVICE native_device,
+            WDF_POWER_DEVICE_STATE target_state) noexcept -> NTSTATUS {
+      return detail::invoke_status_callback<Callback>(device{native_device},
+                                                       target_state);
+    };
+    return *this;
+  }
+
+  /**
+   * @brief Registers EvtDeviceD0ExitPreInterruptsDisabled.
+   * @tparam Callback Typed noexcept callback.
+   * @return This callback configuration.
+   */
+  template <auto Callback>
+  pnp_power_callbacks &on_d0_exit_pre_interrupts_disabled() noexcept {
+    value_.EvtDeviceD0ExitPreInterruptsDisabled =
+        +[](WDFDEVICE native_device,
+            WDF_POWER_DEVICE_STATE target_state) noexcept -> NTSTATUS {
+      return detail::invoke_status_callback<Callback>(device{native_device},
+                                                       target_state);
+    };
+    return *this;
+  }
+
+  /**
+   * @brief Registers EvtDeviceSelfManagedIoInit.
+   * @tparam Callback Typed noexcept callback.
+   * @return This callback configuration.
+   */
+  template <auto Callback>
+  pnp_power_callbacks &on_self_managed_io_init() noexcept {
+    value_.EvtDeviceSelfManagedIoInit =
+        +[](WDFDEVICE native_device) noexcept -> NTSTATUS {
+      return detail::invoke_status_callback<Callback>(device{native_device});
+    };
+    return *this;
+  }
+
+  /**
+   * @brief Registers EvtDeviceSelfManagedIoCleanup.
+   * @tparam Callback Typed noexcept callback.
+   * @return This callback configuration.
+   */
+  template <auto Callback>
+  pnp_power_callbacks &on_self_managed_io_cleanup() noexcept {
+    value_.EvtDeviceSelfManagedIoCleanup =
+        +[](WDFDEVICE native_device) noexcept {
+      detail::invoke_callback<Callback>(device{native_device});
+    };
+    return *this;
+  }
+
+  /**
+   * @brief Registers EvtDeviceSelfManagedIoFlush.
+   * @tparam Callback Typed noexcept callback.
+   * @return This callback configuration.
+   */
+  template <auto Callback>
+  pnp_power_callbacks &on_self_managed_io_flush() noexcept {
+    value_.EvtDeviceSelfManagedIoFlush =
+        +[](WDFDEVICE native_device) noexcept {
+      detail::invoke_callback<Callback>(device{native_device});
+    };
+    return *this;
+  }
+
+  /**
+   * @brief Registers EvtDeviceSelfManagedIoSuspend.
+   * @tparam Callback Typed noexcept callback.
+   * @return This callback configuration.
+   */
+  template <auto Callback>
+  pnp_power_callbacks &on_self_managed_io_suspend() noexcept {
+    value_.EvtDeviceSelfManagedIoSuspend =
+        +[](WDFDEVICE native_device) noexcept -> NTSTATUS {
+      return detail::invoke_status_callback<Callback>(device{native_device});
+    };
+    return *this;
+  }
+
+  /**
+   * @brief Registers EvtDeviceSelfManagedIoRestart.
+   * @tparam Callback Typed noexcept callback.
+   * @return This callback configuration.
+   */
+  template <auto Callback>
+  pnp_power_callbacks &on_self_managed_io_restart() noexcept {
+    value_.EvtDeviceSelfManagedIoRestart =
+        +[](WDFDEVICE native_device) noexcept -> NTSTATUS {
+      return detail::invoke_status_callback<Callback>(device{native_device});
+    };
+    return *this;
+  }
+
+  /**
+   * @brief Registers EvtDeviceSurpriseRemoval.
+   * @tparam Callback Typed noexcept callback.
+   * @return This callback configuration.
+   */
+  template <auto Callback>
+  pnp_power_callbacks &on_surprise_removal() noexcept {
+    value_.EvtDeviceSurpriseRemoval = +[](WDFDEVICE native_device) noexcept {
+      detail::invoke_callback<Callback>(device{native_device});
+    };
+    return *this;
+  }
+
+  /**
+   * @brief Registers EvtDeviceQueryRemove.
+   * @tparam Callback Typed noexcept callback.
+   * @return This callback configuration.
+   */
+  template <auto Callback>
+  pnp_power_callbacks &on_query_remove() noexcept {
+    value_.EvtDeviceQueryRemove =
+        +[](WDFDEVICE native_device) noexcept -> NTSTATUS {
+      return detail::invoke_status_callback<Callback>(device{native_device});
+    };
+    return *this;
+  }
+
+  /**
+   * @brief Registers EvtDeviceQueryStop.
+   * @tparam Callback Typed noexcept callback.
+   * @return This callback configuration.
+   */
+  template <auto Callback> pnp_power_callbacks &on_query_stop() noexcept {
+    value_.EvtDeviceQueryStop =
+        +[](WDFDEVICE native_device) noexcept -> NTSTATUS {
+      return detail::invoke_status_callback<Callback>(device{native_device});
+    };
+    return *this;
+  }
+
+  /**
+   * @brief Registers EvtDeviceUsageNotification.
+   * @tparam Callback Typed noexcept callback.
+   * @return This callback configuration.
+   */
+  template <auto Callback>
+  pnp_power_callbacks &on_usage_notification() noexcept {
+    value_.EvtDeviceUsageNotification =
+        +[](WDFDEVICE native_device, WDF_SPECIAL_FILE_TYPE notification_type,
+            BOOLEAN in_notification_path) noexcept {
+      detail::invoke_callback<Callback>(device{native_device}, notification_type,
+                                        in_notification_path != FALSE);
+    };
+    return *this;
+  }
+
+  /**
+   * @brief Registers EvtDeviceRelationsQuery.
+   * @tparam Callback Typed noexcept callback.
+   * @return This callback configuration.
+   */
+  template <auto Callback>
+  pnp_power_callbacks &on_relations_query() noexcept {
+    value_.EvtDeviceRelationsQuery =
+        +[](WDFDEVICE native_device,
+            DEVICE_RELATION_TYPE relation_type) noexcept {
+      detail::invoke_callback<Callback>(device{native_device}, relation_type);
+    };
+    return *this;
+  }
+
+  /**
+   * @brief Registers EvtDeviceUsageNotificationEx.
+   * @tparam Callback Typed noexcept callback.
+   * @return This callback configuration.
+   */
+  template <auto Callback>
+  pnp_power_callbacks &on_usage_notification_ex() noexcept {
+    value_.EvtDeviceUsageNotificationEx =
+        +[](WDFDEVICE native_device, WDF_SPECIAL_FILE_TYPE notification_type,
+            BOOLEAN in_notification_path) noexcept -> NTSTATUS {
+      return detail::invoke_status_callback<Callback>(
+          device{native_device}, notification_type,
+          in_notification_path != FALSE);
+    };
+    return *this;
+  }
+
+  /** @brief Returns the mutable native callback structure. */
+  PWDF_PNPPOWER_EVENT_CALLBACKS native() noexcept { return &value_; }
+
+private:
+  WDF_PNPPOWER_EVENT_CALLBACKS value_{};
+};
+
+/**
+ * @brief Initializes and configures WDF power-policy callbacks.
+ */
+class power_policy_callbacks {
+public:
+  /** @brief Initializes all power-policy callbacks to WDF defaults. */
+  power_policy_callbacks() noexcept {
+    WDF_POWER_POLICY_EVENT_CALLBACKS_INIT(&value_);
+  }
+
+  /**
+   * @brief Registers EvtDeviceArmWakeFromS0.
+   * @tparam Callback Typed noexcept callback.
+   * @return This callback configuration.
+   */
+  template <auto Callback>
+  power_policy_callbacks &on_arm_wake_from_s0() noexcept {
+    value_.EvtDeviceArmWakeFromS0 =
+        +[](WDFDEVICE native_device) noexcept -> NTSTATUS {
+      return detail::invoke_status_callback<Callback>(device{native_device});
+    };
+    return *this;
+  }
+
+  /**
+   * @brief Registers EvtDeviceDisarmWakeFromS0.
+   * @tparam Callback Typed noexcept callback.
+   * @return This callback configuration.
+   */
+  template <auto Callback>
+  power_policy_callbacks &on_disarm_wake_from_s0() noexcept {
+    value_.EvtDeviceDisarmWakeFromS0 =
+        +[](WDFDEVICE native_device) noexcept {
+      detail::invoke_callback<Callback>(device{native_device});
+    };
+    return *this;
+  }
+
+  /**
+   * @brief Registers EvtDeviceWakeFromS0Triggered.
+   * @tparam Callback Typed noexcept callback.
+   * @return This callback configuration.
+   */
+  template <auto Callback>
+  power_policy_callbacks &on_wake_from_s0_triggered() noexcept {
+    value_.EvtDeviceWakeFromS0Triggered =
+        +[](WDFDEVICE native_device) noexcept {
+      detail::invoke_callback<Callback>(device{native_device});
+    };
+    return *this;
+  }
+
+  /**
+   * @brief Registers EvtDeviceArmWakeFromSx.
+   * @tparam Callback Typed noexcept callback.
+   * @return This callback configuration.
+   */
+  template <auto Callback>
+  power_policy_callbacks &on_arm_wake_from_sx() noexcept {
+    value_.EvtDeviceArmWakeFromSx =
+        +[](WDFDEVICE native_device) noexcept -> NTSTATUS {
+      return detail::invoke_status_callback<Callback>(device{native_device});
+    };
+    return *this;
+  }
+
+  /**
+   * @brief Registers EvtDeviceDisarmWakeFromSx.
+   * @tparam Callback Typed noexcept callback.
+   * @return This callback configuration.
+   */
+  template <auto Callback>
+  power_policy_callbacks &on_disarm_wake_from_sx() noexcept {
+    value_.EvtDeviceDisarmWakeFromSx =
+        +[](WDFDEVICE native_device) noexcept {
+      detail::invoke_callback<Callback>(device{native_device});
+    };
+    return *this;
+  }
+
+  /**
+   * @brief Registers EvtDeviceWakeFromSxTriggered.
+   * @tparam Callback Typed noexcept callback.
+   * @return This callback configuration.
+   */
+  template <auto Callback>
+  power_policy_callbacks &on_wake_from_sx_triggered() noexcept {
+    value_.EvtDeviceWakeFromSxTriggered =
+        +[](WDFDEVICE native_device) noexcept {
+      detail::invoke_callback<Callback>(device{native_device});
+    };
+    return *this;
+  }
+
+  /**
+   * @brief Registers EvtDeviceArmWakeFromSxWithReason.
+   * @tparam Callback Typed noexcept callback.
+   * @return This callback configuration.
+   */
+  template <auto Callback>
+  power_policy_callbacks &on_arm_wake_from_sx_with_reason() noexcept {
+    value_.EvtDeviceArmWakeFromSxWithReason =
+        +[](WDFDEVICE native_device, BOOLEAN device_wake_enabled,
+            BOOLEAN children_armed_for_wake) noexcept -> NTSTATUS {
+      return detail::invoke_status_callback<Callback>(
+          device{native_device}, device_wake_enabled != FALSE,
+          children_armed_for_wake != FALSE);
+    };
+    return *this;
+  }
+
+  /** @brief Returns the mutable native callback structure. */
+  PWDF_POWER_POLICY_EVENT_CALLBACKS native() noexcept { return &value_; }
+
+private:
+  WDF_POWER_POLICY_EVENT_CALLBACKS value_{};
+};
+} // namespace ntl::kmdf

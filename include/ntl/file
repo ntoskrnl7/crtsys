@@ -1,0 +1,72 @@
+/**
+ * @file file
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Non-owning C++ facade for a kernel FILE_OBJECT.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include <ntddk.h>
+
+#include <string_view>
+
+namespace ntl {
+/**
+ * @brief Observes a kernel FILE_OBJECT without owning its reference.
+ *
+ * This type is intended for dispatch and framework callbacks whose caller
+ * keeps the FILE_OBJECT alive. Use ntl::unique_object<PFILE_OBJECT> when an
+ * object-manager reference must be owned.
+ */
+class file {
+public:
+  /** @brief Creates an empty file-object facade. */
+  file() noexcept = default;
+
+  /** @brief Wraps a FILE_OBJECT without taking or releasing a reference. */
+  explicit file(PFILE_OBJECT object) noexcept : object_(object) {}
+
+  /** @brief Returns the file name stored in FILE_OBJECT. */
+  std::wstring_view name() const noexcept {
+    if (!object_ || !object_->FileName.Buffer)
+      return {};
+    return {object_->FileName.Buffer,
+            object_->FileName.Length / sizeof(wchar_t)};
+  }
+
+  /** @brief Returns whether read access was granted for this open. */
+  bool can_read() const noexcept {
+    return object_ && object_->ReadAccess != FALSE;
+  }
+
+  /** @brief Returns whether write access was granted for this open. */
+  bool can_write() const noexcept {
+    return object_ && object_->WriteAccess != FALSE;
+  }
+
+  /** @brief Returns whether delete access was granted for this open. */
+  bool can_delete() const noexcept {
+    return object_ && object_->DeleteAccess != FALSE;
+  }
+
+  /** @brief Returns the related FILE_OBJECT, if one is present. */
+  file related() const noexcept {
+    return file{object_ ? object_->RelatedFileObject : nullptr};
+  }
+
+  /** @brief Returns the target device object recorded by the I/O manager. */
+  PDEVICE_OBJECT device_object() const noexcept {
+    return object_ ? object_->DeviceObject : nullptr;
+  }
+
+  /** @brief Returns the native FILE_OBJECT pointer. */
+  PFILE_OBJECT native_object() const noexcept { return object_; }
+
+  /** @brief Returns true when a FILE_OBJECT is present. */
+  explicit operator bool() const noexcept { return object_ != nullptr; }
+
+private:
+  PFILE_OBJECT object_ = nullptr;
+};
+} // namespace ntl

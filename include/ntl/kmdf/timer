@@ -1,0 +1,209 @@
+/**
+ * @file timer
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Typed KMDF timer configuration and object facade.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "callback"
+#include "object_attributes"
+
+#include "../result"
+
+#include <utility>
+#include "detail/wdf"
+
+namespace ntl::kmdf {
+class timer_config;
+
+/** @brief Non-owning facade for a WDFTIMER object. */
+class timer {
+public:
+  /** @brief Creates an empty timer facade. */
+  timer() noexcept = default;
+
+  /** @brief Wraps a WDF timer object without taking ownership. */
+  explicit timer(WDFTIMER object) noexcept : object_(object) {}
+
+  /**
+   * @brief Creates a WDF timer parented to another WDF object.
+   * @param parent Parent object that controls the timer lifetime.
+   * @param config Typed timer configuration.
+   * @param attributes Optional callback and context attributes.
+   */
+  template <class Parent>
+  static ntl::result<timer>
+  try_create(const Parent &parent, timer_config &config,
+             object_attributes *attributes = nullptr) noexcept;
+
+  /** @brief Creates a parented timer with a managed C++ context. */
+  template <class Context, class Parent, class... Args>
+  static ntl::result<timer>
+  try_create(const Parent &parent, timer_config &config,
+             object_attributes *attributes, Args &&...args) noexcept;
+
+  /**
+   * @brief Starts or restarts the timer.
+   * @param due_time Absolute or relative WDF due time in 100-nanosecond units.
+   * @return True when the timer was already queued.
+   * @note May be called at IRQL <= DISPATCH_LEVEL.
+   */
+  bool start(LONGLONG due_time) const noexcept {
+    return WdfTimerStart(object_, due_time) != FALSE;
+  }
+
+  /** @brief Starts the timer after a relative millisecond interval. */
+  bool start_after_ms(ULONG milliseconds) const noexcept {
+    return start(WDF_REL_TIMEOUT_IN_MS(milliseconds));
+  }
+
+  /**
+   * @brief Stops the timer.
+   * @param wait True to wait for an executing callback to return.
+   * @return True when the timer was queued before this call.
+   * @note `wait == true` requires PASSIVE_LEVEL; otherwise DISPATCH_LEVEL is
+   * supported.
+   */
+  bool stop(bool wait = false) const noexcept {
+    return WdfTimerStop(object_, wait ? TRUE : FALSE) != FALSE;
+  }
+
+  /** @brief Returns the timer's parent WDF object. */
+  object parent() const noexcept {
+    return object{WdfTimerGetParentObject(object_)};
+  }
+
+  /** @brief Returns this timer object's constructed C++ context. */
+  template <class T> T &context() const noexcept {
+    return detail::get_context<T>(reinterpret_cast<WDFOBJECT>(object_));
+  }
+
+  /** @brief Returns this timer object's context, or nullptr when absent. */
+  template <class T> T *try_context() const noexcept {
+    return detail::try_get_context<T>(reinterpret_cast<WDFOBJECT>(object_));
+  }
+
+  /** @brief Allocates and constructs an additional timer context. */
+  template <class T, class... Args>
+  ntl::result<T *> try_emplace_context(Args &&...args) const noexcept {
+    return object{reinterpret_cast<WDFOBJECT>(object_)}
+        .template try_emplace_context<T>(std::forward<Args>(args)...);
+  }
+
+  /** @brief Returns the native WDF timer object. */
+  WDFTIMER native_object() const noexcept { return object_; }
+
+  /** @brief Returns true when a native timer object is present. */
+  explicit operator bool() const noexcept { return object_ != WDF_NO_HANDLE; }
+
+private:
+  WDFTIMER object_ = WDF_NO_HANDLE;
+};
+
+/** @brief Initializes and configures WDF_TIMER_CONFIG. */
+class timer_config {
+public:
+  /**
+   * @brief Creates a one-shot timer configuration.
+   * @tparam Callback Non-capturing `void(timer) noexcept` callback.
+   */
+  template <auto Callback> static timer_config one_shot() noexcept {
+    return timer_config{+[](WDFTIMER native_timer) noexcept {
+      detail::invoke_callback<Callback>(timer{native_timer});
+    }};
+  }
+
+  /**
+   * @brief Creates a periodic timer configuration.
+   * @tparam Callback Non-capturing `void(timer) noexcept` callback.
+   * @param period_ms Period in milliseconds.
+   */
+  template <auto Callback>
+  static timer_config periodic(ULONG period_ms) noexcept {
+    timer_config config{+[](WDFTIMER native_timer) noexcept {
+      detail::invoke_callback<Callback>(timer{native_timer});
+    }};
+    config.period(period_ms);
+    return config;
+  }
+
+  /** @brief Registers the typed timer callback. */
+  template <auto Callback> timer_config &on_expire() noexcept {
+    value_.EvtTimerFunc = +[](WDFTIMER native_timer) noexcept {
+      detail::invoke_callback<Callback>(timer{native_timer});
+    };
+    return *this;
+  }
+
+  /** @brief Sets zero for one-shot operation or a millisecond period. */
+  timer_config &period(ULONG period_ms) noexcept {
+    value_.Period = period_ms;
+    return *this;
+  }
+
+  /** @brief Configures serialization with the parent object's callbacks. */
+  timer_config &automatic_serialization(bool enabled = true) noexcept {
+    value_.AutomaticSerialization = enabled ? TRUE : FALSE;
+    return *this;
+  }
+
+  /** @brief Sets the permitted timer coalescing delay in milliseconds. */
+  timer_config &tolerable_delay(ULONG milliseconds) noexcept {
+    value_.TolerableDelay = milliseconds;
+    return *this;
+  }
+
+  /** @brief Selects a high-resolution framework timer. */
+  timer_config &high_resolution(bool enabled = true) noexcept {
+    value_.UseHighResolutionTimer = enabled ? TRUE : FALSE;
+    return *this;
+  }
+
+  /** @brief Returns the mutable native timer configuration. */
+  PWDF_TIMER_CONFIG native() noexcept { return &value_; }
+
+private:
+  explicit timer_config(PFN_WDF_TIMER callback) noexcept {
+    WDF_TIMER_CONFIG_INIT(&value_, callback);
+  }
+
+  WDF_TIMER_CONFIG value_{};
+};
+
+template <class Parent>
+ntl::result<timer> timer::try_create(const Parent &parent, timer_config &config,
+                                     object_attributes *attributes) noexcept {
+  object_attributes local_attributes;
+  object_attributes &effective = attributes ? *attributes : local_attributes;
+  effective.parent(parent);
+
+  WDFTIMER object = WDF_NO_HANDLE;
+  const NTSTATUS result =
+      WdfTimerCreate(config.native(), effective.native(), &object);
+  if (!NT_SUCCESS(result))
+    return ntl::unexpected(result);
+  return ntl::ok(timer{object});
+}
+
+template <class Context, class Parent, class... Args>
+ntl::result<timer> timer::try_create(const Parent &parent, timer_config &config,
+                                     object_attributes *attributes,
+                                     Args &&...args) noexcept {
+  object_attributes local_attributes;
+  object_attributes &effective = attributes ? *attributes : local_attributes;
+  effective.parent(parent);
+  effective.template prepare_context<Context>();
+
+  WDFTIMER object = WDF_NO_HANDLE;
+  const NTSTATUS result =
+      WdfTimerCreate(config.native(), effective.native(), &object);
+  if (!NT_SUCCESS(result))
+    return ntl::unexpected(result);
+
+  effective.template construct_context<Context>(
+      reinterpret_cast<WDFOBJECT>(object), std::forward<Args>(args)...);
+  return ntl::ok(timer{object});
+}
+} // namespace ntl::kmdf

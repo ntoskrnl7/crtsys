@@ -101,6 +101,32 @@ ntl::status ntl::main(ntl::driver& driver,
 }
 ```
 
+### WDM and KMDF driver models
+
+The NuGet package reads the WDK project's existing `DriverType` setting. A
+KMDF project uses its normal `DriverEntry` and `WdfDriverCreate` by default.
+Projects that prefer an NTL-style entry can set
+`CrtSysUseNtlKmdfMain=true` and implement `ntl::kmdf::main` instead. Both modes
+leave PnP, power, queue, request, object lifetime, and dispatch processing with
+WDF; crtsys only brackets the WDF startup/unload path with C++ runtime lifetime.
+
+For a regular WDM project that defines its own `DriverEntry`, set:
+
+```xml
+<CrtSysUseNtlMain>false</CrtSysUseNtlMain>
+```
+
+For CMake, select standard KMDF or the optional NTL KMDF entry on the existing
+helper:
+
+```cmake
+crtsys_add_driver(my_kmdf_driver KMDF 1.15 src/main.cpp)
+crtsys_add_driver(my_ntl_kmdf_driver KMDF 1.15 NTL src/main.cpp)
+```
+
+See the complete [NTL KMDF driver/app sample](./examples/kmdf-ntl-driver)
+and the [NTL KMDF API guide](./docs/ntl/kmdf.md).
+
 ## Runtime Stack
 
 ```mermaid
@@ -159,13 +185,14 @@ may compile or work.
 | [Usage Examples](./docs/usage-examples.md) | Small driver-side NTL examples |
 | [NTL sample driver](./examples/ntl-driver) | Complete Visual Studio/NuGet and CMake driver sample using `ntl::main`, device endpoint, typed IOCTLs, remove lock, registry config, passive executor, and pool-backed PMR |
 | [NTL RPC sample driver](./examples/ntl-rpc-driver) | Complete Visual Studio/NuGet and CMake driver/app pair using the shared NTL RPC schema |
+| [NTL KMDF sample](./examples/kmdf-ntl-driver) | `ntl::kmdf::main`, C++ WDF contexts, typed file/queue/request and deferred callbacks, and STL in passive KMDF callbacks |
 | [CI Driver Load Tests](./docs/ci-driver-load-tests.md) | Optional self-hosted driver load/run workflow |
 
 ## Operational Boundaries
 
 | Boundary | Policy |
 | --- | --- |
-| Driver model | The driver remains a normal WDK driver. Verifier, HVCI, unload safety, target OS validation, and paging rules still matter. |
+| Driver model | WDM and KMDF projects remain normal WDK drivers. KMDF retains WDF ownership of PnP, power, queues, requests, and dispatch. Verifier, HVCI, unload safety, target OS validation, and paging rules still matter. |
 | IRQL | Runtime-backed C++/CRT/STL paths are `PASSIVE_LEVEL` unless a specific API documents a wider contract. |
 | Stack | Kernel stacks are small; use `ntl::expand_stack` for exception-heavy or STL-heavy paths. |
 | TLS | MSVC function-local statics are supported, including multi-driver compiler TLS slot isolation. That supported path isolates runtime compiler TLS slots between driver images. It does not make user-declared `thread_local T value` safe: in kernel mode the GS-based TLS assumption points at processor-local KPCR state, not a per-thread user-mode TEB. |
@@ -181,7 +208,14 @@ may compile or work.
 
 Tested toolchains include Visual Studio 2017, 2019, 2022, and 2026 with WDK/SDK
 versions such as `10.0.17763.0`, `10.0.18362.0`, `10.0.22000.0`,
-`10.0.22621.0`, and `10.0.26100.0`.
+`10.0.22621.0`, `10.0.26100.0`, and `10.0.28000.0`.
+
+The Visual Studio 2026 (`v145`) validation covers SDK/WDK `10.0.28000.0`
+on x64 and ARM64. Because WDK `10.0.28000.0` does not provide x86
+kernel-mode libraries, the v145 x86 configuration uses SDK `10.0.28000.0`
+with WDK `10.0.22621.0`. A clean v145 x64 Debug driver built with LDK
+`0.7.24` and SDK/WDK `10.0.28000.0` also passed VM load, run, and unload
+validation.
 
 Visual Studio 2017 has missing CRT source/header pieces for some paths, so
 `crtsys` uses selected UCXXRT compatibility code for that toolset.

@@ -1,0 +1,23 @@
+/**
+ * @file wdf
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Internal KMDF include boundary.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ *
+ */
+#pragma once
+
+#if defined(_MSC_VER)
+#pragma warning(push)
+// Older WDK KMDF 1.15 headers forward-declare _WDF_REQUEST_TYPE without an
+// underlying type. MSVC reports C4471 even though the declaration is owned by
+// the WDK; newer WDK headers declare it as `enum _WDF_REQUEST_TYPE : int`.
+#pragma warning(disable : 4471)
+#endif
+
+#include <wdf.h>
+
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
