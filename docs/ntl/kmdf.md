@@ -48,7 +48,8 @@ ntl::status ntl::kmdf::main(driver_builder& builder,
 ```
 
 `driver`, `device`, `file`, `io_queue`, `io_target`, `request`, `memory`,
-`interrupt`, `timer`, `work_item`, and `child_list` are non-owning facades.
+`dma_enabler`, `common_buffer`, `dma_transaction`, `interrupt`, `timer`,
+`work_item`, and `child_list` are non-owning facades.
 WDF retains native object ownership and applies the configured parent-child
 lifetime rules. `registry_key` and `driver_request` are move-only owners:
 `registry_key` closes its `WDFKEY`, while `driver_request` deletes an unsent
@@ -379,6 +380,78 @@ auto open = ntl::kmdf::io_target_open_params::open_by_name(
     &*name, GENERIC_READ | GENERIC_WRITE);
 auto status = created_target->try_open(open);
 ```
+
+## DMA
+
+`dma_enabler`, `common_buffer`, and `dma_transaction` preserve KMDF's native
+DMA object and callback model while replacing repetitive configuration and
+handle conversion with typed facades. Creating an enabler or common buffer is
+a `PASSIVE_LEVEL` operation. The program-DMA callback normally runs at
+`DISPATCH_LEVEL`, so it must not use the PASSIVE_LEVEL CRT/STL surface.
+
+```cpp
+ntl::kmdf::dma_enabler_config dma_config(
+    WdfDmaProfileScatterGather64, 1024 * 1024);
+
+auto dma = ntl::kmdf::dma_enabler::try_create(device, dma_config);
+if (!dma)
+  return dma.status();
+
+ntl::kmdf::common_buffer_config aligned(15); // 16-byte alignment
+auto descriptors = ntl::kmdf::common_buffer::try_create(
+    dma.value(), 4096, aligned);
+if (!descriptors)
+  return descriptors.status();
+
+auto* table = descriptors->data<device_descriptor>();
+const auto device_address = descriptors->logical_address();
+```
+
+A request-backed DMA transaction installs an allocation-free typed program
+callback. The callback receives the scatter/gather list that must be
+programmed into the device:
+
+```cpp
+constexpr auto program_dma =
+    +[](ntl::kmdf::dma_transaction transaction,
+        ntl::kmdf::device,
+        void* context,
+        WDF_DMA_DIRECTION direction,
+        ntl::kmdf::scatter_gather_list fragments) noexcept {
+      auto& registers = *static_cast<device_registers*>(context);
+      for (ULONG i = 0; i != fragments.size(); ++i) {
+        const auto* fragment = fragments.at(i);
+        registers.program(direction, fragment->Address,
+                          fragment->Length);
+      }
+      return true;
+    };
+
+auto transaction = ntl::kmdf::dma_transaction::try_create(dma.value());
+if (!transaction)
+  return transaction.status();
+
+auto status = transaction->try_initialize_request<program_dma>(
+    request, WdfDmaDirectionWriteToDevice);
+if (status.is_err())
+  return status;
+
+return transaction->try_execute(&registers);
+```
+
+The facade deliberately does not delete an active transaction. After the
+interrupt/DPC path reports the last transfer with `complete_transfer()` or
+`complete_final()`, call `try_release()` before reinitializing the same WDF
+object, or call `destroy()` when it will not be reused. If `try_execute()`
+fails after successful initialization, release the transaction before reuse.
+The WDF parent remains the final teardown fallback.
+
+Package builds instantiate these typed DMA callbacks on every supported
+toolset and architecture. Runtime DMA execution requires matching hardware
+resources and is therefore not claimed by the software-only VM smoke test.
+The buildable [KMDF DMA driver template](../../examples/kmdf-dma-ntl-driver)
+shows the complete request, scatter/gather programming, interrupt-DPC
+completion, transaction release, and request-completion flow.
 
 ## Interrupts
 

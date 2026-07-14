@@ -11,6 +11,7 @@
 #include "callback"
 #include "child_list"
 #include "context"
+#include "dma"
 #include "device"
 #include "driver"
 #include "file"
