@@ -1,0 +1,493 @@
+# KMDF Helpers
+
+[Back to NTL documentation](./README.md)
+
+NTL KMDF support is an optional C++ surface over the normal KMDF object model.
+It does not replace WDF dispatch, PnP, power, queue, request, parent-child
+lifetime, or synchronization rules.
+
+## Select The Entry Model
+
+Visual Studio/MSBuild projects keep `<DriverType>KMDF</DriverType>` and opt in:
+
+```xml
+<CrtSysUseNtlKmdfMain>true</CrtSysUseNtlKmdfMain>
+```
+
+CMake projects add `NTL` to the KMDF driver declaration:
+
+```cmake
+crtsys_add_driver(my_driver KMDF 1.15 NTL src/main.cpp)
+```
+
+Without that opt-in, a KMDF project keeps its standard `DriverEntry` and calls
+`WdfDriverCreate` itself.
+
+## Driver Entry
+
+The NTL entry receives a `driver_builder` bound to the native `DriverEntry`
+arguments. `try_create()` preserves the `NTSTATUS` returned by
+`WdfDriverCreate`.
+
+```cpp
+#include <ntl/kmdf/all>
+
+constexpr auto on_driver_unload =
+    +[](kmdf::driver) noexcept {};
+
+ntl::status ntl::kmdf::main(driver_builder& builder,
+                            const std::wstring& registry_path) {
+  (void)registry_path;
+
+  kmdf::driver_config config;
+  config.non_pnp().on_unload<on_driver_unload>();
+
+  auto driver = builder.try_create(config);
+  return driver ? ntl::status::ok() : driver.status();
+}
+```
+
+`driver`, `device`, `file`, `io_queue`, `io_target`, `request`, `interrupt`,
+`timer`, `work_item`, and `child_list` are non-owning facades. WDF retains
+native object ownership and applies the configured parent-child lifetime
+rules. `registry_key` is the exception: it is a move-only owner that closes
+its `WDFKEY` at `PASSIVE_LEVEL`.
+
+## Plug And Play Device
+
+`EvtDriverDeviceAdd` receives a framework-owned `PWDFDEVICE_INIT`.
+`device_init` is deliberately non-owning: it never calls `WdfDeviceInitFree`.
+On successful `try_create()`, `WdfDeviceCreate` consumes the initialization
+object. If the callback returns before creating a device, KMDF deletes it after
+the callback returns.
+
+```cpp
+constexpr auto on_prepare_hardware =
+    +[](kmdf::device, kmdf::resource_list,
+        kmdf::resource_list) noexcept -> NTSTATUS {
+      return STATUS_SUCCESS;
+    };
+
+constexpr auto on_release_hardware =
+    +[](kmdf::device,
+        kmdf::resource_list) noexcept -> NTSTATUS {
+      return STATUS_SUCCESS;
+    };
+
+constexpr auto on_d0_entry =
+    +[](kmdf::device,
+        WDF_POWER_DEVICE_STATE) noexcept -> NTSTATUS {
+      return STATUS_SUCCESS;
+    };
+
+constexpr auto on_d0_exit =
+    +[](kmdf::device,
+        WDF_POWER_DEVICE_STATE) noexcept -> NTSTATUS {
+      return STATUS_SUCCESS;
+    };
+
+constexpr auto on_device_control =
+    +[](kmdf::io_queue, kmdf::request request, size_t, size_t,
+        ULONG) noexcept {
+      request.complete(STATUS_NOT_SUPPORTED);
+    };
+
+constexpr auto on_device_add =
+    +[](kmdf::driver, kmdf::device_init& init) noexcept -> NTSTATUS {
+      ntl::kmdf::pnp_power_callbacks callbacks;
+      callbacks
+          .on_prepare_hardware<on_prepare_hardware>()
+          .on_release_hardware<on_release_hardware>()
+          .on_d0_entry<on_d0_entry>()
+          .on_d0_exit<on_d0_exit>();
+
+      init.io_type(WdfDeviceIoBuffered).pnp_power(callbacks);
+
+      ntl::kmdf::object_attributes attributes;
+      attributes.execution_level(WdfExecutionLevelPassive);
+      auto device = init.try_create(&attributes);
+      if (!device)
+        return device.status();
+
+      ntl::status status =
+          device.value().try_create_interface(GUID_DEVINTERFACE_MY_DEVICE);
+      if (status.is_err())
+        return status;
+
+      ntl::kmdf::io_queue_config queue(WdfIoQueueDispatchSequential);
+      queue.on_device_control<on_device_control>();
+      queue.power_managed(WdfTrue);
+      auto created_queue =
+          ntl::kmdf::io_queue::try_create(device.value(), queue);
+      return created_queue ? STATUS_SUCCESS : created_queue.status();
+    };
+
+ntl::status ntl::kmdf::main(driver_builder& builder,
+                            const std::wstring&) {
+  ntl::kmdf::driver_config config;
+  config.on_device_add<on_device_add>();
+  auto driver = builder.try_create(config);
+  return driver ? ntl::status::ok() : driver.status();
+}
+```
+
+The unary `+` converts each non-capturing lambda to a compile-time function
+pointer. Giving that pointer a `constexpr` name before passing it as a template
+argument also keeps Visual Studio IntelliSense from misparsing an inline lambda
+template argument. NTL installs an allocation-free WDF thunk that converts
+native handles to non-owning `driver`, `device`, `io_queue`, `request`, and
+`resource_list` facades. Callbacks must be `noexcept`. Persistent state belongs
+in a WDF object context because WDF callbacks cannot retain a C++ lambda closure.
+
+`pnp_power_callbacks` covers hardware prepare/release, D0 transitions,
+self-managed I/O, query-stop/query-remove, and surprise removal.
+`power_policy_callbacks` covers S0/Sx wake policy callbacks. Both expose
+`native()` for less common WDF fields rather than hiding the native framework.
+
+## C++ Object Context
+
+NTL can construct a C++ object directly in WDF-owned context storage. This is
+the KMDF counterpart of the extension lifetime managed by `ntl::device<T>`:
+construction follows successful WDF object creation, and the destructor runs
+from the WDF destroy callback before the context storage is released.
+
+```cpp
+struct device_state {
+  std::vector<std::uint32_t> completed_values;
+  std::atomic<std::uint32_t> open_files{0};
+
+  ~device_state() noexcept = default;
+};
+
+ntl::kmdf::object_attributes attributes;
+attributes.execution_level(WdfExecutionLevelPassive);
+
+auto created = init.try_create<device_state>(&attributes);
+if (!created)
+  return created.status();
+
+auto& state = created->context<device_state>();
+```
+
+Context constructors and destructors must be `noexcept`. WDF stores one
+context for each C++ type; `object::try_emplace_context<T>()` can attach an
+additional type after object creation. `try_context<T>()` returns null when
+that type is absent, while `context<T>()` asserts that it is present. Native
+`WDF_DECLARE_CONTEXT_TYPE*` contexts remain available through
+`object_attributes::context_type()` when NTL-managed C++ lifetime is not used.
+
+## Control Device And Queue
+
+`control_device_init` owns a `PWDFDEVICE_INIT` until it is consumed by
+`try_create()`. If setup fails first, its destructor calls
+`WdfDeviceInitFree`. `object_attributes`, `driver_config`, and
+`io_queue_config` install typed callbacks while retaining `native()` access to
+the corresponding WDF configuration structures for fields not wrapped by NTL.
+
+```cpp
+#include <wdmsec.h>
+
+auto init = ntl::kmdf::control_device_init::try_allocate(
+    driver, &SDDL_DEVOBJ_SYS_ALL_ADM_RWX_WORLD_RW_RES_R);
+if (!init)
+  return init.status();
+
+auto device = init.value().try_create();
+if (!device)
+  return device.status();
+
+ntl::kmdf::io_queue_config queue_config(WdfIoQueueDispatchSequential);
+queue_config.on_device_control<on_device_control>();
+
+auto queue = ntl::kmdf::io_queue::try_create(device.value(), queue_config);
+if (!queue)
+  return queue.status();
+```
+
+For a complete non-PnP control-device flow with an application, typed request
+buffers, STL use, symbolic-link creation, and queue callbacks, see the
+[NTL KMDF sample](../../examples/kmdf-ntl-driver).
+
+## File Objects
+
+`ntl::kmdf::file` observes a `WDFFILEOBJECT`. Its `wdm()` method returns an
+`ntl::file` view of the underlying `PFILE_OBJECT`; neither facade owns or
+dereferences the object. Use `ntl::unique_object<PFILE_OBJECT>` when an
+object-manager reference must be owned, and a handle owner for a file opened
+through `ZwCreateFile`.
+
+```cpp
+struct file_state {
+  std::wstring name;
+  bool cleaned_up = false;
+  ~file_state() noexcept = default;
+};
+
+constexpr auto on_file_create =
+    +[](kmdf::device device, kmdf::request request,
+        kmdf::file file) noexcept {
+      try {
+        file.context<file_state>().name.assign(file.name());
+        ++device.context<device_state>().open_files;
+        request.complete(STATUS_SUCCESS);
+      } catch (...) {
+        request.complete(STATUS_INSUFFICIENT_RESOURCES);
+      }
+    };
+
+constexpr auto on_file_cleanup = +[](kmdf::file file) noexcept {
+  file.context<file_state>().cleaned_up = true;
+};
+
+constexpr auto on_file_close = +[](kmdf::file file) noexcept {
+  NT_ASSERT(file.context<file_state>().cleaned_up);
+};
+
+ntl::kmdf::file_config<file_state> files;
+files
+    .on_create<on_file_create>()
+    .on_cleanup<on_file_cleanup>()
+    .on_close<on_file_close>();
+
+init.file_objects(files);
+```
+
+The file context is constructed before the typed create callback and destroyed
+with the `WDFFILEOBJECT`, after the native cleanup/close sequence. Configure
+file-object cleanup behavior with `file_config`, rather than combining an
+NTL-managed file context with `object_attributes::on_cleanup()` or
+`on_destroy()`.
+
+## Request Buffers
+
+`request::try_input_buffer<T>()` and `try_output_buffer<T>()` call the matching
+KMDF buffer-retrieval APIs and return `ntl::result<request_buffer<T>>`.
+`request_buffer<T>` is a non-owning view valid only under the native WDF request
+buffer lifetime contract.
+
+`request` is move-only because a KMDF callback has one right to complete,
+forward, requeue, or send the request. `request::try_forward_to()` and
+`try_requeue()` are rvalue-qualified and empty the facade after WDF accepts the
+transfer:
+
+```cpp
+auto status = std::move(request).try_forward_to(destination);
+```
+
+`try_mark_cancelable()` and `try_unmark_cancelable()` preserve KMDF's native
+cancellation race: `STATUS_CANCELLED` from unmark means the cancellation
+callback owns completion.
+
+To send a formatted request to another device stack, register an allocation-
+free completion callback and transfer it to an `io_target`:
+
+```cpp
+auto target = device.default_io_target();
+ntl::kmdf::send_options options;
+options.timeout(WDF_REL_TIMEOUT_IN_MS(1000));
+
+constexpr auto on_request_completion =
+    +[](kmdf::request request, kmdf::io_target,
+        kmdf::completion_params result, void*) noexcept {
+      request.complete(result.status(), result.information());
+    };
+request.on_completion<on_request_completion>();
+
+auto status = std::move(request).try_send(target, &options);
+if (status.is_err()) {
+  // WDF did not accept the send; this code still controls request.
+  request.complete(status);
+}
+```
+
+Successful send transfers control to WDF until the completion callback.
+Failed send leaves the original request facade usable. `send_options`
+deliberately models asynchronous ownership-preserving options; synchronous and
+send-and-forget modes remain available through native WDF APIs because they
+have different completion contracts.
+
+## Interrupts
+
+`interrupt_config` installs compile-time callbacks without dynamic allocation.
+`interrupt::try_create()` preserves `WdfInterruptCreate` status and can also
+construct an NTL-managed C++ interrupt context.
+
+| Callback | Typed signature | Execution level |
+| --- | --- | --- |
+| ISR | `bool(interrupt, ULONG) noexcept` | DIRQL, or `PASSIVE_LEVEL` for a passive interrupt |
+| DPC | `void(interrupt, object) noexcept` | `DISPATCH_LEVEL` |
+| Work item | `void(interrupt, object) noexcept` | `PASSIVE_LEVEL` |
+| Enable/disable | `NTSTATUS(interrupt, device) noexcept` | Interrupt service level |
+
+```cpp
+constexpr auto on_interrupt =
+    +[](kmdf::interrupt interrupt, ULONG) noexcept {
+      // Inspect and acknowledge hardware here.
+      return interrupt.queue_dpc();
+    };
+constexpr auto on_interrupt_dpc =
+    +[](kmdf::interrupt interrupt, kmdf::object) noexcept {
+      // DISPATCH_LEVEL: defer CRT/STL work if necessary.
+      interrupt.queue_work_item();
+    };
+constexpr auto on_interrupt_work_item =
+    +[](kmdf::interrupt, kmdf::object) noexcept {
+      // PASSIVE_LEVEL work may use the audited CRT/STL surface.
+    };
+
+auto config =
+    ntl::kmdf::interrupt_config::with_isr<on_interrupt>();
+config
+    .on_dpc<on_interrupt_dpc>()
+    .on_work_item<on_interrupt_work_item>();
+
+auto created = ntl::kmdf::interrupt::try_create(device, config);
+if (!created)
+  return created.status();
+```
+
+`interrupt_lock` pairs `WdfInterruptAcquireLock` and
+`WdfInterruptReleaseLock`; `interrupt::synchronize()` wraps
+`WdfInterruptSynchronize`. These helpers retain the native interrupt IRQL and
+deadlock contracts.
+
+## Timer And Work Item
+
+`ntl::kmdf::timer` and `ntl::kmdf::work_item` are WDF objects parented to a
+device, queue, or another WDF object. They are different from the WDM-oriented
+`ntl::timer` and `ntl::work_item`: KMDF owns their lifetime and can serialize
+their callbacks with the parent object's callbacks.
+
+```cpp
+constexpr auto on_work_item = +[](kmdf::work_item item) noexcept {
+  auto& state = item.parent().context<device_state>();
+  state.refresh_at_passive_level();
+};
+constexpr auto on_timer = +[](kmdf::timer timer) noexcept {
+  timer.parent().context<device_state>().poll();
+};
+
+auto work_config =
+    ntl::kmdf::work_item_config::with_callback<on_work_item>();
+work_config.automatic_serialization(false);
+
+auto work = ntl::kmdf::work_item::try_create(device, work_config);
+if (!work)
+  return work.status();
+work->enqueue();
+
+auto timer_config =
+    ntl::kmdf::timer_config::periodic<on_timer>(1000);
+
+ntl::kmdf::object_attributes timer_attributes;
+timer_attributes.execution_level(WdfExecutionLevelPassive);
+auto timer = ntl::kmdf::timer::try_create(
+    device, timer_config, &timer_attributes);
+if (!timer)
+  return timer.status();
+timer->start_after_ms(1000);
+```
+
+A work-item callback always runs at `PASSIVE_LEVEL`; `flush()` also requires
+`PASSIVE_LEVEL` and must not be called from that work item's callback. A timer
+normally follows WDF timer execution rules. Select
+`WdfExecutionLevelPassive` when its body uses the CRT/STL; WDF requires such a
+passive timer to be one-shot (`Period == 0`). `timer::stop(true)` waits for an
+active callback and therefore requires `PASSIVE_LEVEL`. High-resolution timers
+must keep `TolerableDelay` at zero, as required by WDF.
+
+## Dynamic Child Lists
+
+`child_list_config<Identification, Address>` maps KMDF child descriptions to
+typed payloads. NTL deliberately requires trivially copyable, standard-layout
+payloads because KMDF's default description behavior copies and compares their
+bytes. Drivers that need allocated strings or another complex identity can
+still use the native WDF callbacks through `child_list_config::native()`.
+
+```cpp
+struct child_id { ULONG serial; };
+struct child_address { ULONG slot; };
+
+using children = ntl::kmdf::child_list_config<child_id, child_address>;
+constexpr auto on_child_create =
+    +[](kmdf::child_list,
+        const kmdf::child_identification<child_id>& id,
+        kmdf::device_init init) noexcept -> NTSTATUS {
+      // Configure and create the child PDO from id.payload.
+      (void)id;
+      (void)init;
+      return STATUS_NOT_SUPPORTED;
+    };
+auto config = children::with_create<on_child_create>();
+
+// Configure the FDO's framework-owned default list before device creation.
+init.default_child_list(config);
+
+// Additional child lists can be created after the parent device exists.
+auto list = ntl::kmdf::child_list::try_create(parent_device, config);
+if (!list)
+  return list.status();
+
+const kmdf::child_identification<child_id> id{{7}};
+const kmdf::child_address<child_address> address{{2}};
+return list->add_or_update(id, address);
+```
+
+The facade also exposes scan begin/end, present/missing updates, PDO lookup,
+address lookup, eject requests, and RAII iteration. `device_init` passed to the
+child-create callback remains framework-owned and is never freed by NTL.
+
+## Registry And Device Properties
+
+`device::try_open_registry_key()` returns a move-only
+`ntl::kmdf::registry_key`. It provides relative subkey open/create, raw value
+query/assignment, DWORD/QWORD/string helpers, and removal while retaining the
+native `WDFKEY` and WDM handle escape hatches.
+
+```cpp
+auto key = device.try_open_registry_key(
+    PLUGPLAY_REGKEY_DEVICE, KEY_READ | KEY_WRITE);
+if (!key)
+  return key.status();
+
+auto enabled = key->query_dword(L"Enabled");
+if (!enabled)
+  return enabled.status();
+
+auto status = key->assign_string(L"Mode", L"safe");
+if (status.is_err())
+  return status;
+
+auto description =
+    device.try_query_property(DevicePropertyDeviceDescription);
+```
+
+Legacy `DEVICE_REGISTRY_PROPERTY` queries return raw bytes. The `DEVPROPKEY`
+overload returns `device_property_value`, including its `DEVPROPTYPE`, with
+checked `as_string()` and `as_uint32()` conversions. These NTL helpers require
+`PASSIVE_LEVEL` because they return allocated STL storage. The underlying
+native `WdfDeviceQueryPropertyEx` API remains available when a driver needs
+its wider `APC_LEVEL` contract and supplies its own storage.
+
+## Queue Control
+
+`io_queue` exposes start, stop, drain, purge, and stop-and-purge operations.
+The `*_and_wait()` forms call the synchronous WDF methods and therefore require
+the same `PASSIVE_LEVEL` and deadlock precautions as the native APIs. The
+asynchronous forms optionally take a compile-time
+`void(io_queue, void*) noexcept` callback and an opaque context pointer.
+
+`native()` and `native_handle()` are explicit interoperation escape hatches.
+File and interrupt objects use `native_object()` to reflect object semantics.
+They do not imply that normal NTL callbacks should expose `WDFDEVICE`,
+`WDFQUEUE`, or `WDFREQUEST`; the typed callback surface has the same WDF object
+lifetime and synchronization rules without adding dynamic dispatch or storage.
+
+## Execution Context
+
+The entry function and the sample queue use `PASSIVE_LEVEL` execution. A WDF
+callback may run at a higher IRQL when its queue/object configuration allows
+that, so using CRT/STL inside a callback still requires a passive execution
+contract such as `object_attributes::execution_level(WdfExecutionLevelPassive)`.
+All native KMDF callback, cancellation, synchronization, and lifetime rules
+remain in force.

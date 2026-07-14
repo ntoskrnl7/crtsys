@@ -1,0 +1,114 @@
+/**
+ * @file io_target
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief KMDF I/O target and request-send option facades.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "../status"
+
+#include "detail/wdf"
+
+namespace ntl::kmdf {
+class device;
+
+/** @brief Read-only view of KMDF request completion parameters. */
+class completion_params {
+public:
+  /** @brief Wraps framework-owned completion parameters. */
+  explicit completion_params(PWDF_REQUEST_COMPLETION_PARAMS value) noexcept
+      : value_(value) {}
+
+  /** @brief Returns the request type reported by the target. */
+  WDF_REQUEST_TYPE type() const noexcept { return value_->Type; }
+
+  /** @brief Returns the completion NTSTATUS. */
+  ntl::status status() const noexcept { return value_->IoStatus.Status; }
+
+  /** @brief Returns the completion information value. */
+  ULONG_PTR information() const noexcept {
+    return value_->IoStatus.Information;
+  }
+
+  /** @brief Returns the native completion parameters. */
+  PWDF_REQUEST_COMPLETION_PARAMS native_handle() const noexcept {
+    return value_;
+  }
+
+private:
+  PWDF_REQUEST_COMPLETION_PARAMS value_;
+};
+
+/** @brief Configures WdfRequestSend behavior without transferring ownership. */
+class send_options {
+public:
+  /** @brief Initializes asynchronous send options. */
+  send_options() noexcept { WDF_REQUEST_SEND_OPTIONS_INIT(&value_, 0); }
+
+  /** @brief Applies a relative or absolute WDF timeout value. */
+  send_options &timeout(LONGLONG value) noexcept {
+    WDF_REQUEST_SEND_OPTIONS_SET_TIMEOUT(&value_, value);
+    return *this;
+  }
+
+  /** @brief Allows sending while the target is not in its started state. */
+  send_options &ignore_target_state(bool enabled = true) noexcept {
+    if (enabled)
+      value_.Flags |= WDF_REQUEST_SEND_OPTION_IGNORE_TARGET_STATE;
+    else
+      value_.Flags &= ~WDF_REQUEST_SEND_OPTION_IGNORE_TARGET_STATE;
+    return *this;
+  }
+
+  /** @brief Returns the mutable native send options. */
+  PWDF_REQUEST_SEND_OPTIONS native() noexcept { return &value_; }
+
+private:
+  WDF_REQUEST_SEND_OPTIONS value_{};
+};
+
+/** @brief Non-owning facade for a WDFIOTARGET handle. */
+class io_target {
+public:
+  /** @brief Creates an empty target facade. */
+  io_target() noexcept = default;
+
+  /** @brief Wraps an I/O target without taking ownership. */
+  explicit io_target(WDFIOTARGET handle) noexcept : handle_(handle) {}
+
+  /** @brief Starts a previously stopped I/O target. */
+  ntl::status try_start() const noexcept { return WdfIoTargetStart(handle_); }
+
+  /** @brief Returns the target's current framework state. */
+  WDF_IO_TARGET_STATE state() const noexcept {
+    return WdfIoTargetGetState(handle_);
+  }
+
+  /** @brief Returns the WDF device associated with this target. */
+  device owner() const noexcept;
+
+  /** @brief Returns the native WDFIOTARGET handle. */
+  WDFIOTARGET native_handle() const noexcept { return handle_; }
+
+  /** @brief Returns true when a native target handle is present. */
+  explicit operator bool() const noexcept { return handle_ != WDF_NO_HANDLE; }
+
+private:
+  WDFIOTARGET handle_ = WDF_NO_HANDLE;
+};
+
+} // namespace ntl::kmdf
+
+#include "device"
+
+namespace ntl::kmdf {
+inline device io_target::owner() const noexcept {
+  return device{WdfIoTargetGetDevice(handle_)};
+}
+
+inline io_target device::default_io_target() const noexcept {
+  return io_target{WdfDeviceGetIoTarget(native_handle())};
+}
+} // namespace ntl::kmdf

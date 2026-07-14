@@ -1,0 +1,103 @@
+/**
+ * @file property
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Typed and legacy KMDF device-property query helpers.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "../result"
+
+#include <cstdint>
+#include <cstring>
+#include <string>
+#include <utility>
+#include <vector>
+#include "detail/wdf"
+
+namespace ntl::kmdf {
+/** @brief DEVPROPKEY query result with its native DEVPROPTYPE. */
+struct device_property_value {
+  DEVPROPTYPE type = DEVPROP_TYPE_EMPTY;
+  std::vector<std::uint8_t> data;
+
+  /** @brief Interprets a DEVPROP_TYPE_STRING payload as std::wstring. */
+  ntl::result<std::wstring> as_string() const {
+    if (type != DEVPROP_TYPE_STRING)
+      return ntl::unexpected(STATUS_OBJECT_TYPE_MISMATCH);
+    if ((data.size() % sizeof(wchar_t)) != 0)
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    const auto *text = reinterpret_cast<const wchar_t *>(data.data());
+    std::wstring result(text, text + data.size() / sizeof(wchar_t));
+    while (!result.empty() && result.back() == L'\0')
+      result.pop_back();
+    return ntl::ok(std::move(result));
+  }
+
+  /** @brief Interprets a DEVPROP_TYPE_UINT32 payload. */
+  ntl::result<std::uint32_t> as_uint32() const noexcept {
+    if (type != DEVPROP_TYPE_UINT32 || data.size() != sizeof(std::uint32_t))
+      return ntl::unexpected(STATUS_OBJECT_TYPE_MISMATCH);
+    std::uint32_t result = 0;
+    std::memcpy(&result, data.data(), sizeof(result));
+    return ntl::ok(result);
+  }
+};
+
+/** @brief Queries a legacy DEVICE_REGISTRY_PROPERTY at PASSIVE_LEVEL. */
+inline ntl::result<std::vector<std::uint8_t>>
+query_device_property(WDFDEVICE device, DEVICE_REGISTRY_PROPERTY property) {
+  ULONG bytes = 0;
+  NTSTATUS result =
+      WdfDeviceQueryProperty(device, property, 0, nullptr, &bytes);
+  if (result != STATUS_BUFFER_TOO_SMALL && result != STATUS_BUFFER_OVERFLOW &&
+      !NT_SUCCESS(result))
+    return ntl::unexpected(result);
+
+  std::vector<std::uint8_t> value(bytes);
+  if (bytes == 0)
+    return ntl::ok(std::move(value));
+
+  result =
+      WdfDeviceQueryProperty(device, property, bytes, value.data(), &bytes);
+  if (!NT_SUCCESS(result))
+    return ntl::unexpected(result);
+  value.resize(bytes);
+  return ntl::ok(std::move(value));
+}
+
+/**
+ * @brief Queries a DEVPROPKEY and returns owned STL storage.
+ * @note This helper requires PASSIVE_LEVEL because it allocates a vector,
+ * even though the underlying WDF query permits APC_LEVEL.
+ */
+inline ntl::result<device_property_value>
+query_device_property(WDFDEVICE device, const DEVPROPKEY &property,
+                      LCID locale = LOCALE_NEUTRAL) {
+  WDF_DEVICE_PROPERTY_DATA data{};
+  WDF_DEVICE_PROPERTY_DATA_INIT(&data, &property);
+  data.Lcid = locale;
+
+  ULONG bytes = 0;
+  DEVPROPTYPE type = DEVPROP_TYPE_EMPTY;
+  NTSTATUS result =
+      WdfDeviceQueryPropertyEx(device, &data, 0, nullptr, &bytes, &type);
+  if (result != STATUS_BUFFER_TOO_SMALL && result != STATUS_BUFFER_OVERFLOW &&
+      !NT_SUCCESS(result))
+    return ntl::unexpected(result);
+
+  device_property_value value;
+  value.type = type;
+  value.data.resize(bytes);
+  if (bytes == 0)
+    return ntl::ok(std::move(value));
+
+  result = WdfDeviceQueryPropertyEx(device, &data, bytes, value.data.data(),
+                                    &bytes, &value.type);
+  if (!NT_SUCCESS(result))
+    return ntl::unexpected(result);
+  value.data.resize(bytes);
+  return ntl::ok(std::move(value));
+}
+} // namespace ntl::kmdf

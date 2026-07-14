@@ -1,0 +1,46 @@
+/**
+ * @file callback
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Allocation-free adapters for typed KMDF callbacks.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ *
+ */
+#pragma once
+
+#include "../status"
+
+#include <type_traits>
+#include <utility>
+
+namespace ntl::kmdf::detail {
+template <auto Callback, class... Args>
+void invoke_callback(Args &&...args) noexcept {
+  static_assert(std::is_nothrow_invocable_v<decltype(Callback), Args...>,
+                "NTL KMDF callbacks must accept the typed facade arguments and "
+                "be noexcept.");
+  Callback(std::forward<Args>(args)...);
+}
+
+template <auto Callback, class... Args>
+NTSTATUS invoke_status_callback(Args &&...args) noexcept {
+  static_assert(std::is_nothrow_invocable_v<decltype(Callback), Args...>,
+                "NTL KMDF callbacks must accept the typed facade arguments and "
+                "be noexcept.");
+  using result_type = std::invoke_result_t<decltype(Callback), Args...>;
+  static_assert(std::is_convertible_v<result_type, NTSTATUS>,
+                "This NTL KMDF callback must return NTSTATUS or ntl::status.");
+  return static_cast<NTSTATUS>(Callback(std::forward<Args>(args)...));
+}
+
+template <auto Callback, class... Args>
+bool invoke_boolean_callback(Args &&...args) noexcept {
+  static_assert(std::is_nothrow_invocable_v<decltype(Callback), Args...>,
+                "NTL KMDF callbacks must accept the typed facade arguments and "
+                "be noexcept.");
+  using result_type = std::invoke_result_t<decltype(Callback), Args...>;
+  static_assert(std::is_convertible_v<result_type, bool>,
+                "This NTL KMDF callback must return bool.");
+  return static_cast<bool>(Callback(std::forward<Args>(args)...));
+}
+} // namespace ntl::kmdf::detail

@@ -79,8 +79,17 @@ msbuild .\my_driver.vcxproj /restore /p:Configuration=Release /p:Platform=ARM
 
 The native package supplies the MSBuild props/targets needed by a WDK consumer
 project, including include paths, forced includes, runtime libraries, LDK
-libraries, and the `CrtSysDriverEntry` entry point wiring used by the package
-consumer tests.
+libraries, and the startup object for the selected driver model.
+
+| WDK project shape | crtsys selection | Source entry |
+| --- | --- | --- |
+| WDM with the NTL entry wrapper | default, or `<CrtSysUseNtlMain>true</CrtSysUseNtlMain>` | `ntl::main` |
+| WDM with a standard entry | `<CrtSysUseNtlMain>false</CrtSysUseNtlMain>` | `DriverEntry` |
+| Standard KMDF | existing `<DriverType>KMDF</DriverType>`; default | standard `DriverEntry` and `WdfDriverCreate` |
+| NTL KMDF | `<DriverType>KMDF</DriverType>` and `<CrtSysUseNtlKmdfMain>true</CrtSysUseNtlKmdfMain>` | `ntl::kmdf::main` |
+
+The NTL KMDF entry is optional. In both KMDF modes WDF retains its normal PnP,
+power, queue, request, object-lifetime, and dispatch ownership.
 
 The driver remains a normal WDK driver. Verifier, signing, target OS policy,
 IRQL, paging, and unload safety are still owned by the driver project.

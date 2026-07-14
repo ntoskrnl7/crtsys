@@ -69,6 +69,26 @@ assumption is tied to processor-local KPCR state, not a user-mode TEB for each
 thread. User code must not rely on `thread_local T value` as C++ per-thread
 storage.
 
+## Driver Model Integration
+
+crtsys has separate startup objects so linking one static runtime library does
+not force every project into the same driver model:
+
+| Project model | OS image entry | Driver-facing entry |
+| --- | --- | --- |
+| NTL WDM | `CrtSysDriverEntry` | `ntl::main` |
+| Standard WDM | `CrtSysWdmDriverEntry` | normal `DriverEntry` |
+| Standard KMDF | `CrtSysKmdfDriverEntry` | normal `DriverEntry` followed by `WdfDriverCreate` |
+| NTL KMDF | `CrtSysNtlKmdfDriverEntry` | `ntl::kmdf::main` with a `driver_builder` |
+
+The KMDF startup initializes the crtsys runtime and then calls the WDF-provided
+`FxDriverEntry`. WDF invokes the driver's normal `DriverEntry` and retains its
+dispatch, PnP, power, queue, and request machinery. crtsys wraps only the WDF
+unload path so C++ runtime teardown happens after WDF and user unload callbacks
+return. The optional NTL KMDF path changes only the driver-facing initialization
+API; it still calls `WdfDriverCreate` and does not replace KMDF major-function
+entries or WDF object ownership.
+
 ## Consumer Paths
 
 Visual Studio/MSBuild driver projects normally consume the NuGet package through

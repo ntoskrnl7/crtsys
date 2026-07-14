@@ -21,6 +21,14 @@ substrate를 실제로 밟는 API를 명시 테스트로 고정합니다. 목록
 사용할 때도 일반 kernel code와 같은 driver-context 감사를 적용하고, 해당
 경로가 드라이버에서 중요해지면 harness test를 추가하는 방식이 좋습니다.
 
+현재 Visual Studio 2026(`v145`) toolchain 검증에는 SDK/WDK
+`10.0.28000.0`을 사용한 x64/ARM64 driver build와 SDK `10.0.28000.0` 및
+WDK `10.0.22621.0`을 사용한 x86 build가 포함됩니다. LDK `0.7.24`와
+SDK/WDK `10.0.28000.0`으로 clean build한 v145 x64 Debug driver는 VM에서
+load, run, unload 검증도 통과했습니다. Hosted CI의 v145 baseline은
+SDK/WDK `10.0.26100.0`을 유지하며, `10.0.28000.0` 결과는 추가로 수행한
+local build/package 및 VM 검증을 기록합니다.
+
 범례:
 
 - [x] Driver-test coverage 있음: `crtsys` kernel driver test에서 명시적으로

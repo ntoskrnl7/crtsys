@@ -17,8 +17,10 @@ The detailed API reference is split by topic:
 | [Status, exceptions, and stack expansion](./ntl/status-exceptions-stack.md) | `ntl::status`, `ntl::exception`, SEH boundary helper, `ntl::expand_stack` |
 | [Result](./ntl/result.md) | `ntl::result<T>`, `ntl::result<void>`, `ntl::unexpected`, `ntl::ok`, result-returning factory helpers |
 | [Handle and object ownership](./ntl/ownership.md) | `ntl::unique_handle`, `ntl::unique_object`, `try_reference_object_by_handle` |
+| [File object facades](./ntl/file-object.md) | `ntl::file`, `ntl::kmdf::file`, and WDM/KMDF file-object ownership boundaries |
 | [Registry](./ntl/registry.md) | `ntl::registry_key`, `ntl::registry_value`, `ntl::driver_config`, `try_open_driver_parameters`, typed registry value query/set helpers |
 | [Driver, device, and IRP helpers](./ntl/driver-device-irp.md) | `ntl::main`, `ntl::driver`, `ntl::device`, `ntl::device_endpoint`, `try_create_device`, dispatch callbacks, `ntl::irp` |
+| [KMDF helpers](./ntl/kmdf.md) | `ntl::kmdf::main`, C++ WDF contexts, typed I/O/interrupt/timer/work-item/child-list facades, and registry/property helpers |
 | [Typed IOCTL helper](./ntl/ioctl.md) | `ntl::ioctl`, `is_ioctl`, typed input/output buffer helpers |
 | [Device interface](./ntl/device-interface.md) | `ntl::device_interface_link`, `try_register_device_interface` |
 | [RPC](./ntl/rpc.md) | RPC schema macros, server lifetime, user-mode client calls |

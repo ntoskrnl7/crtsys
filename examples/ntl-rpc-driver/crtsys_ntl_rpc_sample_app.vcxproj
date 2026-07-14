@@ -11,10 +11,13 @@
     </ProjectConfiguration>
   </ItemGroup>
   <PropertyGroup Label="Globals">
+    <BaseIntermediateOutputPath>$(MSBuildThisFileDirectory)obj\$(MSBuildProjectName)\</BaseIntermediateOutputPath>
+    <MSBuildProjectExtensionsPath>$(BaseIntermediateOutputPath)</MSBuildProjectExtensionsPath>
     <ProjectGuid>{BA770E09-259C-4D56-A074-E2D6D17EC78E}</ProjectGuid>
     <RootNamespace>CrtSysNtlRpcSampleApp</RootNamespace>
     <ProjectName>crtsys_ntl_rpc_sample_app</ProjectName>
-    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <WindowsTargetPlatformVersion Condition="'$(VisualStudioVersion)' == '18.0'">10.0.28000.0</WindowsTargetPlatformVersion>
+    <WindowsTargetPlatformVersion Condition="'$(WindowsTargetPlatformVersion)' == ''">10.0</WindowsTargetPlatformVersion>
     <CrtSysPackageVersion Condition="'$(CrtSysPackageVersion)' == ''">*</CrtSysPackageVersion>
     <RestoreProjectStyle>PackageReference</RestoreProjectStyle>
   </PropertyGroup>

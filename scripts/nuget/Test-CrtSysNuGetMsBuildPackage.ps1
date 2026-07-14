@@ -13,6 +13,9 @@ param(
   [ValidateSet('v142', 'v143', 'v145')]
   [string] $Toolset = 'v143',
 
+  [ValidateSet('NTL', 'WDM', 'KMDF', 'NTL_KMDF')]
+  [string] $DriverModel = 'NTL',
+
   [string] $WindowsSdkVersion = '10.0.22621.0',
 
   [string] $WdkVersion,
@@ -60,7 +63,9 @@ function Resolve-MsBuildPath {
 
   $visualStudioPath = $installations[0].installationPath
   $msbuildCandidates = @(
+    Join-Path $visualStudioPath 'MSBuild\Current\Bin\amd64\MSBuild.exe'
     Join-Path $visualStudioPath 'MSBuild\Current\Bin\MSBuild.exe'
+    Join-Path $visualStudioPath 'MSBuild\15.0\Bin\amd64\MSBuild.exe'
     Join-Path $visualStudioPath 'MSBuild\15.0\Bin\MSBuild.exe'
   )
   $msbuild = $msbuildCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
@@ -79,7 +84,7 @@ if ([string]::IsNullOrWhiteSpace($PackageDirectory)) {
 }
 
 if ([string]::IsNullOrWhiteSpace($WorkDirectory)) {
-  $WorkDirectory = Join-Path $repoRoot "artifacts\nuget-msbuild-consumer-test\$Toolset\$Architecture\$Configuration"
+  $WorkDirectory = Join-Path $repoRoot "artifacts\nuget-msbuild-consumer-test\$DriverModel\$Toolset\$Architecture\$Configuration"
 }
 
 $PackageDirectory = (Resolve-Path $PackageDirectory).Path
@@ -150,6 +155,24 @@ if ([string]::IsNullOrWhiteSpace($securityRuntimePath)) {
   throw "WDK kernel library directory is missing BufferOverflowK.lib or bufferoverflowfastfailk.lib: $wdkKernelLibDirectory"
 }
 
+$isKmdf = $DriverModel -in @('KMDF', 'NTL_KMDF')
+$kmdfVersion = '1.15'
+$wdfIncludeDirectory = ''
+$wdfLibraryDirectory = ''
+if ($isKmdf) {
+  $wdfIncludeDirectory = Join-Path $windowsKitsRoot "Include\wdf\kmdf\$kmdfVersion"
+  $wdfLibraryDirectory = Join-Path $windowsKitsRoot "Lib\wdf\kmdf\$($wdkPlatformByArchitecture[$Architecture])\$kmdfVersion"
+  foreach ($requiredPath in @(
+    (Join-Path $wdfIncludeDirectory 'wdf.h'),
+    (Join-Path $wdfLibraryDirectory 'WdfDriverEntry.lib'),
+    (Join-Path $wdfLibraryDirectory 'WdfLdr.lib')
+  )) {
+    if (-not (Test-Path $requiredPath)) {
+      throw "KMDF $kmdfVersion dependency was not found: $requiredPath"
+    }
+  }
+}
+
 Write-Host "Requested Windows SDK version: $WindowsSdkVersion"
 Write-Host "Resolved WDK version: $WdkVersion"
 
@@ -158,10 +181,8 @@ if ($Toolset -eq 'v142' -and $Architecture -eq 'ARM64' -and [version]$WdkVersion
 }
 
 if ($WdkVersion -ne $WindowsSdkVersion) {
-  Write-Host "Requested WDK $WindowsSdkVersion was not usable for $Architecture. Using WDK $WdkVersion."
+  Write-Host "Using Windows SDK $WindowsSdkVersion with WDK libraries $WdkVersion for $Architecture."
 }
-
-$WindowsSdkVersion = $WdkVersion
 
 $msbuild = Resolve-MsBuildPath -RequestedMajor $VisualStudioMajorVersion
 
@@ -210,6 +231,7 @@ foreach ($requiredPath in @(
   'build\native\crtsys.props',
   'build\native\crtsys.targets',
   'include\ntl\driver',
+  'include\ntl\kmdf\driver',
   "build\native\lib\native\$Toolset\$Architecture\$Configuration\crtsys.lib",
   "build\native\lib\native\$Toolset\$Architecture\$Configuration\Ldk.lib"
 )) {
@@ -258,6 +280,30 @@ $escapedPlatform = ConvertTo-XmlEscapedText $platform
 $escapedArchitectureDefines = ConvertTo-XmlEscapedText $architectureDefines
 $crtsysProps = ConvertTo-XmlEscapedText (Join-Path $packageRoot 'build\native\crtsys.props')
 $crtsysTargets = ConvertTo-XmlEscapedText (Join-Path $packageRoot 'build\native\crtsys.targets')
+$driverType = if ($isKmdf) { 'KMDF' } else { 'WDM' }
+$useNtlMain = if ($DriverModel -eq 'NTL') { 'true' } else { 'false' }
+$useNtlKmdfMain = if ($DriverModel -eq 'NTL_KMDF') { 'true' } else { 'false' }
+$kmdfVersionProperty = if ($isKmdf) { "    <KmdfVersion>$kmdfVersion</KmdfVersion>" } else { '' }
+$additionalDriverIncludes = if ($isKmdf) {
+  (ConvertTo-XmlEscapedText $wdfIncludeDirectory) + ';'
+} else {
+  ''
+}
+$additionalDriverLibraries = if ($isKmdf) {
+  (ConvertTo-XmlEscapedText (Join-Path $wdfLibraryDirectory 'WdfDriverEntry.lib')) + ';' +
+    (ConvertTo-XmlEscapedText (Join-Path $wdfLibraryDirectory 'WdfLdr.lib')) + ';'
+} else {
+  ''
+}
+$additionalCompileOptions = ''
+if ($isKmdf) {
+  $additionalCompileOptions += '/wd4324 '
+}
+$callingConventionProperty = if ($Architecture -eq 'x86') {
+  '      <CallingConvention>StdCall</CallingConvention>'
+} else {
+  ''
+}
 
 $targetName = 'CrtSysMsBuildPackageSmoke'
 $projectPath = Join-Path $projectDirectory "$targetName.vcxproj"
@@ -277,8 +323,11 @@ $vcxproj = @"
     <Keyword>Win32Proj</Keyword>
     <ProjectName>$targetName</ProjectName>
     <WindowsTargetPlatformVersion>$escapedWindowsSdkVersion</WindowsTargetPlatformVersion>
-    <DriverType>WDM</DriverType>
+    <DriverType>$driverType</DriverType>
+$kmdfVersionProperty
     <CrtSysUseDriverSupport>true</CrtSysUseDriverSupport>
+    <CrtSysUseNtlMain>$useNtlMain</CrtSysUseNtlMain>
+    <CrtSysUseNtlKmdfMain>$useNtlKmdfMain</CrtSysUseNtlKmdfMain>
     <CrtSysExpectedLibToolset>$escapedToolset</CrtSysExpectedLibToolset>
   </PropertyGroup>
   <Import Project="$crtsysProps" Condition="Exists('$crtsysProps')" />
@@ -298,18 +347,20 @@ $vcxproj = @"
   </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile>
-      <AdditionalIncludeDirectories>$sharedInclude;$kmInclude;$kmCrtInclude;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$sharedInclude;$kmInclude;$kmCrtInclude;$additionalDriverIncludes%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>$escapedArchitectureDefines;WINNT=1;_WIN32_WINNT=0x0601;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalOptions>%(AdditionalOptions) /Zc:__cplusplus</AdditionalOptions>
+      <AdditionalOptions>%(AdditionalOptions) /Zc:__cplusplus $additionalCompileOptions</AdditionalOptions>
+$callingConventionProperty
       <ExceptionHandling>Sync</ExceptionHandling>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <RuntimeLibrary>$runtimeLibrary</RuntimeLibrary>
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
+      <ControlFlowGuard>Guard</ControlFlowGuard>
     </ClCompile>
     <Link>
       <AdditionalLibraryDirectories>$wdkKernelLibDirectoryEscaped;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>$ntoskrnlLib;$halLib;$wmilibLib;$securityRuntimeLib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$ntoskrnlLib;$halLib;$wmilibLib;$securityRuntimeLib;$additionalDriverLibraries%(AdditionalDependencies)</AdditionalDependencies>
       <IgnoreAllDefaultLibraries>true</IgnoreAllDefaultLibraries>
       <SubSystem>Native</SubSystem>
       <AdditionalOptions>%(AdditionalOptions) /DRIVER /MACHINE:$machine</AdditionalOptions>
@@ -326,7 +377,8 @@ $vcxproj = @"
 
 Set-Content -LiteralPath $projectPath -Value $vcxproj -Encoding UTF8
 
-$mainCpp = @'
+$mainCpp = switch ($DriverModel) {
+  'NTL' { @'
 #include <ntl/driver>
 
 #include <string>
@@ -343,7 +395,387 @@ ntl::status ntl::main(ntl::driver& driver, const std::wstring& registry_path) {
   driver.on_unload([]() {});
   return ntl::status::ok();
 }
-'@
+'@ }
+  'WDM' { @'
+#include <ntddk.h>
+
+#include <numeric>
+#include <vector>
+
+extern "C" DRIVER_UNLOAD CrtSysPackageSmokeDriverUnload;
+extern "C" DRIVER_INITIALIZE DriverEntry;
+
+extern "C" void CrtSysPackageSmokeDriverUnload(PDRIVER_OBJECT driver_object) {
+  UNREFERENCED_PARAMETER(driver_object);
+}
+
+extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT driver_object,
+                                 PUNICODE_STRING registry_path) {
+  UNREFERENCED_PARAMETER(registry_path);
+
+  const std::vector<int> values{1, 2, 3};
+  if (std::accumulate(values.begin(), values.end(), 0) != 6) {
+    return STATUS_UNSUCCESSFUL;
+  }
+
+  driver_object->DriverUnload = CrtSysPackageSmokeDriverUnload;
+  return STATUS_SUCCESS;
+}
+'@ }
+  'KMDF' { @'
+#include <ntddk.h>
+
+#pragma warning(push)
+// Older WDK KMDF 1.15 headers trigger C4471 under v142 with /WX.
+#pragma warning(disable : 4471)
+#include <wdf.h>
+#pragma warning(pop)
+
+#include <numeric>
+#include <vector>
+
+extern "C" DRIVER_INITIALIZE DriverEntry;
+
+extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT driver_object,
+                                 PUNICODE_STRING registry_path) {
+  const std::vector<int> values{1, 2, 3};
+  if (std::accumulate(values.begin(), values.end(), 0) != 6) {
+    return STATUS_UNSUCCESSFUL;
+  }
+
+  WDF_DRIVER_CONFIG config;
+  WDF_DRIVER_CONFIG_INIT(&config, WDF_NO_EVENT_CALLBACK);
+  config.DriverInitFlags |= WdfDriverInitNonPnpDriver;
+  config.EvtDriverUnload = +[](WDFDRIVER) noexcept {};
+  return WdfDriverCreate(driver_object, registry_path, WDF_NO_OBJECT_ATTRIBUTES,
+                         &config, WDF_NO_HANDLE);
+}
+'@ }
+  'NTL_KMDF' { @'
+#include <ntl/kmdf/all>
+
+#include <numeric>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace {
+constexpr GUID sample_interface = {
+    0x3dfc4dc0, 0x6d61, 0x4a97,
+    {0xa1, 0x10, 0x2a, 0xa8, 0x2f, 0x96, 0x87, 0xe1}};
+
+struct sample_device_context {
+  std::vector<int> values;
+};
+
+struct sample_file_context {
+  std::string name;
+};
+
+struct sample_interrupt_context {
+  ULONG count = 0;
+};
+
+struct sample_child_identity {
+  ULONG serial_number;
+};
+
+struct sample_child_address {
+  ULONG slot;
+};
+
+struct sample_additional_context {
+  explicit sample_additional_context(ULONG value) noexcept : value(value) {}
+  ULONG value;
+};
+
+[[maybe_unused]] void compile_typed_callback_surface(
+    ntl::kmdf::device device, ntl::kmdf::device_init& init,
+    ntl::kmdf::io_queue queue, ntl::kmdf::request request) {
+  using namespace ntl::kmdf;
+
+  object_attributes object_config;
+  object_config
+      .on_cleanup<+[](object) noexcept {}>()
+      .on_destroy<+[](object) noexcept {}>();
+  (void)device.try_emplace_context<sample_additional_context>(42);
+
+  (void)request.try_mark_cancelable<
+      +[](ntl::kmdf::request) noexcept {}>();
+  queue.stop<+[](ntl::kmdf::io_queue, void*) noexcept {}>();
+  queue.drain<+[](ntl::kmdf::io_queue, void*) noexcept {}>();
+  queue.purge<+[](ntl::kmdf::io_queue, void*) noexcept {}>();
+  queue.stop_and_purge<+[](ntl::kmdf::io_queue, void*) noexcept {}>();
+
+  file_config<sample_file_context> files;
+  files
+      .on_create<
+          +[](ntl::kmdf::device, ntl::kmdf::request request,
+              ntl::kmdf::file file) noexcept {
+            (void)file.context<sample_file_context>();
+            (void)file.wdm();
+            request.complete(STATUS_SUCCESS);
+          }>()
+      .on_cleanup<+[](ntl::kmdf::file) noexcept {}>()
+      .on_close<+[](ntl::kmdf::file) noexcept {}>();
+  init.file_objects(files);
+
+  io_target target = device.default_io_target();
+  send_options options;
+  options.ignore_target_state().timeout(WDF_REL_TIMEOUT_IN_MS(100));
+  request.on_completion<
+      +[](ntl::kmdf::request, ntl::kmdf::io_target,
+          ntl::kmdf::completion_params, void*) noexcept {}>();
+  (void)std::move(request).try_send(target, &options);
+
+  auto interrupt_settings = interrupt_config::with_isr<
+      +[](ntl::kmdf::interrupt, ULONG) noexcept { return false; }>();
+  interrupt_settings
+      .on_dpc<
+          +[](ntl::kmdf::interrupt, ntl::kmdf::object) noexcept {}>()
+      .on_work_item<
+          +[](ntl::kmdf::interrupt, ntl::kmdf::object) noexcept {}>()
+      .on_enable<
+          +[](ntl::kmdf::interrupt,
+              ntl::kmdf::device) noexcept -> NTSTATUS {
+            return STATUS_SUCCESS;
+          }>()
+      .on_disable<
+          +[](ntl::kmdf::interrupt,
+              ntl::kmdf::device) noexcept -> NTSTATUS {
+            return STATUS_SUCCESS;
+          }>();
+  (void)interrupt::try_create<sample_interrupt_context>(
+      device, interrupt_settings, nullptr);
+
+  auto timer_settings = timer_config::periodic<
+      +[](ntl::kmdf::timer) noexcept {}>(1000);
+  timer_settings.automatic_serialization(false).tolerable_delay(10);
+  auto timer_object = timer::try_create(device, timer_settings);
+  if (timer_object) {
+    (void)timer_object->start_after_ms(10);
+    (void)timer_object->stop(false);
+  }
+
+  auto work_settings = work_item_config::with_callback<
+      +[](ntl::kmdf::work_item) noexcept {}>();
+  work_settings.automatic_serialization(false);
+  auto work_object = work_item::try_create(device, work_settings);
+  if (work_object) {
+    work_object->enqueue();
+  }
+
+  using sample_child_config =
+      child_list_config<sample_child_identity, sample_child_address>;
+  auto child_settings = sample_child_config::with_create<
+      +[](ntl::kmdf::child_list,
+          const ntl::kmdf::child_identification<sample_child_identity>&,
+          ntl::kmdf::device_init) noexcept -> NTSTATUS {
+        return STATUS_NOT_SUPPORTED;
+      }>();
+  child_settings
+      .on_scan<+[](ntl::kmdf::child_list) noexcept {}>()
+      .on_compare<
+          +[](ntl::kmdf::child_list,
+              const ntl::kmdf::child_identification<sample_child_identity>& a,
+              const ntl::kmdf::child_identification<sample_child_identity>& b)
+          noexcept {
+            return a.payload.serial_number == b.payload.serial_number;
+          }>();
+  init.default_child_list(child_settings);
+  auto children = child_list::try_create(device, child_settings);
+  if (children) {
+    const child_identification<sample_child_identity> id{{1}};
+    const child_address<sample_child_address> address{{2}};
+    (void)children->add_or_update(id, address);
+    (void)children->find(id);
+    auto iteration = children->iterate();
+    (void)iteration.next();
+  }
+
+  auto device_key =
+      device.try_open_registry_key(PLUGPLAY_REGKEY_DEVICE, KEY_READ);
+  if (device_key) {
+    (void)device_key->query_dword(std::wstring(L"SampleValue"));
+  }
+  (void)device.try_query_property(DevicePropertyDeviceDescription);
+
+  io_queue_config queue_config(WdfIoQueueDispatchSequential);
+  queue_config
+      .on_device_control<
+          +[](ntl::kmdf::io_queue, ntl::kmdf::request, size_t, size_t,
+              ULONG) noexcept {}>()
+      .on_internal_device_control<
+          +[](ntl::kmdf::io_queue, ntl::kmdf::request, size_t, size_t,
+              ULONG) noexcept {}>()
+      .on_read<
+          +[](ntl::kmdf::io_queue, ntl::kmdf::request, size_t) noexcept {}>()
+      .on_write<
+          +[](ntl::kmdf::io_queue, ntl::kmdf::request, size_t) noexcept {}>()
+      .on_default<
+          +[](ntl::kmdf::io_queue, ntl::kmdf::request) noexcept {}>()
+      .on_stop<
+          +[](ntl::kmdf::io_queue, ntl::kmdf::request, ULONG) noexcept {}>()
+      .on_resume<
+          +[](ntl::kmdf::io_queue, ntl::kmdf::request) noexcept {}>()
+      .on_canceled<
+          +[](ntl::kmdf::io_queue, ntl::kmdf::request) noexcept {}>();
+
+  pnp_power_callbacks pnp;
+  pnp.on_prepare_hardware<
+         +[](ntl::kmdf::device, resource_list,
+             resource_list) noexcept -> NTSTATUS { return STATUS_SUCCESS; }>()
+      .on_release_hardware<
+          +[](ntl::kmdf::device,
+              resource_list) noexcept -> NTSTATUS { return STATUS_SUCCESS; }>()
+      .on_d0_entry<
+          +[](ntl::kmdf::device,
+              WDF_POWER_DEVICE_STATE) noexcept -> NTSTATUS {
+            return STATUS_SUCCESS;
+          }>()
+      .on_d0_entry_post_interrupts_enabled<
+          +[](ntl::kmdf::device,
+              WDF_POWER_DEVICE_STATE) noexcept -> NTSTATUS {
+            return STATUS_SUCCESS;
+          }>()
+      .on_d0_exit<
+          +[](ntl::kmdf::device,
+              WDF_POWER_DEVICE_STATE) noexcept -> NTSTATUS {
+            return STATUS_SUCCESS;
+          }>()
+      .on_d0_exit_pre_interrupts_disabled<
+          +[](ntl::kmdf::device,
+              WDF_POWER_DEVICE_STATE) noexcept -> NTSTATUS {
+            return STATUS_SUCCESS;
+          }>()
+      .on_self_managed_io_init<
+          +[](ntl::kmdf::device) noexcept -> NTSTATUS {
+            return STATUS_SUCCESS;
+          }>()
+      .on_self_managed_io_cleanup<+[](ntl::kmdf::device) noexcept {}>()
+      .on_self_managed_io_flush<+[](ntl::kmdf::device) noexcept {}>()
+      .on_self_managed_io_suspend<
+          +[](ntl::kmdf::device) noexcept -> NTSTATUS {
+            return STATUS_SUCCESS;
+          }>()
+      .on_self_managed_io_restart<
+          +[](ntl::kmdf::device) noexcept -> NTSTATUS {
+            return STATUS_SUCCESS;
+          }>()
+      .on_surprise_removal<+[](ntl::kmdf::device) noexcept {}>()
+      .on_query_remove<
+          +[](ntl::kmdf::device) noexcept -> NTSTATUS {
+            return STATUS_SUCCESS;
+          }>()
+      .on_query_stop<
+          +[](ntl::kmdf::device) noexcept -> NTSTATUS {
+            return STATUS_SUCCESS;
+          }>()
+      .on_usage_notification<
+          +[](ntl::kmdf::device, WDF_SPECIAL_FILE_TYPE, bool) noexcept {}>()
+      .on_relations_query<
+          +[](ntl::kmdf::device, DEVICE_RELATION_TYPE) noexcept {}>()
+      .on_usage_notification_ex<
+          +[](ntl::kmdf::device, WDF_SPECIAL_FILE_TYPE,
+              bool) noexcept -> NTSTATUS { return STATUS_SUCCESS; }>();
+
+  power_policy_callbacks power;
+  power
+      .on_arm_wake_from_s0<
+          +[](ntl::kmdf::device) noexcept -> NTSTATUS {
+            return STATUS_SUCCESS;
+          }>()
+      .on_disarm_wake_from_s0<+[](ntl::kmdf::device) noexcept {}>()
+      .on_wake_from_s0_triggered<+[](ntl::kmdf::device) noexcept {}>()
+      .on_arm_wake_from_sx<
+          +[](ntl::kmdf::device) noexcept -> NTSTATUS {
+            return STATUS_SUCCESS;
+          }>()
+      .on_disarm_wake_from_sx<+[](ntl::kmdf::device) noexcept {}>()
+      .on_wake_from_sx_triggered<+[](ntl::kmdf::device) noexcept {}>()
+      .on_arm_wake_from_sx_with_reason<
+          +[](ntl::kmdf::device, bool, bool) noexcept -> NTSTATUS {
+            return STATUS_SUCCESS;
+          }>();
+}
+}
+
+ntl::status ntl::kmdf::main(driver_builder& builder,
+                            const std::wstring& registry_path) {
+  UNREFERENCED_PARAMETER(registry_path);
+
+  const std::vector<int> values{1, 2, 3};
+  if (std::accumulate(values.begin(), values.end(), 0) != 6) {
+    return STATUS_UNSUCCESSFUL;
+  }
+
+  kmdf::driver_config config;
+  config.on_device_add<
+      +[](kmdf::driver, kmdf::device_init& init) noexcept -> NTSTATUS {
+        ntl::kmdf::pnp_power_callbacks pnp;
+        pnp.on_prepare_hardware<
+               +[](kmdf::device, kmdf::resource_list,
+                   kmdf::resource_list) noexcept -> NTSTATUS {
+                 return STATUS_SUCCESS;
+               }>()
+            .on_release_hardware<
+                +[](kmdf::device,
+                    kmdf::resource_list) noexcept -> NTSTATUS {
+                  return STATUS_SUCCESS;
+                }>()
+            .on_d0_entry<
+                +[](kmdf::device,
+                    WDF_POWER_DEVICE_STATE) noexcept -> NTSTATUS {
+                  return STATUS_SUCCESS;
+                }>()
+            .on_d0_exit<
+                +[](kmdf::device,
+                    WDF_POWER_DEVICE_STATE) noexcept -> NTSTATUS {
+                  return STATUS_SUCCESS;
+                }>();
+
+        init.io_type(WdfDeviceIoBuffered).pnp_power(pnp);
+
+        ntl::kmdf::file_config<sample_file_context> files;
+        files.on_create<
+            +[](kmdf::device, kmdf::request request,
+                kmdf::file) noexcept {
+              request.complete(STATUS_SUCCESS);
+            }>();
+        init.file_objects(files);
+
+        ntl::kmdf::object_attributes attributes;
+        attributes.execution_level(WdfExecutionLevelPassive);
+        auto created = init.try_create<sample_device_context>(&attributes);
+        if (!created) {
+          return created.status();
+        }
+
+        ntl::status status =
+            created.value().try_create_interface(sample_interface);
+        if (status.is_err()) {
+          return status;
+        }
+
+        ntl::kmdf::io_queue_config queue_config(
+            WdfIoQueueDispatchSequential);
+        queue_config.on_default<
+            +[](kmdf::io_queue, kmdf::request request) noexcept {
+              request.complete(STATUS_NOT_SUPPORTED);
+            }>();
+        queue_config.power_managed(WdfTrue);
+        auto queue =
+            ntl::kmdf::io_queue::try_create(created.value(), queue_config);
+        if (!queue) {
+          return queue.status();
+        }
+        return STATUS_SUCCESS;
+      }>();
+  auto created = builder.try_create(config);
+  return created ? ntl::status::ok() : created.status();
+}
+'@ }
+}
 
 Set-Content -LiteralPath $mainPath -Value $mainCpp -Encoding UTF8
 
@@ -355,7 +787,7 @@ $msbuildArgs = @(
   "/p:Platform=$platform"
 )
 
-Write-Host "Building NuGet native MSBuild consumer for crtsys $Toolset $Architecture $Configuration"
+Write-Host "Building NuGet native MSBuild $DriverModel consumer for crtsys $Toolset $Architecture $Configuration"
 & $msbuild @msbuildArgs
 if ($LASTEXITCODE -ne 0) {
   throw "MSBuild NuGet native consumer failed with exit code $LASTEXITCODE."
@@ -366,4 +798,4 @@ if (-not (Test-Path $driverPath)) {
   throw "MSBuild NuGet native consumer driver was not produced: $driverPath"
 }
 
-Write-Host "NuGet native MSBuild consumer test passed: $driverPath"
+Write-Host "NuGet native MSBuild $DriverModel consumer test passed: $driverPath"

@@ -100,7 +100,9 @@ if ($visualStudioInstallations.Count -eq 0) {
 
 $visualStudioPath = $visualStudioInstallations[0].installationPath
 $msbuildCandidates = @(
+  Join-Path $visualStudioPath 'MSBuild\Current\Bin\amd64\MSBuild.exe'
   Join-Path $visualStudioPath 'MSBuild\Current\Bin\MSBuild.exe'
+  Join-Path $visualStudioPath 'MSBuild\15.0\Bin\amd64\MSBuild.exe'
   Join-Path $visualStudioPath 'MSBuild\15.0\Bin\MSBuild.exe'
 )
 $msbuild = $msbuildCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
@@ -232,7 +234,13 @@ if ($isDriverConsumer) {
   $requiredPackagePaths += @(
     "build\native\lib\native\$Toolset\$Architecture\$Configuration\crtsys.lib",
     "build\native\lib\native\$Toolset\$Architecture\$Configuration\Ldk.lib",
-    'include\ntl\driver'
+    'include\ntl\driver',
+    'include\ntl\kmdf\driver',
+    'include\ntl\kmdf\timer',
+    'include\ntl\kmdf\work_item',
+    'include\ntl\kmdf\child_list',
+    'include\ntl\kmdf\registry',
+    'include\ntl\kmdf\property'
   )
 }
 

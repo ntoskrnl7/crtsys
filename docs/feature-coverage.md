@@ -21,6 +21,14 @@ substrate. Rely on unlisted paths with the same driver-context audit you would
 apply to any kernel code, and add a harness test when a path becomes important
 to your driver.
 
+The current Visual Studio 2026 (`v145`) toolchain evidence includes x64 and
+ARM64 driver builds with SDK/WDK `10.0.28000.0`, plus x86 builds with SDK
+`10.0.28000.0` and WDK `10.0.22621.0`. A clean v145 x64 Debug driver built
+with LDK `0.7.24` and SDK/WDK `10.0.28000.0` passed VM load, run, and unload
+validation. Hosted CI retains SDK/WDK `10.0.26100.0` as its v145 baseline;
+the `10.0.28000.0` result records the additional local build/package and VM
+validation.
+
 Legend:
 
 - [x] Driver-test covered: explicitly exercised by the `crtsys` kernel driver

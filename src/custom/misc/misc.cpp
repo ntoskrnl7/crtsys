@@ -25,47 +25,6 @@ extern "C" DECLSPEC_SELECTANY UINT_PTR
 extern "C" DECLSPEC_SELECTANY UINT_PTR
     __security_cookie_complement = ~CRTSYS_DEFAULT_SECURITY_COOKIE;
 
-#if CRTSYS_USE_NTL_MAIN
-//
-// 
-// When building with /GS, BufferOverflowK.lib(gs_support.obj) provides
-// GsDriverEntry, and GsDriverEntry calls DriverEntry. Define DriverEntry here
-// intentionally to satisfy that path.
-//
-
-EXTERN_C DRIVER_INITIALIZE DriverEntry;
-
-#ifdef ALLOC_PRAGMA
-#pragma alloc_text(INIT, DriverEntry)
-#endif
-
-//
-// BufferOverflowK.lib(gs_support.obj)
-//
-// GsDriverEntry 
-//
-EXTERN_C DRIVER_INITIALIZE CrtSysDriverEntry;
-
-EXTERN_C
-NTSTATUS
-DriverEntry (
-  _In_ PDRIVER_OBJECT DriverObject,
-  _In_ PUNICODE_STRING RegistryPath
-  )
-{
-    PAGED_CODE();
-
-    //
-    // If this target was built to use ntl::main, reaching DriverEntry means
-    // something was wired incorrectly.
-    // 
-    CRTSYS_DIAGNOSTIC_BREAK();
-
-    return CrtSysDriverEntry( DriverObject,
-                              RegistryPath );
-}
-#endif
-
 #if CRTSYS_USE_LIBCNTPR
 #include "../crt/setlocal.h"
 

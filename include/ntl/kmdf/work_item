@@ -1,0 +1,163 @@
+/**
+ * @file work_item
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Typed KMDF work-item configuration and object facade.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "callback"
+#include "object_attributes"
+
+#include "../result"
+
+#include <utility>
+#include "detail/wdf"
+
+namespace ntl::kmdf {
+class work_item_config;
+
+/**
+ * @brief Non-owning facade for a WDFWORKITEM object.
+ *
+ * Unlike `ntl::work_item`, this object participates in the WDF parent
+ * hierarchy and can use WDF callback serialization. Its callback always runs
+ * at PASSIVE_LEVEL.
+ */
+class work_item {
+public:
+  /** @brief Creates an empty work-item facade. */
+  work_item() noexcept = default;
+
+  /** @brief Wraps a WDF work item without taking ownership. */
+  explicit work_item(WDFWORKITEM object) noexcept : object_(object) {}
+
+  /** @brief Creates a work item parented to another WDF object. */
+  template <class Parent>
+  static ntl::result<work_item>
+  try_create(const Parent &parent, work_item_config &config,
+             object_attributes *attributes = nullptr) noexcept;
+
+  /** @brief Creates a parented work item with a managed C++ context. */
+  template <class Context, class Parent, class... Args>
+  static ntl::result<work_item>
+  try_create(const Parent &parent, work_item_config &config,
+             object_attributes *attributes, Args &&...args) noexcept;
+
+  /** @brief Queues the work item for PASSIVE_LEVEL execution. */
+  void enqueue() const noexcept { WdfWorkItemEnqueue(object_); }
+
+  /**
+   * @brief Waits until all queued invocations have completed.
+   * @note Requires PASSIVE_LEVEL and must not be called from this work item's
+   * callback.
+   */
+  void flush() const noexcept { WdfWorkItemFlush(object_); }
+
+  /** @brief Returns the work item's parent WDF object. */
+  object parent() const noexcept {
+    return object{WdfWorkItemGetParentObject(object_)};
+  }
+
+  /** @brief Returns this work item's constructed C++ context. */
+  template <class T> T &context() const noexcept {
+    return detail::get_context<T>(reinterpret_cast<WDFOBJECT>(object_));
+  }
+
+  /** @brief Returns this work item's context, or nullptr when absent. */
+  template <class T> T *try_context() const noexcept {
+    return detail::try_get_context<T>(reinterpret_cast<WDFOBJECT>(object_));
+  }
+
+  /** @brief Allocates and constructs an additional work-item context. */
+  template <class T, class... Args>
+  ntl::result<T *> try_emplace_context(Args &&...args) const noexcept {
+    return object{reinterpret_cast<WDFOBJECT>(object_)}
+        .template try_emplace_context<T>(std::forward<Args>(args)...);
+  }
+
+  /** @brief Returns the native WDF work-item object. */
+  WDFWORKITEM native_object() const noexcept { return object_; }
+
+  /** @brief Returns true when a native work-item object is present. */
+  explicit operator bool() const noexcept { return object_ != WDF_NO_HANDLE; }
+
+private:
+  WDFWORKITEM object_ = WDF_NO_HANDLE;
+};
+
+/** @brief Initializes and configures WDF_WORKITEM_CONFIG. */
+class work_item_config {
+public:
+  /**
+   * @brief Creates a work-item configuration with a typed callback.
+   * @tparam Callback Non-capturing `void(work_item) noexcept` callback.
+   */
+  template <auto Callback> static work_item_config with_callback() noexcept {
+    return work_item_config{+[](WDFWORKITEM native_work_item) noexcept {
+      detail::invoke_callback<Callback>(work_item{native_work_item});
+    }};
+  }
+
+  /** @brief Registers the typed PASSIVE_LEVEL work-item callback. */
+  template <auto Callback> work_item_config &on_execute() noexcept {
+    value_.EvtWorkItemFunc = +[](WDFWORKITEM native_work_item) noexcept {
+      detail::invoke_callback<Callback>(work_item{native_work_item});
+    };
+    return *this;
+  }
+
+  /** @brief Configures serialization with the parent object's callbacks. */
+  work_item_config &automatic_serialization(bool enabled = true) noexcept {
+    value_.AutomaticSerialization = enabled ? TRUE : FALSE;
+    return *this;
+  }
+
+  /** @brief Returns the mutable native work-item configuration. */
+  PWDF_WORKITEM_CONFIG native() noexcept { return &value_; }
+
+private:
+  explicit work_item_config(PFN_WDF_WORKITEM callback) noexcept {
+    WDF_WORKITEM_CONFIG_INIT(&value_, callback);
+  }
+
+  WDF_WORKITEM_CONFIG value_{};
+};
+
+template <class Parent>
+ntl::result<work_item>
+work_item::try_create(const Parent &parent, work_item_config &config,
+                      object_attributes *attributes) noexcept {
+  object_attributes local_attributes;
+  object_attributes &effective = attributes ? *attributes : local_attributes;
+  effective.parent(parent);
+
+  WDFWORKITEM object = WDF_NO_HANDLE;
+  const NTSTATUS result =
+      WdfWorkItemCreate(config.native(), effective.native(), &object);
+  if (!NT_SUCCESS(result))
+    return ntl::unexpected(result);
+  return ntl::ok(work_item{object});
+}
+
+template <class Context, class Parent, class... Args>
+ntl::result<work_item>
+work_item::try_create(const Parent &parent, work_item_config &config,
+                      object_attributes *attributes, Args &&...args) noexcept {
+  object_attributes local_attributes;
+  object_attributes &effective = attributes ? *attributes : local_attributes;
+  effective.parent(parent);
+  effective.template prepare_context<Context>();
+
+  WDFWORKITEM object = WDF_NO_HANDLE;
+  const NTSTATUS result =
+      WdfWorkItemCreate(config.native(), effective.native(), &object);
+  if (!NT_SUCCESS(result))
+    return ntl::unexpected(result);
+
+  effective.template construct_context<Context>(
+      reinterpret_cast<WDFOBJECT>(object), std::forward<Args>(args)...);
+  return ntl::ok(work_item{object});
+}
+} // namespace ntl::kmdf

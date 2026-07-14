@@ -204,7 +204,7 @@ endif()
 if(CRTSYS_LDK_SOURCE_DIR)
   CPMAddPackage(NAME Ldk SOURCE_DIR "${CRTSYS_LDK_SOURCE_DIR}")
 else()
-  CPMAddPackage("gh:ntoskrnl7/Ldk@0.7.23")
+  CPMAddPackage("gh:ntoskrnl7/Ldk@0.7.24")
 endif()
 CPMAddPackage(
   NAME raw_pdb
@@ -349,8 +349,24 @@ endif()
 target_include_directories(crtsys PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/custom/msvc/${CRTSYS_MSVC_COMPAT_TOOLSET_VERSION}/include")
 target_include_directories(crtsys PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/custom/msvc/${CRTSYS_MSVC_COMPAT_TOOLSET_VERSION}/crt/src/vcruntime")
 target_include_directories(crtsys PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/custom/msvc/${CRTSYS_MSVC_COMPAT_TOOLSET_VERSION}/crt/src/stl")
-target_include_directories(crtsys BEFORE PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/custom/ucrt/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/inc")
+target_include_directories(crtsys BEFORE PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/custom/ucrt/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/inc"
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/custom/ucrt/common/inc"
+)
 target_include_directories(crtsys PRIVATE "${raw_pdb_SOURCE_DIR}/src")
+
+# The optional NTL KMDF entry object is part of crtsys.lib. Build that object
+# against the oldest KMDF contract supported by crtsys; a consuming driver may
+# still select a newer KMDF version for its own sources and WDF import library.
+set(CRTSYS_MINIMUM_KMDF_VERSION "1.15")
+set(CRTSYS_MINIMUM_KMDF_INCLUDE_DIR
+    "${WDK_ROOT}/Include/wdf/kmdf/${CRTSYS_MINIMUM_KMDF_VERSION}")
+if(NOT EXISTS "${CRTSYS_MINIMUM_KMDF_INCLUDE_DIR}/wdf.h")
+  message(FATAL_ERROR
+    "KMDF ${CRTSYS_MINIMUM_KMDF_VERSION} headers were not found at "
+    "${CRTSYS_MINIMUM_KMDF_INCLUDE_DIR}. Install the matching WDK KMDF headers.")
+endif()
+target_include_directories(crtsys PRIVATE "${CRTSYS_MINIMUM_KMDF_INCLUDE_DIR}")
 
 #
 # link libraries
@@ -375,9 +391,6 @@ if (CRTSYS_USE_LIBCNTPR)
 else()
   target_compile_definitions(crtsys PRIVATE "CRTSYS_NEED_CRT_IOB_FUNC")
   target_compile_definitions(crtsys PRIVATE "CRTSYS_NEED_CRT_ABORT")
-endif()
-if (CRTSYS_NTL_MAIN)
-  target_compile_definitions(crtsys PUBLIC CRTSYS_USE_NTL_MAIN)
 endif()
 if (NOT CRTSYS_ENABLE_DIAGNOSTIC_BREAKPOINTS)
   target_compile_definitions(crtsys PRIVATE "CRTSYS_ENABLE_DIAGNOSTIC_BREAKPOINTS=0")

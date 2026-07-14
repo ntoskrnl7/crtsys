@@ -1,0 +1,613 @@
+/**
+ * @file device
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief KMDF control-device initialization and device handle facades.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ *
+ */
+#pragma once
+
+#include "../except"
+#include "../result"
+#include "../status"
+#include "../unicode_string"
+#include "callback"
+#include "object_attributes"
+#include "property"
+#include "registry"
+
+#include <string>
+#include <utility>
+#include "detail/wdf"
+
+namespace ntl::kmdf {
+template <class Context> class file_config;
+template <class Identification, class Address> class child_list_config;
+class io_target;
+class request;
+
+/**
+ * @brief Non-owning facade for a WDFDEVICE handle.
+ */
+class device {
+public:
+  /**
+   * @brief Creates an empty device facade.
+   */
+  device() noexcept = default;
+
+  /**
+   * @brief Wraps a WDF device handle without taking ownership.
+   * @param handle Native WDF device handle.
+   */
+  explicit device(WDFDEVICE handle) noexcept : handle_(handle) {}
+
+  /**
+   * @brief Creates a symbolic link for the device.
+   * @param link_name Native symbolic-link name.
+   * @return WdfDeviceCreateSymbolicLink status.
+   */
+  ntl::status
+  try_create_symbolic_link(PCUNICODE_STRING link_name) const noexcept {
+    return WdfDeviceCreateSymbolicLink(handle_, link_name);
+  }
+
+  /**
+   * @brief Creates a symbolic link for the device.
+   * @param link_name Symbolic-link name, for example \\DosDevices\\Sample.
+   * @return WdfDeviceCreateSymbolicLink status.
+   */
+  ntl::status try_create_symbolic_link(const std::wstring &link_name) const {
+    ntl::unicode_string native_name(link_name);
+    return try_create_symbolic_link(&*native_name);
+  }
+
+  /**
+   * @brief Registers a PnP device interface.
+   * @param interface_class Device interface class GUID.
+   * @param reference Optional native reference string.
+   * @return WdfDeviceCreateDeviceInterface status.
+   */
+  ntl::status
+  try_create_interface(const GUID &interface_class,
+                       PCUNICODE_STRING reference = nullptr) const noexcept {
+    return WdfDeviceCreateDeviceInterface(handle_, &interface_class, reference);
+  }
+
+  /**
+   * @brief Registers a named PnP device interface.
+   * @param interface_class Device interface class GUID.
+   * @param reference Reference string without path separators.
+   * @return WdfDeviceCreateDeviceInterface status.
+   */
+  ntl::status try_create_interface(const GUID &interface_class,
+                                   const std::wstring &reference) const {
+    ntl::unicode_string native_reference(reference);
+    return try_create_interface(interface_class, &*native_reference);
+  }
+
+  /**
+   * @brief Opens a device-instance registry key at PASSIVE_LEVEL.
+   * @param key_type PLUGPLAY_REGKEY_* flags accepted by KMDF.
+   * @param desired_access Requested registry access rights.
+   * @param attributes Optional WDF attributes for the key object.
+   */
+  ntl::result<registry_key> try_open_registry_key(
+      ULONG key_type, ACCESS_MASK desired_access = KEY_READ,
+      object_attributes *attributes = nullptr) const noexcept {
+    return registry_key::try_open_device(handle_, key_type, desired_access,
+                                         attributes);
+  }
+
+  /** @brief Queries a legacy DEVICE_REGISTRY_PROPERTY at PASSIVE_LEVEL. */
+  ntl::result<std::vector<std::uint8_t>>
+  try_query_property(DEVICE_REGISTRY_PROPERTY property) const {
+    return query_device_property(handle_, property);
+  }
+
+  /** @brief Queries a DEVPROPKEY into owned storage at PASSIVE_LEVEL. */
+  ntl::result<device_property_value>
+  try_query_property(const DEVPROPKEY &property,
+                     LCID locale = LOCALE_NEUTRAL) const {
+    return query_device_property(handle_, property, locale);
+  }
+
+  /**
+   * @brief Enables or disables a registered device interface.
+   */
+  void
+  set_interface_state(const GUID &interface_class, bool enabled,
+                      PCUNICODE_STRING reference = nullptr) const noexcept {
+    WdfDeviceSetDeviceInterfaceState(handle_, &interface_class, reference,
+                                     enabled ? TRUE : FALSE);
+  }
+
+  /**
+   * @brief Marks a non-PnP control device as initialized.
+   */
+  void finish_initializing() const noexcept {
+    WdfControlFinishInitializing(handle_);
+  }
+
+  /** @brief Returns this device's constructed C++ context. */
+  template <class T> T &context() const noexcept {
+    return detail::get_context<T>(reinterpret_cast<WDFOBJECT>(handle_));
+  }
+
+  /** @brief Returns this device's C++ context, or nullptr when absent. */
+  template <class T> T *try_context() const noexcept {
+    return detail::try_get_context<T>(reinterpret_cast<WDFOBJECT>(handle_));
+  }
+
+  /** @brief Allocates and constructs an additional typed device context. */
+  template <class T, class... Args>
+  ntl::result<T *> try_emplace_context(Args &&...args) const noexcept {
+    return object{reinterpret_cast<WDFOBJECT>(handle_)}
+        .template try_emplace_context<T>(std::forward<Args>(args)...);
+  }
+
+  /** @brief Returns the device's default I/O target. */
+  io_target default_io_target() const noexcept;
+
+  /**
+   * @brief Returns the native WDF device handle.
+   */
+  WDFDEVICE native_handle() const noexcept { return handle_; }
+
+  /**
+   * @brief Returns true when a native handle is present.
+   */
+  explicit operator bool() const noexcept { return handle_ != WDF_NO_HANDLE; }
+
+private:
+  WDFDEVICE handle_ = WDF_NO_HANDLE;
+};
+
+} // namespace ntl::kmdf
+
+#include "request"
+
+namespace ntl::kmdf {
+
+/**
+ * @brief Non-owning facade for DeviceInit supplied to EvtDriverDeviceAdd.
+ *
+ * The framework owns this initialization object and deletes it after the
+ * callback returns when WdfDeviceCreate has not consumed it. This wrapper
+ * therefore never calls WdfDeviceInitFree.
+ */
+class device_init {
+public:
+  /**
+   * @brief Wraps DeviceInit supplied to EvtDriverDeviceAdd.
+   * @param value Framework-owned initialization object.
+   */
+  explicit device_init(PWDFDEVICE_INIT value) noexcept : value_(value) {}
+
+  device_init(const device_init &) = delete;
+  device_init &operator=(const device_init &) = delete;
+
+  /** @brief Transfers this non-owning facade from another wrapper. */
+  device_init(device_init &&other) noexcept
+      : value_(std::exchange(other.value_, nullptr)) {}
+
+  /** @brief Rebinds this facade to another wrapper's initialization object. */
+  device_init &operator=(device_init &&other) noexcept {
+    if (this != &other)
+      value_ = std::exchange(other.value_, nullptr);
+    return *this;
+  }
+
+  /**
+   * @brief Sets the WDM device type.
+   * @param type FILE_DEVICE_* value.
+   * @return This initialization facade.
+   */
+  device_init &device_type(ULONG type) noexcept {
+    WdfDeviceInitSetDeviceType(value_, type);
+    return *this;
+  }
+
+  /**
+   * @brief Sets the WDF I/O buffering model.
+   * @param type WDF device I/O type.
+   * @return This initialization facade.
+   */
+  device_init &io_type(WDF_DEVICE_IO_TYPE type) noexcept {
+    WdfDeviceInitSetIoType(value_, type);
+    return *this;
+  }
+
+  /**
+   * @brief Configures exclusive access.
+   * @param enabled True to allow only one open file object.
+   * @return This initialization facade.
+   */
+  device_init &exclusive(bool enabled = true) noexcept {
+    WdfDeviceInitSetExclusive(value_, enabled ? TRUE : FALSE);
+    return *this;
+  }
+
+  /**
+   * @brief Marks the device as a filter FDO.
+   * @return This initialization facade.
+   */
+  device_init &filter() noexcept {
+    WdfFdoInitSetFilter(value_);
+    return *this;
+  }
+
+  /**
+   * @brief Configures power-policy ownership.
+   * @param enabled True when this driver owns device power policy.
+   * @return This initialization facade.
+   */
+  device_init &power_policy_owner(bool enabled = true) noexcept {
+    WdfDeviceInitSetPowerPolicyOwnership(value_, enabled ? TRUE : FALSE);
+    return *this;
+  }
+
+  /**
+   * @brief Marks the device power path as pageable.
+   * @return This initialization facade.
+   */
+  device_init &power_pageable() noexcept {
+    WdfDeviceInitSetPowerPageable(value_);
+    return *this;
+  }
+
+  /**
+   * @brief Marks the device power path as nonpageable.
+   * @return This initialization facade.
+   */
+  device_init &power_not_pageable() noexcept {
+    WdfDeviceInitSetPowerNotPageable(value_);
+    return *this;
+  }
+
+  /**
+   * @brief Applies PnP and power callbacks before device creation.
+   * @param callbacks Initialized callback configuration.
+   * @return This initialization facade.
+   */
+  template <class Callbacks>
+  device_init &pnp_power(Callbacks &callbacks) noexcept {
+    WdfDeviceInitSetPnpPowerEventCallbacks(value_, callbacks.native());
+    return *this;
+  }
+
+  /**
+   * @brief Applies power-policy callbacks before device creation.
+   * @param callbacks Initialized callback configuration.
+   * @return This initialization facade.
+   */
+  template <class Callbacks>
+  device_init &power_policy(Callbacks &callbacks) noexcept {
+    WdfDeviceInitSetPowerPolicyEventCallbacks(value_, callbacks.native());
+    return *this;
+  }
+
+  /**
+   * @brief Configures the FDO's framework-created default child list.
+   * @param config Typed child-identification and address configuration.
+   * @param attributes Optional attributes for the default child-list object.
+   * @return This initialization facade.
+   */
+  template <class Identification, class Address>
+  device_init &
+  default_child_list(child_list_config<Identification, Address> &config,
+                     object_attributes *attributes = nullptr) noexcept;
+
+  /**
+   * @brief Registers a typed EvtIoInCallerContext callback.
+   * @tparam Callback Non-capturing `void(device, request) noexcept` callback.
+   * @return This initialization facade.
+   */
+  template <auto Callback> device_init &on_io_in_caller_context() noexcept {
+    WdfDeviceInitSetIoInCallerContextCallback(
+        value_,
+        +[](WDFDEVICE native_device, WDFREQUEST native_request) noexcept {
+          detail::invoke_callback<Callback>(device{native_device},
+                                            request{native_request});
+        });
+    return *this;
+  }
+
+  /**
+   * @brief Applies attributes to WDF request objects created for this device.
+   * @param attributes Request object attributes.
+   * @return This initialization facade.
+   */
+  device_init &request_attributes(object_attributes &attributes) noexcept {
+    WdfDeviceInitSetRequestAttributes(value_, attributes.native());
+    return *this;
+  }
+
+  /**
+   * @brief Applies typed file-object callbacks before device creation.
+   * @param config Typed file-object configuration.
+   * @param attributes Optional attributes for each WDF file object.
+   * @return This initialization facade.
+   */
+  template <class Context>
+  device_init &file_objects(file_config<Context> &config) noexcept;
+
+  /**
+   * @brief Creates the PnP device and preserves NTSTATUS on failure.
+   * @param attributes Optional WDF object attributes.
+   * @return Non-owning device facade or WdfDeviceCreate failure status.
+   */
+  ntl::result<device>
+  try_create(object_attributes *attributes = nullptr) noexcept {
+    if (!value_)
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+
+    WDFDEVICE handle = WDF_NO_HANDLE;
+    const NTSTATUS result = WdfDeviceCreate(
+        &value_, attributes ? attributes->native() : nullptr, &handle);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return ntl::ok(device{handle});
+  }
+
+  /**
+   * @brief Creates a PnP device with a managed C++ context.
+   * @tparam Context Context object constructed in WDF-owned storage.
+   * @param attributes Optional WDF object attributes.
+   * @param args Arguments passed to the context constructor.
+   * @return Device facade or WdfDeviceCreate failure status.
+   *
+   * Context construction and destruction must be noexcept. WDF invokes the
+   * destructor when the device object is destroyed.
+   */
+  template <class Context, class... Args>
+  ntl::result<device> try_create(object_attributes *attributes,
+                                 Args &&...args) noexcept {
+    if (!value_)
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+
+    object_attributes local_attributes;
+    object_attributes &effective = attributes ? *attributes : local_attributes;
+    effective.template prepare_context<Context>();
+
+    WDFDEVICE handle = WDF_NO_HANDLE;
+    const NTSTATUS result =
+        WdfDeviceCreate(&value_, effective.native(), &handle);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+
+    effective.template construct_context<Context>(
+        reinterpret_cast<WDFOBJECT>(handle), std::forward<Args>(args)...);
+    return ntl::ok(device{handle});
+  }
+
+  /** @brief Creates a PnP device with a default-constructed C++ context. */
+  template <class Context> ntl::result<device> try_create() noexcept {
+    return try_create<Context>(nullptr);
+  }
+
+  /**
+   * @brief Creates the PnP device and throws on failure.
+   * @param attributes Optional WDF object attributes.
+   * @return Non-owning device facade.
+   * @throw ntl::exception when WdfDeviceCreate fails.
+   */
+  device create(object_attributes *attributes = nullptr) {
+    auto created = try_create(attributes);
+    if (!created)
+      throw ntl::exception(created.status(), "WdfDeviceCreate failed.");
+    return std::move(created).value();
+  }
+
+  /** @brief Creates a device with a managed context and throws on failure. */
+  template <class Context, class... Args>
+  device create(object_attributes *attributes, Args &&...args) {
+    auto created = try_create<Context>(attributes, std::forward<Args>(args)...);
+    if (!created)
+      throw ntl::exception(created.status(), "WdfDeviceCreate failed.");
+    return std::move(created).value();
+  }
+
+  /** @brief Creates a device with a default-constructed managed context. */
+  template <class Context> device create() { return create<Context>(nullptr); }
+
+  /** @brief Returns the currently wrapped initialization pointer. */
+  PWDFDEVICE_INIT native_handle() const noexcept { return value_; }
+
+private:
+  PWDFDEVICE_INIT value_;
+};
+
+/**
+ * @brief Owns a PWDFDEVICE_INIT allocated for a KMDF control device.
+ *
+ * WdfDeviceCreate consumes the pointer on success. If creation is not
+ * attempted or fails without consuming it, the destructor calls
+ * WdfDeviceInitFree.
+ */
+class control_device_init {
+public:
+  /**
+   * @brief Allocates a control-device initialization object.
+   * @param driver WDF driver that will own the control device.
+   * @param sddl Security descriptor string for the control device.
+   * @return Owned initialization object or STATUS_INSUFFICIENT_RESOURCES.
+   */
+  template <class Driver>
+  static ntl::result<control_device_init>
+  try_allocate(const Driver &driver, PCUNICODE_STRING sddl) noexcept {
+    PWDFDEVICE_INIT value =
+        WdfControlDeviceInitAllocate(driver.native_handle(), sddl);
+    if (!value)
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    return ntl::ok(control_device_init{value});
+  }
+
+  control_device_init(const control_device_init &) = delete;
+  control_device_init &operator=(const control_device_init &) = delete;
+
+  /**
+   * @brief Transfers ownership from another initialization wrapper.
+   */
+  control_device_init(control_device_init &&other) noexcept
+      : value_(std::exchange(other.value_, nullptr)) {}
+
+  /**
+   * @brief Releases any current initialization object and takes another.
+   */
+  control_device_init &operator=(control_device_init &&other) noexcept {
+    if (this != &other) {
+      reset();
+      value_ = std::exchange(other.value_, nullptr);
+    }
+    return *this;
+  }
+
+  /**
+   * @brief Frees an unconsumed control-device initialization object.
+   */
+  ~control_device_init() { reset(); }
+
+  /**
+   * @brief Assigns a native device name.
+   * @param name Native device name.
+   * @return WdfDeviceInitAssignName status.
+   */
+  ntl::status assign_name(PCUNICODE_STRING name) noexcept {
+    return WdfDeviceInitAssignName(value_, name);
+  }
+
+  /**
+   * @brief Assigns a native device name.
+   * @param name Device name, for example \\Device\\Sample.
+   * @return WdfDeviceInitAssignName status.
+   */
+  ntl::status assign_name(const std::wstring &name) {
+    ntl::unicode_string native_name(name);
+    return assign_name(&*native_name);
+  }
+
+  /**
+   * @brief Sets the WDM device type.
+   * @param type FILE_DEVICE_* value.
+   * @return This initialization object.
+   */
+  control_device_init &device_type(ULONG type) noexcept {
+    WdfDeviceInitSetDeviceType(value_, type);
+    return *this;
+  }
+
+  /**
+   * @brief Sets the WDF I/O buffering model.
+   * @param type WDF device I/O type.
+   * @return This initialization object.
+   */
+  control_device_init &io_type(WDF_DEVICE_IO_TYPE type) noexcept {
+    WdfDeviceInitSetIoType(value_, type);
+    return *this;
+  }
+
+  /**
+   * @brief Applies typed file-object callbacks before control-device creation.
+   * @param config Typed file-object configuration.
+   * @param attributes Optional attributes for each WDF file object.
+   * @return This initialization object.
+   */
+  template <class Context>
+  control_device_init &file_objects(file_config<Context> &config) noexcept;
+
+  /**
+   * @brief Creates the WDF device and preserves NTSTATUS on failure.
+   * @param attributes Optional WDF object attributes.
+   * @return Non-owning device facade or WdfDeviceCreate failure status.
+   */
+  ntl::result<device>
+  try_create(object_attributes *attributes = nullptr) noexcept {
+    if (!value_)
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+
+    WDFDEVICE handle = WDF_NO_HANDLE;
+    const NTSTATUS result = WdfDeviceCreate(
+        &value_, attributes ? attributes->native() : nullptr, &handle);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return ntl::ok(device{handle});
+  }
+
+  /**
+   * @brief Creates a control device with a managed C++ context.
+   * @tparam Context Context object constructed in WDF-owned storage.
+   * @param attributes Optional WDF object attributes.
+   * @param args Arguments passed to the context constructor.
+   * @return Device facade or WdfDeviceCreate failure status.
+   */
+  template <class Context, class... Args>
+  ntl::result<device> try_create(object_attributes *attributes,
+                                 Args &&...args) noexcept {
+    if (!value_)
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+
+    object_attributes local_attributes;
+    object_attributes &effective = attributes ? *attributes : local_attributes;
+    effective.template prepare_context<Context>();
+
+    WDFDEVICE handle = WDF_NO_HANDLE;
+    const NTSTATUS result =
+        WdfDeviceCreate(&value_, effective.native(), &handle);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+
+    effective.template construct_context<Context>(
+        reinterpret_cast<WDFOBJECT>(handle), std::forward<Args>(args)...);
+    return ntl::ok(device{handle});
+  }
+
+  /** @brief Creates a control device with a default C++ context. */
+  template <class Context> ntl::result<device> try_create() noexcept {
+    return try_create<Context>(nullptr);
+  }
+
+  /**
+   * @brief Creates the WDF device and throws on failure.
+   * @param attributes Optional WDF object attributes.
+   * @return Non-owning device facade.
+   * @throw ntl::exception when WdfDeviceCreate fails.
+   */
+  device create(object_attributes *attributes = nullptr) {
+    auto created = try_create(attributes);
+    if (!created)
+      throw ntl::exception(created.status(), "WdfDeviceCreate failed.");
+    return std::move(created).value();
+  }
+
+  /** @brief Creates a control device with context and throws on failure. */
+  template <class Context, class... Args>
+  device create(object_attributes *attributes, Args &&...args) {
+    auto created = try_create<Context>(attributes, std::forward<Args>(args)...);
+    if (!created)
+      throw ntl::exception(created.status(), "WdfDeviceCreate failed.");
+    return std::move(created).value();
+  }
+
+  /** @brief Creates a control device with a default C++ context. */
+  template <class Context> device create() { return create<Context>(nullptr); }
+
+  /**
+   * @brief Returns the native initialization pointer.
+   */
+  PWDFDEVICE_INIT native_handle() const noexcept { return value_; }
+
+private:
+  explicit control_device_init(PWDFDEVICE_INIT value) noexcept
+      : value_(value) {}
+
+  void reset() noexcept {
+    if (value_)
+      WdfDeviceInitFree(value_);
+    value_ = nullptr;
+  }
+
+  PWDFDEVICE_INIT value_ = nullptr;
+};
+} // namespace ntl::kmdf

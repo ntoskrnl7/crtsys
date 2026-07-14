@@ -240,7 +240,7 @@ jobs:
       fail-fast: false
       matrix:
         toolset: [v142, v143, v145]
-        arch: [x64, ARM, ARM64]
+        arch: [x86, x64, ARM, ARM64]
         config: [Debug, Release]
         include:
           - toolset: v142
@@ -272,6 +272,11 @@ jobs:
         shell: pwsh
         run: ./scripts/nuget/Ensure-CrtSysWdk.ps1 -WindowsSdkVersion '${{ matrix.windows_sdk }}'
 
+      - name: Ensure WDK for x86
+        if: ${{ matrix.arch == 'x86' }}
+        shell: pwsh
+        run: ./scripts/nuget/Ensure-CrtSysWdk.ps1 -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}' -RequiredPlatforms x86
+
       - name: Ensure WDK for ARM32
         if: ${{ matrix.arch == 'ARM' && matrix.toolset != 'v145' }}
         shell: pwsh
@@ -287,17 +292,31 @@ jobs:
           name: crtsys-nuget-${{ needs.pack.outputs.package_version }}
           path: artifacts/nuget
 
-      - name: Build package consumer test driver
+      - name: Build package consumer test drivers
         shell: pwsh
-        run: >
-          ./scripts/nuget/Test-CrtSysNuGetMsBuildPackage.ps1
-          -PackageDirectory artifacts/nuget
-          -Version '${{ needs.pack.outputs.package_version }}'
-          -Toolset '${{ matrix.toolset }}'
-          -Architecture '${{ matrix.arch }}'
-          -Configuration '${{ matrix.config }}'
-          -WindowsSdkVersion '${{ matrix.windows_sdk }}'
-          -VisualStudioMajorVersion '${{ matrix.vs_major }}'
+        run: |
+          $wdkVersion = ''
+          if ('${{ matrix.arch }}' -eq 'x86') {
+            $wdkVersion = '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}'
+          }
+
+          foreach ($driverModel in @('NTL', 'WDM', 'KMDF', 'NTL_KMDF')) {
+            $parameters = @{
+              PackageDirectory = 'artifacts/nuget'
+              Version = '${{ needs.pack.outputs.package_version }}'
+              Toolset = '${{ matrix.toolset }}'
+              Architecture = '${{ matrix.arch }}'
+              Configuration = '${{ matrix.config }}'
+              DriverModel = $driverModel
+              WindowsSdkVersion = '${{ matrix.windows_sdk }}'
+              VisualStudioMajorVersion = '${{ matrix.vs_major }}'
+            }
+            if (-not [string]::IsNullOrWhiteSpace($wdkVersion)) {
+              $parameters.WdkVersion = $wdkVersion
+            }
+
+            ./scripts/nuget/Test-CrtSysNuGetMsBuildPackage.ps1 @parameters
+          }
 
   test-package-layout:
     name: Validate NuGet package layout ${{ matrix.vs_label }} ${{ matrix.toolset }} ${{ matrix.arch }} ${{ matrix.config }}
@@ -450,7 +469,7 @@ jobs:
           name: crtsys-release-assets-${{ needs.pack.outputs.package_version }}
           path: artifacts/release
 
-      - name: Build prebuilt release CMake consumer test
+      - name: Build prebuilt release CMake consumer tests
         shell: pwsh
         run: |
           $windowsSdkVersion = '${{ matrix.windows_sdk }}'
@@ -471,7 +490,10 @@ jobs:
             $parameters.WdkVersion = $wdkVersion
           }
 
-          ./scripts/nuget/Test-CrtSysReleaseAssets.ps1 @parameters
+          foreach ($driverModel in @('NTL', 'WDM', 'KMDF', 'NTL_KMDF')) {
+            $parameters.DriverModel = $driverModel
+            ./scripts/nuget/Test-CrtSysReleaseAssets.ps1 @parameters
+          }
 
   test-release-prebuilt-layout:
     name: Validate release prebuilt layout ${{ matrix.vs_label }} ${{ matrix.toolset }} ${{ matrix.arch }} ${{ matrix.config }}

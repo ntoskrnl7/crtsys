@@ -13,6 +13,9 @@ param(
   [ValidateSet('v142', 'v143', 'v145')]
   [string] $Toolset = 'v143',
 
+  [ValidateSet('NTL', 'WDM', 'KMDF', 'NTL_KMDF')]
+  [string] $DriverModel = 'NTL',
+
   [string] $WindowsSdkVersion = '10.0.22621.0',
 
   [string] $WdkVersion = '',
@@ -32,7 +35,7 @@ if ([string]::IsNullOrWhiteSpace($ReleaseDirectory)) {
 }
 
 if ([string]::IsNullOrWhiteSpace($WorkDirectory)) {
-  $WorkDirectory = Join-Path $repoRoot "artifacts\release-consumer-test\$Toolset\$Architecture\$Configuration"
+  $WorkDirectory = Join-Path $repoRoot "artifacts\release-consumer-test\$DriverModel\$Toolset\$Architecture\$Configuration"
 }
 
 $WorkDirectory = [System.IO.Path]::GetFullPath($WorkDirectory)
@@ -92,6 +95,12 @@ foreach ($requiredPath in @(
   'share\crtsys\cmake\crtsys-config-version.cmake',
   'share\crtsys\cmake\CrtSys.cmake',
   'include\ntl\driver',
+  'include\ntl\kmdf\driver',
+  'include\ntl\kmdf\timer',
+  'include\ntl\kmdf\work_item',
+  'include\ntl\kmdf\child_list',
+  'include\ntl\kmdf\registry',
+  'include\ntl\kmdf\property',
   'include\.internal\adjust_link_order'
 )) {
   $fullPath = Join-Path $bundleRoot $requiredPath
@@ -109,20 +118,39 @@ $consumerDirectory = Join-Path $WorkDirectory 'consumer'
 New-Item -ItemType Directory -Force -Path $consumerDirectory | Out-Null
 
 $cmakeBundleRoot = $bundleRoot.Replace('\', '/')
+$driverDeclaration = switch ($DriverModel) {
+  'NTL' { @'
+set(CRTSYS_NTL_MAIN ON)
+crtsys_add_driver(crtsys_release_asset_smoke main.cpp)
+'@ }
+  'WDM' { @'
+set(CRTSYS_NTL_MAIN OFF)
+crtsys_add_driver(crtsys_release_asset_smoke main.cpp)
+'@ }
+  'KMDF' { @'
+set(CRTSYS_NTL_MAIN OFF)
+crtsys_add_driver(crtsys_release_asset_smoke KMDF 1.15 main.cpp)
+'@ }
+  'NTL_KMDF' { @'
+set(CRTSYS_NTL_MAIN OFF)
+crtsys_add_driver(crtsys_release_asset_smoke KMDF 1.15 NTL main.cpp)
+'@ }
+}
+
 $cmakeLists = @"
 cmake_minimum_required(VERSION 3.14 FATAL_ERROR)
 
 project(crtsys_release_asset_smoke LANGUAGES C CXX)
 
-set(CRTSYS_NTL_MAIN ON)
 find_package(crtsys CONFIG REQUIRED PATHS "$cmakeBundleRoot" NO_DEFAULT_PATH)
 
-crtsys_add_driver(crtsys_release_asset_smoke main.cpp)
+$driverDeclaration
 target_compile_features(crtsys_release_asset_smoke PRIVATE cxx_std_17)
 "@
 Set-Content -LiteralPath (Join-Path $consumerDirectory 'CMakeLists.txt') -Value $cmakeLists -Encoding UTF8
 
-$mainCpp = @'
+$mainCpp = switch ($DriverModel) {
+  'NTL' { @'
 #include <string>
 #include <vector>
 
@@ -139,7 +167,143 @@ ntl::status ntl::main(ntl::driver& driver,
 
   return ntl::status::ok();
 }
-'@
+'@ }
+  'WDM' { @'
+#include <ntddk.h>
+
+#include <numeric>
+#include <vector>
+
+extern "C" DRIVER_UNLOAD CrtSysReleaseSmokeDriverUnload;
+extern "C" DRIVER_INITIALIZE DriverEntry;
+
+extern "C" void CrtSysReleaseSmokeDriverUnload(PDRIVER_OBJECT driver_object) {
+  UNREFERENCED_PARAMETER(driver_object);
+}
+
+extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT driver_object,
+                                 PUNICODE_STRING registry_path) {
+  UNREFERENCED_PARAMETER(registry_path);
+
+  const std::vector<int> values{1, 2, 3};
+  if (std::accumulate(values.begin(), values.end(), 0) != 6) {
+    return STATUS_UNSUCCESSFUL;
+  }
+
+  driver_object->DriverUnload = CrtSysReleaseSmokeDriverUnload;
+  return STATUS_SUCCESS;
+}
+'@ }
+  'KMDF' { @'
+#include <ntddk.h>
+
+#pragma warning(push)
+// Older WDK KMDF 1.15 headers trigger C4471 under v142 with /WX.
+#pragma warning(disable : 4471)
+#include <wdf.h>
+#pragma warning(pop)
+
+#include <numeric>
+#include <vector>
+
+extern "C" DRIVER_INITIALIZE DriverEntry;
+
+extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT driver_object,
+                                 PUNICODE_STRING registry_path) {
+  const std::vector<int> values{1, 2, 3};
+  if (std::accumulate(values.begin(), values.end(), 0) != 6) {
+    return STATUS_UNSUCCESSFUL;
+  }
+
+  WDF_DRIVER_CONFIG config;
+  WDF_DRIVER_CONFIG_INIT(&config, WDF_NO_EVENT_CALLBACK);
+  config.DriverInitFlags |= WdfDriverInitNonPnpDriver;
+  config.EvtDriverUnload = +[](WDFDRIVER) noexcept {};
+  return WdfDriverCreate(driver_object, registry_path, WDF_NO_OBJECT_ATTRIBUTES,
+                         &config, WDF_NO_HANDLE);
+}
+'@ }
+  'NTL_KMDF' { @'
+#include <ntl/kmdf/all>
+
+#include <numeric>
+#include <string>
+#include <vector>
+
+namespace {
+constexpr GUID sample_interface = {
+    0x3dfc4dc0, 0x6d61, 0x4a97,
+    {0xa1, 0x10, 0x2a, 0xa8, 0x2f, 0x96, 0x87, 0xe1}};
+}
+
+ntl::status ntl::kmdf::main(driver_builder& builder,
+                            const std::wstring& registry_path) {
+  (void)registry_path;
+
+  const std::vector<int> values{1, 2, 3};
+  if (std::accumulate(values.begin(), values.end(), 0) != 6) {
+    return STATUS_UNSUCCESSFUL;
+  }
+
+  kmdf::driver_config config;
+  config.on_device_add<
+      +[](kmdf::driver, kmdf::device_init& init) noexcept -> NTSTATUS {
+        ntl::kmdf::pnp_power_callbacks pnp;
+        pnp.on_prepare_hardware<
+               +[](kmdf::device, kmdf::resource_list,
+                   kmdf::resource_list) noexcept -> NTSTATUS {
+                 return STATUS_SUCCESS;
+               }>()
+            .on_release_hardware<
+                +[](kmdf::device,
+                    kmdf::resource_list) noexcept -> NTSTATUS {
+                  return STATUS_SUCCESS;
+                }>()
+            .on_d0_entry<
+                +[](kmdf::device,
+                    WDF_POWER_DEVICE_STATE) noexcept -> NTSTATUS {
+                  return STATUS_SUCCESS;
+                }>()
+            .on_d0_exit<
+                +[](kmdf::device,
+                    WDF_POWER_DEVICE_STATE) noexcept -> NTSTATUS {
+                  return STATUS_SUCCESS;
+                }>();
+
+        init.io_type(WdfDeviceIoBuffered).pnp_power(pnp);
+
+        ntl::kmdf::object_attributes attributes;
+        attributes.execution_level(WdfExecutionLevelPassive);
+        auto created = init.try_create(&attributes);
+        if (!created) {
+          return created.status();
+        }
+
+        ntl::status status =
+            created.value().try_create_interface(sample_interface);
+        if (status.is_err()) {
+          return status;
+        }
+
+        ntl::kmdf::io_queue_config queue_config(
+            WdfIoQueueDispatchSequential);
+        queue_config.on_default<
+            +[](kmdf::io_queue, kmdf::request request) noexcept {
+              request.complete(STATUS_NOT_SUPPORTED);
+            }>();
+        queue_config.power_managed(WdfTrue);
+        auto queue =
+            ntl::kmdf::io_queue::try_create(created.value(), queue_config);
+        if (!queue) {
+          return queue.status();
+        }
+        return STATUS_SUCCESS;
+      }>();
+  auto created = builder.try_create(config);
+  return created ? ntl::status::ok() : created.status();
+}
+'@ }
+}
 Set-Content -LiteralPath (Join-Path $consumerDirectory 'main.cpp') -Value $mainCpp -Encoding UTF8
 
 $buildDirectory = Join-Path $WorkDirectory "build_${Toolset}_$Architecture"
@@ -156,13 +320,13 @@ $configureArgs = @(
   "-DCMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION=$WindowsSdkVersion"
 )
 
-Write-Host "Configuring prebuilt release asset consumer for $Architecture $Configuration with Windows SDK $WindowsSdkVersion and WDK $WdkVersion"
+Write-Host "Configuring prebuilt release asset $DriverModel consumer for $Architecture $Configuration with Windows SDK $WindowsSdkVersion and WDK $WdkVersion"
 & cmake @configureArgs
 if ($LASTEXITCODE -ne 0) {
   throw "CMake configure failed with exit code $LASTEXITCODE."
 }
 
-Write-Host "Building prebuilt release asset consumer for $Architecture $Configuration"
+Write-Host "Building prebuilt release asset $DriverModel consumer for $Architecture $Configuration"
 & cmake --build $buildDirectory --config $Configuration --target crtsys_release_asset_smoke --parallel
 if ($LASTEXITCODE -ne 0) {
   throw "CMake build failed with exit code $LASTEXITCODE."
@@ -173,4 +337,4 @@ if (-not (Test-Path $driverPath)) {
   throw "Prebuilt release asset consumer driver was not produced: $driverPath"
 }
 
-Write-Host "Prebuilt release asset consumer test passed: $driverPath"
+Write-Host "Prebuilt release asset $DriverModel consumer test passed: $driverPath"

@@ -73,8 +73,17 @@ msbuild .\my_driver.vcxproj /restore /p:Configuration=Release /p:Platform=ARM64
 
 native package는 WDK consumer project에 필요한 MSBuild props/targets를
 제공합니다. 여기에는 include path, forced include, runtime library, LDK
-library, package consumer test에서 쓰는 `CrtSysDriverEntry` entry point wiring이
-포함됩니다.
+library, 선택한 driver model에 맞는 startup object가 포함됩니다.
+
+| WDK project 형태 | crtsys 선택 | Source entry |
+| --- | --- | --- |
+| NTL entry wrapper를 쓰는 WDM | 기본값 또는 `<CrtSysUseNtlMain>true</CrtSysUseNtlMain>` | `ntl::main` |
+| 일반 진입점을 쓰는 WDM | `<CrtSysUseNtlMain>false</CrtSysUseNtlMain>` | `DriverEntry` |
+| 일반 KMDF | 기존 `<DriverType>KMDF</DriverType>` 설정의 기본값 | 일반 `DriverEntry`와 `WdfDriverCreate` |
+| NTL KMDF | `<DriverType>KMDF</DriverType>`와 `<CrtSysUseNtlKmdfMain>true</CrtSysUseNtlKmdfMain>` | `ntl::kmdf::main` |
+
+NTL KMDF 진입점은 선택 사항입니다. 두 KMDF 방식 모두 PnP, power, queue,
+request, object lifetime, dispatch 처리는 기존과 같이 WDF가 소유합니다.
 
 driver는 여전히 일반 WDK driver입니다. Verifier, signing, target OS policy,
 IRQL, paging, unload safety는 driver project가 책임집니다.

@@ -344,7 +344,7 @@ function(crtsys_get_prebuilt_library _out_path _library _configuration)
     return()
 endfunction()
 
-function(crtsys_apply_driver_settings _target _root)
+function(crtsys_apply_driver_settings _target _root _use_ntl_main _use_ntl_kmdf_main)
     get_target_property(INC_DIR_TMP ${_target} INCLUDE_DIRECTORIES)
     if(NOT INC_DIR_TMP)
         set(INC_DIR_TMP "")
@@ -376,8 +376,11 @@ function(crtsys_apply_driver_settings _target _root)
 
     target_compile_options(${_target} PRIVATE "$<$<COMPILE_LANGUAGE:C,CXX>:/FI${_root}/include/.internal/adjust_link_order>")
 
-    if(CRTSYS_NTL_MAIN)
+    if(_use_ntl_main)
       target_compile_definitions(${_target} PUBLIC CRTSYS_USE_NTL_MAIN)
+    endif()
+    if(_use_ntl_kmdf_main)
+      target_compile_definitions(${_target} PUBLIC CRTSYS_USE_NTL_KMDF_MAIN)
     endif()
 endfunction()
 
@@ -439,19 +442,76 @@ function(crtsys_link_prebuilt_driver_libraries _target)
 endfunction()
 
 function(crtsys_add_driver _target)
-    cmake_parse_arguments(WDK "" "WINVER" "" ${ARGN})
+    cmake_parse_arguments(WDK "NTL" "WINVER;KMDF" "" ${ARGN})
+
+    if(WDK_NTL AND NOT WDK_KMDF)
+        message(FATAL_ERROR "The NTL argument is valid only with KMDF. Use CRTSYS_NTL_MAIN for WDM NTL drivers.")
+    endif()
+
+    set(_crtsys_wdk_arguments ${WDK_UNPARSED_ARGUMENTS})
+    if(WDK_WINVER)
+        list(APPEND _crtsys_wdk_arguments WINVER "${WDK_WINVER}")
+    endif()
+
+    if(WDK_KMDF AND WDK_NTL)
+        set(_crtsys_entry_point CrtSysNtlKmdfDriverEntry)
+        set(_crtsys_use_ntl_main FALSE)
+        set(_crtsys_use_ntl_kmdf_main TRUE)
+    elseif(WDK_KMDF)
+        set(_crtsys_entry_point CrtSysKmdfDriverEntry)
+        set(_crtsys_use_ntl_main FALSE)
+        set(_crtsys_use_ntl_kmdf_main FALSE)
+    elseif(CRTSYS_NTL_MAIN)
+        set(_crtsys_entry_point CrtSysDriverEntry)
+        set(_crtsys_use_ntl_main TRUE)
+        set(_crtsys_use_ntl_kmdf_main FALSE)
+    else()
+        set(_crtsys_entry_point CrtSysWdmDriverEntry)
+        set(_crtsys_use_ntl_main FALSE)
+        set(_crtsys_use_ntl_kmdf_main FALSE)
+    endif()
 
     set(_CRTSYS_ORIGINAL_GENERATOR_PLATFORM "${CMAKE_GENERATOR_PLATFORM}")
     if(_CRTSYS_ORIGINAL_GENERATOR_PLATFORM MATCHES "^([^,]+),")
         set(CMAKE_GENERATOR_PLATFORM "${CMAKE_MATCH_1}")
     endif()
 
-    wdk_add_driver(${_target} ${WDK_UNPARSED_ARGUMENTS} CUSTOM_ENTRY_POINT CrtSysDriverEntry EXTENDED_CPP_FEATURES)
+    wdk_add_driver(
+        ${_target}
+        ${_crtsys_wdk_arguments}
+        CUSTOM_ENTRY_POINT ${_crtsys_entry_point}
+        EXTENDED_CPP_FEATURES
+    )
+
+    if(WDK_KMDF)
+        set(_crtsys_kmdf_include "${WDK_ROOT}/Include/wdf/kmdf/${WDK_KMDF}")
+        set(_crtsys_kmdf_lib "${WDK_ROOT}/Lib/wdf/kmdf/${WDK_PLATFORM}/${WDK_KMDF}")
+        if(NOT EXISTS "${_crtsys_kmdf_include}/wdf.h")
+            message(FATAL_ERROR "KMDF ${WDK_KMDF} headers were not found under ${_crtsys_kmdf_include}.")
+        endif()
+        if(NOT EXISTS "${_crtsys_kmdf_lib}/WdfDriverEntry.lib" OR
+           NOT EXISTS "${_crtsys_kmdf_lib}/WdfLdr.lib")
+            message(FATAL_ERROR "KMDF ${WDK_KMDF} libraries were not found under ${_crtsys_kmdf_lib}.")
+        endif()
+
+        target_include_directories(${_target} SYSTEM PRIVATE "${_crtsys_kmdf_include}")
+        target_link_libraries(
+            ${_target}
+            "${_crtsys_kmdf_lib}/WdfDriverEntry.lib"
+            "${_crtsys_kmdf_lib}/WdfLdr.lib"
+        )
+        target_compile_definitions(${_target} PUBLIC CRTSYS_USE_KMDF)
+    endif()
 
     set(CMAKE_GENERATOR_PLATFORM "${_CRTSYS_ORIGINAL_GENERATOR_PLATFORM}")
     crtsys_scope_compile_options_to_c_cxx(${_target})
 
-    crtsys_apply_driver_settings(${_target} "${_CRTSYS_ROOT}")
+    crtsys_apply_driver_settings(
+        ${_target}
+        "${_CRTSYS_ROOT}"
+        ${_crtsys_use_ntl_main}
+        ${_crtsys_use_ntl_kmdf_main}
+    )
 
     if(CRTSYS_USE_PREBUILT)
         crtsys_link_prebuilt_driver_libraries(${_target})

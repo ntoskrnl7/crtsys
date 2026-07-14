@@ -1,0 +1,326 @@
+/**
+ * @file registry
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief RAII and value helpers for KMDF registry keys.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "object_attributes"
+
+#include "../result"
+#include "../status"
+#include "../unicode_string"
+
+#include <cstdint>
+#include <cstring>
+#include <string>
+#include <utility>
+#include <vector>
+#include "detail/wdf"
+
+namespace ntl::kmdf {
+/** @brief Raw value returned by WdfRegistryQueryValue. */
+struct registry_value {
+  ULONG type = REG_NONE;
+  std::vector<std::uint8_t> data;
+};
+
+/**
+ * @brief Move-only RAII owner for a WDFKEY.
+ * @note Open, query, assignment, removal, and destruction require
+ * PASSIVE_LEVEL.
+ */
+class registry_key {
+public:
+  /** @brief Creates an empty key owner. */
+  registry_key() noexcept = default;
+
+  /** @brief Takes ownership of a native WDF key object. */
+  explicit registry_key(WDFKEY object) noexcept : object_(object) {}
+
+  registry_key(const registry_key &) = delete;
+  registry_key &operator=(const registry_key &) = delete;
+
+  /** @brief Transfers WDF key ownership. */
+  registry_key(registry_key &&other) noexcept
+      : object_(std::exchange(other.object_, nullptr)) {}
+
+  /** @brief Closes any current key and transfers WDF key ownership. */
+  registry_key &operator=(registry_key &&other) noexcept {
+    if (this != &other) {
+      close();
+      object_ = std::exchange(other.object_, nullptr);
+    }
+    return *this;
+  }
+
+  /** @brief Closes the WDF key at PASSIVE_LEVEL. */
+  ~registry_key() { close(); }
+
+  /** @brief Opens a device-instance registry key. */
+  static ntl::result<registry_key>
+  try_open_device(WDFDEVICE device, ULONG key_type,
+                  ACCESS_MASK desired_access = KEY_READ,
+                  object_attributes *attributes = nullptr) noexcept {
+    WDFKEY object = WDF_NO_HANDLE;
+    const NTSTATUS result = WdfDeviceOpenRegistryKey(
+        device, key_type, desired_access,
+        attributes ? attributes->native() : nullptr, &object);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return ntl::ok(registry_key{object});
+  }
+
+  /** @brief Opens a child key relative to this key. */
+  ntl::result<registry_key>
+  try_open(PCUNICODE_STRING name, ACCESS_MASK desired_access = KEY_READ,
+           object_attributes *attributes = nullptr) const noexcept {
+    if (!object_)
+      return ntl::unexpected(STATUS_INVALID_HANDLE);
+
+    WDFKEY child = WDF_NO_HANDLE;
+    const NTSTATUS result =
+        WdfRegistryOpenKey(object_, name, desired_access,
+                           attributes ? attributes->native() : nullptr, &child);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return ntl::ok(registry_key{child});
+  }
+
+  /** @brief Opens a named child key relative to this key. */
+  ntl::result<registry_key>
+  try_open(const std::wstring &name, ACCESS_MASK desired_access = KEY_READ,
+           object_attributes *attributes = nullptr) const {
+    ntl::unicode_string native_name(name);
+    return try_open(&*native_name, desired_access, attributes);
+  }
+
+  /** @brief Creates or opens a child key relative to this key. */
+  ntl::result<registry_key>
+  try_create(PCUNICODE_STRING name,
+             ACCESS_MASK desired_access = KEY_READ | KEY_WRITE,
+             ULONG create_options = REG_OPTION_NON_VOLATILE,
+             ULONG *disposition = nullptr,
+             object_attributes *attributes = nullptr) const noexcept {
+    if (!object_)
+      return ntl::unexpected(STATUS_INVALID_HANDLE);
+
+    WDFKEY child = WDF_NO_HANDLE;
+    const NTSTATUS result = WdfRegistryCreateKey(
+        object_, name, desired_access, create_options, disposition,
+        attributes ? attributes->native() : nullptr, &child);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return ntl::ok(registry_key{child});
+  }
+
+  /** @brief Creates or opens a named child key relative to this key. */
+  ntl::result<registry_key>
+  try_create(const std::wstring &name,
+             ACCESS_MASK desired_access = KEY_READ | KEY_WRITE,
+             ULONG create_options = REG_OPTION_NON_VOLATILE,
+             ULONG *disposition = nullptr,
+             object_attributes *attributes = nullptr) const {
+    ntl::unicode_string native_name(name);
+    return try_create(&*native_name, desired_access, create_options,
+                      disposition, attributes);
+  }
+
+  /** @brief Closes the owned key if present. */
+  void close() noexcept {
+    if (object_)
+      WdfRegistryClose(object_);
+    object_ = WDF_NO_HANDLE;
+  }
+
+  /** @brief Removes this key from the registry. */
+  ntl::status remove() noexcept {
+    if (!object_)
+      return STATUS_INVALID_HANDLE;
+    const NTSTATUS result = WdfRegistryRemoveKey(object_);
+    // KMDF deletes the WDFKEY object even when registry deletion fails.
+    object_ = WDF_NO_HANDLE;
+    return result;
+  }
+
+  /** @brief Removes a named value. */
+  ntl::status remove_value(PCUNICODE_STRING name) const noexcept {
+    if (!object_)
+      return STATUS_INVALID_HANDLE;
+    return WdfRegistryRemoveValue(object_, name);
+  }
+
+  /** @brief Removes a named value. */
+  ntl::status remove_value(const std::wstring &name) const {
+    ntl::unicode_string native_name(name);
+    return remove_value(&*native_name);
+  }
+
+  /** @brief Queries a raw registry value. */
+  ntl::result<registry_value> query_value(PCUNICODE_STRING name) const {
+    if (!object_)
+      return ntl::unexpected(STATUS_INVALID_HANDLE);
+
+    ULONG bytes = 0;
+    ULONG type = REG_NONE;
+    NTSTATUS result =
+        WdfRegistryQueryValue(object_, name, 0, nullptr, &bytes, &type);
+    if (result != STATUS_BUFFER_TOO_SMALL && result != STATUS_BUFFER_OVERFLOW &&
+        !NT_SUCCESS(result))
+      return ntl::unexpected(result);
+
+    registry_value value;
+    value.type = type;
+    value.data.resize(bytes);
+    if (bytes == 0)
+      return ntl::ok(std::move(value));
+
+    result = WdfRegistryQueryValue(object_, name, bytes, value.data.data(),
+                                   &bytes, &value.type);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    value.data.resize(bytes);
+    return ntl::ok(std::move(value));
+  }
+
+  /** @brief Queries a raw named registry value. */
+  ntl::result<registry_value> query_value(const std::wstring &name) const {
+    ntl::unicode_string native_name(name);
+    return query_value(&*native_name);
+  }
+
+  /** @brief Queries a REG_DWORD value. */
+  ntl::result<std::uint32_t> query_dword(PCUNICODE_STRING name) const noexcept {
+    if (!object_)
+      return ntl::unexpected(STATUS_INVALID_HANDLE);
+    ULONG value = 0;
+    const NTSTATUS result = WdfRegistryQueryULong(object_, name, &value);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return ntl::ok(static_cast<std::uint32_t>(value));
+  }
+
+  /** @brief Queries a named REG_DWORD value. */
+  ntl::result<std::uint32_t> query_dword(const std::wstring &name) const {
+    ntl::unicode_string native_name(name);
+    return query_dword(&*native_name);
+  }
+
+  /** @brief Queries a REG_QWORD value. */
+  ntl::result<std::uint64_t> query_qword(PCUNICODE_STRING name) const {
+    auto value = query_value(name);
+    if (!value)
+      return ntl::unexpected(value.status());
+    if (value->type != REG_QWORD || value->data.size() != sizeof(std::uint64_t))
+      return ntl::unexpected(STATUS_OBJECT_TYPE_MISMATCH);
+    std::uint64_t result = 0;
+    std::memcpy(&result, value->data.data(), sizeof(result));
+    return ntl::ok(result);
+  }
+
+  /** @brief Queries a named REG_QWORD value. */
+  ntl::result<std::uint64_t> query_qword(const std::wstring &name) const {
+    ntl::unicode_string native_name(name);
+    return query_qword(&*native_name);
+  }
+
+  /** @brief Queries a REG_SZ or REG_EXPAND_SZ value. */
+  ntl::result<std::wstring> query_string(PCUNICODE_STRING name) const {
+    auto value = query_value(name);
+    if (!value)
+      return ntl::unexpected(value.status());
+    if (value->type != REG_SZ && value->type != REG_EXPAND_SZ)
+      return ntl::unexpected(STATUS_OBJECT_TYPE_MISMATCH);
+    if ((value->data.size() % sizeof(wchar_t)) != 0)
+      return ntl::unexpected(STATUS_DATA_ERROR);
+
+    const auto *text = reinterpret_cast<const wchar_t *>(value->data.data());
+    std::wstring result(text, text + value->data.size() / sizeof(wchar_t));
+    while (!result.empty() && result.back() == L'\0')
+      result.pop_back();
+    return ntl::ok(std::move(result));
+  }
+
+  /** @brief Queries a named REG_SZ or REG_EXPAND_SZ value. */
+  ntl::result<std::wstring> query_string(const std::wstring &name) const {
+    ntl::unicode_string native_name(name);
+    return query_string(&*native_name);
+  }
+
+  /** @brief Assigns a raw registry value. */
+  ntl::status assign_value(PCUNICODE_STRING name, ULONG type, const void *data,
+                           ULONG bytes) const noexcept {
+    if (!object_)
+      return STATUS_INVALID_HANDLE;
+    return WdfRegistryAssignValue(object_, name, type, bytes,
+                                  const_cast<void *>(data));
+  }
+
+  /** @brief Assigns a raw named registry value. */
+  ntl::status assign_value(const std::wstring &name, ULONG type,
+                           const void *data, ULONG bytes) const {
+    ntl::unicode_string native_name(name);
+    return assign_value(&*native_name, type, data, bytes);
+  }
+
+  /** @brief Assigns a REG_DWORD value. */
+  ntl::status assign_dword(PCUNICODE_STRING name,
+                           std::uint32_t value) const noexcept {
+    if (!object_)
+      return STATUS_INVALID_HANDLE;
+    return WdfRegistryAssignULong(object_, name, value);
+  }
+
+  /** @brief Assigns a named REG_DWORD value. */
+  ntl::status assign_dword(const std::wstring &name,
+                           std::uint32_t value) const {
+    ntl::unicode_string native_name(name);
+    return assign_dword(&*native_name, value);
+  }
+
+  /** @brief Assigns a REG_QWORD value. */
+  ntl::status assign_qword(PCUNICODE_STRING name,
+                           std::uint64_t value) const noexcept {
+    return assign_value(name, REG_QWORD, &value, sizeof(value));
+  }
+
+  /** @brief Assigns a named REG_QWORD value. */
+  ntl::status assign_qword(const std::wstring &name,
+                           std::uint64_t value) const {
+    ntl::unicode_string native_name(name);
+    return assign_qword(&*native_name, value);
+  }
+
+  /** @brief Assigns a REG_SZ value including its terminating NUL. */
+  ntl::status assign_string(PCUNICODE_STRING name,
+                            PCUNICODE_STRING value) const noexcept {
+    if (!object_)
+      return STATUS_INVALID_HANDLE;
+    return WdfRegistryAssignUnicodeString(object_, name, value);
+  }
+
+  /** @brief Assigns a named REG_SZ value. */
+  ntl::status assign_string(const std::wstring &name,
+                            const std::wstring &value) const {
+    ntl::unicode_string native_name(name);
+    ntl::unicode_string native_value(value);
+    return assign_string(&*native_name, &*native_value);
+  }
+
+  /** @brief Returns the underlying WDM registry handle. */
+  HANDLE wdm_handle() const noexcept {
+    return object_ ? WdfRegistryWdmGetHandle(object_) : nullptr;
+  }
+
+  /** @brief Returns the native WDF key object. */
+  WDFKEY native_object() const noexcept { return object_; }
+
+  /** @brief Returns true when a key object is owned. */
+  explicit operator bool() const noexcept { return object_ != WDF_NO_HANDLE; }
+
+private:
+  WDFKEY object_ = WDF_NO_HANDLE;
+};
+} // namespace ntl::kmdf

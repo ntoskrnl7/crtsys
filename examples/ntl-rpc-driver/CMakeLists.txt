@@ -9,7 +9,7 @@ CPMAddPackage(NAME crtsys SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../..")
 include("${crtsys_SOURCE_DIR}/cmake/CrtSys.cmake")
 
 crtsys_add_driver(crtsys_ntl_rpc_sample
-  src/main.cpp
+  driver/main.cpp
 )
 
 add_executable(crtsys_ntl_rpc_sample_app

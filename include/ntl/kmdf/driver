@@ -1,0 +1,233 @@
+/**
+ * @file driver
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief KMDF driver configuration and NTL entry-point support.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ *
+ */
+#pragma once
+
+#include "../except"
+#include "../result"
+#include "../status"
+#include "callback"
+#include "device"
+#include "object_attributes"
+
+#include <string>
+#include <utility>
+#include "detail/wdf"
+
+namespace ntl::kmdf {
+/**
+ * @brief Non-owning facade for a WDFDRIVER handle.
+ *
+ * WDF retains ownership and applies its normal parent/child lifetime rules.
+ */
+class driver {
+public:
+  /**
+   * @brief Creates an empty driver facade.
+   */
+  driver() noexcept = default;
+
+  /**
+   * @brief Wraps an existing WDF driver handle without taking ownership.
+   * @param handle Native WDF driver handle.
+   */
+  explicit driver(WDFDRIVER handle) noexcept : handle_(handle) {}
+
+  /**
+   * @brief Returns the native WDF driver handle.
+   */
+  WDFDRIVER native_handle() const noexcept { return handle_; }
+
+  /**
+   * @brief Returns true when a native handle is present.
+   */
+  explicit operator bool() const noexcept { return handle_ != WDF_NO_HANDLE; }
+
+private:
+  WDFDRIVER handle_ = WDF_NO_HANDLE;
+};
+
+/**
+ * @brief Initializes and configures WDF_DRIVER_CONFIG.
+ */
+class driver_config {
+public:
+  /**
+   * @brief Initializes a driver configuration without a device-add callback.
+   */
+  driver_config() noexcept {
+    WDF_DRIVER_CONFIG_INIT(&value_, WDF_NO_EVENT_CALLBACK);
+  }
+
+  /**
+   * @brief Sets a typed KMDF EvtDriverDeviceAdd callback.
+   * @tparam Callback Non-capturing
+   * `NTSTATUS(driver, device_init&) noexcept` callback. `ntl::status` is also
+   * accepted as the return type.
+   * @return This configuration object.
+   */
+  template <auto Callback> driver_config &on_device_add() noexcept {
+    value_.EvtDriverDeviceAdd =
+        +[](WDFDRIVER native_driver,
+            PWDFDEVICE_INIT native_init) noexcept -> NTSTATUS {
+      device_init init{native_init};
+      return detail::invoke_status_callback<Callback>(driver{native_driver},
+                                                       init);
+    };
+    return *this;
+  }
+
+  /**
+   * @brief Sets a typed KMDF EvtDriverUnload callback.
+   * @tparam Callback Non-capturing `void(driver) noexcept` callback.
+   * @return This configuration object.
+   */
+  template <auto Callback> driver_config &on_unload() noexcept {
+    value_.EvtDriverUnload = +[](WDFDRIVER native_driver) noexcept {
+      detail::invoke_callback<Callback>(driver{native_driver});
+    };
+    return *this;
+  }
+
+  /**
+   * @brief Selects or clears the non-PnP KMDF driver mode.
+   * @param enabled True for WdfDriverInitNonPnpDriver.
+   * @return This configuration object.
+   */
+  driver_config &non_pnp(bool enabled = true) noexcept {
+    set_flag(WdfDriverInitNonPnpDriver, enabled);
+    return *this;
+  }
+
+  /**
+   * @brief Selects or clears WdfDriverInitNoDispatchOverride.
+   * @param enabled True to keep the existing WDM dispatch table.
+   * @return This configuration object.
+   */
+  driver_config &no_dispatch_override(bool enabled = true) noexcept {
+    set_flag(WdfDriverInitNoDispatchOverride, enabled);
+    return *this;
+  }
+
+  /**
+   * @brief Sets the WDF framework allocation pool tag.
+   * @param tag Four-byte kernel pool tag.
+   * @return This configuration object.
+   */
+  driver_config &pool_tag(ULONG tag) noexcept {
+    value_.DriverPoolTag = tag;
+    return *this;
+  }
+
+  /**
+   * @brief Returns the mutable native configuration structure.
+   */
+  PWDF_DRIVER_CONFIG native() noexcept { return &value_; }
+
+private:
+  void set_flag(WDF_DRIVER_INIT_FLAGS flag, bool enabled) noexcept {
+    const ULONG bit = static_cast<ULONG>(flag);
+    if (enabled)
+      value_.DriverInitFlags |= bit;
+    else
+      value_.DriverInitFlags &= ~bit;
+  }
+
+  WDF_DRIVER_CONFIG value_{};
+};
+
+/**
+ * @brief Creates the WDFDRIVER associated with the current DriverEntry call.
+ *
+ * This object is supplied by the crtsys NTL KMDF entry point. It does not
+ * replace WDF initialization and calls WdfDriverCreate directly.
+ */
+class driver_builder {
+public:
+  /**
+   * @brief Binds the native DriverEntry arguments.
+   * @param driver_object Native WDM driver object.
+   * @param registry_path Native service registry path.
+   */
+  driver_builder(PDRIVER_OBJECT driver_object,
+                 PCUNICODE_STRING registry_path) noexcept
+      : driver_object_(driver_object), registry_path_(registry_path) {}
+
+  /**
+   * @brief Calls WdfDriverCreate and preserves its NTSTATUS result.
+   * @param config KMDF driver configuration.
+   * @param attributes Optional WDF driver object attributes.
+   * @return Non-owning driver facade, or the WdfDriverCreate failure status.
+   */
+  ntl::result<driver>
+  try_create(driver_config &config,
+             object_attributes *attributes = nullptr) noexcept {
+    if (created_)
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+
+    WDFDRIVER handle = WDF_NO_HANDLE;
+    const NTSTATUS result =
+        WdfDriverCreate(driver_object_, registry_path_,
+                        attributes ? attributes->native() : nullptr,
+                        config.native(), &handle);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+
+    created_ = true;
+    return ntl::ok(driver{handle});
+  }
+
+  /**
+   * @brief Calls WdfDriverCreate and throws on failure.
+   * @param config KMDF driver configuration.
+   * @param attributes Optional WDF driver object attributes.
+   * @return Non-owning driver facade.
+   * @throw ntl::exception when WdfDriverCreate fails.
+   */
+  driver create(driver_config &config,
+                object_attributes *attributes = nullptr) {
+    auto created = try_create(config, attributes);
+    if (!created)
+      throw ntl::exception(created.status(), "WdfDriverCreate failed.");
+    return std::move(created).value();
+  }
+
+  /**
+   * @brief Returns the native WDM driver object passed to DriverEntry.
+   */
+  PDRIVER_OBJECT native_driver_object() const noexcept {
+    return driver_object_;
+  }
+
+  /**
+   * @brief Returns the native service registry path passed to DriverEntry.
+   */
+  PCUNICODE_STRING native_registry_path() const noexcept {
+    return registry_path_;
+  }
+
+private:
+  PDRIVER_OBJECT driver_object_;
+  PCUNICODE_STRING registry_path_;
+  bool created_ = false;
+};
+
+#if _X86_
+// MSVC treats every function named main as a hosted entry-point candidate.
+// NTL owns this hook and calls it through its declared kernel calling
+// convention, so suppress the hosted-only C4007 diagnostic under WDK /Gz.
+#pragma warning(disable : 4007)
+#endif
+/**
+ * @brief User-provided NTL KMDF driver entry point.
+ * @param driver Builder used to configure and create the WDFDRIVER.
+ * @param registry_path Service registry path copied from DriverEntry.
+ * @return Driver initialization status.
+ */
+ntl::status main(driver_builder &driver, const std::wstring &registry_path);
+} // namespace ntl::kmdf

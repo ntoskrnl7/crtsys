@@ -1,0 +1,204 @@
+/**
+ * @file object_attributes
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief C++ configuration facade for WDF_OBJECT_ATTRIBUTES.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ *
+ */
+#pragma once
+
+#include "callback"
+#include "context"
+
+#include "../result"
+
+#include "detail/wdf"
+
+namespace ntl::kmdf {
+class object_attributes;
+
+/** @brief Non-owning facade for a generic WDF object handle. */
+class object {
+public:
+  /** @brief Wraps a native WDF object without taking ownership. */
+  explicit object(WDFOBJECT handle) noexcept : handle_(handle) {}
+
+  /** @brief Returns the native WDF object handle. */
+  WDFOBJECT native_handle() const noexcept { return handle_; }
+
+  /** @brief Returns this object's constructed C++ context. */
+  template <class T> T &context() const noexcept {
+    return detail::get_context<T>(handle_);
+  }
+
+  /** @brief Returns this object's context, or nullptr when absent. */
+  template <class T> T *try_context() const noexcept {
+    return detail::try_get_context<T>(handle_);
+  }
+
+  /**
+   * @brief Allocates and constructs an additional C++ object context.
+   * @return Context pointer or WdfObjectAllocateContext failure status.
+   */
+  template <class T, class... Args>
+  ntl::result<T *> try_emplace_context(Args &&...args) const noexcept;
+
+private:
+  WDFOBJECT handle_;
+};
+
+/**
+ * @brief Initializes and configures WDF object attributes.
+ *
+ * The wrapper does not own a WDF object. It only keeps the native attributes
+ * structure used while creating one.
+ */
+class object_attributes {
+public:
+  /**
+   * @brief Initializes attributes with WDF defaults.
+   */
+  object_attributes() noexcept { WDF_OBJECT_ATTRIBUTES_INIT(&value_); }
+
+  /**
+   * @brief Sets the callback execution-level constraint.
+   * @param level WDF execution level for the created object.
+   * @return This attributes object.
+   */
+  object_attributes &execution_level(WDF_EXECUTION_LEVEL level) noexcept {
+    value_.ExecutionLevel = level;
+    return *this;
+  }
+
+  /**
+   * @brief Sets the callback synchronization scope.
+   * @param scope WDF synchronization scope for the created object.
+   * @return This attributes object.
+   */
+  object_attributes &
+  synchronization_scope(WDF_SYNCHRONIZATION_SCOPE scope) noexcept {
+    value_.SynchronizationScope = scope;
+    return *this;
+  }
+
+  /**
+   * @brief Sets the parent in the WDF object hierarchy.
+   * @param parent Native parent WDF object.
+   * @return This attributes object.
+   */
+  template <class Parent>
+  object_attributes &parent(const Parent &parent) noexcept {
+    value_.ParentObject = parent_object(parent, 0);
+    return *this;
+  }
+
+  /**
+   * @brief Registers the WDF object cleanup callback.
+   * @tparam Callback Non-capturing `void(object) noexcept` callback.
+   * @return This attributes object.
+   */
+  template <auto Callback> object_attributes &on_cleanup() noexcept {
+    cleanup_callback_ = +[](WDFOBJECT native_object) noexcept {
+      detail::invoke_callback<Callback>(object{native_object});
+    };
+    if (!managed_context_)
+      value_.EvtCleanupCallback = cleanup_callback_;
+    return *this;
+  }
+
+  /**
+   * @brief Registers the WDF object destroy callback.
+   * @tparam Callback Non-capturing `void(object) noexcept` callback.
+   * @return This attributes object.
+   */
+  template <auto Callback> object_attributes &on_destroy() noexcept {
+    destroy_callback_ = +[](WDFOBJECT native_object) noexcept {
+      detail::invoke_callback<Callback>(object{native_object});
+    };
+    if (!managed_context_)
+      value_.EvtDestroyCallback = destroy_callback_;
+    return *this;
+  }
+
+  /** @internal Prepares WDF storage for a C++ context type. */
+  template <class T> void prepare_context() noexcept {
+    detail::prepare_context_attributes<T>(value_, cleanup_callback_,
+                                          destroy_callback_);
+    managed_context_ = true;
+  }
+
+  /** @internal Constructs a prepared C++ context after WDF object creation. */
+  template <class T, class... Args>
+  T &construct_context(WDFOBJECT object, Args &&...args) noexcept {
+    return detail::construct_context<T>(object, cleanup_callback_,
+                                        destroy_callback_,
+                                        std::forward<Args>(args)...);
+  }
+
+  /**
+   * @brief Associates native WDF context type information with the object.
+   * @param type_info Type information produced by WDF context macros.
+   * @return This attributes object.
+   */
+  object_attributes &
+  context_type(PCWDF_OBJECT_CONTEXT_TYPE_INFO type_info) noexcept {
+    value_.ContextTypeInfo = type_info;
+    return *this;
+  }
+
+  /**
+   * @brief Overrides the context allocation size.
+   * @param size Context size in bytes.
+   * @return This attributes object.
+   */
+  object_attributes &context_size(size_t size) noexcept {
+    value_.ContextSizeOverride = size;
+    return *this;
+  }
+
+  /**
+   * @brief Returns the mutable native attributes structure.
+   */
+  PWDF_OBJECT_ATTRIBUTES native() noexcept { return &value_; }
+
+  /**
+   * @brief Returns the native attributes structure.
+   */
+  const WDF_OBJECT_ATTRIBUTES &native_value() const noexcept { return value_; }
+
+private:
+  template <class Parent>
+  static auto parent_object(const Parent &parent, int) noexcept
+      -> decltype(parent.native_object(), WDFOBJECT{}) {
+    return reinterpret_cast<WDFOBJECT>(parent.native_object());
+  }
+
+  template <class Parent>
+  static auto parent_object(const Parent &parent, long) noexcept
+      -> decltype(parent.native_handle(), WDFOBJECT{}) {
+    return reinterpret_cast<WDFOBJECT>(parent.native_handle());
+  }
+
+  WDF_OBJECT_ATTRIBUTES value_{};
+  PFN_WDF_OBJECT_CONTEXT_CLEANUP cleanup_callback_ = nullptr;
+  PFN_WDF_OBJECT_CONTEXT_DESTROY destroy_callback_ = nullptr;
+  bool managed_context_ = false;
+};
+
+template <class T, class... Args>
+ntl::result<T *> object::try_emplace_context(Args &&...args) const noexcept {
+  object_attributes attributes;
+  attributes.template prepare_context<T>();
+  void *raw_context = nullptr;
+  const NTSTATUS result =
+      WdfObjectAllocateContext(handle_, attributes.native(), &raw_context);
+  if (!NT_SUCCESS(result))
+    return ntl::unexpected(result);
+
+  UNREFERENCED_PARAMETER(raw_context);
+  T &value = attributes.template construct_context<T>(
+      handle_, std::forward<Args>(args)...);
+  return ntl::ok(&value);
+}
+} // namespace ntl::kmdf

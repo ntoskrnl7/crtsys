@@ -1,7 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="12.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <PropertyGroup>
-    <CrtSysPackageRoot Condition="'$(CrtSysPackageRoot)' == ''">$([MSBuild]::NormalizeDirectory('$(MSBuildThisFileDirectory)', 'packages', 'crtsys'))</CrtSysPackageRoot>
+    <BaseIntermediateOutputPath>$(MSBuildThisFileDirectory)obj\$(MSBuildProjectName)\</BaseIntermediateOutputPath>
+    <MSBuildProjectExtensionsPath>$(BaseIntermediateOutputPath)</MSBuildProjectExtensionsPath>
+    <CrtSysUsePackageReference Condition="'$(CrtSysPackageRoot)' == ''">true</CrtSysUsePackageReference>
+    <CrtSysPackageVersion Condition="'$(CrtSysPackageVersion)' == ''">*</CrtSysPackageVersion>
+    <ExcludeRestorePackageImports Condition="'$(CrtSysPackageRoot)' != ''">true</ExcludeRestorePackageImports>
+    <RestoreProjectStyle>PackageReference</RestoreProjectStyle>
   </PropertyGroup>
   <Import Project="$(CrtSysPackageRoot)build\native\crtsys.props" Condition="Exists('$(CrtSysPackageRoot)build\native\crtsys.props')" />
   <ItemGroup Label="ProjectConfigurations">
@@ -43,6 +48,8 @@
     <RootNamespace>CrtSysNuGetTest</RootNamespace>
     <Configuration Condition="'$(Configuration)' == ''">Release</Configuration>
     <Platform Condition="'$(Platform)' == ''">x64</Platform>
+    <!-- Prevent newer WDK headers from importing kernel APIs added after the Windows Driver RS5 baseline. -->
+    <_NT_TARGET_VERSION>0xA000006</_NT_TARGET_VERSION>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Label="Configuration" Condition="'$(Configuration)'=='Debug'">
@@ -72,6 +79,10 @@
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="Exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" />
   </ImportGroup>
   <ItemGroup Label="WrappedTaskItems" />
+  <ItemGroup Condition="'$(CrtSysUsePackageReference)' == 'true'">
+    <PackageReference Include="crtsys" Version="$(CrtSysPackageVersion)" />
+    <PackageReference Include="nlohmann.json" Version="3.12.0" />
+  </ItemGroup>
   <ItemDefinitionGroup>
     <ClCompile>
       <WarningLevel>Level4</WarningLevel>
@@ -92,13 +103,21 @@
     <ClCompile Include="..\cmake\driver\src\cpp\stl\atomic.cpp" />
     <ClCompile Include="..\cmake\driver\src\cpp\stl\chrono.cpp" />
     <ClCompile Include="..\cmake\driver\src\cpp\stl\containers.cpp" />
+    <ClCompile Include="..\cmake\driver\src\cpp\stl\cstdio.cpp" />
+    <ClCompile Include="..\cmake\driver\src\cpp\stl\cstdio_file_state.cpp" />
+    <ClCompile Include="..\cmake\driver\src\cpp\stl\cstdlib.cpp" />
+    <ClCompile Include="..\cmake\driver\src\cpp\stl\ctime.cpp" />
+    <ClCompile Include="..\cmake\driver\src\cpp\stl\cxx_latest.cpp" />
+    <ClCompile Include="..\cmake\driver\src\cpp\stl\diagnostics.cpp" />
     <ClCompile Include="..\cmake\driver\src\cpp\stl\exception.cpp" />
     <ClCompile Include="..\cmake\driver\src\cpp\stl\filesystem.cpp" />
     <ClCompile Include="..\cmake\driver\src\cpp\stl\functional.cpp" />
     <ClCompile Include="..\cmake\driver\src\cpp\stl\locale.cpp" />
     <ClCompile Include="..\cmake\driver\src\cpp\stl\memory.cpp" />
+    <ClCompile Include="..\cmake\driver\src\cpp\stl\nls.cpp" />
     <ClCompile Include="..\cmake\driver\src\cpp\stl\numeric.cpp" />
     <ClCompile Include="..\cmake\driver\src\cpp\stl\regex.cpp" />
+    <ClCompile Include="..\cmake\driver\src\cpp\stl\streams.cpp" />
     <ClCompile Include="..\cmake\driver\src\cpp\stl\string.cpp" />
     <ClCompile Include="..\cmake\driver\src\cpp\stl\thread.cpp" />
     <ClCompile Include="..\cmake\driver\src\cpp\stl\utility.cpp" />

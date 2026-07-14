@@ -3,6 +3,21 @@ build*/
 !nuget/build/**
 .vscode
 .vs/
+*.vcxproj.user
 artifacts/
 lib/
 .cpm-cache/
+
+# Visual Studio sample and NuGet consumer outputs.
+examples/*/obj/
+examples/*/x64/
+examples/*/x86/
+examples/*/ARM/
+examples/*/ARM64/
+examples/*/crtsys_*.*/
+test/nuget/obj/
+test/nuget/x64/
+test/nuget/x86/
+test/nuget/ARM/
+test/nuget/ARM64/
+test/nuget/crtsys_*.*/

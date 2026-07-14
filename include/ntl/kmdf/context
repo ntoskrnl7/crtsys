@@ -1,0 +1,118 @@
+/**
+ * @file context
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief C++ object lifetime support for KMDF object contexts.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ *
+ */
+#pragma once
+
+#include <ntddk.h>
+#include "detail/wdf"
+
+#include <cstddef>
+#include <new>
+#include <type_traits>
+#include <utility>
+
+namespace ntl::kmdf::detail {
+struct managed_context_header {
+  PFN_WDF_OBJECT_CONTEXT_CLEANUP user_cleanup;
+  PFN_WDF_OBJECT_CONTEXT_DESTROY user_destroy;
+  bool constructed;
+};
+
+template <class T> struct managed_context_storage {
+  managed_context_header header;
+  alignas(T) unsigned char value[sizeof(T)];
+};
+
+template <class T>
+inline PCWDF_OBJECT_CONTEXT_TYPE_INFO managed_context_type_info() noexcept {
+  // Older WDKs declare ContextName as writable PCHAR even though WDF only
+  // reads this static type name. Newer WDKs corrected the field to LPCSTR.
+  static const WDF_OBJECT_CONTEXT_TYPE_INFO info = {
+      sizeof(WDF_OBJECT_CONTEXT_TYPE_INFO), const_cast<PCHAR>(__FUNCSIG__),
+      sizeof(managed_context_storage<T>), nullptr, nullptr};
+  return &info;
+}
+
+template <class T>
+managed_context_storage<T> *context_storage(WDFOBJECT object) noexcept {
+  return static_cast<managed_context_storage<T> *>(
+      WdfObjectGetTypedContextWorker(object, managed_context_type_info<T>()));
+}
+
+template <class T> void managed_context_cleanup(WDFOBJECT object) noexcept {
+  auto *storage = context_storage<T>(object);
+  if (storage && storage->header.user_cleanup)
+    storage->header.user_cleanup(object);
+}
+
+template <class T> void managed_context_destroy(WDFOBJECT object) noexcept {
+  auto *storage = context_storage<T>(object);
+  if (!storage)
+    return;
+
+  if (storage->header.user_destroy)
+    storage->header.user_destroy(object);
+
+  if (storage->header.constructed) {
+    reinterpret_cast<T *>(storage->value)->~T();
+    storage->header.constructed = false;
+  }
+}
+
+template <class T>
+void prepare_context_attributes(
+    WDF_OBJECT_ATTRIBUTES &attributes,
+    PFN_WDF_OBJECT_CONTEXT_CLEANUP user_cleanup = nullptr,
+    PFN_WDF_OBJECT_CONTEXT_DESTROY user_destroy = nullptr) noexcept {
+  static_assert(alignof(T) <= MEMORY_ALLOCATION_ALIGNMENT,
+                "KMDF context type requires unsupported over-alignment");
+  static_assert(std::is_nothrow_destructible_v<T>,
+                "KMDF context destructors must be noexcept");
+
+  attributes.ContextTypeInfo = managed_context_type_info<T>();
+  attributes.ContextSizeOverride = 0;
+  attributes.EvtCleanupCallback = managed_context_cleanup<T>;
+  attributes.EvtDestroyCallback = managed_context_destroy<T>;
+
+  UNREFERENCED_PARAMETER(user_cleanup);
+  UNREFERENCED_PARAMETER(user_destroy);
+}
+
+template <class T, class... Args>
+T &construct_context(WDFOBJECT object,
+                     PFN_WDF_OBJECT_CONTEXT_CLEANUP user_cleanup,
+                     PFN_WDF_OBJECT_CONTEXT_DESTROY user_destroy,
+                     Args &&...args) noexcept {
+  static_assert(std::is_nothrow_constructible_v<T, Args...>,
+                "KMDF context constructors must be noexcept");
+
+  auto *storage = context_storage<T>(object);
+  NT_ASSERT(storage != nullptr);
+  NT_ASSERT(!storage->header.constructed);
+
+  storage->header.user_cleanup = user_cleanup;
+  storage->header.user_destroy = user_destroy;
+  T *value = ::new (storage->value) T(std::forward<Args>(args)...);
+  storage->header.constructed = true;
+  return *value;
+}
+
+template <class T> T *try_get_context(WDFOBJECT object) noexcept {
+  auto *storage = context_storage<T>(object);
+  if (!storage || !storage->header.constructed)
+    return nullptr;
+
+  return reinterpret_cast<T *>(storage->value);
+}
+
+template <class T> T &get_context(WDFOBJECT object) noexcept {
+  T *value = try_get_context<T>(object);
+  NT_ASSERT(value != nullptr);
+  return *value;
+}
+} // namespace ntl::kmdf::detail
