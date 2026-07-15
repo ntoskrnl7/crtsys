@@ -525,6 +525,20 @@ constexpr auto sample_usb_reader_failure =
   queue.purge<+[](ntl::kmdf::io_queue, void*) noexcept {}>();
   queue.stop_and_purge<+[](ntl::kmdf::io_queue, void*) noexcept {}>();
 
+  request_parameters parameters;
+  auto found = queue.try_find(nullptr, nullptr, &parameters);
+  if (found) {
+    auto retrieved = queue.try_retrieve(std::move(found).value());
+    if (retrieved)
+      retrieved->complete(STATUS_SUCCESS);
+  }
+  auto next = queue.try_retrieve_next();
+  if (next)
+    next->complete(STATUS_SUCCESS);
+  auto for_file = queue.try_retrieve_for(request.associated_file());
+  if (for_file)
+    for_file->complete(STATUS_SUCCESS);
+
   file_config<sample_file_context> files;
   files
       .on_create<

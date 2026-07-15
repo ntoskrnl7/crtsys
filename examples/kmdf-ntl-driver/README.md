@@ -21,6 +21,12 @@ During device setup the sample also allocates parented `WDFMEMORY`, verifies
 buffer copies, creates a general I/O target, and creates then automatically
 deletes an unsent `ntl::kmdf::driver_request`.
 
+The app also exercises a manually dispatched queue with real overlapped I/O.
+One pending IOCTL is retrieved by its KMDF file object and completed normally;
+a second is canceled with `CancelIoEx` while still queued. The driver verifies
+the move-only request ownership transition and completes the framework's
+`EvtIoCanceledOnQueue` callback exactly once.
+
 ## Visual Studio and NuGet
 
 Open `crtsys_kmdf_ntl_sample_vs.sln`, restore packages, and build `Debug|x64`
@@ -66,4 +72,5 @@ Expected app output:
 
 ```text
 NTL KMDF ok: value=36 result=42 server_irql=0 message=KMDF transformed 36 to 42
+NTL KMDF manual queue ok: released=1 canceled=1
 ```

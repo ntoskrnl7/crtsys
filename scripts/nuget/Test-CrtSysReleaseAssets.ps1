@@ -347,6 +347,28 @@ constexpr auto sample_usb_reader_failure =
       .enabled(false);
   (void)wake.try_apply(device);
 }
+
+[[maybe_unused]] void compile_manual_queue_surface(
+    ntl::kmdf::io_queue queue, ntl::kmdf::request request,
+    ntl::kmdf::file file) {
+  using namespace ntl::kmdf;
+
+  request_parameters parameters;
+  auto found = queue.try_find(nullptr, &file, &parameters);
+  if (found) {
+    auto retrieved = queue.try_retrieve(std::move(found).value());
+    if (retrieved)
+      retrieved->complete(STATUS_SUCCESS);
+  }
+
+  auto next = queue.try_retrieve_next();
+  if (next)
+    next->complete(STATUS_SUCCESS);
+
+  auto for_file = queue.try_retrieve_for(request.associated_file());
+  if (for_file)
+    for_file->complete(STATUS_SUCCESS);
+}
 }
 
 ntl::status ntl::kmdf::main(driver_builder& builder,

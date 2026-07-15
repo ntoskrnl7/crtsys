@@ -21,6 +21,30 @@
 #include "detail/wdf"
 
 namespace ntl::kmdf {
+class file;
+
+/** @brief Initialized view of the parameters associated with a WDF request. */
+class request_parameters {
+public:
+  /** @brief Initializes storage for WdfIoQueueFindRequest. */
+  request_parameters() noexcept { WDF_REQUEST_PARAMETERS_INIT(&value_); }
+
+  /** @brief Returns the request's major-function classification. */
+  WDF_REQUEST_TYPE type() const noexcept { return value_.Type; }
+
+  /** @brief Returns the request's minor function. */
+  UCHAR minor_function() const noexcept { return value_.MinorFunction; }
+
+  /** @brief Returns the native parameter structure. */
+  const WDF_REQUEST_PARAMETERS &value() const noexcept { return value_; }
+
+  /** @brief Returns mutable storage for a WDF query operation. */
+  PWDF_REQUEST_PARAMETERS native() noexcept { return &value_; }
+
+private:
+  WDF_REQUEST_PARAMETERS value_{};
+};
+
 /** @brief Builder for WDF_REQUEST_REUSE_PARAMS. */
 class request_reuse_params {
 public:
@@ -343,6 +367,9 @@ public:
   bool is_canceled() const noexcept {
     return WdfRequestIsCanceled(handle_) != FALSE;
   }
+
+  /** @brief Returns the file object associated with this request. */
+  file associated_file() const noexcept;
 
   /** @brief Returns the current framework request status. */
   ntl::status current_status() const noexcept {
