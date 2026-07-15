@@ -77,6 +77,10 @@ private:
   WDFFILEOBJECT object_ = WDF_NO_HANDLE;
 };
 
+inline file request::associated_file() const noexcept {
+  return file{WdfRequestGetFileObject(native_handle())};
+}
+
 /**
  * @brief Configures typed KMDF file-object callbacks.
  * @tparam Context Optional C++ context constructed for each opened file.

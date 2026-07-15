@@ -11,13 +11,76 @@
 #include "../result"
 #include "callback"
 #include "device"
+#include "file"
 #include "object_attributes"
 #include "request"
 
 #include "detail/wdf"
 
+#include <utility>
+
 namespace ntl::kmdf {
+class io_queue;
 class io_queue_config;
+
+/**
+ * @brief Move-only reference to a request found in a manual queue.
+ *
+ * WdfIoQueueFindRequest adds a framework-object reference but does not give
+ * the driver ownership of the request. This type releases that reference
+ * automatically. Use io_queue::try_retrieve() to take the request out of the
+ * queue before processing or completing it.
+ */
+class found_request {
+public:
+  /** @brief Creates an empty search result. */
+  found_request() noexcept = default;
+
+  found_request(const found_request &) = delete;
+  found_request &operator=(const found_request &) = delete;
+
+  /** @brief Transfers the framework-object reference. */
+  found_request(found_request &&other) noexcept
+      : handle_(std::exchange(other.handle_, nullptr)) {}
+
+  /** @brief Releases any current reference and takes another one. */
+  found_request &operator=(found_request &&other) noexcept {
+    if (this != &other) {
+      reset();
+      handle_ = std::exchange(other.handle_, nullptr);
+    }
+    return *this;
+  }
+
+  /** @brief Releases the reference returned by WdfIoQueueFindRequest. */
+  ~found_request() { reset(); }
+
+  /** @brief Releases the held framework-object reference. */
+  void reset() noexcept {
+    if (handle_) {
+      // KMDF 1.15 declares the diagnostic file parameter as mutable PCHAR,
+      // so its WdfObjectDereference macro conflicts with /Zc:strictStrings.
+      WdfObjectDereferenceActual(reinterpret_cast<WDFOBJECT>(handle_), nullptr,
+                                 __LINE__, const_cast<PCHAR>(__FILE__));
+    }
+    handle_ = nullptr;
+  }
+
+  /** @brief Returns the referenced request handle for another queue query. */
+  WDFREQUEST native_handle() const noexcept { return handle_; }
+
+  /** @brief Returns true while a referenced request is held. */
+  explicit operator bool() const noexcept { return handle_ != nullptr; }
+
+private:
+  friend class io_queue;
+
+  /** @brief Takes ownership of a reference returned by WdfIoQueueFindRequest.
+   */
+  explicit found_request(WDFREQUEST handle) noexcept : handle_(handle) {}
+
+  WDFREQUEST handle_ = nullptr;
+};
 
 /** @brief Non-owning facade for a WDFQUEUE handle. */
 class io_queue {
@@ -35,6 +98,69 @@ public:
   static ntl::result<io_queue>
   try_create(const device &owner, io_queue_config &config,
              object_attributes *attributes = nullptr) noexcept;
+
+  /**
+   * @brief Retrieves the next request from a manually dispatched queue.
+   * @return A driver-owned request or the exact KMDF failure status.
+   */
+  ntl::result<request> try_retrieve_next() const noexcept {
+    WDFREQUEST native_request = WDF_NO_HANDLE;
+    const NTSTATUS result =
+        WdfIoQueueRetrieveNextRequest(handle_, &native_request);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return ntl::ok(request{native_request});
+  }
+
+  /**
+   * @brief Retrieves the next queued request associated with a file object.
+   * @return A driver-owned request or the exact KMDF failure status.
+   */
+  ntl::result<request> try_retrieve_for(const file &owner) const noexcept {
+    WDFREQUEST native_request = WDF_NO_HANDLE;
+    const NTSTATUS result = WdfIoQueueRetrieveRequestByFileObject(
+        handle_, owner.native_object(), &native_request);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return ntl::ok(request{native_request});
+  }
+
+  /**
+   * @brief Finds a request without removing it from a manual queue.
+   * @param after Previous search result, or null to start at the queue head.
+   * @param owner Optional file-object filter.
+   * @param parameters Optional initialized storage for request parameters.
+   * @return A referenced search result or the exact KMDF failure status.
+   */
+  ntl::result<found_request>
+  try_find(const found_request *after = nullptr, const file *owner = nullptr,
+           request_parameters *parameters = nullptr) const noexcept {
+    WDFREQUEST native_request = WDF_NO_HANDLE;
+    const NTSTATUS result = WdfIoQueueFindRequest(
+        handle_, after ? after->native_handle() : WDF_NO_HANDLE,
+        owner ? owner->native_object() : WDF_NO_HANDLE,
+        parameters ? parameters->native() : nullptr, &native_request);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return ntl::ok(found_request{native_request});
+  }
+
+  /**
+   * @brief Removes a previously found request from a manual queue.
+   * @return A driver-owned request or the exact KMDF failure status.
+   * @note The search reference is released whether retrieval succeeds or
+   * fails. A STATUS_NOT_FOUND result means cancellation or another consumer
+   * won the race.
+   */
+  ntl::result<request> try_retrieve(found_request &&found) const noexcept {
+    WDFREQUEST native_request = WDF_NO_HANDLE;
+    const NTSTATUS result = WdfIoQueueRetrieveFoundRequest(
+        handle_, found.native_handle(), &native_request);
+    found.reset();
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return ntl::ok(request{native_request});
+  }
 
   /** @brief Starts dispatching requests from this queue. */
   void start() const noexcept { WdfIoQueueStart(handle_); }

@@ -355,6 +355,44 @@ auto status = std::move(request).try_forward_to(destination);
 cancellation race: `STATUS_CANCELLED` from unmark means the cancellation
 callback owns completion.
 
+## Manual Queues And Cancellation
+
+Create a non-default `WdfIoQueueDispatchManual` queue when requests must wait
+for hardware, data, or another request. `try_retrieve_next()` and
+`try_retrieve_for()` remove a request from that queue and return a move-only
+`request`, transferring the right to process and complete it to the caller:
+
+```cpp
+ntl::kmdf::io_queue_config pending_config(
+    WdfIoQueueDispatchManual, false);
+pending_config.on_canceled<on_canceled>();
+
+auto pending = ntl::kmdf::io_queue::try_create(
+    device, pending_config, &passive_attributes);
+
+auto waiting = pending->try_retrieve_for(release.associated_file());
+if (!waiting)
+  return waiting.status();
+
+waiting->complete(STATUS_SUCCESS);
+```
+
+`try_find()` supports non-destructive inspection. KMDF increments the found
+request's object reference but does not give the driver request ownership, so
+NTL returns a move-only `found_request` that automatically dereferences the
+object. Pass it to `try_retrieve()` to atomically attempt the ownership
+transition. `STATUS_NOT_FOUND` means cancellation or another consumer removed
+the request first. `request_parameters` supplies initialized storage for the
+found request's native parameters.
+
+Do not call `try_mark_cancelable()` while a request is still in a WDF queue;
+the framework owns queued-request cancellation. An `on_canceled()` queue
+callback receives the canceled request and must complete it. After a driver
+retrieves and retains a request, it may mark it cancelable. Before completing
+that driver-owned request outside the cancellation callback, call
+`try_unmark_cancelable()`: a `STATUS_CANCELLED` result means the cancellation
+callback owns the only legal completion.
+
 To send a formatted request to another device stack, register an allocation-
 free completion callback and transfer it to an `io_target`:
 
