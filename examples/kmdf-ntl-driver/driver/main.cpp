@@ -1,14 +1,17 @@
 #include <ntddk.h>
 #include <wdmsec.h>
 
+#include <ntl/event>
 #include <ntl/irql>
 #include <ntl/kmdf/all>
+#include <ntl/wait>
 
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdint>
 #include <format>
+#include <mutex>
 #include <numeric>
 #include <string>
 #include <vector>
@@ -53,6 +56,31 @@ struct child_location {
   ULONG slot;
 };
 
+struct utility_dpc_state {
+  std::atomic<std::uint32_t> executions{0};
+  std::atomic<std::uint32_t> observed_irql{0};
+  ntl::event completed{ntl::event_type::synchronization};
+};
+
+struct utility_wait_lock_state {
+  explicit utility_wait_lock_state(ntl::kmdf::wait_lock lock) noexcept
+      : lock(lock) {}
+
+  ntl::kmdf::wait_lock lock;
+  ntl::event acquired{ntl::event_type::synchronization};
+  ntl::event release{ntl::event_type::synchronization};
+};
+
+ntl::event utility_object_destroyed{ntl::event_type::synchronization};
+
+struct utility_object_state {
+  explicit utility_object_state(std::uint32_t value) noexcept : value(value) {}
+
+  ~utility_object_state() noexcept { utility_object_destroyed.set(); }
+
+  std::uint32_t value;
+};
+
 constexpr auto child_create_callback =
     +[](ntl::kmdf::child_list,
         const ntl::kmdf::child_identification<child_identity> &,
@@ -70,6 +98,25 @@ constexpr auto child_compare_callback =
             &right) noexcept {
   return left.payload.serial_number == right.payload.serial_number;
 };
+
+constexpr auto utility_dpc_callback = +[](ntl::kmdf::dpc work) noexcept {
+  // Standalone KMDF DPC callbacks run at DISPATCH_LEVEL. Keep this path
+  // allocation-free and do not use the general PASSIVE_LEVEL CRT/STL surface.
+  auto &state = work.context<utility_dpc_state>();
+  state.observed_irql.store(static_cast<std::uint32_t>(ntl::current_irql()),
+                            std::memory_order_relaxed);
+  state.executions.fetch_add(1, std::memory_order_relaxed);
+  state.completed.set();
+};
+
+constexpr auto utility_wait_lock_callback =
+    +[](ntl::kmdf::work_item work) noexcept {
+      auto &state = work.context<utility_wait_lock_state>();
+      state.lock.lock();
+      state.acquired.set();
+      (void)state.release.wait();
+      state.lock.unlock();
+    };
 
 [[maybe_unused]] void compile_child_list_surface(ntl::kmdf::device device) {
   using child_config =
@@ -126,6 +173,161 @@ ntl::status verify_request_memory_surface(ntl::kmdf::device device) noexcept {
     return request.status();
 
   DbgPrint("[crtsys KMDF sample] request/memory surface verified\n");
+  return STATUS_SUCCESS;
+}
+
+ntl::status verify_common_object_surface(ntl::kmdf::device device) noexcept {
+  utility_object_destroyed.clear();
+  {
+    ntl::kmdf::object_attributes object_config;
+    object_config.parent(device);
+    auto general =
+        ntl::kmdf::owned_object::try_create<utility_object_state>(
+            &object_config, 42);
+    if (!general)
+      return general.status();
+    if (general->context<utility_object_state>().value != 42)
+      return STATUS_DATA_ERROR;
+
+    static ULONG reference_tag = ntl::pool_tag("NTLo");
+    auto reference = general->reference(&reference_tag);
+    auto moved_reference = std::move(reference);
+    if (reference || !moved_reference ||
+        moved_reference.context<utility_object_state>().value != 42)
+      return STATUS_DATA_ERROR;
+    moved_reference.reset();
+
+    ntl::kmdf::object_reference device_reference{device};
+    if (!device_reference)
+      return STATUS_DATA_ERROR;
+  }
+
+  ntl::status status = ntl::wait_for(utility_object_destroyed, 1000);
+  if (status.is_err())
+    return status;
+
+  ntl::kmdf::object_attributes spin_attributes;
+  spin_attributes.parent(device);
+  auto spin = ntl::kmdf::spin_lock::try_create(&spin_attributes);
+  if (!spin)
+    return spin.status();
+
+  ULONG protected_value = 0;
+  {
+    // WDF spin-lock acquisition raises IRQL to DISPATCH_LEVEL. Only the scalar
+    // state update belongs inside this critical section.
+    std::lock_guard<ntl::kmdf::spin_lock> guard(*spin);
+    ++protected_value;
+  }
+
+  ntl::kmdf::object_attributes wait_attributes;
+  wait_attributes.parent(device);
+  auto wait = ntl::kmdf::wait_lock::try_create(&wait_attributes);
+  if (!wait)
+    return wait.status();
+  {
+    std::lock_guard<ntl::kmdf::wait_lock> guard(*wait);
+    ++protected_value;
+  }
+  if (!wait->try_lock())
+    return STATUS_DEVICE_BUSY;
+  wait->unlock();
+
+  auto wait_work_config =
+      ntl::kmdf::work_item_config::with_callback<utility_wait_lock_callback>();
+  auto wait_work = ntl::kmdf::work_item::try_create<utility_wait_lock_state>(
+      device, wait_work_config, nullptr, *wait);
+  if (!wait_work)
+    return wait_work.status();
+  wait_work->enqueue();
+
+  auto &wait_state = wait_work->context<utility_wait_lock_state>();
+  status = ntl::wait_for(wait_state.acquired, 1000);
+  if (static_cast<NTSTATUS>(status) != STATUS_SUCCESS) {
+    wait_state.release.set();
+    wait_work->flush();
+    return status;
+  }
+
+  const bool acquired_while_contended = wait->try_lock();
+  wait_state.release.set();
+  wait_work->flush();
+  if (acquired_while_contended)
+    return STATUS_DATA_ERROR;
+
+  ntl::kmdf::object_attributes lookaside_attributes;
+  lookaside_attributes.parent(device);
+  auto cache = ntl::kmdf::lookaside::try_create(
+      sizeof(std::array<std::uint32_t, 4>), NonPagedPoolNx, "NTLk",
+      &lookaside_attributes);
+  if (!cache)
+    return cache.status();
+
+  auto allocation = cache->try_allocate();
+  if (!allocation)
+    return allocation.status();
+  constexpr std::array<std::uint32_t, 4> source{1, 3, 5, 7};
+  std::array<std::uint32_t, 4> destination{};
+  status = allocation->try_copy_from(0, source.data(), sizeof(source));
+  if (status.is_err())
+    return status;
+  status = allocation->try_copy_to(0, destination.data(), sizeof(destination));
+  if (status.is_err() || destination != source)
+    return status.is_err() ? status : ntl::status{STATUS_DATA_ERROR};
+
+  ntl::kmdf::object_attributes string_attributes;
+  string_attributes.parent(device);
+  constexpr std::wstring_view expected_text = L"NTL KMDF object utilities";
+  auto text = ntl::kmdf::string::try_create(expected_text, &string_attributes);
+  if (!text)
+    return text.status();
+  if (text->view() != expected_text)
+    return STATUS_DATA_ERROR;
+
+  ntl::kmdf::object_attributes collection_attributes;
+  collection_attributes.parent(device);
+  auto objects = ntl::kmdf::collection::try_create(&collection_attributes);
+  if (!objects)
+    return objects.status();
+  status = objects->try_add(*text);
+  if (status.is_err())
+    return status;
+  status = objects->try_add(*cache);
+  if (status.is_err())
+    return status;
+  if (objects->size() != 2 ||
+      objects->first().native_handle() !=
+          reinterpret_cast<WDFOBJECT>(text->native_object()) ||
+      objects->last().native_handle() !=
+          reinterpret_cast<WDFOBJECT>(cache->native_object()))
+    return STATUS_DATA_ERROR;
+  objects->remove(*text);
+  objects->remove_at(0);
+  if (!objects->empty())
+    return STATUS_DATA_ERROR;
+
+  auto dpc_config =
+      ntl::kmdf::dpc_config::with_callback<utility_dpc_callback>();
+  dpc_config.automatic_serialization(false);
+  auto deferred = ntl::kmdf::dpc::try_create<utility_dpc_state>(
+      device, dpc_config, nullptr);
+  if (!deferred)
+    return deferred.status();
+  if (!deferred->enqueue())
+    return STATUS_DEVICE_BUSY;
+
+  status =
+      ntl::wait_for(deferred->context<utility_dpc_state>().completed, 1000);
+  if (status.is_err())
+    return status;
+  const auto &dpc_state = deferred->context<utility_dpc_state>();
+  if (dpc_state.executions.load(std::memory_order_relaxed) != 1 ||
+      dpc_state.observed_irql.load(std::memory_order_relaxed) !=
+          DISPATCH_LEVEL ||
+      protected_value != 2)
+    return STATUS_DATA_ERROR;
+
+  DbgPrint("[crtsys KMDF sample] common object utilities verified\n");
   return STATUS_SUCCESS;
 }
 
@@ -320,6 +522,10 @@ ntl::status create_control_device(const ntl::kmdf::driver &driver) {
     return STATUS_DATA_ERROR;
 
   status = verify_request_memory_surface(device);
+  if (status.is_err())
+    return status;
+
+  status = verify_common_object_surface(device);
   if (status.is_err())
     return status;
 

@@ -1,0 +1,106 @@
+/**
+ * @file collection
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief KMDF object-collection facade.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "object_attributes"
+
+#include "../result"
+#include "../status"
+
+#include "detail/wdf"
+
+namespace ntl::kmdf {
+/** @brief Non-owning facade for a WDFCOLLECTION object. */
+class collection {
+public:
+  /** @brief Creates an empty collection facade. */
+  collection() noexcept = default;
+
+  /** @brief Wraps a WDF collection without taking ownership. */
+  explicit collection(WDFCOLLECTION object) noexcept : object_(object) {}
+
+  /** @brief Creates a WDF object collection. */
+  static ntl::result<collection>
+  try_create(object_attributes *attributes = nullptr) noexcept {
+    WDFCOLLECTION object = WDF_NO_HANDLE;
+    const NTSTATUS result = WdfCollectionCreate(
+        attributes ? attributes->native() : nullptr, &object);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return ntl::ok(collection{object});
+  }
+
+  /** @brief Adds a generic WDF object and retains a framework reference. */
+  ntl::status try_add(object item) const noexcept {
+    return WdfCollectionAdd(object_, item.native_handle());
+  }
+
+  /** @brief Adds a typed NTL KMDF facade to the collection. */
+  template <class T> ntl::status try_add(const T &item) const noexcept {
+    return WdfCollectionAdd(object_, as_object(item, 0));
+  }
+
+  /** @brief Removes a generic WDF object and releases its collection reference.
+   */
+  void remove(object item) const noexcept {
+    WdfCollectionRemove(object_, item.native_handle());
+  }
+
+  /** @brief Removes a typed NTL KMDF facade from the collection. */
+  template <class T> void remove(const T &item) const noexcept {
+    WdfCollectionRemove(object_, as_object(item, 0));
+  }
+
+  /** @brief Removes the object at a valid zero-based index. */
+  void remove_at(ULONG index) const noexcept {
+    WdfCollectionRemoveItem(object_, index);
+  }
+
+  /** @brief Returns the number of objects in the collection. */
+  ULONG size() const noexcept { return WdfCollectionGetCount(object_); }
+
+  /** @brief Returns true when the collection contains no objects. */
+  bool empty() const noexcept { return size() == 0; }
+
+  /** @brief Returns the object at a valid zero-based index. */
+  object at(ULONG index) const noexcept {
+    return object{WdfCollectionGetItem(object_, index)};
+  }
+
+  /** @brief Returns the first object, or an empty object facade. */
+  object first() const noexcept {
+    return object{WdfCollectionGetFirstItem(object_)};
+  }
+
+  /** @brief Returns the last object, or an empty object facade. */
+  object last() const noexcept {
+    return object{WdfCollectionGetLastItem(object_)};
+  }
+
+  /** @brief Returns the native WDF collection object. */
+  WDFCOLLECTION native_object() const noexcept { return object_; }
+
+  /** @brief Returns true when a native collection object is present. */
+  explicit operator bool() const noexcept { return object_ != WDF_NO_HANDLE; }
+
+private:
+  template <class T>
+  static auto as_object(const T &item, int) noexcept
+      -> decltype(item.native_object(), WDFOBJECT{}) {
+    return reinterpret_cast<WDFOBJECT>(item.native_object());
+  }
+
+  template <class T>
+  static auto as_object(const T &item, long) noexcept
+      -> decltype(item.native_handle(), WDFOBJECT{}) {
+    return reinterpret_cast<WDFOBJECT>(item.native_handle());
+  }
+
+  WDFCOLLECTION object_ = WDF_NO_HANDLE;
+};
+} // namespace ntl::kmdf

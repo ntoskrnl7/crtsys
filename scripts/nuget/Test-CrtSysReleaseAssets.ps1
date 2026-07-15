@@ -103,6 +103,7 @@ foreach ($requiredPath in @(
   'include\ntl\kmdf\child_list',
   'include\ntl\kmdf\registry',
   'include\ntl\kmdf\property',
+  'include\ntl\kmdf\object',
   'include\.internal\adjust_link_order'
 )) {
   $fullPath = Join-Path $bundleRoot $requiredPath
@@ -249,6 +250,61 @@ constexpr auto sample_usb_reader =
 constexpr auto sample_usb_reader_failure =
     +[](ntl::kmdf::usb_pipe, ntl::status,
         USBD_STATUS) noexcept { return false; };
+
+constexpr auto sample_standalone_dpc =
+    +[](ntl::kmdf::dpc) noexcept {};
+
+struct sample_general_object_context {
+  explicit sample_general_object_context(ULONG value) noexcept : value(value) {}
+  ULONG value;
+};
+
+[[maybe_unused]] void compile_common_object_surface(
+    ntl::kmdf::device device) {
+  using namespace ntl::kmdf;
+
+  object_attributes attributes;
+  attributes.parent(device);
+
+  auto general = owned_object::try_create<sample_general_object_context>(
+      &attributes, 42);
+  if (general) {
+    auto reference = general->reference();
+    auto moved_reference = std::move(reference);
+    (void)moved_reference.context<sample_general_object_context>().value;
+  }
+  object_reference device_reference{device};
+
+  auto spin = spin_lock::try_create(&attributes);
+  if (spin) {
+    spin->lock();
+    spin->unlock();
+  }
+
+  auto wait = wait_lock::try_create(&attributes);
+  if (wait && wait->try_lock())
+    wait->unlock();
+
+  auto cache = lookaside::try_create(
+      sizeof(ULONG) * 4, NonPagedPoolNx, "NTLk", &attributes);
+  if (cache) {
+    auto allocation = cache->try_allocate();
+    if (allocation)
+      (void)allocation->data<ULONG>();
+  }
+
+  auto label = string::try_create(L"release smoke");
+  auto objects = collection::try_create(&attributes);
+  if (label && objects) {
+    (void)label->view();
+    (void)objects->try_add(*label);
+    objects->remove(*label);
+  }
+
+  auto dpc_settings = dpc_config::with_callback<sample_standalone_dpc>();
+  dpc_settings.automatic_serialization(false);
+  (void)dpc::try_create(device, dpc_settings);
+}
 
 [[maybe_unused]] void compile_dma_surface(
     ntl::kmdf::device device, ntl::kmdf::request request) {

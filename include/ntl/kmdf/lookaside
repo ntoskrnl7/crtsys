@@ -1,0 +1,157 @@
+/**
+ * @file lookaside
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief KMDF lookaside-list and allocation facades.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "memory"
+#include "object_attributes"
+
+#include "../pool_allocator"
+#include "../result"
+
+#include "detail/wdf"
+#include <cstddef>
+#include <utility>
+
+namespace ntl::kmdf {
+/**
+ * @brief Move-only owner of WDFMEMORY allocated from a WDF lookaside list.
+ *
+ * Destroying this object deletes the WDFMEMORY object and returns its
+ * fixed-size backing buffer to the originating lookaside list.
+ */
+class lookaside_memory {
+public:
+  lookaside_memory(const lookaside_memory &) = delete;
+  lookaside_memory &operator=(const lookaside_memory &) = delete;
+
+  /** @brief Transfers ownership of a lookaside allocation. */
+  lookaside_memory(lookaside_memory &&other) noexcept
+      : object_(std::exchange(other.object_, nullptr)) {}
+
+  /** @brief Deletes the current allocation and takes another one. */
+  lookaside_memory &operator=(lookaside_memory &&other) noexcept {
+    if (this != &other) {
+      reset();
+      object_ = std::exchange(other.object_, nullptr);
+    }
+    return *this;
+  }
+
+  /** @brief Returns the allocation to its WDF lookaside list. */
+  ~lookaside_memory() { reset(); }
+
+  /** @brief Returns a non-owning memory facade for this allocation. */
+  memory get() const noexcept { return memory{object_}; }
+
+  /** @brief Returns the allocation's backing buffer. */
+  void *data(size_t *size_bytes = nullptr) const noexcept {
+    return get().data(size_bytes);
+  }
+
+  /** @brief Returns the allocation's backing buffer as T elements. */
+  template <class T> T *data() const noexcept { return get().data<T>(); }
+
+  /** @brief Returns the fixed allocation size in bytes. */
+  size_t size_bytes() const noexcept { return get().size_bytes(); }
+
+  /** @brief Copies caller bytes into the allocation. */
+  ntl::status try_copy_from(size_t offset, const void *source,
+                            size_t size_bytes) const noexcept {
+    return get().try_copy_from(offset, source, size_bytes);
+  }
+
+  /** @brief Copies allocation bytes into caller storage. */
+  ntl::status try_copy_to(size_t offset, void *destination,
+                          size_t size_bytes) const noexcept {
+    return get().try_copy_to(offset, destination, size_bytes);
+  }
+
+  /** @brief Returns the native WDF memory object. */
+  WDFMEMORY native_object() const noexcept { return object_; }
+
+  /** @brief Releases ownership without deleting the WDF memory object. */
+  WDFMEMORY release() noexcept { return std::exchange(object_, nullptr); }
+
+  /** @brief Returns true while this object owns an allocation. */
+  explicit operator bool() const noexcept { return object_ != WDF_NO_HANDLE; }
+
+private:
+  friend class lookaside;
+
+  explicit lookaside_memory(WDFMEMORY object) noexcept : object_(object) {}
+
+  void reset() noexcept {
+    if (object_ != WDF_NO_HANDLE)
+      WdfObjectDelete(reinterpret_cast<WDFOBJECT>(object_));
+    object_ = WDF_NO_HANDLE;
+  }
+
+  WDFMEMORY object_ = WDF_NO_HANDLE;
+};
+
+/** @brief Non-owning facade for a fixed-size WDFLOOKASIDE object. */
+class lookaside {
+public:
+  /** @brief Creates an empty lookaside facade. */
+  lookaside() noexcept = default;
+
+  /** @brief Wraps a WDF lookaside object without taking ownership. */
+  explicit lookaside(WDFLOOKASIDE object) noexcept : object_(object) {}
+
+  /**
+   * @brief Creates a fixed-size WDF lookaside list.
+   * @param size_bytes Size of each allocation; must be nonzero.
+   * @param pool_type Pool used when the lookaside cache needs backing storage.
+   * @param tag Native four-character pool tag.
+   * @param attributes Optional lookaside parent and object attributes.
+   * @param memory_attributes Optional attributes copied to each WDFMEMORY.
+   */
+  static ntl::result<lookaside>
+  try_create(size_t size_bytes, POOL_TYPE pool_type = NonPagedPoolNx,
+             ULONG tag = ntl::pool_tag("NTLk"),
+             object_attributes *attributes = nullptr,
+             object_attributes *memory_attributes = nullptr) noexcept {
+    WDFLOOKASIDE object = WDF_NO_HANDLE;
+    const NTSTATUS result = WdfLookasideListCreate(
+        attributes ? attributes->native() : nullptr, size_bytes, pool_type,
+        memory_attributes ? memory_attributes->native() : nullptr, tag,
+        &object);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return ntl::ok(lookaside{object});
+  }
+
+  /** @brief Creates a lookaside list with a readable four-character tag. */
+  template <size_t N>
+  static ntl::result<lookaside>
+  try_create(size_t size_bytes, POOL_TYPE pool_type, const char (&tag)[N],
+             object_attributes *attributes = nullptr,
+             object_attributes *memory_attributes = nullptr) noexcept {
+    return try_create(size_bytes, pool_type, ntl::pool_tag(tag), attributes,
+                      memory_attributes);
+  }
+
+  /** @brief Allocates one move-owned WDF memory object from the list. */
+  ntl::result<lookaside_memory> try_allocate() const noexcept {
+    WDFMEMORY object = WDF_NO_HANDLE;
+    const NTSTATUS result = WdfMemoryCreateFromLookaside(object_, &object);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return ntl::ok(lookaside_memory{object});
+  }
+
+  /** @brief Returns the native WDF lookaside object. */
+  WDFLOOKASIDE native_object() const noexcept { return object_; }
+
+  /** @brief Returns true when a native lookaside object is present. */
+  explicit operator bool() const noexcept { return object_ != WDF_NO_HANDLE; }
+
+private:
+  WDFLOOKASIDE object_ = WDF_NO_HANDLE;
+};
+} // namespace ntl::kmdf

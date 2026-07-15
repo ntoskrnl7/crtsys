@@ -187,7 +187,7 @@ flowchart TD
 | [사용 예제](./ko-kr-usage-examples.md) | Driver-side NTL 예제 |
 | [NTL sample driver](../examples/ntl-driver) | Visual Studio/NuGet 및 CMake로 빌드 가능한 typed IOCTL driver/app 예제 |
 | [NTL RPC sample driver](../examples/ntl-rpc-driver) | Visual Studio/NuGet 및 CMake로 빌드 가능한 shared RPC schema driver/app 예제 |
-| [NTL KMDF 예제](../examples/kmdf-ntl-driver) | `ntl::kmdf::main`, C++ WDF context, typed file/request와 manual queue 취소, deferred callback, passive callback 안의 STL 사용을 보여주는 driver/app 예제 |
+| [NTL KMDF 예제](../examples/kmdf-ntl-driver) | `ntl::kmdf::main`, C++ WDF context, typed file/request와 manual queue 취소, WDF lock/lookaside/collection/string/DPC 유틸리티, deferred callback, passive callback 안의 STL 사용을 보여주는 driver/app 예제 |
 | [NTL KMDF DMA 템플릿](../examples/kmdf-dma-ntl-driver) | 실제 하드웨어용 PnP packet-DMA transaction, scatter/gather, common buffer와 interrupt-DPC 연결 예제 |
 | [NTL KMDF USB 템플릿](../examples/kmdf-usb-ntl-driver) | PnP USB device/interface/pipe와 continuous reader, user-mode 상태 조회 앱을 포함한 빌드 가능한 예제 |
 | [CI driver load tests](./ci-driver-load-tests.md) | optional self-hosted driver load/run workflow |
