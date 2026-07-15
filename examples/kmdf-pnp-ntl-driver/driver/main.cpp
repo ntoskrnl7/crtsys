@@ -29,9 +29,15 @@ constexpr auto prepare_hardware =
   auto &state = device.context<device_state>();
   state.prepare_count.fetch_add(1, std::memory_order_relaxed);
   state.hardware_prepared.store(true, std::memory_order_release);
-  DbgPrint("[crtsys KMDF PnP sample] prepare hardware: raw=%lu translated=%lu\n",
-           static_cast<unsigned long>(raw.size()),
-           static_cast<unsigned long>(translated.size()));
+  for (const ntl::kmdf::resource_descriptor resource : translated) {
+    DbgPrint("[crtsys KMDF PnP sample] resource: type=%u flags=0x%04x\n",
+             static_cast<unsigned>(resource.type()),
+             static_cast<unsigned>(resource.flags()));
+  }
+  DbgPrint(
+      "[crtsys KMDF PnP sample] prepare hardware: raw=%lu translated=%lu\n",
+      static_cast<unsigned long>(raw.size()),
+      static_cast<unsigned long>(translated.size()));
   return STATUS_SUCCESS;
 };
 
@@ -154,8 +160,17 @@ constexpr auto device_add =
     return created.status();
 
   const ntl::kmdf::device device = created.value();
-  ntl::status status = device.try_create_interface(
-      kmdf_pnp_ntl_sample::device_interface_guid);
+  ntl::kmdf::idle_policy idle(IdleCannotWakeFromS0);
+  idle.timeout(10'000, DriverManagedIdleTimeout)
+      .user_control(IdleDoNotAllowUserControl)
+      .enabled(true)
+      .exclude_d3_cold(WdfUseDefault);
+  ntl::status status = idle.try_apply(device);
+  if (status.is_err())
+    return status;
+
+  status =
+      device.try_create_interface(kmdf_pnp_ntl_sample::device_interface_guid);
   if (status.is_err())
     return status;
 

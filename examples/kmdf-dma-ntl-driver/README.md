@@ -10,6 +10,11 @@ control flow:
 4. report transfer completion from the interrupt DPC;
 5. release the transaction and complete the original request.
 
+The prepare-hardware path iterates `ntl::kmdf::resource_list` and obtains the
+device register range through `resource_descriptor::memory()`. This keeps the
+raw `CM_PARTIAL_RESOURCE_DESCRIPTOR` union out of ordinary driver code while
+retaining `native()` for uncommon resource types.
+
 The template is intentionally not supplied with an INF. DMA register layout,
 interrupt status bits, descriptor format, transfer direction, alignment, and
 hardware ID are device-specific. Replace the contents of `sample_hardware`,

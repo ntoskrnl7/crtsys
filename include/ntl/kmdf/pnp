@@ -13,26 +13,270 @@
 
 #include "detail/wdf"
 
+#include <cstddef>
+#include <cstdint>
+#include <iterator>
+#include <optional>
+
 namespace ntl::kmdf {
-/** @brief Non-owning facade for a KMDF resource list. */
+
+/** @brief Identifies whether a resource descriptor came from the raw or
+ * translated list. */
+enum class resource_origin { raw, translated };
+
+/** @brief Physical address range assigned to a memory or port resource. */
+struct address_resource {
+  PHYSICAL_ADDRESS start{};
+  ULONGLONG length = 0;
+};
+
+/** @brief Interrupt assignment independent of the native descriptor union
+ * layout. */
+struct interrupt_resource {
+  bool message_signaled = false;
+  resource_origin origin = resource_origin::translated;
+  ULONG level = 0;
+  USHORT group = 0;
+  ULONG vector = 0;
+  KAFFINITY affinity = 0;
+  USHORT message_count = 0;
+};
+
+/** @brief DMA channel assignment independent of legacy and DMA v3 layouts. */
+struct dma_resource {
+  bool version_3 = false;
+  ULONG channel = 0;
+  ULONG port_or_request_line = 0;
+  UCHAR transfer_width = 0;
+};
+
+/** @brief Connection resource identity used by GPIO, serial, and
+ * function-config resources. */
+struct connection_resource {
+  UCHAR connection_class = 0;
+  UCHAR connection_type = 0;
+  std::uint64_t id = 0;
+};
+
+/** @brief Non-owning typed facade for one CM_PARTIAL_RESOURCE_DESCRIPTOR. */
+class resource_descriptor {
+public:
+  /** @brief Creates an empty descriptor facade. */
+  resource_descriptor() noexcept = default;
+
+  /** @brief Wraps a native descriptor without taking ownership. */
+  resource_descriptor(PCM_PARTIAL_RESOURCE_DESCRIPTOR descriptor,
+                      resource_origin origin) noexcept
+      : descriptor_(descriptor), origin_(origin) {}
+
+  /** @brief Returns the CM_RESOURCE_TYPE value. */
+  UCHAR type() const noexcept {
+    return descriptor_ ? descriptor_->Type : CmResourceTypeNull;
+  }
+
+  /** @brief Returns the native sharing disposition. */
+  CM_SHARE_DISPOSITION share_disposition() const noexcept {
+    return descriptor_ ? static_cast<CM_SHARE_DISPOSITION>(
+                             descriptor_->ShareDisposition)
+                       : CmResourceShareUndetermined;
+  }
+
+  /** @brief Returns the type-specific CM_RESOURCE_* flags. */
+  USHORT flags() const noexcept { return descriptor_ ? descriptor_->Flags : 0; }
+
+  /** @brief Returns the list from which this descriptor originated. */
+  resource_origin origin() const noexcept { return origin_; }
+
+  /** @brief Returns a memory range when this is a memory descriptor. */
+  std::optional<address_resource> memory() const noexcept {
+    if (!descriptor_)
+      return std::nullopt;
+
+    if (descriptor_->Type == CmResourceTypeMemory)
+      return address_resource{descriptor_->u.Memory.Start,
+                              descriptor_->u.Memory.Length};
+
+    if (descriptor_->Type != CmResourceTypeMemoryLarge)
+      return std::nullopt;
+
+    const USHORT large_type = descriptor_->Flags & CM_RESOURCE_MEMORY_LARGE;
+    if (large_type != CM_RESOURCE_MEMORY_LARGE_40 &&
+        large_type != CM_RESOURCE_MEMORY_LARGE_48 &&
+        large_type != CM_RESOURCE_MEMORY_LARGE_64) {
+      return std::nullopt;
+    }
+
+    ULONGLONG start = 0;
+    const ULONGLONG length = RtlCmDecodeMemIoResource(descriptor_, &start);
+    PHYSICAL_ADDRESS physical_start{};
+    physical_start.QuadPart = static_cast<LONGLONG>(start);
+    return address_resource{physical_start, length};
+  }
+
+  /** @brief Returns a port range when this is a port descriptor. */
+  std::optional<address_resource> port() const noexcept {
+    if (!descriptor_ || descriptor_->Type != CmResourceTypePort)
+      return std::nullopt;
+    return address_resource{descriptor_->u.Port.Start,
+                            descriptor_->u.Port.Length};
+  }
+
+  /** @brief Returns a normalized interrupt assignment. */
+  std::optional<interrupt_resource> interrupt() const noexcept {
+    if (!descriptor_ || descriptor_->Type != CmResourceTypeInterrupt)
+      return std::nullopt;
+
+    interrupt_resource result{};
+    result.message_signaled =
+        (descriptor_->Flags & CM_RESOURCE_INTERRUPT_MESSAGE) != 0;
+    result.origin = origin_;
+
+    if (!result.message_signaled) {
+      result.level = descriptor_->u.Interrupt.Level;
+#if defined(NT_PROCESSOR_GROUPS)
+      result.group = descriptor_->u.Interrupt.Group;
+#endif
+      result.vector = descriptor_->u.Interrupt.Vector;
+      result.affinity = descriptor_->u.Interrupt.Affinity;
+      return result;
+    }
+
+    if (origin_ == resource_origin::raw) {
+#if defined(NT_PROCESSOR_GROUPS)
+      result.group = descriptor_->u.MessageInterrupt.Raw.Group;
+#endif
+      result.message_count = descriptor_->u.MessageInterrupt.Raw.MessageCount;
+      result.vector = descriptor_->u.MessageInterrupt.Raw.Vector;
+      result.affinity = descriptor_->u.MessageInterrupt.Raw.Affinity;
+    } else {
+      result.level = descriptor_->u.MessageInterrupt.Translated.Level;
+#if defined(NT_PROCESSOR_GROUPS)
+      result.group = descriptor_->u.MessageInterrupt.Translated.Group;
+#endif
+      result.vector = descriptor_->u.MessageInterrupt.Translated.Vector;
+      result.affinity = descriptor_->u.MessageInterrupt.Translated.Affinity;
+    }
+    return result;
+  }
+
+  /** @brief Returns a normalized DMA channel assignment. */
+  std::optional<dma_resource> dma() const noexcept {
+    if (!descriptor_ || descriptor_->Type != CmResourceTypeDma)
+      return std::nullopt;
+
+    dma_resource result{};
+    result.version_3 = (descriptor_->Flags & CM_RESOURCE_DMA_V3) != 0;
+    if (result.version_3) {
+      result.channel = descriptor_->u.DmaV3.Channel;
+      result.port_or_request_line = descriptor_->u.DmaV3.RequestLine;
+      result.transfer_width = descriptor_->u.DmaV3.TransferWidth;
+    } else {
+      result.channel = descriptor_->u.Dma.Channel;
+      result.port_or_request_line = descriptor_->u.Dma.Port;
+    }
+    return result;
+  }
+
+  /** @brief Returns a normalized connection identity. */
+  std::optional<connection_resource> connection() const noexcept {
+    if (!descriptor_ || descriptor_->Type != CmResourceTypeConnection)
+      return std::nullopt;
+    return connection_resource{
+        descriptor_->u.Connection.Class, descriptor_->u.Connection.Type,
+        (static_cast<std::uint64_t>(descriptor_->u.Connection.IdHighPart)
+         << 32) |
+            descriptor_->u.Connection.IdLowPart};
+  }
+
+  /** @brief Returns the native descriptor for uncommon resource types. */
+  PCM_PARTIAL_RESOURCE_DESCRIPTOR native() const noexcept {
+    return descriptor_;
+  }
+
+  /** @brief Returns true when a native descriptor is present. */
+  explicit operator bool() const noexcept { return descriptor_ != nullptr; }
+
+private:
+  PCM_PARTIAL_RESOURCE_DESCRIPTOR descriptor_ = nullptr;
+  resource_origin origin_ = resource_origin::translated;
+};
+
+/** @brief Non-owning iterable facade for a KMDF resource list. */
 class resource_list {
 public:
   /** @brief Wraps a native resource list without taking ownership. */
-  explicit resource_list(WDFCMRESLIST handle) noexcept : handle_(handle) {}
+  explicit resource_list(
+      WDFCMRESLIST handle,
+      resource_origin origin = resource_origin::translated) noexcept
+      : handle_(handle), origin_(origin) {}
 
   /** @brief Returns the number of resource descriptors. */
   ULONG size() const noexcept { return WdfCmResourceListGetCount(handle_); }
 
-  /** @brief Returns a resource descriptor, or nullptr for an invalid index. */
-  PCM_PARTIAL_RESOURCE_DESCRIPTOR at(ULONG index) const noexcept {
-    return WdfCmResourceListGetDescriptor(handle_, index);
+  /** @brief Returns a typed descriptor, or an empty facade for an invalid
+   * index. */
+  resource_descriptor at(ULONG index) const noexcept {
+    return resource_descriptor{WdfCmResourceListGetDescriptor(handle_, index),
+                               origin_};
   }
+
+  /** @brief Returns a typed descriptor by index. */
+  resource_descriptor operator[](ULONG index) const noexcept {
+    return at(index);
+  }
+
+  /** @brief Input iterator over typed resource descriptors. */
+  class iterator {
+  public:
+    using iterator_category = std::input_iterator_tag;
+    using value_type = resource_descriptor;
+    using difference_type = std::ptrdiff_t;
+    using pointer = void;
+    using reference = resource_descriptor;
+
+    iterator() noexcept = default;
+    iterator(const resource_list *list, ULONG index) noexcept
+        : list_(list), index_(index) {}
+
+    resource_descriptor operator*() const noexcept { return list_->at(index_); }
+    iterator &operator++() noexcept {
+      ++index_;
+      return *this;
+    }
+    iterator operator++(int) noexcept {
+      iterator previous = *this;
+      ++*this;
+      return previous;
+    }
+    friend bool operator==(const iterator &left,
+                           const iterator &right) noexcept {
+      return left.list_ == right.list_ && left.index_ == right.index_;
+    }
+    friend bool operator!=(const iterator &left,
+                           const iterator &right) noexcept {
+      return !(left == right);
+    }
+
+  private:
+    const resource_list *list_ = nullptr;
+    ULONG index_ = 0;
+  };
+
+  /** @brief Returns an iterator to the first descriptor. */
+  iterator begin() const noexcept { return iterator{this, 0}; }
+
+  /** @brief Returns an iterator one past the final descriptor. */
+  iterator end() const noexcept { return iterator{this, size()}; }
 
   /** @brief Returns the native resource-list handle. */
   WDFCMRESLIST native_handle() const noexcept { return handle_; }
 
+  /** @brief Returns whether this is the raw or translated list. */
+  resource_origin origin() const noexcept { return origin_; }
+
 private:
   WDFCMRESLIST handle_;
+  resource_origin origin_;
 };
 
 /**
@@ -44,23 +288,21 @@ private:
 class pnp_power_callbacks {
 public:
   /** @brief Initializes all PnP and power callbacks to WDF defaults. */
-  pnp_power_callbacks() noexcept {
-    WDF_PNPPOWER_EVENT_CALLBACKS_INIT(&value_);
-  }
+  pnp_power_callbacks() noexcept { WDF_PNPPOWER_EVENT_CALLBACKS_INIT(&value_); }
 
   /**
    * @brief Registers EvtDevicePrepareHardware.
    * @tparam Callback Typed noexcept callback.
    * @return This callback configuration.
    */
-  template <auto Callback>
-  pnp_power_callbacks &on_prepare_hardware() noexcept {
+  template <auto Callback> pnp_power_callbacks &on_prepare_hardware() noexcept {
     value_.EvtDevicePrepareHardware =
         +[](WDFDEVICE native_device, WDFCMRESLIST native_raw,
             WDFCMRESLIST native_translated) noexcept -> NTSTATUS {
       return detail::invoke_status_callback<Callback>(
-          device{native_device}, resource_list{native_raw},
-          resource_list{native_translated});
+          device{native_device},
+          resource_list{native_raw, resource_origin::raw},
+          resource_list{native_translated, resource_origin::translated});
     };
     return *this;
   }
@@ -70,13 +312,13 @@ public:
    * @tparam Callback Typed noexcept callback.
    * @return This callback configuration.
    */
-  template <auto Callback>
-  pnp_power_callbacks &on_release_hardware() noexcept {
+  template <auto Callback> pnp_power_callbacks &on_release_hardware() noexcept {
     value_.EvtDeviceReleaseHardware =
         +[](WDFDEVICE native_device,
             WDFCMRESLIST native_translated) noexcept -> NTSTATUS {
       return detail::invoke_status_callback<Callback>(
-          device{native_device}, resource_list{native_translated});
+          device{native_device},
+          resource_list{native_translated, resource_origin::translated});
     };
     return *this;
   }
@@ -91,7 +333,7 @@ public:
         +[](WDFDEVICE native_device,
             WDF_POWER_DEVICE_STATE previous_state) noexcept -> NTSTATUS {
       return detail::invoke_status_callback<Callback>(device{native_device},
-                                                       previous_state);
+                                                      previous_state);
     };
     return *this;
   }
@@ -107,7 +349,7 @@ public:
         +[](WDFDEVICE native_device,
             WDF_POWER_DEVICE_STATE previous_state) noexcept -> NTSTATUS {
       return detail::invoke_status_callback<Callback>(device{native_device},
-                                                       previous_state);
+                                                      previous_state);
     };
     return *this;
   }
@@ -122,7 +364,7 @@ public:
         +[](WDFDEVICE native_device,
             WDF_POWER_DEVICE_STATE target_state) noexcept -> NTSTATUS {
       return detail::invoke_status_callback<Callback>(device{native_device},
-                                                       target_state);
+                                                      target_state);
     };
     return *this;
   }
@@ -138,7 +380,7 @@ public:
         +[](WDFDEVICE native_device,
             WDF_POWER_DEVICE_STATE target_state) noexcept -> NTSTATUS {
       return detail::invoke_status_callback<Callback>(device{native_device},
-                                                       target_state);
+                                                      target_state);
     };
     return *this;
   }
@@ -166,8 +408,8 @@ public:
   pnp_power_callbacks &on_self_managed_io_cleanup() noexcept {
     value_.EvtDeviceSelfManagedIoCleanup =
         +[](WDFDEVICE native_device) noexcept {
-      detail::invoke_callback<Callback>(device{native_device});
-    };
+          detail::invoke_callback<Callback>(device{native_device});
+        };
     return *this;
   }
 
@@ -178,8 +420,7 @@ public:
    */
   template <auto Callback>
   pnp_power_callbacks &on_self_managed_io_flush() noexcept {
-    value_.EvtDeviceSelfManagedIoFlush =
-        +[](WDFDEVICE native_device) noexcept {
+    value_.EvtDeviceSelfManagedIoFlush = +[](WDFDEVICE native_device) noexcept {
       detail::invoke_callback<Callback>(device{native_device});
     };
     return *this;
@@ -218,8 +459,7 @@ public:
    * @tparam Callback Typed noexcept callback.
    * @return This callback configuration.
    */
-  template <auto Callback>
-  pnp_power_callbacks &on_surprise_removal() noexcept {
+  template <auto Callback> pnp_power_callbacks &on_surprise_removal() noexcept {
     value_.EvtDeviceSurpriseRemoval = +[](WDFDEVICE native_device) noexcept {
       detail::invoke_callback<Callback>(device{native_device});
     };
@@ -231,8 +471,7 @@ public:
    * @tparam Callback Typed noexcept callback.
    * @return This callback configuration.
    */
-  template <auto Callback>
-  pnp_power_callbacks &on_query_remove() noexcept {
+  template <auto Callback> pnp_power_callbacks &on_query_remove() noexcept {
     value_.EvtDeviceQueryRemove =
         +[](WDFDEVICE native_device) noexcept -> NTSTATUS {
       return detail::invoke_status_callback<Callback>(device{native_device});
@@ -263,9 +502,10 @@ public:
     value_.EvtDeviceUsageNotification =
         +[](WDFDEVICE native_device, WDF_SPECIAL_FILE_TYPE notification_type,
             BOOLEAN in_notification_path) noexcept {
-      detail::invoke_callback<Callback>(device{native_device}, notification_type,
-                                        in_notification_path != FALSE);
-    };
+          detail::invoke_callback<Callback>(device{native_device},
+                                            notification_type,
+                                            in_notification_path != FALSE);
+        };
     return *this;
   }
 
@@ -274,13 +514,13 @@ public:
    * @tparam Callback Typed noexcept callback.
    * @return This callback configuration.
    */
-  template <auto Callback>
-  pnp_power_callbacks &on_relations_query() noexcept {
+  template <auto Callback> pnp_power_callbacks &on_relations_query() noexcept {
     value_.EvtDeviceRelationsQuery =
         +[](WDFDEVICE native_device,
             DEVICE_RELATION_TYPE relation_type) noexcept {
-      detail::invoke_callback<Callback>(device{native_device}, relation_type);
-    };
+          detail::invoke_callback<Callback>(device{native_device},
+                                            relation_type);
+        };
     return *this;
   }
 
@@ -339,8 +579,7 @@ public:
    */
   template <auto Callback>
   power_policy_callbacks &on_disarm_wake_from_s0() noexcept {
-    value_.EvtDeviceDisarmWakeFromS0 =
-        +[](WDFDEVICE native_device) noexcept {
+    value_.EvtDeviceDisarmWakeFromS0 = +[](WDFDEVICE native_device) noexcept {
       detail::invoke_callback<Callback>(device{native_device});
     };
     return *this;
@@ -355,8 +594,8 @@ public:
   power_policy_callbacks &on_wake_from_s0_triggered() noexcept {
     value_.EvtDeviceWakeFromS0Triggered =
         +[](WDFDEVICE native_device) noexcept {
-      detail::invoke_callback<Callback>(device{native_device});
-    };
+          detail::invoke_callback<Callback>(device{native_device});
+        };
     return *this;
   }
 
@@ -381,8 +620,7 @@ public:
    */
   template <auto Callback>
   power_policy_callbacks &on_disarm_wake_from_sx() noexcept {
-    value_.EvtDeviceDisarmWakeFromSx =
-        +[](WDFDEVICE native_device) noexcept {
+    value_.EvtDeviceDisarmWakeFromSx = +[](WDFDEVICE native_device) noexcept {
       detail::invoke_callback<Callback>(device{native_device});
     };
     return *this;
@@ -397,8 +635,8 @@ public:
   power_policy_callbacks &on_wake_from_sx_triggered() noexcept {
     value_.EvtDeviceWakeFromSxTriggered =
         +[](WDFDEVICE native_device) noexcept {
-      detail::invoke_callback<Callback>(device{native_device});
-    };
+          detail::invoke_callback<Callback>(device{native_device});
+        };
     return *this;
   }
 
@@ -424,5 +662,130 @@ public:
 
 private:
   WDF_POWER_POLICY_EVENT_CALLBACKS value_{};
+};
+
+/** @brief Configures runtime-idle behavior while the system remains in S0. */
+class idle_policy {
+public:
+  /** @brief Initializes the policy with WDF defaults for the stated capability.
+   */
+  explicit idle_policy(
+      WDF_POWER_POLICY_S0_IDLE_CAPABILITIES capability) noexcept {
+    WDF_DEVICE_POWER_POLICY_IDLE_SETTINGS_INIT(&value_, capability);
+  }
+
+  /** @brief Selects the device power state entered while idle. */
+  idle_policy &device_state(DEVICE_POWER_STATE state) noexcept {
+    value_.DxState = state;
+    return *this;
+  }
+
+  /** @brief Sets the idle timeout and how WDF interprets it. */
+  idle_policy &timeout(ULONG milliseconds,
+                       WDF_POWER_POLICY_IDLE_TIMEOUT_TYPE type =
+                           DriverManagedIdleTimeout) noexcept {
+    value_.IdleTimeout = milliseconds;
+    value_.IdleTimeoutType = type;
+    return *this;
+  }
+
+  /** @brief Configures whether users may override idle policy. */
+  idle_policy &
+  user_control(WDF_POWER_POLICY_S0_IDLE_USER_CONTROL control) noexcept {
+    value_.UserControlOfIdleSettings = control;
+    return *this;
+  }
+
+  /** @brief Explicitly enables or disables runtime idle. */
+  idle_policy &enabled(bool enabled) noexcept {
+    value_.Enabled = enabled ? WdfTrue : WdfFalse;
+    return *this;
+  }
+
+  /** @brief Restores WDF's default runtime-idle enablement policy. */
+  idle_policy &use_default_enablement() noexcept {
+    value_.Enabled = WdfUseDefault;
+    return *this;
+  }
+
+  /** @brief Configures whether an idle device powers up on system wake. */
+  idle_policy &power_up_on_system_wake(WDF_TRI_STATE value) noexcept {
+    value_.PowerUpIdleDeviceOnSystemWake = value;
+    return *this;
+  }
+
+  /** @brief Configures whether S0 idle excludes D3cold. */
+  idle_policy &exclude_d3_cold(WDF_TRI_STATE value) noexcept {
+    value_.ExcludeD3Cold = value;
+    return *this;
+  }
+
+  /** @brief Applies this policy to a device and preserves WDF's NTSTATUS. */
+  ntl::status try_apply(device target) noexcept {
+    return WdfDeviceAssignS0IdleSettings(target.native_handle(), &value_);
+  }
+
+  /** @brief Returns the mutable native settings for uncommon fields. */
+  PWDF_DEVICE_POWER_POLICY_IDLE_SETTINGS native() noexcept { return &value_; }
+
+private:
+  WDF_DEVICE_POWER_POLICY_IDLE_SETTINGS value_{};
+};
+
+/** @brief Configures device wake behavior while the system is in Sx. */
+class wake_policy {
+public:
+  /** @brief Initializes the policy with WDF defaults. */
+  wake_policy() noexcept {
+    WDF_DEVICE_POWER_POLICY_WAKE_SETTINGS_INIT(&value_);
+  }
+
+  /** @brief Selects the device power state used while armed for wake. */
+  wake_policy &device_state(DEVICE_POWER_STATE state) noexcept {
+    value_.DxState = state;
+    return *this;
+  }
+
+  /** @brief Configures whether users may override wake policy. */
+  wake_policy &
+  user_control(WDF_POWER_POLICY_SX_WAKE_USER_CONTROL control) noexcept {
+    value_.UserControlOfWakeSettings = control;
+    return *this;
+  }
+
+  /** @brief Explicitly enables or disables wake from Sx. */
+  wake_policy &enabled(bool enabled) noexcept {
+    value_.Enabled = enabled ? WdfTrue : WdfFalse;
+    return *this;
+  }
+
+  /** @brief Restores WDF's default wake enablement policy. */
+  wake_policy &use_default_enablement() noexcept {
+    value_.Enabled = WdfUseDefault;
+    return *this;
+  }
+
+  /** @brief Arms this parent when one of its children is armed for wake. */
+  wake_policy &arm_for_armed_children(bool enabled = true) noexcept {
+    value_.ArmForWakeIfChildrenAreArmedForWake = enabled ? TRUE : FALSE;
+    return *this;
+  }
+
+  /** @brief Propagates successful parent wake indication to child devices. */
+  wake_policy &indicate_child_wake(bool enabled = true) noexcept {
+    value_.IndicateChildWakeOnParentWake = enabled ? TRUE : FALSE;
+    return *this;
+  }
+
+  /** @brief Applies this policy to a device and preserves WDF's NTSTATUS. */
+  ntl::status try_apply(device target) noexcept {
+    return WdfDeviceAssignSxWakeSettings(target.native_handle(), &value_);
+  }
+
+  /** @brief Returns the mutable native settings for uncommon fields. */
+  PWDF_DEVICE_POWER_POLICY_WAKE_SETTINGS native() noexcept { return &value_; }
+
+private:
+  WDF_DEVICE_POWER_POLICY_WAKE_SETTINGS value_{};
 };
 } // namespace ntl::kmdf

@@ -146,6 +146,81 @@ self-managed I/O, query-stop/query-remove, and surprise removal.
 `power_policy_callbacks` covers S0/Sx wake policy callbacks. Both expose
 `native()` for less common WDF fields rather than hiding the native framework.
 
+## Hardware Resources
+
+`resource_list` is an iterable, non-owning view of the resource list supplied
+by KMDF. Each element is a `resource_descriptor`; its `memory()`, `port()`,
+`interrupt()`, `dma()`, and `connection()` methods return typed values only
+when the descriptor has the matching type. `native()` remains available for
+less common resource types. Large memory descriptors are decoded with the WDK
+`RtlCmDecodeMemIoResource` helper rather than by interpreting their compressed
+length fields directly.
+
+```cpp
+constexpr auto on_prepare_hardware =
+    +[](kmdf::device device, kmdf::resource_list raw,
+        kmdf::resource_list translated) noexcept -> NTSTATUS {
+      (void)raw;
+
+      for (const kmdf::resource_descriptor resource : translated) {
+        const auto memory = resource.memory();
+        if (!memory)
+          continue;
+
+        auto* registers = MmMapIoSpace(memory->start,
+                                       static_cast<SIZE_T>(memory->length),
+                                       MmNonCached);
+        if (!registers)
+          return STATUS_INSUFFICIENT_RESOURCES;
+        device.context<device_state>().registers = registers;
+        return STATUS_SUCCESS;
+      }
+      return STATUS_DEVICE_CONFIGURATION_ERROR;
+    };
+```
+
+The raw list contains bus-relative resources. The translated list contains
+system addresses, interrupt vectors, and affinities suitable for the driver's
+hardware-access path. `resource_origin` is carried into interrupt descriptors
+so message-signaled interrupt fields are decoded from the correct native union
+member. Resource facades do not own or extend the lifetime of the WDF list and
+are valid only from `EvtDevicePrepareHardware` until
+`EvtDeviceReleaseHardware` returns.
+
+## Idle And Wake Policy
+
+`idle_policy` initializes `WDF_DEVICE_POWER_POLICY_IDLE_SETTINGS` with the WDF
+initializer and configures runtime idle in S0. `wake_policy` does the same for
+`WDF_DEVICE_POWER_POLICY_WAKE_SETTINGS` and wake from Sx. Both return the exact
+WDF `NTSTATUS` from `try_apply()`.
+
+```cpp
+ntl::kmdf::idle_policy idle(IdleCannotWakeFromS0);
+idle.timeout(10'000, DriverManagedIdleTimeout)
+    .user_control(IdleDoNotAllowUserControl)
+    .enabled(true)
+    .exclude_d3_cold(WdfUseDefault);
+
+ntl::status status = idle.try_apply(device);
+if (status.is_err())
+  return status;
+
+ntl::kmdf::wake_policy wake;
+wake.device_state(PowerDeviceMaximum)
+    .user_control(WakeDoNotAllowUserControl)
+    .enabled(true);
+
+status = wake.try_apply(device);
+if (status.is_err())
+  return status;
+```
+
+Apply these settings after `WdfDeviceCreate` and only when the driver owns the
+device power policy. The wrappers follow the native WDF contract of at most
+`DISPATCH_LEVEL`; the example configures them during `EvtDeviceAdd`, where the
+driver is already running at `PASSIVE_LEVEL`. Whether a device can actually
+wake from a given state remains a hardware, bus, firmware, and INF contract.
+
 ## C++ Object Context
 
 NTL can construct a C++ object directly in WDF-owned context storage. This is

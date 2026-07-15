@@ -321,6 +321,32 @@ constexpr auto sample_usb_reader_failure =
   reader.on_failure<sample_usb_reader_failure>().pending_reads(1);
   (void)pipe.try_configure_reader(reader);
 }
+
+[[maybe_unused]] void compile_resource_and_power_surface(
+    ntl::kmdf::device device, ntl::kmdf::resource_list resources) {
+  using namespace ntl::kmdf;
+
+  for (const resource_descriptor descriptor : resources) {
+    (void)descriptor.memory();
+    (void)descriptor.port();
+    (void)descriptor.interrupt();
+    (void)descriptor.dma();
+    (void)descriptor.connection();
+  }
+
+  idle_policy idle(IdleCannotWakeFromS0);
+  idle.timeout(1000, DriverManagedIdleTimeout)
+      .user_control(IdleDoNotAllowUserControl)
+      .enabled(true)
+      .exclude_d3_cold(WdfUseDefault);
+  (void)idle.try_apply(device);
+
+  wake_policy wake;
+  wake.device_state(PowerDeviceMaximum)
+      .user_control(WakeDoNotAllowUserControl)
+      .enabled(false);
+  (void)wake.try_apply(device);
+}
 }
 
 ntl::status ntl::kmdf::main(driver_builder& builder,

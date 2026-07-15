@@ -141,19 +141,19 @@ constexpr auto prepare_hardware =
   // and explicitly PASSIVE_LEVEL CRT/STL work belongs in callbacks like this,
   // rather than in EvtProgramDma, the ISR, or the interrupt DPC.
   auto &state = device.context<device_state>();
-  for (ULONG index = 0; index != translated.size(); ++index) {
-    PCM_PARTIAL_RESOURCE_DESCRIPTOR resource = translated.at(index);
-    if (!resource || resource->Type != CmResourceTypeMemory ||
-        resource->u.Memory.Length < sizeof(sample_hardware::registers))
+  for (const ntl::kmdf::resource_descriptor resource : translated) {
+    const auto memory = resource.memory();
+    if (!memory || memory->length < sizeof(sample_hardware::registers) ||
+        memory->length > MAXULONG_PTR)
       continue;
 
+    const SIZE_T length = static_cast<SIZE_T>(memory->length);
     state.registers = static_cast<volatile sample_hardware::registers *>(
-        MmMapIoSpace(resource->u.Memory.Start, resource->u.Memory.Length,
-                     MmNonCached));
+        MmMapIoSpace(memory->start, length, MmNonCached));
     if (!state.registers)
       return STATUS_INSUFFICIENT_RESOURCES;
 
-    state.register_length = resource->u.Memory.Length;
+    state.register_length = length;
     return STATUS_SUCCESS;
   }
 
