@@ -1,0 +1,162 @@
+/**
+ * @file dpc
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Typed standalone KMDF DPC configuration and facade.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "callback"
+#include "object_attributes"
+
+#include "../result"
+
+#include "detail/wdf"
+#include <utility>
+
+namespace ntl::kmdf {
+class dpc_config;
+
+/** @brief Non-owning facade for a WDFDPC object. */
+class dpc {
+public:
+  /** @brief Creates an empty DPC facade. */
+  dpc() noexcept = default;
+
+  /** @brief Wraps a WDF DPC object without taking ownership. */
+  explicit dpc(WDFDPC object) noexcept : object_(object) {}
+
+  /** @brief Creates a DPC parented to another WDF object. */
+  template <class Parent>
+  static ntl::result<dpc>
+  try_create(const Parent &parent, dpc_config &config,
+             object_attributes *attributes = nullptr) noexcept;
+
+  /** @brief Creates a parented DPC with a managed C++ context. */
+  template <class Context, class Parent, class... Args>
+  static ntl::result<dpc> try_create(const Parent &parent, dpc_config &config,
+                                     object_attributes *attributes,
+                                     Args &&...args) noexcept;
+
+  /**
+   * @brief Queues the DPC for DISPATCH_LEVEL execution.
+   * @return True when the DPC was inserted into the queue.
+   */
+  bool enqueue() const noexcept { return WdfDpcEnqueue(object_) != FALSE; }
+
+  /**
+   * @brief Cancels a queued DPC.
+   * @param wait True to wait for a running callback; this requires
+   * PASSIVE_LEVEL. False is valid through HIGH_LEVEL.
+   */
+  bool cancel(bool wait = false) const noexcept {
+    return WdfDpcCancel(object_, wait ? TRUE : FALSE) != FALSE;
+  }
+
+  /** @brief Returns the DPC's parent WDF object. */
+  object parent() const noexcept {
+    return object{WdfDpcGetParentObject(object_)};
+  }
+
+  /** @brief Returns this DPC object's constructed C++ context. */
+  template <class T> T &context() const noexcept {
+    return detail::get_context<T>(reinterpret_cast<WDFOBJECT>(object_));
+  }
+
+  /** @brief Returns this DPC object's context, or nullptr when absent. */
+  template <class T> T *try_context() const noexcept {
+    return detail::try_get_context<T>(reinterpret_cast<WDFOBJECT>(object_));
+  }
+
+  /** @brief Allocates and constructs an additional DPC context. */
+  template <class T, class... Args>
+  ntl::result<T *> try_emplace_context(Args &&...args) const noexcept {
+    return object{reinterpret_cast<WDFOBJECT>(object_)}
+        .template try_emplace_context<T>(std::forward<Args>(args)...);
+  }
+
+  /** @brief Returns the native WDF DPC object. */
+  WDFDPC native_object() const noexcept { return object_; }
+
+  /** @brief Returns true when a native DPC object is present. */
+  explicit operator bool() const noexcept { return object_ != WDF_NO_HANDLE; }
+
+private:
+  WDFDPC object_ = WDF_NO_HANDLE;
+};
+
+/** @brief Initializes and configures WDF_DPC_CONFIG. */
+class dpc_config {
+public:
+  /**
+   * @brief Creates a DPC configuration with a typed callback.
+   * @tparam Callback Non-capturing `void(dpc) noexcept` callback. The callback
+   * runs at DISPATCH_LEVEL.
+   */
+  template <auto Callback> static dpc_config with_callback() noexcept {
+    return dpc_config{+[](WDFDPC native_dpc) noexcept {
+      detail::invoke_callback<Callback>(dpc{native_dpc});
+    }};
+  }
+
+  /** @brief Registers the typed DISPATCH_LEVEL DPC callback. */
+  template <auto Callback> dpc_config &on_execute() noexcept {
+    value_.EvtDpcFunc = +[](WDFDPC native_dpc) noexcept {
+      detail::invoke_callback<Callback>(dpc{native_dpc});
+    };
+    return *this;
+  }
+
+  /** @brief Configures serialization with the parent object's callbacks. */
+  dpc_config &automatic_serialization(bool enabled = true) noexcept {
+    value_.AutomaticSerialization = enabled ? TRUE : FALSE;
+    return *this;
+  }
+
+  /** @brief Returns the mutable native DPC configuration. */
+  PWDF_DPC_CONFIG native() noexcept { return &value_; }
+
+private:
+  explicit dpc_config(PFN_WDF_DPC callback) noexcept {
+    WDF_DPC_CONFIG_INIT(&value_, callback);
+  }
+
+  WDF_DPC_CONFIG value_{};
+};
+
+template <class Parent>
+ntl::result<dpc> dpc::try_create(const Parent &parent, dpc_config &config,
+                                 object_attributes *attributes) noexcept {
+  object_attributes local_attributes;
+  object_attributes &effective = attributes ? *attributes : local_attributes;
+  effective.parent(parent);
+
+  WDFDPC object = WDF_NO_HANDLE;
+  const NTSTATUS result =
+      WdfDpcCreate(config.native(), effective.native(), &object);
+  if (!NT_SUCCESS(result))
+    return ntl::unexpected(result);
+  return ntl::ok(dpc{object});
+}
+
+template <class Context, class Parent, class... Args>
+ntl::result<dpc> dpc::try_create(const Parent &parent, dpc_config &config,
+                                 object_attributes *attributes,
+                                 Args &&...args) noexcept {
+  object_attributes local_attributes;
+  object_attributes &effective = attributes ? *attributes : local_attributes;
+  effective.parent(parent);
+  effective.template prepare_context<Context>();
+
+  WDFDPC object = WDF_NO_HANDLE;
+  const NTSTATUS result =
+      WdfDpcCreate(config.native(), effective.native(), &object);
+  if (!NT_SUCCESS(result))
+    return ntl::unexpected(result);
+
+  effective.template construct_context<Context>(
+      reinterpret_cast<WDFOBJECT>(object), std::forward<Args>(args)...);
+  return ntl::ok(dpc{object});
+}
+} // namespace ntl::kmdf

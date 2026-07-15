@@ -491,6 +491,11 @@ struct sample_additional_context {
   ULONG value;
 };
 
+struct sample_general_object_context {
+  explicit sample_general_object_context(ULONG value) noexcept : value(value) {}
+  ULONG value;
+};
+
 constexpr auto sample_program_dma =
     +[](ntl::kmdf::dma_transaction, ntl::kmdf::device, void*,
         WDF_DMA_DIRECTION,
@@ -506,6 +511,9 @@ constexpr auto sample_usb_reader =
 constexpr auto sample_usb_reader_failure =
     +[](ntl::kmdf::usb_pipe, ntl::status,
         USBD_STATUS) noexcept { return false; };
+
+constexpr auto sample_standalone_dpc =
+    +[](ntl::kmdf::dpc) noexcept {};
 
 [[maybe_unused]] void compile_typed_callback_surface(
     ntl::kmdf::device device, ntl::kmdf::device_init& init,
@@ -574,6 +582,48 @@ constexpr auto sample_usb_reader_failure =
     (void)allocated_memory->data<ULONG>();
     (void)allocated_memory->size<ULONG>();
   }
+
+  object_attributes utility_attributes;
+  utility_attributes.parent(device);
+  auto general_object =
+      owned_object::try_create<sample_general_object_context>(
+          &utility_attributes, 42);
+  if (general_object) {
+    auto reference = general_object->reference();
+    auto moved_reference = std::move(reference);
+    (void)moved_reference.context<sample_general_object_context>().value;
+  }
+  object_reference device_reference{device};
+
+  auto framework_spin = spin_lock::try_create(&utility_attributes);
+  if (framework_spin) {
+    framework_spin->lock();
+    framework_spin->unlock();
+  }
+  auto framework_wait = wait_lock::try_create(&utility_attributes);
+  if (framework_wait && framework_wait->try_lock()) {
+    framework_wait->unlock();
+  }
+
+  auto cache = lookaside::try_create(
+      sizeof(ULONG) * 4, NonPagedPoolNx, "NTLk", &utility_attributes);
+  if (cache) {
+    auto cached_memory = cache->try_allocate();
+    if (cached_memory)
+      (void)cached_memory->data<ULONG>();
+  }
+
+  auto framework_string = string::try_create(L"package smoke");
+  auto framework_collection = collection::try_create(&utility_attributes);
+  if (framework_string && framework_collection) {
+    (void)framework_string->view();
+    (void)framework_collection->try_add(*framework_string);
+    framework_collection->remove(*framework_string);
+  }
+
+  auto dpc_settings = dpc_config::with_callback<sample_standalone_dpc>();
+  dpc_settings.automatic_serialization(false);
+  (void)dpc::try_create(device, dpc_settings);
 
   auto created_target = io_target::try_create(device);
   auto open_params = io_target_open_params::existing_device(

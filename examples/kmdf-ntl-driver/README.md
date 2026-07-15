@@ -20,6 +20,11 @@ callback lifetime.
 During device setup the sample also allocates parented `WDFMEMORY`, verifies
 buffer copies, creates a general I/O target, and creates then automatically
 deletes an unsent `ntl::kmdf::driver_request`.
+It also exercises the common WDF object utilities in one runtime path:
+`spin_lock`, `wait_lock`, move-owned lookaside memory, `collection`, `string`,
+and a standalone `dpc`. The DPC callback performs only lock-free counter and
+event operations at `DISPATCH_LEVEL`; the passive setup path waits for and
+checks the result.
 
 The app also exercises a manually dispatched queue with real overlapped I/O.
 One pending IOCTL is retrieved by its KMDF file object and completed normally;

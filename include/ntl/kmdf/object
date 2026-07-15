@@ -1,0 +1,264 @@
+/**
+ * @file object
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Generic KMDF object ownership and reference-count helpers.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ *
+ */
+#pragma once
+
+#include "object_attributes"
+
+#include "../result"
+
+#include "detail/wdf"
+
+#include <utility>
+
+namespace ntl::kmdf {
+/**
+ * @brief Move-only owner of one WDF framework-object reference.
+ *
+ * This type balances WdfObjectReferenceActual with
+ * WdfObjectDereferenceActual. It does not own deletion of the referenced
+ * object and therefore never calls WdfObjectDelete.
+ *
+ * @note Construction, reset, move assignment, and destruction require IRQL
+ * <= DISPATCH_LEVEL because they change a WDF reference count.
+ */
+class object_reference {
+public:
+  /** @brief Creates an empty reference owner. */
+  object_reference() noexcept = default;
+
+  /**
+   * @brief Acquires one reference to a WDF object.
+   * @param value Non-owning object facade to reference.
+   * @param tag Optional WDF reference-tracking tag.
+   */
+  explicit object_reference(object value, void *tag = nullptr) noexcept
+      : object_(value.native_handle()), tag_(tag) {
+    if (object_ != WDF_NO_HANDLE)
+      reference(object_, tag_);
+  }
+
+  /**
+   * @brief Acquires one reference to a typed KMDF facade.
+   * @param value Facade exposing native_object() or native_handle().
+   * @param tag Optional WDF reference-tracking tag.
+   */
+  template <class Value>
+  explicit object_reference(const Value &value, void *tag = nullptr) noexcept
+      : object_reference(object{to_object(value, 0)}, tag) {}
+
+  object_reference(const object_reference &) = delete;
+  object_reference &operator=(const object_reference &) = delete;
+
+  /** @brief Transfers the framework-object reference. */
+  object_reference(object_reference &&other) noexcept
+      : object_(std::exchange(other.object_, nullptr)),
+        tag_(std::exchange(other.tag_, nullptr)) {}
+
+  /** @brief Releases the current reference and takes another one. */
+  object_reference &operator=(object_reference &&other) noexcept {
+    if (this != &other) {
+      reset();
+      object_ = std::exchange(other.object_, nullptr);
+      tag_ = std::exchange(other.tag_, nullptr);
+    }
+    return *this;
+  }
+
+  /** @brief Releases the held framework-object reference. */
+  ~object_reference() { reset(); }
+
+  /** @brief Releases the held reference and becomes empty. */
+  void reset() noexcept {
+    if (object_ != WDF_NO_HANDLE)
+      dereference(object_, tag_);
+    object_ = WDF_NO_HANDLE;
+    tag_ = nullptr;
+  }
+
+  /** @brief Returns a non-owning facade for the referenced object. */
+  object get() const noexcept { return object{object_}; }
+
+  /** @brief Returns the native referenced WDF object. */
+  WDFOBJECT native_handle() const noexcept { return object_; }
+
+  /** @brief Returns the tag paired with this reference. */
+  void *tag() const noexcept { return tag_; }
+
+  /** @brief Returns this object's constructed C++ context. */
+  template <class T> T &context() const noexcept {
+    return get().template context<T>();
+  }
+
+  /** @brief Returns this object's context, or nullptr when absent. */
+  template <class T> T *try_context() const noexcept {
+    return get().template try_context<T>();
+  }
+
+  /** @brief Returns true while one framework-object reference is held. */
+  explicit operator bool() const noexcept { return object_ != WDF_NO_HANDLE; }
+
+private:
+  template <class Value>
+  static auto to_object(const Value &value, int) noexcept
+      -> decltype(value.native_object(), WDFOBJECT{}) {
+    return reinterpret_cast<WDFOBJECT>(value.native_object());
+  }
+
+  template <class Value>
+  static auto to_object(const Value &value, long) noexcept
+      -> decltype(value.native_handle(), WDFOBJECT{}) {
+    return reinterpret_cast<WDFOBJECT>(value.native_handle());
+  }
+
+  static void reference(WDFOBJECT object, void *tag) noexcept {
+    // KMDF 1.15 declares the diagnostic file parameter as mutable PCHAR.
+    WdfObjectReferenceActual(object, tag, __LINE__,
+                             const_cast<PCHAR>(__FILE__));
+  }
+
+  static void dereference(WDFOBJECT object, void *tag) noexcept {
+    WdfObjectDereferenceActual(object, tag, __LINE__,
+                               const_cast<PCHAR>(__FILE__));
+  }
+
+  WDFOBJECT object_ = WDF_NO_HANDLE;
+  void *tag_ = nullptr;
+};
+
+/**
+ * @brief Move-only deletion owner for a general WDF object.
+ *
+ * The owner calls WdfObjectDelete when reset or destroyed. It is intended for
+ * objects returned by WdfObjectCreate and must not outlive the object's WDF
+ * parent. Additional object_reference instances delay final destruction but
+ * do not transfer deletion ownership.
+ *
+ * @note Creation, reset, move assignment, and destruction require IRQL <=
+ * DISPATCH_LEVEL.
+ */
+class owned_object {
+public:
+  /** @brief Creates an empty deletion owner. */
+  owned_object() noexcept = default;
+
+  owned_object(const owned_object &) = delete;
+  owned_object &operator=(const owned_object &) = delete;
+
+  /** @brief Transfers deletion ownership. */
+  owned_object(owned_object &&other) noexcept
+      : object_(std::exchange(other.object_, nullptr)) {}
+
+  /** @brief Deletes the current object and takes another one. */
+  owned_object &operator=(owned_object &&other) noexcept {
+    if (this != &other) {
+      reset();
+      object_ = std::exchange(other.object_, nullptr);
+    }
+    return *this;
+  }
+
+  /** @brief Requests deletion of the owned WDF object. */
+  ~owned_object() { reset(); }
+
+  /**
+   * @brief Creates a general WDF object.
+   * @param attributes Optional parent, callbacks, and context attributes.
+   * @return Deletion owner or the exact WdfObjectCreate failure status.
+   */
+  static ntl::result<owned_object>
+  try_create(object_attributes *attributes = nullptr) noexcept {
+    WDFOBJECT value = WDF_NO_HANDLE;
+    const NTSTATUS status =
+        WdfObjectCreate(attributes ? attributes->native() : nullptr, &value);
+    if (!NT_SUCCESS(status))
+      return ntl::unexpected(status);
+    return ntl::ok(owned_object{value});
+  }
+
+  /**
+   * @brief Creates a general WDF object with a managed C++ context.
+   * @param attributes Optional parent and callback attributes.
+   * @param args Arguments forwarded to the context constructor.
+   * @return Deletion owner or the exact WdfObjectCreate failure status.
+   */
+  template <class Context, class... Args>
+  static ntl::result<owned_object> try_create(object_attributes *attributes,
+                                              Args &&...args) noexcept {
+    object_attributes local_attributes;
+    object_attributes &actual = attributes ? *attributes : local_attributes;
+    actual.template prepare_context<Context>();
+
+    WDFOBJECT value = WDF_NO_HANDLE;
+    const NTSTATUS status = WdfObjectCreate(actual.native(), &value);
+    if (!NT_SUCCESS(status))
+      return ntl::unexpected(status);
+
+    actual.template construct_context<Context>(value,
+                                               std::forward<Args>(args)...);
+    return ntl::ok(owned_object{value});
+  }
+
+  /** @brief Creates a general WDF object with a default C++ context. */
+  template <class Context>
+  static ntl::result<owned_object> try_create() noexcept {
+    return try_create<Context>(nullptr);
+  }
+
+  /** @brief Requests deletion and becomes empty. */
+  void reset() noexcept {
+    if (object_ != WDF_NO_HANDLE)
+      WdfObjectDelete(object_);
+    object_ = WDF_NO_HANDLE;
+  }
+
+  /**
+   * @brief Releases deletion ownership to the caller.
+   * @note The caller must eventually request deletion or rely on the parent.
+   */
+  WDFOBJECT release() noexcept { return std::exchange(object_, nullptr); }
+
+  /** @brief Returns a non-owning facade for the owned object. */
+  object get() const noexcept { return object{object_}; }
+
+  /** @brief Returns the native owned WDF object. */
+  WDFOBJECT native_handle() const noexcept { return object_; }
+
+  /** @brief Acquires one independently tracked reference to this object. */
+  object_reference reference(void *tag = nullptr) const noexcept {
+    return object_reference{get(), tag};
+  }
+
+  /** @brief Returns this object's constructed C++ context. */
+  template <class T> T &context() const noexcept {
+    return get().template context<T>();
+  }
+
+  /** @brief Returns this object's context, or nullptr when absent. */
+  template <class T> T *try_context() const noexcept {
+    return get().template try_context<T>();
+  }
+
+  /**
+   * @brief Allocates and constructs an additional C++ object context.
+   * @return Context pointer or WdfObjectAllocateContext failure status.
+   */
+  template <class T, class... Args>
+  ntl::result<T *> try_emplace_context(Args &&...args) const noexcept {
+    return get().template try_emplace_context<T>(std::forward<Args>(args)...);
+  }
+
+  /** @brief Returns true while deletion ownership is held. */
+  explicit operator bool() const noexcept { return object_ != WDF_NO_HANDLE; }
+
+private:
+  explicit owned_object(WDFOBJECT value) noexcept : object_(value) {}
+
+  WDFOBJECT object_ = WDF_NO_HANDLE;
+};
+} // namespace ntl::kmdf

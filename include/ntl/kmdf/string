@@ -1,0 +1,92 @@
+/**
+ * @file string
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief KMDF string-object facade.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "object_attributes"
+
+#include "../result"
+
+#include "detail/wdf"
+#include <climits>
+#include <string_view>
+
+namespace ntl::kmdf {
+/** @brief Non-owning facade for a WDFSTRING object. */
+class string {
+public:
+  /** @brief Creates an empty string facade. */
+  string() noexcept = default;
+
+  /** @brief Wraps a WDF string object without taking ownership. */
+  explicit string(WDFSTRING object) noexcept : object_(object) {}
+
+  /**
+   * @brief Creates a WDF string by copying a native Unicode string.
+   * @param value Initial value, or nullptr for an empty mutable WDF string.
+   * @note Requires PASSIVE_LEVEL.
+   */
+  static ntl::result<string>
+  try_create(PCUNICODE_STRING value = nullptr,
+             object_attributes *attributes = nullptr) noexcept {
+    WDFSTRING object = WDF_NO_HANDLE;
+    const NTSTATUS result = WdfStringCreate(
+        value, attributes ? attributes->native() : nullptr, &object);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return ntl::ok(string{object});
+  }
+
+  /**
+   * @brief Creates a WDF string by copying a wide string view.
+   * @note Requires PASSIVE_LEVEL.
+   */
+  static ntl::result<string>
+  try_create(std::wstring_view value,
+             object_attributes *attributes = nullptr) noexcept {
+    if (value.size() > USHRT_MAX / sizeof(WCHAR))
+      return ntl::unexpected(STATUS_NAME_TOO_LONG);
+
+    UNICODE_STRING native{};
+    native.Buffer = const_cast<PWCHAR>(value.data());
+    native.Length = static_cast<USHORT>(value.size() * sizeof(WCHAR));
+    native.MaximumLength = native.Length;
+    return try_create(&native, attributes);
+  }
+
+  /**
+   * @brief Returns a native Unicode view into WDF-owned storage.
+   * @note Requires PASSIVE_LEVEL. The view remains valid only while this WDF
+   * string exists and is not modified by the framework.
+   */
+  UNICODE_STRING unicode() const noexcept {
+    UNICODE_STRING value{};
+    WdfStringGetUnicodeString(object_, &value);
+    return value;
+  }
+
+  /**
+   * @brief Returns a standard wide-string view into WDF-owned storage.
+   * @note Requires PASSIVE_LEVEL and follows the same lifetime as unicode().
+   */
+  std::wstring_view view() const noexcept {
+    const UNICODE_STRING value = unicode();
+    if (!value.Buffer || value.Length == 0)
+      return {};
+    return {value.Buffer, value.Length / sizeof(WCHAR)};
+  }
+
+  /** @brief Returns the native WDF string object. */
+  WDFSTRING native_object() const noexcept { return object_; }
+
+  /** @brief Returns true when a native string object is present. */
+  explicit operator bool() const noexcept { return object_ != WDF_NO_HANDLE; }
+
+private:
+  WDFSTRING object_ = WDF_NO_HANDLE;
+};
+} // namespace ntl::kmdf

@@ -494,6 +494,130 @@ auto open = ntl::kmdf::io_target_open_params::open_by_name(
 auto status = created_target->try_open(open);
 ```
 
+## Common WDF Object Utilities
+
+The KMDF namespace provides typed facades for framework spin locks, wait
+locks, fixed-size lookaside memory, object collections, strings, and
+standalone DPCs. These are distinct from similarly named WDM-oriented NTL
+types: `ntl::kmdf::*` objects participate in WDF's parent hierarchy,
+verification, callback serialization, and reference model.
+
+The generic lifecycle helpers keep three different responsibilities explicit:
+
+- `object` is a non-owning view of any `WDFOBJECT`.
+- `owned_object` owns deletion of a general object created by
+  `WdfObjectCreate` and calls `WdfObjectDelete` when reset or destroyed.
+- `object_reference` owns one reference-count increment and balances it with
+  `WdfObjectDereferenceActual`; it never requests deletion with
+  `WdfObjectDelete`.
+
+An `owned_object` must not outlive its configured WDF parent. Deleting it can
+return before the final destruction callback if another `object_reference` is
+still held. These types are also distinct from `ntl::unique_object`, which
+owns an object-manager pointer reference and calls `ObDereferenceObject`.
+
+```cpp
+struct operation_state {
+  explicit operation_state(ULONG id) noexcept : id(id) {}
+  ULONG id;
+};
+
+ntl::kmdf::object_attributes attributes;
+attributes.parent(device);
+
+auto operation = ntl::kmdf::owned_object::try_create<operation_state>(
+    &attributes, 42);
+if (!operation)
+  return operation.status();
+
+auto pending_reference = operation->reference();
+auto id = pending_reference.context<operation_state>().id;
+
+// The same reference owner accepts typed WDF facades.
+ntl::kmdf::object_reference device_reference{device};
+```
+
+`spin_lock` and `wait_lock` implement the standard C++ lockable surface, so
+they work with `std::lock_guard`. A WDF spin lock raises IRQL to
+`DISPATCH_LEVEL`; a blocking WDF wait-lock acquisition requires
+`PASSIVE_LEVEL`. Keep PASSIVE_LEVEL-only CRT/STL work outside a spin-lock
+critical section. `wait_lock::try_lock()` uses a zero timeout and returns
+`false` for `STATUS_TIMEOUT`; that status is informational, so a generic
+`NT_SUCCESS` check is not sufficient to decide whether the lock was acquired.
+
+```cpp
+auto spin = ntl::kmdf::spin_lock::try_create();
+if (!spin)
+  return spin.status();
+{
+  std::lock_guard guard(*spin);
+  ++shared_counter; // nonpageable, DISPATCH_LEVEL-safe work only
+}
+
+auto wait = ntl::kmdf::wait_lock::try_create();
+if (!wait)
+  return wait.status();
+{
+  std::lock_guard guard(*wait); // blocking acquisition: PASSIVE_LEVEL
+  update_passive_state();
+}
+```
+
+`lookaside` creates fixed-size `WDFMEMORY` allocations. `try_allocate()`
+returns a move-only `lookaside_memory`; its destructor calls
+`WdfObjectDelete`, which returns the backing block to the WDF lookaside list.
+This explicit owner prevents a successful allocation from being silently
+leaked.
+
+```cpp
+ntl::kmdf::object_attributes attributes;
+attributes.parent(device);
+
+auto packets = ntl::kmdf::lookaside::try_create(
+    sizeof(packet), NonPagedPoolNx, "Pkt0", &attributes);
+if (!packets)
+  return packets.status();
+
+auto packet_memory = packets->try_allocate();
+if (!packet_memory)
+  return packet_memory.status();
+auto* packet_view = packet_memory->data<packet>();
+```
+
+`collection` retains framework references to WDF objects until they are
+removed or the collection is deleted. `string` copies a `UNICODE_STRING` or
+`std::wstring_view` into a WDF-owned string object; creation and value access
+require `PASSIVE_LEVEL`.
+
+```cpp
+auto label = ntl::kmdf::string::try_create(L"sample device");
+auto objects = ntl::kmdf::collection::try_create();
+if (!label || !objects)
+  return STATUS_INSUFFICIENT_RESOURCES;
+auto status = objects->try_add(*label);
+```
+
+A standalone `dpc` is parented to another WDF object and invokes its typed
+callback at `DISPATCH_LEVEL`. `enqueue()` is valid through `HIGH_LEVEL`;
+`cancel(true)` waits for a running callback and therefore requires
+`PASSIVE_LEVEL`. Use only nonpageable, IRQL-safe operations in the callback
+and defer general CRT/STL work to `ntl::kmdf::work_item`.
+
+```cpp
+constexpr auto on_dpc = +[](ntl::kmdf::dpc work) noexcept {
+  work.context<dpc_state>().pending.store(true,
+                                          std::memory_order_relaxed);
+};
+
+auto config = ntl::kmdf::dpc_config::with_callback<on_dpc>();
+config.automatic_serialization(false);
+auto deferred = ntl::kmdf::dpc::try_create<dpc_state>(
+    device, config, nullptr);
+if (!deferred)
+  return deferred.status();
+deferred->enqueue();
+```
+
 ## DMA
 
 `dma_enabler`, `common_buffer`, and `dma_transaction` preserve KMDF's native

@@ -1,0 +1,95 @@
+/**
+ * @file wait_lock
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief KMDF wait-lock object facade.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "object_attributes"
+
+#include "../result"
+#include "../status"
+
+#include "detail/wdf"
+
+namespace ntl::kmdf {
+/**
+ * @brief Non-owning facade for a WDFWAITLOCK object.
+ *
+ * Blocking acquisition requires PASSIVE_LEVEL. A zero-timeout probe is valid
+ * through DISPATCH_LEVEL, matching the WDF contract.
+ */
+class wait_lock {
+public:
+  /** @brief Creates an empty wait-lock facade. */
+  wait_lock() noexcept = default;
+
+  /** @brief Wraps a WDF wait-lock object without taking ownership. */
+  explicit wait_lock(WDFWAITLOCK object) noexcept : object_(object) {}
+
+  /** @brief Creates a WDF wait lock. */
+  static ntl::result<wait_lock>
+  try_create(object_attributes *attributes = nullptr) noexcept {
+    WDFWAITLOCK object = WDF_NO_HANDLE;
+    const NTSTATUS result =
+        WdfWaitLockCreate(attributes ? attributes->native() : nullptr, &object);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return ntl::ok(wait_lock{object});
+  }
+
+  /**
+   * @brief Acquires the lock, waiting indefinitely.
+   * @note Requires PASSIVE_LEVEL.
+   */
+  void lock() const noexcept {
+    const NTSTATUS result = WdfWaitLockAcquire(object_, nullptr);
+    NT_ASSERT(NT_SUCCESS(result));
+    UNREFERENCED_PARAMETER(result);
+  }
+
+  /**
+   * @brief Attempts to acquire the lock without waiting.
+   * @note May be called at IRQL <= DISPATCH_LEVEL.
+   */
+  bool try_lock() const noexcept {
+    LONGLONG timeout = 0;
+    // STATUS_TIMEOUT is a nonnegative NTSTATUS, so NT_SUCCESS would
+    // incorrectly report a zero-timeout miss as an acquired lock.
+    return WdfWaitLockAcquire(object_, &timeout) == STATUS_SUCCESS;
+  }
+
+  /**
+   * @brief Acquires the lock with a native absolute or relative timeout.
+   * @param timeout Pointer to a 100-nanosecond timeout value, or nullptr to
+   * wait indefinitely.
+   * @return WDF acquisition status, including STATUS_TIMEOUT.
+   */
+  ntl::status try_acquire(LONGLONG *timeout) const noexcept {
+    return WdfWaitLockAcquire(object_, timeout);
+  }
+
+  /**
+   * @brief Acquires the lock with a relative millisecond timeout.
+   * @note A nonzero timeout requires PASSIVE_LEVEL.
+   */
+  ntl::status try_acquire_for_ms(ULONG milliseconds) const noexcept {
+    LONGLONG timeout = WDF_REL_TIMEOUT_IN_MS(milliseconds);
+    return try_acquire(&timeout);
+  }
+
+  /** @brief Releases the lock. */
+  void unlock() const noexcept { WdfWaitLockRelease(object_); }
+
+  /** @brief Returns the native WDF wait-lock object. */
+  WDFWAITLOCK native_object() const noexcept { return object_; }
+
+  /** @brief Returns true when a native wait-lock object is present. */
+  explicit operator bool() const noexcept { return object_ != WDF_NO_HANDLE; }
+
+private:
+  WDFWAITLOCK object_ = WDF_NO_HANDLE;
+};
+} // namespace ntl::kmdf

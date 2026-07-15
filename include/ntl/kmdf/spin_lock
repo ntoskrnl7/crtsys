@@ -1,0 +1,57 @@
+/**
+ * @file spin_lock
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief KMDF spin-lock object facade.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "object_attributes"
+
+#include "../result"
+
+#include "detail/wdf"
+
+namespace ntl::kmdf {
+/**
+ * @brief Non-owning facade for a WDFSPINLOCK object.
+ *
+ * The type satisfies the C++ BasicLockable interface. Acquiring the lock raises
+ * IRQL to DISPATCH_LEVEL and releasing it restores the previous IRQL.
+ */
+class spin_lock {
+public:
+  /** @brief Creates an empty spin-lock facade. */
+  spin_lock() noexcept = default;
+
+  /** @brief Wraps a WDF spin-lock object without taking ownership. */
+  explicit spin_lock(WDFSPINLOCK object) noexcept : object_(object) {}
+
+  /** @brief Creates a WDF spin lock. */
+  static ntl::result<spin_lock>
+  try_create(object_attributes *attributes = nullptr) noexcept {
+    WDFSPINLOCK object = WDF_NO_HANDLE;
+    const NTSTATUS result =
+        WdfSpinLockCreate(attributes ? attributes->native() : nullptr, &object);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return ntl::ok(spin_lock{object});
+  }
+
+  /** @brief Acquires the lock and raises IRQL to DISPATCH_LEVEL. */
+  void lock() const noexcept { WdfSpinLockAcquire(object_); }
+
+  /** @brief Releases the lock and restores the previous IRQL. */
+  void unlock() const noexcept { WdfSpinLockRelease(object_); }
+
+  /** @brief Returns the native WDF spin-lock object. */
+  WDFSPINLOCK native_object() const noexcept { return object_; }
+
+  /** @brief Returns true when a native spin-lock object is present. */
+  explicit operator bool() const noexcept { return object_ != WDF_NO_HANDLE; }
+
+private:
+  WDFSPINLOCK object_ = WDF_NO_HANDLE;
+};
+} // namespace ntl::kmdf

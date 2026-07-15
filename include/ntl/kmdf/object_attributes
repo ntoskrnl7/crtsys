@@ -21,6 +21,9 @@ class object_attributes;
 /** @brief Non-owning facade for a generic WDF object handle. */
 class object {
 public:
+  /** @brief Creates an empty generic object facade. */
+  object() noexcept = default;
+
   /** @brief Wraps a native WDF object without taking ownership. */
   explicit object(WDFOBJECT handle) noexcept : handle_(handle) {}
 
@@ -44,8 +47,11 @@ public:
   template <class T, class... Args>
   ntl::result<T *> try_emplace_context(Args &&...args) const noexcept;
 
+  /** @brief Returns true when a native WDF object is present. */
+  explicit operator bool() const noexcept { return handle_ != WDF_NO_HANDLE; }
+
 private:
-  WDFOBJECT handle_;
+  WDFOBJECT handle_ = WDF_NO_HANDLE;
 };
 
 /**
