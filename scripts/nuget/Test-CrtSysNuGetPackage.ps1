@@ -241,8 +241,11 @@ if ($isDriverConsumer) {
     'include\ntl\kmdf\dma',
     'include\ntl\kmdf\usb',
     'include\ntl\kmdf\child_list',
+    'include\ntl\kmdf\pdo',
+    'include\ntl\kmdf\query_interface',
+    'include\ntl\kmdf\resource_requirements',
     'include\ntl\kmdf\registry',
-    'include\ntl\kmdf\property'
+    'include\ntl\kmdf\property',
     'include\ntl\kmdf\wmi'
   )
 }

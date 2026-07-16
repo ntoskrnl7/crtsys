@@ -1,0 +1,57 @@
+[Version]
+Signature="$WINDOWS NT$"
+Class=System
+ClassGuid={4d36e97d-e325-11ce-bfc1-08002be10318}
+Provider=%ProviderName%
+CatalogFile=crtsys_kmdf_bus_ntl_sample.cat
+DriverVer=06/21/2006,1.0.0.0
+PnpLockdown=1
+
+[DestinationDirs]
+DefaultDestDir=13
+
+[SourceDisksNames]
+1=%DiskName%,,,
+
+[SourceDisksFiles]
+crtsys_kmdf_bus_ntl_sample.sys=1
+
+[Manufacturer]
+%ProviderName%=Models,NTamd64.10.0...16299,NTarm64.10.0...16299,NTx86.10.0...16299
+
+[Models.NTamd64.10.0...16299]
+%DeviceDescription%=Device_Install,Root\CrtSysKmdfNtlBusSample
+
+[Models.NTarm64.10.0...16299]
+%DeviceDescription%=Device_Install,Root\CrtSysKmdfNtlBusSample
+
+[Models.NTx86.10.0...16299]
+%DeviceDescription%=Device_Install,Root\CrtSysKmdfNtlBusSample
+
+[Device_Install.NT]
+CopyFiles=DriverCopyFiles
+
+[DriverCopyFiles]
+crtsys_kmdf_bus_ntl_sample.sys
+
+[Device_Install.NT.Services]
+AddService=crtsys_kmdf_bus_ntl_sample,0x00000002,Service_Install
+
+[Service_Install]
+DisplayName=%ServiceDescription%
+ServiceType=1
+StartType=3
+ErrorControl=1
+ServiceBinary=%13%\crtsys_kmdf_bus_ntl_sample.sys
+
+[Device_Install.NT.Wdf]
+KmdfService=crtsys_kmdf_bus_ntl_sample,Kmdf_Install
+
+[Kmdf_Install]
+KmdfLibraryVersion=1.15
+
+[Strings]
+ProviderName="crtsys"
+DeviceDescription="crtsys NTL KMDF bus sample"
+ServiceDescription="crtsys NTL KMDF bus sample driver"
+DiskName="crtsys NTL KMDF bus sample installation media"

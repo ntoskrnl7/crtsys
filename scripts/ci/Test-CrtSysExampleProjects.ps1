@@ -46,10 +46,17 @@ if ($LASTEXITCODE -ne 0) {
   throw 'Could not enumerate tracked Visual Studio example projects.'
 }
 
+$untrackedProjectPaths = @(
+  & git -C $repoRoot ls-files --others --exclude-standard -- 'examples/**/*.vcxproj'
+)
+if ($LASTEXITCODE -ne 0) {
+  throw 'Could not enumerate untracked Visual Studio example projects.'
+}
+
 $projects = @(
-  $trackedProjectPaths | ForEach-Object {
-    Get-Item -LiteralPath (Join-Path $repoRoot $_)
-  }
+  @($trackedProjectPaths + $untrackedProjectPaths) |
+    Sort-Object -Unique |
+    ForEach-Object { Get-Item -LiteralPath (Join-Path $repoRoot $_) }
 )
 
 foreach ($project in $projects) {

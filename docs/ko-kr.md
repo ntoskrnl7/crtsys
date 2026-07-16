@@ -191,6 +191,7 @@ flowchart TD
 | [NTL KMDF DMA 템플릿](../examples/kmdf-dma-ntl-driver) | 실제 하드웨어용 PnP packet-DMA transaction, scatter/gather, common buffer와 interrupt-DPC 연결 예제 |
 | [NTL KMDF USB 템플릿](../examples/kmdf-usb-ntl-driver) | PnP USB device/interface/pipe와 continuous reader, user-mode 상태 조회 앱을 포함한 빌드 가능한 예제 |
 | [NTL KMDF WMI 예제](../examples/kmdf-wmi-ntl-driver) | MOF 기반 typed WMI query/set/method provider, event 전달과 `ROOT\\WMI` user-mode 검증 앱 |
+| [NTL KMDF 버스 예제](../examples/kmdf-bus-ntl-driver) | dynamic PDO plug/remove/eject 수명 주기와 버스/자식 function driver 사이 typed `QUERY_INTERFACE` 검증 예제 |
 | [CI driver load tests](./ci-driver-load-tests.md) | optional self-hosted driver load/run workflow |
 
 ## Operational Boundaries

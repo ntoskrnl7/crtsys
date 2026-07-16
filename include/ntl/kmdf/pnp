@@ -225,6 +225,29 @@ public:
     return at(index);
   }
 
+  /** @brief Appends a copied descriptor to a mutable resource list. */
+  ntl::status
+  try_append(const CM_PARTIAL_RESOURCE_DESCRIPTOR &descriptor) const noexcept {
+    CM_PARTIAL_RESOURCE_DESCRIPTOR native = descriptor;
+    return WdfCmResourceListAppendDescriptor(handle_, &native);
+  }
+
+  /** @brief Inserts a copied descriptor at the specified index. */
+  ntl::status
+  try_insert(ULONG index,
+             const CM_PARTIAL_RESOURCE_DESCRIPTOR &descriptor) const noexcept {
+    CM_PARTIAL_RESOURCE_DESCRIPTOR native = descriptor;
+    return WdfCmResourceListInsertDescriptor(handle_, &native, index);
+  }
+
+  /** @brief Removes a descriptor by index when present. */
+  bool remove(ULONG index) const noexcept {
+    if (index >= size())
+      return false;
+    WdfCmResourceListRemove(handle_, index);
+    return true;
+  }
+
   /** @brief Input iterator over typed resource descriptors. */
   class iterator {
   public:

@@ -84,7 +84,16 @@ struct utility_object_state {
 constexpr auto child_create_callback =
     +[](ntl::kmdf::child_list,
         const ntl::kmdf::child_identification<child_identity> &,
-        ntl::kmdf::device_init) noexcept -> NTSTATUS {
+        ntl::kmdf::pdo_init init) noexcept -> NTSTATUS {
+  ntl::status status = init.assign_device_id(L"CrtSys\\NtlChild");
+  if (status.is_err())
+    return status;
+  status = init.assign_instance_id(L"0");
+  if (status.is_err())
+    return status;
+  status = init.add_hardware_id(L"CrtSys\\NtlChild");
+  if (status.is_err())
+    return status;
   return STATUS_NOT_SUPPORTED;
 };
 
@@ -132,7 +141,12 @@ constexpr auto utility_wait_lock_callback =
   const ntl::kmdf::child_identification<child_identity> child{{42}};
   const ntl::kmdf::child_address<child_location> address{{3}};
   (void)list->add_or_update(child, address);
-  (void)list->find(child);
+  auto found = list->find(child);
+  if (found) {
+    ntl::kmdf::child_identification<child_identity> round_trip;
+    (void)found.value.retrieve_identification(round_trip);
+    (void)found.value.parent();
+  }
   auto iteration = list->iterate();
   (void)iteration.next();
 }
