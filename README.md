@@ -189,6 +189,7 @@ may compile or work.
 | [NTL KMDF DMA template](./examples/kmdf-dma-ntl-driver) | Buildable PnP packet-DMA transaction, scatter/gather, common-buffer, and interrupt-DPC integration template for real hardware |
 | [NTL KMDF USB template](./examples/kmdf-usb-ntl-driver) | Buildable PnP USB device/interface/pipe and continuous-reader template with a user-mode inspection app |
 | [NTL KMDF WMI sample](./examples/kmdf-wmi-ntl-driver) | MOF-backed typed WMI query/set/method providers, event delivery, and a `ROOT\\WMI` user-mode verifier |
+| [NTL KMDF bus sample](./examples/kmdf-bus-ntl-driver) | Dynamic PDO plug/remove/eject lifecycle and a typed `QUERY_INTERFACE` contract between bus and child function drivers |
 | [CI Driver Load Tests](./docs/ci-driver-load-tests.md) | Optional self-hosted driver load/run workflow |
 
 ## Operational Boundaries

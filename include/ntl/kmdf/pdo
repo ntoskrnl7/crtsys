@@ -1,0 +1,451 @@
+/**
+ * @file pdo
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Typed KMDF physical-device-object initialization and operations.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "callback"
+#include "device"
+#include "object_attributes"
+#include "pnp"
+#include "resource_requirements"
+
+#include "../result"
+#include "../status"
+#include "../unicode_string"
+
+#include <string>
+#include <utility>
+
+#include "detail/wdf"
+
+namespace ntl::kmdf {
+
+/** @brief Non-owning facade for a KMDF physical device object. */
+class pdo : public device {
+public:
+  /** @brief Creates an empty PDO facade. */
+  pdo() noexcept = default;
+
+  /** @brief Wraps a WDF PDO without taking ownership. */
+  explicit pdo(WDFDEVICE handle) noexcept : device(handle) {}
+
+  /** @brief Returns the parent FDO for this PDO. */
+  device parent() const noexcept {
+    return device{WdfPdoGetParent(native_handle())};
+  }
+
+  /** @brief Reports that a statically enumerated PDO is no longer present. */
+  ntl::status mark_missing() const noexcept {
+    return WdfPdoMarkMissing(native_handle());
+  }
+
+  /** @brief Requests that Plug and Play eject this PDO. */
+  void request_eject() const noexcept { WdfPdoRequestEject(native_handle()); }
+
+  /** @brief Retrieves this PDO's typed child-identification description. */
+  template <class Description>
+  ntl::status retrieve_identification(Description &description) const noexcept {
+    return WdfPdoRetrieveIdentificationDescription(native_handle(),
+                                                   description.native());
+  }
+
+  /** @brief Retrieves this PDO's typed child-address description. */
+  template <class Description>
+  ntl::status retrieve_address(Description &description) const noexcept {
+    return WdfPdoRetrieveAddressDescription(native_handle(),
+                                            description.native());
+  }
+
+  /** @brief Updates this PDO's typed child-address description. */
+  template <class Description>
+  ntl::status update_address(const Description &description) const noexcept {
+    return WdfPdoUpdateAddressDescription(native_handle(),
+                                          description.native());
+  }
+
+  /** @brief Adds a physical device to this PDO's ejection relation list. */
+  ntl::status add_ejection_relation(PDEVICE_OBJECT related) const noexcept {
+    return WdfPdoAddEjectionRelationsPhysicalDevice(native_handle(), related);
+  }
+
+  /** @brief Removes a physical device from this PDO's ejection relations. */
+  void remove_ejection_relation(PDEVICE_OBJECT related) const noexcept {
+    WdfPdoRemoveEjectionRelationsPhysicalDevice(native_handle(), related);
+  }
+
+  /** @brief Clears every physical device in this PDO's ejection relations. */
+  void clear_ejection_relations() const noexcept {
+    WdfPdoClearEjectionRelationsDevices(native_handle());
+  }
+
+  /** @brief Applies Plug and Play capabilities to this PDO. */
+  pdo &pnp_capabilities(WDF_DEVICE_PNP_CAPABILITIES &capabilities) noexcept {
+    WdfDeviceSetPnpCapabilities(native_handle(), &capabilities);
+    return *this;
+  }
+
+  /** @brief Applies power capabilities to this PDO. */
+  pdo &
+  power_capabilities(WDF_DEVICE_POWER_CAPABILITIES &capabilities) noexcept {
+    WdfDeviceSetPowerCapabilities(native_handle(), &capabilities);
+    return *this;
+  }
+};
+
+inline ntl::status
+device::try_add_static_child(const pdo &child) const noexcept {
+  return WdfFdoAddStaticChild(native_handle(), child.native_handle());
+}
+
+/**
+ * @brief Initializes typed WDF_PDO_EVENT_CALLBACKS.
+ *
+ * Every native PDO event runs at PASSIVE_LEVEL. The callback facades are
+ * non-owning and remain valid only for the native callback invocation.
+ */
+class pdo_event_callbacks {
+public:
+  /** @brief Initializes all PDO callbacks to WDF defaults. */
+  pdo_event_callbacks() noexcept { WDF_PDO_EVENT_CALLBACKS_INIT(&value_); }
+
+  /** @brief Registers the boot-resource query callback. */
+  template <auto Callback> pdo_event_callbacks &on_resources_query() noexcept {
+    value_.EvtDeviceResourcesQuery =
+        +[](WDFDEVICE native_device,
+            WDFCMRESLIST native_resources) noexcept -> NTSTATUS {
+      return detail::invoke_status_callback<Callback>(
+          pdo{native_device},
+          resource_list{native_resources, resource_origin::raw});
+    };
+    return *this;
+  }
+
+  /** @brief Registers the resource-requirements query callback. */
+  template <auto Callback>
+  pdo_event_callbacks &on_resource_requirements_query() noexcept {
+    value_.EvtDeviceResourceRequirementsQuery =
+        +[](WDFDEVICE native_device,
+            WDFIORESREQLIST native_requirements) noexcept -> NTSTATUS {
+      return detail::invoke_status_callback<Callback>(
+          pdo{native_device}, io_resource_requirements{native_requirements});
+    };
+    return *this;
+  }
+
+  /** @brief Registers the eject callback. */
+  template <auto Callback> pdo_event_callbacks &on_eject() noexcept {
+    value_.EvtDeviceEject = +[](WDFDEVICE native_device) noexcept -> NTSTATUS {
+      return detail::invoke_status_callback<Callback>(pdo{native_device});
+    };
+    return *this;
+  }
+
+  /** @brief Registers the media-lock state callback. */
+  template <auto Callback> pdo_event_callbacks &on_set_lock() noexcept {
+    value_.EvtDeviceSetLock =
+        +[](WDFDEVICE native_device, BOOLEAN locked) noexcept -> NTSTATUS {
+      return detail::invoke_status_callback<Callback>(pdo{native_device},
+                                                      locked != FALSE);
+    };
+    return *this;
+  }
+
+  /** @brief Registers the bus wake-enable callback. */
+  template <auto Callback>
+  pdo_event_callbacks &on_enable_wake_at_bus() noexcept {
+    value_.EvtDeviceEnableWakeAtBus =
+        +[](WDFDEVICE native_device,
+            SYSTEM_POWER_STATE state) noexcept -> NTSTATUS {
+      return detail::invoke_status_callback<Callback>(pdo{native_device},
+                                                      state);
+    };
+    return *this;
+  }
+
+  /** @brief Registers the bus wake-disable callback. */
+  template <auto Callback>
+  pdo_event_callbacks &on_disable_wake_at_bus() noexcept {
+    value_.EvtDeviceDisableWakeAtBus = +[](WDFDEVICE native_device) noexcept {
+      detail::invoke_callback<Callback>(pdo{native_device});
+    };
+    return *this;
+  }
+
+  /** @brief Registers notification that PnP observed the PDO as missing. */
+  template <auto Callback> pdo_event_callbacks &on_reported_missing() noexcept {
+    value_.EvtDeviceReportedMissing = +[](WDFDEVICE native_device) noexcept {
+      detail::invoke_callback<Callback>(pdo{native_device});
+    };
+    return *this;
+  }
+
+  /** @brief Returns the mutable native callback table. */
+  PWDF_PDO_EVENT_CALLBACKS native() noexcept { return &value_; }
+
+private:
+  WDF_PDO_EVENT_CALLBACKS value_{};
+};
+
+/**
+ * @brief Typed facade for PWDFDEVICE_INIT values used to create PDOs.
+ *
+ * A value received by a dynamic child-list callback is framework-owned. A
+ * value returned by try_allocate() is owned by this object until
+ * WdfDeviceCreate consumes it.
+ */
+class pdo_init : public device_init {
+public:
+  /** @brief Wraps framework-owned PDO initialization state. */
+  explicit pdo_init(PWDFDEVICE_INIT value) noexcept : device_init(value) {}
+
+  /** @brief Allocates initialization state for a statically enumerated PDO. */
+  static ntl::result<pdo_init> try_allocate(const device &parent) noexcept {
+    PWDFDEVICE_INIT value = WdfPdoInitAllocate(parent.native_handle());
+    if (!value)
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    return ntl::ok(pdo_init{value, true});
+  }
+
+  pdo_init(const pdo_init &) = delete;
+  pdo_init &operator=(const pdo_init &) = delete;
+
+  /** @brief Transfers PDO initialization state and any ownership. */
+  pdo_init(pdo_init &&other) noexcept
+      : device_init(std::move(other)),
+        owns_(std::exchange(other.owns_, false)) {}
+
+  /** @brief Releases current owned state and takes another PDO initializer. */
+  pdo_init &operator=(pdo_init &&other) noexcept {
+    if (this != &other) {
+      reset();
+      device_init::operator=(std::move(other));
+      owns_ = std::exchange(other.owns_, false);
+    }
+    return *this;
+  }
+
+  /** @brief Frees statically allocated state that was not consumed. */
+  ~pdo_init() { reset(); }
+
+  /** @brief Assigns the required PDO device identifier. */
+  ntl::status assign_device_id(PCUNICODE_STRING id) noexcept {
+    return WdfPdoInitAssignDeviceID(native_handle(), id);
+  }
+
+  /** @brief Assigns a null-terminated PDO device identifier. */
+  ntl::status assign_device_id(const wchar_t *id) noexcept {
+    UNICODE_STRING value{};
+    RtlInitUnicodeString(&value, id);
+    return assign_device_id(&value);
+  }
+
+  /** @brief Assigns the required PDO device identifier. */
+  ntl::status assign_device_id(const std::wstring &id) {
+    ntl::unicode_string value(id);
+    return assign_device_id(&*value);
+  }
+
+  /** @brief Assigns the required PDO instance identifier. */
+  ntl::status assign_instance_id(PCUNICODE_STRING id) noexcept {
+    return WdfPdoInitAssignInstanceID(native_handle(), id);
+  }
+
+  /** @brief Assigns a null-terminated PDO instance identifier. */
+  ntl::status assign_instance_id(const wchar_t *id) noexcept {
+    UNICODE_STRING value{};
+    RtlInitUnicodeString(&value, id);
+    return assign_instance_id(&value);
+  }
+
+  /** @brief Assigns the required PDO instance identifier. */
+  ntl::status assign_instance_id(const std::wstring &id) {
+    ntl::unicode_string value(id);
+    return assign_instance_id(&*value);
+  }
+
+  /** @brief Adds a hardware identifier to the PDO. */
+  ntl::status add_hardware_id(PCUNICODE_STRING id) noexcept {
+    return WdfPdoInitAddHardwareID(native_handle(), id);
+  }
+
+  /** @brief Adds a null-terminated hardware identifier to the PDO. */
+  ntl::status add_hardware_id(const wchar_t *id) noexcept {
+    UNICODE_STRING value{};
+    RtlInitUnicodeString(&value, id);
+    return add_hardware_id(&value);
+  }
+
+  /** @brief Adds a hardware identifier to the PDO. */
+  ntl::status add_hardware_id(const std::wstring &id) {
+    ntl::unicode_string value(id);
+    return add_hardware_id(&*value);
+  }
+
+  /** @brief Adds a compatible identifier to the PDO. */
+  ntl::status add_compatible_id(PCUNICODE_STRING id) noexcept {
+    return WdfPdoInitAddCompatibleID(native_handle(), id);
+  }
+
+  /** @brief Adds a null-terminated compatible identifier to the PDO. */
+  ntl::status add_compatible_id(const wchar_t *id) noexcept {
+    UNICODE_STRING value{};
+    RtlInitUnicodeString(&value, id);
+    return add_compatible_id(&value);
+  }
+
+  /** @brief Adds a compatible identifier to the PDO. */
+  ntl::status add_compatible_id(const std::wstring &id) {
+    ntl::unicode_string value(id);
+    return add_compatible_id(&*value);
+  }
+
+  /** @brief Assigns the PDO container identifier string. */
+  ntl::status assign_container_id(PCUNICODE_STRING id) noexcept {
+    return WdfPdoInitAssignContainerID(native_handle(), id);
+  }
+
+  /** @brief Assigns a null-terminated PDO container identifier. */
+  ntl::status assign_container_id(const wchar_t *id) noexcept {
+    UNICODE_STRING value{};
+    RtlInitUnicodeString(&value, id);
+    return assign_container_id(&value);
+  }
+
+  /** @brief Assigns the PDO container identifier string. */
+  ntl::status assign_container_id(const std::wstring &id) {
+    ntl::unicode_string value(id);
+    return assign_container_id(&*value);
+  }
+
+  /** @brief Adds localized PDO description and location text. */
+  ntl::status add_device_text(PCUNICODE_STRING description,
+                              PCUNICODE_STRING location, LCID locale) noexcept {
+    return WdfPdoInitAddDeviceText(native_handle(), description, location,
+                                   locale);
+  }
+
+  /** @brief Adds null-terminated localized description and location text. */
+  ntl::status add_device_text(const wchar_t *description,
+                              const wchar_t *location, LCID locale) noexcept {
+    UNICODE_STRING native_description{};
+    UNICODE_STRING native_location{};
+    RtlInitUnicodeString(&native_description, description);
+    RtlInitUnicodeString(&native_location, location);
+    return add_device_text(&native_description, &native_location, locale);
+  }
+
+  /** @brief Adds localized PDO description and location text. */
+  ntl::status add_device_text(const std::wstring &description,
+                              const std::wstring &location, LCID locale) {
+    ntl::unicode_string native_description(description);
+    ntl::unicode_string native_location(location);
+    return add_device_text(&*native_description, &*native_location, locale);
+  }
+
+  /** @brief Selects the default locale for PDO text. */
+  pdo_init &default_locale(LCID locale) noexcept {
+    WdfPdoInitSetDefaultLocale(native_handle(), locale);
+    return *this;
+  }
+
+  /** @brief Marks this PDO as a raw device in the supplied setup class. */
+  ntl::status assign_raw_device(const GUID &device_class) noexcept {
+    return WdfPdoInitAssignRawDevice(native_handle(), &device_class);
+  }
+
+  /** @brief Allows unhandled PDO requests to be forwarded to the parent. */
+  pdo_init &allow_forwarding_to_parent() noexcept {
+    WdfPdoInitAllowForwardingRequestToParent(native_handle());
+    return *this;
+  }
+
+  /** @brief Installs callbacks for PDO resource, eject, lock, and wake events.
+   */
+  pdo_init &events(pdo_event_callbacks &callbacks) noexcept {
+    WdfPdoInitSetEventCallbacks(native_handle(), callbacks.native());
+    return *this;
+  }
+
+  /** @brief Creates the PDO and preserves NTSTATUS on failure. */
+  ntl::result<pdo>
+  try_create(object_attributes *attributes = nullptr) noexcept {
+    if (!native_handle())
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+
+    WDFDEVICE handle = WDF_NO_HANDLE;
+    const NTSTATUS result =
+        WdfDeviceCreate(native_handle_address(),
+                        attributes ? attributes->native() : nullptr, &handle);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+
+    owns_ = false;
+    return ntl::ok(pdo{handle});
+  }
+
+  /** @brief Creates a PDO with a managed C++ context. */
+  template <class Context, class... Args>
+  ntl::result<pdo> try_create(object_attributes *attributes,
+                              Args &&...args) noexcept {
+    if (!native_handle())
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+
+    object_attributes local_attributes;
+    object_attributes &effective = attributes ? *attributes : local_attributes;
+    effective.template prepare_context<Context>();
+
+    WDFDEVICE handle = WDF_NO_HANDLE;
+    const NTSTATUS result =
+        WdfDeviceCreate(native_handle_address(), effective.native(), &handle);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+
+    owns_ = false;
+    effective.template construct_context<Context>(
+        reinterpret_cast<WDFOBJECT>(handle), std::forward<Args>(args)...);
+    return ntl::ok(pdo{handle});
+  }
+
+  /** @brief Creates a PDO with a default-constructed C++ context. */
+  template <class Context> ntl::result<pdo> try_create() noexcept {
+    return try_create<Context>(nullptr);
+  }
+
+  /** @brief Creates the PDO and throws ntl::exception on failure. */
+  pdo create(object_attributes *attributes = nullptr) {
+    auto created = try_create(attributes);
+    if (!created)
+      throw ntl::exception(created.status(), "WdfDeviceCreate PDO failed.");
+    return std::move(created).value();
+  }
+
+  /** @brief Creates a PDO with managed context and throws on failure. */
+  template <class Context, class... Args>
+  pdo create(object_attributes *attributes, Args &&...args) {
+    auto created = try_create<Context>(attributes, std::forward<Args>(args)...);
+    if (!created)
+      throw ntl::exception(created.status(), "WdfDeviceCreate PDO failed.");
+    return std::move(created).value();
+  }
+
+  /** @brief Creates a PDO with default-constructed managed context. */
+  template <class Context> pdo create() { return create<Context>(nullptr); }
+
+private:
+  pdo_init(PWDFDEVICE_INIT value, bool owns) noexcept
+      : device_init(value), owns_(owns) {}
+
+  void reset() noexcept {
+    if (owns_ && native_handle())
+      WdfDeviceInitFree(native_handle());
+    owns_ = false;
+  }
+
+  bool owns_ = false;
+};
+
+} // namespace ntl::kmdf

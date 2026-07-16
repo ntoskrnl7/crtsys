@@ -10,14 +10,15 @@
 #include "callback"
 #include "device"
 #include "object_attributes"
+#include "pdo"
 
 #include "../result"
 #include "../status"
 
+#include "detail/wdf"
 #include <cstddef>
 #include <type_traits>
 #include <utility>
-#include "detail/wdf"
 
 namespace ntl::kmdf {
 template <class Identification, class Address> class child_list_config;
@@ -106,7 +107,7 @@ struct no_child_address {};
 
 /** @brief Result returned when looking up a PDO by identification. */
 struct child_lookup {
-  device value;
+  pdo value;
   WDF_CHILD_LIST_RETRIEVE_DEVICE_STATUS status =
       WdfChildListRetrieveDeviceUndefined;
 
@@ -197,7 +198,7 @@ public:
       const noexcept {
     WDF_CHILD_RETRIEVE_INFO info{};
     WDF_CHILD_RETRIEVE_INFO_INIT(&info, identification.native());
-    return {device{WdfChildListRetrievePdo(object_, &info)}, info.Status};
+    return {pdo{WdfChildListRetrievePdo(object_, &info)}, info.Status};
   }
 
   /** @brief Retrieves the current address for an identified child. */
@@ -250,8 +251,9 @@ public:
   /**
    * @brief Creates a configuration with its required child-creation callback.
    * @tparam Callback Non-capturing
-   * `NTSTATUS(child_list, const identification_type&, device_init) noexcept`
-   * callback.
+   * The callback has the form
+   * `NTSTATUS(child_list, const
+   * identification_type&, pdo_init) noexcept`.
    */
   template <auto Callback> static child_list_config with_create() noexcept {
     return child_list_config{
@@ -261,7 +263,7 @@ public:
           const auto &id =
               *reinterpret_cast<const identification_type *>(native_id);
           return detail::invoke_status_callback<Callback>(
-              child_list{native_list}, id, device_init{native_init});
+              child_list{native_list}, id, pdo_init{native_init});
         }};
   }
 
@@ -274,7 +276,7 @@ public:
       const auto &id =
           *reinterpret_cast<const identification_type *>(native_id);
       return detail::invoke_status_callback<Callback>(
-          child_list{native_list}, id, device_init{native_init});
+          child_list{native_list}, id, pdo_init{native_init});
     };
     return *this;
   }
@@ -333,7 +335,8 @@ public:
   PWDF_CHILD_LIST_CONFIG native() noexcept { return &value_; }
 
 private:
-  explicit child_list_config(PFN_WDF_CHILD_LIST_CREATE_DEVICE callback) noexcept {
+  explicit child_list_config(
+      PFN_WDF_CHILD_LIST_CREATE_DEVICE callback) noexcept {
     WDF_CHILD_LIST_CONFIG_INIT(&value_, sizeof(identification_type), callback);
     if constexpr (has_address)
       value_.AddressDescriptionSize = sizeof(address_type);
@@ -359,13 +362,13 @@ public:
    * @brief Retrieves the next child device.
    * @return Device facade, or STATUS_NO_MORE_ENTRIES at the end.
    */
-  ntl::result<device> next() noexcept {
+  ntl::result<pdo> next() noexcept {
     WDFDEVICE native_device = WDF_NO_HANDLE;
     const NTSTATUS result = WdfChildListRetrieveNextDevice(
         list_.native_object(), &iterator_, &native_device, nullptr);
     if (!NT_SUCCESS(result))
       return ntl::unexpected(result);
-    return ntl::ok(device{native_device});
+    return ntl::ok(pdo{native_device});
   }
 
 private:

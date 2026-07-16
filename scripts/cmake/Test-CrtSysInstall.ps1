@@ -120,6 +120,9 @@ if ($LASTEXITCODE -ne 0) {
 
 foreach ($requiredPath in @(
   "include\ntl\driver",
+  "include\ntl\kmdf\pdo",
+  "include\ntl\kmdf\query_interface",
+  "include\ntl\kmdf\resource_requirements",
   "include\.internal\adjust_link_order",
   "share\crtsys\cmake\crtsys-config.cmake",
   "share\crtsys\cmake\CrtSys.cmake",

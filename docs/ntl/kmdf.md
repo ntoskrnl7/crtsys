@@ -852,11 +852,19 @@ using children = ntl::kmdf::child_list_config<child_id, child_address>;
 constexpr auto on_child_create =
     +[](kmdf::child_list,
         const kmdf::child_identification<child_id>& id,
-        kmdf::device_init init) noexcept -> NTSTATUS {
-      // Configure and create the child PDO from id.payload.
-      (void)id;
-      (void)init;
-      return STATUS_NOT_SUPPORTED;
+        kmdf::pdo_init init) noexcept -> NTSTATUS {
+      auto status = init.assign_device_id(L"Sample\\Child");
+      if (status.is_err())
+        return status;
+      status = init.assign_instance_id(L"7");
+      if (status.is_err())
+        return status;
+      status = init.add_hardware_id(L"Sample\\Child");
+      if (status.is_err())
+        return status;
+
+      auto child = init.try_create();
+      return child ? STATUS_SUCCESS : child.status();
     };
 auto config = children::with_create<on_child_create>();
 
@@ -873,9 +881,125 @@ const kmdf::child_address<child_address> address{{2}};
 return list->add_or_update(id, address);
 ```
 
-The facade also exposes scan begin/end, present/missing updates, PDO lookup,
-address lookup, eject requests, and RAII iteration. `device_init` passed to the
-child-create callback remains framework-owned and is never freed by NTL.
+The facade also exposes scan begin/end, present/missing updates, typed PDO
+lookup, address lookup, eject requests, and RAII iteration. `pdo_init` keeps
+the ownership distinction explicit: the value supplied to a dynamic
+child-create callback is framework-owned, while `pdo_init::try_allocate()`
+owns a static PDO initializer until `try_create()` consumes it. Its typed
+surface covers device, instance, hardware, compatible, and container IDs,
+localized device text, raw-device assignment, and forwarding to the parent.
+
+The resulting `pdo` facade supports parent lookup, identification/address
+round trips, missing/eject requests, ejection relations, and PnP/power
+capabilities. A statically allocated child can be attached with
+`device::try_add_static_child()`. The buildable
+[KMDF bus sample](../../examples/kmdf-bus-ntl-driver) exercises dynamic plug,
+missing, and eject transitions against a real child function driver.
+
+### PDO Events And Resource Requirements
+
+`pdo_event_callbacks` covers the PDO-specific resource, eject, lock, wake, and
+reported-missing events in `WDF_PDO_EVENT_CALLBACKS`. Register the table on
+`pdo_init` before `try_create()`. WDF invokes these callbacks at
+`PASSIVE_LEVEL`.
+
+Resource reporting has three distinct stages:
+
+- `on_resource_requirements_query()` receives `io_resource_requirements` and
+  reports the logical configurations that PnP may arbitrate.
+- `on_resources_query()` receives a mutable `resource_list` for firmware or
+  boot resources already assigned to the child.
+- `pnp_power_callbacks::on_prepare_hardware()` receives the final raw and
+  translated `resource_list` values selected by PnP.
+
+`io_resource_descriptor` owns an `IO_RESOURCE_DESCRIPTOR` and supplies
+factories for memory, port, interrupt, legacy and v3 DMA, connection, and
+device-private requirements. `io_resource_list` represents one logical
+configuration; `io_resource_requirements` contains one or more alternatives.
+The facades copy descriptors into WDF lists and retain `native()` or
+`native_handle()` access for bus-specific fields.
+
+```cpp
+constexpr auto query_requirements =
+    +[](kmdf::pdo child,
+        kmdf::io_resource_requirements requirements) noexcept -> NTSTATUS {
+  requirements.interface_type(Internal).slot_number(0);
+
+  auto configuration = requirements.try_create_list();
+  if (!configuration)
+    return configuration.status();
+
+  PHYSICAL_ADDRESS minimum{};
+  PHYSICAL_ADDRESS maximum{};
+  maximum.QuadPart = 0xffff;
+  auto status = configuration->try_append(
+      kmdf::io_resource_descriptor::port(
+          minimum, maximum, 8, 1, CM_RESOURCE_PORT_IO));
+  if (status.is_err())
+    return status;
+  return requirements.try_append(configuration.value());
+};
+
+constexpr auto query_boot_resources =
+    +[](kmdf::pdo, kmdf::resource_list resources) noexcept -> NTSTATUS {
+  // A software-enumerated child can legitimately have no boot resources.
+  return resources.size() == 0 ? STATUS_SUCCESS : STATUS_DATA_ERROR;
+};
+
+ntl::kmdf::pdo_event_callbacks events;
+events.on_resource_requirements_query<query_requirements>()
+    .on_resources_query<query_boot_resources>();
+init.events(events);
+```
+
+Do not invent memory ranges, interrupts, or DMA channels merely to populate a
+test list. A virtual child that requires no hardware resources should append
+an empty logical configuration, as the bus sample does. Hardware bus drivers
+should report only ranges and alternatives that their bus contract actually
+supports.
+
+### Driver-Defined Query Interfaces
+
+A provider starts with the normal Windows `INTERFACE` header and adds typed
+operations. `make_query_interface()` initializes the common header, while
+`query_interface_config` registers the contract on a WDF device:
+
+```cpp
+struct counter_interface {
+  INTERFACE header;
+  NTSTATUS(NTAPI *next)(void* context, ULONG* value) noexcept;
+};
+
+auto interface = ntl::kmdf::make_query_interface<counter_interface>(
+    1, child.native_handle(),
+    ntl::kmdf::reference_query_interface_object,
+    ntl::kmdf::dereference_query_interface_object);
+interface.next = next_counter;
+
+ntl::kmdf::query_interface_config config{interface, counter_interface_guid};
+auto status = child.try_add_query_interface(config);
+```
+
+The function driver queries the interface through its device stack. The
+returned `queried_interface<T>` is move-only and calls
+`InterfaceDereference` exactly once when reset or destroyed:
+
+```cpp
+auto queried = device.try_query_interface<counter_interface>(
+    counter_interface_guid, 1);
+if (!queried)
+  return queried.status();
+
+auto interface = std::move(queried).value();
+ULONG value = 0;
+auto status = interface->next(interface->header.Context, &value);
+```
+
+The GUID and structure layout form a cross-driver ABI. Keep the first member
+as `INTERFACE`, use fixed-width payload types, and increment the interface
+version when the contract changes. These helpers do not hide WDF ownership:
+the provider chooses the reference callbacks and the consumer owns the
+acquired reference through `queried_interface<T>`.
 
 ## Registry And Device Properties
 

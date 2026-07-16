@@ -24,7 +24,10 @@
 namespace ntl::kmdf {
 template <class Context> class file_config;
 template <class Identification, class Address> class child_list_config;
+template <class Interface> class query_interface_config;
+template <class Interface> class queried_interface;
 class io_target;
+class pdo;
 class request;
 
 /**
@@ -170,6 +173,38 @@ public:
 
   /** @brief Returns the device's default I/O target. */
   io_target default_io_target() const noexcept;
+
+  /** @brief Registers a typed driver-defined interface on this device. */
+  template <class Interface>
+  ntl::status try_add_query_interface(
+      query_interface_config<Interface> &config) const noexcept;
+
+  /**
+   * @brief Queries a typed driver-defined interface from the lower
+   * stack.
+   * @param interface_type Interface contract GUID.
+   * @param
+   * version Requested interface version.
+   * @param specific_data Optional
+   * provider-specific query data.
+   * @param initial_value Optional
+   * caller-initialized import-interface value.
+   */
+  template <class Interface>
+  ntl::result<queried_interface<Interface>>
+  try_query_interface(const GUID &interface_type, USHORT version,
+                      void *specific_data = nullptr,
+                      Interface initial_value = Interface{}) const noexcept;
+
+  /** @brief Adds an already-created statically enumerated PDO to this FDO. */
+  ntl::status try_add_static_child(const pdo &child) const noexcept;
+
+  /** @brief Publishes bus information for children enumerated by this FDO. */
+  const device &
+  bus_information(PNP_BUS_INFORMATION &information) const noexcept {
+    WdfDeviceSetBusInformationForChildren(handle_, &information);
+    return *this;
+  }
 
   /**
    * @brief Returns the native WDF device handle.
@@ -435,6 +470,10 @@ public:
 
   /** @brief Returns the currently wrapped initialization pointer. */
   PWDFDEVICE_INIT native_handle() const noexcept { return value_; }
+
+protected:
+  /** @brief Returns the storage consumed by WdfDeviceCreate. */
+  PWDFDEVICE_INIT *native_handle_address() noexcept { return &value_; }
 
 private:
   PWDFDEVICE_INIT value_;

@@ -1,0 +1,320 @@
+/**
+ * @file resource_requirements
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Typed KMDF resource-requirements list facades.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "object_attributes"
+
+#include "../result"
+#include "../status"
+
+#include "detail/wdf"
+
+#include <cstdint>
+
+namespace ntl::kmdf {
+
+/** @brief Selects how Plug and Play orders a resource descriptor. */
+enum class io_resource_option : UCHAR {
+  none = 0,
+  preferred = IO_RESOURCE_PREFERRED,
+  default_resource = IO_RESOURCE_DEFAULT,
+  alternative = IO_RESOURCE_ALTERNATIVE,
+};
+
+/**
+ * @brief Owns one IO_RESOURCE_DESCRIPTOR used in a logical configuration.
+ *
+ * The factory functions initialize the native union for common resource
+ * types. native() remains available for bus-specific descriptors and flags.
+ */
+class io_resource_descriptor {
+public:
+  /** @brief Creates a null resource descriptor. */
+  io_resource_descriptor() noexcept { initialize(CmResourceTypeNull); }
+
+  /** @brief Copies an existing native resource descriptor. */
+  explicit io_resource_descriptor(
+      const IO_RESOURCE_DESCRIPTOR &descriptor) noexcept
+      : value_(descriptor) {}
+
+  /** @brief Creates a memory-range requirement. */
+  static io_resource_descriptor
+  memory(PHYSICAL_ADDRESS minimum, PHYSICAL_ADDRESS maximum, ULONG length,
+         ULONG alignment, USHORT flags = CM_RESOURCE_MEMORY_READ_WRITE,
+         CM_SHARE_DISPOSITION sharing = CmResourceShareDeviceExclusive,
+         io_resource_option option = io_resource_option::none) noexcept {
+    io_resource_descriptor descriptor;
+    descriptor.initialize(CmResourceTypeMemory, sharing, flags, option);
+    descriptor.value_.u.Memory.MinimumAddress = minimum;
+    descriptor.value_.u.Memory.MaximumAddress = maximum;
+    descriptor.value_.u.Memory.Length = length;
+    descriptor.value_.u.Memory.Alignment = alignment;
+    return descriptor;
+  }
+
+  /** @brief Creates an I/O-port requirement. */
+  static io_resource_descriptor
+  port(PHYSICAL_ADDRESS minimum, PHYSICAL_ADDRESS maximum, ULONG length,
+       ULONG alignment, USHORT flags = CM_RESOURCE_PORT_IO,
+       CM_SHARE_DISPOSITION sharing = CmResourceShareDeviceExclusive,
+       io_resource_option option = io_resource_option::none) noexcept {
+    io_resource_descriptor descriptor;
+    descriptor.initialize(CmResourceTypePort, sharing, flags, option);
+    descriptor.value_.u.Port.MinimumAddress = minimum;
+    descriptor.value_.u.Port.MaximumAddress = maximum;
+    descriptor.value_.u.Port.Length = length;
+    descriptor.value_.u.Port.Alignment = alignment;
+    return descriptor;
+  }
+
+  /** @brief Creates an interrupt-vector requirement. */
+  static io_resource_descriptor
+  interrupt(ULONG minimum_vector, ULONG maximum_vector,
+            USHORT flags = CM_RESOURCE_INTERRUPT_LEVEL_SENSITIVE,
+            CM_SHARE_DISPOSITION sharing = CmResourceShareShared,
+            io_resource_option option = io_resource_option::none,
+            IRQ_DEVICE_POLICY affinity_policy = IrqPolicyMachineDefault,
+            IRQ_PRIORITY priority_policy = IrqPriorityUndefined,
+            KAFFINITY targeted_processors = 0, USHORT group = 0) noexcept {
+    io_resource_descriptor descriptor;
+    descriptor.initialize(CmResourceTypeInterrupt, sharing, flags, option);
+    descriptor.value_.u.Interrupt.MinimumVector = minimum_vector;
+    descriptor.value_.u.Interrupt.MaximumVector = maximum_vector;
+    descriptor.value_.u.Interrupt.AffinityPolicy = affinity_policy;
+#if defined(NT_PROCESSOR_GROUPS)
+    descriptor.value_.u.Interrupt.Group = group;
+#else
+    UNREFERENCED_PARAMETER(group);
+#endif
+    descriptor.value_.u.Interrupt.PriorityPolicy = priority_policy;
+    descriptor.value_.u.Interrupt.TargetedProcessors = targeted_processors;
+    return descriptor;
+  }
+
+  /** @brief Creates a legacy DMA-channel requirement. */
+  static io_resource_descriptor
+  dma(ULONG minimum_channel, ULONG maximum_channel,
+      USHORT flags = CM_RESOURCE_DMA_8_AND_16,
+      CM_SHARE_DISPOSITION sharing = CmResourceShareDeviceExclusive,
+      io_resource_option option = io_resource_option::none) noexcept {
+    io_resource_descriptor descriptor;
+    descriptor.initialize(CmResourceTypeDma, sharing, flags, option);
+    descriptor.value_.u.Dma.MinimumChannel = minimum_channel;
+    descriptor.value_.u.Dma.MaximumChannel = maximum_channel;
+    return descriptor;
+  }
+
+  /** @brief Creates a DMA v3 request-line requirement. */
+  static io_resource_descriptor
+  dma_v3(ULONG request_line, ULONG channel, ULONG transfer_width,
+         CM_SHARE_DISPOSITION sharing = CmResourceShareDeviceExclusive,
+         io_resource_option option = io_resource_option::none) noexcept {
+    io_resource_descriptor descriptor;
+    descriptor.initialize(CmResourceTypeDma, sharing, CM_RESOURCE_DMA_V3,
+                          option);
+    descriptor.value_.u.DmaV3.RequestLine = request_line;
+    descriptor.value_.u.DmaV3.Channel = channel;
+    descriptor.value_.u.DmaV3.TransferWidth = transfer_width;
+    return descriptor;
+  }
+
+  /** @brief Creates a GPIO, serial-bus, or function-config connection. */
+  static io_resource_descriptor
+  connection(UCHAR connection_class, UCHAR connection_type, std::uint64_t id,
+             CM_SHARE_DISPOSITION sharing = CmResourceShareShared,
+             io_resource_option option = io_resource_option::none) noexcept {
+    io_resource_descriptor descriptor;
+    descriptor.initialize(CmResourceTypeConnection, sharing, 0, option);
+    descriptor.value_.u.Connection.Class = connection_class;
+    descriptor.value_.u.Connection.Type = connection_type;
+    descriptor.value_.u.Connection.IdLowPart = static_cast<ULONG>(id);
+    descriptor.value_.u.Connection.IdHighPart = static_cast<ULONG>(id >> 32);
+    return descriptor;
+  }
+
+  /** @brief Creates a bus-defined private requirement descriptor. */
+  static io_resource_descriptor device_private(
+      ULONG first, ULONG second = 0, ULONG third = 0,
+      io_resource_option option = io_resource_option::none) noexcept {
+    io_resource_descriptor descriptor;
+    descriptor.initialize(CmResourceTypeDevicePrivate,
+                          CmResourceShareUndetermined, 0, option);
+    descriptor.value_.u.DevicePrivate.Data[0] = first;
+    descriptor.value_.u.DevicePrivate.Data[1] = second;
+    descriptor.value_.u.DevicePrivate.Data[2] = third;
+    return descriptor;
+  }
+
+  /** @brief Returns the mutable native descriptor. */
+  PIO_RESOURCE_DESCRIPTOR native() noexcept { return &value_; }
+
+  /** @brief Returns the native descriptor. */
+  const IO_RESOURCE_DESCRIPTOR &native_value() const noexcept { return value_; }
+
+private:
+  void
+  initialize(CM_RESOURCE_TYPE type,
+             CM_SHARE_DISPOSITION sharing = CmResourceShareUndetermined,
+             USHORT flags = 0,
+             io_resource_option option = io_resource_option::none) noexcept {
+    RtlZeroMemory(&value_, sizeof(value_));
+    value_.Option = static_cast<UCHAR>(option);
+    value_.Type = static_cast<UCHAR>(type);
+    value_.ShareDisposition = static_cast<UCHAR>(sharing);
+    value_.Flags = flags;
+  }
+
+  IO_RESOURCE_DESCRIPTOR value_{};
+};
+
+class io_resource_requirements;
+
+/** @brief Non-owning facade for one WDF logical resource configuration. */
+class io_resource_list {
+public:
+  /** @brief Creates an empty resource-list facade. */
+  io_resource_list() noexcept = default;
+
+  /** @brief Wraps a WDF logical resource list without taking ownership. */
+  explicit io_resource_list(WDFIORESLIST handle) noexcept : handle_(handle) {}
+
+  /** @brief Appends a copied descriptor to this logical configuration. */
+  ntl::status
+  try_append(const io_resource_descriptor &descriptor) const noexcept {
+    IO_RESOURCE_DESCRIPTOR native = descriptor.native_value();
+    return WdfIoResourceListAppendDescriptor(handle_, &native);
+  }
+
+  /** @brief Inserts a copied descriptor at the specified index. */
+  ntl::status
+  try_insert(ULONG index,
+             const io_resource_descriptor &descriptor) const noexcept {
+    IO_RESOURCE_DESCRIPTOR native = descriptor.native_value();
+    return WdfIoResourceListInsertDescriptor(handle_, &native, index);
+  }
+
+  /** @brief Replaces one descriptor when the index is valid. */
+  ntl::status
+  try_update(ULONG index,
+             const io_resource_descriptor &descriptor) const noexcept {
+    if (index >= size())
+      return STATUS_INVALID_PARAMETER;
+    IO_RESOURCE_DESCRIPTOR native = descriptor.native_value();
+    WdfIoResourceListUpdateDescriptor(handle_, &native, index);
+    return STATUS_SUCCESS;
+  }
+
+  /** @brief Returns a copied descriptor by index. */
+  ntl::result<io_resource_descriptor> try_at(ULONG index) const noexcept {
+    PIO_RESOURCE_DESCRIPTOR descriptor =
+        WdfIoResourceListGetDescriptor(handle_, index);
+    if (!descriptor)
+      return ntl::unexpected(STATUS_NOT_FOUND);
+    return ntl::ok(io_resource_descriptor{*descriptor});
+  }
+
+  /** @brief Returns the number of descriptors in this configuration. */
+  ULONG size() const noexcept { return WdfIoResourceListGetCount(handle_); }
+
+  /** @brief Removes a descriptor by index when present. */
+  bool remove(ULONG index) const noexcept {
+    if (index >= size())
+      return false;
+    WdfIoResourceListRemove(handle_, index);
+    return true;
+  }
+
+  /** @brief Returns the native WDF logical-resource-list handle. */
+  WDFIORESLIST native_handle() const noexcept { return handle_; }
+
+  /** @brief Returns true when a native WDF handle is present. */
+  explicit operator bool() const noexcept { return handle_ != WDF_NO_HANDLE; }
+
+private:
+  WDFIORESLIST handle_ = WDF_NO_HANDLE;
+};
+
+/** @brief Non-owning facade for WDFIORESREQLIST. */
+class io_resource_requirements {
+public:
+  /** @brief Creates an empty requirements-list facade. */
+  io_resource_requirements() noexcept = default;
+
+  /** @brief Wraps a WDF requirements list without taking ownership. */
+  explicit io_resource_requirements(WDFIORESREQLIST handle) noexcept
+      : handle_(handle) {}
+
+  /** @brief Sets the legacy bus interface type. */
+  io_resource_requirements &interface_type(INTERFACE_TYPE type) noexcept {
+    WdfIoResourceRequirementsListSetInterfaceType(handle_, type);
+    return *this;
+  }
+
+  /** @brief Sets the legacy bus slot number. */
+  io_resource_requirements &slot_number(ULONG slot) noexcept {
+    WdfIoResourceRequirementsListSetSlotNumber(handle_, slot);
+    return *this;
+  }
+
+  /** @brief Creates an empty logical configuration owned by this list. */
+  ntl::result<io_resource_list>
+  try_create_list(object_attributes *attributes = nullptr) const noexcept {
+    WDFIORESLIST list = WDF_NO_HANDLE;
+    const NTSTATUS result = WdfIoResourceListCreate(
+        handle_, attributes ? attributes->native() : nullptr, &list);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return ntl::ok(io_resource_list{list});
+  }
+
+  /** @brief Appends one logical configuration to the requirements list. */
+  ntl::status try_append(const io_resource_list &list) const noexcept {
+    return WdfIoResourceRequirementsListAppendIoResList(handle_,
+                                                        list.native_handle());
+  }
+
+  /** @brief Inserts one logical configuration at the specified index. */
+  ntl::status try_insert(ULONG index,
+                         const io_resource_list &list) const noexcept {
+    return WdfIoResourceRequirementsListInsertIoResList(
+        handle_, list.native_handle(), index);
+  }
+
+  /** @brief Returns one logical configuration by index. */
+  ntl::result<io_resource_list> try_at(ULONG index) const noexcept {
+    WDFIORESLIST list =
+        WdfIoResourceRequirementsListGetIoResList(handle_, index);
+    if (!list)
+      return ntl::unexpected(STATUS_NOT_FOUND);
+    return ntl::ok(io_resource_list{list});
+  }
+
+  /** @brief Returns the number of logical configurations. */
+  ULONG size() const noexcept {
+    return WdfIoResourceRequirementsListGetCount(handle_);
+  }
+
+  /** @brief Removes one logical configuration by index when present. */
+  bool remove(ULONG index) const noexcept {
+    if (index >= size())
+      return false;
+    WdfIoResourceRequirementsListRemove(handle_, index);
+    return true;
+  }
+
+  /** @brief Returns the native WDF requirements-list handle. */
+  WDFIORESREQLIST native_handle() const noexcept { return handle_; }
+
+  /** @brief Returns true when a native WDF handle is present. */
+  explicit operator bool() const noexcept { return handle_ != WDF_NO_HANDLE; }
+
+private:
+  WDFIORESREQLIST handle_ = WDF_NO_HANDLE;
+};
+
+} // namespace ntl::kmdf

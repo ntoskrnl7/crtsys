@@ -235,6 +235,9 @@ foreach ($requiredPath in @(
   'include\ntl\kmdf\dma',
   'include\ntl\kmdf\usb',
   'include\ntl\kmdf\wmi',
+  'include\ntl\kmdf\pdo',
+  'include\ntl\kmdf\query_interface',
+  'include\ntl\kmdf\resource_requirements',
   "build\native\lib\native\$Toolset\$Architecture\$Configuration\crtsys.lib",
   "build\native\lib\native\$Toolset\$Architecture\$Configuration\Ldk.lib"
 )) {
@@ -504,6 +507,24 @@ struct sample_wmi_data {
 constexpr GUID sample_wmi_guid = {
     0x3988f399, 0xa3df, 0x4d40,
     {0xa1, 0xdd, 0x2e, 0x3f, 0x2f, 0xf1, 0x8f, 0x8c}};
+
+constexpr GUID sample_query_interface_guid = {
+    0x3f3fb9d4, 0xc11e, 0x4628,
+    {0xb1, 0xc1, 0x90, 0xaf, 0xf6, 0x63, 0x10, 0xb8}};
+
+using sample_query_value_fn = NTSTATUS(NTAPI *)(void *, ULONG *) noexcept;
+
+struct sample_query_interface {
+  INTERFACE header;
+  sample_query_value_fn query_value;
+};
+
+NTSTATUS NTAPI sample_query_value(void *, ULONG *value) noexcept {
+  if (!value)
+    return STATUS_INVALID_PARAMETER;
+  *value = 42;
+  return STATUS_SUCCESS;
+}
 
 constexpr auto sample_wmi_control =
     +[](ntl::kmdf::wmi_provider, WDF_WMI_PROVIDER_CONTROL,
@@ -833,7 +854,14 @@ constexpr auto sample_standalone_dpc =
   auto child_settings = sample_child_config::with_create<
       +[](ntl::kmdf::child_list,
           const ntl::kmdf::child_identification<sample_child_identity>&,
-          ntl::kmdf::device_init) noexcept -> NTSTATUS {
+          ntl::kmdf::pdo_init init) noexcept -> NTSTATUS {
+        ntl::status status =
+            init.assign_device_id(L"CrtSys\\PackageChild");
+        if (status.is_err())
+          return status;
+        status = init.assign_instance_id(L"0");
+        if (status.is_err())
+          return status;
         return STATUS_NOT_SUPPORTED;
       }>();
   child_settings
@@ -851,10 +879,84 @@ constexpr auto sample_standalone_dpc =
     const child_identification<sample_child_identity> id{{1}};
     const child_address<sample_child_address> address{{2}};
     (void)children->add_or_update(id, address);
-    (void)children->find(id);
+    auto found_child = children->find(id);
+    if (found_child) {
+      child_identification<sample_child_identity> round_trip;
+      (void)found_child.value.retrieve_identification(round_trip);
+      (void)found_child.value.parent();
+    }
     auto iteration = children->iterate();
     (void)iteration.next();
   }
+
+  auto static_init = pdo_init::try_allocate(device);
+  if (static_init &&
+      static_init->assign_device_id(L"CrtSys\\PackageStaticChild").is_ok() &&
+      static_init->assign_instance_id(L"0").is_ok()) {
+    pdo_event_callbacks pdo_events;
+    pdo_events
+        .on_resource_requirements_query<
+            +[](pdo,
+                io_resource_requirements requirements) noexcept -> NTSTATUS {
+              requirements.interface_type(Internal).slot_number(0);
+              auto configuration = requirements.try_create_list();
+              if (!configuration)
+                return configuration.status();
+
+              PHYSICAL_ADDRESS minimum{};
+              PHYSICAL_ADDRESS maximum{};
+              maximum.QuadPart = 0xffff;
+              (void)configuration->try_append(io_resource_descriptor::memory(
+                  minimum, maximum, 0x1000, 0x1000));
+              (void)configuration->try_append(io_resource_descriptor::port(
+                  minimum, maximum, 8, 1));
+              (void)configuration->try_append(
+                  io_resource_descriptor::interrupt(1, 15));
+              (void)configuration->try_append(
+                  io_resource_descriptor::dma(0, 7));
+              (void)configuration->try_append(
+                  io_resource_descriptor::dma_v3(1, 0, DMAV3_TRANFER_WIDTH_32));
+              (void)configuration->try_append(
+                  io_resource_descriptor::connection(
+                      CM_RESOURCE_CONNECTION_CLASS_SERIAL,
+                      CM_RESOURCE_CONNECTION_TYPE_SERIAL_I2C, 1));
+              (void)configuration->try_append(
+                  io_resource_descriptor::device_private(1, 2, 3));
+              (void)configuration->try_at(0);
+              return requirements.try_append(configuration.value());
+            }>()
+        .on_resources_query<
+            +[](pdo, resource_list resources) noexcept -> NTSTATUS {
+              CM_PARTIAL_RESOURCE_DESCRIPTOR descriptor{};
+              descriptor.Type = CmResourceTypeDevicePrivate;
+              (void)resources.try_append(descriptor);
+              (void)resources.remove(0);
+              return STATUS_SUCCESS;
+            }>()
+        .on_eject<+[](pdo) noexcept -> NTSTATUS { return STATUS_SUCCESS; }>()
+        .on_set_lock<
+            +[](pdo, bool) noexcept -> NTSTATUS { return STATUS_SUCCESS; }>()
+        .on_enable_wake_at_bus<
+            +[](pdo, SYSTEM_POWER_STATE) noexcept -> NTSTATUS {
+              return STATUS_SUCCESS;
+            }>()
+        .on_disable_wake_at_bus<+[](pdo) noexcept {}>()
+        .on_reported_missing<+[](pdo) noexcept {}>();
+    static_init->events(pdo_events);
+    auto static_child = static_init->try_create();
+    if (static_child)
+      (void)device.try_add_static_child(static_child.value());
+  }
+
+  auto query_value = make_query_interface<sample_query_interface>(
+      1, device.native_handle(), reference_query_interface_object,
+      dereference_query_interface_object);
+  query_value.query_value = sample_query_value;
+  query_interface_config query_value_config{query_value,
+                                             sample_query_interface_guid};
+  (void)device.try_add_query_interface(query_value_config);
+  (void)device.try_query_interface<sample_query_interface>(
+      sample_query_interface_guid, 1);
 
   auto device_key =
       device.try_open_registry_key(PLUGPLAY_REGKEY_DEVICE, KEY_READ);

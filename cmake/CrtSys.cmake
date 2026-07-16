@@ -513,6 +513,10 @@ function(crtsys_add_driver _target)
         ${_crtsys_use_ntl_kmdf_main}
     )
 
+    if(_crtsys_use_ntl_main OR _crtsys_use_ntl_kmdf_main)
+        target_compile_features(${_target} PRIVATE cxx_std_17)
+    endif()
+
     if(CRTSYS_USE_PREBUILT)
         crtsys_link_prebuilt_driver_libraries(${_target})
     else()

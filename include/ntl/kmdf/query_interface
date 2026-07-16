@@ -1,0 +1,240 @@
+/**
+ * @file query_interface
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Typed KMDF driver-defined query-interface helpers.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "callback"
+#include "device"
+
+#include "../result"
+#include "../status"
+
+#include "detail/wdf"
+
+#include <limits>
+#include <type_traits>
+#include <utility>
+
+namespace ntl::kmdf {
+
+namespace detail {
+template <class Interface> constexpr void validate_query_interface() noexcept {
+  static_assert(std::is_standard_layout_v<Interface>,
+                "A driver-defined interface must be standard-layout.");
+  static_assert(std::is_trivially_copyable_v<Interface>,
+                "A driver-defined interface must be trivially copyable.");
+  static_assert(sizeof(Interface) >= sizeof(INTERFACE),
+                "A driver-defined interface must begin with INTERFACE.");
+  static_assert(sizeof(Interface) <= (std::numeric_limits<USHORT>::max)(),
+                "A driver-defined interface must fit in INTERFACE::Size.");
+}
+
+template <class Interface>
+PINTERFACE query_interface_header(Interface &value) noexcept {
+  validate_query_interface<Interface>();
+  return reinterpret_cast<PINTERFACE>(&value);
+}
+
+template <class Interface>
+PINTERFACE query_interface_header(const Interface &value) noexcept {
+  validate_query_interface<Interface>();
+  return const_cast<PINTERFACE>(reinterpret_cast<const INTERFACE *>(&value));
+}
+} // namespace detail
+
+/**
+ * @brief Initializes a driver-defined interface value.
+ *
+ * @tparam Interface Standard-layout structure whose first member is INTERFACE.
+ * @param version Interface contract version.
+ * @param context Provider context passed to every interface callback.
+ * @param reference Acquires one provider-defined interface reference.
+ * @param dereference Releases one provider-defined interface reference.
+ */
+template <class Interface>
+Interface make_query_interface(USHORT version, void *context,
+                               PINTERFACE_REFERENCE reference,
+                               PINTERFACE_DEREFERENCE dereference) noexcept {
+  detail::validate_query_interface<Interface>();
+  Interface value{};
+  PINTERFACE header = detail::query_interface_header(value);
+  header->Size = static_cast<USHORT>(sizeof(Interface));
+  header->Version = version;
+  header->Context = context;
+  header->InterfaceReference = reference;
+  header->InterfaceDereference = dereference;
+  return value;
+}
+
+/** @brief Acquires a WDF object used as a query-interface context. */
+inline void NTAPI reference_query_interface_object(void *context) noexcept {
+  if (context) {
+    WdfObjectReferenceActual(reinterpret_cast<WDFOBJECT>(context), nullptr,
+                             __LINE__, const_cast<PCHAR>(__FILE__));
+  }
+}
+
+/** @brief Releases a WDF object used as a query-interface context. */
+inline void NTAPI dereference_query_interface_object(void *context) noexcept {
+  if (context) {
+    WdfObjectDereferenceActual(reinterpret_cast<WDFOBJECT>(context), nullptr,
+                               __LINE__, const_cast<PCHAR>(__FILE__));
+  }
+}
+
+/**
+ * @brief Provider-side configuration for WdfDeviceAddQueryInterface.
+ *
+ * @tparam Interface Standard-layout structure whose first member is INTERFACE.
+ * @note The supplied interface value must remain alive until the configuration
+ * is passed to device::try_add_query_interface(). KMDF copies the value while
+ * registering it.
+ */
+template <class Interface> class query_interface_config {
+public:
+  /** @brief Configures a driver-defined interface exposed under a GUID. */
+  query_interface_config(Interface &value, const GUID &interface_type) noexcept
+      : interface_type_(interface_type) {
+    detail::validate_query_interface<Interface>();
+    WDF_QUERY_INTERFACE_CONFIG_INIT(&value_,
+                                    detail::query_interface_header(value),
+                                    &interface_type_, nullptr);
+  }
+
+  query_interface_config(const query_interface_config &) = delete;
+  query_interface_config &operator=(const query_interface_config &) = delete;
+  query_interface_config(query_interface_config &&) = delete;
+  query_interface_config &operator=(query_interface_config &&) = delete;
+
+  /**
+   * @brief Processes a validated query before KMDF completes it.
+   * @tparam Callback Non-capturing
+   * `NTSTATUS(device, const GUID&, Interface&, void*) noexcept` callback.
+   */
+  template <auto Callback> query_interface_config &on_process() noexcept {
+    value_.EvtDeviceProcessQueryInterfaceRequest =
+        +[](WDFDEVICE native_device, LPGUID native_type,
+            PINTERFACE native_interface, void *specific_data) noexcept {
+          return detail::invoke_status_callback<Callback>(
+              device{native_device}, *native_type,
+              *reinterpret_cast<Interface *>(native_interface), specific_data);
+        };
+    return *this;
+  }
+
+  /** @brief Forwards a PDO query down the parent device stack. */
+  query_interface_config &send_to_parent_stack(bool enabled = true) noexcept {
+    value_.SendQueryToParentStack = enabled ? TRUE : FALSE;
+    return *this;
+  }
+
+  /** @brief Lets the query callback initialize caller-supplied interface data.
+   */
+  query_interface_config &import(bool enabled = true) noexcept {
+    value_.ImportInterface = enabled ? TRUE : FALSE;
+    return *this;
+  }
+
+  /** @brief Returns the native KMDF configuration. */
+  PWDF_QUERY_INTERFACE_CONFIG native() noexcept { return &value_; }
+
+private:
+  GUID interface_type_{};
+  WDF_QUERY_INTERFACE_CONFIG value_{};
+};
+
+/**
+ * @brief Move-only owner of a queried driver interface reference.
+ *
+ * WdfFdoQueryForInterface returns an acquired interface. Destruction calls
+ * INTERFACE::InterfaceDereference exactly once when the provider supplied one.
+ */
+template <class Interface> class queried_interface {
+public:
+  queried_interface() noexcept = default;
+  queried_interface(const queried_interface &) = delete;
+  queried_interface &operator=(const queried_interface &) = delete;
+
+  /** @brief Transfers the acquired interface reference. */
+  queried_interface(queried_interface &&other) noexcept
+      : value_(other.value_), acquired_(std::exchange(other.acquired_, false)) {
+    other.value_ = Interface{};
+  }
+
+  /** @brief Releases the current reference and takes another one. */
+  queried_interface &operator=(queried_interface &&other) noexcept {
+    if (this != &other) {
+      reset();
+      value_ = other.value_;
+      acquired_ = std::exchange(other.acquired_, false);
+      other.value_ = Interface{};
+    }
+    return *this;
+  }
+
+  /** @brief Releases the acquired interface reference. */
+  ~queried_interface() { reset(); }
+
+  /** @brief Releases the current interface and becomes empty. */
+  void reset() noexcept {
+    if (acquired_) {
+      PINTERFACE header = detail::query_interface_header(value_);
+      if (header->InterfaceDereference)
+        header->InterfaceDereference(header->Context);
+    }
+    value_ = Interface{};
+    acquired_ = false;
+  }
+
+  /** @brief Returns the typed interface value. */
+  Interface &get() noexcept { return value_; }
+
+  /** @brief Returns the typed interface value. */
+  const Interface &get() const noexcept { return value_; }
+
+  Interface *operator->() noexcept { return &value_; }
+  const Interface *operator->() const noexcept { return &value_; }
+  Interface &operator*() noexcept { return value_; }
+  const Interface &operator*() const noexcept { return value_; }
+
+  /** @brief Returns true while an acquired interface is held. */
+  explicit operator bool() const noexcept { return acquired_; }
+
+private:
+  friend class device;
+
+  explicit queried_interface(Interface value) noexcept
+      : value_(value), acquired_(true) {
+    detail::validate_query_interface<Interface>();
+  }
+
+  Interface value_{};
+  bool acquired_ = false;
+};
+
+template <class Interface>
+ntl::status device::try_add_query_interface(
+    query_interface_config<Interface> &config) const noexcept {
+  return WdfDeviceAddQueryInterface(native_handle(), config.native());
+}
+
+template <class Interface>
+ntl::result<queried_interface<Interface>>
+device::try_query_interface(const GUID &interface_type, USHORT version,
+                            void *specific_data,
+                            Interface initial_value) const noexcept {
+  detail::validate_query_interface<Interface>();
+  const NTSTATUS result = WdfFdoQueryForInterface(
+      native_handle(), &interface_type,
+      detail::query_interface_header(initial_value),
+      static_cast<USHORT>(sizeof(Interface)), version, specific_data);
+  if (!NT_SUCCESS(result))
+    return ntl::unexpected(result);
+  return ntl::ok(queried_interface<Interface>{initial_value});
+}
+
+} // namespace ntl::kmdf

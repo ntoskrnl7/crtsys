@@ -32,6 +32,10 @@ a second is canceled with `CancelIoEx` while still queued. The driver verifies
 the move-only request ownership transition and completes the framework's
 `EvtIoCanceledOnQueue` callback exactly once.
 
+This sample intentionally remains a non-PnP control device. For typed child
+enumeration and PDO creation, use the separate
+[KMDF bus and PDO sample](../kmdf-bus-ntl-driver).
+
 ## Visual Studio and NuGet
 
 Open `crtsys_kmdf_ntl_sample_vs.sln`, restore packages, and build `Debug|x64`
