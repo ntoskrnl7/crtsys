@@ -1,0 +1,3 @@
+#include <windows.h>
+
+CrtSysKmdfWmi MOFDATA "crtsys_kmdf_wmi_ntl_sample.bmf"

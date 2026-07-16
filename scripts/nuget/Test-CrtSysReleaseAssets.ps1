@@ -104,6 +104,7 @@ foreach ($requiredPath in @(
   'include\ntl\kmdf\registry',
   'include\ntl\kmdf\property',
   'include\ntl\kmdf\object',
+  'include\ntl\kmdf\wmi',
   'include\.internal\adjust_link_order'
 )) {
   $fullPath = Join-Path $bundleRoot $requiredPath
@@ -257,6 +258,20 @@ constexpr auto sample_standalone_dpc =
 struct sample_general_object_context {
   explicit sample_general_object_context(ULONG value) noexcept : value(value) {}
   ULONG value;
+};
+
+struct sample_wmi_data {
+  ULONG value;
+};
+
+constexpr GUID sample_wmi_guid = {
+    0x3988f399, 0xa3df, 0x4d40,
+    {0xa1, 0xdd, 0x2e, 0x3f, 0x2f, 0xf1, 0x8f, 0x8c}};
+
+constexpr auto sample_wmi_query =
+    +[](ntl::kmdf::wmi_instance,
+        ntl::kmdf::wmi_output_buffer output) noexcept -> NTSTATUS {
+  return output.try_write(sample_wmi_data{42});
 };
 
 [[maybe_unused]] void compile_common_object_surface(
@@ -424,6 +439,23 @@ struct sample_general_object_context {
   auto for_file = queue.try_retrieve_for(request.associated_file());
   if (for_file)
     for_file->complete(STATUS_SUCCESS);
+}
+
+[[maybe_unused]] void compile_wmi_surface(ntl::kmdf::device device) {
+  using namespace ntl::kmdf;
+
+  (void)device.try_assign_mof_resource(L"CrtSysReleaseSmoke");
+  wmi_provider_config provider_settings(sample_wmi_guid);
+  provider_settings.minimum_instance_buffer_size(sizeof(sample_wmi_data));
+  auto provider = wmi_provider::try_create(device, provider_settings);
+  if (!provider)
+    return;
+
+  wmi_instance_config instance_settings(provider.value());
+  instance_settings.register_automatically().on_query<sample_wmi_query>();
+  auto instance = wmi_instance::try_create(device, instance_settings);
+  if (instance)
+    (void)instance->try_fire_event(sample_wmi_data{1});
 }
 }
 

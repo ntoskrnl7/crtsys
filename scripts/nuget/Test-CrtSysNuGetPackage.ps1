@@ -243,6 +243,7 @@ if ($isDriverConsumer) {
     'include\ntl\kmdf\child_list',
     'include\ntl\kmdf\registry',
     'include\ntl\kmdf\property'
+    'include\ntl\kmdf\wmi'
   )
 }
 

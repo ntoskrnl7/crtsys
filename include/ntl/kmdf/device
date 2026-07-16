@@ -17,9 +17,9 @@
 #include "property"
 #include "registry"
 
+#include "detail/wdf"
 #include <string>
 #include <utility>
-#include "detail/wdf"
 
 namespace ntl::kmdf {
 template <class Context> class file_config;
@@ -85,6 +85,27 @@ public:
                                    const std::wstring &reference) const {
     ntl::unicode_string native_reference(reference);
     return try_create_interface(interface_class, &*native_reference);
+  }
+
+  /**
+   * @brief Assigns the embedded MOF resource used by custom WMI
+   * providers.
+   * @param resource_name Name of the driver's MOFDATA
+   * resource.
+   * @return WdfDeviceAssignMofResourceName status.
+   * @note
+   * Call this before creating custom WMI provider instances.
+   */
+  ntl::status
+  try_assign_mof_resource(PCUNICODE_STRING resource_name) const noexcept {
+    return WdfDeviceAssignMofResourceName(handle_, resource_name);
+  }
+
+  /** @brief Assigns a named embedded MOF resource. */
+  ntl::status try_assign_mof_resource(const std::wstring &resource_name) const {
+    UNICODE_STRING native_name{};
+    RtlInitUnicodeString(&native_name, resource_name.c_str());
+    return try_assign_mof_resource(&native_name);
   }
 
   /**

@@ -1,0 +1,507 @@
+/**
+ * @file wmi
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Typed KMDF WMI provider and instance helpers.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ *
+ */
+#pragma once
+
+#include "callback"
+#include "device"
+#include "object_attributes"
+
+#include "../result"
+#include "../status"
+
+#include <type_traits>
+#include <utility>
+
+namespace ntl::kmdf {
+class wmi_provider_config;
+class wmi_instance_config;
+
+/** @brief Read-only view of a WMI callback input buffer. */
+class wmi_input_buffer {
+public:
+  /** @brief Wraps a WMI input buffer without taking ownership. */
+  wmi_input_buffer(const void *data, ULONG size) noexcept
+      : data_(data), size_(size) {}
+
+  /** @brief Returns the untyped WMI input buffer. */
+  const void *data() const noexcept { return data_; }
+
+  /** @brief Returns the input buffer size in bytes. */
+  ULONG size() const noexcept { return size_; }
+
+  /**
+   * @brief Returns a typed view when the complete value is present.
+   * @return Pointer to the input value or STATUS_BUFFER_TOO_SMALL.
+   */
+  template <class T> ntl::result<const T *> try_read() const noexcept {
+    static_assert(std::is_trivially_copyable_v<T>,
+                  "WMI data blocks must be trivially copyable.");
+    if (data_ == nullptr || size_ < sizeof(T))
+      return ntl::unexpected(STATUS_BUFFER_TOO_SMALL);
+    return ntl::ok(static_cast<const T *>(data_));
+  }
+
+private:
+  const void *data_ = nullptr;
+  ULONG size_ = 0;
+};
+
+/** @brief Checked writer for a WMI query or method output buffer. */
+class wmi_output_buffer {
+public:
+  /** @brief Wraps a framework-owned WMI output buffer. */
+  wmi_output_buffer(void *data, ULONG capacity, PULONG used) noexcept
+      : data_(data), capacity_(capacity), used_(used) {}
+
+  /** @brief Returns the untyped WMI output buffer. */
+  void *data() const noexcept { return data_; }
+
+  /** @brief Returns the output capacity in bytes. */
+  ULONG capacity() const noexcept { return capacity_; }
+
+  /** @brief Records the required or produced output size. */
+  void used(ULONG size) const noexcept {
+    if (used_ != nullptr)
+      *used_ = size;
+  }
+
+  /**
+   * @brief Copies one fixed-size WMI data block into the output buffer.
+   * @return STATUS_BUFFER_TOO_SMALL or STATUS_SUCCESS.
+   */
+  template <class T> ntl::status try_write(const T &value) const noexcept {
+    static_assert(std::is_trivially_copyable_v<T>,
+                  "WMI data blocks must be trivially copyable.");
+    used(static_cast<ULONG>(sizeof(T)));
+    if (data_ == nullptr || capacity_ < sizeof(T))
+      return STATUS_BUFFER_TOO_SMALL;
+    RtlCopyMemory(data_, &value, sizeof(T));
+    return ntl::status::ok();
+  }
+
+  /**
+   * @brief Appends one WMI-formatted counted Unicode string at the buffer
+   * start.
+   * @param value String to encode with WDF_WMI_BUFFER_APPEND_STRING.
+   * @return WDF string-append status.
+   */
+  ntl::status try_write(PCUNICODE_STRING value) const noexcept {
+    ULONG required = 0;
+    const NTSTATUS status =
+        WDF_WMI_BUFFER_APPEND_STRING(data_, capacity_, value, &required);
+    used(required);
+    return status;
+  }
+
+private:
+  void *data_ = nullptr;
+  ULONG capacity_ = 0;
+  PULONG used_ = nullptr;
+};
+
+/** @brief Shared input/output buffer supplied to a WMI method callback. */
+class wmi_method_buffer {
+public:
+  /** @brief Wraps the shared WMI method buffer without taking ownership. */
+  wmi_method_buffer(void *data, ULONG input_size, ULONG output_capacity,
+                    PULONG used) noexcept
+      : data_(data), input_size_(input_size), output_capacity_(output_capacity),
+        used_(used) {}
+
+  /** @brief Returns a read-only view of the method input. */
+  wmi_input_buffer input() const noexcept {
+    return wmi_input_buffer{data_, input_size_};
+  }
+
+  /** @brief Returns a checked writer for the method output. */
+  wmi_output_buffer output() const noexcept {
+    return wmi_output_buffer{data_, output_capacity_, used_};
+  }
+
+  /** @brief Returns the shared native method buffer. */
+  void *data() const noexcept { return data_; }
+
+  /** @brief Returns the method input size in bytes. */
+  ULONG input_size() const noexcept { return input_size_; }
+
+  /** @brief Returns the method output capacity in bytes. */
+  ULONG output_capacity() const noexcept { return output_capacity_; }
+
+private:
+  void *data_ = nullptr;
+  ULONG input_size_ = 0;
+  ULONG output_capacity_ = 0;
+  PULONG used_ = nullptr;
+};
+
+/** @brief Non-owning facade for a WDF WMI provider object. */
+class wmi_provider {
+public:
+  /** @brief Creates an empty provider facade. */
+  wmi_provider() noexcept = default;
+
+  /** @brief Wraps a WDF WMI provider without taking ownership. */
+  explicit wmi_provider(WDFWMIPROVIDER object) noexcept : object_(object) {}
+
+  /**
+   * @brief Creates a provider associated with a PnP device.
+   * @note A control device is not a valid WMI provider parent. The framework
+   * owns provider deletion and deletes it with the device.
+   * @note WDF does not permit an explicit ExecutionLevel on WMI provider
+   * objects. Follow the documented IRQL contract of each native callback.
+   */
+  static ntl::result<wmi_provider>
+  try_create(const device &owner, wmi_provider_config &config,
+             object_attributes *attributes = nullptr) noexcept;
+
+  /** @brief Creates a provider with a managed C++ context. */
+  template <class Context, class... Args>
+  static ntl::result<wmi_provider>
+  try_create(const device &owner, wmi_provider_config &config,
+             object_attributes *attributes, Args &&...args) noexcept;
+
+  /** @brief Returns the provider's parent device. */
+  device owner() const noexcept {
+    return device{WdfWmiProviderGetDevice(object_)};
+  }
+
+  /** @brief Reports whether clients enabled the selected provider function. */
+  bool is_enabled(WDF_WMI_PROVIDER_CONTROL control) const noexcept {
+    return WdfWmiProviderIsEnabled(object_, control) != FALSE;
+  }
+
+  /** @brief Returns the tracing handle for a tracing provider. */
+  ULONGLONG tracing_handle() const noexcept {
+    return WdfWmiProviderGetTracingHandle(object_);
+  }
+
+  /** @brief Returns this provider's constructed C++ context. */
+  template <class T> T &context() const noexcept {
+    return detail::get_context<T>(reinterpret_cast<WDFOBJECT>(object_));
+  }
+
+  /** @brief Returns this provider's context, or nullptr when absent. */
+  template <class T> T *try_context() const noexcept {
+    return detail::try_get_context<T>(reinterpret_cast<WDFOBJECT>(object_));
+  }
+
+  /** @brief Returns the native WDF WMI provider object. */
+  WDFWMIPROVIDER native_object() const noexcept { return object_; }
+
+  /** @brief Returns true when a provider object is present. */
+  explicit operator bool() const noexcept { return object_ != WDF_NO_HANDLE; }
+
+private:
+  WDFWMIPROVIDER object_ = WDF_NO_HANDLE;
+};
+
+/** @brief Initializes and configures WDF_WMI_PROVIDER_CONFIG. */
+class wmi_provider_config {
+public:
+  /** @brief Creates a provider configuration for one WMI data-block GUID. */
+  explicit wmi_provider_config(const GUID &guid) noexcept {
+    WDF_WMI_PROVIDER_CONFIG_INIT(&value_, &guid);
+  }
+
+  /** @brief Sets WDF_WMI_PROVIDER_FLAGS values. */
+  wmi_provider_config &flags(ULONG value) noexcept {
+    value_.Flags = value;
+    return *this;
+  }
+
+  /** @brief Marks this provider as event-only. */
+  wmi_provider_config &event_only(bool enabled = true) noexcept {
+    if (enabled)
+      value_.Flags |= WdfWmiProviderEventOnly;
+    else
+      value_.Flags &= ~static_cast<ULONG>(WdfWmiProviderEventOnly);
+    return *this;
+  }
+
+  /** @brief Marks data collection as expensive. */
+  wmi_provider_config &expensive(bool enabled = true) noexcept {
+    if (enabled)
+      value_.Flags |= WdfWmiProviderExpensive;
+    else
+      value_.Flags &= ~static_cast<ULONG>(WdfWmiProviderExpensive);
+    return *this;
+  }
+
+  /** @brief Sets the fixed minimum query/set instance buffer size. */
+  wmi_provider_config &minimum_instance_buffer_size(ULONG size) noexcept {
+    value_.MinInstanceBufferSize = size;
+    return *this;
+  }
+
+  /**
+   * @brief Registers a typed provider function-control callback.
+   * @tparam Callback `status(wmi_provider, WDF_WMI_PROVIDER_CONTROL, bool)`.
+   * @note KMDF ignores this callback for an event-only provider.
+   */
+  template <auto Callback> wmi_provider_config &on_function_control() noexcept {
+    value_.EvtWmiProviderFunctionControl =
+        +[](WDFWMIPROVIDER provider, WDF_WMI_PROVIDER_CONTROL control,
+            BOOLEAN enable) noexcept -> NTSTATUS {
+      return detail::invoke_status_callback<Callback>(wmi_provider{provider},
+                                                      control, enable != FALSE);
+    };
+    return *this;
+  }
+
+  /** @brief Returns the mutable native provider configuration. */
+  PWDF_WMI_PROVIDER_CONFIG native() noexcept { return &value_; }
+
+private:
+  WDF_WMI_PROVIDER_CONFIG value_{};
+};
+
+/** @brief Non-owning facade for a WDF WMI provider instance. */
+class wmi_instance {
+public:
+  /** @brief Creates an empty instance facade. */
+  wmi_instance() noexcept = default;
+
+  /** @brief Wraps a WDF WMI instance without taking ownership. */
+  explicit wmi_instance(WDFWMIINSTANCE object) noexcept : object_(object) {}
+
+  /**
+   * @brief Creates a WMI provider instance parented by a PnP device.
+   * @note WDF does not permit an explicit ExecutionLevel on WMI instance
+   * objects. Query, set, set-item, and method callbacks run at PASSIVE_LEVEL.
+   */
+  static ntl::result<wmi_instance>
+  try_create(const device &owner, wmi_instance_config &config,
+             object_attributes *attributes = nullptr) noexcept;
+
+  /** @brief Creates a WMI instance with a managed C++ context. */
+  template <class Context, class... Args>
+  static ntl::result<wmi_instance>
+  try_create(const device &owner, wmi_instance_config &config,
+             object_attributes *attributes, Args &&...args) noexcept;
+
+  /** @brief Registers a manually managed provider instance at PASSIVE_LEVEL. */
+  ntl::status try_register() const noexcept {
+    return WdfWmiInstanceRegister(object_);
+  }
+
+  /** @brief Deregisters this provider instance at PASSIVE_LEVEL. */
+  void deregister() const noexcept { WdfWmiInstanceDeregister(object_); }
+
+  /**
+   * @brief Fires an event for an event-only provider at IRQL <= APC_LEVEL.
+   */
+  ntl::status try_fire_event(const void *data, ULONG size) const noexcept {
+    return WdfWmiInstanceFireEvent(object_, size, const_cast<void *>(data));
+  }
+
+  /** @brief Fires one fixed-size event data block. */
+  template <class T> ntl::status try_fire_event(const T &data) const noexcept {
+    static_assert(std::is_trivially_copyable_v<T>,
+                  "WMI event data must be trivially copyable.");
+    return try_fire_event(&data, static_cast<ULONG>(sizeof(T)));
+  }
+
+  /** @brief Returns the device associated with this WMI instance. */
+  device owner() const noexcept {
+    return device{WdfWmiInstanceGetDevice(object_)};
+  }
+
+  /** @brief Returns this instance's WMI provider. */
+  wmi_provider provider() const noexcept {
+    return wmi_provider{WdfWmiInstanceGetProvider(object_)};
+  }
+
+  /** @brief Returns this instance's constructed C++ context. */
+  template <class T> T &context() const noexcept {
+    return detail::get_context<T>(reinterpret_cast<WDFOBJECT>(object_));
+  }
+
+  /** @brief Returns this instance's context, or nullptr when absent. */
+  template <class T> T *try_context() const noexcept {
+    return detail::try_get_context<T>(reinterpret_cast<WDFOBJECT>(object_));
+  }
+
+  /** @brief Allocates and constructs an additional instance context. */
+  template <class T, class... Args>
+  ntl::result<T *> try_emplace_context(Args &&...args) const noexcept {
+    return object{reinterpret_cast<WDFOBJECT>(object_)}
+        .template try_emplace_context<T>(std::forward<Args>(args)...);
+  }
+
+  /** @brief Returns the native WDF WMI instance object. */
+  WDFWMIINSTANCE native_object() const noexcept { return object_; }
+
+  /** @brief Returns true when an instance object is present. */
+  explicit operator bool() const noexcept { return object_ != WDF_NO_HANDLE; }
+
+private:
+  WDFWMIINSTANCE object_ = WDF_NO_HANDLE;
+};
+
+/** @brief Initializes and configures WDF_WMI_INSTANCE_CONFIG. */
+class wmi_instance_config {
+public:
+  /** @brief Associates this instance with an explicitly created provider. */
+  explicit wmi_instance_config(const wmi_provider &provider) noexcept {
+    WDF_WMI_INSTANCE_CONFIG_INIT_PROVIDER(&value_, provider.native_object());
+  }
+
+  /**
+   * @brief Creates the single-instance provider together with this instance.
+   * @note The provider configuration must remain alive through try_create().
+   * @note Use this form for a provider flagged WdfWmiProviderEventOnly.
+   */
+  explicit wmi_instance_config(wmi_provider_config &provider) noexcept {
+    WDF_WMI_INSTANCE_CONFIG_INIT_PROVIDER_CONFIG(&value_, provider.native());
+  }
+
+  /** @brief Lets the framework register this instance on first D0 entry. */
+  wmi_instance_config &register_automatically(bool enabled = true) noexcept {
+    value_.Register = enabled ? TRUE : FALSE;
+    return *this;
+  }
+
+  /**
+   * @brief Lets WDF copy native object context for a read-only query.
+   * @note NTL managed C++ contexts contain lifetime metadata and must use an
+   * explicit query callback instead of this native WDF shortcut.
+   */
+  wmi_instance_config &
+  use_native_context_for_query(bool enabled = true) noexcept {
+    value_.UseContextForQuery = enabled ? TRUE : FALSE;
+    return *this;
+  }
+
+  /**
+   * @brief Registers a typed query callback.
+   * @tparam Callback `status(wmi_instance, wmi_output_buffer)`.
+   */
+  template <auto Callback> wmi_instance_config &on_query() noexcept {
+    value_.EvtWmiInstanceQueryInstance =
+        +[](WDFWMIINSTANCE instance, ULONG size, PVOID buffer,
+            PULONG used) noexcept -> NTSTATUS {
+      return detail::invoke_status_callback<Callback>(
+          wmi_instance{instance}, wmi_output_buffer{buffer, size, used});
+    };
+    return *this;
+  }
+
+  /**
+   * @brief Registers a typed whole-instance set callback.
+   * @tparam Callback `status(wmi_instance, wmi_input_buffer)`.
+   */
+  template <auto Callback> wmi_instance_config &on_set() noexcept {
+    value_.EvtWmiInstanceSetInstance = +[](WDFWMIINSTANCE instance, ULONG size,
+                                           PVOID buffer) noexcept -> NTSTATUS {
+      return detail::invoke_status_callback<Callback>(
+          wmi_instance{instance}, wmi_input_buffer{buffer, size});
+    };
+    return *this;
+  }
+
+  /**
+   * @brief Registers a typed single-item set callback.
+   * @tparam Callback `status(wmi_instance, ULONG, wmi_input_buffer)`.
+   */
+  template <auto Callback> wmi_instance_config &on_set_item() noexcept {
+    value_.EvtWmiInstanceSetItem =
+        +[](WDFWMIINSTANCE instance, ULONG item_id, ULONG size,
+            PVOID buffer) noexcept -> NTSTATUS {
+      return detail::invoke_status_callback<Callback>(
+          wmi_instance{instance}, item_id, wmi_input_buffer{buffer, size});
+    };
+    return *this;
+  }
+
+  /**
+   * @brief Registers a typed method callback.
+   * @tparam Callback `status(wmi_instance, ULONG, wmi_method_buffer)`.
+   */
+  template <auto Callback> wmi_instance_config &on_execute() noexcept {
+    value_.EvtWmiInstanceExecuteMethod =
+        +[](WDFWMIINSTANCE instance, ULONG method_id, ULONG input_size,
+            ULONG output_size, PVOID buffer, PULONG used) noexcept -> NTSTATUS {
+      return detail::invoke_status_callback<Callback>(
+          wmi_instance{instance}, method_id,
+          wmi_method_buffer{buffer, input_size, output_size, used});
+    };
+    return *this;
+  }
+
+  /** @brief Returns the mutable native instance configuration. */
+  PWDF_WMI_INSTANCE_CONFIG native() noexcept { return &value_; }
+
+private:
+  WDF_WMI_INSTANCE_CONFIG value_{};
+};
+
+inline ntl::result<wmi_provider>
+wmi_provider::try_create(const device &owner, wmi_provider_config &config,
+                         object_attributes *attributes) noexcept {
+  WDFWMIPROVIDER object = WDF_NO_HANDLE;
+  const NTSTATUS status = WdfWmiProviderCreate(
+      owner.native_handle(), config.native(),
+      attributes ? attributes->native() : nullptr, &object);
+  if (!NT_SUCCESS(status))
+    return ntl::unexpected(status);
+  return ntl::ok(wmi_provider{object});
+}
+
+template <class Context, class... Args>
+ntl::result<wmi_provider>
+wmi_provider::try_create(const device &owner, wmi_provider_config &config,
+                         object_attributes *attributes,
+                         Args &&...args) noexcept {
+  object_attributes local_attributes;
+  object_attributes &effective = attributes ? *attributes : local_attributes;
+  effective.template prepare_context<Context>();
+
+  WDFWMIPROVIDER object = WDF_NO_HANDLE;
+  const NTSTATUS status = WdfWmiProviderCreate(
+      owner.native_handle(), config.native(), effective.native(), &object);
+  if (!NT_SUCCESS(status))
+    return ntl::unexpected(status);
+
+  effective.template construct_context<Context>(
+      reinterpret_cast<WDFOBJECT>(object), std::forward<Args>(args)...);
+  return ntl::ok(wmi_provider{object});
+}
+
+inline ntl::result<wmi_instance>
+wmi_instance::try_create(const device &owner, wmi_instance_config &config,
+                         object_attributes *attributes) noexcept {
+  WDFWMIINSTANCE object = WDF_NO_HANDLE;
+  const NTSTATUS status = WdfWmiInstanceCreate(
+      owner.native_handle(), config.native(),
+      attributes ? attributes->native() : nullptr, &object);
+  if (!NT_SUCCESS(status))
+    return ntl::unexpected(status);
+  return ntl::ok(wmi_instance{object});
+}
+
+template <class Context, class... Args>
+ntl::result<wmi_instance>
+wmi_instance::try_create(const device &owner, wmi_instance_config &config,
+                         object_attributes *attributes,
+                         Args &&...args) noexcept {
+  object_attributes local_attributes;
+  object_attributes &effective = attributes ? *attributes : local_attributes;
+  effective.template prepare_context<Context>();
+
+  WDFWMIINSTANCE object = WDF_NO_HANDLE;
+  const NTSTATUS status = WdfWmiInstanceCreate(
+      owner.native_handle(), config.native(), effective.native(), &object);
+  if (!NT_SUCCESS(status))
+    return ntl::unexpected(status);
+
+  effective.template construct_context<Context>(
+      reinterpret_cast<WDFOBJECT>(object), std::forward<Args>(args)...);
+  return ntl::ok(wmi_instance{object});
+}
+} // namespace ntl::kmdf

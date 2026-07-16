@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <BaseIntermediateOutputPath>$(MSBuildThisFileDirectory)obj\$(MSBuildProjectName)\</BaseIntermediateOutputPath>
+    <MSBuildProjectExtensionsPath>$(BaseIntermediateOutputPath)</MSBuildProjectExtensionsPath>
+    <ProjectGuid>{0F70F89B-E086-4A79-9173-104A9E7668D3}</ProjectGuid>
+    <RootNamespace>CrtSysKmdfWmiNtlSample</RootNamespace>
+    <ProjectName>crtsys_kmdf_wmi_ntl_sample</ProjectName>
+    <WindowsTargetPlatformVersion Condition="'$(VisualStudioVersion)' == '18.0'">10.0.28000.0</WindowsTargetPlatformVersion>
+    <WindowsTargetPlatformVersion Condition="'$(WindowsTargetPlatformVersion)' == ''">10.0</WindowsTargetPlatformVersion>
+    <_NT_TARGET_VERSION>0xA000006</_NT_TARGET_VERSION>
+    <SkipPackageVerification Condition="'$(VisualStudioVersion)' == '18.0'">true</SkipPackageVerification>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration" Condition="'$(Configuration)'=='Debug'">
+    <TargetVersion>Windows10</TargetVersion>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <DriverTargetPlatform>Desktop</DriverTargetPlatform>
+    <DriverType>KMDF</DriverType>
+    <KmdfVersion>1.15</KmdfVersion>
+    <CrtSysUseNtlKmdfMain>true</CrtSysUseNtlKmdfMain>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <ConfigurationType>Driver</ConfigurationType>
+    <SignMode>TestSign</SignMode>
+  </PropertyGroup>
+  <PropertyGroup Label="Configuration" Condition="'$(Configuration)'=='Release'">
+    <TargetVersion>Windows10</TargetVersion>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <DriverTargetPlatform>Desktop</DriverTargetPlatform>
+    <DriverType>KMDF</DriverType>
+    <KmdfVersion>1.15</KmdfVersion>
+    <CrtSysUseNtlKmdfMain>true</CrtSysUseNtlKmdfMain>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <ConfigurationType>Driver</ConfigurationType>
+    <SignMode>TestSign</SignMode>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup>
+    <TargetName>crtsys_kmdf_wmi_ntl_sample</TargetName>
+  </PropertyGroup>
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="Exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" />
+  </ImportGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(MSBuildThisFileDirectory)shared;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <WarningLevel>Level4</WarningLevel>
+      <TreatWarningAsError>true</TreatWarningAsError>
+      <LanguageStandard>stdcpplatest</LanguageStandard>
+    </ClCompile>
+    <ResourceCompile>
+      <AdditionalIncludeDirectories>$(IntDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ResourceCompile>
+    <DriverSign>
+      <FileDigestAlgorithm>sha256</FileDigestAlgorithm>
+    </DriverSign>
+  </ItemDefinitionGroup>
+  <ItemGroup Condition="'$(CrtSysUsePackageReference)' == 'true'">
+    <PackageReference Include="crtsys" Version="$(CrtSysPackageVersion)" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="driver\main.cpp" />
+    <ResourceCompile Include="crtsys_kmdf_wmi_ntl_sample.rc" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="shared\kmdf_wmi_ntl.hpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <Mofcomp Include="crtsys_kmdf_wmi_ntl_sample.mof">
+      <CreateBinaryMofFile>$(IntDir)crtsys_kmdf_wmi_ntl_sample.bmf</CreateBinaryMofFile>
+      <WmiSyntaxCheck>false</WmiSyntaxCheck>
+    </Mofcomp>
+    <Wmimofck Include="$(IntDir)crtsys_kmdf_wmi_ntl_sample.bmf" />
+  </ItemGroup>
+  <ItemGroup>
+    <Inf Include="crtsys_kmdf_wmi_ntl_sample.inf" />
+  </ItemGroup>
+  <ItemGroup>
+    <FilesToPackage Include="$(TargetPath)">
+      <PackageRelativeDirectory></PackageRelativeDirectory>
+    </FilesToPackage>
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>
