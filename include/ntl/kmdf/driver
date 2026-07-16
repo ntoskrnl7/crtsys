@@ -14,10 +14,11 @@
 #include "callback"
 #include "device"
 #include "object_attributes"
+#include "string"
 
+#include "detail/wdf"
 #include <string>
 #include <utility>
-#include "detail/wdf"
 
 namespace ntl::kmdf {
 /**
@@ -37,6 +38,48 @@ public:
    * @param handle Native WDF driver handle.
    */
   explicit driver(WDFDRIVER handle) noexcept : handle_(handle) {}
+
+  /** @brief Returns the service registry path borrowed from KMDF. */
+  PCWSTR registry_path() const noexcept {
+    return WdfDriverGetRegistryPath(handle_);
+  }
+
+  /** @brief Opens the driver's Parameters registry key at PASSIVE_LEVEL. */
+  ntl::result<registry_key>
+  try_open_parameters(ACCESS_MASK desired_access = KEY_READ,
+                      object_attributes *attributes = nullptr) const noexcept {
+    WDFKEY key = WDF_NO_HANDLE;
+    const NTSTATUS result = WdfDriverOpenParametersRegistryKey(
+        handle_, desired_access, attributes ? attributes->native() : nullptr,
+        &key);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return ntl::ok(registry_key{key});
+  }
+
+  /** @brief Reports whether the running KMDF version meets a requirement. */
+  bool is_version_available(ULONG major, ULONG minor) const noexcept {
+    WDF_DRIVER_VERSION_AVAILABLE_PARAMS params{};
+    WDF_DRIVER_VERSION_AVAILABLE_PARAMS_INIT(&params, major, minor);
+    return WdfDriverIsVersionAvailable(handle_, &params) != FALSE;
+  }
+
+  /** @brief Retrieves the running KMDF version string at PASSIVE_LEVEL. */
+  ntl::result<string> try_version_string() const noexcept {
+    auto value = string::try_create();
+    if (!value)
+      return ntl::unexpected(value.status());
+    const NTSTATUS result =
+        WdfDriverRetrieveVersionString(handle_, value->native_object());
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return value;
+  }
+
+  /** @brief Returns the underlying WDM driver object. */
+  PDRIVER_OBJECT wdm_driver_object() const noexcept {
+    return WdfDriverWdmGetDriverObject(handle_);
+  }
 
   /**
    * @brief Returns the native WDF driver handle.
@@ -77,7 +120,7 @@ public:
             PWDFDEVICE_INIT native_init) noexcept -> NTSTATUS {
       device_init init{native_init};
       return detail::invoke_status_callback<Callback>(driver{native_driver},
-                                                       init);
+                                                      init);
     };
     return *this;
   }
@@ -171,10 +214,9 @@ public:
       return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
 
     WDFDRIVER handle = WDF_NO_HANDLE;
-    const NTSTATUS result =
-        WdfDriverCreate(driver_object_, registry_path_,
-                        attributes ? attributes->native() : nullptr,
-                        config.native(), &handle);
+    const NTSTATUS result = WdfDriverCreate(
+        driver_object_, registry_path_,
+        attributes ? attributes->native() : nullptr, config.native(), &handle);
     if (!NT_SUCCESS(result))
       return ntl::unexpected(result);
 

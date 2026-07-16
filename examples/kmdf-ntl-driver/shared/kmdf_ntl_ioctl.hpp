@@ -33,6 +33,7 @@ struct manual_queue_stats {
   std::uint32_t queued_requests;
   std::uint32_t released_requests;
   std::uint32_t canceled_requests;
+  std::uint32_t forward_progress_requests;
 };
 
 struct transform_ioctl_contract {

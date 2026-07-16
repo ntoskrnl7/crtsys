@@ -1,6 +1,6 @@
 param(
   [Parameter(Mandatory = $true)]
-  [ValidateSet('app', 'driver')]
+  [ValidateSet('app', 'driver', 'kmdf-verifier-stress')]
   [string] $Project,
 
   [Parameter(Mandatory = $true)]
@@ -24,7 +24,11 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-$sourceDir = Join-Path $repoRoot "test\cmake\$Project"
+$sourceDir = if ($Project -eq 'kmdf-verifier-stress') {
+  Join-Path $repoRoot 'test\kmdf\verifier-stress'
+} else {
+  Join-Path $repoRoot "test\cmake\$Project"
+}
 
 if (-not (Test-Path (Join-Path $sourceDir 'CMakeLists.txt'))) {
   throw "CMakeLists.txt was not found under '$sourceDir'."

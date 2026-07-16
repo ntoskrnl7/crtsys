@@ -13,12 +13,12 @@
 #include "../status"
 #include "../unicode_string"
 
+#include "detail/wdf"
 #include <cstdint>
 #include <cstring>
 #include <string>
 #include <utility>
 #include <vector>
-#include "detail/wdf"
 
 namespace ntl::kmdf {
 /** @brief Raw value returned by WdfRegistryQueryValue. */
@@ -249,6 +249,39 @@ public:
     return query_string(&*native_name);
   }
 
+  /** @brief Queries a REG_MULTI_SZ value into owned strings. */
+  ntl::result<std::vector<std::wstring>>
+  query_multi_string(PCUNICODE_STRING name) const {
+    auto value = query_value(name);
+    if (!value)
+      return ntl::unexpected(value.status());
+    if (value->type != REG_MULTI_SZ)
+      return ntl::unexpected(STATUS_OBJECT_TYPE_MISMATCH);
+    if ((value->data.size() % sizeof(wchar_t)) != 0)
+      return ntl::unexpected(STATUS_DATA_ERROR);
+
+    const auto *begin = reinterpret_cast<const wchar_t *>(value->data.data());
+    const auto *end = begin + value->data.size() / sizeof(wchar_t);
+    std::vector<std::wstring> result;
+    for (const auto *cursor = begin; cursor < end && *cursor != L'\0';) {
+      const auto *terminator = cursor;
+      while (terminator < end && *terminator != L'\0')
+        ++terminator;
+      if (terminator == end)
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      result.emplace_back(cursor, terminator);
+      cursor = terminator + 1;
+    }
+    return ntl::ok(std::move(result));
+  }
+
+  /** @brief Queries a named REG_MULTI_SZ value. */
+  ntl::result<std::vector<std::wstring>>
+  query_multi_string(const std::wstring &name) const {
+    ntl::unicode_string native_name(name);
+    return query_multi_string(&*native_name);
+  }
+
   /** @brief Assigns a raw registry value. */
   ntl::status assign_value(PCUNICODE_STRING name, ULONG type, const void *data,
                            ULONG bytes) const noexcept {
@@ -307,6 +340,41 @@ public:
     ntl::unicode_string native_name(name);
     ntl::unicode_string native_value(value);
     return assign_string(&*native_name, &*native_value);
+  }
+
+  /** @brief Assigns a REG_MULTI_SZ value. */
+  ntl::status
+  assign_multi_string(PCUNICODE_STRING name,
+                      const std::vector<std::wstring> &values) const {
+    std::vector<wchar_t> buffer;
+    size_t characters = 1;
+    for (const auto &value : values)
+      characters += value.size() + 1;
+    if (values.empty())
+      ++characters;
+
+    buffer.reserve(characters);
+    for (const auto &value : values) {
+      buffer.insert(buffer.end(), value.begin(), value.end());
+      buffer.push_back(L'\0');
+    }
+    buffer.push_back(L'\0');
+    if (values.empty())
+      buffer.push_back(L'\0');
+
+    const size_t bytes = buffer.size() * sizeof(wchar_t);
+    if (bytes > MAXULONG)
+      return STATUS_INTEGER_OVERFLOW;
+    return assign_value(name, REG_MULTI_SZ, buffer.data(),
+                        static_cast<ULONG>(bytes));
+  }
+
+  /** @brief Assigns a named REG_MULTI_SZ value. */
+  ntl::status
+  assign_multi_string(const std::wstring &name,
+                      const std::vector<std::wstring> &values) const {
+    ntl::unicode_string native_name(name);
+    return assign_multi_string(&*native_name, values);
   }
 
   /** @brief Returns the underlying WDM registry handle. */

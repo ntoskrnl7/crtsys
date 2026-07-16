@@ -21,6 +21,7 @@
 namespace {
 
 struct device_state {
+  std::mutex transformed_values_lock;
   std::vector<std::uint32_t> transformed_values;
   ntl::kmdf::io_queue pending_requests;
   std::atomic<std::uint32_t> open_files{0};
@@ -28,6 +29,8 @@ struct device_state {
   std::atomic<std::uint32_t> timer_expirations{0};
   std::atomic<std::uint32_t> released_requests{0};
   std::atomic<std::uint32_t> canceled_requests{0};
+  std::atomic<std::uint32_t> forward_progress_reservations{0};
+  std::atomic<std::uint32_t> forward_progress_requests{0};
 
   ~device_state() noexcept {
     DbgPrint("[crtsys KMDF sample] device context destroyed\n");
@@ -97,16 +100,14 @@ constexpr auto child_create_callback =
   return STATUS_NOT_SUPPORTED;
 };
 
-constexpr auto child_scan_callback =
-    +[](ntl::kmdf::child_list) noexcept {};
+constexpr auto child_scan_callback = +[](ntl::kmdf::child_list) noexcept {};
 
 constexpr auto child_compare_callback =
     +[](ntl::kmdf::child_list,
         const ntl::kmdf::child_identification<child_identity> &left,
-        const ntl::kmdf::child_identification<child_identity>
-            &right) noexcept {
-  return left.payload.serial_number == right.payload.serial_number;
-};
+        const ntl::kmdf::child_identification<child_identity> &right) noexcept {
+      return left.payload.serial_number == right.payload.serial_number;
+    };
 
 constexpr auto utility_dpc_callback = +[](ntl::kmdf::dpc work) noexcept {
   // Standalone KMDF DPC callbacks run at DISPATCH_LEVEL. Keep this path
@@ -131,8 +132,7 @@ constexpr auto utility_wait_lock_callback =
   using child_config =
       ntl::kmdf::child_list_config<child_identity, child_location>;
   auto config = child_config::with_create<child_create_callback>();
-  config.on_scan<child_scan_callback>()
-      .on_compare<child_compare_callback>();
+  config.on_scan<child_scan_callback>().on_compare<child_compare_callback>();
 
   auto list = ntl::kmdf::child_list::try_create(device, config);
   if (!list)
@@ -156,8 +156,7 @@ ntl::status verify_request_memory_surface(ntl::kmdf::device device) noexcept {
   memory_attributes.parent(device);
 
   auto allocated = ntl::kmdf::memory::try_allocate(
-      sizeof(std::uint32_t) * 4, NonPagedPoolNx, "NTLm",
-      &memory_attributes);
+      sizeof(std::uint32_t) * 4, NonPagedPoolNx, "NTLm", &memory_attributes);
   if (!allocated)
     return allocated.status();
 
@@ -195,9 +194,8 @@ ntl::status verify_common_object_surface(ntl::kmdf::device device) noexcept {
   {
     ntl::kmdf::object_attributes object_config;
     object_config.parent(device);
-    auto general =
-        ntl::kmdf::owned_object::try_create<utility_object_state>(
-            &object_config, 42);
+    auto general = ntl::kmdf::owned_object::try_create<utility_object_state>(
+        &object_config, 42);
     if (!general)
       return general.status();
     if (general->context<utility_object_state>().value != 42)
@@ -351,24 +349,24 @@ void complete_transform(device_state &state,
 constexpr auto file_create_callback =
     +[](ntl::kmdf::device device, ntl::kmdf::request request,
         ntl::kmdf::file file) noexcept {
-  try {
-    auto &state = file.context<file_state>();
-    state.name.assign(file.name());
-    device.context<device_state>().open_files.fetch_add(
-        1, std::memory_order_relaxed);
+      try {
+        auto &state = file.context<file_state>();
+        state.name.assign(file.name());
+        device.context<device_state>().open_files.fetch_add(
+            1, std::memory_order_relaxed);
 
-    const ntl::file wdm_file = file.wdm();
-    DbgPrint("[crtsys KMDF sample] file opened (%Iu chars, read=%u, "
-             "write=%u)\n",
-             state.name.size(), wdm_file.can_read() ? 1u : 0u,
-             wdm_file.can_write() ? 1u : 0u);
-    request.complete(STATUS_SUCCESS);
-  } catch (const std::bad_alloc &) {
-    request.complete(STATUS_INSUFFICIENT_RESOURCES);
-  } catch (...) {
-    request.complete(STATUS_UNSUCCESSFUL);
-  }
-};
+        const ntl::file wdm_file = file.wdm();
+        DbgPrint("[crtsys KMDF sample] file opened (%Iu chars, read=%u, "
+                 "write=%u)\n",
+                 state.name.size(), wdm_file.can_read() ? 1u : 0u,
+                 wdm_file.can_write() ? 1u : 0u);
+        request.complete(STATUS_SUCCESS);
+      } catch (const std::bad_alloc &) {
+        request.complete(STATUS_INSUFFICIENT_RESOURCES);
+      } catch (...) {
+        request.complete(STATUS_UNSUCCESSFUL);
+      }
+    };
 
 constexpr auto file_cleanup_callback = +[](ntl::kmdf::file file) noexcept {
   file.context<file_state>().cleaned_up = true;
@@ -383,8 +381,7 @@ constexpr auto file_close_callback = +[](ntl::kmdf::file file) noexcept {
   DbgPrint("[crtsys KMDF sample] file close\n");
 };
 
-constexpr auto work_item_callback =
-    +[](ntl::kmdf::work_item item) noexcept {
+constexpr auto work_item_callback = +[](ntl::kmdf::work_item item) noexcept {
   item.parent().context<device_state>().work_items.fetch_add(
       1, std::memory_order_relaxed);
   DbgPrint("[crtsys KMDF sample] work item ran at IRQL %lu\n",
@@ -398,95 +395,107 @@ constexpr auto timer_callback = +[](ntl::kmdf::timer timer) noexcept {
            static_cast<unsigned long>(ntl::current_irql()));
 };
 
-constexpr auto device_control_callback =
-    +[](ntl::kmdf::io_queue queue, ntl::kmdf::request request, size_t, size_t,
-        ULONG io_control_code) noexcept {
-      auto &state = queue.owner().context<device_state>();
+constexpr auto device_control_callback = +[](ntl::kmdf::io_queue queue,
+                                             ntl::kmdf::request request, size_t,
+                                             size_t,
+                                             ULONG io_control_code) noexcept {
+  auto &state = queue.owner().context<device_state>();
+  const auto parameters = request.parameters();
+  if (parameters.type() != WdfRequestTypeDeviceControl ||
+      !request.associated_queue() || request.wdm_irp() == nullptr) {
+    request.complete(STATUS_OBJECT_TYPE_MISMATCH);
+    return;
+  }
+  (void)request.requestor_mode();
+  (void)request.is_from_32bit_process();
+  (void)request.is_reserved();
 
-      if (io_control_code == kmdf_ntl_sample::transform_ioctl_code) {
-        complete_transform(state, std::move(request));
-        return;
-      }
+  if (io_control_code == kmdf_ntl_sample::transform_ioctl_code) {
+    complete_transform(state, std::move(request));
+    return;
+  }
 
-      if (io_control_code == kmdf_ntl_sample::manual_wait_ioctl_code) {
-        const ntl::status status =
-            std::move(request).try_forward_to(state.pending_requests);
-        if (status.is_err())
-          request.complete(status);
-        return;
-      }
+  if (io_control_code == kmdf_ntl_sample::manual_wait_ioctl_code) {
+    const ntl::status status =
+        std::move(request).try_forward_to(state.pending_requests);
+    if (status.is_err())
+      request.complete(status);
+    return;
+  }
 
-      if (io_control_code == kmdf_ntl_sample::manual_release_ioctl_code) {
-        const ntl::kmdf::file associated_file = request.associated_file();
-        ntl::kmdf::request_parameters parameters;
-        auto found = state.pending_requests.try_find(nullptr, &associated_file,
-                                                     &parameters);
-        if (!found) {
-          request.complete(found.status());
-          return;
-        }
-        if (parameters.type() != WdfRequestTypeDeviceControl ||
-            parameters.value().Parameters.DeviceIoControl.IoControlCode !=
-                kmdf_ntl_sample::manual_wait_ioctl_code) {
-          request.complete(STATUS_OBJECT_TYPE_MISMATCH);
-          return;
-        }
+  if (io_control_code == kmdf_ntl_sample::manual_release_ioctl_code) {
+    const ntl::kmdf::file associated_file = request.associated_file();
+    ntl::kmdf::request_parameters queued_parameters;
+    auto found = state.pending_requests.try_find(nullptr, &associated_file,
+                                                 &queued_parameters);
+    if (!found) {
+      request.complete(found.status());
+      return;
+    }
+    if (queued_parameters.type() != WdfRequestTypeDeviceControl ||
+        queued_parameters.value().Parameters.DeviceIoControl.IoControlCode !=
+            kmdf_ntl_sample::manual_wait_ioctl_code) {
+      request.complete(STATUS_OBJECT_TYPE_MISMATCH);
+      return;
+    }
 
-        auto pending =
-            state.pending_requests.try_retrieve(std::move(found).value());
-        if (!pending) {
-          request.complete(pending.status());
-          return;
-        }
+    auto pending =
+        state.pending_requests.try_retrieve(std::move(found).value());
+    if (!pending) {
+      request.complete(pending.status());
+      return;
+    }
 
-        auto input =
-            pending->try_input_buffer<kmdf_ntl_sample::manual_wait_request>();
-        auto output =
-            pending->try_output_buffer<kmdf_ntl_sample::manual_wait_reply>();
-        if (!input || !output) {
-          const NTSTATUS status = !input ? input.status() : output.status();
-          pending->complete(status);
-          request.complete(status);
-          return;
-        }
+    auto input =
+        pending->try_input_buffer<kmdf_ntl_sample::manual_wait_request>();
+    auto output =
+        pending->try_output_buffer<kmdf_ntl_sample::manual_wait_reply>();
+    if (!input || !output) {
+      const NTSTATUS status = !input ? input.status() : output.status();
+      pending->complete(status);
+      request.complete(status);
+      return;
+    }
 
-        const auto &input_buffer = input.value();
-        auto &output_buffer = output.value();
-        output_buffer->value = input_buffer->value + 1000;
-        output_buffer->server_irql =
-            static_cast<std::uint32_t>(ntl::current_irql());
-        pending->complete(STATUS_SUCCESS,
-                          sizeof(kmdf_ntl_sample::manual_wait_reply));
-        state.released_requests.fetch_add(1, std::memory_order_relaxed);
-        request.complete(STATUS_SUCCESS);
-        return;
-      }
+    const auto &input_buffer = input.value();
+    auto &output_buffer = output.value();
+    output_buffer->value = input_buffer->value + 1000;
+    output_buffer->server_irql =
+        static_cast<std::uint32_t>(ntl::current_irql());
+    pending->complete(STATUS_SUCCESS,
+                      sizeof(kmdf_ntl_sample::manual_wait_reply));
+    state.released_requests.fetch_add(1, std::memory_order_relaxed);
+    request.complete(STATUS_SUCCESS);
+    return;
+  }
 
-      if (io_control_code == kmdf_ntl_sample::manual_stats_ioctl_code) {
-        auto output =
-            request.try_output_buffer<kmdf_ntl_sample::manual_queue_stats>();
-        if (!output) {
-          request.complete(output.status());
-          return;
-        }
+  if (io_control_code == kmdf_ntl_sample::manual_stats_ioctl_code) {
+    auto output =
+        request.try_output_buffer<kmdf_ntl_sample::manual_queue_stats>();
+    if (!output) {
+      request.complete(output.status());
+      return;
+    }
 
-        auto &output_buffer = output.value();
-        ULONG queued_requests = 0;
-        (void)state.pending_requests.state(&queued_requests, nullptr);
-        output_buffer->queued_requests = queued_requests;
-        output_buffer->released_requests =
-            state.released_requests.load(std::memory_order_relaxed);
-        output_buffer->canceled_requests =
-            state.canceled_requests.load(std::memory_order_relaxed);
-        request.complete(STATUS_SUCCESS,
-                         sizeof(kmdf_ntl_sample::manual_queue_stats));
-        return;
-      }
+    auto &output_buffer = output.value();
+    ULONG queued_requests = 0;
+    (void)state.pending_requests.state(&queued_requests, nullptr);
+    output_buffer->queued_requests = queued_requests;
+    output_buffer->released_requests =
+        state.released_requests.load(std::memory_order_relaxed);
+    output_buffer->canceled_requests =
+        state.canceled_requests.load(std::memory_order_relaxed);
+    output_buffer->forward_progress_requests =
+        state.forward_progress_requests.load(std::memory_order_relaxed);
+    request.complete(STATUS_SUCCESS,
+                     sizeof(kmdf_ntl_sample::manual_queue_stats));
+    return;
+  }
 
-      {
-        request.complete(STATUS_INVALID_DEVICE_REQUEST);
-      }
-    };
+  {
+    request.complete(STATUS_INVALID_DEVICE_REQUEST);
+  }
+};
 
 constexpr auto manual_queue_canceled_callback =
     +[](ntl::kmdf::io_queue queue, ntl::kmdf::request request) noexcept {
@@ -495,9 +504,32 @@ constexpr auto manual_queue_canceled_callback =
       request.complete(STATUS_CANCELLED);
     };
 
+constexpr auto forward_progress_reserved_callback =
+    +[](ntl::kmdf::io_queue queue,
+        ntl::kmdf::reserved_request_resources) noexcept -> NTSTATUS {
+  queue.owner().context<device_state>().forward_progress_reservations.fetch_add(
+      1, std::memory_order_relaxed);
+  return STATUS_SUCCESS;
+};
+
+constexpr auto forward_progress_request_callback =
+    +[](ntl::kmdf::io_queue queue,
+        ntl::kmdf::request_resources) noexcept -> NTSTATUS {
+  // KMDF calls this callback for every new request before queue insertion.
+  // The restricted view does not expose completion or a reserved-only test,
+  // preventing this stage from being confused with reserve preparation.
+  queue.owner().context<device_state>().forward_progress_requests.fetch_add(
+      1, std::memory_order_relaxed);
+  return STATUS_SUCCESS;
+};
+
 constexpr auto unload_callback = +[](ntl::kmdf::driver) noexcept {
   DbgPrint("[crtsys KMDF sample] unload at IRQL %lu\n",
            static_cast<unsigned long>(ntl::current_irql()));
+};
+
+constexpr auto shutdown_callback = +[](ntl::kmdf::device) noexcept {
+  DbgPrint("[crtsys KMDF sample] control device shutdown\n");
 };
 
 ntl::status create_control_device(const ntl::kmdf::driver &driver) {
@@ -512,7 +544,9 @@ ntl::status create_control_device(const ntl::kmdf::driver &driver) {
   if (status.is_err())
     return status;
 
-  init.device_type(FILE_DEVICE_UNKNOWN).io_type(WdfDeviceIoBuffered);
+  init.device_type(FILE_DEVICE_UNKNOWN)
+      .io_type(WdfDeviceIoBuffered)
+      .on_shutdown<shutdown_callback>(WdfDeviceShutdown);
 
   ntl::kmdf::file_config<file_state> files;
   files.execution_level(WdfExecutionLevelPassive)
@@ -529,6 +563,9 @@ ntl::status create_control_device(const ntl::kmdf::driver &driver) {
     return device_result.status();
 
   const auto device = std::move(device_result).value();
+  auto device_name = device.try_name();
+  if (!device_name || device_name->view() != L"\\Device\\CrtSysKmdfNtlSample")
+    return STATUS_DATA_ERROR;
   auto identity = device.try_emplace_context<device_identity>(0x4B4D4446u);
   if (!identity)
     return identity.status();
@@ -560,8 +597,7 @@ ntl::status create_control_device(const ntl::kmdf::driver &driver) {
           std::memory_order_relaxed) != 1)
     return STATUS_DATA_ERROR;
 
-  auto timer_config =
-      ntl::kmdf::timer_config::one_shot<timer_callback>();
+  auto timer_config = ntl::kmdf::timer_config::one_shot<timer_callback>();
   timer_config.automatic_serialization(false);
   ntl::kmdf::object_attributes timer_attributes;
   timer_attributes.execution_level(WdfExecutionLevelPassive);
@@ -583,15 +619,33 @@ ntl::status create_control_device(const ntl::kmdf::driver &driver) {
     return manual_queue.status();
   device.context<device_state>().pending_requests = manual_queue.value();
 
-  ntl::kmdf::io_queue_config queue_config(WdfIoQueueDispatchSequential);
+  // A forwarded manual-wait request remains incomplete. Parallel dispatch
+  // lets release and statistics IOCTLs run while that request is pending.
+  ntl::kmdf::io_queue_config queue_config(WdfIoQueueDispatchParallel);
   queue_config.on_device_control<device_control_callback>();
 
   ntl::kmdf::object_attributes queue_attributes;
-  queue_attributes.execution_level(WdfExecutionLevelPassive);
+  queue_attributes.execution_level(WdfExecutionLevelPassive)
+      .synchronization_scope(WdfSynchronizationScopeNone);
   auto queue_result =
       ntl::kmdf::io_queue::try_create(device, queue_config, &queue_attributes);
   if (!queue_result)
     return queue_result.status();
+
+  auto forward_progress =
+      ntl::kmdf::forward_progress_policy::always_reserved(1);
+  forward_progress
+      .prepare_reserved_requests<forward_progress_reserved_callback>()
+      .prepare_each_request<forward_progress_request_callback>();
+  status = forward_progress.try_assign(queue_result.value());
+  if (status.is_err())
+    return status;
+  if (device.context<device_state>().forward_progress_reservations.load(
+          std::memory_order_relaxed) != 1)
+    return STATUS_DATA_ERROR;
+
+  if (device.default_queue().native_handle() != queue_result->native_handle())
+    return STATUS_DATA_ERROR;
 
   device.finish_initializing();
   return STATUS_SUCCESS;
@@ -624,7 +678,10 @@ void complete_transform(device_state &state,
     std::vector<std::uint32_t> values{input->value, 1, 2, 3};
     const std::uint32_t transformed =
         std::accumulate(values.begin(), values.end(), std::uint32_t{0});
-    state.transformed_values.push_back(transformed);
+    {
+      std::lock_guard lock(state.transformed_values_lock);
+      state.transformed_values.push_back(transformed);
+    }
     const std::string message =
         std::format("KMDF transformed {} to {}", input->value, transformed);
 

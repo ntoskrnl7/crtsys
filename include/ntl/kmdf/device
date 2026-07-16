@@ -16,6 +16,7 @@
 #include "object_attributes"
 #include "property"
 #include "registry"
+#include "string"
 
 #include "detail/wdf"
 #include <string>
@@ -27,6 +28,7 @@ template <class Identification, class Address> class child_list_config;
 template <class Interface> class query_interface_config;
 template <class Interface> class queried_interface;
 class io_target;
+class io_queue;
 class pdo;
 class request;
 
@@ -147,6 +149,32 @@ public:
                                      enabled ? TRUE : FALSE);
   }
 
+  /** @brief Retrieves the framework device name at PASSIVE_LEVEL. */
+  ntl::result<string> try_name() const noexcept {
+    auto value = string::try_create();
+    if (!value)
+      return ntl::unexpected(value.status());
+    const NTSTATUS result =
+        WdfDeviceRetrieveDeviceName(handle_, value->native_object());
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return value;
+  }
+
+  /** @brief Retrieves one registered device-interface string. */
+  ntl::result<string>
+  try_interface_string(const GUID &interface_class,
+                       PCUNICODE_STRING reference = nullptr) const noexcept {
+    auto value = string::try_create();
+    if (!value)
+      return ntl::unexpected(value.status());
+    const NTSTATUS result = WdfDeviceRetrieveDeviceInterfaceString(
+        handle_, &interface_class, reference, value->native_object());
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return value;
+  }
+
   /**
    * @brief Marks a non-PnP control device as initialized.
    */
@@ -173,6 +201,100 @@ public:
 
   /** @brief Returns the device's default I/O target. */
   io_target default_io_target() const noexcept;
+
+  /** @brief Returns the device's default I/O queue, when configured. */
+  io_queue default_queue() const noexcept;
+
+  /** @brief Routes one request type to a non-default queue. */
+  ntl::status try_route_requests(const io_queue &queue,
+                                 WDF_REQUEST_TYPE type) const noexcept;
+
+  /** @brief Prevents the device from entering its idle power state. */
+  ntl::status try_stop_idle(bool wait_for_d0 = false) const noexcept {
+    return WdfDeviceStopIdleNoTrack(handle_, wait_for_d0 ? TRUE : FALSE);
+  }
+
+  /** @brief Releases one successful try_stop_idle() reference. */
+  void resume_idle() const noexcept { WdfDeviceResumeIdleNoTrack(handle_); }
+
+  /** @brief Returns the current framework PnP state. */
+  WDF_DEVICE_PNP_STATE pnp_state() const noexcept {
+    return WdfDeviceGetDevicePnpState(handle_);
+  }
+
+  /** @brief Returns the current framework device-power state. */
+  WDF_DEVICE_POWER_STATE power_state() const noexcept {
+    return WdfDeviceGetDevicePowerState(handle_);
+  }
+
+  /** @brief Returns the current framework power-policy state. */
+  WDF_DEVICE_POWER_POLICY_STATE power_policy_state() const noexcept {
+    return WdfDeviceGetDevicePowerPolicyState(handle_);
+  }
+
+  /** @brief Returns the system power action currently in progress. */
+  POWER_ACTION system_power_action() const noexcept {
+    return WdfDeviceGetSystemPowerAction(handle_);
+  }
+
+  /** @brief Returns the current PnP device-state flags. */
+  WDF_DEVICE_STATE state() const noexcept {
+    WDF_DEVICE_STATE value{};
+    WDF_DEVICE_STATE_INIT(&value);
+    WdfDeviceGetDeviceState(handle_, &value);
+    return value;
+  }
+
+  /** @brief Replaces the PnP device-state flags. */
+  void state(WDF_DEVICE_STATE &value) const noexcept {
+    WdfDeviceSetDeviceState(handle_, &value);
+  }
+
+  /** @brief Reports a framework device failure. */
+  void set_failed(WDF_DEVICE_FAILED_ACTION action) const noexcept {
+    WdfDeviceSetFailed(handle_, action);
+  }
+
+  /** @brief Completes a pending wake request with the supplied status. */
+  ntl::status indicate_wake_status(NTSTATUS value) const noexcept {
+    return WdfDeviceIndicateWakeStatus(handle_, value);
+  }
+
+  /** @brief Returns the WDM functional device object. */
+  PDEVICE_OBJECT wdm_device_object() const noexcept {
+    return WdfDeviceWdmGetDeviceObject(handle_);
+  }
+
+  /** @brief Returns the WDM device object attached below this device. */
+  PDEVICE_OBJECT wdm_attached_device_object() const noexcept {
+    return WdfDeviceWdmGetAttachedDevice(handle_);
+  }
+
+  /** @brief Returns the WDM physical device object. */
+  PDEVICE_OBJECT wdm_physical_device_object() const noexcept {
+    return WdfDeviceWdmGetPhysicalDevice(handle_);
+  }
+
+  /** @brief Returns the current WDM device characteristics. */
+  ULONG characteristics() const noexcept {
+    return WdfDeviceGetCharacteristics(handle_);
+  }
+
+  /** @brief Sets and optionally clears WDM device characteristics. */
+  void characteristics(ULONG set_flags, ULONG clear_flags = 0) const noexcept {
+    const ULONG value = (characteristics() | set_flags) & ~clear_flags;
+    WdfDeviceSetCharacteristics(handle_, value);
+  }
+
+  /** @brief Returns the current DMA alignment requirement. */
+  ULONG alignment_requirement() const noexcept {
+    return WdfDeviceGetAlignmentRequirement(handle_);
+  }
+
+  /** @brief Sets the DMA alignment requirement. */
+  void alignment_requirement(ULONG value) const noexcept {
+    WdfDeviceSetAlignmentRequirement(handle_, value);
+  }
 
   /** @brief Registers a typed driver-defined interface on this device. */
   template <class Interface>
@@ -218,6 +340,52 @@ public:
 
 private:
   WDFDEVICE handle_ = WDF_NO_HANDLE;
+};
+
+/** @brief Move-only RAII reference that keeps a KMDF device out of idle. */
+class device_idle_reference {
+public:
+  device_idle_reference(const device_idle_reference &) = delete;
+  device_idle_reference &operator=(const device_idle_reference &) = delete;
+
+  /** @brief Transfers an acquired idle reference. */
+  device_idle_reference(device_idle_reference &&other) noexcept
+      : owner_(std::exchange(other.owner_, device{})) {}
+
+  /** @brief Releases any current reference and transfers another. */
+  device_idle_reference &operator=(device_idle_reference &&other) noexcept {
+    if (this != &other) {
+      reset();
+      owner_ = std::exchange(other.owner_, device{});
+    }
+    return *this;
+  }
+
+  /** @brief Releases the idle reference. */
+  ~device_idle_reference() { reset(); }
+
+  /** @brief Acquires a device idle reference. */
+  static ntl::result<device_idle_reference>
+  try_acquire(device owner, bool wait_for_d0 = false) noexcept {
+    const ntl::status result = owner.try_stop_idle(wait_for_d0);
+    if (result.is_err())
+      return ntl::unexpected(static_cast<NTSTATUS>(result));
+    return ntl::ok(device_idle_reference{owner});
+  }
+
+  /** @brief Releases the reference before destruction. */
+  void reset() noexcept {
+    if (owner_)
+      owner_.resume_idle();
+    owner_ = device{};
+  }
+
+  /** @brief Returns the device held out of idle. */
+  device owner() const noexcept { return owner_; }
+
+private:
+  explicit device_idle_reference(device owner) noexcept : owner_(owner) {}
+  device owner_{};
 };
 
 } // namespace ntl::kmdf
@@ -275,6 +443,40 @@ public:
     return *this;
   }
 
+  /** @brief Applies separate read/write/control buffering policies. */
+  device_init &io_type(WDF_IO_TYPE_CONFIG &config) noexcept {
+    WdfDeviceInitSetIoTypeEx(value_, &config);
+    return *this;
+  }
+
+  /** @brief Assigns an optional native device name. */
+  ntl::status try_assign_name(PCUNICODE_STRING name) noexcept {
+    return WdfDeviceInitAssignName(value_, name);
+  }
+
+  /** @brief Assigns an optional native device name. */
+  ntl::status try_assign_name(const std::wstring &name) {
+    ntl::unicode_string native_name(name);
+    return try_assign_name(&*native_name);
+  }
+
+  /** @brief Assigns an SDDL security descriptor before device creation. */
+  ntl::status try_assign_sddl(PCUNICODE_STRING sddl) noexcept {
+    return WdfDeviceInitAssignSDDLString(value_, sddl);
+  }
+
+  /** @brief Assigns a device setup class. */
+  device_init &device_class(const GUID &value) noexcept {
+    WdfDeviceInitSetDeviceClass(value_, &value);
+    return *this;
+  }
+
+  /** @brief Assigns WDM DEVICE_OBJECT characteristics. */
+  device_init &characteristics(ULONG value, bool exclusive = false) noexcept {
+    WdfDeviceInitSetCharacteristics(value_, value, exclusive ? TRUE : FALSE);
+    return *this;
+  }
+
   /**
    * @brief Configures exclusive access.
    * @param enabled True to allow only one open file object.
@@ -319,6 +521,40 @@ public:
    */
   device_init &power_not_pageable() noexcept {
     WdfDeviceInitSetPowerNotPageable(value_);
+    return *this;
+  }
+
+  /** @brief Marks this device as requiring inrush power sequencing. */
+  device_init &power_inrush() noexcept {
+    WdfDeviceInitSetPowerInrush(value_);
+    return *this;
+  }
+
+  /** @brief Selects release-hardware ordering after prepare-hardware failure.
+   */
+  device_init &release_hardware_order_on_failure(
+      WDF_RELEASE_HARDWARE_ORDER_ON_FAILURE order) noexcept {
+    WdfDeviceInitSetReleaseHardwareOrderOnFailure(value_, order);
+    return *this;
+  }
+
+  /** @brief Configures WDM remove-lock behavior for the device stack. */
+  device_init &remove_lock_options(ULONG flags) noexcept {
+    WDF_REMOVE_LOCK_OPTIONS options{};
+    WDF_REMOVE_LOCK_OPTIONS_INIT(&options, flags);
+    WdfDeviceInitSetRemoveLockOptions(value_, &options);
+    return *this;
+  }
+
+  /** @brief Returns the physical device object supplied for this FDO. */
+  PDEVICE_OBJECT physical_device_object() const noexcept {
+    return WdfFdoInitWdmGetPhysicalDevice(value_);
+  }
+
+  /** @brief Applies FDO resource-filter callbacks before device creation. */
+  template <class Callbacks>
+  device_init &fdo_events(Callbacks &callbacks) noexcept {
+    WdfFdoInitSetEventCallbacks(value_, callbacks.native());
     return *this;
   }
 
@@ -565,6 +801,21 @@ public:
    */
   control_device_init &io_type(WDF_DEVICE_IO_TYPE type) noexcept {
     WdfDeviceInitSetIoType(value_, type);
+    return *this;
+  }
+
+  /**
+   * @brief Registers a typed control-device shutdown notification.
+   * @tparam Callback Non-capturing `void(device) noexcept` callback.
+   */
+  template <auto Callback>
+  control_device_init &on_shutdown(UCHAR flags) noexcept {
+    WdfControlDeviceInitSetShutdownNotification(
+        value_,
+        +[](WDFDEVICE native_device) noexcept {
+          detail::invoke_callback<Callback>(device{native_device});
+        },
+        flags);
     return *this;
   }
 

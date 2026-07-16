@@ -146,6 +146,14 @@ self-managed I/O, query-stop/query-remove, and surprise removal.
 `power_policy_callbacks` covers S0/Sx wake policy callbacks. Both expose
 `native()` for less common WDF fields rather than hiding the native framework.
 
+The `device` facade also exposes operational state without inventing a second
+state machine: `pnp_state()`, `power_state()`, `power_policy_state()`,
+`system_power_action()`, `state()`, `set_failed()`, and
+`indicate_wake_status()`. `default_queue()` and `try_route_requests()` cover
+default and type-specific dispatch. `device_idle_reference::try_acquire()` is
+a move-only RAII pairing of `WdfDeviceStopIdleNoTrack` and
+`WdfDeviceResumeIdleNoTrack`; waiting for D0 requires `PASSIVE_LEVEL`.
+
 ## Hardware Resources
 
 `resource_list` is an iterable, non-owning view of the resource list supplied
@@ -342,6 +350,17 @@ KMDF buffer-retrieval APIs and return `ntl::result<request_buffer<T>>`.
 `request_buffer<T>` is a non-owning view valid only under the native WDF request
 buffer lifetime contract.
 
+The request facade also exposes framework memory objects and MDLs with
+`try_input_memory()`, `try_output_memory()`, `try_input_mdl()`, and
+`try_output_mdl()`. The explicitly named `try_unsafe_user_*()` functions are
+only for `EvtIoInCallerContext`; validate or lock those user addresses before
+retaining them. `try_lock_user_buffer_for_read()` and
+`try_lock_user_buffer_for_write()` return the resulting WDF memory object.
+
+`parameters()`, `requestor_mode()`, `is_from_32bit_process()`,
+`associated_queue()`, and `wdm_irp()` provide request diagnostics and explicit
+WDM interoperation without duplicating WDF's request state.
+
 `request` is move-only because a KMDF callback has one right to complete,
 forward, requeue, or send the request. `request::try_forward_to()` and
 `try_requeue()` are rvalue-qualified and empty the facade after WDF accepts the
@@ -423,6 +442,51 @@ so the caller can complete the original queue request after the lower target
 finishes. Send-and-forget remains a native WDF escape hatch because it has a
 different ownership contract.
 
+## Queue Forward Progress
+
+`forward_progress_policy` reserves framework requests so essential I/O can
+still reach a queue when ordinary request allocation fails. Assign the policy
+after creating the queue and before the device starts processing I/O:
+
+```cpp
+constexpr auto prepare_reserved_request =
+    +[](kmdf::io_queue,
+        kmdf::reserved_request_resources resources) noexcept -> NTSTATUS {
+      configure_reserved_storage(resources.as_object());
+      return STATUS_SUCCESS;
+    };
+
+constexpr auto prepare_each_request =
+    +[](kmdf::io_queue,
+        kmdf::request_resources resources) noexcept -> NTSTATUS {
+      configure_request_storage(resources.as_object());
+      return STATUS_SUCCESS;
+    };
+
+auto policy = kmdf::forward_progress_policy::always_reserved(2);
+policy.prepare_reserved_requests<prepare_reserved_request>()
+    .prepare_each_request<prepare_each_request>();
+
+auto status = policy.try_assign(queue);
+if (status.is_err())
+  return status;
+```
+
+`always_reserved()` is the normal reliability policy. `paging_io()` selects
+KMDF's paging-I/O policy, while `examine<Callback>()` lets a DISPATCH_LEVEL-safe
+callback choose whether each IRP fails or consumes a reserved request.
+`prepare_reserved_requests()` performs one-time preparation for every reserved
+request and receives `reserved_request_resources`, whose type guarantees that
+contract. In contrast, KMDF calls `prepare_each_request()` for every new
+framework request after creating it and before inserting it into a queue,
+including ordinary requests that are not reserved. Returning failure from that
+callback rejects the request.
+
+Both callbacks receive restricted resource-preparation views rather than a
+normal `request`, so they cannot accidentally complete, forward, or requeue a
+request that has not entered an I/O queue. They can run at `DISPATCH_LEVEL` and
+must not call the PASSIVE_LEVEL CRT/STL surface.
+
 ## WDF Memory And Driver-Created Requests
 
 `memory` wraps `WDFMEMORY`. `try_allocate()` creates WDF-owned storage and
@@ -493,6 +557,13 @@ auto open = ntl::kmdf::io_target_open_params::open_by_name(
     &*name, GENERIC_READ | GENERIC_WRITE);
 auto status = created_target->try_open(open);
 ```
+
+For PASSIVE_LEVEL one-shot operations, `memory_descriptor` describes a caller
+buffer, MDL, or WDF memory range. `io_target::try_read()`, `try_write()`,
+`try_ioctl()`, `try_internal_ioctl()`, and `try_internal_ioctl_others()` use
+KMDF's synchronous target helpers without requiring a separately created
+request. The target facade also exposes target WDM device/file objects as
+explicit `wdm_*()` interoperation methods.
 
 ## Common WDF Object Utilities
 
@@ -789,7 +860,9 @@ if (!created)
 `interrupt_lock` pairs `WdfInterruptAcquireLock` and
 `WdfInterruptReleaseLock`; `interrupt::synchronize()` wraps
 `WdfInterruptSynchronize`. These helpers retain the native interrupt IRQL and
-deadlock contracts.
+deadlock contracts. `info()`, `policy()`, and `extended_policy()` expose vector
+and affinity configuration, while `enable()`, `disable()`, `report_active()`,
+and `report_inactive()` preserve KMDF's explicit interrupt lifecycle.
 
 ## Timer And Work Item
 
@@ -1005,8 +1078,8 @@ acquired reference through `queried_interface<T>`.
 
 `device::try_open_registry_key()` returns a move-only
 `ntl::kmdf::registry_key`. It provides relative subkey open/create, raw value
-query/assignment, DWORD/QWORD/string helpers, and removal while retaining the
-native `WDFKEY` and WDM handle escape hatches.
+query/assignment, DWORD/QWORD/string/multi-string helpers, and removal while
+retaining the native `WDFKEY` and WDM handle escape hatches.
 
 ```cpp
 auto key = device.try_open_registry_key(
@@ -1019,6 +1092,10 @@ if (!enabled)
   return enabled.status();
 
 auto status = key->assign_string(L"Mode", L"safe");
+if (status.is_err())
+  return status;
+
+status = key->assign_multi_string(L"Fallbacks", {L"primary", L"safe"});
 if (status.is_err())
   return status;
 
@@ -1109,6 +1186,43 @@ File and interrupt objects use `native_object()` to reflect object semantics.
 They do not imply that normal NTL callbacks should expose `WDFDEVICE`,
 `WDFQUEUE`, or `WDFREQUEST`; the typed callback surface has the same WDF object
 lifetime and synchronization rules without adding dynamic dispatch or storage.
+
+## FDO, Control, And Object Utilities
+
+`fdo_event_callbacks` covers the framework's FDO resource-filter stage with
+typed `device`, `io_resource_requirements`, and `resource_list` arguments.
+The callbacks run at `PASSIVE_LEVEL` and are installed before device creation:
+
+```cpp
+ntl::kmdf::fdo_event_callbacks events;
+events.on_add_resource_requirements<filter_requirements>()
+      .on_remove_resource_requirements<remove_requirements>()
+      .on_remove_added_resources<remove_added_resources>();
+init.fdo_events(events);
+```
+
+`device::try_name()` and `try_interface_string()` return framework-owned
+`ntl::kmdf::string` objects. A control device can register a typed shutdown
+notification through `control_device_init::on_shutdown()`. Use
+`object_lock_guard` only for a WDF object created with a non-none
+synchronization scope; the guard balances `WdfObjectAcquireLock` and
+`WdfObjectReleaseLock` without allocating a second lock.
+
+## KMDF Surface Boundary
+
+The NTL surface covers the common control, PnP, filter, function, and bus
+driver paths: entry and device creation, typed contexts and callbacks, queues,
+forward progress and cancellation, requests and targets, files, PnP/power,
+resources, interrupts, timers/work items/DPCs, child lists/PDOs, query
+interfaces, FDO resource filtering, registry/properties, DMA, USB, WMI,
+control-device shutdown, and framework object synchronization.
+
+NTL deliberately does not rename every WDF function. Raw IRP dispatch and
+preprocessing, miniport integration, verifier bugcheck helpers, device-family
+protocol structures, and uncommon version-specific fields remain available
+through `native()`, `native_handle()`, `native_object()`, `wdm_*()`, and the
+normal WDK headers. Those paths are explicit framework interoperation, not a
+missing second implementation of WDF.
 
 ## Execution Context
 

@@ -50,6 +50,11 @@ public:
                              : nullptr};
   }
 
+  /** @brief Returns WDF file-object flags for create/cleanup policy. */
+  ULONG flags() const noexcept {
+    return object_ ? WdfFileObjectGetFlags(object_) : 0;
+  }
+
   /** @brief Returns this file object's constructed C++ context. */
   template <class T> T &context() const noexcept {
     return detail::get_context<T>(reinterpret_cast<WDFOBJECT>(object_));

@@ -1,0 +1,159 @@
+/**
+ * @file forward_progress
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief KMDF I/O queue forward-progress policy helpers.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "callback"
+#include "io_queue"
+
+#include "../status"
+
+#include "detail/wdf"
+#include <type_traits>
+
+namespace ntl::kmdf {
+class forward_progress_policy;
+
+/**
+ * @brief Restricted view passed while KMDF prepares resources for a request.
+ *
+ * This facade intentionally exposes neither completion nor queue-transfer
+ * operations. The request has not entered an I/O queue yet; the callback may
+ * only allocate resources and parent them to the native request object.
+ */
+class request_resources {
+public:
+  /** @brief Returns the request as a generic WDF object parent. */
+  object as_object() const noexcept {
+    return object{reinterpret_cast<WDFOBJECT>(handle_)};
+  }
+
+  /** @brief Returns the native request for explicit WDF interoperation. */
+  WDFREQUEST native_handle() const noexcept { return handle_; }
+
+protected:
+  /** @internal Created only by the forward-progress callback adapter. */
+  explicit request_resources(WDFREQUEST handle) noexcept : handle_(handle) {}
+
+private:
+  friend class forward_progress_policy;
+  WDFREQUEST handle_ = WDF_NO_HANDLE;
+};
+
+/**
+ * @brief Resource-preparation view guaranteed to represent a reserved request.
+ *
+ * The type itself carries the reserved-request guarantee, so callbacks do not
+ * need to inspect WdfRequestIsReserved and cannot confuse this stage with the
+ * per-request preparation callback.
+ */
+class reserved_request_resources final : public request_resources {
+private:
+  friend class forward_progress_policy;
+
+  /** @internal Created only for the reserved-request callback. */
+  explicit reserved_request_resources(WDFREQUEST handle) noexcept
+      : request_resources(handle) {}
+};
+
+/**
+ * @brief Builder for WDF_IO_QUEUE_FORWARD_PROGRESS_POLICY.
+ *
+ * Forward progress reserves framework requests so a queue can continue to
+ * service essential I/O when ordinary request allocation fails.
+ */
+class forward_progress_policy {
+public:
+  /** @brief Always uses a reserved request after normal allocation fails. */
+  static forward_progress_policy always_reserved(ULONG request_count) noexcept {
+    forward_progress_policy policy;
+    WDF_IO_QUEUE_FORWARD_PROGRESS_POLICY_DEFAULT_INIT(&policy.value_,
+                                                      request_count);
+    return policy;
+  }
+
+  /** @brief Selects KMDF's paging-I/O reserved-request policy. */
+  static forward_progress_policy paging_io(ULONG request_count) noexcept {
+    forward_progress_policy policy;
+    WDF_IO_QUEUE_FORWARD_PROGRESS_POLICY_PAGINGIO_INIT(&policy.value_,
+                                                       request_count);
+    return policy;
+  }
+
+  /**
+   * @brief Lets a typed callback decide whether an IRP uses a reserved request.
+   * @tparam Callback Non-capturing
+   * `WDF_IO_FORWARD_PROGRESS_ACTION(io_queue, PIRP) noexcept` callback.
+   */
+  template <auto Callback>
+  static forward_progress_policy examine(ULONG request_count) noexcept {
+    static_assert(
+        std::is_nothrow_invocable_r_v<WDF_IO_FORWARD_PROGRESS_ACTION,
+                                      decltype(Callback), io_queue, PIRP>,
+        "The forward-progress examine callback must return "
+        "WDF_IO_FORWARD_PROGRESS_ACTION and be noexcept.");
+
+    forward_progress_policy policy;
+    WDF_IO_QUEUE_FORWARD_PROGRESS_POLICY_EXAMINE_INIT(
+        &policy.value_, request_count,
+        +[](WDFQUEUE native_queue,
+            PIRP irp) noexcept -> WDF_IO_FORWARD_PROGRESS_ACTION {
+          return Callback(io_queue{native_queue}, irp);
+        });
+    return policy;
+  }
+
+  /**
+   * @brief Prepares each reserved request once when KMDF creates the reserve.
+   * @tparam Callback Non-capturing
+   * `NTSTATUS(io_queue, reserved_request_resources) noexcept` callback.
+   */
+  template <auto Callback>
+  forward_progress_policy &prepare_reserved_requests() noexcept {
+    value_.EvtIoAllocateResourcesForReservedRequest =
+        +[](WDFQUEUE native_queue,
+            WDFREQUEST native_request) noexcept -> NTSTATUS {
+      return detail::invoke_status_callback<Callback>(
+          io_queue{native_queue}, reserved_request_resources{native_request});
+    };
+    return *this;
+  }
+
+  /**
+   * @brief Prepares every new framework request before queue insertion.
+   *
+   * KMDF invokes this callback after creating each request object and before
+   * inserting it into a queue. The request can be an ordinary request; it is
+   * not necessarily one of the policy's reserved forward-progress requests.
+   * @tparam Callback Non-capturing
+   * `NTSTATUS(io_queue, request_resources) noexcept` callback.
+   */
+  template <auto Callback>
+  forward_progress_policy &prepare_each_request() noexcept {
+    value_.EvtIoAllocateRequestResources =
+        +[](WDFQUEUE native_queue,
+            WDFREQUEST native_request) noexcept -> NTSTATUS {
+      return detail::invoke_status_callback<Callback>(
+          io_queue{native_queue}, request_resources{native_request});
+    };
+    return *this;
+  }
+
+  /** @brief Assigns this policy to an existing queue at PASSIVE_LEVEL. */
+  ntl::status try_assign(const io_queue &queue) noexcept {
+    return WdfIoQueueAssignForwardProgressPolicy(queue.native_handle(),
+                                                 &value_);
+  }
+
+  /** @brief Returns the mutable native policy. */
+  PWDF_IO_QUEUE_FORWARD_PROGRESS_POLICY native() noexcept { return &value_; }
+
+private:
+  forward_progress_policy() noexcept = default;
+  WDF_IO_QUEUE_FORWARD_PROGRESS_POLICY value_{};
+};
+} // namespace ntl::kmdf
