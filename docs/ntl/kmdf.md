@@ -909,6 +909,69 @@ checked `as_string()` and `as_uint32()` conversions. These NTL helpers require
 native `WdfDeviceQueryPropertyEx` API remains available when a driver needs
 its wider `APC_LEVEL` contract and supplies its own storage.
 
+## WMI Providers And Instances
+
+`wmi_provider` and `wmi_instance` are non-owning facades for KMDF's
+framework-owned WMI objects. A provider belongs to a PnP device and cannot be
+created for a control device. `wmi_provider_config` declares one data-block
+GUID; `wmi_instance_config` connects typed query, set, set-item, and method
+callbacks to an instance of that provider.
+
+```cpp
+struct telemetry_state {
+  std::uint32_t value = 7;
+};
+
+constexpr auto query_telemetry =
+    +[](ntl::kmdf::wmi_instance instance,
+        ntl::kmdf::wmi_output_buffer output) noexcept -> NTSTATUS {
+  return output.try_write(instance.context<telemetry_state>());
+};
+
+ntl::kmdf::wmi_provider_config provider(telemetry_guid);
+provider.minimum_instance_buffer_size(sizeof(telemetry_state));
+
+auto created_provider =
+    ntl::kmdf::wmi_provider::try_create(device, provider);
+if (!created_provider)
+  return created_provider.status();
+
+ntl::kmdf::wmi_instance_config instance(created_provider.value());
+instance.register_automatically().on_query<query_telemetry>();
+
+auto telemetry = ntl::kmdf::wmi_instance::try_create<telemetry_state>(
+    device, instance, nullptr);
+```
+
+Assign the compiled MOF resource name before the device starts:
+
+```cpp
+auto status = device.try_assign_mof_resource(L"DriverMofResource");
+```
+
+`wmi_input_buffer`, `wmi_output_buffer`, and `wmi_method_buffer` validate
+fixed-size trivially-copyable payloads and preserve WMI's required-size
+reporting. `use_native_context_for_query()` is the native WDF shortcut and
+must not be used with an NTL-managed C++ context, because the managed context
+also contains construction metadata.
+
+Automatic registration occurs on the first D0 entry. Manual instances can use
+`try_register()` and `deregister()` at `PASSIVE_LEVEL`. Event-only providers
+are created through the `wmi_instance_config(wmi_provider_config&)`
+single-instance path and use `try_fire_event()` at IRQL no higher than
+`APC_LEVEL`. Query, set, set-item, method, and provider function-control
+callbacks run at `PASSIVE_LEVEL`; the function-control callback is ignored
+for event-only providers. WDF does not permit an explicit
+`ExecutionLevel` on WMI provider or instance objects, so their
+`object_attributes` must retain `WdfExecutionLevelInheritFromParent`. Set a
+passive contract on supported parent objects such as the device or queue, and
+always follow each native KMDF WMI callback's documented IRQL contract.
+
+The buildable [KMDF WMI sample](../../examples/kmdf-wmi-ntl-driver) compiles
+and validates a binary MOF resource, runs typed query/set/method callbacks,
+subscribes to an event from user mode, triggers it through a device interface,
+and verifies the event payload through `ROOT\\WMI`.
+
 ## Queue Control
 
 `io_queue` exposes start, stop, drain, purge, and stop-and-purge operations.

@@ -33,4 +33,5 @@
 #include "timer"
 #include "usb"
 #include "wait_lock"
+#include "wmi"
 #include "work_item"

@@ -1,0 +1,51 @@
+#PRAGMA AUTORECOVER
+
+[Dynamic, Provider("WMIProv"),
+ WMI,
+ Description("crtsys NTL KMDF WMI sample data"),
+ guid("{CC8BE7F6-37D9-4818-B89E-0D2D110F11A0}"),
+ locale("MS\\0x409")]
+class CrtSys_KmdfWmiSample
+{
+    [key, read]
+    string InstanceName;
+
+    [read]
+    boolean Active;
+
+    [WmiDataId(1), read, write]
+    uint32 Value;
+
+    [WmiDataId(2), read]
+    uint32 QueryCount;
+
+    [WmiDataId(3), read]
+    uint32 SetCount;
+
+    [WmiDataId(4), read]
+    uint32 MethodCount;
+
+    [WmiDataId(5), read]
+    uint32 EventCount;
+
+    [Implemented, WmiMethodId(1)]
+    void Transform([in] uint32 Input,
+                   [out] uint32 Output);
+};
+
+[WMI, Dynamic, Provider("WMIProv"),
+ guid("{6E3F0489-13A3-423A-9759-2ADE54867388}"),
+ locale("MS\\0x409"),
+ WmiExpense(1),
+ Description("crtsys NTL KMDF WMI sample event")]
+class CrtSys_KmdfWmiEvent : WMIEvent
+{
+    [key, read]
+    string InstanceName;
+
+    [read]
+    boolean Active;
+
+    [WmiDataId(1), read]
+    uint32 Sequence;
+};

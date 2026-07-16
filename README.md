@@ -188,6 +188,7 @@ may compile or work.
 | [NTL KMDF sample](./examples/kmdf-ntl-driver) | `ntl::kmdf::main`, C++ WDF contexts, typed file/request and manual-queue cancellation, common WDF object utilities, deferred callbacks, and STL in passive KMDF callbacks |
 | [NTL KMDF DMA template](./examples/kmdf-dma-ntl-driver) | Buildable PnP packet-DMA transaction, scatter/gather, common-buffer, and interrupt-DPC integration template for real hardware |
 | [NTL KMDF USB template](./examples/kmdf-usb-ntl-driver) | Buildable PnP USB device/interface/pipe and continuous-reader template with a user-mode inspection app |
+| [NTL KMDF WMI sample](./examples/kmdf-wmi-ntl-driver) | MOF-backed typed WMI query/set/method providers, event delivery, and a `ROOT\\WMI` user-mode verifier |
 | [CI Driver Load Tests](./docs/ci-driver-load-tests.md) | Optional self-hosted driver load/run workflow |
 
 ## Operational Boundaries

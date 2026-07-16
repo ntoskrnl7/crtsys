@@ -234,6 +234,7 @@ foreach ($requiredPath in @(
   'include\ntl\kmdf\driver',
   'include\ntl\kmdf\dma',
   'include\ntl\kmdf\usb',
+  'include\ntl\kmdf\wmi',
   "build\native\lib\native\$Toolset\$Architecture\$Configuration\crtsys.lib",
   "build\native\lib\native\$Toolset\$Architecture\$Configuration\Ldk.lib"
 )) {
@@ -494,6 +495,37 @@ struct sample_additional_context {
 struct sample_general_object_context {
   explicit sample_general_object_context(ULONG value) noexcept : value(value) {}
   ULONG value;
+};
+
+struct sample_wmi_data {
+  ULONG value;
+};
+
+constexpr GUID sample_wmi_guid = {
+    0x3988f399, 0xa3df, 0x4d40,
+    {0xa1, 0xdd, 0x2e, 0x3f, 0x2f, 0xf1, 0x8f, 0x8c}};
+
+constexpr auto sample_wmi_control =
+    +[](ntl::kmdf::wmi_provider, WDF_WMI_PROVIDER_CONTROL,
+        bool) noexcept -> NTSTATUS { return STATUS_SUCCESS; };
+
+constexpr auto sample_wmi_query =
+    +[](ntl::kmdf::wmi_instance,
+        ntl::kmdf::wmi_output_buffer output) noexcept -> NTSTATUS {
+  return output.try_write(sample_wmi_data{42});
+};
+
+constexpr auto sample_wmi_set =
+    +[](ntl::kmdf::wmi_instance,
+        ntl::kmdf::wmi_input_buffer input) noexcept -> NTSTATUS {
+  return input.try_read<sample_wmi_data>() ? STATUS_SUCCESS
+                                           : STATUS_BUFFER_TOO_SMALL;
+};
+
+constexpr auto sample_wmi_method =
+    +[](ntl::kmdf::wmi_instance, ULONG,
+        ntl::kmdf::wmi_method_buffer buffer) noexcept -> NTSTATUS {
+  return buffer.output().try_write(sample_wmi_data{84});
 };
 
 constexpr auto sample_program_dma =
@@ -830,6 +862,28 @@ constexpr auto sample_standalone_dpc =
     (void)device_key->query_dword(std::wstring(L"SampleValue"));
   }
   (void)device.try_query_property(DevicePropertyDeviceDescription);
+  (void)device.try_assign_mof_resource(L"CrtSysPackageSmoke");
+
+  wmi_provider_config wmi_provider_settings(sample_wmi_guid);
+  wmi_provider_settings
+      .minimum_instance_buffer_size(sizeof(sample_wmi_data))
+      .on_function_control<sample_wmi_control>();
+  auto wmi_provider_object =
+      wmi_provider::try_create(device, wmi_provider_settings);
+  if (wmi_provider_object) {
+    wmi_instance_config wmi_instance_settings(wmi_provider_object.value());
+    wmi_instance_settings
+        .register_automatically()
+        .on_query<sample_wmi_query>()
+        .on_set<sample_wmi_set>()
+        .on_execute<sample_wmi_method>();
+    auto wmi_instance_object =
+        wmi_instance::try_create(device, wmi_instance_settings);
+    if (wmi_instance_object) {
+      (void)wmi_instance_object->provider();
+      (void)wmi_instance_object->try_fire_event(sample_wmi_data{1});
+    }
+  }
 
   io_queue_config queue_config(WdfIoQueueDispatchSequential);
   queue_config
