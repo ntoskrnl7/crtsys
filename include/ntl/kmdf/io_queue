@@ -242,6 +242,23 @@ public:
     return WdfIoQueueGetState(handle_, queued_requests, driver_requests);
   }
 
+  /**
+   * @brief Registers a callback invoked when a manual queue becomes
+   * nonempty.
+   * @tparam Callback Non-capturing `void(io_queue, void*)
+   * noexcept` callback.
+   */
+  template <auto Callback>
+  ntl::status ready_notify(void *context = nullptr) const noexcept {
+    return WdfIoQueueReadyNotify(handle_, queue_state_callback<Callback>(),
+                                 context);
+  }
+
+  /** @brief Removes a previously registered manual-queue ready callback. */
+  ntl::status clear_ready_notify() const noexcept {
+    return WdfIoQueueReadyNotify(handle_, nullptr, nullptr);
+  }
+
   /** @brief Returns the native WDF queue handle. */
   WDFQUEUE native_handle() const noexcept { return handle_; }
 
@@ -396,5 +413,20 @@ io_queue::try_create(const device &owner, io_queue_config &config,
   if (!NT_SUCCESS(result))
     return ntl::unexpected(result);
   return ntl::ok(io_queue{handle});
+}
+
+inline io_queue device::default_queue() const noexcept {
+  return io_queue{WdfDeviceGetDefaultQueue(native_handle())};
+}
+
+inline ntl::status
+device::try_route_requests(const io_queue &queue,
+                           WDF_REQUEST_TYPE type) const noexcept {
+  return WdfDeviceConfigureRequestDispatching(native_handle(),
+                                              queue.native_handle(), type);
+}
+
+inline io_queue request::associated_queue() const noexcept {
+  return io_queue{WdfRequestGetIoQueue(native_handle())};
 }
 } // namespace ntl::kmdf

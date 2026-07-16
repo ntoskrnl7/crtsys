@@ -10,12 +10,14 @@
 #include "callback"
 #include "device"
 #include "object_attributes"
+#include "spin_lock"
+#include "wait_lock"
 
 #include "../result"
 #include "../status"
 
-#include <utility>
 #include "detail/wdf"
+#include <utility>
 
 namespace ntl::kmdf {
 class interrupt_config;
@@ -75,8 +77,45 @@ public:
   /** @brief Acquires the framework interrupt lock. */
   void acquire_lock() const noexcept { WdfInterruptAcquireLock(object_); }
 
+  /** @brief Tries to acquire a passive-level interrupt lock without waiting. */
+  bool try_acquire_lock() const noexcept {
+    return WdfInterruptTryToAcquireLock(object_) != FALSE;
+  }
+
   /** @brief Releases the framework interrupt lock. */
   void release_lock() const noexcept { WdfInterruptReleaseLock(object_); }
+
+  /** @brief Explicitly enables the interrupt at PASSIVE_LEVEL. */
+  void enable() const noexcept { WdfInterruptEnable(object_); }
+
+  /** @brief Explicitly disables the interrupt at PASSIVE_LEVEL. */
+  void disable() const noexcept { WdfInterruptDisable(object_); }
+
+  /** @brief Returns vector, affinity, IRQL, mode, and polarity information. */
+  WDF_INTERRUPT_INFO info() const noexcept {
+    WDF_INTERRUPT_INFO value{};
+    WDF_INTERRUPT_INFO_INIT(&value);
+    WdfInterruptGetInfo(object_, &value);
+    return value;
+  }
+
+  /** @brief Assigns the interrupt affinity and priority policy. */
+  void policy(WDF_INTERRUPT_POLICY policy,
+              WDF_INTERRUPT_PRIORITY priority = WdfIrqPriorityUndefined,
+              KAFFINITY target_processors = 0) const noexcept {
+    WdfInterruptSetPolicy(object_, policy, priority, target_processors);
+  }
+
+  /** @brief Assigns a processor-group-aware interrupt policy. */
+  void extended_policy(WDF_INTERRUPT_EXTENDED_POLICY &policy) const noexcept {
+    WdfInterruptSetExtendedPolicy(object_, &policy);
+  }
+
+  /** @brief Reports the interrupt active without reconnecting it. */
+  void report_active() const noexcept { WdfInterruptReportActive(object_); }
+
+  /** @brief Reports the interrupt inactive without disconnecting it. */
+  void report_inactive() const noexcept { WdfInterruptReportInactive(object_); }
 
   /** @brief Returns the WDF device associated with the interrupt. */
   device owner() const noexcept {
@@ -141,14 +180,13 @@ public:
    * @tparam Callback Non-capturing `bool(interrupt, ULONG) noexcept` callback.
    */
   template <auto Callback> static interrupt_config with_isr() noexcept {
-    return interrupt_config{
-        +[](WDFINTERRUPT native_interrupt,
-            ULONG message_id) noexcept -> BOOLEAN {
-          return detail::invoke_boolean_callback<Callback>(
-                     interrupt{native_interrupt}, message_id)
-                     ? TRUE
-                     : FALSE;
-        }};
+    return interrupt_config{+[](WDFINTERRUPT native_interrupt,
+                                ULONG message_id) noexcept -> BOOLEAN {
+      return detail::invoke_boolean_callback<Callback>(
+                 interrupt{native_interrupt}, message_id)
+                 ? TRUE
+                 : FALSE;
+    }};
   }
 
   /**
@@ -243,6 +281,25 @@ public:
   /** @brief Configures wake-capable interrupt behavior. */
   interrupt_config &can_wake_device(bool enabled = true) noexcept {
     value_.CanWakeDevice = enabled ? TRUE : FALSE;
+    return *this;
+  }
+
+  /** @brief Selects whether power-down reports the interrupt inactive. */
+  interrupt_config &
+  report_inactive_on_power_down(WDF_TRI_STATE value) noexcept {
+    value_.ReportInactiveOnPowerDown = value;
+    return *this;
+  }
+
+  /** @brief Shares one framework spin lock across related interrupts. */
+  interrupt_config &synchronize_with(spin_lock lock) noexcept {
+    value_.SpinLock = lock.native_object();
+    return *this;
+  }
+
+  /** @brief Supplies the passive-level wait lock used by this interrupt. */
+  interrupt_config &passive_lock(wait_lock lock) noexcept {
+    value_.WaitLock = lock.native_object();
     return *this;
   }
 

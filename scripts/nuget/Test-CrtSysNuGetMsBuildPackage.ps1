@@ -568,15 +568,34 @@ constexpr auto sample_usb_reader_failure =
 constexpr auto sample_standalone_dpc =
     +[](ntl::kmdf::dpc) noexcept {};
 
+[[maybe_unused]] void compile_control_init_surface(
+    ntl::kmdf::control_device_init& init) {
+  init.on_shutdown<
+      +[](ntl::kmdf::device) noexcept {}>(WdfDeviceShutdown);
+}
+
 [[maybe_unused]] void compile_typed_callback_surface(
     ntl::kmdf::device device, ntl::kmdf::device_init& init,
     ntl::kmdf::io_queue queue, ntl::kmdf::request request) {
   using namespace ntl::kmdf;
 
+  WDF_IO_TYPE_CONFIG io_type_config{};
+  WDF_IO_TYPE_CONFIG_INIT(&io_type_config);
+  init.io_type(io_type_config)
+      .device_class(sample_interface)
+      .characteristics(FILE_DEVICE_SECURE_OPEN)
+      .power_inrush()
+      .release_hardware_order_on_failure(
+          WdfReleaseHardwareOrderOnFailureAfterDescendants)
+      .remove_lock_options(WDF_REMOVE_LOCK_OPTION_ACQUIRE_FOR_IO);
+
   object_attributes object_config;
   object_config
       .on_cleanup<+[](object) noexcept {}>()
       .on_destroy<+[](object) noexcept {}>();
+  object_lock_guard object_lock{
+      object{reinterpret_cast<WDFOBJECT>(device.native_handle())}};
+  (void)object_lock.get();
   (void)device.try_emplace_context<sample_additional_context>(42);
 
   (void)request.try_mark_cancelable<
@@ -585,6 +604,39 @@ constexpr auto sample_standalone_dpc =
   queue.drain<+[](ntl::kmdf::io_queue, void*) noexcept {}>();
   queue.purge<+[](ntl::kmdf::io_queue, void*) noexcept {}>();
   queue.stop_and_purge<+[](ntl::kmdf::io_queue, void*) noexcept {}>();
+  (void)queue.ready_notify<
+      +[](ntl::kmdf::io_queue, void*) noexcept {}>();
+  (void)queue.clear_ready_notify();
+
+  auto progress = forward_progress_policy::examine<
+      +[](ntl::kmdf::io_queue, PIRP) noexcept {
+        return WdfIoForwardProgressActionUseReservedRequest;
+      }>(1);
+  progress
+      .prepare_reserved_requests<
+          +[](ntl::kmdf::io_queue,
+              ntl::kmdf::reserved_request_resources) noexcept -> NTSTATUS {
+            return STATUS_SUCCESS;
+          }>()
+      .prepare_each_request<
+          +[](ntl::kmdf::io_queue,
+              ntl::kmdf::request_resources) noexcept -> NTSTATUS {
+            return STATUS_SUCCESS;
+          }>();
+  (void)progress.try_assign(queue);
+
+  (void)request.parameters();
+  (void)request.completion_parameters();
+  request.format_from_wdm_stack(nullptr);
+  (void)request.requestor_mode();
+  (void)request.is_from_32bit_process();
+  (void)request.is_reserved();
+  (void)request.associated_queue();
+  (void)request.try_input_memory();
+  (void)request.try_output_memory();
+  (void)request.try_input_mdl();
+  (void)request.try_output_mdl();
+  (void)request.wdm_irp();
 
   request_parameters parameters;
   auto found = queue.try_find(nullptr, nullptr, &parameters);
@@ -607,6 +659,7 @@ constexpr auto sample_standalone_dpc =
               ntl::kmdf::file file) noexcept {
             (void)file.context<sample_file_context>();
             (void)file.wdm();
+            (void)file.flags();
             request.complete(STATUS_SUCCESS);
           }>()
       .on_cleanup<+[](ntl::kmdf::file) noexcept {}>()
@@ -625,6 +678,36 @@ constexpr auto sample_standalone_dpc =
   auto preallocated_memory = memory::try_preallocated(
       backing_storage, sizeof(backing_storage), &memory_attributes);
   memory_offset buffer_range(sizeof(ULONG), sizeof(ULONG) * 2);
+  auto input_descriptor =
+      memory_descriptor::buffer(backing_storage, sizeof(backing_storage));
+  auto output_descriptor =
+      memory_descriptor::buffer(backing_storage, sizeof(backing_storage));
+  (void)target.try_read(&output_descriptor);
+  (void)target.try_write(&input_descriptor);
+  (void)target.try_ioctl(0, &input_descriptor, &output_descriptor);
+  (void)target.try_internal_ioctl(0, &input_descriptor, &output_descriptor);
+  (void)target.try_internal_ioctl_others(
+      0, &input_descriptor, &input_descriptor, &output_descriptor);
+  (void)target.wdm_device_object();
+  (void)target.wdm_physical_device_object();
+  (void)target.wdm_file_object();
+  (void)target.wdm_file_handle();
+
+  (void)device.try_name();
+  (void)device.try_interface_string(sample_interface);
+  (void)device.default_queue();
+  (void)device.try_route_requests(queue, WdfRequestTypeDeviceControl);
+  (void)device.pnp_state();
+  (void)device.power_state();
+  (void)device.power_policy_state();
+  (void)device.system_power_action();
+  (void)device.state();
+  (void)device.wdm_device_object();
+  (void)device.wdm_attached_device_object();
+  (void)device.wdm_physical_device_object();
+  (void)device.characteristics();
+  (void)device.alignment_requirement();
+  (void)device_idle_reference::try_acquire(device);
   if (allocated_memory && preallocated_memory) {
     (void)allocated_memory->try_copy_from(
         0, backing_storage, sizeof(backing_storage));
@@ -676,7 +759,29 @@ constexpr auto sample_standalone_dpc =
 
   auto dpc_settings = dpc_config::with_callback<sample_standalone_dpc>();
   dpc_settings.automatic_serialization(false);
-  (void)dpc::try_create(device, dpc_settings);
+  auto dpc_object = dpc::try_create(device, dpc_settings);
+  if (dpc_object)
+    (void)dpc_object->wdm();
+
+  fdo_event_callbacks fdo_events;
+  fdo_events
+      .on_add_resource_requirements<
+          +[](ntl::kmdf::device,
+              ntl::kmdf::io_resource_requirements) noexcept -> NTSTATUS {
+            return STATUS_SUCCESS;
+          }>()
+      .on_remove_resource_requirements<
+          +[](ntl::kmdf::device,
+              ntl::kmdf::io_resource_requirements) noexcept -> NTSTATUS {
+            return STATUS_SUCCESS;
+          }>()
+      .on_remove_added_resources<
+          +[](ntl::kmdf::device, ntl::kmdf::resource_list,
+              ntl::kmdf::resource_list) noexcept -> NTSTATUS {
+            return STATUS_SUCCESS;
+          }>();
+  init.fdo_events(fdo_events);
+  (void)init.physical_device_object();
 
   auto created_target = io_target::try_create(device);
   auto open_params = io_target_open_params::existing_device(
@@ -829,8 +934,19 @@ constexpr auto sample_standalone_dpc =
               ntl::kmdf::device) noexcept -> NTSTATUS {
             return STATUS_SUCCESS;
           }>();
-  (void)interrupt::try_create<sample_interrupt_context>(
+  interrupt_settings.report_inactive_on_power_down(WdfUseDefault);
+  auto interrupt_object = interrupt::try_create<sample_interrupt_context>(
       device, interrupt_settings, nullptr);
+  if (interrupt_object) {
+    (void)interrupt_object->info();
+    (void)interrupt_object->try_acquire_lock();
+    interrupt_object->policy(WdfIrqPolicyMachineDefault);
+    WDF_INTERRUPT_EXTENDED_POLICY extended_policy{};
+    WDF_INTERRUPT_EXTENDED_POLICY_INIT(&extended_policy);
+    interrupt_object->extended_policy(extended_policy);
+    interrupt_object->report_active();
+    interrupt_object->report_inactive();
+  }
 
   auto timer_settings = timer_config::periodic<
       +[](ntl::kmdf::timer) noexcept {}>(1000);
@@ -962,6 +1078,9 @@ constexpr auto sample_standalone_dpc =
       device.try_open_registry_key(PLUGPLAY_REGKEY_DEVICE, KEY_READ);
   if (device_key) {
     (void)device_key->query_dword(std::wstring(L"SampleValue"));
+    (void)device_key->query_multi_string(std::wstring(L"SampleMulti"));
+    (void)device_key->assign_multi_string(
+        std::wstring(L"SampleMulti"), {L"one", L"two"});
   }
   (void)device.try_query_property(DevicePropertyDeviceDescription);
   (void)device.try_assign_mof_resource(L"CrtSysPackageSmoke");
@@ -1127,7 +1246,11 @@ ntl::status ntl::kmdf::main(driver_builder& builder,
 
   kmdf::driver_config config;
   config.on_device_add<
-      +[](kmdf::driver, kmdf::device_init& init) noexcept -> NTSTATUS {
+      +[](kmdf::driver driver,
+          kmdf::device_init& init) noexcept -> NTSTATUS {
+        (void)driver.registry_path();
+        (void)driver.is_version_available(1, 15);
+        (void)driver.wdm_driver_object();
         ntl::kmdf::pnp_power_callbacks pnp;
         pnp.on_prepare_hardware<
                +[](kmdf::device, kmdf::resource_list,

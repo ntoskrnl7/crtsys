@@ -6,10 +6,12 @@ power, and object-lifetime model. `crtsys` supplies the kernel-compatible CRT
 and STL startup and shutdown path plus thin C++ facades under `ntl/kmdf/`.
 
 The driver is a non-PnP KMDF control driver so it can be loaded and unloaded as
-a service in an isolated test VM. Its sequential default queue is explicitly
-configured for `WdfExecutionLevelPassive`. The IOCTL callback uses
-`std::vector`, `std::accumulate`, and `std::format`, catches all C++ exceptions
-at the WDF callback boundary, and returns the observed server IRQL to the app.
+a service in an isolated test VM. Its parallel default queue is explicitly
+configured for `WdfExecutionLevelPassive`; this lets a release IOCTL complete
+an earlier request waiting in the manually dispatched queue. The IOCTL callback
+uses `std::vector`, `std::accumulate`, and `std::format`, catches all C++
+exceptions at the WDF callback boundary, and returns the observed server IRQL
+to the app.
 The same open/IOCTL/close flow constructs and destroys non-trivial
 `device_state` and per-open `file_state` objects in WDF-owned context storage.
 Typed file callbacks also demonstrate the `ntl::kmdf::file::wdm()` bridge to a
@@ -31,6 +33,14 @@ One pending IOCTL is retrieved by its KMDF file object and completed normally;
 a second is canceled with `CancelIoEx` while still queued. The driver verifies
 the move-only request ownership transition and completes the framework's
 `EvtIoCanceledOnQueue` callback exactly once.
+
+The default queue also assigns one KMDF forward-progress reserved request.
+The one-time allocation callback receives the reserved-only
+`reserved_request_resources` view before the device starts. Its
+`request_resources` callback also records every ordinary request before queue
+insertion, and the app verifies that the counter advances. Neither restricted
+view can complete or forward the request, and their distinct types prevent
+ordinary I/O from being mistaken for reserved-request fallback traffic.
 
 This sample intentionally remains a non-PnP control device. For typed child
 enumeration and PDO creation, use the separate

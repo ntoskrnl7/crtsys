@@ -543,6 +543,22 @@ ntl::status ntl::kmdf::main(driver_builder& builder,
         if (!queue) {
           return queue.status();
         }
+
+        auto forward_progress =
+            ntl::kmdf::forward_progress_policy::always_reserved(1);
+        forward_progress.prepare_reserved_requests<
+            +[](kmdf::io_queue,
+                kmdf::reserved_request_resources) noexcept -> NTSTATUS {
+              return STATUS_SUCCESS;
+            }>();
+        status = forward_progress.try_assign(queue.value());
+        if (status.is_err()) {
+          return status;
+        }
+
+        (void)created->default_queue();
+        (void)created->pnp_state();
+        (void)created->power_state();
         return STATUS_SUCCESS;
       }>();
   auto created = builder.try_create(config);

@@ -13,9 +13,9 @@
 #include "../status"
 #include "object_attributes"
 
+#include "detail/wdf"
 #include <cstddef>
 #include <type_traits>
-#include "detail/wdf"
 
 namespace ntl::kmdf {
 /** @brief Describes a byte range within a WDF memory object. */
@@ -89,9 +89,9 @@ public:
   try_preallocated(void *buffer, size_t size_bytes,
                    object_attributes *attributes = nullptr) noexcept {
     WDFMEMORY object = WDF_NO_HANDLE;
-    const NTSTATUS result = WdfMemoryCreatePreallocated(
-        attributes ? attributes->native() : nullptr, buffer, size_bytes,
-        &object);
+    const NTSTATUS result =
+        WdfMemoryCreatePreallocated(attributes ? attributes->native() : nullptr,
+                                    buffer, size_bytes, &object);
     if (!NT_SUCCESS(result))
       return ntl::unexpected(result);
     return ntl::ok(memory{object});
@@ -157,5 +157,47 @@ public:
 
 private:
   WDFMEMORY object_ = WDF_NO_HANDLE;
+};
+
+/** @brief Borrowed storage descriptor for synchronous WDF I/O operations. */
+class memory_descriptor {
+public:
+  /** @brief Describes mutable caller-owned contiguous storage. */
+  static memory_descriptor buffer(void *data, ULONG size_bytes) noexcept {
+    memory_descriptor descriptor;
+    WDF_MEMORY_DESCRIPTOR_INIT_BUFFER(&descriptor.value_, data, size_bytes);
+    return descriptor;
+  }
+
+  /** @brief Describes read-only caller-owned contiguous storage. */
+  static memory_descriptor buffer(const void *data, ULONG size_bytes) noexcept {
+    return buffer(const_cast<void *>(data), size_bytes);
+  }
+
+  /** @brief Describes an MDL and its usable byte count. */
+  static memory_descriptor mdl(PMDL value, ULONG size_bytes) noexcept {
+    memory_descriptor descriptor;
+    WDF_MEMORY_DESCRIPTOR_INIT_MDL(&descriptor.value_, value, size_bytes);
+    return descriptor;
+  }
+
+  /**
+   * @brief Describes a WDF memory object and optional byte range.
+   *
+   * @note The memory_offset object must outlive the synchronous operation.
+ */
+  static memory_descriptor
+  from_memory(memory value, memory_offset *offset = nullptr) noexcept {
+    memory_descriptor descriptor;
+    WDF_MEMORY_DESCRIPTOR_INIT_HANDLE(&descriptor.value_, value.native_handle(),
+                                      offset ? offset->native() : nullptr);
+    return descriptor;
+  }
+
+  /** @brief Returns the mutable native memory descriptor. */
+  PWDF_MEMORY_DESCRIPTOR native() noexcept { return &value_; }
+
+private:
+  WDF_MEMORY_DESCRIPTOR value_{};
 };
 } // namespace ntl::kmdf

@@ -1,0 +1,80 @@
+/**
+ * @file fdo
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Typed KMDF FDO resource-filter callbacks.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "callback"
+#include "device"
+#include "pnp"
+#include "resource_requirements"
+
+#include "detail/wdf"
+
+namespace ntl::kmdf {
+/** @brief Configures WDF_FDO_EVENT_CALLBACKS with typed NTL facades. */
+class fdo_event_callbacks {
+public:
+  /** @brief Initializes all FDO event callbacks to WDF defaults. */
+  fdo_event_callbacks() noexcept { WDF_FDO_EVENT_CALLBACKS_INIT(&value_); }
+
+  /**
+   * @brief Filters resource requirements added for an FDO.
+   * @tparam Callback Non-capturing
+   * `NTSTATUS(device, io_resource_requirements) noexcept` callback.
+   */
+  template <auto Callback>
+  fdo_event_callbacks &on_add_resource_requirements() noexcept {
+    value_.EvtDeviceFilterAddResourceRequirements =
+        +[](WDFDEVICE native_device,
+            WDFIORESREQLIST native_requirements) noexcept -> NTSTATUS {
+      return detail::invoke_status_callback<Callback>(
+          device{native_device}, io_resource_requirements{native_requirements});
+    };
+    return *this;
+  }
+
+  /**
+   * @brief Filters resource requirements removed for an FDO.
+   * @tparam Callback Non-capturing
+   * `NTSTATUS(device, io_resource_requirements) noexcept` callback.
+   */
+  template <auto Callback>
+  fdo_event_callbacks &on_remove_resource_requirements() noexcept {
+    value_.EvtDeviceFilterRemoveResourceRequirements =
+        +[](WDFDEVICE native_device,
+            WDFIORESREQLIST native_requirements) noexcept -> NTSTATUS {
+      return detail::invoke_status_callback<Callback>(
+          device{native_device}, io_resource_requirements{native_requirements});
+    };
+    return *this;
+  }
+
+  /**
+   * @brief Handles removal of resources previously added by this driver.
+   * @tparam Callback Non-capturing
+   * `NTSTATUS(device, resource_list, resource_list) noexcept` callback.
+   */
+  template <auto Callback>
+  fdo_event_callbacks &on_remove_added_resources() noexcept {
+    value_.EvtDeviceRemoveAddedResources =
+        +[](WDFDEVICE native_device, WDFCMRESLIST native_raw,
+            WDFCMRESLIST native_translated) noexcept -> NTSTATUS {
+      return detail::invoke_status_callback<Callback>(
+          device{native_device},
+          resource_list{native_raw, resource_origin::raw},
+          resource_list{native_translated, resource_origin::translated});
+    };
+    return *this;
+  }
+
+  /** @brief Returns the mutable native callback configuration. */
+  PWDF_FDO_EVENT_CALLBACKS native() noexcept { return &value_; }
+
+private:
+  WDF_FDO_EVENT_CALLBACKS value_{};
+};
+} // namespace ntl::kmdf

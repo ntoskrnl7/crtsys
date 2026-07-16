@@ -17,6 +17,8 @@
 #include "dpc"
 #include "driver"
 #include "file"
+#include "fdo"
+#include "forward_progress"
 #include "interrupt"
 #include "io_queue"
 #include "io_target"

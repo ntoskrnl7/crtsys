@@ -18,6 +18,39 @@
 
 namespace ntl::kmdf {
 /**
+ * @brief Move-only guard for a framework object's automatic lock.
+ *
+ * The object must have a non-none synchronization scope. This guard does not
+ * create a lock and follows the IRQL contract of WdfObjectAcquireLock.
+ */
+class object_lock_guard {
+public:
+  /** @brief Acquires the framework object's automatic lock. */
+  explicit object_lock_guard(object value) noexcept : object_(value) {
+    WdfObjectAcquireLock(object_.native_handle());
+  }
+
+  object_lock_guard(const object_lock_guard &) = delete;
+  object_lock_guard &operator=(const object_lock_guard &) = delete;
+
+  /** @brief Transfers responsibility for releasing the lock. */
+  object_lock_guard(object_lock_guard &&other) noexcept
+      : object_(std::exchange(other.object_, object{})) {}
+
+  /** @brief Releases the automatic lock when still held. */
+  ~object_lock_guard() {
+    if (object_)
+      WdfObjectReleaseLock(object_.native_handle());
+  }
+
+  /** @brief Returns the locked framework object. */
+  object get() const noexcept { return object_; }
+
+private:
+  object object_{};
+};
+
+/**
  * @brief Move-only owner of one WDF framework-object reference.
  *
  * This type balances WdfObjectReferenceActual with

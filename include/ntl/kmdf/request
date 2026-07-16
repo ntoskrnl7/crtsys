@@ -15,13 +15,14 @@
 #include "memory"
 #include "object_attributes"
 
+#include "detail/wdf"
 #include <cstddef>
 #include <type_traits>
 #include <utility>
-#include "detail/wdf"
 
 namespace ntl::kmdf {
 class file;
+class io_queue;
 
 /** @brief Initialized view of the parameters associated with a WDF request. */
 class request_parameters {
@@ -175,6 +176,107 @@ public:
     return ntl::ok(request_buffer<T>{static_cast<T *>(data), size_bytes});
   }
 
+  /** @brief Retrieves the framework input memory object. */
+  ntl::result<memory> try_input_memory() const noexcept {
+    WDFMEMORY value = WDF_NO_HANDLE;
+    const NTSTATUS result = WdfRequestRetrieveInputMemory(handle_, &value);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return ntl::ok(memory{value});
+  }
+
+  /** @brief Retrieves the framework output memory object. */
+  ntl::result<memory> try_output_memory() const noexcept {
+    WDFMEMORY value = WDF_NO_HANDLE;
+    const NTSTATUS result = WdfRequestRetrieveOutputMemory(handle_, &value);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return ntl::ok(memory{value});
+  }
+
+  /** @brief Retrieves the input MDL for direct or neither-buffered I/O. */
+  ntl::result<PMDL> try_input_mdl() const noexcept {
+    PMDL value = nullptr;
+    const NTSTATUS result = WdfRequestRetrieveInputWdmMdl(handle_, &value);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return ntl::ok(value);
+  }
+
+  /** @brief Retrieves the output MDL for direct or neither-buffered I/O. */
+  ntl::result<PMDL> try_output_mdl() const noexcept {
+    PMDL value = nullptr;
+    const NTSTATUS result = WdfRequestRetrieveOutputWdmMdl(handle_, &value);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return ntl::ok(value);
+  }
+
+  /**
+   * @brief Retrieves an unvalidated user input buffer in
+   * EvtIoInCallerContext.
+   * @warning The caller must validate or
+   * probe-and-lock this user address
+   * before using it outside the
+   * requestor's process context.
+   */
+  template <class T>
+  ntl::result<request_buffer<const T>> try_unsafe_user_input_buffer(
+      size_t minimum_bytes = sizeof(T)) const noexcept {
+    void *data = nullptr;
+    size_t size_bytes = 0;
+    const NTSTATUS result = WdfRequestRetrieveUnsafeUserInputBuffer(
+        handle_, minimum_bytes, &data, &size_bytes);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return ntl::ok(
+        request_buffer<const T>{static_cast<const T *>(data), size_bytes});
+  }
+
+  /**
+   * @brief Retrieves an unvalidated user output buffer in
+   * EvtIoInCallerContext.
+   * @warning The caller must validate or
+   * probe-and-lock this user address
+   * before using it outside the
+   * requestor's process context.
+   */
+  template <class T>
+  ntl::result<request_buffer<T>> try_unsafe_user_output_buffer(
+      size_t minimum_bytes = sizeof(T)) const noexcept {
+    void *data = nullptr;
+    size_t size_bytes = 0;
+    const NTSTATUS result = WdfRequestRetrieveUnsafeUserOutputBuffer(
+        handle_, minimum_bytes, &data, &size_bytes);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return ntl::ok(request_buffer<T>{static_cast<T *>(data), size_bytes});
+  }
+
+  /** @brief Probes and locks a user buffer for device reads. */
+  ntl::result<memory>
+  try_lock_user_buffer_for_read(void *buffer,
+                                size_t size_bytes) const noexcept {
+    WDFMEMORY value = WDF_NO_HANDLE;
+    const NTSTATUS result = WdfRequestProbeAndLockUserBufferForRead(
+        handle_, buffer, size_bytes, &value);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return ntl::ok(memory{value});
+  }
+
+  /** @brief Probes and locks a user buffer for device writes. */
+  ntl::result<memory>
+  try_lock_user_buffer_for_write(void *buffer,
+                                 size_t size_bytes) const noexcept {
+    WDFMEMORY value = WDF_NO_HANDLE;
+    const NTSTATUS result = WdfRequestProbeAndLockUserBufferForWrite(
+        handle_, buffer, size_bytes, &value);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return ntl::ok(memory{value});
+  }
+
   /**
    * @brief Forwards this request to another driver-owned queue.
    * @param destination Destination queue owned by the same driver.
@@ -242,32 +344,33 @@ public:
   }
 
   /** @brief Formats a read request for an I/O target. */
-  ntl::status try_format_read(const io_target &target, memory output = {},
-                              memory_offset *output_offset = nullptr,
-                              LONGLONG *device_offset = nullptr) const noexcept {
+  ntl::status
+  try_format_read(const io_target &target, memory output = {},
+                  memory_offset *output_offset = nullptr,
+                  LONGLONG *device_offset = nullptr) const noexcept {
     return WdfIoTargetFormatRequestForRead(
         target.native_handle(), handle_, output.native_handle(),
         output_offset ? output_offset->native() : nullptr, device_offset);
   }
 
   /** @brief Formats a write request for an I/O target. */
-  ntl::status try_format_write(const io_target &target, memory input = {},
-                               memory_offset *input_offset = nullptr,
-                               LONGLONG *device_offset = nullptr) const noexcept {
+  ntl::status
+  try_format_write(const io_target &target, memory input = {},
+                   memory_offset *input_offset = nullptr,
+                   LONGLONG *device_offset = nullptr) const noexcept {
     return WdfIoTargetFormatRequestForWrite(
         target.native_handle(), handle_, input.native_handle(),
         input_offset ? input_offset->native() : nullptr, device_offset);
   }
 
   /** @brief Formats a device-control request for an I/O target. */
-  ntl::status try_format_ioctl(
-      const io_target &target, ULONG code, memory input = {},
-      memory output = {}, memory_offset *input_offset = nullptr,
-      memory_offset *output_offset = nullptr) const noexcept {
+  ntl::status
+  try_format_ioctl(const io_target &target, ULONG code, memory input = {},
+                   memory output = {}, memory_offset *input_offset = nullptr,
+                   memory_offset *output_offset = nullptr) const noexcept {
     return WdfIoTargetFormatRequestForIoctl(
         target.native_handle(), handle_, code, input.native_handle(),
-        input_offset ? input_offset->native() : nullptr,
-        output.native_handle(),
+        input_offset ? input_offset->native() : nullptr, output.native_handle(),
         output_offset ? output_offset->native() : nullptr);
   }
 
@@ -278,8 +381,7 @@ public:
       memory_offset *output_offset = nullptr) const noexcept {
     return WdfIoTargetFormatRequestForInternalIoctl(
         target.native_handle(), handle_, code, input.native_handle(),
-        input_offset ? input_offset->native() : nullptr,
-        output.native_handle(),
+        input_offset ? input_offset->native() : nullptr, output.native_handle(),
         output_offset ? output_offset->native() : nullptr);
   }
 
@@ -368,8 +470,58 @@ public:
     return WdfRequestIsCanceled(handle_) != FALSE;
   }
 
+  /** @brief Requests cancellation of a request already sent to an I/O target.
+   */
+  bool cancel_sent() const noexcept {
+    return WdfRequestCancelSentRequest(handle_) != FALSE;
+  }
+
+  /** @brief Acknowledges an EvtIoStop notification. */
+  void acknowledge_stop(bool requeue = false) const noexcept {
+    WdfRequestStopAcknowledge(handle_, requeue ? TRUE : FALSE);
+  }
+
+  /** @brief Returns a snapshot of the request parameters. */
+  request_parameters parameters() const noexcept {
+    request_parameters value;
+    WdfRequestGetParameters(handle_, value.native());
+    return value;
+  }
+
+  /** @brief Returns a snapshot of request completion parameters. */
+  WDF_REQUEST_COMPLETION_PARAMS completion_parameters() const noexcept {
+    WDF_REQUEST_COMPLETION_PARAMS value{};
+    WDF_REQUEST_COMPLETION_PARAMS_INIT(&value);
+    WdfRequestGetCompletionParams(handle_, &value);
+    return value;
+  }
+
+  /** @brief Formats the request from an explicit WDM stack location. */
+  void format_from_wdm_stack(PIO_STACK_LOCATION stack) const noexcept {
+    WdfRequestWdmFormatUsingStackLocation(handle_, stack);
+  }
+
+  /** @brief Returns the requestor's processor mode. */
+  KPROCESSOR_MODE requestor_mode() const noexcept {
+    return WdfRequestGetRequestorMode(handle_);
+  }
+
+  /** @brief Reports whether a 32-bit process issued this request. */
+  bool is_from_32bit_process() const noexcept {
+    return WdfRequestIsFrom32BitProcess(handle_) != FALSE;
+  }
+
+  /** @brief Reports whether this is a KMDF forward-progress reserved request.
+   */
+  bool is_reserved() const noexcept {
+    return WdfRequestIsReserved(handle_) != FALSE;
+  }
+
   /** @brief Returns the file object associated with this request. */
   file associated_file() const noexcept;
+
+  /** @brief Returns the KMDF queue currently associated with this request. */
+  io_queue associated_queue() const noexcept;
 
   /** @brief Returns the current framework request status. */
   ntl::status current_status() const noexcept {
@@ -404,6 +556,17 @@ public:
     WdfRequestCompleteWithInformation(handle_, completion_status, information);
     handle_ = nullptr;
   }
+
+  /** @brief Completes the request with a caller-selected priority boost. */
+  void complete_with_priority_boost(NTSTATUS completion_status,
+                                    CCHAR priority_boost) noexcept {
+    WdfRequestCompleteWithPriorityBoost(handle_, completion_status,
+                                        priority_boost);
+    handle_ = nullptr;
+  }
+
+  /** @brief Returns the underlying WDM IRP for explicit interoperation. */
+  PIRP wdm_irp() const noexcept { return WdfRequestWdmGetIrp(handle_); }
 
   /**
    * @brief Returns the native WDF request handle.
@@ -468,9 +631,9 @@ public:
   try_create_from_irp(PIRP irp, bool frees_irp,
                       object_attributes *attributes = nullptr) noexcept {
     WDFREQUEST handle = WDF_NO_HANDLE;
-    const NTSTATUS result = WdfRequestCreateFromIrp(
-        attributes ? attributes->native() : nullptr, irp,
-        frees_irp ? TRUE : FALSE, &handle);
+    const NTSTATUS result =
+        WdfRequestCreateFromIrp(attributes ? attributes->native() : nullptr,
+                                irp, frees_irp ? TRUE : FALSE, &handle);
     if (!NT_SUCCESS(result))
       return ntl::unexpected(result);
     return ntl::ok(driver_request{handle});
@@ -498,26 +661,28 @@ public:
   }
 
   /** @brief Formats a read request for an I/O target. */
-  ntl::status try_format_read(const io_target &target, memory output = {},
-                              memory_offset *output_offset = nullptr,
-                              LONGLONG *device_offset = nullptr) const noexcept {
+  ntl::status
+  try_format_read(const io_target &target, memory output = {},
+                  memory_offset *output_offset = nullptr,
+                  LONGLONG *device_offset = nullptr) const noexcept {
     return request{handle_}.try_format_read(target, output, output_offset,
                                             device_offset);
   }
 
   /** @brief Formats a write request for an I/O target. */
-  ntl::status try_format_write(const io_target &target, memory input = {},
-                               memory_offset *input_offset = nullptr,
-                               LONGLONG *device_offset = nullptr) const noexcept {
+  ntl::status
+  try_format_write(const io_target &target, memory input = {},
+                   memory_offset *input_offset = nullptr,
+                   LONGLONG *device_offset = nullptr) const noexcept {
     return request{handle_}.try_format_write(target, input, input_offset,
                                              device_offset);
   }
 
   /** @brief Formats a device-control request for an I/O target. */
-  ntl::status try_format_ioctl(
-      const io_target &target, ULONG code, memory input = {},
-      memory output = {}, memory_offset *input_offset = nullptr,
-      memory_offset *output_offset = nullptr) const noexcept {
+  ntl::status
+  try_format_ioctl(const io_target &target, ULONG code, memory input = {},
+                   memory output = {}, memory_offset *input_offset = nullptr,
+                   memory_offset *output_offset = nullptr) const noexcept {
     return request{handle_}.try_format_ioctl(target, code, input, output,
                                              input_offset, output_offset);
   }
@@ -552,9 +717,8 @@ public:
     return try_send_impl(
         target, options,
         +[](WDFREQUEST native_request, WDFIOTARGET,
-            PWDF_REQUEST_COMPLETION_PARAMS, WDFCONTEXT) noexcept {
-          WdfObjectDelete(native_request);
-        },
+            PWDF_REQUEST_COMPLETION_PARAMS,
+            WDFCONTEXT) noexcept { WdfObjectDelete(native_request); },
         nullptr);
   }
 
@@ -602,9 +766,7 @@ public:
   WDFREQUEST native_handle() const noexcept { return handle_; }
 
   /** @brief Releases ownership without deleting the WDF request. */
-  WDFREQUEST release() noexcept {
-    return std::exchange(handle_, nullptr);
-  }
+  WDFREQUEST release() noexcept { return std::exchange(handle_, nullptr); }
 
   /** @brief Returns true while this object owns a WDF request. */
   explicit operator bool() const noexcept { return handle_ != WDF_NO_HANDLE; }
@@ -613,8 +775,7 @@ private:
   explicit driver_request(WDFREQUEST handle) noexcept : handle_(handle) {}
 
   static ntl::result<driver_request>
-  try_create_impl(WDFIOTARGET target,
-                  object_attributes *attributes) noexcept {
+  try_create_impl(WDFIOTARGET target, object_attributes *attributes) noexcept {
     WDFREQUEST handle = WDF_NO_HANDLE;
     const NTSTATUS result = WdfRequestCreate(
         attributes ? attributes->native() : nullptr, target, &handle);
@@ -623,10 +784,9 @@ private:
     return ntl::ok(driver_request{handle});
   }
 
-  ntl::status
-  try_send_impl(const io_target &target, send_options *options,
-                PFN_WDF_REQUEST_COMPLETION_ROUTINE completion,
-                void *context) noexcept {
+  ntl::status try_send_impl(const io_target &target, send_options *options,
+                            PFN_WDF_REQUEST_COMPLETION_ROUTINE completion,
+                            void *context) noexcept {
     const ULONG incompatible = WDF_REQUEST_SEND_OPTION_SYNCHRONOUS |
                                WDF_REQUEST_SEND_OPTION_SEND_AND_FORGET;
     if (options && (options->flags() & incompatible) != 0)

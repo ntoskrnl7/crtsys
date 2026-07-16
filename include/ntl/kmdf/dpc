@@ -59,6 +59,9 @@ public:
     return object{WdfDpcGetParentObject(object_)};
   }
 
+  /** @brief Returns the underlying WDM KDPC for explicit interoperation. */
+  PKDPC wdm() const noexcept { return WdfDpcWdmGetDpc(object_); }
+
   /** @brief Returns this DPC object's constructed C++ context. */
   template <class T> T &context() const noexcept {
     return detail::get_context<T>(reinterpret_cast<WDFOBJECT>(object_));

@@ -10,6 +10,7 @@
 #include "../result"
 #include "../status"
 #include "callback"
+#include "memory"
 #include "object_attributes"
 
 #include "detail/wdf"
@@ -136,6 +137,82 @@ public:
     return WdfIoTargetGetState(handle_);
   }
 
+  /** @brief Sends a synchronous read request at PASSIVE_LEVEL. */
+  ntl::status try_read(memory_descriptor *output = nullptr,
+                       LONGLONG *device_offset = nullptr,
+                       send_options *options = nullptr,
+                       ULONG_PTR *bytes_read = nullptr) const noexcept {
+    return WdfIoTargetSendReadSynchronously(
+        handle_, WDF_NO_HANDLE, output ? output->native() : nullptr,
+        device_offset, options ? options->native() : nullptr, bytes_read);
+  }
+
+  /** @brief Sends a synchronous write request at PASSIVE_LEVEL. */
+  ntl::status try_write(memory_descriptor *input = nullptr,
+                        LONGLONG *device_offset = nullptr,
+                        send_options *options = nullptr,
+                        ULONG_PTR *bytes_written = nullptr) const noexcept {
+    return WdfIoTargetSendWriteSynchronously(
+        handle_, WDF_NO_HANDLE, input ? input->native() : nullptr,
+        device_offset, options ? options->native() : nullptr, bytes_written);
+  }
+
+  /** @brief Sends a synchronous device-control request at PASSIVE_LEVEL. */
+  ntl::status try_ioctl(ULONG code, memory_descriptor *input = nullptr,
+                        memory_descriptor *output = nullptr,
+                        send_options *options = nullptr,
+                        ULONG_PTR *bytes_returned = nullptr) const noexcept {
+    return WdfIoTargetSendIoctlSynchronously(
+        handle_, WDF_NO_HANDLE, code, input ? input->native() : nullptr,
+        output ? output->native() : nullptr,
+        options ? options->native() : nullptr, bytes_returned);
+  }
+
+  /** @brief Sends a synchronous internal IOCTL at PASSIVE_LEVEL. */
+  ntl::status
+  try_internal_ioctl(ULONG code, memory_descriptor *input = nullptr,
+                     memory_descriptor *output = nullptr,
+                     send_options *options = nullptr,
+                     ULONG_PTR *bytes_returned = nullptr) const noexcept {
+    return WdfIoTargetSendInternalIoctlSynchronously(
+        handle_, WDF_NO_HANDLE, code, input ? input->native() : nullptr,
+        output ? output->native() : nullptr,
+        options ? options->native() : nullptr, bytes_returned);
+  }
+
+  /** @brief Sends a synchronous internal IOCTL with three other arguments. */
+  ntl::status try_internal_ioctl_others(
+      ULONG code, memory_descriptor *argument1 = nullptr,
+      memory_descriptor *argument2 = nullptr,
+      memory_descriptor *argument4 = nullptr, send_options *options = nullptr,
+      ULONG_PTR *bytes_returned = nullptr) const noexcept {
+    return WdfIoTargetSendInternalIoctlOthersSynchronously(
+        handle_, WDF_NO_HANDLE, code, argument1 ? argument1->native() : nullptr,
+        argument2 ? argument2->native() : nullptr,
+        argument4 ? argument4->native() : nullptr,
+        options ? options->native() : nullptr, bytes_returned);
+  }
+
+  /** @brief Returns the WDM target device object. */
+  PDEVICE_OBJECT wdm_device_object() const noexcept {
+    return WdfIoTargetWdmGetTargetDeviceObject(handle_);
+  }
+
+  /** @brief Returns the WDM target physical device object, when available. */
+  PDEVICE_OBJECT wdm_physical_device_object() const noexcept {
+    return WdfIoTargetWdmGetTargetPhysicalDevice(handle_);
+  }
+
+  /** @brief Returns the WDM target file object, when the target has one. */
+  PFILE_OBJECT wdm_file_object() const noexcept {
+    return WdfIoTargetWdmGetTargetFileObject(handle_);
+  }
+
+  /** @brief Returns the target file handle, when the target has one. */
+  HANDLE wdm_file_handle() const noexcept {
+    return WdfIoTargetWdmGetTargetFileHandle(handle_);
+  }
+
   /** @brief Returns the WDF device associated with this target. */
   device owner() const noexcept;
 
@@ -154,8 +231,7 @@ class io_target_open_params {
 public:
   /** @brief Opens an existing device object and optional file object. */
   static io_target_open_params
-  existing_device(PDEVICE_OBJECT device,
-                  PFILE_OBJECT file = nullptr) noexcept {
+  existing_device(PDEVICE_OBJECT device, PFILE_OBJECT file = nullptr) noexcept {
     io_target_open_params params;
     WDF_IO_TARGET_OPEN_PARAMS_INIT_EXISTING_DEVICE(&params.value_, device);
     params.value_.TargetFileObject = file;
@@ -281,9 +357,9 @@ inline ntl::result<io_target>
 io_target::try_create(const device &owner,
                       object_attributes *attributes) noexcept {
   WDFIOTARGET handle = WDF_NO_HANDLE;
-  const NTSTATUS result = WdfIoTargetCreate(
-      owner.native_handle(), attributes ? attributes->native() : nullptr,
-      &handle);
+  const NTSTATUS result =
+      WdfIoTargetCreate(owner.native_handle(),
+                        attributes ? attributes->native() : nullptr, &handle);
   if (!NT_SUCCESS(result))
     return ntl::unexpected(result);
   return ntl::ok(io_target{handle});
