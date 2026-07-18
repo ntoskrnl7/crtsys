@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
-  <Import Project="$(CrtSysPackageRoot)build\native\crtsys.targets" Condition="Exists('$(CrtSysPackageRoot)build\native\crtsys.targets')" />
+  <Import Project="$(CrtSysPackageRoot)build\native\crtsys.targets"
+          Condition="'$(VCProjectUpgraderObjectName)' != 'NoUpgrade' and Exists('$(CrtSysPackageRoot)build\native\crtsys.targets')" />
 </Project>
