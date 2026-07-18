@@ -96,6 +96,19 @@ Do not use runtime-backed helpers in DPC, ISR, paging I/O, spin-lock-held, or
 other elevated-IRQL hot paths unless the exact API is documented and tested for
 that context.
 
+### Runtime Teardown Ordering
+
+Objects that own CRT, STL, LDK, or NTL state must be destroyed before
+`CrtSysUninitializeRuntime` terminates the runtime substrate. This rule applies
+to both normal unload and initialization failure. In particular, when
+`ntl::main` returns a failure, the NTL entry path releases its `ntl::driver`
+state before shutting down the runtime; reversing that order could make a C++
+container destructor access an already-terminated LDK heap.
+
+The default-off `CRTSYS_ENABLE_FAILURE_HARNESS_SELF_TEST` regression path
+deliberately makes driver initialization fail. Its expected result is a failed
+driver start with complete C++ object destruction and no bugcheck.
+
 ## Synchronization Philosophy
 
 NTL favors ownership clarity and blocking/resource-style coordination for the
