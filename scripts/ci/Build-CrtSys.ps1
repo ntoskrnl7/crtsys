@@ -1,7 +1,7 @@
 param(
   [Parameter(Mandatory = $true)]
   [ValidateSet('app', 'driver', 'kmdf-verifier-stress',
-               'rpc-lifecycle-stress', 'rpc-async')]
+               'rpc-lifecycle-stress', 'rpc-async', 'rpc-notifications')]
   [string] $Project,
 
   [Parameter(Mandatory = $true)]
@@ -31,6 +31,8 @@ $sourceDir = if ($Project -eq 'kmdf-verifier-stress') {
   Join-Path $repoRoot 'test\rpc\lifecycle-stress'
 } elseif ($Project -eq 'rpc-async') {
   Join-Path $repoRoot 'test\rpc\async'
+} elseif ($Project -eq 'rpc-notifications') {
+  Join-Path $repoRoot 'test\rpc\notifications'
 } else {
   Join-Path $repoRoot "test\cmake\$Project"
 }

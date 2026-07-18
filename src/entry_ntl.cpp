@@ -43,6 +43,7 @@ public:
     if (dispatchers) {
       bool has_any_dispatcher = dispatchers->on_create ||
                                  dispatchers->on_close ||
+                                 dispatchers->on_cleanup ||
                                  dispatchers->on_device_control ||
                                  dispatchers->on_pending_device_control;
       auto invoke_dispatch = [&](auto &&dispatch) {
@@ -79,6 +80,15 @@ public:
         if (dispatchers->on_close) {
           ntl::irp request(irp);
           invoke_dispatch([&]() { dispatchers->on_close(request); });
+        } else if (has_any_dispatcher) {
+          status = STATUS_SUCCESS;
+        }
+        break;
+      }
+      case IRP_MJ_CLEANUP: {
+        if (dispatchers->on_cleanup) {
+          ntl::irp request(irp);
+          invoke_dispatch([&]() { dispatchers->on_cleanup(request); });
         } else if (has_any_dispatcher) {
           status = STATUS_SUCCESS;
         }
