@@ -161,11 +161,11 @@ Shared header (`shared/demo_rpc.hpp`):
 
 NTL_RPC_BEGIN(demo_rpc)
 
-NTL_ADD_CALLBACK_2(demo_rpc, int, add, int, a, int, b, {
-  return a + b;
+NTL_ADD_CALLBACK_ID_2(demo_rpc, 0x801, int, add, int, left, int, right, {
+  return left + right;
 })
 
-NTL_ADD_CALLBACK_1(demo_rpc, int, negate, int, value, {
+NTL_ADD_CALLBACK_ID_1(demo_rpc, 0x802, int, negate, int, value, {
   return -value;
 })
 
@@ -178,13 +178,13 @@ Kernel side:
 #include <memory>
 #include <ntl/driver>
 #include <ntl/rpc/server>
-#include "shared/demo_rpc.hpp" // generated RPC contract header
+#include "shared/demo_rpc.hpp"
 
 ntl::status ntl::main(ntl::driver& driver,
                       const std::wstring& registry_path) {
   (void)registry_path;
 
-  auto rpc_server = demo_rpc::init(driver); // creates \\Device\\demo_rpc endpoint
+  auto rpc_server = demo_rpc::init(driver);
 
   driver.on_unload([rpc_server]() mutable {
     rpc_server.reset(); // remove endpoint before driver unload completes
@@ -200,13 +200,13 @@ App side:
 #include <exception>
 #include <iostream>
 #include <ntl/rpc/client>
-#include "shared/demo_rpc.hpp" // same shared contract header
+#include "shared/demo_rpc.hpp"
 
 int wmain() {
   try {
-    std::wcout << L"40 + 2 = " << demo_rpc::add(40, 2) << L"\n";
     ntl::rpc::client client(L"demo_rpc");
-    auto value = client.invoke<int>(demo_rpc::negate_1_index, 7);
+    std::wcout << L"40 + 2 = " << demo_rpc::add(40, 2) << L"\n";
+    auto value = client.invoke(demo_rpc::negate_1_method, 7);
     std::wcout << L"negate(7) = " << value << L"\n";
   } catch (const std::exception& e) {
     std::cerr << "RPC call failed: " << e.what() << "\n";

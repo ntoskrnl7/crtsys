@@ -17,22 +17,140 @@
 
 #include "../deps/zpp/serializer.h"
 
+#include <cstddef>
+#include <tuple>
+#include <type_traits>
+
 #if defined(NTL_USER_MODE)
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <winioctl.h>
+#else
+#ifndef _NTDDK_
+#include <wdm.h>
+#endif
 #endif // defined(NTL_USER_MODE)
 
-#define FILE_DEVICE_NTL_RPC 60000
+namespace ntl {
+namespace rpc {
+
+/** @brief Device type reserved for NTL RPC control codes. */
+constexpr unsigned long device_type = 60000;
+
+/** @brief Default receive capacity for methods without an explicit limit. */
+constexpr std::size_t default_response_size = 4096;
+
+/** @brief Associates a return type with a per-method response capacity. */
+template <typename T, std::size_t Bytes> struct bounded_response {
+  static_assert(Bytes != 0, "RPC response capacity must be nonzero");
+  using value_type = T;
+  static constexpr std::size_t size = Bytes;
+};
+
+/** @brief Resolves the value type and receive capacity of an RPC response. */
+template <typename T> struct response_traits {
+  using type = T;
+  static constexpr std::size_t size = default_response_size;
+};
+
+template <> struct response_traits<void> {
+  using type = void;
+  static constexpr std::size_t size = 0;
+};
+
+template <typename T, std::size_t Bytes>
+struct response_traits<bounded_response<T, Bytes>> {
+  using type = T;
+  static constexpr std::size_t size = Bytes;
+};
+
+/** @brief Unwraps an RPC response declaration to its callback return type. */
+template <typename T>
+using response_type_t = typename response_traits<T>::type;
+
+/** @brief Builds the METHOD_BUFFERED control code for an RPC method ID. */
+constexpr unsigned long control_code(unsigned long id) noexcept {
+  return static_cast<unsigned long>(
+      CTL_CODE(device_type, id, METHOD_BUFFERED, FILE_ANY_ACCESS));
+}
+
+/** @brief Marker base used to recognize typed RPC method descriptors. */
+struct method_tag {};
 
 /**
- * @brief Builds the IOCTL code used for an NTL RPC function index.
+ * @brief Describes one typed RPC method shared by the driver and client.
+ * @tparam Id Stable vendor IOCTL function ID in the 0x800-0xFFF range.
+ * @tparam Signature Function signature describing the result and arguments.
+ * @tparam ResponseSize Maximum serialized response bytes.
  */
-#define NTL_RPC_DEVICE_CTL(_idx_)                                              \
-  ((DWORD)CTL_CODE(FILE_DEVICE_NTL_RPC, _idx_, METHOD_BUFFERED,                \
-                   FILE_ANY_ACCESS))
+template <unsigned long Id, typename Signature,
+          std::size_t ResponseSize = default_response_size>
+class method;
 
-/**
- * @brief Preserves comma-containing argument lists inside RPC macros.
- */
+template <unsigned long Id, typename Return, typename... Arguments,
+          std::size_t ResponseSize>
+class method<Id, Return(Arguments...), ResponseSize> : public method_tag {
+  static_assert(Id >= 0x800 && Id <= 0xFFF,
+                "NTL RPC method IDs must use the vendor range 0x800-0xFFF");
+  static_assert(std::is_void<Return>::value || ResponseSize != 0,
+                "A non-void RPC method requires response capacity");
+
+public:
+  using return_type = Return;
+  using argument_storage =
+      std::tuple<typename std::decay<Arguments>::type...>;
+
+  /** @brief Returns the stable IOCTL function ID. */
+  static constexpr unsigned long id() noexcept { return Id; }
+
+  /** @brief Returns the complete METHOD_BUFFERED IOCTL code. */
+  static constexpr unsigned long code() noexcept { return control_code(Id); }
+
+  /** @brief Returns the number of method arguments. */
+  static constexpr std::size_t arity() noexcept { return sizeof...(Arguments); }
+
+  /** @brief Returns the receive capacity used by the generated client call. */
+  static constexpr std::size_t response_size() noexcept {
+    return std::is_void<Return>::value ? 0 : ResponseSize;
+  }
+
+  /**
+   * @brief Returns the same method contract with an explicit response limit.
+   */
+  template <std::size_t Bytes>
+  constexpr method<Id, Return(Arguments...), Bytes>
+  max_response_size() const noexcept {
+    static_assert(Bytes != 0, "RPC response capacity must be nonzero");
+    return {};
+  }
+};
+
+/** @brief Reports whether a type is an NTL RPC method descriptor. */
+template <typename T>
+struct is_method
+    : std::is_base_of<method_tag, typename std::decay<T>::type> {};
+
+/** @brief Builds a typed method from a response declaration and arguments. */
+template <unsigned long Id, typename Response, typename... Arguments>
+struct make_method {
+  using return_type = response_type_t<Response>;
+  using type = method<Id, return_type(Arguments...),
+                      response_traits<Response>::size>;
+};
+
+/** @brief Shorthand for the method type produced by `make_method`. */
+template <unsigned long Id, typename Response, typename... Arguments>
+using make_method_t = typename make_method<Id, Response, Arguments...>::type;
+
+} // namespace rpc
+} // namespace ntl
+
+/** @brief Preserves comma-containing types inside RPC macros. */
 #define NTL_RPC_ARG_PACK(...) __VA_ARGS__
+
+/** @brief Declares a larger response limit without changing the return type. */
+#define NTL_RPC_BOUNDED_RESPONSE(_bytes_, ...)                                 \
+  ntl::rpc::bounded_response<__VA_ARGS__, (_bytes_)>
+
+/** @brief Maps line-based convenience IDs into the vendor IOCTL range. */
+#define NTL_RPC_DETAIL_LINE_ID (0x800ul + (__LINE__ & 0x7FFul))

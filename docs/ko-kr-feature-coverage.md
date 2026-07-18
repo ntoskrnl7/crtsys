@@ -84,7 +84,7 @@ exception 없음, 유효한 WDK 문맥을 직접 보장해야 합니다. driver 
 | NTL ERESOURCE wrapper | `ntl::resource`, `ntl::unique_lock<ntl::resource>`, `ntl::shared_lock<ntl::resource>` | `<= APC_LEVEL` | blocking/resource-style synchronization입니다. DPC, ISR, spin-lock-held path에서 쓰지 마세요. |
 | NTL spin lock wrapper | `ntl::spin_lock`, `ntl::unique_lock<ntl::spin_lock>` | `<= DISPATCH_LEVEL` | 보유 구간은 resident, 짧고, nonblocking이어야 하며 allocation, wait, exception, stream, 임의 STL/runtime helper 호출이 없어야 합니다. |
 | NTL IRQL helper | `ntl::irql`, `ntl::raise_irql`, `ntl::raise_irql_to_dpc_level`, `ntl::raise_irql_to_synch_level` | 현재 IRQL을 명시적으로 조작 | raised scope는 최대한 작게 유지하세요. |
-| NTL RPC client | `ntl::rpc::client` | user mode, kernel IRQL 아님 | client side는 `DeviceIoControl`을 씁니다. kernel-side 안전성은 server callback 계약을 따릅니다. |
+| NTL RPC client | `ntl::rpc::client` | user mode, kernel IRQL 아님 | 공유 macro가 typed method descriptor 위에서 양쪽 코드를 생성합니다. bounded reply, malformed/trailing payload 거부, x86 client와 x64 driver schema를 검증합니다. |
 
 ## C++ Standard
 

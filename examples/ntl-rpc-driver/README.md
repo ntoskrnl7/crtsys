@@ -2,15 +2,17 @@
 
 This sample shows the NTL RPC helper layer. It is intentionally separate from
 the typed IOCTL sample in `examples/ntl-driver`: the IOCTL sample shows manual
-device-control contracts, while this sample shows a shared schema that
-generates both the kernel server and the user-mode client wrappers.
+device-control contracts, while this sample generates both sides from one
+shared callback declaration.
 
 The sample demonstrates:
 
 - `ntl::main` as the C++ driver entry point
 - `ntl::rpc::server` lifetime owned by the driver unload callback
 - `ntl::rpc::client` from a user-mode companion app
-- stable explicit RPC callback IDs with `NTL_ADD_CALLBACK_ID_*`
+- shared-schema RPC callback IDs and deduced return types
+- direct generated wrappers plus a reusable typed client
+- bounded variable-size responses checked before server callback execution
 - serialization of simple scalar values, a custom request/reply pair, and a
   `std::vector`
 
@@ -62,29 +64,25 @@ cmake -S examples\ntl-rpc-driver -B examples\ntl-rpc-driver\build_x64 -A x64 -DC
 ## Shared Schema
 
 The shared contract lives in
-[`shared/ntl_rpc_sample.hpp`](./shared/ntl_rpc_sample.hpp). The driver includes
-it after `<ntl/rpc/server>`, and the app includes it after `<ntl/rpc/client>`.
-The callback bodies in that shared header are the server implementation: they
-run in the kernel driver when the app sends an RPC request. The user-mode app
-gets matching wrapper declarations from the same schema, not local execution of
-those callback bodies.
+[`shared/ntl_rpc_sample.hpp`](./shared/ntl_rpc_sample.hpp). The macro bodies
+become kernel callbacks when included after `<ntl/rpc/server>` and typed
+user-mode wrappers when included after `<ntl/rpc/client>`.
 
 The schema exposes:
 
-- `crtsys_ntl_rpc_sample::add(a, b)`
-- `crtsys_ntl_rpc_sample::describe(request)`
-- `crtsys_ntl_rpc_sample::series(count)`
+- `crtsys_ntl_rpc_sample::add`
+- `crtsys_ntl_rpc_sample::describe`
+- `crtsys_ntl_rpc_sample::series`
 
-The `describe` callback intentionally calls the kernel-only WDK API
+The driver-side `describe` callback intentionally calls the kernel-only WDK API
 `KeGetCurrentIrql()` and returns that value as `server_irql`. This makes the
-execution boundary visible: the callback body is driver-side code, while the
-app only receives the serialized reply.
+execution boundary visible: the app only receives the serialized reply.
 The callbacks also emit one-line `DbgPrint` messages so a kernel debugger can
 see that `add`, `describe`, and `series` ran in the driver.
 
-Use explicit callback IDs for externally visible RPC contracts. The
-`NTL_ADD_CALLBACK_*` macros that use `__LINE__` are convenient for tests, but
-line numbers are not a stable ABI.
+The `series` callback uses `NTL_RPC_BOUNDED_RESPONSE` to declare a 64 KiB
+maximum serialized response. The client uses that value as its receive
+capacity, and the server verifies the capacity before executing the callback.
 
 ## Loading
 
@@ -99,8 +97,8 @@ sc delete CrtSysNtlRpcSample
 
 ## User-Mode RPC App
 
-The sample app calls both generated wrappers and an explicit reusable
-`ntl::rpc::client`:
+The sample app uses the generated wrappers for the occasional `add` and
+`describe` calls, then reuses one `ntl::rpc::client` for the `series` call:
 
 ```bat
 examples\ntl-rpc-driver\build_x64\Debug\crtsys_ntl_rpc_sample_app.exe 21 7

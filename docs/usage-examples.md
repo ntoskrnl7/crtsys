@@ -79,21 +79,9 @@ contract.
 
 ## RPC Skeleton
 
-The RPC helper generates a matching kernel server and user-mode client from one
-shared schema header. The driver includes `<ntl/rpc/server>` before the schema;
-the app includes `<ntl/rpc/client>` before the same schema.
-
-For a buildable driver/app pair, see
+The RPC helper generates the kernel dispatcher and user-mode wrappers from one
+shared macro declaration. For a buildable driver/app pair, see
 [`examples/ntl-rpc-driver`](../examples/ntl-rpc-driver).
-
-The compact `NTL_ADD_CALLBACK_N` macros use `__LINE__` as the callback ID. This
-keeps small internal or test schemas easy to write, but it also means the schema
-line number becomes part of the app/driver ABI. Both sides must include the
-exact same schema file without generating different line numbers.
-
-For a longer-lived ABI, use `NTL_ADD_CALLBACK_ID_N` and assign stable IDs
-explicitly. Keep IDs unique within the schema and within the `CTL_CODE` function
-field range.
 
 ### Shared Schema
 
@@ -101,25 +89,29 @@ field range.
 // shared/demo_rpc.hpp
 #pragma once
 
-// Include this file after <ntl/rpc/server> in the driver, and after
-// <ntl/rpc/client> in the user-mode app.
-
+#include <vector>
 NTL_RPC_BEGIN(demo_rpc)
 
-NTL_ADD_CALLBACK_2(demo_rpc, int, add, int, a, int, b, {
-  return a + b;
+NTL_ADD_CALLBACK_2(demo_rpc, int, add, int, left, int, right, {
+  return left + right;
 })
 
-NTL_ADD_CALLBACK_ID_1(demo_rpc, 0x802, int, negate, int, value, {
-  return -value;
-})
+NTL_ADD_CALLBACK_1(
+    demo_rpc,
+    NTL_RPC_BOUNDED_RESPONSE(64 * 1024, std::vector<int>), values, int, count, {
+      if (count < 0 || count > 4096)
+        throw ntl::exception(STATUS_INVALID_PARAMETER, "invalid count");
+      return std::vector<int>(static_cast<std::size_t>(count), 42);
+    })
 
 NTL_RPC_END(demo_rpc)
 ```
 
-For types with commas, such as `std::map<int, int>`, wrap the type with
-`NTL_RPC_ARG_PACK(...)`. For custom objects, provide a `zpp::serializer`
-serialization function; the tested `point` class in
+The default macros derive matching method IDs from this shared schema. Use the
+`NTL_ADD_CALLBACK_ID_N` variants with a stable vendor IOCTL function ID in the
+`0x800` through `0xFFF` range only when independently versioned binaries need a
+fixed wire ABI. For custom objects, provide a `zpp::serializer` serialization
+function; the tested `point` class in
 [`test/cmake/common/rpc.hpp`](../test/cmake/common/rpc.hpp) shows the pattern.
 
 ### Kernel Server
@@ -145,9 +137,8 @@ ntl::status ntl::main(ntl::driver& driver,
 }
 ```
 
-`demo_rpc::init(driver)` creates a device named `\Device\demo_rpc`. Keep the
-returned `std::shared_ptr<ntl::rpc::server>` alive for as long as the RPC
-endpoint should exist. A common pattern is to capture it in the unload callback.
+`demo_rpc::init()` creates `\Device\demo_rpc`. Keep the returned server alive for
+as long as the endpoint should exist.
 
 Server callbacks run in the driver's device-control dispatch path. Keep them
 short, validate inputs, and use the same IRQL discipline as other
@@ -163,11 +154,11 @@ runtime-backed driver control code.
 
 int wmain() {
   try {
-    std::wcout << L"40 + 2 = " << demo_rpc::add(40, 2) << L"\n";
+    std::cout << demo_rpc::add(40, 2) << "\n";
 
     ntl::rpc::client client(L"demo_rpc");
-    auto value = client.invoke<int>(demo_rpc::negate_1_index, 7);
-    std::wcout << L"negate(7) = " << value << L"\n";
+    const auto values = client.invoke(demo_rpc::values_1_method, 16);
+    std::cout << "values=" << values.size() << "\n";
     return 0;
   } catch (const std::exception& e) {
     std::cerr << "RPC failed: " << e.what() << "\n";
@@ -176,9 +167,10 @@ int wmain() {
 }
 ```
 
-The generated wrapper functions, such as `demo_rpc::add`, create a temporary
-client and call the matching device. Use an explicit `ntl::rpc::client` when
-you want to reuse the handle or control the output buffer size.
+The generated wrapper is convenient for occasional calls. The generated
+`<name>_<arity>_method` object supports a reusable client. A variable-size
+reply declares its bound with `NTL_RPC_BOUNDED_RESPONSE`; the server checks that
+capacity before executing the callback and returns only the bytes written.
 
 The driver must be loaded before the app can open the RPC device.
 

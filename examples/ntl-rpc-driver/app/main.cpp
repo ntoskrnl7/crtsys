@@ -59,9 +59,8 @@ int wmain(int argc, wchar_t **argv) {
     }
 
     ntl::rpc::client client(L"crtsys_ntl_rpc_sample");
-    const auto values =
-        client.invoke<std::vector<std::uint32_t>>(
-            crtsys_ntl_rpc_sample::series_1_index, std::uint32_t{4});
+    const auto values = client.invoke(crtsys_ntl_rpc_sample::series_1_method,
+                                      std::uint32_t{4});
     const std::vector<std::uint32_t> expected{1, 2, 3, 4};
     if (values != expected) {
       std::fwprintf(stderr, L"unexpected series result\n");

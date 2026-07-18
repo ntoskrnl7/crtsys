@@ -230,7 +230,11 @@ $packageRoot = (Resolve-Path $packageRoot).Path
 foreach ($requiredPath in @(
   'build\native\crtsys.props',
   'build\native\crtsys.targets',
+  'docs\third-party-notices.md',
   'include\ntl\driver',
+  'include\ntl\deps\zpp\LICENSE',
+  'include\ntl\deps\zpp\README.md',
+  'include\ntl\deps\zpp\serializer.h',
   'include\ntl\kmdf\driver',
   'include\ntl\kmdf\dma',
   'include\ntl\kmdf\usb',
@@ -386,6 +390,7 @@ Set-Content -LiteralPath $projectPath -Value $vcxproj -Encoding UTF8
 $mainCpp = switch ($DriverModel) {
   'NTL' { @'
 #include <ntl/driver>
+#include <ntl/deps/zpp/serializer.h>
 
 #include <string>
 #include <vector>
@@ -395,6 +400,17 @@ ntl::status ntl::main(ntl::driver& driver, const std::wstring& registry_path) {
 
   std::vector<int> values{1, 2, 3};
   if (values.size() != 3) {
+    return ntl::status(STATUS_UNSUCCESSFUL);
+  }
+
+  std::vector<unsigned char> bytes;
+  zpp::serializer::memory_output_archive output(bytes);
+  output(values);
+
+  std::vector<int> restored;
+  zpp::serializer::memory_input_archive input(bytes);
+  input(restored);
+  if (restored != values) {
     return ntl::status(STATUS_UNSUCCESSFUL);
   }
 

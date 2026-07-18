@@ -188,8 +188,9 @@ IRQL: 특정 dispatch path가 따로 audit되고 문서화되지 않았다면
 - [`include/ntl/rpc/server`](../include/ntl/rpc/server)
 - [`include/ntl/rpc/client`](../include/ntl/rpc/client)
 
-RPC helper는 `DeviceIoControl` 기반의 server/client stub을 생성합니다.
-직렬화는 `zpp::serializer`를 사용합니다.
+RPC helper는 하나의 공유 선언에서 `DeviceIoControl` 기반 kernel callback
+dispatcher와 user-mode wrapper를 생성합니다. 직렬화는 `zpp::serializer`를
+사용합니다.
 
 주요 macro:
 
@@ -208,18 +209,27 @@ RPC helper는 `DeviceIoControl` 기반의 server/client stub을 생성합니다.
 - `NTL_ADD_CALLBACK_ID_4`
 - `NTL_ADD_CALLBACK_ID_5`
 
-`NTL_ADD_CALLBACK_N`은 callback ID로 `__LINE__`을 사용합니다. 작은 내부용
-schema나 테스트 schema에는 편하지만, schema line number가 ABI의 일부가
-됩니다. schema formatting이나 순서 변경 뒤에도 ID가 안정적으로 유지되어야
-한다면 `NTL_ADD_CALLBACK_ID_N`을 사용하세요.
+suffix의 `0`부터 `5`는 callback 인자 개수입니다. 드라이버와 앱이 같은 공유
+schema를 사용하는 일반적인 경우에는 간결한 `NTL_ADD_CALLBACK_N`을
+사용하세요. 드라이버와 앱을 독립적으로 버전 관리하면서 schema 재배치 뒤에도
+같은 wire ABI를 유지해야 할 때는 vendor IOCTL function 범위의 명시적인 ID를
+받는 `NTL_ADD_CALLBACK_ID_N`을 사용하세요.
+
+가변 크기 return type은
+`NTL_RPC_BOUNDED_RESPONSE(Bytes, ReturnType)`로 최대 직렬화 응답 크기를
+선언할 수 있습니다. server는 이 크기의 output buffer가 제공됐는지 callback
+실행 전에 확인합니다.
 
 타입:
 
 - `ntl::rpc::server`
-  - kernel-mode RPC device holder입니다.
+  - kernel-mode RPC device와 typed dispatch table을 소유합니다.
 - `ntl::rpc::client`
   - user-mode client입니다.
-  - `invoke<Ret>(index, args...)`를 제공합니다.
+  - generated `<name>_<arity>_method`를 받는 `invoke(method, args...)`를
+    제공합니다. return type과 response capacity는 method에서 추론합니다.
+- `ntl::rpc::method<Id, Signature>`
+  - macro 내부에서 사용하는 v142 호환 typed contract입니다.
 
 전체 schema 예시는 [`test/cmake/common/rpc.hpp`](../test/cmake/common/rpc.hpp)를
 참고하세요. 더 작은 app/driver 흐름 예시는 [NTL 사용 예제](./ko-kr-usage-examples.md)를
