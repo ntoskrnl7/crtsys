@@ -200,6 +200,38 @@ IRP with `STATUS_CANCELLED`; `get()` then throws `std::system_error` with
 `ERROR_OPERATION_ABORTED`. Callback code should therefore remain bounded and
 must not treat cancellation as thread termination.
 
+Callbacks that perform long-running work can opt into cooperative
+cancellation by accepting `ntl::rpc::call_context` before their declared RPC
+arguments:
+
+```cpp
+server->on(read_values,
+    [](ntl::rpc::call_context context, std::uint32_t count) {
+      std::vector<std::uint32_t> result;
+      result.reserve(count);
+      for (std::uint32_t index = 0; index != count; ++index) {
+        context.throw_if_cancelled();
+        result.push_back(read_one_value(index));
+      }
+      return result;
+    });
+```
+
+`cancelled()` becomes true after the request is cancelled or the NTL endpoint
+actually begins `stop()`. `throw_if_cancelled()` terminates that RPC with
+`STATUS_CANCELLED`, which the app observes as `ERROR_OPERATION_ABORTED`.
+Choose a polling interval that bounds cancellation latency without adding a
+check to every trivial operation.
+
+The context parameter is optional. Existing `[](args...)` callbacks keep their
+original behavior and are selected before the context-aware form. An SCM
+service-stop request alone does not start endpoint shutdown while an app still
+owns an open legacy WDM device handle; cancel pending calls and close clients
+before waiting for `SERVICE_STOPPED`.
+
+`call_context` is a non-owning view valid only while its callback is running.
+Do not retain it or capture it in work that can outlive the callback.
+
 Synchronous `invoke()` remains available on both normal and asynchronous
 endpoints. On an asynchronous endpoint it waits for the pending operation and
 preserves the existing typed return API.
@@ -460,8 +492,9 @@ fixture under Driver Verifier to cover unload and device lifetime races that a
 single process execution cannot expose.
 
 [`test/rpc/async`](../../test/rpc/async) covers timeout, targeted cancellation,
-request ownership beyond client lifetime, concurrent overlapped calls, pending
-resource limits, and cleanup of an abandoned request.
+cooperative cancellation of a running callback, request ownership beyond
+client lifetime, concurrent overlapped calls, pending resource limits, and
+cleanup of an abandoned request.
 
 [`test/rpc/notifications`](../../test/rpc/notifications) covers typed STL
 payloads, FIFO receives, timeout and cancellation, pending receive limits,
