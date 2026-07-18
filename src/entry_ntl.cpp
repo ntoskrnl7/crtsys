@@ -37,12 +37,14 @@ class device_dispatch_invoker {
 public:
   static status invoke(PDEVICE_OBJECT device_object, PIRP irp) noexcept {
     NTSTATUS status = STATUS_INVALID_DEVICE_REQUEST;
+    bool complete_irp = true;
     irp->IoStatus.Information = 0;
     auto dispatchers = this_driver->dispatchers(device_object);
     if (dispatchers) {
       bool has_any_dispatcher = dispatchers->on_create ||
-                                dispatchers->on_close ||
-                                dispatchers->on_device_control;
+                                 dispatchers->on_close ||
+                                 dispatchers->on_device_control ||
+                                 dispatchers->on_pending_device_control;
       auto invoke_dispatch = [&](auto &&dispatch) {
         auto ret = ntl::seh::try_except([&]() {
           irp->IoStatus.Status = STATUS_SUCCESS;
@@ -83,7 +85,8 @@ public:
         break;
       }
       case IRP_MJ_DEVICE_CONTROL:
-        if (dispatchers->on_device_control) {
+        if (dispatchers->on_device_control ||
+            dispatchers->on_pending_device_control) {
           invoke_dispatch([&]() {
             const void *in_buf_ptr;
             void *out_buf_ptr;
@@ -120,8 +123,19 @@ public:
                 in_buf_ptr,
                 irp_sp->Parameters.DeviceIoControl.InputBufferLength);
             device_control::out_buffer out_buf(out_buf_ptr, out_len);
-            dispatchers->on_device_control(code, in_buf, out_buf);
-            irp->IoStatus.Information = (ULONG_PTR)out_buf.size;
+            if (dispatchers->on_pending_device_control) {
+              ntl::irp request(irp);
+              const auto result = dispatchers->on_pending_device_control(
+                  request, code, in_buf, out_buf);
+              if (result == device_control::dispatch_result::pending) {
+                status = STATUS_PENDING;
+                complete_irp = false;
+                return;
+              }
+            } else {
+              dispatchers->on_device_control(code, in_buf, out_buf);
+            }
+            irp->IoStatus.Information = static_cast<ULONG_PTR>(out_buf.size);
           });
         }
         break;
@@ -129,6 +143,8 @@ public:
         break;
       }
     }
+    if (!complete_irp)
+      return STATUS_PENDING;
     irp->IoStatus.Status = status;
     IoCompleteRequest(irp, IO_NO_INCREMENT);
     return status;

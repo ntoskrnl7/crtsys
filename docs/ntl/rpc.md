@@ -150,6 +150,60 @@ The generated wrapper is the shortest path for occasional calls. Reuse an
 calls without reopening the device. `invoke()` derives its return type from the
 method object, so callers do not repeat an ID or return type.
 
+## Asynchronous Calls, Timeouts, And Cancellation
+
+Asynchronous calls are opt-in on the endpoint. The server pends application
+method IRPs and invokes their callbacks from PASSIVE_LEVEL system work items.
+Contract discovery remains synchronous.
+
+```cpp
+ntl::rpc::server_options options(L"demo_rpc");
+options.asynchronous().max_pending_calls(64);
+
+// Macro contracts accept the same options while retaining their generated
+// callback registration.
+auto server = demo_rpc::init(driver, options);
+```
+
+The pending-call limit bounds retained IRPs, nonpaged request state, and queued
+work. The default is `server_options::default_max_pending_calls`; choose a
+smaller product-specific value when the callbacks are expensive. An excess
+call fails before its application callback runs.
+
+The user-mode client owns every input/output buffer, event, and `OVERLAPPED`
+structure until completion:
+
+```cpp
+using namespace std::chrono_literals;
+
+ntl::rpc::client client(L"demo_rpc");
+auto call = client.invoke_async(demo_rpc::read_values_1_method,
+                                std::uint32_t{16});
+
+if (call.wait_for(250ms) == ntl::rpc::async_wait_status::timeout) {
+  (void)call.cancel();
+}
+
+const auto values = call.get(); // waits, then deserializes or throws
+```
+
+`wait_for()` reporting `timeout` does not release the live request. The caller
+may keep waiting, call `cancel()`, or destroy the `async_call`; destruction
+requests cancellation and drains completion before releasing its buffers. An
+`async_call` may outlive the `client` that created it because both retain the
+same device handle.
+
+`CancelIoEx` cannot forcibly stop arbitrary kernel C++ code. If cancellation
+wins before a queued callback starts, NTL skips that callback. If the callback
+is already running, NTL lets it return, discards its output, and completes the
+IRP with `STATUS_CANCELLED`; `get()` then throws `std::system_error` with
+`ERROR_OPERATION_ABORTED`. Callback code should therefore remain bounded and
+must not treat cancellation as thread termination.
+
+Synchronous `invoke()` remains available on both normal and asynchronous
+endpoints. On an asynchronous endpoint it waits for the pending operation and
+preserves the existing typed return API.
+
 ## Contract Compatibility
 
 An app and driver that are released independently should validate their shared
@@ -315,6 +369,10 @@ and closes short-lived clients, stops the driver service while a long callback
 is active, restarts it, and validates a fresh contract and call. Run that
 fixture under Driver Verifier to cover unload and device lifetime races that a
 single process execution cannot expose.
+
+[`test/rpc/async`](../../test/rpc/async) covers timeout, targeted cancellation,
+request ownership beyond client lifetime, concurrent overlapped calls, pending
+resource limits, and cleanup of an abandoned request.
 
 ## Trust Boundary
 

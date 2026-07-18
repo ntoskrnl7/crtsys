@@ -28,6 +28,12 @@ namespace close {
 using dispatch_fn = std::function<void(irp &)>;
 } // namespace close
 namespace device_control {
+/** @brief Describes whether the NTL dispatcher must complete an IRP. */
+enum class dispatch_result {
+  complete,
+  pending,
+};
+
 /**
  * @brief Decodes a CTL_CODE value passed to an IRP_MJ_DEVICE_CONTROL handler.
  */
@@ -155,6 +161,18 @@ struct out_buffer {
 using dispatch_fn = std::function<void(const device_control::code &,
                                        const device_control::in_buffer &,
                                        device_control::out_buffer &)>;
+
+/**
+ * @brief Advanced device-control callback that may retain an IRP.
+ *
+ * Returning pending transfers completion responsibility to the callback. The
+ * callback must arrange exactly one later IoCompleteRequest call and keep all
+ * METHOD_* buffers valid by retaining the IRP until that completion.
+ */
+using pending_dispatch_fn =
+    std::function<dispatch_result(irp &, const device_control::code &,
+                                  const device_control::in_buffer &,
+                                  device_control::out_buffer &)>;
 } // namespace device_control
 } // namespace ntl
 
@@ -165,6 +183,7 @@ struct dispatchers_t {
   create::dispatch_fn on_create;
   close::dispatch_fn on_close;
   device_control::dispatch_fn on_device_control;
+  device_control::pending_dispatch_fn on_pending_device_control;
 };
 
 template <typename Extension> struct extension_data_t;
@@ -361,7 +380,19 @@ public:
    * @brief Registers an IRP_MJ_DEVICE_CONTROL callback.
    */
   device &on_device_control(device_control::dispatch_fn &&f) {
+    dispatchers().on_pending_device_control = {};
     dispatchers().on_device_control = f;
+    return *this;
+  }
+
+  /**
+   * @brief Registers an IRP_MJ_DEVICE_CONTROL callback that may pend requests.
+   * @note This is a low-level ownership surface. Prefer a higher-level helper
+   * such as ntl::rpc::server when possible.
+   */
+  device &on_pending_device_control(device_control::pending_dispatch_fn &&f) {
+    dispatchers().on_device_control = {};
+    dispatchers().on_pending_device_control = std::move(f);
     return *this;
   }
 

@@ -68,6 +68,8 @@ constexpr std::uint64_t secure_endpoint = 1ull << 1;
 constexpr std::uint64_t immutable_dispatch = 1ull << 2;
 /** @brief Active callbacks are protected by kernel rundown protection. */
 constexpr std::uint64_t rundown_shutdown = 1ull << 3;
+/** @brief This endpoint executes calls as cancellable pending IRPs. */
+constexpr std::uint64_t asynchronous_calls = 1ull << 4;
 /** @brief All transport features implemented by this NTL version. */
 constexpr std::uint64_t current = resource_limits | secure_endpoint |
                                   immutable_dispatch | rundown_shutdown;

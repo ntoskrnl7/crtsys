@@ -138,6 +138,22 @@ jobs:
             -Configuration Debug `
             -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}'
 
+      - name: Build RPC lifecycle and asynchronous fixtures
+        if: matrix.project == 'driver' && matrix.arch == 'x64' && matrix.config == 'Debug'
+        shell: pwsh
+        run: |
+          ./scripts/ci/Build-CrtSys.ps1 `
+            -Project rpc-lifecycle-stress `
+            -Architecture x64 `
+            -Configuration Debug `
+            -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}'
+
+          ./scripts/ci/Build-CrtSys.ps1 `
+            -Project rpc-async `
+            -Architecture x64 `
+            -Configuration Debug `
+            -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}'
+
       - name: Test-sign driver
         if: matrix.project == 'driver' && matrix.config == 'Debug'
         shell: pwsh

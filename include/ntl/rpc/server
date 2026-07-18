@@ -10,9 +10,11 @@
 #include "common"
 
 #include <ntl/driver>
+#include <ntl/pool_allocator>
 
 #include <functional>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <tuple>
 #include <type_traits>
@@ -31,6 +33,8 @@ constexpr GUID device_class_guid = {
 /** @brief Configures one secure kernel RPC endpoint. */
 class server_options {
 public:
+  static constexpr std::uint32_t default_max_pending_calls = 256;
+
   /** @brief Creates SYSTEM/Administrators-only defaults for a device name. */
   explicit server_options(std::wstring name) : name_(std::move(name)) {}
 
@@ -58,6 +62,28 @@ public:
     return *this;
   }
 
+  /**
+   * @brief Runs application RPC callbacks as pending PASSIVE_LEVEL work items.
+   *
+   * This endpoint mode allows an overlapped client to observe timeout and
+   * request cancellation without changing the existing synchronous API.
+   */
+  server_options &asynchronous(bool enabled = true) noexcept {
+    asynchronous_ = enabled;
+    return *this;
+  }
+
+  /**
+   * @brief Sets the maximum number of application calls retained as IRPs.
+   * @note The limit applies only when asynchronous mode is enabled.
+   */
+  server_options &max_pending_calls(std::uint32_t count) {
+    if (count == 0 || count > static_cast<std::uint32_t>(MAXLONG))
+      throw std::invalid_argument("NTL RPC pending-call limit is invalid");
+    max_pending_calls_ = count;
+    return *this;
+  }
+
   /** @brief Returns the device name without the `\\Device\\` prefix. */
   const std::wstring &name() const noexcept { return name_; }
 
@@ -75,6 +101,14 @@ public:
   /** @brief Returns application-defined capability bits. */
   std::uint64_t capabilities() const noexcept { return capabilities_; }
 
+  /** @brief Returns whether this endpoint pends application RPC calls. */
+  bool is_asynchronous() const noexcept { return asynchronous_; }
+
+  /** @brief Returns the configured asynchronous pending-call limit. */
+  std::uint32_t max_pending_calls() const noexcept {
+    return max_pending_calls_;
+  }
+
 private:
   std::wstring name_;
   std::wstring security_descriptor_ =
@@ -82,6 +116,8 @@ private:
   GUID class_guid_ = device_class_guid;
   std::uint32_t contract_version_ = 1;
   std::uint64_t capabilities_ = 0;
+  bool asynchronous_ = false;
+  std::uint32_t max_pending_calls_ = default_max_pending_calls;
 };
 
 namespace detail {
@@ -92,7 +128,13 @@ public:
       : rundown_(&rundown) {}
   rundown_guard(const rundown_guard &) = delete;
   rundown_guard &operator=(const rundown_guard &) = delete;
-  ~rundown_guard() { ExReleaseRundownProtection(rundown_); }
+  ~rundown_guard() {
+    if (rundown_)
+      ExReleaseRundownProtection(rundown_);
+  }
+
+  /** @brief Transfers the acquired reference to a pending request. */
+  void release() noexcept { rundown_ = nullptr; }
 
 private:
   EX_RUNDOWN_REF *rundown_;
@@ -220,11 +262,130 @@ public:
                          ntl::device_control::out_buffer &)>;
 
   dispatch_table(std::uint32_t contract_version,
-                 std::uint64_t capabilities)
-      : contract_version_(contract_version), capabilities_(capabilities) {
+                 std::uint64_t capabilities, bool asynchronous,
+                 std::uint32_t max_pending_calls)
+      : contract_version_(contract_version), capabilities_(capabilities),
+        asynchronous_(asynchronous),
+        max_pending_calls_(static_cast<LONG>(max_pending_calls)) {
     ExInitializeRundownProtection(&rundown_);
     ExInitializeFastMutex(&registration_lock_);
   }
+
+private:
+  class pending_call {
+  public:
+    pending_call(EX_RUNDOWN_REF &rundown, PIRP request,
+                 dispatch_handler &handler,
+                 const ntl::device_control::in_buffer &input,
+                 const ntl::device_control::out_buffer &output,
+                 dispatch_table *owner) noexcept
+        : rundown_(&rundown), request_(request), handler_(&handler),
+          input_(input), output_(output), owner_(owner) {}
+
+    pending_call(const pending_call &) = delete;
+    pending_call &operator=(const pending_call &) = delete;
+
+    void start() noexcept {
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4996) // Device-independent WORK_QUEUE_ITEM wrapper.
+#endif
+      ExInitializeWorkItem(&work_item_, &pending_call::run, this);
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+
+      IoMarkIrpPending(request_);
+      KIRQL cancel_irql = PASSIVE_LEVEL;
+      IoAcquireCancelSpinLock(&cancel_irql);
+      request_->Tail.Overlay.DriverContext[0] = this;
+      if (request_->Cancel) {
+        InterlockedExchange(&cancel_requested_, 1);
+      } else {
+        IoSetCancelRoutine(request_, &pending_call::cancel);
+      }
+      IoReleaseCancelSpinLock(cancel_irql);
+
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4996) // Device-independent WORK_QUEUE_ITEM wrapper.
+#endif
+      ExQueueWorkItem(&work_item_, DelayedWorkQueue);
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+    }
+
+  private:
+    static void NTAPI cancel(PDEVICE_OBJECT, PIRP request) noexcept {
+      auto *const self = static_cast<pending_call *>(
+          request->Tail.Overlay.DriverContext[0]);
+      if (self)
+        InterlockedExchange(&self->cancel_requested_, 1);
+      IoReleaseCancelSpinLock(request->CancelIrql);
+    }
+
+    static void NTAPI run(void *context) noexcept {
+      ntl::pool_ptr<pending_call> owner(
+          static_cast<pending_call *>(context),
+          ntl::pool_deleter<pending_call>{"NTRa"});
+      owner->execute();
+    }
+
+    void execute() noexcept {
+      NTSTATUS status = STATUS_SUCCESS;
+
+      if (InterlockedCompareExchange(&cancel_requested_, 0, 0) == 0) {
+        const auto seh_result = ntl::seh::try_except([&]() {
+          try {
+            (*handler_)(input_, output_);
+          } catch (const ntl::exception &error) {
+            status = error.get_status();
+            output_.clear();
+          } catch (const std::exception &) {
+            status = STATUS_UNSUCCESSFUL;
+            output_.clear();
+          }
+        });
+        if (!std::get<0>(seh_result)) {
+          status = static_cast<NTSTATUS>(std::get<1>(seh_result));
+          output_.clear();
+        }
+      }
+
+      KIRQL cancel_irql = PASSIVE_LEVEL;
+      IoAcquireCancelSpinLock(&cancel_irql);
+      (void)IoSetCancelRoutine(request_, nullptr);
+      const bool cancelled =
+          request_->Cancel ||
+          InterlockedCompareExchange(&cancel_requested_, 0, 0) != 0;
+      request_->Tail.Overlay.DriverContext[0] = nullptr;
+      IoReleaseCancelSpinLock(cancel_irql);
+
+      if (cancelled) {
+        status = STATUS_CANCELLED;
+        output_.clear();
+      }
+
+      request_->IoStatus.Status = status;
+      request_->IoStatus.Information =
+          NT_SUCCESS(status) ? static_cast<ULONG_PTR>(output_.size) : 0;
+      IoCompleteRequest(request_, IO_NO_INCREMENT);
+      InterlockedDecrement(&owner_->pending_calls_);
+      ExReleaseRundownProtection(rundown_);
+    }
+
+    EX_RUNDOWN_REF *rundown_;
+    PIRP request_;
+    dispatch_handler *handler_;
+    ntl::device_control::in_buffer input_;
+    ntl::device_control::out_buffer output_;
+    dispatch_table *owner_;
+    WORK_QUEUE_ITEM work_item_{};
+    volatile LONG cancel_requested_ = 0;
+  };
+
+public:
   dispatch_table(const dispatch_table &) = delete;
   dispatch_table &operator=(const dispatch_table &) = delete;
 
@@ -258,9 +419,11 @@ public:
       throw ntl::exception(STATUS_DELETE_PENDING,
                            "Cannot start a stopped NTL RPC server");
     std::sort(method_ids_.begin(), method_ids_.end());
+    const auto features =
+        transport_features::current |
+        (asynchronous_ ? transport_features::asynchronous_calls : 0);
     contract_ = contract_info(current_protocol_version, contract_version_,
-                              transport_features::current, capabilities_,
-                              method_ids_);
+                              features, capabilities_, method_ids_);
     InterlockedExchange(&started_, 1);
   }
 
@@ -292,7 +455,59 @@ public:
     found->second(input, output);
   }
 
+  ntl::device_control::dispatch_result
+  dispatch_pending(ntl::irp &request, const ntl::device_control::code &code,
+                   const ntl::device_control::in_buffer &input,
+                   ntl::device_control::out_buffer &output) {
+    if (InterlockedCompareExchange(&started_, 0, 0) == 0)
+      throw ntl::exception(STATUS_DEVICE_NOT_READY,
+                           "NTL RPC server has not started");
+    if (!ExAcquireRundownProtection(&rundown_))
+      throw ntl::exception(STATUS_DELETE_PENDING,
+                           "NTL RPC server is stopping");
+    rundown_guard guard(rundown_);
+
+    if (code.value == control_code(contract_query_id)) {
+      write_contract(input, output);
+      return ntl::device_control::dispatch_result::complete;
+    }
+
+    const auto found = handlers_.find(code.value);
+    if (found == handlers_.end())
+      throw ntl::exception(STATUS_INVALID_DEVICE_REQUEST,
+                           "Unknown NTL RPC method ID");
+
+    if (!try_acquire_pending_call())
+      throw ntl::exception(STATUS_DEVICE_BUSY,
+                           "NTL RPC pending-call limit reached");
+
+    auto pending = ntl::try_make_pool<pending_call>(
+        "NTRa", rundown_, request.get(), found->second, input, output, this);
+    if (!pending) {
+      InterlockedDecrement(&pending_calls_);
+      throw ntl::exception(pending.status(),
+                           "NTL RPC pending request allocation failed");
+    }
+
+    pending.value()->start();
+    (void)pending.value().release();
+    guard.release();
+    return ntl::device_control::dispatch_result::pending;
+  }
+
 private:
+  bool try_acquire_pending_call() noexcept {
+    LONG observed = InterlockedCompareExchange(&pending_calls_, 0, 0);
+    while (observed < max_pending_calls_) {
+      const LONG previous =
+          InterlockedCompareExchange(&pending_calls_, observed + 1, observed);
+      if (previous == observed)
+        return true;
+      observed = previous;
+    }
+    return false;
+  }
+
   void write_contract(const ntl::device_control::in_buffer &input,
                       ntl::device_control::out_buffer &output) const {
     if (input.size != 0)
@@ -321,6 +536,9 @@ private:
   FAST_MUTEX registration_lock_{};
   std::uint32_t contract_version_;
   std::uint64_t capabilities_;
+  bool asynchronous_;
+  LONG max_pending_calls_;
+  volatile LONG pending_calls_ = 0;
   volatile LONG started_ = 0;
   volatile LONG stopping_ = 0;
 };
@@ -341,7 +559,8 @@ public:
   /** @brief Creates a named RPC device with explicit endpoint options. */
   server(ntl::driver &driver, const server_options &server_opts)
       : dispatch_(std::make_shared<detail::dispatch_table>(
-            server_opts.contract_version(), server_opts.capabilities())) {
+            server_opts.contract_version(), server_opts.capabilities(),
+            server_opts.is_asynchronous(), server_opts.max_pending_calls())) {
     ntl::device_options options;
     options
         .name(server_opts.name())
@@ -350,12 +569,22 @@ public:
                              server_opts.class_guid());
     device_ = driver.create_device<void>(options);
     const auto dispatch = dispatch_;
-    device_->on_device_control(
-        [dispatch](const ntl::device_control::code &code,
-                   const ntl::device_control::in_buffer &input,
-                   ntl::device_control::out_buffer &output) {
-          dispatch->dispatch(code, input, output);
-        });
+    if (server_opts.is_asynchronous()) {
+      device_->on_pending_device_control(
+          [dispatch](ntl::irp &request,
+                     const ntl::device_control::code &code,
+                     const ntl::device_control::in_buffer &input,
+                     ntl::device_control::out_buffer &output) {
+            return dispatch->dispatch_pending(request, code, input, output);
+          });
+    } else {
+      device_->on_device_control(
+          [dispatch](const ntl::device_control::code &code,
+                     const ntl::device_control::in_buffer &input,
+                     ntl::device_control::out_buffer &output) {
+            dispatch->dispatch(code, input, output);
+          });
+    }
   }
 
   server(const server &) = delete;
@@ -415,8 +644,10 @@ inline std::shared_ptr<server> make_server(ntl::driver &driver,
   namespace _rpc_name_ {                                                       \
   constexpr std::uint32_t rpc_contract_version = (_version_);                 \
   constexpr std::uint64_t rpc_capabilities = (_capabilities_);                \
-  inline std::shared_ptr<ntl::rpc::server> init(ntl::driver &driver) {         \
-    ntl::rpc::server_options rpc_options(L#_rpc_name_);                         \
+  inline std::shared_ptr<ntl::rpc::server>                                    \
+  init(ntl::driver &driver,                                                   \
+       ntl::rpc::server_options rpc_options =                                 \
+           ntl::rpc::server_options(L#_rpc_name_)) {                          \
     rpc_options.contract_version(rpc_contract_version)                         \
         .capabilities(rpc_capabilities);                                       \
     auto rpc_server = ntl::rpc::make_server(driver, rpc_options);

@@ -10,7 +10,10 @@
 #include "common"
 #include "../handle"
 
+#include <chrono>
 #include <limits>
+#include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -98,6 +101,299 @@ private:
   friend class client;
 };
 
+/** @brief Result of a bounded wait on one asynchronous RPC call. */
+enum class async_wait_status {
+  completed,
+  timeout,
+};
+
+namespace detail {
+
+class async_operation {
+public:
+  async_operation(std::shared_ptr<ntl::unique_handle> handle,
+                  unsigned long code, std::vector<unsigned char> input,
+                  std::size_t output_size)
+      : handle_(std::move(handle)), input_(std::move(input)),
+        output_(output_size), event_(::CreateEventW(nullptr, TRUE, FALSE,
+                                                    nullptr)) {
+    if (!handle_ || !*handle_)
+      throw std::system_error(ERROR_INVALID_HANDLE, std::system_category(),
+                              "NTL RPC device is not open");
+    if (!event_)
+      throw std::system_error(static_cast<int>(::GetLastError()),
+                              std::system_category(),
+                              "NTL RPC event creation failed");
+    if (input_.size() > static_cast<std::size_t>(
+                            (std::numeric_limits<DWORD>::max)()) ||
+        output_.size() > static_cast<std::size_t>(
+                             (std::numeric_limits<DWORD>::max)()))
+      throw std::length_error(
+          "NTL RPC asynchronous buffer exceeds DWORD capacity");
+
+    overlapped_.hEvent = event_.get();
+    DWORD returned = 0;
+    const BOOL succeeded = ::DeviceIoControl(
+        handle_->get(), code, input_.empty() ? nullptr : input_.data(),
+        static_cast<DWORD>(input_.size()),
+        output_.empty() ? nullptr : output_.data(),
+        static_cast<DWORD>(output_.size()), &returned, &overlapped_);
+    if (succeeded) {
+      completed_ = true;
+      returned_ = returned;
+      if (returned_ <= output_.size())
+        output_.resize(returned_);
+      else
+        error_ = ERROR_INVALID_DATA;
+      return;
+    }
+
+    const DWORD error = ::GetLastError();
+    if (error != ERROR_IO_PENDING)
+      throw std::system_error(static_cast<int>(error), std::system_category(),
+                              "NTL RPC overlapped DeviceIoControl failed");
+  }
+
+  async_operation(const async_operation &) = delete;
+  async_operation &operator=(const async_operation &) = delete;
+
+  ~async_operation() {
+    if (!ready_noexcept()) {
+      (void)::CancelIoEx(handle_->get(), &overlapped_);
+      (void)observe_completion(true);
+    }
+  }
+
+  bool ready() const {
+    {
+      std::lock_guard<std::mutex> guard(lock_);
+      if (completed_)
+        return true;
+    }
+
+    const DWORD wait = ::WaitForSingleObject(event_.get(), 0);
+    if (wait == WAIT_OBJECT_0)
+      return true;
+    if (wait == WAIT_TIMEOUT)
+      return false;
+    throw std::system_error(static_cast<int>(::GetLastError()),
+                            std::system_category(),
+                            "NTL RPC asynchronous wait failed");
+  }
+
+  async_wait_status wait_for(std::chrono::milliseconds timeout) {
+    if (ready()) {
+      (void)observe_completion(true);
+      return async_wait_status::completed;
+    }
+
+    const auto count = timeout.count();
+    const DWORD wait_ms =
+        count <= 0
+            ? 0
+            : count >= static_cast<decltype(count)>((INFINITE) - 1)
+                  ? (INFINITE) - 1
+                  : static_cast<DWORD>(count);
+    const DWORD wait = ::WaitForSingleObject(event_.get(), wait_ms);
+    if (wait == WAIT_TIMEOUT)
+      return async_wait_status::timeout;
+    if (wait != WAIT_OBJECT_0)
+      throw std::system_error(static_cast<int>(::GetLastError()),
+                              std::system_category(),
+                              "NTL RPC asynchronous wait failed");
+
+    (void)observe_completion(true);
+    return async_wait_status::completed;
+  }
+
+  void wait() { (void)observe_completion(true); }
+
+  bool cancel() {
+    if (::CancelIoEx(handle_->get(), &overlapped_))
+      return true;
+    const DWORD error = ::GetLastError();
+    if (error == ERROR_NOT_FOUND)
+      return false;
+    throw std::system_error(static_cast<int>(error), std::system_category(),
+                            "NTL RPC cancellation failed");
+  }
+
+  const std::vector<unsigned char> &output() {
+    (void)observe_completion(true);
+    std::lock_guard<std::mutex> guard(lock_);
+    if (error_ != ERROR_SUCCESS)
+      throw std::system_error(static_cast<int>(error_),
+                              std::system_category(),
+                              "NTL RPC asynchronous call failed");
+    return output_;
+  }
+
+private:
+  bool ready_noexcept() const noexcept {
+    {
+      std::lock_guard<std::mutex> guard(lock_);
+      if (completed_)
+        return true;
+    }
+    return ::WaitForSingleObject(event_.get(), 0) == WAIT_OBJECT_0;
+  }
+
+  bool observe_completion(bool wait) noexcept {
+    std::lock_guard<std::mutex> guard(lock_);
+    if (completed_)
+      return true;
+
+    DWORD returned = 0;
+    if (!::GetOverlappedResult(handle_->get(), &overlapped_, &returned,
+                               wait ? TRUE : FALSE)) {
+      const DWORD error = ::GetLastError();
+      if (!wait && error == ERROR_IO_INCOMPLETE)
+        return false;
+      error_ = error;
+    } else {
+      error_ = ERROR_SUCCESS;
+      returned_ = returned;
+      if (returned_ <= output_.size())
+        output_.resize(returned_);
+      else
+        error_ = ERROR_INVALID_DATA;
+    }
+    completed_ = true;
+    return true;
+  }
+
+  std::shared_ptr<ntl::unique_handle> handle_;
+  std::vector<unsigned char> input_;
+  std::vector<unsigned char> output_;
+  ntl::unique_handle event_;
+  OVERLAPPED overlapped_{};
+  mutable std::mutex lock_;
+  DWORD returned_ = 0;
+  DWORD error_ = ERROR_SUCCESS;
+  bool completed_ = false;
+};
+
+} // namespace detail
+
+/** @brief Move-only owner of one asynchronous typed RPC invocation. */
+template <typename T> class async_call {
+public:
+  async_call(const async_call &) = delete;
+  async_call &operator=(const async_call &) = delete;
+  async_call(async_call &&) noexcept = default;
+  async_call &operator=(async_call &&) noexcept = default;
+
+  /** @brief Returns true until get() consumes the result. */
+  explicit operator bool() const noexcept { return state_ && !consumed_; }
+
+  /** @brief Reports whether the underlying DeviceIoControl has completed. */
+  bool ready() const {
+    ensure_valid();
+    return state_->ready();
+  }
+
+  /** @brief Waits up to timeout for completion. */
+  async_wait_status wait_for(std::chrono::milliseconds timeout) {
+    ensure_valid();
+    return state_->wait_for(timeout);
+  }
+
+  /** @brief Waits without a timeout. */
+  void wait() {
+    ensure_valid();
+    state_->wait();
+  }
+
+  /** @brief Requests cancellation with CancelIoEx for only this call. */
+  bool cancel() {
+    ensure_valid();
+    return state_->cancel();
+  }
+
+  /** @brief Waits, deserializes, and consumes the typed result. */
+  T get() {
+    ensure_valid();
+    const auto &output = state_->output();
+    zpp::serializer::memory_view_input_archive archive(
+        output.data(), output.size(), decode_allocation_);
+    T value{};
+    archive(value);
+    if (archive.offset() != output.size())
+      throw std::runtime_error("NTL RPC response contains trailing bytes");
+    consumed_ = true;
+    state_.reset();
+    return std::move(value);
+  }
+
+private:
+  friend class client;
+  async_call(std::shared_ptr<detail::async_operation> state,
+             std::size_t decode_allocation)
+      : state_(std::move(state)), decode_allocation_(decode_allocation) {}
+
+  void ensure_valid() const {
+    if (!state_ || consumed_)
+      throw std::logic_error("NTL RPC asynchronous call has no result");
+  }
+
+  std::shared_ptr<detail::async_operation> state_;
+  std::size_t decode_allocation_;
+  bool consumed_ = false;
+};
+
+/** @brief Move-only owner of an asynchronous void RPC invocation. */
+template <> class async_call<void> {
+public:
+  async_call(const async_call &) = delete;
+  async_call &operator=(const async_call &) = delete;
+  async_call(async_call &&) noexcept = default;
+  async_call &operator=(async_call &&) noexcept = default;
+
+  explicit operator bool() const noexcept { return state_ && !consumed_; }
+
+  bool ready() const {
+    ensure_valid();
+    return state_->ready();
+  }
+
+  async_wait_status wait_for(std::chrono::milliseconds timeout) {
+    ensure_valid();
+    return state_->wait_for(timeout);
+  }
+
+  void wait() {
+    ensure_valid();
+    state_->wait();
+  }
+
+  bool cancel() {
+    ensure_valid();
+    return state_->cancel();
+  }
+
+  /** @brief Waits for completion and consumes a void result. */
+  void get() {
+    ensure_valid();
+    if (!state_->output().empty())
+      throw std::runtime_error("void NTL RPC method returned output bytes");
+    consumed_ = true;
+    state_.reset();
+  }
+
+private:
+  friend class client;
+  explicit async_call(std::shared_ptr<detail::async_operation> state)
+      : state_(std::move(state)) {}
+
+  void ensure_valid() const {
+    if (!state_ || consumed_)
+      throw std::logic_error("NTL RPC asynchronous call has no result");
+  }
+
+  std::shared_ptr<detail::async_operation> state_;
+  bool consumed_ = false;
+};
+
 /** @brief Owns a user-mode handle to an NTL RPC device. */
 class client {
 public:
@@ -106,12 +402,20 @@ public:
    * @param rpc_name Kernel device name without the `\\Device\\` prefix.
    */
   explicit client(const std::wstring &rpc_name)
-      : handle_(::CreateFileW(
+      : handle_(std::make_shared<ntl::unique_handle>(::CreateFileW(
             (L"\\\\?\\Global\\GLOBALROOT\\Device\\" + rpc_name).c_str(),
-            GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL)) {}
+            GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
+            FILE_FLAG_OVERLAPPED, NULL))) {}
+
+  client(const client &) = delete;
+  client &operator=(const client &) = delete;
+  client(client &&) noexcept = default;
+  client &operator=(client &&) noexcept = default;
 
   /** @brief Returns true when the RPC device was opened successfully. */
-  explicit operator bool() const noexcept { return static_cast<bool>(handle_); }
+  explicit operator bool() const noexcept {
+    return handle_ && static_cast<bool>(*handle_);
+  }
 
   /**
    * @brief Queries wire, capability, and method metadata from the server.
@@ -222,6 +526,35 @@ public:
                        std::forward<Arguments>(args)...);
   }
 
+  /**
+   * @brief Starts a typed RPC invocation with overlapped DeviceIoControl.
+   * @return An object that owns the request buffers and supports wait/cancel.
+   */
+  template <typename Method, typename... Arguments>
+  async_call<typename Method::return_type>
+  invoke_async(const Method &rpc_method, Arguments &&...args) {
+    static_assert(is_method<Method>::value,
+                  "ntl::rpc::client::invoke_async requires an ntl::rpc::method");
+    static_assert(sizeof...(Arguments) == Method::arity(),
+                  "RPC argument count does not match the method signature");
+    static_assert(Method::response_size() <=
+                      static_cast<std::size_t>(
+                          (std::numeric_limits<DWORD>::max)()),
+                  "NTL RPC response capacity exceeds DWORD capacity");
+    (void)rpc_method;
+
+    auto input =
+        serialize_method_arguments<Method>(std::forward<Arguments>(args)...);
+    if (input.size() > Method::request_size())
+      throw std::length_error("NTL RPC request exceeded its method limit");
+
+    auto state = std::make_shared<detail::async_operation>(
+        handle_, Method::code(), std::move(input), Method::response_size());
+    return make_async_call<Method>(std::move(state),
+                                   typename std::is_void<
+                                       typename Method::return_type>::type{});
+  }
+
 private:
   template <typename Tuple, std::size_t... Index>
   static std::vector<unsigned char>
@@ -252,22 +585,52 @@ private:
   }
 
   void call(unsigned long code, const std::vector<unsigned char> &input,
-            void *output, DWORD output_size, DWORD &returned) const {
-    if (!handle_)
+             void *output, DWORD output_size, DWORD &returned) const {
+    if (!handle_ || !*handle_)
       throw std::system_error(ERROR_INVALID_HANDLE, std::system_category(),
                               "NTL RPC device is not open");
 
     ensure_dword_size(input.size(), "NTL RPC input exceeds DWORD capacity");
+    ntl::unique_handle event(::CreateEventW(nullptr, TRUE, FALSE, nullptr));
+    if (!event)
+      throw std::system_error(static_cast<int>(::GetLastError()),
+                              std::system_category(),
+                              "NTL RPC event creation failed");
+
+    OVERLAPPED overlapped{};
+    overlapped.hEvent = event.get();
     if (!::DeviceIoControl(
-            handle_.get(), code,
+            handle_->get(), code,
             input.empty() ? nullptr
                           : const_cast<unsigned char *>(input.data()),
             static_cast<DWORD>(input.size()), output, output_size, &returned,
-            nullptr)) {
+            &overlapped)) {
       const DWORD error = ::GetLastError();
-      throw std::system_error(static_cast<int>(error), std::system_category(),
-                              "NTL RPC DeviceIoControl failed");
+      if (error != ERROR_IO_PENDING)
+        throw std::system_error(static_cast<int>(error),
+                                std::system_category(),
+                                "NTL RPC DeviceIoControl failed");
+      if (!::GetOverlappedResult(handle_->get(), &overlapped, &returned,
+                                 TRUE))
+        throw std::system_error(static_cast<int>(::GetLastError()),
+                                std::system_category(),
+                                "NTL RPC DeviceIoControl completion failed");
     }
+  }
+
+  template <typename Method>
+  static async_call<typename Method::return_type>
+  make_async_call(std::shared_ptr<detail::async_operation> state,
+                  std::false_type) {
+    return async_call<typename Method::return_type>(
+        std::move(state), Method::decode_allocation());
+  }
+
+  template <typename Method>
+  static async_call<typename Method::return_type>
+  make_async_call(std::shared_ptr<detail::async_operation> state,
+                  std::true_type) {
+    return async_call<void>(std::move(state));
   }
 
   template <typename Method, typename... Arguments>
@@ -316,7 +679,7 @@ private:
   }
 
 private:
-  ntl::unique_handle handle_;
+  std::shared_ptr<ntl::unique_handle> handle_;
 };
 
 } // namespace rpc
