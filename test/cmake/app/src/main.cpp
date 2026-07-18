@@ -6,74 +6,85 @@
 #include "common/rpc.hpp"
 
 TEST(ntl_rpc_client, invoke_callback_by_invoke_method) {
-  ntl::rpc::client cli(L"test_rpc", 1024 * 1024);
+  ntl::rpc::client cli(L"test_rpc");
 
   using namespace test_rpc;
-  EXPECT_EQ(cli.invoke<int>(test_inc_1_index, 1), 2);
-  EXPECT_EQ(cli.invoke<int>(test_dec_1_index, 1), 0);
+  ntl::rpc::contract_requirements requirements;
+  requirements.contract_version(rpc_contract_version)
+      .capabilities(rpc_capabilities)
+      .method(test_inc_1_method)
+      .method(test_stable_sum_2_method)
+      .method(test_list_1_method);
+  const auto contract = cli.require_contract(requirements);
+  EXPECT_EQ(contract.contract_version(), rpc_contract_version);
+  EXPECT_TRUE(contract.supports(test_stable_sum_2_method));
 
-  EXPECT_EQ(cli.invoke<int>(test_sum_2_index, 1, 2), 3);
-  EXPECT_EQ(cli.invoke<int>(test_stable_sum_2_index, 1, 2), 3);
-  EXPECT_EQ(cli.invoke<int>(test_sum_3_index, 1, 2, 3), 6);
-  EXPECT_EQ(cli.invoke<int>(test_sum_4_index, 1, 2, 3, 4), 10);
-  EXPECT_EQ(cli.invoke<int>(test_sum_5_index, 1, 2, 3, 4, 5), 15);
+  EXPECT_EQ(cli.invoke(test_inc_1_method, 1), 2);
+  EXPECT_EQ(cli.invoke(test_dec_1_method, 1), 0);
 
-  EXPECT_NO_FATAL_FAILURE(cli.invoke<void>(test_void_0_index));
+  EXPECT_EQ(cli.invoke(test_sum_2_method, 1, 2), 3);
+  EXPECT_EQ(cli.invoke(test_stable_sum_2_method, 1, 2), 3);
+  EXPECT_EQ(cli.invoke(test_sum_3_method, 1, 2, 3), 6);
+  EXPECT_EQ(cli.invoke(test_sum_4_method, 1, 2, 3, 4), 10);
+  EXPECT_EQ(cli.invoke(test_sum_5_method, 1, 2, 3, 4, 5), 15);
+
+  EXPECT_NO_FATAL_FAILURE(cli.invoke(test_void_0_method));
 
   std::vector<int> vec = {1, 2, 3};
-  EXPECT_FALSE(cli.invoke<bool>(test_vec_1_index, vec));
+  EXPECT_FALSE(cli.invoke(test_vec_1_method, vec));
 
   std::set<int> set = {1, 2, 3, 4};
-  EXPECT_FALSE(cli.invoke<bool>(test_set_1_index, set));
+  EXPECT_FALSE(cli.invoke(test_set_1_method, set));
 
-  auto test_list_ret = test_list({1, 2, 3, 4, 5, 6});
+  auto test_list_ret =
+      cli.invoke(test_list_1_method, std::list<int>{1, 2, 3, 4, 5, 6});
   for (size_t i = 0; i < test_list_ret.size(); i++)
     EXPECT_STREQ(std::to_string(i + 1).c_str(), test_list_ret[i].c_str());
 
-  auto test_map_ret = test_map({{1, 1}, {2, 2}, {3, 3}});
+  auto test_map_ret = cli.invoke(
+      test_map_1_method, std::map<int, int>{{1, 1}, {2, 2}, {3, 3}});
   EXPECT_FALSE(test_map_ret.empty());
   for (auto e : test_map_ret)
     EXPECT_STREQ(std::to_string(e.first).c_str(), e.second.c_str());
 
-  EXPECT_TRUE(test_map2({{1, 1}, {2, 2}, {3, 3}}, {}));
+  EXPECT_TRUE(cli.invoke(test_map2_2_method,
+                         std::map<int, int>{{1, 1}, {2, 2}, {3, 3}},
+                         std::map<int, int>{}));
 
-  auto test_point_class_ret = test_point_class(point(1, 1), point(4, 1));
+  auto test_point_class_ret =
+      cli.invoke(test_point_class_2_method, point(1, 1), point(4, 1));
   EXPECT_EQ(test_point_class_ret.get_x(), 4);
   EXPECT_EQ(test_point_class_ret.get_y(), 1);
 }
 
-TEST(ntl_rpc_client, invoke_callback_by_symbol) {
+TEST(ntl_rpc_client, invoke_generated_wrapper) {
   using namespace test_rpc;
 
   EXPECT_EQ(test_inc(1), 2);
   EXPECT_EQ(test_dec(1), 0);
-
   EXPECT_EQ(test_sum(1, 2), 3);
   EXPECT_EQ(test_stable_sum(1, 2), 3);
   EXPECT_EQ(test_sum(1, 2, 3), 6);
   EXPECT_EQ(test_sum(1, 2, 3, 4), 10);
   EXPECT_EQ(test_sum(1, 2, 3, 4, 5), 15);
-
   EXPECT_NO_FATAL_FAILURE(test_void());
+  EXPECT_FALSE(test_vec(std::vector<int>{1, 2, 3}));
+  EXPECT_FALSE(test_set(std::set<int>{1, 2, 3, 4}));
 
-  EXPECT_FALSE(test_vec({1, 2, 3}));
+  const auto strings = test_list(std::list<int>{1, 2, 3});
+  ASSERT_EQ(strings.size(), 3u);
+  EXPECT_EQ(strings[0], "1");
+  EXPECT_EQ(strings[2], "3");
 
-  EXPECT_FALSE(test_set({1, 2, 3, 4}));
+  const auto mapped =
+      test_map(std::map<int, int>{{1, 1}, {2, 2}, {3, 3}});
+  EXPECT_EQ(mapped.at(2), "2");
+  EXPECT_TRUE(test_map2(std::map<int, int>{{1, 1}},
+                        std::map<int, int>{}));
 
-  auto test_list_ret = test_list({1, 2, 3, 4, 5, 6});
-  for (size_t i = 0; i < test_list_ret.size(); i++)
-    EXPECT_STREQ(std::to_string(i + 1).c_str(), test_list_ret[i].c_str());
-
-  auto test_map_ret = test_map({{1, 1}, {2, 2}, {3, 3}});
-  EXPECT_FALSE(test_map_ret.empty());
-  for (auto e : test_map_ret)
-    EXPECT_STREQ(std::to_string(e.first).c_str(), e.second.c_str());
-
-  EXPECT_TRUE(test_map2({{1, 1}, {2, 2}, {3, 3}}, {}));
-
-  auto test_point_class_ret = test_point_class(point(1, 1), point(4, 1));
-  EXPECT_EQ(test_point_class_ret.get_x(), 4);
-  EXPECT_EQ(test_point_class_ret.get_y(), 1);
+  const auto selected = test_point_class(point(1, 1), point(4, 1));
+  EXPECT_EQ(selected.get_x(), 4);
+  EXPECT_EQ(selected.get_y(), 1);
 }
 
 #include "common/test_device.h"

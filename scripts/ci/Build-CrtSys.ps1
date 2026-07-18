@@ -1,6 +1,7 @@
 param(
   [Parameter(Mandatory = $true)]
-  [ValidateSet('app', 'driver', 'kmdf-verifier-stress')]
+  [ValidateSet('app', 'driver', 'kmdf-verifier-stress',
+               'rpc-lifecycle-stress')]
   [string] $Project,
 
   [Parameter(Mandatory = $true)]
@@ -26,6 +27,8 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $sourceDir = if ($Project -eq 'kmdf-verifier-stress') {
   Join-Path $repoRoot 'test\kmdf\verifier-stress'
+} elseif ($Project -eq 'rpc-lifecycle-stress') {
+  Join-Path $repoRoot 'test\rpc\lifecycle-stress'
 } else {
   Join-Path $repoRoot "test\cmake\$Project"
 }

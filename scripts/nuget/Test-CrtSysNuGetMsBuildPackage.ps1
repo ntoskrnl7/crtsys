@@ -230,7 +230,11 @@ $packageRoot = (Resolve-Path $packageRoot).Path
 foreach ($requiredPath in @(
   'build\native\crtsys.props',
   'build\native\crtsys.targets',
+  'docs\third-party-notices.md',
   'include\ntl\driver',
+  'include\ntl\deps\zpp\LICENSE',
+  'include\ntl\deps\zpp\README.md',
+  'include\ntl\deps\zpp\serializer.h',
   'include\ntl\kmdf\driver',
   'include\ntl\kmdf\dma',
   'include\ntl\kmdf\usb',
@@ -386,9 +390,17 @@ Set-Content -LiteralPath $projectPath -Value $vcxproj -Encoding UTF8
 $mainCpp = switch ($DriverModel) {
   'NTL' { @'
 #include <ntl/driver>
+#include <ntl/deps/zpp/serializer.h>
+#include <ntl/rpc/server>
 
+#include <memory>
 #include <string>
 #include <vector>
+
+namespace {
+using package_smoke_method = ntl::rpc::make_method_t<0xC53, int, int>;
+std::shared_ptr<ntl::rpc::server> package_smoke_server;
+} // namespace
 
 ntl::status ntl::main(ntl::driver& driver, const std::wstring& registry_path) {
   UNREFERENCED_PARAMETER(registry_path);
@@ -398,7 +410,25 @@ ntl::status ntl::main(ntl::driver& driver, const std::wstring& registry_path) {
     return ntl::status(STATUS_UNSUCCESSFUL);
   }
 
-  driver.on_unload([]() {});
+  std::vector<unsigned char> bytes;
+  zpp::serializer::memory_output_archive output(bytes);
+  output(values);
+
+  std::vector<int> restored;
+  zpp::serializer::memory_input_archive input(bytes);
+  input(restored);
+  if (restored != values) {
+    return ntl::status(STATUS_UNSUCCESSFUL);
+  }
+
+  ntl::rpc::server_options rpc_options(L"CrtSysPackageSmokeRpc");
+  rpc_options.contract_version(9).capabilities(0x5);
+  package_smoke_server = ntl::rpc::make_server(driver, rpc_options);
+  package_smoke_server
+      ->on(package_smoke_method{}, [](int value) { return value; })
+      .start();
+
+  driver.on_unload([]() { package_smoke_server.reset(); });
   return ntl::status::ok();
 }
 '@ }

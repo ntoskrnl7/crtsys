@@ -255,10 +255,31 @@ public:
    */
   bool is_exclusive() const { return exclusive_; }
 
+  /**
+   * @brief Creates a named legacy/control device with an explicit ACL.
+   * @param sddl SDDL string applied by IoCreateDeviceSecure.
+   * @param class_guid Project-owned device setup class GUID.
+   * @note Secure creation is valid only for named legacy/control devices or
+   * raw PDOs. Do not use it to create a WDM FDO.
+   */
+  device_options &security_descriptor(const std::wstring &sddl,
+                                      const GUID &class_guid) {
+    security_descriptor_ = sddl;
+    class_guid_ = class_guid;
+    secure_ = true;
+    return *this;
+  }
+
+  /** @brief Returns whether explicit secure device creation is enabled. */
+  bool has_security_descriptor() const noexcept { return secure_; }
+
 private:
   std::wstring name_;
   device_type type_;
   bool exclusive_;
+  std::wstring security_descriptor_;
+  GUID class_guid_{};
+  bool secure_ = false;
 };
 
 /**

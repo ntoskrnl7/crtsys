@@ -40,6 +40,16 @@ int wmain(int argc, wchar_t **argv) {
   const std::uint32_t bias = parse_value(argc, argv, 2, 7);
 
   try {
+    ntl::rpc::client client(L"crtsys_ntl_rpc_sample");
+    ntl::rpc::contract_requirements requirements;
+    requirements.contract_version(
+        crtsys_ntl_rpc_sample::rpc_contract_version)
+        .capabilities(crtsys_ntl_rpc_sample::rpc_capabilities)
+        .method(crtsys_ntl_rpc_sample::add_2_method)
+        .method(crtsys_ntl_rpc_sample::describe_1_method)
+        .method(crtsys_ntl_rpc_sample::series_1_method);
+    (void)client.require_contract(requirements);
+
     const int sum = crtsys_ntl_rpc_sample::add(40, 2);
     if (sum != 42) {
       std::fwprintf(stderr, L"unexpected add result: %d\n", sum);
@@ -58,10 +68,8 @@ int wmain(int argc, wchar_t **argv) {
       return 1;
     }
 
-    ntl::rpc::client client(L"crtsys_ntl_rpc_sample");
-    const auto values =
-        client.invoke<std::vector<std::uint32_t>>(
-            crtsys_ntl_rpc_sample::series_1_index, std::uint32_t{4});
+    const auto values = client.invoke(crtsys_ntl_rpc_sample::series_1_method,
+                                      std::uint32_t{4});
     const std::vector<std::uint32_t> expected{1, 2, 3, 4};
     if (values != expected) {
       std::fwprintf(stderr, L"unexpected series result\n");

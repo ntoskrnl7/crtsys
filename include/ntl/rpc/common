@@ -17,22 +17,317 @@
 
 #include "../deps/zpp/serializer.h"
 
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <tuple>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
 #if defined(NTL_USER_MODE)
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <winioctl.h>
+#else
+#ifndef _NTDDK_
+#include <wdm.h>
+#endif
 #endif // defined(NTL_USER_MODE)
 
-#define FILE_DEVICE_NTL_RPC 60000
+namespace ntl {
+namespace rpc {
+
+/** @brief Device type reserved for NTL RPC control codes. */
+constexpr unsigned long device_type = 60000;
+
+/** @brief Default receive capacity for methods without an explicit limit. */
+constexpr std::size_t default_response_size = 4096;
+
+/** @brief Default serialized request limit for one method invocation. */
+constexpr std::size_t default_request_size = 1024 * 1024;
+
+/** @brief Default cumulative allocation budget while decoding one payload. */
+constexpr std::size_t default_decode_allocation = 4 * 1024 * 1024;
+
+/** @brief Current wire format used by the built-in contract query. */
+constexpr std::uint32_t current_protocol_version = 1;
+
+/** @brief Reserved IOCTL function ID used by `client::query_contract()`. */
+constexpr unsigned long contract_query_id = 0xFFF;
+
+/** @brief Receive capacity for the built-in contract query. */
+constexpr std::size_t contract_response_size = 64 * 1024;
+
+namespace transport_features {
+/** @brief Per-method request and decode-allocation limits are enforced. */
+constexpr std::uint64_t resource_limits = 1ull << 0;
+/** @brief The endpoint is created with an explicit kernel device ACL. */
+constexpr std::uint64_t secure_endpoint = 1ull << 1;
+/** @brief The dispatch table becomes immutable when the server starts. */
+constexpr std::uint64_t immutable_dispatch = 1ull << 2;
+/** @brief Active callbacks are protected by kernel rundown protection. */
+constexpr std::uint64_t rundown_shutdown = 1ull << 3;
+/** @brief All transport features implemented by this NTL version. */
+constexpr std::uint64_t current = resource_limits | secure_endpoint |
+                                  immutable_dispatch | rundown_shutdown;
+} // namespace transport_features
+
+/** @brief Describes one running RPC server's wire and application contract. */
+class contract_info {
+public:
+  /** @brief Creates an empty value for deserialization. */
+  contract_info() = default;
+
+  /** @brief Creates the immutable metadata published by a running server. */
+  contract_info(std::uint32_t protocol_version,
+                std::uint32_t contract_version,
+                std::uint64_t transport_feature_mask,
+                std::uint64_t capability_mask,
+                std::vector<std::uint32_t> method_ids)
+      : protocol_version_(protocol_version),
+        contract_version_(contract_version),
+        transport_features_(transport_feature_mask),
+        capabilities_(capability_mask), method_ids_(std::move(method_ids)) {}
+
+  /** @brief Returns the NTL RPC wire protocol version. */
+  std::uint32_t protocol_version() const noexcept { return protocol_version_; }
+
+  /** @brief Returns the application-defined contract version. */
+  std::uint32_t contract_version() const noexcept { return contract_version_; }
+
+  /** @brief Returns framework transport feature bits. */
+  std::uint64_t transport_feature_mask() const noexcept {
+    return transport_features_;
+  }
+
+  /** @brief Returns application-defined capability bits. */
+  std::uint64_t capability_mask() const noexcept { return capabilities_; }
+
+  /** @brief Returns sorted application method IDs supported by the server. */
+  const std::vector<std::uint32_t> &method_ids() const noexcept {
+    return method_ids_;
+  }
+
+  /** @brief Reports whether the server publishes one method ID. */
+  bool supports_method(std::uint32_t id) const noexcept {
+    return std::binary_search(method_ids_.begin(), method_ids_.end(), id);
+  }
+
+  /** @brief Reports whether the server publishes a typed method. */
+  template <typename Method>
+  bool supports(const Method &) const noexcept {
+    return supports_method(static_cast<std::uint32_t>(Method::id()));
+  }
+
+private:
+  std::uint32_t protocol_version_ = 0;
+  std::uint32_t contract_version_ = 0;
+  std::uint64_t transport_features_ = 0;
+  std::uint64_t capabilities_ = 0;
+  std::vector<std::uint32_t> method_ids_;
+
+public:
+  friend zpp::serializer::access;
+  template <typename Archive, typename Self>
+  static void serialize(Archive &archive, Self &self) {
+    archive(self.protocol_version_, self.contract_version_,
+            self.transport_features_, self.capabilities_, self.method_ids_);
+  }
+};
+
+/** @brief Associates a return type with a per-method response capacity. */
+template <typename T, std::size_t Bytes> struct bounded_response {
+  static_assert(Bytes != 0, "RPC response capacity must be nonzero");
+  using value_type = T;
+  static constexpr std::size_t size = Bytes;
+};
+
+/** @brief Associates a response type with all per-method resource limits. */
+template <typename T, std::size_t ResponseBytes, std::size_t RequestBytes,
+          std::size_t DecodeAllocation>
+struct method_limits {
+  static_assert(std::is_void<T>::value || ResponseBytes != 0,
+                "A non-void RPC method requires response capacity");
+  static_assert(RequestBytes != 0, "RPC request capacity must be nonzero");
+  static_assert(DecodeAllocation != 0,
+                "RPC decode allocation must be nonzero");
+  using value_type = T;
+  static constexpr std::size_t response_size =
+      std::is_void<T>::value ? 0 : ResponseBytes;
+  static constexpr std::size_t request_size = RequestBytes;
+  static constexpr std::size_t decode_allocation = DecodeAllocation;
+};
+
+/** @brief Resolves the value type and receive capacity of an RPC response. */
+template <typename T> struct response_traits {
+  using type = T;
+  static constexpr std::size_t size = default_response_size;
+  static constexpr std::size_t request_size = default_request_size;
+  static constexpr std::size_t decode_allocation = default_decode_allocation;
+};
+
+template <> struct response_traits<void> {
+  using type = void;
+  static constexpr std::size_t size = 0;
+  static constexpr std::size_t request_size = default_request_size;
+  static constexpr std::size_t decode_allocation = default_decode_allocation;
+};
+
+template <typename T, std::size_t Bytes>
+struct response_traits<bounded_response<T, Bytes>> {
+  using type = T;
+  static constexpr std::size_t size = Bytes;
+  static constexpr std::size_t request_size = default_request_size;
+  static constexpr std::size_t decode_allocation = default_decode_allocation;
+};
+
+template <typename T, std::size_t ResponseBytes, std::size_t RequestBytes,
+          std::size_t DecodeAllocation>
+struct response_traits<
+    method_limits<T, ResponseBytes, RequestBytes, DecodeAllocation>> {
+  using type = T;
+  static constexpr std::size_t size =
+      method_limits<T, ResponseBytes, RequestBytes,
+                    DecodeAllocation>::response_size;
+  static constexpr std::size_t request_size = RequestBytes;
+  static constexpr std::size_t decode_allocation = DecodeAllocation;
+};
+
+/** @brief Unwraps an RPC response declaration to its callback return type. */
+template <typename T>
+using response_type_t = typename response_traits<T>::type;
+
+/** @brief Builds the METHOD_BUFFERED control code for an RPC method ID. */
+constexpr unsigned long control_code(unsigned long id) noexcept {
+  return static_cast<unsigned long>(
+      CTL_CODE(device_type, id, METHOD_BUFFERED,
+               FILE_READ_DATA | FILE_WRITE_DATA));
+}
+
+/** @brief Marker base used to recognize typed RPC method descriptors. */
+struct method_tag {};
 
 /**
- * @brief Builds the IOCTL code used for an NTL RPC function index.
+ * @brief Describes one typed RPC method shared by the driver and client.
+ * @tparam Id Stable vendor IOCTL function ID in the 0x800-0xFFE range.
+ * @tparam Signature Function signature describing the result and arguments.
+ * @tparam ResponseSize Maximum serialized response bytes.
+ * @tparam RequestSize Maximum serialized request bytes.
+ * @tparam DecodeAllocation Maximum cumulative allocation charged while
+ * decoding a request or response.
  */
-#define NTL_RPC_DEVICE_CTL(_idx_)                                              \
-  ((DWORD)CTL_CODE(FILE_DEVICE_NTL_RPC, _idx_, METHOD_BUFFERED,                \
-                   FILE_ANY_ACCESS))
+template <unsigned long Id, typename Signature,
+          std::size_t ResponseSize = default_response_size,
+          std::size_t RequestSize = default_request_size,
+          std::size_t DecodeAllocation = default_decode_allocation>
+class method;
 
-/**
- * @brief Preserves comma-containing argument lists inside RPC macros.
- */
+template <unsigned long Id, typename Return, typename... Arguments,
+          std::size_t ResponseSize, std::size_t RequestSize,
+          std::size_t DecodeAllocation>
+class method<Id, Return(Arguments...), ResponseSize, RequestSize,
+             DecodeAllocation> : public method_tag {
+  static_assert(Id >= 0x800 && Id < contract_query_id,
+                "NTL RPC method IDs must use 0x800-0xFFE; 0xFFF is reserved");
+  static_assert(std::is_void<Return>::value || ResponseSize != 0,
+                "A non-void RPC method requires response capacity");
+  static_assert(RequestSize != 0, "An RPC method requires request capacity");
+  static_assert(DecodeAllocation != 0,
+                "An RPC method requires a decode allocation budget");
+
+public:
+  using return_type = Return;
+  using argument_storage =
+      std::tuple<typename std::decay<Arguments>::type...>;
+
+  /** @brief Returns the stable IOCTL function ID. */
+  static constexpr unsigned long id() noexcept { return Id; }
+
+  /** @brief Returns the complete METHOD_BUFFERED IOCTL code. */
+  static constexpr unsigned long code() noexcept { return control_code(Id); }
+
+  /** @brief Returns the number of method arguments. */
+  static constexpr std::size_t arity() noexcept { return sizeof...(Arguments); }
+
+  /** @brief Returns the receive capacity used by the generated client call. */
+  static constexpr std::size_t response_size() noexcept {
+    return std::is_void<Return>::value ? 0 : ResponseSize;
+  }
+
+  /** @brief Returns the maximum serialized request size. */
+  static constexpr std::size_t request_size() noexcept { return RequestSize; }
+
+  /** @brief Returns the cumulative allocation budget used while decoding. */
+  static constexpr std::size_t decode_allocation() noexcept {
+    return DecodeAllocation;
+  }
+
+  /**
+   * @brief Returns the same method contract with an explicit response limit.
+   */
+  template <std::size_t Bytes>
+  constexpr method<Id, Return(Arguments...), Bytes, RequestSize,
+                   DecodeAllocation>
+  max_response_size() const noexcept {
+    static_assert(Bytes != 0, "RPC response capacity must be nonzero");
+    return {};
+  }
+
+  /** @brief Returns the same method contract with an explicit request limit. */
+  template <std::size_t Bytes>
+  constexpr method<Id, Return(Arguments...), ResponseSize, Bytes,
+                   DecodeAllocation>
+  max_request_size() const noexcept {
+    static_assert(Bytes != 0, "RPC request capacity must be nonzero");
+    return {};
+  }
+
+  /**
+   * @brief Returns the same method contract with an explicit decode budget.
+   */
+  template <std::size_t Bytes>
+  constexpr method<Id, Return(Arguments...), ResponseSize, RequestSize, Bytes>
+  max_decode_allocation() const noexcept {
+    static_assert(Bytes != 0, "RPC decode allocation must be nonzero");
+    return {};
+  }
+};
+
+/** @brief Reports whether a type is an NTL RPC method descriptor. */
+template <typename T>
+struct is_method
+    : std::is_base_of<method_tag, typename std::decay<T>::type> {};
+
+/** @brief Builds a typed method from a response declaration and arguments. */
+template <unsigned long Id, typename Response, typename... Arguments>
+struct make_method {
+  using return_type = response_type_t<Response>;
+  using type = method<Id, return_type(Arguments...),
+                      response_traits<Response>::size,
+                      response_traits<Response>::request_size,
+                      response_traits<Response>::decode_allocation>;
+};
+
+/** @brief Shorthand for the method type produced by `make_method`. */
+template <unsigned long Id, typename Response, typename... Arguments>
+using make_method_t = typename make_method<Id, Response, Arguments...>::type;
+
+} // namespace rpc
+} // namespace ntl
+
+/** @brief Preserves comma-containing types inside RPC macros. */
 #define NTL_RPC_ARG_PACK(...) __VA_ARGS__
+
+/** @brief Declares a larger response limit without changing the return type. */
+#define NTL_RPC_BOUNDED_RESPONSE(_bytes_, ...)                                 \
+  ntl::rpc::bounded_response<__VA_ARGS__, (_bytes_)>
+
+/** @brief Declares response, request, and decode-allocation method limits. */
+#define NTL_RPC_METHOD_LIMITS(_response_bytes_, _request_bytes_,               \
+                              _decode_bytes_, ...)                             \
+  ntl::rpc::method_limits<__VA_ARGS__, (_response_bytes_),                    \
+                          (_request_bytes_), (_decode_bytes_)>
+
+/** @brief Maps line-based convenience IDs into the vendor IOCTL range. */
+#define NTL_RPC_DETAIL_LINE_ID (0x800ul + (__LINE__ % 0x7FFul))

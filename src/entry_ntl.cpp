@@ -163,6 +163,7 @@ CrtSysDriverEntry(PDRIVER_OBJECT driver_object,
         ntl::main, std::ref(*driver), std::wstring(registry_path->Buffer));
     if (!entry_status.is_ok()) {
       ntl::driver_unload_invoker::unload(*driver);
+      driver.reset();
       CrtSysUninitializeRuntime(driver_object);
       return entry_status;
     }

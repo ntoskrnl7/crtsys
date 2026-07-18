@@ -1479,10 +1479,13 @@ public:
      * Construct a memory view input archive, that loads data from an array
      * of given pointer and size.
      */
-    memory_view_input_archive(const unsigned char * input,
-                              std::size_t size) noexcept :
+    memory_view_input_archive(
+        const unsigned char * input,
+        std::size_t size,
+        std::size_t allocation_budget = static_cast<std::size_t>(-1)) noexcept :
         m_input(input),
-        m_size(size)
+        m_size(size),
+        m_allocation_budget(allocation_budget)
     {
     }
 
@@ -1521,6 +1524,30 @@ public:
     }
 
     /**
+     * Returns the number of unread bytes in the input data.
+     */
+    std::size_t remaining() const noexcept
+    {
+        return m_offset <= m_size ? m_size - m_offset : 0;
+    }
+
+    /**
+     * Charges dynamic storage that a loading serializer is about to create.
+     * This lets an RPC boundary reject small payloads that claim enormous
+     * container counts before resize() or node allocation occurs.
+     */
+    bool consume_allocation(std::size_t count,
+                            std::size_t item_size) noexcept
+    {
+        if (item_size != 0 && count > m_allocation_budget / item_size) {
+            return false;
+        }
+
+        m_allocation_budget -= count * item_size;
+        return true;
+    }
+
+    /**
      * Returns the current offset in the input data.
      */
     std::size_t offset() const noexcept
@@ -1544,7 +1571,7 @@ protected:
     auto serialize(Item && item)
     {
         // Verify that the vector is large enough to contain the item.
-        if (m_size < (sizeof(item) + m_offset)) {
+        if (sizeof(item) > remaining()) {
 #ifndef ZPP_SERIALIZER_FREESTANDING
             throw out_of_range("Input vector was not large enough to "
                                "contain the requested item");
@@ -1573,7 +1600,7 @@ protected:
     auto serialize(void * data, std::size_t size)
     {
         // Verify that the vector is large enough to contain the data.
-        if (m_size < (size + m_offset)) {
+        if (size > remaining()) {
 #ifndef ZPP_SERIALIZER_FREESTANDING
             throw out_of_range("Input vector was not large enough to "
                                "contain the requested item");
@@ -1609,6 +1636,11 @@ private:
      * The next input.
      */
     std::size_t m_offset{};
+
+    /**
+     * Remaining dynamic allocation charged by container deserialization.
+     */
+    std::size_t m_allocation_budget{};
 }; // memory_view_input_archive
 
 /**
@@ -1874,6 +1906,46 @@ private:
 };     // registry
 #endif // ZPP_SERIALIZER_FREESTANDING
 
+namespace detail
+{
+template <typename Archive>
+auto serialized_bytes_fit(const Archive & archive,
+                          std::size_t count,
+                          std::size_t item_size,
+                          int) noexcept -> decltype(archive.remaining(), bool())
+{
+    return item_size == 0 || count <= archive.remaining() / item_size;
+}
+
+template <typename Archive>
+bool serialized_bytes_fit(const Archive &,
+                          std::size_t,
+                          std::size_t,
+                          long) noexcept
+{
+    return true;
+}
+
+template <typename Archive>
+auto allocation_fits(Archive & archive,
+                     std::size_t count,
+                     std::size_t item_size,
+                     int) noexcept ->
+    decltype(archive.consume_allocation(count, item_size), bool())
+{
+    return archive.consume_allocation(count, item_size);
+}
+
+template <typename Archive>
+bool allocation_fits(Archive &,
+                     std::size_t,
+                     std::size_t,
+                     long) noexcept
+{
+    return true;
+}
+} // namespace detail
+
 /**
  * Serialize resizable containers, operates on loading (input) archives.
  */
@@ -1909,6 +1981,18 @@ auto serialize(Archive & archive, Container & container)
         return result;
     }
 #endif
+
+    if (!detail::allocation_fits(
+            archive,
+            static_cast<std::size_t>(size),
+            sizeof(typename Container::value_type),
+            0)) {
+#ifndef ZPP_SERIALIZER_FREESTANDING
+        throw out_of_range("Container allocation exceeds the decode budget.");
+#else
+        return freestanding::error{error::out_of_range};
+#endif
+    }
 
     // Resize the container to match the size.
     container.resize(size);
@@ -2086,6 +2170,30 @@ auto serialize(Archive & archive, Container & container)
     }
 #endif
 
+    if (!detail::serialized_bytes_fit(
+            archive,
+            static_cast<std::size_t>(size),
+            sizeof(typename Container::value_type),
+            0)) {
+#ifndef ZPP_SERIALIZER_FREESTANDING
+        throw out_of_range("Container payload exceeds the input data.");
+#else
+        return freestanding::error{error::out_of_range};
+#endif
+    }
+
+    if (!detail::allocation_fits(
+            archive,
+            static_cast<std::size_t>(size),
+            sizeof(typename Container::value_type),
+            0)) {
+#ifndef ZPP_SERIALIZER_FREESTANDING
+        throw out_of_range("Container allocation exceeds the decode budget.");
+#else
+        return freestanding::error{error::out_of_range};
+#endif
+    }
+
     // Resize the container to match the size.
     container.resize(size);
 
@@ -2249,6 +2357,18 @@ auto serialize(Archive & archive, Container & container)
     }
 #endif
 
+    if (!detail::allocation_fits(
+            archive,
+            static_cast<std::size_t>(size),
+            sizeof(typename detail::container_nonconst_value_type_t<Container>),
+            0)) {
+#ifndef ZPP_SERIALIZER_FREESTANDING
+        throw out_of_range("Container allocation exceeds the decode budget.");
+#else
+        return freestanding::error{error::out_of_range};
+#endif
+    }
+
     // Serialize all the items.
     for (SizeType i{}; i < size; ++i) {
         // Deduce the container item type.
@@ -2256,12 +2376,11 @@ auto serialize(Archive & archive, Container & container)
             detail::container_nonconst_value_type_t<Container>;
 
         // Create just enough storage properly aligned for one item.
-        std::aligned_storage_t<sizeof(item_type), alignof(item_type)>
-            storage;
+        alignas(item_type) unsigned char storage[sizeof(item_type)];
 
         // Create the object at the storage.
         std::unique_ptr<item_type, void (*)(item_type *)> object(
-            access::placement_new<item_type>(std::addressof(storage)),
+            access::placement_new<item_type>(static_cast<void *>(storage)),
             [](auto pointer) { access::destruct(*pointer); });
 
         // Serialize the object.
@@ -2599,11 +2718,11 @@ auto serialize(Archive & archive, std::optional<Type> & optional)
 #endif
     } else {
         // The object storage.
-        std::aligned_storage_t<sizeof(Type), alignof(Type)> storage;
+        alignas(Type) unsigned char storage[sizeof(Type)];
 
         // Create the object at the storage.
         std::unique_ptr<Type, void (*)(Type *)> object(
-            access::placement_new<Type>(std::addressof(storage)),
+            access::placement_new<Type>(static_cast<void *>(storage)),
             [](auto pointer) { access::destruct(*pointer); });
 
         // Load the object.
@@ -2697,11 +2816,11 @@ auto serialize(Archive & archive, std::variant<Types...> & variant)
             return archive(*std::get_if<Types>(&variant));
         } else {
             // The object storage.
-            std::aligned_storage_t<sizeof(Types), alignof(Types)> storage;
+            alignas(Types) unsigned char storage[sizeof(Types)];
 
             // Create the object at the storage.
             std::unique_ptr<Types, void (*)(Types *)> object(
-                access::placement_new<Types>(std::addressof(storage)),
+                access::placement_new<Types>(static_cast<void *>(storage)),
                 [](auto pointer) { access::destruct(*pointer); });
 
             // Load the object.

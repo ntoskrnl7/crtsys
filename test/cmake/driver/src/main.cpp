@@ -112,13 +112,15 @@ ntl::status ntl::main(ntl::driver &driver, const std::wstring &registry_path) {
     });
   }
 
-  driver.on_unload([registry_path, test_endpoint,
-                    rpc_svr = test_rpc::init(driver)]() mutable {
+  auto rpc_server = test_rpc::init(driver);
+
+  driver.on_unload([registry_path, test_endpoint, rpc_server]() mutable {
     auto test_dev = test_endpoint->device();
     if (test_dev)
       std::wcout << L"delete device :" << test_dev->name() << " - "
                  << test_dev->extension().val << L'\n';
     test_endpoint->reset();
+    rpc_server.reset();
     std::wcout << L"unload driver (registry_path :" << registry_path << L")\n";
   });
 

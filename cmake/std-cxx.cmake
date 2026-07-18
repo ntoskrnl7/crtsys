@@ -22,6 +22,7 @@ macro(set_std_cxx_latest target)
 
     if(MSVC)
         set(_std_cxx_option "/std:c++${_version}")
+        target_compile_options(${target} PRIVATE "/Zc:__cplusplus")
     else()
         set(_std_cxx_option "-std=c++${_version}")
     endif()

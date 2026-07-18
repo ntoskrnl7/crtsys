@@ -1,315 +1,550 @@
 /**
  * @file server
  * @author jungkwang.lee (ntoskrnl7@gmail.com)
- * @brief rpc server
+ * @brief Typed kernel-mode NTL RPC server.
  *
  * @copyright Copyright (c) 2022 NT Template Library Authors.
- *
  */
-
 #pragma once
 
 #include "common"
 
 #include <ntl/driver>
 
-/**
- * @brief Starts a kernel-mode RPC namespace and dispatch lambda.
- */
-#define NTL_RPC_BEGIN(_rpc_name_)                                              \
-  namespace _rpc_name_ {                                                       \
-  std::shared_ptr<ntl::rpc::server> init(ntl::driver &driver) {                \
-    auto dev = driver.create_device<void>(                                     \
-        ntl::device_options().name(L#_rpc_name_).type(FILE_DEVICE_NTL_RPC));   \
-    dev->on_device_control([](const ntl::device_control::code &code, const ntl::device_control::in_buffer &in_buffer, ntl::device_control::out_buffer &out_buffer) {
+#include <functional>
+#include <memory>
+#include <string>
+#include <tuple>
+#include <type_traits>
+#include <unordered_map>
+#include <utility>
 
-/**
- * @brief Ends a kernel-mode RPC namespace and returns the server object.
- */
-#define NTL_RPC_END(_rpc_name_)                                                \
-  });                                                                          \
-  return std::make_shared<ntl::rpc::server>(dev);                              \
-  }                                                                            \
-  }
-
-/**
- * @brief Registers a zero-argument kernel-mode RPC callback with an explicit ID.
- */
-#define NTL_ADD_CALLBACK_ID_0(_rpc_name_, _id_, _ret_, _name_, ...)            \
-  if (code.function() == (_id_)) {                                             \
-    auto _name_ = []() -> _ret_ __VA_ARGS__;                                   \
-    if constexpr (std::is_void_v<_ret_>) {                                     \
-      _name_();                                                                \
-    } else {                                                                   \
-      zpp::serializer::memory_view_output_archive out(                         \
-          reinterpret_cast<unsigned char *>(out_buffer.ptr), out_buffer.size); \
-      out(_name_());                                                           \
-    }                                                                          \
-    return;                                                                    \
-  }
-
-/**
- * @brief Registers a zero-argument kernel-mode RPC callback using __LINE__ as ID.
- */
-#define NTL_ADD_CALLBACK_0(_rpc_name_, _ret_, _name_, ...)                     \
-  NTL_ADD_CALLBACK_ID_0(_rpc_name_, __LINE__, _ret_, _name_, __VA_ARGS__)
-
-/**
- * @brief Registers a one-argument kernel-mode RPC callback with an explicit ID.
- */
-#define NTL_ADD_CALLBACK_ID_1(_rpc_name_, _id_, _ret_, _name_, _arg0_type_,    \
-                              _arg0_name_, ...)                                \
-  if (code.function() == (_id_)) {                                             \
-    auto _name_ = [](_arg0_type_ _arg0_name_) -> _ret_ __VA_ARGS__;            \
-    zpp::serializer::memory_view_input_archive in(                             \
-        reinterpret_cast<const unsigned char *>(in_buffer.ptr),                \
-        in_buffer.size);                                                       \
-    std::remove_const_t<                                                       \
-        std::remove_reference_t<std::remove_cv_t<_arg0_type_>>>                \
-        _arg0_name_;                                                           \
-    in(_arg0_name_);                                                           \
-    if constexpr (std::is_void_v<_ret_>) {                                     \
-      _name_(_arg0_name_);                                                     \
-    } else {                                                                   \
-      zpp::serializer::memory_view_output_archive out(                         \
-          reinterpret_cast<unsigned char *>(out_buffer.ptr), out_buffer.size); \
-      _ret_ ___return_value___ = _name_(_arg0_name_);                          \
-      out(___return_value___);                                                 \
-      out_buffer.size = out.offset();                                          \
-    }                                                                          \
-    return;                                                                    \
-  }
-
-/**
- * @brief Registers a one-argument kernel-mode RPC callback using __LINE__ as ID.
- */
-#define NTL_ADD_CALLBACK_1(_rpc_name_, _ret_, _name_, _arg0_type_,             \
-                           _arg0_name_, ...)                                   \
-  NTL_ADD_CALLBACK_ID_1(_rpc_name_, __LINE__, _ret_, _name_, _arg0_type_,      \
-                        _arg0_name_, __VA_ARGS__)
-
-/**
- * @brief Registers a two-argument kernel-mode RPC callback with an explicit ID.
- */
-#define NTL_ADD_CALLBACK_ID_2(_rpc_name_, _id_, _ret_, _name_, _arg0_type_,    \
-                              _arg0_name_, _arg1_type_, _arg1_name_, ...)      \
-  if (code.function() == (_id_)) {                                             \
-    auto _name_ = [](_arg0_type_ _arg0_name_,                                  \
-                     _arg1_type_ _arg1_name_) -> _ret_ __VA_ARGS__;            \
-    zpp::serializer::memory_view_input_archive in(                             \
-        reinterpret_cast<const unsigned char *>(in_buffer.ptr),                \
-        in_buffer.size);                                                       \
-    std::remove_const_t<                                                       \
-        std::remove_reference_t<std::remove_cv_t<_arg0_type_>>>                \
-        _arg0_name_;                                                           \
-    std::remove_const_t<                                                       \
-        std::remove_reference_t<std::remove_cv_t<_arg1_type_>>>                \
-        _arg1_name_;                                                           \
-    in(_arg0_name_, _arg1_name_);                                              \
-    if constexpr (std::is_void_v<_ret_>) {                                     \
-      _name_(_arg0_name_, _arg1_name_);                                        \
-    } else {                                                                   \
-      zpp::serializer::memory_view_output_archive out(                         \
-          reinterpret_cast<unsigned char *>(out_buffer.ptr), out_buffer.size); \
-      _ret_ ___return_value___ = _name_(_arg0_name_, _arg1_name_);             \
-      out(___return_value___);                                                 \
-      out_buffer.size = out.offset();                                          \
-    }                                                                          \
-    return;                                                                    \
-  }
-
-/**
- * @brief Registers a two-argument kernel-mode RPC callback using __LINE__ as ID.
- */
-#define NTL_ADD_CALLBACK_2(_rpc_name_, _ret_, _name_, _arg0_type_,             \
-                           _arg0_name_, _arg1_type_, _arg1_name_, ...)         \
-  NTL_ADD_CALLBACK_ID_2(_rpc_name_, __LINE__, _ret_, _name_, _arg0_type_,      \
-                        _arg0_name_, _arg1_type_, _arg1_name_, __VA_ARGS__)
-
-/**
- * @brief Registers a three-argument kernel-mode RPC callback with an explicit ID.
- */
-#define NTL_ADD_CALLBACK_ID_3(_rpc_name_, _id_, _ret_, _name_, _arg0_type_,    \
-                              _arg0_name_, _arg1_type_, _arg1_name_,           \
-                              _arg2_type_, _arg2_name_, ...)                   \
-  if (code.function() == (_id_)) {                                             \
-    auto _name_ = [](_arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_,         \
-                     _arg2_type_ _arg2_name_) -> _ret_ __VA_ARGS__;            \
-    zpp::serializer::memory_view_input_archive in(                             \
-        reinterpret_cast<const unsigned char *>(in_buffer.ptr),                \
-        in_buffer.size);                                                       \
-    std::remove_const_t<                                                       \
-        std::remove_reference_t<std::remove_cv_t<_arg0_type_>>>                \
-        _arg0_name_;                                                           \
-    std::remove_const_t<                                                       \
-        std::remove_reference_t<std::remove_cv_t<_arg1_type_>>>                \
-        _arg1_name_;                                                           \
-    std::remove_const_t<                                                       \
-        std::remove_reference_t<std::remove_cv_t<_arg2_type_>>>                \
-        _arg2_name_;                                                           \
-    in(_arg0_name_, _arg1_name_, _arg2_name_);                                 \
-    if constexpr (std::is_void_v<_ret_>) {                                     \
-      _name_(_arg0_name_, _arg1_name_, _arg2_name_);                           \
-    } else {                                                                   \
-      zpp::serializer::memory_view_output_archive out(                         \
-          reinterpret_cast<unsigned char *>(out_buffer.ptr), out_buffer.size); \
-      _ret_ ___return_value___ =                                               \
-          _name_(_arg0_name_, _arg1_name_, _arg2_name_);                       \
-      out(___return_value___);                                                 \
-      out_buffer.size = out.offset();                                          \
-    }                                                                          \
-    return;                                                                    \
-  }
-
-/**
- * @brief Registers a three-argument kernel-mode RPC callback using __LINE__ as ID.
- */
-#define NTL_ADD_CALLBACK_3(_rpc_name_, _ret_, _name_, _arg0_type_,             \
-                           _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_, \
-                           _arg2_name_, ...)                                   \
-  NTL_ADD_CALLBACK_ID_3(_rpc_name_, __LINE__, _ret_, _name_, _arg0_type_,      \
-                        _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_,    \
-                        _arg2_name_, __VA_ARGS__)
-
-/**
- * @brief Registers a four-argument kernel-mode RPC callback with an explicit ID.
- */
-#define NTL_ADD_CALLBACK_ID_4(_rpc_name_, _id_, _ret_, _name_, _arg0_type_,    \
-                              _arg0_name_, _arg1_type_, _arg1_name_,           \
-                              _arg2_type_, _arg2_name_, _arg3_type_,           \
-                              _arg3_name_, ...)                                \
-  if (code.function() == (_id_)) {                                             \
-    auto _name_ = [](_arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_,         \
-                     _arg2_type_ _arg2_name_,                                  \
-                     _arg3_type_ _arg3_name_) -> _ret_ __VA_ARGS__;            \
-    zpp::serializer::memory_view_input_archive in(                             \
-        reinterpret_cast<const unsigned char *>(in_buffer.ptr),                \
-        in_buffer.size);                                                       \
-    std::remove_const_t<                                                       \
-        std::remove_reference_t<std::remove_cv_t<_arg0_type_>>>                \
-        _arg0_name_;                                                           \
-    std::remove_const_t<                                                       \
-        std::remove_reference_t<std::remove_cv_t<_arg1_type_>>>                \
-        _arg1_name_;                                                           \
-    std::remove_const_t<                                                       \
-        std::remove_reference_t<std::remove_cv_t<_arg2_type_>>>                \
-        _arg2_name_;                                                           \
-    std::remove_const_t<                                                       \
-        std::remove_reference_t<std::remove_cv_t<_arg3_type_>>>                \
-        _arg3_name_;                                                           \
-    in(_arg0_name_, _arg1_name_, _arg2_name_, _arg3_name_);                    \
-    if constexpr (std::is_void_v<_ret_>) {                                     \
-      _name_(_arg0_name_, _arg1_name_, _arg2_name_, _arg3_name_);              \
-    } else {                                                                   \
-      zpp::serializer::memory_view_output_archive out(                         \
-          reinterpret_cast<unsigned char *>(out_buffer.ptr), out_buffer.size); \
-      _ret_ ___return_value___ =                                               \
-          _name_(_arg0_name_, _arg1_name_, _arg2_name_, _arg3_name_);          \
-      out(___return_value___);                                                 \
-      out_buffer.size = out.offset();                                          \
-    }                                                                          \
-    return;                                                                    \
-  }
-
-/**
- * @brief Registers a four-argument kernel-mode RPC callback using __LINE__ as ID.
- */
-#define NTL_ADD_CALLBACK_4(_rpc_name_, _ret_, _name_, _arg0_type_,             \
-                           _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_, \
-                           _arg2_name_, _arg3_type_, _arg3_name_, ...)         \
-  NTL_ADD_CALLBACK_ID_4(_rpc_name_, __LINE__, _ret_, _name_, _arg0_type_,      \
-                        _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_,    \
-                        _arg2_name_, _arg3_type_, _arg3_name_, __VA_ARGS__)
-
-/**
- * @brief Registers a five-argument kernel-mode RPC callback with an explicit ID.
- */
-#define NTL_ADD_CALLBACK_ID_5(_rpc_name_, _id_, _ret_, _name_, _arg0_type_,    \
-                              _arg0_name_, _arg1_type_, _arg1_name_,           \
-                              _arg2_type_, _arg2_name_, _arg3_type_,           \
-                              _arg3_name_, _arg4_type_, _arg4_name_, ...)      \
-  if (code.function() == (_id_)) {                                             \
-    auto _name_ = [](_arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_,         \
-                     _arg2_type_ _arg2_name_, _arg3_type_ _arg3_name_,         \
-                     _arg4_type_ _arg4_name_) -> _ret_ __VA_ARGS__;            \
-    zpp::serializer::memory_view_input_archive in(                             \
-        reinterpret_cast<const unsigned char *>(in_buffer.ptr),                \
-        in_buffer.size);                                                       \
-    std::remove_const_t<                                                       \
-        std::remove_reference_t<std::remove_cv_t<_arg0_type_>>>                \
-        _arg0_name_;                                                           \
-    std::remove_const_t<                                                       \
-        std::remove_reference_t<std::remove_cv_t<_arg1_type_>>>                \
-        _arg1_name_;                                                           \
-    std::remove_const_t<                                                       \
-        std::remove_reference_t<std::remove_cv_t<_arg2_type_>>>                \
-        _arg2_name_;                                                           \
-    std::remove_const_t<                                                       \
-        std::remove_reference_t<std::remove_cv_t<_arg3_type_>>>                \
-        _arg3_name_;                                                           \
-    std::remove_const_t<                                                       \
-        std::remove_reference_t<std::remove_cv_t<_arg4_type_>>>                \
-        _arg4_name_;                                                           \
-    in(_arg0_name_, _arg1_name_, _arg2_name_, _arg3_name_, _arg4_name_);       \
-    if constexpr (std::is_void_v<_ret_>) {                                     \
-      _name_(_arg0_name_, _arg1_name_, _arg2_name_, _arg3_name_, _arg4_name_); \
-    } else {                                                                   \
-      zpp::serializer::memory_view_output_archive out(                         \
-          reinterpret_cast<unsigned char *>(out_buffer.ptr), out_buffer.size); \
-      _ret_ ___return_value___ = _name_(_arg0_name_, _arg1_name_, _arg2_name_, \
-                                        _arg3_name_, _arg4_name_);             \
-      out(___return_value___);                                                 \
-      out_buffer.size = out.offset();                                          \
-    }                                                                          \
-    return;                                                                    \
-  }
-
-/**
- * @brief Registers a five-argument kernel-mode RPC callback using __LINE__ as ID.
- */
-#define NTL_ADD_CALLBACK_5(_rpc_name_, _ret_, _name_, _arg0_type_,             \
-                           _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_, \
-                           _arg2_name_, _arg3_type_, _arg3_name_, _arg4_type_, \
-                           _arg4_name_, ...)                                   \
-  NTL_ADD_CALLBACK_ID_5(_rpc_name_, __LINE__, _ret_, _name_, _arg0_type_,      \
-                        _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_,    \
-                        _arg2_name_, _arg3_type_, _arg3_name_, _arg4_type_,    \
-                        _arg4_name_, __VA_ARGS__)
-
-#if defined(NTL_USER_MODE)
-
-#else  // !defined(NTL_USER_MODE)
+#if !defined(NTL_USER_MODE)
 namespace ntl {
 namespace rpc {
-/**
- * @brief Owns the device object backing a kernel-mode NTL RPC endpoint.
- */
-class server {
+
+/** @brief Setup class used by secure NTL RPC control devices. */
+constexpr GUID device_class_guid = {
+    0xdcf4f515, 0xb540, 0x40cb,
+    {0x82, 0x47, 0x88, 0x10, 0xaa, 0x38, 0x9b, 0xda}};
+
+/** @brief Configures one secure kernel RPC endpoint. */
+class server_options {
 public:
-  /**
-   * @brief Keeps the RPC device alive for the server lifetime.
-   */
-  server(std::shared_ptr<device<void>> &device) : dev_(device) {}
+  /** @brief Creates SYSTEM/Administrators-only defaults for a device name. */
+  explicit server_options(std::wstring name) : name_(std::move(name)) {}
 
   /**
-   * @brief Transfers RPC server ownership.
+   * @brief Replaces the endpoint ACL and setup class GUID.
+   * @note Use a project-owned GUID and an SDDL policy appropriate for the
+   * callers that are allowed to issue kernel RPC requests.
    */
-  server(server &&other) { *this = std::move(other); }
-
-  /**
-   * @brief Transfers RPC server ownership.
-   */
-  server &operator=(server &&rhs) {
-    dev_ = std::move(rhs.dev_);
+  server_options &security_descriptor(std::wstring sddl,
+                                      const GUID &class_guid) {
+    security_descriptor_ = std::move(sddl);
+    class_guid_ = class_guid;
     return *this;
   }
 
-private:
-  server(const server &) = delete;
+  /** @brief Sets the application contract version published to clients. */
+  server_options &contract_version(std::uint32_t version) noexcept {
+    contract_version_ = version;
+    return *this;
+  }
+
+  /** @brief Sets application-defined capability bits published to clients. */
+  server_options &capabilities(std::uint64_t capability_mask) noexcept {
+    capabilities_ = capability_mask;
+    return *this;
+  }
+
+  /** @brief Returns the device name without the `\\Device\\` prefix. */
+  const std::wstring &name() const noexcept { return name_; }
+
+  /** @brief Returns the SDDL applied during secure device creation. */
+  const std::wstring &security_descriptor() const noexcept {
+    return security_descriptor_;
+  }
+
+  /** @brief Returns the setup class GUID used for secure device creation. */
+  const GUID &class_guid() const noexcept { return class_guid_; }
+
+  /** @brief Returns the application contract version. */
+  std::uint32_t contract_version() const noexcept { return contract_version_; }
+
+  /** @brief Returns application-defined capability bits. */
+  std::uint64_t capabilities() const noexcept { return capabilities_; }
 
 private:
-  std::shared_ptr<device<void>> dev_;
+  std::wstring name_;
+  std::wstring security_descriptor_ =
+      L"D:P(A;;GA;;;SY)(A;;GA;;;BA)";
+  GUID class_guid_ = device_class_guid;
+  std::uint32_t contract_version_ = 1;
+  std::uint64_t capabilities_ = 0;
 };
+
+namespace detail {
+
+class rundown_guard {
+public:
+  explicit rundown_guard(EX_RUNDOWN_REF &rundown) noexcept
+      : rundown_(&rundown) {}
+  rundown_guard(const rundown_guard &) = delete;
+  rundown_guard &operator=(const rundown_guard &) = delete;
+  ~rundown_guard() { ExReleaseRundownProtection(rundown_); }
+
+private:
+  EX_RUNDOWN_REF *rundown_;
+};
+
+class fast_mutex_guard {
+public:
+  explicit fast_mutex_guard(FAST_MUTEX &mutex) noexcept : mutex_(&mutex) {
+    ExAcquireFastMutex(mutex_);
+  }
+  fast_mutex_guard(const fast_mutex_guard &) = delete;
+  fast_mutex_guard &operator=(const fast_mutex_guard &) = delete;
+  ~fast_mutex_guard() { ExReleaseFastMutex(mutex_); }
+
+private:
+  FAST_MUTEX *mutex_;
+};
+
+template <typename Archive, typename Tuple, std::size_t... Index>
+void deserialize_arguments(Archive &archive, Tuple &arguments,
+                           std::index_sequence<Index...>) {
+  archive(std::get<Index>(arguments)...);
+}
+
+template <typename Callback, typename Tuple, std::size_t... Index>
+auto invoke_callback(Callback &callback, Tuple &arguments,
+                     std::index_sequence<Index...>)
+    -> decltype(callback(std::get<Index>(arguments)...)) {
+  return callback(std::get<Index>(arguments)...);
+}
+
+template <typename Method, typename Callback>
+void invoke_method(Callback &callback,
+                   const ntl::device_control::in_buffer &input,
+                   ntl::device_control::out_buffer &output, std::true_type) {
+  if (input.size > Method::request_size())
+    throw ntl::exception(STATUS_INVALID_BUFFER_SIZE,
+                         "NTL RPC request exceeded its method limit");
+
+  typename Method::argument_storage arguments{};
+  zpp::serializer::memory_view_input_archive archive(
+      reinterpret_cast<const unsigned char *>(input.ptr), input.size,
+      Method::decode_allocation());
+  try {
+    deserialize_arguments(
+        archive, arguments,
+        std::make_index_sequence<
+            std::tuple_size<typename Method::argument_storage>::value>{});
+  } catch (const std::exception &) {
+    throw ntl::exception(STATUS_INVALID_PARAMETER,
+                         "Invalid NTL RPC request payload");
+  }
+
+  if (archive.offset() != input.size)
+    throw ntl::exception(STATUS_INVALID_PARAMETER,
+                         "Trailing NTL RPC request bytes");
+
+  invoke_callback(
+      callback, arguments,
+      std::make_index_sequence<
+          std::tuple_size<typename Method::argument_storage>::value>{});
+  output.clear();
+}
+
+template <typename Method, typename Callback>
+void invoke_method(Callback &callback,
+                   const ntl::device_control::in_buffer &input,
+                   ntl::device_control::out_buffer &output, std::false_type) {
+  if (input.size > Method::request_size())
+    throw ntl::exception(STATUS_INVALID_BUFFER_SIZE,
+                         "NTL RPC request exceeded its method limit");
+
+  if (!output.can_write(Method::response_size()))
+    throw ntl::exception(STATUS_BUFFER_TOO_SMALL,
+                         "NTL RPC response buffer is below the method limit");
+
+  typename Method::argument_storage arguments{};
+  zpp::serializer::memory_view_input_archive input_archive(
+      reinterpret_cast<const unsigned char *>(input.ptr), input.size,
+      Method::decode_allocation());
+  try {
+    deserialize_arguments(
+        input_archive, arguments,
+        std::make_index_sequence<
+            std::tuple_size<typename Method::argument_storage>::value>{});
+  } catch (const std::exception &) {
+    throw ntl::exception(STATUS_INVALID_PARAMETER,
+                         "Invalid NTL RPC request payload");
+  }
+
+  if (input_archive.offset() != input.size)
+    throw ntl::exception(STATUS_INVALID_PARAMETER,
+                         "Trailing NTL RPC request bytes");
+
+  typename Method::return_type result = invoke_callback(
+      callback, arguments,
+      std::make_index_sequence<
+          std::tuple_size<typename Method::argument_storage>::value>{});
+
+  try {
+    zpp::serializer::memory_view_output_archive output_archive(
+        reinterpret_cast<unsigned char *>(output.ptr), output.size);
+    output_archive(result);
+    output.size = output_archive.offset();
+  } catch (const zpp::serializer::out_of_range &) {
+    output.clear();
+    throw ntl::exception(STATUS_BUFFER_TOO_SMALL,
+                         "NTL RPC result exceeded its response limit");
+  }
+}
+
+template <typename Method, typename Callback>
+void invoke_method(Callback &callback,
+                   const ntl::device_control::in_buffer &input,
+                   ntl::device_control::out_buffer &output) {
+  using is_void =
+      typename std::is_void<typename Method::return_type>::type;
+  invoke_method<Method>(callback, input, output, is_void{});
+}
+
+class dispatch_table {
+public:
+  using dispatch_handler =
+      std::function<void(const ntl::device_control::in_buffer &,
+                         ntl::device_control::out_buffer &)>;
+
+  dispatch_table(std::uint32_t contract_version,
+                 std::uint64_t capabilities)
+      : contract_version_(contract_version), capabilities_(capabilities) {
+    ExInitializeRundownProtection(&rundown_);
+    ExInitializeFastMutex(&registration_lock_);
+  }
+  dispatch_table(const dispatch_table &) = delete;
+  dispatch_table &operator=(const dispatch_table &) = delete;
+
+  template <typename Method, typename Callback>
+  void add(Callback &&callback) {
+    fast_mutex_guard guard(registration_lock_);
+    if (InterlockedCompareExchange(&started_, 0, 0) != 0 ||
+        InterlockedCompareExchange(&stopping_, 0, 0) != 0)
+      throw ntl::exception(STATUS_INVALID_DEVICE_STATE,
+                           "NTL RPC methods are immutable after start");
+
+    const auto code = Method::code();
+    if (handlers_.find(code) != handlers_.end())
+      throw ntl::exception(STATUS_OBJECT_NAME_COLLISION,
+                           "Duplicate NTL RPC method ID");
+
+    using callback_type = typename std::decay<Callback>::type;
+    handlers_.emplace(
+        code,
+        [fn = callback_type(std::forward<Callback>(callback))](
+            const ntl::device_control::in_buffer &input,
+            ntl::device_control::out_buffer &output) mutable {
+          detail::invoke_method<Method>(fn, input, output);
+        });
+    method_ids_.push_back(static_cast<std::uint32_t>(Method::id()));
+  }
+
+  void start() {
+    fast_mutex_guard guard(registration_lock_);
+    if (InterlockedCompareExchange(&stopping_, 0, 0) != 0)
+      throw ntl::exception(STATUS_DELETE_PENDING,
+                           "Cannot start a stopped NTL RPC server");
+    std::sort(method_ids_.begin(), method_ids_.end());
+    contract_ = contract_info(current_protocol_version, contract_version_,
+                              transport_features::current, capabilities_,
+                              method_ids_);
+    InterlockedExchange(&started_, 1);
+  }
+
+  void stop() noexcept {
+    if (InterlockedCompareExchange(&stopping_, 1, 0) == 0)
+      ExWaitForRundownProtectionRelease(&rundown_);
+  }
+
+  void dispatch(const ntl::device_control::code &code,
+                const ntl::device_control::in_buffer &input,
+                ntl::device_control::out_buffer &output) {
+    if (InterlockedCompareExchange(&started_, 0, 0) == 0)
+      throw ntl::exception(STATUS_DEVICE_NOT_READY,
+                           "NTL RPC server has not started");
+    if (!ExAcquireRundownProtection(&rundown_))
+      throw ntl::exception(STATUS_DELETE_PENDING,
+                           "NTL RPC server is stopping");
+    rundown_guard guard(rundown_);
+
+    if (code.value == control_code(contract_query_id)) {
+      write_contract(input, output);
+      return;
+    }
+
+    const auto found = handlers_.find(code.value);
+    if (found == handlers_.end())
+      throw ntl::exception(STATUS_INVALID_DEVICE_REQUEST,
+                           "Unknown NTL RPC method ID");
+    found->second(input, output);
+  }
+
+private:
+  void write_contract(const ntl::device_control::in_buffer &input,
+                      ntl::device_control::out_buffer &output) const {
+    if (input.size != 0)
+      throw ntl::exception(STATUS_INVALID_PARAMETER,
+                           "NTL RPC contract query does not accept input");
+    if (!output.can_write(contract_response_size))
+      throw ntl::exception(STATUS_BUFFER_TOO_SMALL,
+                           "NTL RPC contract response buffer is too small");
+
+    try {
+      zpp::serializer::memory_view_output_archive archive(
+          reinterpret_cast<unsigned char *>(output.ptr), output.size);
+      archive(contract_);
+      output.size = archive.offset();
+    } catch (const zpp::serializer::out_of_range &) {
+      output.clear();
+      throw ntl::exception(STATUS_BUFFER_TOO_SMALL,
+                           "NTL RPC contract response exceeded its limit");
+    }
+  }
+
+  std::unordered_map<unsigned long, dispatch_handler> handlers_;
+  std::vector<std::uint32_t> method_ids_;
+  contract_info contract_;
+  EX_RUNDOWN_REF rundown_{};
+  FAST_MUTEX registration_lock_{};
+  std::uint32_t contract_version_;
+  std::uint64_t capabilities_;
+  volatile LONG started_ = 0;
+  volatile LONG stopping_ = 0;
+};
+
+} // namespace detail
+
+/** @brief Owns a WDM device and typed RPC method dispatch table. */
+class server {
+public:
+  /**
+   * @brief Creates a named RPC device.
+   * @param driver NTL driver that owns the native device.
+   * @param rpc_name Device name without the `\\Device\\` prefix.
+   */
+  server(ntl::driver &driver, const std::wstring &rpc_name)
+      : server(driver, server_options(rpc_name)) {}
+
+  /** @brief Creates a named RPC device with explicit endpoint options. */
+  server(ntl::driver &driver, const server_options &server_opts)
+      : dispatch_(std::make_shared<detail::dispatch_table>(
+            server_opts.contract_version(), server_opts.capabilities())) {
+    ntl::device_options options;
+    options
+        .name(server_opts.name())
+        .type(static_cast<ntl::device_type>(ntl::rpc::device_type))
+        .security_descriptor(server_opts.security_descriptor(),
+                             server_opts.class_guid());
+    device_ = driver.create_device<void>(options);
+    const auto dispatch = dispatch_;
+    device_->on_device_control(
+        [dispatch](const ntl::device_control::code &code,
+                   const ntl::device_control::in_buffer &input,
+                   ntl::device_control::out_buffer &output) {
+          dispatch->dispatch(code, input, output);
+        });
+  }
+
+  server(const server &) = delete;
+  server &operator=(const server &) = delete;
+  server(server &&) = delete;
+  server &operator=(server &&) = delete;
+
+  /** @brief Stops new calls and drains active callbacks before member teardown. */
+  ~server() { stop(); }
+
+  /**
+   * @brief Registers a callback for a shared typed method descriptor.
+   * @return This server for fluent registration.
+   */
+  template <typename Method, typename Callback>
+  server &on(const Method &, Callback &&callback) {
+    static_assert(is_method<Method>::value,
+                  "ntl::rpc::server::on requires an ntl::rpc::method");
+
+    dispatch_->template add<Method>(std::forward<Callback>(callback));
+    return *this;
+  }
+
+  /** @brief Publishes the immutable method table for request dispatch. */
+  server &start() {
+    dispatch_->start();
+    return *this;
+  }
+
+  /** @brief Rejects new calls and waits for active callbacks to finish. */
+  void stop() noexcept {
+    if (dispatch_)
+      dispatch_->stop();
+  }
+
+private:
+  std::shared_ptr<detail::dispatch_table> dispatch_;
+  std::shared_ptr<ntl::device<void>> device_;
+};
+
+/** @brief Creates a shared owner for an NTL RPC server. */
+inline std::shared_ptr<server> make_server(ntl::driver &driver,
+                                           const std::wstring &rpc_name) {
+  return std::make_shared<server>(driver, rpc_name);
+}
+
+/** @brief Creates a shared owner for a configured secure RPC server. */
+inline std::shared_ptr<server> make_server(ntl::driver &driver,
+                                           const server_options &options) {
+  return std::make_shared<server>(driver, options);
+}
+
 } // namespace rpc
 } // namespace ntl
+
+#define NTL_RPC_BEGIN_CONTRACT(_rpc_name_, _version_, _capabilities_)         \
+  namespace _rpc_name_ {                                                       \
+  constexpr std::uint32_t rpc_contract_version = (_version_);                 \
+  constexpr std::uint64_t rpc_capabilities = (_capabilities_);                \
+  inline std::shared_ptr<ntl::rpc::server> init(ntl::driver &driver) {         \
+    ntl::rpc::server_options rpc_options(L#_rpc_name_);                         \
+    rpc_options.contract_version(rpc_contract_version)                         \
+        .capabilities(rpc_capabilities);                                       \
+    auto rpc_server = ntl::rpc::make_server(driver, rpc_options);
+
+#define NTL_RPC_BEGIN(_rpc_name_)                                              \
+  NTL_RPC_BEGIN_CONTRACT(_rpc_name_, 1, 0)
+
+#define NTL_RPC_END(_rpc_name_)                                                \
+  rpc_server->start();                                                         \
+  return rpc_server;                                                           \
+  }                                                                            \
+  }
+
+#define NTL_ADD_CALLBACK_ID_0(_rpc_name_, _id_, _ret_, _name_, ...)           \
+  {                                                                            \
+    using rpc_method_type = ntl::rpc::make_method_t<(_id_), _ret_>;           \
+    constexpr rpc_method_type rpc_method{};                                    \
+    rpc_server->on(rpc_method,                                                 \
+                   []() -> ntl::rpc::response_type_t<_ret_> __VA_ARGS__);      \
+  }
+
+#define NTL_ADD_CALLBACK_0(_rpc_name_, _ret_, _name_, ...)                    \
+  NTL_ADD_CALLBACK_ID_0(_rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_,    \
+                        __VA_ARGS__)
+
+#define NTL_ADD_CALLBACK_ID_1(_rpc_name_, _id_, _ret_, _name_, _arg0_type_,   \
+                              _arg0_name_, ...)                               \
+  {                                                                            \
+    using rpc_method_type =                                                    \
+        ntl::rpc::make_method_t<(_id_), _ret_, _arg0_type_>;                  \
+    constexpr rpc_method_type rpc_method{};                                    \
+    rpc_server->on(                                                            \
+        rpc_method,                                                            \
+        [](_arg0_type_ _arg0_name_)                                            \
+            -> ntl::rpc::response_type_t<_ret_> __VA_ARGS__);                 \
+  }
+
+#define NTL_ADD_CALLBACK_1(_rpc_name_, _ret_, _name_, _arg0_type_,            \
+                           _arg0_name_, ...)                                  \
+  NTL_ADD_CALLBACK_ID_1(_rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_,    \
+                        _arg0_type_, _arg0_name_, __VA_ARGS__)
+
+#define NTL_ADD_CALLBACK_ID_2(_rpc_name_, _id_, _ret_, _name_, _arg0_type_,   \
+                              _arg0_name_, _arg1_type_, _arg1_name_, ...)     \
+  {                                                                            \
+    using rpc_method_type = ntl::rpc::make_method_t<                          \
+        (_id_), _ret_, _arg0_type_, _arg1_type_>;                             \
+    constexpr rpc_method_type rpc_method{};                                    \
+    rpc_server->on(                                                            \
+        rpc_method,                                                            \
+        [](_arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_)                  \
+            -> ntl::rpc::response_type_t<_ret_> __VA_ARGS__);                 \
+  }
+
+#define NTL_ADD_CALLBACK_2(_rpc_name_, _ret_, _name_, _arg0_type_,            \
+                           _arg0_name_, _arg1_type_, _arg1_name_, ...)        \
+  NTL_ADD_CALLBACK_ID_2(_rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_,    \
+                        _arg0_type_, _arg0_name_, _arg1_type_, _arg1_name_,    \
+                        __VA_ARGS__)
+
+#define NTL_ADD_CALLBACK_ID_3(_rpc_name_, _id_, _ret_, _name_, _arg0_type_,   \
+                              _arg0_name_, _arg1_type_, _arg1_name_,          \
+                              _arg2_type_, _arg2_name_, ...)                  \
+  {                                                                            \
+    using rpc_method_type = ntl::rpc::make_method_t<                          \
+        (_id_), _ret_, _arg0_type_, _arg1_type_, _arg2_type_>;                \
+    constexpr rpc_method_type rpc_method{};                                    \
+    rpc_server->on(                                                            \
+        rpc_method,                                                            \
+        [](_arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_,                  \
+           _arg2_type_ _arg2_name_)                                            \
+            -> ntl::rpc::response_type_t<_ret_> __VA_ARGS__);                 \
+  }
+
+#define NTL_ADD_CALLBACK_3(_rpc_name_, _ret_, _name_, _arg0_type_,            \
+                           _arg0_name_, _arg1_type_, _arg1_name_,             \
+                           _arg2_type_, _arg2_name_, ...)                     \
+  NTL_ADD_CALLBACK_ID_3(_rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_,    \
+                        _arg0_type_, _arg0_name_, _arg1_type_, _arg1_name_,    \
+                        _arg2_type_, _arg2_name_, __VA_ARGS__)
+
+#define NTL_ADD_CALLBACK_ID_4(_rpc_name_, _id_, _ret_, _name_, _arg0_type_,   \
+                              _arg0_name_, _arg1_type_, _arg1_name_,          \
+                              _arg2_type_, _arg2_name_, _arg3_type_,          \
+                              _arg3_name_, ...)                               \
+  {                                                                            \
+    using rpc_method_type = ntl::rpc::make_method_t<                          \
+        (_id_), _ret_, _arg0_type_, _arg1_type_, _arg2_type_, _arg3_type_>;   \
+    constexpr rpc_method_type rpc_method{};                                    \
+    rpc_server->on(                                                            \
+        rpc_method,                                                            \
+        [](_arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_,                  \
+           _arg2_type_ _arg2_name_, _arg3_type_ _arg3_name_)                  \
+            -> ntl::rpc::response_type_t<_ret_> __VA_ARGS__);                 \
+  }
+
+#define NTL_ADD_CALLBACK_4(_rpc_name_, _ret_, _name_, _arg0_type_,            \
+                           _arg0_name_, _arg1_type_, _arg1_name_,             \
+                           _arg2_type_, _arg2_name_, _arg3_type_,             \
+                           _arg3_name_, ...)                                  \
+  NTL_ADD_CALLBACK_ID_4(_rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_,    \
+                        _arg0_type_, _arg0_name_, _arg1_type_, _arg1_name_,    \
+                        _arg2_type_, _arg2_name_, _arg3_type_, _arg3_name_,    \
+                        __VA_ARGS__)
+
+#define NTL_ADD_CALLBACK_ID_5(_rpc_name_, _id_, _ret_, _name_, _arg0_type_,   \
+                              _arg0_name_, _arg1_type_, _arg1_name_,          \
+                              _arg2_type_, _arg2_name_, _arg3_type_,          \
+                              _arg3_name_, _arg4_type_, _arg4_name_, ...)     \
+  {                                                                            \
+    using rpc_method_type = ntl::rpc::make_method_t<                          \
+        (_id_), _ret_, _arg0_type_, _arg1_type_, _arg2_type_, _arg3_type_,    \
+        _arg4_type_>;                                                          \
+    constexpr rpc_method_type rpc_method{};                                    \
+    rpc_server->on(                                                            \
+        rpc_method,                                                            \
+        [](_arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_,                  \
+           _arg2_type_ _arg2_name_, _arg3_type_ _arg3_name_,                  \
+           _arg4_type_ _arg4_name_)                                            \
+            -> ntl::rpc::response_type_t<_ret_> __VA_ARGS__);                 \
+  }
+
+#define NTL_ADD_CALLBACK_5(_rpc_name_, _ret_, _name_, _arg0_type_,            \
+                           _arg0_name_, _arg1_type_, _arg1_name_,             \
+                           _arg2_type_, _arg2_name_, _arg3_type_,             \
+                           _arg3_name_, _arg4_type_, _arg4_name_, ...)        \
+  NTL_ADD_CALLBACK_ID_5(_rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_,    \
+                        _arg0_type_, _arg0_name_, _arg1_type_, _arg1_name_,    \
+                        _arg2_type_, _arg2_name_, _arg3_type_, _arg3_name_,    \
+                        _arg4_type_, _arg4_name_, __VA_ARGS__)
 #endif // !defined(NTL_USER_MODE)

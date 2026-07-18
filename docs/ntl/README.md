@@ -33,7 +33,7 @@ For buildable samples, see:
 | [Device-control pattern](./device-control-pattern.md) | Practical `IOCTL` dispatch pattern using typed IOCTLs, remove locks, MDLs, and output reporting |
 | [Typed IOCTL helper](./ioctl.md) | Compile-time `CTL_CODE` descriptors tied to request/reply payload types |
 | [Device interface](./device-interface.md) | PnP `IoRegisterDeviceInterface` ownership and enable/disable helper |
-| [RPC](./rpc.md) | Kernel/user RPC schema macros, server lifetime, client calls, and stable callback IDs |
+| [RPC](./rpc.md) | Kernel/user RPC schemas, stable callback IDs, framing checks, and x86/x64 wire rules |
 | [Synchronization](./synchronization.md) | `ntl::irql`, IRQL query/contract helpers, spin locks, ERESOURCE wrapper, and lock helpers |
 | [Remove lock](./remove-lock.md) | `IO_REMOVE_LOCK` RAII guard for dispatch/remove/unload synchronization |
 | [Event](./event.md) | `KEVENT` wrapper for notification/synchronization events |

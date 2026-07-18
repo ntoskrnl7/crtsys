@@ -107,6 +107,17 @@ inline int RunAllTests() {
     }                                                                         \
   } while (false)
 
+#define ASSERT_EQ(actual, expected)                                           \
+  do {                                                                        \
+    const auto& actual_value = (actual);                                      \
+    const auto& expected_value = (expected);                                  \
+    if (!(actual_value == expected_value)) {                                  \
+      ::testing::record_failure(__FILE__, __LINE__,                           \
+                                "ASSERT_EQ(" #actual ", " #expected ")");   \
+      return;                                                                 \
+    }                                                                         \
+  } while (false)
+
 #define EXPECT_NE(actual, expected)                                           \
   do {                                                                        \
     const auto& actual_value = (actual);                                      \

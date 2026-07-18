@@ -1,225 +1,463 @@
 /**
- * @file rpc
+ * @file client
  * @author jungkwang.lee (ntoskrnl7@gmail.com)
- * @brief rpc client
+ * @brief Typed user-mode NTL RPC client.
  *
  * @copyright Copyright (c) 2022 NT Template Library Authors.
- *
  */
 #pragma once
 
 #include "common"
 #include "../handle"
 
+#include <limits>
 #include <stdexcept>
 #include <string>
+#include <system_error>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #if defined(NTL_USER_MODE)
 namespace ntl {
 namespace rpc {
-/**
- * @brief User-mode helper for invoking an NTL RPC device.
- */
+
+/** @brief Identifies why an RPC server contract was rejected. */
+enum class contract_mismatch_reason {
+  query_unavailable,
+  protocol_version,
+  contract_version,
+  transport_features,
+  capabilities,
+  method,
+};
+
+/** @brief Reports an application or transport contract incompatibility. */
+class contract_mismatch : public std::runtime_error {
+public:
+  /** @brief Creates an incompatibility error with diagnostic values. */
+  contract_mismatch(contract_mismatch_reason reason, const char *message,
+                    std::uint64_t expected = 0,
+                    std::uint64_t actual = 0)
+      : std::runtime_error(message), reason_(reason), expected_(expected),
+        actual_(actual) {}
+
+  /** @brief Returns the failed compatibility rule. */
+  contract_mismatch_reason reason() const noexcept { return reason_; }
+
+  /** @brief Returns the required version, feature mask, or method ID. */
+  std::uint64_t expected() const noexcept { return expected_; }
+
+  /** @brief Returns the server value, or zero for a missing method. */
+  std::uint64_t actual() const noexcept { return actual_; }
+
+private:
+  contract_mismatch_reason reason_;
+  std::uint64_t expected_;
+  std::uint64_t actual_;
+};
+
+/** @brief Declares the server contract required by one client. */
+class contract_requirements {
+public:
+  /** @brief Requires an exact application contract version. */
+  contract_requirements &contract_version(std::uint32_t version) noexcept {
+    has_contract_version_ = true;
+    contract_version_ = version;
+    return *this;
+  }
+
+  /** @brief Requires all selected NTL transport features. */
+  contract_requirements &transport_features(std::uint64_t features) noexcept {
+    transport_features_ = features;
+    return *this;
+  }
+
+  /** @brief Requires all selected application-defined capability bits. */
+  contract_requirements &capabilities(std::uint64_t capabilities) noexcept {
+    capabilities_ = capabilities;
+    return *this;
+  }
+
+  /** @brief Requires one typed method to be present on the server. */
+  template <typename Method>
+  contract_requirements &method(const Method &) {
+    static_assert(is_method<Method>::value,
+                  "contract_requirements::method requires an RPC method");
+    method_ids_.push_back(static_cast<std::uint32_t>(Method::id()));
+    return *this;
+  }
+
+private:
+  bool has_contract_version_ = false;
+  std::uint32_t contract_version_ = 0;
+  std::uint64_t transport_features_ = 0;
+  std::uint64_t capabilities_ = 0;
+  std::vector<std::uint32_t> method_ids_;
+
+  friend class client;
+};
+
+/** @brief Owns a user-mode handle to an NTL RPC device. */
 class client {
 public:
   /**
-   * @brief Opens the named NTL RPC device.
-   * @param rpc_name Kernel device name without the \\Device prefix.
-   * @param out_buffer_size Temporary output buffer size for non-void calls.
+   * @brief Opens an NTL RPC device.
+   * @param rpc_name Kernel device name without the `\\Device\\` prefix.
    */
-  client(const std::wstring &rpc_name, size_t out_buffer_size = 4096)
+  explicit client(const std::wstring &rpc_name)
       : handle_(::CreateFileW(
             (L"\\\\?\\Global\\GLOBALROOT\\Device\\" + rpc_name).c_str(),
-            GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL)),
-        out_buffer_size_(out_buffer_size) {}
+            GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL)) {}
+
+  /** @brief Returns true when the RPC device was opened successfully. */
+  explicit operator bool() const noexcept { return static_cast<bool>(handle_); }
 
   /**
-   * @brief Invokes a registered RPC callback by function index.
-   * @param index Function code embedded into the device control request.
-   * @param args Serializable callback arguments.
-   * @return Deserialized callback return value for non-void calls.
-   * @throws std::runtime_error if the device handle or DeviceIoControl fails.
+   * @brief Queries wire, capability, and method metadata from the server.
+   * @return Immutable metadata published when the server started.
    */
-  template <typename Ret, typename... Args>
-  Ret invoke(uint64_t index, Args &&... args) {
-    if (!handle_)
-      throw std::runtime_error("invalid handle");
-
-    std::vector<uint8_t> in_buffer;
-    zpp::serializer::memory_output_archive out(in_buffer);
-    out(args...);
-
+  contract_info query_contract() const {
+    std::vector<unsigned char> output(contract_response_size);
+    const std::vector<unsigned char> input;
     DWORD returned = 0;
-#pragma warning(disable : 4984)
-    if constexpr (std::is_void_v<Ret>) {
-      if (!::DeviceIoControl(handle_.get(), NTL_RPC_DEVICE_CTL(index),
-                             in_buffer.empty() ? NULL : &in_buffer[0],
-                             (DWORD)in_buffer.size(), NULL, 0, &returned, NULL))
-        throw std::runtime_error("failed to DeviceIoControl (index : " +
-                                 std::to_string(index) + ")");
-    } else {
-      std::vector<uint8_t> out_buffer(out_buffer_size_);
-      if (!::DeviceIoControl(handle_.get(), NTL_RPC_DEVICE_CTL(index),
-                             in_buffer.empty() ? NULL : &in_buffer[0],
-                             (DWORD)in_buffer.size(), &out_buffer[0],
-                             (DWORD)out_buffer.size(), &returned, NULL))
-        throw std::runtime_error("failed to DeviceIoControl (index : " +
-                                 std::to_string(index) + ")");
-      zpp::serializer::memory_input_archive in(out_buffer);
-      Ret rv;
-      in(rv);
-      return std::move(rv);
+    try {
+      call(control_code(contract_query_id), input, output.data(),
+           static_cast<DWORD>(output.size()), returned);
+    } catch (const std::system_error &error) {
+      const auto code = static_cast<DWORD>(error.code().value());
+      if (code == ERROR_INVALID_FUNCTION || code == ERROR_NOT_SUPPORTED) {
+        throw contract_mismatch(
+            contract_mismatch_reason::query_unavailable,
+            "NTL RPC server does not support contract discovery");
+      }
+      throw;
     }
-#pragma warning(default : 4984)
+
+    if (returned > output.size())
+      throw std::runtime_error(
+          "NTL RPC contract query returned an invalid output size");
+
+    output.resize(returned);
+    try {
+      zpp::serializer::memory_view_input_archive archive(
+          output.data(), output.size(), contract_response_size);
+      contract_info info;
+      archive(info);
+      if (archive.offset() != output.size())
+        throw std::runtime_error(
+            "NTL RPC contract response contains trailing bytes");
+      const auto &methods = info.method_ids();
+      if (!std::is_sorted(methods.begin(), methods.end()) ||
+          std::adjacent_find(methods.begin(), methods.end()) != methods.end())
+        throw std::runtime_error(
+            "NTL RPC contract response has an invalid method table");
+      return info;
+    } catch (const zpp::serializer::out_of_range &) {
+      throw std::runtime_error("NTL RPC contract response is malformed");
+    }
+  }
+
+  /**
+   * @brief Queries and validates the server before application RPC calls.
+   * @param requirements Application and transport requirements.
+   * @return The validated server metadata for optional inspection.
+   */
+  contract_info
+  require_contract(const contract_requirements &requirements) const {
+    auto info = query_contract();
+    if (info.protocol_version() != current_protocol_version) {
+      throw contract_mismatch(contract_mismatch_reason::protocol_version,
+                              "NTL RPC protocol version mismatch",
+                              current_protocol_version,
+                              info.protocol_version());
+    }
+    if (requirements.has_contract_version_ &&
+        info.contract_version() != requirements.contract_version_) {
+      throw contract_mismatch(contract_mismatch_reason::contract_version,
+                              "NTL RPC application contract version mismatch",
+                              requirements.contract_version_,
+                              info.contract_version());
+    }
+    if ((info.transport_feature_mask() & requirements.transport_features_) !=
+        requirements.transport_features_) {
+      throw contract_mismatch(contract_mismatch_reason::transport_features,
+                              "NTL RPC transport feature is unavailable",
+                              requirements.transport_features_,
+                              info.transport_feature_mask());
+    }
+    if ((info.capability_mask() & requirements.capabilities_) !=
+        requirements.capabilities_) {
+      throw contract_mismatch(contract_mismatch_reason::capabilities,
+                              "NTL RPC application capability is unavailable",
+                              requirements.capabilities_,
+                              info.capability_mask());
+    }
+    for (const auto id : requirements.method_ids_) {
+      if (!info.supports_method(id)) {
+        throw contract_mismatch(contract_mismatch_reason::method,
+                                "NTL RPC method is unavailable", id, 0);
+      }
+    }
+    return info;
+  }
+
+  /**
+   * @brief Invokes a typed RPC method.
+   * @param rpc_method Shared method descriptor.
+   * @param args Serializable method arguments.
+   * @return Deserialized method result, or no value for a void method.
+   */
+  template <typename Method, typename... Arguments>
+  typename Method::return_type invoke(const Method &rpc_method,
+                                      Arguments &&...args) {
+    static_assert(is_method<Method>::value,
+                  "ntl::rpc::client::invoke requires an ntl::rpc::method");
+    static_assert(sizeof...(Arguments) == Method::arity(),
+                  "RPC argument count does not match the method signature");
+
+    using is_void =
+        typename std::is_void<typename Method::return_type>::type;
+    return invoke_impl(rpc_method, is_void{},
+                       std::forward<Arguments>(args)...);
+  }
+
+private:
+  template <typename Tuple, std::size_t... Index>
+  static std::vector<unsigned char>
+  serialize_arguments(Tuple &arguments, std::index_sequence<Index...>) {
+    std::vector<unsigned char> bytes;
+    zpp::serializer::memory_output_archive archive(bytes);
+    archive(std::get<Index>(arguments)...);
+    return bytes;
+  }
+
+  template <typename Method, typename... Arguments>
+  static std::vector<unsigned char>
+  serialize_method_arguments(Arguments &&...args) {
+    using storage = typename Method::argument_storage;
+    static_assert(std::is_constructible<storage, Arguments &&...>::value,
+                  "RPC arguments cannot initialize the method signature");
+    storage arguments(std::forward<Arguments>(args)...);
+    return serialize_arguments(
+        arguments,
+        std::make_index_sequence<std::tuple_size<storage>::value>{});
+  }
+
+  static void ensure_dword_size(std::size_t size, const char *description) {
+    if (size > static_cast<std::size_t>(
+                   (std::numeric_limits<DWORD>::max)())) {
+      throw std::length_error(description);
+    }
+  }
+
+  void call(unsigned long code, const std::vector<unsigned char> &input,
+            void *output, DWORD output_size, DWORD &returned) const {
+    if (!handle_)
+      throw std::system_error(ERROR_INVALID_HANDLE, std::system_category(),
+                              "NTL RPC device is not open");
+
+    ensure_dword_size(input.size(), "NTL RPC input exceeds DWORD capacity");
+    if (!::DeviceIoControl(
+            handle_.get(), code,
+            input.empty() ? nullptr
+                          : const_cast<unsigned char *>(input.data()),
+            static_cast<DWORD>(input.size()), output, output_size, &returned,
+            nullptr)) {
+      const DWORD error = ::GetLastError();
+      throw std::system_error(static_cast<int>(error), std::system_category(),
+                              "NTL RPC DeviceIoControl failed");
+    }
+  }
+
+  template <typename Method, typename... Arguments>
+  void invoke_impl(const Method &, std::true_type, Arguments &&...args) {
+    const auto input =
+        serialize_method_arguments<Method>(std::forward<Arguments>(args)...);
+    if (input.size() > Method::request_size())
+      throw std::length_error("NTL RPC request exceeded its method limit");
+    DWORD returned = 0;
+    call(Method::code(), input, nullptr, 0, returned);
+    if (returned != 0)
+      throw std::runtime_error("void NTL RPC method returned output bytes");
+  }
+
+  template <typename Method, typename... Arguments>
+  typename Method::return_type invoke_impl(const Method &, std::false_type,
+                                           Arguments &&...args) {
+    using return_type = typename Method::return_type;
+    static_assert(std::is_default_constructible<return_type>::value,
+                  "NTL RPC return types must be default constructible");
+    static_assert(Method::response_size() <=
+                      static_cast<std::size_t>(
+                          (std::numeric_limits<DWORD>::max)()),
+                  "NTL RPC response capacity exceeds DWORD capacity");
+
+    const auto input =
+        serialize_method_arguments<Method>(std::forward<Arguments>(args)...);
+    if (input.size() > Method::request_size())
+      throw std::length_error("NTL RPC request exceeded its method limit");
+    std::vector<unsigned char> output(Method::response_size());
+    DWORD returned = 0;
+    call(Method::code(), input, output.data(),
+         static_cast<DWORD>(output.size()), returned);
+
+    if (returned > output.size())
+      throw std::runtime_error("NTL RPC returned an invalid output size");
+
+    output.resize(returned);
+    zpp::serializer::memory_view_input_archive archive(
+        output.data(), output.size(), Method::decode_allocation());
+    return_type value{};
+    archive(value);
+    if (archive.offset() != output.size())
+      throw std::runtime_error("NTL RPC response contains trailing bytes");
+    return std::move(value);
   }
 
 private:
   ntl::unique_handle handle_;
-  size_t out_buffer_size_;
 };
+
 } // namespace rpc
 } // namespace ntl
 
-#define NTL_RPC_BEGIN(_rpc_name_) namespace _rpc_name_ {
+#define NTL_RPC_BEGIN_CONTRACT(_rpc_name_, _version_, _capabilities_)         \
+  namespace _rpc_name_ {                                                       \
+  constexpr std::uint32_t rpc_contract_version = (_version_);                 \
+  constexpr std::uint64_t rpc_capabilities = (_capabilities_);
+
+#define NTL_RPC_BEGIN(_rpc_name_)                                              \
+  NTL_RPC_BEGIN_CONTRACT(_rpc_name_, 1, 0)
 #define NTL_RPC_END(_rpc_name_) }
 
-/**
- * @brief Declares a zero-argument user-mode RPC wrapper with an explicit ID.
- */
 #define NTL_ADD_CALLBACK_ID_0(_rpc_name_, _id_, _ret_, _name_, ...)            \
-  static const int _name_##_0_index = (_id_);                                  \
-  inline _ret_ _name_() {                                                      \
-    return ntl::rpc::client(L#_rpc_name_).invoke<_ret_>((_id_));               \
+  using _name_##_0_method_type =                                               \
+      ntl::rpc::make_method_t<(_id_), _ret_>;                                  \
+  static constexpr _name_##_0_method_type _name_##_0_method{};                 \
+  inline ntl::rpc::response_type_t<_ret_> _name_() {                           \
+    return ntl::rpc::client(L#_rpc_name_).invoke(_name_##_0_method);           \
   }
 
-/**
- * @brief Declares a zero-argument user-mode RPC wrapper using __LINE__ as ID.
- */
-#define NTL_ADD_CALLBACK_0(_rpc_name_, _ret_, _name_, ...)                     \
-  NTL_ADD_CALLBACK_ID_0(_rpc_name_, __LINE__, _ret_, _name_, __VA_ARGS__)
+#define NTL_ADD_CALLBACK_0(_rpc_name_, _ret_, _name_, ...)                    \
+  NTL_ADD_CALLBACK_ID_0(_rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_,    \
+                        __VA_ARGS__)
 
-/**
- * @brief Declares a one-argument user-mode RPC wrapper with an explicit ID.
- */
-#define NTL_ADD_CALLBACK_ID_1(_rpc_name_, _id_, _ret_, _name_, _arg0_type_,    \
-                              _arg0_name_, ...)                                \
-  static const int _name_##_1_index = (_id_);                                  \
-  inline _ret_ _name_(_arg0_type_ _arg0_name_) {                               \
+#define NTL_ADD_CALLBACK_ID_1(_rpc_name_, _id_, _ret_, _name_, _arg0_type_,   \
+                              _arg0_name_, ...)                               \
+  using _name_##_1_method_type =                                               \
+      ntl::rpc::make_method_t<(_id_), _ret_, _arg0_type_>;                    \
+  static constexpr _name_##_1_method_type _name_##_1_method{};                 \
+  inline ntl::rpc::response_type_t<_ret_>                                     \
+  _name_(_arg0_type_ _arg0_name_) {                                            \
     return ntl::rpc::client(L#_rpc_name_)                                      \
-        .invoke<_ret_>((_id_), std::forward<_arg0_type_>(_arg0_name_));        \
+        .invoke(_name_##_1_method,                                             \
+                std::forward<_arg0_type_>(_arg0_name_));                       \
   }
 
-/**
- * @brief Declares a one-argument user-mode RPC wrapper using __LINE__ as ID.
- */
-#define NTL_ADD_CALLBACK_1(_rpc_name_, _ret_, _name_, _arg0_type_,             \
-                           _arg0_name_, ...)                                   \
-  NTL_ADD_CALLBACK_ID_1(_rpc_name_, __LINE__, _ret_, _name_, _arg0_type_,      \
-                        _arg0_name_, __VA_ARGS__)
+#define NTL_ADD_CALLBACK_1(_rpc_name_, _ret_, _name_, _arg0_type_,            \
+                           _arg0_name_, ...)                                  \
+  NTL_ADD_CALLBACK_ID_1(_rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_,    \
+                        _arg0_type_, _arg0_name_, __VA_ARGS__)
 
-/**
- * @brief Declares a two-argument user-mode RPC wrapper with an explicit ID.
- */
-#define NTL_ADD_CALLBACK_ID_2(_rpc_name_, _id_, _ret_, _name_, _arg0_type_,    \
-                              _arg0_name_, _arg1_type_, _arg1_name_, ...)      \
-  static const int _name_##_2_index = (_id_);                                  \
-  inline _ret_ _name_(_arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_) {      \
+#define NTL_ADD_CALLBACK_ID_2(_rpc_name_, _id_, _ret_, _name_, _arg0_type_,   \
+                              _arg0_name_, _arg1_type_, _arg1_name_, ...)     \
+  using _name_##_2_method_type =                                               \
+      ntl::rpc::make_method_t<(_id_), _ret_, _arg0_type_, _arg1_type_>;       \
+  static constexpr _name_##_2_method_type _name_##_2_method{};                 \
+  inline ntl::rpc::response_type_t<_ret_>                                     \
+  _name_(_arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_) {                  \
     return ntl::rpc::client(L#_rpc_name_)                                      \
-        .invoke<_ret_>((_id_), std::forward<_arg0_type_>(_arg0_name_),         \
-                       std::forward<_arg1_type_>(_arg1_name_));                \
+        .invoke(_name_##_2_method,                                             \
+                std::forward<_arg0_type_>(_arg0_name_),                        \
+                std::forward<_arg1_type_>(_arg1_name_));                       \
   }
 
-/**
- * @brief Declares a two-argument user-mode RPC wrapper using __LINE__ as ID.
- */
-#define NTL_ADD_CALLBACK_2(_rpc_name_, _ret_, _name_, _arg0_type_,             \
-                           _arg0_name_, _arg1_type_, _arg1_name_, ...)         \
-  NTL_ADD_CALLBACK_ID_2(_rpc_name_, __LINE__, _ret_, _name_, _arg0_type_,      \
-                        _arg0_name_, _arg1_type_, _arg1_name_, __VA_ARGS__)
+#define NTL_ADD_CALLBACK_2(_rpc_name_, _ret_, _name_, _arg0_type_,            \
+                           _arg0_name_, _arg1_type_, _arg1_name_, ...)        \
+  NTL_ADD_CALLBACK_ID_2(_rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_,    \
+                        _arg0_type_, _arg0_name_, _arg1_type_, _arg1_name_,    \
+                        __VA_ARGS__)
 
-/**
- * @brief Declares a three-argument user-mode RPC wrapper with an explicit ID.
- */
-#define NTL_ADD_CALLBACK_ID_3(_rpc_name_, _id_, _ret_, _name_, _arg0_type_,    \
-                              _arg0_name_, _arg1_type_, _arg1_name_,           \
-                              _arg2_type_, _arg2_name_, ...)                   \
-  static const int _name_##_3_index = (_id_);                                  \
-  inline _ret_ _name_(_arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_,        \
-                      _arg2_type_ _arg2_name_) {                               \
+#define NTL_ADD_CALLBACK_ID_3(_rpc_name_, _id_, _ret_, _name_, _arg0_type_,   \
+                              _arg0_name_, _arg1_type_, _arg1_name_,          \
+                              _arg2_type_, _arg2_name_, ...)                  \
+  using _name_##_3_method_type =                                               \
+      ntl::rpc::make_method_t<(_id_), _ret_, _arg0_type_, _arg1_type_,        \
+                              _arg2_type_>;                                    \
+  static constexpr _name_##_3_method_type _name_##_3_method{};                 \
+  inline ntl::rpc::response_type_t<_ret_>                                     \
+  _name_(_arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_,                    \
+         _arg2_type_ _arg2_name_) {                                            \
     return ntl::rpc::client(L#_rpc_name_)                                      \
-        .invoke<_ret_>((_id_), std::forward<_arg0_type_>(_arg0_name_),         \
-                       std::forward<_arg1_type_>(_arg1_name_),                 \
-                       std::forward<_arg2_type_>(_arg2_name_));                \
+        .invoke(_name_##_3_method,                                             \
+                std::forward<_arg0_type_>(_arg0_name_),                        \
+                std::forward<_arg1_type_>(_arg1_name_),                        \
+                std::forward<_arg2_type_>(_arg2_name_));                       \
   }
 
-/**
- * @brief Declares a three-argument user-mode RPC wrapper using __LINE__ as ID.
- */
-#define NTL_ADD_CALLBACK_3(_rpc_name_, _ret_, _name_, _arg0_type_,             \
-                           _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_, \
-                           _arg2_name_, ...)                                   \
-  NTL_ADD_CALLBACK_ID_3(_rpc_name_, __LINE__, _ret_, _name_, _arg0_type_,      \
-                        _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_,    \
-                        _arg2_name_, __VA_ARGS__)
+#define NTL_ADD_CALLBACK_3(_rpc_name_, _ret_, _name_, _arg0_type_,            \
+                           _arg0_name_, _arg1_type_, _arg1_name_,             \
+                           _arg2_type_, _arg2_name_, ...)                     \
+  NTL_ADD_CALLBACK_ID_3(_rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_,    \
+                        _arg0_type_, _arg0_name_, _arg1_type_, _arg1_name_,    \
+                        _arg2_type_, _arg2_name_, __VA_ARGS__)
 
-/**
- * @brief Declares a four-argument user-mode RPC wrapper with an explicit ID.
- */
-#define NTL_ADD_CALLBACK_ID_4(_rpc_name_, _id_, _ret_, _name_, _arg0_type_,    \
-                              _arg0_name_, _arg1_type_, _arg1_name_,           \
-                              _arg2_type_, _arg2_name_, _arg3_type_,           \
-                              _arg3_name_, ...)                                \
-  static const int _name_##_4_index = (_id_);                                  \
-  inline _ret_ _name_(_arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_,        \
-                      _arg2_type_ _arg2_name_, _arg3_type_ _arg3_name_) {      \
+#define NTL_ADD_CALLBACK_ID_4(_rpc_name_, _id_, _ret_, _name_, _arg0_type_,   \
+                              _arg0_name_, _arg1_type_, _arg1_name_,          \
+                              _arg2_type_, _arg2_name_, _arg3_type_,          \
+                              _arg3_name_, ...)                               \
+  using _name_##_4_method_type =                                               \
+      ntl::rpc::make_method_t<(_id_), _ret_, _arg0_type_, _arg1_type_,        \
+                              _arg2_type_, _arg3_type_>;                       \
+  static constexpr _name_##_4_method_type _name_##_4_method{};                 \
+  inline ntl::rpc::response_type_t<_ret_>                                     \
+  _name_(_arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_,                    \
+         _arg2_type_ _arg2_name_, _arg3_type_ _arg3_name_) {                  \
     return ntl::rpc::client(L#_rpc_name_)                                      \
-        .invoke<_ret_>((_id_), std::forward<_arg0_type_>(_arg0_name_),         \
-                       std::forward<_arg1_type_>(_arg1_name_),                 \
-                       std::forward<_arg2_type_>(_arg2_name_),                 \
-                       std::forward<_arg3_type_>(_arg3_name_));                \
+        .invoke(_name_##_4_method,                                             \
+                std::forward<_arg0_type_>(_arg0_name_),                        \
+                std::forward<_arg1_type_>(_arg1_name_),                        \
+                std::forward<_arg2_type_>(_arg2_name_),                        \
+                std::forward<_arg3_type_>(_arg3_name_));                       \
   }
 
-/**
- * @brief Declares a four-argument user-mode RPC wrapper using __LINE__ as ID.
- */
-#define NTL_ADD_CALLBACK_4(_rpc_name_, _ret_, _name_, _arg0_type_,             \
-                           _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_, \
-                           _arg2_name_, _arg3_type_, _arg3_name_, ...)         \
-  NTL_ADD_CALLBACK_ID_4(_rpc_name_, __LINE__, _ret_, _name_, _arg0_type_,      \
-                        _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_,    \
-                        _arg2_name_, _arg3_type_, _arg3_name_, __VA_ARGS__)
+#define NTL_ADD_CALLBACK_4(_rpc_name_, _ret_, _name_, _arg0_type_,            \
+                           _arg0_name_, _arg1_type_, _arg1_name_,             \
+                           _arg2_type_, _arg2_name_, _arg3_type_,             \
+                           _arg3_name_, ...)                                  \
+  NTL_ADD_CALLBACK_ID_4(_rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_,    \
+                        _arg0_type_, _arg0_name_, _arg1_type_, _arg1_name_,    \
+                        _arg2_type_, _arg2_name_, _arg3_type_, _arg3_name_,    \
+                        __VA_ARGS__)
 
-/**
- * @brief Declares a five-argument user-mode RPC wrapper with an explicit ID.
- */
-#define NTL_ADD_CALLBACK_ID_5(_rpc_name_, _id_, _ret_, _name_, _arg0_type_,    \
-                              _arg0_name_, _arg1_type_, _arg1_name_,           \
-                              _arg2_type_, _arg2_name_, _arg3_type_,           \
-                              _arg3_name_, _arg4_type_, _arg4_name_, ...)      \
-  static const int _name_##_5_index = (_id_);                                  \
-  inline _ret_ _name_(_arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_,        \
-                      _arg2_type_ _arg2_name_, _arg3_type_ _arg3_name_,        \
-                      _arg4_type_ _arg4_name_) {                               \
+#define NTL_ADD_CALLBACK_ID_5(_rpc_name_, _id_, _ret_, _name_, _arg0_type_,   \
+                              _arg0_name_, _arg1_type_, _arg1_name_,          \
+                              _arg2_type_, _arg2_name_, _arg3_type_,          \
+                              _arg3_name_, _arg4_type_, _arg4_name_, ...)     \
+  using _name_##_5_method_type =                                               \
+      ntl::rpc::make_method_t<(_id_), _ret_, _arg0_type_, _arg1_type_,        \
+                              _arg2_type_, _arg3_type_, _arg4_type_>;          \
+  static constexpr _name_##_5_method_type _name_##_5_method{};                 \
+  inline ntl::rpc::response_type_t<_ret_>                                     \
+  _name_(_arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_,                    \
+         _arg2_type_ _arg2_name_, _arg3_type_ _arg3_name_,                    \
+         _arg4_type_ _arg4_name_) {                                            \
     return ntl::rpc::client(L#_rpc_name_)                                      \
-        .invoke<_ret_>((_id_), std::forward<_arg0_type_>(_arg0_name_),         \
-                       std::forward<_arg1_type_>(_arg1_name_),                 \
-                       std::forward<_arg2_type_>(_arg2_name_),                 \
-                       std::forward<_arg3_type_>(_arg3_name_),                 \
-                       std::forward<_arg4_type_>(_arg4_name_));                \
+        .invoke(_name_##_5_method,                                             \
+                std::forward<_arg0_type_>(_arg0_name_),                        \
+                std::forward<_arg1_type_>(_arg1_name_),                        \
+                std::forward<_arg2_type_>(_arg2_name_),                        \
+                std::forward<_arg3_type_>(_arg3_name_),                        \
+                std::forward<_arg4_type_>(_arg4_name_));                       \
   }
 
-/**
- * @brief Declares a five-argument user-mode RPC wrapper using __LINE__ as ID.
- */
-#define NTL_ADD_CALLBACK_5(_rpc_name_, _ret_, _name_, _arg0_type_,             \
-                           _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_, \
-                           _arg2_name_, _arg3_type_, _arg3_name_, _arg4_type_, \
-                           _arg4_name_, ...)                                   \
-  NTL_ADD_CALLBACK_ID_5(_rpc_name_, __LINE__, _ret_, _name_, _arg0_type_,      \
-                        _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_,    \
-                        _arg2_name_, _arg3_type_, _arg3_name_, _arg4_type_,    \
-                        _arg4_name_, __VA_ARGS__)
-#else // !defined(NTL_USER_MODE)
-
-#endif // !defined(NTL_USER_MODE)
+#define NTL_ADD_CALLBACK_5(_rpc_name_, _ret_, _name_, _arg0_type_,            \
+                           _arg0_name_, _arg1_type_, _arg1_name_,             \
+                           _arg2_type_, _arg2_name_, _arg3_type_,             \
+                           _arg3_name_, _arg4_type_, _arg4_name_, ...)        \
+  NTL_ADD_CALLBACK_ID_5(_rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_,    \
+                        _arg0_type_, _arg0_name_, _arg1_type_, _arg1_name_,    \
+                        _arg2_type_, _arg2_name_, _arg3_type_, _arg3_name_,    \
+                        _arg4_type_, _arg4_name_, __VA_ARGS__)
+#endif // defined(NTL_USER_MODE)

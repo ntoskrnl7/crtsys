@@ -84,7 +84,7 @@ The driver tests still exercise these features from `PASSIVE_LEVEL`.
 | NTL ERESOURCE wrapper | `ntl::resource`, `ntl::unique_lock<ntl::resource>`, `ntl::shared_lock<ntl::resource>` | `<= APC_LEVEL` | Blocking/resource-style synchronization. Do not use in DPC, ISR, or spin-lock-held paths. |
 | NTL spin lock wrapper | `ntl::spin_lock`, `ntl::unique_lock<ntl::spin_lock>` | `<= DISPATCH_LEVEL` | Keep held regions resident, short, nonblocking, and free of allocation, waits, exceptions, streams, and arbitrary STL/runtime helpers. |
 | NTL IRQL helpers | `ntl::irql`, `ntl::current_irql`, `ntl::is_passive_level`, `ntl::is_irql_at_most`, `ntl::require_passive_level`, `ntl::require_irql_at_most`, `ntl::raise_irql`, `ntl::raise_irql_to_dpc_level`, `ntl::raise_irql_to_synch_level` | Query helpers follow caller context; require helpers return status; raise helpers explicitly manipulate current IRQL | Keep raised scopes as small as possible. |
-| NTL RPC client | `ntl::rpc::client` | User mode, not kernel IRQL | Client side uses `DeviceIoControl`; server callback contract still controls kernel-side safety. |
+| NTL RPC client | `ntl::rpc::client` | User mode, not kernel IRQL | Shared macros generate both sides over typed method descriptors. Bounded replies, malformed/trailing payload rejection, and x86-client/x64-driver schemas are covered. |
 
 ## C++ Standard
 
