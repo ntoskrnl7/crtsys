@@ -56,6 +56,9 @@ constexpr std::uint32_t current_protocol_version = 1;
 /** @brief Reserved IOCTL function ID used by `client::query_contract()`. */
 constexpr unsigned long contract_query_id = 0xFFF;
 
+/** @brief Reserved IOCTL function ID used by notification receive requests. */
+constexpr unsigned long notification_wait_id = 0xFFE;
+
 /** @brief Receive capacity for the built-in contract query. */
 constexpr std::size_t contract_response_size = 64 * 1024;
 
@@ -70,6 +73,8 @@ constexpr std::uint64_t immutable_dispatch = 1ull << 2;
 constexpr std::uint64_t rundown_shutdown = 1ull << 3;
 /** @brief This endpoint executes calls as cancellable pending IRPs. */
 constexpr std::uint64_t asynchronous_calls = 1ull << 4;
+/** @brief This endpoint can complete pending receives with kernel events. */
+constexpr std::uint64_t kernel_notifications = 1ull << 5;
 /** @brief All transport features implemented by this NTL version. */
 constexpr std::uint64_t current = resource_limits | secure_endpoint |
                                   immutable_dispatch | rundown_shutdown;
@@ -207,6 +212,18 @@ constexpr unsigned long control_code(unsigned long id) noexcept {
                FILE_READ_DATA | FILE_WRITE_DATA));
 }
 
+/** @brief Returns the reserved control code used to receive notifications. */
+constexpr unsigned long notification_control_code() noexcept {
+  return control_code(notification_wait_id);
+}
+
+namespace detail {
+/** @brief Fixed-width request sent before one notification IRP is queued. */
+struct notification_wait_request {
+  std::uint32_t id;
+};
+} // namespace detail
+
 /** @brief Marker base used to recognize typed RPC method descriptors. */
 struct method_tag {};
 
@@ -230,8 +247,9 @@ template <unsigned long Id, typename Return, typename... Arguments,
           std::size_t DecodeAllocation>
 class method<Id, Return(Arguments...), ResponseSize, RequestSize,
              DecodeAllocation> : public method_tag {
-  static_assert(Id >= 0x800 && Id < contract_query_id,
-                "NTL RPC method IDs must use 0x800-0xFFE; 0xFFF is reserved");
+  static_assert(Id >= 0x800 && Id < notification_wait_id,
+                "NTL RPC method IDs must use 0x800-0xFFD; 0xFFE and 0xFFF "
+                "are reserved");
   static_assert(std::is_void<Return>::value || ResponseSize != 0,
                 "A non-void RPC method requires response capacity");
   static_assert(RequestSize != 0, "An RPC method requires request capacity");
@@ -296,6 +314,67 @@ public:
   }
 };
 
+/** @brief Marker base used to recognize typed notification descriptors. */
+struct notification_tag {};
+
+/**
+ * @brief Describes one typed kernel-to-user notification channel.
+ * @tparam Id Stable, nonzero application-defined channel ID.
+ * @tparam Payload Serializable event payload type.
+ * @tparam ResponseSize Maximum serialized payload bytes.
+ * @tparam DecodeAllocation Maximum client allocation while decoding a payload.
+ */
+template <std::uint32_t Id, typename Payload,
+          std::size_t ResponseSize = default_response_size,
+          std::size_t DecodeAllocation = default_decode_allocation>
+class notification : public notification_tag {
+  static_assert(Id != 0, "NTL RPC notification IDs must be nonzero");
+  static_assert(!std::is_void<Payload>::value,
+                "NTL RPC notifications require a payload type");
+  static_assert(ResponseSize != 0,
+                "NTL RPC notification capacity must be nonzero");
+  static_assert(DecodeAllocation != 0,
+                "NTL RPC notification decode budget must be nonzero");
+
+public:
+  using payload_type = Payload;
+
+  /** @brief Returns the application-defined channel ID. */
+  static constexpr std::uint32_t id() noexcept { return Id; }
+
+  /** @brief Returns the maximum serialized payload size. */
+  static constexpr std::size_t response_size() noexcept {
+    return ResponseSize;
+  }
+
+  /** @brief Returns the client-side payload decode allocation budget. */
+  static constexpr std::size_t decode_allocation() noexcept {
+    return DecodeAllocation;
+  }
+
+  /** @brief Returns the same channel with an explicit payload capacity. */
+  template <std::size_t Bytes>
+  constexpr notification<Id, Payload, Bytes, DecodeAllocation>
+  max_response_size() const noexcept {
+    static_assert(Bytes != 0, "NTL RPC notification capacity must be nonzero");
+    return {};
+  }
+
+  /** @brief Returns the same channel with an explicit decode budget. */
+  template <std::size_t Bytes>
+  constexpr notification<Id, Payload, ResponseSize, Bytes>
+  max_decode_allocation() const noexcept {
+    static_assert(Bytes != 0,
+                  "NTL RPC notification decode budget must be nonzero");
+    return {};
+  }
+};
+
+/** @brief Reports whether a type is an NTL RPC notification descriptor. */
+template <typename T>
+struct is_notification
+    : std::is_base_of<notification_tag, typename std::decay<T>::type> {};
+
 /** @brief Reports whether a type is an NTL RPC method descriptor. */
 template <typename T>
 struct is_method
@@ -332,4 +411,4 @@ using make_method_t = typename make_method<Id, Response, Arguments...>::type;
                           (_request_bytes_), (_decode_bytes_)>
 
 /** @brief Maps line-based convenience IDs into the vendor IOCTL range. */
-#define NTL_RPC_DETAIL_LINE_ID (0x800ul + (__LINE__ % 0x7FFul))
+#define NTL_RPC_DETAIL_LINE_ID (0x800ul + (__LINE__ % 0x7FEul))

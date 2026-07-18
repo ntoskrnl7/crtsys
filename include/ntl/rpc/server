@@ -34,6 +34,7 @@ constexpr GUID device_class_guid = {
 class server_options {
 public:
   static constexpr std::uint32_t default_max_pending_calls = 256;
+  static constexpr std::uint32_t default_max_pending_notifications = 256;
 
   /** @brief Creates SYSTEM/Administrators-only defaults for a device name. */
   explicit server_options(std::wstring name) : name_(std::move(name)) {}
@@ -84,6 +85,15 @@ public:
     return *this;
   }
 
+  /** @brief Sets the maximum number of queued notification receive IRPs. */
+  server_options &max_pending_notifications(std::uint32_t count) {
+    if (count == 0 || count > static_cast<std::uint32_t>(MAXLONG))
+      throw std::invalid_argument(
+          "NTL RPC pending-notification limit is invalid");
+    max_pending_notifications_ = count;
+    return *this;
+  }
+
   /** @brief Returns the device name without the `\\Device\\` prefix. */
   const std::wstring &name() const noexcept { return name_; }
 
@@ -109,6 +119,11 @@ public:
     return max_pending_calls_;
   }
 
+  /** @brief Returns the queued notification receive limit. */
+  std::uint32_t max_pending_notifications() const noexcept {
+    return max_pending_notifications_;
+  }
+
 private:
   std::wstring name_;
   std::wstring security_descriptor_ =
@@ -118,6 +133,8 @@ private:
   std::uint64_t capabilities_ = 0;
   bool asynchronous_ = false;
   std::uint32_t max_pending_calls_ = default_max_pending_calls;
+  std::uint32_t max_pending_notifications_ =
+      default_max_pending_notifications;
 };
 
 namespace detail {
@@ -255,6 +272,224 @@ void invoke_method(Callback &callback,
   invoke_method<Method>(callback, input, output, is_void{});
 }
 
+class notification_queue {
+public:
+  notification_queue() = default;
+  notification_queue(const notification_queue &) = delete;
+  notification_queue &operator=(const notification_queue &) = delete;
+
+  void initialize(EX_RUNDOWN_REF &rundown,
+                  std::uint32_t max_pending) {
+    rundown_ = &rundown;
+    max_pending_ = static_cast<LONG>(max_pending);
+    InitializeListHead(&requests_);
+    KeInitializeSpinLock(&lock_);
+    const NTSTATUS status = IoCsqInitializeEx(
+        &csq_, &notification_queue::insert,
+        &notification_queue::remove, &notification_queue::peek,
+        &notification_queue::acquire_lock,
+        &notification_queue::release_lock,
+        &notification_queue::complete_cancelled);
+    if (!NT_SUCCESS(status))
+      throw ntl::exception(status,
+                           "NTL RPC notification queue initialization failed");
+  }
+
+  void start() noexcept {
+    KIRQL irql = PASSIVE_LEVEL;
+    KeAcquireSpinLock(&lock_, &irql);
+    InterlockedExchange(&accepting_, 1);
+    KeReleaseSpinLock(&lock_, irql);
+  }
+
+  ntl::device_control::dispatch_result
+  enqueue(ntl::irp &request, std::uint32_t id) {
+    notification_insert_context context{id};
+    const NTSTATUS status =
+        IoCsqInsertIrpEx(&csq_, request.get(), nullptr, &context);
+    if (status == STATUS_CANCELLED) {
+      // IO_CSQ owns and completes an IRP that was cancelled before insertion.
+      return ntl::device_control::dispatch_result::pending;
+    }
+    if (!NT_SUCCESS(status))
+      throw ntl::exception(status,
+                           "NTL RPC notification receive was not queued");
+    return ntl::device_control::dispatch_result::pending;
+  }
+
+  template <typename Notification>
+  ntl::status
+  try_notify(const typename Notification::payload_type &payload) noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return ntl::status{STATUS_INVALID_DEVICE_STATE};
+
+    notification_match match{};
+    match.id = Notification::id();
+    match.match_id = true;
+    PIRP request = IoCsqRemoveNextIrp(&csq_, &match);
+    if (!request) {
+      return ntl::status{
+          InterlockedCompareExchange(&accepting_, 0, 0) != 0
+              ? STATUS_NOT_FOUND
+              : STATUS_DELETE_PENDING};
+    }
+
+    NTSTATUS status = STATUS_SUCCESS;
+    ULONG_PTR information = 0;
+    const auto stack = IoGetCurrentIrpStackLocation(request);
+    const auto capacity = static_cast<std::size_t>(
+        stack->Parameters.DeviceIoControl.OutputBufferLength);
+    if (!request->AssociatedIrp.SystemBuffer ||
+        capacity < Notification::response_size()) {
+      status = STATUS_BUFFER_TOO_SMALL;
+    } else {
+      try {
+        zpp::serializer::memory_view_output_archive archive(
+            reinterpret_cast<unsigned char *>(
+                request->AssociatedIrp.SystemBuffer),
+            capacity);
+        archive(payload);
+        information = static_cast<ULONG_PTR>(archive.offset());
+      } catch (const zpp::serializer::out_of_range &) {
+        status = STATUS_BUFFER_TOO_SMALL;
+      } catch (const std::exception &) {
+        status = STATUS_INVALID_PARAMETER;
+      }
+    }
+
+    complete_owned(request, status,
+                   NT_SUCCESS(status) ? information : 0);
+    return ntl::status{status};
+  }
+
+  void cleanup(PFILE_OBJECT file_object) noexcept {
+    if (!file_object)
+      return;
+    notification_match match{};
+    match.file_object = file_object;
+    match.match_file = true;
+    while (PIRP request = IoCsqRemoveNextIrp(&csq_, &match))
+      complete_owned(request, STATUS_CANCELLED, 0);
+  }
+
+  void stop() noexcept {
+    KIRQL irql = PASSIVE_LEVEL;
+    KeAcquireSpinLock(&lock_, &irql);
+    InterlockedExchange(&accepting_, 0);
+    KeReleaseSpinLock(&lock_, irql);
+
+    while (PIRP request = IoCsqRemoveNextIrp(&csq_, nullptr))
+      complete_owned(request, STATUS_DELETE_PENDING, 0);
+  }
+
+private:
+  struct notification_insert_context {
+    std::uint32_t id;
+  };
+
+  struct notification_match {
+    std::uint32_t id = 0;
+    PFILE_OBJECT file_object = nullptr;
+    bool match_id = false;
+    bool match_file = false;
+  };
+
+  static notification_queue *from_csq(PIO_CSQ csq) noexcept {
+    return CONTAINING_RECORD(csq, notification_queue, csq_);
+  }
+
+  static NTSTATUS NTAPI insert(PIO_CSQ csq, PIRP request,
+                               PVOID insert_context) noexcept {
+    auto *const self = from_csq(csq);
+    const auto *const context =
+        static_cast<const notification_insert_context *>(insert_context);
+    if (!context || InterlockedCompareExchange(&self->accepting_, 0, 0) == 0)
+      return STATUS_DELETE_PENDING;
+    if (InterlockedCompareExchange(&self->pending_, 0, 0) >=
+        self->max_pending_)
+      return STATUS_DEVICE_BUSY;
+    if (!ExAcquireRundownProtection(self->rundown_))
+      return STATUS_DELETE_PENDING;
+
+    request->Tail.Overlay.DriverContext[0] =
+        reinterpret_cast<PVOID>(static_cast<ULONG_PTR>(context->id));
+    request->Tail.Overlay.DriverContext[1] = self;
+    InsertTailList(&self->requests_, &request->Tail.Overlay.ListEntry);
+    InterlockedIncrement(&self->pending_);
+    return STATUS_SUCCESS;
+  }
+
+  static void NTAPI remove(PIO_CSQ, PIRP request) noexcept {
+    RemoveEntryList(&request->Tail.Overlay.ListEntry);
+  }
+
+  static PIRP NTAPI peek(PIO_CSQ csq, PIRP request,
+                         PVOID peek_context) noexcept {
+    auto *const self = from_csq(csq);
+    const auto *const match =
+        static_cast<const notification_match *>(peek_context);
+    PLIST_ENTRY entry = request ? request->Tail.Overlay.ListEntry.Flink
+                                : self->requests_.Flink;
+    while (entry != &self->requests_) {
+      PIRP candidate =
+          CONTAINING_RECORD(entry, IRP, Tail.Overlay.ListEntry);
+      entry = entry->Flink;
+      if (!match)
+        return candidate;
+
+      bool selected = true;
+      if (match->match_id) {
+        const auto id = static_cast<std::uint32_t>(reinterpret_cast<ULONG_PTR>(
+            candidate->Tail.Overlay.DriverContext[0]));
+        selected = id == match->id;
+      }
+      if (selected && match->match_file) {
+        selected = IoGetCurrentIrpStackLocation(candidate)->FileObject ==
+                   match->file_object;
+      }
+      if (selected)
+        return candidate;
+    }
+    return nullptr;
+  }
+
+  static void NTAPI acquire_lock(PIO_CSQ csq, PKIRQL irql) noexcept {
+    KeAcquireSpinLock(&from_csq(csq)->lock_, irql);
+  }
+
+  static void NTAPI release_lock(PIO_CSQ csq, KIRQL irql) noexcept {
+    KeReleaseSpinLock(&from_csq(csq)->lock_, irql);
+  }
+
+  static void NTAPI complete_cancelled(PIO_CSQ csq,
+                                       PIRP request) noexcept {
+    from_csq(csq)->complete_owned(request, STATUS_CANCELLED, 0);
+  }
+
+  void complete_owned(PIRP request, NTSTATUS status,
+                      ULONG_PTR information) noexcept {
+    const bool owns_rundown =
+        request->Tail.Overlay.DriverContext[1] == this;
+    request->Tail.Overlay.DriverContext[0] = nullptr;
+    request->Tail.Overlay.DriverContext[1] = nullptr;
+    request->IoStatus.Status = status;
+    request->IoStatus.Information = information;
+    IoCompleteRequest(request, IO_NO_INCREMENT);
+    if (owns_rundown) {
+      InterlockedDecrement(&pending_);
+      ExReleaseRundownProtection(rundown_);
+    }
+  }
+
+  IO_CSQ csq_{};
+  LIST_ENTRY requests_{};
+  KSPIN_LOCK lock_{};
+  EX_RUNDOWN_REF *rundown_ = nullptr;
+  LONG max_pending_ = 0;
+  volatile LONG pending_ = 0;
+  volatile LONG accepting_ = 0;
+};
+
 class dispatch_table {
 public:
   using dispatch_handler =
@@ -263,12 +498,14 @@ public:
 
   dispatch_table(std::uint32_t contract_version,
                  std::uint64_t capabilities, bool asynchronous,
-                 std::uint32_t max_pending_calls)
+                 std::uint32_t max_pending_calls,
+                 std::uint32_t max_pending_notifications)
       : contract_version_(contract_version), capabilities_(capabilities),
         asynchronous_(asynchronous),
         max_pending_calls_(static_cast<LONG>(max_pending_calls)) {
     ExInitializeRundownProtection(&rundown_);
     ExInitializeFastMutex(&registration_lock_);
+    notifications_.initialize(rundown_, max_pending_notifications);
   }
 
 private:
@@ -413,6 +650,21 @@ public:
     method_ids_.push_back(static_cast<std::uint32_t>(Method::id()));
   }
 
+  template <typename Notification> void add_notification() {
+    fast_mutex_guard guard(registration_lock_);
+    if (InterlockedCompareExchange(&started_, 0, 0) != 0 ||
+        InterlockedCompareExchange(&stopping_, 0, 0) != 0)
+      throw ntl::exception(
+          STATUS_INVALID_DEVICE_STATE,
+          "NTL RPC notifications are immutable after start");
+
+    const auto inserted = notification_limits_.emplace(
+        Notification::id(), Notification::response_size());
+    if (!inserted.second)
+      throw ntl::exception(STATUS_OBJECT_NAME_COLLISION,
+                           "Duplicate NTL RPC notification ID");
+  }
+
   void start() {
     fast_mutex_guard guard(registration_lock_);
     if (InterlockedCompareExchange(&stopping_, 0, 0) != 0)
@@ -421,15 +673,21 @@ public:
     std::sort(method_ids_.begin(), method_ids_.end());
     const auto features =
         transport_features::current |
-        (asynchronous_ ? transport_features::asynchronous_calls : 0);
+        (asynchronous_ ? transport_features::asynchronous_calls : 0) |
+        (!notification_limits_.empty()
+             ? transport_features::kernel_notifications
+             : 0);
     contract_ = contract_info(current_protocol_version, contract_version_,
                               features, capabilities_, method_ids_);
+    notifications_.start();
     InterlockedExchange(&started_, 1);
   }
 
   void stop() noexcept {
-    if (InterlockedCompareExchange(&stopping_, 1, 0) == 0)
+    if (InterlockedCompareExchange(&stopping_, 1, 0) == 0) {
+      notifications_.stop();
       ExWaitForRundownProtectionRelease(&rundown_);
+    }
   }
 
   void dispatch(const ntl::device_control::code &code,
@@ -462,6 +720,28 @@ public:
     if (InterlockedCompareExchange(&started_, 0, 0) == 0)
       throw ntl::exception(STATUS_DEVICE_NOT_READY,
                            "NTL RPC server has not started");
+
+    if (code.value == notification_control_code()) {
+      if (input.size != sizeof(detail::notification_wait_request))
+        throw ntl::exception(
+            STATUS_INVALID_PARAMETER,
+            "Invalid NTL RPC notification receive request");
+      const auto wait = input.as<detail::notification_wait_request>();
+      if (!wait)
+        throw ntl::exception(
+            STATUS_INVALID_PARAMETER,
+            "Missing NTL RPC notification receive request");
+      const auto registered = notification_limits_.find(wait->id);
+      if (registered == notification_limits_.end())
+        throw ntl::exception(STATUS_INVALID_DEVICE_REQUEST,
+                             "Unknown NTL RPC notification ID");
+      if (!output.can_write(registered->second))
+        throw ntl::exception(
+            STATUS_BUFFER_TOO_SMALL,
+            "NTL RPC notification receive buffer is too small");
+      return notifications_.enqueue(request, wait->id);
+    }
+
     if (!ExAcquireRundownProtection(&rundown_))
       throw ntl::exception(STATUS_DELETE_PENDING,
                            "NTL RPC server is stopping");
@@ -476,6 +756,11 @@ public:
     if (found == handlers_.end())
       throw ntl::exception(STATUS_INVALID_DEVICE_REQUEST,
                            "Unknown NTL RPC method ID");
+
+    if (!asynchronous_) {
+      found->second(input, output);
+      return ntl::device_control::dispatch_result::complete;
+    }
 
     if (!try_acquire_pending_call())
       throw ntl::exception(STATUS_DEVICE_BUSY,
@@ -493,6 +778,26 @@ public:
     (void)pending.value().release();
     guard.release();
     return ntl::device_control::dispatch_result::pending;
+  }
+
+  void cleanup(ntl::irp &request) noexcept {
+    notifications_.cleanup(request.stack_location()->FileObject);
+  }
+
+  template <typename Notification>
+  ntl::status
+  try_notify(const typename Notification::payload_type &payload) noexcept {
+    if (InterlockedCompareExchange(&started_, 0, 0) == 0)
+      return ntl::status{STATUS_DEVICE_NOT_READY};
+    if (!ExAcquireRundownProtection(&rundown_))
+      return ntl::status{STATUS_DELETE_PENDING};
+    rundown_guard guard(rundown_);
+
+    const auto registered = notification_limits_.find(Notification::id());
+    if (registered == notification_limits_.end() ||
+        registered->second != Notification::response_size())
+      return ntl::status{STATUS_INVALID_DEVICE_REQUEST};
+    return notifications_.template try_notify<Notification>(payload);
   }
 
 private:
@@ -530,10 +835,12 @@ private:
   }
 
   std::unordered_map<unsigned long, dispatch_handler> handlers_;
+  std::unordered_map<std::uint32_t, std::size_t> notification_limits_;
   std::vector<std::uint32_t> method_ids_;
   contract_info contract_;
   EX_RUNDOWN_REF rundown_{};
   FAST_MUTEX registration_lock_{};
+  notification_queue notifications_;
   std::uint32_t contract_version_;
   std::uint64_t capabilities_;
   bool asynchronous_;
@@ -560,7 +867,8 @@ public:
   server(ntl::driver &driver, const server_options &server_opts)
       : dispatch_(std::make_shared<detail::dispatch_table>(
             server_opts.contract_version(), server_opts.capabilities(),
-            server_opts.is_asynchronous(), server_opts.max_pending_calls())) {
+            server_opts.is_asynchronous(), server_opts.max_pending_calls(),
+            server_opts.max_pending_notifications())) {
     ntl::device_options options;
     options
         .name(server_opts.name())
@@ -569,22 +877,16 @@ public:
                              server_opts.class_guid());
     device_ = driver.create_device<void>(options);
     const auto dispatch = dispatch_;
-    if (server_opts.is_asynchronous()) {
-      device_->on_pending_device_control(
-          [dispatch](ntl::irp &request,
-                     const ntl::device_control::code &code,
-                     const ntl::device_control::in_buffer &input,
-                     ntl::device_control::out_buffer &output) {
-            return dispatch->dispatch_pending(request, code, input, output);
-          });
-    } else {
-      device_->on_device_control(
-          [dispatch](const ntl::device_control::code &code,
-                     const ntl::device_control::in_buffer &input,
-                     ntl::device_control::out_buffer &output) {
-            dispatch->dispatch(code, input, output);
-          });
-    }
+    device_
+        ->on_pending_device_control(
+            [dispatch](ntl::irp &request,
+                       const ntl::device_control::code &code,
+                       const ntl::device_control::in_buffer &input,
+                       ntl::device_control::out_buffer &output) {
+              return dispatch->dispatch_pending(request, code, input, output);
+            })
+        .on_cleanup(
+            [dispatch](ntl::irp &request) { dispatch->cleanup(request); });
   }
 
   server(const server &) = delete;
@@ -606,6 +908,30 @@ public:
 
     dispatch_->template add<Method>(std::forward<Callback>(callback));
     return *this;
+  }
+
+  /** @brief Registers a typed notification channel before start(). */
+  template <typename Notification>
+  server &register_notification(const Notification &) {
+    static_assert(is_notification<Notification>::value,
+                  "register_notification requires an ntl::rpc::notification");
+    dispatch_->template add_notification<Notification>();
+    return *this;
+  }
+
+  /**
+   * @brief Completes the oldest matching receive with one typed payload.
+   * @return STATUS_NOT_FOUND when no app currently waits on this channel.
+   * @note Serialization requires PASSIVE_LEVEL. Notifications are not buffered
+   * when no receive IRP is available.
+   */
+  template <typename Notification>
+  ntl::status
+  try_notify(const Notification &,
+             const typename Notification::payload_type &payload) noexcept {
+    static_assert(is_notification<Notification>::value,
+                  "try_notify requires an ntl::rpc::notification");
+    return dispatch_->template try_notify<Notification>(payload);
   }
 
   /** @brief Publishes the immutable method table for request dispatch. */

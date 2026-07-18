@@ -138,7 +138,7 @@ jobs:
             -Configuration Debug `
             -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}'
 
-      - name: Build RPC lifecycle and asynchronous fixtures
+      - name: Build RPC lifecycle, asynchronous, and notification fixtures
         if: matrix.project == 'driver' && matrix.arch == 'x64' && matrix.config == 'Debug'
         shell: pwsh
         run: |
@@ -151,6 +151,22 @@ jobs:
           ./scripts/ci/Build-CrtSys.ps1 `
             -Project rpc-async `
             -Architecture x64 `
+            -Configuration Debug `
+            -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}'
+
+          ./scripts/ci/Build-CrtSys.ps1 `
+            -Project rpc-notifications `
+            -Architecture x64 `
+            -Configuration Debug `
+            -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}'
+
+      - name: Build x86 RPC notification fixture
+        if: matrix.project == 'driver' && matrix.arch == 'x86' && matrix.config == 'Debug'
+        shell: pwsh
+        run: |
+          ./scripts/ci/Build-CrtSys.ps1 `
+            -Project rpc-notifications `
+            -Architecture x86 `
             -Configuration Debug `
             -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}'
 

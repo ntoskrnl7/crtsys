@@ -27,6 +27,9 @@ using dispatch_fn = std::function<void(irp &)>;
 namespace close {
 using dispatch_fn = std::function<void(irp &)>;
 } // namespace close
+namespace cleanup {
+using dispatch_fn = std::function<void(irp &)>;
+} // namespace cleanup
 namespace device_control {
 /** @brief Describes whether the NTL dispatcher must complete an IRP. */
 enum class dispatch_result {
@@ -182,6 +185,7 @@ namespace device {
 struct dispatchers_t {
   create::dispatch_fn on_create;
   close::dispatch_fn on_close;
+  cleanup::dispatch_fn on_cleanup;
   device_control::dispatch_fn on_device_control;
   device_control::pending_dispatch_fn on_pending_device_control;
 };
@@ -373,6 +377,16 @@ public:
    */
   device &on_close(close::dispatch_fn &&f) {
     dispatchers().on_close = f;
+    return *this;
+  }
+
+  /**
+   * @brief Registers an IRP_MJ_CLEANUP callback.
+   * @note Use this callback to release requests retained for one file object
+   * before its final close dispatch.
+   */
+  device &on_cleanup(cleanup::dispatch_fn &&f) {
+    dispatchers().on_cleanup = std::move(f);
     return *this;
   }
 

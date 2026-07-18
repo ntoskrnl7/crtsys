@@ -62,8 +62,8 @@ the schema is reformatted or reordered. This is an optional ABI-stability
 control, not the required form for normal shared-header use.
 
 Explicit method IDs must be stable and unique within the endpoint and use the
-vendor IOCTL function range `0x800` through `0xFFE`; NTL reserves `0xFFF` for
-contract discovery. Client arguments are
+vendor IOCTL function range `0x800` through `0xFFD`; NTL reserves `0xFFE` for
+notification receives and `0xFFF` for contract discovery. Client arguments are
 converted to the declared argument types before serialization, so a fixed-width
 method declaration cannot accidentally encode a native-width caller type.
 
@@ -203,6 +203,95 @@ must not treat cancellation as thread termination.
 Synchronous `invoke()` remains available on both normal and asynchronous
 endpoints. On an asynchronous endpoint it waits for the pending operation and
 preserves the existing typed return API.
+
+## Kernel-To-App Notifications
+
+A notification channel describes one serializable payload shared by the
+driver and app. Its ID is a fixed-width application channel ID, not a native
+pointer or an architecture-sized value:
+
+```cpp
+struct progress_event {
+  std::uint64_t operation_id = 0;
+  std::string phase;
+  std::vector<std::uint32_t> values;
+
+  friend zpp::serializer::access;
+  template <typename Archive, typename Self>
+  static void serialize(Archive& archive, Self& self) {
+    archive(self.operation_id, self.phase, self.values);
+  }
+};
+
+constexpr auto progress =
+    ntl::rpc::notification<0x1001, progress_event>{}
+        .max_response_size<64 * 1024>()
+        .max_decode_allocation<128 * 1024>();
+```
+
+Register every channel before `start()`. Publishing requires `PASSIVE_LEVEL`
+because arbitrary payload serialization can execute CRT/STL code:
+
+```cpp
+ntl::rpc::server_options options(L"demo_rpc");
+options.max_pending_notifications(32);
+
+auto server = ntl::rpc::make_server(driver, options);
+server->register_notification(progress);
+server->start();
+
+const auto status = server->try_notify(
+    progress, progress_event{42, "indexing", {1, 2, 3}});
+if (static_cast<NTSTATUS>(status) == STATUS_NOT_FOUND) {
+  // No app currently has a receive queued. NTL does not buffer the event.
+}
+```
+
+The app queues a receive before asking the driver to produce the event:
+
+```cpp
+using namespace std::chrono_literals;
+
+ntl::rpc::client client(L"demo_rpc");
+auto receive = client.receive_async(progress);
+
+if (receive.wait_for(250ms) == ntl::rpc::async_wait_status::timeout)
+  (void)receive.cancel();
+
+const auto event = receive.get();
+```
+
+`receive(progress)` provides the blocking form. `receive_async(progress)`
+returns `notification_wait<payload_type>`, which has the same `ready()`,
+`wait_for()`, `wait()`, `cancel()`, and `get()` ownership rules as
+`async_call<T>`.
+
+The transport is an inverted-call queue: each app receive contributes one
+pending `METHOD_BUFFERED` IRP, and each successful `try_notify()` completes the
+oldest receive for the matching channel. It is intentionally queue delivery,
+not broadcast delivery. Multiple independent consumers therefore compete for
+events on the same endpoint. A product that needs broadcast semantics should
+create separate endpoints or implement subscriber identity in its application
+contract.
+
+NTL uses `IO_CSQ` for cancellation races. `CancelIoEx`, destruction of a
+`notification_wait`, `IRP_MJ_CLEANUP`, and server shutdown each remove and
+complete a receive exactly once. `stop()` first rejects new receives, completes
+all queued receives with a failure, and then waits for normal RPC callback
+rundown.
+
+A legacy WDM driver cannot finish a service stop while an app still owns an
+open device handle. Before waiting for `SERVICE_STOPPED`, cancel or destroy all
+`notification_wait` objects and close their clients. `IRP_MJ_CLEANUP` then
+removes the app's queued receives, allowing unload to begin; the server shutdown
+flush remains the final defense for any receive still owned by the endpoint.
+
+The pending receive limit bounds retained IRPs and their I/O-manager buffers.
+An event is not retained when no receive exists; `try_notify()` returns
+`STATUS_NOT_FOUND`, allowing the driver to drop, count, coalesce, or queue the
+event using product-specific policy. Payload bytes contain no extra framework
+header. The receive request carries only one hidden `std::uint32_t` channel ID,
+so the same x64 driver contract is usable by x86 and x64 apps.
 
 ## Contract Compatibility
 
@@ -373,6 +462,11 @@ single process execution cannot expose.
 [`test/rpc/async`](../../test/rpc/async) covers timeout, targeted cancellation,
 request ownership beyond client lifetime, concurrent overlapped calls, pending
 resource limits, and cleanup of an abandoned request.
+
+[`test/rpc/notifications`](../../test/rpc/notifications) covers typed STL
+payloads, FIFO receives, timeout and cancellation, pending receive limits,
+handle cleanup, service stop after pending receive cancellation, unload,
+restart, and x64-driver/x86-app wire compatibility.
 
 ## Trust Boundary
 

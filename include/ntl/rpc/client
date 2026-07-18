@@ -11,6 +11,7 @@
 #include "../handle"
 
 #include <chrono>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -394,6 +395,9 @@ private:
   bool consumed_ = false;
 };
 
+/** @brief Move-only owner of one pending typed kernel notification. */
+template <typename T> using notification_wait = async_call<T>;
+
 /** @brief Owns a user-mode handle to an NTL RPC device. */
 class client {
 public:
@@ -553,6 +557,46 @@ public:
     return make_async_call<Method>(std::move(state),
                                    typename std::is_void<
                                        typename Method::return_type>::type{});
+  }
+
+  /**
+   * @brief Waits for and returns one typed kernel notification.
+   * @note Each successful receive consumes one notification. Start another
+   * receive before asking the driver to publish the next event.
+   */
+  template <typename Notification>
+  typename Notification::payload_type receive(const Notification &channel) {
+    return receive_async(channel).get();
+  }
+
+  /**
+   * @brief Queues a cancellable overlapped receive for one notification.
+   * @return An owner that keeps its IRP buffers and device handle alive.
+   */
+  template <typename Notification>
+  notification_wait<typename Notification::payload_type>
+  receive_async(const Notification &channel) {
+    static_assert(
+        is_notification<Notification>::value,
+        "ntl::rpc::client::receive_async requires an ntl::rpc::notification");
+    static_assert(
+        std::is_default_constructible<
+            typename Notification::payload_type>::value,
+        "NTL RPC notification payloads must be default constructible");
+    static_assert(Notification::response_size() <=
+                      static_cast<std::size_t>(
+                          (std::numeric_limits<DWORD>::max)()),
+                  "NTL RPC notification capacity exceeds DWORD capacity");
+    (void)channel;
+
+    detail::notification_wait_request request{Notification::id()};
+    std::vector<unsigned char> input(sizeof(request));
+    std::memcpy(input.data(), &request, sizeof(request));
+    auto state = std::make_shared<detail::async_operation>(
+        handle_, notification_control_code(), std::move(input),
+        Notification::response_size());
+    return notification_wait<typename Notification::payload_type>(
+        std::move(state), Notification::decode_allocation());
   }
 
 private:
