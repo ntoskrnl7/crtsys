@@ -32,7 +32,7 @@ struct ntl_rpc_sample_reply {
 // The same declaration expands to kernel callback registration when this file
 // follows <ntl/rpc/server>, and to user-mode wrapper functions when it follows
 // <ntl/rpc/client>.
-NTL_RPC_BEGIN(crtsys_ntl_rpc_sample)
+NTL_RPC_BEGIN_CONTRACT(crtsys_ntl_rpc_sample, 1, 0x1ull)
 
 constexpr std::uint32_t series_max_count = 4096;
 

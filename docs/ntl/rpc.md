@@ -26,7 +26,7 @@ Headers:
 #include <cstdint>
 #include <vector>
 
-NTL_RPC_BEGIN(demo_rpc)
+NTL_RPC_BEGIN_CONTRACT(demo_rpc, 3, 0x1ull)
 
 NTL_ADD_CALLBACK_2(demo_rpc, int, add, int, left, int, right, {
   return left + right;
@@ -62,7 +62,8 @@ the schema is reformatted or reordered. This is an optional ABI-stability
 control, not the required form for normal shared-header use.
 
 Explicit method IDs must be stable and unique within the endpoint and use the
-vendor IOCTL function range `0x800` through `0xFFF`. Client arguments are
+vendor IOCTL function range `0x800` through `0xFFE`; NTL reserves `0xFFF` for
+contract discovery. Client arguments are
 converted to the declared argument types before serialization, so a fixed-width
 method declaration cannot accidentally encode a native-width caller type.
 
@@ -96,11 +97,23 @@ ntl::status ntl::main(ntl::driver& driver,
 `demo_rpc::init()` creates `\Device\demo_rpc` and registers every callback in
 the shared declaration. Keep the returned
 `std::shared_ptr<ntl::rpc::server>` alive for the endpoint lifetime. Registering
-the same method ID twice fails instead of silently replacing a callback.
+the same method ID twice fails instead of silently replacing a callback. The
+macro-generated `init()` calls `start()` after registration; direct users of
+`make_server()` must call `start()` explicitly. After that point the dispatch
+table is immutable, so late registration is rejected instead of racing with
+active calls.
 
 Server callbacks run in the driver's device-control dispatch path. Keep them
 short, validate semantic limits before allocating, and follow the same IRQL and
-lifetime rules as other driver control callbacks.
+lifetime rules as other driver control callbacks. Server shutdown rejects new
+calls and waits for callbacks that already acquired rundown protection. Do not
+call `stop()` from one of the server's own callbacks because it would wait for
+that callback to return.
+
+`stop()` leaves the control device owned by the server while rejecting its RPC
+dispatches. Keep the server alive until driver unload, as shown above. This
+allows existing user handles to close before the server destructor releases the
+NTL device and its C++ extension state.
 
 ## User-Mode Client
 
@@ -137,6 +150,54 @@ The generated wrapper is the shortest path for occasional calls. Reuse an
 calls without reopening the device. `invoke()` derives its return type from the
 method object, so callers do not repeat an ID or return type.
 
+## Contract Compatibility
+
+An app and driver that are released independently should validate their shared
+contract once after opening the endpoint. Contract discovery is a reserved
+query, not a header added to every RPC request:
+
+```cpp
+ntl::rpc::client client(L"demo_rpc");
+
+ntl::rpc::contract_requirements requirements;
+requirements
+    .contract_version(demo_rpc::rpc_contract_version)
+    .transport_features(ntl::rpc::transport_features::resource_limits |
+                        ntl::rpc::transport_features::secure_endpoint)
+    .capabilities(demo_rpc::rpc_capabilities)
+    .method(demo_rpc::add_2_method)
+    .method(demo_rpc::read_values_1_method);
+
+const auto server_contract = client.require_contract(requirements);
+```
+
+`NTL_RPC_BEGIN_CONTRACT(Name, Version, Capabilities)` publishes the application
+contract version, application-defined capability bits, and every registered
+method ID. `NTL_RPC_BEGIN(Name)` remains the compact form and publishes version
+`1` with no application capability bits.
+
+The reported values have separate meanings:
+
+- `protocol_version()` is the NTL wire format version. NTL validates it
+  automatically in `require_contract()`.
+- `contract_version()` is the application's exact schema/API version.
+- `transport_feature_mask()` describes NTL protections such as resource limits,
+  endpoint security, immutable dispatch, and rundown shutdown.
+- `capability_mask()` contains application-defined optional feature bits.
+- `method_ids()` is the sorted set of methods registered before `start()`.
+
+`query_contract()` returns this metadata without imposing application policy.
+`require_contract()` checks selected requirements and throws
+`ntl::rpc::contract_mismatch`; its `reason()`, `expected()`, and `actual()`
+members distinguish protocol, application version, transport feature,
+capability, and missing-method failures. This lets an app report a clear
+driver/app version mismatch before invoking a business method.
+
+Use explicit `NTL_ADD_CALLBACK_ID_*` IDs for independently updated binaries.
+Line-derived IDs are convenient when both sides always build from the same
+header, but source reordering changes those IDs and therefore is not a stable
+published contract.
+
 ## Bounded Responses
 
 Every non-void method has a maximum serialized response size. The default is
@@ -160,6 +221,47 @@ round trip. The cost is the local receive-buffer allocation selected for that
 method. Keep limits large enough for valid replies but small enough to bound
 untrusted allocation pressure.
 
+## Request And Decode Limits
+
+Every method also limits serialized request bytes and cumulative dynamic
+storage created while decoding. The defaults are 1 MiB per request and 4 MiB
+of decoded dynamic storage. Methods that accept variable-size input should set
+limits appropriate for their contract:
+
+```cpp
+constexpr auto update_words =
+    ntl::rpc::method<0x901, void(const std::vector<std::string>&)>{}
+        .max_request_size<64 * 1024>()
+        .max_decode_allocation<256 * 1024>();
+```
+
+The shared callback macros expose the same contract without abandoning the
+single-source driver/client declaration:
+
+```cpp
+NTL_ADD_CALLBACK_ID_1(
+    demo_rpc, 0x901,
+    NTL_RPC_METHOD_LIMITS(0, 64 * 1024, 256 * 1024, void),
+    update_words, const std::vector<std::string>&, words, {
+      apply_words(words);
+    })
+```
+
+The three numeric values are response capacity, serialized request limit, and
+decode-allocation budget, in that order. A `void` method ignores the response
+capacity; use `0` to make that explicit.
+
+The request limit rejects an oversized `DeviceIoControl` input before decoding
+or invoking the callback. The decode-allocation limit is separate because a
+small payload can declare a very large container count. NTL charges dynamic
+containers, including nested and associative containers, against this budget
+before allocation. The same method budget protects client-side response
+decoding.
+
+These are transport resource limits, not application validation. A callback
+must still validate semantic rules such as maximum item count, string length,
+allowed enum values, and authorization for the requested operation.
+
 ## Typed Core
 
 The macro frontend delegates to `ntl::rpc::method<Id, Signature>` and
@@ -179,7 +281,7 @@ the user/kernel and process-bitness boundary:
 | Containers | Sequence, set, map, unordered, nested, and fixed-size containers |
 | Compound values | `std::pair`, `std::tuple`, `std::optional`, and `std::variant` |
 | User types | Custom objects with `zpp::serializer` serialization support |
-| Boundary cases | Empty and large payloads, undersized responses, truncated data, invalid lengths, trailing bytes, and unknown method IDs |
+| Boundary cases | Empty and large payloads, undersized responses, truncated data, invalid lengths, trailing bytes, request/decode limits, and unknown method IDs |
 
 This table records exercised coverage, not an exhaustive allowlist. Other
 serializable types can work, but cross-bitness schemas must follow the wire
@@ -199,19 +301,41 @@ containers are safe only when their element and nested value types follow the
 same rule; the container's process-local representation is never transmitted.
 
 The server rejects unread trailing input, impossible container lengths,
-undersized output buffers, and unknown method IDs before invoking application
-code. The client deserializes only the byte count returned by
-`DeviceIoControl` and rejects trailing response bytes or a reply that cannot
-construct the declared return type.
+request or decode-budget violations, undersized output buffers, and unknown
+method IDs before invoking application code. The client deserializes only the
+byte count returned by `DeviceIoControl` and rejects trailing response bytes or
+a reply that cannot construct the declared return type.
 
 See [`test/rpc/cross-bitness`](../../test/rpc/cross-bitness) for the buildable
 x64 driver plus x86/x64 client fixture. The x64-driver/x86-client VM run is the
 authoritative cross-bitness case; the x64 client is the same-bitness control.
 
+[`test/rpc/lifecycle-stress`](../../test/rpc/lifecycle-stress) repeatedly opens
+and closes short-lived clients, stops the driver service while a long callback
+is active, restarts it, and validates a fresh contract and call. Run that
+fixture under Driver Verifier to cover unload and device lifetime races that a
+single process execution cannot expose.
+
 ## Trust Boundary
 
-The current endpoint uses `FILE_ANY_ACCESS` and is intended for a controlled
-local driver/client pair. RPC serialization validation prevents malformed
-buffers from becoming ordinary application inputs, but it is not authorization.
-Drivers exposed to untrusted processes must apply an appropriate device security
-descriptor and validate caller permissions and semantic input limits.
+NTL RPC IOCTLs require a handle opened for both read and write access. By
+default, `make_server()` creates a named device with `IoCreateDeviceSecure()`
+and an ACL that grants access only to Local System and Administrators. The
+cross-bitness fixture verifies that a restricted impersonation token cannot
+open the endpoint.
+
+Use `server_options` when a product needs a different principal set. Give the
+device class a project-owned GUID rather than reusing the NTL default:
+
+```cpp
+ntl::rpc::server_options options(L"demo_rpc");
+options.security_descriptor(project_sddl, project_device_class_guid);
+
+auto server = ntl::rpc::make_server(driver, options);
+server->on(method, callback);
+server->start();
+```
+
+The ACL controls who can open the device. Serialization checks and resource
+limits control how accepted bytes are decoded. Neither replaces per-method
+authorization or semantic validation when callers have different privileges.

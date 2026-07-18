@@ -7,11 +7,16 @@
 
 #include <windows.h>
 
+#include <algorithm>
+#include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <exception>
 #include <limits>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include <ntl/rpc/client>
 
@@ -85,11 +90,119 @@ bool expect_rejected_raw_request(std::uint64_t function,
   return accepted == FALSE;
 }
 
+bool expect_restricted_open_denied() {
+  HANDLE process_token = nullptr;
+  HANDLE restricted_token = nullptr;
+  HANDLE impersonation_token = nullptr;
+  if (!OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY,
+                        &process_token))
+    return false;
+
+  BYTE world_buffer[SECURITY_MAX_SID_SIZE]{};
+  DWORD world_size = sizeof(world_buffer);
+  SID_AND_ATTRIBUTES restricted[1]{};
+  bool result = false;
+
+  if (CreateWellKnownSid(WinWorldSid, nullptr, world_buffer, &world_size)) {
+    restricted[0].Sid = world_buffer;
+    if (CreateRestrictedToken(process_token, DISABLE_MAX_PRIVILEGE, 0,
+                              nullptr, 0, nullptr, 1, restricted,
+                              &restricted_token) &&
+        DuplicateTokenEx(restricted_token, TOKEN_IMPERSONATE | TOKEN_QUERY,
+                         nullptr, SecurityImpersonation, TokenImpersonation,
+                         &impersonation_token) &&
+        SetThreadToken(nullptr, impersonation_token)) {
+      HANDLE device = CreateFileW(
+          L"\\\\?\\Global\\GLOBALROOT\\Device\\crtsys_rpc_cross_bitness",
+          GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+      const DWORD error = GetLastError();
+      if (device != INVALID_HANDLE_VALUE)
+        CloseHandle(device);
+      result = device == INVALID_HANDLE_VALUE && error == ERROR_ACCESS_DENIED;
+      RevertToSelf();
+    }
+  }
+
+  if (impersonation_token)
+    CloseHandle(impersonation_token);
+  if (restricted_token)
+    CloseHandle(restricted_token);
+  CloseHandle(process_token);
+  return result;
+}
+
+bool expect_contract_mismatch(
+    const ntl::rpc::client &client,
+    const ntl::rpc::contract_requirements &requirements,
+    ntl::rpc::contract_mismatch_reason expected_reason) {
+  try {
+    (void)client.require_contract(requirements);
+  } catch (const ntl::rpc::contract_mismatch &error) {
+    return error.reason() == expected_reason;
+  } catch (...) {
+  }
+  return false;
+}
+
 } // namespace
 
 int wmain() {
   try {
     ntl::rpc::client client(L"crtsys_rpc_cross_bitness");
+    if (!client || !expect_restricted_open_denied()) {
+      std::fwprintf(stderr, L"RPC endpoint security policy failed\n");
+      return 1;
+    }
+
+    ntl::rpc::contract_requirements requirements;
+    requirements
+        .contract_version(crtsys_rpc_cross_bitness::contract_version)
+        .transport_features(ntl::rpc::transport_features::current)
+        .capabilities(crtsys_rpc_cross_bitness::capabilities::current)
+        .method(crtsys_rpc_cross_bitness::architecture)
+        .method(crtsys_rpc_cross_bitness::echo)
+        .method(crtsys_rpc_cross_bitness::narrow_reply)
+        .method(crtsys_rpc_cross_bitness::vector_size)
+        .method(crtsys_rpc_cross_bitness::echo_count)
+        .method(crtsys_rpc_cross_bitness::guarded_words)
+        .method(crtsys_rpc_cross_bitness::guarded_count)
+        .method(crtsys_rpc_cross_bitness::concurrent_increment)
+        .method(crtsys_rpc_cross_bitness::concurrent_count)
+        .method(crtsys_rpc_cross_bitness::slow_call)
+        .method(crtsys_rpc_cross_bitness::request_stop)
+        .method(crtsys_rpc_cross_bitness::slow_active);
+    const auto contract = client.require_contract(requirements);
+    if (contract.method_ids().size() != 12 ||
+        !std::is_sorted(contract.method_ids().begin(),
+                        contract.method_ids().end())) {
+      std::fwprintf(stderr, L"RPC contract method table is invalid\n");
+      return 1;
+    }
+
+    ntl::rpc::contract_requirements wrong_version;
+    wrong_version.contract_version(
+        crtsys_rpc_cross_bitness::contract_version + 1);
+    ntl::rpc::contract_requirements missing_capability;
+    missing_capability.capabilities(1ull << 63);
+    ntl::rpc::contract_requirements missing_method;
+    missing_method.method(crtsys_rpc_cross_bitness::unavailable_method);
+    ntl::rpc::contract_requirements missing_transport_feature;
+    missing_transport_feature.transport_features(1ull << 63);
+    if (!expect_contract_mismatch(
+            client, wrong_version,
+            ntl::rpc::contract_mismatch_reason::contract_version) ||
+        !expect_contract_mismatch(
+            client, missing_capability,
+            ntl::rpc::contract_mismatch_reason::capabilities) ||
+        !expect_contract_mismatch(
+            client, missing_method,
+            ntl::rpc::contract_mismatch_reason::method) ||
+        !expect_contract_mismatch(
+            client, missing_transport_feature,
+            ntl::rpc::contract_mismatch_reason::transport_features)) {
+      std::fwprintf(stderr, L"RPC contract mismatch was not diagnosed\n");
+      return 1;
+    }
 
     const auto server =
         client.invoke(crtsys_rpc_cross_bitness::architecture);
@@ -174,15 +287,35 @@ int wmain() {
       return 1;
     }
 
+    if (client.invoke(crtsys_rpc_cross_bitness::guarded_words,
+                      std::vector<std::string>{"alpha", "beta"}) != 2 ||
+        client.invoke(crtsys_rpc_cross_bitness::guarded_count) != 1) {
+      std::fwprintf(stderr, L"valid guarded request failed\n");
+      return 1;
+    }
+
     const std::uint8_t malformed = 0xFF;
     const std::uint32_t oversized_count = 0xFFFFFFFFu;
+    const std::uint32_t allocation_attack_count = 0x1000u;
+    const std::array<std::uint8_t, 256> oversized_request{};
     if (!expect_rejected_raw_request(crtsys_rpc_cross_bitness::echo.id(),
                                      &malformed, sizeof(malformed)) ||
         !expect_rejected_raw_request(
             crtsys_rpc_cross_bitness::vector_size.id(), &oversized_count,
             sizeof(oversized_count)) ||
+        !expect_rejected_raw_request(
+            crtsys_rpc_cross_bitness::guarded_words.id(),
+            &allocation_attack_count, sizeof(allocation_attack_count)) ||
+        !expect_rejected_raw_request(
+            crtsys_rpc_cross_bitness::guarded_words.id(),
+            oversized_request.data(),
+            static_cast<DWORD>(oversized_request.size())) ||
         !expect_rejected_raw_request(0xAFF, nullptr, 0)) {
       std::fwprintf(stderr, L"malformed RPC request was accepted\n");
+      return 1;
+    }
+    if (client.invoke(crtsys_rpc_cross_bitness::guarded_count) != 1) {
+      std::fwprintf(stderr, L"rejected request executed its callback\n");
       return 1;
     }
 
@@ -193,11 +326,92 @@ int wmain() {
       return 1;
     }
 
+    constexpr std::uint32_t worker_count = 8;
+    constexpr std::uint32_t calls_per_worker = 128;
+    std::atomic<bool> concurrent_failed{false};
+    std::vector<std::thread> workers;
+    workers.reserve(worker_count);
+    for (std::uint32_t worker = 0; worker < worker_count; ++worker) {
+      workers.emplace_back([&] {
+        try {
+          ntl::rpc::client worker_client(L"crtsys_rpc_cross_bitness");
+          if (!worker_client) {
+            concurrent_failed.store(true);
+            return;
+          }
+          for (std::uint32_t call = 0; call < calls_per_worker; ++call)
+            (void)worker_client.invoke(
+                crtsys_rpc_cross_bitness::concurrent_increment,
+                std::uint32_t{1});
+        } catch (...) {
+          concurrent_failed.store(true);
+        }
+      });
+    }
+    for (auto &worker : workers)
+      worker.join();
+    const auto concurrent_total =
+        client.invoke(crtsys_rpc_cross_bitness::concurrent_count);
+    if (concurrent_failed.load() ||
+        concurrent_total != worker_count * calls_per_worker) {
+      std::fwprintf(stderr, L"concurrent RPC dispatch failed: %u\n",
+                    concurrent_total);
+      return 1;
+    }
+
+    std::atomic<std::uint32_t> slow_result{0};
+    std::atomic<bool> slow_failed{false};
+    std::thread slow_worker([&] {
+      try {
+        ntl::rpc::client slow_client(L"crtsys_rpc_cross_bitness");
+        slow_result.store(slow_client.invoke(
+            crtsys_rpc_cross_bitness::slow_call, std::uint32_t{300}));
+      } catch (...) {
+        slow_failed.store(true);
+      }
+    });
+
+    bool slow_started = false;
+    for (int attempt = 0; attempt < 100 && !slow_started; ++attempt) {
+      slow_started =
+          client.invoke(crtsys_rpc_cross_bitness::slow_active) != 0;
+      if (!slow_started)
+        Sleep(5);
+    }
+    if (!slow_started ||
+        client.invoke(crtsys_rpc_cross_bitness::request_stop) != 1) {
+      slow_worker.join();
+      std::fwprintf(stderr, L"RPC rundown test could not start\n");
+      return 1;
+    }
+    slow_worker.join();
+    if (slow_failed.load() || slow_result.load() != 300) {
+      std::fwprintf(stderr, L"active RPC was not drained successfully\n");
+      return 1;
+    }
+
+    bool stopped = false;
+    for (int attempt = 0; attempt < 100 && !stopped; ++attempt) {
+      try {
+        (void)client.invoke(crtsys_rpc_cross_bitness::architecture);
+        Sleep(5);
+      } catch (...) {
+        stopped = true;
+      }
+    }
+    if (!stopped) {
+      std::fwprintf(stderr, L"RPC server accepted calls after stop\n");
+      return 1;
+    }
+
     const wchar_t *const client_arch = sizeof(void *) == 4 ? L"x86" : L"x64";
     std::wprintf(L"RPC cross-bitness PASS: client=%ls server=x64 "
                  L"boundary=1 empty=1 large_bytes=%zu large_numbers=%zu "
-                 L"bounded_response=1 malformed=3\n",
-                 client_arch, large.bytes.size(), large.numbers.size());
+                 L"bounded_response=1 malformed=5 security=1 contract=4 "
+                 L"concurrent=%u "
+                 L"rundown=1\n",
+                 client_arch, large.bytes.size(), large.numbers.size(),
+                 concurrent_total);
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "RPC cross-bitness failure: %s\n", error.what());

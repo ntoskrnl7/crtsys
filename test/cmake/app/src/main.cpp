@@ -9,6 +9,16 @@ TEST(ntl_rpc_client, invoke_callback_by_invoke_method) {
   ntl::rpc::client cli(L"test_rpc");
 
   using namespace test_rpc;
+  ntl::rpc::contract_requirements requirements;
+  requirements.contract_version(rpc_contract_version)
+      .capabilities(rpc_capabilities)
+      .method(test_inc_1_method)
+      .method(test_stable_sum_2_method)
+      .method(test_list_1_method);
+  const auto contract = cli.require_contract(requirements);
+  EXPECT_EQ(contract.contract_version(), rpc_contract_version);
+  EXPECT_TRUE(contract.supports(test_stable_sum_2_method));
+
   EXPECT_EQ(cli.invoke(test_inc_1_method, 1), 2);
   EXPECT_EQ(cli.invoke(test_dec_1_method, 1), 0);
 

@@ -22,6 +22,82 @@
 namespace ntl {
 namespace rpc {
 
+/** @brief Identifies why an RPC server contract was rejected. */
+enum class contract_mismatch_reason {
+  query_unavailable,
+  protocol_version,
+  contract_version,
+  transport_features,
+  capabilities,
+  method,
+};
+
+/** @brief Reports an application or transport contract incompatibility. */
+class contract_mismatch : public std::runtime_error {
+public:
+  /** @brief Creates an incompatibility error with diagnostic values. */
+  contract_mismatch(contract_mismatch_reason reason, const char *message,
+                    std::uint64_t expected = 0,
+                    std::uint64_t actual = 0)
+      : std::runtime_error(message), reason_(reason), expected_(expected),
+        actual_(actual) {}
+
+  /** @brief Returns the failed compatibility rule. */
+  contract_mismatch_reason reason() const noexcept { return reason_; }
+
+  /** @brief Returns the required version, feature mask, or method ID. */
+  std::uint64_t expected() const noexcept { return expected_; }
+
+  /** @brief Returns the server value, or zero for a missing method. */
+  std::uint64_t actual() const noexcept { return actual_; }
+
+private:
+  contract_mismatch_reason reason_;
+  std::uint64_t expected_;
+  std::uint64_t actual_;
+};
+
+/** @brief Declares the server contract required by one client. */
+class contract_requirements {
+public:
+  /** @brief Requires an exact application contract version. */
+  contract_requirements &contract_version(std::uint32_t version) noexcept {
+    has_contract_version_ = true;
+    contract_version_ = version;
+    return *this;
+  }
+
+  /** @brief Requires all selected NTL transport features. */
+  contract_requirements &transport_features(std::uint64_t features) noexcept {
+    transport_features_ = features;
+    return *this;
+  }
+
+  /** @brief Requires all selected application-defined capability bits. */
+  contract_requirements &capabilities(std::uint64_t capabilities) noexcept {
+    capabilities_ = capabilities;
+    return *this;
+  }
+
+  /** @brief Requires one typed method to be present on the server. */
+  template <typename Method>
+  contract_requirements &method(const Method &) {
+    static_assert(is_method<Method>::value,
+                  "contract_requirements::method requires an RPC method");
+    method_ids_.push_back(static_cast<std::uint32_t>(Method::id()));
+    return *this;
+  }
+
+private:
+  bool has_contract_version_ = false;
+  std::uint32_t contract_version_ = 0;
+  std::uint64_t transport_features_ = 0;
+  std::uint64_t capabilities_ = 0;
+  std::vector<std::uint32_t> method_ids_;
+
+  friend class client;
+};
+
 /** @brief Owns a user-mode handle to an NTL RPC device. */
 class client {
 public:
@@ -36,6 +112,95 @@ public:
 
   /** @brief Returns true when the RPC device was opened successfully. */
   explicit operator bool() const noexcept { return static_cast<bool>(handle_); }
+
+  /**
+   * @brief Queries wire, capability, and method metadata from the server.
+   * @return Immutable metadata published when the server started.
+   */
+  contract_info query_contract() const {
+    std::vector<unsigned char> output(contract_response_size);
+    const std::vector<unsigned char> input;
+    DWORD returned = 0;
+    try {
+      call(control_code(contract_query_id), input, output.data(),
+           static_cast<DWORD>(output.size()), returned);
+    } catch (const std::system_error &error) {
+      const auto code = static_cast<DWORD>(error.code().value());
+      if (code == ERROR_INVALID_FUNCTION || code == ERROR_NOT_SUPPORTED) {
+        throw contract_mismatch(
+            contract_mismatch_reason::query_unavailable,
+            "NTL RPC server does not support contract discovery");
+      }
+      throw;
+    }
+
+    if (returned > output.size())
+      throw std::runtime_error(
+          "NTL RPC contract query returned an invalid output size");
+
+    output.resize(returned);
+    try {
+      zpp::serializer::memory_view_input_archive archive(
+          output.data(), output.size(), contract_response_size);
+      contract_info info;
+      archive(info);
+      if (archive.offset() != output.size())
+        throw std::runtime_error(
+            "NTL RPC contract response contains trailing bytes");
+      const auto &methods = info.method_ids();
+      if (!std::is_sorted(methods.begin(), methods.end()) ||
+          std::adjacent_find(methods.begin(), methods.end()) != methods.end())
+        throw std::runtime_error(
+            "NTL RPC contract response has an invalid method table");
+      return info;
+    } catch (const zpp::serializer::out_of_range &) {
+      throw std::runtime_error("NTL RPC contract response is malformed");
+    }
+  }
+
+  /**
+   * @brief Queries and validates the server before application RPC calls.
+   * @param requirements Application and transport requirements.
+   * @return The validated server metadata for optional inspection.
+   */
+  contract_info
+  require_contract(const contract_requirements &requirements) const {
+    auto info = query_contract();
+    if (info.protocol_version() != current_protocol_version) {
+      throw contract_mismatch(contract_mismatch_reason::protocol_version,
+                              "NTL RPC protocol version mismatch",
+                              current_protocol_version,
+                              info.protocol_version());
+    }
+    if (requirements.has_contract_version_ &&
+        info.contract_version() != requirements.contract_version_) {
+      throw contract_mismatch(contract_mismatch_reason::contract_version,
+                              "NTL RPC application contract version mismatch",
+                              requirements.contract_version_,
+                              info.contract_version());
+    }
+    if ((info.transport_feature_mask() & requirements.transport_features_) !=
+        requirements.transport_features_) {
+      throw contract_mismatch(contract_mismatch_reason::transport_features,
+                              "NTL RPC transport feature is unavailable",
+                              requirements.transport_features_,
+                              info.transport_feature_mask());
+    }
+    if ((info.capability_mask() & requirements.capabilities_) !=
+        requirements.capabilities_) {
+      throw contract_mismatch(contract_mismatch_reason::capabilities,
+                              "NTL RPC application capability is unavailable",
+                              requirements.capabilities_,
+                              info.capability_mask());
+    }
+    for (const auto id : requirements.method_ids_) {
+      if (!info.supports_method(id)) {
+        throw contract_mismatch(contract_mismatch_reason::method,
+                                "NTL RPC method is unavailable", id, 0);
+      }
+    }
+    return info;
+  }
 
   /**
    * @brief Invokes a typed RPC method.
@@ -109,6 +274,8 @@ private:
   void invoke_impl(const Method &, std::true_type, Arguments &&...args) {
     const auto input =
         serialize_method_arguments<Method>(std::forward<Arguments>(args)...);
+    if (input.size() > Method::request_size())
+      throw std::length_error("NTL RPC request exceeded its method limit");
     DWORD returned = 0;
     call(Method::code(), input, nullptr, 0, returned);
     if (returned != 0)
@@ -128,6 +295,8 @@ private:
 
     const auto input =
         serialize_method_arguments<Method>(std::forward<Arguments>(args)...);
+    if (input.size() > Method::request_size())
+      throw std::length_error("NTL RPC request exceeded its method limit");
     std::vector<unsigned char> output(Method::response_size());
     DWORD returned = 0;
     call(Method::code(), input, output.data(),
@@ -137,7 +306,8 @@ private:
       throw std::runtime_error("NTL RPC returned an invalid output size");
 
     output.resize(returned);
-    zpp::serializer::memory_input_archive archive(output);
+    zpp::serializer::memory_view_input_archive archive(
+        output.data(), output.size(), Method::decode_allocation());
     return_type value{};
     archive(value);
     if (archive.offset() != output.size())
@@ -152,7 +322,13 @@ private:
 } // namespace rpc
 } // namespace ntl
 
-#define NTL_RPC_BEGIN(_rpc_name_) namespace _rpc_name_ {
+#define NTL_RPC_BEGIN_CONTRACT(_rpc_name_, _version_, _capabilities_)         \
+  namespace _rpc_name_ {                                                       \
+  constexpr std::uint32_t rpc_contract_version = (_version_);                 \
+  constexpr std::uint64_t rpc_capabilities = (_capabilities_);
+
+#define NTL_RPC_BEGIN(_rpc_name_)                                              \
+  NTL_RPC_BEGIN_CONTRACT(_rpc_name_, 1, 0)
 #define NTL_RPC_END(_rpc_name_) }
 
 #define NTL_ADD_CALLBACK_ID_0(_rpc_name_, _id_, _ret_, _name_, ...)            \

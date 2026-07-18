@@ -22,7 +22,94 @@
 #if !defined(NTL_USER_MODE)
 namespace ntl {
 namespace rpc {
+
+/** @brief Setup class used by secure NTL RPC control devices. */
+constexpr GUID device_class_guid = {
+    0xdcf4f515, 0xb540, 0x40cb,
+    {0x82, 0x47, 0x88, 0x10, 0xaa, 0x38, 0x9b, 0xda}};
+
+/** @brief Configures one secure kernel RPC endpoint. */
+class server_options {
+public:
+  /** @brief Creates SYSTEM/Administrators-only defaults for a device name. */
+  explicit server_options(std::wstring name) : name_(std::move(name)) {}
+
+  /**
+   * @brief Replaces the endpoint ACL and setup class GUID.
+   * @note Use a project-owned GUID and an SDDL policy appropriate for the
+   * callers that are allowed to issue kernel RPC requests.
+   */
+  server_options &security_descriptor(std::wstring sddl,
+                                      const GUID &class_guid) {
+    security_descriptor_ = std::move(sddl);
+    class_guid_ = class_guid;
+    return *this;
+  }
+
+  /** @brief Sets the application contract version published to clients. */
+  server_options &contract_version(std::uint32_t version) noexcept {
+    contract_version_ = version;
+    return *this;
+  }
+
+  /** @brief Sets application-defined capability bits published to clients. */
+  server_options &capabilities(std::uint64_t capability_mask) noexcept {
+    capabilities_ = capability_mask;
+    return *this;
+  }
+
+  /** @brief Returns the device name without the `\\Device\\` prefix. */
+  const std::wstring &name() const noexcept { return name_; }
+
+  /** @brief Returns the SDDL applied during secure device creation. */
+  const std::wstring &security_descriptor() const noexcept {
+    return security_descriptor_;
+  }
+
+  /** @brief Returns the setup class GUID used for secure device creation. */
+  const GUID &class_guid() const noexcept { return class_guid_; }
+
+  /** @brief Returns the application contract version. */
+  std::uint32_t contract_version() const noexcept { return contract_version_; }
+
+  /** @brief Returns application-defined capability bits. */
+  std::uint64_t capabilities() const noexcept { return capabilities_; }
+
+private:
+  std::wstring name_;
+  std::wstring security_descriptor_ =
+      L"D:P(A;;GA;;;SY)(A;;GA;;;BA)";
+  GUID class_guid_ = device_class_guid;
+  std::uint32_t contract_version_ = 1;
+  std::uint64_t capabilities_ = 0;
+};
+
 namespace detail {
+
+class rundown_guard {
+public:
+  explicit rundown_guard(EX_RUNDOWN_REF &rundown) noexcept
+      : rundown_(&rundown) {}
+  rundown_guard(const rundown_guard &) = delete;
+  rundown_guard &operator=(const rundown_guard &) = delete;
+  ~rundown_guard() { ExReleaseRundownProtection(rundown_); }
+
+private:
+  EX_RUNDOWN_REF *rundown_;
+};
+
+class fast_mutex_guard {
+public:
+  explicit fast_mutex_guard(FAST_MUTEX &mutex) noexcept : mutex_(&mutex) {
+    ExAcquireFastMutex(mutex_);
+  }
+  fast_mutex_guard(const fast_mutex_guard &) = delete;
+  fast_mutex_guard &operator=(const fast_mutex_guard &) = delete;
+  ~fast_mutex_guard() { ExReleaseFastMutex(mutex_); }
+
+private:
+  FAST_MUTEX *mutex_;
+};
 
 template <typename Archive, typename Tuple, std::size_t... Index>
 void deserialize_arguments(Archive &archive, Tuple &arguments,
@@ -41,9 +128,14 @@ template <typename Method, typename Callback>
 void invoke_method(Callback &callback,
                    const ntl::device_control::in_buffer &input,
                    ntl::device_control::out_buffer &output, std::true_type) {
+  if (input.size > Method::request_size())
+    throw ntl::exception(STATUS_INVALID_BUFFER_SIZE,
+                         "NTL RPC request exceeded its method limit");
+
   typename Method::argument_storage arguments{};
   zpp::serializer::memory_view_input_archive archive(
-      reinterpret_cast<const unsigned char *>(input.ptr), input.size);
+      reinterpret_cast<const unsigned char *>(input.ptr), input.size,
+      Method::decode_allocation());
   try {
     deserialize_arguments(
         archive, arguments,
@@ -69,13 +161,18 @@ template <typename Method, typename Callback>
 void invoke_method(Callback &callback,
                    const ntl::device_control::in_buffer &input,
                    ntl::device_control::out_buffer &output, std::false_type) {
+  if (input.size > Method::request_size())
+    throw ntl::exception(STATUS_INVALID_BUFFER_SIZE,
+                         "NTL RPC request exceeded its method limit");
+
   if (!output.can_write(Method::response_size()))
     throw ntl::exception(STATUS_BUFFER_TOO_SMALL,
                          "NTL RPC response buffer is below the method limit");
 
   typename Method::argument_storage arguments{};
   zpp::serializer::memory_view_input_archive input_archive(
-      reinterpret_cast<const unsigned char *>(input.ptr), input.size);
+      reinterpret_cast<const unsigned char *>(input.ptr), input.size,
+      Method::decode_allocation());
   try {
     deserialize_arguments(
         input_archive, arguments,
@@ -116,45 +213,28 @@ void invoke_method(Callback &callback,
   invoke_method<Method>(callback, input, output, is_void{});
 }
 
-} // namespace detail
-
-/** @brief Owns a WDM device and typed RPC method dispatch table. */
-class server {
+class dispatch_table {
 public:
-  /**
-   * @brief Creates a named RPC device.
-   * @param driver NTL driver that owns the native device.
-   * @param rpc_name Device name without the `\\Device\\` prefix.
-   */
-  server(ntl::driver &driver, const std::wstring &rpc_name) {
-    ntl::device_options options;
-    options.name(rpc_name).type(
-        static_cast<ntl::device_type>(ntl::rpc::device_type));
-    device_ = driver.create_device<void>(options);
-    device_->on_device_control(
-        [this](const ntl::device_control::code &code,
-               const ntl::device_control::in_buffer &input,
-               ntl::device_control::out_buffer &output) {
-          dispatch(code, input, output);
-        });
+  using dispatch_handler =
+      std::function<void(const ntl::device_control::in_buffer &,
+                         ntl::device_control::out_buffer &)>;
+
+  dispatch_table(std::uint32_t contract_version,
+                 std::uint64_t capabilities)
+      : contract_version_(contract_version), capabilities_(capabilities) {
+    ExInitializeRundownProtection(&rundown_);
+    ExInitializeFastMutex(&registration_lock_);
   }
+  dispatch_table(const dispatch_table &) = delete;
+  dispatch_table &operator=(const dispatch_table &) = delete;
 
-  server(const server &) = delete;
-  server &operator=(const server &) = delete;
-  server(server &&) = delete;
-  server &operator=(server &&) = delete;
-
-  /** @brief Deletes the RPC device before destroying registered callbacks. */
-  ~server() { device_.reset(); }
-
-  /**
-   * @brief Registers a callback for a shared typed method descriptor.
-   * @return This server for fluent registration.
-   */
   template <typename Method, typename Callback>
-  server &on(const Method &, Callback &&callback) {
-    static_assert(is_method<Method>::value,
-                  "ntl::rpc::server::on requires an ntl::rpc::method");
+  void add(Callback &&callback) {
+    fast_mutex_guard guard(registration_lock_);
+    if (InterlockedCompareExchange(&started_, 0, 0) != 0 ||
+        InterlockedCompareExchange(&stopping_, 0, 0) != 0)
+      throw ntl::exception(STATUS_INVALID_DEVICE_STATE,
+                           "NTL RPC methods are immutable after start");
 
     const auto code = Method::code();
     if (handlers_.find(code) != handlers_.end())
@@ -169,17 +249,42 @@ public:
             ntl::device_control::out_buffer &output) mutable {
           detail::invoke_method<Method>(fn, input, output);
         });
-    return *this;
+    method_ids_.push_back(static_cast<std::uint32_t>(Method::id()));
   }
 
-private:
-  using dispatch_handler =
-      std::function<void(const ntl::device_control::in_buffer &,
-                         ntl::device_control::out_buffer &)>;
+  void start() {
+    fast_mutex_guard guard(registration_lock_);
+    if (InterlockedCompareExchange(&stopping_, 0, 0) != 0)
+      throw ntl::exception(STATUS_DELETE_PENDING,
+                           "Cannot start a stopped NTL RPC server");
+    std::sort(method_ids_.begin(), method_ids_.end());
+    contract_ = contract_info(current_protocol_version, contract_version_,
+                              transport_features::current, capabilities_,
+                              method_ids_);
+    InterlockedExchange(&started_, 1);
+  }
+
+  void stop() noexcept {
+    if (InterlockedCompareExchange(&stopping_, 1, 0) == 0)
+      ExWaitForRundownProtectionRelease(&rundown_);
+  }
 
   void dispatch(const ntl::device_control::code &code,
                 const ntl::device_control::in_buffer &input,
                 ntl::device_control::out_buffer &output) {
+    if (InterlockedCompareExchange(&started_, 0, 0) == 0)
+      throw ntl::exception(STATUS_DEVICE_NOT_READY,
+                           "NTL RPC server has not started");
+    if (!ExAcquireRundownProtection(&rundown_))
+      throw ntl::exception(STATUS_DELETE_PENDING,
+                           "NTL RPC server is stopping");
+    rundown_guard guard(rundown_);
+
+    if (code.value == control_code(contract_query_id)) {
+      write_contract(input, output);
+      return;
+    }
+
     const auto found = handlers_.find(code.value);
     if (found == handlers_.end())
       throw ntl::exception(STATUS_INVALID_DEVICE_REQUEST,
@@ -188,7 +293,106 @@ private:
   }
 
 private:
+  void write_contract(const ntl::device_control::in_buffer &input,
+                      ntl::device_control::out_buffer &output) const {
+    if (input.size != 0)
+      throw ntl::exception(STATUS_INVALID_PARAMETER,
+                           "NTL RPC contract query does not accept input");
+    if (!output.can_write(contract_response_size))
+      throw ntl::exception(STATUS_BUFFER_TOO_SMALL,
+                           "NTL RPC contract response buffer is too small");
+
+    try {
+      zpp::serializer::memory_view_output_archive archive(
+          reinterpret_cast<unsigned char *>(output.ptr), output.size);
+      archive(contract_);
+      output.size = archive.offset();
+    } catch (const zpp::serializer::out_of_range &) {
+      output.clear();
+      throw ntl::exception(STATUS_BUFFER_TOO_SMALL,
+                           "NTL RPC contract response exceeded its limit");
+    }
+  }
+
   std::unordered_map<unsigned long, dispatch_handler> handlers_;
+  std::vector<std::uint32_t> method_ids_;
+  contract_info contract_;
+  EX_RUNDOWN_REF rundown_{};
+  FAST_MUTEX registration_lock_{};
+  std::uint32_t contract_version_;
+  std::uint64_t capabilities_;
+  volatile LONG started_ = 0;
+  volatile LONG stopping_ = 0;
+};
+
+} // namespace detail
+
+/** @brief Owns a WDM device and typed RPC method dispatch table. */
+class server {
+public:
+  /**
+   * @brief Creates a named RPC device.
+   * @param driver NTL driver that owns the native device.
+   * @param rpc_name Device name without the `\\Device\\` prefix.
+   */
+  server(ntl::driver &driver, const std::wstring &rpc_name)
+      : server(driver, server_options(rpc_name)) {}
+
+  /** @brief Creates a named RPC device with explicit endpoint options. */
+  server(ntl::driver &driver, const server_options &server_opts)
+      : dispatch_(std::make_shared<detail::dispatch_table>(
+            server_opts.contract_version(), server_opts.capabilities())) {
+    ntl::device_options options;
+    options
+        .name(server_opts.name())
+        .type(static_cast<ntl::device_type>(ntl::rpc::device_type))
+        .security_descriptor(server_opts.security_descriptor(),
+                             server_opts.class_guid());
+    device_ = driver.create_device<void>(options);
+    const auto dispatch = dispatch_;
+    device_->on_device_control(
+        [dispatch](const ntl::device_control::code &code,
+                   const ntl::device_control::in_buffer &input,
+                   ntl::device_control::out_buffer &output) {
+          dispatch->dispatch(code, input, output);
+        });
+  }
+
+  server(const server &) = delete;
+  server &operator=(const server &) = delete;
+  server(server &&) = delete;
+  server &operator=(server &&) = delete;
+
+  /** @brief Stops new calls and drains active callbacks before member teardown. */
+  ~server() { stop(); }
+
+  /**
+   * @brief Registers a callback for a shared typed method descriptor.
+   * @return This server for fluent registration.
+   */
+  template <typename Method, typename Callback>
+  server &on(const Method &, Callback &&callback) {
+    static_assert(is_method<Method>::value,
+                  "ntl::rpc::server::on requires an ntl::rpc::method");
+
+    dispatch_->template add<Method>(std::forward<Callback>(callback));
+    return *this;
+  }
+
+  /** @brief Publishes the immutable method table for request dispatch. */
+  server &start() {
+    dispatch_->start();
+    return *this;
+  }
+
+  /** @brief Rejects new calls and waits for active callbacks to finish. */
+  void stop() noexcept {
+    if (dispatch_)
+      dispatch_->stop();
+  }
+
+private:
+  std::shared_ptr<detail::dispatch_table> dispatch_;
   std::shared_ptr<ntl::device<void>> device_;
 };
 
@@ -198,15 +402,30 @@ inline std::shared_ptr<server> make_server(ntl::driver &driver,
   return std::make_shared<server>(driver, rpc_name);
 }
 
+/** @brief Creates a shared owner for a configured secure RPC server. */
+inline std::shared_ptr<server> make_server(ntl::driver &driver,
+                                           const server_options &options) {
+  return std::make_shared<server>(driver, options);
+}
+
 } // namespace rpc
 } // namespace ntl
 
-#define NTL_RPC_BEGIN(_rpc_name_)                                              \
+#define NTL_RPC_BEGIN_CONTRACT(_rpc_name_, _version_, _capabilities_)         \
   namespace _rpc_name_ {                                                       \
+  constexpr std::uint32_t rpc_contract_version = (_version_);                 \
+  constexpr std::uint64_t rpc_capabilities = (_capabilities_);                \
   inline std::shared_ptr<ntl::rpc::server> init(ntl::driver &driver) {         \
-    auto rpc_server = ntl::rpc::make_server(driver, L#_rpc_name_);
+    ntl::rpc::server_options rpc_options(L#_rpc_name_);                         \
+    rpc_options.contract_version(rpc_contract_version)                         \
+        .capabilities(rpc_capabilities);                                       \
+    auto rpc_server = ntl::rpc::make_server(driver, rpc_options);
+
+#define NTL_RPC_BEGIN(_rpc_name_)                                              \
+  NTL_RPC_BEGIN_CONTRACT(_rpc_name_, 1, 0)
 
 #define NTL_RPC_END(_rpc_name_)                                                \
+  rpc_server->start();                                                         \
   return rpc_server;                                                           \
   }                                                                            \
   }

@@ -147,6 +147,15 @@ struct rpc_cross_bitness_payload {
 
 namespace crtsys_rpc_cross_bitness {
 
+constexpr std::uint32_t contract_version = 3;
+namespace capabilities {
+constexpr std::uint64_t guarded_requests = 1ull << 0;
+constexpr std::uint64_t concurrent_dispatch = 1ull << 1;
+constexpr std::uint64_t rundown_shutdown = 1ull << 2;
+constexpr std::uint64_t current =
+    guarded_requests | concurrent_dispatch | rundown_shutdown;
+} // namespace capabilities
+
 constexpr auto architecture =
     ntl::rpc::method<0xA01, rpc_architecture_info()>{};
 constexpr auto echo =
@@ -160,5 +169,20 @@ constexpr auto vector_size =
     ntl::rpc::method<0xA04,
                      std::uint32_t(const std::vector<std::uint8_t> &)>{};
 constexpr auto echo_count = ntl::rpc::method<0xA05, std::uint32_t()>{};
+constexpr auto guarded_words =
+    ntl::rpc::method<0xA06,
+                     std::uint32_t(const std::vector<std::string> &)>{}
+        .max_request_size<128>()
+        .max_decode_allocation<512>();
+constexpr auto guarded_count = ntl::rpc::method<0xA07, std::uint32_t()>{};
+constexpr auto concurrent_increment =
+    ntl::rpc::method<0xA08, std::uint32_t(std::uint32_t)>{};
+constexpr auto concurrent_count =
+    ntl::rpc::method<0xA09, std::uint32_t()>{};
+constexpr auto slow_call =
+    ntl::rpc::method<0xA0A, std::uint32_t(std::uint32_t)>{};
+constexpr auto request_stop = ntl::rpc::method<0xA0B, std::uint32_t()>{};
+constexpr auto slow_active = ntl::rpc::method<0xA0C, std::uint32_t()>{};
+constexpr auto unavailable_method = ntl::rpc::method<0xAFD, void()>{};
 
 } // namespace crtsys_rpc_cross_bitness

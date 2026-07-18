@@ -1479,10 +1479,13 @@ public:
      * Construct a memory view input archive, that loads data from an array
      * of given pointer and size.
      */
-    memory_view_input_archive(const unsigned char * input,
-                              std::size_t size) noexcept :
+    memory_view_input_archive(
+        const unsigned char * input,
+        std::size_t size,
+        std::size_t allocation_budget = static_cast<std::size_t>(-1)) noexcept :
         m_input(input),
-        m_size(size)
+        m_size(size),
+        m_allocation_budget(allocation_budget)
     {
     }
 
@@ -1526,6 +1529,22 @@ public:
     std::size_t remaining() const noexcept
     {
         return m_offset <= m_size ? m_size - m_offset : 0;
+    }
+
+    /**
+     * Charges dynamic storage that a loading serializer is about to create.
+     * This lets an RPC boundary reject small payloads that claim enormous
+     * container counts before resize() or node allocation occurs.
+     */
+    bool consume_allocation(std::size_t count,
+                            std::size_t item_size) noexcept
+    {
+        if (item_size != 0 && count > m_allocation_budget / item_size) {
+            return false;
+        }
+
+        m_allocation_budget -= count * item_size;
+        return true;
     }
 
     /**
@@ -1617,6 +1636,11 @@ private:
      * The next input.
      */
     std::size_t m_offset{};
+
+    /**
+     * Remaining dynamic allocation charged by container deserialization.
+     */
+    std::size_t m_allocation_budget{};
 }; // memory_view_input_archive
 
 /**
@@ -1901,6 +1925,25 @@ bool serialized_bytes_fit(const Archive &,
 {
     return true;
 }
+
+template <typename Archive>
+auto allocation_fits(Archive & archive,
+                     std::size_t count,
+                     std::size_t item_size,
+                     int) noexcept ->
+    decltype(archive.consume_allocation(count, item_size), bool())
+{
+    return archive.consume_allocation(count, item_size);
+}
+
+template <typename Archive>
+bool allocation_fits(Archive &,
+                     std::size_t,
+                     std::size_t,
+                     long) noexcept
+{
+    return true;
+}
 } // namespace detail
 
 /**
@@ -1938,6 +1981,18 @@ auto serialize(Archive & archive, Container & container)
         return result;
     }
 #endif
+
+    if (!detail::allocation_fits(
+            archive,
+            static_cast<std::size_t>(size),
+            sizeof(typename Container::value_type),
+            0)) {
+#ifndef ZPP_SERIALIZER_FREESTANDING
+        throw out_of_range("Container allocation exceeds the decode budget.");
+#else
+        return freestanding::error{error::out_of_range};
+#endif
+    }
 
     // Resize the container to match the size.
     container.resize(size);
@@ -2127,6 +2182,18 @@ auto serialize(Archive & archive, Container & container)
 #endif
     }
 
+    if (!detail::allocation_fits(
+            archive,
+            static_cast<std::size_t>(size),
+            sizeof(typename Container::value_type),
+            0)) {
+#ifndef ZPP_SERIALIZER_FREESTANDING
+        throw out_of_range("Container allocation exceeds the decode budget.");
+#else
+        return freestanding::error{error::out_of_range};
+#endif
+    }
+
     // Resize the container to match the size.
     container.resize(size);
 
@@ -2289,6 +2356,18 @@ auto serialize(Archive & archive, Container & container)
         return result;
     }
 #endif
+
+    if (!detail::allocation_fits(
+            archive,
+            static_cast<std::size_t>(size),
+            sizeof(typename detail::container_nonconst_value_type_t<Container>),
+            0)) {
+#ifndef ZPP_SERIALIZER_FREESTANDING
+        throw out_of_range("Container allocation exceeds the decode budget.");
+#else
+        return freestanding::error{error::out_of_range};
+#endif
+    }
 
     // Serialize all the items.
     for (SizeType i{}; i < size; ++i) {

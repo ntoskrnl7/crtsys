@@ -11,6 +11,7 @@
 #ifndef _NTDDK_
 #include <wdm.h>
 #endif
+#include <wdmsec.h>
 #ifndef ClearFlag
 #define ClearFlag(_F, _SF) ((_F) &= ~(_SF))
 #endif
@@ -94,10 +95,18 @@ public:
       ULONG extension_size =
           (ULONG)sizeof(detail::device::extension_data_t<Extension>);
       if (opts.name_.empty()) {
+        if (opts.secure_)
+          return STATUS_INVALID_PARAMETER;
         return IoCreateDevice(object_, extension_size, NULL, opts.type_, 0,
                               opts.exclusive_, &dev);
       } else {
         unicode_string dev_name(L"\\Device\\" + opts.name_);
+        if (opts.secure_) {
+          unicode_string sddl(opts.security_descriptor_);
+          return IoCreateDeviceSecure(
+              object_, extension_size, &*dev_name, opts.type_, 0,
+              opts.exclusive_, &*sddl, &opts.class_guid_, &dev);
+        }
         return IoCreateDevice(object_, extension_size, &*dev_name, opts.type_,
                               0, opts.exclusive_, &dev);
       }

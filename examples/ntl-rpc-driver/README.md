@@ -13,6 +13,11 @@ The sample demonstrates:
 - shared-schema RPC callback IDs and deduced return types
 - direct generated wrappers plus a reusable typed client
 - bounded variable-size responses checked before server callback execution
+- a secure control device restricted to Local System and Administrators by
+  default
+- per-method request and decode-allocation limits
+- an immutable dispatch table with rundown-protected shutdown
+- startup contract discovery for version, capability, and method compatibility
 - serialization of simple scalar values, a custom request/reply pair, and a
   `std::vector`
 
@@ -74,6 +79,12 @@ The schema exposes:
 - `crtsys_ntl_rpc_sample::describe`
 - `crtsys_ntl_rpc_sample::series`
 
+The schema uses `NTL_RPC_BEGIN_CONTRACT` to publish application contract
+version `1`, one sample capability bit, and the registered method IDs. The app
+calls `client.require_contract()` once before its first generated wrapper, so a
+mismatched driver fails with a contract diagnostic instead of an unrelated
+method error.
+
 The driver-side `describe` callback intentionally calls the kernel-only WDK API
 `KeGetCurrentIrql()` and returns that value as `server_irql`. This makes the
 execution boundary visible: the app only receives the serialized reply.
@@ -83,6 +94,14 @@ see that `add`, `describe`, and `series` ran in the driver.
 The `series` callback uses `NTL_RPC_BOUNDED_RESPONSE` to declare a 64 KiB
 maximum serialized response. The client uses that value as its receive
 capacity, and the server verifies the capacity before executing the callback.
+Use `NTL_RPC_METHOD_LIMITS` instead when a method also needs request and
+decode-allocation limits smaller than the secure defaults documented in
+[`docs/ntl/rpc.md`](../../docs/ntl/rpc.md).
+
+The macro-generated server freezes its dispatch table after registering the
+shared schema. Keep the returned server owner alive until driver unload. NTL
+rejects new RPC calls during shutdown and waits for callbacks already in
+progress before the owner releases the device.
 
 ## Loading
 

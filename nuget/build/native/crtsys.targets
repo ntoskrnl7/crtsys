@@ -42,7 +42,7 @@
     <CrtSysDriverPreprocessorDefinitions Condition="'$(CrtSysUseNtlMain)' == 'true'">$(CrtSysDriverPreprocessorDefinitions);CRTSYS_USE_NTL_MAIN</CrtSysDriverPreprocessorDefinitions>
     <CrtSysDriverPreprocessorDefinitions Condition="'$(CrtSysUseNtlKmdfMain)' == 'true'">$(CrtSysDriverPreprocessorDefinitions);CRTSYS_USE_NTL_KMDF_MAIN</CrtSysDriverPreprocessorDefinitions>
     <CrtSysDriverPreprocessorDefinitions Condition="'$(CrtSysIsKmdf)' == 'true'">$(CrtSysDriverPreprocessorDefinitions);CRTSYS_USE_KMDF</CrtSysDriverPreprocessorDefinitions>
-    <CrtSysDriverLibraries>crtsys.lib;Ldk.lib;cng.lib;aux_klib.lib</CrtSysDriverLibraries>
+    <CrtSysDriverLibraries>crtsys.lib;Ldk.lib;cng.lib;aux_klib.lib;wdmsec.lib</CrtSysDriverLibraries>
     <CrtSysDriverLibraries Condition="'$(CrtSysUseLibcntpr)' == 'true'">$(CrtSysDriverLibraries);libcntpr.lib</CrtSysDriverLibraries>
     <DisableKernelFlag Condition="'$(CrtSysUseDriverSupport)' == 'true'">true</DisableKernelFlag>
     <Inf2CatUseLocalTime Condition="'$(CrtSysUseDriverSupport)' == 'true' and '$(Inf2CatUseLocalTime)' == ''">true</Inf2CatUseLocalTime>

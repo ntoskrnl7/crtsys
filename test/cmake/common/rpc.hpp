@@ -27,7 +27,7 @@ private:
   int m_y = 0;
 };
 
-NTL_RPC_BEGIN(test_rpc)
+NTL_RPC_BEGIN_CONTRACT(test_rpc, 7, 0x3ull)
 
 // The line-based forms remain a compact convenience contract. The explicit-ID
 // forms below cover stable externally visible method IDs.
@@ -60,7 +60,9 @@ NTL_ADD_CALLBACK_ID_1(test_rpc, 0x907, bool, test_set,
 
 NTL_ADD_CALLBACK_ID_1(
     test_rpc, 0x908,
-    NTL_RPC_BOUNDED_RESPONSE(1024 * 1024, std::vector<std::string>), test_list,
+    NTL_RPC_METHOD_LIMITS(1024 * 1024, 128 * 1024, 2 * 1024 * 1024,
+                          std::vector<std::string>),
+    test_list,
     const std::list<int> &, values, {
       std::vector<std::string> result;
       for (auto value : values)
