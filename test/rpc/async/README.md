@@ -6,6 +6,7 @@ mode and the user-mode `client::invoke_async()` request owner. It covers:
 - an RPC request outliving the `client` object that started it;
 - bounded waits that report timeout without releasing live I/O buffers;
 - targeted `CancelIoEx` cancellation;
+- early exit from a running callback through `ntl::rpc::call_context`;
 - typed value and void results;
 - safe cancellation and drain when a pending request object leaves scope;
 - multiple concurrent overlapped calls on one device handle; and
@@ -20,6 +21,10 @@ cancel request prevents a queued callback from starting when possible. Once a
 callback is already running, NTL does not terminate kernel execution; it waits
 for the callback to return, discards its output, and completes the IRP with
 `STATUS_CANCELLED`.
+
+A callback that accepts `ntl::rpc::call_context` can poll `cancelled()` or call
+`throw_if_cancelled()` between bounded work units. Existing callbacks without
+that first parameter retain the previous drain-to-completion behavior.
 
 This is a test fixture rather than an onboarding example. Run it only in a
 disposable kernel-debugging VM, and repeat it under Driver Verifier before

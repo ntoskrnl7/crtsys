@@ -53,6 +53,7 @@ ntl::rpc::contract_requirements requirements() {
       .method(crtsys_rpc_async::delayed_value)
       .method(crtsys_rpc_async::delayed_void)
       .method(crtsys_rpc_async::checksum)
+      .method(crtsys_rpc_async::cooperative_value)
       .method(crtsys_rpc_async::query_stats);
   return value;
 }
@@ -63,6 +64,18 @@ ntl::rpc::client open_client() {
     throw std::runtime_error("could not open asynchronous RPC endpoint");
   (void)client.require_contract(requirements());
   return client;
+}
+
+bool wait_for_started(ntl::rpc::client &client, std::uint32_t expected,
+                      DWORD timeout_ms) {
+  const ULONGLONG deadline = ::GetTickCount64() + timeout_ms;
+  while (::GetTickCount64() < deadline) {
+    const auto stats = client.invoke(crtsys_rpc_async::query_stats);
+    if (stats.started >= expected)
+      return true;
+    ::Sleep(10);
+  }
+  return false;
 }
 
 bool wait_for_service_state(SC_HANDLE service, DWORD expected_state,
@@ -136,6 +149,36 @@ void test_cancel() {
     throw;
   }
   throw std::runtime_error("cancelled RPC returned a value");
+}
+
+void test_cooperative_cancel() {
+  auto client = open_client();
+  auto monitor = open_client();
+  const auto before = monitor.invoke(crtsys_rpc_async::query_stats);
+  auto call = client.invoke_async(crtsys_rpc_async::cooperative_value,
+                                  5000u, 31u);
+  if (!wait_for_started(monitor, before.started + 1, 2000))
+    throw std::runtime_error("cooperative callback did not start");
+
+  const auto cancel_started = std::chrono::steady_clock::now();
+  if (!call.cancel())
+    throw std::runtime_error("cooperative CancelIoEx found no pending RPC");
+  bool cancelled = false;
+  try {
+    (void)call.get();
+  } catch (const std::system_error &error) {
+    if (error.code().value() != ERROR_OPERATION_ABORTED)
+      throw;
+    cancelled = true;
+  }
+  if (!cancelled)
+    throw std::runtime_error("cooperative cancellation returned a value");
+  if (std::chrono::steady_clock::now() - cancel_started >= 2s)
+    throw std::runtime_error("cooperative callback ignored cancellation");
+
+  const auto after = monitor.invoke(crtsys_rpc_async::query_stats);
+  if (after.cancellations_observed <= before.cancellations_observed)
+    throw std::runtime_error("call_context did not observe cancellation");
 }
 
 void test_void_and_scope_cleanup() {
@@ -222,8 +265,14 @@ void test_in_flight_stop(const wchar_t *service_name) {
   SERVICE_STATUS status{};
   {
     auto client = open_client();
+    auto monitor = open_client();
+    const auto before = monitor.invoke(crtsys_rpc_async::query_stats);
     auto call =
         client.invoke_async(crtsys_rpc_async::delayed_value, 1000u, 73u);
+    auto cooperative = client.invoke_async(
+        crtsys_rpc_async::cooperative_value, 10000u, 79u);
+    if (!wait_for_started(monitor, before.started + 2, 2000))
+      throw std::runtime_error("service-stop callbacks did not start");
     if (call.wait_for(5ms) != ntl::rpc::async_wait_status::timeout)
       throw std::runtime_error("in-flight stop RPC completed unexpectedly");
 
@@ -232,8 +281,20 @@ void test_in_flight_stop(const wchar_t *service_name) {
                               std::system_category(),
                               "asynchronous RPC service stop failed");
 
-    // The server rundown waits for this pending IRP. Consume the result and
-    // close the device handle before waiting for SERVICE_STOPPED.
+    // An open device handle delays DriverUnload. Cancel the cooperative call,
+    // drain both requests, and close every client before waiting for STOPPED.
+    if (!cooperative.cancel())
+      throw std::runtime_error("service-stop cancellation found no RPC");
+    bool cooperative_cancelled = false;
+    try {
+      (void)cooperative.get();
+    } catch (const std::system_error &error) {
+      if (error.code().value() != ERROR_OPERATION_ABORTED)
+        throw;
+      cooperative_cancelled = true;
+    }
+    if (!cooperative_cancelled)
+      throw std::runtime_error("service-stop cancellation returned a value");
     if (call.get() != 73u)
       throw std::runtime_error("in-flight stop RPC result mismatch");
   }
@@ -264,6 +325,7 @@ int wmain(int argc, wchar_t **argv) {
     test_client_lifetime();
     test_timeout();
     test_cancel();
+    test_cooperative_cancel();
     test_void_and_scope_cleanup();
     test_concurrent_calls();
     test_pending_limit();
@@ -277,7 +339,8 @@ int wmain(int argc, wchar_t **argv) {
       throw std::runtime_error("asynchronous RPC callbacks did not drain");
 
     std::printf("RPC async PASS: callbacks=%lu timeout=1 cancel=1 "
-                "concurrent=32 pending_limit=32 service_restart=%u\n",
+                "cooperative_cancel=1 concurrent=32 pending_limit=32 "
+                "service_restart=%u\n",
                 static_cast<unsigned long>(stats.completed), argc > 1 ? 1u : 0u);
     return 0;
   } catch (const std::exception &error) {

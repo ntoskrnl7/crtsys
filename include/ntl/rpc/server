@@ -138,6 +138,57 @@ private:
 };
 
 namespace detail {
+class call_context_access;
+}
+
+/**
+ * @brief Non-owning cancellation view passed to an RPC callback.
+ * @note The view is valid only for the duration of that callback invocation.
+ * Do not retain it or use it from work that outlives the callback.
+ */
+class call_context {
+public:
+  /**
+   * @brief Returns whether the client cancelled the call or the server is
+   * stopping.
+   * @note Cancellation is cooperative. Kernel execution is never terminated
+   * asynchronously.
+   */
+  bool cancelled() const noexcept {
+    return is_set(request_cancelled_) || is_set(server_stopping_);
+  }
+
+  /** @brief Throws `STATUS_CANCELLED` when cancellation was requested. */
+  void throw_if_cancelled() const {
+    if (cancelled())
+      throw ntl::exception(STATUS_CANCELLED, "NTL RPC call was cancelled");
+  }
+
+private:
+  friend class detail::call_context_access;
+
+  call_context(volatile LONG *request_cancelled,
+               volatile LONG *server_stopping) noexcept
+      : request_cancelled_(request_cancelled),
+        server_stopping_(server_stopping) {}
+
+  static bool is_set(volatile LONG *value) noexcept {
+    return value && InterlockedCompareExchange(value, 0, 0) != 0;
+  }
+
+  volatile LONG *request_cancelled_ = nullptr;
+  volatile LONG *server_stopping_ = nullptr;
+};
+
+namespace detail {
+
+class call_context_access {
+public:
+  static call_context make(volatile LONG *request_cancelled,
+                           volatile LONG *server_stopping) noexcept {
+    return call_context(request_cancelled, server_stopping);
+  }
+};
 
 class rundown_guard {
 public:
@@ -177,16 +228,24 @@ void deserialize_arguments(Archive &archive, Tuple &arguments,
 }
 
 template <typename Callback, typename Tuple, std::size_t... Index>
-auto invoke_callback(Callback &callback, Tuple &arguments,
-                     std::index_sequence<Index...>)
+auto invoke_callback(int, Callback &callback, const call_context &,
+                     Tuple &arguments, std::index_sequence<Index...>)
     -> decltype(callback(std::get<Index>(arguments)...)) {
   return callback(std::get<Index>(arguments)...);
+}
+
+template <typename Callback, typename Tuple, std::size_t... Index>
+auto invoke_callback(long, Callback &callback, const call_context &context,
+                     Tuple &arguments, std::index_sequence<Index...>)
+    -> decltype(callback(context, std::get<Index>(arguments)...)) {
+  return callback(context, std::get<Index>(arguments)...);
 }
 
 template <typename Method, typename Callback>
 void invoke_method(Callback &callback,
                    const ntl::device_control::in_buffer &input,
-                   ntl::device_control::out_buffer &output, std::true_type) {
+                   ntl::device_control::out_buffer &output,
+                   const call_context &context, std::true_type) {
   if (input.size > Method::request_size())
     throw ntl::exception(STATUS_INVALID_BUFFER_SIZE,
                          "NTL RPC request exceeded its method limit");
@@ -210,7 +269,7 @@ void invoke_method(Callback &callback,
                          "Trailing NTL RPC request bytes");
 
   invoke_callback(
-      callback, arguments,
+      0, callback, context, arguments,
       std::make_index_sequence<
           std::tuple_size<typename Method::argument_storage>::value>{});
   output.clear();
@@ -219,7 +278,8 @@ void invoke_method(Callback &callback,
 template <typename Method, typename Callback>
 void invoke_method(Callback &callback,
                    const ntl::device_control::in_buffer &input,
-                   ntl::device_control::out_buffer &output, std::false_type) {
+                   ntl::device_control::out_buffer &output,
+                   const call_context &context, std::false_type) {
   if (input.size > Method::request_size())
     throw ntl::exception(STATUS_INVALID_BUFFER_SIZE,
                          "NTL RPC request exceeded its method limit");
@@ -247,7 +307,7 @@ void invoke_method(Callback &callback,
                          "Trailing NTL RPC request bytes");
 
   typename Method::return_type result = invoke_callback(
-      callback, arguments,
+      0, callback, context, arguments,
       std::make_index_sequence<
           std::tuple_size<typename Method::argument_storage>::value>{});
 
@@ -266,10 +326,11 @@ void invoke_method(Callback &callback,
 template <typename Method, typename Callback>
 void invoke_method(Callback &callback,
                    const ntl::device_control::in_buffer &input,
-                   ntl::device_control::out_buffer &output) {
+                   ntl::device_control::out_buffer &output,
+                   const call_context &context) {
   using is_void =
       typename std::is_void<typename Method::return_type>::type;
-  invoke_method<Method>(callback, input, output, is_void{});
+  invoke_method<Method>(callback, input, output, context, is_void{});
 }
 
 class notification_queue {
@@ -494,7 +555,8 @@ class dispatch_table {
 public:
   using dispatch_handler =
       std::function<void(const ntl::device_control::in_buffer &,
-                         ntl::device_control::out_buffer &)>;
+                         ntl::device_control::out_buffer &,
+                         const call_context &)>;
 
   dispatch_table(std::uint32_t contract_version,
                  std::uint64_t capabilities, bool asynchronous,
@@ -575,7 +637,9 @@ private:
       if (InterlockedCompareExchange(&cancel_requested_, 0, 0) == 0) {
         const auto seh_result = ntl::seh::try_except([&]() {
           try {
-            (*handler_)(input_, output_);
+            const auto context = call_context_access::make(
+                &cancel_requested_, &owner_->stopping_);
+            (*handler_)(input_, output_, context);
           } catch (const ntl::exception &error) {
             status = error.get_status();
             output_.clear();
@@ -644,8 +708,9 @@ public:
         code,
         [fn = callback_type(std::forward<Callback>(callback))](
             const ntl::device_control::in_buffer &input,
-            ntl::device_control::out_buffer &output) mutable {
-          detail::invoke_method<Method>(fn, input, output);
+            ntl::device_control::out_buffer &output,
+            const call_context &context) mutable {
+          detail::invoke_method<Method>(fn, input, output, context);
         });
     method_ids_.push_back(static_cast<std::uint32_t>(Method::id()));
   }
@@ -710,7 +775,9 @@ public:
     if (found == handlers_.end())
       throw ntl::exception(STATUS_INVALID_DEVICE_REQUEST,
                            "Unknown NTL RPC method ID");
-    found->second(input, output);
+    const auto context =
+        call_context_access::make(nullptr, &stopping_);
+    found->second(input, output, context);
   }
 
   ntl::device_control::dispatch_result
@@ -758,7 +825,9 @@ public:
                            "Unknown NTL RPC method ID");
 
     if (!asynchronous_) {
-      found->second(input, output);
+      const auto context =
+          call_context_access::make(nullptr, &stopping_);
+      found->second(input, output, context);
       return ntl::device_control::dispatch_result::complete;
     }
 

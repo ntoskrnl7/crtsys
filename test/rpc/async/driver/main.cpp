@@ -18,12 +18,33 @@ namespace {
 struct async_state {
   std::atomic<std::uint32_t> started{0};
   std::atomic<std::uint32_t> completed{0};
+  std::atomic<std::uint32_t> cancellations_observed{0};
 };
 
 void delay(std::uint32_t milliseconds) noexcept {
   LARGE_INTEGER interval{};
   interval.QuadPart = -static_cast<LONGLONG>(milliseconds) * 10'000;
   (void)KeDelayExecutionThread(KernelMode, FALSE, &interval);
+}
+
+void cooperative_delay(ntl::rpc::call_context context, async_state &state,
+                       std::uint32_t milliseconds) {
+  constexpr std::uint32_t quantum_ms = 10;
+  std::uint32_t elapsed = 0;
+  while (elapsed < milliseconds) {
+    if (context.cancelled()) {
+      state.cancellations_observed.fetch_add(1, std::memory_order_relaxed);
+      context.throw_if_cancelled();
+    }
+    const auto remaining = milliseconds - elapsed;
+    const auto interval = remaining < quantum_ms ? remaining : quantum_ms;
+    delay(interval);
+    elapsed += interval;
+  }
+  if (context.cancelled()) {
+    state.cancellations_observed.fetch_add(1, std::memory_order_relaxed);
+    context.throw_if_cancelled();
+  }
 }
 
 class call_guard {
@@ -70,10 +91,18 @@ ntl::status ntl::main(ntl::driver &driver, const std::wstring &) {
             return std::accumulate(values.begin(), values.end(),
                                    std::uint64_t{0});
           })
+      .on(crtsys_rpc_async::cooperative_value,
+          [state](ntl::rpc::call_context context, std::uint32_t milliseconds,
+                  std::uint32_t value) {
+            call_guard guard(*state);
+            cooperative_delay(context, *state, milliseconds);
+            return value;
+          })
       .on(crtsys_rpc_async::query_stats, [state] {
         return rpc_async_stats{
             state->started.load(std::memory_order_relaxed),
-            state->completed.load(std::memory_order_acquire)};
+            state->completed.load(std::memory_order_acquire),
+            state->cancellations_observed.load(std::memory_order_acquire)};
       });
   server->start();
 
