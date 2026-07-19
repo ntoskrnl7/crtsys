@@ -46,6 +46,8 @@ private:
 
 inline void InitGoogleTest() {}
 
+inline void InitGoogleTest(int*, char**) {}
+
 inline void record_failure(const char* file, int line, const char* expression) {
   ++failure_count();
   std::cerr << file << ':' << line << ": expectation failed: " << expression
@@ -152,6 +154,22 @@ inline int RunAllTests() {
 #define EXPECT_NO_FATAL_FAILURE(statement)                                    \
   do {                                                                        \
     statement;                                                                \
+  } while (false)
+
+#define EXPECT_THROW(statement, exception_type)                               \
+  do {                                                                        \
+    bool caught_expected_exception = false;                                   \
+    try {                                                                     \
+      statement;                                                              \
+    } catch (const exception_type&) {                                          \
+      caught_expected_exception = true;                                       \
+    } catch (...) {                                                           \
+    }                                                                         \
+    if (!caught_expected_exception) {                                         \
+      ::testing::record_failure(                                              \
+          __FILE__, __LINE__,                                                  \
+          "EXPECT_THROW(" #statement ", " #exception_type ")");          \
+    }                                                                         \
   } while (false)
 
 #define RUN_ALL_TESTS() ::testing::RunAllTests()

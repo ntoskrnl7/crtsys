@@ -9,11 +9,11 @@
 #include <cstdlib>
 #include <cwchar>
 #include <exception>
-#include <vector>
 
 #include <ntl/rpc/client>
 
 #include "ntl_rpc_sample.hpp"
+#include "examples.hpp"
 
 namespace {
 
@@ -47,39 +47,16 @@ int wmain(int argc, wchar_t **argv) {
         .capabilities(crtsys_ntl_rpc_sample::rpc_capabilities)
         .method(crtsys_ntl_rpc_sample::add_2_method)
         .method(crtsys_ntl_rpc_sample::describe_1_method)
-        .method(crtsys_ntl_rpc_sample::series_1_method);
+        .method(crtsys_ntl_rpc_sample::series_1_method)
+        .method(crtsys_ntl_rpc_sample::delayed_add_3_method);
     (void)client.require_contract(requirements);
 
-    const int sum = crtsys_ntl_rpc_sample::add(40, 2);
-    if (sum != 42) {
-      std::fwprintf(stderr, L"unexpected add result: %d\n", sum);
-      return 1;
-    }
-
-    ntl_rpc_sample_request request{value, bias};
-    const auto reply = crtsys_ntl_rpc_sample::describe(request);
-    if (reply.value != value || reply.doubled != value * 2 ||
-        reply.biased != value + bias || reply.server_irql != 0) {
-      std::fwprintf(stderr,
-                    L"unexpected describe reply: value=%u doubled=%u "
-                    L"biased=%u server_irql=%u\n",
-                    reply.value, reply.doubled, reply.biased,
-                    reply.server_irql);
-      return 1;
-    }
-
-    const auto values = client.invoke(crtsys_ntl_rpc_sample::series_1_method,
-                                      std::uint32_t{4});
-    const std::vector<std::uint32_t> expected{1, 2, 3, 4};
-    if (values != expected) {
-      std::fwprintf(stderr, L"unexpected series result\n");
-      return 1;
-    }
-
-    std::wprintf(L"rpc ok: add=%d value=%u doubled=%u biased=%u "
-                 L"server_irql=%u series=%zu\n",
-                 sum, reply.value, reply.doubled, reply.biased,
-                 reply.server_irql, values.size());
+    crtsys_ntl_rpc_sample_app::run_synchronous_calls(client, value, bias);
+    crtsys_ntl_rpc_sample_app::run_asynchronous_call();
+    crtsys_ntl_rpc_sample_app::run_cancellation();
+    crtsys_ntl_rpc_sample_app::run_coroutine_call();
+    crtsys_ntl_rpc_sample_app::run_stop_token_cancellation();
+    std::wprintf(L"all RPC examples completed\n");
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "RPC failed: %s\n", error.what());

@@ -1,0 +1,184 @@
+/**
+ * @file coroutine
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief C++20 coroutine adapter for user-mode NTL RPC calls.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "client"
+
+#if !defined(NTL_USER_MODE)
+#error "<ntl/rpc/coroutine> is available only to user-mode RPC clients."
+#endif
+
+#if !((defined(_MSVC_LANG) && _MSVC_LANG >= 202002L) ||                  \
+      (!defined(_MSVC_LANG) && __cplusplus >= 202002L))
+#error "<ntl/rpc/coroutine> requires C++20 or later."
+#endif
+
+#include <atomic>
+#include <condition_variable>
+#include <coroutine>
+#include <cstdint>
+#include <mutex>
+#include <system_error>
+#include <utility>
+
+namespace ntl {
+namespace rpc {
+namespace detail {
+
+/** Coordinates one Windows thread-pool wait with one suspended coroutine. */
+class coroutine_wait_state {
+public:
+  explicit coroutine_wait_state(
+      std::shared_ptr<async_operation> operation) noexcept
+      : operation_(std::move(operation)) {}
+
+  coroutine_wait_state(const coroutine_wait_state &) = delete;
+  coroutine_wait_state &operator=(const coroutine_wait_state &) = delete;
+
+  void add_ref() noexcept { references_.fetch_add(1); }
+
+  void release() noexcept {
+    if (references_.fetch_sub(1) == 1)
+      delete this;
+  }
+
+  void start(std::coroutine_handle<> continuation) {
+    continuation_ = continuation;
+
+    // Keep the state alive if the event is already signaled and the callback
+    // resumes the coroutine before SetThreadpoolWait returns.
+    add_ref();
+    auto *wait = ::CreateThreadpoolWait(&wait_callback, this, nullptr);
+    if (!wait) {
+      const auto error = static_cast<int>(::GetLastError());
+      release();
+      throw std::system_error(error, std::system_category(),
+                              "NTL RPC coroutine wait creation failed");
+    }
+
+    // This reference belongs to the thread-pool callback. Cancelling the RPC
+    // signals its OVERLAPPED event, so the callback also runs for abandonment.
+    add_ref();
+    ::SetThreadpoolWait(wait, operation_->completion_event(), nullptr);
+    release();
+  }
+
+  /** Prevents future resumption and cooperatively cancels a pending request. */
+  void abandon() noexcept {
+    auto expected = phase::waiting;
+    if (phase_.compare_exchange_strong(expected, phase::abandoned)) {
+      (void)operation_->cancel_noexcept();
+      return;
+    }
+
+    // A task owner must not destroy a coroutine frame concurrently with its
+    // resume. Waiting here closes the narrow race for owners that coordinate
+    // destruction through the awaiter's destructor.
+    if (expected == phase::resuming && active_resume_state() != this) {
+      std::unique_lock<std::mutex> guard(completion_lock_);
+      completion_changed_.wait(guard, [this] {
+        return phase_.load() == phase::completed;
+      });
+    }
+  }
+
+private:
+  enum class phase : std::uint8_t {
+    waiting,
+    resuming,
+    abandoned,
+    completed,
+  };
+
+  static coroutine_wait_state *&active_resume_state() noexcept {
+    static thread_local coroutine_wait_state *current = nullptr;
+    return current;
+  }
+
+  static void CALLBACK wait_callback(PTP_CALLBACK_INSTANCE, void *context,
+                                     PTP_WAIT wait,
+                                     TP_WAIT_RESULT) noexcept {
+    auto *state = static_cast<coroutine_wait_state *>(context);
+
+    // The completion event is manual-reset. Disarm and close the one-shot wait
+    // before resuming user code so no second callback can be queued.
+    ::SetThreadpoolWait(wait, nullptr, nullptr);
+    ::CloseThreadpoolWait(wait);
+
+    auto expected = phase::waiting;
+    if (state->phase_.compare_exchange_strong(expected, phase::resuming)) {
+      auto *previous = active_resume_state();
+      active_resume_state() = state;
+      state->continuation_.resume();
+      active_resume_state() = previous;
+    }
+
+    {
+      std::lock_guard<std::mutex> guard(state->completion_lock_);
+      state->phase_.store(phase::completed);
+    }
+    state->completion_changed_.notify_all();
+    state->release();
+  }
+
+  std::atomic<unsigned long> references_{1};
+  std::shared_ptr<async_operation> operation_;
+  std::coroutine_handle<> continuation_{};
+  std::atomic<phase> phase_{phase::waiting};
+  std::mutex completion_lock_;
+  std::condition_variable completion_changed_;
+};
+
+/** Awaiter that transfers one move-only async_call into a coroutine frame. */
+template <typename T> class async_call_awaiter {
+public:
+  explicit async_call_awaiter(async_call<T> call) noexcept
+      : call_(std::move(call)) {}
+
+  async_call_awaiter(const async_call_awaiter &) = delete;
+  async_call_awaiter &operator=(const async_call_awaiter &) = delete;
+
+  async_call_awaiter(async_call_awaiter &&other) noexcept
+      : call_(std::move(other.call_)), wait_(other.wait_) {
+    other.wait_ = nullptr;
+  }
+
+  ~async_call_awaiter() {
+    if (wait_) {
+      wait_->abandon();
+      wait_->release();
+    }
+  }
+
+  bool await_ready() { return call_.ready(); }
+
+  void await_suspend(std::coroutine_handle<> continuation) {
+    wait_ = new coroutine_wait_state(call_.state_);
+    wait_->start(continuation);
+  }
+
+  decltype(auto) await_resume() { return call_.get(); }
+
+private:
+  async_call<T> call_;
+  coroutine_wait_state *wait_ = nullptr;
+};
+
+} // namespace detail
+
+/**
+ * @brief Suspends a C++20 coroutine until one asynchronous RPC call completes.
+ * @note Move the call into co_await because its result can be consumed once.
+ */
+template <typename T>
+detail::async_call_awaiter<T> operator co_await(async_call<T> &&call) noexcept {
+  return detail::async_call_awaiter<T>(std::move(call));
+}
+
+} // namespace rpc
+} // namespace ntl

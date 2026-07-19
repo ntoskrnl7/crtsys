@@ -16,6 +16,7 @@ Headers:
 - [`include/ntl/rpc/common`](../../include/ntl/rpc/common)
 - [`include/ntl/rpc/server`](../../include/ntl/rpc/server)
 - [`include/ntl/rpc/client`](../../include/ntl/rpc/client)
+- [`include/ntl/rpc/coroutine`](../../include/ntl/rpc/coroutine), optional C++20
 
 ## Shared Contract And Implementation
 
@@ -60,6 +61,31 @@ Use `NTL_ADD_CALLBACK_ID_0` through `NTL_ADD_CALLBACK_ID_5` when independently
 versioned driver and app binaries must retain the same method IDs even after
 the schema is reformatted or reordered. This is an optional ABI-stability
 control, not the required form for normal shared-header use.
+
+Long-running callbacks can use `NTL_ADD_CALLBACK_CONTEXT_0` through
+`NTL_ADD_CALLBACK_CONTEXT_5`, or their explicit-ID
+`NTL_ADD_CALLBACK_CONTEXT_ID_*` forms. The argument after the callback name is
+the kernel-only `ntl::rpc::call_context` variable name:
+
+```cpp
+NTL_ADD_CALLBACK_CONTEXT_ID_1(
+    demo_rpc, 0x902, std::uint32_t, calculate, call,
+    std::uint32_t, count, {
+      std::uint32_t result = 0;
+      for (std::uint32_t index = 0; index != count; ++index) {
+        call.throw_if_cancelled();
+        result += calculate_one(index);
+      }
+      return result;
+    })
+```
+
+Naming `call` explicitly makes the available request context visible in the
+callback body and avoids relying on a hidden macro identifier. The context is
+not serialized and is not part of the user-mode function signature. The app
+still receives `demo_rpc::calculate(count)` and
+`demo_rpc::calculate_1_method`, with the same method ID and wire payload it
+would have received from `NTL_ADD_CALLBACK_ID_1`.
 
 Explicit method IDs must be stable and unique within the endpoint and use the
 vendor IOCTL function range `0x800` through `0xFFD`; NTL reserves `0xFFE` for
@@ -214,8 +240,32 @@ server->on(read_values,
         result.push_back(read_one_value(index));
       }
       return result;
-    });
+});
 ```
+
+The same callback can be declared in a shared macro contract with the
+`NTL_ADD_CALLBACK_CONTEXT_*` family shown earlier. A context-aware declaration
+does not turn an endpoint asynchronous by itself. Full asynchronous and
+cooperative cancellation behavior requires all three pieces:
+
+1. Configure the endpoint with `server_options::asynchronous()`.
+2. Start the call with `client::invoke_async()` to obtain an `async_call` that
+   can be waited on, timed out, or cancelled.
+3. Use `call_context::cancelled()` or `throw_if_cancelled()` in long-running
+   callback work so an already-running callback can stop promptly.
+
+Each callback macro generates both forms. For a method named `read_values`,
+`read_values(args...)` is the synchronous convenience function and
+`read_values_async(args...)` returns `async_call<T>`:
+
+```cpp
+auto call = demo_rpc::read_values_async(std::uint32_t{16});
+```
+
+Like the synchronous convenience function, this form opens the named endpoint
+for an independent call. Code that makes many calls can keep one
+`ntl::rpc::client` and pass the generated `<name>_<arity>_method` descriptor to
+`client.invoke()` or `client.invoke_async()` instead.
 
 `cancelled()` becomes true after the request is cancelled or the NTL endpoint
 actually begins `stop()`. `throw_if_cancelled()` terminates that RPC with
@@ -235,6 +285,63 @@ Do not retain it or capture it in work that can outlive the callback.
 Synchronous `invoke()` remains available on both normal and asynchronous
 endpoints. On an asynchronous endpoint it waits for the pending operation and
 preserves the existing typed return API.
+
+### C++20 Stop Tokens And Coroutines
+
+The existing `invoke_async(method, args...)` overload remains available in
+C++14 and later. C++20 clients can bind the same operation to a stop token:
+
+```cpp
+#include <stop_token>
+
+std::stop_source source;
+auto call = demo_rpc::read_values_async(source.get_token(),
+                                        std::uint32_t{16});
+
+source.request_stop();
+```
+
+The returned `async_call<T>` owns its `std::stop_callback` registration. A stop
+request calls `CancelIoEx` for that operation only. Destruction removes the
+registration before the native operation state can be released. If the token
+was already stopped, NTL does not issue an RPC and returns an already-cancelled
+operation.
+
+Include the optional C++20 adapter to await the same native operation:
+
+```cpp
+#include <ntl/rpc/coroutine>
+
+application_task<std::vector<std::uint32_t>>
+read_async(std::stop_token token) {
+  co_return co_await demo_rpc::read_values_async(token, std::uint32_t{16});
+}
+```
+
+The generated async function is available in C++14 and later. Its
+`std::stop_token` overload and direct `co_await` use require C++20; include
+`<ntl/rpc/coroutine>` to make `async_call<T>` awaitable.
+
+`<ntl/rpc/coroutine>` uses a Windows thread-pool wait to resume the coroutine
+when the `OVERLAPPED` event is signaled. It does not create one waiting thread
+per call, and it does not replace the request buffers, event, device handle, or
+`CancelIoEx` ownership held by `async_call<T>`. Moving the call into `co_await`
+also preserves its consume-once `get()` semantics.
+
+The C++ standard does not provide a general coroutine `task<T>` return type or
+scheduler. Applications use the awaitable with their existing task framework;
+the RPC example contains a small top-level task owner solely to make the sample
+self-contained. Destroying a coroutine while its RPC awaiter is still pending
+prevents later resumption and cancels that request. As with other coroutine
+awaitables, an external task owner must not destroy the same coroutine frame
+concurrently with a resumption it does not coordinate.
+
+The same C++20 stop-token overload is available for `receive_async()`. C++14
+and C++17 translation units do not include `<stop_token>` or `<coroutine>` and
+retain the original API and ABI surface. The internal asynchronous operation
+also has the same layout in every language mode, so one executable may safely
+link C++14 translation units with C++20 translation units that use stop tokens
+or the coroutine adapter.
 
 ## Kernel-To-App Notifications
 
@@ -495,6 +602,10 @@ single process execution cannot expose.
 cooperative cancellation of a running callback, request ownership beyond
 client lifetime, concurrent overlapped calls, pending resource limits, and
 cleanup of an abandoned request.
+
+The C++20 client tests additionally cover typed and `void` coroutine results,
+already-stopped and running stop tokens, exactly-once resumption, abandonment
+of a suspended coroutine frame, and reuse of the endpoint after cancellation.
 
 [`test/rpc/notifications`](../../test/rpc/notifications) covers typed STL
 payloads, FIFO receives, timeout and cancellation, pending receive limits,

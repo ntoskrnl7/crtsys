@@ -1,9 +1,17 @@
 #include <gtest/gtest.h>
 #include <windows.h>
 
+#include <chrono>
+#include <cstddef>
+#include <system_error>
+
 #include <ntl/rpc/client>
 // rpc client stub code
 #include "common/rpc.hpp"
+
+extern "C" std::size_t ntl_rpc_cxx14_async_operation_size() noexcept {
+  return sizeof(ntl::rpc::detail::async_operation);
+}
 
 TEST(ntl_rpc_client, invoke_callback_by_invoke_method) {
   ntl::rpc::client cli(L"test_rpc");
@@ -14,7 +22,8 @@ TEST(ntl_rpc_client, invoke_callback_by_invoke_method) {
       .capabilities(rpc_capabilities)
       .method(test_inc_1_method)
       .method(test_stable_sum_2_method)
-      .method(test_list_1_method);
+      .method(test_list_1_method)
+      .method(test_cooperative_delay_2_method);
   const auto contract = cli.require_contract(requirements);
   EXPECT_EQ(contract.contract_version(), rpc_contract_version);
   EXPECT_TRUE(contract.supports(test_stable_sum_2_method));
@@ -55,6 +64,17 @@ TEST(ntl_rpc_client, invoke_callback_by_invoke_method) {
       cli.invoke(test_point_class_2_method, point(1, 1), point(4, 1));
   EXPECT_EQ(test_point_class_ret.get_x(), 4);
   EXPECT_EQ(test_point_class_ret.get_y(), 1);
+
+  EXPECT_EQ(cli.invoke(test_cooperative_delay_2_method, std::uint32_t{0},
+                       std::uint32_t{42}),
+            42u);
+
+  auto cancelled = cli.invoke_async(test_cooperative_delay_2_method,
+                                    std::uint32_t{2000}, std::uint32_t{43});
+  EXPECT_EQ(cancelled.wait_for(std::chrono::milliseconds(50)),
+            ntl::rpc::async_wait_status::timeout);
+  EXPECT_TRUE(cancelled.cancel());
+  EXPECT_THROW((void)cancelled.get(), std::system_error);
 }
 
 TEST(ntl_rpc_client, invoke_generated_wrapper) {
@@ -85,6 +105,25 @@ TEST(ntl_rpc_client, invoke_generated_wrapper) {
   const auto selected = test_point_class(point(1, 1), point(4, 1));
   EXPECT_EQ(selected.get_x(), 4);
   EXPECT_EQ(selected.get_y(), 1);
+  EXPECT_EQ(test_cooperative_delay(std::uint32_t{0}, std::uint32_t{44}), 44u);
+}
+
+TEST(ntl_rpc_client, invoke_generated_async_wrapper) {
+  using namespace test_rpc;
+
+  EXPECT_EQ(test_inc_async(1).get(), 2);
+  EXPECT_EQ(test_sum_async(1, 2).get(), 3);
+  EXPECT_EQ(test_sum_async(1, 2, 3).get(), 6);
+  EXPECT_EQ(test_sum_async(1, 2, 3, 4).get(), 10);
+  EXPECT_EQ(test_sum_async(1, 2, 3, 4, 5).get(), 15);
+  EXPECT_NO_FATAL_FAILURE(test_void_async().get());
+
+  auto cancelled = test_cooperative_delay_async(
+      std::uint32_t{2000}, std::uint32_t{45});
+  EXPECT_EQ(cancelled.wait_for(std::chrono::milliseconds(50)),
+            ntl::rpc::async_wait_status::timeout);
+  EXPECT_TRUE(cancelled.cancel());
+  EXPECT_THROW((void)cancelled.get(), std::system_error);
 }
 
 #include "common/test_device.h"
@@ -151,7 +190,7 @@ TEST(ntl_device, opens_through_dos_device_symbolic_link) {
   }
 }
 
-int main() {
-  testing::InitGoogleTest();
+int main(int argc, char **argv) {
+  testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }
