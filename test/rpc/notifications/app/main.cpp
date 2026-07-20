@@ -5,7 +5,11 @@
 #define NOMINMAX
 #endif
 
+#define WIN32_NO_STATUS
 #include <windows.h>
+#undef WIN32_NO_STATUS
+#include <winternl.h>
+#include <ntstatus.h>
 
 #include <chrono>
 #include <cstdint>
@@ -48,11 +52,17 @@ ntl::rpc::contract_requirements requirements() {
   ntl::rpc::contract_requirements value;
   value.contract_version(crtsys_rpc_notifications::contract_version)
       .transport_features(ntl::rpc::transport_features::current |
-                          ntl::rpc::transport_features::kernel_notifications)
+                          ntl::rpc::transport_features::asynchronous_calls |
+                          ntl::rpc::transport_features::kernel_notifications |
+                          ntl::rpc::transport_features::reliable_notifications |
+                          ntl::rpc::transport_features::
+                              notification_persistence_hooks)
       .capabilities(crtsys_rpc_notifications::capabilities::current)
       .method(crtsys_rpc_notifications::publish)
       .method(crtsys_rpc_notifications::publish_at_dispatch)
-      .method(crtsys_rpc_notifications::query_stats);
+      .method(crtsys_rpc_notifications::query_stats)
+      .method(crtsys_rpc_notifications::publish_reliable)
+      .method(crtsys_rpc_notifications::hold_session);
   return value;
 }
 
@@ -60,7 +70,11 @@ ntl::rpc::client open_client() {
   ntl::rpc::client client(endpoint_name);
   if (!client)
     throw std::runtime_error("could not open notification RPC endpoint");
-  (void)client.require_contract(requirements());
+  try {
+    (void)client.require_contract(requirements());
+  } catch (const std::exception &error) {
+    throw std::runtime_error(std::string("contract query: ") + error.what());
+  }
   return client;
 }
 
@@ -213,13 +227,170 @@ void test_irql_contract() {
       client.receive_async(crtsys_rpc_notifications::progress);
   const auto status = client.invoke(
       crtsys_rpc_notifications::publish_at_dispatch, 200u);
-  if (status != crtsys_rpc_notifications::invalid_device_state)
+  if (status != STATUS_INVALID_DEVICE_STATE)
     throw std::runtime_error("notification accepted DISPATCH_LEVEL payload");
   if (receive.ready())
     throw std::runtime_error("rejected high-IRQL publish consumed a receive");
   if (!client.invoke(crtsys_rpc_notifications::publish, 200u, 2u))
     throw std::runtime_error("PASSIVE_LEVEL retry did not publish");
   validate(receive.get(), 200u, 2u);
+}
+
+template <typename Callback>
+void run_test(const char *name, Callback &&callback) {
+  std::printf("[RPC notifications] RUN  %s\n", name);
+  try {
+    callback();
+  } catch (const std::exception &error) {
+    throw std::runtime_error(std::string(name) + ": " + error.what());
+  }
+  std::printf("[RPC notifications] PASS %s\n", name);
+}
+
+void test_reliable_session_delivery() {
+  ntl::rpc::session_token token{};
+  std::uint64_t session_id = 0;
+  std::uint64_t first_delivery_sequence = 0;
+  {
+    auto client = open_client();
+    const auto session = client.start_session();
+    token = session.token;
+    session_id = session.id;
+    client.subscribe(crtsys_rpc_notifications::progress);
+
+    if (client.invoke(crtsys_rpc_notifications::publish_reliable, 500u, 3u) !=
+        0)
+      throw std::runtime_error("reliable notification was not queued");
+    const auto delivery =
+        client.receive_reliable(crtsys_rpc_notifications::progress);
+    if (delivery.sequence() == 0)
+      throw std::runtime_error("reliable notification had no ACK sequence");
+    first_delivery_sequence = delivery.sequence();
+    validate(delivery.payload(), 500u, 3u);
+    // Do not ACK. Closing this handle must retain and replay the delivery.
+  }
+
+  auto client = open_client();
+  const auto resumed = client.resume_session(token);
+  if (resumed.id != session_id)
+    throw std::runtime_error("in-memory session identity changed on resume");
+  const auto replay =
+      client.receive_reliable(crtsys_rpc_notifications::progress);
+  if (replay.sequence() != first_delivery_sequence)
+    throw std::runtime_error("unacknowledged notification was not replayed");
+  validate(replay.payload(), 500u, 3u);
+  client.acknowledge(crtsys_rpc_notifications::progress, replay);
+
+  auto empty =
+      client.receive_reliable_async(crtsys_rpc_notifications::progress);
+  if (empty.wait_for(2ms) != ntl::rpc::async_wait_status::timeout) {
+    try {
+      const auto duplicate = empty.get();
+      throw std::runtime_error(
+          "ACKed notification was replayed with sequence " +
+          std::to_string(duplicate.sequence()));
+    } catch (const std::system_error &error) {
+      throw std::runtime_error(
+          "empty reliable receive completed with error " +
+          std::to_string(error.code().value()) + ": " + error.what());
+    }
+  }
+  if (!empty.cancel())
+    throw std::runtime_error("reliable receive cancellation was not issued");
+  try {
+    (void)empty.get();
+    throw std::runtime_error("cancelled reliable receive returned a payload");
+  } catch (const std::system_error &error) {
+    if (error.code().value() != ERROR_OPERATION_ABORTED)
+      throw;
+  }
+
+  // The endpoint limit is four queued records per session. A fifth publish
+  // must apply bounded backpressure until the client ACKs one delivery.
+  for (std::uint64_t index = 0; index != 4; ++index) {
+    if (client.invoke(crtsys_rpc_notifications::publish_reliable,
+                      600u + index, 2u) != 0)
+      throw std::runtime_error("reliable FIFO publish failed");
+  }
+  if (client.invoke(crtsys_rpc_notifications::publish_reliable, 700u, 1u) !=
+      STATUS_DEVICE_BUSY)
+    throw std::runtime_error("reliable queue backpressure was not enforced");
+
+  for (std::uint64_t index = 0; index != 4; ++index) {
+    const auto delivery =
+        client.receive_reliable(crtsys_rpc_notifications::progress);
+    validate(delivery.payload(), 600u + index, 2u);
+    client.acknowledge(crtsys_rpc_notifications::progress, delivery);
+  }
+  if (client.invoke(crtsys_rpc_notifications::publish_reliable, 701u, 1u) !=
+      0)
+    throw std::runtime_error("ACK did not release reliable queue capacity");
+  const auto released =
+      client.receive_reliable(crtsys_rpc_notifications::progress);
+  validate(released.payload(), 701u, 1u);
+  client.acknowledge(crtsys_rpc_notifications::progress, released);
+
+  auto cancelled =
+      client.receive_reliable_async(crtsys_rpc_notifications::progress);
+  client.unsubscribe(crtsys_rpc_notifications::progress);
+  try {
+    (void)cancelled.get();
+    throw std::runtime_error("unsubscribe did not cancel a pending receive");
+  } catch (const std::system_error &error) {
+    if (error.code().value() != ERROR_OPERATION_ABORTED)
+      throw;
+  }
+  if (client.invoke(crtsys_rpc_notifications::publish_reliable, 702u, 1u) !=
+      STATUS_NOT_FOUND)
+    throw std::runtime_error("unsubscribed session accepted a notification");
+
+  client.close_session();
+  auto closed = open_client();
+  bool resume_rejected = false;
+  try {
+    (void)closed.resume_session(token);
+  } catch (const std::system_error &) {
+    resume_rejected = true;
+  }
+  if (!resume_rejected)
+    throw std::runtime_error("explicitly closed session was resumed");
+}
+
+void test_persisted_session_restore() {
+  ntl::rpc::session_token token{};
+  {
+    auto client = open_client();
+    token = client.start_session().token;
+    client.subscribe(crtsys_rpc_notifications::progress);
+    if (client.invoke(crtsys_rpc_notifications::publish_reliable, 800u, 5u) !=
+        0)
+      throw std::runtime_error("persisted notification was not queued");
+  }
+
+  // The server's in-memory retention is 500 ms. Resume after it expires to
+  // force notification_store::restore rather than the in-memory fast path.
+  ::Sleep(650);
+  auto restored = open_client();
+  (void)restored.resume_session(token);
+  const auto delivery =
+      restored.receive_reliable(crtsys_rpc_notifications::progress);
+  validate(delivery.payload(), 800u, 5u);
+  restored.acknowledge(crtsys_rpc_notifications::progress, delivery);
+  restored.close_session();
+}
+
+void test_close_waits_for_session_call() {
+  auto client = open_client();
+  const auto session = client.start_session();
+  auto pending = client.invoke_async(crtsys_rpc_notifications::hold_session,
+                                     std::uint32_t{100});
+  ::Sleep(10);
+  client.close_session();
+  if (!pending.ready())
+    throw std::runtime_error(
+        "session close returned while its RPC callback was still active");
+  if (pending.get() != session.id)
+    throw std::runtime_error("active RPC lost its client session during close");
 }
 
 void test_pending_stop(const wchar_t *service_name) {
@@ -283,7 +454,7 @@ void test_pending_stop(const wchar_t *service_name) {
     throw std::runtime_error("restarted endpoint did not publish");
   validate(receive.get(), 300u, 3u);
   if (restarted.invoke(crtsys_rpc_notifications::publish_at_dispatch, 301u) !=
-      crtsys_rpc_notifications::invalid_device_state)
+      STATUS_INVALID_DEVICE_STATE)
     throw std::runtime_error("restarted endpoint lost its IRQL contract");
 }
 
@@ -294,22 +465,32 @@ int wmain(int argc, wchar_t **argv) {
   std::setvbuf(stderr, nullptr, _IONBF, 0);
 
   try {
-    test_unbuffered_delivery();
-    test_typed_receive();
-    test_synchronous_receive();
-    test_timeout_and_cancel();
-    test_scope_cleanup();
-    test_fifo_and_pending_limit();
-    test_irql_contract();
+    run_test("unbuffered delivery", test_unbuffered_delivery);
+    run_test("typed receive", test_typed_receive);
+    run_test("synchronous receive", test_synchronous_receive);
+    run_test("timeout and cancel", test_timeout_and_cancel);
+    run_test("scope cleanup", test_scope_cleanup);
+    run_test("FIFO and pending limit", test_fifo_and_pending_limit);
+    run_test("IRQL contract", test_irql_contract);
+    run_test("reliable session delivery", test_reliable_session_delivery);
+    run_test("persisted session restore", test_persisted_session_restore);
+    run_test("session close rundown", test_close_waits_for_session_call);
 
-    if (argc > 1)
-      test_pending_stop(argv[1]);
+    rpc_notification_stats stats{};
+    {
+      auto client = open_client();
+      stats = client.invoke(crtsys_rpc_notifications::query_stats);
+      if (stats.delivered == 0 || stats.dropped == 0 ||
+          stats.sessions_opened == 0 || stats.sessions_resumed == 0 ||
+          stats.sessions_disconnected == 0 || stats.sessions_closed == 0 ||
+          stats.persisted < 7 || stats.acknowledged < 7)
+        throw std::runtime_error("notification counters were not exercised");
+    }
 
-    auto client = open_client();
-    const auto stats =
-        client.invoke(crtsys_rpc_notifications::query_stats);
-    if (stats.delivered == 0 || stats.dropped == 0)
-      throw std::runtime_error("notification counters were not exercised");
+    if (argc > 1) {
+      run_test("pending receive service restart",
+               [service_name = argv[1]] { test_pending_stop(service_name); });
+    }
 
     std::printf("RPC notifications PASS: delivered=%lu dropped=%lu "
                 "cross_bitness_safe=1 service_restart=%u\n",

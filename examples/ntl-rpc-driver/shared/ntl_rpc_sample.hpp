@@ -9,6 +9,13 @@
 // The same declaration expands to kernel callback registration when this file
 // follows <ntl/rpc/server>, and to user-mode wrapper functions when it follows
 // <ntl/rpc/client>.
+namespace crtsys_ntl_rpc_sample {
+constexpr auto progress =
+    ntl::rpc::notification<0x1001, ntl_rpc_sample_progress>{};
+constexpr auto publish_progress =
+    ntl::rpc::method<0x904, bool(std::uint64_t)>{};
+} // namespace crtsys_ntl_rpc_sample
+
 NTL_RPC_BEGIN_CONTRACT(crtsys_ntl_rpc_sample, 2, 0x3ull)
 
 NTL_ADD_CALLBACK_ID_2(crtsys_ntl_rpc_sample, 0x900, int, add, int, left, int,

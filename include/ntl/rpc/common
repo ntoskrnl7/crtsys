@@ -59,8 +59,14 @@ constexpr unsigned long contract_query_id = 0xFFF;
 /** @brief Reserved IOCTL function ID used by notification receive requests. */
 constexpr unsigned long notification_wait_id = 0xFFE;
 
+/** @brief Reserved IOCTL function ID used by client-session control. */
+constexpr unsigned long session_control_id = 0xFFD;
+
 /** @brief Receive capacity for the built-in contract query. */
 constexpr std::size_t contract_response_size = 64 * 1024;
+
+/** @brief Reserved serialization headroom for a reliable delivery envelope. */
+constexpr std::size_t reliable_notification_overhead = 32;
 
 namespace transport_features {
 /** @brief Per-method request and decode-allocation limits are enforced. */
@@ -77,11 +83,45 @@ constexpr std::uint64_t asynchronous_calls = 1ull << 4;
 constexpr std::uint64_t kernel_notifications = 1ull << 5;
 /** @brief Method callbacks receive the captured original caller context. */
 constexpr std::uint64_t caller_security_context = 1ull << 6;
+/** @brief File handles can opt into reconnectable client sessions. */
+constexpr std::uint64_t client_sessions = 1ull << 7;
+/** @brief Sessions can ACK and replay bounded kernel notifications. */
+constexpr std::uint64_t reliable_notifications = 1ull << 8;
+/** @brief Applications may attach external notification storage hooks. */
+constexpr std::uint64_t notification_persistence_hooks = 1ull << 9;
 /** @brief All transport features implemented by this NTL version. */
 constexpr std::uint64_t current = resource_limits | secure_endpoint |
                                   immutable_dispatch | rundown_shutdown |
-                                  caller_security_context;
+                                  caller_security_context | client_sessions;
 } // namespace transport_features
+
+/** @brief Opaque 128-bit capability used to reconnect one RPC session. */
+struct session_token {
+  std::uint64_t high = 0;
+  std::uint64_t low = 0;
+
+  /** @brief Reports whether the token can identify a session. */
+  bool valid() const noexcept { return high != 0 || low != 0; }
+
+  friend bool operator==(const session_token &left,
+                         const session_token &right) noexcept {
+    return left.high == right.high && left.low == right.low;
+  }
+
+  friend bool operator!=(const session_token &left,
+                         const session_token &right) noexcept {
+    return !(left == right);
+  }
+};
+
+/** @brief Public identity returned when a client session is established. */
+struct session_info {
+  session_token token{};
+  std::uint64_t id = 0;
+
+  /** @brief Reports whether the value describes an established session. */
+  bool valid() const noexcept { return token.valid() && id != 0; }
+};
 
 /** @brief Describes one running RPC server's wire and application contract. */
 class contract_info {
@@ -220,11 +260,57 @@ constexpr unsigned long notification_control_code() noexcept {
   return control_code(notification_wait_id);
 }
 
+/** @brief Returns the reserved control code used to manage sessions. */
+constexpr unsigned long session_control_code() noexcept {
+  return control_code(session_control_id);
+}
+
 namespace detail {
 /** @brief Fixed-width request sent before one notification IRP is queued. */
 struct notification_wait_request {
   std::uint32_t id;
 };
+
+/** @brief Fixed-width request for a reliable notification receive. */
+struct reliable_notification_wait_request {
+  std::uint32_t id;
+  std::uint32_t reserved;
+};
+
+enum class session_control_operation : std::uint32_t {
+  create = 1,
+  resume = 2,
+  close = 3,
+  subscribe = 4,
+  unsubscribe = 5,
+  acknowledge = 6,
+};
+
+/** @brief Cross-bitness session command carried by METHOD_BUFFERED. */
+struct session_control_request {
+  std::uint32_t version;
+  session_control_operation operation;
+  session_token token;
+  std::uint32_t notification_id;
+  std::uint32_t reserved;
+  std::uint64_t sequence;
+};
+
+/** @brief Cross-bitness session handshake result. */
+struct session_control_response {
+  session_info session;
+};
+
+constexpr std::uint32_t session_control_version = 1;
+
+static_assert(sizeof(session_token) == 16,
+              "NTL RPC session tokens must be cross-bitness stable");
+static_assert(sizeof(session_info) == 24,
+              "NTL RPC session identities must be cross-bitness stable");
+static_assert(sizeof(session_control_request) == 40,
+              "NTL RPC session commands must be cross-bitness stable");
+static_assert(sizeof(session_control_response) == 24,
+              "NTL RPC session responses must be cross-bitness stable");
 } // namespace detail
 
 /** @brief Marker base used to recognize typed RPC method descriptors. */
@@ -232,7 +318,7 @@ struct method_tag {};
 
 /**
  * @brief Describes one typed RPC method shared by the driver and client.
- * @tparam Id Stable vendor IOCTL function ID in the 0x800-0xFFE range.
+ * @tparam Id Stable vendor IOCTL function ID in the 0x800-0xFFC range.
  * @tparam Signature Function signature describing the result and arguments.
  * @tparam ResponseSize Maximum serialized response bytes.
  * @tparam RequestSize Maximum serialized request bytes.
@@ -250,9 +336,9 @@ template <unsigned long Id, typename Return, typename... Arguments,
           std::size_t DecodeAllocation>
 class method<Id, Return(Arguments...), ResponseSize, RequestSize,
              DecodeAllocation> : public method_tag {
-  static_assert(Id >= 0x800 && Id < notification_wait_id,
-                "NTL RPC method IDs must use 0x800-0xFFD; 0xFFE and 0xFFF "
-                "are reserved");
+  static_assert(Id >= 0x800 && Id < session_control_id,
+                "NTL RPC method IDs must use 0x800-0xFFC; 0xFFD-0xFFF are "
+                "reserved");
   static_assert(std::is_void<Return>::value || ResponseSize != 0,
                 "A non-void RPC method requires response capacity");
   static_assert(RequestSize != 0, "An RPC method requires request capacity");
@@ -377,6 +463,36 @@ public:
 template <typename T>
 struct is_notification
     : std::is_base_of<notification_tag, typename std::decay<T>::type> {};
+
+/** @brief One replayable notification and its explicit ACK sequence. */
+template <typename T> class notification_delivery {
+public:
+  notification_delivery() = default;
+
+  /** @brief Creates a delivery from a sequence and typed payload. */
+  notification_delivery(std::uint64_t sequence, T payload)
+      : sequence_(sequence), payload_(std::move(payload)) {}
+
+  /** @brief Returns the sequence that must be acknowledged. */
+  std::uint64_t sequence() const noexcept { return sequence_; }
+
+  /** @brief Returns the immutable typed payload. */
+  const T &payload() const noexcept { return payload_; }
+
+  /** @brief Returns the mutable typed payload. */
+  T &payload() noexcept { return payload_; }
+
+private:
+  std::uint64_t sequence_ = 0;
+  T payload_{};
+
+public:
+  friend zpp::serializer::access;
+  template <typename Archive, typename Self>
+  static void serialize(Archive &archive, Self &self) {
+    archive(self.sequence_, self.payload_);
+  }
+};
 
 /** @brief Reports whether a type is an NTL RPC method descriptor. */
 template <typename T>

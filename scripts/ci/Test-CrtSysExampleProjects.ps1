@@ -23,6 +23,7 @@ if (Test-Path -LiteralPath $sharedPropsPath -PathType Leaf) {
   $sharedProps = Get-Content -LiteralPath $sharedPropsPath -Raw
   foreach ($requiredToken in @(
       'CrtSysDevelopmentPackageRoot',
+      'CrtSysUseRepositoryDevelopmentFiles',
       'CrtSysUsePackageReference',
       'ExcludeRestorePackageImports',
       'build\native\crtsys.props')) {
@@ -35,8 +36,14 @@ if (Test-Path -LiteralPath $sharedPropsPath -PathType Leaf) {
 $sharedTargetsPath = Join-Path $examplesRoot 'Directory.Build.targets'
 if (Test-Path -LiteralPath $sharedTargetsPath -PathType Leaf) {
   $sharedTargets = Get-Content -LiteralPath $sharedTargetsPath -Raw
-  if (-not $sharedTargets.Contains('build\native\crtsys.targets')) {
-    $errors.Add('examples/Directory.Build.targets does not import crtsys.targets.')
+  foreach ($requiredToken in @(
+      'nuget\build\native\crtsys.targets',
+      'build\native\crtsys.targets',
+      'CrtSysUseRepositoryDevelopmentFiles',
+      '$(CrtSysRepositoryRoot)include')) {
+    if (-not $sharedTargets.Contains($requiredToken)) {
+      $errors.Add("examples/Directory.Build.targets is missing $requiredToken.")
+    }
   }
 }
 
@@ -87,7 +94,7 @@ foreach ($project in $projects) {
   }
 
   $localPackageProperties = $document.SelectNodes(
-      '//msb:CrtSysRepositoryRoot | //msb:CrtSysDevelopmentPackageRoot | //msb:CrtSysUsePackageReference | //msb:CrtSysPackageVersion | //msb:ExcludeRestorePackageImports | //msb:RestoreProjectStyle',
+      '//msb:CrtSysRepositoryRoot | //msb:CrtSysDevelopmentPackageRoot | //msb:CrtSysUseRepositoryDevelopmentFiles | //msb:CrtSysUsePackageReference | //msb:CrtSysPackageVersion | //msb:ExcludeRestorePackageImports | //msb:RestoreProjectStyle',
       $namespace)
   if ($localPackageProperties.Count -ne 0) {
     $relativePath = Get-RepositoryRelativePath $project.FullName

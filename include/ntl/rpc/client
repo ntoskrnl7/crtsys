@@ -486,8 +486,19 @@ public:
 
   client(const client &) = delete;
   client &operator=(const client &) = delete;
-  client(client &&) noexcept = default;
-  client &operator=(client &&) noexcept = default;
+  client(client &&other) noexcept
+      : handle_(std::move(other.handle_)), session_(other.session_) {
+    other.session_ = {};
+  }
+
+  client &operator=(client &&other) noexcept {
+    if (this != &other) {
+      handle_ = std::move(other.handle_);
+      session_ = other.session_;
+      other.session_ = {};
+    }
+    return *this;
+  }
 
   /** @brief Returns true when the RPC device was opened successfully. */
   explicit operator bool() const noexcept {
@@ -581,6 +592,92 @@ public:
       }
     }
     return info;
+  }
+
+  /**
+   * @brief Creates a reconnectable session on this device handle.
+   * @return The opaque reconnect token and endpoint-local session ID.
+   * @note Preserve only the token when reconnecting from another handle. The
+   * numeric ID is useful while this server instance remains loaded.
+   */
+  session_info start_session() {
+    session_ = session_command(detail::session_control_operation::create, {});
+    return session_;
+  }
+
+  /**
+   * @brief Reattaches this device handle to a disconnected session.
+   * @param token Opaque token returned by `start_session()`.
+   */
+  session_info resume_session(session_token token) {
+    if (!token.valid())
+      throw std::invalid_argument("NTL RPC session token is invalid");
+    session_ = session_command(detail::session_control_operation::resume,
+                               token);
+    return session_;
+  }
+
+  /** @brief Returns true after this handle creates or resumes a session. */
+  bool has_session() const noexcept { return session_.valid(); }
+
+  /** @brief Returns the session attached to this device handle. */
+  const session_info &session() const noexcept { return session_; }
+
+  /**
+   * @brief Explicitly closes this session and discards server-side replay
+   * state.
+   * @note Closing the device handle without calling this function merely
+   * disconnects the session so that its token can resume it.
+   */
+  void close_session() {
+    require_session();
+    session_command(detail::session_control_operation::close, session_.token);
+    session_ = {};
+  }
+
+  /** @brief Subscribes this session to a reliable notification channel. */
+  template <typename Notification>
+  void subscribe(const Notification &channel) {
+    static_assert(is_notification<Notification>::value,
+                  "client::subscribe requires an ntl::rpc::notification");
+    (void)channel;
+    require_session();
+    session_command(detail::session_control_operation::subscribe,
+                    session_.token, Notification::id());
+  }
+
+  /** @brief Stops future reliable deliveries for one channel. */
+  template <typename Notification>
+  void unsubscribe(const Notification &channel) {
+    static_assert(is_notification<Notification>::value,
+                  "client::unsubscribe requires an ntl::rpc::notification");
+    (void)channel;
+    require_session();
+    session_command(detail::session_control_operation::unsubscribe,
+                    session_.token, Notification::id());
+  }
+
+  /** @brief Removes one successfully processed reliable delivery. */
+  template <typename Notification>
+  void acknowledge(
+      const Notification &channel,
+      const notification_delivery<typename Notification::payload_type>
+          &delivery) {
+    acknowledge(channel, delivery.sequence());
+  }
+
+  /** @brief Removes one reliable delivery by its sequence number. */
+  template <typename Notification>
+  void acknowledge(const Notification &channel, std::uint64_t sequence) {
+    static_assert(is_notification<Notification>::value,
+                  "client::acknowledge requires an ntl::rpc::notification");
+    (void)channel;
+    require_session();
+    if (sequence == 0)
+      throw std::invalid_argument(
+          "NTL RPC notification sequence must be nonzero");
+    session_command(detail::session_control_operation::acknowledge,
+                    session_.token, Notification::id(), sequence);
   }
 
   /**
@@ -702,6 +799,49 @@ public:
         std::move(state), Notification::decode_allocation());
   }
 
+  /**
+   * @brief Waits for one replayable notification.
+   * @return A payload paired with the sequence that must be acknowledged.
+   */
+  template <typename Notification>
+  notification_delivery<typename Notification::payload_type>
+  receive_reliable(const Notification &channel) {
+    return receive_reliable_async(channel).get();
+  }
+
+  /**
+   * @brief Queues a cancellable receive for this session's oldest unacknowledged
+   * notification on the selected channel.
+   */
+  template <typename Notification>
+  notification_wait<
+      notification_delivery<typename Notification::payload_type>>
+  receive_reliable_async(const Notification &channel) {
+    static_assert(
+        is_notification<Notification>::value,
+        "client::receive_reliable_async requires an ntl::rpc::notification");
+    static_assert(
+        std::is_default_constructible<
+            typename Notification::payload_type>::value,
+        "NTL RPC notification payloads must be default constructible");
+    static_assert(
+        Notification::response_size() + reliable_notification_overhead <=
+            static_cast<std::size_t>((std::numeric_limits<DWORD>::max)()),
+        "NTL RPC reliable notification capacity exceeds DWORD capacity");
+    (void)channel;
+    require_session();
+
+    detail::reliable_notification_wait_request request{Notification::id(), 0};
+    std::vector<unsigned char> input(sizeof(request));
+    std::memcpy(input.data(), &request, sizeof(request));
+    auto state = std::make_shared<detail::async_operation>(
+        handle_, notification_control_code(), std::move(input),
+        Notification::response_size() + reliable_notification_overhead);
+    return notification_wait<
+        notification_delivery<typename Notification::payload_type>>(
+        std::move(state), Notification::decode_allocation());
+  }
+
 #if NTL_RPC_HAS_STOP_TOKEN
   /** @brief Queues a notification receive bound to a C++20 stop token. */
   template <typename Notification>
@@ -719,9 +859,70 @@ public:
     detail::attach_stop_token(token, wait.state_);
     return wait;
   }
+
+  /** @brief Queues a reliable receive bound to a C++20 stop token. */
+  template <typename Notification>
+  notification_wait<
+      notification_delivery<typename Notification::payload_type>>
+  receive_reliable_async(std::stop_token token,
+                         const Notification &channel) {
+    if (token.stop_requested()) {
+      auto state = std::make_shared<detail::async_operation>(
+          handle_, detail::completed_error_operation_t{},
+          ERROR_OPERATION_ABORTED);
+      return notification_wait<
+          notification_delivery<typename Notification::payload_type>>(
+          std::move(state), Notification::decode_allocation());
+    }
+
+    auto wait = receive_reliable_async(channel);
+    detail::attach_stop_token(token, wait.state_);
+    return wait;
+  }
 #endif
 
 private:
+  void require_session() const {
+    if (!session_.valid())
+      throw std::logic_error(
+          "NTL RPC client has not created or resumed a session");
+  }
+
+  session_info session_command(detail::session_control_operation operation,
+                               session_token token,
+                               std::uint32_t notification_id = 0,
+                               std::uint64_t sequence = 0) {
+    detail::session_control_request request{};
+    request.version = detail::session_control_version;
+    request.operation = operation;
+    request.token = token;
+    request.notification_id = notification_id;
+    request.sequence = sequence;
+
+    std::vector<unsigned char> input(sizeof(request));
+    std::memcpy(input.data(), &request, sizeof(request));
+    const bool returns_session =
+        operation == detail::session_control_operation::create ||
+        operation == detail::session_control_operation::resume;
+    detail::session_control_response response{};
+    DWORD returned = 0;
+    call(session_control_code(), input,
+         returns_session ? static_cast<void *>(&response) : nullptr,
+         returns_session ? static_cast<DWORD>(sizeof(response)) : 0,
+         returned);
+
+    if (returns_session) {
+      if (returned != sizeof(response) || !response.session.valid())
+        throw std::runtime_error(
+            "NTL RPC server returned an invalid session response");
+      return response.session;
+    }
+    if (returned != 0)
+      throw std::runtime_error(
+          "NTL RPC session command returned unexpected output bytes");
+    return {};
+  }
+
   template <typename Tuple, std::size_t... Index>
   static std::vector<unsigned char>
   serialize_arguments(Tuple &arguments, std::index_sequence<Index...>) {
@@ -775,12 +976,15 @@ private:
       if (error != ERROR_IO_PENDING)
         throw std::system_error(static_cast<int>(error),
                                 std::system_category(),
-                                "NTL RPC DeviceIoControl failed");
+                                "NTL RPC DeviceIoControl failed for code " +
+                                    std::to_string(code));
       if (!::GetOverlappedResult(handle_->get(), &overlapped, &returned,
                                  TRUE))
         throw std::system_error(static_cast<int>(::GetLastError()),
                                 std::system_category(),
-                                "NTL RPC DeviceIoControl completion failed");
+                                "NTL RPC DeviceIoControl completion failed "
+                                "for code " +
+                                    std::to_string(code));
     }
   }
 
@@ -846,6 +1050,7 @@ private:
 
 private:
   std::shared_ptr<ntl::unique_handle> handle_;
+  session_info session_{};
 };
 
 } // namespace rpc

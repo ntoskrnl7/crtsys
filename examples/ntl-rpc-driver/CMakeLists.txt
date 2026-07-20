@@ -11,6 +11,7 @@ include("${crtsys_SOURCE_DIR}/cmake/CrtSys.cmake")
 crtsys_add_driver(crtsys_ntl_rpc_sample
   driver/caller_security.cpp
   driver/main.cpp
+  driver/notifications.cpp
   driver/operations.cpp
 )
 
@@ -20,6 +21,7 @@ add_executable(crtsys_ntl_rpc_sample_app
   app/cancellation.cpp
   app/coroutine_call.cpp
   app/main.cpp
+  app/reliable_notifications.cpp
   app/stop_token_cancellation.cpp
   app/synchronous_calls.cpp
 )

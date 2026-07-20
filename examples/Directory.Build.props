@@ -6,6 +6,7 @@
   <PropertyGroup Condition="'$(VCProjectUpgraderObjectName)' != 'NoUpgrade'">
     <CrtSysRepositoryRoot Condition="'$(CrtSysRepositoryRoot)' == ''">$([MSBuild]::NormalizeDirectory('$(MSBuildThisFileDirectory)', '..'))</CrtSysRepositoryRoot>
     <CrtSysDevelopmentPackageRoot Condition="'$(CrtSysDevelopmentPackageRoot)' == ''">$(CrtSysRepositoryRoot)artifacts\development-package\</CrtSysDevelopmentPackageRoot>
+    <CrtSysUseRepositoryDevelopmentFiles Condition="'$(CrtSysPackageRoot)' == '' and Exists('$(CrtSysDevelopmentPackageRoot)build\native\crtsys.props')">true</CrtSysUseRepositoryDevelopmentFiles>
     <CrtSysPackageRoot Condition="'$(CrtSysPackageRoot)' == '' and Exists('$(CrtSysDevelopmentPackageRoot)build\native\crtsys.props')">$(CrtSysDevelopmentPackageRoot)</CrtSysPackageRoot>
     <CrtSysUsePackageReference Condition="'$(CrtSysPackageRoot)' == ''">true</CrtSysUsePackageReference>
     <CrtSysUsePackageReference Condition="'$(CrtSysUsePackageReference)' == ''">false</CrtSysUsePackageReference>

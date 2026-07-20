@@ -21,6 +21,7 @@ The sample demonstrates:
 - an immutable dispatch table with rundown-protected shutdown
 - startup contract discovery for version, capability, and method compatibility
 - original caller identity and pre-deserialization method authorization
+- reconnectable client sessions and reliable notifications replayed until ACK
 - serialization of simple scalar values, a custom request/reply pair, and a
   `std::vector`
 
@@ -31,12 +32,14 @@ The source is split by responsibility:
 - `shared/ntl_rpc_caller_security.hpp`: caller-security method descriptors
 - `driver/caller_security.cpp`: caller inspection and method authorization
 - `driver/operations.cpp`: kernel callback implementations
+- `driver/notifications.cpp`: session state and reliable notification publish
 - `app/caller_security.cpp`: caller-security client calls
 - `app/synchronous_calls.cpp`: generated wrappers and reusable synchronous client
 - `app/asynchronous_call.cpp`: successful asynchronous completion
 - `app/cancellation.cpp`: timeout followed by cooperative cancellation
 - `app/coroutine_call.cpp`: C++20 `co_await` completion
 - `app/stop_token_cancellation.cpp`: C++20 `stop_token` cancellation
+- `app/reliable_notifications.cpp`: subscribe, reconnect, replay, and ACK
 - `app/coroutine_task.hpp`: minimal top-level coroutine owner used by the app
 - `app/main.cpp`: argument parsing, contract validation, and example sequencing
 
@@ -123,6 +126,31 @@ The macro-generated server freezes its dispatch table after registering the
 shared schema. Keep the returned server owner alive until driver unload. NTL
 rejects new RPC calls during shutdown and waits for callbacks already in
 progress before the owner releases the device.
+
+This sample uses `crtsys_ntl_rpc_sample::make_server()` instead of `init()` so
+it can register its notification channel and session callback before
+`start()`. The ordinary `init()` convenience API remains appropriate when a
+contract needs only its macro-declared methods.
+
+## Reliable Notification At A Glance
+
+[`app/reliable_notifications.cpp`](./app/reliable_notifications.cpp) creates a
+session, subscribes to `progress`, receives a typed delivery, and intentionally
+disconnects before ACK. A second client resumes the opaque token, receives the
+same sequence, acknowledges it, and explicitly closes the session:
+
+```cpp
+const auto session = client.start_session();
+client.subscribe(crtsys_ntl_rpc_sample::progress);
+
+const auto delivery =
+    client.receive_reliable(crtsys_ntl_rpc_sample::progress);
+client.acknowledge(crtsys_ntl_rpc_sample::progress, delivery);
+```
+
+The exhaustive queue-limit, cancellation, x86-app/x64-driver, and lifecycle
+cases stay in [`test/rpc/notifications`](../../test/rpc/notifications) so the
+public sample remains readable.
 
 The sample initializes the endpoint with `server_options::asynchronous()`.
 Application requests are therefore pended and executed by PASSIVE_LEVEL work
@@ -271,5 +299,6 @@ cancel: kernel callback observed cancellation
 coroutine: suspended without blocking the caller
 coroutine: resumed with add=42
 stop_token: coroutine resumed with cancellation
+reliable notification: sequence=1 text=reliable progress 42
 all RPC examples completed
 ```

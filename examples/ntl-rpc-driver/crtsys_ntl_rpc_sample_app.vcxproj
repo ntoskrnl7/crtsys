@@ -59,6 +59,7 @@
     <ClCompile Include="app\cancellation.cpp" />
     <ClCompile Include="app\coroutine_call.cpp" />
     <ClCompile Include="app\main.cpp" />
+    <ClCompile Include="app\reliable_notifications.cpp" />
     <ClCompile Include="app\stop_token_cancellation.cpp" />
     <ClCompile Include="app\synchronous_calls.cpp" />
   </ItemGroup>

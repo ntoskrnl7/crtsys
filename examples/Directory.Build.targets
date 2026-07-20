@@ -1,5 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="$(CrtSysRepositoryRoot)nuget\build\native\crtsys.targets"
+          Condition="'$(VCProjectUpgraderObjectName)' != 'NoUpgrade' and '$(CrtSysUseRepositoryDevelopmentFiles)' == 'true'" />
   <Import Project="$(CrtSysPackageRoot)build\native\crtsys.targets"
-          Condition="'$(VCProjectUpgraderObjectName)' != 'NoUpgrade' and Exists('$(CrtSysPackageRoot)build\native\crtsys.targets')" />
+          Condition="'$(VCProjectUpgraderObjectName)' != 'NoUpgrade' and '$(CrtSysUseRepositoryDevelopmentFiles)' != 'true' and Exists('$(CrtSysPackageRoot)build\native\crtsys.targets')" />
+
+  <!-- In-repository Visual Studio examples use the development package for
+       binaries, but should always see the current header-only NTL sources. -->
+  <ItemDefinitionGroup Condition="'$(CrtSysUseRepositoryDevelopmentFiles)' == 'true'">
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(CrtSysRepositoryRoot)include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+  </ItemDefinitionGroup>
 </Project>

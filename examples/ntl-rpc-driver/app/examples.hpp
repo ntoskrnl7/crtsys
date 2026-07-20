@@ -23,4 +23,6 @@ void run_coroutine_call();
 
 void run_stop_token_cancellation();
 
+void run_reliable_notifications();
+
 } // namespace crtsys_ntl_rpc_sample_app
