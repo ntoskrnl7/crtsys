@@ -57,6 +57,7 @@ int wmain(int argc, wchar_t **argv) {
     crtsys_ntl_rpc_sample_app::run_cancellation();
     crtsys_ntl_rpc_sample_app::run_coroutine_call();
     crtsys_ntl_rpc_sample_app::run_stop_token_cancellation();
+    crtsys_ntl_rpc_sample_app::run_reliable_notifications();
     std::wprintf(L"all RPC examples completed\n");
     return 0;
   } catch (const std::exception &error) {

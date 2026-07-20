@@ -115,8 +115,9 @@ rejects the request before its argument bytes are decoded or allowed to
 allocate memory.
 
 Explicit method IDs must be stable and unique within the endpoint and use the
-vendor IOCTL function range `0x800` through `0xFFD`; NTL reserves `0xFFE` for
-notification receives and `0xFFF` for contract discovery. Client arguments are
+vendor IOCTL function range `0x800` through `0xFFC`; NTL reserves `0xFFD` for
+session control, `0xFFE` for notification receives, and `0xFFF` for contract
+discovery. Client arguments are
 converted to the declared argument types before serialization, so a fixed-width
 method declaration cannot accidentally encode a native-width caller type.
 
@@ -151,8 +152,11 @@ ntl::status ntl::main(ntl::driver& driver,
 the shared declaration. Keep the returned
 `std::shared_ptr<ntl::rpc::server>` alive for the endpoint lifetime. Registering
 the same method ID twice fails instead of silently replacing a callback. The
-macro-generated `init()` calls `start()` after registration; direct users of
-`make_server()` must call `start()` explicitly. After that point the dispatch
+macro-generated `init()` calls `start()` after registration. Use the generated
+`demo_rpc::make_server()` instead when notifications or session hooks must be
+registered after the macro methods but before startup, and then call `start()`
+explicitly. Direct users of `ntl::rpc::make_server()` follow the same rule.
+After that point the dispatch
 table is immutable, so late registration is rejected instead of racing with
 active calls.
 
@@ -459,6 +463,105 @@ event using product-specific policy. Payload bytes contain no extra framework
 header. The receive request carries only one hidden `std::uint32_t` channel ID,
 so the same x64 driver contract is usable by x86 and x64 apps.
 
+## Client Sessions And Reliable Notifications
+
+The notification API above is deliberately transient: the app queues a receive
+first, and the driver drops or handles the event itself when no receive exists.
+Use an opted-in client session when an event must remain available until that
+specific client acknowledges it.
+
+Register the channel and session policies before starting the server:
+
+```cpp
+auto server = demo_rpc::make_server(driver, options);
+server
+    ->register_notification(progress)
+    .on_session_open(
+        [](ntl::rpc::client_session& session,
+           const ntl::rpc::call_context&) -> NTSTATUS {
+          session.state(std::make_shared<client_state>());
+          return STATUS_SUCCESS;
+        })
+    .on_session_resume(
+        [](ntl::rpc::client_session& session,
+           const ntl::rpc::call_context& caller) -> NTSTATUS {
+          return authorize_reconnect(session, caller);
+        });
+server->start();
+```
+
+`client_session::state()` stores application-owned typed state across handle
+disconnect and reconnect. Session hooks run at `PASSIVE_LEVEL`. The
+`call_context` supplied to open and resume policies describes the current
+requester, so a reconnect can recheck identity instead of trusting the token as
+the only authorization decision. `client_session::token()` lets an application
+hook restore its own external authentication or subscription metadata; treat
+that token as a secret and never print it. A callback may use the
+`client_session` pointer only for the duration of that callback; it must not
+retain the pointer. Explicit close and retention expiry wait for active RPC
+callbacks associated with the session before `on_session_close()` runs.
+
+The app explicitly creates and subscribes its session:
+
+```cpp
+ntl::rpc::client client(L"demo_rpc");
+const auto session = client.start_session();
+client.subscribe(progress);
+
+auto delivery = client.receive_reliable(progress);
+process(delivery.payload());
+client.acknowledge(progress, delivery);
+```
+
+The driver targets that session's endpoint-local numeric ID:
+
+```cpp
+const auto status = server->try_notify(
+    session_id, progress, progress_event{42, "indexing", {1, 2, 3}});
+```
+
+Reliable delivery has these rules:
+
+- `try_notify(session_id, ...)` serializes and queues one record only for a
+  subscribed session. It requires `PASSIVE_LEVEL`.
+- `receive_reliable()` and `receive_reliable_async()` return
+  `notification_delivery<T>`, which contains the typed payload and its nonzero
+  sequence.
+- A delivered record stays in the session until `acknowledge()` succeeds.
+  Disconnecting before ACK resets its in-flight state, so the next handle that
+  resumes the token receives the same sequence again.
+- Destroying or closing the device handle disconnects the session; it does not
+  discard replay state. Save `session.token` and call `resume_session(token)`
+  on a newly opened client.
+- `close_session()` explicitly destroys the session and its persisted records.
+  Its token cannot be resumed afterward.
+- `unsubscribe()` cancels a pending reliable receive. It rejects unsubscribe
+  while that channel still has unacknowledged records, preventing silent data
+  loss; ACK or process those records first.
+- Per-session and endpoint-wide queue limits are configured with
+  `max_reliable_notifications_per_session()` and
+  `max_reliable_notifications()`. A full queue returns `STATUS_DEVICE_BUSY`,
+  providing bounded backpressure rather than unbounded kernel allocation.
+
+The reconnect token is a random 128-bit capability. Treat it as a secret: do
+not log it or expose it to unrelated processes. Endpoint ACLs and
+`on_session_resume()` remain the policy boundary.
+
+In-memory sessions expire after `session_retention_ms()` while disconnected.
+NTL can optionally bridge a longer lifetime through
+`notification_storage(std::shared_ptr<notification_store>)`. The store receives
+serialized records before publication, ACK removal, token restoration, and
+explicit-session deletion. NTL itself performs no file or registry I/O. Store
+hooks run at `PASSIVE_LEVEL` without the internal session lock held, and should
+be idempotent because disconnect, retry, and shutdown can race with external
+storage failures. Retention expiry releases only the in-memory copy; it does
+not call `erase_session()`. The external store can therefore restore the token
+later when it retained session metadata or at least one unacknowledged record.
+
+Transient `receive()`/`try_notify()` and session-based reliable delivery are
+separate modes on the same typed channel. Existing transient notification code
+does not create a session or gain buffering implicitly.
+
 ## Contract Compatibility
 
 An app and driver that are released independently should validate their shared
@@ -637,7 +740,8 @@ of a suspended coroutine frame, and reuse of the endpoint after cancellation.
 [`test/rpc/notifications`](../../test/rpc/notifications) covers typed STL
 payloads, FIFO receives, timeout and cancellation, pending receive limits,
 handle cleanup, service stop after pending receive cancellation, unload,
-restart, and x64-driver/x86-app wire compatibility.
+restart, reconnectable sessions, replay until ACK, bounded backpressure,
+persistence hooks, and x64-driver/x86-app wire compatibility.
 
 [`test/rpc/security`](../../test/rpc/security) covers the original caller's
 processor mode, process ID, impersonation token, and security subject context.

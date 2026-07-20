@@ -32,6 +32,10 @@ jobs:
         shell: pwsh
         run: ./scripts/ci/Test-CrtSysExampleProjects.ps1
 
+      - name: Reject hard-coded NTSTATUS values
+        shell: pwsh
+        run: ./scripts/ci/Test-NoHardcodedNtStatus.ps1
+
   build-vs2022:
     name: VS2022/v143 ${{ matrix.project }} ${{ matrix.arch }} ${{ matrix.config }}
     runs-on: windows-2022

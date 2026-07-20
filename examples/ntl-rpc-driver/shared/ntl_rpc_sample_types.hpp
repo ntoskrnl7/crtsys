@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 #include <ntl/deps/zpp/serializer.h>
 
@@ -25,5 +26,16 @@ struct ntl_rpc_sample_reply {
   template <typename Archive, typename Self>
   static void serialize(Archive &archive, Self &self) {
     archive(self.value, self.doubled, self.biased, self.server_irql);
+  }
+};
+
+struct ntl_rpc_sample_progress {
+  std::uint64_t value = 0;
+  std::string text;
+
+  friend zpp::serializer::access;
+  template <typename Archive, typename Self>
+  static void serialize(Archive &archive, Self &self) {
+    archive(self.value, self.text);
   }
 };

@@ -14,6 +14,12 @@ Coverage includes:
 - service stop with pending receive cancellation, handle cleanup, unload,
   restart, and a fresh call;
 - no implicit event buffering when no application receive is pending.
+- reconnectable sessions with opaque cross-bitness tokens;
+- reliable delivery replay until explicit ACK;
+- bounded per-session backpressure and capacity release after ACK;
+- subscription cancellation and explicit session close;
+- typed session state and external persistence hook invocation;
+- session close waiting for an active asynchronous session RPC callback.
 
 The VM authority case uses the x64 Debug driver with both the x64 and x86
 Debug apps under Driver Verifier. Pass the installed service name to the app

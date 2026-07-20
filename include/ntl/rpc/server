@@ -12,14 +12,20 @@
 #include <ntl/driver>
 #include <ntl/pool_allocator>
 
+#include <chrono>
+#include <deque>
 #include <functional>
+#include <limits>
 #include <memory>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <tuple>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
+#include <vector>
 
 #if !defined(NTL_USER_MODE)
 // IoGetRequestorProcessId is available since Windows 2000, but the WDK
@@ -41,6 +47,11 @@ class server_options {
 public:
   static constexpr std::uint32_t default_max_pending_calls = 256;
   static constexpr std::uint32_t default_max_pending_notifications = 256;
+  static constexpr std::uint32_t default_max_sessions = 256;
+  static constexpr std::uint32_t
+      default_max_reliable_notifications_per_session = 64;
+  static constexpr std::uint32_t default_max_reliable_notifications = 4096;
+  static constexpr std::uint64_t default_session_retention_ms = 5 * 60 * 1000;
 
   /** @brief Creates SYSTEM/Administrators-only defaults for a device name. */
   explicit server_options(std::wstring name) : name_(std::move(name)) {}
@@ -100,6 +111,41 @@ public:
     return *this;
   }
 
+  /** @brief Sets the maximum number of live and reconnectable sessions. */
+  server_options &max_sessions(std::uint32_t count) {
+    if (count == 0)
+      throw std::invalid_argument("NTL RPC session limit is invalid");
+    max_sessions_ = count;
+    return *this;
+  }
+
+  /** @brief Sets the per-session reliable-notification queue limit. */
+  server_options &max_reliable_notifications_per_session(
+      std::uint32_t count) {
+    if (count == 0)
+      throw std::invalid_argument(
+          "NTL RPC per-session notification limit is invalid");
+    max_reliable_notifications_per_session_ = count;
+    return *this;
+  }
+
+  /** @brief Sets the endpoint-wide reliable-notification queue limit. */
+  server_options &max_reliable_notifications(std::uint32_t count) {
+    if (count == 0)
+      throw std::invalid_argument(
+          "NTL RPC reliable notification limit is invalid");
+    max_reliable_notifications_ = count;
+    return *this;
+  }
+
+  /** @brief Sets how long disconnected sessions remain reconnectable. */
+  server_options &session_retention_ms(std::uint64_t milliseconds) {
+    if (milliseconds == 0)
+      throw std::invalid_argument("NTL RPC session retention is invalid");
+    session_retention_ms_ = milliseconds;
+    return *this;
+  }
+
   /** @brief Returns the device name without the `\\Device\\` prefix. */
   const std::wstring &name() const noexcept { return name_; }
 
@@ -130,6 +176,24 @@ public:
     return max_pending_notifications_;
   }
 
+  /** @brief Returns the maximum session count. */
+  std::uint32_t max_sessions() const noexcept { return max_sessions_; }
+
+  /** @brief Returns the reliable queue limit for one session. */
+  std::uint32_t max_reliable_notifications_per_session() const noexcept {
+    return max_reliable_notifications_per_session_;
+  }
+
+  /** @brief Returns the endpoint-wide reliable queue limit. */
+  std::uint32_t max_reliable_notifications() const noexcept {
+    return max_reliable_notifications_;
+  }
+
+  /** @brief Returns disconnected-session retention in milliseconds. */
+  std::uint64_t session_retention_ms() const noexcept {
+    return session_retention_ms_;
+  }
+
 private:
   std::wstring name_;
   std::wstring security_descriptor_ =
@@ -141,11 +205,21 @@ private:
   std::uint32_t max_pending_calls_ = default_max_pending_calls;
   std::uint32_t max_pending_notifications_ =
       default_max_pending_notifications;
+  std::uint32_t max_sessions_ = default_max_sessions;
+  std::uint32_t max_reliable_notifications_per_session_ =
+      default_max_reliable_notifications_per_session;
+  std::uint32_t max_reliable_notifications_ =
+      default_max_reliable_notifications;
+  std::uint64_t session_retention_ms_ = default_session_retention_ms;
 };
 
 namespace detail {
 class call_context_access;
+class session_registry;
+class session_operation_guard;
 }
+
+class client_session;
 
 /**
  * @brief Non-owning cancellation view passed to an RPC callback.
@@ -178,6 +252,15 @@ public:
 
   /** @brief Reports whether the original request came from kernel mode. */
   bool is_kernel_mode() const noexcept { return requestor_mode_ == KernelMode; }
+
+  /** @brief Reports whether this call belongs to an opted-in client session. */
+  bool has_session() const noexcept { return session_ != nullptr; }
+
+  /**
+   * @brief Returns the client session for this call, or nullptr.
+   * @note The pointer is valid only during the callback invocation.
+   */
+  client_session *session() const noexcept { return session_; }
 
   /**
    * @brief Returns the process ID recorded for the requesting thread.
@@ -237,11 +320,12 @@ private:
                volatile LONG *server_stopping,
                PSECURITY_SUBJECT_CONTEXT subject_context,
                KPROCESSOR_MODE requestor_mode,
-               HANDLE requestor_process_id) noexcept
+               HANDLE requestor_process_id,
+               client_session *session) noexcept
       : request_cancelled_(request_cancelled),
         server_stopping_(server_stopping), subject_context_(subject_context),
         requestor_mode_(requestor_mode),
-        requestor_process_id_(requestor_process_id) {}
+        requestor_process_id_(requestor_process_id), session_(session) {}
 
   static bool is_set(volatile LONG *value) noexcept {
     return value && InterlockedCompareExchange(value, 0, 0) != 0;
@@ -252,6 +336,7 @@ private:
   PSECURITY_SUBJECT_CONTEXT subject_context_ = nullptr;
   KPROCESSOR_MODE requestor_mode_ = KernelMode;
   HANDLE requestor_process_id_ = nullptr;
+  client_session *session_ = nullptr;
 };
 
 namespace detail {
@@ -292,10 +377,11 @@ class call_context_access {
 public:
   static call_context make(volatile LONG *request_cancelled,
                            volatile LONG *server_stopping,
-                           captured_caller_context &caller) noexcept {
+                           captured_caller_context &caller,
+                           client_session *session = nullptr) noexcept {
     return call_context(request_cancelled, server_stopping,
                         caller.subject_context(), caller.requestor_mode(),
-                        caller.requestor_process_id());
+                        caller.requestor_process_id(), session);
   }
 };
 
@@ -340,6 +426,873 @@ public:
 
 private:
   FAST_MUTEX *mutex_;
+};
+
+} // namespace detail
+
+/**
+ * @brief Reconnectable state associated with one opted-in RPC client.
+ * @note The framework owns this object. A callback may retain typed user state,
+ * but must not retain the `client_session` pointer itself.
+ */
+class client_session {
+public:
+  /** @brief Returns the endpoint-local numeric session ID. */
+  std::uint64_t id() const noexcept { return info_.id; }
+
+  /**
+   * @brief Returns the opaque token used to reconnect this session.
+   * @note Treat this capability as a secret. Do not write it to diagnostic
+   * output or expose it to an unrelated caller.
+   */
+  const session_token &token() const noexcept { return info_.token; }
+
+  /** @brief Reports whether a file handle is currently attached. */
+  bool connected() const noexcept {
+    return InterlockedCompareExchange(&connected_, 0, 0) != 0;
+  }
+
+  /** @brief Replaces the application-owned typed session state. */
+  template <typename T> void state(std::shared_ptr<T> value) {
+    std::shared_ptr<void> previous;
+    {
+      detail::fast_mutex_guard guard(state_lock_);
+      previous = std::move(state_);
+      state_ = std::move(value);
+      state_type_ = state_ ? type_key<T>() : nullptr;
+    }
+    // A user-owned state destructor may require PASSIVE_LEVEL. Keep it out of
+    // the fast-mutex region, which runs at APC_LEVEL.
+    previous.reset();
+  }
+
+  /** @brief Returns typed application state, or empty on a type mismatch. */
+  template <typename T> std::shared_ptr<T> state() const {
+    detail::fast_mutex_guard guard(state_lock_);
+    if (!state_ || state_type_ != type_key<T>())
+      return {};
+    return std::static_pointer_cast<T>(state_);
+  }
+
+  /** @brief Clears application-owned session state. */
+  void clear_state() noexcept {
+    std::shared_ptr<void> previous;
+    {
+      detail::fast_mutex_guard guard(state_lock_);
+      previous = std::move(state_);
+      state_type_ = nullptr;
+    }
+    previous.reset();
+  }
+
+private:
+  friend class detail::session_registry;
+  friend class detail::session_operation_guard;
+
+  explicit client_session(session_info info) : info_(info) {
+    ExInitializeFastMutex(&state_lock_);
+    ExInitializeRundownProtection(&operations_);
+  }
+
+  template <typename T> static const void *type_key() noexcept {
+    static const unsigned char key = 0;
+    return &key;
+  }
+
+  struct queued_notification {
+    std::uint32_t id = 0;
+    std::uint64_t sequence = 0;
+    std::vector<unsigned char> bytes;
+    bool in_flight = false;
+    bool acknowledging = false;
+  };
+
+  session_info info_{};
+  mutable FAST_MUTEX state_lock_{};
+  EX_RUNDOWN_REF operations_{};
+  std::shared_ptr<void> state_;
+  const void *state_type_ = nullptr;
+  std::unordered_set<std::uint32_t> subscriptions_;
+  std::deque<queued_notification> notifications_;
+  PFILE_OBJECT file_object_ = nullptr;
+  std::uint64_t next_sequence_ = 1;
+  std::uint64_t disconnected_at_ = 0;
+  mutable volatile LONG connected_ = 0;
+  bool connecting_ = false;
+  bool closed_ = false;
+};
+
+/** @brief Immutable serialized record passed to persistence hooks. */
+struct notification_record_view {
+  session_token session{};
+  std::uint64_t session_id = 0;
+  std::uint32_t notification_id = 0;
+  std::uint64_t sequence = 0;
+  const unsigned char *data = nullptr;
+  std::size_t size = 0;
+};
+
+/** @brief Receives records restored by an application persistence hook. */
+class notification_restore_sink {
+public:
+  virtual ~notification_restore_sink() = default;
+
+  /** @brief Adds one serialized notification to the reconnecting session. */
+  virtual ntl::status add(std::uint32_t notification_id,
+                          std::uint64_t sequence,
+                          const void *data,
+                          std::size_t size) noexcept = 0;
+};
+
+/**
+ * @brief Optional application storage hooks for reliable notifications.
+ * @note NTL does not perform file or registry I/O. Hooks run at PASSIVE_LEVEL
+ * without an internal session lock held.
+ */
+class notification_store {
+public:
+  virtual ~notification_store() = default;
+
+  /** @brief Persists a record before it becomes visible to the client. */
+  virtual ntl::status
+  persist(const notification_record_view &) noexcept {
+    return ntl::status::ok();
+  }
+
+  /** @brief Removes one record after the client explicitly ACKs it. */
+  virtual ntl::status acknowledge(const session_token &,
+                                  std::uint32_t,
+                                  std::uint64_t) noexcept {
+    return ntl::status::ok();
+  }
+
+  /** @brief Restores records when an in-memory session no longer exists. */
+  virtual ntl::status restore(const session_token &,
+                              notification_restore_sink &) noexcept {
+    return ntl::status{STATUS_NOT_FOUND};
+  }
+
+  /** @brief Removes all external state for an explicitly closed session. */
+  virtual void erase_session(const session_token &) noexcept {}
+};
+
+namespace detail {
+
+class session_operation_guard {
+public:
+  explicit session_operation_guard(
+      std::shared_ptr<client_session> session) noexcept
+      : session_(std::move(session)) {
+    acquired_ = !session_ ||
+                ExAcquireRundownProtection(&session_->operations_) != FALSE;
+  }
+
+  session_operation_guard(const session_operation_guard &) = delete;
+  session_operation_guard &operator=(const session_operation_guard &) = delete;
+
+  ~session_operation_guard() {
+    if (session_ && acquired_)
+      ExReleaseRundownProtection(&session_->operations_);
+  }
+
+  bool available() const noexcept { return acquired_; }
+  client_session *get() const noexcept {
+    return acquired_ ? session_.get() : nullptr;
+  }
+
+private:
+  std::shared_ptr<client_session> session_;
+  bool acquired_ = false;
+};
+
+class session_registry {
+public:
+  using session_policy =
+      std::function<NTSTATUS(client_session &, const call_context &)>;
+  using session_event = std::function<void(client_session &)>;
+
+  session_registry(std::uint32_t max_sessions,
+                   std::uint32_t max_per_session,
+                   std::uint32_t max_total,
+                   std::uint64_t retention_ms)
+      : max_sessions_(max_sessions), max_per_session_(max_per_session),
+        max_total_(max_total), retention_ms_(retention_ms) {
+    ExInitializeFastMutex(&lock_);
+  }
+
+  session_registry(const session_registry &) = delete;
+  session_registry &operator=(const session_registry &) = delete;
+
+  void register_notification(std::uint32_t id, std::size_t capacity) {
+    notification_limits_.emplace(id, capacity);
+  }
+
+  void store(std::shared_ptr<notification_store> value) {
+    store_ = std::move(value);
+  }
+
+  bool has_store() const noexcept { return static_cast<bool>(store_); }
+
+  void on_open(session_policy value) { on_open_ = std::move(value); }
+  void on_resume(session_policy value) { on_resume_ = std::move(value); }
+  void on_disconnect(session_event value) {
+    on_disconnect_ = std::move(value);
+  }
+  void on_close(session_event value) { on_close_ = std::move(value); }
+
+  session_info create(PFILE_OBJECT file_object,
+                      captured_caller_context &caller,
+                      volatile LONG *stopping) {
+    if (!file_object)
+      throw ntl::exception(STATUS_INVALID_PARAMETER,
+                           "NTL RPC session requires a file object");
+    prune_expired();
+
+    std::shared_ptr<client_session> session;
+    for (;;) {
+      // ExAcquireFastMutex raises IRQL to APC_LEVEL. Generate the token before
+      // taking lock_, because SystemFunction036/BCryptGenRandom requires
+      // PASSIVE_LEVEL. The collision check and insertion remain atomic below.
+      const session_token token = generate_token();
+
+      fast_mutex_guard guard(lock_);
+      if (by_file_.find(file_object) != by_file_.end())
+        throw ntl::exception(STATUS_OBJECT_NAME_COLLISION,
+                             "The RPC handle already owns a session");
+      if (by_token_.size() >= max_sessions_)
+        throw ntl::exception(STATUS_DEVICE_BUSY,
+                             "NTL RPC session limit reached");
+      if (by_token_.find(token) != by_token_.end())
+        continue;
+
+      session_info info{};
+      info.id = allocate_session_id_locked();
+      info.token = token;
+      session = std::shared_ptr<client_session>(new client_session(info));
+      session->file_object_ = file_object;
+      session->connecting_ = true;
+      by_token_.emplace(info.token, session);
+      by_id_.emplace(info.id, session);
+      by_file_.emplace(file_object, session);
+      break;
+    }
+
+    try {
+      const auto context = call_context_access::make(
+          nullptr, stopping, caller, session.get());
+      const NTSTATUS status =
+          on_open_ ? on_open_(*session, context) : STATUS_SUCCESS;
+      if (!NT_SUCCESS(status))
+        throw ntl::exception(status, "NTL RPC session open was denied");
+
+      fast_mutex_guard guard(lock_);
+      const auto bound = by_file_.find(file_object);
+      if (session->closed_ || session->file_object_ != file_object ||
+          bound == by_file_.end() || bound->second != session)
+        throw ntl::exception(STATUS_CANCELLED,
+                             "NTL RPC session open was cancelled");
+      session->connecting_ = false;
+      InterlockedExchange(&session->connected_, 1);
+      return session->info_;
+    } catch (...) {
+      remove_failed_connection(session);
+      throw;
+    }
+  }
+
+  session_info resume(PFILE_OBJECT file_object,
+                      const session_token &token,
+                      captured_caller_context &caller,
+                      volatile LONG *stopping) {
+    if (!file_object || !token.valid())
+      throw ntl::exception(STATUS_INVALID_PARAMETER,
+                           "NTL RPC resume request is invalid");
+    prune_expired();
+
+    auto session = find_or_restore(token);
+    {
+      fast_mutex_guard guard(lock_);
+      if (by_file_.find(file_object) != by_file_.end())
+        throw ntl::exception(STATUS_OBJECT_NAME_COLLISION,
+                             "The RPC handle already owns a session");
+      if (session->closed_ || session->connecting_ || session->connected())
+        throw ntl::exception(STATUS_DEVICE_BUSY,
+                             "NTL RPC session is already connected");
+      session->connecting_ = true;
+      session->file_object_ = file_object;
+      by_file_.emplace(file_object, session);
+    }
+
+    try {
+      const auto context = call_context_access::make(
+          nullptr, stopping, caller, session.get());
+      const NTSTATUS status =
+          on_resume_ ? on_resume_(*session, context) : STATUS_SUCCESS;
+      if (!NT_SUCCESS(status))
+        throw ntl::exception(status, "NTL RPC session resume was denied");
+
+      fast_mutex_guard guard(lock_);
+      const auto bound = by_file_.find(file_object);
+      if (session->closed_ || session->file_object_ != file_object ||
+          bound == by_file_.end() || bound->second != session)
+        throw ntl::exception(STATUS_CANCELLED,
+                             "NTL RPC session resume was cancelled");
+      for (auto &record : session->notifications_) {
+        record.in_flight = false;
+        record.acknowledging = false;
+      }
+      session->disconnected_at_ = 0;
+      session->connecting_ = false;
+      InterlockedExchange(&session->connected_, 1);
+      return session->info_;
+    } catch (...) {
+      fast_mutex_guard guard(lock_);
+      by_file_.erase(file_object);
+      if (!session->closed_) {
+        session->file_object_ = nullptr;
+        session->connecting_ = false;
+        session->disconnected_at_ = now_ms();
+      }
+      throw;
+    }
+  }
+
+  std::shared_ptr<client_session> find(PFILE_OBJECT file_object) const {
+    if (!file_object)
+      return {};
+    fast_mutex_guard guard(lock_);
+    const auto found = by_file_.find(file_object);
+    return found == by_file_.end() ? std::shared_ptr<client_session>{}
+                                   : found->second;
+  }
+
+  void subscribe(PFILE_OBJECT file_object, const session_token &token,
+                  std::uint32_t notification_id, bool enabled) {
+    if (notification_limits_.find(notification_id) ==
+        notification_limits_.end())
+      throw ntl::exception(STATUS_INVALID_DEVICE_REQUEST,
+                           "Unknown reliable notification ID");
+
+    fast_mutex_guard guard(lock_);
+    auto session = require_bound_locked(file_object, token);
+    if (enabled) {
+      session->subscriptions_.insert(notification_id);
+    } else {
+      const auto pending = std::find_if(
+          session->notifications_.begin(), session->notifications_.end(),
+          [=](const client_session::queued_notification &record) {
+            return record.id == notification_id;
+          });
+      if (pending != session->notifications_.end())
+        throw ntl::exception(
+            STATUS_DEVICE_BUSY,
+            "A reliable notification must be acknowledged before "
+            "unsubscribing");
+      session->subscriptions_.erase(notification_id);
+    }
+  }
+
+  void acknowledge(PFILE_OBJECT file_object, const session_token &token,
+                   std::uint32_t notification_id, std::uint64_t sequence) {
+    std::shared_ptr<client_session> session;
+    {
+      fast_mutex_guard guard(lock_);
+      session = require_bound_locked(file_object, token);
+      auto found = find_record(*session, notification_id, sequence);
+      if (found == session->notifications_.end())
+        throw ntl::exception(STATUS_NOT_FOUND,
+                             "Reliable notification ACK was not found");
+      if (found->acknowledging)
+        throw ntl::exception(STATUS_DEVICE_BUSY,
+                             "Reliable notification ACK is already active");
+      if (!ExAcquireRundownProtection(&session->operations_))
+        throw ntl::exception(STATUS_DELETE_PENDING,
+                             "NTL RPC session is closing");
+      found->acknowledging = true;
+    }
+    rundown_guard operation(session->operations_);
+
+    const auto store = store_;
+    if (store) {
+      const auto status =
+          store->acknowledge(token, notification_id, sequence);
+      if (!status.is_ok()) {
+        fast_mutex_guard guard(lock_);
+        auto found = find_record(*session, notification_id, sequence);
+        if (found != session->notifications_.end())
+          found->acknowledging = false;
+        throw ntl::exception(status,
+                             "Reliable notification ACK persistence failed");
+      }
+    }
+
+    fast_mutex_guard guard(lock_);
+    auto found = find_record(*session, notification_id, sequence);
+    if (!session->closed_ && found != session->notifications_.end()) {
+      session->notifications_.erase(found);
+      --queued_total_;
+    }
+  }
+
+  enum class receive_result { queued, completed };
+
+  receive_result receive(PFILE_OBJECT file_object,
+                         std::uint32_t notification_id,
+                         ntl::device_control::out_buffer &output) {
+    fast_mutex_guard guard(lock_);
+    auto session = require_bound_locked(file_object, session_token{});
+    if (session->subscriptions_.find(notification_id) ==
+        session->subscriptions_.end())
+      throw ntl::exception(STATUS_INVALID_DEVICE_STATE,
+                           "Reliable notification channel is not subscribed");
+
+    auto found = first_ready_record(*session, notification_id);
+    if (found == session->notifications_.end())
+      return receive_result::queued;
+    if (!output.write_bytes(found->bytes.data(), found->bytes.size()))
+      throw ntl::exception(STATUS_BUFFER_TOO_SMALL,
+                           "Reliable notification receive buffer is too small");
+    found->in_flight = true;
+    return receive_result::completed;
+  }
+
+  template <typename Enqueue>
+  std::uint64_t enqueue_receive(PFILE_OBJECT file_object,
+                                std::uint32_t notification_id,
+                                Enqueue &&enqueue) {
+    fast_mutex_guard guard(lock_);
+    auto session = require_bound_locked(file_object, session_token{});
+    if (session->subscriptions_.find(notification_id) ==
+        session->subscriptions_.end())
+      throw ntl::exception(STATUS_INVALID_DEVICE_STATE,
+                           "Reliable notification channel is not subscribed");
+    enqueue();
+    return session->info_.id;
+  }
+
+  template <typename Notification>
+  ntl::status publish(
+      std::uint64_t session_id,
+      const typename Notification::payload_type &payload) noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return ntl::status{STATUS_INVALID_DEVICE_STATE};
+
+    std::shared_ptr<client_session> session;
+    std::uint64_t sequence = 0;
+    {
+      fast_mutex_guard guard(lock_);
+      const auto found = by_id_.find(session_id);
+      if (found == by_id_.end() || found->second->closed_)
+        return ntl::status{STATUS_NOT_FOUND};
+      session = found->second;
+      if (session->subscriptions_.find(Notification::id()) ==
+          session->subscriptions_.end())
+        return ntl::status{STATUS_NOT_FOUND};
+      if (session->notifications_.size() >= max_per_session_ ||
+          queued_total_ >= max_total_)
+        return ntl::status{STATUS_DEVICE_BUSY};
+      if (!ExAcquireRundownProtection(&session->operations_))
+        return ntl::status{STATUS_DELETE_PENDING};
+      sequence = session->next_sequence_++;
+    }
+    rundown_guard operation(session->operations_);
+
+    std::vector<unsigned char> bytes;
+    try {
+      bytes.resize(Notification::response_size() +
+                   reliable_notification_overhead);
+      notification_delivery<typename Notification::payload_type> delivery(
+          sequence, payload);
+      zpp::serializer::memory_view_output_archive archive(bytes.data(),
+                                                           bytes.size());
+      archive(delivery);
+      bytes.resize(archive.offset());
+    } catch (const zpp::serializer::out_of_range &) {
+      return ntl::status{STATUS_BUFFER_TOO_SMALL};
+    } catch (const std::bad_alloc &) {
+      return ntl::status{STATUS_INSUFFICIENT_RESOURCES};
+    } catch (const std::exception &) {
+      return ntl::status{STATUS_INVALID_PARAMETER};
+    }
+
+    const auto store = store_;
+    if (store) {
+      const notification_record_view record{
+          session->info_.token, session->info_.id, Notification::id(),
+          sequence, bytes.data(), bytes.size()};
+      const auto status = store->persist(record);
+      if (!status.is_ok())
+        return status;
+    }
+
+    NTSTATUS queue_status = STATUS_DEVICE_BUSY;
+    try {
+      fast_mutex_guard guard(lock_);
+      if (!session->closed_ &&
+          session->subscriptions_.find(Notification::id()) !=
+              session->subscriptions_.end() &&
+          session->notifications_.size() < max_per_session_ &&
+          queued_total_ < max_total_) {
+        typename client_session::queued_notification record;
+        record.id = Notification::id();
+        record.sequence = sequence;
+        record.bytes = std::move(bytes);
+        session->notifications_.push_back(std::move(record));
+        ++queued_total_;
+        queue_status = STATUS_SUCCESS;
+      }
+    } catch (const std::bad_alloc &) {
+      queue_status = STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    if (!NT_SUCCESS(queue_status) && store) {
+      const auto rollback = store->acknowledge(
+          session->info_.token, Notification::id(), sequence);
+      if (!rollback.is_ok())
+        return rollback;
+    }
+    return ntl::status{queue_status};
+  }
+
+  bool take_for_delivery(std::uint64_t session_id,
+                         std::uint32_t notification_id,
+                         std::vector<unsigned char> &bytes,
+                         PFILE_OBJECT &file_object,
+                         std::uint64_t &sequence) {
+    fast_mutex_guard guard(lock_);
+    const auto found = by_id_.find(session_id);
+    if (found == by_id_.end() || !found->second->connected())
+      return false;
+    auto &session = *found->second;
+    auto record = first_ready_record(session, notification_id);
+    if (record == session.notifications_.end())
+      return false;
+    file_object = session.file_object_;
+    if (!file_object)
+      return false;
+    try {
+      bytes = record->bytes;
+    } catch (const std::bad_alloc &) {
+      return false;
+    }
+    record->in_flight = true;
+    sequence = record->sequence;
+    return true;
+  }
+
+  void release_delivery(std::uint64_t session_id,
+                        std::uint32_t notification_id,
+                        std::uint64_t sequence) noexcept {
+    fast_mutex_guard guard(lock_);
+    const auto found = by_id_.find(session_id);
+    if (found == by_id_.end())
+      return;
+    auto record = find_record(*found->second, notification_id, sequence);
+    if (record != found->second->notifications_.end() &&
+        !record->acknowledging)
+      record->in_flight = false;
+  }
+
+  PFILE_OBJECT connected_file(std::uint64_t session_id) const {
+    fast_mutex_guard guard(lock_);
+    const auto found = by_id_.find(session_id);
+    if (found == by_id_.end() || !found->second->connected())
+      return nullptr;
+    return found->second->file_object_;
+  }
+
+  void disconnect(PFILE_OBJECT file_object) noexcept {
+    std::shared_ptr<client_session> session;
+    {
+      fast_mutex_guard guard(lock_);
+      const auto found = by_file_.find(file_object);
+      if (found == by_file_.end())
+        return;
+      session = found->second;
+      by_file_.erase(found);
+      session->file_object_ = nullptr;
+      session->connecting_ = false;
+      session->disconnected_at_ = now_ms();
+      for (auto &record : session->notifications_) {
+        record.in_flight = false;
+        record.acknowledging = false;
+      }
+      InterlockedExchange(&session->connected_, 0);
+    }
+    invoke_event_noexcept(on_disconnect_, *session);
+  }
+
+  void close(PFILE_OBJECT file_object, const session_token &token) {
+    std::shared_ptr<client_session> session;
+    {
+      fast_mutex_guard guard(lock_);
+      session = require_bound_locked(file_object, token);
+      remove_locked(session);
+    }
+    ExWaitForRundownProtectionRelease(&session->operations_);
+    finalize_closed(session, true);
+  }
+
+  void stop() noexcept {
+    for (;;) {
+      std::shared_ptr<client_session> session;
+      {
+        fast_mutex_guard guard(lock_);
+        if (by_token_.empty()) {
+          by_file_.clear();
+          by_id_.clear();
+          queued_total_ = 0;
+          break;
+        }
+        session = by_token_.begin()->second;
+        remove_locked(session);
+      }
+      ExWaitForRundownProtectionRelease(&session->operations_);
+      invoke_event_noexcept(on_close_, *session);
+    }
+  }
+
+private:
+  struct token_hash {
+    std::size_t operator()(const session_token &value) const noexcept {
+      const auto mixed = value.high ^
+                         (value.low + 0x9e3779b97f4a7c15ull +
+                          (value.high << 6) + (value.high >> 2));
+      return static_cast<std::size_t>(mixed ^ (mixed >> 32));
+    }
+  };
+
+  class restore_collector final : public notification_restore_sink {
+  public:
+    restore_collector(const session_registry &owner) : owner_(owner) {}
+
+    ntl::status add(std::uint32_t id, std::uint64_t sequence,
+                    const void *data, std::size_t size) noexcept override {
+      try {
+        const auto limit = owner_.notification_limits_.find(id);
+        if (limit == owner_.notification_limits_.end() || sequence == 0 ||
+            sequence == (std::numeric_limits<std::uint64_t>::max)() ||
+            !data || size == 0 ||
+            size > limit->second + reliable_notification_overhead ||
+            records_.size() >= owner_.max_per_session_)
+          return ntl::status{STATUS_INVALID_PARAMETER};
+        const auto duplicate = std::find_if(
+            records_.begin(), records_.end(),
+            [=](const client_session::queued_notification &record) {
+              return record.id == id && record.sequence == sequence;
+            });
+        if (duplicate != records_.end())
+          return ntl::status{STATUS_OBJECT_NAME_COLLISION};
+        client_session::queued_notification record;
+        record.id = id;
+        record.sequence = sequence;
+        const auto *first = static_cast<const unsigned char *>(data);
+        record.bytes.assign(first, first + size);
+        records_.push_back(std::move(record));
+        return ntl::status::ok();
+      } catch (const std::exception &) {
+        return ntl::status{STATUS_INSUFFICIENT_RESOURCES};
+      }
+    }
+
+    const session_registry &owner_;
+    std::vector<client_session::queued_notification> records_;
+  };
+
+  static std::uint64_t now_ms() noexcept {
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+  }
+
+  static session_token generate_token() {
+    std::random_device random;
+    session_token token{};
+    do {
+      token.high = (static_cast<std::uint64_t>(random()) << 32) | random();
+      token.low = (static_cast<std::uint64_t>(random()) << 32) | random();
+    } while (!token.valid());
+    return token;
+  }
+
+  using record_iterator =
+      std::deque<client_session::queued_notification>::iterator;
+
+  static record_iterator find_record(client_session &session,
+                                     std::uint32_t id,
+                                     std::uint64_t sequence) {
+    return std::find_if(
+        session.notifications_.begin(), session.notifications_.end(),
+        [=](const client_session::queued_notification &record) {
+          return record.id == id && record.sequence == sequence;
+        });
+  }
+
+  static record_iterator first_ready_record(client_session &session,
+                                             std::uint32_t id) {
+    return std::find_if(
+        session.notifications_.begin(), session.notifications_.end(),
+        [=](const client_session::queued_notification &record) {
+          return record.id == id && !record.in_flight &&
+                 !record.acknowledging;
+        });
+  }
+
+  std::shared_ptr<client_session>
+  require_bound_locked(PFILE_OBJECT file_object,
+                       const session_token &token) const {
+    const auto found = by_file_.find(file_object);
+    if (found == by_file_.end() || found->second->closed_ ||
+        (!token.valid() ? false : found->second->info_.token != token))
+      throw ntl::exception(STATUS_INVALID_HANDLE,
+                           "RPC handle has no matching client session");
+    return found->second;
+  }
+
+  std::shared_ptr<client_session>
+  find_or_restore(const session_token &token) {
+    {
+      fast_mutex_guard guard(lock_);
+      const auto found = by_token_.find(token);
+      if (found != by_token_.end())
+        return found->second;
+    }
+
+    const auto store = store_;
+    if (!store)
+      throw ntl::exception(STATUS_NOT_FOUND,
+                           "NTL RPC session token was not found");
+
+    restore_collector collector(*this);
+    const auto restored = store->restore(token, collector);
+    if (!restored.is_ok())
+      throw ntl::exception(restored,
+                           "NTL RPC persisted session restore failed");
+
+    fast_mutex_guard guard(lock_);
+    const auto existing = by_token_.find(token);
+    if (existing != by_token_.end())
+      return existing->second;
+    if (by_token_.size() >= max_sessions_ ||
+        queued_total_ + collector.records_.size() > max_total_)
+      throw ntl::exception(STATUS_DEVICE_BUSY,
+                           "NTL RPC restored session exceeds limits");
+
+    session_info info{token, allocate_session_id_locked()};
+    auto session = std::shared_ptr<client_session>(new client_session(info));
+    std::uint64_t next_sequence = 1;
+    for (auto &record : collector.records_) {
+      next_sequence = (std::max)(next_sequence, record.sequence + 1);
+      session->subscriptions_.insert(record.id);
+      session->notifications_.push_back(std::move(record));
+      ++queued_total_;
+    }
+    session->next_sequence_ = next_sequence;
+    session->disconnected_at_ = now_ms();
+    by_token_.emplace(token, session);
+    by_id_.emplace(info.id, session);
+    return session;
+  }
+
+  void remove_failed_connection(
+      const std::shared_ptr<client_session> &session) noexcept {
+    {
+      fast_mutex_guard guard(lock_);
+      remove_locked(session);
+    }
+    ExWaitForRundownProtectionRelease(&session->operations_);
+    finalize_closed(session, true);
+  }
+
+  std::uint64_t allocate_session_id_locked() noexcept {
+    std::uint64_t id = 0;
+    do {
+      id = next_session_id_++;
+    } while (id == 0 || by_id_.find(id) != by_id_.end());
+    return id;
+  }
+
+  void remove_locked(const std::shared_ptr<client_session> &session) noexcept {
+    if (session->file_object_)
+      by_file_.erase(session->file_object_);
+    by_id_.erase(session->info_.id);
+    by_token_.erase(session->info_.token);
+    queued_total_ -= session->notifications_.size();
+    session->file_object_ = nullptr;
+    session->closed_ = true;
+    session->connecting_ = false;
+    InterlockedExchange(&session->connected_, 0);
+  }
+
+  void finalize_closed(const std::shared_ptr<client_session> &session,
+                       bool erase_persisted) noexcept {
+    const auto store = store_;
+    if (store && erase_persisted)
+      store->erase_session(session->info_.token);
+    invoke_event_noexcept(on_close_, *session);
+  }
+
+  void prune_expired() {
+    const auto now = now_ms();
+    std::vector<std::shared_ptr<client_session>> expired;
+    {
+      fast_mutex_guard guard(lock_);
+      // Reserve before mutating maps so an allocation failure leaves every
+      // session reachable and internally consistent.
+      expired.reserve(by_token_.size());
+      for (auto iterator = by_token_.begin(); iterator != by_token_.end();) {
+        auto session = iterator->second;
+        if (!session->connected() && !session->connecting_ &&
+            session->disconnected_at_ != 0 &&
+            now - session->disconnected_at_ >= retention_ms_) {
+          by_id_.erase(session->info_.id);
+          queued_total_ -= session->notifications_.size();
+          session->closed_ = true;
+          expired.push_back(session);
+          iterator = by_token_.erase(iterator);
+        } else {
+          ++iterator;
+        }
+      }
+    }
+    for (auto &session : expired) {
+      ExWaitForRundownProtectionRelease(&session->operations_);
+      // Retention expiry releases kernel memory, but an application-provided
+      // store remains authoritative and may restore the token later.
+      finalize_closed(session, false);
+    }
+  }
+
+  static void invoke_event_noexcept(const session_event &event,
+                                    client_session &session) noexcept {
+    if (!event)
+      return;
+    try {
+      event(session);
+    } catch (...) {
+      // Session lifecycle hooks are observational once teardown has started.
+      // An application exception must not escape a kernel cleanup path.
+    }
+  }
+
+  mutable FAST_MUTEX lock_{};
+  std::unordered_map<session_token, std::shared_ptr<client_session>, token_hash>
+      by_token_;
+  std::unordered_map<std::uint64_t, std::shared_ptr<client_session>> by_id_;
+  std::unordered_map<PFILE_OBJECT, std::shared_ptr<client_session>> by_file_;
+  std::unordered_map<std::uint32_t, std::size_t> notification_limits_;
+  std::shared_ptr<notification_store> store_;
+  session_policy on_open_;
+  session_policy on_resume_;
+  session_event on_disconnect_;
+  session_event on_close_;
+  std::uint32_t max_sessions_;
+  std::size_t max_per_session_;
+  std::size_t max_total_;
+  std::uint64_t retention_ms_;
+  std::size_t queued_total_ = 0;
+  std::uint64_t next_session_id_ = 1;
 };
 
 template <typename Archive, typename Tuple, std::size_t... Index>
@@ -456,6 +1409,8 @@ void invoke_method(Callback &callback,
 
 class notification_queue {
 public:
+  enum class wait_mode : ULONG_PTR { live = 0, reliable = 1 };
+
   notification_queue() = default;
   notification_queue(const notification_queue &) = delete;
   notification_queue &operator=(const notification_queue &) = delete;
@@ -485,8 +1440,9 @@ public:
   }
 
   ntl::device_control::dispatch_result
-  enqueue(ntl::irp &request, std::uint32_t id) {
-    notification_insert_context context{id};
+  enqueue(ntl::irp &request, std::uint32_t id,
+          wait_mode mode = wait_mode::live) {
+    notification_insert_context context{id, mode};
     const NTSTATUS status =
         IoCsqInsertIrpEx(&csq_, request.get(), nullptr, &context);
     if (status == STATUS_CANCELLED) {
@@ -508,6 +1464,8 @@ public:
     notification_match match{};
     match.id = Notification::id();
     match.match_id = true;
+    match.mode = wait_mode::live;
+    match.match_mode = true;
     PIRP request = IoCsqRemoveNextIrp(&csq_, &match);
     if (!request) {
       return ntl::status{
@@ -544,12 +1502,44 @@ public:
     return ntl::status{status};
   }
 
+  PIRP remove_next(std::uint32_t id, PFILE_OBJECT file_object,
+                   wait_mode mode) noexcept {
+    notification_match match{};
+    match.id = id;
+    match.file_object = file_object;
+    match.mode = mode;
+    match.match_id = true;
+    match.match_file = true;
+    match.match_mode = true;
+    return IoCsqRemoveNextIrp(&csq_, &match);
+  }
+
+  void complete(PIRP request, NTSTATUS status,
+                ULONG_PTR information) noexcept {
+    complete_owned(request, status, information);
+  }
+
   void cleanup(PFILE_OBJECT file_object) noexcept {
     if (!file_object)
       return;
     notification_match match{};
     match.file_object = file_object;
     match.match_file = true;
+    while (PIRP request = IoCsqRemoveNextIrp(&csq_, &match))
+      complete_owned(request, STATUS_CANCELLED, 0);
+  }
+
+  void cancel(PFILE_OBJECT file_object, std::uint32_t id,
+              wait_mode mode) noexcept {
+    if (!file_object)
+      return;
+    notification_match match{};
+    match.id = id;
+    match.file_object = file_object;
+    match.mode = mode;
+    match.match_id = true;
+    match.match_file = true;
+    match.match_mode = true;
     while (PIRP request = IoCsqRemoveNextIrp(&csq_, &match))
       complete_owned(request, STATUS_CANCELLED, 0);
   }
@@ -567,13 +1557,16 @@ public:
 private:
   struct notification_insert_context {
     std::uint32_t id;
+    wait_mode mode;
   };
 
   struct notification_match {
     std::uint32_t id = 0;
     PFILE_OBJECT file_object = nullptr;
+    wait_mode mode = wait_mode::live;
     bool match_id = false;
     bool match_file = false;
+    bool match_mode = false;
   };
 
   static notification_queue *from_csq(PIO_CSQ csq) noexcept {
@@ -596,6 +1589,8 @@ private:
     request->Tail.Overlay.DriverContext[0] =
         reinterpret_cast<PVOID>(static_cast<ULONG_PTR>(context->id));
     request->Tail.Overlay.DriverContext[1] = self;
+    request->Tail.Overlay.DriverContext[2] =
+        reinterpret_cast<PVOID>(static_cast<ULONG_PTR>(context->mode));
     InsertTailList(&self->requests_, &request->Tail.Overlay.ListEntry);
     InterlockedIncrement(&self->pending_);
     return STATUS_SUCCESS;
@@ -629,6 +1624,11 @@ private:
         selected = IoGetCurrentIrpStackLocation(candidate)->FileObject ==
                    match->file_object;
       }
+      if (selected && match->match_mode) {
+        const auto mode = static_cast<wait_mode>(reinterpret_cast<ULONG_PTR>(
+            candidate->Tail.Overlay.DriverContext[2]));
+        selected = mode == match->mode;
+      }
       if (selected)
         return candidate;
     }
@@ -654,6 +1654,7 @@ private:
         request->Tail.Overlay.DriverContext[1] == this;
     request->Tail.Overlay.DriverContext[0] = nullptr;
     request->Tail.Overlay.DriverContext[1] = nullptr;
+    request->Tail.Overlay.DriverContext[2] = nullptr;
     request->IoStatus.Status = status;
     request->IoStatus.Information = information;
     IoCompleteRequest(request, IO_NO_INCREMENT);
@@ -682,10 +1683,16 @@ public:
   dispatch_table(std::uint32_t contract_version,
                  std::uint64_t capabilities, bool asynchronous,
                  std::uint32_t max_pending_calls,
-                 std::uint32_t max_pending_notifications)
+                 std::uint32_t max_pending_notifications,
+                 std::uint32_t max_sessions,
+                 std::uint32_t max_reliable_per_session,
+                 std::uint32_t max_reliable_total,
+                 std::uint64_t session_retention_ms)
       : contract_version_(contract_version), capabilities_(capabilities),
         asynchronous_(asynchronous),
-        max_pending_calls_(static_cast<LONG>(max_pending_calls)) {
+        max_pending_calls_(static_cast<LONG>(max_pending_calls)),
+        sessions_(max_sessions, max_reliable_per_session,
+                  max_reliable_total, session_retention_ms) {
     ExInitializeRundownProtection(&rundown_);
     ExInitializeFastMutex(&registration_lock_);
     notifications_.initialize(rundown_, max_pending_notifications);
@@ -698,9 +1705,11 @@ private:
                  dispatch_handler &handler,
                  const ntl::device_control::in_buffer &input,
                  const ntl::device_control::out_buffer &output,
-                 dispatch_table *owner) noexcept
+                 dispatch_table *owner,
+                 std::shared_ptr<client_session> session) noexcept
         : rundown_(&rundown), request_(request), handler_(&handler),
-          input_(input), output_(output), owner_(owner), caller_(request) {}
+          input_(input), output_(output), owner_(owner), caller_(request),
+          session_(std::move(session)) {}
 
     pending_call(const pending_call &) = delete;
     pending_call &operator=(const pending_call &) = delete;
@@ -761,11 +1770,15 @@ private:
     void execute() noexcept {
       NTSTATUS status = STATUS_SUCCESS;
 
-      if (InterlockedCompareExchange(&cancel_requested_, 0, 0) == 0) {
+      if (!session_.available()) {
+        status = STATUS_DELETE_PENDING;
+        output_.clear();
+      } else if (InterlockedCompareExchange(&cancel_requested_, 0, 0) == 0) {
         const auto seh_result = ntl::seh::try_except([&]() {
           try {
             const auto context = call_context_access::make(
-                &cancel_requested_, &owner_->stopping_, caller_);
+                &cancel_requested_, &owner_->stopping_, caller_,
+                session_.get());
             (*handler_)(input_, output_, context);
           } catch (const ntl::exception &error) {
             status = error.get_status();
@@ -808,6 +1821,7 @@ private:
     ntl::device_control::out_buffer output_;
     dispatch_table *owner_;
     captured_caller_context caller_;
+    session_operation_guard session_;
     WORK_QUEUE_ITEM work_item_{};
     volatile LONG cancel_requested_ = 0;
   };
@@ -874,6 +1888,64 @@ public:
     method_ids_.push_back(static_cast<std::uint32_t>(Method::id()));
   }
 
+  void set_notification_store(std::shared_ptr<notification_store> store) {
+    fast_mutex_guard guard(registration_lock_);
+    if (InterlockedCompareExchange(&started_, 0, 0) != 0)
+      throw ntl::exception(
+          STATUS_INVALID_DEVICE_STATE,
+          "NTL RPC notification storage is immutable after start");
+    sessions_.store(std::move(store));
+  }
+
+  template <typename Callback> void set_session_open(Callback &&callback) {
+    using callback_type = typename std::decay<Callback>::type;
+    fast_mutex_guard guard(registration_lock_);
+    if (InterlockedCompareExchange(&started_, 0, 0) != 0)
+      throw ntl::exception(STATUS_INVALID_DEVICE_STATE,
+                           "NTL RPC session hooks are immutable after start");
+    sessions_.on_open(
+        [fn = callback_type(std::forward<Callback>(callback))](
+            client_session &session, const call_context &context) mutable {
+          return authorization_status(fn(session, context));
+        });
+  }
+
+  template <typename Callback> void set_session_resume(Callback &&callback) {
+    using callback_type = typename std::decay<Callback>::type;
+    fast_mutex_guard guard(registration_lock_);
+    if (InterlockedCompareExchange(&started_, 0, 0) != 0)
+      throw ntl::exception(STATUS_INVALID_DEVICE_STATE,
+                           "NTL RPC session hooks are immutable after start");
+    sessions_.on_resume(
+        [fn = callback_type(std::forward<Callback>(callback))](
+            client_session &session, const call_context &context) mutable {
+          return authorization_status(fn(session, context));
+        });
+  }
+
+  template <typename Callback>
+  void set_session_disconnect(Callback &&callback) {
+    using callback_type = typename std::decay<Callback>::type;
+    fast_mutex_guard guard(registration_lock_);
+    if (InterlockedCompareExchange(&started_, 0, 0) != 0)
+      throw ntl::exception(STATUS_INVALID_DEVICE_STATE,
+                           "NTL RPC session hooks are immutable after start");
+    sessions_.on_disconnect(
+        [fn = callback_type(std::forward<Callback>(callback))](
+            client_session &session) mutable { fn(session); });
+  }
+
+  template <typename Callback> void set_session_close(Callback &&callback) {
+    using callback_type = typename std::decay<Callback>::type;
+    fast_mutex_guard guard(registration_lock_);
+    if (InterlockedCompareExchange(&started_, 0, 0) != 0)
+      throw ntl::exception(STATUS_INVALID_DEVICE_STATE,
+                           "NTL RPC session hooks are immutable after start");
+    sessions_.on_close(
+        [fn = callback_type(std::forward<Callback>(callback))](
+            client_session &session) mutable { fn(session); });
+  }
+
   template <typename Notification> void add_notification() {
     fast_mutex_guard guard(registration_lock_);
     if (InterlockedCompareExchange(&started_, 0, 0) != 0 ||
@@ -887,6 +1959,8 @@ public:
     if (!inserted.second)
       throw ntl::exception(STATUS_OBJECT_NAME_COLLISION,
                            "Duplicate NTL RPC notification ID");
+    sessions_.register_notification(Notification::id(),
+                                    Notification::response_size());
   }
 
   void start() {
@@ -899,7 +1973,11 @@ public:
         transport_features::current |
         (asynchronous_ ? transport_features::asynchronous_calls : 0) |
         (!notification_limits_.empty()
-             ? transport_features::kernel_notifications
+             ? transport_features::kernel_notifications |
+                   transport_features::reliable_notifications
+             : 0) |
+        (sessions_.has_store()
+             ? transport_features::notification_persistence_hooks
              : 0);
     contract_ = contract_info(current_protocol_version, contract_version_,
                               features, capabilities_, method_ids_);
@@ -911,6 +1989,7 @@ public:
     if (InterlockedCompareExchange(&stopping_, 1, 0) == 0) {
       notifications_.stop();
       ExWaitForRundownProtectionRelease(&rundown_);
+      sessions_.stop();
     }
   }
 
@@ -951,7 +2030,51 @@ public:
       throw ntl::exception(STATUS_DEVICE_NOT_READY,
                            "NTL RPC server has not started");
 
+    if (code.value == session_control_code()) {
+      dispatch_session_control(request, input, output);
+      return ntl::device_control::dispatch_result::complete;
+    }
+
     if (code.value == notification_control_code()) {
+      if (!ExAcquireRundownProtection(&rundown_))
+        throw ntl::exception(STATUS_DELETE_PENDING,
+                             "NTL RPC server is stopping");
+      rundown_guard notification_rundown(rundown_);
+
+      if (input.size ==
+          sizeof(detail::reliable_notification_wait_request)) {
+        const auto wait =
+            input.as<detail::reliable_notification_wait_request>();
+        if (!wait || wait->reserved != 0)
+          throw ntl::exception(
+              STATUS_INVALID_PARAMETER,
+              "Invalid reliable notification receive request");
+        const auto registered = notification_limits_.find(wait->id);
+        if (registered == notification_limits_.end())
+          throw ntl::exception(STATUS_INVALID_DEVICE_REQUEST,
+                               "Unknown reliable notification ID");
+        if (!output.can_write(registered->second +
+                              reliable_notification_overhead))
+          throw ntl::exception(
+              STATUS_BUFFER_TOO_SMALL,
+              "Reliable notification receive buffer is too small");
+
+        const auto result = sessions_.receive(
+            request.stack_location()->FileObject, wait->id, output);
+        if (result == session_registry::receive_result::completed)
+          return ntl::device_control::dispatch_result::complete;
+
+        auto pending = ntl::device_control::dispatch_result::complete;
+        const auto session_id = sessions_.enqueue_receive(
+            request.stack_location()->FileObject, wait->id, [&] {
+              pending = notifications_.enqueue(
+                  request, wait->id,
+                  notification_queue::wait_mode::reliable);
+            });
+        try_complete_reliable(session_id, wait->id);
+        return pending;
+      }
+
       if (input.size != sizeof(detail::notification_wait_request))
         throw ntl::exception(
             STATUS_INVALID_PARAMETER,
@@ -993,8 +2116,14 @@ public:
 
     if (!asynchronous_) {
       captured_caller_context caller(request.get());
+      session_operation_guard session(
+          sessions_.find(request.stack_location()->FileObject));
+      if (!session.available())
+        throw ntl::exception(STATUS_DELETE_PENDING,
+                             "NTL RPC client session is closing");
       const auto context =
-          call_context_access::make(nullptr, &stopping_, caller);
+          call_context_access::make(nullptr, &stopping_, caller,
+                                    session.get());
       found->second(input, output, context);
       return ntl::device_control::dispatch_result::complete;
     }
@@ -1003,8 +2132,10 @@ public:
       throw ntl::exception(STATUS_DEVICE_BUSY,
                            "NTL RPC pending-call limit reached");
 
+    auto session = sessions_.find(request.stack_location()->FileObject);
     auto pending = ntl::try_make_pool<pending_call>(
-        "NTRa", rundown_, request.get(), found->second, input, output, this);
+        "NTRa", rundown_, request.get(), found->second, input, output, this,
+        std::move(session));
     if (!pending) {
       InterlockedDecrement(&pending_calls_);
       throw ntl::exception(pending.status(),
@@ -1018,7 +2149,9 @@ public:
   }
 
   void cleanup(ntl::irp &request) noexcept {
-    notifications_.cleanup(request.stack_location()->FileObject);
+    const auto file_object = request.stack_location()->FileObject;
+    sessions_.disconnect(file_object);
+    notifications_.cleanup(file_object);
   }
 
   template <typename Notification>
@@ -1037,7 +2170,163 @@ public:
     return notifications_.template try_notify<Notification>(payload);
   }
 
+  template <typename Notification>
+  ntl::status try_notify(
+      std::uint64_t session_id,
+      const typename Notification::payload_type &payload) noexcept {
+    if (InterlockedCompareExchange(&started_, 0, 0) == 0)
+      return ntl::status{STATUS_DEVICE_NOT_READY};
+    if (!ExAcquireRundownProtection(&rundown_))
+      return ntl::status{STATUS_DELETE_PENDING};
+    rundown_guard guard(rundown_);
+
+    const auto registered = notification_limits_.find(Notification::id());
+    if (registered == notification_limits_.end() ||
+        registered->second != Notification::response_size())
+      return ntl::status{STATUS_INVALID_DEVICE_REQUEST};
+    const auto status =
+        sessions_.template publish<Notification>(session_id, payload);
+    if (status.is_ok())
+      try_complete_reliable(session_id, Notification::id());
+    return status;
+  }
+
 private:
+  void dispatch_session_control(
+      ntl::irp &request, const ntl::device_control::in_buffer &input,
+      ntl::device_control::out_buffer &output) {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+      throw ntl::exception(STATUS_INVALID_DEVICE_STATE,
+                           "NTL RPC session control requires PASSIVE_LEVEL");
+    if (input.size != sizeof(detail::session_control_request))
+      throw ntl::exception(STATUS_INVALID_PARAMETER,
+                           "Invalid NTL RPC session control request");
+    const auto command = input.as<detail::session_control_request>();
+    if (!command || command->version != detail::session_control_version ||
+        command->reserved != 0)
+      throw ntl::exception(STATUS_INVALID_PARAMETER,
+                           "Unsupported NTL RPC session control request");
+
+    if (!ExAcquireRundownProtection(&rundown_))
+      throw ntl::exception(STATUS_DELETE_PENDING,
+                           "NTL RPC server is stopping");
+    rundown_guard rundown(rundown_);
+
+    const auto file_object = request.stack_location()->FileObject;
+    switch (command->operation) {
+    case detail::session_control_operation::create: {
+      if (command->token.valid() || command->notification_id != 0 ||
+          command->sequence != 0)
+        throw ntl::exception(STATUS_INVALID_PARAMETER,
+                             "Invalid NTL RPC session create request");
+      if (!output.can_write(sizeof(detail::session_control_response)))
+        throw ntl::exception(STATUS_BUFFER_TOO_SMALL,
+                             "NTL RPC session response buffer is too small");
+      captured_caller_context caller(request.get());
+      const detail::session_control_response response{
+          sessions_.create(file_object, caller, &stopping_)};
+      if (!output.write(response))
+        throw ntl::exception(STATUS_BUFFER_TOO_SMALL,
+                             "NTL RPC session response buffer is too small");
+      return;
+    }
+    case detail::session_control_operation::resume: {
+      if (!command->token.valid() || command->notification_id != 0 ||
+          command->sequence != 0)
+        throw ntl::exception(STATUS_INVALID_PARAMETER,
+                             "Invalid NTL RPC session resume request");
+      if (!output.can_write(sizeof(detail::session_control_response)))
+        throw ntl::exception(STATUS_BUFFER_TOO_SMALL,
+                             "NTL RPC session response buffer is too small");
+      captured_caller_context caller(request.get());
+      const detail::session_control_response response{
+          sessions_.resume(file_object, command->token, caller, &stopping_)};
+      if (!output.write(response))
+        throw ntl::exception(STATUS_BUFFER_TOO_SMALL,
+                             "NTL RPC session response buffer is too small");
+      return;
+    }
+    case detail::session_control_operation::close:
+      if (!command->token.valid() || command->notification_id != 0 ||
+          command->sequence != 0)
+        throw ntl::exception(STATUS_INVALID_PARAMETER,
+                             "Invalid NTL RPC session close request");
+      sessions_.close(file_object, command->token);
+      notifications_.cleanup(file_object);
+      output.clear();
+      return;
+    case detail::session_control_operation::subscribe:
+      if (!command->token.valid() || command->notification_id == 0 ||
+          command->sequence != 0)
+        throw ntl::exception(STATUS_INVALID_PARAMETER,
+                             "Invalid NTL RPC session subscribe request");
+      sessions_.subscribe(file_object, command->token,
+                          command->notification_id, true);
+      output.clear();
+      return;
+    case detail::session_control_operation::unsubscribe:
+      if (!command->token.valid() || command->notification_id == 0 ||
+          command->sequence != 0)
+        throw ntl::exception(STATUS_INVALID_PARAMETER,
+                             "Invalid NTL RPC session unsubscribe request");
+      sessions_.subscribe(file_object, command->token,
+                           command->notification_id, false);
+      notifications_.cancel(file_object, command->notification_id,
+                            notification_queue::wait_mode::reliable);
+      output.clear();
+      return;
+    case detail::session_control_operation::acknowledge:
+      if (!command->token.valid() || command->notification_id == 0 ||
+          command->sequence == 0)
+        throw ntl::exception(STATUS_INVALID_PARAMETER,
+                             "Invalid NTL RPC notification ACK request");
+      sessions_.acknowledge(file_object, command->token,
+                            command->notification_id, command->sequence);
+      output.clear();
+      return;
+    default:
+      throw ntl::exception(STATUS_INVALID_PARAMETER,
+                           "Unknown NTL RPC session control operation");
+    }
+  }
+
+  void try_complete_reliable(std::uint64_t session_id,
+                             std::uint32_t notification_id) noexcept {
+    const auto file_object = sessions_.connected_file(session_id);
+    if (!file_object)
+      return;
+
+    std::vector<unsigned char> bytes;
+    PFILE_OBJECT current_file = nullptr;
+    std::uint64_t sequence = 0;
+    if (!sessions_.take_for_delivery(session_id, notification_id, bytes,
+                                     current_file, sequence))
+      return;
+
+    PIRP request = notifications_.remove_next(
+        notification_id, file_object,
+        notification_queue::wait_mode::reliable);
+    if (!request || current_file != file_object) {
+      sessions_.release_delivery(session_id, notification_id, sequence);
+      if (request)
+        notifications_.complete(request, STATUS_CANCELLED, 0);
+      return;
+    }
+
+    const auto stack = IoGetCurrentIrpStackLocation(request);
+    const auto capacity = static_cast<std::size_t>(
+        stack->Parameters.DeviceIoControl.OutputBufferLength);
+    if (!request->AssociatedIrp.SystemBuffer || capacity < bytes.size()) {
+      sessions_.release_delivery(session_id, notification_id, sequence);
+      notifications_.complete(request, STATUS_BUFFER_TOO_SMALL, 0);
+      return;
+    }
+    std::memcpy(request->AssociatedIrp.SystemBuffer, bytes.data(),
+                bytes.size());
+    notifications_.complete(request, STATUS_SUCCESS,
+                            static_cast<ULONG_PTR>(bytes.size()));
+  }
+
   bool try_acquire_pending_call() noexcept {
     LONG observed = InterlockedCompareExchange(&pending_calls_, 0, 0);
     while (observed < max_pending_calls_) {
@@ -1082,6 +2371,7 @@ private:
   std::uint64_t capabilities_;
   bool asynchronous_;
   LONG max_pending_calls_;
+  session_registry sessions_;
   volatile LONG pending_calls_ = 0;
   volatile LONG started_ = 0;
   volatile LONG stopping_ = 0;
@@ -1105,7 +2395,11 @@ public:
       : dispatch_(std::make_shared<detail::dispatch_table>(
             server_opts.contract_version(), server_opts.capabilities(),
             server_opts.is_asynchronous(), server_opts.max_pending_calls(),
-            server_opts.max_pending_notifications())) {
+            server_opts.max_pending_notifications(),
+            server_opts.max_sessions(),
+            server_opts.max_reliable_notifications_per_session(),
+            server_opts.max_reliable_notifications(),
+            server_opts.session_retention_ms())) {
     ntl::device_options options;
     options
         .name(server_opts.name())
@@ -1172,6 +2466,37 @@ public:
     return *this;
   }
 
+  /** @brief Attaches optional external reliable-notification storage hooks. */
+  server &notification_storage(std::shared_ptr<notification_store> store) {
+    dispatch_->set_notification_store(std::move(store));
+    return *this;
+  }
+
+  /** @brief Registers policy and state initialization for new sessions. */
+  template <typename Callback> server &on_session_open(Callback &&callback) {
+    dispatch_->set_session_open(std::forward<Callback>(callback));
+    return *this;
+  }
+
+  /** @brief Registers policy applied before a token reconnect succeeds. */
+  template <typename Callback> server &on_session_resume(Callback &&callback) {
+    dispatch_->set_session_resume(std::forward<Callback>(callback));
+    return *this;
+  }
+
+  /** @brief Observes a handle disconnect while retaining its session. */
+  template <typename Callback>
+  server &on_session_disconnect(Callback &&callback) {
+    dispatch_->set_session_disconnect(std::forward<Callback>(callback));
+    return *this;
+  }
+
+  /** @brief Observes explicit close, expiry, or final server teardown. */
+  template <typename Callback> server &on_session_close(Callback &&callback) {
+    dispatch_->set_session_close(std::forward<Callback>(callback));
+    return *this;
+  }
+
   /** @brief Registers a typed notification channel before start(). */
   template <typename Notification>
   server &register_notification(const Notification &) {
@@ -1194,6 +2519,19 @@ public:
     static_assert(is_notification<Notification>::value,
                   "try_notify requires an ntl::rpc::notification");
     return dispatch_->template try_notify<Notification>(payload);
+  }
+
+  /**
+   * @brief Queues a replayable notification for one subscribed session.
+   * @return STATUS_DEVICE_BUSY when a configured queue limit is reached.
+   */
+  template <typename Notification>
+  ntl::status
+  try_notify(std::uint64_t session_id, const Notification &,
+             const typename Notification::payload_type &payload) noexcept {
+    static_assert(is_notification<Notification>::value,
+                  "try_notify requires an ntl::rpc::notification");
+    return dispatch_->template try_notify<Notification>(session_id, payload);
   }
 
   /** @brief Publishes the immutable method table for request dispatch. */
@@ -1233,9 +2571,9 @@ inline std::shared_ptr<server> make_server(ntl::driver &driver,
   constexpr std::uint32_t rpc_contract_version = (_version_);                 \
   constexpr std::uint64_t rpc_capabilities = (_capabilities_);                \
   inline std::shared_ptr<ntl::rpc::server>                                    \
-  init(ntl::driver &driver,                                                   \
-       ntl::rpc::server_options rpc_options =                                 \
-           ntl::rpc::server_options(L#_rpc_name_)) {                          \
+  make_server(ntl::driver &driver,                                            \
+              ntl::rpc::server_options rpc_options =                          \
+                  ntl::rpc::server_options(L#_rpc_name_)) {                   \
     rpc_options.contract_version(rpc_contract_version)                         \
         .capabilities(rpc_capabilities);                                       \
     auto rpc_server = ntl::rpc::make_server(driver, rpc_options);
@@ -1244,8 +2582,16 @@ inline std::shared_ptr<server> make_server(ntl::driver &driver,
   NTL_RPC_BEGIN_CONTRACT(_rpc_name_, 1, 0)
 
 #define NTL_RPC_END(_rpc_name_)                                                \
-  rpc_server->start();                                                         \
   return rpc_server;                                                           \
+  }                                                                            \
+  inline std::shared_ptr<ntl::rpc::server>                                    \
+  init(ntl::driver &driver,                                                   \
+       ntl::rpc::server_options rpc_options =                                 \
+           ntl::rpc::server_options(L#_rpc_name_)) {                          \
+    auto rpc_server = ::_rpc_name_::make_server(                              \
+        driver, std::move(rpc_options));                                       \
+    rpc_server->start();                                                       \
+    return rpc_server;                                                         \
   }                                                                            \
   }
 
