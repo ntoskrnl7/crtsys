@@ -87,6 +87,33 @@ still receives `demo_rpc::calculate(count)` and
 `demo_rpc::calculate_1_method`, with the same method ID and wire payload it
 would have received from `NTL_ADD_CALLBACK_ID_1`.
 
+Use `NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_0` through
+`NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_5`, or their explicit-ID forms, when a
+macro-declared method also needs authorization before deserialization. The
+argument after the callback name is a server-side policy callable; the next
+argument names the `call_context` available to the method callback:
+
+```cpp
+NTSTATUS authorize_user_mode(
+    const ntl::rpc::call_context& caller) noexcept {
+  return caller.is_user_mode() ? STATUS_SUCCESS : STATUS_ACCESS_DENIED;
+}
+
+NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_ID_1(
+    demo_rpc, 0x903, std::uint32_t, protected_echo,
+    authorize_user_mode, call, std::uint32_t, value, {
+      call.throw_if_cancelled();
+      return value;
+    })
+```
+
+The policy callable receives the original requester's context and must return
+`NTSTATUS` or `ntl::status`. It is a server-only token: the client expansion
+discards it and generates the same synchronous, asynchronous, stop-token, and
+coroutine wrappers as an ordinary callback declaration. A failed policy status
+rejects the request before its argument bytes are decoded or allowed to
+allocate memory.
+
 Explicit method IDs must be stable and unique within the endpoint and use the
 vendor IOCTL function range `0x800` through `0xFFD`; NTL reserves `0xFFE` for
 notification receives and `0xFFF` for contract discovery. Client arguments are
@@ -612,6 +639,14 @@ payloads, FIFO receives, timeout and cancellation, pending receive limits,
 handle cleanup, service stop after pending receive cancellation, unload,
 restart, and x64-driver/x86-app wire compatibility.
 
+[`test/rpc/security`](../../test/rpc/security) covers the original caller's
+processor mode, process ID, impersonation token, and security subject context.
+It runs the server asynchronously to verify that the referenced caller tokens
+remain valid after dispatch moves from the request thread to a system worker.
+The fixture also verifies allow and deny security descriptors, callback
+suppression after authorization failure, and x64-driver/x86-app wire
+compatibility.
+
 ## Trust Boundary
 
 NTL RPC IOCTLs require a handle opened for both read and write access. By
@@ -635,3 +670,47 @@ server->start();
 The ACL controls who can open the device. Serialization checks and resource
 limits control how accepted bytes are decoded. Neither replaces per-method
 authorization or semantic validation when callers have different privileges.
+
+For per-method authorization, register the typed method with
+`on_authorized()`. The policy runs before request deserialization and before
+the application callback:
+
+```cpp
+constexpr ACCESS_MASK read_report = 0x0001;
+GENERIC_MAPPING report_mapping{
+    read_report, read_report, read_report, read_report};
+
+server->on_authorized(
+    read_report_method,
+    [&](const ntl::rpc::call_context& call) {
+      return call.check_access(report_security_descriptor,
+                               read_report,
+                               report_mapping);
+    },
+    [](std::uint32_t report_id) {
+      return load_report(report_id);
+    });
+```
+
+An authorization policy must return `NTSTATUS` or `ntl::status`. A failed
+status is returned to the app without decoding the method arguments or running
+the method callback. `bool` is deliberately rejected because a C++ `true`
+would otherwise be interpreted as a successful nonzero `NTSTATUS` value.
+Macro schemas use the equivalent
+`NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT[_ID]_*` forms described above; they retain
+the same ordering and security guarantee as `on_authorized()`.
+
+`ntl::rpc::call_context` also provides `requestor_mode()`, `is_user_mode()`,
+`is_kernel_mode()`, and `requestor_process_id()`. The process ID is diagnostic
+metadata only: IDs can be reused and must not be used as credentials. Advanced
+policies can pass `native_subject_context()` to documented Windows security
+APIs such as `SePrivilegeCheck`. Treat the structure as opaque: do not inspect
+or modify its members. The returned pointer is non-owning, must not be released
+or retained, and is valid only during the policy or method callback. Prefer
+`check_access()` for ordinary access decisions.
+
+Both synchronous and asynchronous servers capture the subject context while
+handling the original IRP. Asynchronous dispatch therefore evaluates the
+original client's primary or impersonation token rather than the system worker
+thread's token. Subject capture, authorization, and method callbacks require
+`PASSIVE_LEVEL`.

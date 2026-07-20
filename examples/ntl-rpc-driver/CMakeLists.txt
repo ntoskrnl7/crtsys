@@ -9,12 +9,14 @@ CPMAddPackage(NAME crtsys SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../..")
 include("${crtsys_SOURCE_DIR}/cmake/CrtSys.cmake")
 
 crtsys_add_driver(crtsys_ntl_rpc_sample
+  driver/caller_security.cpp
   driver/main.cpp
   driver/operations.cpp
 )
 
 add_executable(crtsys_ntl_rpc_sample_app
   app/asynchronous_call.cpp
+  app/caller_security.cpp
   app/cancellation.cpp
   app/coroutine_call.cpp
   app/main.cpp

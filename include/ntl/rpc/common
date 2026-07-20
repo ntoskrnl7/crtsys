@@ -75,9 +75,12 @@ constexpr std::uint64_t rundown_shutdown = 1ull << 3;
 constexpr std::uint64_t asynchronous_calls = 1ull << 4;
 /** @brief This endpoint can complete pending receives with kernel events. */
 constexpr std::uint64_t kernel_notifications = 1ull << 5;
+/** @brief Method callbacks receive the captured original caller context. */
+constexpr std::uint64_t caller_security_context = 1ull << 6;
 /** @brief All transport features implemented by this NTL version. */
 constexpr std::uint64_t current = resource_limits | secure_endpoint |
-                                  immutable_dispatch | rundown_shutdown;
+                                  immutable_dispatch | rundown_shutdown |
+                                  caller_security_context;
 } // namespace transport_features
 
 /** @brief Describes one running RPC server's wire and application contract. */

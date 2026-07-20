@@ -27,7 +27,18 @@ private:
   int m_y = 0;
 };
 
-NTL_RPC_BEGIN_CONTRACT(test_rpc, 8, 0x3ull)
+#if !defined(NTL_USER_MODE)
+namespace test_rpc_server {
+
+inline NTSTATUS
+authorize_user_mode(const ntl::rpc::call_context &caller) noexcept {
+  return caller.is_user_mode() ? STATUS_SUCCESS : STATUS_ACCESS_DENIED;
+}
+
+} // namespace test_rpc_server
+#endif
+
+NTL_RPC_BEGIN_CONTRACT(test_rpc, 9, 0x3ull)
 
 // The line-based forms remain a compact convenience contract. The explicit-ID
 // forms below cover stable externally visible method IDs.
@@ -92,9 +103,10 @@ NTL_ADD_CALLBACK_ID_2(test_rpc, 0x90B, point, test_point_class,
                         return left.get_x() > right.get_x() ? left : right;
                       })
 
-NTL_ADD_CALLBACK_CONTEXT_ID_2(
-    test_rpc, 0x90C, std::uint32_t, test_cooperative_delay, call,
-    std::uint32_t, milliseconds, std::uint32_t, value, {
+NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_ID_2(
+    test_rpc, 0x90C, std::uint32_t, test_cooperative_delay,
+    test_rpc_server::authorize_user_mode, call, std::uint32_t, milliseconds,
+    std::uint32_t, value, {
       constexpr std::uint32_t quantum_ms = 10;
       std::uint32_t elapsed = 0;
       while (elapsed < milliseconds) {
@@ -112,6 +124,43 @@ NTL_ADD_CALLBACK_CONTEXT_ID_2(
 
       call.throw_if_cancelled();
       return value;
+    })
+
+// Compile every authorized macro arity and both ID styles in the shared
+// driver/app contract. The two-argument form above is also exercised at
+// runtime by the cooperative cancellation tests.
+NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_0(
+    test_rpc, std::uint32_t, test_authorized_0,
+    test_rpc_server::authorize_user_mode, call, {
+      return call.is_user_mode() ? 1u : 0u;
+    })
+
+NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_ID_1(
+    test_rpc, 0x90D, std::uint32_t, test_authorized_1,
+    test_rpc_server::authorize_user_mode, call, std::uint32_t, a, {
+      return a + (call.is_user_mode() ? 1u : 0u);
+    })
+
+NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_3(
+    test_rpc, std::uint32_t, test_authorized_3,
+    test_rpc_server::authorize_user_mode, call, std::uint32_t, a,
+    std::uint32_t, b, std::uint32_t, c, {
+      return a + b + c + (call.is_user_mode() ? 1u : 0u);
+    })
+
+NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_ID_4(
+    test_rpc, 0x90E, std::uint32_t, test_authorized_4,
+    test_rpc_server::authorize_user_mode, call, std::uint32_t, a,
+    std::uint32_t, b, std::uint32_t, c, std::uint32_t, d, {
+      return a + b + c + d + (call.is_user_mode() ? 1u : 0u);
+    })
+
+NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_5(
+    test_rpc, std::uint32_t, test_authorized_5,
+    test_rpc_server::authorize_user_mode, call, std::uint32_t, a,
+    std::uint32_t, b, std::uint32_t, c, std::uint32_t, d,
+    std::uint32_t, e, {
+      return a + b + c + d + e + (call.is_user_mode() ? 1u : 0u);
     })
 
 NTL_RPC_END(test_rpc)

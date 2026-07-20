@@ -37,6 +37,11 @@ void delay(ntl::rpc::call_context call, std::uint32_t milliseconds) {
 
 } // namespace
 
+NTSTATUS authorize_user_mode(
+    const ntl::rpc::call_context &caller) noexcept {
+  return caller.is_user_mode() ? STATUS_SUCCESS : STATUS_ACCESS_DENIED;
+}
+
 int add(int left, int right) noexcept {
   DbgPrint("crtsys_ntl_rpc_sample::add kernel callback: left=%d right=%d\n",
            left, right);

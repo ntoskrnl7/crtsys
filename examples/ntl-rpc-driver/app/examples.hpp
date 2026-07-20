@@ -13,6 +13,8 @@ namespace crtsys_ntl_rpc_sample_app {
 void run_synchronous_calls(ntl::rpc::client &client, std::uint32_t value,
                            std::uint32_t bias);
 
+void run_caller_security();
+
 void run_asynchronous_call();
 
 void run_cancellation();

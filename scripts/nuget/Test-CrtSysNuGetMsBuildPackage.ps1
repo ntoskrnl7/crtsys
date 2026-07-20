@@ -399,6 +399,8 @@ $mainCpp = switch ($DriverModel) {
 
 namespace {
 using package_smoke_method = ntl::rpc::make_method_t<0xC53, int, int>;
+using package_smoke_authorized_method =
+    ntl::rpc::make_method_t<0xC54, int, int>;
 std::shared_ptr<ntl::rpc::server> package_smoke_server;
 } // namespace
 
@@ -426,6 +428,14 @@ ntl::status ntl::main(ntl::driver& driver, const std::wstring& registry_path) {
   package_smoke_server = ntl::rpc::make_server(driver, rpc_options);
   package_smoke_server
       ->on(package_smoke_method{}, [](int value) { return value; })
+      .on_authorized(
+          package_smoke_authorized_method{},
+          [](const ntl::rpc::call_context& call) {
+            return call.is_user_mode()
+                       ? ntl::status::ok()
+                       : ntl::status(STATUS_ACCESS_DENIED);
+          },
+          [](int value) { return value; })
       .start();
 
   driver.on_unload([]() { package_smoke_server.reset(); });

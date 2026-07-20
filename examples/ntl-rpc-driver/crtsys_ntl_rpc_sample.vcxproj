@@ -60,11 +60,14 @@
     <PackageReference Include="crtsys" Version="$(CrtSysPackageVersion)" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="driver\caller_security.cpp" />
     <ClCompile Include="driver\main.cpp" />
     <ClCompile Include="driver\operations.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="driver\caller_security.hpp" />
     <ClInclude Include="driver\operations.hpp" />
+    <ClInclude Include="shared\ntl_rpc_caller_security.hpp" />
     <ClInclude Include="shared\ntl_rpc_sample.hpp" />
     <ClInclude Include="shared\ntl_rpc_sample_types.hpp" />
   </ItemGroup>

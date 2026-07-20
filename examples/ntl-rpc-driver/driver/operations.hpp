@@ -9,6 +9,9 @@
 
 namespace crtsys_ntl_rpc_sample_server {
 
+NTSTATUS authorize_user_mode(
+    const ntl::rpc::call_context &caller) noexcept;
+
 int add(int left, int right) noexcept;
 
 ntl_rpc_sample_reply describe(const ntl_rpc_sample_request &request) noexcept;
