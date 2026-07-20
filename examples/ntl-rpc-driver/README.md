@@ -12,6 +12,8 @@ The sample demonstrates:
 - `ntl::rpc::client` from a user-mode companion app
 - shared-schema RPC callback IDs and deduced return types
 - direct generated wrappers plus a reusable typed client
+- an asynchronous `OVERLAPPED` RPC that leaves the calling thread available
+- timeout, `CancelIoEx`, and cooperative kernel callback cancellation
 - bounded variable-size responses checked before server callback execution
 - a secure control device restricted to Local System and Administrators by
   default
@@ -20,6 +22,19 @@ The sample demonstrates:
 - startup contract discovery for version, capability, and method compatibility
 - serialization of simple scalar values, a custom request/reply pair, and a
   `std::vector`
+
+The source is split by responsibility:
+
+- `shared/ntl_rpc_sample_types.hpp`: serialized request and reply types
+- `shared/ntl_rpc_sample.hpp`: the driver/app RPC contract
+- `driver/operations.cpp`: kernel callback implementations
+- `app/synchronous_calls.cpp`: generated wrappers and reusable synchronous client
+- `app/asynchronous_call.cpp`: successful asynchronous completion
+- `app/cancellation.cpp`: timeout followed by cooperative cancellation
+- `app/coroutine_call.cpp`: C++20 `co_await` completion
+- `app/stop_token_cancellation.cpp`: C++20 `stop_token` cancellation
+- `app/coroutine_task.hpp`: minimal top-level coroutine owner used by the app
+- `app/main.cpp`: argument parsing, contract validation, and example sequencing
 
 ## Visual Studio / NuGet
 
@@ -78,18 +93,20 @@ The schema exposes:
 - `crtsys_ntl_rpc_sample::add`
 - `crtsys_ntl_rpc_sample::describe`
 - `crtsys_ntl_rpc_sample::series`
+- `crtsys_ntl_rpc_sample::delayed_add`
 
 The schema uses `NTL_RPC_BEGIN_CONTRACT` to publish application contract
-version `1`, one sample capability bit, and the registered method IDs. The app
+version `2`, sample capability bits, and stable explicit method IDs. The app
 calls `client.require_contract()` once before its first generated wrapper, so a
 mismatched driver fails with a contract diagnostic instead of an unrelated
 method error.
 
-The driver-side `describe` callback intentionally calls the kernel-only WDK API
-`KeGetCurrentIrql()` and returns that value as `server_irql`. This makes the
-execution boundary visible: the app only receives the serialized reply.
-The callbacks also emit one-line `DbgPrint` messages so a kernel debugger can
-see that `add`, `describe`, and `series` ran in the driver.
+The shared header maps each method to an implementation in
+`driver/operations.cpp`. The driver-side `describe` operation intentionally
+calls the kernel-only WDK API `KeGetCurrentIrql()` and returns that value as
+`server_irql`. This makes the execution boundary visible: the app only receives
+the serialized reply. The operations also emit one-line `DbgPrint` messages so
+a kernel debugger can see that they ran in the driver.
 
 The `series` callback uses `NTL_RPC_BOUNDED_RESPONSE` to declare a 64 KiB
 maximum serialized response. The client uses that value as its receive
@@ -102,6 +119,90 @@ The macro-generated server freezes its dispatch table after registering the
 shared schema. Keep the returned server owner alive until driver unload. NTL
 rejects new RPC calls during shutdown and waits for callbacks already in
 progress before the owner releases the device.
+
+The sample initializes the endpoint with `server_options::asynchronous()`.
+Application requests are therefore pended and executed by PASSIVE_LEVEL work
+items. `delayed_add` uses `NTL_ADD_CALLBACK_CONTEXT_ID_3`, which gives its
+kernel implementation a named `ntl::rpc::call_context`. The operation polls
+that context between short waits and exits through `throw_if_cancelled()` when
+the app cancels the request.
+
+## Async Model
+
+NTL RPC does not implement asynchronous calls with `std::promise` or
+`std::future`. `ntl::rpc::async_call<T>` owns the native Windows asynchronous
+I/O state required by one request:
+
+- an `OVERLAPPED` `DeviceIoControl` request
+- the request and response buffers
+- a waitable event
+- the device handle needed by `GetOverlappedResult` and `CancelIoEx`
+
+It deliberately offers future-like `wait()`, `wait_for()`, and `get()` methods,
+but also provides `cancel()` for the underlying I/O request. Standard
+`std::future` has no operation-specific Windows I/O cancellation contract and
+would not by itself solve the buffer and `OVERLAPPED` lifetime requirements.
+
+Generated contracts provide matching synchronous and asynchronous convenience
+functions. `add(40, 2)` returns the result directly, while
+`delayed_add_async(...)` returns an owned `async_call<int>`:
+
+```cpp
+auto call = crtsys_ntl_rpc_sample::delayed_add_async(
+    std::uint32_t{100}, 40, 2);
+
+// The caller can do other work here.
+if (call.wait_for(std::chrono::seconds(2)) ==
+    ntl::rpc::async_wait_status::completed) {
+  const int result = call.get();
+}
+```
+
+Both convenience functions open the named endpoint for an independent call.
+For a sequence of calls, keep one `ntl::rpc::client` and use the generated
+`delayed_add_3_method` descriptor with `client.invoke_async(...)` to reuse the
+same connection.
+
+The cancellation example starts a two-second request, observes a 50 ms
+timeout, calls `cancel()`, and then verifies that `get()` reports
+`ERROR_OPERATION_ABORTED`. The server callback checks its named context so the
+kernel work stops promptly instead of merely discarding a late result.
+
+## C++20 Stop Tokens And Coroutines
+
+The C++14-compatible overload remains the baseline. When the app is compiled
+as C++20 or later, the same client also accepts a `std::stop_token`:
+
+```cpp
+std::stop_source source;
+auto call = crtsys_ntl_rpc_sample::delayed_add_async(
+    source.get_token(), std::uint32_t{2000}, 40, 2);
+
+source.request_stop(); // Requests CancelIoEx for this call.
+```
+
+Including `<ntl/rpc/coroutine>` makes the move-only call awaitable without
+changing its native I/O ownership:
+
+```cpp
+auto add_with_coroutine(std::stop_token token) -> application_task<int> {
+  co_return co_await crtsys_ntl_rpc_sample::delayed_add_async(
+      token, std::uint32_t{2000}, 40, 2);
+}
+```
+
+The C++ standard supplies coroutine handles and suspension rules, but it does
+not define a general `task<T>` type. `app/coroutine_task.hpp` is therefore a
+small example-only owner for the top-level sample coroutine. The NTL feature is
+the `co_await` adapter for `async_call<T>`; applications may use it with their
+own coroutine task or scheduler. Completion is observed through a Windows
+thread-pool wait, so awaiting does not consume one blocking thread per RPC.
+
+A stop request follows the same transport path as explicit `cancel()`:
+`std::stop_token` -> `CancelIoEx` -> server `call_context`. The suspended
+coroutine resumes once with `ERROR_OPERATION_ABORTED`. The stop-token overload
+and `<ntl/rpc/coroutine>` are C++20-only; existing C++14 and C++17 calls remain
+unchanged.
 
 ## Loading
 
@@ -116,15 +217,22 @@ sc delete CrtSysNtlRpcSample
 
 ## User-Mode RPC App
 
-The sample app uses the generated wrappers for the occasional `add` and
-`describe` calls, then reuses one `ntl::rpc::client` for the `series` call:
+The sample app runs the synchronous, asynchronous, explicit-cancellation,
+coroutine, and stop-token files in sequence:
 
 ```bat
 examples\ntl-rpc-driver\build_x64\Debug\crtsys_ntl_rpc_sample_app.exe 21 7
 ```
 
-Expected output:
+Representative output:
 
 ```text
-rpc ok: add=42 value=21 doubled=42 biased=28 server_irql=0 series=4
+sync: add=42 value=21 doubled=42 biased=28 server_irql=0 series=4
+async: request started; caller remains available
+async: completed with add=42
+cancel: kernel callback observed cancellation
+coroutine: suspended without blocking the caller
+coroutine: resumed with add=42
+stop_token: coroutine resumed with cancellation
+all RPC examples completed
 ```

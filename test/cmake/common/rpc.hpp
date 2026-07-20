@@ -27,7 +27,7 @@ private:
   int m_y = 0;
 };
 
-NTL_RPC_BEGIN_CONTRACT(test_rpc, 7, 0x3ull)
+NTL_RPC_BEGIN_CONTRACT(test_rpc, 8, 0x3ull)
 
 // The line-based forms remain a compact convenience contract. The explicit-ID
 // forms below cover stable externally visible method IDs.
@@ -91,5 +91,27 @@ NTL_ADD_CALLBACK_ID_2(test_rpc, 0x90B, point, test_point_class,
                       const point &, left, const point &, right, {
                         return left.get_x() > right.get_x() ? left : right;
                       })
+
+NTL_ADD_CALLBACK_CONTEXT_ID_2(
+    test_rpc, 0x90C, std::uint32_t, test_cooperative_delay, call,
+    std::uint32_t, milliseconds, std::uint32_t, value, {
+      constexpr std::uint32_t quantum_ms = 10;
+      std::uint32_t elapsed = 0;
+      while (elapsed < milliseconds) {
+        call.throw_if_cancelled();
+
+        const auto remaining = milliseconds - elapsed;
+        const auto interval_ms =
+            remaining < quantum_ms ? remaining : quantum_ms;
+        LARGE_INTEGER interval{};
+        interval.QuadPart =
+            -static_cast<LONGLONG>(interval_ms) * 10'000;
+        (void)KeDelayExecutionThread(KernelMode, FALSE, &interval);
+        elapsed += interval_ms;
+      }
+
+      call.throw_if_cancelled();
+      return value;
+    })
 
 NTL_RPC_END(test_rpc)

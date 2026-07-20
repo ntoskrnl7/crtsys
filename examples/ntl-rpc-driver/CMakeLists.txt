@@ -10,10 +10,16 @@ include("${crtsys_SOURCE_DIR}/cmake/CrtSys.cmake")
 
 crtsys_add_driver(crtsys_ntl_rpc_sample
   driver/main.cpp
+  driver/operations.cpp
 )
 
 add_executable(crtsys_ntl_rpc_sample_app
+  app/asynchronous_call.cpp
+  app/cancellation.cpp
+  app/coroutine_call.cpp
   app/main.cpp
+  app/stop_token_cancellation.cpp
+  app/synchronous_calls.cpp
 )
 
 target_include_directories(crtsys_ntl_rpc_sample

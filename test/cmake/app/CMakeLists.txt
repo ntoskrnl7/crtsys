@@ -13,7 +13,12 @@ CPMAddPackage(
     OPTIONS "INSTALL_GTEST OFF" "BUILD_GMOCK OFF" "gtest_force_shared_crt"
   )
 
-add_executable(crtsys_test_app src/main.cpp)
+add_executable(crtsys_test_app
+    src/main.cpp
+    src/rpc_coroutine.cpp)
+
+set_source_files_properties(src/rpc_coroutine.cpp PROPERTIES
+    COMPILE_OPTIONS "/std:c++20;/Zc:__cplusplus")
 
 target_compile_options(crtsys_test_app PRIVATE "/EHsc")
 

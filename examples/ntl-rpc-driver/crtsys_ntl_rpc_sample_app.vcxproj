@@ -54,10 +54,18 @@
     <PackageReference Include="crtsys" Version="$(CrtSysPackageVersion)" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="app\asynchronous_call.cpp" />
+    <ClCompile Include="app\cancellation.cpp" />
+    <ClCompile Include="app\coroutine_call.cpp" />
     <ClCompile Include="app\main.cpp" />
+    <ClCompile Include="app\stop_token_cancellation.cpp" />
+    <ClCompile Include="app\synchronous_calls.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="app\coroutine_task.hpp" />
+    <ClInclude Include="app\examples.hpp" />
     <ClInclude Include="shared\ntl_rpc_sample.hpp" />
+    <ClInclude Include="shared\ntl_rpc_sample_types.hpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

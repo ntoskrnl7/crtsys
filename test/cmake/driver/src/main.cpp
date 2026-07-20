@@ -112,7 +112,9 @@ ntl::status ntl::main(ntl::driver &driver, const std::wstring &registry_path) {
     });
   }
 
-  auto rpc_server = test_rpc::init(driver);
+  ntl::rpc::server_options rpc_options(L"test_rpc");
+  rpc_options.asynchronous().max_pending_calls(32);
+  auto rpc_server = test_rpc::init(driver, rpc_options);
 
   driver.on_unload([registry_path, test_endpoint, rpc_server]() mutable {
     auto test_dev = test_endpoint->device();

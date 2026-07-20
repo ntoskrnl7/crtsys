@@ -22,6 +22,19 @@
 #include <utility>
 #include <vector>
 
+#if ((defined(_MSVC_LANG) && _MSVC_LANG >= 202002L) ||                  \
+     (!defined(_MSVC_LANG) && __cplusplus >= 202002L)) &&              \
+    defined(__has_include)
+#if __has_include(<stop_token>)
+#include <stop_token>
+#define NTL_RPC_HAS_STOP_TOKEN 1
+#endif
+#endif
+
+#ifndef NTL_RPC_HAS_STOP_TOKEN
+#define NTL_RPC_HAS_STOP_TOKEN 0
+#endif
+
 #if defined(NTL_USER_MODE)
 namespace ntl {
 namespace rpc {
@@ -110,6 +123,10 @@ enum class async_wait_status {
 
 namespace detail {
 
+template <typename T> class async_call_awaiter;
+
+struct completed_error_operation_t {};
+
 class async_operation {
 public:
   async_operation(std::shared_ptr<ntl::unique_handle> handle,
@@ -153,6 +170,20 @@ public:
     if (error != ERROR_IO_PENDING)
       throw std::system_error(static_cast<int>(error), std::system_category(),
                               "NTL RPC overlapped DeviceIoControl failed");
+  }
+
+  async_operation(std::shared_ptr<ntl::unique_handle> handle,
+                  completed_error_operation_t, DWORD error)
+      : handle_(std::move(handle)),
+        event_(::CreateEventW(nullptr, TRUE, TRUE, nullptr)), error_(error),
+        completed_(true) {
+    if (!handle_ || !*handle_)
+      throw std::system_error(ERROR_INVALID_HANDLE, std::system_category(),
+                              "NTL RPC device is not open");
+    if (!event_)
+      throw std::system_error(static_cast<int>(::GetLastError()),
+                              std::system_category(),
+                              "NTL RPC event creation failed");
   }
 
   async_operation(const async_operation &) = delete;
@@ -219,6 +250,22 @@ public:
                             "NTL RPC cancellation failed");
   }
 
+  /** @brief Requests cancellation without propagating callback exceptions. */
+  bool cancel_noexcept() noexcept {
+    if (::CancelIoEx(handle_->get(), &overlapped_))
+      return true;
+    return false;
+  }
+
+  /** @brief Returns the event signaled when the overlapped request completes. */
+  HANDLE completion_event() const noexcept { return event_.get(); }
+
+  /** @brief Keeps a type-erased cancellation registration alive. */
+  void attach_cancellation_registration(
+      std::shared_ptr<void> registration) noexcept {
+    cancellation_registration_ = std::move(registration);
+  }
+
   const std::vector<unsigned char> &output() {
     (void)observe_completion(true);
     std::lock_guard<std::mutex> guard(lock_);
@@ -272,7 +319,31 @@ private:
   DWORD returned_ = 0;
   DWORD error_ = ERROR_SUCCESS;
   bool completed_ = false;
+  // Keep this member in every language mode. A conditional std::stop_callback
+  // member would give C++14 and C++20 translation units different class
+  // layouts when both are linked into one application.
+  std::shared_ptr<void> cancellation_registration_;
 };
+
+#if NTL_RPC_HAS_STOP_TOKEN
+struct stop_canceller {
+  std::weak_ptr<async_operation> operation;
+
+  void operator()() const noexcept {
+    if (auto current = operation.lock())
+      (void)current->cancel_noexcept();
+  }
+};
+
+inline void attach_stop_token(
+    std::stop_token token,
+    const std::shared_ptr<async_operation> &operation) {
+  using callback_type = std::stop_callback<stop_canceller>;
+  auto registration = std::make_shared<callback_type>(
+      token, stop_canceller{std::weak_ptr<async_operation>(operation)});
+  operation->attach_cancellation_registration(std::move(registration));
+}
+#endif
 
 } // namespace detail
 
@@ -328,6 +399,7 @@ public:
 
 private:
   friend class client;
+  template <typename U> friend class detail::async_call_awaiter;
   async_call(std::shared_ptr<detail::async_operation> state,
              std::size_t decode_allocation)
       : state_(std::move(state)), decode_allocation_(decode_allocation) {}
@@ -383,6 +455,7 @@ public:
 
 private:
   friend class client;
+  template <typename U> friend class detail::async_call_awaiter;
   explicit async_call(std::shared_ptr<detail::async_operation> state)
       : state_(std::move(state)) {}
 
@@ -559,6 +632,36 @@ public:
                                        typename Method::return_type>::type{});
   }
 
+#if NTL_RPC_HAS_STOP_TOKEN
+  /**
+   * @brief Starts an overlapped RPC and binds it to a C++20 stop token.
+   * @param token Token whose stop request cancels only this RPC operation.
+   * @param rpc_method Shared method descriptor.
+   * @param args Serializable method arguments.
+   */
+  template <typename Method, typename... Arguments>
+  async_call<typename Method::return_type>
+  invoke_async(std::stop_token token, const Method &rpc_method,
+               Arguments &&...args) {
+    // A stop request that predates the call must not reach the driver. Apart
+    // from avoiding needless work, this removes the issue/cancel race that
+    // would otherwise occur while constructing an immediately-invoked
+    // std::stop_callback.
+    if (token.stop_requested()) {
+      auto state = std::make_shared<detail::async_operation>(
+          handle_, detail::completed_error_operation_t{},
+          ERROR_OPERATION_ABORTED);
+      return make_async_call<Method>(
+          std::move(state),
+          typename std::is_void<typename Method::return_type>::type{});
+    }
+
+    auto call = invoke_async(rpc_method, std::forward<Arguments>(args)...);
+    detail::attach_stop_token(token, call.state_);
+    return call;
+  }
+#endif
+
   /**
    * @brief Waits for and returns one typed kernel notification.
    * @note Each successful receive consumes one notification. Start another
@@ -598,6 +701,25 @@ public:
     return notification_wait<typename Notification::payload_type>(
         std::move(state), Notification::decode_allocation());
   }
+
+#if NTL_RPC_HAS_STOP_TOKEN
+  /** @brief Queues a notification receive bound to a C++20 stop token. */
+  template <typename Notification>
+  notification_wait<typename Notification::payload_type>
+  receive_async(std::stop_token token, const Notification &channel) {
+    if (token.stop_requested()) {
+      auto state = std::make_shared<detail::async_operation>(
+          handle_, detail::completed_error_operation_t{},
+          ERROR_OPERATION_ABORTED);
+      return notification_wait<typename Notification::payload_type>(
+          std::move(state), Notification::decode_allocation());
+    }
+
+    auto wait = receive_async(channel);
+    detail::attach_stop_token(token, wait.state_);
+    return wait;
+  }
+#endif
 
 private:
   template <typename Tuple, std::size_t... Index>
@@ -738,13 +860,113 @@ private:
   NTL_RPC_BEGIN_CONTRACT(_rpc_name_, 1, 0)
 #define NTL_RPC_END(_rpc_name_) }
 
+#if NTL_RPC_HAS_STOP_TOKEN
+#define NTL_RPC_DETAIL_STOP_ASYNC_0(_rpc_name_, _ret_, _name_)                \
+  inline ntl::rpc::async_call<ntl::rpc::response_type_t<_ret_>>               \
+  _name_##_async(std::stop_token ntl_rpc_stop_token) {                        \
+    return ntl::rpc::client(L#_rpc_name_)                                      \
+        .invoke_async(ntl_rpc_stop_token, _name_##_0_method);                  \
+  }
+
+#define NTL_RPC_DETAIL_STOP_ASYNC_1(_rpc_name_, _ret_, _name_, _arg0_type_,   \
+                                    _arg0_name_)                              \
+  inline ntl::rpc::async_call<ntl::rpc::response_type_t<_ret_>>               \
+  _name_##_async(std::stop_token ntl_rpc_stop_token,                          \
+                  _arg0_type_ _arg0_name_) {                                  \
+    return ntl::rpc::client(L#_rpc_name_)                                      \
+        .invoke_async(ntl_rpc_stop_token, _name_##_1_method,                   \
+                      std::forward<_arg0_type_>(_arg0_name_));                 \
+  }
+
+#define NTL_RPC_DETAIL_STOP_ASYNC_2(                                          \
+    _rpc_name_, _ret_, _name_, _arg0_type_, _arg0_name_, _arg1_type_,       \
+    _arg1_name_)                                                              \
+  inline ntl::rpc::async_call<ntl::rpc::response_type_t<_ret_>>               \
+  _name_##_async(std::stop_token ntl_rpc_stop_token,                          \
+                  _arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_) {         \
+    return ntl::rpc::client(L#_rpc_name_)                                      \
+        .invoke_async(ntl_rpc_stop_token, _name_##_2_method,                   \
+                      std::forward<_arg0_type_>(_arg0_name_),                  \
+                      std::forward<_arg1_type_>(_arg1_name_));                 \
+  }
+
+#define NTL_RPC_DETAIL_STOP_ASYNC_3(                                          \
+    _rpc_name_, _ret_, _name_, _arg0_type_, _arg0_name_, _arg1_type_,       \
+    _arg1_name_, _arg2_type_, _arg2_name_)                                   \
+  inline ntl::rpc::async_call<ntl::rpc::response_type_t<_ret_>>               \
+  _name_##_async(std::stop_token ntl_rpc_stop_token,                          \
+                  _arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_,          \
+                  _arg2_type_ _arg2_name_) {                                  \
+    return ntl::rpc::client(L#_rpc_name_)                                      \
+        .invoke_async(ntl_rpc_stop_token, _name_##_3_method,                   \
+                      std::forward<_arg0_type_>(_arg0_name_),                  \
+                      std::forward<_arg1_type_>(_arg1_name_),                  \
+                      std::forward<_arg2_type_>(_arg2_name_));                 \
+  }
+
+#define NTL_RPC_DETAIL_STOP_ASYNC_4(                                          \
+    _rpc_name_, _ret_, _name_, _arg0_type_, _arg0_name_, _arg1_type_,       \
+    _arg1_name_, _arg2_type_, _arg2_name_, _arg3_type_, _arg3_name_)        \
+  inline ntl::rpc::async_call<ntl::rpc::response_type_t<_ret_>>               \
+  _name_##_async(std::stop_token ntl_rpc_stop_token,                          \
+                  _arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_,          \
+                  _arg2_type_ _arg2_name_, _arg3_type_ _arg3_name_) {        \
+    return ntl::rpc::client(L#_rpc_name_)                                      \
+        .invoke_async(ntl_rpc_stop_token, _name_##_4_method,                   \
+                      std::forward<_arg0_type_>(_arg0_name_),                  \
+                      std::forward<_arg1_type_>(_arg1_name_),                  \
+                      std::forward<_arg2_type_>(_arg2_name_),                  \
+                      std::forward<_arg3_type_>(_arg3_name_));                 \
+  }
+
+#define NTL_RPC_DETAIL_STOP_ASYNC_5(                                          \
+    _rpc_name_, _ret_, _name_, _arg0_type_, _arg0_name_, _arg1_type_,       \
+    _arg1_name_, _arg2_type_, _arg2_name_, _arg3_type_, _arg3_name_,        \
+    _arg4_type_, _arg4_name_)                                                \
+  inline ntl::rpc::async_call<ntl::rpc::response_type_t<_ret_>>               \
+  _name_##_async(std::stop_token ntl_rpc_stop_token,                          \
+                  _arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_,          \
+                  _arg2_type_ _arg2_name_, _arg3_type_ _arg3_name_,          \
+                  _arg4_type_ _arg4_name_) {                                  \
+    return ntl::rpc::client(L#_rpc_name_)                                      \
+        .invoke_async(ntl_rpc_stop_token, _name_##_5_method,                   \
+                      std::forward<_arg0_type_>(_arg0_name_),                  \
+                      std::forward<_arg1_type_>(_arg1_name_),                  \
+                      std::forward<_arg2_type_>(_arg2_name_),                  \
+                      std::forward<_arg3_type_>(_arg3_name_),                  \
+                      std::forward<_arg4_type_>(_arg4_name_));                 \
+  }
+#else
+#define NTL_RPC_DETAIL_STOP_ASYNC_0(_rpc_name_, _ret_, _name_)
+#define NTL_RPC_DETAIL_STOP_ASYNC_1(_rpc_name_, _ret_, _name_, _arg0_type_,   \
+                                    _arg0_name_)
+#define NTL_RPC_DETAIL_STOP_ASYNC_2(                                          \
+    _rpc_name_, _ret_, _name_, _arg0_type_, _arg0_name_, _arg1_type_,       \
+    _arg1_name_)
+#define NTL_RPC_DETAIL_STOP_ASYNC_3(                                          \
+    _rpc_name_, _ret_, _name_, _arg0_type_, _arg0_name_, _arg1_type_,       \
+    _arg1_name_, _arg2_type_, _arg2_name_)
+#define NTL_RPC_DETAIL_STOP_ASYNC_4(                                          \
+    _rpc_name_, _ret_, _name_, _arg0_type_, _arg0_name_, _arg1_type_,       \
+    _arg1_name_, _arg2_type_, _arg2_name_, _arg3_type_, _arg3_name_)
+#define NTL_RPC_DETAIL_STOP_ASYNC_5(                                          \
+    _rpc_name_, _ret_, _name_, _arg0_type_, _arg0_name_, _arg1_type_,       \
+    _arg1_name_, _arg2_type_, _arg2_name_, _arg3_type_, _arg3_name_,        \
+    _arg4_type_, _arg4_name_)
+#endif
+
 #define NTL_ADD_CALLBACK_ID_0(_rpc_name_, _id_, _ret_, _name_, ...)            \
   using _name_##_0_method_type =                                               \
       ntl::rpc::make_method_t<(_id_), _ret_>;                                  \
   static constexpr _name_##_0_method_type _name_##_0_method{};                 \
   inline ntl::rpc::response_type_t<_ret_> _name_() {                           \
     return ntl::rpc::client(L#_rpc_name_).invoke(_name_##_0_method);           \
-  }
+  }                                                                            \
+  inline ntl::rpc::async_call<ntl::rpc::response_type_t<_ret_>>               \
+  _name_##_async() {                                                           \
+    return ntl::rpc::client(L#_rpc_name_).invoke_async(_name_##_0_method);     \
+  }                                                                            \
+  NTL_RPC_DETAIL_STOP_ASYNC_0(_rpc_name_, _ret_, _name_)
 
 #define NTL_ADD_CALLBACK_0(_rpc_name_, _ret_, _name_, ...)                    \
   NTL_ADD_CALLBACK_ID_0(_rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_,    \
@@ -760,7 +982,15 @@ private:
     return ntl::rpc::client(L#_rpc_name_)                                      \
         .invoke(_name_##_1_method,                                             \
                 std::forward<_arg0_type_>(_arg0_name_));                       \
-  }
+  }                                                                            \
+  inline ntl::rpc::async_call<ntl::rpc::response_type_t<_ret_>>               \
+  _name_##_async(_arg0_type_ _arg0_name_) {                                   \
+    return ntl::rpc::client(L#_rpc_name_)                                      \
+        .invoke_async(_name_##_1_method,                                       \
+                      std::forward<_arg0_type_>(_arg0_name_));                 \
+  }                                                                            \
+  NTL_RPC_DETAIL_STOP_ASYNC_1(_rpc_name_, _ret_, _name_, _arg0_type_,        \
+                              _arg0_name_)
 
 #define NTL_ADD_CALLBACK_1(_rpc_name_, _ret_, _name_, _arg0_type_,            \
                            _arg0_name_, ...)                                  \
@@ -778,7 +1008,16 @@ private:
         .invoke(_name_##_2_method,                                             \
                 std::forward<_arg0_type_>(_arg0_name_),                        \
                 std::forward<_arg1_type_>(_arg1_name_));                       \
-  }
+  }                                                                            \
+  inline ntl::rpc::async_call<ntl::rpc::response_type_t<_ret_>>               \
+  _name_##_async(_arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_) {         \
+    return ntl::rpc::client(L#_rpc_name_)                                      \
+        .invoke_async(_name_##_2_method,                                       \
+                      std::forward<_arg0_type_>(_arg0_name_),                  \
+                      std::forward<_arg1_type_>(_arg1_name_));                 \
+  }                                                                            \
+  NTL_RPC_DETAIL_STOP_ASYNC_2(_rpc_name_, _ret_, _name_, _arg0_type_,        \
+                              _arg0_name_, _arg1_type_, _arg1_name_)
 
 #define NTL_ADD_CALLBACK_2(_rpc_name_, _ret_, _name_, _arg0_type_,            \
                            _arg0_name_, _arg1_type_, _arg1_name_, ...)        \
@@ -801,7 +1040,19 @@ private:
                 std::forward<_arg0_type_>(_arg0_name_),                        \
                 std::forward<_arg1_type_>(_arg1_name_),                        \
                 std::forward<_arg2_type_>(_arg2_name_));                       \
-  }
+  }                                                                            \
+  inline ntl::rpc::async_call<ntl::rpc::response_type_t<_ret_>>               \
+  _name_##_async(_arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_,           \
+                  _arg2_type_ _arg2_name_) {                                  \
+    return ntl::rpc::client(L#_rpc_name_)                                      \
+        .invoke_async(_name_##_3_method,                                       \
+                      std::forward<_arg0_type_>(_arg0_name_),                  \
+                      std::forward<_arg1_type_>(_arg1_name_),                  \
+                      std::forward<_arg2_type_>(_arg2_name_));                 \
+  }                                                                            \
+  NTL_RPC_DETAIL_STOP_ASYNC_3(                                                \
+      _rpc_name_, _ret_, _name_, _arg0_type_, _arg0_name_, _arg1_type_,     \
+      _arg1_name_, _arg2_type_, _arg2_name_)
 
 #define NTL_ADD_CALLBACK_3(_rpc_name_, _ret_, _name_, _arg0_type_,            \
                            _arg0_name_, _arg1_type_, _arg1_name_,             \
@@ -827,7 +1078,20 @@ private:
                 std::forward<_arg1_type_>(_arg1_name_),                        \
                 std::forward<_arg2_type_>(_arg2_name_),                        \
                 std::forward<_arg3_type_>(_arg3_name_));                       \
-  }
+  }                                                                            \
+  inline ntl::rpc::async_call<ntl::rpc::response_type_t<_ret_>>               \
+  _name_##_async(_arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_,           \
+                  _arg2_type_ _arg2_name_, _arg3_type_ _arg3_name_) {        \
+    return ntl::rpc::client(L#_rpc_name_)                                      \
+        .invoke_async(_name_##_4_method,                                       \
+                      std::forward<_arg0_type_>(_arg0_name_),                  \
+                      std::forward<_arg1_type_>(_arg1_name_),                  \
+                      std::forward<_arg2_type_>(_arg2_name_),                  \
+                      std::forward<_arg3_type_>(_arg3_name_));                 \
+  }                                                                            \
+  NTL_RPC_DETAIL_STOP_ASYNC_4(                                                \
+      _rpc_name_, _ret_, _name_, _arg0_type_, _arg0_name_, _arg1_type_,     \
+      _arg1_name_, _arg2_type_, _arg2_name_, _arg3_type_, _arg3_name_)
 
 #define NTL_ADD_CALLBACK_4(_rpc_name_, _ret_, _name_, _arg0_type_,            \
                            _arg0_name_, _arg1_type_, _arg1_name_,             \
@@ -857,7 +1121,23 @@ private:
                 std::forward<_arg2_type_>(_arg2_name_),                        \
                 std::forward<_arg3_type_>(_arg3_name_),                        \
                 std::forward<_arg4_type_>(_arg4_name_));                       \
-  }
+  }                                                                            \
+  inline ntl::rpc::async_call<ntl::rpc::response_type_t<_ret_>>               \
+  _name_##_async(_arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_,           \
+                  _arg2_type_ _arg2_name_, _arg3_type_ _arg3_name_,          \
+                  _arg4_type_ _arg4_name_) {                                  \
+    return ntl::rpc::client(L#_rpc_name_)                                      \
+        .invoke_async(_name_##_5_method,                                       \
+                      std::forward<_arg0_type_>(_arg0_name_),                  \
+                      std::forward<_arg1_type_>(_arg1_name_),                  \
+                      std::forward<_arg2_type_>(_arg2_name_),                  \
+                      std::forward<_arg3_type_>(_arg3_name_),                  \
+                      std::forward<_arg4_type_>(_arg4_name_));                 \
+  }                                                                            \
+  NTL_RPC_DETAIL_STOP_ASYNC_5(                                                \
+      _rpc_name_, _ret_, _name_, _arg0_type_, _arg0_name_, _arg1_type_,     \
+      _arg1_name_, _arg2_type_, _arg2_name_, _arg3_type_, _arg3_name_,      \
+      _arg4_type_, _arg4_name_)
 
 #define NTL_ADD_CALLBACK_5(_rpc_name_, _ret_, _name_, _arg0_type_,            \
                            _arg0_name_, _arg1_type_, _arg1_name_,             \
@@ -867,4 +1147,93 @@ private:
                         _arg0_type_, _arg0_name_, _arg1_type_, _arg1_name_,    \
                         _arg2_type_, _arg2_name_, _arg3_type_, _arg3_name_,    \
                         _arg4_type_, _arg4_name_, __VA_ARGS__)
+
+// The context name is consumed only by the kernel expansion. User-mode
+// wrappers retain the same method descriptor, arguments, and wire format.
+#define NTL_ADD_CALLBACK_CONTEXT_ID_0(_rpc_name_, _id_, _ret_, _name_,        \
+                                      _context_name_, ...)                    \
+  NTL_ADD_CALLBACK_ID_0(_rpc_name_, _id_, _ret_, _name_, __VA_ARGS__)
+
+#define NTL_ADD_CALLBACK_CONTEXT_0(_rpc_name_, _ret_, _name_,                 \
+                                   _context_name_, ...)                       \
+  NTL_ADD_CALLBACK_CONTEXT_ID_0(_rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_,    \
+                                _name_, _context_name_, __VA_ARGS__)
+
+#define NTL_ADD_CALLBACK_CONTEXT_ID_1(                                        \
+    _rpc_name_, _id_, _ret_, _name_, _context_name_, _arg0_type_,            \
+    _arg0_name_, ...)                                                         \
+  NTL_ADD_CALLBACK_ID_1(_rpc_name_, _id_, _ret_, _name_, _arg0_type_,        \
+                        _arg0_name_, __VA_ARGS__)
+
+#define NTL_ADD_CALLBACK_CONTEXT_1(_rpc_name_, _ret_, _name_,                 \
+                                   _context_name_, _arg0_type_,               \
+                                   _arg0_name_, ...)                          \
+  NTL_ADD_CALLBACK_CONTEXT_ID_1(                                              \
+      _rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_, _context_name_,      \
+      _arg0_type_, _arg0_name_, __VA_ARGS__)
+
+#define NTL_ADD_CALLBACK_CONTEXT_ID_2(                                        \
+    _rpc_name_, _id_, _ret_, _name_, _context_name_, _arg0_type_,            \
+    _arg0_name_, _arg1_type_, _arg1_name_, ...)                              \
+  NTL_ADD_CALLBACK_ID_2(_rpc_name_, _id_, _ret_, _name_, _arg0_type_,        \
+                        _arg0_name_, _arg1_type_, _arg1_name_, __VA_ARGS__)
+
+#define NTL_ADD_CALLBACK_CONTEXT_2(                                           \
+    _rpc_name_, _ret_, _name_, _context_name_, _arg0_type_, _arg0_name_,     \
+    _arg1_type_, _arg1_name_, ...)                                           \
+  NTL_ADD_CALLBACK_CONTEXT_ID_2(                                              \
+      _rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_, _context_name_,      \
+      _arg0_type_, _arg0_name_, _arg1_type_, _arg1_name_, __VA_ARGS__)
+
+#define NTL_ADD_CALLBACK_CONTEXT_ID_3(                                        \
+    _rpc_name_, _id_, _ret_, _name_, _context_name_, _arg0_type_,            \
+    _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_, _arg2_name_, ...)    \
+  NTL_ADD_CALLBACK_ID_3(_rpc_name_, _id_, _ret_, _name_, _arg0_type_,        \
+                        _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_,   \
+                        _arg2_name_, __VA_ARGS__)
+
+#define NTL_ADD_CALLBACK_CONTEXT_3(                                           \
+    _rpc_name_, _ret_, _name_, _context_name_, _arg0_type_, _arg0_name_,     \
+    _arg1_type_, _arg1_name_, _arg2_type_, _arg2_name_, ...)                 \
+  NTL_ADD_CALLBACK_CONTEXT_ID_3(                                              \
+      _rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_, _context_name_,      \
+      _arg0_type_, _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_,       \
+      _arg2_name_, __VA_ARGS__)
+
+#define NTL_ADD_CALLBACK_CONTEXT_ID_4(                                        \
+    _rpc_name_, _id_, _ret_, _name_, _context_name_, _arg0_type_,            \
+    _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_, _arg2_name_,         \
+    _arg3_type_, _arg3_name_, ...)                                           \
+  NTL_ADD_CALLBACK_ID_4(                                                      \
+      _rpc_name_, _id_, _ret_, _name_, _arg0_type_, _arg0_name_,             \
+      _arg1_type_, _arg1_name_, _arg2_type_, _arg2_name_, _arg3_type_,       \
+      _arg3_name_, __VA_ARGS__)
+
+#define NTL_ADD_CALLBACK_CONTEXT_4(                                           \
+    _rpc_name_, _ret_, _name_, _context_name_, _arg0_type_, _arg0_name_,     \
+    _arg1_type_, _arg1_name_, _arg2_type_, _arg2_name_, _arg3_type_,         \
+    _arg3_name_, ...)                                                         \
+  NTL_ADD_CALLBACK_CONTEXT_ID_4(                                              \
+      _rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_, _context_name_,      \
+      _arg0_type_, _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_,       \
+      _arg2_name_, _arg3_type_, _arg3_name_, __VA_ARGS__)
+
+#define NTL_ADD_CALLBACK_CONTEXT_ID_5(                                        \
+    _rpc_name_, _id_, _ret_, _name_, _context_name_, _arg0_type_,            \
+    _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_, _arg2_name_,         \
+    _arg3_type_, _arg3_name_, _arg4_type_, _arg4_name_, ...)                 \
+  NTL_ADD_CALLBACK_ID_5(                                                      \
+      _rpc_name_, _id_, _ret_, _name_, _arg0_type_, _arg0_name_,             \
+      _arg1_type_, _arg1_name_, _arg2_type_, _arg2_name_, _arg3_type_,       \
+      _arg3_name_, _arg4_type_, _arg4_name_, __VA_ARGS__)
+
+#define NTL_ADD_CALLBACK_CONTEXT_5(                                           \
+    _rpc_name_, _ret_, _name_, _context_name_, _arg0_type_, _arg0_name_,     \
+    _arg1_type_, _arg1_name_, _arg2_type_, _arg2_name_, _arg3_type_,         \
+    _arg3_name_, _arg4_type_, _arg4_name_, ...)                              \
+  NTL_ADD_CALLBACK_CONTEXT_ID_5(                                              \
+      _rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_, _context_name_,      \
+      _arg0_type_, _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_,       \
+      _arg2_name_, _arg3_type_, _arg3_name_, _arg4_type_, _arg4_name_,       \
+      __VA_ARGS__)
 #endif // defined(NTL_USER_MODE)
