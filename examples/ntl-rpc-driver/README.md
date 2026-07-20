@@ -20,6 +20,7 @@ The sample demonstrates:
 - per-method request and decode-allocation limits
 - an immutable dispatch table with rundown-protected shutdown
 - startup contract discovery for version, capability, and method compatibility
+- original caller identity and pre-deserialization method authorization
 - serialization of simple scalar values, a custom request/reply pair, and a
   `std::vector`
 
@@ -27,7 +28,10 @@ The source is split by responsibility:
 
 - `shared/ntl_rpc_sample_types.hpp`: serialized request and reply types
 - `shared/ntl_rpc_sample.hpp`: the driver/app RPC contract
+- `shared/ntl_rpc_caller_security.hpp`: caller-security method descriptors
+- `driver/caller_security.cpp`: caller inspection and method authorization
 - `driver/operations.cpp`: kernel callback implementations
+- `app/caller_security.cpp`: caller-security client calls
 - `app/synchronous_calls.cpp`: generated wrappers and reusable synchronous client
 - `app/asynchronous_call.cpp`: successful asynchronous completion
 - `app/cancellation.cpp`: timeout followed by cooperative cancellation
@@ -122,10 +126,43 @@ progress before the owner releases the device.
 
 The sample initializes the endpoint with `server_options::asynchronous()`.
 Application requests are therefore pended and executed by PASSIVE_LEVEL work
-items. `delayed_add` uses `NTL_ADD_CALLBACK_CONTEXT_ID_3`, which gives its
-kernel implementation a named `ntl::rpc::call_context`. The operation polls
-that context between short waits and exits through `throw_if_cancelled()` when
-the app cancels the request.
+items. `delayed_add` uses `NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_ID_3`, which
+checks the original caller before decoding the request and gives its kernel
+implementation a named `ntl::rpc::call_context`. The operation polls that
+context between short waits and exits through `throw_if_cancelled()` when the
+app cancels the request. The generated app API remains
+`crtsys_ntl_rpc_sample::delayed_add(...)` and `delayed_add_async(...)`.
+
+## Caller Authorization At A Glance
+
+[`driver/caller_security.cpp`](./driver/caller_security.cpp) keeps the complete
+authorization path together. The policy receives the original requester even
+though the sample server executes the call on a system worker thread:
+
+```cpp
+server->on_authorized(
+    crtsys_ntl_rpc_security::user_mode_echo,
+    [](const ntl::rpc::call_context &caller) -> NTSTATUS {
+      return caller.is_user_mode() ? STATUS_SUCCESS : STATUS_ACCESS_DENIED;
+    },
+    [](std::uint32_t value) { return value; });
+```
+
+The app invokes the same shared method descriptor without any security-specific
+transport code:
+
+```cpp
+ntl::rpc::client client(L"crtsys_ntl_rpc_security_sample");
+auto caller = client.invoke(crtsys_ntl_rpc_security::caller_info);
+auto value = client.invoke(crtsys_ntl_rpc_security::user_mode_echo, 42u);
+```
+
+Endpoint ACLs decide who may open the RPC device. `on_authorized()` adds a
+per-method decision before request deserialization and callback execution. A
+real driver can replace the short user-mode policy above with
+`call_context::check_access()` and its own security descriptor. The exhaustive
+allow/deny, impersonation, and callback-suppression cases remain in
+[`test/rpc/security`](../../test/rpc/security), keeping this sample readable.
 
 ## Async Model
 

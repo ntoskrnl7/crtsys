@@ -52,6 +52,7 @@ int wmain(int argc, wchar_t **argv) {
     (void)client.require_contract(requirements);
 
     crtsys_ntl_rpc_sample_app::run_synchronous_calls(client, value, bias);
+    crtsys_ntl_rpc_sample_app::run_caller_security();
     crtsys_ntl_rpc_sample_app::run_asynchronous_call();
     crtsys_ntl_rpc_sample_app::run_cancellation();
     crtsys_ntl_rpc_sample_app::run_coroutine_call();

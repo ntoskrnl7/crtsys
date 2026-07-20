@@ -64,7 +64,7 @@ exception 없음, 유효한 WDK 문맥을 직접 보장해야 합니다. driver 
 | STL atomic primitive | resident storage 위의 `std::atomic`, `std::atomic_ref`, `std::atomic_flag` load, store, exchange, compare-exchange 및 C++20 wait/notify | 감사된 non-waiting operation은 `<= DISPATCH_LEVEL`; wait/notify는 `PASSIVE_LEVEL` only | wait/notify는 blocking synchronization으로 취급하세요. elevated IRQL에서 runtime-backed callback이나 allocation과 섞지 마세요. |
 | I/O stream | `std::cin`, `std::cout`, `std::cerr`, `std::clog`, wide stream 계열 | `PASSIVE_LEVEL` only | diagnostic/test 용도입니다. production hot path와 stack-sensitive path에서는 피하세요. |
 | C math 및 floating-point helper | math function, floating-point classification helper | exact helper를 별도 감사하지 않았다면 `PASSIVE_LEVEL` | floating-point state와 helper dependency는 driver context에 민감합니다. |
-| NTL entry, driver, device, RPC server helper | `ntl::main`, `ntl::driver`, `ntl::device`, `ntl::rpc::server` | `PASSIVE_LEVEL` only | initialization, teardown, device setup, IOCTL/RPC control path 용도입니다. |
+| NTL entry, driver, device, RPC server helper | `ntl::main`, `ntl::driver`, `ntl::device`, `ntl::rpc::server` | `PASSIVE_LEVEL` only | initialization, teardown, device setup, IOCTL/RPC control path 용도입니다. RPC는 원래 호출자의 보안 context를 보존하고 request 역직렬화 전에 method별 authorization을 수행할 수 있습니다. |
 | NTL IRP view and typed IOCTL helper | `ntl::irp`, `ntl::device_control::in_buffer`, `ntl::device_control::out_buffer`, `ntl::ioctl` | IRP를 넘겨준 dispatch path를 따름 | NTL device callback은 exact callback body를 별도 감사하지 않았다면 `PASSIVE_LEVEL`로 보세요. |
 | NTL status wrapper | `ntl::status` | caller context | `NTSTATUS`를 감싼 value-only wrapper입니다. |
 | NTL stack expansion | `ntl::expand_stack` | `PASSIVE_LEVEL` only | runtime-backed control-path helper입니다. hot path 회피 수단이 아닙니다. |

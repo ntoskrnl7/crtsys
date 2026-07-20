@@ -28,9 +28,10 @@ NTL_ADD_CALLBACK_ID_1(
       return crtsys_ntl_rpc_sample_server::series(count);
     })
 
-NTL_ADD_CALLBACK_CONTEXT_ID_3(
-    crtsys_ntl_rpc_sample, 0x903, int, delayed_add, call,
-    std::uint32_t, milliseconds, int, left, int, right, {
+NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_ID_3(
+    crtsys_ntl_rpc_sample, 0x903, int, delayed_add,
+    crtsys_ntl_rpc_sample_server::authorize_user_mode, call, std::uint32_t,
+    milliseconds, int, left, int, right, {
       return crtsys_ntl_rpc_sample_server::delayed_add(
           call, milliseconds, left, right);
     })

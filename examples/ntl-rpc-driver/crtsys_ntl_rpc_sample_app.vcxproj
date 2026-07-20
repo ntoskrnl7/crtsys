@@ -55,6 +55,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="app\asynchronous_call.cpp" />
+    <ClCompile Include="app\caller_security.cpp" />
     <ClCompile Include="app\cancellation.cpp" />
     <ClCompile Include="app\coroutine_call.cpp" />
     <ClCompile Include="app\main.cpp" />
@@ -64,6 +65,7 @@
   <ItemGroup>
     <ClInclude Include="app\coroutine_task.hpp" />
     <ClInclude Include="app\examples.hpp" />
+    <ClInclude Include="shared\ntl_rpc_caller_security.hpp" />
     <ClInclude Include="shared\ntl_rpc_sample.hpp" />
     <ClInclude Include="shared\ntl_rpc_sample_types.hpp" />
   </ItemGroup>

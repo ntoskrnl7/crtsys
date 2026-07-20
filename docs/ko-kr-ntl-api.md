@@ -208,12 +208,23 @@ dispatcher와 user-mode wrapper를 생성합니다. 직렬화는 `zpp::serialize
 - `NTL_ADD_CALLBACK_ID_3`
 - `NTL_ADD_CALLBACK_ID_4`
 - `NTL_ADD_CALLBACK_ID_5`
+- `NTL_ADD_CALLBACK_CONTEXT_N` / `NTL_ADD_CALLBACK_CONTEXT_ID_N`
+- `NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_N` /
+  `NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_ID_N`
 
 suffix의 `0`부터 `5`는 callback 인자 개수입니다. 드라이버와 앱이 같은 공유
 schema를 사용하는 일반적인 경우에는 간결한 `NTL_ADD_CALLBACK_N`을
 사용하세요. 드라이버와 앱을 독립적으로 버전 관리하면서 schema 재배치 뒤에도
 같은 wire ABI를 유지해야 할 때는 vendor IOCTL function 범위의 명시적인 ID를
 받는 `NTL_ADD_CALLBACK_ID_N`을 사용하세요.
+
+취소 확인 등으로 callback에서 `ntl::rpc::call_context`가 필요하면
+`NTL_ADD_CALLBACK_CONTEXT_N` 계열을 사용합니다. 신뢰하지 않는 요청 인자를
+역직렬화하기 전에 호출자 권한을 검사해야 하면
+`NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_N` 계열을 사용합니다. 권한 정책은 원본
+요청자의 `call_context`를 받고 `NTSTATUS` 또는 `ntl::status`를 반환합니다.
+실패 상태이면 인자 역직렬화와 callback 실행이 모두 생략됩니다. 앱 쪽에는 기존과
+동일한 동기, 비동기, `stop_token`, coroutine wrapper가 생성됩니다.
 
 가변 크기 return type은
 `NTL_RPC_BOUNDED_RESPONSE(Bytes, ReturnType)`로 최대 직렬화 응답 크기를
