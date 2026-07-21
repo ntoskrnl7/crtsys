@@ -1,0 +1,243 @@
+/**
+ * @file shared_ring
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Fixed-layout single-producer/single-consumer shared-memory ring.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "common"
+
+#if defined(_DDK_DRIVER_) || defined(_NTDDK_) || defined(_NTIFS_) ||           \
+    defined(_WDMDDK_)
+#ifndef _NTDDK_
+#include <wdm.h>
+#endif
+#else
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <limits>
+#include <type_traits>
+
+namespace ntl {
+namespace ipc {
+
+namespace detail {
+
+constexpr std::uint32_t shared_ring_magic = 0x524C544Eu; // "NTLR"
+constexpr std::uint32_t shared_ring_version = 1;
+
+struct alignas(64) shared_ring_header {
+  std::uint32_t magic;
+  std::uint32_t version;
+  std::uint32_t header_size;
+  std::uint32_t element_size;
+  std::uint32_t capacity;
+  std::uint32_t flags;
+  std::uint64_t epoch;
+  std::uint64_t reserved[4];
+  volatile LONG64 write_sequence;
+  std::uint64_t write_reserved[7];
+  volatile LONG64 read_sequence;
+  std::uint64_t read_reserved[7];
+};
+
+static_assert(offsetof(shared_ring_header, write_sequence) == 64,
+              "NTL IPC write sequence must occupy its own cache line");
+static_assert(offsetof(shared_ring_header, read_sequence) == 128,
+              "NTL IPC read sequence must occupy its own cache line");
+static_assert(sizeof(shared_ring_header) == 192,
+              "NTL IPC ring header must be cross-bitness stable");
+
+inline std::uint64_t atomic_load(volatile LONG64 *value) noexcept {
+  return static_cast<std::uint64_t>(InterlockedCompareExchange64(value, 0, 0));
+}
+
+inline void atomic_store(volatile LONG64 *value,
+                         std::uint64_t desired) noexcept {
+  InterlockedExchange64(value, static_cast<LONG64>(desired));
+}
+
+} // namespace detail
+
+/**
+ * @brief Non-owning SPSC ring over a caller-supplied shared-memory range.
+ * @tparam T Fixed-layout record copied into and out of shared slots.
+ * @tparam Capacity Number of records retained before backpressure is applied.
+ *
+ * One side must be the only writer and the other side the only reader. Use one
+ * ring for each direction of a duplex channel. The record type must not contain
+ * native pointers, size_t, handles, or architecture-dependent layout when a
+ * 32-bit app communicates with a 64-bit driver.
+ */
+template <typename T, std::size_t Capacity> class shared_ring {
+  static_assert(std::is_trivially_copyable<T>::value,
+                "NTL IPC ring records must be trivially copyable");
+  static_assert(std::is_standard_layout<T>::value,
+                "NTL IPC ring records must have standard layout");
+  static_assert(Capacity != 0, "NTL IPC ring capacity must be nonzero");
+  static_assert(Capacity <= (std::numeric_limits<std::uint32_t>::max)(),
+                "NTL IPC ring capacity exceeds the wire field");
+  static_assert(sizeof(T) <= (std::numeric_limits<std::uint32_t>::max)(),
+                "NTL IPC ring record size exceeds the wire field");
+  static_assert(
+      Capacity <= ((std::numeric_limits<std::size_t>::max)() -
+                   sizeof(detail::shared_ring_header)) /
+                      sizeof(T),
+      "NTL IPC ring byte size overflows size_t");
+
+public:
+  /** @brief Bytes required for the header and all fixed-size slots. */
+  static constexpr std::size_t required_bytes() noexcept {
+    return sizeof(detail::shared_ring_header) + sizeof(T) * Capacity;
+  }
+
+  /** @brief Required alignment for the shared-memory base address. */
+  static constexpr std::size_t required_alignment() noexcept { return 64; }
+
+  /**
+   * @brief Initializes an unpublished shared-memory range and binds a facade.
+   * @param memory Cache-line-aligned writable memory.
+   * @param bytes Accessible byte count.
+   * @param result Receives the bound ring on success.
+   * @param epoch Nonzero owner-selected generation for diagnostics.
+   */
+  static validation_status initialize(void *memory, std::size_t bytes,
+                                      shared_ring &result,
+                                      std::uint64_t epoch = 1) noexcept {
+    result = {};
+    if (!memory || epoch == 0)
+      return validation_status::invalid_argument;
+    if ((reinterpret_cast<std::uintptr_t>(memory) % required_alignment()) != 0)
+      return validation_status::misaligned_buffer;
+    if (bytes < required_bytes())
+      return validation_status::insufficient_buffer;
+
+    std::memset(memory, 0, required_bytes());
+    auto *const header = static_cast<detail::shared_ring_header *>(memory);
+    header->magic = detail::shared_ring_magic;
+    header->version = detail::shared_ring_version;
+    header->header_size = sizeof(detail::shared_ring_header);
+    header->element_size = sizeof(T);
+    header->capacity = static_cast<std::uint32_t>(Capacity);
+    header->epoch = epoch;
+    detail::atomic_store(&header->write_sequence, 0);
+    detail::atomic_store(&header->read_sequence, 0);
+    result.header_ = header;
+    return validation_status::success;
+  }
+
+  /** @brief Validates and attaches to an initialized shared-memory ring. */
+  static validation_status attach(void *memory, std::size_t bytes,
+                                  shared_ring &result) noexcept {
+    result = {};
+    if (!memory)
+      return validation_status::invalid_argument;
+    if ((reinterpret_cast<std::uintptr_t>(memory) % required_alignment()) != 0)
+      return validation_status::misaligned_buffer;
+    if (bytes < required_bytes())
+      return validation_status::insufficient_buffer;
+
+    auto *const header = static_cast<detail::shared_ring_header *>(memory);
+    if (header->magic != detail::shared_ring_magic ||
+        header->version != detail::shared_ring_version ||
+        header->header_size != sizeof(detail::shared_ring_header) ||
+        header->element_size != sizeof(T) || header->capacity != Capacity ||
+        header->flags != 0 || header->epoch == 0)
+      return validation_status::incompatible_layout;
+
+    for (const auto reserved : header->reserved) {
+      if (reserved != 0)
+        return validation_status::incompatible_layout;
+    }
+    for (const auto reserved : header->write_reserved) {
+      if (reserved != 0)
+        return validation_status::incompatible_layout;
+    }
+    for (const auto reserved : header->read_reserved) {
+      if (reserved != 0)
+        return validation_status::incompatible_layout;
+    }
+
+    const auto write = detail::atomic_load(&header->write_sequence);
+    const auto read = detail::atomic_load(&header->read_sequence);
+    if (write - read > Capacity)
+      return validation_status::incompatible_layout;
+
+    result.header_ = header;
+    return validation_status::success;
+  }
+
+  /** @brief Reports whether this facade is attached to a valid header. */
+  explicit operator bool() const noexcept { return header_ != nullptr; }
+
+  /** @brief Returns the owner-selected ring epoch. */
+  std::uint64_t epoch() const noexcept { return header_ ? header_->epoch : 0; }
+
+  /** @brief Returns an approximate number of records ready to read. */
+  std::size_t readable() const noexcept {
+    if (!header_)
+      return 0;
+    const auto write = detail::atomic_load(&header_->write_sequence);
+    const auto read = detail::atomic_load(&header_->read_sequence);
+    const auto count = write - read;
+    return count <= Capacity ? static_cast<std::size_t>(count) : 0;
+  }
+
+  /** @brief Returns an approximate number of records that can be written. */
+  std::size_t writable() const noexcept { return Capacity - readable(); }
+
+  /**
+   * @brief Writes one record, or returns false while the bounded ring is full.
+   * @note Exactly one producer may call this method for a ring instance.
+   */
+  bool try_write(const T &value) noexcept {
+    if (!header_)
+      return false;
+    const auto write = detail::atomic_load(&header_->write_sequence);
+    const auto read = detail::atomic_load(&header_->read_sequence);
+    if (write - read >= Capacity)
+      return false;
+
+    std::memcpy(slot(write), &value, sizeof(value));
+    detail::atomic_store(&header_->write_sequence, write + 1);
+    return true;
+  }
+
+  /**
+   * @brief Reads one record, or returns false while the bounded ring is empty.
+   * @note Exactly one consumer may call this method for a ring instance.
+   */
+  bool try_read(T &value) noexcept {
+    if (!header_)
+      return false;
+    const auto read = detail::atomic_load(&header_->read_sequence);
+    const auto write = detail::atomic_load(&header_->write_sequence);
+    if (write == read || write - read > Capacity)
+      return false;
+
+    std::memcpy(&value, slot(read), sizeof(value));
+    detail::atomic_store(&header_->read_sequence, read + 1);
+    return true;
+  }
+
+private:
+  unsigned char *slot(std::uint64_t sequence) const noexcept {
+    auto *const slots = reinterpret_cast<unsigned char *>(header_) +
+                        sizeof(detail::shared_ring_header);
+    return slots + static_cast<std::size_t>(sequence % Capacity) * sizeof(T);
+  }
+
+  detail::shared_ring_header *header_ = nullptr;
+};
+
+} // namespace ipc
+} // namespace ntl

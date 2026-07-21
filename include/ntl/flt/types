@@ -1,0 +1,752 @@
+/**
+ * @file types
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Fundamental Filter Manager facades and callback result types.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "context"
+
+#include <fltKernel.h>
+
+#include "../file"
+
+#include <limits>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+namespace ntl::flt {
+
+class volume;
+class instance;
+class instance_ref;
+
+/** @brief Stable identity returned for one attached minifilter instance. */
+struct instance_information {
+  std::wstring name;
+  std::wstring altitude;
+  std::wstring volume_name;
+  std::wstring filter_name;
+};
+
+/** @brief Runtime identifier for a Filter Manager callback operation. */
+enum class operation_id : unsigned char {
+  create = IRP_MJ_CREATE,
+  create_named_pipe = IRP_MJ_CREATE_NAMED_PIPE,
+  close = IRP_MJ_CLOSE,
+  read = IRP_MJ_READ,
+  write = IRP_MJ_WRITE,
+  query_information = IRP_MJ_QUERY_INFORMATION,
+  set_information = IRP_MJ_SET_INFORMATION,
+  query_ea = IRP_MJ_QUERY_EA,
+  set_ea = IRP_MJ_SET_EA,
+  flush_buffers = IRP_MJ_FLUSH_BUFFERS,
+  query_volume_information = IRP_MJ_QUERY_VOLUME_INFORMATION,
+  set_volume_information = IRP_MJ_SET_VOLUME_INFORMATION,
+  directory_control = IRP_MJ_DIRECTORY_CONTROL,
+  file_system_control = IRP_MJ_FILE_SYSTEM_CONTROL,
+  device_control = IRP_MJ_DEVICE_CONTROL,
+  internal_device_control = IRP_MJ_INTERNAL_DEVICE_CONTROL,
+  shutdown = IRP_MJ_SHUTDOWN,
+  lock_control = IRP_MJ_LOCK_CONTROL,
+  cleanup = IRP_MJ_CLEANUP,
+  create_mailslot = IRP_MJ_CREATE_MAILSLOT,
+  query_security = IRP_MJ_QUERY_SECURITY,
+  set_security = IRP_MJ_SET_SECURITY,
+  power = IRP_MJ_POWER,
+  system_control = IRP_MJ_SYSTEM_CONTROL,
+  device_change = IRP_MJ_DEVICE_CHANGE,
+  query_quota = IRP_MJ_QUERY_QUOTA,
+  set_quota = IRP_MJ_SET_QUOTA,
+  pnp = IRP_MJ_PNP,
+  acquire_for_section_synchronization =
+      IRP_MJ_ACQUIRE_FOR_SECTION_SYNCHRONIZATION,
+  release_for_section_synchronization =
+      IRP_MJ_RELEASE_FOR_SECTION_SYNCHRONIZATION,
+  acquire_for_modified_page_writer = IRP_MJ_ACQUIRE_FOR_MOD_WRITE,
+  release_for_modified_page_writer = IRP_MJ_RELEASE_FOR_MOD_WRITE,
+  acquire_for_cache_flush = IRP_MJ_ACQUIRE_FOR_CC_FLUSH,
+  release_for_cache_flush = IRP_MJ_RELEASE_FOR_CC_FLUSH,
+  query_open = IRP_MJ_QUERY_OPEN,
+  fast_io_check_if_possible = IRP_MJ_FAST_IO_CHECK_IF_POSSIBLE,
+  network_query_open = IRP_MJ_NETWORK_QUERY_OPEN,
+  mdl_read = IRP_MJ_MDL_READ,
+  mdl_read_complete = IRP_MJ_MDL_READ_COMPLETE,
+  prepare_mdl_write = IRP_MJ_PREPARE_MDL_WRITE,
+  mdl_write_complete = IRP_MJ_MDL_WRITE_COMPLETE,
+  volume_mount = IRP_MJ_VOLUME_MOUNT,
+  volume_dismount = IRP_MJ_VOLUME_DISMOUNT,
+};
+
+/** @brief Compile-time tag for an operation without read/write flags. */
+template <operation_id Value> class operation_tag {
+  friend struct operation;
+
+public:
+  /** @brief Returns the runtime operation identifier. */
+  static constexpr operation_id value = Value;
+
+  /** @brief Returns the native Filter Manager major-function value. */
+  static constexpr UCHAR native_value = static_cast<UCHAR>(Value);
+
+private:
+  constexpr operation_tag() noexcept = default;
+};
+
+/** @brief Compile-time tag for read/write operations that accept flags. */
+template <operation_id Value> class read_write_operation_tag {
+  friend struct operation;
+
+public:
+  /** @brief Returns the runtime operation identifier. */
+  static constexpr operation_id value = Value;
+
+  /** @brief Returns the native Filter Manager major-function value. */
+  static constexpr UCHAR native_value = static_cast<UCHAR>(Value);
+
+private:
+  constexpr read_write_operation_tag() noexcept = default;
+};
+
+/**
+ * @brief Typed constants accepted by registration::on().
+ *
+ * read and write use a distinct tag type because Filter Manager operation
+ * flags are valid only for those two operations.
+ */
+struct operation {
+  inline static constexpr operation_tag<operation_id::create> create{};
+  inline static constexpr operation_tag<operation_id::create_named_pipe>
+      create_named_pipe{};
+  inline static constexpr operation_tag<operation_id::close> close{};
+  inline static constexpr read_write_operation_tag<operation_id::read> read{};
+  inline static constexpr read_write_operation_tag<operation_id::write> write{};
+  inline static constexpr operation_tag<operation_id::query_information>
+      query_information{};
+  inline static constexpr operation_tag<operation_id::set_information>
+      set_information{};
+  inline static constexpr operation_tag<operation_id::query_ea> query_ea{};
+  inline static constexpr operation_tag<operation_id::set_ea> set_ea{};
+  inline static constexpr operation_tag<operation_id::flush_buffers>
+      flush_buffers{};
+  inline static constexpr operation_tag<operation_id::query_volume_information>
+      query_volume_information{};
+  inline static constexpr operation_tag<operation_id::set_volume_information>
+      set_volume_information{};
+  inline static constexpr operation_tag<operation_id::directory_control>
+      directory_control{};
+  inline static constexpr operation_tag<operation_id::file_system_control>
+      file_system_control{};
+  inline static constexpr operation_tag<operation_id::device_control>
+      device_control{};
+  inline static constexpr operation_tag<operation_id::internal_device_control>
+      internal_device_control{};
+  inline static constexpr operation_tag<operation_id::shutdown> shutdown{};
+  inline static constexpr operation_tag<operation_id::lock_control>
+      lock_control{};
+  inline static constexpr operation_tag<operation_id::cleanup> cleanup{};
+  inline static constexpr operation_tag<operation_id::create_mailslot>
+      create_mailslot{};
+  inline static constexpr operation_tag<operation_id::query_security>
+      query_security{};
+  inline static constexpr operation_tag<operation_id::set_security>
+      set_security{};
+  inline static constexpr operation_tag<operation_id::power> power{};
+  inline static constexpr operation_tag<operation_id::system_control>
+      system_control{};
+  inline static constexpr operation_tag<operation_id::device_change>
+      device_change{};
+  inline static constexpr operation_tag<operation_id::query_quota>
+      query_quota{};
+  inline static constexpr operation_tag<operation_id::set_quota> set_quota{};
+  inline static constexpr operation_tag<operation_id::pnp> pnp{};
+  inline static constexpr operation_tag<
+      operation_id::acquire_for_section_synchronization>
+      acquire_for_section_synchronization{};
+  inline static constexpr operation_tag<
+      operation_id::release_for_section_synchronization>
+      release_for_section_synchronization{};
+  inline static constexpr operation_tag<
+      operation_id::acquire_for_modified_page_writer>
+      acquire_for_modified_page_writer{};
+  inline static constexpr operation_tag<
+      operation_id::release_for_modified_page_writer>
+      release_for_modified_page_writer{};
+  inline static constexpr operation_tag<operation_id::acquire_for_cache_flush>
+      acquire_for_cache_flush{};
+  inline static constexpr operation_tag<operation_id::release_for_cache_flush>
+      release_for_cache_flush{};
+  inline static constexpr operation_tag<operation_id::query_open> query_open{};
+  inline static constexpr operation_tag<operation_id::fast_io_check_if_possible>
+      fast_io_check_if_possible{};
+  inline static constexpr operation_tag<operation_id::network_query_open>
+      network_query_open{};
+  inline static constexpr operation_tag<operation_id::mdl_read> mdl_read{};
+  inline static constexpr operation_tag<operation_id::mdl_read_complete>
+      mdl_read_complete{};
+  inline static constexpr operation_tag<operation_id::prepare_mdl_write>
+      prepare_mdl_write{};
+  inline static constexpr operation_tag<operation_id::mdl_write_complete>
+      mdl_write_complete{};
+  inline static constexpr operation_tag<operation_id::volume_mount>
+      volume_mount{};
+  inline static constexpr operation_tag<operation_id::volume_dismount>
+      volume_dismount{};
+};
+
+/** @brief Result returned by a minifilter pre-operation callback. */
+enum class pre_result : unsigned long {
+  success_with_callback = FLT_PREOP_SUCCESS_WITH_CALLBACK,
+  success_no_callback = FLT_PREOP_SUCCESS_NO_CALLBACK,
+  pending = FLT_PREOP_PENDING,
+  disallow_fast_io = FLT_PREOP_DISALLOW_FASTIO,
+  complete = FLT_PREOP_COMPLETE,
+  synchronize = FLT_PREOP_SYNCHRONIZE,
+  disallow_fsfilter_io = FLT_PREOP_DISALLOW_FSFILTER_IO,
+};
+
+/** @brief Result returned by a minifilter post-operation callback. */
+enum class post_result : unsigned long {
+  finished = FLT_POSTOP_FINISHED_PROCESSING,
+  more_processing_required = FLT_POSTOP_MORE_PROCESSING_REQUIRED,
+  disallow_fsfilter_io = FLT_POSTOP_DISALLOW_FSFILTER_IO,
+};
+
+/** @brief Chooses whether mixed post processing ends or continues when safe. */
+enum class post_continuation {
+  finished,
+  when_safe,
+};
+
+/** @brief Flags controlling which read/write operations reach a callback. */
+enum class operation_flags : unsigned long {
+  none = 0,
+  skip_paging_io = FLTFL_OPERATION_REGISTRATION_SKIP_PAGING_IO,
+  skip_cached_io = FLTFL_OPERATION_REGISTRATION_SKIP_CACHED_IO,
+  skip_non_dasd_io = FLTFL_OPERATION_REGISTRATION_SKIP_NON_DASD_IO,
+#ifdef FLTFL_OPERATION_REGISTRATION_SKIP_NON_CACHED_NON_PAGING_IO
+  skip_non_cached_non_paging_io =
+      FLTFL_OPERATION_REGISTRATION_SKIP_NON_CACHED_NON_PAGING_IO,
+#endif
+};
+
+/** @brief Combines operation registration flags. */
+constexpr operation_flags operator|(operation_flags left,
+                                    operation_flags right) noexcept {
+  return static_cast<operation_flags>(static_cast<unsigned long>(left) |
+                                      static_cast<unsigned long>(right));
+}
+
+/** @brief Move-only rundown reference returned by explicit attachment. */
+class instance_ref {
+public:
+  instance_ref() noexcept = default;
+
+  /** @brief Takes ownership of one Filter Manager rundown reference. */
+  explicit instance_ref(PFLT_INSTANCE value) noexcept : value_(value) {}
+
+  instance_ref(const instance_ref &) = delete;
+  instance_ref &operator=(const instance_ref &) = delete;
+
+  instance_ref(instance_ref &&other) noexcept
+      : value_(std::exchange(other.value_, nullptr)) {}
+
+  instance_ref &operator=(instance_ref &&other) noexcept {
+    if (this != &other) {
+      reset();
+      value_ = std::exchange(other.value_, nullptr);
+    }
+    return *this;
+  }
+
+  /** @brief Releases the owned rundown reference. */
+  ~instance_ref() { reset(); }
+
+  /** @brief Returns a non-owning facade for the referenced instance. */
+  flt::instance view() const noexcept;
+
+  /** @brief Returns the native referenced instance pointer. */
+  PFLT_INSTANCE native_handle() const noexcept { return value_; }
+
+  /** @brief Returns true when a rundown reference is owned. */
+  explicit operator bool() const noexcept { return value_ != nullptr; }
+
+  /** @brief Releases the current rundown reference early. */
+  void reset() noexcept {
+    if (value_) {
+      FltObjectDereference(value_);
+      value_ = nullptr;
+    }
+  }
+
+private:
+  PFLT_INSTANCE value_ = nullptr;
+};
+
+/** @brief Non-owning facade for a registered Filter Manager filter. */
+class filter {
+public:
+  /** @brief Creates an empty filter facade. */
+  filter() noexcept = default;
+
+  /** @brief Wraps a native filter without changing its reference count. */
+  explicit filter(PFLT_FILTER value) noexcept : value_(value) {}
+
+  /** @brief Returns the native filter pointer. */
+  PFLT_FILTER native_handle() const noexcept { return value_; }
+
+  /** @brief Returns true when a native filter is present. */
+  explicit operator bool() const noexcept { return value_ != nullptr; }
+
+  /**
+   * @brief Attaches the default instance definition to a volume.
+   * @param target Target Filter Manager volume.
+   * @return A referenced instance owner or the Filter Manager status.
+   * @note Runs at PASSIVE_LEVEL. Instance attributes come from the INF.
+   */
+  ntl::result<instance_ref> try_attach(volume target) const noexcept;
+
+  /**
+   * @brief Attaches a named INF instance definition to a volume.
+   * @param target Target Filter Manager volume.
+   * @param instance_name Registry instance-definition name.
+   * @return A referenced instance owner or the Filter Manager status.
+   * @note Runs at PASSIVE_LEVEL.
+   */
+  ntl::result<instance_ref>
+  try_attach(volume target, std::wstring_view instance_name) const noexcept;
+
+  /**
+   * @brief Attaches an instance at an explicitly supplied altitude.
+   * @param target Target Filter Manager volume.
+   * @param altitude Decimal altitude string.
+   * @param instance_name Optional instance name.
+   * @return A referenced instance owner or the Filter Manager status.
+   * @note Runs at PASSIVE_LEVEL. Prefer named INF definitions in production.
+   */
+  ntl::result<instance_ref>
+  try_attach_at(volume target, std::wstring_view altitude,
+                std::wstring_view instance_name = {}) const noexcept;
+
+  /**
+   * @brief Detaches the highest instance of this filter from a volume.
+   * @param target Target Filter Manager volume.
+   */
+  ntl::status try_detach(volume target) const noexcept;
+
+  /**
+   * @brief Detaches one named instance from a volume.
+   * @param target Target Filter Manager volume.
+   * @param instance_name Attached instance name.
+   */
+  ntl::status try_detach(volume target,
+                         std::wstring_view instance_name) const noexcept;
+
+  /**
+   * @brief Enumerates every current attachment owned by this filter.
+   * @return Instance name, altitude, volume, and filter identity records.
+   * @note Runs at PASSIVE_LEVEL because the result owns dynamic strings.
+   */
+  ntl::result<std::vector<instance_information>> try_instances() const noexcept;
+
+private:
+  PFLT_FILTER value_ = nullptr;
+};
+
+/** @brief Non-owning facade for a Filter Manager volume. */
+class volume {
+public:
+  /** @brief Creates an empty volume facade. */
+  volume() noexcept = default;
+
+  /** @brief Wraps a native volume without changing its reference count. */
+  explicit volume(PFLT_VOLUME value) noexcept : value_(value) {}
+
+  /** @brief Returns the native volume pointer. */
+  PFLT_VOLUME native_handle() const noexcept { return value_; }
+
+  /** @brief Returns true when a native volume is present. */
+  explicit operator bool() const noexcept { return value_ != nullptr; }
+
+private:
+  PFLT_VOLUME value_ = nullptr;
+};
+
+/** @brief Non-owning facade for a minifilter instance. */
+class instance {
+public:
+  /** @brief Creates an empty instance facade. */
+  instance() noexcept = default;
+
+  /** @brief Wraps a native instance without changing its reference count. */
+  explicit instance(PFLT_INSTANCE value) noexcept : value_(value) {}
+
+  /** @brief Returns the native instance pointer. */
+  PFLT_INSTANCE native_handle() const noexcept { return value_; }
+
+  /** @brief Returns true when a native instance is present. */
+  explicit operator bool() const noexcept { return value_ != nullptr; }
+
+  /**
+   * @brief Queries this attachment's name, altitude, volume, and filter.
+   * @return An owning identity record or the Filter Manager status.
+   * @note Runs at PASSIVE_LEVEL because the result owns dynamic strings.
+   */
+  ntl::result<instance_information> try_information() const noexcept;
+
+private:
+  PFLT_INSTANCE value_ = nullptr;
+};
+
+inline flt::instance instance_ref::view() const noexcept {
+  return flt::instance{value_};
+}
+
+namespace detail {
+
+inline bool make_unicode_view(std::wstring_view value,
+                              UNICODE_STRING &native) noexcept {
+  constexpr auto maximum_characters =
+      (std::numeric_limits<USHORT>::max)() / sizeof(wchar_t);
+  if (value.size() > maximum_characters)
+    return false;
+
+  native.Buffer = const_cast<PWCH>(value.data());
+  native.Length = static_cast<USHORT>(value.size() * sizeof(wchar_t));
+  native.MaximumLength = native.Length;
+  return true;
+}
+
+inline bool assign_instance_string(const unsigned char *buffer,
+                                   std::size_t buffer_size, USHORT offset,
+                                   USHORT length, std::wstring &destination) {
+  if ((length % sizeof(wchar_t)) != 0 || offset > buffer_size ||
+      length > buffer_size - offset)
+    return false;
+
+  const auto *first = reinterpret_cast<const wchar_t *>(buffer + offset);
+  destination.assign(first, first + length / sizeof(wchar_t));
+  return true;
+}
+
+inline ntl::result<instance_information>
+parse_instance_information(const std::vector<unsigned char> &buffer) noexcept {
+  if (buffer.size() < sizeof(INSTANCE_FULL_INFORMATION))
+    return ntl::unexpected(STATUS_INFO_LENGTH_MISMATCH);
+
+  try {
+    const auto *native =
+        reinterpret_cast<const INSTANCE_FULL_INFORMATION *>(buffer.data());
+    instance_information result;
+    if (!assign_instance_string(buffer.data(), buffer.size(),
+                                native->InstanceNameBufferOffset,
+                                native->InstanceNameLength, result.name) ||
+        !assign_instance_string(buffer.data(), buffer.size(),
+                                native->AltitudeBufferOffset,
+                                native->AltitudeLength, result.altitude) ||
+        !assign_instance_string(buffer.data(), buffer.size(),
+                                native->VolumeNameBufferOffset,
+                                native->VolumeNameLength, result.volume_name) ||
+        !assign_instance_string(buffer.data(), buffer.size(),
+                                native->FilterNameBufferOffset,
+                                native->FilterNameLength, result.filter_name))
+      return ntl::unexpected(STATUS_INFO_LENGTH_MISMATCH);
+    return result;
+  } catch (...) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  }
+}
+
+template <class Query>
+inline ntl::result<instance_information>
+query_instance_information(Query &&query) noexcept {
+  if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+    return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+
+  ULONG required = 0;
+  NTSTATUS status = query(nullptr, 0, &required);
+  if (status != STATUS_BUFFER_TOO_SMALL && status != STATUS_BUFFER_OVERFLOW)
+    return ntl::unexpected(status);
+
+  try {
+    std::vector<unsigned char> buffer(required);
+    for (unsigned int retry = 0; retry != 3; ++retry) {
+      ULONG returned = 0;
+      status =
+          query(buffer.data(), static_cast<ULONG>(buffer.size()), &returned);
+      if (status == STATUS_BUFFER_TOO_SMALL ||
+          status == STATUS_BUFFER_OVERFLOW) {
+        buffer.resize(returned);
+        continue;
+      }
+      if (!NT_SUCCESS(status))
+        return ntl::unexpected(status);
+      if (returned > buffer.size())
+        return ntl::unexpected(STATUS_INFO_LENGTH_MISMATCH);
+      buffer.resize(returned);
+      return parse_instance_information(buffer);
+    }
+    return ntl::unexpected(status);
+  } catch (...) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  }
+}
+
+} // namespace detail
+
+inline ntl::result<instance_information>
+instance::try_information() const noexcept {
+  if (!value_)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+
+  return detail::query_instance_information(
+      [this](PVOID buffer, ULONG size, PULONG returned) noexcept {
+        return FltGetInstanceInformation(value_, InstanceFullInformation,
+                                         buffer, size, returned);
+      });
+}
+
+inline ntl::result<instance_ref>
+filter::try_attach(volume target) const noexcept {
+  if (!value_ || !target)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+    return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+
+  PFLT_INSTANCE attached = nullptr;
+  const NTSTATUS status =
+      FltAttachVolume(value_, target.native_handle(), nullptr, &attached);
+  if (!NT_SUCCESS(status))
+    return ntl::unexpected(status);
+  return instance_ref{attached};
+}
+
+inline ntl::result<instance_ref>
+filter::try_attach(volume target,
+                   std::wstring_view instance_name) const noexcept {
+  if (!value_ || !target)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+    return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+
+  UNICODE_STRING native_name{};
+  if (instance_name.empty() ||
+      !detail::make_unicode_view(instance_name, native_name))
+    return ntl::unexpected(instance_name.empty() ? STATUS_INVALID_PARAMETER
+                                                 : STATUS_NAME_TOO_LONG);
+
+  PFLT_INSTANCE attached = nullptr;
+  const NTSTATUS status =
+      FltAttachVolume(value_, target.native_handle(), &native_name, &attached);
+  if (!NT_SUCCESS(status))
+    return ntl::unexpected(status);
+  return instance_ref{attached};
+}
+
+inline ntl::result<instance_ref>
+filter::try_attach_at(volume target, std::wstring_view altitude,
+                      std::wstring_view instance_name) const noexcept {
+  if (!value_ || !target)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+    return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+
+  UNICODE_STRING native_altitude{};
+  UNICODE_STRING native_name{};
+  if (altitude.empty() || !detail::make_unicode_view(altitude, native_altitude))
+    return ntl::unexpected(altitude.empty() ? STATUS_INVALID_PARAMETER
+                                            : STATUS_NAME_TOO_LONG);
+  if (!instance_name.empty() &&
+      !detail::make_unicode_view(instance_name, native_name))
+    return ntl::unexpected(STATUS_NAME_TOO_LONG);
+
+  PFLT_INSTANCE attached = nullptr;
+  const NTSTATUS status = FltAttachVolumeAtAltitude(
+      value_, target.native_handle(), &native_altitude,
+      instance_name.empty() ? nullptr : &native_name, &attached);
+  if (!NT_SUCCESS(status))
+    return ntl::unexpected(status);
+  return instance_ref{attached};
+}
+
+inline ntl::status filter::try_detach(volume target) const noexcept {
+  if (!value_ || !target)
+    return STATUS_INVALID_PARAMETER;
+  if (KeGetCurrentIrql() > APC_LEVEL)
+    return STATUS_INVALID_DEVICE_STATE;
+  return FltDetachVolume(value_, target.native_handle(), nullptr);
+}
+
+inline ntl::status
+filter::try_detach(volume target,
+                   std::wstring_view instance_name) const noexcept {
+  if (!value_ || !target)
+    return STATUS_INVALID_PARAMETER;
+  if (KeGetCurrentIrql() > APC_LEVEL)
+    return STATUS_INVALID_DEVICE_STATE;
+
+  UNICODE_STRING native_name{};
+  if (instance_name.empty() ||
+      !detail::make_unicode_view(instance_name, native_name))
+    return instance_name.empty() ? STATUS_INVALID_PARAMETER
+                                 : STATUS_NAME_TOO_LONG;
+  return FltDetachVolume(value_, target.native_handle(), &native_name);
+}
+
+inline ntl::result<std::vector<instance_information>>
+filter::try_instances() const noexcept {
+  if (!value_)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+    return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+
+  try {
+    std::vector<instance_information> result;
+    for (ULONG index = 0;; ++index) {
+      auto current = detail::query_instance_information(
+          [this, index](PVOID buffer, ULONG size, PULONG returned) noexcept {
+            return FltEnumerateInstanceInformationByFilter(
+                value_, index, InstanceFullInformation, buffer, size, returned);
+          });
+      if (!current) {
+        if (static_cast<NTSTATUS>(current.status()) == STATUS_NO_MORE_ENTRIES)
+          return result;
+        return ntl::unexpected(current.status());
+      }
+      result.push_back(std::move(*current));
+    }
+  } catch (...) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  }
+}
+
+/** @brief Typed view of the objects associated with a minifilter callback. */
+class related_objects {
+public:
+  /** @brief Wraps the callback-owned related-object structure. */
+  explicit related_objects(PCFLT_RELATED_OBJECTS value) noexcept
+      : value_(value) {}
+
+  /** @brief Returns the registered filter. */
+  flt::filter filter() const noexcept {
+    return flt::filter{value_ ? value_->Filter : nullptr};
+  }
+
+  /** @brief Returns the target volume. */
+  flt::volume volume() const noexcept {
+    return flt::volume{value_ ? value_->Volume : nullptr};
+  }
+
+  /** @brief Returns the attached minifilter instance. */
+  flt::instance instance() const noexcept {
+    return flt::instance{value_ ? value_->Instance : nullptr};
+  }
+
+  /** @brief Returns the kernel FILE_OBJECT facade. */
+  ntl::file file() const noexcept {
+    return ntl::file{value_ ? value_->FileObject : nullptr};
+  }
+
+  /** @brief Returns the native transaction object when present. */
+  PKTRANSACTION transaction() const noexcept {
+    return value_ ? value_->Transaction : nullptr;
+  }
+
+  /** @brief Returns the native related-object structure. */
+  PCFLT_RELATED_OBJECTS native() const noexcept { return value_; }
+
+  /**
+   * @brief Returns whether the current file-system object supports a context.
+   * @param definition Typed context declaration registered by the filter.
+   * @note Filter Manager support queries require IRQL <= APC_LEVEL.
+   */
+  template <class T, context_scope Scope>
+  bool supports(const context_definition<T, Scope> &) const noexcept {
+    if (KeGetCurrentIrql() > APC_LEVEL)
+      return false;
+    return detail::context_api<Scope>::supports(context_objects());
+  }
+
+  /**
+   * @brief Gets an existing typed context and owns the returned reference.
+   * @param definition Typed context declaration registered by the filter.
+   * @return A move-only context reference or the Filter Manager status.
+   */
+  template <class T, context_scope Scope>
+  ntl::result<context_ref<T, Scope>>
+  try_get(const context_definition<T, Scope> &) const noexcept {
+    return detail::get_context<T, Scope>(context_objects());
+  }
+
+  /**
+   * @brief Gets or atomically installs one typed context.
+   * @param definition Typed context declaration registered by the filter.
+   * @param args Arguments forwarded to T's noexcept constructor.
+   * @return The existing or newly installed context reference.
+   *
+   * The helper uses FLT_SET_CONTEXT_KEEP_IF_EXISTS. If another thread wins
+   * the creation race, its referenced context is returned and the losing
+   * allocation is destroyed automatically.
+   */
+  template <class T, context_scope Scope, class... Args>
+  ntl::result<context_ref<T, Scope>>
+  try_get_or_create(const context_definition<T, Scope> &definition,
+                    Args &&...args) const noexcept {
+    return detail::get_or_create_context<T, Scope>(
+        context_objects(), definition, std::forward<Args>(args)...);
+  }
+
+private:
+  detail::native_context_objects context_objects() const noexcept {
+    if (!value_)
+      return {};
+    return {value_->Filter, value_->Volume, value_->Instance,
+            value_->FileObject, value_->Transaction};
+  }
+
+  PCFLT_RELATED_OBJECTS value_ = nullptr;
+};
+
+/** @brief View of post-operation callback flags. */
+class post_operation_flags {
+public:
+  /** @brief Wraps native post-operation flags. */
+  explicit post_operation_flags(FLT_POST_OPERATION_FLAGS value) noexcept
+      : value_(value) {}
+
+  /** @brief Returns true when the instance is draining during teardown. */
+  bool draining() const noexcept {
+    return (value_ & FLTFL_POST_OPERATION_DRAINING) != 0;
+  }
+
+  /** @brief Returns the native flag value. */
+  FLT_POST_OPERATION_FLAGS native() const noexcept { return value_; }
+
+private:
+  FLT_POST_OPERATION_FLAGS value_ = 0;
+};
+
+/** @brief View of minifilter unload flags. */
+class unload_flags {
+public:
+  /** @brief Wraps native unload flags. */
+  explicit unload_flags(FLT_FILTER_UNLOAD_FLAGS value) noexcept
+      : value_(value) {}
+
+  /** @brief Returns true when the unload cannot be vetoed. */
+  bool mandatory() const noexcept {
+    return (value_ & FLTFL_FILTER_UNLOAD_MANDATORY) != 0;
+  }
+
+  /** @brief Returns the native flag value. */
+  FLT_FILTER_UNLOAD_FLAGS native() const noexcept { return value_; }
+
+private:
+  FLT_FILTER_UNLOAD_FLAGS value_ = 0;
+};
+
+} // namespace ntl::flt

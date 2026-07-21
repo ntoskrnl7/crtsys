@@ -779,8 +779,29 @@ receive.
 This stream transports serialized chunks through `METHOD_BUFFERED`; it is not
 a zero-copy data path. Shared-memory or MDL-backed transfer has different
 mapping, process-exit, cancellation, and driver-unload ownership requirements
-and should be exposed as a separate transport rather than changing this wire
-contract invisibly.
+and is therefore an explicit optional data plane rather than an invisible
+change to this serialized stream contract.
+
+## Shared-Memory Data Plane
+
+For high-volume fixed-layout records, an opted-in client session can register
+caller-owned memory with `client::register_shared_region()`. The driver probes,
+pins, and maps the pages in the original requestor process context and returns a
+fixed-width `region_handle`. RPC methods exchange only `buffer_token` values;
+callbacks resolve them through `call_context::try_resolve()` with explicit
+driver-read or driver-write access.
+
+The common `ntl::ipc::shared_ring<T, Capacity>` layout provides bounded SPSC
+backpressure without serializing each record through `DeviceIoControl`. Use one
+ring per direction for duplex traffic. Record fields must be fixed-width and
+must not contain pointers, handles, `size_t`, strings, or STL containers.
+
+Shared regions require a client session. They are invalidated on unregister,
+disconnect, session close, retention expiry, and server stop. Per-session count
+and byte quotas are configured through `server_options`. See
+[`IPC shared memory`](./ipc.md) for the API and lifetime rules, and
+[`test/rpc/cross-bitness`](../../test/rpc/cross-bitness) for the x64-driver with
+x64/x86-client VM coverage.
 
 ## Contract Compatibility
 

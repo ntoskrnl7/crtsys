@@ -1,0 +1,16 @@
+/**
+ * @file all
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief All transport-neutral NTL IPC primitives.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "common"
+#include "shared_ring"
+
+#if defined(_DDK_DRIVER_) || defined(_NTDDK_) || defined(_NTIFS_) ||           \
+    defined(_WDMDDK_)
+#include "kernel_region"
+#endif

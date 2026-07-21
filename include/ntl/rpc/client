@@ -589,6 +589,174 @@ private:
   reliable_batch_wait wait_;
 };
 
+/**
+ * @brief Owns one user allocation registered and pinned by an RPC session.
+ *
+ * Destruction unregisters the region before releasing its virtual address.
+ * Keep this object alive while any buffer_token or shared_ring over its memory
+ * can still be used by the driver.
+ */
+class registered_region {
+public:
+  registered_region() noexcept = default;
+  registered_region(const registered_region &) = delete;
+  registered_region &operator=(const registered_region &) = delete;
+
+  registered_region(registered_region &&other) noexcept
+      : handle_(std::move(other.handle_)), session_(other.session_),
+        region_(other.region_), memory_(other.memory_), bytes_(other.bytes_) {
+    other.session_ = {};
+    other.region_ = {};
+    other.memory_ = nullptr;
+    other.bytes_ = 0;
+  }
+
+  registered_region &operator=(registered_region &&other) noexcept {
+    if (this == &other)
+      return *this;
+    reset_noexcept();
+    handle_ = std::move(other.handle_);
+    session_ = other.session_;
+    region_ = other.region_;
+    memory_ = other.memory_;
+    bytes_ = other.bytes_;
+    other.session_ = {};
+    other.region_ = {};
+    other.memory_ = nullptr;
+    other.bytes_ = 0;
+    return *this;
+  }
+
+  /** @brief Unregisters the MDL before releasing the user allocation. */
+  ~registered_region() { reset_noexcept(); }
+
+  /** @brief Reports whether allocation and kernel registration both exist. */
+  explicit operator bool() const noexcept {
+    return memory_ != nullptr && region_.valid();
+  }
+
+  /** @brief Returns the page-aligned user mapping. */
+  void *data() const noexcept { return memory_; }
+
+  /** @brief Returns the allocated and registered byte count. */
+  std::size_t size() const noexcept { return bytes_; }
+
+  /** @brief Returns the kernel-assigned region identity. */
+  ntl::ipc::region_handle handle() const noexcept { return region_; }
+
+  /** @brief Creates a checked pointer-free token for a subrange. */
+  ntl::ipc::buffer_token token(std::size_t offset, std::size_t length) const {
+    if (!*this || length == 0 || offset > bytes_ || length > bytes_ - offset)
+      throw std::out_of_range("NTL RPC shared-region token is out of range");
+    return ntl::ipc::buffer_token{region_,
+                                  static_cast<std::uint64_t>(offset),
+                                  static_cast<std::uint64_t>(length)};
+  }
+
+  /**
+   * @brief Explicitly unregisters and releases the region, reporting failures.
+   * @note If the session was already closed, the server has already unpinned
+   * the range; ERROR_NOT_FOUND and invalid-handle errors are treated as closed.
+   */
+  void close() {
+    if (!memory_)
+      return;
+    if (region_.valid())
+      unregister_region(true);
+    release_memory();
+  }
+
+private:
+  friend class client;
+
+  registered_region(std::shared_ptr<ntl::unique_handle> handle,
+                    session_token session, ntl::ipc::region_handle region,
+                    void *memory, std::size_t bytes) noexcept
+      : handle_(std::move(handle)), session_(session), region_(region),
+        memory_(memory), bytes_(bytes) {}
+
+  void unregister_region(bool report_failure) {
+    if (!handle_ || !*handle_ || !session_.valid() || !region_.valid()) {
+      region_ = {};
+      return;
+    }
+
+    detail::region_control_request request{};
+    request.version = detail::session_control_version;
+    request.operation = detail::session_control_operation::unregister_region;
+    request.token = session_;
+    request.region = region_;
+
+    ntl::unique_handle event(::CreateEventW(nullptr, TRUE, FALSE, nullptr));
+    if (!event) {
+      if (report_failure)
+        throw std::system_error(static_cast<int>(::GetLastError()),
+                                std::system_category(),
+                                "NTL RPC shared-region close event failed");
+      return;
+    }
+
+    OVERLAPPED overlapped{};
+    overlapped.hEvent = event.get();
+    DWORD returned = 0;
+    BOOL completed = ::DeviceIoControl(
+        handle_->get(), session_control_code(), &request, sizeof(request),
+        nullptr, 0, &returned, &overlapped);
+    DWORD error = completed ? ERROR_SUCCESS : ::GetLastError();
+    if (!completed && error == ERROR_IO_PENDING) {
+      completed = ::GetOverlappedResult(handle_->get(), &overlapped, &returned,
+                                        TRUE);
+      error = completed ? ERROR_SUCCESS : ::GetLastError();
+    }
+
+    if (!completed && error != ERROR_NOT_FOUND &&
+        error != ERROR_INVALID_HANDLE && error != ERROR_FILE_NOT_FOUND) {
+      if (report_failure)
+        throw std::system_error(static_cast<int>(error), std::system_category(),
+                                "NTL RPC shared-region unregistration failed");
+      return;
+    }
+    region_ = {};
+  }
+
+  void release_memory() noexcept {
+    if (memory_)
+      ::VirtualFree(memory_, 0, MEM_RELEASE);
+    memory_ = nullptr;
+    bytes_ = 0;
+    session_ = {};
+    handle_.reset();
+  }
+
+  void reset_noexcept() noexcept {
+    try {
+      if (region_.valid())
+        unregister_region(false);
+    } catch (...) {
+    }
+    if (!region_.valid()) {
+      release_memory();
+      return;
+    }
+
+    // Do not release pages that may still be pinned by the driver. The virtual
+    // allocation intentionally remains reserved until process teardown if a
+    // live shared file handle prevented the best-effort unregister request
+    // from completing. Explicit close() reports this condition to the caller.
+    handle_.reset();
+    memory_ = nullptr;
+    bytes_ = 0;
+    session_ = {};
+    region_ = {};
+  }
+
+  std::shared_ptr<ntl::unique_handle> handle_;
+  session_token session_{};
+  ntl::ipc::region_handle region_{};
+  void *memory_ = nullptr;
+  std::size_t bytes_ = 0;
+};
+
 /** @brief Owns a user-mode handle to an NTL RPC device. */
 class client {
 public:
@@ -795,6 +963,57 @@ public:
           "NTL RPC notification sequence must be nonzero");
     session_command(detail::session_control_operation::acknowledge,
                     session_.token, Notification::id(), sequence);
+  }
+
+  /**
+   * @brief Allocates and registers one session-bound shared-memory region.
+   * @param bytes Region size, limited by the server quota and MDL ULONG length.
+   * @param access Driver access to grant after probing the user pages.
+   * @return Move-only owner that unregisters before VirtualFree.
+   */
+  registered_region
+  register_shared_region(std::size_t bytes,
+                         ntl::ipc::region_access access =
+                             ntl::ipc::region_access::driver_read_write) {
+    require_session();
+    if (bytes == 0 ||
+        bytes > static_cast<std::size_t>((std::numeric_limits<ULONG>::max)()) ||
+        access == ntl::ipc::region_access::none ||
+        !ntl::ipc::has_access(ntl::ipc::region_access::driver_read_write,
+                              access))
+      throw std::invalid_argument("NTL RPC shared-region request is invalid");
+
+    void *const memory =
+        ::VirtualAlloc(nullptr, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    if (!memory)
+      throw std::system_error(static_cast<int>(::GetLastError()),
+                              std::system_category(),
+                              "NTL RPC shared-region allocation failed");
+
+    detail::region_control_request request{};
+    request.version = detail::session_control_version;
+    request.operation = detail::session_control_operation::register_region;
+    request.token = session_.token;
+    request.registration = ntl::ipc::region_registration::from(
+        memory, bytes, access);
+
+    detail::region_control_response response{};
+    DWORD returned = 0;
+    try {
+      std::vector<unsigned char> input(sizeof(request));
+      std::memcpy(input.data(), &request, sizeof(request));
+      call(session_control_code(), input, &response,
+           static_cast<DWORD>(sizeof(response)), returned);
+      if (returned != sizeof(response) || !response.region.valid())
+        throw std::runtime_error(
+            "NTL RPC server returned an invalid shared-region response");
+    } catch (...) {
+      ::VirtualFree(memory, 0, MEM_RELEASE);
+      throw;
+    }
+
+    return registered_region{handle_, session_.token, response.region, memory,
+                             bytes};
   }
 
   /** @brief ACKs a typed single-channel batch in delivery order. */

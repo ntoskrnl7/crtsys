@@ -14,6 +14,11 @@ Visual Studio/MSBuild projects keep `<DriverType>KMDF</DriverType>` and opt in:
 <CrtSysUseNtlKmdfMain>true</CrtSysUseNtlKmdfMain>
 ```
 
+When using the NuGet package, the same setting is available from **Project
+Properties > Driver Settings > Driver Model**. Keep WDK **Type of driver** set
+to **KMDF**, then choose **crtsys Driver Model = NTL KMDF**. The package writes
+the NTL entry-point property automatically.
+
 CMake projects add `NTL` to the KMDF driver declaration:
 
 ```cmake

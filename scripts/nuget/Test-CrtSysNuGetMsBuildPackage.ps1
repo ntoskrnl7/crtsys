@@ -13,7 +13,7 @@ param(
   [ValidateSet('v142', 'v143', 'v145')]
   [string] $Toolset = 'v143',
 
-  [ValidateSet('NTL', 'WDM', 'KMDF', 'NTL_KMDF')]
+  [ValidateSet('NTL', 'WDM', 'KMDF', 'NTL_KMDF', 'NTL_FLT')]
   [string] $DriverModel = 'NTL',
 
   [string] $WindowsSdkVersion = '10.0.22621.0',
@@ -138,7 +138,11 @@ $wdkPlatformByArchitecture = @{
   ARM64 = 'arm64'
 }
 $wdkKernelLibDirectory = Join-Path $windowsKitsRoot "Lib\$WdkVersion\km\$($wdkPlatformByArchitecture[$Architecture])"
-foreach ($requiredLib in @('ntoskrnl.lib', 'hal.lib', 'wmilib.lib', 'libcntpr.lib', 'cng.lib', 'aux_klib.lib')) {
+$requiredWdkLibraries = @('ntoskrnl.lib', 'hal.lib', 'wmilib.lib', 'libcntpr.lib', 'cng.lib', 'aux_klib.lib')
+if ($DriverModel -eq 'NTL_FLT') {
+  $requiredWdkLibraries += 'fltmgr.lib'
+}
+foreach ($requiredLib in $requiredWdkLibraries) {
   if (-not (Test-Path (Join-Path $wdkKernelLibDirectory $requiredLib))) {
     throw "WDK kernel library directory is missing $requiredLib`: $wdkKernelLibDirectory"
   }
@@ -230,11 +234,16 @@ $packageRoot = (Resolve-Path $packageRoot).Path
 foreach ($requiredPath in @(
   'build\native\crtsys.props',
   'build\native\crtsys.targets',
+  'build\native\crtsys.xml',
   'docs\third-party-notices.md',
   'include\ntl\driver',
   'include\ntl\deps\zpp\LICENSE',
   'include\ntl\deps\zpp\README.md',
   'include\ntl\deps\zpp\serializer.h',
+  'include\ntl\flt\driver',
+  'include\ntl\flt\communication',
+  'include\ntl\flt\communication_client',
+  'include\ntl\flt\port_common',
   'include\ntl\kmdf\driver',
   'include\ntl\kmdf\dma',
   'include\ntl\kmdf\usb',
@@ -293,6 +302,8 @@ $crtsysTargets = ConvertTo-XmlEscapedText (Join-Path $packageRoot 'build\native\
 $driverType = if ($isKmdf) { 'KMDF' } else { 'WDM' }
 $useNtlMain = if ($DriverModel -eq 'NTL') { 'true' } else { 'false' }
 $useNtlKmdfMain = if ($DriverModel -eq 'NTL_KMDF') { 'true' } else { 'false' }
+$isMinifilter = if ($DriverModel -eq 'NTL_FLT') { 'true' } else { 'false' }
+$useNtlFltMain = $isMinifilter
 $kmdfVersionProperty = if ($isKmdf) { "    <KmdfVersion>$kmdfVersion</KmdfVersion>" } else { '' }
 $additionalDriverIncludes = if ($isKmdf) {
   (ConvertTo-XmlEscapedText $wdfIncludeDirectory) + ';'
@@ -306,7 +317,7 @@ $additionalDriverLibraries = if ($isKmdf) {
   ''
 }
 $additionalCompileOptions = ''
-if ($isKmdf) {
+if ($isKmdf -or $isMinifilter) {
   $additionalCompileOptions += '/wd4324 '
 }
 $callingConventionProperty = if ($Architecture -eq 'x86') {
@@ -338,6 +349,8 @@ $kmdfVersionProperty
     <CrtSysUseDriverSupport>true</CrtSysUseDriverSupport>
     <CrtSysUseNtlMain>$useNtlMain</CrtSysUseNtlMain>
     <CrtSysUseNtlKmdfMain>$useNtlKmdfMain</CrtSysUseNtlKmdfMain>
+    <CrtSysIsMinifilter>$isMinifilter</CrtSysIsMinifilter>
+    <CrtSysUseNtlFltMain>$useNtlFltMain</CrtSysUseNtlFltMain>
     <CrtSysExpectedLibToolset>$escapedToolset</CrtSysExpectedLibToolset>
   </PropertyGroup>
   <Import Project="$crtsysProps" Condition="Exists('$crtsysProps')" />
@@ -466,6 +479,31 @@ extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT driver_object,
 
   driver_object->DriverUnload = CrtSysPackageSmokeDriverUnload;
   return STATUS_SUCCESS;
+}
+'@ }
+  'NTL_FLT' { @'
+#include <ntl/flt/all>
+
+#include <numeric>
+#include <utility>
+#include <vector>
+
+ntl::status ntl::flt::main(ntl::flt::driver &driver,
+                           std::wstring_view) {
+  const std::vector<int> values{1, 2, 3};
+  if (std::accumulate(values.begin(), values.end(), 0) != 6)
+    return STATUS_UNSUCCESSFUL;
+
+  ntl::flt::registration callbacks;
+  callbacks.on(
+      ntl::flt::operation::create,
+      [](ntl::flt::create_callback_data data, ntl::flt::related_objects,
+         void *&) noexcept {
+        const auto parameters = data.parameters();
+        (void)parameters.create_options();
+        return ntl::flt::pre_result::success_no_callback;
+      });
+  return driver.start(std::move(callbacks));
 }
 '@ }
   'KMDF' { @'

@@ -9,13 +9,15 @@
 
 #pragma once
 
-#if defined(_DDK_DRIVER_)
+#if defined(_DDK_DRIVER_) || defined(_NTDDK_) || defined(_NTIFS_) ||           \
+    defined(_WDMDDK_)
 #undef NTL_USER_MODE
 #else
 #define NTL_USER_MODE
 #endif
 
 #include "../deps/zpp/serializer.h"
+#include "../ipc/common"
 
 #include <algorithm>
 #include <cstddef>
@@ -110,10 +112,18 @@ constexpr std::uint64_t typed_streams = 1ull << 10;
 constexpr std::uint64_t bounded_batches = 1ull << 11;
 /** @brief Batch delivery selects higher-priority ready channels first. */
 constexpr std::uint64_t priority_delivery = 1ull << 12;
+/** @brief Sessions can register pointer-free shared-memory regions. */
+constexpr std::uint64_t shared_memory_regions = 1ull << 13;
+/** @brief The kernel endpoint can invoke typed handlers in a user client. */
+constexpr std::uint64_t bidirectional_requests = 1ull << 14;
+/** @brief Connections expose lifecycle hooks and typed application state. */
+constexpr std::uint64_t connection_lifecycle = 1ull << 15;
+/** @brief Contract queries include member kinds and resource limits. */
+constexpr std::uint64_t detailed_contract = 1ull << 16;
 /** @brief All transport features implemented by this NTL version. */
-constexpr std::uint64_t current = resource_limits | secure_endpoint |
-                                  immutable_dispatch | rundown_shutdown |
-                                  caller_security_context | client_sessions;
+constexpr std::uint64_t current =
+    resource_limits | secure_endpoint | immutable_dispatch | rundown_shutdown |
+    caller_security_context | client_sessions | shared_memory_regions;
 } // namespace transport_features
 
 /** @brief Opaque 128-bit capability used to reconnect one RPC session. */
@@ -323,6 +333,14 @@ enum class session_control_operation : std::uint32_t {
   subscribe = 4,
   unsubscribe = 5,
   acknowledge = 6,
+  register_region = 7,
+  unregister_region = 8,
+};
+
+/** @brief Prefix shared by every session-control message. */
+struct session_control_header {
+  std::uint32_t version;
+  session_control_operation operation;
 };
 
 /** @brief Cross-bitness session command carried by METHOD_BUFFERED. */
@@ -340,6 +358,20 @@ struct session_control_response {
   session_info session;
 };
 
+/** @brief Cross-bitness registration or unregistration command. */
+struct region_control_request {
+  std::uint32_t version;
+  session_control_operation operation;
+  session_token token;
+  ntl::ipc::region_registration registration;
+  ntl::ipc::region_handle region;
+};
+
+/** @brief Returns the identity assigned to a newly pinned region. */
+struct region_control_response {
+  ntl::ipc::region_handle region;
+};
+
 constexpr std::uint32_t session_control_version = 1;
 
 static_assert(sizeof(session_token) == 16,
@@ -350,6 +382,12 @@ static_assert(sizeof(session_control_request) == 40,
               "NTL RPC session commands must be cross-bitness stable");
 static_assert(sizeof(session_control_response) == 24,
               "NTL RPC session responses must be cross-bitness stable");
+static_assert(sizeof(session_control_header) == 8,
+              "NTL RPC session headers must be cross-bitness stable");
+static_assert(sizeof(region_control_request) == 64,
+              "NTL RPC region commands must be cross-bitness stable");
+static_assert(sizeof(region_control_response) == 16,
+              "NTL RPC region responses must be cross-bitness stable");
 static_assert(sizeof(reliable_batch_wait_request) == 16,
               "NTL RPC batch requests must be cross-bitness stable");
 static_assert(sizeof(reliable_batch_header) == 8,

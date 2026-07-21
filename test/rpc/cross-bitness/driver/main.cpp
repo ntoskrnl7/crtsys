@@ -91,6 +91,62 @@ ntl::status ntl::main(ntl::driver &driver, const std::wstring &) {
       .on(crtsys_rpc_cross_bitness::slow_active, [state] {
         return state->slow_calls.load(std::memory_order_relaxed);
       })
+      .on(crtsys_rpc_cross_bitness::fill_shared_ring,
+          [](const ntl::rpc::call_context &context,
+             ntl::ipc::buffer_token token, std::uint32_t first,
+             std::uint32_t count) {
+            auto buffer = context.try_resolve(
+                token, ntl::ipc::region_access::driver_write);
+            if (!buffer)
+              throw ntl::exception(buffer.status(),
+                                   "Could not resolve RPC shared ring");
+
+            rpc_shared_ring ring;
+            if (rpc_shared_ring::attach(buffer->data(), buffer->size(), ring) !=
+                ntl::ipc::validation_status::success)
+              throw ntl::exception(STATUS_INVALID_PARAMETER,
+                                   "Invalid RPC shared ring layout");
+
+            std::uint32_t written = 0;
+            for (; written < count; ++written) {
+              const auto sequence = first + written;
+              const rpc_shared_ring_record record{
+                  sequence, 0x44525652u, sequence ^ 0xA5A55A5Au};
+              if (!ring.try_write(record))
+                break;
+            }
+            return written;
+          })
+      .on(crtsys_rpc_cross_bitness::consume_shared_ring,
+          [](const ntl::rpc::call_context &context,
+             ntl::ipc::buffer_token token, std::uint32_t count) {
+            auto buffer = context.try_resolve(
+                token, ntl::ipc::region_access::driver_read);
+            if (!buffer)
+              throw ntl::exception(buffer.status(),
+                                   "Could not resolve RPC shared ring");
+
+            rpc_shared_ring ring;
+            if (rpc_shared_ring::attach(buffer->data(), buffer->size(), ring) !=
+                ntl::ipc::validation_status::success)
+              throw ntl::exception(STATUS_INVALID_PARAMETER,
+                                   "Invalid RPC shared ring layout");
+
+            std::uint64_t sum = 0;
+            rpc_shared_ring_record record{};
+            for (std::uint32_t index = 0; index < count; ++index) {
+              if (!ring.try_read(record))
+                break;
+              if (record.source != 0x41505020u ||
+                  record.checksum !=
+                      (static_cast<std::uint32_t>(record.sequence) ^
+                       0x5A5AA5A5u))
+                throw ntl::exception(STATUS_DATA_ERROR,
+                                     "RPC shared ring record is corrupt");
+              sum += record.sequence;
+            }
+            return sum;
+          })
       .on(crtsys_rpc_cross_bitness::request_stop, [state] {
         bool expected = false;
         if (!state->stop_requested.compare_exchange_strong(expected, true))

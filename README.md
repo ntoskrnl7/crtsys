@@ -101,7 +101,7 @@ ntl::status ntl::main(ntl::driver& driver,
 }
 ```
 
-### WDM and KMDF driver models
+### WDM, KMDF, and minifilter driver models
 
 The NuGet package reads the WDK project's existing `DriverType` setting. A
 KMDF project uses its normal `DriverEntry` and `WdfDriverCreate` by default.
@@ -126,6 +126,20 @@ crtsys_add_driver(my_ntl_kmdf_driver KMDF 1.15 NTL src/main.cpp)
 
 See the complete [NTL KMDF driver/app sample](./examples/kmdf-ntl-driver)
 and the [NTL KMDF API guide](./docs/ntl/kmdf.md).
+
+File-system minifilters remain Filter Manager drivers. Select the model
+explicitly; crtsys links `fltmgr.lib`, owns the runtime boundary, and calls
+`ntl::flt::main`, while Filter Manager continues to own operation dispatch,
+instances, altitude ordering, and teardown:
+
+```cmake
+crtsys_add_driver(my_minifilter MINIFILTER NTL src/main.cpp)
+```
+
+Visual Studio/NuGet projects use `CrtSysIsMinifilter=true` and
+`CrtSysUseNtlFltMain=true`. See the
+[NTL minifilter sample](./examples/minifilter-ntl-driver) and
+[API guide](./docs/ntl/minifilter.md).
 
 ## Runtime Stack
 
@@ -190,13 +204,14 @@ may compile or work.
 | [NTL KMDF USB template](./examples/kmdf-usb-ntl-driver) | Buildable PnP USB device/interface/pipe and continuous-reader template with a user-mode inspection app |
 | [NTL KMDF WMI sample](./examples/kmdf-wmi-ntl-driver) | MOF-backed typed WMI query/set/method providers, event delivery, and a `ROOT\\WMI` user-mode verifier |
 | [NTL KMDF bus sample](./examples/kmdf-bus-ntl-driver) | Dynamic PDO plug/remove/eject lifecycle and a typed `QUERY_INTERFACE` contract between bus and child function drivers |
+| [NTL minifilter sample](./examples/minifilter-ntl-driver) | Typed create/write callbacks, RAII file-name information, file/stream/stream-handle contexts, a 24H2-format INF, and a file-operation exerciser |
 | [CI Driver Load Tests](./docs/ci-driver-load-tests.md) | Optional self-hosted driver load/run workflow |
 
 ## Operational Boundaries
 
 | Boundary | Policy |
 | --- | --- |
-| Driver model | WDM and KMDF projects remain normal WDK drivers. KMDF retains WDF ownership of PnP, power, queues, requests, and dispatch. Verifier, HVCI, unload safety, target OS validation, and paging rules still matter. |
+| Driver model | WDM, KMDF, and minifilter projects remain normal WDK drivers. KMDF retains WDF ownership of PnP/power/dispatch; Filter Manager retains minifilter callback and instance ownership. Verifier, HVCI, unload safety, target OS validation, and paging rules still matter. |
 | IRQL | Runtime-backed C++/CRT/STL paths are `PASSIVE_LEVEL` unless a specific API documents a wider contract. |
 | Stack | Kernel stacks are small; use `ntl::expand_stack` for exception-heavy or STL-heavy paths. |
 | TLS | MSVC function-local statics are supported, including multi-driver compiler TLS slot isolation. That supported path isolates runtime compiler TLS slots between driver images. It does not make user-declared `thread_local T value` safe: in kernel mode the GS-based TLS assumption points at processor-local KPCR state, not a per-thread user-mode TEB. |

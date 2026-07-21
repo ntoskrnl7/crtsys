@@ -1,0 +1,235 @@
+/**
+ * @file rpc
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Shared typed contract macros for minifilter communication ports.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "../rpc/common"
+
+#if defined(NTL_USER_MODE)
+#include "communication_client"
+#else
+#include "communication"
+#endif
+
+#define NTL_FLT_RPC_DETAIL_JOIN_INNER(_left_, _right_) _left_##_right_
+#define NTL_FLT_RPC_DETAIL_JOIN(_left_, _right_)                               \
+  NTL_FLT_RPC_DETAIL_JOIN_INNER(_left_, _right_)
+#define NTL_FLT_RPC_DETAIL_LINE_ID                                             \
+  (0x80000000u | static_cast<std::uint32_t>(__LINE__))
+
+/** Declares one notification descriptor shared by driver and app builds. */
+#define NTL_FLT_DECLARE_NOTIFICATION_ID(_contract_, _id_, _type_, _name_)      \
+  namespace _contract_ {                                                       \
+  using _name_##_notification_type = ntl::rpc::notification<(_id_), _type_>;  \
+  static constexpr _name_##_notification_type _name_##_notification{};         \
+  }
+
+/** Declares one typed bidirectional stream shared by driver and app builds. */
+#define NTL_FLT_DECLARE_STREAM_ID(_contract_, _id_, _name_, _upload_type_,     \
+                                  _download_type_)                             \
+  namespace _contract_ {                                                       \
+  using _name_##_stream_type =                                                 \
+      ntl::rpc::stream<(_id_), _upload_type_, _download_type_>;               \
+  static constexpr _name_##_stream_type _name_##_stream{};                     \
+  }
+
+#if !defined(NTL_USER_MODE)
+
+/** Begins one versioned shared minifilter communication contract. */
+#define NTL_FLT_RPC_BEGIN_CONTRACT(_contract_, _port_name_, _version_,         \
+                                   _capabilities_)                             \
+  namespace _contract_ {                                                       \
+  static constexpr wchar_t port_name[] = (_port_name_);                        \
+  static constexpr std::uint32_t contract_version = (_version_);               \
+  static constexpr std::uint64_t capabilities = (_capabilities_);              \
+  inline ntl::flt::communication_server make_server() {                        \
+    ntl::flt::communication_server flt_server;                                 \
+    flt_server.contract(contract_version, capabilities);
+
+#define NTL_FLT_RPC_BEGIN(_contract_, _port_name_)                             \
+  NTL_FLT_RPC_BEGIN_CONTRACT(_contract_, _port_name_, 1, 0)
+
+/** Ends a kernel contract and returns its configured server. */
+#define NTL_FLT_RPC_END(_contract_)                                            \
+  return flt_server;                                                           \
+  }                                                                            \
+  }
+
+/**
+ * Registers one explicitly identified method. The callback may receive a
+ * communication_context before the declared method arguments.
+ */
+#define NTL_FLT_ADD_METHOD_ID(_contract_, _id_, _signature_, _name_, ...)      \
+  {                                                                            \
+    using _name_##_method_type = ntl::rpc::method<(_id_), _signature_>;        \
+    constexpr _name_##_method_type _name_##_method{};                          \
+    flt_server.on(_name_##_method, __VA_ARGS__);                               \
+  }
+
+#define NTL_FLT_ADD_METHOD(_contract_, _signature_, _name_, ...)               \
+  NTL_FLT_ADD_METHOD_ID(_contract_, NTL_FLT_RPC_DETAIL_LINE_ID, _signature_,   \
+                        _name_, __VA_ARGS__)
+
+/** Registers a previously declared typed notification channel. */
+#define NTL_FLT_REGISTER_NOTIFICATION(_contract_, _name_)                      \
+  flt_server.register_notification(_contract_::_name_##_notification)
+
+/** Registers a declared stream and its app-to-driver upload callback. */
+#define NTL_FLT_REGISTER_STREAM(_contract_, _name_, _upload_name_,             \
+                                _stream_name_, ...)                            \
+  flt_server.on_stream(                                                        \
+      _contract_::_name_##_stream,                                             \
+      [] (const ntl::flt::communication_context &flt_stream_call,             \
+          const typename _contract_::_name_##_stream_type::upload_type        \
+              &_upload_name_,                                                  \
+          ntl::flt::communication_stream_context<                             \
+              _contract_::_name_##_stream_type> &_stream_name_) {             \
+        (void)flt_stream_call;                                                  \
+        __VA_ARGS__                                                            \
+      })
+
+/** Registers one explicitly identified pre-decode authorization policy. */
+#define NTL_FLT_ADD_AUTHORIZED_METHOD_ID(                                      \
+    _contract_, _id_, _signature_, _name_, _authorization_, ...)              \
+  {                                                                            \
+    using _name_##_method_type = ntl::rpc::method<(_id_), _signature_>;        \
+    constexpr _name_##_method_type _name_##_method{};                          \
+    flt_server.on_authorized(_name_##_method, (_authorization_), __VA_ARGS__); \
+  }
+
+#else
+
+#if defined(__cpp_lib_jthread) && __cpp_lib_jthread >= 201911L
+#define NTL_FLT_RPC_DETAIL_STOP_OVERLOAD(_name_)                               \
+  template <typename... NtlFltArguments>                                       \
+  inline auto _name_##_async(std::stop_token token,                            \
+                             ntl::flt::communication_client &client,           \
+                             NtlFltArguments &&...arguments)                   \
+      -> decltype(client.invoke_async(                                         \
+          token, _name_##_method,                                              \
+          std::forward<NtlFltArguments>(arguments)...)) {                      \
+    return client.invoke_async(token, _name_##_method,                         \
+                               std::forward<NtlFltArguments>(arguments)...);   \
+  }
+#define NTL_FLT_RPC_DETAIL_NOTIFICATION_STOP_OVERLOAD(_name_)                  \
+  inline auto _name_##_async(std::stop_token token,                           \
+                             ntl::flt::communication_client &client)          \
+      -> ntl::flt::communication_notification_wait<                           \
+          _name_##_notification_type::payload_type, false> {                   \
+    return client.receive_async(token, _name_##_notification);                 \
+  }                                                                            \
+  inline auto _name_##_reliable_async(                                        \
+      std::stop_token token, ntl::flt::communication_client &client)          \
+      -> ntl::flt::communication_notification_wait<                           \
+          _name_##_notification_type::payload_type, true> {                    \
+    return client.receive_reliable_async(token, _name_##_notification);        \
+  }
+#else
+#define NTL_FLT_RPC_DETAIL_STOP_OVERLOAD(_name_)
+#define NTL_FLT_RPC_DETAIL_NOTIFICATION_STOP_OVERLOAD(_name_)
+#endif
+
+/** Begins the user-mode expansion of one versioned contract. */
+#define NTL_FLT_RPC_BEGIN_CONTRACT(_contract_, _port_name_, _version_,         \
+                                   _capabilities_)                             \
+  namespace _contract_ {                                                       \
+  static constexpr wchar_t port_name[] = (_port_name_);                        \
+  static constexpr std::uint32_t contract_version = (_version_);               \
+  static constexpr std::uint64_t capabilities = (_capabilities_);              \
+  inline ntl::flt::communication_client connect() {                            \
+    auto client = ntl::flt::communication_client::connect(port_name);          \
+    client.require_contract(contract_version, capabilities);                   \
+    return client;                                                             \
+  }                                                                            \
+  inline ntl::flt::communication_client resume(                               \
+      ntl::rpc::session_token token) {                                         \
+    auto client = ntl::flt::communication_client::resume(port_name, token);    \
+    client.require_contract(contract_version, capabilities);                   \
+    return client;                                                             \
+  }
+
+#define NTL_FLT_RPC_BEGIN(_contract_, _port_name_)                             \
+  NTL_FLT_RPC_BEGIN_CONTRACT(_contract_, _port_name_, 1, 0)
+
+#define NTL_FLT_RPC_END(_contract_) }
+
+/**
+ * Generates a descriptor plus synchronous and asynchronous typed client
+ * functions. The callback body is consumed only by the kernel expansion.
+ */
+#define NTL_FLT_ADD_METHOD_ID(_contract_, _id_, _signature_, _name_, ...)      \
+  using _name_##_method_type = ntl::rpc::method<(_id_), _signature_>;          \
+  static constexpr _name_##_method_type _name_##_method{};                     \
+  template <typename... NtlFltArguments>                                       \
+  inline auto _name_(ntl::flt::communication_client &client,                   \
+                     NtlFltArguments &&...arguments)                           \
+      -> decltype(client.invoke(                                               \
+          _name_##_method, std::forward<NtlFltArguments>(arguments)...)) {     \
+    return client.invoke(_name_##_method,                                      \
+                         std::forward<NtlFltArguments>(arguments)...);         \
+  }                                                                            \
+  template <typename... NtlFltArguments>                                       \
+  inline auto _name_##_async(ntl::flt::communication_client &client,           \
+                             NtlFltArguments &&...arguments)                   \
+      -> decltype(client.invoke_async(                                         \
+          _name_##_method, std::forward<NtlFltArguments>(arguments)...)) {     \
+    return client.invoke_async(_name_##_method,                                \
+                               std::forward<NtlFltArguments>(arguments)...);   \
+  }                                                                            \
+  NTL_FLT_RPC_DETAIL_STOP_OVERLOAD(_name_)
+
+#define NTL_FLT_ADD_METHOD(_contract_, _signature_, _name_, ...)               \
+  NTL_FLT_ADD_METHOD_ID(_contract_, NTL_FLT_RPC_DETAIL_LINE_ID, _signature_,   \
+                        _name_, __VA_ARGS__)
+
+#define NTL_FLT_REGISTER_NOTIFICATION(_contract_, _name_)                      \
+  inline auto _name_(ntl::flt::communication_client &client)                  \
+      -> _name_##_notification_type::payload_type {                           \
+    return client.receive(_name_##_notification);                              \
+  }                                                                            \
+  inline auto _name_##_async(ntl::flt::communication_client &client)          \
+      -> ntl::flt::communication_notification_wait<                           \
+          _name_##_notification_type::payload_type, false> {                   \
+    return client.receive_async(_name_##_notification);                        \
+  }                                                                            \
+  inline auto _name_##_reliable(ntl::flt::communication_client &client)       \
+      -> ntl::rpc::notification_delivery<                                     \
+          _name_##_notification_type::payload_type> {                          \
+    return client.receive_reliable(_name_##_notification);                     \
+  }                                                                            \
+  inline auto _name_##_reliable_async(                                        \
+      ntl::flt::communication_client &client)                                 \
+      -> ntl::flt::communication_notification_wait<                           \
+          _name_##_notification_type::payload_type, true> {                    \
+    return client.receive_reliable_async(_name_##_notification);               \
+  }                                                                            \
+  NTL_FLT_RPC_DETAIL_NOTIFICATION_STOP_OVERLOAD(_name_)
+
+#define NTL_FLT_REGISTER_STREAM(_contract_, _name_, _upload_name_,             \
+                                _stream_name_, ...)                            \
+  inline ntl::flt::communication_client_stream<_name_##_stream_type> _name_(  \
+      ntl::flt::communication_client &client) {                                \
+    return client.open_stream(_name_##_stream);                                \
+  }
+
+#define NTL_FLT_ADD_AUTHORIZED_METHOD_ID(                                      \
+    _contract_, _id_, _signature_, _name_, _authorization_, ...)              \
+  NTL_FLT_ADD_METHOD_ID(_contract_, _id_, _signature_, _name_, __VA_ARGS__)
+
+#endif
+
+#define NTL_FLT_ADD_AUTHORIZED_METHOD(                                         \
+    _contract_, _signature_, _name_, _authorization_, ...)                    \
+  NTL_FLT_ADD_AUTHORIZED_METHOD_ID(                                            \
+      _contract_, NTL_FLT_RPC_DETAIL_LINE_ID, _signature_, _name_,             \
+      _authorization_, __VA_ARGS__)
+
+/* Callback terminology aliases the established NTL RPC macro vocabulary. */
+#define NTL_FLT_ADD_CALLBACK_ID NTL_FLT_ADD_METHOD_ID
+#define NTL_FLT_ADD_CALLBACK NTL_FLT_ADD_METHOD
+#define NTL_FLT_ADD_AUTHORIZED_CALLBACK_ID NTL_FLT_ADD_AUTHORIZED_METHOD_ID
+#define NTL_FLT_ADD_AUTHORIZED_CALLBACK NTL_FLT_ADD_AUTHORIZED_METHOD

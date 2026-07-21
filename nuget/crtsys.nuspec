@@ -22,5 +22,6 @@
 
     <file src="build\native\crtsys.props" target="build\native" />
     <file src="build\native\crtsys.targets" target="build\native" />
+    <file src="build\native\crtsys.xml" target="build\native" />
   </files>
 </package>

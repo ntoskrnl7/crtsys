@@ -7,6 +7,7 @@
 #include <ntl/handle>
 #include <ntl/ioctl>
 #include <ntl/irp>
+#include <ntl/ipc/all>
 #include <ntl/irql>
 #include <ntl/lookaside_list>
 #include <ntl/mdl>
@@ -86,6 +87,80 @@ struct ioctl_pipeline_output {
   std::uint32_t value;
   std::uint32_t checksum;
 };
+
+struct ipc_ring_test_record {
+  std::uint32_t sequence;
+  std::uint32_t value;
+};
+
+bool ntl_ipc_test_impl() {
+  constexpr ntl::ipc::region_handle region{7, 11};
+  alignas(64) unsigned char region_storage[512]{};
+  ntl::ipc::region_view view{region, region_storage, sizeof(region_storage),
+                             ntl::ipc::region_access::driver_read_write};
+
+  ntl::ipc::buffer_token token;
+  if (view.token(64, 128, token) != ntl::ipc::validation_status::success ||
+      token.region != region || token.offset != 64 || token.length != 128)
+    return false;
+
+  ntl::ipc::mutable_buffer_view resolved;
+  if (view.resolve(token, ntl::ipc::region_access::driver_write, resolved) !=
+          ntl::ipc::validation_status::success ||
+      resolved.data() != region_storage + 64 || resolved.size() != 128)
+    return false;
+
+  auto stale = token;
+  ++stale.region.generation;
+  if (view.resolve(stale, ntl::ipc::region_access::driver_read, resolved) !=
+      ntl::ipc::validation_status::stale_region)
+    return false;
+
+  auto overflow = token;
+  overflow.offset = sizeof(region_storage) - 1;
+  overflow.length = 2;
+  if (view.resolve(overflow, ntl::ipc::region_access::driver_read, resolved) !=
+      ntl::ipc::validation_status::range_overflow)
+    return false;
+
+  using ring_type = ntl::ipc::shared_ring<ipc_ring_test_record, 4>;
+  alignas(64) unsigned char ring_storage[ring_type::required_bytes()]{};
+  ring_type writer;
+  if (ring_type::initialize(ring_storage, sizeof(ring_storage), writer, 19) !=
+          ntl::ipc::validation_status::success ||
+      writer.epoch() != 19)
+    return false;
+
+  ring_type reader;
+  if (ring_type::attach(ring_storage, sizeof(ring_storage), reader) !=
+      ntl::ipc::validation_status::success)
+    return false;
+
+  for (std::uint32_t index = 0; index != 4; ++index) {
+    if (!writer.try_write({index, index * 10}))
+      return false;
+  }
+  if (writer.try_write({4, 40}) || writer.writable() != 0 ||
+      reader.readable() != 4)
+    return false;
+
+  ipc_ring_test_record record{};
+  for (std::uint32_t index = 0; index != 2; ++index) {
+    if (!reader.try_read(record) || record.sequence != index ||
+        record.value != index * 10)
+      return false;
+  }
+
+  if (!writer.try_write({4, 40}) || !writer.try_write({5, 50}))
+    return false;
+  for (std::uint32_t index = 2; index != 6; ++index) {
+    if (!reader.try_read(record) || record.sequence != index ||
+        record.value != index * 10)
+      return false;
+  }
+  return !reader.try_read(record) && reader.readable() == 0 &&
+         writer.writable() == 4;
+}
 
 void delete_symbolic_link_if_present(const std::wstring &link_name) {
   ntl::unicode_string native_link_name(link_name);
@@ -1785,6 +1860,8 @@ TEST(ntl_test, ntl_device_control_pipeline_test) {
 TEST(ntl_test, ntl_mdl_test) {
   EXPECT_TRUE(ntl_mdl_test());
 }
+
+TEST(ntl_test, ntl_ipc_test) { EXPECT_TRUE(ntl_ipc_test_impl()); }
 
 TEST(ntl_test, ntl_remove_lock_test) {
   EXPECT_TRUE(ntl_remove_lock_test());

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Rule Name="KernelModeDriver"
+      xmlns="http://schemas.microsoft.com/build/2009/properties">
+  <EnumProperty Name="CrtSysDriverModel"
+                DisplayName="crtsys Driver Model"
+                Description="Select the crtsys entry model for this kernel-mode driver."
+                Category="DriverModel"
+                F1Keyword="crtsys.drivermodel">
+    <EnumValue Name="Default"
+               DisplayName="Use project driver model"
+               Description="Do not select an additional crtsys entry model." />
+    <EnumValue Name="NtlWdm"
+               DisplayName="NTL WDM"
+               Description="Use the NTL WDM entry point and ntl::main." />
+    <EnumValue Name="StandardWdm"
+               DisplayName="Standard WDM"
+               Description="Use the project's normal DriverEntry instead of ntl::main." />
+    <EnumValue Name="NtlMinifilter"
+               DisplayName="NTL Minifilter"
+               Description="Use the NTL Filter Manager entry point and minifilter runtime support." />
+    <EnumValue Name="NtlKmdf"
+               DisplayName="NTL KMDF"
+               Description="Use the NTL KMDF entry point. Set WDK Type of driver to KMDF as well." />
+  </EnumProperty>
+</Rule>

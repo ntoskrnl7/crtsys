@@ -31,22 +31,42 @@
     <CrtSysLibDir Condition="'$(CrtSysLibDir)' == ''">$(CrtSysExactLibDir)</CrtSysLibDir>
     <CrtSysLibDir Condition="'$(CrtSysUseDriverSupport)' == 'true' and '$(CrtSysAllowToolsetFallback)' == 'true' and '$(CrtSysLibToolset)' != 'v143' and !Exists('$(CrtSysLibDir)crtsys.lib')">$(CrtSysFallbackLibDir)</CrtSysLibDir>
     <CrtSysLibDir Condition="'$(CrtSysUseDriverSupport)' == 'true' and '$(CrtSysHasToolsetLibLayout)' != 'true' and !Exists('$(CrtSysLibDir)crtsys.lib')">$(CrtSysLegacyLibDir)</CrtSysLibDir>
+    <CrtSysUseNtlKmdfMain Condition="'$(CrtSysUseNtlKmdfMain)' == ''">false</CrtSysUseNtlKmdfMain>
+    <CrtSysUseNtlFltMain Condition="'$(CrtSysUseNtlFltMain)' == ''">false</CrtSysUseNtlFltMain>
     <CrtSysIsKmdf Condition="'$(DriverType)' == 'KMDF'">true</CrtSysIsKmdf>
     <CrtSysIsKmdf Condition="'$(CrtSysIsKmdf)' == ''">false</CrtSysIsKmdf>
-    <CrtSysUseNtlKmdfMain Condition="'$(CrtSysUseNtlKmdfMain)' == ''">false</CrtSysUseNtlKmdfMain>
-    <CrtSysUseNtlMain Condition="'$(CrtSysUseNtlMain)' == '' and '$(CrtSysIsKmdf)' == 'true'">false</CrtSysUseNtlMain>
+    <CrtSysDriverModel Condition="'$(CrtSysDriverModel)' == '' and '$(CrtSysUseNtlFltMain)' == 'true'">NtlMinifilter</CrtSysDriverModel>
+    <CrtSysDriverModel Condition="'$(CrtSysDriverModel)' == '' and '$(CrtSysUseNtlKmdfMain)' == 'true'">NtlKmdf</CrtSysDriverModel>
+    <CrtSysDriverModel Condition="'$(CrtSysDriverModel)' == '' and '$(CrtSysIsKmdf)' != 'true' and '$(CrtSysUseNtlMain)' == 'false'">StandardWdm</CrtSysDriverModel>
+    <CrtSysDriverModel Condition="'$(CrtSysDriverModel)' == '' and '$(CrtSysIsKmdf)' != 'true' and '$(CrtSysUseNtlMain)' != 'false'">NtlWdm</CrtSysDriverModel>
+    <CrtSysDriverModel Condition="'$(CrtSysDriverModel)' == ''">Default</CrtSysDriverModel>
+    <CrtSysUseNtlMain Condition="'$(CrtSysDriverModel)' == 'NtlWdm'">true</CrtSysUseNtlMain>
+    <CrtSysUseNtlMain Condition="'$(CrtSysDriverModel)' == 'StandardWdm'">false</CrtSysUseNtlMain>
+    <CrtSysIsMinifilter Condition="'$(CrtSysDriverModel)' == 'NtlMinifilter'">true</CrtSysIsMinifilter>
+    <CrtSysUseNtlFltMain Condition="'$(CrtSysDriverModel)' == 'NtlMinifilter'">true</CrtSysUseNtlFltMain>
+    <CrtSysUseNtlKmdfMain Condition="'$(CrtSysDriverModel)' == 'NtlKmdf'">true</CrtSysUseNtlKmdfMain>
+    <CrtSysIsMinifilter Condition="'$(CrtSysIsMinifilter)' == '' and '$(CrtSysUseNtlFltMain)' == 'true'">true</CrtSysIsMinifilter>
+    <CrtSysIsMinifilter Condition="'$(CrtSysIsMinifilter)' == ''">false</CrtSysIsMinifilter>
+    <CrtSysUseNtlMain Condition="'$(CrtSysUseNtlMain)' == '' and ('$(CrtSysIsKmdf)' == 'true' or '$(CrtSysIsMinifilter)' == 'true')">false</CrtSysUseNtlMain>
     <CrtSysUseNtlMain Condition="'$(CrtSysUseNtlMain)' == ''">true</CrtSysUseNtlMain>
     <CrtSysUseLibcntpr Condition="'$(CrtSysUseLibcntpr)' == ''">true</CrtSysUseLibcntpr>
     <CrtSysDriverPreprocessorDefinitions Condition="'$(CrtSysDriverPreprocessorDefinitions)' == ''">_KERNEL32_;_ITERATOR_DEBUG_LEVEL=0;_HAS_EXCEPTIONS</CrtSysDriverPreprocessorDefinitions>
     <CrtSysDriverPreprocessorDefinitions Condition="'$(CrtSysUseLibcntpr)' == 'true'">$(CrtSysDriverPreprocessorDefinitions);CRTSYS_USE_LIBCNTPR</CrtSysDriverPreprocessorDefinitions>
     <CrtSysDriverPreprocessorDefinitions Condition="'$(CrtSysUseNtlMain)' == 'true'">$(CrtSysDriverPreprocessorDefinitions);CRTSYS_USE_NTL_MAIN</CrtSysDriverPreprocessorDefinitions>
     <CrtSysDriverPreprocessorDefinitions Condition="'$(CrtSysUseNtlKmdfMain)' == 'true'">$(CrtSysDriverPreprocessorDefinitions);CRTSYS_USE_NTL_KMDF_MAIN</CrtSysDriverPreprocessorDefinitions>
+    <CrtSysDriverPreprocessorDefinitions Condition="'$(CrtSysUseNtlFltMain)' == 'true'">$(CrtSysDriverPreprocessorDefinitions);CRTSYS_USE_NTL_FLT_MAIN</CrtSysDriverPreprocessorDefinitions>
     <CrtSysDriverPreprocessorDefinitions Condition="'$(CrtSysIsKmdf)' == 'true'">$(CrtSysDriverPreprocessorDefinitions);CRTSYS_USE_KMDF</CrtSysDriverPreprocessorDefinitions>
+    <CrtSysDriverPreprocessorDefinitions Condition="'$(CrtSysIsMinifilter)' == 'true'">$(CrtSysDriverPreprocessorDefinitions);CRTSYS_USE_MINIFILTER</CrtSysDriverPreprocessorDefinitions>
     <CrtSysDriverLibraries>crtsys.lib;Ldk.lib;cng.lib;aux_klib.lib;wdmsec.lib</CrtSysDriverLibraries>
     <CrtSysDriverLibraries Condition="'$(CrtSysUseLibcntpr)' == 'true'">$(CrtSysDriverLibraries);libcntpr.lib</CrtSysDriverLibraries>
+    <CrtSysDriverLibraries Condition="'$(CrtSysIsMinifilter)' == 'true'">$(CrtSysDriverLibraries);fltmgr.lib</CrtSysDriverLibraries>
     <DisableKernelFlag Condition="'$(CrtSysUseDriverSupport)' == 'true'">true</DisableKernelFlag>
     <Inf2CatUseLocalTime Condition="'$(CrtSysUseDriverSupport)' == 'true' and '$(Inf2CatUseLocalTime)' == ''">true</Inf2CatUseLocalTime>
   </PropertyGroup>
+
+  <ItemGroup Condition="'$(CrtSysIsDriverProject)' == 'true'">
+    <PropertyPageSchema Include="$(CrtSysRoot)build\native\crtsys.xml" />
+  </ItemGroup>
 
   <Target Name="CrtSysValidateNativePackage" BeforeTargets="PrepareForBuild">
     <Error
@@ -55,6 +75,18 @@
     <Error
       Condition="'$(CrtSysUseDriverSupport)' == 'true' and '$(CrtSysUseNtlKmdfMain)' == 'true' and '$(CrtSysIsKmdf)' != 'true'"
       Text="CrtSysUseNtlKmdfMain requires a KMDF driver project." />
+    <Error
+      Condition="'$(CrtSysUseDriverSupport)' == 'true' and '$(CrtSysIsKmdf)' == 'true' and '$(CrtSysIsMinifilter)' == 'true'"
+      Text="A driver cannot select both KMDF and minifilter entry models." />
+    <Error
+      Condition="'$(CrtSysUseDriverSupport)' == 'true' and '$(CrtSysIsMinifilter)' == 'true' and '$(CrtSysUseNtlMain)' == 'true'"
+      Text="Minifilter projects cannot enable the WDM-only CrtSysUseNtlMain property. Use CrtSysUseNtlFltMain instead." />
+    <Error
+      Condition="'$(CrtSysUseDriverSupport)' == 'true' and '$(CrtSysUseNtlFltMain)' == 'true' and '$(CrtSysIsMinifilter)' != 'true'"
+      Text="CrtSysUseNtlFltMain requires a minifilter driver project." />
+    <Error
+      Condition="'$(CrtSysUseDriverSupport)' == 'true' and '$(CrtSysUseNtlFltMain)' == 'true' and ('$(CrtSysUseNtlKmdfMain)' == 'true' or '$(CrtSysUseNtlMain)' == 'true')"
+      Text="CrtSysUseNtlFltMain cannot be combined with another crtsys entry model." />
     <Error
       Condition="'$(CrtSysUseDriverSupport)' == 'true' and '$(CrtSysLibPlatform)' != 'x86' and '$(CrtSysLibPlatform)' != 'x64' and '$(CrtSysLibPlatform)' != 'ARM' and '$(CrtSysLibPlatform)' != 'ARM64'"
       Text="crtsys NuGet package contains prebuilt driver libraries for x86, x64, ARM, and ARM64 depending on the selected MSVC toolset. Current platform is '$(Platform)'." />
@@ -83,18 +115,21 @@
       <AdditionalIncludeDirectories Condition="'$(CrtSysUseDriverSupport)' != 'true'">$(CrtSysRoot)include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <ForcedIncludeFiles Condition="'$(CrtSysUseDriverSupport)' == 'true'">$(CrtSysRoot)include\.internal\adjust_link_order;%(ForcedIncludeFiles)</ForcedIncludeFiles>
       <PreprocessorDefinitions Condition="'$(CrtSysUseDriverSupport)' == 'true'">$(CrtSysDriverPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalOptions Condition="'$(CrtSysUseDriverSupport)' == 'true'">/Zc:__cplusplus /Zc:wchar_t %(AdditionalOptions)</AdditionalOptions>
-      <AdditionalOptions Condition="'$(CrtSysUseDriverSupport)' != 'true'">/Zc:__cplusplus /Zc:wchar_t %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions Condition="'$(CrtSysUseDriverSupport)' == 'true'">/Zc:__cplusplus %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions Condition="'$(CrtSysUseDriverSupport)' != 'true'">/Zc:__cplusplus %(AdditionalOptions)</AdditionalOptions>
+      <TreatWChar_tAsBuiltInType>true</TreatWChar_tAsBuiltInType>
       <RuntimeLibrary Condition="'$(CrtSysUseDriverSupport)' == 'true'">MultiThreaded</RuntimeLibrary>
       <ExceptionHandling Condition="'$(CrtSysUseDriverSupport)' == 'true'">Sync</ExceptionHandling>
     </ClCompile>
     <Link Condition="'$(CrtSysUseDriverSupport)' == 'true'">
       <AdditionalLibraryDirectories>$(CrtSysLibDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>$(CrtSysDriverLibraries);%(AdditionalDependencies)</AdditionalDependencies>
-      <EntryPointSymbol Condition="'$(CrtSysIsKmdf)' == 'true' and '$(CrtSysUseNtlKmdfMain)' == 'true'">CrtSysNtlKmdfDriverEntry$(CrtSysEntryPointSuffix)</EntryPointSymbol>
-      <EntryPointSymbol Condition="'$(CrtSysIsKmdf)' == 'true' and '$(CrtSysUseNtlKmdfMain)' != 'true'">CrtSysKmdfDriverEntry$(CrtSysEntryPointSuffix)</EntryPointSymbol>
-      <EntryPointSymbol Condition="'$(CrtSysIsKmdf)' != 'true' and '$(CrtSysUseNtlMain)' == 'true'">CrtSysDriverEntry$(CrtSysEntryPointSuffix)</EntryPointSymbol>
-      <EntryPointSymbol Condition="'$(CrtSysIsKmdf)' != 'true' and '$(CrtSysUseNtlMain)' != 'true'">CrtSysWdmDriverEntry$(CrtSysEntryPointSuffix)</EntryPointSymbol>
+      <EntryPointSymbol Condition="'$(CrtSysIsMinifilter)' == 'true' and '$(CrtSysUseNtlFltMain)' == 'true'">CrtSysNtlFltDriverEntry$(CrtSysEntryPointSuffix)</EntryPointSymbol>
+      <EntryPointSymbol Condition="'$(CrtSysIsMinifilter)' == 'true' and '$(CrtSysUseNtlFltMain)' != 'true'">CrtSysWdmDriverEntry$(CrtSysEntryPointSuffix)</EntryPointSymbol>
+      <EntryPointSymbol Condition="'$(CrtSysIsMinifilter)' != 'true' and '$(CrtSysIsKmdf)' == 'true' and '$(CrtSysUseNtlKmdfMain)' == 'true'">CrtSysNtlKmdfDriverEntry$(CrtSysEntryPointSuffix)</EntryPointSymbol>
+      <EntryPointSymbol Condition="'$(CrtSysIsMinifilter)' != 'true' and '$(CrtSysIsKmdf)' == 'true' and '$(CrtSysUseNtlKmdfMain)' != 'true'">CrtSysKmdfDriverEntry$(CrtSysEntryPointSuffix)</EntryPointSymbol>
+      <EntryPointSymbol Condition="'$(CrtSysIsMinifilter)' != 'true' and '$(CrtSysIsKmdf)' != 'true' and '$(CrtSysUseNtlMain)' == 'true'">CrtSysDriverEntry$(CrtSysEntryPointSuffix)</EntryPointSymbol>
+      <EntryPointSymbol Condition="'$(CrtSysIsMinifilter)' != 'true' and '$(CrtSysIsKmdf)' != 'true' and '$(CrtSysUseNtlMain)' != 'true'">CrtSysWdmDriverEntry$(CrtSysEntryPointSuffix)</EntryPointSymbol>
       <ImageHasSafeExceptionHandlers Condition="'$(CrtSysLibPlatform)' == 'x86'">false</ImageHasSafeExceptionHandlers>
       <AdditionalOptions>/FORCE:MULTIPLE %(AdditionalOptions)</AdditionalOptions>
       <TreatLinkerWarningAsErrors>false</TreatLinkerWarningAsErrors>

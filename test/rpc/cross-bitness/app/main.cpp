@@ -170,9 +170,11 @@ int wmain() {
         .method(crtsys_rpc_cross_bitness::concurrent_count)
         .method(crtsys_rpc_cross_bitness::slow_call)
         .method(crtsys_rpc_cross_bitness::request_stop)
-        .method(crtsys_rpc_cross_bitness::slow_active);
+        .method(crtsys_rpc_cross_bitness::slow_active)
+        .method(crtsys_rpc_cross_bitness::fill_shared_ring)
+        .method(crtsys_rpc_cross_bitness::consume_shared_ring);
     const auto contract = client.require_contract(requirements);
-    if (contract.method_ids().size() != 12 ||
+    if (contract.method_ids().size() != 14 ||
         !std::is_sorted(contract.method_ids().begin(),
                         contract.method_ids().end())) {
       std::fwprintf(stderr, L"RPC contract method table is invalid\n");
@@ -326,6 +328,76 @@ int wmain() {
       return 1;
     }
 
+    const auto session = client.start_session();
+    if (!session.valid()) {
+      std::fwprintf(stderr, L"RPC shared-memory session creation failed\n");
+      return 1;
+    }
+    {
+      auto region = client.register_shared_region(
+          rpc_shared_ring::required_bytes(),
+          ntl::ipc::region_access::driver_read_write);
+      rpc_shared_ring ring;
+      if (rpc_shared_ring::initialize(region.data(), region.size(), ring, 7) !=
+          ntl::ipc::validation_status::success) {
+        std::fwprintf(stderr, L"RPC shared ring initialization failed\n");
+        return 1;
+      }
+
+      const auto token = region.token(0, rpc_shared_ring::required_bytes());
+      const auto written = client.invoke(
+          crtsys_rpc_cross_bitness::fill_shared_ring, token,
+          std::uint32_t{100}, std::uint32_t{10});
+      if (written != 8 || ring.readable() != 8) {
+        std::fwprintf(stderr, L"RPC shared ring backpressure failed\n");
+        return 1;
+      }
+
+      for (std::uint32_t index = 0; index < written; ++index) {
+        rpc_shared_ring_record record{};
+        if (!ring.try_read(record) || record.sequence != 100 + index ||
+            record.source != 0x44525652u ||
+            record.checksum != ((100 + index) ^ 0xA5A55A5Au)) {
+          std::fwprintf(stderr, L"driver-to-app shared ring data failed\n");
+          return 1;
+        }
+      }
+
+      std::uint64_t expected_sum = 0;
+      for (std::uint32_t index = 0; index < 5; ++index) {
+        const auto sequence = std::uint64_t{0x100000000ull} + index;
+        const rpc_shared_ring_record record{
+            sequence, 0x41505020u,
+            static_cast<std::uint32_t>(sequence) ^ 0x5A5AA5A5u};
+        if (!ring.try_write(record)) {
+          std::fwprintf(stderr, L"app-to-driver shared ring write failed\n");
+          return 1;
+        }
+        expected_sum += sequence;
+      }
+      const auto consumed_sum = client.invoke(
+          crtsys_rpc_cross_bitness::consume_shared_ring, token,
+          std::uint32_t{5});
+      if (consumed_sum != expected_sum || ring.readable() != 0) {
+        std::fwprintf(stderr, L"app-to-driver shared ring data failed\n");
+        return 1;
+      }
+      region.close();
+
+      bool stale_token_rejected = false;
+      try {
+        (void)client.invoke(crtsys_rpc_cross_bitness::fill_shared_ring, token,
+                            std::uint32_t{1}, std::uint32_t{1});
+      } catch (const std::exception &) {
+        stale_token_rejected = true;
+      }
+      if (!stale_token_rejected) {
+        std::fwprintf(stderr, L"stale RPC shared-memory token was accepted\n");
+        return 1;
+      }
+    }
+    client.close_session();
+
     constexpr std::uint32_t worker_count = 8;
     constexpr std::uint32_t calls_per_worker = 128;
     std::atomic<bool> concurrent_failed{false};
@@ -408,7 +480,7 @@ int wmain() {
     std::wprintf(L"RPC cross-bitness PASS: client=%ls server=x64 "
                  L"boundary=1 empty=1 large_bytes=%zu large_numbers=%zu "
                  L"bounded_response=1 malformed=5 security=1 contract=4 "
-                 L"concurrent=%u "
+                 L"shared_memory=2 stale_token=1 concurrent=%u "
                  L"rundown=1\n",
                  client_arch, large.bytes.size(), large.numbers.size(),
                  concurrent_total);

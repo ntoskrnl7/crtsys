@@ -39,7 +39,8 @@ public:
    * @brief Transfers MDL ownership.
    */
   mdl(mdl &&other) noexcept
-      : mdl_(other.release()), pages_locked_(other.pages_locked_) {
+      : mdl_(other.mdl_), pages_locked_(other.pages_locked_) {
+    other.mdl_ = nullptr;
     other.pages_locked_ = false;
   }
 
@@ -51,8 +52,9 @@ public:
       return *this;
 
     reset();
-    mdl_ = other.release();
+    mdl_ = other.mdl_;
     pages_locked_ = other.pages_locked_;
+    other.mdl_ = nullptr;
     other.pages_locked_ = false;
     return *this;
   }

@@ -1,0 +1,2837 @@
+/**
+ * @file communication
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Typed kernel endpoint for Filter Manager communication ports.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include <fltKernel.h>
+
+#include "port_common"
+
+#include "../except"
+#include "../ipc/kernel_region"
+#include "../passive_executor"
+#include "../result"
+#include "../rpc/common"
+#include "../status"
+
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <deque>
+#include <functional>
+#include <limits>
+#include <memory>
+#include <mutex>
+#include <new>
+#include <string>
+#include <tuple>
+#include <type_traits>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+
+namespace ntl {
+namespace flt {
+
+class driver;
+class communication_server;
+class communication_publisher;
+class communication_connection;
+
+namespace detail {
+struct communication_connection_state;
+struct communication_server_state;
+struct communication_async_state;
+
+struct communication_connection_public_state {
+  template <typename T> static const void *type_key() noexcept {
+    static const unsigned char key = 0;
+    return &key;
+  }
+
+  std::uint64_t id = 0;
+  HANDLE process_id = nullptr;
+  std::atomic<std::uint64_t> session_id{0};
+  std::atomic<bool> connected{true};
+  mutable std::mutex state_lock;
+  std::shared_ptr<void> user_state;
+  const void *user_state_type = nullptr;
+};
+
+inline NTSTATUS guarded_copy(void *destination, const void *source,
+                             std::size_t bytes) noexcept {
+  if (bytes == 0)
+    return STATUS_SUCCESS;
+  if (!destination || !source)
+    return STATUS_INVALID_PARAMETER;
+
+  __try {
+    RtlCopyMemory(destination, source, bytes);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return GetExceptionCode();
+  }
+  return STATUS_SUCCESS;
+}
+} // namespace detail
+
+/** @brief Action taken when one reliable session queue reaches its limit. */
+enum class communication_overflow_policy {
+  /** @brief Reject the new record and preserve every queued record. */
+  reject_newest,
+  /** @brief Remove the oldest record that is not currently being delivered. */
+  drop_oldest,
+};
+
+/**
+ * @brief Copyable, non-owning identity for one connected user-mode client.
+ *
+ * The facade remains safe to inspect after disconnect. `connected()` becomes
+ * false and targeted sends return STATUS_NOT_FOUND. Application state may be
+ * retained by a copied facade until the last copy is destroyed.
+ */
+class communication_connection {
+public:
+  communication_connection() noexcept = default;
+
+  /** @brief Reports whether the client port is still connected. */
+  bool connected() const noexcept { return state_ && state_->connected.load(); }
+
+  /** @brief Returns the endpoint-local connection ID. */
+  std::uint64_t id() const noexcept { return state_ ? state_->id : 0; }
+
+  /** @brief Returns the process that opened the Filter Manager port. */
+  HANDLE process_id() const noexcept {
+    return state_ ? state_->process_id : nullptr;
+  }
+
+  /** @brief Returns the currently attached reconnectable session ID. */
+  std::uint64_t session_id() const noexcept {
+    return state_ ? state_->session_id.load() : 0;
+  }
+
+  /** @brief Replaces application-owned typed state for this connection. */
+  template <typename T> void state(std::shared_ptr<T> value) {
+    if (!state_)
+      throw ntl::exception(STATUS_INVALID_HANDLE,
+                           "The minifilter connection is empty");
+    std::shared_ptr<void> previous;
+    {
+      std::lock_guard<std::mutex> guard(state_->state_lock);
+      previous = std::move(state_->user_state);
+      state_->user_state = std::move(value);
+      state_->user_state_type =
+          state_->user_state
+              ? detail::communication_connection_public_state::type_key<T>()
+              : nullptr;
+    }
+    previous.reset();
+  }
+
+  /** @brief Returns typed application state, or empty on a type mismatch. */
+  template <typename T> std::shared_ptr<T> state() const {
+    if (!state_)
+      return {};
+    std::lock_guard<std::mutex> guard(state_->state_lock);
+    if (!state_->user_state ||
+        state_->user_state_type !=
+            detail::communication_connection_public_state::type_key<T>())
+      return {};
+    return std::static_pointer_cast<T>(state_->user_state);
+  }
+
+  /** @brief Clears application-owned state without affecting the connection. */
+  void clear_state() noexcept {
+    if (!state_)
+      return;
+    std::shared_ptr<void> previous;
+    {
+      std::lock_guard<std::mutex> guard(state_->state_lock);
+      previous = std::move(state_->user_state);
+      state_->user_state_type = nullptr;
+    }
+    previous.reset();
+  }
+
+private:
+  friend class communication_context;
+  friend class communication_publisher;
+  friend struct detail::communication_server_state;
+  explicit communication_connection(
+      std::shared_ptr<detail::communication_connection_public_state>
+          state) noexcept
+      : state_(std::move(state)) {}
+
+  std::shared_ptr<detail::communication_connection_public_state> state_;
+};
+
+/** @brief Identifies the typed channel represented by a stored record. */
+enum class communication_record_kind {
+  notification,
+  stream,
+};
+
+/** @brief Immutable serialized record passed to persistence hooks. */
+struct communication_record_view {
+  ntl::rpc::session_token session{};
+  std::uint64_t session_id = 0;
+  std::uint32_t channel_id = 0;
+  std::uint64_t sequence = 0;
+  communication_record_kind kind = communication_record_kind::notification;
+  const unsigned char *data = nullptr;
+  std::size_t size = 0;
+};
+
+/** @brief Receives records restored by an application persistence hook. */
+class communication_restore_sink {
+public:
+  virtual ~communication_restore_sink() = default;
+
+  /** @brief Adds one serialized record to the reconnecting session. */
+  virtual ntl::status add(std::uint32_t channel_id, std::uint64_t sequence,
+                          communication_record_kind kind, const void *data,
+                          std::size_t size) noexcept = 0;
+};
+
+/**
+ * @brief Optional external storage for reliable minifilter deliveries.
+ * @note NTL performs no file or registry I/O. Hooks run at PASSIVE_LEVEL and
+ * without the communication server's connection or session mutex held.
+ */
+class communication_notification_store {
+public:
+  virtual ~communication_notification_store() = default;
+
+  /** @brief Persists a record before it becomes visible to the client. */
+  virtual ntl::status persist(const communication_record_view &) noexcept {
+    return ntl::status::ok();
+  }
+
+  /** @brief Removes one externally stored record after an explicit ACK. */
+  virtual ntl::status acknowledge(const ntl::rpc::session_token &,
+                                  std::uint32_t, std::uint64_t) noexcept {
+    return ntl::status::ok();
+  }
+
+  /**
+   * @brief Atomically removes records covered by one transport batch ACK.
+   * @note Stores that enable batch delivery must override this operation. The
+   * default accepts one record only because sequential deletion could leave
+   * external state partially committed after an intermediate failure.
+   */
+  virtual ntl::status acknowledge_batch(const ntl::rpc::session_token &session,
+                                        std::uint32_t channel_id,
+                                        const std::uint64_t *sequences,
+                                        std::size_t count) noexcept {
+    if (!sequences || count == 0)
+      return ntl::status{STATUS_INVALID_PARAMETER};
+    return count == 1 ? acknowledge(session, channel_id, sequences[0])
+                      : ntl::status{STATUS_NOT_SUPPORTED};
+  }
+
+  /** @brief Restores records when an in-memory session is unavailable. */
+  virtual ntl::status restore(const ntl::rpc::session_token &,
+                              communication_restore_sink &) noexcept {
+    return ntl::status{STATUS_NOT_FOUND};
+  }
+
+  /** @brief Erases external state for an explicitly closed session. */
+  virtual void erase_session(const ntl::rpc::session_token &) noexcept {}
+};
+
+/** @brief Limits and security applied to one communication server port. */
+class communication_port_options {
+public:
+  /** @brief Sets the maximum simultaneous Filter Manager connections. */
+  communication_port_options &max_connections(LONG value) noexcept {
+    max_connections_ = value;
+    return *this;
+  }
+
+  /** @brief Sets the maximum pending asynchronous calls per connection. */
+  communication_port_options &max_pending_async(std::size_t value) noexcept {
+    max_pending_async_ = value;
+    return *this;
+  }
+
+  /** @brief Sets the maximum reconnectable sessions retained by the port. */
+  communication_port_options &max_sessions(std::size_t value) noexcept {
+    max_sessions_ = value;
+    return *this;
+  }
+
+  /** @brief Sets the maximum queued reliable records per session. */
+  communication_port_options &max_reliable_records(std::size_t value) noexcept {
+    max_reliable_records_ = value;
+    return *this;
+  }
+
+  /** @brief Sets the maximum serialized reliable bytes per session. */
+  communication_port_options &max_reliable_bytes(std::size_t value) noexcept {
+    max_reliable_bytes_ = value;
+    return *this;
+  }
+
+  /** @brief Selects the action taken when a reliable queue is full. */
+  communication_port_options &
+  reliable_overflow(communication_overflow_policy value) noexcept {
+    reliable_overflow_ = value;
+    return *this;
+  }
+
+  /** @brief Sets the pinned-memory quotas applied independently per client. */
+  communication_port_options &
+  region_limits(ntl::ipc::region_limits value) noexcept {
+    region_limits_ = value;
+    return *this;
+  }
+
+  /**
+   * @brief Uses a caller-owned security descriptor instead of the Filter
+   * Manager default descriptor.
+   * @note The descriptor must remain valid until driver.start() returns.
+   */
+  communication_port_options &
+  security_descriptor(PSECURITY_DESCRIPTOR value) noexcept {
+    security_descriptor_ = value;
+    return *this;
+  }
+
+  LONG max_connections() const noexcept { return max_connections_; }
+  std::size_t max_pending_async() const noexcept { return max_pending_async_; }
+  std::size_t max_sessions() const noexcept { return max_sessions_; }
+  std::size_t max_reliable_records() const noexcept {
+    return max_reliable_records_;
+  }
+  std::size_t max_reliable_bytes() const noexcept {
+    return max_reliable_bytes_;
+  }
+  communication_overflow_policy reliable_overflow() const noexcept {
+    return reliable_overflow_;
+  }
+  ntl::ipc::region_limits shared_region_limits() const noexcept {
+    return region_limits_;
+  }
+  PSECURITY_DESCRIPTOR security_descriptor() const noexcept {
+    return security_descriptor_;
+  }
+
+private:
+  LONG max_connections_ = 8;
+  std::size_t max_pending_async_ = 64;
+  std::size_t max_sessions_ = 64;
+  std::size_t max_reliable_records_ = 256;
+  std::size_t max_reliable_bytes_ = 4 * 1024 * 1024;
+  communication_overflow_policy reliable_overflow_ =
+      communication_overflow_policy::reject_newest;
+  ntl::ipc::region_limits region_limits_{};
+  PSECURITY_DESCRIPTOR security_descriptor_ = nullptr;
+};
+
+/**
+ * @brief Context supplied to one app-to-minifilter typed method callback.
+ *
+ * The object is valid only for the current callback. Shared-memory lookups
+ * retain the selected MDL until the returned pinned_buffer is destroyed.
+ */
+class communication_context {
+public:
+  /** @brief Returns the process that issued FilterSendMessage. */
+  HANDLE requestor_process_id() const noexcept { return process_id_; }
+
+  /** @brief Resolves a pointer-free range registered by this connection. */
+  [[nodiscard]] ntl::result<ntl::ipc::pinned_buffer>
+  try_resolve(ntl::ipc::buffer_token token,
+              ntl::ipc::region_access required) const noexcept;
+
+  /** @brief Returns the native client port for specialized Filter Manager use.
+   */
+  PFLT_PORT native_port() const noexcept;
+
+  /** @brief Reports a cooperative cancellation request for an async call. */
+  bool cancellation_requested() const noexcept;
+
+  /** @brief Returns the reconnectable session handling this callback. */
+  std::uint64_t session_id() const noexcept;
+
+  /** @brief Returns a safe copyable identity for this client connection. */
+  communication_connection connection() const noexcept;
+
+private:
+  friend struct detail::communication_server_state;
+  communication_context(
+      detail::communication_connection_state *connection, HANDLE process_id,
+      detail::communication_async_state *async = nullptr) noexcept
+      : connection_(connection), process_id_(process_id), async_(async) {}
+
+  detail::communication_connection_state *connection_ = nullptr;
+  HANDLE process_id_ = nullptr;
+  detail::communication_async_state *async_ = nullptr;
+};
+
+namespace detail {
+
+struct communication_connection_state {
+  communication_connection_state(communication_server_state *owner_value,
+                                 PFLT_PORT port_value, std::uint64_t id_value,
+                                 HANDLE process_id,
+                                 ntl::ipc::region_limits limits)
+      : owner(owner_value), port(port_value), id(id_value), regions(limits),
+        public_state(
+            std::make_shared<communication_connection_public_state>()) {
+    public_state->id = id_value;
+    public_state->process_id = process_id;
+    ExInitializeRundownProtection(&operations);
+  }
+
+  communication_server_state *owner = nullptr;
+  PFLT_PORT port = nullptr;
+  std::uint64_t id = 0;
+  std::atomic<std::uint64_t> session_id{0};
+  std::shared_ptr<communication_connection_public_state> public_state;
+  EX_RUNDOWN_REF operations{};
+  ntl::ipc::pinned_region_registry regions;
+  std::mutex session_lock;
+  std::mutex async_lock;
+  std::unordered_map<std::uint64_t, std::shared_ptr<communication_async_state>>
+      async_requests;
+};
+
+struct communication_async_state {
+  communication_connection_state *connection = nullptr;
+  std::uint64_t request_id = 0;
+  std::uint32_t method_id = 0;
+  HANDLE requestor_process_id = nullptr;
+  std::vector<unsigned char> input;
+  std::atomic<bool> cancellation_requested{false};
+};
+
+struct communication_channel_definition {
+  std::size_t request_size = 0;
+  std::size_t response_size = 0;
+  std::size_t decode_allocation = 0;
+  ntl::rpc::delivery_priority priority = ntl::rpc::delivery_priority::normal;
+  std::size_t max_batch_records = 1;
+  bool stream = false;
+};
+
+struct communication_method_definition {
+  std::size_t request_size = 0;
+  std::size_t response_size = 0;
+  std::size_t decode_allocation = 0;
+};
+
+struct communication_delivery_record {
+  communication_inbound_kind kind =
+      communication_inbound_kind::reliable_notification;
+  std::uint32_t id = 0;
+  std::uint64_t sequence = 0;
+  ntl::rpc::delivery_priority priority = ntl::rpc::delivery_priority::normal;
+  std::vector<unsigned char> payload;
+  bool in_flight = false;
+  bool acknowledging = false;
+};
+
+struct communication_session_state {
+  ntl::rpc::session_info info{};
+  communication_connection_state *connection = nullptr;
+  std::unordered_set<std::uint32_t> subscriptions;
+  std::unordered_set<std::uint32_t> streams;
+  std::unordered_map<std::uint32_t, std::size_t> batch_limits;
+  std::deque<communication_delivery_record> deliveries;
+  std::unordered_map<std::uint64_t, ntl::rpc::delivery_priority>
+      pending_persistence;
+  std::size_t queued_bytes = 0;
+  std::uint64_t next_sequence = 1;
+};
+
+class connection_operation_guard {
+public:
+  explicit connection_operation_guard(
+      communication_connection_state *connection) noexcept
+      : connection_(connection),
+        acquired_(connection &&
+                  ExAcquireRundownProtection(&connection->operations)) {}
+  connection_operation_guard(const connection_operation_guard &) = delete;
+  connection_operation_guard &
+  operator=(const connection_operation_guard &) = delete;
+  ~connection_operation_guard() {
+    if (acquired_)
+      ExReleaseRundownProtection(&connection_->operations);
+  }
+  explicit operator bool() const noexcept { return acquired_; }
+
+private:
+  communication_connection_state *connection_ = nullptr;
+  bool acquired_ = false;
+};
+
+template <typename Archive, typename Tuple, std::size_t... Index>
+void deserialize_port_arguments(Archive &archive, Tuple &arguments,
+                                std::index_sequence<Index...>) {
+  archive(std::get<Index>(arguments)...);
+}
+
+template <typename Archive, typename Tuple, std::size_t... Index>
+void serialize_port_arguments(Archive &archive, Tuple &arguments,
+                              std::index_sequence<Index...>) {
+  archive(std::get<Index>(arguments)...);
+}
+
+template <typename Callback, typename Tuple, std::size_t... Index>
+auto invoke_port_callback(int, Callback &callback,
+                          const communication_context &, Tuple &arguments,
+                          std::index_sequence<Index...>)
+    -> decltype(callback(std::get<Index>(arguments)...)) {
+  return callback(std::get<Index>(arguments)...);
+}
+
+template <typename Callback, typename Tuple, std::size_t... Index>
+auto invoke_port_callback(long, Callback &callback,
+                          const communication_context &context,
+                          Tuple &arguments, std::index_sequence<Index...>)
+    -> decltype(callback(context, std::get<Index>(arguments)...)) {
+  return callback(context, std::get<Index>(arguments)...);
+}
+
+class communication_handler {
+public:
+  virtual ~communication_handler() = default;
+  virtual std::size_t request_limit() const noexcept = 0;
+  virtual std::size_t response_limit() const noexcept = 0;
+  virtual std::size_t decode_limit() const noexcept = 0;
+  virtual NTSTATUS invoke(const communication_context &context,
+                          const void *input, std::size_t input_size,
+                          std::vector<unsigned char> &output) noexcept = 0;
+};
+
+inline NTSTATUS authorization_status(NTSTATUS value) noexcept { return value; }
+inline NTSTATUS authorization_status(ntl::status value) noexcept {
+  return static_cast<NTSTATUS>(value);
+}
+
+template <typename Method, typename Callback>
+class typed_communication_handler : public communication_handler {
+public:
+  explicit typed_communication_handler(Callback callback)
+      : callback_(std::move(callback)) {}
+
+  std::size_t request_limit() const noexcept override {
+    return Method::request_size();
+  }
+  std::size_t response_limit() const noexcept override {
+    return Method::response_size();
+  }
+  std::size_t decode_limit() const noexcept override {
+    return Method::decode_allocation();
+  }
+
+  NTSTATUS invoke(const communication_context &context, const void *input,
+                  std::size_t input_size,
+                  std::vector<unsigned char> &output) noexcept override {
+    try {
+      if (input_size > Method::request_size())
+        return STATUS_INVALID_BUFFER_SIZE;
+
+      std::vector<unsigned char> request(input_size);
+      const NTSTATUS copy_status =
+          guarded_copy(request.data(), input, input_size);
+      if (!NT_SUCCESS(copy_status))
+        return copy_status;
+
+      typename Method::argument_storage arguments{};
+      zpp::serializer::memory_view_input_archive archive(
+          request.data(), request.size(), Method::decode_allocation());
+      deserialize_port_arguments(
+          archive, arguments,
+          std::make_index_sequence<
+              std::tuple_size<typename Method::argument_storage>::value>{});
+      if (archive.offset() != request.size())
+        return STATUS_INVALID_PARAMETER;
+
+      return invoke_result(
+          context, arguments, output,
+          typename std::is_void<typename Method::return_type>::type{});
+    } catch (const zpp::serializer::out_of_range &) {
+      return STATUS_INVALID_PARAMETER;
+    } catch (const ntl::exception &error) {
+      return static_cast<NTSTATUS>(error.get_status());
+    } catch (const std::bad_alloc &) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    } catch (...) {
+      return STATUS_UNSUCCESSFUL;
+    }
+  }
+
+private:
+  template <typename Tuple>
+  NTSTATUS invoke_result(const communication_context &context, Tuple &arguments,
+                         std::vector<unsigned char> &output, std::true_type) {
+    invoke_port_callback(
+        0, callback_, context, arguments,
+        std::make_index_sequence<std::tuple_size<Tuple>::value>{});
+    output.clear();
+    return STATUS_SUCCESS;
+  }
+
+  template <typename Tuple>
+  NTSTATUS invoke_result(const communication_context &context, Tuple &arguments,
+                         std::vector<unsigned char> &output, std::false_type) {
+    typename Method::return_type result = invoke_port_callback(
+        0, callback_, context, arguments,
+        std::make_index_sequence<std::tuple_size<Tuple>::value>{});
+    output.resize(Method::response_size());
+    zpp::serializer::memory_view_output_archive archive(output.data(),
+                                                        output.size());
+    archive(result);
+    output.resize(archive.offset());
+    return STATUS_SUCCESS;
+  }
+
+  Callback callback_;
+};
+
+template <typename Method, typename Authorization, typename Callback>
+class typed_authorized_communication_handler : public communication_handler {
+public:
+  typed_authorized_communication_handler(Authorization authorization,
+                                         Callback callback)
+      : authorization_(std::move(authorization)), inner_(std::move(callback)) {
+    using result_type =
+        decltype(authorization_(std::declval<const communication_context &>()));
+    static_assert(
+        !std::is_same<typename std::decay<result_type>::type, bool>::value,
+        "Minifilter authorization must return NTSTATUS or ntl::status");
+  }
+
+  std::size_t request_limit() const noexcept override {
+    return inner_.request_limit();
+  }
+  std::size_t response_limit() const noexcept override {
+    return inner_.response_limit();
+  }
+  std::size_t decode_limit() const noexcept override {
+    return inner_.decode_limit();
+  }
+
+  NTSTATUS invoke(const communication_context &context, const void *input,
+                  std::size_t input_size,
+                  std::vector<unsigned char> &output) noexcept override {
+    try {
+      const NTSTATUS status = authorization_status(authorization_(context));
+      if (!NT_SUCCESS(status))
+        return status;
+      return inner_.invoke(context, input, input_size, output);
+    } catch (const ntl::exception &error) {
+      return static_cast<NTSTATUS>(error.get_status());
+    } catch (...) {
+      return STATUS_ACCESS_DENIED;
+    }
+  }
+
+private:
+  Authorization authorization_;
+  typed_communication_handler<Method, Callback> inner_;
+};
+
+struct communication_server_state {
+  using connection_policy = std::function<NTSTATUS(communication_connection &)>;
+  using connection_event = std::function<void(communication_connection &)>;
+
+  class restore_collector final : public communication_restore_sink {
+  public:
+    explicit restore_collector(const communication_server_state &owner)
+        : owner_(owner) {}
+
+    ntl::status add(std::uint32_t channel_id, std::uint64_t sequence,
+                    communication_record_kind kind, const void *data,
+                    std::size_t size) noexcept override {
+      try {
+        const auto channel = owner_.channels.find(channel_id);
+        if (channel == owner_.channels.end() || sequence == 0 || !data ||
+            size == 0 || size > channel->second.response_size ||
+            (kind == communication_record_kind::stream) !=
+                channel->second.stream ||
+            records.size() >= owner_.options.max_reliable_records() ||
+            size > owner_.options.max_reliable_bytes() -
+                       (std::min)(bytes, owner_.options.max_reliable_bytes()))
+          return ntl::status{STATUS_INVALID_PARAMETER};
+        const auto duplicate =
+            std::find_if(records.begin(), records.end(),
+                         [=](const communication_delivery_record &record) {
+                           return record.sequence == sequence;
+                         });
+        if (duplicate != records.end())
+          return ntl::status{STATUS_OBJECT_NAME_COLLISION};
+        communication_delivery_record record{};
+        record.kind = kind == communication_record_kind::stream
+                          ? communication_inbound_kind::stream_record
+                          : communication_inbound_kind::reliable_notification;
+        record.id = channel_id;
+        record.sequence = sequence;
+        record.priority = channel->second.priority;
+        const auto *first = static_cast<const unsigned char *>(data);
+        record.payload.assign(first, first + size);
+        bytes += size;
+        records.push_back(std::move(record));
+        return ntl::status::ok();
+      } catch (const std::bad_alloc &) {
+        return ntl::status{STATUS_INSUFFICIENT_RESOURCES};
+      } catch (...) {
+        return ntl::status{STATUS_UNSUCCESSFUL};
+      }
+    }
+
+    ntl::status validate() noexcept {
+      try {
+        std::sort(records.begin(), records.end(),
+                  [](const communication_delivery_record &left,
+                     const communication_delivery_record &right) {
+                    return left.sequence < right.sequence;
+                  });
+        return ntl::status::ok();
+      } catch (const std::bad_alloc &) {
+        return ntl::status{STATUS_INSUFFICIENT_RESOURCES};
+      }
+    }
+
+    const communication_server_state &owner_;
+    std::vector<communication_delivery_record> records;
+    std::size_t bytes = 0;
+  };
+
+  ~communication_server_state() {
+    if (server_port)
+      FltCloseCommunicationPort(server_port);
+  }
+
+  NTSTATUS start(PFLT_FILTER filter_value, const std::wstring &name_value,
+                 const communication_port_options &options_value) noexcept {
+    if (!filter_value || name_value.empty() || server_port)
+      return STATUS_INVALID_PARAMETER;
+    if (options_value.max_connections() <= 0 ||
+        options_value.max_pending_async() == 0 ||
+        options_value.max_sessions() == 0 ||
+        options_value.max_reliable_records() == 0 ||
+        options_value.max_reliable_bytes() == 0)
+      return STATUS_INVALID_PARAMETER;
+
+    filter = filter_value;
+    options = options_value;
+
+    UNICODE_STRING name{};
+    RtlInitUnicodeString(&name, name_value.c_str());
+
+    PSECURITY_DESCRIPTOR descriptor = options.security_descriptor();
+    bool free_descriptor = false;
+    if (!descriptor) {
+      const NTSTATUS security_status =
+          FltBuildDefaultSecurityDescriptor(&descriptor, FLT_PORT_ALL_ACCESS);
+      if (!NT_SUCCESS(security_status))
+        return security_status;
+      free_descriptor = true;
+    }
+
+    OBJECT_ATTRIBUTES attributes{};
+    InitializeObjectAttributes(&attributes, &name,
+                               OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+                               nullptr, descriptor);
+    const NTSTATUS status = FltCreateCommunicationPort(
+        filter, &server_port, &attributes, this, &connect, &disconnect,
+        &message, options.max_connections());
+    if (free_descriptor)
+      FltFreeSecurityDescriptor(descriptor);
+    return status;
+  }
+
+  void close_listener() noexcept {
+    if (server_port) {
+      FltCloseCommunicationPort(server_port);
+      server_port = nullptr;
+    }
+  }
+
+  static NTSTATUS FLTAPI connect(PFLT_PORT client_port, PVOID server_cookie,
+                                 PVOID, ULONG,
+                                 PVOID *connection_cookie) noexcept {
+    if (!client_port || !server_cookie || !connection_cookie)
+      return STATUS_INVALID_PARAMETER;
+
+    auto *const owner =
+        static_cast<communication_server_state *>(server_cookie);
+    auto id = owner->next_connection_id.fetch_add(1);
+    if (id == 0)
+      id = owner->next_connection_id.fetch_add(1);
+    communication_connection_state *connection = nullptr;
+    try {
+      connection = new communication_connection_state(
+          owner, client_port, id, PsGetCurrentProcessId(),
+          owner->options.shared_region_limits());
+    } catch (const std::bad_alloc &) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    } catch (...) {
+      return STATUS_UNSUCCESSFUL;
+    }
+
+    try {
+      std::lock_guard<std::mutex> guard(owner->connections_lock);
+      owner->connections.insert(connection);
+    } catch (...) {
+      delete connection;
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    if (owner->on_connect) {
+      NTSTATUS hook_status = STATUS_UNSUCCESSFUL;
+      try {
+        communication_connection facade{connection->public_state};
+        hook_status = owner->on_connect(facade);
+      } catch (const ntl::exception &error) {
+        hook_status = static_cast<NTSTATUS>(error.get_status());
+      } catch (const std::bad_alloc &) {
+        hook_status = STATUS_INSUFFICIENT_RESOURCES;
+      } catch (...) {
+        hook_status = STATUS_UNSUCCESSFUL;
+      }
+      if (!NT_SUCCESS(hook_status)) {
+        std::lock_guard<std::mutex> guard(owner->connections_lock);
+        owner->connections.erase(connection);
+        connection->public_state->connected.store(false);
+        delete connection;
+        return hook_status;
+      }
+    }
+
+    *connection_cookie = connection;
+    return STATUS_SUCCESS;
+  }
+
+  static void FLTAPI disconnect(PVOID connection_cookie) noexcept {
+    auto *const connection =
+        static_cast<communication_connection_state *>(connection_cookie);
+    if (!connection)
+      return;
+
+    {
+      std::lock_guard<std::mutex> guard(connection->async_lock);
+      for (auto &entry : connection->async_requests)
+        entry.second->cancellation_requested.store(true);
+    }
+    auto *const owner = connection->owner;
+    ExWaitForRundownProtectionRelease(&connection->operations);
+    connection->regions.close();
+
+    const auto session_id = connection->session_id.load();
+    if (owner && session_id != 0) {
+      std::lock_guard<std::mutex> guard(owner->sessions_lock);
+      const auto found = owner->sessions.find(session_id);
+      if (found != owner->sessions.end() &&
+          found->second->connection == connection) {
+        // Only detach_session creates a reconnectable retained session.
+        // An unexpected process/handle close must not leak sessions until the
+        // endpoint reaches max_sessions().
+        owner->sessions.erase(found);
+      }
+      connection->session_id.store(0);
+    }
+    if (owner) {
+      std::lock_guard<std::mutex> guard(owner->connections_lock);
+      owner->connections.erase(connection);
+    }
+    connection->public_state->session_id.store(0);
+    connection->public_state->connected.store(false);
+    if (owner && connection->port)
+      FltCloseClientPort(owner->filter, &connection->port);
+    if (owner && owner->on_disconnect) {
+      try {
+        communication_connection facade{connection->public_state};
+        owner->on_disconnect(facade);
+      } catch (...) {
+        // Disconnect is already committed. Application observation must not
+        // escape Filter Manager teardown.
+      }
+    }
+    delete connection;
+  }
+
+  static NTSTATUS FLTAPI message(PVOID connection_cookie, PVOID input_buffer,
+                                 ULONG input_length, PVOID output_buffer,
+                                 ULONG output_length,
+                                 PULONG returned_length) noexcept {
+    if (!connection_cookie || !returned_length)
+      return STATUS_INVALID_PARAMETER;
+    *returned_length = 0;
+
+    auto *const connection =
+        static_cast<communication_connection_state *>(connection_cookie);
+    connection_operation_guard operation(connection);
+    if (!operation)
+      return STATUS_DELETE_PENDING;
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return STATUS_INVALID_DEVICE_STATE;
+    if (!input_buffer || input_length < sizeof(communication_request_header))
+      return STATUS_INVALID_PARAMETER;
+
+    communication_request_header header{};
+    NTSTATUS status = guarded_copy(&header, input_buffer, sizeof(header));
+    if (!NT_SUCCESS(status))
+      return status;
+    if (header.magic != communication_magic ||
+        header.version != communication_version ||
+        header.payload_size !=
+            input_length - sizeof(communication_request_header))
+      return STATUS_INVALID_PARAMETER;
+
+    const auto *const payload =
+        static_cast<const unsigned char *>(input_buffer) +
+        sizeof(communication_request_header);
+    std::vector<unsigned char> output;
+    try {
+      switch (header.operation) {
+      case communication_operation::invoke:
+        status = connection->owner->invoke(connection, header.id, payload,
+                                           header.payload_size, output);
+        break;
+      case communication_operation::register_region:
+        status = connection->owner->register_region(connection, header, payload,
+                                                    output);
+        break;
+      case communication_operation::unregister_region:
+        status =
+            connection->owner->unregister_region(connection, header, payload);
+        break;
+      case communication_operation::invoke_async:
+        status = connection->owner->invoke_async(connection, header, payload);
+        break;
+      case communication_operation::cancel_async:
+        status = connection->owner->cancel_async(connection, header, payload);
+        break;
+      case communication_operation::query_contract:
+        status = connection->owner->query_contract(header, output);
+        break;
+      case communication_operation::open_session:
+        status = connection->owner->open_session(connection, header, output);
+        break;
+      case communication_operation::resume_session:
+        status = connection->owner->resume_session(connection, header, payload,
+                                                   output);
+        break;
+      case communication_operation::close_session:
+        status = connection->owner->close_session(connection, header);
+        break;
+      case communication_operation::detach_session:
+        status = connection->owner->detach_session(connection, header);
+        break;
+      case communication_operation::subscribe:
+        status =
+            connection->owner->subscribe(connection, header, payload, false);
+        break;
+      case communication_operation::unsubscribe:
+        status = connection->owner->unsubscribe(connection, header, false);
+        break;
+      case communication_operation::acknowledge:
+        status = connection->owner->acknowledge(connection, header, payload);
+        break;
+      case communication_operation::acknowledge_batch:
+        status =
+            connection->owner->acknowledge_batch(connection, header, payload);
+        break;
+      case communication_operation::open_stream:
+        status =
+            connection->owner->subscribe(connection, header, payload, true);
+        break;
+      case communication_operation::close_stream:
+        status = connection->owner->unsubscribe(connection, header, true);
+        break;
+      default:
+        status = STATUS_INVALID_PARAMETER;
+        break;
+      }
+    } catch (const std::bad_alloc &) {
+      status = STATUS_INSUFFICIENT_RESOURCES;
+    } catch (...) {
+      status = STATUS_UNSUCCESSFUL;
+    }
+    if (!NT_SUCCESS(status))
+      return status;
+    if (output.size() > output_length ||
+        output.size() > (std::numeric_limits<ULONG>::max)())
+      return STATUS_BUFFER_TOO_SMALL;
+
+    status = guarded_copy(output_buffer, output.data(), output.size());
+    if (!NT_SUCCESS(status))
+      return status;
+    *returned_length = static_cast<ULONG>(output.size());
+    return STATUS_SUCCESS;
+  }
+
+  NTSTATUS invoke(communication_connection_state *connection, std::uint32_t id,
+                  const void *payload, std::size_t payload_size,
+                  std::vector<unsigned char> &output) noexcept {
+    const auto found = handlers.find(id);
+    if (found == handlers.end())
+      return STATUS_NOT_SUPPORTED;
+    if (payload_size > found->second->request_limit())
+      return STATUS_INVALID_BUFFER_SIZE;
+
+    const communication_context context{connection, PsGetCurrentProcessId()};
+    return found->second->invoke(context, payload, payload_size, output);
+  }
+
+  NTSTATUS invoke_async(communication_connection_state *connection,
+                        const communication_request_header &header,
+                        const void *payload) noexcept {
+    if (header.id == 0 ||
+        header.payload_size < sizeof(communication_async_request))
+      return STATUS_INVALID_PARAMETER;
+
+    const auto found = handlers.find(header.id);
+    if (found == handlers.end())
+      return STATUS_NOT_SUPPORTED;
+
+    communication_async_request request{};
+    NTSTATUS status = guarded_copy(&request, payload, sizeof(request));
+    if (!NT_SUCCESS(status) || request.request_id == 0)
+      return NT_SUCCESS(status) ? STATUS_INVALID_PARAMETER : status;
+
+    const auto input_size =
+        header.payload_size - sizeof(communication_async_request);
+    if (input_size > found->second->request_limit())
+      return STATUS_INVALID_BUFFER_SIZE;
+    if (!ExAcquireRundownProtection(&connection->operations))
+      return STATUS_DELETE_PENDING;
+
+    std::shared_ptr<communication_async_state> async;
+    try {
+      async = std::make_shared<communication_async_state>();
+      async->connection = connection;
+      async->request_id = request.request_id;
+      async->method_id = header.id;
+      async->requestor_process_id = PsGetCurrentProcessId();
+      async->input.resize(input_size);
+      status = guarded_copy(async->input.data(),
+                            static_cast<const unsigned char *>(payload) +
+                                sizeof(request),
+                            input_size);
+      if (!NT_SUCCESS(status)) {
+        ExReleaseRundownProtection(&connection->operations);
+        return status;
+      }
+
+      std::lock_guard<std::mutex> guard(connection->async_lock);
+      if (connection->async_requests.size() >= options.max_pending_async()) {
+        ExReleaseRundownProtection(&connection->operations);
+        return STATUS_QUOTA_EXCEEDED;
+      }
+      if (!connection->async_requests.emplace(async->request_id, async)
+               .second) {
+        ExReleaseRundownProtection(&connection->operations);
+        return STATUS_OBJECT_NAME_COLLISION;
+      }
+    } catch (const std::bad_alloc &) {
+      ExReleaseRundownProtection(&connection->operations);
+      return STATUS_INSUFFICIENT_RESOURCES;
+    } catch (...) {
+      ExReleaseRundownProtection(&connection->operations);
+      return STATUS_UNSUCCESSFUL;
+    }
+
+    const auto queue_status =
+        ntl::passive_executor(DelayedWorkQueue, "NFlt").post([async] {
+          async->connection->owner->complete_async(async);
+        });
+    if (queue_status.is_ok())
+      return STATUS_SUCCESS;
+
+    {
+      std::lock_guard<std::mutex> guard(connection->async_lock);
+      connection->async_requests.erase(async->request_id);
+    }
+    ExReleaseRundownProtection(&connection->operations);
+    return static_cast<NTSTATUS>(queue_status);
+  }
+
+  NTSTATUS cancel_async(communication_connection_state *connection,
+                        const communication_request_header &header,
+                        const void *payload) noexcept {
+    if (header.id != 0 ||
+        header.payload_size != sizeof(communication_async_request))
+      return STATUS_INVALID_PARAMETER;
+
+    communication_async_request request{};
+    const NTSTATUS status = guarded_copy(&request, payload, sizeof(request));
+    if (!NT_SUCCESS(status) || request.request_id == 0)
+      return NT_SUCCESS(status) ? STATUS_INVALID_PARAMETER : status;
+
+    std::lock_guard<std::mutex> guard(connection->async_lock);
+    const auto found = connection->async_requests.find(request.request_id);
+    if (found == connection->async_requests.end())
+      return STATUS_SUCCESS;
+    found->second->cancellation_requested.store(true);
+    return STATUS_SUCCESS;
+  }
+
+  NTSTATUS query_contract(const communication_request_header &header,
+                          std::vector<unsigned char> &output) noexcept {
+    if (header.id != 0 || header.payload_size != 0)
+      return STATUS_INVALID_PARAMETER;
+    try {
+      std::vector<communication_contract_member> members;
+      members.reserve(handlers.size() + client_methods.size() +
+                      channels.size());
+      for (const auto &entry : handlers) {
+        communication_contract_member member{};
+        member.id = entry.first;
+        member.kind = communication_member_kind::app_to_driver_method;
+        member.request_size =
+            static_cast<std::uint32_t>(entry.second->request_limit());
+        member.response_size =
+            static_cast<std::uint32_t>(entry.second->response_limit());
+        member.decode_allocation =
+            static_cast<std::uint32_t>(entry.second->decode_limit());
+        members.push_back(member);
+      }
+      for (const auto &entry : client_methods) {
+        communication_contract_member member{};
+        member.id = entry.first;
+        member.kind = communication_member_kind::driver_to_app_method;
+        member.request_size =
+            static_cast<std::uint32_t>(entry.second.request_size);
+        member.response_size =
+            static_cast<std::uint32_t>(entry.second.response_size);
+        member.decode_allocation =
+            static_cast<std::uint32_t>(entry.second.decode_allocation);
+        members.push_back(member);
+      }
+      for (const auto &entry : channels) {
+        communication_contract_member member{};
+        member.id = entry.first;
+        member.kind = entry.second.stream
+                          ? communication_member_kind::stream
+                          : communication_member_kind::notification;
+        member.request_size =
+            static_cast<std::uint32_t>(entry.second.request_size);
+        member.response_size =
+            static_cast<std::uint32_t>(entry.second.response_size);
+        member.decode_allocation =
+            static_cast<std::uint32_t>(entry.second.decode_allocation);
+        member.max_batch_records =
+            static_cast<std::uint32_t>(entry.second.max_batch_records);
+        member.priority = static_cast<std::uint32_t>(entry.second.priority);
+        members.push_back(member);
+      }
+      std::sort(members.begin(), members.end(),
+                [](const communication_contract_member &left,
+                   const communication_contract_member &right) {
+                  return left.id < right.id ||
+                         (left.id == right.id &&
+                          static_cast<std::uint16_t>(left.kind) <
+                              static_cast<std::uint16_t>(right.kind));
+                });
+
+      constexpr std::uint64_t features =
+          ntl::rpc::transport_features::resource_limits |
+          ntl::rpc::transport_features::secure_endpoint |
+          ntl::rpc::transport_features::immutable_dispatch |
+          ntl::rpc::transport_features::rundown_shutdown |
+          ntl::rpc::transport_features::asynchronous_calls |
+          ntl::rpc::transport_features::kernel_notifications |
+          ntl::rpc::transport_features::caller_security_context |
+          ntl::rpc::transport_features::client_sessions |
+          ntl::rpc::transport_features::reliable_notifications |
+          ntl::rpc::transport_features::typed_streams |
+          ntl::rpc::transport_features::bounded_batches |
+          ntl::rpc::transport_features::priority_delivery |
+          ntl::rpc::transport_features::shared_memory_regions |
+          ntl::rpc::transport_features::notification_persistence_hooks |
+          ntl::rpc::transport_features::bidirectional_requests |
+          ntl::rpc::transport_features::connection_lifecycle |
+          ntl::rpc::transport_features::detailed_contract;
+      communication_contract_info info(communication_version, contract_version,
+                                       features, capabilities,
+                                       std::move(members));
+      output.resize(ntl::rpc::contract_response_size);
+      zpp::serializer::memory_view_output_archive archive(output.data(),
+                                                          output.size());
+      archive(info);
+      output.resize(archive.offset());
+      return STATUS_SUCCESS;
+    } catch (const zpp::serializer::out_of_range &) {
+      output.clear();
+      return STATUS_BUFFER_TOO_SMALL;
+    } catch (const std::bad_alloc &) {
+      output.clear();
+      return STATUS_INSUFFICIENT_RESOURCES;
+    } catch (...) {
+      output.clear();
+      return STATUS_UNSUCCESSFUL;
+    }
+  }
+
+  NTSTATUS open_session(communication_connection_state *connection,
+                        const communication_request_header &header,
+                        std::vector<unsigned char> &output) noexcept {
+    std::lock_guard<std::mutex> operation_guard(connection->session_lock);
+    if (header.id != 0 || header.payload_size != 0 ||
+        connection->session_id.load() != 0)
+      return STATUS_INVALID_PARAMETER;
+
+    auto session = std::make_shared<communication_session_state>();
+    UUID uuid{};
+    const NTSTATUS token_status = ExUuidCreate(&uuid);
+    if (!NT_SUCCESS(token_status))
+      return token_status;
+    static_assert(sizeof(uuid) == sizeof(session->info.token),
+                  "UUID and NTL session tokens must have the same width");
+    RtlCopyMemory(&session->info.token, &uuid, sizeof(uuid));
+    auto id = next_session_id.fetch_add(1);
+    if (id == 0)
+      id = next_session_id.fetch_add(1);
+    session->info.id = id;
+    session->connection = connection;
+
+    try {
+      std::lock_guard<std::mutex> guard(sessions_lock);
+      if (sessions.size() >= options.max_sessions())
+        return STATUS_QUOTA_EXCEEDED;
+      if (!sessions.emplace(id, session).second)
+        return STATUS_OBJECT_NAME_COLLISION;
+      connection->session_id.store(id);
+      connection->public_state->session_id.store(id);
+      output.resize(sizeof(session->info));
+      RtlCopyMemory(output.data(), &session->info, output.size());
+      return STATUS_SUCCESS;
+    } catch (const std::bad_alloc &) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    } catch (...) {
+      return STATUS_UNSUCCESSFUL;
+    }
+  }
+
+  NTSTATUS resume_session(communication_connection_state *connection,
+                          const communication_request_header &header,
+                          const void *payload,
+                          std::vector<unsigned char> &output) noexcept {
+    std::lock_guard<std::mutex> operation_guard(connection->session_lock);
+    if (header.id != 0 ||
+        header.payload_size != sizeof(ntl::rpc::session_token) ||
+        connection->session_id.load() != 0)
+      return STATUS_INVALID_PARAMETER;
+    ntl::rpc::session_token token{};
+    const NTSTATUS copy_status = guarded_copy(&token, payload, sizeof(token));
+    if (!NT_SUCCESS(copy_status) || !token.valid())
+      return NT_SUCCESS(copy_status) ? STATUS_INVALID_PARAMETER : copy_status;
+
+    std::uint64_t session_id = 0;
+    try {
+      {
+        std::lock_guard<std::mutex> guard(sessions_lock);
+        for (auto &entry : sessions) {
+          if (entry.second->info.token != token)
+            continue;
+          if (entry.second->connection)
+            return STATUS_DEVICE_BUSY;
+          entry.second->connection = connection;
+          for (auto &record : entry.second->deliveries) {
+            record.in_flight = false;
+            record.acknowledging = false;
+          }
+          connection->session_id.store(entry.first);
+          connection->public_state->session_id.store(entry.first);
+          session_id = entry.first;
+          output.resize(sizeof(entry.second->info));
+          RtlCopyMemory(output.data(), &entry.second->info, output.size());
+          break;
+        }
+      }
+
+      if (session_id == 0) {
+        const auto store = notification_store;
+        if (!store)
+          return STATUS_NOT_FOUND;
+        restore_collector restored(*this);
+        const auto restore_status = store->restore(token, restored);
+        if (!restore_status.is_ok())
+          return static_cast<NTSTATUS>(restore_status);
+        const auto validation = restored.validate();
+        if (!validation.is_ok())
+          return static_cast<NTSTATUS>(validation);
+
+        std::lock_guard<std::mutex> guard(sessions_lock);
+        for (auto &entry : sessions) {
+          if (entry.second->info.token != token)
+            continue;
+          if (entry.second->connection)
+            return STATUS_DEVICE_BUSY;
+          entry.second->connection = connection;
+          connection->session_id.store(entry.first);
+          connection->public_state->session_id.store(entry.first);
+          session_id = entry.first;
+          output.resize(sizeof(entry.second->info));
+          RtlCopyMemory(output.data(), &entry.second->info, output.size());
+          break;
+        }
+
+        if (session_id == 0) {
+          if (sessions.size() >= options.max_sessions())
+            return STATUS_QUOTA_EXCEEDED;
+          auto session = std::make_shared<communication_session_state>();
+          auto id = next_session_id.fetch_add(1);
+          if (id == 0)
+            id = next_session_id.fetch_add(1);
+          session->info.token = token;
+          session->info.id = id;
+          session->connection = connection;
+          session->queued_bytes = restored.bytes;
+          std::uint64_t next_sequence = 1;
+          for (auto &record : restored.records) {
+            session->subscriptions.insert(record.id);
+            session->batch_limits.emplace(record.id, 1);
+            const auto channel = channels.find(record.id);
+            if (channel != channels.end() && channel->second.stream)
+              session->streams.insert(record.id);
+            next_sequence = (std::max)(next_sequence, record.sequence + 1);
+            session->deliveries.push_back(std::move(record));
+          }
+          session->next_sequence = next_sequence;
+          if (!sessions.emplace(id, session).second)
+            return STATUS_OBJECT_NAME_COLLISION;
+          connection->session_id.store(id);
+          connection->public_state->session_id.store(id);
+          session_id = id;
+          output.resize(sizeof(session->info));
+          RtlCopyMemory(output.data(), &session->info, output.size());
+        }
+      }
+    } catch (const std::bad_alloc &) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    } catch (...) {
+      return STATUS_UNSUCCESSFUL;
+    }
+    schedule_delivery(session_id);
+    return STATUS_SUCCESS;
+  }
+
+  NTSTATUS close_session(communication_connection_state *connection,
+                         const communication_request_header &header) noexcept {
+    std::lock_guard<std::mutex> operation_guard(connection->session_lock);
+    if (header.id != 0 || header.payload_size != 0 ||
+        connection->session_id.load() == 0)
+      return STATUS_INVALID_PARAMETER;
+    ntl::rpc::session_token token{};
+    {
+      std::lock_guard<std::mutex> guard(sessions_lock);
+      const auto found = sessions.find(connection->session_id.load());
+      if (found == sessions.end() || found->second->connection != connection)
+        return STATUS_INVALID_HANDLE;
+      token = found->second->info.token;
+      sessions.erase(found);
+      connection->session_id.store(0);
+      connection->public_state->session_id.store(0);
+    }
+    const auto store = notification_store;
+    if (store)
+      store->erase_session(token);
+    return STATUS_SUCCESS;
+  }
+
+  NTSTATUS detach_session(communication_connection_state *connection,
+                          const communication_request_header &header) noexcept {
+    std::lock_guard<std::mutex> operation_guard(connection->session_lock);
+    if (header.id != 0 || header.payload_size != 0 ||
+        connection->session_id.load() == 0)
+      return STATUS_INVALID_PARAMETER;
+
+    std::lock_guard<std::mutex> guard(sessions_lock);
+    const auto found = sessions.find(connection->session_id.load());
+    if (found == sessions.end() || found->second->connection != connection)
+      return STATUS_INVALID_HANDLE;
+
+    found->second->connection = nullptr;
+    for (auto &record : found->second->deliveries)
+      record.in_flight = false;
+    connection->session_id.store(0);
+    connection->public_state->session_id.store(0);
+    return STATUS_SUCCESS;
+  }
+
+  NTSTATUS subscribe(communication_connection_state *connection,
+                     const communication_request_header &header,
+                     const void *payload, bool stream) noexcept {
+    std::lock_guard<std::mutex> operation_guard(connection->session_lock);
+    if (header.id == 0 ||
+        (header.payload_size != 0 &&
+         header.payload_size != sizeof(communication_subscription_request)) ||
+        connection->session_id.load() == 0)
+      return STATUS_INVALID_PARAMETER;
+    const auto channel = channels.find(header.id);
+    if (channel == channels.end() || channel->second.stream != stream)
+      return STATUS_NOT_SUPPORTED;
+    communication_subscription_request request{1, 0};
+    if (header.payload_size != 0) {
+      const auto status = guarded_copy(&request, payload, sizeof(request));
+      if (!NT_SUCCESS(status))
+        return status;
+    }
+    if (request.reserved != 0 || request.max_batch_records == 0 ||
+        request.max_batch_records > channel->second.max_batch_records)
+      return STATUS_INVALID_PARAMETER;
+    try {
+      std::lock_guard<std::mutex> guard(sessions_lock);
+      const auto found = sessions.find(connection->session_id.load());
+      if (found == sessions.end() || found->second->connection != connection)
+        return STATUS_INVALID_HANDLE;
+      found->second->subscriptions.insert(header.id);
+      found->second->batch_limits[header.id] = request.max_batch_records;
+      if (stream)
+        found->second->streams.insert(header.id);
+    } catch (const std::bad_alloc &) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    } catch (...) {
+      return STATUS_UNSUCCESSFUL;
+    }
+    schedule_delivery(connection->session_id.load());
+    return STATUS_SUCCESS;
+  }
+
+  NTSTATUS unsubscribe(communication_connection_state *connection,
+                       const communication_request_header &header,
+                       bool stream) noexcept {
+    std::lock_guard<std::mutex> operation_guard(connection->session_lock);
+    if (header.id == 0 || header.payload_size != 0 ||
+        connection->session_id.load() == 0)
+      return STATUS_INVALID_PARAMETER;
+    std::lock_guard<std::mutex> guard(sessions_lock);
+    const auto found = sessions.find(connection->session_id.load());
+    if (found == sessions.end() || found->second->connection != connection)
+      return STATUS_INVALID_HANDLE;
+    const auto pending = std::find_if(
+        found->second->deliveries.begin(), found->second->deliveries.end(),
+        [&](const communication_delivery_record &record) {
+          return record.id == header.id;
+        });
+    if (pending != found->second->deliveries.end())
+      return STATUS_DEVICE_BUSY;
+    if (stream)
+      found->second->streams.erase(header.id);
+    found->second->subscriptions.erase(header.id);
+    found->second->batch_limits.erase(header.id);
+    return STATUS_SUCCESS;
+  }
+
+  NTSTATUS acknowledge(communication_connection_state *connection,
+                       const communication_request_header &header,
+                       const void *payload) noexcept {
+    std::lock_guard<std::mutex> operation_guard(connection->session_lock);
+    if (header.id == 0 ||
+        header.payload_size != sizeof(communication_ack_request) ||
+        connection->session_id.load() == 0)
+      return STATUS_INVALID_PARAMETER;
+    communication_ack_request request{};
+    const NTSTATUS copy_status =
+        guarded_copy(&request, payload, sizeof(request));
+    if (!NT_SUCCESS(copy_status) || request.sequence == 0)
+      return NT_SUCCESS(copy_status) ? STATUS_INVALID_PARAMETER : copy_status;
+
+    ntl::rpc::session_token token{};
+    bool found_record = false;
+    {
+      std::lock_guard<std::mutex> guard(sessions_lock);
+      const auto found = sessions.find(connection->session_id.load());
+      if (found == sessions.end() || found->second->connection != connection)
+        return STATUS_INVALID_HANDLE;
+      token = found->second->info.token;
+      for (auto record = found->second->deliveries.begin();
+           record != found->second->deliveries.end(); ++record) {
+        if (record->id != header.id || record->sequence != request.sequence)
+          continue;
+        if (record->acknowledging)
+          return STATUS_DEVICE_BUSY;
+        record->acknowledging = true;
+        found_record = true;
+        break;
+      }
+    }
+    if (!found_record)
+      return STATUS_NOT_FOUND;
+
+    const auto store = notification_store;
+    if (store) {
+      const auto stored =
+          store->acknowledge(token, header.id, request.sequence);
+      if (!stored.is_ok()) {
+        std::lock_guard<std::mutex> guard(sessions_lock);
+        const auto session = sessions.find(connection->session_id.load());
+        if (session != sessions.end())
+          for (auto &record : session->second->deliveries)
+            if (record.id == header.id && record.sequence == request.sequence)
+              record.acknowledging = false;
+        return static_cast<NTSTATUS>(stored);
+      }
+    }
+
+    bool removed = false;
+    {
+      std::lock_guard<std::mutex> guard(sessions_lock);
+      const auto session = sessions.find(connection->session_id.load());
+      if (session != sessions.end() &&
+          session->second->connection == connection) {
+        for (auto record = session->second->deliveries.begin();
+             record != session->second->deliveries.end(); ++record) {
+          if (record->id != header.id || record->sequence != request.sequence)
+            continue;
+          session->second->queued_bytes -= record->payload.size();
+          session->second->deliveries.erase(record);
+          removed = true;
+          break;
+        }
+      }
+    }
+    if (!removed)
+      return STATUS_NOT_FOUND;
+    schedule_delivery(connection->session_id.load());
+    return STATUS_SUCCESS;
+  }
+
+  NTSTATUS acknowledge_batch(communication_connection_state *connection,
+                             const communication_request_header &header,
+                             const void *payload) noexcept {
+    std::lock_guard<std::mutex> operation_guard(connection->session_lock);
+    if (header.id == 0 || connection->session_id.load() == 0 ||
+        header.payload_size < sizeof(communication_ack_batch_header))
+      return STATUS_INVALID_PARAMETER;
+    communication_ack_batch_header batch{};
+    auto status = guarded_copy(&batch, payload, sizeof(batch));
+    if (!NT_SUCCESS(status) || batch.reserved != 0 || batch.count == 0 ||
+        batch.count > ntl::rpc::maximum_batch_records ||
+        header.payload_size !=
+            sizeof(batch) + sizeof(std::uint64_t) * batch.count)
+      return NT_SUCCESS(status) ? STATUS_INVALID_PARAMETER : status;
+
+    std::vector<std::uint64_t> sequences(batch.count);
+    status = guarded_copy(sequences.data(),
+                          static_cast<const unsigned char *>(payload) +
+                              sizeof(batch),
+                          sequences.size() * sizeof(sequences.front()));
+    if (!NT_SUCCESS(status))
+      return status;
+    std::sort(sequences.begin(), sequences.end());
+    if (sequences.front() == 0 ||
+        std::adjacent_find(sequences.begin(), sequences.end()) !=
+            sequences.end())
+      return STATUS_INVALID_PARAMETER;
+
+    ntl::rpc::session_token token{};
+    {
+      std::lock_guard<std::mutex> guard(sessions_lock);
+      const auto found = sessions.find(connection->session_id.load());
+      if (found == sessions.end() || found->second->connection != connection)
+        return STATUS_INVALID_HANDLE;
+      token = found->second->info.token;
+      for (const auto sequence : sequences) {
+        auto record = std::find_if(
+            found->second->deliveries.begin(), found->second->deliveries.end(),
+            [=](const communication_delivery_record &value) {
+              return value.id == header.id && value.sequence == sequence;
+            });
+        if (record == found->second->deliveries.end())
+          return STATUS_NOT_FOUND;
+        if (record->acknowledging)
+          return STATUS_DEVICE_BUSY;
+      }
+      for (const auto sequence : sequences) {
+        auto record = std::find_if(
+            found->second->deliveries.begin(), found->second->deliveries.end(),
+            [=](const communication_delivery_record &value) {
+              return value.id == header.id && value.sequence == sequence;
+            });
+        record->acknowledging = true;
+      }
+    }
+
+    const auto store = notification_store;
+    if (store) {
+      const auto stored = store->acknowledge_batch(
+          token, header.id, sequences.data(), sequences.size());
+      if (!stored.is_ok()) {
+        std::lock_guard<std::mutex> guard(sessions_lock);
+        const auto found = sessions.find(connection->session_id.load());
+        if (found != sessions.end())
+          for (auto &record : found->second->deliveries)
+            if (record.id == header.id &&
+                std::binary_search(sequences.begin(), sequences.end(),
+                                   record.sequence))
+              record.acknowledging = false;
+        return static_cast<NTSTATUS>(stored);
+      }
+    }
+
+    {
+      std::lock_guard<std::mutex> guard(sessions_lock);
+      const auto found = sessions.find(connection->session_id.load());
+      if (found == sessions.end() || found->second->connection != connection)
+        return STATUS_NOT_FOUND;
+      for (const auto sequence : sequences) {
+        const auto record = std::find_if(
+            found->second->deliveries.begin(), found->second->deliveries.end(),
+            [=](const communication_delivery_record &value) {
+              return value.id == header.id && value.sequence == sequence;
+            });
+        found->second->queued_bytes -= record->payload.size();
+        found->second->deliveries.erase(record);
+      }
+    }
+    schedule_delivery(connection->session_id.load());
+    return STATUS_SUCCESS;
+  }
+
+  NTSTATUS send_inbound(communication_connection_state *connection,
+                        communication_inbound_header header,
+                        const std::vector<unsigned char> &payload,
+                        LONGLONG timeout_100ns) noexcept {
+    if (!connection || !connection->port ||
+        payload.size() > communication_inbound_payload_limit ||
+        payload.size() > (std::numeric_limits<ULONG>::max)() - sizeof(header))
+      return STATUS_INVALID_PARAMETER;
+    try {
+      header.payload_size = static_cast<std::uint32_t>(payload.size());
+      std::vector<unsigned char> message(sizeof(header) + payload.size());
+      RtlCopyMemory(message.data(), &header, sizeof(header));
+      if (!payload.empty())
+        RtlCopyMemory(message.data() + sizeof(header), payload.data(),
+                      payload.size());
+      LARGE_INTEGER timeout{};
+      timeout.QuadPart = timeout_100ns;
+      return FltSendMessage(filter, &connection->port, message.data(),
+                            static_cast<ULONG>(message.size()), nullptr,
+                            nullptr, &timeout);
+    } catch (const std::bad_alloc &) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    } catch (...) {
+      return STATUS_UNSUCCESSFUL;
+    }
+  }
+
+  ntl::status
+  try_publish_transient(std::uint32_t id,
+                        const std::vector<unsigned char> &payload) noexcept {
+    const auto channel = channels.find(id);
+    if (channel == channels.end() || channel->second.stream ||
+        payload.size() > channel->second.response_size)
+      return ntl::status{STATUS_INVALID_PARAMETER};
+
+    std::vector<std::pair<communication_connection_state *, std::uint64_t>>
+        recipients;
+    try {
+      std::lock_guard<std::mutex> guard(sessions_lock);
+      for (auto &entry : sessions) {
+        auto &session = *entry.second;
+        auto *const connection = session.connection;
+        if (!connection || session.subscriptions.count(id) == 0)
+          continue;
+        if (ExAcquireRundownProtection(&connection->operations))
+          recipients.emplace_back(connection, entry.first);
+      }
+    } catch (const std::bad_alloc &) {
+      for (const auto &recipient : recipients)
+        ExReleaseRundownProtection(&recipient.first->operations);
+      return ntl::status{STATUS_INSUFFICIENT_RESOURCES};
+    }
+    if (recipients.empty())
+      return ntl::status{STATUS_NOT_FOUND};
+
+    std::size_t queued = 0;
+    for (const auto &recipient : recipients) {
+      auto *const connection = recipient.first;
+      const auto session_id = recipient.second;
+      const auto status =
+          ntl::passive_executor(DelayedWorkQueue, "NFlt")
+              .post([this, connection, session_id, id, payload] {
+                if (connection->session_id.load() != session_id) {
+                  ExReleaseRundownProtection(&connection->operations);
+                  return;
+                }
+                communication_inbound_header frame{};
+                frame.kind = communication_inbound_kind::notification;
+                frame.id = id;
+                frame.session_id = session_id;
+                (void)send_inbound(connection, frame, payload,
+                                   -100LL * 10LL * 1000LL);
+                ExReleaseRundownProtection(&connection->operations);
+              });
+      if (status.is_ok()) {
+        ++queued;
+      } else {
+        ExReleaseRundownProtection(&connection->operations);
+      }
+    }
+    return ntl::status{queued != 0 ? STATUS_SUCCESS
+                                   : STATUS_INSUFFICIENT_RESOURCES};
+  }
+
+  ntl::status try_publish_transient_to(
+      const std::shared_ptr<communication_connection_public_state> &target,
+      std::uint32_t id, const std::vector<unsigned char> &payload) noexcept {
+    const auto channel = channels.find(id);
+    if (!target || channel == channels.end() || channel->second.stream ||
+        payload.size() > channel->second.response_size)
+      return ntl::status{STATUS_INVALID_PARAMETER};
+
+    communication_connection_state *connection = nullptr;
+    std::uint64_t session_id = 0;
+    {
+      std::lock_guard<std::mutex> guard(connections_lock);
+      for (auto *candidate : connections) {
+        if (candidate->public_state != target)
+          continue;
+        if (ExAcquireRundownProtection(&candidate->operations)) {
+          connection = candidate;
+          session_id = candidate->session_id.load();
+        }
+        break;
+      }
+    }
+    if (!connection)
+      return ntl::status{STATUS_NOT_FOUND};
+    {
+      std::lock_guard<std::mutex> guard(sessions_lock);
+      const auto session = sessions.find(session_id);
+      if (session == sessions.end() ||
+          session->second->connection != connection ||
+          session->second->subscriptions.count(id) == 0) {
+        ExReleaseRundownProtection(&connection->operations);
+        return ntl::status{STATUS_NOT_FOUND};
+      }
+    }
+
+    const auto queued =
+        ntl::passive_executor(DelayedWorkQueue, "NFlt")
+            .post([this, connection, session_id, id, payload] {
+              if (connection->session_id.load() != session_id) {
+                ExReleaseRundownProtection(&connection->operations);
+                return;
+              }
+              communication_inbound_header frame{};
+              frame.kind = communication_inbound_kind::notification;
+              frame.id = id;
+              frame.session_id = session_id;
+              (void)send_inbound(connection, frame, payload,
+                                 -100LL * 10LL * 1000LL);
+              ExReleaseRundownProtection(&connection->operations);
+            });
+    if (!queued.is_ok())
+      ExReleaseRundownProtection(&connection->operations);
+    return queued;
+  }
+
+  NTSTATUS request_client(
+      const std::shared_ptr<communication_connection_public_state> &target,
+      std::uint32_t id, const std::vector<unsigned char> &payload,
+      std::vector<unsigned char> &output, LONGLONG timeout_100ns) noexcept {
+    if (!target || id == 0)
+      return STATUS_INVALID_PARAMETER;
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return STATUS_INVALID_DEVICE_STATE;
+    const auto definition = client_methods.find(id);
+    if (definition == client_methods.end())
+      return STATUS_NOT_SUPPORTED;
+    if (payload.size() > definition->second.request_size ||
+        definition->second.response_size > communication_inbound_payload_limit)
+      return STATUS_INVALID_BUFFER_SIZE;
+
+    communication_connection_state *connection = nullptr;
+    std::uint64_t session_id = 0;
+    {
+      std::lock_guard<std::mutex> guard(connections_lock);
+      for (auto *candidate : connections) {
+        if (candidate->public_state != target)
+          continue;
+        if (ExAcquireRundownProtection(&candidate->operations)) {
+          connection = candidate;
+          session_id = candidate->session_id.load();
+        }
+        break;
+      }
+    }
+    if (!connection || session_id == 0) {
+      if (connection)
+        ExReleaseRundownProtection(&connection->operations);
+      return STATUS_NOT_FOUND;
+    }
+    NTSTATUS status = STATUS_UNSUCCESSFUL;
+    try {
+      communication_inbound_header frame{};
+      frame.kind = communication_inbound_kind::request;
+      frame.id = id;
+      frame.payload_size = static_cast<std::uint32_t>(payload.size());
+      frame.session_id = session_id;
+      auto correlation = next_outbound_request_id.fetch_add(1);
+      if (correlation == 0)
+        correlation = next_outbound_request_id.fetch_add(1);
+      frame.correlation = correlation;
+
+      std::vector<unsigned char> message(sizeof(frame) + payload.size());
+      RtlCopyMemory(message.data(), &frame, sizeof(frame));
+      if (!payload.empty())
+        RtlCopyMemory(message.data() + sizeof(frame), payload.data(),
+                      payload.size());
+
+      // FilterReplyMessage requires FILTER_REPLY_HEADER in user mode, but
+      // Filter Manager consumes that header and copies only the caller-defined
+      // reply bytes into FltSendMessage's ReplyBuffer.
+      const auto reply_capacity = sizeof(communication_reply_header) +
+                                  definition->second.response_size;
+      if (reply_capacity > (std::numeric_limits<ULONG>::max)()) {
+        status = STATUS_INVALID_BUFFER_SIZE;
+      } else {
+        std::vector<unsigned char> reply(reply_capacity);
+        ULONG reply_length = static_cast<ULONG>(reply.size());
+        LARGE_INTEGER timeout{};
+        timeout.QuadPart = timeout_100ns;
+        status = FltSendMessage(filter, &connection->port, message.data(),
+                                static_cast<ULONG>(message.size()),
+                                reply.data(), &reply_length, &timeout);
+        if (NT_SUCCESS(status)) {
+          if (reply_length < sizeof(communication_reply_header)) {
+            status = STATUS_INVALID_BUFFER_SIZE;
+          } else {
+            communication_reply_header header{};
+            RtlCopyMemory(&header, reply.data(), sizeof(header));
+            const auto available = reply_length - sizeof(header);
+            if (header.magic != communication_magic ||
+                header.version != communication_version ||
+                header.reserved != 0 || header.payload_size != available ||
+                header.payload_size > definition->second.response_size) {
+              status = STATUS_INVALID_PARAMETER;
+            } else {
+              status = static_cast<NTSTATUS>(header.status);
+              if (NT_SUCCESS(status)) {
+                output.resize(header.payload_size);
+                if (!output.empty())
+                  RtlCopyMemory(output.data(), reply.data() + sizeof(header),
+                                output.size());
+              }
+            }
+          }
+        }
+      }
+    } catch (const std::bad_alloc &) {
+      status = STATUS_INSUFFICIENT_RESOURCES;
+    } catch (...) {
+      status = STATUS_UNSUCCESSFUL;
+    }
+    ExReleaseRundownProtection(&connection->operations);
+    return status;
+  }
+
+  ntl::result<std::uint64_t>
+  try_enqueue_reliable(std::uint64_t session_id, std::uint32_t id,
+                       communication_inbound_kind kind,
+                       const std::vector<unsigned char> &payload) noexcept {
+    const auto channel = channels.find(id);
+    if (channel == channels.end() ||
+        (kind == communication_inbound_kind::stream_record) !=
+            channel->second.stream ||
+        payload.size() > channel->second.response_size)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+
+    std::uint64_t sequence = 0;
+    ntl::rpc::session_token token{};
+    const auto store = notification_store;
+    if (store && KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+    try {
+      std::lock_guard<std::mutex> guard(sessions_lock);
+      const auto found = sessions.find(session_id);
+      if (found == sessions.end())
+        return ntl::unexpected(STATUS_NOT_FOUND);
+      auto &session = *found->second;
+      token = session.info.token;
+      if (session.subscriptions.count(id) == 0 ||
+          (channel->second.stream && session.streams.count(id) == 0))
+        return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+      const auto over_limit = [&] {
+        return session.deliveries.size() >= options.max_reliable_records() ||
+               payload.size() > options.max_reliable_bytes() -
+                                    (std::min)(session.queued_bytes,
+                                               options.max_reliable_bytes());
+      };
+      while (over_limit()) {
+        // External storage must be updated before a queued record is removed.
+        // Keep drop_oldest deterministic by requiring the caller to ACK or
+        // choose reject_newest when a persistence hook is installed.
+        if (store)
+          return ntl::unexpected(STATUS_DEVICE_BUSY);
+        if (options.reliable_overflow() !=
+            communication_overflow_policy::drop_oldest)
+          return ntl::unexpected(STATUS_DEVICE_BUSY);
+        const auto oldest =
+            std::find_if(session.deliveries.begin(), session.deliveries.end(),
+                         [](const communication_delivery_record &record) {
+                           return !record.in_flight;
+                         });
+        if (oldest == session.deliveries.end())
+          return ntl::unexpected(STATUS_DEVICE_BUSY);
+        session.queued_bytes -= oldest->payload.size();
+        session.deliveries.erase(oldest);
+      }
+      sequence = session.next_sequence++;
+      if (sequence == 0)
+        sequence = session.next_sequence++;
+      if (store)
+        session.pending_persistence.emplace(sequence, channel->second.priority);
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNSUCCESSFUL);
+    }
+
+    if (store) {
+      const communication_record_view record{
+          token,
+          session_id,
+          id,
+          sequence,
+          kind == communication_inbound_kind::stream_record
+              ? communication_record_kind::stream
+              : communication_record_kind::notification,
+          payload.data(),
+          payload.size()};
+      const auto persisted = store->persist(record);
+      if (!persisted.is_ok()) {
+        {
+          std::lock_guard<std::mutex> guard(sessions_lock);
+          const auto found = sessions.find(session_id);
+          if (found != sessions.end() && found->second->info.token == token)
+            found->second->pending_persistence.erase(sequence);
+        }
+        schedule_delivery(session_id);
+        return ntl::unexpected(persisted);
+      }
+    }
+
+    NTSTATUS queue_status = STATUS_UNSUCCESSFUL;
+    try {
+      std::lock_guard<std::mutex> guard(sessions_lock);
+      const auto found = sessions.find(session_id);
+      if (found == sessions.end() || found->second->info.token != token) {
+        queue_status = STATUS_NOT_FOUND;
+      } else {
+        auto &session = *found->second;
+        session.pending_persistence.erase(sequence);
+        const bool over_limit =
+            session.deliveries.size() >= options.max_reliable_records() ||
+            payload.size() > options.max_reliable_bytes() -
+                                 (std::min)(session.queued_bytes,
+                                            options.max_reliable_bytes());
+        if (over_limit) {
+          queue_status = STATUS_DEVICE_BUSY;
+        } else {
+          communication_delivery_record record{};
+          record.kind = kind;
+          record.id = id;
+          record.sequence = sequence;
+          record.priority = channel->second.priority;
+          record.payload = payload;
+          session.queued_bytes += payload.size();
+          session.deliveries.push_back(std::move(record));
+          queue_status = STATUS_SUCCESS;
+        }
+      }
+    } catch (const std::bad_alloc &) {
+      queue_status = STATUS_INSUFFICIENT_RESOURCES;
+    } catch (...) {
+      queue_status = STATUS_UNSUCCESSFUL;
+    }
+    if (!NT_SUCCESS(queue_status)) {
+      {
+        std::lock_guard<std::mutex> guard(sessions_lock);
+        const auto found = sessions.find(session_id);
+        if (found != sessions.end() && found->second->info.token == token)
+          found->second->pending_persistence.erase(sequence);
+      }
+      if (store)
+        (void)store->acknowledge(token, id, sequence);
+      schedule_delivery(session_id);
+      return ntl::unexpected(queue_status);
+    }
+    schedule_delivery(session_id);
+    return sequence;
+  }
+
+  void schedule_delivery(std::uint64_t session_id) noexcept {
+    communication_connection_state *connection = nullptr;
+    std::uint32_t id = 0;
+    bool batch_delivery = false;
+    std::vector<std::uint64_t> sequences;
+    try {
+      std::lock_guard<std::mutex> guard(sessions_lock);
+      const auto found = sessions.find(session_id);
+      if (found == sessions.end() || !found->second->connection)
+        return;
+      auto &session = *found->second;
+      for (const auto &record : session.deliveries) {
+        if (record.in_flight)
+          return;
+      }
+      auto selected = session.deliveries.end();
+      for (auto current = session.deliveries.begin();
+           current != session.deliveries.end(); ++current) {
+        if (selected == session.deliveries.end() ||
+            static_cast<std::uint32_t>(current->priority) >
+                static_cast<std::uint32_t>(selected->priority) ||
+            (current->priority == selected->priority &&
+             current->sequence < selected->sequence))
+          selected = current;
+      }
+      if (selected == session.deliveries.end())
+        return;
+      for (const auto &pending : session.pending_persistence) {
+        if (static_cast<std::uint32_t>(pending.second) >
+                static_cast<std::uint32_t>(selected->priority) ||
+            (pending.second == selected->priority &&
+             pending.first < selected->sequence))
+          return;
+      }
+      connection = session.connection;
+      if (!ExAcquireRundownProtection(&connection->operations))
+        return;
+      id = selected->id;
+      const auto configured = session.batch_limits.find(id);
+      const auto maximum = configured == session.batch_limits.end()
+                               ? std::size_t{1}
+                               : configured->second;
+      batch_delivery = maximum > 1;
+      std::size_t payload_bytes = sizeof(communication_batch_header);
+      for (auto &record : session.deliveries) {
+        if (record.id != id || record.kind != selected->kind ||
+            sequences.size() >= maximum)
+          continue;
+        const auto required =
+            sizeof(communication_batch_record_header) + record.payload.size();
+        if (required >
+            communication_inbound_payload_limit -
+                (std::min)(payload_bytes, communication_inbound_payload_limit))
+          break;
+        record.in_flight = true;
+        sequences.push_back(record.sequence);
+        payload_bytes += required;
+      }
+      if (sequences.empty()) {
+        ExReleaseRundownProtection(&connection->operations);
+        return;
+      }
+    } catch (...) {
+      if (connection)
+        ExReleaseRundownProtection(&connection->operations);
+      return;
+    }
+
+    const auto queue_status =
+        ntl::passive_executor(DelayedWorkQueue, "NFlt")
+            .post([this, connection, session_id, id, batch_delivery,
+                   sequences] {
+              if (batch_delivery)
+                deliver_reliable_batch(connection, session_id, id, sequences);
+              else
+                deliver_reliable(connection, session_id, id, sequences.front());
+            });
+    if (queue_status.is_ok())
+      return;
+    {
+      std::lock_guard<std::mutex> guard(sessions_lock);
+      const auto found = sessions.find(session_id);
+      if (found != sessions.end()) {
+        for (auto &record : found->second->deliveries)
+          if (record.id == id && std::find(sequences.begin(), sequences.end(),
+                                           record.sequence) != sequences.end())
+            record.in_flight = false;
+      }
+    }
+    ExReleaseRundownProtection(&connection->operations);
+  }
+
+  void deliver_reliable(communication_connection_state *connection,
+                        std::uint64_t session_id, std::uint32_t id,
+                        std::uint64_t sequence) noexcept {
+    communication_inbound_header frame{};
+    std::vector<unsigned char> payload;
+    bool found_record = false;
+    {
+      std::lock_guard<std::mutex> guard(sessions_lock);
+      const auto session = sessions.find(session_id);
+      if (session != sessions.end() &&
+          session->second->connection == connection) {
+        for (const auto &record : session->second->deliveries) {
+          if (record.id != id || record.sequence != sequence)
+            continue;
+          frame.kind = record.kind;
+          frame.id = record.id;
+          frame.correlation = record.sequence;
+          frame.session_id = session_id;
+          payload = record.payload;
+          found_record = true;
+          break;
+        }
+      }
+    }
+
+    NTSTATUS status = STATUS_NOT_FOUND;
+    if (found_record)
+      status = send_inbound(connection, frame, payload, -500LL * 10LL * 1000LL);
+    if (status != STATUS_SUCCESS) {
+      std::lock_guard<std::mutex> guard(sessions_lock);
+      const auto session = sessions.find(session_id);
+      if (session != sessions.end()) {
+        for (auto &record : session->second->deliveries) {
+          if (record.id == id && record.sequence == sequence) {
+            record.in_flight = false;
+            break;
+          }
+        }
+      }
+    }
+    ExReleaseRundownProtection(&connection->operations);
+  }
+
+  void
+  deliver_reliable_batch(communication_connection_state *connection,
+                         std::uint64_t session_id, std::uint32_t id,
+                         const std::vector<std::uint64_t> &sequences) noexcept {
+    communication_inbound_header frame{};
+    frame.kind = communication_inbound_kind::reliable_batch;
+    frame.id = id;
+    frame.session_id = session_id;
+    std::vector<unsigned char> payload;
+    bool complete = false;
+    try {
+      std::lock_guard<std::mutex> guard(sessions_lock);
+      const auto session = sessions.find(session_id);
+      if (session != sessions.end() &&
+          session->second->connection == connection) {
+        payload.resize(sizeof(communication_batch_header));
+        communication_batch_header batch{};
+        batch.count = static_cast<std::uint32_t>(sequences.size());
+        RtlCopyMemory(payload.data(), &batch, sizeof(batch));
+        for (const auto sequence : sequences) {
+          const auto record =
+              std::find_if(session->second->deliveries.begin(),
+                           session->second->deliveries.end(),
+                           [=](const communication_delivery_record &value) {
+                             return value.id == id &&
+                                    value.sequence == sequence &&
+                                    value.in_flight;
+                           });
+          if (record == session->second->deliveries.end()) {
+            payload.clear();
+            break;
+          }
+          communication_batch_record_header header{};
+          header.sequence = sequence;
+          header.payload_size =
+              static_cast<std::uint32_t>(record->payload.size());
+          const auto offset = payload.size();
+          payload.resize(offset + sizeof(header) + record->payload.size());
+          RtlCopyMemory(payload.data() + offset, &header, sizeof(header));
+          if (!record->payload.empty())
+            RtlCopyMemory(payload.data() + offset + sizeof(header),
+                          record->payload.data(), record->payload.size());
+        }
+        complete = !payload.empty();
+      }
+    } catch (...) {
+      complete = false;
+    }
+
+    NTSTATUS status = STATUS_NOT_FOUND;
+    if (complete)
+      status = send_inbound(connection, frame, payload, -500LL * 10LL * 1000LL);
+    if (status != STATUS_SUCCESS) {
+      std::lock_guard<std::mutex> guard(sessions_lock);
+      const auto session = sessions.find(session_id);
+      if (session != sessions.end()) {
+        for (auto &record : session->second->deliveries)
+          if (record.id == id && std::find(sequences.begin(), sequences.end(),
+                                           record.sequence) != sequences.end())
+            record.in_flight = false;
+      }
+    }
+    ExReleaseRundownProtection(&connection->operations);
+  }
+
+  void complete_async(
+      const std::shared_ptr<communication_async_state> &async) noexcept {
+    auto *const connection = async->connection;
+    NTSTATUS status = STATUS_CANCELLED;
+    std::vector<unsigned char> output;
+    if (!async->cancellation_requested.load()) {
+      const auto found = handlers.find(async->method_id);
+      if (found == handlers.end()) {
+        status = STATUS_NOT_SUPPORTED;
+      } else {
+        const communication_context context{
+            connection, async->requestor_process_id, async.get()};
+        status = found->second->invoke(context, async->input.data(),
+                                       async->input.size(), output);
+      }
+    }
+
+    if (output.size() > communication_inbound_payload_limit)
+      status = STATUS_BUFFER_OVERFLOW;
+    if (!NT_SUCCESS(status))
+      output.clear();
+
+    try {
+      communication_inbound_header completion{};
+      completion.kind = communication_inbound_kind::async_completion;
+      completion.id = async->method_id;
+      completion.payload_size = static_cast<std::uint32_t>(output.size());
+      completion.correlation = async->request_id;
+      completion.status = static_cast<std::int32_t>(status);
+
+      std::vector<unsigned char> message(sizeof(completion) + output.size());
+      RtlCopyMemory(message.data(), &completion, sizeof(completion));
+      if (!output.empty())
+        RtlCopyMemory(message.data() + sizeof(completion), output.data(),
+                      output.size());
+
+      LARGE_INTEGER timeout{};
+      timeout.QuadPart = -5LL * 10LL * 1000LL * 1000LL;
+      (void)FltSendMessage(filter, &connection->port, message.data(),
+                           static_cast<ULONG>(message.size()), nullptr, nullptr,
+                           &timeout);
+    } catch (...) {
+      // The request still leaves the registry below. A disconnected or
+      // resource-starved client observes cancellation/connection failure.
+    }
+
+    {
+      std::lock_guard<std::mutex> guard(connection->async_lock);
+      connection->async_requests.erase(async->request_id);
+    }
+    ExReleaseRundownProtection(&connection->operations);
+  }
+
+  NTSTATUS register_region(communication_connection_state *connection,
+                           const communication_request_header &header,
+                           const void *payload,
+                           std::vector<unsigned char> &output) noexcept {
+    if (header.id != 0 ||
+        header.payload_size != sizeof(ntl::ipc::region_registration))
+      return STATUS_INVALID_PARAMETER;
+
+    ntl::ipc::region_registration registration{};
+    const NTSTATUS copy_status =
+        guarded_copy(&registration, payload, sizeof(registration));
+    if (!NT_SUCCESS(copy_status))
+      return copy_status;
+    auto region = connection->regions.try_register(registration, UserMode);
+    if (!region)
+      return static_cast<NTSTATUS>(region.status());
+
+    output.resize(sizeof(ntl::ipc::region_handle));
+    RtlCopyMemory(output.data(), &*region, output.size());
+    return STATUS_SUCCESS;
+  }
+
+  NTSTATUS unregister_region(communication_connection_state *connection,
+                             const communication_request_header &header,
+                             const void *payload) noexcept {
+    if (header.id != 0 ||
+        header.payload_size != sizeof(ntl::ipc::region_handle))
+      return STATUS_INVALID_PARAMETER;
+
+    ntl::ipc::region_handle region{};
+    const NTSTATUS copy_status = guarded_copy(&region, payload, sizeof(region));
+    if (!NT_SUCCESS(copy_status))
+      return copy_status;
+    return static_cast<NTSTATUS>(connection->regions.try_unregister(region));
+  }
+
+  PFLT_FILTER filter = nullptr;
+  PFLT_PORT server_port = nullptr;
+  communication_port_options options{};
+  std::unordered_map<std::uint32_t, std::unique_ptr<communication_handler>>
+      handlers;
+  std::unordered_map<std::uint32_t, communication_channel_definition> channels;
+  std::unordered_map<std::uint32_t, communication_method_definition>
+      client_methods;
+  std::mutex connections_lock;
+  std::unordered_set<communication_connection_state *> connections;
+  std::mutex sessions_lock;
+  std::unordered_map<std::uint64_t,
+                     std::shared_ptr<communication_session_state>>
+      sessions;
+  std::atomic<std::uint64_t> next_connection_id{1};
+  std::atomic<std::uint64_t> next_session_id{1};
+  std::atomic<std::uint64_t> next_outbound_request_id{1};
+  std::uint32_t contract_version = 1;
+  std::uint64_t capabilities = 0;
+  std::shared_ptr<communication_notification_store> notification_store;
+  connection_policy on_connect;
+  connection_event on_disconnect;
+};
+
+} // namespace detail
+
+inline ntl::result<ntl::ipc::pinned_buffer> communication_context::try_resolve(
+    ntl::ipc::buffer_token token,
+    ntl::ipc::region_access required) const noexcept {
+  if (!connection_)
+    return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+  return connection_->regions.try_resolve(token, required);
+}
+
+inline PFLT_PORT communication_context::native_port() const noexcept {
+  return connection_ ? connection_->port : nullptr;
+}
+
+inline bool communication_context::cancellation_requested() const noexcept {
+  return async_ && async_->cancellation_requested.load();
+}
+
+inline std::uint64_t communication_context::session_id() const noexcept {
+  return connection_ ? connection_->session_id.load() : 0;
+}
+
+inline communication_connection
+communication_context::connection() const noexcept {
+  return communication_connection{connection_ ? connection_->public_state
+                                              : nullptr};
+}
+
+/** @brief Copyable publisher for a started minifilter communication port. */
+class communication_publisher {
+public:
+  communication_publisher() noexcept = default;
+
+  explicit operator bool() const noexcept { return !state_.expired(); }
+
+  /** @brief Sends one best-effort typed event to current subscribers. */
+  template <typename Notification>
+  ntl::status try_notify(
+      const Notification &,
+      const typename Notification::payload_type &payload) const noexcept {
+    static_assert(
+        ntl::rpc::is_notification<Notification>::value,
+        "communication_publisher::try_notify requires a notification");
+    auto state = state_.lock();
+    if (!state)
+      return ntl::status{STATUS_DELETE_PENDING};
+    auto bytes = serialize<Notification>(payload);
+    if (!bytes)
+      return bytes.status();
+    return state->try_publish_transient(Notification::id(), *bytes);
+  }
+
+  /** @brief Sends one best-effort typed event to a specific connection. */
+  template <typename Notification>
+  ntl::status try_notify(
+      const communication_connection &connection, const Notification &,
+      const typename Notification::payload_type &payload) const noexcept {
+    static_assert(
+        ntl::rpc::is_notification<Notification>::value,
+        "communication_publisher::try_notify requires a notification");
+    auto state = state_.lock();
+    if (!state)
+      return ntl::status{STATUS_DELETE_PENDING};
+    auto bytes = serialize<Notification>(payload);
+    if (!bytes)
+      return bytes.status();
+    return state->try_publish_transient_to(connection.state_,
+                                           Notification::id(), *bytes);
+  }
+
+  /**
+   * @brief Invokes one typed user-mode handler through FilterReplyMessage.
+   * @note The call must run at PASSIVE_LEVEL. The timeout bounds both delivery
+   * to an app receiver and the app callback's reply.
+   */
+  template <typename Method, typename... Arguments>
+  ntl::result<typename Method::return_type>
+  try_request(const communication_connection &connection, const Method &,
+              std::chrono::milliseconds timeout,
+              Arguments &&...arguments) const noexcept {
+    static_assert(ntl::rpc::is_method<Method>::value,
+                  "communication_publisher::try_request requires a method");
+    static_assert(sizeof...(Arguments) == Method::arity(),
+                  "Minifilter app method argument count does not match");
+    if (timeout.count() <= 0)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    auto state = state_.lock();
+    if (!state)
+      return ntl::unexpected(STATUS_DELETE_PENDING);
+
+    auto input = serialize_method_arguments<Method>(
+        std::forward<Arguments>(arguments)...);
+    if (!input)
+      return ntl::unexpected(input.status());
+    std::vector<unsigned char> output;
+    const auto ticks =
+        static_cast<unsigned long long>(timeout.count()) * 10ull * 1000ull;
+    if (ticks > static_cast<unsigned long long>(MAXLONGLONG))
+      return ntl::unexpected(STATUS_INTEGER_OVERFLOW);
+    const NTSTATUS status =
+        state->request_client(connection.state_, Method::id(), *input, output,
+                              -static_cast<LONGLONG>(ticks));
+    if (!NT_SUCCESS(status))
+      return ntl::unexpected(status);
+    return decode_method_result<Method>(
+        output, typename std::is_void<typename Method::return_type>::type{});
+  }
+
+  /** @brief Queues one replayable typed event for a client session. */
+  template <typename Notification>
+  ntl::result<std::uint64_t> try_notify(
+      std::uint64_t session_id, const Notification &,
+      const typename Notification::payload_type &payload) const noexcept {
+    static_assert(
+        ntl::rpc::is_notification<Notification>::value,
+        "communication_publisher::try_notify requires a notification");
+    auto state = state_.lock();
+    if (!state)
+      return ntl::unexpected(STATUS_DELETE_PENDING);
+    auto bytes = serialize<Notification>(payload);
+    if (!bytes)
+      return ntl::unexpected(bytes.status());
+    return state->try_enqueue_reliable(
+        session_id, Notification::id(),
+        detail::communication_inbound_kind::reliable_notification, *bytes);
+  }
+
+  /** @brief Queues one typed driver-to-app stream chunk. */
+  template <typename Stream>
+  ntl::result<std::uint64_t>
+  try_write(std::uint64_t session_id, const Stream &,
+            const typename Stream::download_type &value) const noexcept {
+    static_assert(ntl::rpc::is_stream<Stream>::value,
+                  "communication_publisher::try_write requires a stream");
+    using record_type = typename Stream::record_type;
+    auto state = state_.lock();
+    if (!state)
+      return ntl::unexpected(STATUS_DELETE_PENDING);
+    auto bytes = serialize<typename Stream::download_notification_type>(
+        record_type::chunk(value));
+    if (!bytes)
+      return ntl::unexpected(bytes.status());
+    return state->try_enqueue_reliable(
+        session_id, Stream::id(),
+        detail::communication_inbound_kind::stream_record, *bytes);
+  }
+
+  /** @brief Queues a successful terminal record for one stream. */
+  template <typename Stream>
+  ntl::result<std::uint64_t> try_complete(std::uint64_t session_id,
+                                          const Stream &) const noexcept {
+    static_assert(ntl::rpc::is_stream<Stream>::value,
+                  "communication_publisher::try_complete requires a stream");
+    using record_type = typename Stream::record_type;
+    return try_stream_terminal<Stream>(session_id, record_type::completed());
+  }
+
+  /** @brief Queues a failed terminal record for one stream. */
+  template <typename Stream>
+  ntl::result<std::uint64_t> try_fail(std::uint64_t session_id, const Stream &,
+                                      NTSTATUS status) const noexcept {
+    static_assert(ntl::rpc::is_stream<Stream>::value,
+                  "communication_publisher::try_fail requires a stream");
+    if (NT_SUCCESS(status))
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    using record_type = typename Stream::record_type;
+    return try_stream_terminal<Stream>(
+        session_id, record_type::failed(static_cast<std::int32_t>(status)));
+  }
+
+private:
+  friend class communication_server;
+  explicit communication_publisher(
+      std::weak_ptr<detail::communication_server_state> state) noexcept
+      : state_(std::move(state)) {}
+
+  template <typename Descriptor, typename Payload>
+  static ntl::result<std::vector<unsigned char>>
+  serialize(const Payload &payload) noexcept {
+    try {
+      std::vector<unsigned char> bytes(Descriptor::response_size());
+      zpp::serializer::memory_view_output_archive archive(bytes.data(),
+                                                          bytes.size());
+      auto copy = payload;
+      archive(copy);
+      bytes.resize(archive.offset());
+      return bytes;
+    } catch (const zpp::serializer::out_of_range &) {
+      return ntl::unexpected(STATUS_BUFFER_TOO_SMALL);
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    }
+  }
+
+  template <typename Method, typename... Arguments>
+  static ntl::result<std::vector<unsigned char>>
+  serialize_method_arguments(Arguments &&...arguments) noexcept {
+    try {
+      using storage = typename Method::argument_storage;
+      static_assert(std::is_constructible<storage, Arguments &&...>::value,
+                    "Arguments cannot initialize the minifilter app method");
+      storage values(std::forward<Arguments>(arguments)...);
+      std::vector<unsigned char> bytes;
+      zpp::serializer::memory_output_archive archive(bytes);
+      detail::serialize_port_arguments(
+          archive, values,
+          std::make_index_sequence<std::tuple_size<storage>::value>{});
+      if (bytes.size() > Method::request_size())
+        return ntl::unexpected(STATUS_INVALID_BUFFER_SIZE);
+      return bytes;
+    } catch (const zpp::serializer::out_of_range &) {
+      return ntl::unexpected(STATUS_BUFFER_TOO_SMALL);
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    }
+  }
+
+  template <typename Method>
+  static ntl::result<typename Method::return_type>
+  decode_method_result(const std::vector<unsigned char> &output,
+                       std::true_type) noexcept {
+    if (!output.empty())
+      return ntl::unexpected(STATUS_INVALID_BUFFER_SIZE);
+    return ntl::result<void>::success();
+  }
+
+  template <typename Method>
+  static ntl::result<typename Method::return_type>
+  decode_method_result(const std::vector<unsigned char> &output,
+                       std::false_type) noexcept {
+    try {
+      typename Method::return_type value{};
+      zpp::serializer::memory_view_input_archive archive(
+          output.data(), output.size(), Method::decode_allocation());
+      archive(value);
+      if (archive.offset() != output.size())
+        return ntl::unexpected(STATUS_INVALID_PARAMETER);
+      return value;
+    } catch (const zpp::serializer::out_of_range &) {
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNSUCCESSFUL);
+    }
+  }
+
+  template <typename Stream>
+  ntl::result<std::uint64_t> try_stream_terminal(
+      std::uint64_t session_id,
+      const typename Stream::record_type &record) const noexcept {
+    auto state = state_.lock();
+    if (!state)
+      return ntl::unexpected(STATUS_DELETE_PENDING);
+    auto bytes = serialize<typename Stream::download_notification_type>(record);
+    if (!bytes)
+      return ntl::unexpected(bytes.status());
+    return state->try_enqueue_reliable(
+        session_id, Stream::id(),
+        detail::communication_inbound_kind::stream_record, *bytes);
+  }
+
+  std::weak_ptr<detail::communication_server_state> state_;
+};
+
+/** @brief Callback-scoped facade for one typed bidirectional stream. */
+template <typename Stream> class communication_stream_context {
+public:
+  communication_stream_context(const communication_context &context,
+                               communication_publisher publisher) noexcept
+      : context_(&context), publisher_(std::move(publisher)) {}
+
+  std::uint64_t session_id() const noexcept { return context_->session_id(); }
+  bool cancellation_requested() const noexcept {
+    return context_->cancellation_requested();
+  }
+  ntl::result<std::uint64_t>
+  try_write(const typename Stream::download_type &value) const noexcept {
+    return publisher_.try_write(session_id(), Stream{}, value);
+  }
+  ntl::result<std::uint64_t> try_complete() const noexcept {
+    return publisher_.try_complete(session_id(), Stream{});
+  }
+  ntl::result<std::uint64_t> try_fail(NTSTATUS status) const noexcept {
+    return publisher_.try_fail(session_id(), Stream{}, status);
+  }
+
+private:
+  const communication_context *context_;
+  communication_publisher publisher_;
+};
+
+/**
+ * @brief Configures typed methods for one Filter Manager server port.
+ *
+ * Register every method before passing the object to
+ * driver.add_communication_port(). The driver freezes and owns the endpoint
+ * until Filter Manager has disconnected all clients during unregister.
+ */
+class communication_server {
+  friend class driver;
+
+public:
+  communication_server()
+      : state_(std::make_shared<detail::communication_server_state>()) {}
+  communication_server(const communication_server &) = delete;
+  communication_server &operator=(const communication_server &) = delete;
+  communication_server(communication_server &&) noexcept = default;
+  communication_server &operator=(communication_server &&) noexcept = default;
+  ~communication_server() = default;
+
+  /** @brief Sets immutable application contract metadata. */
+  communication_server &contract(std::uint32_t version,
+                                 std::uint64_t capability_mask = 0) noexcept {
+    if (state_) {
+      state_->contract_version = version;
+      state_->capabilities = capability_mask;
+    }
+    return *this;
+  }
+
+  /**
+   * @brief Registers a policy invoked before a client connection is accepted.
+   * @note The callback may attach typed state to the connection and must return
+   * NTSTATUS or ntl::status. It runs at PASSIVE_LEVEL without NTL locks held.
+   */
+  template <typename Callback>
+  communication_server &on_connect(Callback callback) {
+    using callback_type = typename std::decay<Callback>::type;
+    using result_type = decltype(std::declval<callback_type &>()(
+        std::declval<communication_connection &>()));
+    static_assert(
+        std::is_convertible<result_type, NTSTATUS>::value,
+        "Minifilter connect policies must return NTSTATUS or ntl::status");
+    ensure_configurable();
+    state_->on_connect =
+        [fn = callback_type(std::move(callback))](
+            communication_connection &connection) mutable -> NTSTATUS {
+      return static_cast<NTSTATUS>(fn(connection));
+    };
+    return *this;
+  }
+
+  /**
+   * @brief Registers an observational callback for a committed disconnect.
+   * @note The facade is already marked disconnected, but its typed state is
+   * still available. Exceptions are contained by NTL.
+   */
+  template <typename Callback>
+  communication_server &on_disconnect(Callback callback) {
+    using callback_type = typename std::decay<Callback>::type;
+    ensure_configurable();
+    state_->on_disconnect = [fn = callback_type(std::move(callback))](
+                                communication_connection &connection) mutable {
+      fn(connection);
+    };
+    return *this;
+  }
+
+  /**
+   * @brief Installs external storage hooks for reliable records.
+   * @note The store object must be thread-safe. NTL invokes it without server
+   * mutexes held and never performs storage I/O on the caller's behalf.
+   */
+  communication_server &notification_storage(
+      std::shared_ptr<communication_notification_store> store) {
+    ensure_configurable();
+    state_->notification_store = std::move(store);
+    return *this;
+  }
+
+  /** @brief Returns a copyable publisher that remains valid after move. */
+  communication_publisher publisher() const noexcept {
+    return communication_publisher{state_};
+  }
+
+  /** @brief Registers one `ntl::rpc::method` on this minifilter port. */
+  template <typename Method, typename Callback>
+  communication_server &on(const Method &, Callback callback) {
+    static_assert(ntl::rpc::is_method<Method>::value,
+                  "communication_server::on requires ntl::rpc::method");
+    static_assert(Method::request_size() <=
+                          (std::numeric_limits<std::uint32_t>::max)() &&
+                      Method::response_size() <=
+                          (std::numeric_limits<std::uint32_t>::max)() &&
+                      Method::decode_allocation() <=
+                          (std::numeric_limits<std::uint32_t>::max)(),
+                  "Minifilter method limits must fit the fixed-width contract");
+    if (!state_ || state_->server_port)
+      throw ntl::exception(STATUS_INVALID_DEVICE_STATE,
+                           "The minifilter communication port is active");
+    using handler_type = detail::typed_communication_handler<
+        Method, typename std::decay<Callback>::type>;
+    auto handler = std::make_unique<handler_type>(std::move(callback));
+    const auto inserted =
+        state_->handlers.emplace(Method::id(), std::move(handler));
+    if (!inserted.second)
+      throw ntl::exception(STATUS_OBJECT_NAME_COLLISION,
+                           "Duplicate minifilter communication method ID");
+    return *this;
+  }
+
+  /** @brief Registers a method policy that runs before deserialization. */
+  template <typename Method, typename Authorization, typename Callback>
+  communication_server &on_authorized(const Method &, Authorization policy,
+                                      Callback callback) {
+    static_assert(
+        ntl::rpc::is_method<Method>::value,
+        "communication_server::on_authorized requires ntl::rpc::method");
+    static_assert(Method::request_size() <=
+                          (std::numeric_limits<std::uint32_t>::max)() &&
+                      Method::response_size() <=
+                          (std::numeric_limits<std::uint32_t>::max)() &&
+                      Method::decode_allocation() <=
+                          (std::numeric_limits<std::uint32_t>::max)(),
+                  "Minifilter method limits must fit the fixed-width contract");
+    if (!state_ || state_->server_port)
+      throw ntl::exception(STATUS_INVALID_DEVICE_STATE,
+                           "The minifilter communication port is active");
+    using handler_type = detail::typed_authorized_communication_handler<
+        Method, typename std::decay<Authorization>::type,
+        typename std::decay<Callback>::type>;
+    auto handler =
+        std::make_unique<handler_type>(std::move(policy), std::move(callback));
+    const auto inserted =
+        state_->handlers.emplace(Method::id(), std::move(handler));
+    if (!inserted.second)
+      throw ntl::exception(STATUS_OBJECT_NAME_COLLISION,
+                           "Duplicate minifilter communication method ID");
+    return *this;
+  }
+
+  /** @brief Registers one typed kernel-to-app notification channel. */
+  template <typename Notification>
+  communication_server &register_notification(const Notification &) {
+    static_assert(ntl::rpc::is_notification<Notification>::value,
+                  "register_notification requires ntl::rpc::notification");
+    static_assert(
+        Notification::response_size() <=
+            detail::communication_inbound_payload_limit -
+                sizeof(detail::communication_batch_header) -
+                sizeof(detail::communication_batch_record_header),
+        "Minifilter notification payload exceeds the inbound frame limit");
+    static_assert(Notification::decode_allocation() <=
+                      (std::numeric_limits<std::uint32_t>::max)(),
+                  "Minifilter notification decode limit is too large");
+    if (!state_ || state_->server_port)
+      throw ntl::exception(STATUS_INVALID_DEVICE_STATE,
+                           "The minifilter communication port is active");
+    detail::communication_channel_definition definition{};
+    definition.response_size = Notification::response_size();
+    definition.decode_allocation = Notification::decode_allocation();
+    definition.priority = Notification::priority();
+    definition.max_batch_records = Notification::max_batch_records();
+    const auto inserted =
+        state_->channels.emplace(Notification::id(), definition);
+    if (!inserted.second)
+      throw ntl::exception(STATUS_OBJECT_NAME_COLLISION,
+                           "Duplicate minifilter communication channel ID");
+    return *this;
+  }
+
+  /** @brief Declares one typed driver-to-app request supported by this port. */
+  template <typename Method>
+  communication_server &register_client_method(const Method &) {
+    static_assert(ntl::rpc::is_method<Method>::value,
+                  "register_client_method requires ntl::rpc::method");
+    static_assert(
+        Method::request_size() <= detail::communication_inbound_payload_limit &&
+            Method::response_size() <=
+                detail::communication_inbound_payload_limit &&
+            Method::decode_allocation() <=
+                (std::numeric_limits<std::uint32_t>::max)(),
+        "Minifilter client method limits exceed the transport contract");
+    ensure_configurable();
+    detail::communication_method_definition definition{};
+    definition.request_size = Method::request_size();
+    definition.response_size = Method::response_size();
+    definition.decode_allocation = Method::decode_allocation();
+    const auto inserted =
+        state_->client_methods.emplace(Method::id(), definition);
+    if (!inserted.second)
+      throw ntl::exception(STATUS_OBJECT_NAME_COLLISION,
+                           "Duplicate minifilter app method ID");
+    return *this;
+  }
+
+  /** @brief Registers both directions of one typed stream. */
+  template <typename Stream, typename Callback>
+  communication_server &on_stream(const Stream &, Callback callback) {
+    static_assert(ntl::rpc::is_stream<Stream>::value,
+                  "communication_server::on_stream requires ntl::rpc::stream");
+    register_stream_channel<Stream>();
+    const auto publisher = this->publisher();
+    return on(Stream::upload_method(),
+              [callback = std::move(callback), publisher](
+                  const communication_context &context,
+                  const typename Stream::upload_batch_type &batch) mutable {
+                communication_stream_context<Stream> stream(context, publisher);
+                for (const auto &value : batch.values())
+                  callback(context, value, stream);
+              });
+  }
+
+private:
+  void ensure_configurable() const {
+    if (!state_ || state_->server_port)
+      throw ntl::exception(STATUS_INVALID_DEVICE_STATE,
+                           "The minifilter communication port is active");
+  }
+
+  template <typename Stream> void register_stream_channel() {
+    if (!state_ || state_->server_port)
+      throw ntl::exception(STATUS_INVALID_DEVICE_STATE,
+                           "The minifilter communication port is active");
+    static_assert(
+        Stream::upload_size() <= (std::numeric_limits<std::uint32_t>::max)() &&
+            Stream::download_size() <=
+                detail::communication_inbound_payload_limit -
+                    sizeof(detail::communication_batch_header) -
+                    sizeof(detail::communication_batch_record_header) &&
+            Stream::decode_allocation() <=
+                (std::numeric_limits<std::uint32_t>::max)(),
+        "Minifilter stream limits exceed the transport contract");
+    detail::communication_channel_definition definition{};
+    definition.request_size = Stream::upload_size();
+    definition.response_size = Stream::download_size();
+    definition.decode_allocation = Stream::decode_allocation();
+    definition.priority = Stream::priority();
+    definition.max_batch_records = Stream::max_batch_records();
+    definition.stream = true;
+    const auto inserted = state_->channels.emplace(Stream::id(), definition);
+    if (!inserted.second)
+      throw ntl::exception(STATUS_OBJECT_NAME_COLLISION,
+                           "Duplicate minifilter communication stream ID");
+  }
+
+  NTSTATUS start(PFLT_FILTER filter, const std::wstring &name,
+                 const communication_port_options &options) noexcept {
+    return state_ ? state_->start(filter, name, options)
+                  : STATUS_INVALID_DEVICE_STATE;
+  }
+
+  void close_listener() noexcept {
+    if (state_)
+      state_->close_listener();
+  }
+
+  std::shared_ptr<detail::communication_server_state> state_;
+};
+
+} // namespace flt
+} // namespace ntl

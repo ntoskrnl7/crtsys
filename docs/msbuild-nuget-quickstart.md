@@ -40,6 +40,21 @@ Install-Package crtsys
 The package UI and Package Manager Console both add the same native NuGet
 package reference to the project.
 
+For a minifilter, open **Project Properties > Driver Settings > Driver Model**
+and set **crtsys Driver Model** to **NTL Minifilter**. The package translates
+that selection to `CrtSysIsMinifilter=true` and
+`CrtSysUseNtlFltMain=true`; no manual XML property editing is required. If the
+new row is not visible immediately, reload the project after NuGet restore.
+
+For NTL KMDF, first set the WDK **Type of driver** property to **KMDF**, then
+set **crtsys Driver Model** to **NTL KMDF** on the same page. The package then
+sets `CrtSysUseNtlKmdfMain=true`.
+
+The same dropdown also exposes **NTL WDM** and **Standard WDM**. `NTL WDM`
+selects `ntl::main`; `Standard WDM` selects the project's ordinary
+`DriverEntry`. Leaving **Use project driver model** selected preserves the
+existing project properties.
+
 ## Build Tools Only
 
 Add a `PackageReference` to the driver project:
