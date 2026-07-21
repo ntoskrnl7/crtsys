@@ -16,7 +16,7 @@ constexpr auto publish_progress =
     ntl::rpc::method<0x904, bool(std::uint64_t)>{};
 } // namespace crtsys_ntl_rpc_sample
 
-NTL_RPC_BEGIN_CONTRACT(crtsys_ntl_rpc_sample, 2, 0x3ull)
+NTL_RPC_BEGIN_CONTRACT(crtsys_ntl_rpc_sample, 3, 0x7ull)
 
 NTL_ADD_CALLBACK_ID_2(crtsys_ntl_rpc_sample, 0x900, int, add, int, left, int,
                       right, {
@@ -41,6 +41,18 @@ NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_ID_3(
     milliseconds, int, left, int, right, {
       return crtsys_ntl_rpc_sample_server::delayed_add(
           call, milliseconds, left, right);
+    })
+
+NTL_ADD_STREAM_ID(
+    crtsys_ntl_rpc_sample, 0x905, messages,
+    ntl_rpc_sample_stream_upload, upload,
+    ntl_rpc_sample_stream_download, stream, {
+      ntl_rpc_sample_stream_download reply;
+      reply.sequence = upload.sequence;
+      reply.text = "driver received: " + upload.text;
+      stream.write(reply);
+      if (upload.finish)
+        stream.complete();
     })
 
 NTL_RPC_END(crtsys_ntl_rpc_sample)

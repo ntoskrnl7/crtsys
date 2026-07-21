@@ -46,6 +46,7 @@ public:
       record.token = view.session;
       record.notification_id = view.notification_id;
       record.sequence = view.sequence;
+      record.terminal = view.terminal;
       record.bytes.assign(view.data, view.data + view.size);
       lock_guard guard(lock_);
       records_.push_back(std::move(record));
@@ -82,7 +83,8 @@ public:
         continue;
       found = true;
       const auto status = sink.add(record.notification_id, record.sequence,
-                                   record.bytes.data(), record.bytes.size());
+                                   record.bytes.data(), record.bytes.size(),
+                                   record.terminal);
       if (!status.is_ok())
         return status;
     }
@@ -115,6 +117,7 @@ private:
     ntl::rpc::session_token token{};
     std::uint32_t notification_id = 0;
     std::uint64_t sequence = 0;
+    bool terminal = false;
     std::vector<unsigned char> bytes;
   };
 

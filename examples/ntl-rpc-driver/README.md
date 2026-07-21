@@ -22,6 +22,7 @@ The sample demonstrates:
 - startup contract discovery for version, capability, and method compatibility
 - original caller identity and pre-deserialization method authorization
 - reconnectable client sessions and reliable notifications replayed until ACK
+- session-bound typed streaming with bounded backpressure
 - serialization of simple scalar values, a custom request/reply pair, and a
   `std::vector`
 
@@ -33,6 +34,7 @@ The source is split by responsibility:
 - `driver/caller_security.cpp`: caller inspection and method authorization
 - `driver/operations.cpp`: kernel callback implementations
 - `driver/notifications.cpp`: session state and reliable notification publish
+- `shared/ntl_rpc_sample.hpp`: generated RPC methods and typed stream callback
 - `app/caller_security.cpp`: caller-security client calls
 - `app/synchronous_calls.cpp`: generated wrappers and reusable synchronous client
 - `app/asynchronous_call.cpp`: successful asynchronous completion
@@ -40,6 +42,8 @@ The source is split by responsibility:
 - `app/coroutine_call.cpp`: C++20 `co_await` completion
 - `app/stop_token_cancellation.cpp`: C++20 `stop_token` cancellation
 - `app/reliable_notifications.cpp`: subscribe, reconnect, replay, and ACK
+- `app/streaming.cpp`: open, write, read, ACK, and close a typed stream
+- `app/streaming_batch.cpp`: bounded multi-chunk upload and download batches
 - `app/coroutine_task.hpp`: minimal top-level coroutine owner used by the app
 - `app/main.cpp`: argument parsing, contract validation, and example sequencing
 
@@ -151,6 +155,84 @@ client.acknowledge(crtsys_ntl_rpc_sample::progress, delivery);
 The exhaustive queue-limit, cancellation, x86-app/x64-driver, and lifecycle
 cases stay in [`test/rpc/notifications`](../../test/rpc/notifications) so the
 public sample remains readable.
+
+## Typed Streaming
+
+[`app/streaming.cpp`](./app/streaming.cpp) demonstrates the complete normal
+path without mixing stress logic into the sample. The shared contract macro
+generates the driver upload callback registration and the app-side opening
+helper from one declaration:
+
+```cpp
+NTL_ADD_STREAM_ID(
+    crtsys_ntl_rpc_sample, 0x905, messages,
+    ntl_rpc_sample_stream_upload, upload,
+    ntl_rpc_sample_stream_download, stream, {
+      ntl_rpc_sample_stream_download reply;
+      reply.sequence = upload.sequence;
+      reply.text = "driver received: " + upload.text;
+      stream.write(reply);
+      if (upload.finish)
+        stream.complete();
+    })
+```
+
+`upload.finish` belongs to this sample's chunk format. The app sets it only on
+its final upload chunk; it is not inferred or injected by NTL. The driver uses
+that application-level end marker to queue its own terminal output record.
+
+At runtime, the two directions are independent:
+
+```text
+app read_async() waits
+app write(upload) -------------------------> driver callback
+                       stream.write(reply) -> app download queue
+app read completes, then app ACKs the reply
+                       stream.complete() --> app terminal record
+app ACKs the terminal record and closes the stream
+```
+
+The app keeps one overlapped download read armed while each upload is sent:
+
+```cpp
+(void)client.start_session();
+auto messages = crtsys_ntl_rpc_sample::messages(client);
+auto pending_download = messages.read_async();
+
+ntl_rpc_sample_stream_upload upload;
+upload.sequence = 1;
+upload.text = "chunk 1";
+upload.finish = true;
+messages.write(upload);
+
+auto reply = pending_download.get();
+// Process reply.payload().value() here.
+messages.acknowledge(reply);
+
+auto terminal = messages.read();
+if (!terminal.payload().is_completed())
+  throw std::runtime_error("stream did not complete");
+messages.acknowledge(terminal);
+
+messages.close();
+client.close_session();
+```
+
+Downloads remain queued until ACK and are bounded by the server's reliable
+notification limits. Upload calls use the method request/decode limits and the
+endpoint pending-call limit. Timeout, cancellation, reconnect replay, terminal
+records, and cross-bitness cases are kept in
+[`test/rpc/streaming`](../../test/rpc/streaming).
+
+Once the driver queues `complete()` or `fail()`, NTL rejects later uploads,
+downloads, and duplicate terminal records for that stream instance. The app
+ACKs the terminal and closes the stream before opening another instance.
+
+[`app/streaming_batch.cpp`](./app/streaming_batch.cpp) sends three upload
+chunks through one `write_batch()` call and drains ready replies with
+`read_batch(4)`. A batch read completes when at least one record is ready; it
+does not wait for all four slots. Each record keeps its own replay/ACK sequence,
+and `messages.acknowledge(batch)` acknowledges them in order.
 
 The sample initializes the endpoint with `server_options::asynchronous()`.
 Application requests are therefore pended and executed by PASSIVE_LEVEL work
@@ -300,5 +382,12 @@ coroutine: suspended without blocking the caller
 coroutine: resumed with add=42
 stop_token: coroutine resumed with cancellation
 reliable notification: sequence=1 text=reliable progress 42
+stream: sequence=1 text=driver received: chunk 1
+stream: sequence=2 text=driver received: chunk 2
+stream: sequence=3 text=driver received: chunk 3
+stream: completed
+stream batch: sequence=1 text=driver received: batched chunk 1
+stream batch: sequence=2 text=driver received: batched chunk 2
+stream batch: sequence=3 text=driver received: batched chunk 3
 all RPC examples completed
 ```

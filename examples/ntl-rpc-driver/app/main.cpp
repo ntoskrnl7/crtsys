@@ -12,8 +12,8 @@
 
 #include <ntl/rpc/client>
 
-#include "ntl_rpc_sample.hpp"
 #include "examples.hpp"
+#include "ntl_rpc_sample.hpp"
 
 namespace {
 
@@ -42,8 +42,7 @@ int wmain(int argc, wchar_t **argv) {
   try {
     ntl::rpc::client client(L"crtsys_ntl_rpc_sample");
     ntl::rpc::contract_requirements requirements;
-    requirements.contract_version(
-        crtsys_ntl_rpc_sample::rpc_contract_version)
+    requirements.contract_version(crtsys_ntl_rpc_sample::rpc_contract_version)
         .capabilities(crtsys_ntl_rpc_sample::rpc_capabilities)
         .method(crtsys_ntl_rpc_sample::add_2_method)
         .method(crtsys_ntl_rpc_sample::describe_1_method)
@@ -58,6 +57,8 @@ int wmain(int argc, wchar_t **argv) {
     crtsys_ntl_rpc_sample_app::run_coroutine_call();
     crtsys_ntl_rpc_sample_app::run_stop_token_cancellation();
     crtsys_ntl_rpc_sample_app::run_reliable_notifications();
+    crtsys_ntl_rpc_sample_app::run_streaming();
+    crtsys_ntl_rpc_sample_app::run_streaming_batch();
     std::wprintf(L"all RPC examples completed\n");
     return 0;
   } catch (const std::exception &error) {

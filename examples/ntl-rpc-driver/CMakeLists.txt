@@ -23,6 +23,8 @@ add_executable(crtsys_ntl_rpc_sample_app
   app/main.cpp
   app/reliable_notifications.cpp
   app/stop_token_cancellation.cpp
+  app/streaming.cpp
+  app/streaming_batch.cpp
   app/synchronous_calls.cpp
 )
 

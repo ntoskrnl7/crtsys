@@ -61,6 +61,8 @@
     <ClCompile Include="app\main.cpp" />
     <ClCompile Include="app\reliable_notifications.cpp" />
     <ClCompile Include="app\stop_token_cancellation.cpp" />
+    <ClCompile Include="app\streaming.cpp" />
+    <ClCompile Include="app\streaming_batch.cpp" />
     <ClCompile Include="app\synchronous_calls.cpp" />
   </ItemGroup>
   <ItemGroup>

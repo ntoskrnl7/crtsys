@@ -25,4 +25,8 @@ void run_stop_token_cancellation();
 
 void run_reliable_notifications();
 
+void run_streaming();
+
+void run_streaming_batch();
+
 } // namespace crtsys_ntl_rpc_sample_app

@@ -142,7 +142,7 @@ jobs:
             -Configuration Debug `
             -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}'
 
-      - name: Build RPC lifecycle, async, notification, and security fixtures
+      - name: Build RPC lifecycle, async, notification, security, and streaming fixtures
         if: matrix.project == 'driver' && matrix.arch == 'x64' && matrix.config == 'Debug'
         shell: pwsh
         run: |
@@ -170,7 +170,13 @@ jobs:
             -Configuration Debug `
             -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}'
 
-      - name: Build x86 RPC notification and security fixtures
+          ./scripts/ci/Build-CrtSys.ps1 `
+            -Project rpc-streaming `
+            -Architecture x64 `
+            -Configuration Debug `
+            -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}'
+
+      - name: Build x86 RPC notification, security, and streaming fixtures
         if: matrix.project == 'driver' && matrix.arch == 'x86' && matrix.config == 'Debug'
         shell: pwsh
         run: |
@@ -182,6 +188,12 @@ jobs:
 
           ./scripts/ci/Build-CrtSys.ps1 `
             -Project rpc-security `
+            -Architecture x86 `
+            -Configuration Debug `
+            -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}'
+
+          ./scripts/ci/Build-CrtSys.ps1 `
+            -Project rpc-streaming `
             -Architecture x86 `
             -Configuration Debug `
             -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}'
@@ -307,6 +319,17 @@ jobs:
 
           ./scripts/ci/Build-CrtSys.ps1 @parameters
 
+      - name: Build v142 RPC streaming fixture
+        if: matrix.project == 'driver' && (matrix.arch == 'x86' || matrix.arch == 'x64') && matrix.config == 'Debug'
+        shell: pwsh
+        run: |
+          ./scripts/ci/Build-CrtSys.ps1 `
+            -Project rpc-streaming `
+            -Architecture '${{ matrix.arch }}' `
+            -Configuration Debug `
+            -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}' `
+            -PlatformToolset v142
+
   build-vs2026:
     name: VS2026/v145 ${{ matrix.project }} ${{ matrix.arch }} ${{ matrix.config }}
     runs-on: windows-2025-vs2026
@@ -398,6 +421,29 @@ jobs:
 
           if ($parameters.Project -eq 'driver') {
             $parameters.NoBreakpoint = $true
+          }
+
+          ./scripts/ci/Build-CrtSys.ps1 @parameters
+
+      - name: Build v145 RPC streaming fixture
+        if: matrix.project == 'driver' && (matrix.arch == 'x86' || matrix.arch == 'x64') && matrix.config == 'Debug'
+        shell: pwsh
+        run: |
+          $wdkVersion = ''
+          if ('${{ matrix.arch }}' -eq 'x86') {
+            $wdkVersion = '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}'
+          }
+
+          $parameters = @{
+            Project = 'rpc-streaming'
+            Architecture = '${{ matrix.arch }}'
+            Configuration = 'Debug'
+            WindowsSdkVersion = '${{ env.CRTSYS_VS2026_WINDOWS_SDK_VERSION }}'
+            PlatformToolset = 'v145'
+          }
+
+          if (-not [string]::IsNullOrWhiteSpace($wdkVersion)) {
+            $parameters.WdkVersion = $wdkVersion
           }
 
           ./scripts/ci/Build-CrtSys.ps1 @parameters
