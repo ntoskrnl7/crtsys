@@ -557,10 +557,230 @@ be idempotent because disconnect, retry, and shutdown can race with external
 storage failures. Retention expiry releases only the in-memory copy; it does
 not call `erase_session()`. The external store can therefore restore the token
 later when it retained session metadata or at least one unacknowledged record.
+Restored records may be supplied in any order. NTL sorts them by the original
+session sequence and rejects duplicate sequences, terminal markers on ordinary
+notifications, and stream records that appear after that stream's terminal
+record. A storage implementation therefore cannot accidentally reopen or
+append to a completed stream by returning inconsistent data.
 
 Transient `receive()`/`try_notify()` and session-based reliable delivery are
 separate modes on the same typed channel. Existing transient notification code
 does not create a session or gain buffering implicitly.
+
+## Typed Streaming
+
+An NTL RPC stream is one session-bound, bidirectional typed channel. The two
+directions are independent:
+
+```text
+app                                           driver
+read_async() waits for output
+write(upload) ------------------------------> upload callback
+                   stream.write(download) <-- queues one output record
+read completes
+acknowledge(record) ------------------------> frees queue capacity
+                   stream.complete() <------ queues the terminal record
+read terminal record, ACK it, then close
+```
+
+An app can keep `read_async()` pending while it writes uploads, so upload and
+download can progress concurrently. A download does not disappear when no read
+is currently pending: it remains in the reliable session queue until the app
+reads and explicitly ACKs it. `complete()` and `fail()` are also queued records,
+not implicit close operations.
+
+`upload_chunk::finish` below is application data, not an NTL transport flag.
+The app knows which chunk is its last input and sets the field before calling
+`write()`. This sample protocol lets the driver finish its output after that
+last input. A long-lived stream can omit this field and finish according to a
+driver-owned condition instead.
+
+Define the serialized types and the stream callback once in the shared contract
+header:
+
+```cpp
+struct upload_chunk {
+  std::uint64_t sequence;
+  std::vector<std::uint32_t> values;
+  bool finish;
+
+  friend zpp::serializer::access;
+  template <typename Archive, typename Self>
+  static void serialize(Archive& archive, Self& self) {
+    archive(self.sequence, self.values, self.finish);
+  }
+};
+
+struct download_chunk {
+  std::uint64_t sequence;
+  std::string text;
+
+  friend zpp::serializer::access;
+  template <typename Archive, typename Self>
+  static void serialize(Archive& archive, Self& self) {
+    archive(self.sequence, self.text);
+  }
+};
+
+NTL_RPC_BEGIN_CONTRACT(demo_rpc, 1, 0)
+
+NTL_ADD_STREAM_ID(demo_rpc, 0x920, records,
+                  upload_chunk, upload,
+                  download_chunk, stream, {
+  stream.write(download_chunk{upload.sequence, "accepted"});
+  if (upload.finish)
+    stream.complete();
+})
+
+NTL_RPC_END(demo_rpc)
+```
+
+When included after `<ntl/rpc/server>`, this macro registers the driver upload
+callback. `stream` is a callback-scoped `stream_context`; it targets the current
+client session and exposes `write()`, `complete()`, `fail()`, cancellation, and
+the original call context. When included after `<ntl/rpc/client>`, the same
+declaration generates `demo_rpc::records_stream` and the
+`demo_rpc::records(client)` opening helper.
+
+The app starts a session, opens the generated stream facade, and arms a read
+before writing. This makes the independent directions visible in the code:
+
+```cpp
+ntl::rpc::client client(L"demo_rpc");
+(void)client.start_session();
+auto records = demo_rpc::records(client);
+
+auto pending_reply = records.read_async();
+records.write(upload_chunk{1, {10, 20, 30}, true});
+
+auto reply = pending_reply.get();
+consume(reply.payload().value());
+records.acknowledge(reply);
+
+auto terminal = records.read();
+if (!terminal.payload().is_completed())
+  throw std::runtime_error("stream did not complete");
+records.acknowledge(terminal);
+
+records.close();
+client.close_session();
+```
+
+Use `NTL_ADD_AUTHORIZED_STREAM_ID` when every upload requires an authorization
+policy before deserialization. It has the same captured-requester security
+semantics as `on_authorized()`. The generated app facade is unchanged.
+
+The direct `ntl::rpc::stream`, `server::on_stream()`, and `client::open_stream()`
+APIs remain available when a contract needs custom upload, download, or decode
+limits, or when registration cannot be expressed in the shared macro header.
+
+`write_async()` and `read_async()` return the same owned asynchronous operation
+types used by ordinary RPC and notification calls. Their `wait_for()`,
+`cancel()`, C++20 stop-token, and coroutine rules therefore remain unchanged.
+A timeout leaves the underlying I/O request alive; continue waiting, cancel it,
+or destroy its owner. Cancel or drain outstanding reads and writes before
+`close()` or closing the device handle. A `client_stream` destructor does not
+silently close the stream because close can fail while records remain unACKed.
+
+Driver output uses the reliable notification queue. Every successful read must
+be ACKed, including terminal records. `try_complete()` queues successful end of
+stream; `try_fail()` queues a failed terminal record carrying a WDK
+`NTSTATUS`. Disconnect before ACK causes the same sequence to be replayed after
+`resume_session()`.
+
+After a terminal record is queued, NTL rejects later uploads, output chunks,
+and duplicate terminal records for that session and stream. After the client
+ACKs the terminal, another read fails with `STATUS_END_OF_FILE`; the client
+then calls `close()`. Closing removes that stream instance, so the same session
+may open a fresh instance afterward. Disconnect before terminal ACK preserves
+both the terminal sequence and the non-writable state for reconnect replay.
+
+Calls made serially by one producer are queued in that order. If multiple
+callbacks publish to the same session and stream concurrently, use an
+application sequence field to define their merge order. A terminal waits
+behind already-started output publication and prevents new publication from
+starting.
+
+Backpressure is bounded in both directions:
+
+- Downloads consume the configured per-session and endpoint reliable queue
+  limits. `try_write()`, `try_complete()`, and `try_fail()` return
+  `STATUS_DEVICE_BUSY` while the queue is full. An ACK releases capacity. A
+  failed terminal enqueue rolls its reservation back, so the stream remains
+  writable and the producer can retry after capacity is released.
+- Uploads are ordinary limited RPC requests. Serialized request and decode
+  budgets come from the stream descriptor, while asynchronous concurrency is
+  bounded by `server_options::max_pending_calls()`.
+
+### Bounded batches and delivery priority
+
+The single-record `write()`, `read()`, `read_async()`, and `acknowledge()` APIs
+remain the default. A stream can also move several serialized records through
+one IOCTL without changing its element types:
+
+```cpp
+std::vector<upload_chunk> uploads{first, second, last};
+records.write_batch(uploads);
+
+auto downloads = records.read_batch(4);
+for (const auto& delivery : downloads.values()) {
+  consume(delivery.payload());
+}
+records.acknowledge(downloads);
+```
+
+`write_batch()` invokes the registered upload callback once per element, in
+vector order, and checks cooperative cancellation between elements. It is not
+a transaction: if a later callback fails, effects from earlier callbacks are
+not rolled back. Empty batches and batches larger than the descriptor's
+`max_batch_records()` are rejected. The serialized request and cumulative
+decode allocation must still fit the stream's ordinary upload limits.
+
+`read_batch()` returns up to the requested number of records that are already
+ready. It does not wait for the batch to fill. Every returned record retains
+its own sequence and remains replayable until ACK. The batch ACK convenience
+function sends those ACKs in order; it is likewise not atomic, so an error does
+not undo earlier ACKs. Timeout, `CancelIoEx`, stop-token, reconnect, terminal,
+and persistence behavior are the same as for a single reliable read.
+
+The compile-time bound defaults to 16 and cannot exceed 64:
+
+```cpp
+constexpr auto records =
+    ntl::rpc::stream<0x920, upload_chunk, download_chunk>{}
+        .with_batch_records<8>()
+        .with_priority<ntl::rpc::delivery_priority::high>();
+```
+
+Priority matters only when one any-channel batch receive selects among records
+that are ready on several subscribed reliable channels. A channel-specific
+`read()` or `read_batch()` already names its channel and therefore has nothing
+to prioritize. Within one channel, NTL always preserves sequence/FIFO order.
+For an any-channel consumer:
+
+```cpp
+auto batch = client.receive_reliable_batch(8, 64 * 1024);
+for (const auto& item : batch.items()) {
+  if (item.id() == critical_events.id()) {
+    auto event = item.decode(critical_events);
+    process(event.payload());
+  }
+  client.acknowledge(item);
+}
+```
+
+The selector compares `critical`, `high`, `normal`, then `background`; records
+with the same priority are selected by their session sequence. A pending batch
+completes as soon as at least one record is ready, so it does not delay a low
+priority record in the hope that a future high priority record might arrive.
+The `max_records` and `max_bytes` arguments bound kernel and app memory for one
+receive.
+
+This stream transports serialized chunks through `METHOD_BUFFERED`; it is not
+a zero-copy data path. Shared-memory or MDL-backed transfer has different
+mapping, process-exit, cancellation, and driver-unload ownership requirements
+and should be exposed as a separate transport rather than changing this wire
+contract invisibly.
 
 ## Contract Compatibility
 
@@ -742,6 +962,13 @@ payloads, FIFO receives, timeout and cancellation, pending receive limits,
 handle cleanup, service stop after pending receive cancellation, unload,
 restart, reconnectable sessions, replay until ACK, bounded backpressure,
 persistence hooks, and x64-driver/x86-app wire compatibility.
+
+[`test/rpc/streaming`](../../test/rpc/streaming) covers session-bound typed
+uploads and downloads, explicit ACK, bounded backpressure and capacity
+recovery, timeout and cancellation, callback cancellation, reconnect replay,
+terminal records, reverse-order persistence restoration, bounded upload and
+download batches, cross-channel priority selection, and the x64-driver/x86-app
+wire contract.
 
 [`test/rpc/security`](../../test/rpc/security) covers the original caller's
 processor mode, process ID, impersonation token, and security subject context.

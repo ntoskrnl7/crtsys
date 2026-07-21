@@ -39,3 +39,26 @@ struct ntl_rpc_sample_progress {
     archive(self.value, self.text);
   }
 };
+
+struct ntl_rpc_sample_stream_upload {
+  std::uint64_t sequence = 0;
+  std::string text;
+  bool finish = false;
+
+  friend zpp::serializer::access;
+  template <typename Archive, typename Self>
+  static void serialize(Archive &archive, Self &self) {
+    archive(self.sequence, self.text, self.finish);
+  }
+};
+
+struct ntl_rpc_sample_stream_download {
+  std::uint64_t sequence = 0;
+  std::string text;
+
+  friend zpp::serializer::access;
+  template <typename Archive, typename Self>
+  static void serialize(Archive &archive, Self &self) {
+    archive(self.sequence, self.text);
+  }
+};

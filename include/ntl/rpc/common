@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 #include <tuple>
 #include <type_traits>
 #include <utility>
@@ -68,6 +69,20 @@ constexpr std::size_t contract_response_size = 64 * 1024;
 /** @brief Reserved serialization headroom for a reliable delivery envelope. */
 constexpr std::size_t reliable_notification_overhead = 32;
 
+/** @brief Default maximum number of records carried by one bounded batch. */
+constexpr std::size_t default_batch_records = 16;
+
+/** @brief Hard transport limit for records in one bounded batch. */
+constexpr std::size_t maximum_batch_records = 64;
+
+/** @brief Selects between ready records from different reliable channels. */
+enum class delivery_priority : std::uint32_t {
+  background = 0,
+  normal = 1,
+  high = 2,
+  critical = 3,
+};
+
 namespace transport_features {
 /** @brief Per-method request and decode-allocation limits are enforced. */
 constexpr std::uint64_t resource_limits = 1ull << 0;
@@ -89,6 +104,12 @@ constexpr std::uint64_t client_sessions = 1ull << 7;
 constexpr std::uint64_t reliable_notifications = 1ull << 8;
 /** @brief Applications may attach external notification storage hooks. */
 constexpr std::uint64_t notification_persistence_hooks = 1ull << 9;
+/** @brief Sessions can exchange sequence-numbered typed stream records. */
+constexpr std::uint64_t typed_streams = 1ull << 10;
+/** @brief Reliable channels support bounded multi-record delivery. */
+constexpr std::uint64_t bounded_batches = 1ull << 11;
+/** @brief Batch delivery selects higher-priority ready channels first. */
+constexpr std::uint64_t priority_delivery = 1ull << 12;
 /** @brief All transport features implemented by this NTL version. */
 constexpr std::uint64_t current = resource_limits | secure_endpoint |
                                   immutable_dispatch | rundown_shutdown |
@@ -130,8 +151,7 @@ public:
   contract_info() = default;
 
   /** @brief Creates the immutable metadata published by a running server. */
-  contract_info(std::uint32_t protocol_version,
-                std::uint32_t contract_version,
+  contract_info(std::uint32_t protocol_version, std::uint32_t contract_version,
                 std::uint64_t transport_feature_mask,
                 std::uint64_t capability_mask,
                 std::vector<std::uint32_t> method_ids)
@@ -165,8 +185,7 @@ public:
   }
 
   /** @brief Reports whether the server publishes a typed method. */
-  template <typename Method>
-  bool supports(const Method &) const noexcept {
+  template <typename Method> bool supports(const Method &) const noexcept {
     return supports_method(static_cast<std::uint32_t>(Method::id()));
   }
 
@@ -200,8 +219,7 @@ struct method_limits {
   static_assert(std::is_void<T>::value || ResponseBytes != 0,
                 "A non-void RPC method requires response capacity");
   static_assert(RequestBytes != 0, "RPC request capacity must be nonzero");
-  static_assert(DecodeAllocation != 0,
-                "RPC decode allocation must be nonzero");
+  static_assert(DecodeAllocation != 0, "RPC decode allocation must be nonzero");
   using value_type = T;
   static constexpr std::size_t response_size =
       std::is_void<T>::value ? 0 : ResponseBytes;
@@ -245,14 +263,12 @@ struct response_traits<
 };
 
 /** @brief Unwraps an RPC response declaration to its callback return type. */
-template <typename T>
-using response_type_t = typename response_traits<T>::type;
+template <typename T> using response_type_t = typename response_traits<T>::type;
 
 /** @brief Builds the METHOD_BUFFERED control code for an RPC method ID. */
 constexpr unsigned long control_code(unsigned long id) noexcept {
-  return static_cast<unsigned long>(
-      CTL_CODE(device_type, id, METHOD_BUFFERED,
-               FILE_READ_DATA | FILE_WRITE_DATA));
+  return static_cast<unsigned long>(CTL_CODE(device_type, id, METHOD_BUFFERED,
+                                             FILE_READ_DATA | FILE_WRITE_DATA));
 }
 
 /** @brief Returns the reserved control code used to receive notifications. */
@@ -276,6 +292,29 @@ struct reliable_notification_wait_request {
   std::uint32_t id;
   std::uint32_t reserved;
 };
+
+/** @brief Fixed-width request for one bounded reliable-delivery batch. */
+struct reliable_batch_wait_request {
+  std::uint32_t id;
+  std::uint32_t max_records;
+  std::uint32_t max_bytes;
+  std::uint32_t reserved;
+};
+
+/** @brief Header returned before a sequence of reliable batch records. */
+struct reliable_batch_header {
+  std::uint32_t version;
+  std::uint32_t count;
+};
+
+/** @brief Header preceding one serialized reliable delivery in a batch. */
+struct reliable_batch_record_header {
+  std::uint32_t id;
+  std::uint32_t size;
+  std::uint64_t sequence;
+};
+
+constexpr std::uint32_t reliable_batch_version = 1;
 
 enum class session_control_operation : std::uint32_t {
   create = 1,
@@ -311,6 +350,12 @@ static_assert(sizeof(session_control_request) == 40,
               "NTL RPC session commands must be cross-bitness stable");
 static_assert(sizeof(session_control_response) == 24,
               "NTL RPC session responses must be cross-bitness stable");
+static_assert(sizeof(reliable_batch_wait_request) == 16,
+              "NTL RPC batch requests must be cross-bitness stable");
+static_assert(sizeof(reliable_batch_header) == 8,
+              "NTL RPC batch headers must be cross-bitness stable");
+static_assert(sizeof(reliable_batch_record_header) == 16,
+              "NTL RPC batch record headers must be cross-bitness stable");
 } // namespace detail
 
 /** @brief Marker base used to recognize typed RPC method descriptors. */
@@ -347,8 +392,7 @@ class method<Id, Return(Arguments...), ResponseSize, RequestSize,
 
 public:
   using return_type = Return;
-  using argument_storage =
-      std::tuple<typename std::decay<Arguments>::type...>;
+  using argument_storage = std::tuple<typename std::decay<Arguments>::type...>;
 
   /** @brief Returns the stable IOCTL function ID. */
   static constexpr unsigned long id() noexcept { return Id; }
@@ -415,7 +459,9 @@ struct notification_tag {};
  */
 template <std::uint32_t Id, typename Payload,
           std::size_t ResponseSize = default_response_size,
-          std::size_t DecodeAllocation = default_decode_allocation>
+          std::size_t DecodeAllocation = default_decode_allocation,
+          delivery_priority Priority = delivery_priority::normal,
+          std::size_t BatchRecords = default_batch_records>
 class notification : public notification_tag {
   static_assert(Id != 0, "NTL RPC notification IDs must be nonzero");
   static_assert(!std::is_void<Payload>::value,
@@ -424,6 +470,8 @@ class notification : public notification_tag {
                 "NTL RPC notification capacity must be nonzero");
   static_assert(DecodeAllocation != 0,
                 "NTL RPC notification decode budget must be nonzero");
+  static_assert(BatchRecords != 0 && BatchRecords <= maximum_batch_records,
+                "NTL RPC notification batch record limit is invalid");
 
 public:
   using payload_type = Payload;
@@ -432,18 +480,25 @@ public:
   static constexpr std::uint32_t id() noexcept { return Id; }
 
   /** @brief Returns the maximum serialized payload size. */
-  static constexpr std::size_t response_size() noexcept {
-    return ResponseSize;
-  }
+  static constexpr std::size_t response_size() noexcept { return ResponseSize; }
 
   /** @brief Returns the client-side payload decode allocation budget. */
   static constexpr std::size_t decode_allocation() noexcept {
     return DecodeAllocation;
   }
 
+  /** @brief Returns this channel's cross-channel delivery priority. */
+  static constexpr delivery_priority priority() noexcept { return Priority; }
+
+  /** @brief Returns the maximum records accepted by one batch receive. */
+  static constexpr std::size_t max_batch_records() noexcept {
+    return BatchRecords;
+  }
+
   /** @brief Returns the same channel with an explicit payload capacity. */
   template <std::size_t Bytes>
-  constexpr notification<Id, Payload, Bytes, DecodeAllocation>
+  constexpr notification<Id, Payload, Bytes, DecodeAllocation, Priority,
+                         BatchRecords>
   max_response_size() const noexcept {
     static_assert(Bytes != 0, "NTL RPC notification capacity must be nonzero");
     return {};
@@ -451,10 +506,29 @@ public:
 
   /** @brief Returns the same channel with an explicit decode budget. */
   template <std::size_t Bytes>
-  constexpr notification<Id, Payload, ResponseSize, Bytes>
+  constexpr notification<Id, Payload, ResponseSize, Bytes, Priority,
+                         BatchRecords>
   max_decode_allocation() const noexcept {
     static_assert(Bytes != 0,
                   "NTL RPC notification decode budget must be nonzero");
+    return {};
+  }
+
+  /** @brief Returns the same channel with an explicit delivery priority. */
+  template <delivery_priority Value>
+  constexpr notification<Id, Payload, ResponseSize, DecodeAllocation, Value,
+                         BatchRecords>
+  with_priority() const noexcept {
+    return {};
+  }
+
+  /** @brief Returns the same channel with an explicit batch record limit. */
+  template <std::size_t Count>
+  constexpr notification<Id, Payload, ResponseSize, DecodeAllocation, Priority,
+                         Count>
+  with_batch_records() const noexcept {
+    static_assert(Count != 0 && Count <= maximum_batch_records,
+                  "NTL RPC notification batch record limit is invalid");
     return {};
   }
 };
@@ -463,6 +537,207 @@ public:
 template <typename T>
 struct is_notification
     : std::is_base_of<notification_tag, typename std::decay<T>::type> {};
+
+/** @brief Identifies the meaning of one typed stream record. */
+enum class stream_record_kind : std::uint32_t {
+  chunk = 1,
+  completed = 2,
+  failed = 3,
+};
+
+/** @brief Carries one value or the terminal state of a typed stream. */
+template <typename T> class stream_record {
+public:
+  stream_record() = default;
+
+  /** @brief Creates one data-bearing stream record. */
+  static stream_record chunk(T value) {
+    stream_record record;
+    record.kind_ = stream_record_kind::chunk;
+    record.value_ = std::move(value);
+    return record;
+  }
+
+  /** @brief Creates a successful end-of-stream record. */
+  static stream_record completed() {
+    stream_record record;
+    record.kind_ = stream_record_kind::completed;
+    return record;
+  }
+
+  /** @brief Creates a failed end-of-stream record. */
+  static stream_record failed(std::int32_t status) {
+    stream_record record;
+    record.kind_ = stream_record_kind::failed;
+    record.status_ = status;
+    return record;
+  }
+
+  /** @brief Returns the record category. */
+  stream_record_kind kind() const noexcept { return kind_; }
+
+  /** @brief Reports whether this record contains a chunk. */
+  bool has_value() const noexcept { return kind_ == stream_record_kind::chunk; }
+
+  /** @brief Reports a successful end of stream. */
+  bool is_completed() const noexcept {
+    return kind_ == stream_record_kind::completed;
+  }
+
+  /** @brief Reports a failed end of stream. */
+  bool is_failed() const noexcept {
+    return kind_ == stream_record_kind::failed;
+  }
+
+  /** @brief Returns the terminal NTSTATUS value for a failed record. */
+  std::int32_t status() const noexcept { return status_; }
+
+  /** @brief Returns the immutable chunk storage. Check has_value() first. */
+  const T &value() const noexcept { return value_; }
+
+  /** @brief Returns the mutable chunk storage. Check has_value() first. */
+  T &value() noexcept { return value_; }
+
+private:
+  stream_record_kind kind_ = stream_record_kind::completed;
+  std::int32_t status_ = 0;
+  T value_{};
+
+public:
+  friend zpp::serializer::access;
+  template <typename Archive, typename Self>
+  static void serialize(Archive &archive, Self &self) {
+    archive(self.kind_, self.status_, self.value_);
+  }
+};
+
+/** @brief Marker base used to recognize typed bidirectional streams. */
+struct stream_tag {};
+
+/** @brief Bounded group of app-to-driver stream chunks sent by one request. */
+template <typename T> class stream_upload_batch {
+public:
+  stream_upload_batch() = default;
+  explicit stream_upload_batch(std::vector<T> values)
+      : values_(std::move(values)) {}
+
+  /** @brief Returns the upload chunks in callback execution order. */
+  const std::vector<T> &values() const noexcept { return values_; }
+
+private:
+  std::vector<T> values_;
+
+public:
+  friend zpp::serializer::access;
+  template <typename Archive, typename Self>
+  static void serialize(Archive &archive, Self &self) {
+    archive(self.values_);
+  }
+};
+
+/**
+ * @brief Describes one session-bound bidirectional typed stream.
+ * @tparam
+ * Id Stable vendor method ID and stream channel ID.
+ * @tparam Upload Chunk
+ * type sent from the app to the driver.
+ * @tparam Download Chunk type sent
+ * from the driver to the app.
+ * @tparam DownloadSize Maximum serialized
+ * download record size.
+ * @tparam UploadSize Maximum serialized upload request
+ * size.
+ * @tparam DecodeAllocation Maximum allocation while decoding either
+ * direction.
+ */
+template <unsigned long Id, typename Upload, typename Download,
+          std::size_t DownloadSize = default_response_size,
+          std::size_t UploadSize = default_request_size,
+          std::size_t DecodeAllocation = default_decode_allocation,
+          delivery_priority Priority = delivery_priority::normal,
+          std::size_t BatchRecords = default_batch_records>
+class stream : public stream_tag {
+  static_assert(Id >= 0x800 && Id < session_control_id,
+                "NTL RPC stream IDs must use 0x800-0xFFC");
+  static_assert(!std::is_void<Upload>::value,
+                "NTL RPC streams require an upload chunk type");
+  static_assert(!std::is_void<Download>::value,
+                "NTL RPC streams require a download chunk type");
+  static_assert(DownloadSize != 0,
+                "NTL RPC stream download capacity must be nonzero");
+  static_assert(UploadSize != 0,
+                "NTL RPC stream upload capacity must be nonzero");
+  static_assert(DecodeAllocation != 0,
+                "NTL RPC stream decode budget must be nonzero");
+  static_assert(BatchRecords != 0 && BatchRecords <= maximum_batch_records,
+                "NTL RPC stream batch record limit is invalid");
+
+public:
+  using upload_type = Upload;
+  using upload_batch_type = stream_upload_batch<Upload>;
+  using download_type = Download;
+  using record_type = stream_record<Download>;
+  using upload_method_type =
+      method<Id, void(upload_batch_type), default_response_size, UploadSize,
+             DecodeAllocation>;
+  using download_notification_type =
+      notification<static_cast<std::uint32_t>(Id), record_type, DownloadSize,
+                   DecodeAllocation, Priority, BatchRecords>;
+
+  /** @brief Returns the shared stream ID. */
+  static constexpr std::uint32_t id() noexcept {
+    return static_cast<std::uint32_t>(Id);
+  }
+
+  /** @brief Returns the typed client-to-driver method descriptor. */
+  static constexpr upload_method_type upload_method() noexcept { return {}; }
+
+  /** @brief Returns the typed driver-to-client channel descriptor. */
+  static constexpr download_notification_type download_notification() noexcept {
+    return {};
+  }
+
+  /** @brief Returns the maximum serialized upload request size. */
+  static constexpr std::size_t upload_size() noexcept { return UploadSize; }
+
+  /** @brief Returns the maximum serialized download record size. */
+  static constexpr std::size_t download_size() noexcept { return DownloadSize; }
+
+  /** @brief Returns the allocation budget for decoding either direction. */
+  static constexpr std::size_t decode_allocation() noexcept {
+    return DecodeAllocation;
+  }
+
+  /** @brief Returns this channel's cross-channel delivery priority. */
+  static constexpr delivery_priority priority() noexcept { return Priority; }
+
+  /** @brief Returns the maximum records accepted by one batch receive. */
+  static constexpr std::size_t max_batch_records() noexcept {
+    return BatchRecords;
+  }
+
+  /** @brief Returns the same stream with an explicit download priority. */
+  template <delivery_priority Value>
+  constexpr stream<Id, Upload, Download, DownloadSize, UploadSize,
+                   DecodeAllocation, Value, BatchRecords>
+  with_priority() const noexcept {
+    return {};
+  }
+
+  /** @brief Returns the same stream with an explicit batch record limit. */
+  template <std::size_t Count>
+  constexpr stream<Id, Upload, Download, DownloadSize, UploadSize,
+                   DecodeAllocation, Priority, Count>
+  with_batch_records() const noexcept {
+    static_assert(Count != 0 && Count <= maximum_batch_records,
+                  "NTL RPC stream batch record limit is invalid");
+    return {};
+  }
+};
+
+/** @brief Reports whether a type is an NTL RPC stream descriptor. */
+template <typename T>
+struct is_stream : std::is_base_of<stream_tag, typename std::decay<T>::type> {};
 
 /** @brief One replayable notification and its explicit ACK sequence. */
 template <typename T> class notification_delivery {
@@ -494,19 +769,95 @@ public:
   }
 };
 
+/** @brief One channel-tagged raw record returned by an any-channel batch. */
+class reliable_batch_item {
+public:
+  reliable_batch_item() = default;
+  reliable_batch_item(std::uint32_t id, std::uint64_t sequence,
+                      std::vector<unsigned char> bytes)
+      : id_(id), sequence_(sequence), bytes_(std::move(bytes)) {}
+
+  /** @brief Returns the reliable notification or stream channel ID. */
+  std::uint32_t id() const noexcept { return id_; }
+
+  /** @brief Returns the sequence to pass to acknowledge(). */
+  std::uint64_t sequence() const noexcept { return sequence_; }
+
+  /** @brief Decodes this item with its shared typed channel descriptor. */
+  template <typename Notification>
+  notification_delivery<typename Notification::payload_type>
+  decode(const Notification &) const {
+    static_assert(is_notification<Notification>::value,
+                  "reliable_batch_item::decode requires a notification");
+    if (id_ != Notification::id())
+      throw std::invalid_argument("NTL RPC batch item channel mismatch");
+    zpp::serializer::memory_view_input_archive archive(
+        bytes_.data(), bytes_.size(), Notification::decode_allocation());
+    notification_delivery<typename Notification::payload_type> delivery;
+    archive(delivery);
+    if (archive.offset() != bytes_.size() || delivery.sequence() != sequence_)
+      throw std::runtime_error("Invalid NTL RPC batch delivery");
+    return delivery;
+  }
+
+private:
+  std::uint32_t id_ = 0;
+  std::uint64_t sequence_ = 0;
+  std::vector<unsigned char> bytes_;
+};
+
+/** @brief Bounded batch selected across one or more reliable channels. */
+class reliable_batch {
+public:
+  reliable_batch() = default;
+  explicit reliable_batch(std::vector<reliable_batch_item> items)
+      : items_(std::move(items)) {}
+
+  bool empty() const noexcept { return items_.empty(); }
+  std::size_t size() const noexcept { return items_.size(); }
+  const reliable_batch_item &operator[](std::size_t index) const {
+    return items_.at(index);
+  }
+  const std::vector<reliable_batch_item> &items() const noexcept {
+    return items_;
+  }
+
+private:
+  std::vector<reliable_batch_item> items_;
+};
+
+/** @brief Typed deliveries returned by one bounded channel batch. */
+template <typename T> class notification_batch {
+public:
+  notification_batch() = default;
+  explicit notification_batch(std::vector<notification_delivery<T>> values)
+      : values_(std::move(values)) {}
+
+  bool empty() const noexcept { return values_.empty(); }
+  std::size_t size() const noexcept { return values_.size(); }
+  const notification_delivery<T> &operator[](std::size_t index) const {
+    return values_.at(index);
+  }
+  const std::vector<notification_delivery<T>> &values() const noexcept {
+    return values_;
+  }
+
+private:
+  std::vector<notification_delivery<T>> values_;
+};
+
 /** @brief Reports whether a type is an NTL RPC method descriptor. */
 template <typename T>
-struct is_method
-    : std::is_base_of<method_tag, typename std::decay<T>::type> {};
+struct is_method : std::is_base_of<method_tag, typename std::decay<T>::type> {};
 
 /** @brief Builds a typed method from a response declaration and arguments. */
 template <unsigned long Id, typename Response, typename... Arguments>
 struct make_method {
   using return_type = response_type_t<Response>;
-  using type = method<Id, return_type(Arguments...),
-                      response_traits<Response>::size,
-                      response_traits<Response>::request_size,
-                      response_traits<Response>::decode_allocation>;
+  using type =
+      method<Id, return_type(Arguments...), response_traits<Response>::size,
+             response_traits<Response>::request_size,
+             response_traits<Response>::decode_allocation>;
 };
 
 /** @brief Shorthand for the method type produced by `make_method`. */
@@ -526,8 +877,8 @@ using make_method_t = typename make_method<Id, Response, Arguments...>::type;
 /** @brief Declares response, request, and decode-allocation method limits. */
 #define NTL_RPC_METHOD_LIMITS(_response_bytes_, _request_bytes_,               \
                               _decode_bytes_, ...)                             \
-  ntl::rpc::method_limits<__VA_ARGS__, (_response_bytes_),                    \
-                          (_request_bytes_), (_decode_bytes_)>
+  ntl::rpc::method_limits<__VA_ARGS__, (_response_bytes_), (_request_bytes_),  \
+                          (_decode_bytes_)>
 
 /** @brief Maps line-based convenience IDs into the vendor IOCTL range. */
 #define NTL_RPC_DETAIL_LINE_ID (0x800ul + (__LINE__ % 0x7FEul))

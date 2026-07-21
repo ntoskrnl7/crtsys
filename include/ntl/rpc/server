@@ -39,7 +39,9 @@ namespace rpc {
 
 /** @brief Setup class used by secure NTL RPC control devices. */
 constexpr GUID device_class_guid = {
-    0xdcf4f515, 0xb540, 0x40cb,
+    0xdcf4f515,
+    0xb540,
+    0x40cb,
     {0x82, 0x47, 0x88, 0x10, 0xaa, 0x38, 0x9b, 0xda}};
 
 /** @brief Configures one secure kernel RPC endpoint. */
@@ -120,8 +122,7 @@ public:
   }
 
   /** @brief Sets the per-session reliable-notification queue limit. */
-  server_options &max_reliable_notifications_per_session(
-      std::uint32_t count) {
+  server_options &max_reliable_notifications_per_session(std::uint32_t count) {
     if (count == 0)
       throw std::invalid_argument(
           "NTL RPC per-session notification limit is invalid");
@@ -196,15 +197,13 @@ public:
 
 private:
   std::wstring name_;
-  std::wstring security_descriptor_ =
-      L"D:P(A;;GA;;;SY)(A;;GA;;;BA)";
+  std::wstring security_descriptor_ = L"D:P(A;;GA;;;SY)(A;;GA;;;BA)";
   GUID class_guid_ = device_class_guid;
   std::uint32_t contract_version_ = 1;
   std::uint64_t capabilities_ = 0;
   bool asynchronous_ = false;
   std::uint32_t max_pending_calls_ = default_max_pending_calls;
-  std::uint32_t max_pending_notifications_ =
-      default_max_pending_notifications;
+  std::uint32_t max_pending_notifications_ = default_max_pending_notifications;
   std::uint32_t max_sessions_ = default_max_sessions;
   std::uint32_t max_reliable_notifications_per_session_ =
       default_max_reliable_notifications_per_session;
@@ -217,7 +216,7 @@ namespace detail {
 class call_context_access;
 class session_registry;
 class session_operation_guard;
-}
+} // namespace detail
 
 class client_session;
 
@@ -316,11 +315,9 @@ public:
 private:
   friend class detail::call_context_access;
 
-  call_context(volatile LONG *request_cancelled,
-               volatile LONG *server_stopping,
+  call_context(volatile LONG *request_cancelled, volatile LONG *server_stopping,
                PSECURITY_SUBJECT_CONTEXT subject_context,
-               KPROCESSOR_MODE requestor_mode,
-               HANDLE requestor_process_id,
+               KPROCESSOR_MODE requestor_mode, HANDLE requestor_process_id,
                client_session *session) noexcept
       : request_cancelled_(request_cancelled),
         server_stopping_(server_stopping), subject_context_(subject_context),
@@ -347,10 +344,9 @@ public:
   explicit captured_caller_context(PIRP request) noexcept
       : requestor_mode_(request ? request->RequestorMode : KernelMode),
         requestor_process_id_(
-            request
-                ? reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(
-                      IoGetRequestorProcessId(request)))
-                : nullptr) {
+            request ? reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(
+                          IoGetRequestorProcessId(request)))
+                    : nullptr) {
     SeCaptureSubjectContext(&subject_context_);
   }
 
@@ -385,8 +381,7 @@ public:
   }
 };
 
-template <typename Result>
-NTSTATUS authorization_status(Result &&result) {
+template <typename Result> NTSTATUS authorization_status(Result &&result) {
   using result_type = typename std::decay<Result>::type;
   static_assert(!std::is_same<result_type, bool>::value,
                 "NTL RPC authorization policies must return NTSTATUS or "
@@ -502,9 +497,25 @@ private:
   struct queued_notification {
     std::uint32_t id = 0;
     std::uint64_t sequence = 0;
+    delivery_priority priority = delivery_priority::normal;
     std::vector<unsigned char> bytes;
+    bool terminal = false;
+    bool ready = true;
     bool in_flight = false;
     bool acknowledging = false;
+  };
+
+  enum class stream_phase {
+    open,
+    terminal_reserving,
+    terminal_queued,
+    terminal_acknowledged,
+  };
+
+  struct stream_state {
+    stream_phase phase = stream_phase::open;
+    std::uint32_t active_publishers = 0;
+    std::uint64_t terminal_sequence = 0;
   };
 
   session_info info_{};
@@ -513,6 +524,7 @@ private:
   std::shared_ptr<void> state_;
   const void *state_type_ = nullptr;
   std::unordered_set<std::uint32_t> subscriptions_;
+  std::unordered_map<std::uint32_t, stream_state> streams_;
   std::deque<queued_notification> notifications_;
   PFILE_OBJECT file_object_ = nullptr;
   std::uint64_t next_sequence_ = 1;
@@ -530,6 +542,7 @@ struct notification_record_view {
   std::uint64_t sequence = 0;
   const unsigned char *data = nullptr;
   std::size_t size = 0;
+  bool terminal = false;
 };
 
 /** @brief Receives records restored by an application persistence hook. */
@@ -538,10 +551,9 @@ public:
   virtual ~notification_restore_sink() = default;
 
   /** @brief Adds one serialized notification to the reconnecting session. */
-  virtual ntl::status add(std::uint32_t notification_id,
-                          std::uint64_t sequence,
-                          const void *data,
-                          std::size_t size) noexcept = 0;
+  virtual ntl::status add(std::uint32_t notification_id, std::uint64_t sequence,
+                          const void *data, std::size_t size,
+                          bool terminal = false) noexcept = 0;
 };
 
 /**
@@ -554,14 +566,12 @@ public:
   virtual ~notification_store() = default;
 
   /** @brief Persists a record before it becomes visible to the client. */
-  virtual ntl::status
-  persist(const notification_record_view &) noexcept {
+  virtual ntl::status persist(const notification_record_view &) noexcept {
     return ntl::status::ok();
   }
 
   /** @brief Removes one record after the client explicitly ACKs it. */
-  virtual ntl::status acknowledge(const session_token &,
-                                  std::uint32_t,
+  virtual ntl::status acknowledge(const session_token &, std::uint32_t,
                                   std::uint64_t) noexcept {
     return ntl::status::ok();
   }
@@ -611,10 +621,8 @@ public:
       std::function<NTSTATUS(client_session &, const call_context &)>;
   using session_event = std::function<void(client_session &)>;
 
-  session_registry(std::uint32_t max_sessions,
-                   std::uint32_t max_per_session,
-                   std::uint32_t max_total,
-                   std::uint64_t retention_ms)
+  session_registry(std::uint32_t max_sessions, std::uint32_t max_per_session,
+                   std::uint32_t max_total, std::uint64_t retention_ms)
       : max_sessions_(max_sessions), max_per_session_(max_per_session),
         max_total_(max_total), retention_ms_(retention_ms) {
     ExInitializeFastMutex(&lock_);
@@ -623,8 +631,20 @@ public:
   session_registry(const session_registry &) = delete;
   session_registry &operator=(const session_registry &) = delete;
 
-  void register_notification(std::uint32_t id, std::size_t capacity) {
+  void register_notification(std::uint32_t id, std::size_t capacity,
+                             delivery_priority priority,
+                             std::size_t batch_records) {
     notification_limits_.emplace(id, capacity);
+    notification_priorities_.emplace(id, priority);
+    notification_batch_limits_.emplace(id, batch_records);
+  }
+
+  void register_stream(std::uint32_t id, std::size_t capacity,
+                       delivery_priority priority, std::size_t batch_records) {
+    notification_limits_.emplace(id, capacity);
+    notification_priorities_.emplace(id, priority);
+    notification_batch_limits_.emplace(id, batch_records);
+    stream_ids_.insert(id);
   }
 
   void store(std::shared_ptr<notification_store> value) {
@@ -635,13 +655,10 @@ public:
 
   void on_open(session_policy value) { on_open_ = std::move(value); }
   void on_resume(session_policy value) { on_resume_ = std::move(value); }
-  void on_disconnect(session_event value) {
-    on_disconnect_ = std::move(value);
-  }
+  void on_disconnect(session_event value) { on_disconnect_ = std::move(value); }
   void on_close(session_event value) { on_close_ = std::move(value); }
 
-  session_info create(PFILE_OBJECT file_object,
-                      captured_caller_context &caller,
+  session_info create(PFILE_OBJECT file_object, captured_caller_context &caller,
                       volatile LONG *stopping) {
     if (!file_object)
       throw ntl::exception(STATUS_INVALID_PARAMETER,
@@ -678,8 +695,8 @@ public:
     }
 
     try {
-      const auto context = call_context_access::make(
-          nullptr, stopping, caller, session.get());
+      const auto context =
+          call_context_access::make(nullptr, stopping, caller, session.get());
       const NTSTATUS status =
           on_open_ ? on_open_(*session, context) : STATUS_SUCCESS;
       if (!NT_SUCCESS(status))
@@ -700,8 +717,7 @@ public:
     }
   }
 
-  session_info resume(PFILE_OBJECT file_object,
-                      const session_token &token,
+  session_info resume(PFILE_OBJECT file_object, const session_token &token,
                       captured_caller_context &caller,
                       volatile LONG *stopping) {
     if (!file_object || !token.valid())
@@ -724,8 +740,8 @@ public:
     }
 
     try {
-      const auto context = call_context_access::make(
-          nullptr, stopping, caller, session.get());
+      const auto context =
+          call_context_access::make(nullptr, stopping, caller, session.get());
       const NTSTATUS status =
           on_resume_ ? on_resume_(*session, context) : STATUS_SUCCESS;
       if (!NT_SUCCESS(status))
@@ -766,8 +782,24 @@ public:
                                    : found->second;
   }
 
+  bool is_stream_writable(const client_session *session,
+                          std::uint32_t stream_id) const {
+    if (!session)
+      return false;
+    fast_mutex_guard guard(lock_);
+    const auto found = by_id_.find(session->info_.id);
+    if (found == by_id_.end() || found->second.get() != session ||
+        session->closed_ ||
+        session->subscriptions_.find(stream_id) ==
+            session->subscriptions_.end())
+      return false;
+    const auto stream = session->streams_.find(stream_id);
+    return stream != session->streams_.end() &&
+           stream->second.phase == client_session::stream_phase::open;
+  }
+
   void subscribe(PFILE_OBJECT file_object, const session_token &token,
-                  std::uint32_t notification_id, bool enabled) {
+                 std::uint32_t notification_id, bool enabled) {
     if (notification_limits_.find(notification_id) ==
         notification_limits_.end())
       throw ntl::exception(STATUS_INVALID_DEVICE_REQUEST,
@@ -777,6 +809,10 @@ public:
     auto session = require_bound_locked(file_object, token);
     if (enabled) {
       session->subscriptions_.insert(notification_id);
+      if (stream_ids_.find(notification_id) != stream_ids_.end() &&
+          session->streams_.find(notification_id) == session->streams_.end())
+        session->streams_.emplace(notification_id,
+                                  client_session::stream_state{});
     } else {
       const auto pending = std::find_if(
           session->notifications_.begin(), session->notifications_.end(),
@@ -788,7 +824,13 @@ public:
             STATUS_DEVICE_BUSY,
             "A reliable notification must be acknowledged before "
             "unsubscribing");
+      const auto stream = session->streams_.find(notification_id);
+      if (stream != session->streams_.end() &&
+          stream->second.active_publishers != 0)
+        throw ntl::exception(STATUS_DEVICE_BUSY,
+                             "The RPC stream still has active publishers");
       session->subscriptions_.erase(notification_id);
+      session->streams_.erase(notification_id);
     }
   }
 
@@ -814,8 +856,7 @@ public:
 
     const auto store = store_;
     if (store) {
-      const auto status =
-          store->acknowledge(token, notification_id, sequence);
+      const auto status = store->acknowledge(token, notification_id, sequence);
       if (!status.is_ok()) {
         fast_mutex_guard guard(lock_);
         auto found = find_record(*session, notification_id, sequence);
@@ -829,6 +870,15 @@ public:
     fast_mutex_guard guard(lock_);
     auto found = find_record(*session, notification_id, sequence);
     if (!session->closed_ && found != session->notifications_.end()) {
+      if (found->terminal) {
+        const auto stream = session->streams_.find(notification_id);
+        if (stream != session->streams_.end() &&
+            stream->second.phase ==
+                client_session::stream_phase::terminal_queued &&
+            stream->second.terminal_sequence == sequence)
+          stream->second.phase =
+              client_session::stream_phase::terminal_acknowledged;
+      }
       session->notifications_.erase(found);
       --queued_total_;
     }
@@ -847,12 +897,57 @@ public:
                            "Reliable notification channel is not subscribed");
 
     auto found = first_ready_record(*session, notification_id);
-    if (found == session->notifications_.end())
+    if (found == session->notifications_.end()) {
+      const auto stream = session->streams_.find(notification_id);
+      if (stream != session->streams_.end() &&
+          stream->second.phase ==
+              client_session::stream_phase::terminal_acknowledged)
+        throw ntl::exception(STATUS_END_OF_FILE,
+                             "The RPC stream has reached its terminal state");
       return receive_result::queued;
+    }
     if (!output.write_bytes(found->bytes.data(), found->bytes.size()))
       throw ntl::exception(STATUS_BUFFER_TOO_SMALL,
                            "Reliable notification receive buffer is too small");
     found->in_flight = true;
+    return receive_result::completed;
+  }
+
+  struct batch_delivery_key {
+    std::uint32_t id = 0;
+    std::uint64_t sequence = 0;
+  };
+
+  receive_result receive_batch(PFILE_OBJECT file_object,
+                               std::uint32_t notification_id,
+                               std::uint32_t max_records,
+                               std::uint32_t max_bytes,
+                               ntl::device_control::out_buffer &output) {
+    fast_mutex_guard guard(lock_);
+    auto session = require_bound_locked(file_object, session_token{});
+    validate_batch_request_locked(*session, notification_id, max_records,
+                                  max_bytes);
+
+    std::vector<unsigned char> bytes;
+    std::vector<record_iterator> selected;
+    build_batch_locked(*session, notification_id, max_records, max_bytes, bytes,
+                       selected);
+    if (selected.empty()) {
+      if (notification_id != 0) {
+        const auto stream = session->streams_.find(notification_id);
+        if (stream != session->streams_.end() &&
+            stream->second.phase ==
+                client_session::stream_phase::terminal_acknowledged)
+          throw ntl::exception(STATUS_END_OF_FILE,
+                               "The RPC stream has reached its terminal state");
+      }
+      return receive_result::queued;
+    }
+    if (!output.write_bytes(bytes.data(), bytes.size()))
+      throw ntl::exception(STATUS_BUFFER_TOO_SMALL,
+                           "Reliable batch receive buffer is too small");
+    for (auto record : selected)
+      record->in_flight = true;
     return receive_result::completed;
   }
 
@@ -866,14 +961,33 @@ public:
         session->subscriptions_.end())
       throw ntl::exception(STATUS_INVALID_DEVICE_STATE,
                            "Reliable notification channel is not subscribed");
+    const auto stream = session->streams_.find(notification_id);
+    if (stream != session->streams_.end() &&
+        stream->second.phase ==
+            client_session::stream_phase::terminal_acknowledged)
+      throw ntl::exception(STATUS_END_OF_FILE,
+                           "The RPC stream has reached its terminal state");
+    enqueue();
+    return session->info_.id;
+  }
+
+  template <typename Enqueue>
+  std::uint64_t
+  enqueue_batch_receive(PFILE_OBJECT file_object, std::uint32_t notification_id,
+                        std::uint32_t max_records, std::uint32_t max_bytes,
+                        Enqueue &&enqueue) {
+    fast_mutex_guard guard(lock_);
+    auto session = require_bound_locked(file_object, session_token{});
+    validate_batch_request_locked(*session, notification_id, max_records,
+                                  max_bytes);
     enqueue();
     return session->info_.id;
   }
 
   template <typename Notification>
-  ntl::status publish(
-      std::uint64_t session_id,
-      const typename Notification::payload_type &payload) noexcept {
+  ntl::status
+  publish(std::uint64_t session_id,
+          const typename Notification::payload_type &payload) noexcept {
     if (KeGetCurrentIrql() != PASSIVE_LEVEL)
       return ntl::status{STATUS_INVALID_DEVICE_STATE};
 
@@ -904,7 +1018,7 @@ public:
       notification_delivery<typename Notification::payload_type> delivery(
           sequence, payload);
       zpp::serializer::memory_view_output_archive archive(bytes.data(),
-                                                           bytes.size());
+                                                          bytes.size());
       archive(delivery);
       bytes.resize(archive.offset());
     } catch (const zpp::serializer::out_of_range &) {
@@ -918,8 +1032,8 @@ public:
     const auto store = store_;
     if (store) {
       const notification_record_view record{
-          session->info_.token, session->info_.id, Notification::id(),
-          sequence, bytes.data(), bytes.size()};
+          session->info_.token, session->info_.id, Notification::id(), sequence,
+          bytes.data(),         bytes.size()};
       const auto status = store->persist(record);
       if (!status.is_ok())
         return status;
@@ -936,6 +1050,7 @@ public:
         typename client_session::queued_notification record;
         record.id = Notification::id();
         record.sequence = sequence;
+        record.priority = Notification::priority();
         record.bytes = std::move(bytes);
         session->notifications_.push_back(std::move(record));
         ++queued_total_;
@@ -946,19 +1061,169 @@ public:
     }
 
     if (!NT_SUCCESS(queue_status) && store) {
-      const auto rollback = store->acknowledge(
-          session->info_.token, Notification::id(), sequence);
+      const auto rollback = store->acknowledge(session->info_.token,
+                                               Notification::id(), sequence);
       if (!rollback.is_ok())
         return rollback;
     }
     return ntl::status{queue_status};
   }
 
+  template <typename Notification>
+  ntl::status publish_stream(std::uint64_t session_id,
+                             const typename Notification::payload_type &payload,
+                             bool terminal) noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return ntl::status{STATUS_INVALID_DEVICE_STATE};
+
+    std::shared_ptr<client_session> session;
+    std::uint64_t sequence = 0;
+    {
+      fast_mutex_guard guard(lock_);
+      const auto found = by_id_.find(session_id);
+      if (found == by_id_.end() || found->second->closed_)
+        return ntl::status{STATUS_NOT_FOUND};
+      session = found->second;
+      if (session->subscriptions_.find(Notification::id()) ==
+          session->subscriptions_.end())
+        return ntl::status{STATUS_NOT_FOUND};
+      const auto stream = session->streams_.find(Notification::id());
+      if (stream == session->streams_.end() ||
+          stream->second.phase != client_session::stream_phase::open)
+        return ntl::status{STATUS_INVALID_DEVICE_STATE};
+      if (session->notifications_.size() >= max_per_session_ ||
+          queued_total_ >= max_total_)
+        return ntl::status{STATUS_DEVICE_BUSY};
+      if (!ExAcquireRundownProtection(&session->operations_))
+        return ntl::status{STATUS_DELETE_PENDING};
+      sequence = session->next_sequence_++;
+      if (terminal) {
+        stream->second.phase = client_session::stream_phase::terminal_reserving;
+        stream->second.terminal_sequence = sequence;
+      } else {
+        ++stream->second.active_publishers;
+      }
+    }
+    rundown_guard operation(session->operations_);
+
+    bool reservation_active = true;
+    const auto release_reservation = [&]() noexcept {
+      if (!reservation_active)
+        return;
+      fast_mutex_guard guard(lock_);
+      const auto stream = session->streams_.find(Notification::id());
+      if (stream == session->streams_.end()) {
+        reservation_active = false;
+        return;
+      }
+      if (terminal) {
+        if (stream->second.phase ==
+                client_session::stream_phase::terminal_reserving &&
+            stream->second.terminal_sequence == sequence) {
+          stream->second.phase = client_session::stream_phase::open;
+          stream->second.terminal_sequence = 0;
+        }
+      } else {
+        release_stream_publisher_locked(*session, Notification::id());
+      }
+      reservation_active = false;
+    };
+
+    std::vector<unsigned char> bytes;
+    try {
+      bytes.resize(Notification::response_size() +
+                   reliable_notification_overhead);
+      notification_delivery<typename Notification::payload_type> delivery(
+          sequence, payload);
+      zpp::serializer::memory_view_output_archive archive(bytes.data(),
+                                                          bytes.size());
+      archive(delivery);
+      bytes.resize(archive.offset());
+    } catch (const zpp::serializer::out_of_range &) {
+      release_reservation();
+      return ntl::status{STATUS_BUFFER_TOO_SMALL};
+    } catch (const std::bad_alloc &) {
+      release_reservation();
+      return ntl::status{STATUS_INSUFFICIENT_RESOURCES};
+    } catch (const std::exception &) {
+      release_reservation();
+      return ntl::status{STATUS_INVALID_PARAMETER};
+    }
+
+    const auto store = store_;
+    if (store) {
+      const notification_record_view record{session->info_.token,
+                                            session->info_.id,
+                                            Notification::id(),
+                                            sequence,
+                                            bytes.data(),
+                                            bytes.size(),
+                                            terminal};
+      const auto status = store->persist(record);
+      if (!status.is_ok()) {
+        release_reservation();
+        return status;
+      }
+    }
+
+    NTSTATUS queue_status = STATUS_DEVICE_BUSY;
+    try {
+      fast_mutex_guard guard(lock_);
+      const auto stream = session->streams_.find(Notification::id());
+      const bool valid_state =
+          stream != session->streams_.end() &&
+          (terminal
+               ? stream->second.phase ==
+                         client_session::stream_phase::terminal_reserving &&
+                     stream->second.terminal_sequence == sequence
+               : stream->second.active_publishers != 0);
+      if (!session->closed_ && valid_state &&
+          session->subscriptions_.find(Notification::id()) !=
+              session->subscriptions_.end() &&
+          session->notifications_.size() < max_per_session_ &&
+          queued_total_ < max_total_) {
+        typename client_session::queued_notification record;
+        record.id = Notification::id();
+        record.sequence = sequence;
+        record.priority = Notification::priority();
+        record.bytes = std::move(bytes);
+        record.terminal = terminal;
+        record.ready = !terminal || stream->second.active_publishers == 0;
+        const auto position = std::find_if(
+            session->notifications_.begin(), session->notifications_.end(),
+            [=](const client_session::queued_notification &queued) {
+              return queued.sequence > sequence;
+            });
+        session->notifications_.insert(position, std::move(record));
+        ++queued_total_;
+        if (terminal) {
+          stream->second.phase = client_session::stream_phase::terminal_queued;
+        } else {
+          release_stream_publisher_locked(*session, Notification::id());
+        }
+        reservation_active = false;
+        queue_status = STATUS_SUCCESS;
+      }
+    } catch (const std::bad_alloc &) {
+      queue_status = STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    if (!NT_SUCCESS(queue_status) && store) {
+      const auto rollback = store->acknowledge(session->info_.token,
+                                               Notification::id(), sequence);
+      if (!rollback.is_ok()) {
+        release_reservation();
+        return rollback;
+      }
+    }
+    release_reservation();
+    return ntl::status{queue_status};
+  }
+
   bool take_for_delivery(std::uint64_t session_id,
                          std::uint32_t notification_id,
                          std::vector<unsigned char> &bytes,
-                         PFILE_OBJECT &file_object,
-                         std::uint64_t &sequence) {
+                         PFILE_OBJECT &file_object, std::uint64_t &sequence) {
     fast_mutex_guard guard(lock_);
     const auto found = by_id_.find(session_id);
     if (found == by_id_.end() || !found->second->connected())
@@ -980,17 +1245,78 @@ public:
     return true;
   }
 
-  void release_delivery(std::uint64_t session_id,
-                        std::uint32_t notification_id,
+  bool take_batch_for_delivery(std::uint64_t session_id,
+                               std::uint32_t notification_id,
+                               std::uint32_t max_records,
+                               std::uint32_t max_bytes,
+                               std::vector<unsigned char> &bytes,
+                               PFILE_OBJECT &file_object,
+                               std::vector<batch_delivery_key> &keys) {
+    fast_mutex_guard guard(lock_);
+    const auto found = by_id_.find(session_id);
+    if (found == by_id_.end() || !found->second->connected())
+      return false;
+    auto &session = *found->second;
+    validate_batch_request_locked(session, notification_id, max_records,
+                                  max_bytes);
+
+    std::vector<record_iterator> selected;
+    build_batch_locked(session, notification_id, max_records, max_bytes, bytes,
+                       selected);
+    if (selected.empty())
+      return false;
+    file_object = session.file_object_;
+    if (!file_object)
+      return false;
+    keys.clear();
+    keys.reserve(selected.size());
+    for (auto record : selected)
+      keys.push_back(batch_delivery_key{record->id, record->sequence});
+    for (auto record : selected)
+      record->in_flight = true;
+    return true;
+  }
+
+  bool has_ready_delivery(std::uint64_t session_id,
+                          std::uint32_t notification_id) const noexcept {
+    fast_mutex_guard guard(lock_);
+    const auto found = by_id_.find(session_id);
+    if (found == by_id_.end() || !found->second->connected())
+      return false;
+    const auto &records = found->second->notifications_;
+    return std::find_if(records.begin(), records.end(),
+                        [=](const client_session::queued_notification &record) {
+                          return (notification_id == 0 ||
+                                  record.id == notification_id) &&
+                                 record.ready && !record.in_flight &&
+                                 !record.acknowledging;
+                        }) != records.end();
+  }
+
+  void release_delivery(std::uint64_t session_id, std::uint32_t notification_id,
                         std::uint64_t sequence) noexcept {
     fast_mutex_guard guard(lock_);
     const auto found = by_id_.find(session_id);
     if (found == by_id_.end())
       return;
     auto record = find_record(*found->second, notification_id, sequence);
-    if (record != found->second->notifications_.end() &&
-        !record->acknowledging)
+    if (record != found->second->notifications_.end() && !record->acknowledging)
       record->in_flight = false;
+  }
+
+  void
+  release_batch_delivery(std::uint64_t session_id,
+                         const std::vector<batch_delivery_key> &keys) noexcept {
+    fast_mutex_guard guard(lock_);
+    const auto found = by_id_.find(session_id);
+    if (found == by_id_.end())
+      return;
+    for (const auto &key : keys) {
+      auto record = find_record(*found->second, key.id, key.sequence);
+      if (record != found->second->notifications_.end() &&
+          !record->acknowledging)
+        record->in_flight = false;
+    }
   }
 
   PFILE_OBJECT connected_file(std::uint64_t session_id) const {
@@ -1055,9 +1381,8 @@ public:
 private:
   struct token_hash {
     std::size_t operator()(const session_token &value) const noexcept {
-      const auto mixed = value.high ^
-                         (value.low + 0x9e3779b97f4a7c15ull +
-                          (value.high << 6) + (value.high >> 2));
+      const auto mixed = value.high ^ (value.low + 0x9e3779b97f4a7c15ull +
+                                       (value.high << 6) + (value.high >> 2));
       return static_cast<std::size_t>(mixed ^ (mixed >> 32));
     }
   };
@@ -1066,13 +1391,13 @@ private:
   public:
     restore_collector(const session_registry &owner) : owner_(owner) {}
 
-    ntl::status add(std::uint32_t id, std::uint64_t sequence,
-                    const void *data, std::size_t size) noexcept override {
+    ntl::status add(std::uint32_t id, std::uint64_t sequence, const void *data,
+                    std::size_t size, bool terminal = false) noexcept override {
       try {
         const auto limit = owner_.notification_limits_.find(id);
         if (limit == owner_.notification_limits_.end() || sequence == 0 ||
-            sequence == (std::numeric_limits<std::uint64_t>::max)() ||
-            !data || size == 0 ||
+            sequence == (std::numeric_limits<std::uint64_t>::max)() || !data ||
+            size == 0 ||
             size > limit->second + reliable_notification_overhead ||
             records_.size() >= owner_.max_per_session_)
           return ntl::status{STATUS_INVALID_PARAMETER};
@@ -1086,11 +1411,47 @@ private:
         client_session::queued_notification record;
         record.id = id;
         record.sequence = sequence;
+        const auto priority = owner_.notification_priorities_.find(id);
+        if (priority == owner_.notification_priorities_.end())
+          return ntl::status{STATUS_INVALID_PARAMETER};
+        record.priority = priority->second;
+        record.terminal = terminal;
         const auto *first = static_cast<const unsigned char *>(data);
         record.bytes.assign(first, first + size);
         records_.push_back(std::move(record));
         return ntl::status::ok();
       } catch (const std::exception &) {
+        return ntl::status{STATUS_INSUFFICIENT_RESOURCES};
+      }
+    }
+
+    ntl::status validate_and_sort() noexcept {
+      try {
+        std::sort(records_.begin(), records_.end(),
+                  [](const client_session::queued_notification &left,
+                     const client_session::queued_notification &right) {
+                    return left.sequence < right.sequence;
+                  });
+
+        std::unordered_set<std::uint32_t> terminated_streams;
+        std::uint64_t previous_sequence = 0;
+        for (const auto &record : records_) {
+          if (record.sequence == previous_sequence)
+            return ntl::status{STATUS_OBJECT_NAME_COLLISION};
+          previous_sequence = record.sequence;
+
+          const bool is_stream =
+              owner_.stream_ids_.find(record.id) != owner_.stream_ids_.end();
+          if (record.terminal && !is_stream)
+            return ntl::status{STATUS_INVALID_PARAMETER};
+          if (is_stream &&
+              terminated_streams.find(record.id) != terminated_streams.end())
+            return ntl::status{STATUS_INVALID_PARAMETER};
+          if (record.terminal)
+            terminated_streams.insert(record.id);
+        }
+        return ntl::status::ok();
+      } catch (const std::bad_alloc &) {
         return ntl::status{STATUS_INSUFFICIENT_RESOURCES};
       }
     }
@@ -1119,24 +1480,126 @@ private:
   using record_iterator =
       std::deque<client_session::queued_notification>::iterator;
 
-  static record_iterator find_record(client_session &session,
-                                     std::uint32_t id,
+  static record_iterator find_record(client_session &session, std::uint32_t id,
                                      std::uint64_t sequence) {
-    return std::find_if(
-        session.notifications_.begin(), session.notifications_.end(),
-        [=](const client_session::queued_notification &record) {
-          return record.id == id && record.sequence == sequence;
-        });
+    return std::find_if(session.notifications_.begin(),
+                        session.notifications_.end(),
+                        [=](const client_session::queued_notification &record) {
+                          return record.id == id && record.sequence == sequence;
+                        });
   }
 
   static record_iterator first_ready_record(client_session &session,
-                                             std::uint32_t id) {
-    return std::find_if(
-        session.notifications_.begin(), session.notifications_.end(),
-        [=](const client_session::queued_notification &record) {
-          return record.id == id && !record.in_flight &&
-                 !record.acknowledging;
-        });
+                                            std::uint32_t id) {
+    return std::find_if(session.notifications_.begin(),
+                        session.notifications_.end(),
+                        [=](const client_session::queued_notification &record) {
+                          return record.id == id && record.ready &&
+                                 !record.in_flight && !record.acknowledging;
+                        });
+  }
+
+  void validate_batch_request_locked(const client_session &session,
+                                     std::uint32_t id,
+                                     std::uint32_t max_records,
+                                     std::uint32_t max_bytes) const {
+    if (max_records == 0 || max_records > maximum_batch_records ||
+        max_bytes < sizeof(detail::reliable_batch_header) +
+                        sizeof(detail::reliable_batch_record_header) + 1)
+      throw ntl::exception(STATUS_INVALID_PARAMETER,
+                           "Invalid reliable batch receive limits");
+    if (id == 0) {
+      if (session.subscriptions_.empty())
+        throw ntl::exception(
+            STATUS_INVALID_DEVICE_STATE,
+            "Reliable batch receive requires at least one subscription");
+      return;
+    }
+    if (notification_limits_.find(id) == notification_limits_.end())
+      throw ntl::exception(STATUS_INVALID_DEVICE_REQUEST,
+                           "Unknown reliable batch channel ID");
+    const auto batch_limit = notification_batch_limits_.find(id);
+    if (batch_limit == notification_batch_limits_.end() ||
+        max_records > batch_limit->second)
+      throw ntl::exception(STATUS_INVALID_PARAMETER,
+                           "Reliable batch record limit exceeds its channel");
+    if (session.subscriptions_.find(id) == session.subscriptions_.end())
+      throw ntl::exception(STATUS_INVALID_DEVICE_STATE,
+                           "Reliable batch channel is not subscribed");
+  }
+
+  void build_batch_locked(client_session &session, std::uint32_t id,
+                          std::uint32_t max_records, std::uint32_t max_bytes,
+                          std::vector<unsigned char> &bytes,
+                          std::vector<record_iterator> &selected) const {
+    bytes.clear();
+    selected.clear();
+    bytes.resize(sizeof(detail::reliable_batch_header));
+
+    while (selected.size() < max_records) {
+      auto best = session.notifications_.end();
+      for (auto current = session.notifications_.begin();
+           current != session.notifications_.end(); ++current) {
+        if ((id != 0 && current->id != id) || !current->ready ||
+            current->in_flight || current->acknowledging ||
+            std::find(selected.begin(), selected.end(), current) !=
+                selected.end())
+          continue;
+        if (best == session.notifications_.end() ||
+            (id == 0 && (static_cast<std::uint32_t>(current->priority) >
+                             static_cast<std::uint32_t>(best->priority) ||
+                         (current->priority == best->priority &&
+                          current->sequence < best->sequence))) ||
+            (id != 0 && current->sequence < best->sequence))
+          best = current;
+      }
+      if (best == session.notifications_.end())
+        break;
+
+      const auto required =
+          sizeof(detail::reliable_batch_record_header) + best->bytes.size();
+      if (required > max_bytes - bytes.size()) {
+        if (selected.empty())
+          throw ntl::exception(
+              STATUS_BUFFER_TOO_SMALL,
+              "Reliable batch limit cannot hold the next delivery");
+        break;
+      }
+
+      const detail::reliable_batch_record_header header{
+          best->id, static_cast<std::uint32_t>(best->bytes.size()),
+          best->sequence};
+      const auto offset = bytes.size();
+      bytes.resize(offset + required);
+      std::memcpy(bytes.data() + offset, &header, sizeof(header));
+      std::memcpy(bytes.data() + offset + sizeof(header), best->bytes.data(),
+                  best->bytes.size());
+      selected.push_back(best);
+    }
+
+    if (selected.empty()) {
+      bytes.clear();
+      return;
+    }
+    const detail::reliable_batch_header header{
+        detail::reliable_batch_version,
+        static_cast<std::uint32_t>(selected.size())};
+    std::memcpy(bytes.data(), &header, sizeof(header));
+  }
+
+  static void release_stream_publisher_locked(client_session &session,
+                                              std::uint32_t id) noexcept {
+    const auto stream = session.streams_.find(id);
+    if (stream == session.streams_.end() ||
+        stream->second.active_publishers == 0)
+      return;
+    --stream->second.active_publishers;
+    if (stream->second.active_publishers != 0 ||
+        stream->second.phase != client_session::stream_phase::terminal_queued)
+      return;
+    auto terminal = find_record(session, id, stream->second.terminal_sequence);
+    if (terminal != session.notifications_.end() && terminal->terminal)
+      terminal->ready = true;
   }
 
   std::shared_ptr<client_session>
@@ -1150,8 +1613,7 @@ private:
     return found->second;
   }
 
-  std::shared_ptr<client_session>
-  find_or_restore(const session_token &token) {
+  std::shared_ptr<client_session> find_or_restore(const session_token &token) {
     {
       fast_mutex_guard guard(lock_);
       const auto found = by_token_.find(token);
@@ -1169,6 +1631,10 @@ private:
     if (!restored.is_ok())
       throw ntl::exception(restored,
                            "NTL RPC persisted session restore failed");
+    const auto validated = collector.validate_and_sort();
+    if (!validated.is_ok())
+      throw ntl::exception(validated,
+                           "NTL RPC persisted session records are invalid");
 
     fast_mutex_guard guard(lock_);
     const auto existing = by_token_.find(token);
@@ -1185,6 +1651,15 @@ private:
     for (auto &record : collector.records_) {
       next_sequence = (std::max)(next_sequence, record.sequence + 1);
       session->subscriptions_.insert(record.id);
+      if (stream_ids_.find(record.id) != stream_ids_.end()) {
+        const auto inserted = session->streams_.emplace(
+            record.id, client_session::stream_state{});
+        if (record.terminal) {
+          inserted.first->second.phase =
+              client_session::stream_phase::terminal_queued;
+          inserted.first->second.terminal_sequence = record.sequence;
+        }
+      }
       session->notifications_.push_back(std::move(record));
       ++queued_total_;
     }
@@ -1282,6 +1757,9 @@ private:
   std::unordered_map<std::uint64_t, std::shared_ptr<client_session>> by_id_;
   std::unordered_map<PFILE_OBJECT, std::shared_ptr<client_session>> by_file_;
   std::unordered_map<std::uint32_t, std::size_t> notification_limits_;
+  std::unordered_map<std::uint32_t, delivery_priority> notification_priorities_;
+  std::unordered_map<std::uint32_t, std::size_t> notification_batch_limits_;
+  std::unordered_set<std::uint32_t> stream_ids_;
   std::shared_ptr<notification_store> store_;
   session_policy on_open_;
   session_policy on_resume_;
@@ -1402,29 +1880,37 @@ void invoke_method(Callback &callback,
                    const ntl::device_control::in_buffer &input,
                    ntl::device_control::out_buffer &output,
                    const call_context &context) {
-  using is_void =
-      typename std::is_void<typename Method::return_type>::type;
+  using is_void = typename std::is_void<typename Method::return_type>::type;
   invoke_method<Method>(callback, input, output, context, is_void{});
+}
+
+template <typename Callback, typename Upload>
+void invoke_stream_upload(Callback &callback, const call_context &context,
+                          const Upload &upload) {
+  std::tuple<const Upload &> arguments(upload);
+  invoke_callback(0, callback, context, arguments, std::index_sequence<0>{});
 }
 
 class notification_queue {
 public:
-  enum class wait_mode : ULONG_PTR { live = 0, reliable = 1 };
+  enum class wait_mode : ULONG_PTR {
+    live = 0,
+    reliable = 1,
+    reliable_batch = 2,
+  };
 
   notification_queue() = default;
   notification_queue(const notification_queue &) = delete;
   notification_queue &operator=(const notification_queue &) = delete;
 
-  void initialize(EX_RUNDOWN_REF &rundown,
-                  std::uint32_t max_pending) {
+  void initialize(EX_RUNDOWN_REF &rundown, std::uint32_t max_pending) {
     rundown_ = &rundown;
     max_pending_ = static_cast<LONG>(max_pending);
     InitializeListHead(&requests_);
     KeInitializeSpinLock(&lock_);
     const NTSTATUS status = IoCsqInitializeEx(
-        &csq_, &notification_queue::insert,
-        &notification_queue::remove, &notification_queue::peek,
-        &notification_queue::acquire_lock,
+        &csq_, &notification_queue::insert, &notification_queue::remove,
+        &notification_queue::peek, &notification_queue::acquire_lock,
         &notification_queue::release_lock,
         &notification_queue::complete_cancelled);
     if (!NT_SUCCESS(status))
@@ -1468,10 +1954,9 @@ public:
     match.match_mode = true;
     PIRP request = IoCsqRemoveNextIrp(&csq_, &match);
     if (!request) {
-      return ntl::status{
-          InterlockedCompareExchange(&accepting_, 0, 0) != 0
-              ? STATUS_NOT_FOUND
-              : STATUS_DELETE_PENDING};
+      return ntl::status{InterlockedCompareExchange(&accepting_, 0, 0) != 0
+                             ? STATUS_NOT_FOUND
+                             : STATUS_DELETE_PENDING};
     }
 
     NTSTATUS status = STATUS_SUCCESS;
@@ -1497,8 +1982,7 @@ public:
       }
     }
 
-    complete_owned(request, status,
-                   NT_SUCCESS(status) ? information : 0);
+    complete_owned(request, status, NT_SUCCESS(status) ? information : 0);
     return ntl::status{status};
   }
 
@@ -1514,8 +1998,7 @@ public:
     return IoCsqRemoveNextIrp(&csq_, &match);
   }
 
-  void complete(PIRP request, NTSTATUS status,
-                ULONG_PTR information) noexcept {
+  void complete(PIRP request, NTSTATUS status, ULONG_PTR information) noexcept {
     complete_owned(request, status, information);
   }
 
@@ -1580,8 +2063,7 @@ private:
         static_cast<const notification_insert_context *>(insert_context);
     if (!context || InterlockedCompareExchange(&self->accepting_, 0, 0) == 0)
       return STATUS_DELETE_PENDING;
-    if (InterlockedCompareExchange(&self->pending_, 0, 0) >=
-        self->max_pending_)
+    if (InterlockedCompareExchange(&self->pending_, 0, 0) >= self->max_pending_)
       return STATUS_DEVICE_BUSY;
     if (!ExAcquireRundownProtection(self->rundown_))
       return STATUS_DELETE_PENDING;
@@ -1605,11 +2087,10 @@ private:
     auto *const self = from_csq(csq);
     const auto *const match =
         static_cast<const notification_match *>(peek_context);
-    PLIST_ENTRY entry = request ? request->Tail.Overlay.ListEntry.Flink
-                                : self->requests_.Flink;
+    PLIST_ENTRY entry =
+        request ? request->Tail.Overlay.ListEntry.Flink : self->requests_.Flink;
     while (entry != &self->requests_) {
-      PIRP candidate =
-          CONTAINING_RECORD(entry, IRP, Tail.Overlay.ListEntry);
+      PIRP candidate = CONTAINING_RECORD(entry, IRP, Tail.Overlay.ListEntry);
       entry = entry->Flink;
       if (!match)
         return candidate;
@@ -1643,15 +2124,13 @@ private:
     KeReleaseSpinLock(&from_csq(csq)->lock_, irql);
   }
 
-  static void NTAPI complete_cancelled(PIO_CSQ csq,
-                                       PIRP request) noexcept {
+  static void NTAPI complete_cancelled(PIO_CSQ csq, PIRP request) noexcept {
     from_csq(csq)->complete_owned(request, STATUS_CANCELLED, 0);
   }
 
   void complete_owned(PIRP request, NTSTATUS status,
                       ULONG_PTR information) noexcept {
-    const bool owns_rundown =
-        request->Tail.Overlay.DriverContext[1] == this;
+    const bool owns_rundown = request->Tail.Overlay.DriverContext[1] == this;
     request->Tail.Overlay.DriverContext[0] = nullptr;
     request->Tail.Overlay.DriverContext[1] = nullptr;
     request->Tail.Overlay.DriverContext[2] = nullptr;
@@ -1675,14 +2154,12 @@ private:
 
 class dispatch_table {
 public:
-  using dispatch_handler =
-      std::function<void(const ntl::device_control::in_buffer &,
-                         ntl::device_control::out_buffer &,
-                         const call_context &)>;
+  using dispatch_handler = std::function<void(
+      const ntl::device_control::in_buffer &, ntl::device_control::out_buffer &,
+      const call_context &)>;
 
-  dispatch_table(std::uint32_t contract_version,
-                 std::uint64_t capabilities, bool asynchronous,
-                 std::uint32_t max_pending_calls,
+  dispatch_table(std::uint32_t contract_version, std::uint64_t capabilities,
+                 bool asynchronous, std::uint32_t max_pending_calls,
                  std::uint32_t max_pending_notifications,
                  std::uint32_t max_sessions,
                  std::uint32_t max_reliable_per_session,
@@ -1691,10 +2168,11 @@ public:
       : contract_version_(contract_version), capabilities_(capabilities),
         asynchronous_(asynchronous),
         max_pending_calls_(static_cast<LONG>(max_pending_calls)),
-        sessions_(max_sessions, max_reliable_per_session,
-                  max_reliable_total, session_retention_ms) {
+        sessions_(max_sessions, max_reliable_per_session, max_reliable_total,
+                  session_retention_ms) {
     ExInitializeRundownProtection(&rundown_);
     ExInitializeFastMutex(&registration_lock_);
+    ExInitializeFastMutex(&delivery_lock_);
     notifications_.initialize(rundown_, max_pending_notifications);
   }
 
@@ -1747,8 +2225,8 @@ private:
 
   private:
     static void NTAPI cancel(PDEVICE_OBJECT, PIRP request) noexcept {
-      auto *const self = static_cast<pending_call *>(
-          request->Tail.Overlay.DriverContext[0]);
+      auto *const self =
+          static_cast<pending_call *>(request->Tail.Overlay.DriverContext[0]);
       if (self)
         InterlockedExchange(&self->cancel_requested_, 1);
       IoReleaseCancelSpinLock(request->CancelIrql);
@@ -1830,8 +2308,7 @@ public:
   dispatch_table(const dispatch_table &) = delete;
   dispatch_table &operator=(const dispatch_table &) = delete;
 
-  template <typename Method, typename Callback>
-  void add(Callback &&callback) {
+  template <typename Method, typename Callback> void add(Callback &&callback) {
     fast_mutex_guard guard(registration_lock_);
     if (InterlockedCompareExchange(&started_, 0, 0) != 0 ||
         InterlockedCompareExchange(&stopping_, 0, 0) != 0)
@@ -1845,11 +2322,10 @@ public:
 
     using callback_type = typename std::decay<Callback>::type;
     handlers_.emplace(
-        code,
-        [fn = callback_type(std::forward<Callback>(callback))](
-            const ntl::device_control::in_buffer &input,
-            ntl::device_control::out_buffer &output,
-            const call_context &context) mutable {
+        code, [fn = callback_type(std::forward<Callback>(callback))](
+                  const ntl::device_control::in_buffer &input,
+                  ntl::device_control::out_buffer &output,
+                  const call_context &context) mutable {
           detail::invoke_method<Method>(fn, input, output, context);
         });
     method_ids_.push_back(static_cast<std::uint32_t>(Method::id()));
@@ -1871,21 +2347,137 @@ public:
     using authorization_type = typename std::decay<Authorization>::type;
     using callback_type = typename std::decay<Callback>::type;
     handlers_.emplace(
-        code,
-        [authorize = authorization_type(
-             std::forward<Authorization>(authorization)),
-         fn = callback_type(std::forward<Callback>(callback))](
-            const ntl::device_control::in_buffer &input,
-            ntl::device_control::out_buffer &output,
-            const call_context &context) mutable {
-          const NTSTATUS authorization = detail::authorization_status(
-              authorize(context));
+        code, [authorize = authorization_type(
+                   std::forward<Authorization>(authorization)),
+               fn = callback_type(std::forward<Callback>(callback))](
+                  const ntl::device_control::in_buffer &input,
+                  ntl::device_control::out_buffer &output,
+                  const call_context &context) mutable {
+          const NTSTATUS authorization =
+              detail::authorization_status(authorize(context));
           if (!NT_SUCCESS(authorization))
             throw ntl::exception(authorization,
                                  "NTL RPC method authorization denied");
           detail::invoke_method<Method>(fn, input, output, context);
         });
     method_ids_.push_back(static_cast<std::uint32_t>(Method::id()));
+  }
+
+  template <typename Stream, typename Callback>
+  void add_stream(Callback &&callback) {
+    using upload_method = typename Stream::upload_method_type;
+    using download_notification = typename Stream::download_notification_type;
+    using callback_type = typename std::decay<Callback>::type;
+
+    fast_mutex_guard guard(registration_lock_);
+    if (InterlockedCompareExchange(&started_, 0, 0) != 0 ||
+        InterlockedCompareExchange(&stopping_, 0, 0) != 0)
+      throw ntl::exception(STATUS_INVALID_DEVICE_STATE,
+                           "NTL RPC streams are immutable after start");
+    if (handlers_.find(upload_method::code()) != handlers_.end() ||
+        notification_limits_.find(download_notification::id()) !=
+            notification_limits_.end())
+      throw ntl::exception(STATUS_OBJECT_NAME_COLLISION,
+                           "Duplicate NTL RPC stream ID");
+
+    handlers_.emplace(
+        upload_method::code(),
+        [this, fn = callback_type(std::forward<Callback>(callback))](
+            const ntl::device_control::in_buffer &input,
+            ntl::device_control::out_buffer &output,
+            const call_context &context) mutable {
+          auto invoke_batch = [this,
+                               &fn](const call_context &call,
+                                    const typename Stream::upload_batch_type
+                                        &batch) {
+            if (batch.values().empty() ||
+                batch.values().size() > Stream::max_batch_records())
+              throw ntl::exception(
+                  STATUS_INVALID_PARAMETER,
+                  "NTL RPC stream upload batch record count is invalid");
+            for (const auto &upload : batch.values()) {
+              call.throw_if_cancelled();
+              if (!sessions_.is_stream_writable(call.session(), Stream::id()))
+                throw ntl::exception(
+                    STATUS_INVALID_DEVICE_STATE,
+                    "NTL RPC stream is not writable for this client session");
+              detail::invoke_stream_upload(fn, call, upload);
+            }
+          };
+          detail::invoke_method<upload_method>(invoke_batch, input, output,
+                                               context);
+        });
+    method_ids_.push_back(static_cast<std::uint32_t>(upload_method::id()));
+    notification_limits_.emplace(download_notification::id(),
+                                 download_notification::response_size());
+    sessions_.register_stream(download_notification::id(),
+                              download_notification::response_size(),
+                              download_notification::priority(),
+                              download_notification::max_batch_records());
+    streams_registered_ = true;
+  }
+
+  template <typename Stream, typename Authorization, typename Callback>
+  void add_stream_authorized(Authorization &&authorization,
+                             Callback &&callback) {
+    using upload_method = typename Stream::upload_method_type;
+    using download_notification = typename Stream::download_notification_type;
+    using authorization_type = typename std::decay<Authorization>::type;
+    using callback_type = typename std::decay<Callback>::type;
+
+    fast_mutex_guard guard(registration_lock_);
+    if (InterlockedCompareExchange(&started_, 0, 0) != 0 ||
+        InterlockedCompareExchange(&stopping_, 0, 0) != 0)
+      throw ntl::exception(STATUS_INVALID_DEVICE_STATE,
+                           "NTL RPC streams are immutable after start");
+    if (handlers_.find(upload_method::code()) != handlers_.end() ||
+        notification_limits_.find(download_notification::id()) !=
+            notification_limits_.end())
+      throw ntl::exception(STATUS_OBJECT_NAME_COLLISION,
+                           "Duplicate NTL RPC stream ID");
+
+    handlers_.emplace(
+        upload_method::code(),
+        [this,
+         authorize =
+             authorization_type(std::forward<Authorization>(authorization)),
+         fn = callback_type(std::forward<Callback>(callback))](
+            const ntl::device_control::in_buffer &input,
+            ntl::device_control::out_buffer &output,
+            const call_context &context) mutable {
+          const NTSTATUS status =
+              detail::authorization_status(authorize(context));
+          if (!NT_SUCCESS(status))
+            throw ntl::exception(status, "NTL RPC stream authorization denied");
+          auto invoke_batch = [this,
+                               &fn](const call_context &call,
+                                    const typename Stream::upload_batch_type
+                                        &batch) {
+            if (batch.values().empty() ||
+                batch.values().size() > Stream::max_batch_records())
+              throw ntl::exception(
+                  STATUS_INVALID_PARAMETER,
+                  "NTL RPC stream upload batch record count is invalid");
+            for (const auto &upload : batch.values()) {
+              call.throw_if_cancelled();
+              if (!sessions_.is_stream_writable(call.session(), Stream::id()))
+                throw ntl::exception(
+                    STATUS_INVALID_DEVICE_STATE,
+                    "NTL RPC stream is not writable for this client session");
+              detail::invoke_stream_upload(fn, call, upload);
+            }
+          };
+          detail::invoke_method<upload_method>(invoke_batch, input, output,
+                                               context);
+        });
+    method_ids_.push_back(static_cast<std::uint32_t>(upload_method::id()));
+    notification_limits_.emplace(download_notification::id(),
+                                 download_notification::response_size());
+    sessions_.register_stream(download_notification::id(),
+                              download_notification::response_size(),
+                              download_notification::priority(),
+                              download_notification::max_batch_records());
+    streams_registered_ = true;
   }
 
   void set_notification_store(std::shared_ptr<notification_store> store) {
@@ -1941,26 +2533,25 @@ public:
     if (InterlockedCompareExchange(&started_, 0, 0) != 0)
       throw ntl::exception(STATUS_INVALID_DEVICE_STATE,
                            "NTL RPC session hooks are immutable after start");
-    sessions_.on_close(
-        [fn = callback_type(std::forward<Callback>(callback))](
-            client_session &session) mutable { fn(session); });
+    sessions_.on_close([fn = callback_type(std::forward<Callback>(callback))](
+                           client_session &session) mutable { fn(session); });
   }
 
   template <typename Notification> void add_notification() {
     fast_mutex_guard guard(registration_lock_);
     if (InterlockedCompareExchange(&started_, 0, 0) != 0 ||
         InterlockedCompareExchange(&stopping_, 0, 0) != 0)
-      throw ntl::exception(
-          STATUS_INVALID_DEVICE_STATE,
-          "NTL RPC notifications are immutable after start");
+      throw ntl::exception(STATUS_INVALID_DEVICE_STATE,
+                           "NTL RPC notifications are immutable after start");
 
     const auto inserted = notification_limits_.emplace(
         Notification::id(), Notification::response_size());
     if (!inserted.second)
       throw ntl::exception(STATUS_OBJECT_NAME_COLLISION,
                            "Duplicate NTL RPC notification ID");
-    sessions_.register_notification(Notification::id(),
-                                    Notification::response_size());
+    sessions_.register_notification(
+        Notification::id(), Notification::response_size(),
+        Notification::priority(), Notification::max_batch_records());
   }
 
   void start() {
@@ -1974,11 +2565,14 @@ public:
         (asynchronous_ ? transport_features::asynchronous_calls : 0) |
         (!notification_limits_.empty()
              ? transport_features::kernel_notifications |
-                   transport_features::reliable_notifications
+                   transport_features::reliable_notifications |
+                   transport_features::bounded_batches |
+                   transport_features::priority_delivery
              : 0) |
         (sessions_.has_store()
              ? transport_features::notification_persistence_hooks
-             : 0);
+             : 0) |
+        (streams_registered_ ? transport_features::typed_streams : 0);
     contract_ = contract_info(current_protocol_version, contract_version_,
                               features, capabilities_, method_ids_);
     notifications_.start();
@@ -1994,8 +2588,8 @@ public:
   }
 
   void dispatch(const ntl::device_control::code &code,
-                 const ntl::device_control::in_buffer &input,
-                 ntl::device_control::out_buffer &output) {
+                const ntl::device_control::in_buffer &input,
+                ntl::device_control::out_buffer &output) {
     if (KeGetCurrentIrql() != PASSIVE_LEVEL)
       throw ntl::exception(STATUS_INVALID_DEVICE_STATE,
                            "NTL RPC dispatch requires PASSIVE_LEVEL");
@@ -2003,8 +2597,7 @@ public:
       throw ntl::exception(STATUS_DEVICE_NOT_READY,
                            "NTL RPC server has not started");
     if (!ExAcquireRundownProtection(&rundown_))
-      throw ntl::exception(STATUS_DELETE_PENDING,
-                           "NTL RPC server is stopping");
+      throw ntl::exception(STATUS_DELETE_PENDING, "NTL RPC server is stopping");
     rundown_guard guard(rundown_);
 
     if (code.value == control_code(contract_query_id)) {
@@ -2017,8 +2610,7 @@ public:
       throw ntl::exception(STATUS_INVALID_DEVICE_REQUEST,
                            "Unknown NTL RPC method ID");
     captured_caller_context caller(nullptr);
-    const auto context =
-        call_context_access::make(nullptr, &stopping_, caller);
+    const auto context = call_context_access::make(nullptr, &stopping_, caller);
     found->second(input, output, context);
   }
 
@@ -2041,14 +2633,42 @@ public:
                              "NTL RPC server is stopping");
       rundown_guard notification_rundown(rundown_);
 
-      if (input.size ==
-          sizeof(detail::reliable_notification_wait_request)) {
+      if (input.size == sizeof(detail::reliable_batch_wait_request)) {
+        const auto wait = input.as<detail::reliable_batch_wait_request>();
+        if (!wait || wait->reserved != 0 || wait->max_records == 0 ||
+            wait->max_records > maximum_batch_records ||
+            wait->max_bytes != output.size)
+          throw ntl::exception(STATUS_INVALID_PARAMETER,
+                               "Invalid reliable batch receive request");
+
+        auto pending = ntl::device_control::dispatch_result::complete;
+        std::uint64_t session_id = 0;
+        {
+          fast_mutex_guard delivery_guard(delivery_lock_);
+          const auto result = sessions_.receive_batch(
+              request.stack_location()->FileObject, wait->id, wait->max_records,
+              wait->max_bytes, output);
+          if (result == session_registry::receive_result::completed)
+            return ntl::device_control::dispatch_result::complete;
+
+          session_id = sessions_.enqueue_batch_receive(
+              request.stack_location()->FileObject, wait->id, wait->max_records,
+              wait->max_bytes, [&] {
+                pending = notifications_.enqueue(
+                    request, wait->id,
+                    notification_queue::wait_mode::reliable_batch);
+              });
+        }
+        try_complete_reliable_batch(session_id, wait->id);
+        return pending;
+      }
+
+      if (input.size == sizeof(detail::reliable_notification_wait_request)) {
         const auto wait =
             input.as<detail::reliable_notification_wait_request>();
         if (!wait || wait->reserved != 0)
-          throw ntl::exception(
-              STATUS_INVALID_PARAMETER,
-              "Invalid reliable notification receive request");
+          throw ntl::exception(STATUS_INVALID_PARAMETER,
+                               "Invalid reliable notification receive request");
         const auto registered = notification_limits_.find(wait->id);
         if (registered == notification_limits_.end())
           throw ntl::exception(STATUS_INVALID_DEVICE_REQUEST,
@@ -2059,31 +2679,32 @@ public:
               STATUS_BUFFER_TOO_SMALL,
               "Reliable notification receive buffer is too small");
 
-        const auto result = sessions_.receive(
-            request.stack_location()->FileObject, wait->id, output);
-        if (result == session_registry::receive_result::completed)
-          return ntl::device_control::dispatch_result::complete;
-
         auto pending = ntl::device_control::dispatch_result::complete;
-        const auto session_id = sessions_.enqueue_receive(
-            request.stack_location()->FileObject, wait->id, [&] {
-              pending = notifications_.enqueue(
-                  request, wait->id,
-                  notification_queue::wait_mode::reliable);
-            });
+        std::uint64_t session_id = 0;
+        {
+          fast_mutex_guard delivery_guard(delivery_lock_);
+          const auto result = sessions_.receive(
+              request.stack_location()->FileObject, wait->id, output);
+          if (result == session_registry::receive_result::completed)
+            return ntl::device_control::dispatch_result::complete;
+
+          session_id = sessions_.enqueue_receive(
+              request.stack_location()->FileObject, wait->id, [&] {
+                pending = notifications_.enqueue(
+                    request, wait->id, notification_queue::wait_mode::reliable);
+              });
+        }
         try_complete_reliable(session_id, wait->id);
         return pending;
       }
 
       if (input.size != sizeof(detail::notification_wait_request))
-        throw ntl::exception(
-            STATUS_INVALID_PARAMETER,
-            "Invalid NTL RPC notification receive request");
+        throw ntl::exception(STATUS_INVALID_PARAMETER,
+                             "Invalid NTL RPC notification receive request");
       const auto wait = input.as<detail::notification_wait_request>();
       if (!wait)
-        throw ntl::exception(
-            STATUS_INVALID_PARAMETER,
-            "Missing NTL RPC notification receive request");
+        throw ntl::exception(STATUS_INVALID_PARAMETER,
+                             "Missing NTL RPC notification receive request");
       const auto registered = notification_limits_.find(wait->id);
       if (registered == notification_limits_.end())
         throw ntl::exception(STATUS_INVALID_DEVICE_REQUEST,
@@ -2096,8 +2717,7 @@ public:
     }
 
     if (!ExAcquireRundownProtection(&rundown_))
-      throw ntl::exception(STATUS_DELETE_PENDING,
-                           "NTL RPC server is stopping");
+      throw ntl::exception(STATUS_DELETE_PENDING, "NTL RPC server is stopping");
     rundown_guard guard(rundown_);
 
     if (code.value == control_code(contract_query_id)) {
@@ -2122,8 +2742,7 @@ public:
         throw ntl::exception(STATUS_DELETE_PENDING,
                              "NTL RPC client session is closing");
       const auto context =
-          call_context_access::make(nullptr, &stopping_, caller,
-                                    session.get());
+          call_context_access::make(nullptr, &stopping_, caller, session.get());
       found->second(input, output, context);
       return ntl::device_control::dispatch_result::complete;
     }
@@ -2171,9 +2790,9 @@ public:
   }
 
   template <typename Notification>
-  ntl::status try_notify(
-      std::uint64_t session_id,
-      const typename Notification::payload_type &payload) noexcept {
+  ntl::status
+  try_notify(std::uint64_t session_id,
+             const typename Notification::payload_type &payload) noexcept {
     if (InterlockedCompareExchange(&started_, 0, 0) == 0)
       return ntl::status{STATUS_DEVICE_NOT_READY};
     if (!ExAcquireRundownProtection(&rundown_))
@@ -2186,15 +2805,43 @@ public:
       return ntl::status{STATUS_INVALID_DEVICE_REQUEST};
     const auto status =
         sessions_.template publish<Notification>(session_id, payload);
-    if (status.is_ok())
+    if (status.is_ok()) {
+      try_complete_reliable_batch(session_id, Notification::id());
+      try_complete_reliable_batch(session_id, 0);
       try_complete_reliable(session_id, Notification::id());
+    }
+    return status;
+  }
+
+  template <typename Notification>
+  ntl::status
+  try_stream_record(std::uint64_t session_id,
+                    const typename Notification::payload_type &payload,
+                    bool terminal) noexcept {
+    if (InterlockedCompareExchange(&started_, 0, 0) == 0)
+      return ntl::status{STATUS_DEVICE_NOT_READY};
+    if (!ExAcquireRundownProtection(&rundown_))
+      return ntl::status{STATUS_DELETE_PENDING};
+    rundown_guard guard(rundown_);
+
+    const auto registered = notification_limits_.find(Notification::id());
+    if (registered == notification_limits_.end() ||
+        registered->second != Notification::response_size())
+      return ntl::status{STATUS_INVALID_DEVICE_REQUEST};
+    const auto status = sessions_.template publish_stream<Notification>(
+        session_id, payload, terminal);
+    if (status.is_ok()) {
+      try_complete_reliable_batch(session_id, Notification::id());
+      try_complete_reliable_batch(session_id, 0);
+      try_complete_reliable(session_id, Notification::id());
+    }
     return status;
   }
 
 private:
-  void dispatch_session_control(
-      ntl::irp &request, const ntl::device_control::in_buffer &input,
-      ntl::device_control::out_buffer &output) {
+  void dispatch_session_control(ntl::irp &request,
+                                const ntl::device_control::in_buffer &input,
+                                ntl::device_control::out_buffer &output) {
     if (KeGetCurrentIrql() != PASSIVE_LEVEL)
       throw ntl::exception(STATUS_INVALID_DEVICE_STATE,
                            "NTL RPC session control requires PASSIVE_LEVEL");
@@ -2208,8 +2855,7 @@ private:
                            "Unsupported NTL RPC session control request");
 
     if (!ExAcquireRundownProtection(&rundown_))
-      throw ntl::exception(STATUS_DELETE_PENDING,
-                           "NTL RPC server is stopping");
+      throw ntl::exception(STATUS_DELETE_PENDING, "NTL RPC server is stopping");
     rundown_guard rundown(rundown_);
 
     const auto file_object = request.stack_location()->FileObject;
@@ -2260,8 +2906,8 @@ private:
           command->sequence != 0)
         throw ntl::exception(STATUS_INVALID_PARAMETER,
                              "Invalid NTL RPC session subscribe request");
-      sessions_.subscribe(file_object, command->token,
-                          command->notification_id, true);
+      sessions_.subscribe(file_object, command->token, command->notification_id,
+                          true);
       output.clear();
       return;
     case detail::session_control_operation::unsubscribe:
@@ -2269,10 +2915,12 @@ private:
           command->sequence != 0)
         throw ntl::exception(STATUS_INVALID_PARAMETER,
                              "Invalid NTL RPC session unsubscribe request");
-      sessions_.subscribe(file_object, command->token,
-                           command->notification_id, false);
+      sessions_.subscribe(file_object, command->token, command->notification_id,
+                          false);
       notifications_.cancel(file_object, command->notification_id,
                             notification_queue::wait_mode::reliable);
+      notifications_.cancel(file_object, command->notification_id,
+                            notification_queue::wait_mode::reliable_batch);
       output.clear();
       return;
     case detail::session_control_operation::acknowledge:
@@ -2292,6 +2940,7 @@ private:
 
   void try_complete_reliable(std::uint64_t session_id,
                              std::uint32_t notification_id) noexcept {
+    fast_mutex_guard delivery_guard(delivery_lock_);
     const auto file_object = sessions_.connected_file(session_id);
     if (!file_object)
       return;
@@ -2304,8 +2953,7 @@ private:
       return;
 
     PIRP request = notifications_.remove_next(
-        notification_id, file_object,
-        notification_queue::wait_mode::reliable);
+        notification_id, file_object, notification_queue::wait_mode::reliable);
     if (!request || current_file != file_object) {
       sessions_.release_delivery(session_id, notification_id, sequence);
       if (request)
@@ -2319,6 +2967,74 @@ private:
     if (!request->AssociatedIrp.SystemBuffer || capacity < bytes.size()) {
       sessions_.release_delivery(session_id, notification_id, sequence);
       notifications_.complete(request, STATUS_BUFFER_TOO_SMALL, 0);
+      return;
+    }
+    std::memcpy(request->AssociatedIrp.SystemBuffer, bytes.data(),
+                bytes.size());
+    notifications_.complete(request, STATUS_SUCCESS,
+                            static_cast<ULONG_PTR>(bytes.size()));
+  }
+
+  void try_complete_reliable_batch(std::uint64_t session_id,
+                                   std::uint32_t notification_id) noexcept {
+    fast_mutex_guard delivery_guard(delivery_lock_);
+    const auto file_object = sessions_.connected_file(session_id);
+    if (!file_object ||
+        !sessions_.has_ready_delivery(session_id, notification_id))
+      return;
+
+    PIRP request = notifications_.remove_next(
+        notification_id, file_object,
+        notification_queue::wait_mode::reliable_batch);
+    if (!request)
+      return;
+
+    const auto stack = IoGetCurrentIrpStackLocation(request);
+    const auto input_size = static_cast<std::size_t>(
+        stack->Parameters.DeviceIoControl.InputBufferLength);
+    const auto capacity = static_cast<std::size_t>(
+        stack->Parameters.DeviceIoControl.OutputBufferLength);
+    if (!request->AssociatedIrp.SystemBuffer ||
+        input_size != sizeof(detail::reliable_batch_wait_request)) {
+      notifications_.complete(request, STATUS_INVALID_PARAMETER, 0);
+      return;
+    }
+    detail::reliable_batch_wait_request wait{};
+    std::memcpy(&wait, request->AssociatedIrp.SystemBuffer, sizeof(wait));
+    if (wait.id != notification_id || wait.reserved != 0 ||
+        wait.max_bytes != capacity) {
+      notifications_.complete(request, STATUS_INVALID_PARAMETER, 0);
+      return;
+    }
+
+    std::vector<unsigned char> bytes;
+    std::vector<session_registry::batch_delivery_key> keys;
+    PFILE_OBJECT current_file = nullptr;
+    try {
+      if (!sessions_.take_batch_for_delivery(session_id, notification_id,
+                                             wait.max_records, wait.max_bytes,
+                                             bytes, current_file, keys)) {
+        notifications_.complete(request, STATUS_DEVICE_BUSY, 0);
+        return;
+      }
+    } catch (const std::bad_alloc &) {
+      notifications_.complete(request, STATUS_INSUFFICIENT_RESOURCES, 0);
+      return;
+    } catch (const ntl::exception &error) {
+      notifications_.complete(request, error.get_status(), 0);
+      return;
+    } catch (const std::exception &) {
+      notifications_.complete(request, STATUS_INVALID_PARAMETER, 0);
+      return;
+    }
+
+    if (current_file != file_object || capacity < bytes.size()) {
+      sessions_.release_batch_delivery(session_id, keys);
+      notifications_.complete(request,
+                              current_file != file_object
+                                  ? STATUS_CANCELLED
+                                  : STATUS_BUFFER_TOO_SMALL,
+                              0);
       return;
     }
     std::memcpy(request->AssociatedIrp.SystemBuffer, bytes.data(),
@@ -2366,6 +3082,7 @@ private:
   contract_info contract_;
   EX_RUNDOWN_REF rundown_{};
   FAST_MUTEX registration_lock_{};
+  FAST_MUTEX delivery_lock_{};
   notification_queue notifications_;
   std::uint32_t contract_version_;
   std::uint64_t capabilities_;
@@ -2373,6 +3090,7 @@ private:
   LONG max_pending_calls_;
   session_registry sessions_;
   volatile LONG pending_calls_ = 0;
+  bool streams_registered_ = false;
   volatile LONG started_ = 0;
   volatile LONG stopping_ = 0;
 };
@@ -2395,14 +3113,12 @@ public:
       : dispatch_(std::make_shared<detail::dispatch_table>(
             server_opts.contract_version(), server_opts.capabilities(),
             server_opts.is_asynchronous(), server_opts.max_pending_calls(),
-            server_opts.max_pending_notifications(),
-            server_opts.max_sessions(),
+            server_opts.max_pending_notifications(), server_opts.max_sessions(),
             server_opts.max_reliable_notifications_per_session(),
             server_opts.max_reliable_notifications(),
             server_opts.session_retention_ms())) {
     ntl::device_options options;
-    options
-        .name(server_opts.name())
+    options.name(server_opts.name())
         .type(static_cast<ntl::device_type>(ntl::rpc::device_type))
         .security_descriptor(server_opts.security_descriptor(),
                              server_opts.class_guid());
@@ -2410,8 +3126,7 @@ public:
     const auto dispatch = dispatch_;
     device_
         ->on_pending_device_control(
-            [dispatch](ntl::irp &request,
-                       const ntl::device_control::code &code,
+            [dispatch](ntl::irp &request, const ntl::device_control::code &code,
                        const ntl::device_control::in_buffer &input,
                        ntl::device_control::out_buffer &output) {
               return dispatch->dispatch_pending(request, code, input, output);
@@ -2425,7 +3140,8 @@ public:
   server(server &&) = delete;
   server &operator=(server &&) = delete;
 
-  /** @brief Stops new calls and drains active callbacks before member teardown. */
+  /** @brief Stops new calls and drains active callbacks before member teardown.
+   */
   ~server() { stop(); }
 
   /**
@@ -2461,6 +3177,49 @@ public:
         "ntl::rpc::server::on_authorized requires an ntl::rpc::method");
     (void)method;
     dispatch_->template add_authorized<Method>(
+        std::forward<Authorization>(authorization),
+        std::forward<Callback>(callback));
+    return *this;
+  }
+
+  /**
+   * @brief Registers both directions of a session-bound typed stream.
+
+   * * @param channel Shared stream descriptor.
+   * @param callback Upload
+   * callback accepting `call_context` and one chunk.
+   * @note The client must
+   * create a session and open the stream before use.
+   * Upload calls use the
+   * endpoint pending-call limit. Download records use the
+   * reliable
+   * per-session and endpoint queue limits.
+   */
+  template <typename Stream, typename Callback>
+  server &on_stream(const Stream &channel, Callback &&callback) {
+    static_assert(is_stream<Stream>::value,
+                  "server::on_stream requires an ntl::rpc::stream");
+    (void)channel;
+    dispatch_->template add_stream<Stream>(std::forward<Callback>(callback));
+    return *this;
+  }
+
+  /**
+   * @brief Registers a stream whose uploads require per-stream
+   * authorization.
+   * @note Authorization runs before upload deserialization
+   * and callback
+   * execution, using the original requester's captured
+   * security context.
+   */
+  template <typename Stream, typename Authorization, typename Callback>
+  server &on_stream_authorized(const Stream &channel,
+                               Authorization &&authorization,
+                               Callback &&callback) {
+    static_assert(is_stream<Stream>::value,
+                  "server::on_stream_authorized requires an ntl::rpc::stream");
+    (void)channel;
+    dispatch_->template add_stream_authorized<Stream>(
         std::forward<Authorization>(authorization),
         std::forward<Callback>(callback));
     return *this;
@@ -2534,6 +3293,44 @@ public:
     return dispatch_->template try_notify<Notification>(session_id, payload);
   }
 
+  /** @brief Queues one typed driver-to-app stream chunk. */
+  template <typename Stream>
+  ntl::status try_write(std::uint64_t session_id, const Stream &,
+                        const typename Stream::download_type &value) noexcept {
+    static_assert(is_stream<Stream>::value,
+                  "server::try_write requires an ntl::rpc::stream");
+    using notification_type = typename Stream::download_notification_type;
+    using record_type = typename Stream::record_type;
+    return dispatch_->template try_stream_record<notification_type>(
+        session_id, record_type::chunk(value), false);
+  }
+
+  /** @brief Queues a successful terminal record for one typed stream. */
+  template <typename Stream>
+  ntl::status try_complete(std::uint64_t session_id, const Stream &) noexcept {
+    static_assert(is_stream<Stream>::value,
+                  "server::try_complete requires an ntl::rpc::stream");
+    using notification_type = typename Stream::download_notification_type;
+    using record_type = typename Stream::record_type;
+    return dispatch_->template try_stream_record<notification_type>(
+        session_id, record_type::completed(), true);
+  }
+
+  /** @brief Queues a failed terminal record for one typed stream. */
+  template <typename Stream>
+  ntl::status try_fail(std::uint64_t session_id, const Stream &,
+                       NTSTATUS status) noexcept {
+    static_assert(is_stream<Stream>::value,
+                  "server::try_fail requires an ntl::rpc::stream");
+    if (NT_SUCCESS(status))
+      return ntl::status{STATUS_INVALID_PARAMETER};
+    using notification_type = typename Stream::download_notification_type;
+    using record_type = typename Stream::record_type;
+    return dispatch_->template try_stream_record<notification_type>(
+        session_id, record_type::failed(static_cast<std::int32_t>(status)),
+        true);
+  }
+
   /** @brief Publishes the immutable method table for request dispatch. */
   server &start() {
     dispatch_->start();
@@ -2551,6 +3348,91 @@ private:
   std::shared_ptr<ntl::device<void>> device_;
 };
 
+/**
+ * @brief Callback-scoped server facade for one typed bidirectional stream.
+
+ * * @tparam Stream Shared `ntl::rpc::stream` descriptor type.
+ * @note This
+ * object and every reference returned by it are valid only while
+ * the upload
+ * callback is running. Do not retain them in asynchronous work.
+ */
+template <typename Stream> class stream_context {
+  static_assert(is_stream<Stream>::value,
+                "stream_context requires an ntl::rpc::stream");
+
+public:
+  using upload_type = typename Stream::upload_type;
+  using download_type = typename Stream::download_type;
+
+  /**
+   * @brief Binds a server and the current upload call to one stream.
+   *
+   * @throws ntl::exception when the upload has no active client session.
+   */
+  stream_context(server &owner, const call_context &call)
+      : owner_(&owner), call_(&call) {
+    if (!call_->session())
+      throw ntl::exception(STATUS_INVALID_HANDLE,
+                           "NTL RPC stream upload has no client session");
+  }
+
+  /** @brief Returns the original upload call context. */
+  const call_context &call() const noexcept { return *call_; }
+
+  /** @brief Returns the callback-scoped client session. */
+  client_session &session() const noexcept { return *call_->session(); }
+
+  /** @brief Returns the endpoint-local client session ID. */
+  std::uint64_t session_id() const noexcept { return session().id(); }
+
+  /** @brief Reports whether this upload was cooperatively cancelled. */
+  bool cancelled() const noexcept { return call_->cancelled(); }
+
+  /** @brief Throws `STATUS_CANCELLED` after a cooperative cancellation. */
+  void throw_if_cancelled() const { call_->throw_if_cancelled(); }
+
+  /** @brief Tries to queue one typed driver-to-app stream chunk. */
+  ntl::status try_write(const download_type &value) noexcept {
+    return owner_->try_write(session_id(), Stream{}, value);
+  }
+
+  /** @brief Queues one typed chunk or throws the returned NTSTATUS. */
+  void write(const download_type &value) {
+    const auto result = try_write(value);
+    if (!result.is_ok())
+      throw ntl::exception(result, "NTL RPC stream chunk was not queued");
+  }
+
+  /** @brief Tries to queue a successful terminal stream record. */
+  ntl::status try_complete() noexcept {
+    return owner_->try_complete(session_id(), Stream{});
+  }
+
+  /** @brief Completes the stream or throws the returned NTSTATUS. */
+  void complete() {
+    const auto result = try_complete();
+    if (!result.is_ok())
+      throw ntl::exception(result, "NTL RPC stream completion was not queued");
+  }
+
+  /** @brief Tries to queue a failed terminal stream record. */
+  ntl::status try_fail(NTSTATUS status) noexcept {
+    return owner_->try_fail(session_id(), Stream{}, status);
+  }
+
+  /** @brief Fails the stream or throws the returned NTSTATUS. */
+  void fail(NTSTATUS status) {
+    const auto result = try_fail(status);
+    if (!result.is_ok())
+      throw ntl::exception(result, "NTL RPC stream failure was not queued");
+  }
+
+private:
+  server *owner_;
+  const call_context *call_;
+};
+
 /** @brief Creates a shared owner for an NTL RPC server. */
 inline std::shared_ptr<server> make_server(ntl::driver &driver,
                                            const std::wstring &rpc_name) {
@@ -2566,418 +3448,477 @@ inline std::shared_ptr<server> make_server(ntl::driver &driver,
 } // namespace rpc
 } // namespace ntl
 
-#define NTL_RPC_BEGIN_CONTRACT(_rpc_name_, _version_, _capabilities_)         \
+#define NTL_RPC_BEGIN_CONTRACT(_rpc_name_, _version_, _capabilities_)          \
   namespace _rpc_name_ {                                                       \
-  constexpr std::uint32_t rpc_contract_version = (_version_);                 \
-  constexpr std::uint64_t rpc_capabilities = (_capabilities_);                \
-  inline std::shared_ptr<ntl::rpc::server>                                    \
-  make_server(ntl::driver &driver,                                            \
-              ntl::rpc::server_options rpc_options =                          \
-                  ntl::rpc::server_options(L#_rpc_name_)) {                   \
+  constexpr std::uint32_t rpc_contract_version = (_version_);                  \
+  constexpr std::uint64_t rpc_capabilities = (_capabilities_);                 \
+  inline std::shared_ptr<ntl::rpc::server>                                     \
+  make_server(ntl::driver &driver,                                             \
+              ntl::rpc::server_options rpc_options =                           \
+                  ntl::rpc::server_options(L#_rpc_name_)) {                    \
     rpc_options.contract_version(rpc_contract_version)                         \
         .capabilities(rpc_capabilities);                                       \
     auto rpc_server = ntl::rpc::make_server(driver, rpc_options);
 
-#define NTL_RPC_BEGIN(_rpc_name_)                                              \
-  NTL_RPC_BEGIN_CONTRACT(_rpc_name_, 1, 0)
+#define NTL_RPC_BEGIN(_rpc_name_) NTL_RPC_BEGIN_CONTRACT(_rpc_name_, 1, 0)
 
 #define NTL_RPC_END(_rpc_name_)                                                \
   return rpc_server;                                                           \
   }                                                                            \
-  inline std::shared_ptr<ntl::rpc::server>                                    \
-  init(ntl::driver &driver,                                                   \
-       ntl::rpc::server_options rpc_options =                                 \
-           ntl::rpc::server_options(L#_rpc_name_)) {                          \
-    auto rpc_server = ::_rpc_name_::make_server(                              \
-        driver, std::move(rpc_options));                                       \
+  inline std::shared_ptr<ntl::rpc::server> init(                               \
+      ntl::driver &driver, ntl::rpc::server_options rpc_options =              \
+                               ntl::rpc::server_options(L#_rpc_name_)) {       \
+    auto rpc_server =                                                          \
+        ::_rpc_name_::make_server(driver, std::move(rpc_options));             \
     rpc_server->start();                                                       \
     return rpc_server;                                                         \
   }                                                                            \
   }
 
-#define NTL_ADD_CALLBACK_ID_0(_rpc_name_, _id_, _ret_, _name_, ...)           \
+// The server expansion registers the upload callback and supplies a
+// callback-scoped stream facade. The matching client expansion creates the
+// descriptor and opening helper from this same declaration.
+#define NTL_ADD_STREAM_ID(_rpc_name_, _id_, _name_, _upload_type_,             \
+                          _upload_name_, _download_type_, _stream_name_, ...)  \
   {                                                                            \
-    using rpc_method_type = ntl::rpc::make_method_t<(_id_), _ret_>;           \
+    using rpc_stream_type =                                                    \
+        ntl::rpc::stream<(_id_), _upload_type_, _download_type_>;              \
+    constexpr rpc_stream_type rpc_stream{};                                    \
+    auto *const rpc_stream_server = rpc_server.get();                          \
+    rpc_server->on_stream(                                                     \
+        rpc_stream,                                                            \
+        [rpc_stream_server](const ntl::rpc::call_context &rpc_stream_call,     \
+                            const _upload_type_ &_upload_name_) {              \
+          ntl::rpc::stream_context<rpc_stream_type> _stream_name_(             \
+              *rpc_stream_server, rpc_stream_call);                            \
+          __VA_ARGS__                                                          \
+        });                                                                    \
+  }
+
+#define NTL_ADD_STREAM(_rpc_name_, _name_, _upload_type_, _upload_name_,       \
+                       _download_type_, _stream_name_, ...)                    \
+  NTL_ADD_STREAM_ID(_rpc_name_, NTL_RPC_DETAIL_LINE_ID, _name_, _upload_type_, \
+                    _upload_name_, _download_type_, _stream_name_,             \
+                    __VA_ARGS__)
+
+// Authorization executes before upload deserialization. The matching client
+// macro exposes the same stream facade without embedding the kernel policy.
+#define NTL_ADD_AUTHORIZED_STREAM_ID(                                          \
+    _rpc_name_, _id_, _name_, _authorization_, _upload_type_, _upload_name_,   \
+    _download_type_, _stream_name_, ...)                                       \
+  {                                                                            \
+    using rpc_stream_type =                                                    \
+        ntl::rpc::stream<(_id_), _upload_type_, _download_type_>;              \
+    constexpr rpc_stream_type rpc_stream{};                                    \
+    auto *const rpc_stream_server = rpc_server.get();                          \
+    rpc_server->on_stream_authorized(                                          \
+        rpc_stream, (_authorization_),                                         \
+        [rpc_stream_server](const ntl::rpc::call_context &rpc_stream_call,     \
+                            const _upload_type_ &_upload_name_) {              \
+          ntl::rpc::stream_context<rpc_stream_type> _stream_name_(             \
+              *rpc_stream_server, rpc_stream_call);                            \
+          __VA_ARGS__                                                          \
+        });                                                                    \
+  }
+
+#define NTL_ADD_AUTHORIZED_STREAM(_rpc_name_, _name_, _authorization_,         \
+                                  _upload_type_, _upload_name_,                \
+                                  _download_type_, _stream_name_, ...)         \
+  NTL_ADD_AUTHORIZED_STREAM_ID(_rpc_name_, NTL_RPC_DETAIL_LINE_ID, _name_,     \
+                               _authorization_, _upload_type_, _upload_name_,  \
+                               _download_type_, _stream_name_, __VA_ARGS__)
+
+#define NTL_ADD_CALLBACK_ID_0(_rpc_name_, _id_, _ret_, _name_, ...)            \
+  {                                                                            \
+    using rpc_method_type = ntl::rpc::make_method_t<(_id_), _ret_>;            \
     constexpr rpc_method_type rpc_method{};                                    \
     rpc_server->on(rpc_method,                                                 \
-                   []() -> ntl::rpc::response_type_t<_ret_> __VA_ARGS__);      \
+                   []()->ntl::rpc::response_type_t<_ret_> __VA_ARGS__);        \
   }
 
-#define NTL_ADD_CALLBACK_0(_rpc_name_, _ret_, _name_, ...)                    \
-  NTL_ADD_CALLBACK_ID_0(_rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_,    \
+#define NTL_ADD_CALLBACK_0(_rpc_name_, _ret_, _name_, ...)                     \
+  NTL_ADD_CALLBACK_ID_0(_rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_,     \
                         __VA_ARGS__)
 
-#define NTL_ADD_CALLBACK_ID_1(_rpc_name_, _id_, _ret_, _name_, _arg0_type_,   \
-                              _arg0_name_, ...)                               \
+#define NTL_ADD_CALLBACK_ID_1(_rpc_name_, _id_, _ret_, _name_, _arg0_type_,    \
+                              _arg0_name_, ...)                                \
   {                                                                            \
     using rpc_method_type =                                                    \
-        ntl::rpc::make_method_t<(_id_), _ret_, _arg0_type_>;                  \
+        ntl::rpc::make_method_t<(_id_), _ret_, _arg0_type_>;                   \
     constexpr rpc_method_type rpc_method{};                                    \
-    rpc_server->on(                                                            \
-        rpc_method,                                                            \
-        [](_arg0_type_ _arg0_name_)                                            \
-            -> ntl::rpc::response_type_t<_ret_> __VA_ARGS__);                 \
+    rpc_server->on(rpc_method, [](_arg0_type_ _arg0_name_)                     \
+                                   ->ntl::rpc::response_type_t<_ret_>          \
+                                       __VA_ARGS__);                           \
   }
 
-#define NTL_ADD_CALLBACK_1(_rpc_name_, _ret_, _name_, _arg0_type_,            \
-                           _arg0_name_, ...)                                  \
-  NTL_ADD_CALLBACK_ID_1(_rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_,    \
+#define NTL_ADD_CALLBACK_1(_rpc_name_, _ret_, _name_, _arg0_type_,             \
+                           _arg0_name_, ...)                                   \
+  NTL_ADD_CALLBACK_ID_1(_rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_,     \
                         _arg0_type_, _arg0_name_, __VA_ARGS__)
 
-#define NTL_ADD_CALLBACK_ID_2(_rpc_name_, _id_, _ret_, _name_, _arg0_type_,   \
-                              _arg0_name_, _arg1_type_, _arg1_name_, ...)     \
+#define NTL_ADD_CALLBACK_ID_2(_rpc_name_, _id_, _ret_, _name_, _arg0_type_,    \
+                              _arg0_name_, _arg1_type_, _arg1_name_, ...)      \
   {                                                                            \
-    using rpc_method_type = ntl::rpc::make_method_t<                          \
-        (_id_), _ret_, _arg0_type_, _arg1_type_>;                             \
+    using rpc_method_type =                                                    \
+        ntl::rpc::make_method_t<(_id_), _ret_, _arg0_type_, _arg1_type_>;      \
     constexpr rpc_method_type rpc_method{};                                    \
-    rpc_server->on(                                                            \
-        rpc_method,                                                            \
-        [](_arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_)                  \
-            -> ntl::rpc::response_type_t<_ret_> __VA_ARGS__);                 \
+    rpc_server->on(rpc_method,                                                 \
+                   [](_arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_)        \
+                       ->ntl::rpc::response_type_t<_ret_>                      \
+                           __VA_ARGS__);                                       \
   }
 
-#define NTL_ADD_CALLBACK_2(_rpc_name_, _ret_, _name_, _arg0_type_,            \
-                           _arg0_name_, _arg1_type_, _arg1_name_, ...)        \
-  NTL_ADD_CALLBACK_ID_2(_rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_,    \
+#define NTL_ADD_CALLBACK_2(_rpc_name_, _ret_, _name_, _arg0_type_,             \
+                           _arg0_name_, _arg1_type_, _arg1_name_, ...)         \
+  NTL_ADD_CALLBACK_ID_2(_rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_,     \
                         _arg0_type_, _arg0_name_, _arg1_type_, _arg1_name_,    \
                         __VA_ARGS__)
 
-#define NTL_ADD_CALLBACK_ID_3(_rpc_name_, _id_, _ret_, _name_, _arg0_type_,   \
-                              _arg0_name_, _arg1_type_, _arg1_name_,          \
-                              _arg2_type_, _arg2_name_, ...)                  \
+#define NTL_ADD_CALLBACK_ID_3(_rpc_name_, _id_, _ret_, _name_, _arg0_type_,    \
+                              _arg0_name_, _arg1_type_, _arg1_name_,           \
+                              _arg2_type_, _arg2_name_, ...)                   \
   {                                                                            \
-    using rpc_method_type = ntl::rpc::make_method_t<                          \
-        (_id_), _ret_, _arg0_type_, _arg1_type_, _arg2_type_>;                \
+    using rpc_method_type =                                                    \
+        ntl::rpc::make_method_t<(_id_), _ret_, _arg0_type_, _arg1_type_,       \
+                                _arg2_type_>;                                  \
     constexpr rpc_method_type rpc_method{};                                    \
-    rpc_server->on(                                                            \
-        rpc_method,                                                            \
-        [](_arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_,                  \
-           _arg2_type_ _arg2_name_)                                            \
-            -> ntl::rpc::response_type_t<_ret_> __VA_ARGS__);                 \
+    rpc_server->on(rpc_method,                                                 \
+                   [](_arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_,        \
+                      _arg2_type_ _arg2_name_)                                 \
+                       ->ntl::rpc::response_type_t<_ret_>                      \
+                           __VA_ARGS__);                                       \
   }
 
-#define NTL_ADD_CALLBACK_3(_rpc_name_, _ret_, _name_, _arg0_type_,            \
-                           _arg0_name_, _arg1_type_, _arg1_name_,             \
-                           _arg2_type_, _arg2_name_, ...)                     \
-  NTL_ADD_CALLBACK_ID_3(_rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_,    \
+#define NTL_ADD_CALLBACK_3(_rpc_name_, _ret_, _name_, _arg0_type_,             \
+                           _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_, \
+                           _arg2_name_, ...)                                   \
+  NTL_ADD_CALLBACK_ID_3(_rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_,     \
                         _arg0_type_, _arg0_name_, _arg1_type_, _arg1_name_,    \
                         _arg2_type_, _arg2_name_, __VA_ARGS__)
 
-#define NTL_ADD_CALLBACK_ID_4(_rpc_name_, _id_, _ret_, _name_, _arg0_type_,   \
-                              _arg0_name_, _arg1_type_, _arg1_name_,          \
-                              _arg2_type_, _arg2_name_, _arg3_type_,          \
-                              _arg3_name_, ...)                               \
+#define NTL_ADD_CALLBACK_ID_4(                                                 \
+    _rpc_name_, _id_, _ret_, _name_, _arg0_type_, _arg0_name_, _arg1_type_,    \
+    _arg1_name_, _arg2_type_, _arg2_name_, _arg3_type_, _arg3_name_, ...)      \
   {                                                                            \
-    using rpc_method_type = ntl::rpc::make_method_t<                          \
-        (_id_), _ret_, _arg0_type_, _arg1_type_, _arg2_type_, _arg3_type_>;   \
+    using rpc_method_type =                                                    \
+        ntl::rpc::make_method_t<(_id_), _ret_, _arg0_type_, _arg1_type_,       \
+                                _arg2_type_, _arg3_type_>;                     \
     constexpr rpc_method_type rpc_method{};                                    \
-    rpc_server->on(                                                            \
-        rpc_method,                                                            \
-        [](_arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_,                  \
-           _arg2_type_ _arg2_name_, _arg3_type_ _arg3_name_)                  \
-            -> ntl::rpc::response_type_t<_ret_> __VA_ARGS__);                 \
+    rpc_server->on(rpc_method,                                                 \
+                   [](_arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_,        \
+                      _arg2_type_ _arg2_name_, _arg3_type_ _arg3_name_)        \
+                       ->ntl::rpc::response_type_t<_ret_>                      \
+                           __VA_ARGS__);                                       \
   }
 
-#define NTL_ADD_CALLBACK_4(_rpc_name_, _ret_, _name_, _arg0_type_,            \
-                           _arg0_name_, _arg1_type_, _arg1_name_,             \
-                           _arg2_type_, _arg2_name_, _arg3_type_,             \
-                           _arg3_name_, ...)                                  \
-  NTL_ADD_CALLBACK_ID_4(_rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_,    \
+#define NTL_ADD_CALLBACK_4(_rpc_name_, _ret_, _name_, _arg0_type_,             \
+                           _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_, \
+                           _arg2_name_, _arg3_type_, _arg3_name_, ...)         \
+  NTL_ADD_CALLBACK_ID_4(_rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_,     \
                         _arg0_type_, _arg0_name_, _arg1_type_, _arg1_name_,    \
                         _arg2_type_, _arg2_name_, _arg3_type_, _arg3_name_,    \
                         __VA_ARGS__)
 
-#define NTL_ADD_CALLBACK_ID_5(_rpc_name_, _id_, _ret_, _name_, _arg0_type_,   \
-                              _arg0_name_, _arg1_type_, _arg1_name_,          \
-                              _arg2_type_, _arg2_name_, _arg3_type_,          \
-                              _arg3_name_, _arg4_type_, _arg4_name_, ...)     \
+#define NTL_ADD_CALLBACK_ID_5(_rpc_name_, _id_, _ret_, _name_, _arg0_type_,    \
+                              _arg0_name_, _arg1_type_, _arg1_name_,           \
+                              _arg2_type_, _arg2_name_, _arg3_type_,           \
+                              _arg3_name_, _arg4_type_, _arg4_name_, ...)      \
   {                                                                            \
-    using rpc_method_type = ntl::rpc::make_method_t<                          \
-        (_id_), _ret_, _arg0_type_, _arg1_type_, _arg2_type_, _arg3_type_,    \
-        _arg4_type_>;                                                          \
+    using rpc_method_type =                                                    \
+        ntl::rpc::make_method_t<(_id_), _ret_, _arg0_type_, _arg1_type_,       \
+                                _arg2_type_, _arg3_type_, _arg4_type_>;        \
     constexpr rpc_method_type rpc_method{};                                    \
-    rpc_server->on(                                                            \
-        rpc_method,                                                            \
-        [](_arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_,                  \
-           _arg2_type_ _arg2_name_, _arg3_type_ _arg3_name_,                  \
-           _arg4_type_ _arg4_name_)                                            \
-            -> ntl::rpc::response_type_t<_ret_> __VA_ARGS__);                 \
+    rpc_server->on(rpc_method,                                                 \
+                   [](_arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_,        \
+                      _arg2_type_ _arg2_name_, _arg3_type_ _arg3_name_,        \
+                      _arg4_type_ _arg4_name_)                                 \
+                       ->ntl::rpc::response_type_t<_ret_>                      \
+                           __VA_ARGS__);                                       \
   }
 
-#define NTL_ADD_CALLBACK_5(_rpc_name_, _ret_, _name_, _arg0_type_,            \
-                           _arg0_name_, _arg1_type_, _arg1_name_,             \
-                           _arg2_type_, _arg2_name_, _arg3_type_,             \
-                           _arg3_name_, _arg4_type_, _arg4_name_, ...)        \
-  NTL_ADD_CALLBACK_ID_5(_rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_,    \
+#define NTL_ADD_CALLBACK_5(_rpc_name_, _ret_, _name_, _arg0_type_,             \
+                           _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_, \
+                           _arg2_name_, _arg3_type_, _arg3_name_, _arg4_type_, \
+                           _arg4_name_, ...)                                   \
+  NTL_ADD_CALLBACK_ID_5(_rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_,     \
                         _arg0_type_, _arg0_name_, _arg1_type_, _arg1_name_,    \
                         _arg2_type_, _arg2_name_, _arg3_type_, _arg3_name_,    \
                         _arg4_type_, _arg4_name_, __VA_ARGS__)
 
-#define NTL_ADD_CALLBACK_CONTEXT_ID_0(_rpc_name_, _id_, _ret_, _name_,        \
-                                      _context_name_, ...)                    \
+#define NTL_ADD_CALLBACK_CONTEXT_ID_0(_rpc_name_, _id_, _ret_, _name_,         \
+                                      _context_name_, ...)                     \
   {                                                                            \
-    using rpc_method_type = ntl::rpc::make_method_t<(_id_), _ret_>;           \
+    using rpc_method_type = ntl::rpc::make_method_t<(_id_), _ret_>;            \
     constexpr rpc_method_type rpc_method{};                                    \
-    rpc_server->on(                                                            \
-        rpc_method,                                                            \
-        [](ntl::rpc::call_context _context_name_)                              \
-            -> ntl::rpc::response_type_t<_ret_> __VA_ARGS__);                 \
+    rpc_server->on(rpc_method, [](ntl::rpc::call_context _context_name_)       \
+                                   ->ntl::rpc::response_type_t<_ret_>          \
+                                       __VA_ARGS__);                           \
   }
 
-#define NTL_ADD_CALLBACK_CONTEXT_0(_rpc_name_, _ret_, _name_,                 \
-                                   _context_name_, ...)                       \
-  NTL_ADD_CALLBACK_CONTEXT_ID_0(_rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_,    \
+#define NTL_ADD_CALLBACK_CONTEXT_0(_rpc_name_, _ret_, _name_, _context_name_,  \
+                                   ...)                                        \
+  NTL_ADD_CALLBACK_CONTEXT_ID_0(_rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_,     \
                                 _name_, _context_name_, __VA_ARGS__)
 
-#define NTL_ADD_CALLBACK_CONTEXT_ID_1(                                        \
-    _rpc_name_, _id_, _ret_, _name_, _context_name_, _arg0_type_,            \
-    _arg0_name_, ...)                                                         \
+#define NTL_ADD_CALLBACK_CONTEXT_ID_1(_rpc_name_, _id_, _ret_, _name_,         \
+                                      _context_name_, _arg0_type_,             \
+                                      _arg0_name_, ...)                        \
   {                                                                            \
     using rpc_method_type =                                                    \
-        ntl::rpc::make_method_t<(_id_), _ret_, _arg0_type_>;                  \
+        ntl::rpc::make_method_t<(_id_), _ret_, _arg0_type_>;                   \
     constexpr rpc_method_type rpc_method{};                                    \
-    rpc_server->on(                                                            \
-        rpc_method,                                                            \
-        [](ntl::rpc::call_context _context_name_, _arg0_type_ _arg0_name_)    \
-            -> ntl::rpc::response_type_t<_ret_> __VA_ARGS__);                 \
+    rpc_server->on(rpc_method, [](ntl::rpc::call_context _context_name_,       \
+                                  _arg0_type_ _arg0_name_)                     \
+                                   ->ntl::rpc::response_type_t<_ret_>          \
+                                       __VA_ARGS__);                           \
   }
 
-#define NTL_ADD_CALLBACK_CONTEXT_1(_rpc_name_, _ret_, _name_,                 \
-                                   _context_name_, _arg0_type_,               \
-                                   _arg0_name_, ...)                          \
-  NTL_ADD_CALLBACK_CONTEXT_ID_1(                                              \
-      _rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_, _context_name_,      \
-      _arg0_type_, _arg0_name_, __VA_ARGS__)
+#define NTL_ADD_CALLBACK_CONTEXT_1(_rpc_name_, _ret_, _name_, _context_name_,  \
+                                   _arg0_type_, _arg0_name_, ...)              \
+  NTL_ADD_CALLBACK_CONTEXT_ID_1(_rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_,     \
+                                _name_, _context_name_, _arg0_type_,           \
+                                _arg0_name_, __VA_ARGS__)
 
-#define NTL_ADD_CALLBACK_CONTEXT_ID_2(                                        \
-    _rpc_name_, _id_, _ret_, _name_, _context_name_, _arg0_type_,            \
-    _arg0_name_, _arg1_type_, _arg1_name_, ...)                              \
+#define NTL_ADD_CALLBACK_CONTEXT_ID_2(                                         \
+    _rpc_name_, _id_, _ret_, _name_, _context_name_, _arg0_type_, _arg0_name_, \
+    _arg1_type_, _arg1_name_, ...)                                             \
   {                                                                            \
-    using rpc_method_type = ntl::rpc::make_method_t<                          \
-        (_id_), _ret_, _arg0_type_, _arg1_type_>;                             \
+    using rpc_method_type =                                                    \
+        ntl::rpc::make_method_t<(_id_), _ret_, _arg0_type_, _arg1_type_>;      \
     constexpr rpc_method_type rpc_method{};                                    \
-    rpc_server->on(                                                            \
-        rpc_method,                                                            \
-        [](ntl::rpc::call_context _context_name_, _arg0_type_ _arg0_name_,    \
-           _arg1_type_ _arg1_name_)                                           \
-            -> ntl::rpc::response_type_t<_ret_> __VA_ARGS__);                 \
+    rpc_server->on(rpc_method,                                                 \
+                   [](ntl::rpc::call_context _context_name_,                   \
+                      _arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_)        \
+                       ->ntl::rpc::response_type_t<_ret_>                      \
+                           __VA_ARGS__);                                       \
   }
 
-#define NTL_ADD_CALLBACK_CONTEXT_2(                                           \
-    _rpc_name_, _ret_, _name_, _context_name_, _arg0_type_, _arg0_name_,     \
-    _arg1_type_, _arg1_name_, ...)                                           \
-  NTL_ADD_CALLBACK_CONTEXT_ID_2(                                              \
-      _rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_, _context_name_,      \
+#define NTL_ADD_CALLBACK_CONTEXT_2(_rpc_name_, _ret_, _name_, _context_name_,  \
+                                   _arg0_type_, _arg0_name_, _arg1_type_,      \
+                                   _arg1_name_, ...)                           \
+  NTL_ADD_CALLBACK_CONTEXT_ID_2(                                               \
+      _rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_, _context_name_,       \
       _arg0_type_, _arg0_name_, _arg1_type_, _arg1_name_, __VA_ARGS__)
 
-#define NTL_ADD_CALLBACK_CONTEXT_ID_3(                                        \
-    _rpc_name_, _id_, _ret_, _name_, _context_name_, _arg0_type_,            \
-    _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_, _arg2_name_, ...)    \
+#define NTL_ADD_CALLBACK_CONTEXT_ID_3(                                         \
+    _rpc_name_, _id_, _ret_, _name_, _context_name_, _arg0_type_, _arg0_name_, \
+    _arg1_type_, _arg1_name_, _arg2_type_, _arg2_name_, ...)                   \
   {                                                                            \
-    using rpc_method_type = ntl::rpc::make_method_t<                          \
-        (_id_), _ret_, _arg0_type_, _arg1_type_, _arg2_type_>;                \
+    using rpc_method_type =                                                    \
+        ntl::rpc::make_method_t<(_id_), _ret_, _arg0_type_, _arg1_type_,       \
+                                _arg2_type_>;                                  \
     constexpr rpc_method_type rpc_method{};                                    \
-    rpc_server->on(                                                            \
-        rpc_method,                                                            \
-        [](ntl::rpc::call_context _context_name_, _arg0_type_ _arg0_name_,    \
-           _arg1_type_ _arg1_name_, _arg2_type_ _arg2_name_)                  \
-            -> ntl::rpc::response_type_t<_ret_> __VA_ARGS__);                 \
+    rpc_server->on(rpc_method,                                                 \
+                   [](ntl::rpc::call_context _context_name_,                   \
+                      _arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_,        \
+                      _arg2_type_ _arg2_name_)                                 \
+                       ->ntl::rpc::response_type_t<_ret_>                      \
+                           __VA_ARGS__);                                       \
   }
 
-#define NTL_ADD_CALLBACK_CONTEXT_3(                                           \
-    _rpc_name_, _ret_, _name_, _context_name_, _arg0_type_, _arg0_name_,     \
-    _arg1_type_, _arg1_name_, _arg2_type_, _arg2_name_, ...)                 \
-  NTL_ADD_CALLBACK_CONTEXT_ID_3(                                              \
-      _rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_, _context_name_,      \
-      _arg0_type_, _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_,       \
-      _arg2_name_, __VA_ARGS__)
+#define NTL_ADD_CALLBACK_CONTEXT_3(_rpc_name_, _ret_, _name_, _context_name_,  \
+                                   _arg0_type_, _arg0_name_, _arg1_type_,      \
+                                   _arg1_name_, _arg2_type_, _arg2_name_, ...) \
+  NTL_ADD_CALLBACK_CONTEXT_ID_3(_rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_,     \
+                                _name_, _context_name_, _arg0_type_,           \
+                                _arg0_name_, _arg1_type_, _arg1_name_,         \
+                                _arg2_type_, _arg2_name_, __VA_ARGS__)
 
-#define NTL_ADD_CALLBACK_CONTEXT_ID_4(                                        \
-    _rpc_name_, _id_, _ret_, _name_, _context_name_, _arg0_type_,            \
-    _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_, _arg2_name_,         \
-    _arg3_type_, _arg3_name_, ...)                                           \
+#define NTL_ADD_CALLBACK_CONTEXT_ID_4(                                         \
+    _rpc_name_, _id_, _ret_, _name_, _context_name_, _arg0_type_, _arg0_name_, \
+    _arg1_type_, _arg1_name_, _arg2_type_, _arg2_name_, _arg3_type_,           \
+    _arg3_name_, ...)                                                          \
   {                                                                            \
-    using rpc_method_type = ntl::rpc::make_method_t<                          \
-        (_id_), _ret_, _arg0_type_, _arg1_type_, _arg2_type_, _arg3_type_>;   \
+    using rpc_method_type =                                                    \
+        ntl::rpc::make_method_t<(_id_), _ret_, _arg0_type_, _arg1_type_,       \
+                                _arg2_type_, _arg3_type_>;                     \
     constexpr rpc_method_type rpc_method{};                                    \
-    rpc_server->on(                                                            \
-        rpc_method,                                                            \
-        [](ntl::rpc::call_context _context_name_, _arg0_type_ _arg0_name_,    \
-           _arg1_type_ _arg1_name_, _arg2_type_ _arg2_name_,                  \
-           _arg3_type_ _arg3_name_)                                           \
-            -> ntl::rpc::response_type_t<_ret_> __VA_ARGS__);                 \
+    rpc_server->on(rpc_method,                                                 \
+                   [](ntl::rpc::call_context _context_name_,                   \
+                      _arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_,        \
+                      _arg2_type_ _arg2_name_, _arg3_type_ _arg3_name_)        \
+                       ->ntl::rpc::response_type_t<_ret_>                      \
+                           __VA_ARGS__);                                       \
   }
 
-#define NTL_ADD_CALLBACK_CONTEXT_4(                                           \
-    _rpc_name_, _ret_, _name_, _context_name_, _arg0_type_, _arg0_name_,     \
-    _arg1_type_, _arg1_name_, _arg2_type_, _arg2_name_, _arg3_type_,         \
-    _arg3_name_, ...)                                                         \
-  NTL_ADD_CALLBACK_CONTEXT_ID_4(                                              \
-      _rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_, _context_name_,      \
-      _arg0_type_, _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_,       \
+#define NTL_ADD_CALLBACK_CONTEXT_4(_rpc_name_, _ret_, _name_, _context_name_,  \
+                                   _arg0_type_, _arg0_name_, _arg1_type_,      \
+                                   _arg1_name_, _arg2_type_, _arg2_name_,      \
+                                   _arg3_type_, _arg3_name_, ...)              \
+  NTL_ADD_CALLBACK_CONTEXT_ID_4(                                               \
+      _rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_, _context_name_,       \
+      _arg0_type_, _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_,         \
       _arg2_name_, _arg3_type_, _arg3_name_, __VA_ARGS__)
 
-#define NTL_ADD_CALLBACK_CONTEXT_ID_5(                                        \
-    _rpc_name_, _id_, _ret_, _name_, _context_name_, _arg0_type_,            \
-    _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_, _arg2_name_,         \
-    _arg3_type_, _arg3_name_, _arg4_type_, _arg4_name_, ...)                 \
+#define NTL_ADD_CALLBACK_CONTEXT_ID_5(                                         \
+    _rpc_name_, _id_, _ret_, _name_, _context_name_, _arg0_type_, _arg0_name_, \
+    _arg1_type_, _arg1_name_, _arg2_type_, _arg2_name_, _arg3_type_,           \
+    _arg3_name_, _arg4_type_, _arg4_name_, ...)                                \
   {                                                                            \
-    using rpc_method_type = ntl::rpc::make_method_t<                          \
-        (_id_), _ret_, _arg0_type_, _arg1_type_, _arg2_type_, _arg3_type_,    \
-        _arg4_type_>;                                                          \
+    using rpc_method_type =                                                    \
+        ntl::rpc::make_method_t<(_id_), _ret_, _arg0_type_, _arg1_type_,       \
+                                _arg2_type_, _arg3_type_, _arg4_type_>;        \
     constexpr rpc_method_type rpc_method{};                                    \
-    rpc_server->on(                                                            \
-        rpc_method,                                                            \
-        [](ntl::rpc::call_context _context_name_, _arg0_type_ _arg0_name_,    \
-           _arg1_type_ _arg1_name_, _arg2_type_ _arg2_name_,                  \
-           _arg3_type_ _arg3_name_, _arg4_type_ _arg4_name_)                  \
-            -> ntl::rpc::response_type_t<_ret_> __VA_ARGS__);                 \
+    rpc_server->on(rpc_method,                                                 \
+                   [](ntl::rpc::call_context _context_name_,                   \
+                      _arg0_type_ _arg0_name_, _arg1_type_ _arg1_name_,        \
+                      _arg2_type_ _arg2_name_, _arg3_type_ _arg3_name_,        \
+                      _arg4_type_ _arg4_name_)                                 \
+                       ->ntl::rpc::response_type_t<_ret_>                      \
+                           __VA_ARGS__);                                       \
   }
 
-#define NTL_ADD_CALLBACK_CONTEXT_5(                                           \
-    _rpc_name_, _ret_, _name_, _context_name_, _arg0_type_, _arg0_name_,     \
-    _arg1_type_, _arg1_name_, _arg2_type_, _arg2_name_, _arg3_type_,         \
-    _arg3_name_, _arg4_type_, _arg4_name_, ...)                              \
-  NTL_ADD_CALLBACK_CONTEXT_ID_5(                                              \
-      _rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_, _context_name_,      \
-      _arg0_type_, _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_,       \
-      _arg2_name_, _arg3_type_, _arg3_name_, _arg4_type_, _arg4_name_,       \
+#define NTL_ADD_CALLBACK_CONTEXT_5(                                            \
+    _rpc_name_, _ret_, _name_, _context_name_, _arg0_type_, _arg0_name_,       \
+    _arg1_type_, _arg1_name_, _arg2_type_, _arg2_name_, _arg3_type_,           \
+    _arg3_name_, _arg4_type_, _arg4_name_, ...)                                \
+  NTL_ADD_CALLBACK_CONTEXT_ID_5(                                               \
+      _rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_, _context_name_,       \
+      _arg0_type_, _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_,         \
+      _arg2_name_, _arg3_type_, _arg3_name_, _arg4_type_, _arg4_name_,         \
       __VA_ARGS__)
 
 // These forms keep authorization ahead of request deserialization while
 // preserving call_context access in the application callback. The client-side
 // definitions discard _authorization_ and generate the ordinary typed stubs.
-#define NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_ID_0(                             \
-    _rpc_name_, _id_, _ret_, _name_, _authorization_, _context_name_, ...)  \
+#define NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_ID_0(                              \
+    _rpc_name_, _id_, _ret_, _name_, _authorization_, _context_name_, ...)     \
   {                                                                            \
-    using rpc_method_type = ntl::rpc::make_method_t<(_id_), _ret_>;           \
+    using rpc_method_type = ntl::rpc::make_method_t<(_id_), _ret_>;            \
     constexpr rpc_method_type rpc_method{};                                    \
-    rpc_server->on_authorized(                                                 \
-        rpc_method, (_authorization_),                                         \
-        [](ntl::rpc::call_context _context_name_)                              \
-            -> ntl::rpc::response_type_t<_ret_> __VA_ARGS__);                 \
+    rpc_server->on_authorized(rpc_method, (_authorization_),                   \
+                              [](ntl::rpc::call_context _context_name_)        \
+                                  ->ntl::rpc::response_type_t<_ret_>           \
+                                      __VA_ARGS__);                            \
   }
 
-#define NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_0(                                \
-    _rpc_name_, _ret_, _name_, _authorization_, _context_name_, ...)         \
-  NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_ID_0(                                   \
-      _rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_, _authorization_,    \
-      _context_name_, __VA_ARGS__)
+#define NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_0(                                 \
+    _rpc_name_, _ret_, _name_, _authorization_, _context_name_, ...)           \
+  NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_ID_0(_rpc_name_, NTL_RPC_DETAIL_LINE_ID, \
+                                           _ret_, _name_, _authorization_,     \
+                                           _context_name_, __VA_ARGS__)
 
-#define NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_ID_1(                             \
-    _rpc_name_, _id_, _ret_, _name_, _authorization_, _context_name_,       \
-    _arg0_type_, _arg0_name_, ...)                                            \
+#define NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_ID_1(                              \
+    _rpc_name_, _id_, _ret_, _name_, _authorization_, _context_name_,          \
+    _arg0_type_, _arg0_name_, ...)                                             \
   {                                                                            \
     using rpc_method_type =                                                    \
-        ntl::rpc::make_method_t<(_id_), _ret_, _arg0_type_>;                  \
+        ntl::rpc::make_method_t<(_id_), _ret_, _arg0_type_>;                   \
     constexpr rpc_method_type rpc_method{};                                    \
     rpc_server->on_authorized(                                                 \
         rpc_method, (_authorization_),                                         \
-        [](ntl::rpc::call_context _context_name_, _arg0_type_ _arg0_name_)    \
-            -> ntl::rpc::response_type_t<_ret_> __VA_ARGS__);                 \
+        [](ntl::rpc::call_context _context_name_, _arg0_type_ _arg0_name_)     \
+            ->ntl::rpc::response_type_t<_ret_>                                 \
+                __VA_ARGS__);                                                  \
   }
 
-#define NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_1(                                \
-    _rpc_name_, _ret_, _name_, _authorization_, _context_name_, _arg0_type_, \
-    _arg0_name_, ...)                                                         \
-  NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_ID_1(                                   \
-      _rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_, _authorization_,    \
+#define NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_1(_rpc_name_, _ret_, _name_,       \
+                                              _authorization_, _context_name_, \
+                                              _arg0_type_, _arg0_name_, ...)   \
+  NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_ID_1(                                    \
+      _rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_, _authorization_,      \
       _context_name_, _arg0_type_, _arg0_name_, __VA_ARGS__)
 
-#define NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_ID_2(                             \
-    _rpc_name_, _id_, _ret_, _name_, _authorization_, _context_name_,       \
-    _arg0_type_, _arg0_name_, _arg1_type_, _arg1_name_, ...)                 \
+#define NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_ID_2(                              \
+    _rpc_name_, _id_, _ret_, _name_, _authorization_, _context_name_,          \
+    _arg0_type_, _arg0_name_, _arg1_type_, _arg1_name_, ...)                   \
   {                                                                            \
-    using rpc_method_type = ntl::rpc::make_method_t<                          \
-        (_id_), _ret_, _arg0_type_, _arg1_type_>;                             \
+    using rpc_method_type =                                                    \
+        ntl::rpc::make_method_t<(_id_), _ret_, _arg0_type_, _arg1_type_>;      \
     constexpr rpc_method_type rpc_method{};                                    \
-    rpc_server->on_authorized(                                                 \
-        rpc_method, (_authorization_),                                         \
-        [](ntl::rpc::call_context _context_name_, _arg0_type_ _arg0_name_,    \
-           _arg1_type_ _arg1_name_)                                           \
-            -> ntl::rpc::response_type_t<_ret_> __VA_ARGS__);                 \
+    rpc_server->on_authorized(rpc_method, (_authorization_),                   \
+                              [](ntl::rpc::call_context _context_name_,        \
+                                 _arg0_type_ _arg0_name_,                      \
+                                 _arg1_type_ _arg1_name_)                      \
+                                  ->ntl::rpc::response_type_t<_ret_>           \
+                                      __VA_ARGS__);                            \
   }
 
-#define NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_2(                                \
-    _rpc_name_, _ret_, _name_, _authorization_, _context_name_, _arg0_type_, \
-    _arg0_name_, _arg1_type_, _arg1_name_, ...)                              \
-  NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_ID_2(                                   \
-      _rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_, _authorization_,    \
-      _context_name_, _arg0_type_, _arg0_name_, _arg1_type_, _arg1_name_,    \
+#define NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_2(                                 \
+    _rpc_name_, _ret_, _name_, _authorization_, _context_name_, _arg0_type_,   \
+    _arg0_name_, _arg1_type_, _arg1_name_, ...)                                \
+  NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_ID_2(                                    \
+      _rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_, _authorization_,      \
+      _context_name_, _arg0_type_, _arg0_name_, _arg1_type_, _arg1_name_,      \
       __VA_ARGS__)
 
-#define NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_ID_3(                             \
-    _rpc_name_, _id_, _ret_, _name_, _authorization_, _context_name_,       \
-    _arg0_type_, _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_,         \
-    _arg2_name_, ...)                                                         \
+#define NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_ID_3(                              \
+    _rpc_name_, _id_, _ret_, _name_, _authorization_, _context_name_,          \
+    _arg0_type_, _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_,           \
+    _arg2_name_, ...)                                                          \
   {                                                                            \
-    using rpc_method_type = ntl::rpc::make_method_t<                          \
-        (_id_), _ret_, _arg0_type_, _arg1_type_, _arg2_type_>;               \
+    using rpc_method_type =                                                    \
+        ntl::rpc::make_method_t<(_id_), _ret_, _arg0_type_, _arg1_type_,       \
+                                _arg2_type_>;                                  \
     constexpr rpc_method_type rpc_method{};                                    \
     rpc_server->on_authorized(                                                 \
         rpc_method, (_authorization_),                                         \
-        [](ntl::rpc::call_context _context_name_, _arg0_type_ _arg0_name_,    \
-           _arg1_type_ _arg1_name_, _arg2_type_ _arg2_name_)                  \
-            -> ntl::rpc::response_type_t<_ret_> __VA_ARGS__);                 \
+        [](ntl::rpc::call_context _context_name_, _arg0_type_ _arg0_name_,     \
+           _arg1_type_ _arg1_name_, _arg2_type_ _arg2_name_)                   \
+            ->ntl::rpc::response_type_t<_ret_>                                 \
+                __VA_ARGS__);                                                  \
   }
 
-#define NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_3(                                \
-    _rpc_name_, _ret_, _name_, _authorization_, _context_name_, _arg0_type_, \
-    _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_, _arg2_name_, ...)    \
-  NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_ID_3(                                   \
-      _rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_, _authorization_,    \
-      _context_name_, _arg0_type_, _arg0_name_, _arg1_type_, _arg1_name_,    \
+#define NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_3(                                 \
+    _rpc_name_, _ret_, _name_, _authorization_, _context_name_, _arg0_type_,   \
+    _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_, _arg2_name_, ...)      \
+  NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_ID_3(                                    \
+      _rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_, _authorization_,      \
+      _context_name_, _arg0_type_, _arg0_name_, _arg1_type_, _arg1_name_,      \
       _arg2_type_, _arg2_name_, __VA_ARGS__)
 
-#define NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_ID_4(                             \
-    _rpc_name_, _id_, _ret_, _name_, _authorization_, _context_name_,       \
-    _arg0_type_, _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_,         \
-    _arg2_name_, _arg3_type_, _arg3_name_, ...)                              \
+#define NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_ID_4(                              \
+    _rpc_name_, _id_, _ret_, _name_, _authorization_, _context_name_,          \
+    _arg0_type_, _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_,           \
+    _arg2_name_, _arg3_type_, _arg3_name_, ...)                                \
   {                                                                            \
-    using rpc_method_type = ntl::rpc::make_method_t<                          \
-        (_id_), _ret_, _arg0_type_, _arg1_type_, _arg2_type_, _arg3_type_>;  \
+    using rpc_method_type =                                                    \
+        ntl::rpc::make_method_t<(_id_), _ret_, _arg0_type_, _arg1_type_,       \
+                                _arg2_type_, _arg3_type_>;                     \
     constexpr rpc_method_type rpc_method{};                                    \
     rpc_server->on_authorized(                                                 \
         rpc_method, (_authorization_),                                         \
-        [](ntl::rpc::call_context _context_name_, _arg0_type_ _arg0_name_,    \
-           _arg1_type_ _arg1_name_, _arg2_type_ _arg2_name_,                  \
-           _arg3_type_ _arg3_name_)                                           \
-            -> ntl::rpc::response_type_t<_ret_> __VA_ARGS__);                 \
+        [](ntl::rpc::call_context _context_name_, _arg0_type_ _arg0_name_,     \
+           _arg1_type_ _arg1_name_, _arg2_type_ _arg2_name_,                   \
+           _arg3_type_ _arg3_name_)                                            \
+            ->ntl::rpc::response_type_t<_ret_>                                 \
+                __VA_ARGS__);                                                  \
   }
 
-#define NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_4(                                \
-    _rpc_name_, _ret_, _name_, _authorization_, _context_name_, _arg0_type_, \
-    _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_, _arg2_name_,         \
-    _arg3_type_, _arg3_name_, ...)                                            \
-  NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_ID_4(                                   \
-      _rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_, _authorization_,    \
-      _context_name_, _arg0_type_, _arg0_name_, _arg1_type_, _arg1_name_,    \
+#define NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_4(                                 \
+    _rpc_name_, _ret_, _name_, _authorization_, _context_name_, _arg0_type_,   \
+    _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_, _arg2_name_,           \
+    _arg3_type_, _arg3_name_, ...)                                             \
+  NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_ID_4(                                    \
+      _rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_, _authorization_,      \
+      _context_name_, _arg0_type_, _arg0_name_, _arg1_type_, _arg1_name_,      \
       _arg2_type_, _arg2_name_, _arg3_type_, _arg3_name_, __VA_ARGS__)
 
-#define NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_ID_5(                             \
-    _rpc_name_, _id_, _ret_, _name_, _authorization_, _context_name_,       \
-    _arg0_type_, _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_,         \
-    _arg2_name_, _arg3_type_, _arg3_name_, _arg4_type_, _arg4_name_, ...)   \
+#define NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_ID_5(                              \
+    _rpc_name_, _id_, _ret_, _name_, _authorization_, _context_name_,          \
+    _arg0_type_, _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_,           \
+    _arg2_name_, _arg3_type_, _arg3_name_, _arg4_type_, _arg4_name_, ...)      \
   {                                                                            \
-    using rpc_method_type = ntl::rpc::make_method_t<                          \
-        (_id_), _ret_, _arg0_type_, _arg1_type_, _arg2_type_, _arg3_type_,    \
-        _arg4_type_>;                                                          \
+    using rpc_method_type =                                                    \
+        ntl::rpc::make_method_t<(_id_), _ret_, _arg0_type_, _arg1_type_,       \
+                                _arg2_type_, _arg3_type_, _arg4_type_>;        \
     constexpr rpc_method_type rpc_method{};                                    \
     rpc_server->on_authorized(                                                 \
         rpc_method, (_authorization_),                                         \
-        [](ntl::rpc::call_context _context_name_, _arg0_type_ _arg0_name_,    \
-           _arg1_type_ _arg1_name_, _arg2_type_ _arg2_name_,                  \
-           _arg3_type_ _arg3_name_, _arg4_type_ _arg4_name_)                  \
-            -> ntl::rpc::response_type_t<_ret_> __VA_ARGS__);                 \
+        [](ntl::rpc::call_context _context_name_, _arg0_type_ _arg0_name_,     \
+           _arg1_type_ _arg1_name_, _arg2_type_ _arg2_name_,                   \
+           _arg3_type_ _arg3_name_, _arg4_type_ _arg4_name_)                   \
+            ->ntl::rpc::response_type_t<_ret_>                                 \
+                __VA_ARGS__);                                                  \
   }
 
-#define NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_5(                                \
-    _rpc_name_, _ret_, _name_, _authorization_, _context_name_, _arg0_type_, \
-    _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_, _arg2_name_,         \
-    _arg3_type_, _arg3_name_, _arg4_type_, _arg4_name_, ...)                 \
-  NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_ID_5(                                   \
-      _rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_, _authorization_,    \
-      _context_name_, _arg0_type_, _arg0_name_, _arg1_type_, _arg1_name_,    \
-      _arg2_type_, _arg2_name_, _arg3_type_, _arg3_name_, _arg4_type_,       \
+#define NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_5(                                 \
+    _rpc_name_, _ret_, _name_, _authorization_, _context_name_, _arg0_type_,   \
+    _arg0_name_, _arg1_type_, _arg1_name_, _arg2_type_, _arg2_name_,           \
+    _arg3_type_, _arg3_name_, _arg4_type_, _arg4_name_, ...)                   \
+  NTL_ADD_AUTHORIZED_CALLBACK_CONTEXT_ID_5(                                    \
+      _rpc_name_, NTL_RPC_DETAIL_LINE_ID, _ret_, _name_, _authorization_,      \
+      _context_name_, _arg0_type_, _arg0_name_, _arg1_type_, _arg1_name_,      \
+      _arg2_type_, _arg2_name_, _arg3_type_, _arg3_name_, _arg4_type_,         \
       _arg4_name_, __VA_ARGS__)
 #endif // !defined(NTL_USER_MODE)
