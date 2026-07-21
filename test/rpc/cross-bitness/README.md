@@ -25,7 +25,10 @@ Covered values include:
 - contract discovery from an x86 client, including exact version, transport
   features, application capabilities, and the sorted x64 server method list;
 - deliberate version, capability, method, and transport-feature mismatches
-  producing their corresponding compatibility diagnostics.
+  producing their corresponding compatibility diagnostics;
+- session-bound shared memory in both directions using a fixed-layout SPSC
+  ring, including bounded backpressure and stale-token rejection after the
+  region is unregistered.
 
 Native-width values such as `size_t`, `ptrdiff_t`, `uintptr_t`, `ULONG_PTR`,
 and structures containing pointers are not portable RPC schema types. The
@@ -51,5 +54,5 @@ cmake --build build_x86 --config Release `
 The expected x64-driver/x86-client result is:
 
 ```text
-RPC cross-bitness PASS: client=x86 server=x64 boundary=1 empty=1 large_bytes=131072 large_numbers=32768 bounded_response=1 malformed=5 security=1 contract=4 concurrent=1024 rundown=1
+RPC cross-bitness PASS: client=x86 server=x64 boundary=1 empty=1 large_bytes=131072 large_numbers=32768 bounded_response=1 malformed=5 security=1 contract=4 shared_memory=2 stale_token=1 concurrent=1024 rundown=1
 ```

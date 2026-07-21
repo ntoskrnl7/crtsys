@@ -54,6 +54,12 @@ file(GLOB SOURCE_FILES
     src/*/*/*.c
     )
 
+  list(APPEND SOURCE_FILES
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../flt/compile/operation_callback.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../flt/compile/context.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../flt/compile/instance.cpp
+  )
+
 if (NOT CRTSYS_TEST_NLOHMANN_JSON)
     list(REMOVE_ITEM SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/libs/nlohmann_json.cpp)
 endif()

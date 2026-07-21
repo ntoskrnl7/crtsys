@@ -1,0 +1,166 @@
+/**
+ * @file completion
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Typed RAII state carried from a minifilter pre-operation callback.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+// Filter Manager must establish the ntifs.h type model before another NTL
+// dependency can include ntddk.h. This also keeps the header self-contained.
+#include <fltKernel.h>
+
+#include "../pool_allocator"
+#include "../status"
+
+#include <cstddef>
+#include <new>
+#include <type_traits>
+#include <utility>
+
+namespace ntl::flt {
+namespace detail {
+class completion_access;
+
+inline constexpr ULONG completion_pool_tag = ntl::pool_tag("NTFc");
+} // namespace detail
+
+/**
+ * @brief Non-owning view of typed per-I/O completion state.
+ * @tparam T User state constructed by completion_slot<T> in pre-operation.
+ *
+ * NTL owns the object. The view is valid only for the current post-operation
+ * callback. NTL destroys the state after normal processing, during draining,
+ * or when pre-operation returns a result that does not request a post callback.
+ */
+template <class T> class completion_ref {
+public:
+  /** @brief Creates an empty completion-state view. */
+  constexpr completion_ref() noexcept = default;
+
+  /** @brief Returns true when pre-operation constructed state. */
+  constexpr explicit operator bool() const noexcept {
+    return value_ != nullptr;
+  }
+
+  /** @brief Returns the referenced state, or nullptr when no state exists. */
+  constexpr T *get() const noexcept { return value_; }
+
+  /** @brief Accesses the referenced state. */
+  constexpr T &operator*() const noexcept { return *value_; }
+
+  /** @brief Accesses a member of the referenced state. */
+  constexpr T *operator->() const noexcept { return value_; }
+
+private:
+  friend class detail::completion_access;
+  explicit constexpr completion_ref(T *value) noexcept : value_(value) {}
+
+  T *value_ = nullptr;
+};
+
+/**
+ * @brief Constructs typed state for a later minifilter post-operation callback.
+ * @tparam T Per-I/O state whose destructor releases all owned resources.
+ *
+ * Storage always comes from NonPagedPoolNx because a normal post-operation
+ * callback can run at DISPATCH_LEVEL. T must be noexcept-destructible, and its
+ * destructor and every owned RAII member must be valid at the IRQL where the
+ * corresponding post callback can run. Do not put pageable or blocking cleanup
+ * in T; use a safe continuation or the drain-aware low-level callback instead.
+ */
+template <class T> class completion_slot {
+public:
+  static_assert(!std::is_void_v<T>, "Completion state must be an object type");
+  static_assert(!std::is_array_v<T>, "Completion state cannot be an array");
+  static_assert(std::is_nothrow_destructible_v<T>,
+                "Completion state destructors must be noexcept");
+  static_assert(alignof(T) <= MEMORY_ALLOCATION_ALIGNMENT,
+                "Completion state requires unsupported pool alignment");
+
+  /** @brief Creates an empty pre-operation completion slot. */
+  completion_slot() noexcept = default;
+
+  completion_slot(const completion_slot &) = delete;
+  completion_slot &operator=(const completion_slot &) = delete;
+  completion_slot(completion_slot &&) = delete;
+  completion_slot &operator=(completion_slot &&) = delete;
+
+  /** @brief Destroys state that was not transferred to Filter Manager. */
+  ~completion_slot() { reset(); }
+
+  /**
+   * @brief Constructs the per-I/O state in nonpaged pool.
+   * @param args Arguments forwarded to T's noexcept constructor.
+   * @return STATUS_SUCCESS, STATUS_OBJECT_NAME_COLLISION, or an allocation
+   * failure status.
+   */
+  template <class... Args>
+  [[nodiscard]] ntl::status try_emplace(Args &&...args) noexcept {
+    static_assert(std::is_nothrow_constructible_v<T, Args...>,
+                  "Completion state construction must be noexcept");
+    if (value_)
+      return STATUS_OBJECT_NAME_COLLISION;
+
+    void *const storage =
+        ntl::allocate_pool(sizeof(T), ntl::pool_kind::nonpaged,
+                           ntl::pool_option::none, detail::completion_pool_tag);
+    if (!storage)
+      return STATUS_INSUFFICIENT_RESOURCES;
+
+    value_ = new (storage) T(std::forward<Args>(args)...);
+    return STATUS_SUCCESS;
+  }
+
+  /** @brief Returns true when state has been constructed. */
+  explicit operator bool() const noexcept { return value_ != nullptr; }
+
+  /** @brief Returns the constructed state, or nullptr when empty. */
+  T *get() const noexcept { return value_; }
+
+  /** @brief Accesses the constructed state. */
+  T &operator*() const noexcept { return *value_; }
+
+  /** @brief Accesses a member of the constructed state. */
+  T *operator->() const noexcept { return value_; }
+
+  /** @brief Destroys state immediately and empties the slot. */
+  void reset() noexcept {
+    if (!value_)
+      return;
+    value_->~T();
+    ntl::free_pool(value_, detail::completion_pool_tag);
+    value_ = nullptr;
+  }
+
+private:
+  friend class detail::completion_access;
+
+  T *release() noexcept { return std::exchange(value_, nullptr); }
+
+  T *value_ = nullptr;
+};
+
+namespace detail {
+/** @brief Bridges typed completion storage to Filter Manager's PVOID ABI. */
+class completion_access {
+public:
+  template <class T> static void *release(completion_slot<T> &slot) noexcept {
+    return slot.release();
+  }
+
+  template <class T> static completion_ref<T> view(void *value) noexcept {
+    return completion_ref<T>{static_cast<T *>(value)};
+  }
+
+  template <class T> static void destroy(void *value) noexcept {
+    T *const typed = static_cast<T *>(value);
+    if (!typed)
+      return;
+    typed->~T();
+    ntl::free_pool(typed, completion_pool_tag);
+  }
+};
+} // namespace detail
+} // namespace ntl::flt

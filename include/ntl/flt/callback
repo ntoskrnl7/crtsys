@@ -1,0 +1,389 @@
+/**
+ * @file callback
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Operation-typed Filter Manager callback data.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "completion"
+#include "name"
+#include "parameters"
+#include "types"
+
+#include "../result"
+#include "../status"
+
+#include <fltKernel.h>
+
+#include <cstddef>
+#include <type_traits>
+
+namespace ntl::flt {
+
+namespace detail {
+
+template <typename Tag> struct operation_tag_traits;
+
+template <operation_id Operation>
+struct operation_tag_traits<operation_tag<Operation>> {
+  static constexpr operation_id value = Operation;
+};
+
+template <operation_id Operation>
+struct operation_tag_traits<read_write_operation_tag<Operation>> {
+  static constexpr operation_id value = Operation;
+};
+
+/**
+ * @brief Non-owning mutable callback data for exactly one major operation.
+ * @tparam Operation Major operation selected by registration::on().
+ *
+ * The operation is part of the C++ type. parameters() therefore exposes only
+ * the FLT_PARAMETERS member valid for that registration.
+ */
+template <operation_id Operation> class callback_data_impl {
+public:
+  /** @brief Parameter view associated with this callback operation. */
+  using parameters_type = operation_parameters_t<Operation>;
+
+  /** @brief Compile-time operation identifier. */
+  static constexpr operation_id operation = Operation;
+
+  /** @brief Wraps callback data owned by Filter Manager. */
+  explicit callback_data_impl(PFLT_CALLBACK_DATA value) noexcept
+      : value_(value) {}
+
+  /** @brief Returns the operation selected by registration::on(). */
+  constexpr operation_id major_function() const noexcept { return Operation; }
+
+  /** @brief Returns the native minor-function identifier. */
+  UCHAR minor_function() const noexcept {
+    return value_ && value_->Iopb ? value_->Iopb->MinorFunction : 0xff;
+  }
+
+  /** @brief Returns the IRP flags copied into the Filter Manager IOPB. */
+  ULONG irp_flags() const noexcept {
+    return value_ && value_->Iopb ? value_->Iopb->IrpFlags : 0;
+  }
+
+  /** @brief Returns the operation-specific SL_* flags. */
+  UCHAR operation_flags() const noexcept {
+    return value_ && value_->Iopb ? value_->Iopb->OperationFlags : 0;
+  }
+
+  /** @brief Returns the target kernel FILE_OBJECT facade. */
+  ntl::file target_file() const noexcept {
+    return ntl::file{value_ && value_->Iopb ? value_->Iopb->TargetFileObject
+                                            : nullptr};
+  }
+
+  /** @brief Returns the minifilter instance receiving this operation. */
+  flt::instance target_instance() const noexcept {
+    return flt::instance{value_ && value_->Iopb ? value_->Iopb->TargetInstance
+                                                : nullptr};
+  }
+
+  /** @brief Returns the requestor processor mode. */
+  KPROCESSOR_MODE requestor_mode() const noexcept {
+    return value_ ? value_->RequestorMode : KernelMode;
+  }
+
+  /** @brief Returns true for an IRP-based operation. */
+  bool is_irp_operation() const noexcept {
+    return value_ && FLT_IS_IRP_OPERATION(value_);
+  }
+
+  /** @brief Returns true for a fast-I/O operation. */
+  bool is_fast_io_operation() const noexcept {
+    return value_ && FLT_IS_FASTIO_OPERATION(value_);
+  }
+
+  /** @brief Returns true for a file-system-filter callback operation. */
+  bool is_fsfilter_operation() const noexcept {
+    return value_ && FLT_IS_FS_FILTER_OPERATION(value_);
+  }
+
+  /** @brief Returns the current I/O completion status. */
+  ntl::status io_status() const noexcept {
+    return value_ ? value_->IoStatus.Status : STATUS_INVALID_PARAMETER;
+  }
+
+  /** @brief Returns the current I/O completion information value. */
+  ULONG_PTR information() const noexcept {
+    return value_ ? value_->IoStatus.Information : 0;
+  }
+
+  /**
+   * @brief Completes the operation in a pre-operation callback.
+   * @param value Completion status.
+   * @param information Operation-specific completion information.
+   *
+   * Return pre_result::complete from the callback after calling this method.
+   */
+  void complete(ntl::status value, ULONG_PTR information = 0) noexcept {
+    if (!value_)
+      return;
+    value_->IoStatus.Status = value;
+    value_->IoStatus.Information = information;
+  }
+
+  /** @brief Marks native I/O parameter modifications as dirty. */
+  void mark_dirty() noexcept {
+    if (value_)
+      FltSetCallbackDataDirty(value_);
+  }
+
+  /**
+   * @brief Queries cached Filter Manager name information.
+   * @param options FLT_FILE_NAME_* format and query-method flags.
+   * @return Owned name information, or the Filter Manager failure status.
+   * @note Call only where FltGetFileNameInformation is legal, normally at
+   * IRQL <= APC_LEVEL. The returned owner releases the reference.
+   */
+  ntl::result<name_information>
+  try_query_name(FLT_FILE_NAME_OPTIONS options) const noexcept {
+    if (!value_)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+
+    PFLT_FILE_NAME_INFORMATION information = nullptr;
+    const NTSTATUS result =
+        FltGetFileNameInformation(value_, options, &information);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return ntl::ok(name_information{information});
+  }
+
+  /**
+   * @brief Returns the only parameter view legal for this callback type.
+   *
+   * A create callback returns create_parameters, a write callback returns
+   * write_parameters, and no read/write/create cross-accessor exists.
+   */
+  parameters_type parameters() const noexcept {
+    return parameters_type{value_};
+  }
+
+  /**
+   * @brief Returns the native Filter Manager I/O parameter block.
+   * @note This explicit escape hatch bypasses compile-time union selection.
+   */
+  PFLT_IO_PARAMETER_BLOCK native_iopb() const noexcept {
+    return value_ ? value_->Iopb : nullptr;
+  }
+
+  /** @brief Returns the native callback-data pointer. */
+  PFLT_CALLBACK_DATA native() const noexcept { return value_; }
+
+private:
+  PFLT_CALLBACK_DATA value_ = nullptr;
+};
+
+template <const auto &Operation>
+inline constexpr operation_id operation_value_v = operation_tag_traits<
+    std::remove_cv_t<std::remove_reference_t<decltype(Operation)>>>::value;
+
+} // namespace detail
+
+/**
+ * @brief Callback data whose operation is selected by an operation::* tag.
+ * @tparam Operation Typed operation constant, such as operation::create.
+ */
+template <const auto &Operation>
+using callback_data =
+    detail::callback_data_impl<detail::operation_value_v<Operation>>;
+
+using create_callback_data = callback_data<operation::create>;
+using create_named_pipe_callback_data =
+    callback_data<operation::create_named_pipe>;
+using close_callback_data = callback_data<operation::close>;
+using read_callback_data = callback_data<operation::read>;
+using write_callback_data = callback_data<operation::write>;
+using query_information_callback_data =
+    callback_data<operation::query_information>;
+using set_information_callback_data = callback_data<operation::set_information>;
+using query_ea_callback_data = callback_data<operation::query_ea>;
+using set_ea_callback_data = callback_data<operation::set_ea>;
+using flush_buffers_callback_data = callback_data<operation::flush_buffers>;
+using query_volume_information_callback_data =
+    callback_data<operation::query_volume_information>;
+using set_volume_information_callback_data =
+    callback_data<operation::set_volume_information>;
+using directory_control_callback_data =
+    callback_data<operation::directory_control>;
+using file_system_control_callback_data =
+    callback_data<operation::file_system_control>;
+using device_control_callback_data = callback_data<operation::device_control>;
+using internal_device_control_callback_data =
+    callback_data<operation::internal_device_control>;
+using shutdown_callback_data = callback_data<operation::shutdown>;
+using lock_control_callback_data = callback_data<operation::lock_control>;
+using cleanup_callback_data = callback_data<operation::cleanup>;
+using create_mailslot_callback_data =
+    callback_data<operation::create_mailslot>;
+using query_security_callback_data =
+    callback_data<operation::query_security>;
+using set_security_callback_data = callback_data<operation::set_security>;
+using power_callback_data = callback_data<operation::power>;
+using system_control_callback_data = callback_data<operation::system_control>;
+using device_change_callback_data = callback_data<operation::device_change>;
+using query_quota_callback_data = callback_data<operation::query_quota>;
+using set_quota_callback_data = callback_data<operation::set_quota>;
+using pnp_callback_data = callback_data<operation::pnp>;
+using acquire_for_section_synchronization_callback_data =
+    callback_data<operation::acquire_for_section_synchronization>;
+using release_for_section_synchronization_callback_data =
+    callback_data<operation::release_for_section_synchronization>;
+using acquire_for_modified_page_writer_callback_data =
+    callback_data<operation::acquire_for_modified_page_writer>;
+using release_for_modified_page_writer_callback_data =
+    callback_data<operation::release_for_modified_page_writer>;
+using acquire_for_cache_flush_callback_data =
+    callback_data<operation::acquire_for_cache_flush>;
+using release_for_cache_flush_callback_data =
+    callback_data<operation::release_for_cache_flush>;
+using query_open_callback_data = callback_data<operation::query_open>;
+using fast_io_check_if_possible_callback_data =
+    callback_data<operation::fast_io_check_if_possible>;
+using network_query_open_callback_data =
+    callback_data<operation::network_query_open>;
+using mdl_read_callback_data = callback_data<operation::mdl_read>;
+using mdl_read_complete_callback_data =
+    callback_data<operation::mdl_read_complete>;
+using prepare_mdl_write_callback_data =
+    callback_data<operation::prepare_mdl_write>;
+using mdl_write_complete_callback_data =
+    callback_data<operation::mdl_write_complete>;
+using volume_mount_callback_data = callback_data<operation::volume_mount>;
+using volume_dismount_callback_data =
+    callback_data<operation::volume_dismount>;
+
+/** @brief Typed pre-operation callback used by registration::on(). */
+template <operation_id Operation>
+using pre_operation_callback =
+    pre_result (*)(detail::callback_data_impl<Operation> data,
+                   related_objects objects, void *&completion_context) noexcept;
+
+/**
+ * @brief Context-free pre-operation callback for normal-completion-only use.
+ *
+ * Pair this callback with normal_post_operation_callback. Because no native
+ * CompletionContext is exposed, NTL can safely omit the post callback while
+ * Filter Manager is draining the instance.
+ */
+template <operation_id Operation>
+using normal_pre_operation_callback =
+    pre_result (*)(detail::callback_data_impl<Operation> data,
+                   related_objects objects) noexcept;
+
+/** @brief Typed post-operation callback used by registration::on(). */
+template <operation_id Operation>
+using post_operation_callback = post_result (*)(
+    detail::callback_data_impl<Operation> data, related_objects objects,
+    void *completion_context, post_operation_flags flags) noexcept;
+
+/**
+ * @brief Post-operation callback invoked only after normal I/O completion.
+ *
+ * NTL does not invoke this callback when FLTFL_POST_OPERATION_DRAINING is set.
+ * It always returns FLT_POSTOP_FINISHED_PROCESSING to Filter Manager after the
+ * callback returns. Use post_operation_callback when draining or pending
+ * completion must be handled explicitly.
+ */
+template <operation_id Operation>
+using normal_post_operation_callback =
+    void (*)(detail::callback_data_impl<Operation> data,
+             related_objects objects) noexcept;
+
+/**
+ * @brief Normal-completion post work that may request a safe continuation.
+ *
+ * NTL does not invoke this callback while the instance drains. Return
+ * post_continuation::when_safe to run the paired normal_safe_post_callback at
+ * IRQL <= APC_LEVEL, or post_continuation::finished when no safe work remains.
+ */
+template <operation_id Operation>
+using normal_immediate_post_operation_callback =
+    post_continuation (*)(detail::callback_data_impl<Operation> data,
+                          related_objects objects) noexcept;
+
+/** @brief Flags-less safe continuation invoked at IRQL <= APC_LEVEL. */
+template <operation_id Operation>
+using normal_safe_post_operation_callback =
+    void (*)(detail::callback_data_impl<Operation> data,
+             related_objects objects) noexcept;
+
+/** @brief Pre-operation callback that constructs typed completion state. */
+template <operation_id Operation, class Completion>
+using completion_pre_operation_callback = pre_result (*)(
+    detail::callback_data_impl<Operation> data, related_objects objects,
+    completion_slot<Completion> &completion) noexcept;
+
+/**
+ * @brief Typed post callback invoked only for a normally completed operation.
+ *
+ * NTL destroys the completion state after this callback. During draining the
+ * callback is skipped and the state is destroyed directly.
+ */
+template <operation_id Operation, class Completion>
+using normal_completion_post_operation_callback = void (*)(
+    detail::callback_data_impl<Operation> data, related_objects objects,
+    completion_ref<Completion> completion) noexcept;
+
+/**
+ * @brief Typed post callback that also receives draining notifications.
+ *
+ * NTL destroys the completion state after this callback returns. The callback
+ * must perform only cleanup and return promptly when flags.draining() is true.
+ */
+template <operation_id Operation, class Completion>
+using draining_completion_post_operation_callback = void (*)(
+    detail::callback_data_impl<Operation> data, related_objects objects,
+    completion_ref<Completion> completion, post_operation_flags flags) noexcept;
+
+/**
+ * @brief Typed normal-completion work that may request a safe continuation.
+ *
+ * The completion view remains valid through the paired safe callback. NTL
+ * destroys the state after immediate completion, after safe completion, or
+ * directly if safe processing cannot be scheduled.
+ */
+template <operation_id Operation, class Completion>
+using normal_completion_immediate_post_operation_callback =
+    post_continuation (*)(detail::callback_data_impl<Operation> data,
+                          related_objects objects,
+                          completion_ref<Completion> completion) noexcept;
+
+/** @brief Typed safe continuation invoked at IRQL <= APC_LEVEL. */
+template <operation_id Operation, class Completion>
+using normal_completion_safe_post_operation_callback = void (*)(
+    detail::callback_data_impl<Operation> data, related_objects objects,
+    completion_ref<Completion> completion) noexcept;
+
+/**
+ * @brief Immediate portion of a mixed direct/safe post-operation callback.
+ *
+ * This callback runs first under the native post-operation IRQL contract.
+ * Return post_continuation::when_safe only when the registered safe callback
+ * must run. Return post_continuation::finished after completing all work or
+ * when no safe continuation is needed.
+ */
+template <operation_id Operation>
+using immediate_post_operation_callback = post_continuation (*)(
+    detail::callback_data_impl<Operation> data, related_objects objects,
+    void *completion_context, post_operation_flags flags) noexcept;
+
+/**
+ * @brief Post-operation work that NTL dispatches through
+ * FltDoCompletionProcessingWhenSafe.
+ *
+ * The callback runs at IRQL <= APC_LEVEL and cannot request another pending
+ * completion. NTL resumes completion processing after it returns.
+ */
+template <operation_id Operation>
+using safe_post_operation_callback =
+    void (*)(detail::callback_data_impl<Operation> data,
+             related_objects objects, void *completion_context) noexcept;
+
+} // namespace ntl::flt

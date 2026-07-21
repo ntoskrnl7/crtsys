@@ -2,7 +2,7 @@ param(
   [Parameter(Mandatory = $true)]
   [ValidateSet('app', 'driver', 'kmdf-verifier-stress',
                'rpc-lifecycle-stress', 'rpc-async', 'rpc-notifications',
-               'rpc-security', 'rpc-streaming')]
+               'rpc-security', 'rpc-streaming', 'flt-runtime')]
   [string] $Project,
 
   [Parameter(Mandatory = $true)]
@@ -28,6 +28,8 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $sourceDir = if ($Project -eq 'kmdf-verifier-stress') {
   Join-Path $repoRoot 'test\kmdf\verifier-stress'
+} elseif ($Project -eq 'flt-runtime') {
+  Join-Path $repoRoot 'test\flt\runtime'
 } elseif ($Project -eq 'rpc-lifecycle-stress') {
   Join-Path $repoRoot 'test\rpc\lifecycle-stress'
 } elseif ($Project -eq 'rpc-async') {

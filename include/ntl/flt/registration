@@ -1,0 +1,1739 @@
+/**
+ * @file registration
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Type-safe minifilter callback registration.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "callback"
+#include "types"
+
+#include "../except"
+#include "../status"
+
+#include <fltKernel.h>
+
+#include <array>
+#include <memory>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+namespace ntl::flt {
+class driver;
+
+/** @brief Callback invoked before a service-stop or mandatory filter unload. */
+using unload_callback = ntl::status (*)(unload_flags flags) noexcept;
+
+/** @brief Callback deciding whether the filter attaches to a volume. */
+using instance_setup_callback =
+    ntl::status (*)(related_objects objects, FLT_INSTANCE_SETUP_FLAGS flags,
+                    DEVICE_TYPE volume_device_type,
+                    FLT_FILESYSTEM_TYPE filesystem_type) noexcept;
+
+/** @brief Callback deciding whether a manual instance detach is allowed. */
+using instance_query_teardown_callback = ntl::status (*)(
+    related_objects objects, FLT_INSTANCE_QUERY_TEARDOWN_FLAGS flags) noexcept;
+
+/** @brief Notification delivered at instance teardown start or completion. */
+using instance_teardown_callback = void (*)(
+    related_objects objects, FLT_INSTANCE_TEARDOWN_FLAGS flags) noexcept;
+
+namespace detail {
+inline ntl::status
+allow_manual_detach(related_objects,
+                    FLT_INSTANCE_QUERY_TEARDOWN_FLAGS) noexcept {
+  return STATUS_SUCCESS;
+}
+
+inline ntl::status
+deny_manual_detach(related_objects,
+                   FLT_INSTANCE_QUERY_TEARDOWN_FLAGS) noexcept {
+  return STATUS_FLT_DO_NOT_DETACH;
+}
+
+FLT_PREOP_CALLBACK_STATUS FLTAPI
+pre_operation_trampoline(PFLT_CALLBACK_DATA data, PCFLT_RELATED_OBJECTS objects,
+                         PVOID *completion_context) noexcept;
+
+FLT_POSTOP_CALLBACK_STATUS FLTAPI post_operation_trampoline(
+    PFLT_CALLBACK_DATA data, PCFLT_RELATED_OBJECTS objects,
+    PVOID completion_context, FLT_POST_OPERATION_FLAGS flags) noexcept;
+
+FLT_POSTOP_CALLBACK_STATUS FLTAPI safe_post_operation_trampoline(
+    PFLT_CALLBACK_DATA data, PCFLT_RELATED_OBJECTS objects,
+    PVOID completion_context, FLT_POST_OPERATION_FLAGS flags) noexcept;
+
+NTSTATUS FLTAPI
+filter_unload_trampoline(FLT_FILTER_UNLOAD_FLAGS flags) noexcept;
+
+NTSTATUS FLTAPI instance_setup_trampoline(
+    PCFLT_RELATED_OBJECTS objects, FLT_INSTANCE_SETUP_FLAGS flags,
+    DEVICE_TYPE volume_device_type,
+    FLT_FILESYSTEM_TYPE filesystem_type) noexcept;
+
+NTSTATUS FLTAPI instance_query_teardown_trampoline(
+    PCFLT_RELATED_OBJECTS objects,
+    FLT_INSTANCE_QUERY_TEARDOWN_FLAGS flags) noexcept;
+
+void FLTAPI instance_teardown_start_trampoline(
+    PCFLT_RELATED_OBJECTS objects, FLT_INSTANCE_TEARDOWN_FLAGS flags) noexcept;
+
+void FLTAPI instance_teardown_complete_trampoline(
+    PCFLT_RELATED_OBJECTS objects, FLT_INSTANCE_TEARDOWN_FLAGS flags) noexcept;
+
+/** @brief Owns one operation-typed pre-callback behind a stable erased ABI. */
+class pre_callback_slot {
+public:
+  pre_callback_slot() noexcept = default;
+  pre_callback_slot(const pre_callback_slot &) = delete;
+  pre_callback_slot &operator=(const pre_callback_slot &) = delete;
+
+  pre_callback_slot(pre_callback_slot &&other) noexcept { move_from(other); }
+
+  pre_callback_slot &operator=(pre_callback_slot &&other) noexcept {
+    if (this != &other) {
+      reset();
+      move_from(other);
+    }
+    return *this;
+  }
+
+  ~pre_callback_slot() { reset(); }
+
+  template <operation_id Operation, typename Callback>
+  ntl::status set(Callback callback) noexcept {
+    using pointer = pre_operation_callback<Operation>;
+    static_assert(
+        std::is_convertible_v<Callback, pointer>,
+        "A minifilter pre-callback must be a captureless noexcept callback "
+        "whose callback_data type matches registration::on(operation)");
+
+    pointer value = callback;
+    if (!value)
+      return STATUS_INVALID_PARAMETER;
+
+    try {
+      object_ = new pointer(value);
+    } catch (...) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    invoke_ = [](void *object, PFLT_CALLBACK_DATA data,
+                 PCFLT_RELATED_OBJECTS objects,
+                 void *&completion_context) noexcept {
+      const auto typed = *static_cast<pointer *>(object);
+      return typed(detail::callback_data_impl<Operation>{data},
+                   related_objects{objects}, completion_context);
+    };
+    destroy_ = [](void *object) noexcept {
+      delete static_cast<pointer *>(object);
+    };
+    return STATUS_SUCCESS;
+  }
+
+  template <operation_id Operation, typename Callback>
+  ntl::status set_normal(Callback callback) noexcept {
+    using pointer = normal_pre_operation_callback<Operation>;
+    static_assert(
+        std::is_convertible_v<Callback, pointer>,
+        "A normal-only minifilter pre-callback must be a captureless noexcept "
+        "callback whose callback_data type matches "
+        "registration::on(operation)");
+
+    pointer value = callback;
+    if (!value)
+      return STATUS_INVALID_PARAMETER;
+
+    try {
+      object_ = new pointer(value);
+    } catch (...) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    invoke_ = [](void *object, PFLT_CALLBACK_DATA data,
+                 PCFLT_RELATED_OBJECTS objects, void *&) noexcept {
+      const auto typed = *static_cast<pointer *>(object);
+      return typed(detail::callback_data_impl<Operation>{data},
+                   related_objects{objects});
+    };
+    destroy_ = [](void *object) noexcept {
+      delete static_cast<pointer *>(object);
+    };
+    return STATUS_SUCCESS;
+  }
+
+  template <operation_id Operation, class Completion, typename Callback>
+  ntl::status set_completion(Callback callback) noexcept {
+    using pointer = completion_pre_operation_callback<Operation, Completion>;
+    static_assert(
+        std::is_convertible_v<Callback, pointer>,
+        "A typed-completion pre-callback must be a captureless noexcept "
+        "callback whose callback_data and completion types match registration");
+
+    pointer value = callback;
+    if (!value)
+      return STATUS_INVALID_PARAMETER;
+
+    try {
+      object_ = new pointer(value);
+    } catch (...) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    invoke_ = [](void *object, PFLT_CALLBACK_DATA data,
+                 PCFLT_RELATED_OBJECTS objects,
+                 void *&completion_context) noexcept {
+      const auto typed = *static_cast<pointer *>(object);
+      completion_slot<Completion> completion;
+      const pre_result result =
+          typed(detail::callback_data_impl<Operation>{data},
+                related_objects{objects}, completion);
+      if (result == pre_result::success_with_callback ||
+          result == pre_result::synchronize) {
+        completion_context = detail::completion_access::release(completion);
+      }
+      return result;
+    };
+    destroy_ = [](void *object) noexcept {
+      delete static_cast<pointer *>(object);
+    };
+    return STATUS_SUCCESS;
+  }
+
+  explicit operator bool() const noexcept { return invoke_ != nullptr; }
+
+  pre_result invoke(PFLT_CALLBACK_DATA data, PCFLT_RELATED_OBJECTS objects,
+                    void *&completion_context) const noexcept {
+    return invoke_(object_, data, objects, completion_context);
+  }
+
+  void reset() noexcept {
+    if (destroy_)
+      destroy_(object_);
+    object_ = nullptr;
+    invoke_ = nullptr;
+    destroy_ = nullptr;
+  }
+
+private:
+  using invoke_function = pre_result (*)(void *, PFLT_CALLBACK_DATA,
+                                         PCFLT_RELATED_OBJECTS,
+                                         void *&) noexcept;
+  using destroy_function = void (*)(void *) noexcept;
+
+  void move_from(pre_callback_slot &other) noexcept {
+    object_ = other.object_;
+    invoke_ = other.invoke_;
+    destroy_ = other.destroy_;
+    other.object_ = nullptr;
+    other.invoke_ = nullptr;
+    other.destroy_ = nullptr;
+  }
+
+  void *object_ = nullptr;
+  invoke_function invoke_ = nullptr;
+  destroy_function destroy_ = nullptr;
+};
+
+/** @brief Owns one operation-typed post-callback behind a stable erased ABI. */
+class post_callback_slot {
+public:
+  post_callback_slot() noexcept = default;
+  post_callback_slot(const post_callback_slot &) = delete;
+  post_callback_slot &operator=(const post_callback_slot &) = delete;
+
+  post_callback_slot(post_callback_slot &&other) noexcept { move_from(other); }
+
+  post_callback_slot &operator=(post_callback_slot &&other) noexcept {
+    if (this != &other) {
+      reset();
+      move_from(other);
+    }
+    return *this;
+  }
+
+  ~post_callback_slot() { reset(); }
+
+  template <operation_id Operation, typename Callback>
+  ntl::status set(Callback callback) noexcept {
+    using pointer = post_operation_callback<Operation>;
+    static_assert(
+        std::is_convertible_v<Callback, pointer>,
+        "A minifilter post-callback must be a captureless noexcept callback "
+        "whose callback_data type matches registration::on(operation)");
+
+    pointer value = callback;
+    if (!value)
+      return STATUS_INVALID_PARAMETER;
+
+    try {
+      object_ = new pointer(value);
+    } catch (...) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    invoke_ = [](void *object, PFLT_CALLBACK_DATA data,
+                 PCFLT_RELATED_OBJECTS objects, void *completion_context,
+                 FLT_POST_OPERATION_FLAGS flags) noexcept {
+      const auto typed = *static_cast<pointer *>(object);
+      return typed(detail::callback_data_impl<Operation>{data},
+                   related_objects{objects}, completion_context,
+                   post_operation_flags{flags});
+    };
+    destroy_ = [](void *object) noexcept {
+      delete static_cast<pointer *>(object);
+    };
+    return STATUS_SUCCESS;
+  }
+
+  template <operation_id Operation, typename Callback>
+  ntl::status set_normal(Callback callback) noexcept {
+    using pointer = normal_post_operation_callback<Operation>;
+    static_assert(
+        std::is_convertible_v<Callback, pointer>,
+        "A normal-only minifilter post-callback must be a captureless noexcept "
+        "void callback whose callback_data type matches registration::on"
+        "(operation)");
+
+    pointer value = callback;
+    if (!value)
+      return STATUS_INVALID_PARAMETER;
+
+    try {
+      object_ = new pointer(value);
+    } catch (...) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    invoke_ = [](void *object, PFLT_CALLBACK_DATA data,
+                 PCFLT_RELATED_OBJECTS objects, void *,
+                 FLT_POST_OPERATION_FLAGS) noexcept {
+      const auto typed = *static_cast<pointer *>(object);
+      typed(detail::callback_data_impl<Operation>{data},
+            related_objects{objects});
+      return post_result::finished;
+    };
+    destroy_ = [](void *object) noexcept {
+      delete static_cast<pointer *>(object);
+    };
+    drain_aware_ = false;
+    return STATUS_SUCCESS;
+  }
+
+  template <operation_id Operation, class Completion, typename Callback>
+  ntl::status set_completion_normal(Callback callback) noexcept {
+    using pointer =
+        normal_completion_post_operation_callback<Operation, Completion>;
+    static_assert(
+        std::is_convertible_v<Callback, pointer>,
+        "A normal typed-completion post-callback must be a captureless "
+        "noexcept void callback with matching operation and completion types");
+
+    pointer value = callback;
+    if (!value)
+      return STATUS_INVALID_PARAMETER;
+
+    try {
+      object_ = new pointer(value);
+    } catch (...) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    invoke_ = [](void *object, PFLT_CALLBACK_DATA data,
+                 PCFLT_RELATED_OBJECTS objects, void *completion_context,
+                 FLT_POST_OPERATION_FLAGS) noexcept {
+      const auto typed = *static_cast<pointer *>(object);
+      typed(detail::callback_data_impl<Operation>{data},
+            related_objects{objects},
+            detail::completion_access::view<Completion>(completion_context));
+      return post_result::finished;
+    };
+    cleanup_ = &detail::completion_access::destroy<Completion>;
+    destroy_ = [](void *object) noexcept {
+      delete static_cast<pointer *>(object);
+    };
+    drain_aware_ = false;
+    return STATUS_SUCCESS;
+  }
+
+  template <operation_id Operation, class Completion, typename Callback>
+  ntl::status set_completion_draining(Callback callback) noexcept {
+    using pointer =
+        draining_completion_post_operation_callback<Operation, Completion>;
+    static_assert(
+        std::is_convertible_v<Callback, pointer>,
+        "A drain-aware typed-completion post-callback must be a captureless "
+        "noexcept void callback with matching operation and completion types");
+
+    pointer value = callback;
+    if (!value)
+      return STATUS_INVALID_PARAMETER;
+
+    try {
+      object_ = new pointer(value);
+    } catch (...) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    invoke_ = [](void *object, PFLT_CALLBACK_DATA data,
+                 PCFLT_RELATED_OBJECTS objects, void *completion_context,
+                 FLT_POST_OPERATION_FLAGS flags) noexcept {
+      const auto typed = *static_cast<pointer *>(object);
+      typed(detail::callback_data_impl<Operation>{data},
+            related_objects{objects},
+            detail::completion_access::view<Completion>(completion_context),
+            post_operation_flags{flags});
+      return post_result::finished;
+    };
+    cleanup_ = &detail::completion_access::destroy<Completion>;
+    destroy_ = [](void *object) noexcept {
+      delete static_cast<pointer *>(object);
+    };
+    drain_aware_ = true;
+    return STATUS_SUCCESS;
+  }
+
+  template <operation_id Operation, typename Immediate, typename Safe>
+  ntl::status set_normal_safe(Immediate immediate, Safe safe) noexcept {
+    using immediate_pointer =
+        normal_immediate_post_operation_callback<Operation>;
+    using safe_pointer = normal_safe_post_operation_callback<Operation>;
+    static_assert(
+        std::is_convertible_v<Immediate, immediate_pointer>,
+        "A flags-less immediate post-callback must be a captureless noexcept "
+        "callback returning post_continuation for the registered operation");
+    static_assert(
+        std::is_convertible_v<Safe, safe_pointer>,
+        "A flags-less safe post-callback must be a captureless noexcept void "
+        "callback for the registered operation");
+
+    struct callback_pair {
+      immediate_pointer immediate;
+      safe_pointer safe;
+    };
+
+    const immediate_pointer immediate_value = immediate;
+    const safe_pointer safe_value = safe;
+    if (!immediate_value || !safe_value)
+      return STATUS_INVALID_PARAMETER;
+
+    try {
+      object_ = new callback_pair{immediate_value, safe_value};
+    } catch (...) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    immediate_invoke_ = [](void *object, PFLT_CALLBACK_DATA data,
+                           PCFLT_RELATED_OBJECTS objects, void *,
+                           FLT_POST_OPERATION_FLAGS) noexcept {
+      const auto callbacks = static_cast<callback_pair *>(object);
+      return callbacks->immediate(detail::callback_data_impl<Operation>{data},
+                                  related_objects{objects});
+    };
+    safe_invoke_ = [](void *object, PFLT_CALLBACK_DATA data,
+                      PCFLT_RELATED_OBJECTS objects, void *) noexcept {
+      const auto callbacks = static_cast<callback_pair *>(object);
+      callbacks->safe(detail::callback_data_impl<Operation>{data},
+                      related_objects{objects});
+    };
+    destroy_ = [](void *object) noexcept {
+      delete static_cast<callback_pair *>(object);
+    };
+    drain_aware_ = false;
+    return STATUS_SUCCESS;
+  }
+
+  template <operation_id Operation, class Completion, typename Immediate,
+            typename Safe>
+  ntl::status set_completion_safe(Immediate immediate, Safe safe) noexcept {
+    using immediate_pointer =
+        normal_completion_immediate_post_operation_callback<Operation,
+                                                            Completion>;
+    using safe_pointer =
+        normal_completion_safe_post_operation_callback<Operation, Completion>;
+    static_assert(
+        std::is_convertible_v<Immediate, immediate_pointer>,
+        "A typed immediate post-callback must be a captureless noexcept "
+        "callback returning post_continuation with matching types");
+    static_assert(
+        std::is_convertible_v<Safe, safe_pointer>,
+        "A typed safe post-callback must be a captureless noexcept void "
+        "callback with matching operation and completion types");
+
+    struct callback_pair {
+      immediate_pointer immediate;
+      safe_pointer safe;
+    };
+
+    const immediate_pointer immediate_value = immediate;
+    const safe_pointer safe_value = safe;
+    if (!immediate_value || !safe_value)
+      return STATUS_INVALID_PARAMETER;
+
+    try {
+      object_ = new callback_pair{immediate_value, safe_value};
+    } catch (...) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    immediate_invoke_ = [](void *object, PFLT_CALLBACK_DATA data,
+                           PCFLT_RELATED_OBJECTS objects,
+                           void *completion_context,
+                           FLT_POST_OPERATION_FLAGS) noexcept {
+      const auto callbacks = static_cast<callback_pair *>(object);
+      return callbacks->immediate(
+          detail::callback_data_impl<Operation>{data}, related_objects{objects},
+          detail::completion_access::view<Completion>(completion_context));
+    };
+    safe_invoke_ = [](void *object, PFLT_CALLBACK_DATA data,
+                      PCFLT_RELATED_OBJECTS objects,
+                      void *completion_context) noexcept {
+      const auto callbacks = static_cast<callback_pair *>(object);
+      callbacks->safe(
+          detail::callback_data_impl<Operation>{data}, related_objects{objects},
+          detail::completion_access::view<Completion>(completion_context));
+    };
+    cleanup_ = &detail::completion_access::destroy<Completion>;
+    destroy_ = [](void *object) noexcept {
+      delete static_cast<callback_pair *>(object);
+    };
+    drain_aware_ = false;
+    return STATUS_SUCCESS;
+  }
+
+  template <operation_id Operation, typename Immediate, typename Safe>
+  ntl::status set_safe(Immediate immediate, Safe safe) noexcept {
+    using immediate_pointer = immediate_post_operation_callback<Operation>;
+    using safe_pointer = safe_post_operation_callback<Operation>;
+    static_assert(
+        std::is_convertible_v<Immediate, immediate_pointer>,
+        "A minifilter immediate post-callback must be a captureless noexcept "
+        "callback whose callback_data type matches registration::on"
+        "(operation)");
+    static_assert(
+        std::is_convertible_v<Safe, safe_pointer>,
+        "A minifilter safe post-callback must be a captureless noexcept "
+        "callback whose callback_data type matches registration::on"
+        "(operation)");
+
+    struct callback_pair {
+      immediate_pointer immediate;
+      safe_pointer safe;
+    };
+
+    const immediate_pointer immediate_value = immediate;
+    const safe_pointer safe_value = safe;
+    if (!immediate_value || !safe_value)
+      return STATUS_INVALID_PARAMETER;
+
+    try {
+      object_ = new callback_pair{immediate_value, safe_value};
+    } catch (...) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    immediate_invoke_ = [](void *object, PFLT_CALLBACK_DATA data,
+                           PCFLT_RELATED_OBJECTS objects,
+                           void *completion_context,
+                           FLT_POST_OPERATION_FLAGS flags) noexcept {
+      const auto callbacks = static_cast<callback_pair *>(object);
+      return callbacks->immediate(detail::callback_data_impl<Operation>{data},
+                                  related_objects{objects}, completion_context,
+                                  post_operation_flags{flags});
+    };
+    safe_invoke_ = [](void *object, PFLT_CALLBACK_DATA data,
+                      PCFLT_RELATED_OBJECTS objects,
+                      void *completion_context) noexcept {
+      const auto callbacks = static_cast<callback_pair *>(object);
+      callbacks->safe(detail::callback_data_impl<Operation>{data},
+                      related_objects{objects}, completion_context);
+    };
+    destroy_ = [](void *object) noexcept {
+      delete static_cast<callback_pair *>(object);
+    };
+    return STATUS_SUCCESS;
+  }
+
+  explicit operator bool() const noexcept {
+    return invoke_ != nullptr || immediate_invoke_ != nullptr;
+  }
+
+  bool has_safe_continuation() const noexcept {
+    return immediate_invoke_ != nullptr && safe_invoke_ != nullptr;
+  }
+
+  bool invokes_during_draining() const noexcept { return drain_aware_; }
+
+  post_result invoke(PFLT_CALLBACK_DATA data, PCFLT_RELATED_OBJECTS objects,
+                     void *completion_context,
+                     FLT_POST_OPERATION_FLAGS flags) const noexcept {
+    const post_result result =
+        invoke_(object_, data, objects, completion_context, flags);
+    cleanup(completion_context);
+    return result;
+  }
+
+  post_continuation
+  invoke_immediate(PFLT_CALLBACK_DATA data, PCFLT_RELATED_OBJECTS objects,
+                   void *completion_context,
+                   FLT_POST_OPERATION_FLAGS flags) const noexcept {
+    return immediate_invoke_(object_, data, objects, completion_context, flags);
+  }
+
+  void invoke_safe(PFLT_CALLBACK_DATA data, PCFLT_RELATED_OBJECTS objects,
+                   void *completion_context) const noexcept {
+    safe_invoke_(object_, data, objects, completion_context);
+    cleanup(completion_context);
+  }
+
+  void cleanup(void *completion_context) const noexcept {
+    if (cleanup_)
+      cleanup_(completion_context);
+  }
+
+  void reset() noexcept {
+    if (destroy_)
+      destroy_(object_);
+    object_ = nullptr;
+    invoke_ = nullptr;
+    immediate_invoke_ = nullptr;
+    safe_invoke_ = nullptr;
+    cleanup_ = nullptr;
+    destroy_ = nullptr;
+    drain_aware_ = true;
+  }
+
+private:
+  using invoke_function = post_result (*)(void *, PFLT_CALLBACK_DATA,
+                                          PCFLT_RELATED_OBJECTS, void *,
+                                          FLT_POST_OPERATION_FLAGS) noexcept;
+  using immediate_invoke_function =
+      post_continuation (*)(void *, PFLT_CALLBACK_DATA, PCFLT_RELATED_OBJECTS,
+                            void *, FLT_POST_OPERATION_FLAGS) noexcept;
+  using safe_invoke_function = void (*)(void *, PFLT_CALLBACK_DATA,
+                                        PCFLT_RELATED_OBJECTS, void *) noexcept;
+  using cleanup_function = void (*)(void *) noexcept;
+  using destroy_function = void (*)(void *) noexcept;
+
+  void move_from(post_callback_slot &other) noexcept {
+    object_ = other.object_;
+    invoke_ = other.invoke_;
+    immediate_invoke_ = other.immediate_invoke_;
+    safe_invoke_ = other.safe_invoke_;
+    cleanup_ = other.cleanup_;
+    destroy_ = other.destroy_;
+    drain_aware_ = other.drain_aware_;
+    other.object_ = nullptr;
+    other.invoke_ = nullptr;
+    other.immediate_invoke_ = nullptr;
+    other.safe_invoke_ = nullptr;
+    other.cleanup_ = nullptr;
+    other.destroy_ = nullptr;
+    other.drain_aware_ = true;
+  }
+
+  void *object_ = nullptr;
+  invoke_function invoke_ = nullptr;
+  immediate_invoke_function immediate_invoke_ = nullptr;
+  safe_invoke_function safe_invoke_ = nullptr;
+  cleanup_function cleanup_ = nullptr;
+  destroy_function destroy_ = nullptr;
+  bool drain_aware_ = true;
+};
+
+/** @brief Sparse callback storage for one registered major operation. */
+struct operation_callback_slot {
+  pre_callback_slot pre;
+  post_callback_slot post;
+};
+
+template <operation_id Operation, typename Callback>
+inline constexpr bool is_pre_callback_v =
+    std::is_convertible_v<Callback, pre_operation_callback<Operation>>;
+
+template <operation_id Operation, typename Callback>
+inline constexpr bool is_normal_pre_callback_v =
+    std::is_convertible_v<Callback, normal_pre_operation_callback<Operation>>;
+
+template <operation_id Operation, typename Callback>
+inline constexpr bool is_post_callback_v =
+    std::is_convertible_v<Callback, post_operation_callback<Operation>>;
+
+template <operation_id Operation, typename Callback>
+inline constexpr bool is_normal_post_callback_v =
+    std::is_convertible_v<Callback, normal_post_operation_callback<Operation>>;
+
+template <operation_id Operation, class Completion, typename Callback>
+inline constexpr bool is_completion_pre_callback_v = std::is_convertible_v<
+    Callback, completion_pre_operation_callback<Operation, Completion>>;
+
+template <operation_id Operation, class Completion, typename Callback>
+inline constexpr bool is_normal_completion_post_callback_v =
+    std::is_convertible_v<Callback, normal_completion_post_operation_callback<
+                                        Operation, Completion>>;
+
+template <operation_id Operation, class Completion, typename Callback>
+inline constexpr bool is_draining_completion_post_callback_v =
+    std::is_convertible_v<Callback, draining_completion_post_operation_callback<
+                                        Operation, Completion>>;
+
+template <operation_id Operation, typename Callback>
+inline constexpr bool is_immediate_post_callback_v =
+    std::is_convertible_v<Callback,
+                          immediate_post_operation_callback<Operation>>;
+
+template <operation_id Operation, typename Callback>
+inline constexpr bool is_safe_post_callback_v =
+    std::is_convertible_v<Callback, safe_post_operation_callback<Operation>>;
+
+template <operation_id Operation, typename Callback>
+inline constexpr bool is_normal_immediate_post_callback_v =
+    std::is_convertible_v<Callback,
+                          normal_immediate_post_operation_callback<Operation>>;
+
+template <operation_id Operation, typename Callback>
+inline constexpr bool is_normal_safe_post_callback_v =
+    std::is_convertible_v<Callback,
+                          normal_safe_post_operation_callback<Operation>>;
+
+template <operation_id Operation, class Completion, typename Callback>
+inline constexpr bool is_normal_completion_immediate_post_callback_v =
+    std::is_convertible_v<Callback,
+                          normal_completion_immediate_post_operation_callback<
+                              Operation, Completion>>;
+
+template <operation_id Operation, class Completion, typename Callback>
+inline constexpr bool is_normal_completion_safe_post_callback_v =
+    std::is_convertible_v<
+        Callback,
+        normal_completion_safe_post_operation_callback<Operation, Completion>>;
+
+} // namespace detail
+
+/**
+ * @brief Owns the callback tables consumed by FltRegisterFilter.
+ *
+ * The object is moved into ntl::flt::driver when filtering starts, so all
+ * native callback tables and operation-typed callback slots remain alive until
+ * the filter is unregistered.
+ */
+class registration {
+  friend class driver;
+  friend FLT_PREOP_CALLBACK_STATUS FLTAPI detail::pre_operation_trampoline(
+      PFLT_CALLBACK_DATA, PCFLT_RELATED_OBJECTS, PVOID *) noexcept;
+  friend FLT_POSTOP_CALLBACK_STATUS FLTAPI detail::post_operation_trampoline(
+      PFLT_CALLBACK_DATA, PCFLT_RELATED_OBJECTS, PVOID,
+      FLT_POST_OPERATION_FLAGS) noexcept;
+  friend FLT_POSTOP_CALLBACK_STATUS FLTAPI
+      detail::safe_post_operation_trampoline(PFLT_CALLBACK_DATA,
+                                             PCFLT_RELATED_OBJECTS, PVOID,
+                                             FLT_POST_OPERATION_FLAGS) noexcept;
+  friend NTSTATUS
+      FLTAPI detail::filter_unload_trampoline(FLT_FILTER_UNLOAD_FLAGS) noexcept;
+  friend NTSTATUS FLTAPI detail::instance_setup_trampoline(
+      PCFLT_RELATED_OBJECTS, FLT_INSTANCE_SETUP_FLAGS, DEVICE_TYPE,
+      FLT_FILESYSTEM_TYPE) noexcept;
+  friend NTSTATUS FLTAPI detail::instance_query_teardown_trampoline(
+      PCFLT_RELATED_OBJECTS, FLT_INSTANCE_QUERY_TEARDOWN_FLAGS) noexcept;
+  friend void FLTAPI detail::instance_teardown_start_trampoline(
+      PCFLT_RELATED_OBJECTS, FLT_INSTANCE_TEARDOWN_FLAGS) noexcept;
+  friend void FLTAPI detail::instance_teardown_complete_trampoline(
+      PCFLT_RELATED_OBJECTS, FLT_INSTANCE_TEARDOWN_FLAGS) noexcept;
+
+public:
+  /** @brief Creates an empty registration that supports service-stop unload. */
+  registration() = default;
+  registration(const registration &) = delete;
+  registration &operator=(const registration &) = delete;
+  registration(registration &&) noexcept = default;
+  registration &operator=(registration &&) noexcept = default;
+
+  /** @brief Registers one operation-typed pre-callback. */
+  template <operation_id Value, typename Pre,
+            std::enable_if_t<detail::is_pre_callback_v<Value, Pre>, int> = 0>
+  registration &on(operation_tag<Value> major_function, Pre pre) {
+    return on_impl<Value>(major_function.native_value, std::move(pre), nullptr,
+                          operation_flags::none);
+  }
+
+  /** @brief Registers a context-free pre-callback. */
+  template <
+      operation_id Value, typename Pre,
+      std::enable_if_t<detail::is_normal_pre_callback_v<Value, Pre>, int> = 0>
+  registration &on(operation_tag<Value> major_function, Pre pre) {
+    return on_impl<Value>(major_function.native_value, std::move(pre), nullptr,
+                          operation_flags::none);
+  }
+
+  /** @brief Registers operation-typed pre- and post-callbacks. */
+  template <operation_id Value, typename Pre, typename Post,
+            std::enable_if_t<detail::is_pre_callback_v<Value, Pre> &&
+                                 detail::is_post_callback_v<Value, Post>,
+                             int> = 0>
+  registration &on(operation_tag<Value> major_function, Pre pre, Post post) {
+    return on_impl<Value>(major_function.native_value, std::move(pre),
+                          std::move(post), operation_flags::none);
+  }
+
+  /**
+   * @brief Registers context-free callbacks for normal completion only.
+   *
+   * The post callback is not invoked during instance draining. Use the
+   * four-argument post callback when teardown cleanup is required.
+   */
+  template <operation_id Value, typename Pre, typename Post,
+            std::enable_if_t<detail::is_normal_pre_callback_v<Value, Pre> &&
+                                 detail::is_normal_post_callback_v<Value, Post>,
+                             int> = 0>
+  registration &on(operation_tag<Value> major_function, Pre pre, Post post) {
+    return on_impl<Value>(major_function.native_value, std::move(pre),
+                          std::move(post), operation_flags::none);
+  }
+
+  /** @brief Registers one read/write pre-callback without flags. */
+  template <operation_id Value, typename Pre,
+            std::enable_if_t<detail::is_pre_callback_v<Value, Pre>, int> = 0>
+  registration &on(read_write_operation_tag<Value> major_function, Pre pre) {
+    assert_read_write_operation<Value>();
+    return on_impl<Value>(major_function.native_value, std::move(pre), nullptr,
+                          operation_flags::none);
+  }
+
+  /** @brief Registers a context-free read/write pre-callback. */
+  template <
+      operation_id Value, typename Pre,
+      std::enable_if_t<detail::is_normal_pre_callback_v<Value, Pre>, int> = 0>
+  registration &on(read_write_operation_tag<Value> major_function, Pre pre) {
+    assert_read_write_operation<Value>();
+    return on_impl<Value>(major_function.native_value, std::move(pre), nullptr,
+                          operation_flags::none);
+  }
+
+  /** @brief Registers read/write pre- and post-callbacks without flags. */
+  template <
+      operation_id Value, typename Pre, typename Post,
+      std::enable_if_t<detail::is_pre_callback_v<Value, Pre> &&
+                           detail::is_post_callback_v<Value, Post> &&
+                           !std::is_same_v<std::decay_t<Post>, operation_flags>,
+                       int> = 0>
+  registration &on(read_write_operation_tag<Value> major_function, Pre pre,
+                   Post post) {
+    assert_read_write_operation<Value>();
+    return on_impl<Value>(major_function.native_value, std::move(pre),
+                          std::move(post), operation_flags::none);
+  }
+
+  /** @brief Registers normal-only context-free read/write callbacks. */
+  template <
+      operation_id Value, typename Pre, typename Post,
+      std::enable_if_t<detail::is_normal_pre_callback_v<Value, Pre> &&
+                           detail::is_normal_post_callback_v<Value, Post> &&
+                           !std::is_same_v<std::decay_t<Post>, operation_flags>,
+                       int> = 0>
+  registration &on(read_write_operation_tag<Value> major_function, Pre pre,
+                   Post post) {
+    assert_read_write_operation<Value>();
+    return on_impl<Value>(major_function.native_value, std::move(pre),
+                          std::move(post), operation_flags::none);
+  }
+
+  /** @brief Registers a read/write pre-callback with filtering flags. */
+  template <operation_id Value, typename Pre,
+            std::enable_if_t<detail::is_pre_callback_v<Value, Pre>, int> = 0>
+  registration &on(read_write_operation_tag<Value> major_function, Pre pre,
+                   operation_flags flags) {
+    assert_read_write_operation<Value>();
+    return on_impl<Value>(major_function.native_value, std::move(pre), nullptr,
+                          flags);
+  }
+
+  /** @brief Registers a context-free read/write pre-callback with flags. */
+  template <
+      operation_id Value, typename Pre,
+      std::enable_if_t<detail::is_normal_pre_callback_v<Value, Pre>, int> = 0>
+  registration &on(read_write_operation_tag<Value> major_function, Pre pre,
+                   operation_flags flags) {
+    assert_read_write_operation<Value>();
+    return on_impl<Value>(major_function.native_value, std::move(pre), nullptr,
+                          flags);
+  }
+
+  /** @brief Registers read/write pre- and post-callbacks with flags. */
+  template <operation_id Value, typename Pre, typename Post,
+            std::enable_if_t<detail::is_pre_callback_v<Value, Pre> &&
+                                 detail::is_post_callback_v<Value, Post>,
+                             int> = 0>
+  registration &on(read_write_operation_tag<Value> major_function, Pre pre,
+                   Post post, operation_flags flags) {
+    assert_read_write_operation<Value>();
+    return on_impl<Value>(major_function.native_value, std::move(pre),
+                          std::move(post), flags);
+  }
+
+  /** @brief Registers normal-only context-free read/write callbacks with flags.
+   */
+  template <operation_id Value, typename Pre, typename Post,
+            std::enable_if_t<detail::is_normal_pre_callback_v<Value, Pre> &&
+                                 detail::is_normal_post_callback_v<Value, Post>,
+                             int> = 0>
+  registration &on(read_write_operation_tag<Value> major_function, Pre pre,
+                   Post post, operation_flags flags) {
+    assert_read_write_operation<Value>();
+    return on_impl<Value>(major_function.native_value, std::move(pre),
+                          std::move(post), flags);
+  }
+
+  /**
+   * @brief Registers immediate post work followed by an IRQL-safe continuation.
+   *
+   * The immediate post callback runs first under the native Filter Manager
+   * IRQL contract. NTL invokes the safe callback through
+   * FltDoCompletionProcessingWhenSafe only when the immediate callback returns
+   * post_continuation::when_safe.
+   */
+  template <
+      operation_id Value, typename Pre, typename Post, typename SafePost,
+      std::enable_if_t<detail::is_pre_callback_v<Value, Pre> &&
+                           detail::is_immediate_post_callback_v<Value, Post> &&
+                           detail::is_safe_post_callback_v<Value, SafePost>,
+                       int> = 0>
+  registration &on(operation_tag<Value> major_function, Pre pre, Post post,
+                   SafePost safe_post) {
+    return on_safe_impl<Value>(major_function.native_value, std::move(pre),
+                               std::move(post), std::move(safe_post),
+                               operation_flags::none);
+  }
+
+  /**
+   * @brief Registers mixed direct/safe read or write post processing.
+   *
+   * Paging I/O is always excluded because Filter Manager cannot post paging
+   * completion through FltDoCompletionProcessingWhenSafe.
+   */
+  template <
+      operation_id Value, typename Pre, typename Post, typename SafePost,
+      std::enable_if_t<detail::is_pre_callback_v<Value, Pre> &&
+                           detail::is_immediate_post_callback_v<Value, Post> &&
+                           detail::is_safe_post_callback_v<Value, SafePost>,
+                       int> = 0>
+  registration &on(read_write_operation_tag<Value> major_function, Pre pre,
+                   Post post, SafePost safe_post,
+                   operation_flags flags = operation_flags::none) {
+    assert_read_write_operation<Value>();
+    return on_safe_impl<Value>(major_function.native_value, std::move(pre),
+                               std::move(post), std::move(safe_post),
+                               flags | operation_flags::skip_paging_io);
+  }
+
+  /**
+   * @brief Registers flags-less normal post work with a safe continuation.
+   *
+   * The immediate callback may return post_continuation::when_safe without
+   * accepting post_operation_flags. NTL skips both callbacks while draining.
+   */
+  template <operation_id Value, typename Pre, typename Post, typename SafePost,
+            std::enable_if_t<
+                detail::is_normal_pre_callback_v<Value, Pre> &&
+                    detail::is_normal_immediate_post_callback_v<Value, Post> &&
+                    detail::is_normal_safe_post_callback_v<Value, SafePost>,
+                int> = 0>
+  registration &on(operation_tag<Value> major_function, Pre pre, Post post,
+                   SafePost safe_post) {
+    return on_safe_impl<Value>(major_function.native_value, std::move(pre),
+                               std::move(post), std::move(safe_post),
+                               operation_flags::none);
+  }
+
+  /** @brief Registers flags-less read/write post work with a safe continuation.
+   */
+  template <operation_id Value, typename Pre, typename Post, typename SafePost,
+            std::enable_if_t<
+                detail::is_normal_pre_callback_v<Value, Pre> &&
+                    detail::is_normal_immediate_post_callback_v<Value, Post> &&
+                    detail::is_normal_safe_post_callback_v<Value, SafePost>,
+                int> = 0>
+  registration &on(read_write_operation_tag<Value> major_function, Pre pre,
+                   Post post, SafePost safe_post,
+                   operation_flags flags = operation_flags::none) {
+    assert_read_write_operation<Value>();
+    return on_safe_impl<Value>(major_function.native_value, std::move(pre),
+                               std::move(post), std::move(safe_post),
+                               flags | operation_flags::skip_paging_io);
+  }
+
+  /**
+   * @brief Registers typed RAII completion state for normal completion only.
+   * @tparam Completion Nonpaged per-I/O state constructed by the pre-callback.
+   *
+   * NTL destroys the state after the post callback, while draining without
+   * invoking the post callback, or immediately when pre-operation does not
+   * request a post callback.
+   */
+  template <class Completion, operation_id Value, typename Pre, typename Post,
+            std::enable_if_t<
+                detail::is_completion_pre_callback_v<Value, Completion, Pre> &&
+                    detail::is_normal_completion_post_callback_v<
+                        Value, Completion, Post>,
+                int> = 0>
+  registration &on_with_completion(operation_tag<Value> major_function, Pre pre,
+                                   Post post) {
+    return on_completion_impl<Value, Completion>(
+        major_function.native_value, std::move(pre), std::move(post),
+        operation_flags::none);
+  }
+
+  /** @brief Registers typed state and a post callback that observes draining.
+   */
+  template <class Completion, operation_id Value, typename Pre, typename Post,
+            std::enable_if_t<
+                detail::is_completion_pre_callback_v<Value, Completion, Pre> &&
+                    detail::is_draining_completion_post_callback_v<
+                        Value, Completion, Post>,
+                int> = 0>
+  registration &on_with_completion(operation_tag<Value> major_function, Pre pre,
+                                   Post post) {
+    return on_completion_impl<Value, Completion>(
+        major_function.native_value, std::move(pre), std::move(post),
+        operation_flags::none);
+  }
+
+  /** @brief Registers typed read/write completion state and filtering flags. */
+  template <class Completion, operation_id Value, typename Pre, typename Post,
+            std::enable_if_t<
+                detail::is_completion_pre_callback_v<Value, Completion, Pre> &&
+                    (detail::is_normal_completion_post_callback_v<
+                         Value, Completion, Post> ||
+                     detail::is_draining_completion_post_callback_v<
+                         Value, Completion, Post>),
+                int> = 0>
+  registration &
+  on_with_completion(read_write_operation_tag<Value> major_function, Pre pre,
+                     Post post, operation_flags flags = operation_flags::none) {
+    assert_read_write_operation<Value>();
+    return on_completion_impl<Value, Completion>(
+        major_function.native_value, std::move(pre), std::move(post), flags);
+  }
+
+  /**
+   * @brief Registers typed completion state with flags-less safe processing.
+   *
+   * The state remains alive until immediate or safe processing finishes. NTL
+   * destroys it directly during draining or if safe processing cannot run.
+   */
+  template <class Completion, operation_id Value, typename Pre, typename Post,
+            typename SafePost,
+            std::enable_if_t<
+                detail::is_completion_pre_callback_v<Value, Completion, Pre> &&
+                    detail::is_normal_completion_immediate_post_callback_v<
+                        Value, Completion, Post> &&
+                    detail::is_normal_completion_safe_post_callback_v<
+                        Value, Completion, SafePost>,
+                int> = 0>
+  registration &on_with_completion(operation_tag<Value> major_function, Pre pre,
+                                   Post post, SafePost safe_post) {
+    return on_completion_safe_impl<Value, Completion>(
+        major_function.native_value, std::move(pre), std::move(post),
+        std::move(safe_post), operation_flags::none);
+  }
+
+  /** @brief Registers typed read/write state with flags-less safe processing.
+   */
+  template <class Completion, operation_id Value, typename Pre, typename Post,
+            typename SafePost,
+            std::enable_if_t<
+                detail::is_completion_pre_callback_v<Value, Completion, Pre> &&
+                    detail::is_normal_completion_immediate_post_callback_v<
+                        Value, Completion, Post> &&
+                    detail::is_normal_completion_safe_post_callback_v<
+                        Value, Completion, SafePost>,
+                int> = 0>
+  registration &
+  on_with_completion(read_write_operation_tag<Value> major_function, Pre pre,
+                     Post post, SafePost safe_post,
+                     operation_flags flags = operation_flags::none) {
+    assert_read_write_operation<Value>();
+    return on_completion_safe_impl<Value, Completion>(
+        major_function.native_value, std::move(pre), std::move(post),
+        std::move(safe_post), flags | operation_flags::skip_paging_io);
+  }
+
+  /** @brief Registers one unflagged callback without throwing. */
+  template <operation_id Value, typename Pre,
+            std::enable_if_t<detail::is_pre_callback_v<Value, Pre>, int> = 0>
+  ntl::status try_on(operation_tag<Value> major_function, Pre pre) noexcept {
+    return try_on_impl<Value>(major_function.native_value, std::move(pre),
+                              nullptr, operation_flags::none);
+  }
+
+  /** @brief Registers a context-free pre-callback without throwing. */
+  template <
+      operation_id Value, typename Pre,
+      std::enable_if_t<detail::is_normal_pre_callback_v<Value, Pre>, int> = 0>
+  ntl::status try_on(operation_tag<Value> major_function, Pre pre) noexcept {
+    return try_on_impl<Value>(major_function.native_value, std::move(pre),
+                              nullptr, operation_flags::none);
+  }
+
+  /** @brief Registers unflagged pre/post callbacks without throwing. */
+  template <operation_id Value, typename Pre, typename Post,
+            std::enable_if_t<detail::is_pre_callback_v<Value, Pre> &&
+                                 detail::is_post_callback_v<Value, Post>,
+                             int> = 0>
+  ntl::status try_on(operation_tag<Value> major_function, Pre pre,
+                     Post post) noexcept {
+    return try_on_impl<Value>(major_function.native_value, std::move(pre),
+                              std::move(post), operation_flags::none);
+  }
+
+  /** @brief Registers context-free normal-completion callbacks without
+   * throwing. */
+  template <operation_id Value, typename Pre, typename Post,
+            std::enable_if_t<detail::is_normal_pre_callback_v<Value, Pre> &&
+                                 detail::is_normal_post_callback_v<Value, Post>,
+                             int> = 0>
+  ntl::status try_on(operation_tag<Value> major_function, Pre pre,
+                     Post post) noexcept {
+    return try_on_impl<Value>(major_function.native_value, std::move(pre),
+                              std::move(post), operation_flags::none);
+  }
+
+  /** @brief Registers one read/write callback without throwing. */
+  template <operation_id Value, typename Pre,
+            std::enable_if_t<detail::is_pre_callback_v<Value, Pre>, int> = 0>
+  ntl::status try_on(read_write_operation_tag<Value> major_function,
+                     Pre pre) noexcept {
+    assert_read_write_operation<Value>();
+    return try_on_impl<Value>(major_function.native_value, std::move(pre),
+                              nullptr, operation_flags::none);
+  }
+
+  /** @brief Registers a context-free read/write pre-callback without throwing.
+   */
+  template <
+      operation_id Value, typename Pre,
+      std::enable_if_t<detail::is_normal_pre_callback_v<Value, Pre>, int> = 0>
+  ntl::status try_on(read_write_operation_tag<Value> major_function,
+                     Pre pre) noexcept {
+    assert_read_write_operation<Value>();
+    return try_on_impl<Value>(major_function.native_value, std::move(pre),
+                              nullptr, operation_flags::none);
+  }
+
+  /** @brief Registers read/write pre/post callbacks without throwing. */
+  template <
+      operation_id Value, typename Pre, typename Post,
+      std::enable_if_t<detail::is_pre_callback_v<Value, Pre> &&
+                           detail::is_post_callback_v<Value, Post> &&
+                           !std::is_same_v<std::decay_t<Post>, operation_flags>,
+                       int> = 0>
+  ntl::status try_on(read_write_operation_tag<Value> major_function, Pre pre,
+                     Post post) noexcept {
+    assert_read_write_operation<Value>();
+    return try_on_impl<Value>(major_function.native_value, std::move(pre),
+                              std::move(post), operation_flags::none);
+  }
+
+  /** @brief Registers normal-only context-free read/write callbacks. */
+  template <
+      operation_id Value, typename Pre, typename Post,
+      std::enable_if_t<detail::is_normal_pre_callback_v<Value, Pre> &&
+                           detail::is_normal_post_callback_v<Value, Post> &&
+                           !std::is_same_v<std::decay_t<Post>, operation_flags>,
+                       int> = 0>
+  ntl::status try_on(read_write_operation_tag<Value> major_function, Pre pre,
+                     Post post) noexcept {
+    assert_read_write_operation<Value>();
+    return try_on_impl<Value>(major_function.native_value, std::move(pre),
+                              std::move(post), operation_flags::none);
+  }
+
+  /** @brief Registers one flagged read/write callback without throwing. */
+  template <operation_id Value, typename Pre,
+            std::enable_if_t<detail::is_pre_callback_v<Value, Pre>, int> = 0>
+  ntl::status try_on(read_write_operation_tag<Value> major_function, Pre pre,
+                     operation_flags flags) noexcept {
+    assert_read_write_operation<Value>();
+    return try_on_impl<Value>(major_function.native_value, std::move(pre),
+                              nullptr, flags);
+  }
+
+  /** @brief Registers a flagged context-free read/write pre-callback. */
+  template <
+      operation_id Value, typename Pre,
+      std::enable_if_t<detail::is_normal_pre_callback_v<Value, Pre>, int> = 0>
+  ntl::status try_on(read_write_operation_tag<Value> major_function, Pre pre,
+                     operation_flags flags) noexcept {
+    assert_read_write_operation<Value>();
+    return try_on_impl<Value>(major_function.native_value, std::move(pre),
+                              nullptr, flags);
+  }
+
+  /** @brief Registers flagged read/write pre/post callbacks without throwing.
+   */
+  template <operation_id Value, typename Pre, typename Post,
+            std::enable_if_t<detail::is_pre_callback_v<Value, Pre> &&
+                                 detail::is_post_callback_v<Value, Post>,
+                             int> = 0>
+  ntl::status try_on(read_write_operation_tag<Value> major_function, Pre pre,
+                     Post post, operation_flags flags) noexcept {
+    assert_read_write_operation<Value>();
+    return try_on_impl<Value>(major_function.native_value, std::move(pre),
+                              std::move(post), flags);
+  }
+
+  /** @brief Registers flagged normal-only context-free read/write callbacks. */
+  template <operation_id Value, typename Pre, typename Post,
+            std::enable_if_t<detail::is_normal_pre_callback_v<Value, Pre> &&
+                                 detail::is_normal_post_callback_v<Value, Post>,
+                             int> = 0>
+  ntl::status try_on(read_write_operation_tag<Value> major_function, Pre pre,
+                     Post post, operation_flags flags) noexcept {
+    assert_read_write_operation<Value>();
+    return try_on_impl<Value>(major_function.native_value, std::move(pre),
+                              std::move(post), flags);
+  }
+
+  /** @brief Nonthrowing mixed direct/safe post registration. */
+  template <
+      operation_id Value, typename Pre, typename Post, typename SafePost,
+      std::enable_if_t<detail::is_pre_callback_v<Value, Pre> &&
+                           detail::is_immediate_post_callback_v<Value, Post> &&
+                           detail::is_safe_post_callback_v<Value, SafePost>,
+                       int> = 0>
+  ntl::status try_on(operation_tag<Value> major_function, Pre pre, Post post,
+                     SafePost safe_post) noexcept {
+    return try_on_safe_impl<Value>(major_function.native_value, std::move(pre),
+                                   std::move(post), std::move(safe_post),
+                                   operation_flags::none);
+  }
+
+  /** @brief Nonthrowing mixed direct/safe read or write registration. */
+  template <
+      operation_id Value, typename Pre, typename Post, typename SafePost,
+      std::enable_if_t<detail::is_pre_callback_v<Value, Pre> &&
+                           detail::is_immediate_post_callback_v<Value, Post> &&
+                           detail::is_safe_post_callback_v<Value, SafePost>,
+                       int> = 0>
+  ntl::status try_on(read_write_operation_tag<Value> major_function, Pre pre,
+                     Post post, SafePost safe_post,
+                     operation_flags flags = operation_flags::none) noexcept {
+    assert_read_write_operation<Value>();
+    return try_on_safe_impl<Value>(major_function.native_value, std::move(pre),
+                                   std::move(post), std::move(safe_post),
+                                   flags | operation_flags::skip_paging_io);
+  }
+
+  /** @brief Nonthrowing flags-less post/safe registration. */
+  template <operation_id Value, typename Pre, typename Post, typename SafePost,
+            std::enable_if_t<
+                detail::is_normal_pre_callback_v<Value, Pre> &&
+                    detail::is_normal_immediate_post_callback_v<Value, Post> &&
+                    detail::is_normal_safe_post_callback_v<Value, SafePost>,
+                int> = 0>
+  ntl::status try_on(operation_tag<Value> major_function, Pre pre, Post post,
+                     SafePost safe_post) noexcept {
+    return try_on_safe_impl<Value>(major_function.native_value, std::move(pre),
+                                   std::move(post), std::move(safe_post),
+                                   operation_flags::none);
+  }
+
+  /** @brief Nonthrowing flags-less read/write post/safe registration. */
+  template <operation_id Value, typename Pre, typename Post, typename SafePost,
+            std::enable_if_t<
+                detail::is_normal_pre_callback_v<Value, Pre> &&
+                    detail::is_normal_immediate_post_callback_v<Value, Post> &&
+                    detail::is_normal_safe_post_callback_v<Value, SafePost>,
+                int> = 0>
+  ntl::status try_on(read_write_operation_tag<Value> major_function, Pre pre,
+                     Post post, SafePost safe_post,
+                     operation_flags flags = operation_flags::none) noexcept {
+    assert_read_write_operation<Value>();
+    return try_on_safe_impl<Value>(major_function.native_value, std::move(pre),
+                                   std::move(post), std::move(safe_post),
+                                   flags | operation_flags::skip_paging_io);
+  }
+
+  /** @brief Nonthrowing typed completion registration for normal completion. */
+  template <class Completion, operation_id Value, typename Pre, typename Post,
+            std::enable_if_t<
+                detail::is_completion_pre_callback_v<Value, Completion, Pre> &&
+                    detail::is_normal_completion_post_callback_v<
+                        Value, Completion, Post>,
+                int> = 0>
+  ntl::status try_on_with_completion(operation_tag<Value> major_function,
+                                     Pre pre, Post post) noexcept {
+    return try_on_completion_impl<Value, Completion>(
+        major_function.native_value, std::move(pre), std::move(post),
+        operation_flags::none);
+  }
+
+  /** @brief Nonthrowing typed completion registration that observes draining.
+   */
+  template <class Completion, operation_id Value, typename Pre, typename Post,
+            std::enable_if_t<
+                detail::is_completion_pre_callback_v<Value, Completion, Pre> &&
+                    detail::is_draining_completion_post_callback_v<
+                        Value, Completion, Post>,
+                int> = 0>
+  ntl::status try_on_with_completion(operation_tag<Value> major_function,
+                                     Pre pre, Post post) noexcept {
+    return try_on_completion_impl<Value, Completion>(
+        major_function.native_value, std::move(pre), std::move(post),
+        operation_flags::none);
+  }
+
+  /** @brief Nonthrowing typed read/write completion registration. */
+  template <class Completion, operation_id Value, typename Pre, typename Post,
+            std::enable_if_t<
+                detail::is_completion_pre_callback_v<Value, Completion, Pre> &&
+                    (detail::is_normal_completion_post_callback_v<
+                         Value, Completion, Post> ||
+                     detail::is_draining_completion_post_callback_v<
+                         Value, Completion, Post>),
+                int> = 0>
+  ntl::status try_on_with_completion(
+      read_write_operation_tag<Value> major_function, Pre pre, Post post,
+      operation_flags flags = operation_flags::none) noexcept {
+    assert_read_write_operation<Value>();
+    return try_on_completion_impl<Value, Completion>(
+        major_function.native_value, std::move(pre), std::move(post), flags);
+  }
+
+  /** @brief Nonthrowing typed completion registration with safe processing. */
+  template <class Completion, operation_id Value, typename Pre, typename Post,
+            typename SafePost,
+            std::enable_if_t<
+                detail::is_completion_pre_callback_v<Value, Completion, Pre> &&
+                    detail::is_normal_completion_immediate_post_callback_v<
+                        Value, Completion, Post> &&
+                    detail::is_normal_completion_safe_post_callback_v<
+                        Value, Completion, SafePost>,
+                int> = 0>
+  ntl::status try_on_with_completion(operation_tag<Value> major_function,
+                                     Pre pre, Post post,
+                                     SafePost safe_post) noexcept {
+    return try_on_completion_safe_impl<Value, Completion>(
+        major_function.native_value, std::move(pre), std::move(post),
+        std::move(safe_post), operation_flags::none);
+  }
+
+  /** @brief Nonthrowing typed read/write completion with safe processing. */
+  template <class Completion, operation_id Value, typename Pre, typename Post,
+            typename SafePost,
+            std::enable_if_t<
+                detail::is_completion_pre_callback_v<Value, Completion, Pre> &&
+                    detail::is_normal_completion_immediate_post_callback_v<
+                        Value, Completion, Post> &&
+                    detail::is_normal_completion_safe_post_callback_v<
+                        Value, Completion, SafePost>,
+                int> = 0>
+  ntl::status try_on_with_completion(
+      read_write_operation_tag<Value> major_function, Pre pre, Post post,
+      SafePost safe_post,
+      operation_flags flags = operation_flags::none) noexcept {
+    assert_read_write_operation<Value>();
+    return try_on_completion_safe_impl<Value, Completion>(
+        major_function.native_value, std::move(pre), std::move(post),
+        std::move(safe_post), flags | operation_flags::skip_paging_io);
+  }
+
+  /** @brief Registers optional cleanup before the filter is unregistered. */
+  registration &on_unload(unload_callback callback) noexcept {
+    unload_callback_ = callback;
+    return *this;
+  }
+
+  /** @brief Registers the volume-attachment decision callback. */
+  registration &on_instance_setup(instance_setup_callback callback) noexcept {
+    instance_setup_callback_ = callback;
+    return *this;
+  }
+
+  /** @brief Registers the manual-detach decision callback. */
+  registration &on_instance_query_teardown(
+      instance_query_teardown_callback callback) noexcept {
+    instance_query_teardown_callback_ = callback;
+    return *this;
+  }
+
+  /** @brief Uses NTL's default policy that permits explicit instance detach. */
+  registration &allow_manual_detach() noexcept {
+    instance_query_teardown_callback_ = detail::allow_manual_detach;
+    return *this;
+  }
+
+  /** @brief Rejects FilterDetach and FltDetachVolume requests. */
+  registration &deny_manual_detach() noexcept {
+    instance_query_teardown_callback_ = detail::deny_manual_detach;
+    return *this;
+  }
+
+  /** @brief Registers the instance teardown-start notification. */
+  registration &
+  on_instance_teardown_start(instance_teardown_callback callback) noexcept {
+    instance_teardown_start_callback_ = callback;
+    return *this;
+  }
+
+  /** @brief Registers the instance teardown-complete notification. */
+  registration &
+  on_instance_teardown_complete(instance_teardown_callback callback) noexcept {
+    instance_teardown_complete_callback_ = callback;
+    return *this;
+  }
+
+  /** @brief Enables native FLT_REGISTRATION flags. */
+  registration &flags(FLT_REGISTRATION_FLAGS value) noexcept {
+    flags_ = value;
+    return *this;
+  }
+
+  /**
+   * @brief Registers one typed Filter Manager context declaration.
+   * @param definition Context type, scope, allocation pool, and pool tag.
+   * @return This registration for fluent configuration.
+   */
+  template <class T, context_scope Scope>
+  registration &context(const context_definition<T, Scope> &definition) {
+    const ntl::status result = try_context(definition);
+    if (result.is_err())
+      throw ntl::exception(result, "Invalid minifilter context registration");
+    return *this;
+  }
+
+  /**
+   * @brief Registers one typed context declaration without throwing.
+   * @return STATUS_SUCCESS or an invalid/duplicate registration status.
+   */
+  template <class T, context_scope Scope>
+  ntl::status
+  try_context(const context_definition<T, Scope> &definition) noexcept {
+    static_assert(alignof(detail::managed_context_storage<T>) <=
+                      MEMORY_ALLOCATION_ALIGNMENT,
+                  "Filter Manager context type requires unsupported alignment");
+    static_assert(std::is_nothrow_destructible_v<T>,
+                  "Filter Manager context destructors must be noexcept");
+    static_assert(sizeof(detail::managed_context_storage<T>) <= MAXUSHORT,
+                  "Filter Manager context storage exceeds MAXUSHORT");
+
+    constexpr auto native_type = detail::native_context_type<Scope>();
+    const auto bit = static_cast<ULONG>(native_type);
+    if ((registered_contexts_ & bit) != 0)
+      return STATUS_OBJECT_NAME_COLLISION;
+    if (definition.pool_tag() == 0)
+      return STATUS_INVALID_PARAMETER;
+    FLT_CONTEXT_REGISTRATION native{};
+    native.ContextType = native_type;
+    native.ContextCleanupCallback = detail::context_cleanup;
+    native.Size = sizeof(detail::managed_context_storage<T>);
+    native.PoolTag = definition.pool_tag();
+
+    try {
+      native_contexts_.push_back(native);
+    } catch (...) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    registered_contexts_ |= bit;
+    return STATUS_SUCCESS;
+  }
+
+private:
+  template <operation_id Value>
+  static constexpr void assert_read_write_operation() noexcept {
+    static_assert(Value == operation_id::read || Value == operation_id::write,
+                  "Filter Manager operation flags apply only to read/write");
+  }
+
+  template <operation_id Value, typename Pre, typename Post>
+  registration &on_impl(UCHAR major_function, Pre pre, Post post,
+                        operation_flags flags) {
+    const ntl::status result = try_on_impl<Value>(
+        major_function, std::move(pre), std::move(post), flags);
+    if (result.is_err())
+      throw ntl::exception(result, "Invalid minifilter operation registration");
+    return *this;
+  }
+
+  template <operation_id Value, typename Pre, typename Post, typename SafePost>
+  registration &on_safe_impl(UCHAR major_function, Pre pre, Post post,
+                             SafePost safe_post, operation_flags flags) {
+    const ntl::status result =
+        try_on_safe_impl<Value>(major_function, std::move(pre), std::move(post),
+                                std::move(safe_post), flags);
+    if (result.is_err())
+      throw ntl::exception(result, "Invalid minifilter operation registration");
+    return *this;
+  }
+
+  template <operation_id Value, class Completion, typename Pre, typename Post>
+  registration &on_completion_impl(UCHAR major_function, Pre pre, Post post,
+                                   operation_flags flags) {
+    const ntl::status result = try_on_completion_impl<Value, Completion>(
+        major_function, std::move(pre), std::move(post), flags);
+    if (result.is_err())
+      throw ntl::exception(result,
+                           "Invalid typed minifilter completion registration");
+    return *this;
+  }
+
+  template <operation_id Value, class Completion, typename Pre, typename Post,
+            typename SafePost>
+  registration &on_completion_safe_impl(UCHAR major_function, Pre pre,
+                                        Post post, SafePost safe_post,
+                                        operation_flags flags) {
+    const ntl::status result = try_on_completion_safe_impl<Value, Completion>(
+        major_function, std::move(pre), std::move(post), std::move(safe_post),
+        flags);
+    if (result.is_err())
+      throw ntl::exception(result,
+                           "Invalid typed minifilter safe-post registration");
+    return *this;
+  }
+
+  template <operation_id Value, typename Pre, typename Post, typename SafePost>
+  ntl::status try_on_safe_impl(UCHAR major_function, Pre pre, Post post,
+                               SafePost safe_post,
+                               operation_flags flags) noexcept {
+    if (major_function == IRP_MJ_OPERATION_END)
+      return STATUS_INVALID_PARAMETER;
+    if (callback_index_[major_function])
+      return STATUS_OBJECT_NAME_COLLISION;
+
+    std::unique_ptr<detail::operation_callback_slot> callbacks;
+    try {
+      callbacks = std::make_unique<detail::operation_callback_slot>();
+    } catch (...) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    ntl::status result{STATUS_SUCCESS};
+    if constexpr (detail::is_pre_callback_v<Value, Pre>) {
+      result = callbacks->pre.template set<Value>(std::move(pre));
+    } else {
+      result = callbacks->pre.template set_normal<Value>(std::move(pre));
+    }
+    if (result.is_err())
+      return result;
+
+    if constexpr (detail::is_immediate_post_callback_v<Value, Post>) {
+      result = callbacks->post.template set_safe<Value>(std::move(post),
+                                                        std::move(safe_post));
+    } else {
+      result = callbacks->post.template set_normal_safe<Value>(
+          std::move(post), std::move(safe_post));
+    }
+    if (result.is_err())
+      return result;
+
+    FLT_OPERATION_REGISTRATION native{};
+    native.MajorFunction = major_function;
+    native.Flags = static_cast<FLT_OPERATION_REGISTRATION_FLAGS>(flags);
+    native.PreOperation = detail::pre_operation_trampoline;
+    native.PostOperation = detail::post_operation_trampoline;
+
+    try {
+      native_operations_.push_back(native);
+    } catch (...) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    try {
+      callback_slots_.push_back(std::move(callbacks));
+    } catch (...) {
+      native_operations_.pop_back();
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    callback_index_[major_function] = callback_slots_.back().get();
+    return STATUS_SUCCESS;
+  }
+
+  template <operation_id Value, class Completion, typename Pre, typename Post,
+            typename SafePost>
+  ntl::status try_on_completion_safe_impl(UCHAR major_function, Pre pre,
+                                          Post post, SafePost safe_post,
+                                          operation_flags flags) noexcept {
+    if (major_function == IRP_MJ_OPERATION_END)
+      return STATUS_INVALID_PARAMETER;
+    if (callback_index_[major_function])
+      return STATUS_OBJECT_NAME_COLLISION;
+
+    std::unique_ptr<detail::operation_callback_slot> callbacks;
+    try {
+      callbacks = std::make_unique<detail::operation_callback_slot>();
+    } catch (...) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    ntl::status result =
+        callbacks->pre.template set_completion<Value, Completion>(
+            std::move(pre));
+    if (result.is_err())
+      return result;
+
+    result = callbacks->post.template set_completion_safe<Value, Completion>(
+        std::move(post), std::move(safe_post));
+    if (result.is_err())
+      return result;
+
+    FLT_OPERATION_REGISTRATION native{};
+    native.MajorFunction = major_function;
+    native.Flags = static_cast<FLT_OPERATION_REGISTRATION_FLAGS>(flags);
+    native.PreOperation = detail::pre_operation_trampoline;
+    native.PostOperation = detail::post_operation_trampoline;
+
+    try {
+      native_operations_.push_back(native);
+    } catch (...) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    try {
+      callback_slots_.push_back(std::move(callbacks));
+    } catch (...) {
+      native_operations_.pop_back();
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    callback_index_[major_function] = callback_slots_.back().get();
+    return STATUS_SUCCESS;
+  }
+
+  template <operation_id Value, class Completion, typename Pre, typename Post>
+  ntl::status try_on_completion_impl(UCHAR major_function, Pre pre, Post post,
+                                     operation_flags flags) noexcept {
+    if (major_function == IRP_MJ_OPERATION_END)
+      return STATUS_INVALID_PARAMETER;
+    if (callback_index_[major_function])
+      return STATUS_OBJECT_NAME_COLLISION;
+
+    std::unique_ptr<detail::operation_callback_slot> callbacks;
+    try {
+      callbacks = std::make_unique<detail::operation_callback_slot>();
+    } catch (...) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    ntl::status result =
+        callbacks->pre.template set_completion<Value, Completion>(
+            std::move(pre));
+    if (result.is_err())
+      return result;
+
+    if constexpr (detail::is_normal_completion_post_callback_v<
+                      Value, Completion, Post>) {
+      result =
+          callbacks->post.template set_completion_normal<Value, Completion>(
+              std::move(post));
+    } else {
+      result =
+          callbacks->post.template set_completion_draining<Value, Completion>(
+              std::move(post));
+    }
+    if (result.is_err())
+      return result;
+
+    FLT_OPERATION_REGISTRATION native{};
+    native.MajorFunction = major_function;
+    native.Flags = static_cast<FLT_OPERATION_REGISTRATION_FLAGS>(flags);
+    native.PreOperation = detail::pre_operation_trampoline;
+    native.PostOperation = detail::post_operation_trampoline;
+
+    try {
+      native_operations_.push_back(native);
+    } catch (...) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    try {
+      callback_slots_.push_back(std::move(callbacks));
+    } catch (...) {
+      native_operations_.pop_back();
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    callback_index_[major_function] = callback_slots_.back().get();
+    return STATUS_SUCCESS;
+  }
+
+  template <operation_id Value, typename Pre, typename Post>
+  ntl::status try_on_impl(UCHAR major_function, Pre pre, Post post,
+                          operation_flags flags) noexcept {
+    if (major_function == IRP_MJ_OPERATION_END)
+      return STATUS_INVALID_PARAMETER;
+    if (callback_index_[major_function])
+      return STATUS_OBJECT_NAME_COLLISION;
+
+    std::unique_ptr<detail::operation_callback_slot> callbacks;
+    try {
+      callbacks = std::make_unique<detail::operation_callback_slot>();
+    } catch (...) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    ntl::status result{STATUS_SUCCESS};
+    if constexpr (detail::is_pre_callback_v<Value, Pre>) {
+      result = callbacks->pre.template set<Value>(std::move(pre));
+    } else {
+      result = callbacks->pre.template set_normal<Value>(std::move(pre));
+    }
+    if (result.is_err())
+      return result;
+
+    if constexpr (!std::is_same_v<std::decay_t<Post>, std::nullptr_t>) {
+      if constexpr (detail::is_post_callback_v<Value, Post>) {
+        result = callbacks->post.template set<Value>(std::move(post));
+      } else {
+        result = callbacks->post.template set_normal<Value>(std::move(post));
+      }
+      if (result.is_err())
+        return result;
+    }
+
+    FLT_OPERATION_REGISTRATION native{};
+    native.MajorFunction = major_function;
+    native.Flags = static_cast<FLT_OPERATION_REGISTRATION_FLAGS>(flags);
+    native.PreOperation = detail::pre_operation_trampoline;
+    native.PostOperation = std::is_same_v<std::decay_t<Post>, std::nullptr_t>
+                               ? nullptr
+                               : detail::post_operation_trampoline;
+
+    try {
+      native_operations_.push_back(native);
+    } catch (...) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    try {
+      callback_slots_.push_back(std::move(callbacks));
+    } catch (...) {
+      native_operations_.pop_back();
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    callback_index_[major_function] = callback_slots_.back().get();
+    return STATUS_SUCCESS;
+  }
+
+  std::array<detail::operation_callback_slot *, 256> callback_index_{};
+  std::vector<std::unique_ptr<detail::operation_callback_slot>> callback_slots_;
+  std::vector<FLT_OPERATION_REGISTRATION> native_operations_;
+  std::vector<FLT_CONTEXT_REGISTRATION> native_contexts_;
+  ULONG registered_contexts_ = 0;
+  unload_callback unload_callback_ = nullptr;
+  instance_setup_callback instance_setup_callback_ = nullptr;
+  instance_query_teardown_callback instance_query_teardown_callback_ =
+      detail::allow_manual_detach;
+  instance_teardown_callback instance_teardown_start_callback_ = nullptr;
+  instance_teardown_callback instance_teardown_complete_callback_ = nullptr;
+  FLT_REGISTRATION_FLAGS flags_ = 0;
+};
+
+static_assert(sizeof(registration) <= 4096,
+              "minifilter registration must remain kernel-stack friendly");
+
+} // namespace ntl::flt
