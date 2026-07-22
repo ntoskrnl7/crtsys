@@ -26,8 +26,7 @@
     <UseDebugLibraries>true</UseDebugLibraries>
     <DriverTargetPlatform>Desktop</DriverTargetPlatform>
     <DriverType>WDM</DriverType>
-    <CrtSysIsMinifilter>true</CrtSysIsMinifilter>
-    <CrtSysUseNtlFltMain>true</CrtSysUseNtlFltMain>
+    <CrtSysWdmEntryPoint>NtlMinifilter</CrtSysWdmEntryPoint>
     <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
     <ConfigurationType>Driver</ConfigurationType>
     <SignMode>Off</SignMode>
@@ -37,8 +36,7 @@
     <UseDebugLibraries>false</UseDebugLibraries>
     <DriverTargetPlatform>Desktop</DriverTargetPlatform>
     <DriverType>WDM</DriverType>
-    <CrtSysIsMinifilter>true</CrtSysIsMinifilter>
-    <CrtSysUseNtlFltMain>true</CrtSysUseNtlFltMain>
+    <CrtSysWdmEntryPoint>NtlMinifilter</CrtSysWdmEntryPoint>
     <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
     <ConfigurationType>Driver</ConfigurationType>
     <SignMode>Off</SignMode>

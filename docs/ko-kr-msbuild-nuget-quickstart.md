@@ -20,6 +20,12 @@ MSBuild restore가 가능하면 `msbuild /restore`로 충분합니다. `nuget.ex
 
 ## Visual Studio
 
+NuGet 설치 후 **프로젝트 속성 > Driver Settings > Driver Model**에서
+드라이버 모델에 맞는 crtsys 진입점을 선택합니다. WDK의 **Type of driver**를
+먼저 선택하면 해당 모델에 맞는 속성이 표시됩니다.
+
+![Visual Studio crtsys 드라이버 모델 진입점 선택](./assets/visual-studio-driver-model-ui-ko-kr.gif)
+
 Visual Studio에서는 NuGet package UI를 사용하는 것이 가장 쉽습니다.
 
 ![Visual Studio NuGet package UI에서 crtsys를 설치하는 화면](./assets/visual-studio-nuget-package-ui-ko-kr.gif)
@@ -39,6 +45,11 @@ Install-Package crtsys
 ```
 
 그 다음 WDK driver project를 `x86`, `x64`, 또는 `ARM64`로 일반적인 방식대로 빌드합니다.
+
+KMDF driver는 **Project Properties > Driver Settings > Driver Model**에서
+먼저 WDK `Type of driver`를 `KMDF`로 설정해야 합니다. 그러면
+**crtsys KMDF entry point** 속성에 `No NTL entry point`와 `NTL KMDF`가
+표시되며, `NTL KMDF`를 선택하면 됩니다.
 
 ## Build Tools only
 
@@ -80,10 +91,13 @@ library, 선택한 driver model에 맞는 startup object가 포함됩니다.
 | NTL entry wrapper를 쓰는 WDM | 기본값 또는 `<CrtSysUseNtlMain>true</CrtSysUseNtlMain>` | `ntl::main` |
 | 일반 진입점을 쓰는 WDM | `<CrtSysUseNtlMain>false</CrtSysUseNtlMain>` | `DriverEntry` |
 | 일반 KMDF | 기존 `<DriverType>KMDF</DriverType>` 설정의 기본값 | 일반 `DriverEntry`와 `WdfDriverCreate` |
-| NTL KMDF | `<DriverType>KMDF</DriverType>`와 `<CrtSysUseNtlKmdfMain>true</CrtSysUseNtlKmdfMain>` | `ntl::kmdf::main` |
+| NTL KMDF | `<DriverType>KMDF</DriverType>` + `<CrtSysKmdfEntryPoint>NtlKmdf</CrtSysKmdfEntryPoint>` | `ntl::kmdf::main` |
+| Export driver | WDK `ExportDriver` + crtsys 진입점 선택 없음 | WDK export-driver 진입 모델 |
 
 NTL KMDF 진입점은 선택 사항입니다. 두 KMDF 방식 모두 PnP, power, queue,
 request, object lifetime, dispatch 처리는 기존과 같이 WDF가 소유합니다.
+`ExportDriver`는 일반 WDM 진입점이 아니라 WDK export-driver 모델이므로,
+export driver에서는 NTL WDM, NTL KMDF, NTL Minifilter를 선택하면 안 됩니다.
 
 driver는 여전히 일반 WDK driver입니다. Verifier, signing, target OS policy,
 IRQL, paging, unload safety는 driver project가 책임집니다.

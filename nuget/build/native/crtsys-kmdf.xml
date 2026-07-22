@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Rule Name="KernelModeDriver"
+      OverrideMode="Extend"
+      xmlns="http://schemas.microsoft.com/build/2009/properties">
+  <Rule.DataSource>
+    <DataSource Persistence="ProjectFile"
+                Label="Configuration"
+                HasConfigurationCondition="true" />
+  </Rule.DataSource>
+  <EnumProperty Name="CrtSysKmdfEntryPoint"
+                DisplayName="crtsys KMDF entry point"
+                Description="Select whether this KMDF project uses the NTL KMDF entry point."
+                Category="DriverModel"
+                F1Keyword="crtsys.drivermodel">
+    <EnumProperty.DataSource>
+      <DataSource Persistence="ProjectFile"
+                  Label="Configuration"
+                  HasConfigurationCondition="true"
+                  SourceOfDefaultValue="AfterContext" />
+    </EnumProperty.DataSource>
+    <EnumValue Name="Default"
+               DisplayName="No NTL entry point"
+               Description="Keep the project's normal KMDF DriverEntry and WdfDriverCreate path." />
+    <EnumValue Name="NtlKmdf"
+               DisplayName="NTL KMDF"
+               Description="Use the NTL KMDF entry point and ntl::kmdf::main." />
+  </EnumProperty>
+</Rule>

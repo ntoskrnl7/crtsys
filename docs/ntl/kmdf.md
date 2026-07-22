@@ -14,6 +14,15 @@ Visual Studio/MSBuild projects keep `<DriverType>KMDF</DriverType>` and opt in:
 <CrtSysUseNtlKmdfMain>true</CrtSysUseNtlKmdfMain>
 ```
 
+When using the NuGet package, set **Type of driver = KMDF** in **Project
+Properties > Driver Settings > Driver Model**. The page then shows
+**crtsys KMDF entry point**. Choose **NTL KMDF** to use `ntl::kmdf::main`, or
+choose **No NTL entry point** to keep the normal KMDF entry path.
+
+`ExportDriver` is a separate WDK export-driver model. It is not an ordinary WDM
+driver entry model, so do not select an NTL entry point for an export-driver
+project.
+
 CMake projects add `NTL` to the KMDF driver declaration:
 
 ```cmake

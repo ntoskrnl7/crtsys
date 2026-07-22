@@ -20,7 +20,7 @@
     <WindowsTargetPlatformVersion Condition="'$(WindowsTargetPlatformVersion)' == ''">10.0</WindowsTargetPlatformVersion>
     <!-- Prevent newer WDK headers from importing kernel APIs added after the Windows Driver RS5 baseline. -->
     <_NT_TARGET_VERSION>0xA000006</_NT_TARGET_VERSION>
-    <CrtSysUseNtlMain>true</CrtSysUseNtlMain>
+    <CrtSysWdmEntryPoint>NtlWdm</CrtSysWdmEntryPoint>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Label="Configuration" Condition="'$(Configuration)'=='Debug'">

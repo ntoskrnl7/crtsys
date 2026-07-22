@@ -238,6 +238,8 @@ $requiredPackagePaths = @(
   'README.md',
   'build\native\crtsys.props',
   'build\native\crtsys.targets',
+  'build\native\crtsys.xml',
+  'build\native\crtsys-kmdf.xml',
   'include\ntl\flt\communication_client',
   'include\ntl\flt\port_common',
   'include\ntl\rpc\client',

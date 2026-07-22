@@ -49,17 +49,18 @@ enumeration and PDO creation, use the separate
 ## Visual Studio and NuGet
 
 Open `crtsys_kmdf_ntl_sample_vs.sln`, restore packages, and build `Debug|x64`
-or `Release|x64`. The driver project uses the ordinary WDK setting:
+or `Release|x64`. In **Project Properties > Driver Settings > Driver Model**,
+set **Type of driver = KMDF**, then choose **NTL KMDF** under
+**crtsys KMDF entry point**. The package stores the crtsys selection as:
 
 ```xml
-<DriverType>KMDF</DriverType>
 <KmdfVersion>1.15</KmdfVersion>
-<CrtSysUseNtlKmdfMain>true</CrtSysUseNtlKmdfMain>
+<CrtSysKmdfEntryPoint>NtlKmdf</CrtSysKmdfEntryPoint>
 <PackageReference Include="crtsys" Version="$(CrtSysPackageVersion)" />
 ```
 
-`CrtSysUseNtlKmdfMain` selects `ntl::kmdf::main`. Omit that property to keep
-the standard KMDF `DriverEntry` model.
+The dropdown selection enables `ntl::kmdf::main`. Choose **No NTL entry point**
+when you need the ordinary KMDF entry model.
 
 ## CMake
 
