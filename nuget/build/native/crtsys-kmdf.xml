@@ -7,11 +7,17 @@
                 Label="Configuration"
                 HasConfigurationCondition="true" />
   </Rule.DataSource>
-  <EnumProperty Name="CrtSysDriverModel"
+  <EnumProperty Name="CrtSysKmdfEntryPoint"
                 DisplayName="crtsys KMDF entry point"
                 Description="Select whether this KMDF project uses the NTL KMDF entry point."
                 Category="DriverModel"
                 F1Keyword="crtsys.drivermodel">
+    <EnumProperty.DataSource>
+      <DataSource Persistence="ProjectFile"
+                  Label="Configuration"
+                  HasConfigurationCondition="true"
+                  SourceOfDefaultValue="AfterContext" />
+    </EnumProperty.DataSource>
     <EnumValue Name="Default"
                DisplayName="No NTL entry point"
                Description="Keep the project's normal KMDF DriverEntry and WdfDriverCreate path." />

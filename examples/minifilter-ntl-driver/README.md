@@ -56,7 +56,7 @@ changes.
 
 For the Visual Studio project, open **Project Properties > Driver Settings >
 Driver Model** and select **crtsys WDM entry point = NTL Minifilter**. The project
-stores this selection as `<CrtSysDriverModel>NtlMinifilter</CrtSysDriverModel>`;
+stores this selection as `<CrtSysWdmEntryPoint>NtlMinifilter</CrtSysWdmEntryPoint>`;
 no separate minifilter entry-point flags are required.
 
 The minifilter entry model and Filter Manager library are selected explicitly:

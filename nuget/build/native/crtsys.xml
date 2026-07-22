@@ -7,11 +7,17 @@
                 Label="Configuration"
                 HasConfigurationCondition="true" />
   </Rule.DataSource>
-  <EnumProperty Name="CrtSysDriverModel"
+  <EnumProperty Name="CrtSysWdmEntryPoint"
                 DisplayName="crtsys WDM entry point"
                 Description="Select the crtsys entry point for this WDM or minifilter project."
                 Category="DriverModel"
                 F1Keyword="crtsys.drivermodel">
+    <EnumProperty.DataSource>
+      <DataSource Persistence="ProjectFile"
+                  Label="Configuration"
+                  HasConfigurationCondition="true"
+                  SourceOfDefaultValue="AfterContext" />
+    </EnumProperty.DataSource>
     <EnumValue Name="Default"
                DisplayName="No NTL entry point"
                Description="Keep the project's normal WDM or minifilter entry point." />

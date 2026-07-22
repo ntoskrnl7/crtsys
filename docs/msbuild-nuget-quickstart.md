@@ -105,7 +105,7 @@ libraries, and the startup object for the selected driver model.
 | WDM with the NTL entry wrapper | default, or `<CrtSysUseNtlMain>true</CrtSysUseNtlMain>` | `ntl::main` |
 | WDM with a standard entry | `<CrtSysUseNtlMain>false</CrtSysUseNtlMain>` | `DriverEntry` |
 | Standard KMDF | existing `<DriverType>KMDF</DriverType>`; default | standard `DriverEntry` and `WdfDriverCreate` |
-| NTL KMDF | `<DriverType>KMDF</DriverType>` + `<CrtSysDriverModel>NtlKmdf</CrtSysDriverModel>` | `ntl::kmdf::main` |
+| NTL KMDF | `<DriverType>KMDF</DriverType>` + `<CrtSysKmdfEntryPoint>NtlKmdf</CrtSysKmdfEntryPoint>` | `ntl::kmdf::main` |
 | Export driver | WDK `ExportDriver` + no crtsys entry selection | WDK export-driver entry model |
 
 The NTL KMDF entry is optional. In both KMDF modes WDF retains its normal PnP,

@@ -55,7 +55,7 @@ set **Type of driver = KMDF**, then choose **NTL KMDF** under
 
 ```xml
 <KmdfVersion>1.15</KmdfVersion>
-<CrtSysDriverModel>NtlKmdf</CrtSysDriverModel>
+<CrtSysKmdfEntryPoint>NtlKmdf</CrtSysKmdfEntryPoint>
 <PackageReference Include="crtsys" Version="$(CrtSysPackageVersion)" />
 ```
 
