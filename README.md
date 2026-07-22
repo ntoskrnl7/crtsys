@@ -17,11 +17,8 @@ Driver code keeps familiar MSVC C++ headers and STL types while runtime
 dependencies are mapped onto a kernel-mode substrate with explicit driver-test
 coverage and IRQL contracts.
 
-Listed coverage means "verified by driver tests". It is not an exhaustive
-support ceiling for every header or code path that may compile or work.
-Because `crtsys` uses MSVC CRT/STL source paths over the LDK Windows/NTDLL/ICU
-substrate, adjacent unlisted overloads and header paths often work too; the
-matrix records explicit evidence, not the outer limit of the usable surface.
+The coverage matrix lists features verified by driver tests. Unlisted APIs may
+also work, but are not yet part of the verified set.
 
 ## Quick Start
 
@@ -30,10 +27,20 @@ the NuGet package UI:
 
 ![Visual Studio NuGet package UI installing crtsys](./docs/assets/visual-studio-nuget-package-ui.gif)
 
-After installation, select the driver-model-specific crtsys entry point from
-the Visual Studio property page:
+For an NTL-style WDM driver, select **NTL WDM** and implement `ntl::main` in
+the driver source:
 
-![Visual Studio crtsys driver model entry point](./docs/assets/visual-studio-driver-model-ui.gif)
+![Visual Studio selecting the crtsys NTL WDM entry point and implementing ntl::main](./docs/assets/visual-studio-wdm-ntl-entrypoint.gif)
+
+For an NTL-style KMDF driver, set **Type of driver** to **KMDF**, select
+**NTL KMDF**, and implement `ntl::kmdf::main`:
+
+![Visual Studio selecting the crtsys NTL KMDF entry point and implementing ntl::kmdf::main](./docs/assets/visual-studio-driver-model-ui.gif)
+
+For an NTL-style minifilter, select **NTL Minifilter** and implement
+`ntl::flt::main`:
+
+![Visual Studio selecting the crtsys NTL Minifilter entry point and implementing ntl::flt::main](./docs/assets/visual-studio-ntl-minifilter-entrypoint.gif)
 
 | Path | Use when | Start here |
 | --- | --- | --- |

@@ -12,7 +12,6 @@ keeps the callback tables alive for the registered filter.
 Define `ntl::flt::main` and move a registration into the driver:
 
 ```cpp
-#include <fltKernel.h>
 #include <ntl/flt/all>
 
 ntl::status ntl::flt::main(ntl::flt::driver& driver,

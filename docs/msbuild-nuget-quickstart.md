@@ -40,30 +40,38 @@ Install-Package crtsys
 The package UI and Package Manager Console both add the same native NuGet
 package reference to the project.
 
-For a minifilter, open **Project Properties > Driver Settings > Driver Model**
-and set **crtsys WDM entry point** to **NTL Minifilter**. The package translates
-that selection to `CrtSysIsMinifilter=true` and
-`CrtSysUseNtlFltMain=true`; no manual XML property editing is required. If the
-new row is not visible immediately, reload the project after NuGet restore.
+For an ordinary WDM project, **crtsys WDM entry point** offers **No NTL entry
+point**, **NTL WDM**, and **NTL Minifilter**. `NTL WDM` selects `ntl::main`;
+`NTL Minifilter` selects the Filter Manager entry point.
+
+For an NTL-style WDM driver, select **NTL WDM**, add `main.cpp`, and implement
+`ntl::main`:
+
+![Visual Studio selecting the crtsys NTL WDM entry point and implementing ntl::main](./assets/visual-studio-wdm-ntl-entrypoint.gif)
 
 For NTL KMDF, first set the WDK **Type of driver** property to **KMDF**. The
 property page then shows **crtsys KMDF entry point** with **No NTL entry point**
 and **NTL KMDF** choices. Select **NTL KMDF** to set
 `CrtSysUseNtlKmdfMain=true`.
 
+The NTL KMDF selection and a minimal `ntl::kmdf::main` implementation are shown
+here:
+
+![Visual Studio selecting the crtsys NTL KMDF entry point and implementing ntl::kmdf::main](./assets/visual-studio-driver-model-ui.gif)
+
+For a minifilter, open **Project Properties > Driver Settings > Driver Model**
+and set **crtsys WDM entry point** to **NTL Minifilter**. The package translates
+that selection to `CrtSysIsMinifilter=true` and
+`CrtSysUseNtlFltMain=true`; no manual XML property editing is required. If the
+new row is not visible immediately, reload the project after NuGet restore.
+
+Then add `main.cpp` and implement `ntl::flt::main`:
+
+![Visual Studio selecting the crtsys NTL Minifilter entry point and implementing ntl::flt::main](./assets/visual-studio-ntl-minifilter-entrypoint.gif)
+
 For an **Export driver**, no crtsys entry-point property is shown. Export drivers
 use the WDK export-driver entry model and must not select an NTL WDM, KMDF, or
 minifilter entry point.
-
-For an ordinary WDM project, **crtsys WDM entry point** offers **No NTL entry
-point**, **NTL WDM**, and **NTL Minifilter**. `NTL WDM` selects `ntl::main`;
-`NTL Minifilter` selects the Filter Manager entry point.
-
-The complete property-page interaction is shown here. Set the WDK **Type of
-driver** first; the crtsys row then shows the entry-point choices for that
-driver model.
-
-![Visual Studio crtsys driver model entry point](./assets/visual-studio-driver-model-ui.gif)
 
 ## Build Tools Only
 
