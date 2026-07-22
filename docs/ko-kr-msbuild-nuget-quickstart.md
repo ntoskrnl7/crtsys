@@ -20,6 +20,12 @@ MSBuild restore가 가능하면 `msbuild /restore`로 충분합니다. `nuget.ex
 
 ## Visual Studio
 
+NuGet 설치 후 **프로젝트 속성 > Driver Settings > Driver Model**에서
+드라이버 모델에 맞는 crtsys 진입점을 선택합니다. WDK의 **Type of driver**를
+먼저 선택하면 해당 모델에 맞는 속성이 표시됩니다.
+
+![Visual Studio crtsys 드라이버 모델 진입점 선택](./assets/visual-studio-driver-model-ui.gif)
+
 Visual Studio에서는 NuGet package UI를 사용하는 것이 가장 쉽습니다.
 
 ![Visual Studio NuGet package UI에서 crtsys를 설치하는 화면](./assets/visual-studio-nuget-package-ui-ko-kr.gif)

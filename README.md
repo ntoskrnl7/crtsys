@@ -30,6 +30,11 @@ the NuGet package UI:
 
 ![Visual Studio NuGet package UI installing crtsys](./docs/assets/visual-studio-nuget-package-ui.gif)
 
+After installation, select the driver-model-specific crtsys entry point from
+the Visual Studio property page:
+
+![Visual Studio crtsys driver model entry point](./docs/assets/visual-studio-driver-model-ui.gif)
+
 | Path | Use when | Start here |
 | --- | --- | --- |
 | NuGet / MSBuild | Visual Studio or Build Tools WDK driver project | `PackageReference` or `Install-Package crtsys` |

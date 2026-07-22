@@ -59,6 +59,12 @@ For an ordinary WDM project, **crtsys WDM entry point** offers **No NTL entry
 point**, **NTL WDM**, and **NTL Minifilter**. `NTL WDM` selects `ntl::main`;
 `NTL Minifilter` selects the Filter Manager entry point.
 
+The complete property-page interaction is shown here. Set the WDK **Type of
+driver** first; the crtsys row then shows the entry-point choices for that
+driver model.
+
+![Visual Studio crtsys driver model entry point](./assets/visual-studio-driver-model-ui.gif)
+
 ## Build Tools Only
 
 Add a `PackageReference` to the driver project:
