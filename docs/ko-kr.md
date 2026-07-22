@@ -110,7 +110,7 @@ NuGet package에서 **Project Properties > Driver Settings > Driver Model**의
 WDK `Type of driver`를 먼저 `KMDF`로 설정하면 **crtsys KMDF entry point**가
 표시됩니다. 여기서 `NTL KMDF` 또는 `No NTL entry point`를 선택할 수 있습니다.
 
-![Visual Studio crtsys 드라이버 모델 진입점 선택](./assets/visual-studio-driver-model-ui.gif)
+![Visual Studio crtsys 드라이버 모델 진입점 선택](./assets/visual-studio-driver-model-ui-ko-kr.gif)
 
 두 방식 모두 PnP, power, queue,
 request, object lifetime, dispatch 처리를 WDF가 소유하며, crtsys는 WDF
