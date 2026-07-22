@@ -106,12 +106,16 @@ ntl::status ntl::main(ntl::driver& driver,
 
 ### WDM, KMDF, minifilter driver model
 
-NuGet package는 WDK project의 기존 `DriverType` 설정을 읽습니다. KMDF project는
-기본적으로 일반 `DriverEntry`와 `WdfDriverCreate` 호출을 그대로 유지합니다.
-NTL 방식의 진입점을 원하면 `CrtSysUseNtlKmdfMain=true`로 설정하고
-`ntl::kmdf::main`을 구현할 수 있습니다. 두 방식 모두 PnP, power, queue, request,
-object lifetime, dispatch 처리를 WDF가 소유하며, crtsys는 WDF 시작/unload 경로
-전후의 C++ runtime 수명만 관리합니다.
+NuGet package에서 **Project Properties > Driver Settings > Driver Model**의
+WDK `Type of driver`를 먼저 `KMDF`로 설정하면 **crtsys KMDF entry point**가
+표시됩니다. 여기서 `NTL KMDF` 또는 `No NTL entry point`를 선택할 수 있습니다.
+두 방식 모두 PnP, power, queue,
+request, object lifetime, dispatch 처리를 WDF가 소유하며, crtsys는 WDF
+시작/unload 경로 전후의 C++ runtime 수명만 관리합니다.
+
+`ExportDriver`는 일반 WDM 드라이버가 아니라 WDK export-driver 모델입니다.
+따라서 export driver에서는 NTL WDM, NTL KMDF, NTL Minifilter 진입점을 선택하지
+말고 WDK의 export-driver 진입 모델을 유지해야 합니다.
 
 직접 `DriverEntry`를 정의하는 일반 WDM project는 다음 property를 사용합니다.
 

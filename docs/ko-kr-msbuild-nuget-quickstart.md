@@ -40,6 +40,11 @@ Install-Package crtsys
 
 그 다음 WDK driver project를 `x86`, `x64`, 또는 `ARM64`로 일반적인 방식대로 빌드합니다.
 
+KMDF driver는 **Project Properties > Driver Settings > Driver Model**에서
+먼저 WDK `Type of driver`를 `KMDF`로 설정해야 합니다. 그러면
+**crtsys KMDF entry point** 속성에 `No NTL entry point`와 `NTL KMDF`가
+표시되며, `NTL KMDF`를 선택하면 됩니다.
+
 ## Build Tools only
 
 driver project에 `PackageReference`를 추가합니다.
@@ -80,10 +85,13 @@ library, 선택한 driver model에 맞는 startup object가 포함됩니다.
 | NTL entry wrapper를 쓰는 WDM | 기본값 또는 `<CrtSysUseNtlMain>true</CrtSysUseNtlMain>` | `ntl::main` |
 | 일반 진입점을 쓰는 WDM | `<CrtSysUseNtlMain>false</CrtSysUseNtlMain>` | `DriverEntry` |
 | 일반 KMDF | 기존 `<DriverType>KMDF</DriverType>` 설정의 기본값 | 일반 `DriverEntry`와 `WdfDriverCreate` |
-| NTL KMDF | `<DriverType>KMDF</DriverType>`와 `<CrtSysUseNtlKmdfMain>true</CrtSysUseNtlKmdfMain>` | `ntl::kmdf::main` |
+| NTL KMDF | `<DriverType>KMDF</DriverType>` + `<CrtSysDriverModel>NtlKmdf</CrtSysDriverModel>` | `ntl::kmdf::main` |
+| Export driver | WDK `ExportDriver` + crtsys 진입점 선택 없음 | WDK export-driver 진입 모델 |
 
 NTL KMDF 진입점은 선택 사항입니다. 두 KMDF 방식 모두 PnP, power, queue,
 request, object lifetime, dispatch 처리는 기존과 같이 WDF가 소유합니다.
+`ExportDriver`는 일반 WDM 진입점이 아니라 WDK export-driver 모델이므로,
+export driver에서는 NTL WDM, NTL KMDF, NTL Minifilter를 선택하면 안 됩니다.
 
 driver는 여전히 일반 WDK driver입니다. Verifier, signing, target OS policy,
 IRQL, paging, unload safety는 driver project가 책임집니다.

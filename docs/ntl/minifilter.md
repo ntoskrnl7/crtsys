@@ -50,6 +50,10 @@ crtsys_add_driver(my_filter MINIFILTER NTL driver/main.cpp)
 
 For a Visual Studio WDK project using the NuGet package:
 
+The easiest setup is **Project Properties > Driver Settings > Driver Model**,
+then set **crtsys WDM entry point** to **NTL Minifilter**. The package writes the
+two properties below through its MSBuild targets:
+
 ```xml
 <DriverType>WDM</DriverType>
 <CrtSysIsMinifilter>true</CrtSysIsMinifilter>

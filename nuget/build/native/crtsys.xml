@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Rule Name="KernelModeDriver"
+      OverrideMode="Extend"
+      xmlns="http://schemas.microsoft.com/build/2009/properties">
+  <Rule.DataSource>
+    <DataSource Persistence="ProjectFile"
+                Label="Configuration"
+                HasConfigurationCondition="true" />
+  </Rule.DataSource>
+  <EnumProperty Name="CrtSysDriverModel"
+                DisplayName="crtsys WDM entry point"
+                Description="Select the crtsys entry point for this WDM or minifilter project."
+                Category="DriverModel"
+                F1Keyword="crtsys.drivermodel">
+    <EnumValue Name="Default"
+               DisplayName="No NTL entry point"
+               Description="Keep the project's normal WDM or minifilter entry point." />
+    <EnumValue Name="NtlWdm"
+               DisplayName="NTL WDM"
+               Description="Use the NTL WDM entry point. Valid for WDM projects, not KMDF or ExportDriver projects." />
+    <EnumValue Name="NtlMinifilter"
+               DisplayName="NTL Minifilter"
+               Description="Use the NTL Filter Manager entry point. Valid for minifilter projects." />
+  </EnumProperty>
+</Rule>

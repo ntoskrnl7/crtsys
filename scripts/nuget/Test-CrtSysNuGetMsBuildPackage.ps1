@@ -234,6 +234,8 @@ $packageRoot = (Resolve-Path $packageRoot).Path
 foreach ($requiredPath in @(
   'build\native\crtsys.props',
   'build\native\crtsys.targets',
+  'build\native\crtsys.xml',
+  'build\native\crtsys-kmdf.xml',
   'docs\third-party-notices.md',
   'include\ntl\driver',
   'include\ntl\deps\zpp\LICENSE',

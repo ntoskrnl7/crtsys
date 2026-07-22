@@ -35,9 +35,22 @@
     <CrtSysUseNtlFltMain Condition="'$(CrtSysUseNtlFltMain)' == ''">false</CrtSysUseNtlFltMain>
     <CrtSysIsKmdf Condition="'$(DriverType)' == 'KMDF'">true</CrtSysIsKmdf>
     <CrtSysIsKmdf Condition="'$(CrtSysIsKmdf)' == ''">false</CrtSysIsKmdf>
+    <CrtSysIsExportDriver Condition="'$(DriverType)' == 'ExportDriver'">true</CrtSysIsExportDriver>
+    <CrtSysIsExportDriver Condition="'$(CrtSysIsExportDriver)' == ''">false</CrtSysIsExportDriver>
+    <CrtSysDriverModel Condition="'$(CrtSysDriverModel)' == '' and '$(CrtSysUseNtlFltMain)' == 'true'">NtlMinifilter</CrtSysDriverModel>
+    <CrtSysDriverModel Condition="'$(CrtSysDriverModel)' == '' and '$(CrtSysUseNtlKmdfMain)' == 'true'">NtlKmdf</CrtSysDriverModel>
+    <CrtSysDriverModel Condition="'$(CrtSysDriverModel)' == '' and '$(CrtSysIsExportDriver)' == 'true'">Default</CrtSysDriverModel>
+    <CrtSysDriverModel Condition="'$(CrtSysDriverModel)' == '' and '$(CrtSysIsKmdf)' != 'true' and '$(CrtSysUseNtlMain)' == 'false'">StandardWdm</CrtSysDriverModel>
+    <CrtSysDriverModel Condition="'$(CrtSysDriverModel)' == '' and '$(CrtSysIsKmdf)' != 'true' and '$(CrtSysUseNtlMain)' != 'false'">NtlWdm</CrtSysDriverModel>
+    <CrtSysDriverModel Condition="'$(CrtSysDriverModel)' == ''">Default</CrtSysDriverModel>
+    <CrtSysUseNtlMain Condition="'$(CrtSysDriverModel)' == 'NtlWdm'">true</CrtSysUseNtlMain>
+    <CrtSysUseNtlMain Condition="'$(CrtSysDriverModel)' == 'StandardWdm'">false</CrtSysUseNtlMain>
+    <CrtSysIsMinifilter Condition="'$(CrtSysDriverModel)' == 'NtlMinifilter'">true</CrtSysIsMinifilter>
+    <CrtSysUseNtlFltMain Condition="'$(CrtSysDriverModel)' == 'NtlMinifilter'">true</CrtSysUseNtlFltMain>
+    <CrtSysUseNtlKmdfMain Condition="'$(CrtSysDriverModel)' == 'NtlKmdf'">true</CrtSysUseNtlKmdfMain>
     <CrtSysIsMinifilter Condition="'$(CrtSysIsMinifilter)' == '' and '$(CrtSysUseNtlFltMain)' == 'true'">true</CrtSysIsMinifilter>
     <CrtSysIsMinifilter Condition="'$(CrtSysIsMinifilter)' == ''">false</CrtSysIsMinifilter>
-    <CrtSysUseNtlMain Condition="'$(CrtSysUseNtlMain)' == '' and ('$(CrtSysIsKmdf)' == 'true' or '$(CrtSysIsMinifilter)' == 'true')">false</CrtSysUseNtlMain>
+    <CrtSysUseNtlMain Condition="'$(CrtSysUseNtlMain)' == '' and ('$(CrtSysIsKmdf)' == 'true' or '$(CrtSysIsMinifilter)' == 'true' or '$(CrtSysIsExportDriver)' == 'true')">false</CrtSysUseNtlMain>
     <CrtSysUseNtlMain Condition="'$(CrtSysUseNtlMain)' == ''">true</CrtSysUseNtlMain>
     <CrtSysUseLibcntpr Condition="'$(CrtSysUseLibcntpr)' == ''">true</CrtSysUseLibcntpr>
     <CrtSysDriverPreprocessorDefinitions Condition="'$(CrtSysDriverPreprocessorDefinitions)' == ''">_KERNEL32_;_ITERATOR_DEBUG_LEVEL=0;_HAS_EXCEPTIONS</CrtSysDriverPreprocessorDefinitions>
@@ -54,6 +67,13 @@
     <Inf2CatUseLocalTime Condition="'$(CrtSysUseDriverSupport)' == 'true' and '$(Inf2CatUseLocalTime)' == ''">true</Inf2CatUseLocalTime>
   </PropertyGroup>
 
+  <ItemGroup Condition="'$(CrtSysIsDriverProject)' == 'true' and '$(CrtSysIsKmdf)' == 'true'">
+    <PropertyPageSchema Include="$(CrtSysRoot)build\native\crtsys-kmdf.xml" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(CrtSysIsDriverProject)' == 'true' and '$(CrtSysIsKmdf)' != 'true' and '$(CrtSysIsExportDriver)' != 'true'">
+    <PropertyPageSchema Include="$(CrtSysRoot)build\native\crtsys.xml" />
+  </ItemGroup>
+
   <Target Name="CrtSysValidateNativePackage" BeforeTargets="PrepareForBuild">
     <Error
       Condition="'$(CrtSysUseDriverSupport)' == 'true' and '$(CrtSysIsKmdf)' == 'true' and '$(CrtSysUseNtlMain)' == 'true'"
@@ -61,6 +81,9 @@
     <Error
       Condition="'$(CrtSysUseDriverSupport)' == 'true' and '$(CrtSysUseNtlKmdfMain)' == 'true' and '$(CrtSysIsKmdf)' != 'true'"
       Text="CrtSysUseNtlKmdfMain requires a KMDF driver project." />
+    <Error
+      Condition="'$(CrtSysUseDriverSupport)' == 'true' and '$(CrtSysIsExportDriver)' == 'true' and ('$(CrtSysUseNtlMain)' == 'true' or '$(CrtSysUseNtlKmdfMain)' == 'true' or '$(CrtSysUseNtlFltMain)' == 'true')"
+      Text="Export driver projects cannot use an NTL WDM, KMDF, or minifilter entry point. Use the export driver's DllInitialize/DllUnload model." />
     <Error
       Condition="'$(CrtSysUseDriverSupport)' == 'true' and '$(CrtSysIsKmdf)' == 'true' and '$(CrtSysIsMinifilter)' == 'true'"
       Text="A driver cannot select both KMDF and minifilter entry models." />

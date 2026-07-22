@@ -28,7 +28,7 @@
     <DriverTargetPlatform>Desktop</DriverTargetPlatform>
     <DriverType>KMDF</DriverType>
     <KmdfVersion>1.15</KmdfVersion>
-    <CrtSysUseNtlKmdfMain>true</CrtSysUseNtlKmdfMain>
+    <CrtSysDriverModel>NtlKmdf</CrtSysDriverModel>
     <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
     <ConfigurationType>Driver</ConfigurationType>
     <SignMode>TestSign</SignMode>
@@ -39,7 +39,7 @@
     <DriverTargetPlatform>Desktop</DriverTargetPlatform>
     <DriverType>KMDF</DriverType>
     <KmdfVersion>1.15</KmdfVersion>
-    <CrtSysUseNtlKmdfMain>true</CrtSysUseNtlKmdfMain>
+    <CrtSysDriverModel>NtlKmdf</CrtSysDriverModel>
     <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
     <ConfigurationType>Driver</ConfigurationType>
     <SignMode>TestSign</SignMode>

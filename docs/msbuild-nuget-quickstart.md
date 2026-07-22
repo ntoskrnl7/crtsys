@@ -40,6 +40,25 @@ Install-Package crtsys
 The package UI and Package Manager Console both add the same native NuGet
 package reference to the project.
 
+For a minifilter, open **Project Properties > Driver Settings > Driver Model**
+and set **crtsys WDM entry point** to **NTL Minifilter**. The package translates
+that selection to `CrtSysIsMinifilter=true` and
+`CrtSysUseNtlFltMain=true`; no manual XML property editing is required. If the
+new row is not visible immediately, reload the project after NuGet restore.
+
+For NTL KMDF, first set the WDK **Type of driver** property to **KMDF**. The
+property page then shows **crtsys KMDF entry point** with **No NTL entry point**
+and **NTL KMDF** choices. Select **NTL KMDF** to set
+`CrtSysUseNtlKmdfMain=true`.
+
+For an **Export driver**, no crtsys entry-point property is shown. Export drivers
+use the WDK export-driver entry model and must not select an NTL WDM, KMDF, or
+minifilter entry point.
+
+For an ordinary WDM project, **crtsys WDM entry point** offers **No NTL entry
+point**, **NTL WDM**, and **NTL Minifilter**. `NTL WDM` selects `ntl::main`;
+`NTL Minifilter` selects the Filter Manager entry point.
+
 ## Build Tools Only
 
 Add a `PackageReference` to the driver project:
@@ -86,7 +105,8 @@ libraries, and the startup object for the selected driver model.
 | WDM with the NTL entry wrapper | default, or `<CrtSysUseNtlMain>true</CrtSysUseNtlMain>` | `ntl::main` |
 | WDM with a standard entry | `<CrtSysUseNtlMain>false</CrtSysUseNtlMain>` | `DriverEntry` |
 | Standard KMDF | existing `<DriverType>KMDF</DriverType>`; default | standard `DriverEntry` and `WdfDriverCreate` |
-| NTL KMDF | `<DriverType>KMDF</DriverType>` and `<CrtSysUseNtlKmdfMain>true</CrtSysUseNtlKmdfMain>` | `ntl::kmdf::main` |
+| NTL KMDF | `<DriverType>KMDF</DriverType>` + `<CrtSysDriverModel>NtlKmdf</CrtSysDriverModel>` | `ntl::kmdf::main` |
+| Export driver | WDK `ExportDriver` + no crtsys entry selection | WDK export-driver entry model |
 
 The NTL KMDF entry is optional. In both KMDF modes WDF retains its normal PnP,
 power, queue, request, object-lifetime, and dispatch ownership.
