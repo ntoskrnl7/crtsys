@@ -180,6 +180,17 @@ New-Item -ItemType Directory -Force -Path $testProjectDirectory | Out-Null
 New-Item -ItemType Directory -Force -Path $cmakeTestDirectory | Out-Null
 
 Copy-Item -Path (Join-Path $testProjectSource '*') -Destination $testProjectDirectory -Recurse -Force
+foreach ($generatedDirectory in @(
+  '.vs',
+  'Debug',
+  'Release',
+  'obj',
+  'packages',
+  'external-packages'
+)) {
+  Remove-Item -LiteralPath (Join-Path $testProjectDirectory $generatedDirectory) `
+    -Recurse -Force -ErrorAction SilentlyContinue
+}
 Copy-Item -Path (Join-Path $repoRoot 'test\cmake\common') -Destination $cmakeTestDirectory -Recurse -Force
 if ($isDriverConsumer) {
   $driverTestDirectory = Join-Path $cmakeTestDirectory 'driver'
@@ -227,6 +238,8 @@ $requiredPackagePaths = @(
   'README.md',
   'build\native\crtsys.props',
   'build\native\crtsys.targets',
+  'include\ntl\flt\communication_client',
+  'include\ntl\flt\port_common',
   'include\ntl\rpc\client',
   'docs\ntl-api.md'
 )
@@ -236,6 +249,7 @@ if ($isDriverConsumer) {
     "build\native\lib\native\$Toolset\$Architecture\$Configuration\Ldk.lib",
     'include\ntl\driver',
     'include\ntl\kmdf\driver',
+    'include\ntl\flt\communication',
     'include\ntl\kmdf\timer',
     'include\ntl\kmdf\work_item',
     'include\ntl\kmdf\dma',

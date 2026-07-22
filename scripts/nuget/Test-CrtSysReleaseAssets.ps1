@@ -13,7 +13,7 @@ param(
   [ValidateSet('v142', 'v143', 'v145')]
   [string] $Toolset = 'v143',
 
-  [ValidateSet('NTL', 'WDM', 'KMDF', 'NTL_KMDF')]
+  [ValidateSet('NTL', 'WDM', 'KMDF', 'NTL_KMDF', 'NTL_FLT')]
   [string] $DriverModel = 'NTL',
 
   [string] $WindowsSdkVersion = '10.0.22621.0',
@@ -95,6 +95,10 @@ foreach ($requiredPath in @(
   'share\crtsys\cmake\crtsys-config-version.cmake',
   'share\crtsys\cmake\CrtSys.cmake',
   'include\ntl\driver',
+  'include\ntl\flt\driver',
+  'include\ntl\flt\communication',
+  'include\ntl\flt\communication_client',
+  'include\ntl\flt\port_common',
   'include\ntl\kmdf\driver',
   'include\ntl\kmdf\timer',
   'include\ntl\kmdf\work_item',
@@ -141,6 +145,10 @@ crtsys_add_driver(crtsys_release_asset_smoke KMDF 1.15 main.cpp)
   'NTL_KMDF' { @'
 set(CRTSYS_NTL_MAIN OFF)
 crtsys_add_driver(crtsys_release_asset_smoke KMDF 1.15 NTL main.cpp)
+'@ }
+  'NTL_FLT' { @'
+set(CRTSYS_NTL_MAIN OFF)
+crtsys_add_driver(crtsys_release_asset_smoke MINIFILTER NTL main.cpp)
 '@ }
 }
 
@@ -199,6 +207,31 @@ extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT driver_object,
 
   driver_object->DriverUnload = CrtSysReleaseSmokeDriverUnload;
   return STATUS_SUCCESS;
+}
+'@ }
+  'NTL_FLT' { @'
+#include <ntl/flt/all>
+
+#include <numeric>
+#include <utility>
+#include <vector>
+
+ntl::status ntl::flt::main(ntl::flt::driver &driver,
+                           std::wstring_view) {
+  const std::vector<int> values{1, 2, 3};
+  if (std::accumulate(values.begin(), values.end(), 0) != 6)
+    return STATUS_UNSUCCESSFUL;
+
+  ntl::flt::registration callbacks;
+  callbacks.on(
+      ntl::flt::operation::create,
+      [](ntl::flt::create_callback_data data, ntl::flt::related_objects,
+         void *&) noexcept {
+        const auto parameters = data.parameters();
+        (void)parameters.create_options();
+        return ntl::flt::pre_result::success_no_callback;
+      });
+  return driver.start(std::move(callbacks));
 }
 '@ }
   'KMDF' { @'

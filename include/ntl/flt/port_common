@@ -1,0 +1,278 @@
+/**
+ * @file port_common
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Cross-bitness wire records for typed minifilter communication ports.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "../rpc/common"
+
+#include <algorithm>
+#include <cstdint>
+#include <utility>
+#include <vector>
+
+namespace ntl {
+namespace flt {
+namespace detail {
+
+constexpr std::uint32_t communication_magic = 0x504C544Eu; // "NTLP"
+constexpr std::uint16_t communication_version = 1;
+
+enum class communication_operation : std::uint16_t {
+  invoke = 1,
+  register_region = 2,
+  unregister_region = 3,
+  invoke_async = 4,
+  cancel_async = 5,
+  query_contract = 6,
+  open_session = 7,
+  resume_session = 8,
+  close_session = 9,
+  subscribe = 10,
+  unsubscribe = 11,
+  acknowledge = 12,
+  open_stream = 13,
+  close_stream = 14,
+  detach_session = 15,
+  acknowledge_batch = 16,
+};
+
+/** @brief Identifies one minifilter-to-app frame on the shared receive path. */
+enum class communication_inbound_kind : std::uint16_t {
+  async_completion = 1,
+  notification = 2,
+  reliable_notification = 3,
+  stream_record = 4,
+  reliable_batch = 5,
+  request = 6,
+};
+
+/** @brief Prefix sent with every app-to-minifilter communication message. */
+struct communication_request_header {
+  std::uint32_t magic = communication_magic;
+  std::uint16_t version = communication_version;
+  communication_operation operation = communication_operation::invoke;
+  std::uint32_t id = 0;
+  std::uint32_t payload_size = 0;
+};
+
+static_assert(sizeof(communication_request_header) == 16,
+              "NTL minifilter message headers must be cross-bitness stable");
+
+/** @brief Prefix carried inside an asynchronous invocation payload. */
+struct communication_async_request {
+  std::uint64_t request_id = 0;
+};
+
+/** @brief Prefix sent before every minifilter-to-app payload. */
+struct communication_inbound_header {
+  std::uint32_t magic = communication_magic;
+  std::uint16_t version = communication_version;
+  communication_inbound_kind kind =
+      communication_inbound_kind::async_completion;
+  std::uint32_t id = 0;
+  std::uint32_t payload_size = 0;
+  std::uint64_t correlation = 0;
+  std::uint64_t session_id = 0;
+  std::int32_t status = 0;
+  std::uint32_t flags = 0;
+};
+
+/** @brief Fixed-width ACK for one reliable notification or stream record. */
+struct communication_ack_request {
+  std::uint64_t sequence = 0;
+};
+
+/** @brief Selects single-record or bounded-batch delivery for one channel. */
+struct communication_subscription_request {
+  std::uint32_t max_batch_records = 1;
+  std::uint32_t reserved = 0;
+};
+
+/** @brief Prefix for a single transport ACK covering multiple records. */
+struct communication_ack_batch_header {
+  std::uint32_t count = 0;
+  std::uint32_t reserved = 0;
+};
+
+/** @brief Prefix for one inbound bounded delivery batch. */
+struct communication_batch_header {
+  std::uint32_t version = 1;
+  std::uint32_t count = 0;
+};
+
+/** @brief Prefix for one record inside an inbound delivery batch. */
+struct communication_batch_record_header {
+  std::uint64_t sequence = 0;
+  std::uint32_t payload_size = 0;
+  std::uint32_t reserved = 0;
+};
+
+constexpr std::uint32_t communication_batch_version = 1;
+
+/** @brief Prefix returned by an app for a driver-originated typed request. */
+struct communication_reply_header {
+  std::uint32_t magic = communication_magic;
+  std::uint16_t version = communication_version;
+  std::uint16_t reserved = 0;
+  std::int32_t status = 0;
+  std::uint32_t payload_size = 0;
+};
+
+static_assert(sizeof(communication_async_request) == 8,
+              "NTL asynchronous request IDs must be cross-bitness stable");
+static_assert(sizeof(communication_inbound_header) == 40,
+              "NTL inbound frame headers must be cross-bitness stable");
+static_assert(sizeof(communication_ack_request) == 8,
+              "NTL notification ACKs must be cross-bitness stable");
+static_assert(sizeof(communication_subscription_request) == 8,
+              "NTL subscription options must be cross-bitness stable");
+static_assert(sizeof(communication_ack_batch_header) == 8,
+              "NTL batch ACK headers must be cross-bitness stable");
+static_assert(sizeof(communication_batch_header) == 8,
+              "NTL delivery batch headers must be cross-bitness stable");
+static_assert(sizeof(communication_batch_record_header) == 16,
+              "NTL delivery batch records must be cross-bitness stable");
+static_assert(sizeof(communication_reply_header) == 16,
+              "NTL minifilter replies must be cross-bitness stable");
+
+/** @brief Maximum payload accepted by the user-mode port receiver. */
+constexpr std::size_t communication_inbound_payload_limit = 1024 * 1024;
+
+} // namespace detail
+
+/** @brief Identifies one member in the minifilter communication contract. */
+enum class communication_member_kind : std::uint16_t {
+  app_to_driver_method = 1,
+  driver_to_app_method = 2,
+  notification = 3,
+  stream = 4,
+};
+
+/** @brief Fixed-width resource and wire metadata for one typed member. */
+struct communication_contract_member {
+  std::uint32_t id = 0;
+  communication_member_kind kind =
+      communication_member_kind::app_to_driver_method;
+  std::uint16_t reserved = 0;
+  std::uint32_t request_size = 0;
+  std::uint32_t response_size = 0;
+  std::uint32_t decode_allocation = 0;
+  std::uint32_t max_batch_records = 0;
+  std::uint32_t priority = 0;
+
+  friend zpp::serializer::access;
+  template <typename Archive, typename Self>
+  static void serialize(Archive &archive, Self &self) {
+    archive(self.id, self.kind, self.reserved, self.request_size,
+            self.response_size, self.decode_allocation, self.max_batch_records,
+            self.priority);
+  }
+};
+
+/** @brief Describes one running minifilter communication contract. */
+class communication_contract_info {
+public:
+  communication_contract_info() = default;
+  communication_contract_info(
+      std::uint32_t protocol_version, std::uint32_t contract_version,
+      std::uint64_t transport_features, std::uint64_t capabilities,
+      std::vector<communication_contract_member> members)
+      : protocol_version_(protocol_version),
+        contract_version_(contract_version),
+        transport_features_(transport_features), capabilities_(capabilities),
+        members_(std::move(members)) {}
+
+  std::uint32_t protocol_version() const noexcept { return protocol_version_; }
+  std::uint32_t contract_version() const noexcept { return contract_version_; }
+  std::uint64_t transport_feature_mask() const noexcept {
+    return transport_features_;
+  }
+  std::uint64_t capability_mask() const noexcept { return capabilities_; }
+  const std::vector<communication_contract_member> &members() const noexcept {
+    return members_;
+  }
+
+  const communication_contract_member *
+  find(std::uint32_t id, communication_member_kind kind) const noexcept {
+    const auto found =
+        std::find_if(members_.begin(), members_.end(),
+                     [=](const communication_contract_member &member) {
+                       return member.id == id && member.kind == kind;
+                     });
+    return found == members_.end() ? nullptr : &*found;
+  }
+
+  /** @brief Reports whether the exact app-to-driver method is advertised. */
+  template <typename Method>
+  typename std::enable_if<ntl::rpc::is_method<Method>::value, bool>::type
+  supports(const Method &) const noexcept {
+    return matches_method<Method>(
+        communication_member_kind::app_to_driver_method);
+  }
+
+  /** @brief Reports whether the exact driver-to-app method is advertised. */
+  template <typename Method>
+  typename std::enable_if<ntl::rpc::is_method<Method>::value, bool>::type
+  supports_client_method(const Method &) const noexcept {
+    return matches_method<Method>(
+        communication_member_kind::driver_to_app_method);
+  }
+
+  /** @brief Reports whether the exact notification channel is advertised. */
+  template <typename Notification>
+  typename std::enable_if<ntl::rpc::is_notification<Notification>::value,
+                          bool>::type
+  supports(const Notification &) const noexcept {
+    const auto *member =
+        find(Notification::id(), communication_member_kind::notification);
+    return member && member->request_size == 0 &&
+           member->response_size == Notification::response_size() &&
+           member->decode_allocation == Notification::decode_allocation() &&
+           member->max_batch_records == Notification::max_batch_records() &&
+           member->priority ==
+               static_cast<std::uint32_t>(Notification::priority());
+  }
+
+  /** @brief Reports whether the exact bidirectional stream is advertised. */
+  template <typename Stream>
+  typename std::enable_if<ntl::rpc::is_stream<Stream>::value, bool>::type
+  supports(const Stream &) const noexcept {
+    const auto *member = find(Stream::id(), communication_member_kind::stream);
+    return member && member->request_size == Stream::upload_size() &&
+           member->response_size == Stream::download_size() &&
+           member->decode_allocation == Stream::decode_allocation() &&
+           member->max_batch_records == Stream::max_batch_records() &&
+           member->priority == static_cast<std::uint32_t>(Stream::priority());
+  }
+
+private:
+  template <typename Method>
+  bool matches_method(communication_member_kind kind) const noexcept {
+    const auto *member = find(Method::id(), kind);
+    return member && member->request_size == Method::request_size() &&
+           member->response_size == Method::response_size() &&
+           member->decode_allocation == Method::decode_allocation() &&
+           member->max_batch_records == 0 && member->priority == 0;
+  }
+
+  std::uint32_t protocol_version_ = 0;
+  std::uint32_t contract_version_ = 0;
+  std::uint64_t transport_features_ = 0;
+  std::uint64_t capabilities_ = 0;
+  std::vector<communication_contract_member> members_;
+
+public:
+  friend zpp::serializer::access;
+  template <typename Archive, typename Self>
+  static void serialize(Archive &archive, Self &self) {
+    archive(self.protocol_version_, self.contract_version_,
+            self.transport_features_, self.capabilities_, self.members_);
+  }
+};
+
+} // namespace flt
+} // namespace ntl

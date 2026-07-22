@@ -198,6 +198,16 @@ jobs:
             -Configuration Debug `
             -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}'
 
+      - name: Build NTL minifilter runtime fixture
+        if: matrix.project == 'driver' && matrix.config == 'Debug'
+        shell: pwsh
+        run: |
+          ./scripts/ci/Build-CrtSys.ps1 `
+            -Project flt-runtime `
+            -Architecture '${{ matrix.arch }}' `
+            -Configuration Debug `
+            -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}'
+
       - name: Test-sign driver
         if: matrix.project == 'driver' && matrix.config == 'Debug'
         shell: pwsh
@@ -319,12 +329,21 @@ jobs:
 
           ./scripts/ci/Build-CrtSys.ps1 @parameters
 
-      - name: Build v142 RPC streaming fixture
-        if: matrix.project == 'driver' && (matrix.arch == 'x86' || matrix.arch == 'x64') && matrix.config == 'Debug'
+      - name: Build v142 RPC streaming and minifilter fixtures
+        if: matrix.project == 'driver' && matrix.config == 'Debug'
         shell: pwsh
         run: |
+          if ('${{ matrix.arch }}' -eq 'x86' -or '${{ matrix.arch }}' -eq 'x64') {
+            ./scripts/ci/Build-CrtSys.ps1 `
+              -Project rpc-streaming `
+              -Architecture '${{ matrix.arch }}' `
+              -Configuration Debug `
+              -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}' `
+              -PlatformToolset v142
+          }
+
           ./scripts/ci/Build-CrtSys.ps1 `
-            -Project rpc-streaming `
+            -Project flt-runtime `
             -Architecture '${{ matrix.arch }}' `
             -Configuration Debug `
             -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}' `
@@ -425,8 +444,8 @@ jobs:
 
           ./scripts/ci/Build-CrtSys.ps1 @parameters
 
-      - name: Build v145 RPC streaming fixture
-        if: matrix.project == 'driver' && (matrix.arch == 'x86' || matrix.arch == 'x64') && matrix.config == 'Debug'
+      - name: Build v145 RPC streaming and minifilter fixtures
+        if: matrix.project == 'driver' && matrix.config == 'Debug'
         shell: pwsh
         run: |
           $wdkVersion = ''
@@ -434,18 +453,32 @@ jobs:
             $wdkVersion = '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}'
           }
 
+          if ('${{ matrix.arch }}' -eq 'x86' -or '${{ matrix.arch }}' -eq 'x64') {
+            $parameters = @{
+              Project = 'rpc-streaming'
+              Architecture = '${{ matrix.arch }}'
+              Configuration = 'Debug'
+              WindowsSdkVersion = '${{ env.CRTSYS_VS2026_WINDOWS_SDK_VERSION }}'
+              PlatformToolset = 'v145'
+            }
+
+            if (-not [string]::IsNullOrWhiteSpace($wdkVersion)) {
+              $parameters.WdkVersion = $wdkVersion
+            }
+
+            ./scripts/ci/Build-CrtSys.ps1 @parameters
+          }
+
           $parameters = @{
-            Project = 'rpc-streaming'
+            Project = 'flt-runtime'
             Architecture = '${{ matrix.arch }}'
             Configuration = 'Debug'
             WindowsSdkVersion = '${{ env.CRTSYS_VS2026_WINDOWS_SDK_VERSION }}'
             PlatformToolset = 'v145'
           }
-
           if (-not [string]::IsNullOrWhiteSpace($wdkVersion)) {
             $parameters.WdkVersion = $wdkVersion
           }
-
           ./scripts/ci/Build-CrtSys.ps1 @parameters
 
   driver-load-test-preflight:

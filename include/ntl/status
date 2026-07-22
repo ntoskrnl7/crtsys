@@ -8,7 +8,7 @@
  */
 #pragma once
 
-#include <ntddk.h>
+#include <ntdef.h>
 #include <ntstatus.h>
 
 namespace ntl {

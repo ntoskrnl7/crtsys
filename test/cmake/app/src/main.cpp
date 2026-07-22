@@ -4,13 +4,67 @@
 #include <chrono>
 #include <cstddef>
 #include <system_error>
+#include <type_traits>
 
 #include <ntl/rpc/client>
+#include <ntl/ipc/all>
+#include <ntl/flt/communication_client>
 // rpc client stub code
 #include "common/rpc.hpp"
 
 extern "C" std::size_t ntl_rpc_cxx14_async_operation_size() noexcept {
   return sizeof(ntl::rpc::detail::async_operation);
+}
+
+namespace {
+static_assert(std::is_move_constructible<ntl::flt::communication_client>::value,
+              "The minifilter app client must remain movable");
+
+struct ipc_app_record {
+  std::uint32_t sequence;
+  std::uint32_t value;
+};
+} // namespace
+
+TEST(ntl_ipc, pointer_free_region_and_bounded_ring) {
+  constexpr ntl::ipc::region_handle handle{3, 5};
+  alignas(64) unsigned char region_storage[512]{};
+  ntl::ipc::region_view region{
+      handle, region_storage, sizeof(region_storage),
+      ntl::ipc::region_access::driver_read_write};
+
+  ntl::ipc::buffer_token token;
+  ASSERT_EQ(region.token(32, 128, token),
+            ntl::ipc::validation_status::success);
+  EXPECT_EQ(token.region, handle);
+
+  ntl::ipc::mutable_buffer_view resolved;
+  EXPECT_EQ(region.resolve(token, ntl::ipc::region_access::driver_write,
+                           resolved),
+            ntl::ipc::validation_status::success);
+  EXPECT_EQ(resolved.data(), region_storage + 32);
+  EXPECT_EQ(resolved.size(), 128u);
+
+  using ring_type = ntl::ipc::shared_ring<ipc_app_record, 4>;
+  alignas(64) unsigned char storage[ring_type::required_bytes()]{};
+  ring_type producer;
+  ASSERT_EQ(ring_type::initialize(storage, sizeof(storage), producer, 9),
+            ntl::ipc::validation_status::success);
+  ring_type consumer;
+  ASSERT_EQ(ring_type::attach(storage, sizeof(storage), consumer),
+            ntl::ipc::validation_status::success);
+
+  for (std::uint32_t index = 0; index != 4; ++index)
+    EXPECT_TRUE(producer.try_write({index, index + 100}));
+  EXPECT_FALSE(producer.try_write({4, 104}));
+
+  ipc_app_record value{};
+  for (std::uint32_t index = 0; index != 4; ++index) {
+    ASSERT_TRUE(consumer.try_read(value));
+    EXPECT_EQ(value.sequence, index);
+    EXPECT_EQ(value.value, index + 100);
+  }
+  EXPECT_FALSE(consumer.try_read(value));
 }
 
 TEST(ntl_rpc_client, invoke_callback_by_invoke_method) {

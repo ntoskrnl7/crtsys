@@ -1,0 +1,363 @@
+/**
+ * @file kernel_region
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Transport-neutral kernel ownership for pinned IPC regions.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "common"
+
+#include "../mdl"
+#include "../result"
+
+#ifndef _NTDDK_
+#include <wdm.h>
+#endif
+
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <memory>
+#include <mutex>
+#include <unordered_map>
+#include <utility>
+
+namespace ntl {
+namespace ipc {
+
+/** @brief Limits memory retained by one transport connection or RPC session. */
+class region_limits {
+public:
+  /** @brief Maximum simultaneously registered regions. */
+  static constexpr std::size_t default_max_regions = 16;
+
+  /** @brief Maximum pinned bytes retained by one registry. */
+  static constexpr std::size_t default_max_bytes = 64u * 1024u * 1024u;
+
+  constexpr region_limits() noexcept = default;
+
+  /** @brief Replaces the maximum region count. */
+  constexpr region_limits &max_regions(std::size_t value) noexcept {
+    max_regions_ = value;
+    return *this;
+  }
+
+  /** @brief Replaces the maximum aggregate pinned-byte count. */
+  constexpr region_limits &max_bytes(std::size_t value) noexcept {
+    max_bytes_ = value;
+    return *this;
+  }
+
+  /** @brief Returns the maximum region count. */
+  constexpr std::size_t max_regions() const noexcept { return max_regions_; }
+
+  /** @brief Returns the maximum aggregate byte count. */
+  constexpr std::size_t max_bytes() const noexcept { return max_bytes_; }
+
+private:
+  std::size_t max_regions_ = default_max_regions;
+  std::size_t max_bytes_ = default_max_bytes;
+};
+
+/**
+ * @brief Owns the MDL and system mapping for one caller-owned user range.
+ *
+ * Pinning must happen at PASSIVE_LEVEL in the original requestor process
+ * context. IOCTL RPC calls this from its synchronous session-control dispatch;
+ * a minifilter port adapter calls it from its message callback before returning.
+ */
+class pinned_region {
+public:
+  pinned_region(const pinned_region &) = delete;
+  pinned_region &operator=(const pinned_region &) = delete;
+  pinned_region(pinned_region &&) noexcept = default;
+  pinned_region &operator=(pinned_region &&) noexcept = default;
+
+  /** @brief Pins, maps, and takes ownership of one registration request. */
+  [[nodiscard]] static ntl::result<pinned_region>
+  pin(region_handle handle, const region_registration &registration,
+      KPROCESSOR_MODE requestor_mode = UserMode) noexcept {
+    if (!handle.valid() || !registration.valid())
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+    if (registration.length > (std::numeric_limits<ULONG>::max)() ||
+        registration.length > (std::numeric_limits<std::size_t>::max)())
+      return ntl::unexpected(STATUS_INVALID_BUFFER_SIZE);
+
+    const auto address_value =
+        static_cast<std::uintptr_t>(registration.user_address);
+    if (static_cast<std::uint64_t>(address_value) !=
+        registration.user_address)
+      return ntl::unexpected(STATUS_INVALID_USER_BUFFER);
+
+    const auto length = static_cast<std::uintptr_t>(registration.length);
+    if (length - 1 >
+        (std::numeric_limits<std::uintptr_t>::max)() - address_value)
+      return ntl::unexpected(STATUS_INVALID_USER_BUFFER);
+
+    auto *const address = reinterpret_cast<void *>(address_value);
+
+    auto descriptor = ntl::mdl::allocate(
+        address, static_cast<ULONG>(registration.length));
+    if (!descriptor)
+      return ntl::unexpected(descriptor.status());
+
+    const auto operation =
+        has_access(registration.access, region_access::driver_write)
+            ? IoModifyAccess
+            : IoReadAccess;
+    const auto locked = descriptor->probe_and_lock_pages(requestor_mode,
+                                                          operation);
+    if (!locked)
+      return ntl::unexpected(locked.status());
+
+    const auto mapped = descriptor->system_address(NormalPagePriority);
+    if (!mapped)
+      return ntl::unexpected(mapped.status());
+
+    return ntl::ok(pinned_region{
+        handle, std::move(*descriptor), *mapped,
+        static_cast<std::size_t>(registration.length), registration.access});
+  }
+
+  /** @brief Returns the transport-assigned identity. */
+  region_handle handle() const noexcept { return handle_; }
+
+  /** @brief Returns the pinned byte count. */
+  std::size_t size() const noexcept { return bytes_; }
+
+  /** @brief Returns the access granted to the driver. */
+  region_access access() const noexcept { return access_; }
+
+  /** @brief Returns a non-owning view while this object remains alive. */
+  region_view view() const noexcept {
+    return region_view{handle_, system_address_, bytes_, access_};
+  }
+
+private:
+  pinned_region(region_handle handle, ntl::mdl &&descriptor,
+                void *system_address, std::size_t bytes,
+                region_access access) noexcept
+      : handle_(handle), descriptor_(std::move(descriptor)),
+        system_address_(system_address), bytes_(bytes), access_(access) {}
+
+  region_handle handle_{};
+  ntl::mdl descriptor_{};
+  void *system_address_ = nullptr;
+  std::size_t bytes_ = 0;
+  region_access access_ = region_access::none;
+};
+
+/**
+ * @brief Lifetime-safe resolved buffer that keeps its pinned region alive.
+ */
+class pinned_buffer {
+public:
+  pinned_buffer() noexcept = default;
+
+  /** @brief Returns the validated mapped byte range. */
+  mutable_buffer_view view() const noexcept { return view_; }
+
+  /** @brief Returns the first mapped byte. */
+  unsigned char *data() const noexcept { return view_.data(); }
+
+  /** @brief Returns the mapped byte count. */
+  std::size_t size() const noexcept { return view_.size(); }
+
+  /** @brief Reports whether a range and owning region are present. */
+  explicit operator bool() const noexcept {
+    return static_cast<bool>(owner_) && static_cast<bool>(view_);
+  }
+
+private:
+  friend class pinned_region_registry;
+
+  pinned_buffer(std::shared_ptr<pinned_region> owner,
+                mutable_buffer_view view) noexcept
+      : owner_(std::move(owner)), view_(view) {}
+
+  std::shared_ptr<pinned_region> owner_;
+  mutable_buffer_view view_{};
+};
+
+/**
+ * @brief Connection-scoped table of pinned regions with quotas and generations.
+ *
+ * Clearing or unregistering removes future lookup access immediately. Existing
+ * pinned_buffer values retain the MDL until their in-flight operation returns.
+ */
+class pinned_region_registry {
+public:
+  explicit pinned_region_registry(region_limits limits = {}) noexcept
+      : limits_(limits) {}
+
+  pinned_region_registry(const pinned_region_registry &) = delete;
+  pinned_region_registry &operator=(const pinned_region_registry &) = delete;
+
+  /** @brief Probes, pins, maps, and registers one caller-owned user range. */
+  [[nodiscard]] ntl::result<region_handle>
+  try_register(const region_registration &registration,
+               KPROCESSOR_MODE requestor_mode = UserMode) noexcept {
+    if (!registration.valid())
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    if (registration.length > limits_.max_bytes())
+      return ntl::unexpected(STATUS_QUOTA_EXCEEDED);
+
+    region_handle handle;
+    std::uint64_t registration_epoch = 0;
+    {
+      std::lock_guard<std::mutex> guard(lock_);
+      if (!accepting_)
+        return ntl::unexpected(STATUS_DELETE_PENDING);
+      if (regions_.size() >= limits_.max_regions() ||
+          pinned_bytes_ > limits_.max_bytes() -
+                              static_cast<std::size_t>(registration.length))
+        return ntl::unexpected(STATUS_QUOTA_EXCEEDED);
+      handle = next_handle_locked();
+      registration_epoch = epoch_;
+    }
+
+    auto region = pinned_region::pin(handle, registration, requestor_mode);
+    if (!region)
+      return ntl::unexpected(region.status());
+
+    try {
+      auto owner = std::make_shared<pinned_region>(std::move(*region));
+      std::lock_guard<std::mutex> guard(lock_);
+      if (!accepting_ || epoch_ != registration_epoch)
+        return ntl::unexpected(STATUS_DELETE_PENDING);
+      if (regions_.size() >= limits_.max_regions() ||
+          pinned_bytes_ > limits_.max_bytes() - owner->size())
+        return ntl::unexpected(STATUS_QUOTA_EXCEEDED);
+      const auto inserted = regions_.emplace(handle.id, std::move(owner));
+      if (!inserted.second)
+        return ntl::unexpected(STATUS_OBJECT_NAME_COLLISION);
+      pinned_bytes_ += static_cast<std::size_t>(registration.length);
+    } catch (...) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+    return ntl::ok(handle);
+  }
+
+  /** @brief Removes one exact generation from future lookups. */
+  ntl::status try_unregister(region_handle handle) noexcept {
+    if (!handle.valid())
+      return STATUS_INVALID_PARAMETER;
+
+    std::shared_ptr<pinned_region> removed;
+    {
+      std::lock_guard<std::mutex> guard(lock_);
+      const auto found = regions_.find(handle.id);
+      if (found == regions_.end() || found->second->handle() != handle)
+        return STATUS_NOT_FOUND;
+      removed = std::move(found->second);
+      regions_.erase(found);
+      pinned_bytes_ -= removed->size();
+    }
+    return STATUS_SUCCESS;
+  }
+
+  /** @brief Resolves a token while retaining the underlying MDL. */
+  [[nodiscard]] ntl::result<pinned_buffer>
+  try_resolve(buffer_token token, region_access required) noexcept {
+    if (!token.valid())
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+
+    std::shared_ptr<pinned_region> owner;
+    {
+      std::lock_guard<std::mutex> guard(lock_);
+      const auto found = regions_.find(token.region.id);
+      if (found == regions_.end() || found->second->handle() != token.region)
+        return ntl::unexpected(STATUS_NOT_FOUND);
+      owner = found->second;
+    }
+
+    mutable_buffer_view view;
+    const auto validation = owner->view().resolve(token, required, view);
+    switch (validation) {
+    case validation_status::success:
+      return ntl::ok(pinned_buffer{std::move(owner), view});
+    case validation_status::access_denied:
+      return ntl::unexpected(STATUS_ACCESS_DENIED);
+    case validation_status::stale_region:
+      return ntl::unexpected(STATUS_NOT_FOUND);
+    default:
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    }
+  }
+
+  /** @brief Removes every region; in-flight pinned_buffer owners may outlive it. */
+  void clear() noexcept {
+    std::unordered_map<std::uint64_t, std::shared_ptr<pinned_region>> removed;
+    {
+      std::lock_guard<std::mutex> guard(lock_);
+      removed.swap(regions_);
+      pinned_bytes_ = 0;
+    }
+  }
+
+  /**
+   * @brief Rejects new registrations and removes every current region.
+   * @note In-flight pinned_buffer values retain their own MDL reference.
+   */
+  void close() noexcept {
+    std::unordered_map<std::uint64_t, std::shared_ptr<pinned_region>> removed;
+    {
+      std::lock_guard<std::mutex> guard(lock_);
+      accepting_ = false;
+      if (++epoch_ == 0)
+        ++epoch_;
+      removed.swap(regions_);
+      pinned_bytes_ = 0;
+    }
+  }
+
+  /** @brief Starts an empty registration generation after transport reconnect. */
+  void reopen() noexcept {
+    std::unordered_map<std::uint64_t, std::shared_ptr<pinned_region>> removed;
+    {
+      std::lock_guard<std::mutex> guard(lock_);
+      if (++epoch_ == 0)
+        ++epoch_;
+      removed.swap(regions_);
+      pinned_bytes_ = 0;
+      accepting_ = true;
+    }
+  }
+
+  /** @brief Returns the current registered region count. */
+  std::size_t size() const noexcept {
+    std::lock_guard<std::mutex> guard(lock_);
+    return regions_.size();
+  }
+
+  /** @brief Returns the current aggregate pinned bytes. */
+  std::size_t pinned_bytes() const noexcept {
+    std::lock_guard<std::mutex> guard(lock_);
+    return pinned_bytes_;
+  }
+
+private:
+  region_handle next_handle_locked() noexcept {
+    if (++next_id_ == 0)
+      ++next_id_;
+    if (++next_generation_ == 0)
+      ++next_generation_;
+    return region_handle{next_id_, next_generation_};
+  }
+
+  region_limits limits_;
+  mutable std::mutex lock_;
+  std::unordered_map<std::uint64_t, std::shared_ptr<pinned_region>> regions_;
+  std::size_t pinned_bytes_ = 0;
+  std::uint64_t next_id_ = 0;
+  std::uint64_t next_generation_ = 0;
+  std::uint64_t epoch_ = 1;
+  bool accepting_ = true;
+};
+
+} // namespace ipc
+} // namespace ntl

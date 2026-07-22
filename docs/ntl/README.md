@@ -17,6 +17,7 @@ For buildable samples, see:
 - [NTL KMDF USB driver template](../../examples/kmdf-usb-ntl-driver)
 - [NTL KMDF WMI driver/app sample](../../examples/kmdf-wmi-ntl-driver)
 - [NTL KMDF bus/PDO driver/app sample](../../examples/kmdf-bus-ntl-driver)
+- [NTL minifilter driver/app sample](../../examples/minifilter-ntl-driver)
 
 ## Topics
 
@@ -30,10 +31,12 @@ For buildable samples, see:
 | [Registry](./registry.md) | RAII wrapper for Zw registry keys, driver `Parameters` lookup, and typed value query/set helpers |
 | [Driver, device, and IRP helpers](./driver-device-irp.md) | `ntl::main`, `ntl::driver`, `ntl::device`, `ntl::device_endpoint`, dispatch callbacks, and `ntl::irp` |
 | [KMDF helpers](./kmdf.md) | Optional `ntl::kmdf::main`, C++ contexts, typed I/O, manual queues and cancellation, hardware resources, power policy, DMA/USB/WMI, common WDF objects, interrupt/timer/work-item, child-list/PDO, typed query interfaces, registry, and device-property facades |
+| [Minifilter helpers](./minifilter.md) | `ntl::flt::main`, typed pre/post callbacks and contexts, typed communication ports, and connection-bound shared regions |
 | [Device-control pattern](./device-control-pattern.md) | Practical `IOCTL` dispatch pattern using typed IOCTLs, remove locks, MDLs, and output reporting |
 | [Typed IOCTL helper](./ioctl.md) | Compile-time `CTL_CODE` descriptors tied to request/reply payload types |
 | [Device interface](./device-interface.md) | PnP `IoRegisterDeviceInterface` ownership and enable/disable helper |
 | [RPC](./rpc.md) | Kernel/user RPC schemas, stable callback IDs, framing checks, and x86/x64 wire rules |
+| [IPC shared memory](./ipc.md) | Transport-neutral region tokens and bounded shared-memory rings for IOCTL RPC and minifilter communication ports |
 | [Synchronization](./synchronization.md) | `ntl::irql`, IRQL query/contract helpers, spin locks, ERESOURCE wrapper, and lock helpers |
 | [Remove lock](./remove-lock.md) | `IO_REMOVE_LOCK` RAII guard for dispatch/remove/unload synchronization |
 | [Event](./event.md) | `KEVENT` wrapper for notification/synchronization events |

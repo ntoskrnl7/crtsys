@@ -1,0 +1,236 @@
+/**
+ * @file driver
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Filter Manager driver registration and lifetime owner.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "communication"
+#include "registration"
+#include "types"
+
+#include "../status"
+
+#include <fltKernel.h>
+
+#include <memory>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+namespace ntl::flt {
+
+/**
+ * @brief Owns one registered minifilter for the lifetime of the driver image.
+ *
+ * Call start() once from ntl::flt::main. Filter Manager invokes the NTL unload
+ * trampoline, which runs the user unload callback, unregisters the filter, and
+ * tears down the crtsys runtime after outstanding callbacks have drained.
+ */
+class driver {
+  friend FLT_PREOP_CALLBACK_STATUS FLTAPI detail::pre_operation_trampoline(
+      PFLT_CALLBACK_DATA, PCFLT_RELATED_OBJECTS, PVOID *) noexcept;
+  friend FLT_POSTOP_CALLBACK_STATUS FLTAPI detail::post_operation_trampoline(
+      PFLT_CALLBACK_DATA, PCFLT_RELATED_OBJECTS, PVOID,
+      FLT_POST_OPERATION_FLAGS) noexcept;
+  friend FLT_POSTOP_CALLBACK_STATUS FLTAPI
+      detail::safe_post_operation_trampoline(PFLT_CALLBACK_DATA,
+                                             PCFLT_RELATED_OBJECTS, PVOID,
+                                             FLT_POST_OPERATION_FLAGS) noexcept;
+  friend NTSTATUS
+      FLTAPI detail::filter_unload_trampoline(FLT_FILTER_UNLOAD_FLAGS) noexcept;
+  friend NTSTATUS FLTAPI detail::instance_setup_trampoline(
+      PCFLT_RELATED_OBJECTS, FLT_INSTANCE_SETUP_FLAGS, DEVICE_TYPE,
+      FLT_FILESYSTEM_TYPE) noexcept;
+  friend NTSTATUS FLTAPI detail::instance_query_teardown_trampoline(
+      PCFLT_RELATED_OBJECTS, FLT_INSTANCE_QUERY_TEARDOWN_FLAGS) noexcept;
+  friend void FLTAPI detail::instance_teardown_start_trampoline(
+      PCFLT_RELATED_OBJECTS, FLT_INSTANCE_TEARDOWN_FLAGS) noexcept;
+  friend void FLTAPI detail::instance_teardown_complete_trampoline(
+      PCFLT_RELATED_OBJECTS, FLT_INSTANCE_TEARDOWN_FLAGS) noexcept;
+  friend class driver_initializer;
+
+public:
+  driver(const driver &) = delete;
+  driver &operator=(const driver &) = delete;
+  driver(driver &&) = delete;
+  driver &operator=(driver &&) = delete;
+
+  /** @brief Unregisters a partially initialized filter when entry fails. */
+  ~driver() { unregister_filter(); }
+
+  /**
+   * @brief Queues one typed communication server for creation during
+   * start().
+   * @param name Unique Filter Manager port name, including the
+   * leading slash.
+   * @param server Method table to move into the driver
+   * lifetime.
+   * @param options Connection, asynchronous-call, security, and
+   * shared-memory
+   * limits.
+   * @return STATUS_SUCCESS, or an
+   * allocation/argument error.
+   *
+   * @note Add every port before calling start(). Multiple ports are supported.
+
+   */
+  ntl::status
+  add_communication_port(std::wstring_view name, communication_server &&server,
+                         communication_port_options options = {}) noexcept {
+    if (filter_ || name.empty())
+      return STATUS_INVALID_DEVICE_STATE;
+    if (name.front() != L'\\' || options.max_connections() <= 0 ||
+        options.max_pending_async() == 0 || options.max_sessions() == 0 ||
+        options.max_reliable_records() == 0 ||
+        options.max_reliable_bytes() == 0)
+      return STATUS_INVALID_PARAMETER;
+
+    try {
+      communication_ports_.push_back(std::make_unique<communication_binding>(
+          std::wstring(name), std::move(server), options));
+      return STATUS_SUCCESS;
+    } catch (const std::bad_alloc &) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    } catch (...) {
+      return STATUS_UNSUCCESSFUL;
+    }
+  }
+
+  /**
+   * @brief Registers the callback table and starts filtering.
+   * @param callbacks Persistent callback configuration moved into the driver.
+   * @return FltRegisterFilter or FltStartFiltering status.
+   * @note DriverEntry and this method run at PASSIVE_LEVEL.
+   */
+  ntl::status start(registration &&callbacks) {
+    if (filter_)
+      return STATUS_INVALID_DEVICE_STATE;
+
+    try {
+      callbacks.native_operations_.push_back(
+          FLT_OPERATION_REGISTRATION{IRP_MJ_OPERATION_END});
+      FLT_CONTEXT_REGISTRATION context_end{};
+      context_end.ContextType = FLT_CONTEXT_END;
+      callbacks.native_contexts_.push_back(context_end);
+    } catch (...) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    registration_ = std::move(callbacks);
+
+    native_registration_ = {};
+    native_registration_.Size = sizeof(native_registration_);
+    native_registration_.Version = FLT_REGISTRATION_VERSION;
+    native_registration_.Flags = registration_.flags_;
+    native_registration_.OperationRegistration =
+        registration_.native_operations_.size() > 1
+            ? registration_.native_operations_.data()
+            : nullptr;
+    native_registration_.ContextRegistration =
+        registration_.native_contexts_.size() > 1
+            ? registration_.native_contexts_.data()
+            : nullptr;
+    native_registration_.FilterUnloadCallback =
+        detail::filter_unload_trampoline;
+    native_registration_.InstanceSetupCallback =
+        registration_.instance_setup_callback_
+            ? detail::instance_setup_trampoline
+            : nullptr;
+    native_registration_.InstanceQueryTeardownCallback =
+        registration_.instance_query_teardown_callback_
+            ? detail::instance_query_teardown_trampoline
+            : nullptr;
+    native_registration_.InstanceTeardownStartCallback =
+        registration_.instance_teardown_start_callback_
+            ? detail::instance_teardown_start_trampoline
+            : nullptr;
+    native_registration_.InstanceTeardownCompleteCallback =
+        registration_.instance_teardown_complete_callback_
+            ? detail::instance_teardown_complete_trampoline
+            : nullptr;
+
+    NTSTATUS result =
+        FltRegisterFilter(driver_object_, &native_registration_, &filter_);
+    if (!NT_SUCCESS(result))
+      return result;
+
+    for (auto &binding : communication_ports_) {
+      result = binding->server.start(filter_, binding->name, binding->options);
+      if (!NT_SUCCESS(result)) {
+        unregister_filter();
+        return result;
+      }
+    }
+
+    result = FltStartFiltering(filter_);
+    if (!NT_SUCCESS(result)) {
+      unregister_filter();
+      return result;
+    }
+
+    started_ = true;
+    return STATUS_SUCCESS;
+  }
+
+  /** @brief Returns the registered filter facade. */
+  flt::filter filter() const noexcept { return flt::filter{filter_}; }
+
+  /** @brief Returns true after FltStartFiltering succeeds. */
+  bool started() const noexcept { return started_; }
+
+  /** @brief Returns the native driver object. */
+  PDRIVER_OBJECT native_driver() const noexcept { return driver_object_; }
+
+private:
+  struct communication_binding {
+    communication_binding(std::wstring name_value,
+                          communication_server &&server_value,
+                          communication_port_options options_value)
+        : name(std::move(name_value)), server(std::move(server_value)),
+          options(options_value) {}
+
+    std::wstring name;
+    communication_server server;
+    communication_port_options options;
+  };
+
+  explicit driver(PDRIVER_OBJECT driver_object) noexcept
+      : driver_object_(driver_object) {}
+
+  void unregister_filter() noexcept {
+    for (auto &binding : communication_ports_)
+      binding->server.close_listener();
+    if (filter_) {
+      FltUnregisterFilter(filter_);
+      filter_ = nullptr;
+    }
+    communication_ports_.clear();
+    started_ = false;
+  }
+
+  PDRIVER_OBJECT driver_object_ = nullptr;
+  PFLT_FILTER filter_ = nullptr;
+  bool started_ = false;
+  registration registration_;
+  FLT_REGISTRATION native_registration_{};
+  std::vector<std::unique_ptr<communication_binding>> communication_ports_;
+};
+
+#if _X86_
+// MSVC treats every function named main as a hosted entry-point candidate.
+// This is an NTL-owned kernel hook compiled with the WDK calling convention,
+// so suppress the hosted-only C4007 diagnostic under /Gz.
+#pragma warning(disable : 4007)
+#endif
+/**
+ * @brief User-provided NTL minifilter entry point.
+ * @param driver Minifilter registration owner.
+ * @param registry_path Service registry path.
+ * @return STATUS_SUCCESS after driver.start() succeeds, or an error status.
+ */
+ntl::status main(driver &driver, std::wstring_view registry_path);
+
+} // namespace ntl::flt

@@ -91,6 +91,15 @@ inline int RunAllTests() {
     }                                                                         \
   } while (false)
 
+#define ASSERT_TRUE(condition)                                                \
+  do {                                                                        \
+    if (!(condition)) {                                                       \
+      ::testing::record_failure(__FILE__, __LINE__,                           \
+                                "ASSERT_TRUE(" #condition ")");             \
+      return;                                                                 \
+    }                                                                         \
+  } while (false)
+
 #define EXPECT_FALSE(condition)                                               \
   do {                                                                        \
     if (condition) {                                                          \

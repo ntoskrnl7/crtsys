@@ -10,6 +10,7 @@
 #include "common"
 
 #include <ntl/driver>
+#include <ntl/ipc/kernel_region>
 #include <ntl/pool_allocator>
 
 #include <chrono>
@@ -147,6 +148,22 @@ public:
     return *this;
   }
 
+  /** @brief Sets the maximum shared-memory regions pinned by one session. */
+  server_options &max_shared_regions(std::size_t count) {
+    if (count == 0)
+      throw std::invalid_argument("NTL RPC shared-region limit is invalid");
+    region_limits_.max_regions(count);
+    return *this;
+  }
+
+  /** @brief Sets the maximum shared-memory bytes pinned by one session. */
+  server_options &max_shared_region_bytes(std::size_t bytes) {
+    if (bytes == 0)
+      throw std::invalid_argument("NTL RPC shared-memory quota is invalid");
+    region_limits_.max_bytes(bytes);
+    return *this;
+  }
+
   /** @brief Returns the device name without the `\\Device\\` prefix. */
   const std::wstring &name() const noexcept { return name_; }
 
@@ -195,6 +212,11 @@ public:
     return session_retention_ms_;
   }
 
+  /** @brief Returns the per-session shared-memory limits. */
+  const ntl::ipc::region_limits &shared_region_limits() const noexcept {
+    return region_limits_;
+  }
+
 private:
   std::wstring name_;
   std::wstring security_descriptor_ = L"D:P(A;;GA;;;SY)(A;;GA;;;BA)";
@@ -210,6 +232,7 @@ private:
   std::uint32_t max_reliable_notifications_ =
       default_max_reliable_notifications;
   std::uint64_t session_retention_ms_ = default_session_retention_ms;
+  ntl::ipc::region_limits region_limits_{};
 };
 
 namespace detail {
@@ -260,6 +283,14 @@ public:
    * @note The pointer is valid only during the callback invocation.
    */
   client_session *session() const noexcept { return session_; }
+
+  /**
+   * @brief Resolves a pointer-free shared-memory token for this callback.
+   * @note The returned owner keeps the MDL pinned until the value is destroyed.
+   */
+  [[nodiscard]] ntl::result<ntl::ipc::pinned_buffer>
+  try_resolve(ntl::ipc::buffer_token token,
+              ntl::ipc::region_access required) const noexcept;
 
   /**
    * @brief Returns the process ID recorded for the requesting thread.
@@ -480,11 +511,19 @@ public:
     previous.reset();
   }
 
+  /** @brief Resolves a registered region while retaining its MDL. */
+  [[nodiscard]] ntl::result<ntl::ipc::pinned_buffer>
+  try_resolve(ntl::ipc::buffer_token token,
+              ntl::ipc::region_access required) noexcept {
+    return regions_.try_resolve(token, required);
+  }
+
 private:
   friend class detail::session_registry;
   friend class detail::session_operation_guard;
 
-  explicit client_session(session_info info) : info_(info) {
+  explicit client_session(session_info info, ntl::ipc::region_limits limits)
+      : info_(info), regions_(limits) {
     ExInitializeFastMutex(&state_lock_);
     ExInitializeRundownProtection(&operations_);
   }
@@ -532,7 +571,16 @@ private:
   mutable volatile LONG connected_ = 0;
   bool connecting_ = false;
   bool closed_ = false;
+  ntl::ipc::pinned_region_registry regions_;
 };
+
+inline ntl::result<ntl::ipc::pinned_buffer>
+call_context::try_resolve(ntl::ipc::buffer_token token,
+                          ntl::ipc::region_access required) const noexcept {
+  if (!session_)
+    return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+  return session_->try_resolve(token, required);
+}
 
 /** @brief Immutable serialized record passed to persistence hooks. */
 struct notification_record_view {
@@ -622,9 +670,11 @@ public:
   using session_event = std::function<void(client_session &)>;
 
   session_registry(std::uint32_t max_sessions, std::uint32_t max_per_session,
-                   std::uint32_t max_total, std::uint64_t retention_ms)
+                    std::uint32_t max_total, std::uint64_t retention_ms,
+                    ntl::ipc::region_limits region_limits)
       : max_sessions_(max_sessions), max_per_session_(max_per_session),
-        max_total_(max_total), retention_ms_(retention_ms) {
+        max_total_(max_total), retention_ms_(retention_ms),
+        region_limits_(region_limits) {
     ExInitializeFastMutex(&lock_);
   }
 
@@ -685,7 +735,8 @@ public:
       session_info info{};
       info.id = allocate_session_id_locked();
       info.token = token;
-      session = std::shared_ptr<client_session>(new client_session(info));
+      session = std::shared_ptr<client_session>(
+          new client_session(info, region_limits_));
       session->file_object_ = file_object;
       session->connecting_ = true;
       by_token_.emplace(info.token, session);
@@ -739,6 +790,8 @@ public:
       by_file_.emplace(file_object, session);
     }
 
+    session->regions_.reopen();
+
     try {
       const auto context =
           call_context_access::make(nullptr, stopping, caller, session.get());
@@ -762,6 +815,7 @@ public:
       InterlockedExchange(&session->connected_, 1);
       return session->info_;
     } catch (...) {
+      session->regions_.close();
       fast_mutex_guard guard(lock_);
       by_file_.erase(file_object);
       if (!session->closed_) {
@@ -780,6 +834,42 @@ public:
     const auto found = by_file_.find(file_object);
     return found == by_file_.end() ? std::shared_ptr<client_session>{}
                                    : found->second;
+  }
+
+  ntl::ipc::region_handle
+  register_region(PFILE_OBJECT file_object, const session_token &token,
+                  const ntl::ipc::region_registration &registration,
+                  KPROCESSOR_MODE requestor_mode) {
+    std::shared_ptr<client_session> session;
+    {
+      fast_mutex_guard guard(lock_);
+      session = require_bound_locked(file_object, token);
+    }
+    session_operation_guard operation(session);
+    if (!operation.available())
+      throw ntl::exception(STATUS_DELETE_PENDING,
+                           "NTL RPC session is closing");
+    auto result = session->regions_.try_register(registration, requestor_mode);
+    if (!result)
+      throw ntl::exception(result.status(),
+                           "NTL RPC shared-region registration failed");
+    return *result;
+  }
+
+  void unregister_region(PFILE_OBJECT file_object, const session_token &token,
+                         ntl::ipc::region_handle region) {
+    std::shared_ptr<client_session> session;
+    {
+      fast_mutex_guard guard(lock_);
+      session = require_bound_locked(file_object, token);
+    }
+    session_operation_guard operation(session);
+    if (!operation.available())
+      throw ntl::exception(STATUS_DELETE_PENDING,
+                           "NTL RPC session is closing");
+    const auto status = session->regions_.try_unregister(region);
+    if (!status.is_ok())
+      throw ntl::exception(status, "NTL RPC shared region was not found");
   }
 
   bool is_stream_writable(const client_session *session,
@@ -1345,6 +1435,7 @@ public:
       }
       InterlockedExchange(&session->connected_, 0);
     }
+    session->regions_.close();
     invoke_event_noexcept(on_disconnect_, *session);
   }
 
@@ -1355,6 +1446,7 @@ public:
       session = require_bound_locked(file_object, token);
       remove_locked(session);
     }
+    session->regions_.close();
     ExWaitForRundownProtectionRelease(&session->operations_);
     finalize_closed(session, true);
   }
@@ -1373,6 +1465,7 @@ public:
         session = by_token_.begin()->second;
         remove_locked(session);
       }
+      session->regions_.close();
       ExWaitForRundownProtectionRelease(&session->operations_);
       invoke_event_noexcept(on_close_, *session);
     }
@@ -1646,7 +1739,9 @@ private:
                            "NTL RPC restored session exceeds limits");
 
     session_info info{token, allocate_session_id_locked()};
-    auto session = std::shared_ptr<client_session>(new client_session(info));
+    auto session = std::shared_ptr<client_session>(
+        new client_session(info, region_limits_));
+    session->regions_.close();
     std::uint64_t next_sequence = 1;
     for (auto &record : collector.records_) {
       next_sequence = (std::max)(next_sequence, record.sequence + 1);
@@ -1676,6 +1771,7 @@ private:
       fast_mutex_guard guard(lock_);
       remove_locked(session);
     }
+    session->regions_.close();
     ExWaitForRundownProtectionRelease(&session->operations_);
     finalize_closed(session, true);
   }
@@ -1732,6 +1828,7 @@ private:
       }
     }
     for (auto &session : expired) {
+      session->regions_.close();
       ExWaitForRundownProtectionRelease(&session->operations_);
       // Retention expiry releases kernel memory, but an application-provided
       // store remains authoritative and may restore the token later.
@@ -1771,6 +1868,7 @@ private:
   std::uint64_t retention_ms_;
   std::size_t queued_total_ = 0;
   std::uint64_t next_session_id_ = 1;
+  ntl::ipc::region_limits region_limits_{};
 };
 
 template <typename Archive, typename Tuple, std::size_t... Index>
@@ -2163,13 +2261,14 @@ public:
                  std::uint32_t max_pending_notifications,
                  std::uint32_t max_sessions,
                  std::uint32_t max_reliable_per_session,
-                 std::uint32_t max_reliable_total,
-                 std::uint64_t session_retention_ms)
+                  std::uint32_t max_reliable_total,
+                  std::uint64_t session_retention_ms,
+                  ntl::ipc::region_limits region_limits)
       : contract_version_(contract_version), capabilities_(capabilities),
         asynchronous_(asynchronous),
         max_pending_calls_(static_cast<LONG>(max_pending_calls)),
         sessions_(max_sessions, max_reliable_per_session, max_reliable_total,
-                  session_retention_ms) {
+                  session_retention_ms, region_limits) {
     ExInitializeRundownProtection(&rundown_);
     ExInitializeFastMutex(&registration_lock_);
     ExInitializeFastMutex(&delivery_lock_);
@@ -2845,6 +2944,58 @@ private:
     if (KeGetCurrentIrql() != PASSIVE_LEVEL)
       throw ntl::exception(STATUS_INVALID_DEVICE_STATE,
                            "NTL RPC session control requires PASSIVE_LEVEL");
+    if (input.size < sizeof(detail::session_control_header))
+      throw ntl::exception(STATUS_INVALID_PARAMETER,
+                           "NTL RPC session control header is missing");
+    const auto header = input.as<detail::session_control_header>();
+    if (!header || header->version != detail::session_control_version)
+      throw ntl::exception(STATUS_INVALID_PARAMETER,
+                           "Unsupported NTL RPC session control request");
+
+    if (!ExAcquireRundownProtection(&rundown_))
+      throw ntl::exception(STATUS_DELETE_PENDING, "NTL RPC server is stopping");
+    rundown_guard rundown(rundown_);
+    const auto file_object = request.stack_location()->FileObject;
+
+    if (header->operation == detail::session_control_operation::register_region ||
+        header->operation ==
+            detail::session_control_operation::unregister_region) {
+      if (input.size != sizeof(detail::region_control_request))
+        throw ntl::exception(STATUS_INVALID_PARAMETER,
+                             "Invalid NTL RPC shared-region request");
+      const auto command = input.as<detail::region_control_request>();
+      if (!command || !command->token.valid())
+        throw ntl::exception(STATUS_INVALID_PARAMETER,
+                             "Invalid NTL RPC shared-region session token");
+
+      if (command->operation ==
+          detail::session_control_operation::register_region) {
+        if (command->region.valid() || !command->registration.valid())
+          throw ntl::exception(STATUS_INVALID_PARAMETER,
+                               "Invalid NTL RPC region registration");
+        if (!output.can_write(sizeof(detail::region_control_response)))
+          throw ntl::exception(STATUS_BUFFER_TOO_SMALL,
+                               "NTL RPC region response is too small");
+        const auto handle = sessions_.register_region(
+            file_object, command->token, command->registration,
+            request.get()->RequestorMode);
+        if (!output.write(detail::region_control_response{handle}))
+          throw ntl::exception(STATUS_BUFFER_TOO_SMALL,
+                               "NTL RPC region response is too small");
+        return;
+      }
+
+      if (!command->region.valid() || command->registration.user_address != 0 ||
+          command->registration.length != 0 ||
+          command->registration.access != ntl::ipc::region_access::none ||
+          command->registration.reserved != 0)
+        throw ntl::exception(STATUS_INVALID_PARAMETER,
+                             "Invalid NTL RPC region unregistration");
+      sessions_.unregister_region(file_object, command->token, command->region);
+      output.clear();
+      return;
+    }
+
     if (input.size != sizeof(detail::session_control_request))
       throw ntl::exception(STATUS_INVALID_PARAMETER,
                            "Invalid NTL RPC session control request");
@@ -2854,11 +3005,6 @@ private:
       throw ntl::exception(STATUS_INVALID_PARAMETER,
                            "Unsupported NTL RPC session control request");
 
-    if (!ExAcquireRundownProtection(&rundown_))
-      throw ntl::exception(STATUS_DELETE_PENDING, "NTL RPC server is stopping");
-    rundown_guard rundown(rundown_);
-
-    const auto file_object = request.stack_location()->FileObject;
     switch (command->operation) {
     case detail::session_control_operation::create: {
       if (command->token.valid() || command->notification_id != 0 ||
@@ -3116,7 +3262,8 @@ public:
             server_opts.max_pending_notifications(), server_opts.max_sessions(),
             server_opts.max_reliable_notifications_per_session(),
             server_opts.max_reliable_notifications(),
-            server_opts.session_retention_ms())) {
+            server_opts.session_retention_ms(),
+            server_opts.shared_region_limits())) {
     ntl::device_options options;
     options.name(server_opts.name())
         .type(static_cast<ntl::device_type>(ntl::rpc::device_type))

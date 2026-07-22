@@ -1,0 +1,206 @@
+/**
+ * @file coroutine
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief C++20 coroutine adapter for minifilter communication calls.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "communication_client"
+
+#if !((defined(_MSVC_LANG) && _MSVC_LANG >= 202002L) ||                        \
+      (!defined(_MSVC_LANG) && __cplusplus >= 202002L))
+#error "<ntl/flt/coroutine> requires C++20 or later."
+#endif
+
+#include <atomic>
+#include <condition_variable>
+#include <coroutine>
+#include <mutex>
+#include <system_error>
+#include <utility>
+
+namespace ntl {
+namespace flt {
+namespace detail {
+
+template <typename Operation> class communication_coroutine_wait_state {
+public:
+  explicit communication_coroutine_wait_state(
+      std::shared_ptr<Operation> operation) noexcept
+      : operation_(std::move(operation)) {}
+
+  communication_coroutine_wait_state(
+      const communication_coroutine_wait_state &) = delete;
+  communication_coroutine_wait_state &
+  operator=(const communication_coroutine_wait_state &) = delete;
+
+  void add_ref() noexcept { references_.fetch_add(1); }
+  void release() noexcept {
+    if (references_.fetch_sub(1) == 1)
+      delete this;
+  }
+
+  void start(std::coroutine_handle<> continuation) {
+    continuation_ = continuation;
+    add_ref();
+    auto *wait = ::CreateThreadpoolWait(&wait_callback, this, nullptr);
+    if (!wait) {
+      const auto error = static_cast<int>(::GetLastError());
+      release();
+      throw std::system_error(error, std::system_category(),
+                              "NTL minifilter coroutine wait creation failed");
+    }
+    add_ref();
+    ::SetThreadpoolWait(wait, operation_->completion_event(), nullptr);
+    release();
+  }
+
+  void abandon() noexcept {
+    auto expected = phase::waiting;
+    if (phase_.compare_exchange_strong(expected, phase::abandoned)) {
+      (void)operation_->cancel_noexcept();
+      return;
+    }
+    if (expected == phase::resuming && active_resume_state() != this) {
+      std::unique_lock<std::mutex> guard(completion_lock_);
+      completion_changed_.wait(
+          guard, [this] { return phase_.load() == phase::completed; });
+    }
+  }
+
+private:
+  enum class phase : std::uint8_t {
+    waiting,
+    resuming,
+    abandoned,
+    completed,
+  };
+
+  static communication_coroutine_wait_state *&active_resume_state() noexcept {
+    static thread_local communication_coroutine_wait_state *current = nullptr;
+    return current;
+  }
+
+  static void CALLBACK wait_callback(PTP_CALLBACK_INSTANCE, void *context,
+                                     PTP_WAIT wait, TP_WAIT_RESULT) noexcept {
+    auto *state = static_cast<communication_coroutine_wait_state *>(context);
+    ::SetThreadpoolWait(wait, nullptr, nullptr);
+    ::CloseThreadpoolWait(wait);
+
+    auto expected = phase::waiting;
+    if (state->phase_.compare_exchange_strong(expected, phase::resuming)) {
+      auto *previous = active_resume_state();
+      active_resume_state() = state;
+      state->continuation_.resume();
+      active_resume_state() = previous;
+    }
+
+    {
+      std::lock_guard<std::mutex> guard(state->completion_lock_);
+      state->phase_.store(phase::completed);
+    }
+    state->completion_changed_.notify_all();
+    state->release();
+  }
+
+  std::atomic<unsigned long> references_{1};
+  std::shared_ptr<Operation> operation_;
+  std::coroutine_handle<> continuation_{};
+  std::atomic<phase> phase_{phase::waiting};
+  std::mutex completion_lock_;
+  std::condition_variable completion_changed_;
+};
+
+template <typename T> class communication_async_call_awaiter {
+public:
+  explicit communication_async_call_awaiter(
+      communication_async_call<T> call) noexcept
+      : call_(std::move(call)) {}
+  communication_async_call_awaiter(const communication_async_call_awaiter &) =
+      delete;
+  communication_async_call_awaiter &
+  operator=(const communication_async_call_awaiter &) = delete;
+  communication_async_call_awaiter(
+      communication_async_call_awaiter &&other) noexcept
+      : call_(std::move(other.call_)), wait_(other.wait_) {
+    other.wait_ = nullptr;
+  }
+  ~communication_async_call_awaiter() {
+    if (wait_) {
+      wait_->abandon();
+      wait_->release();
+    }
+  }
+
+  bool await_ready() { return call_.ready(); }
+  void await_suspend(std::coroutine_handle<> continuation) {
+    wait_ = new communication_coroutine_wait_state<
+        communication_async_operation>(call_.state_);
+    wait_->start(continuation);
+  }
+  decltype(auto) await_resume() { return call_.get(); }
+
+private:
+  communication_async_call<T> call_;
+  communication_coroutine_wait_state<communication_async_operation> *wait_ =
+      nullptr;
+};
+
+template <typename Payload, bool Reliable>
+class communication_notification_wait_awaiter {
+public:
+  using wait_type = communication_notification_wait<Payload, Reliable>;
+  explicit communication_notification_wait_awaiter(wait_type wait) noexcept
+      : wait_value_(std::move(wait)) {}
+  communication_notification_wait_awaiter(
+      const communication_notification_wait_awaiter &) = delete;
+  communication_notification_wait_awaiter &
+  operator=(const communication_notification_wait_awaiter &) = delete;
+  communication_notification_wait_awaiter(
+      communication_notification_wait_awaiter &&other) noexcept
+      : wait_value_(std::move(other.wait_value_)), wait_(other.wait_) {
+    other.wait_ = nullptr;
+  }
+  ~communication_notification_wait_awaiter() {
+    if (wait_) {
+      wait_->abandon();
+      wait_->release();
+    }
+  }
+
+  bool await_ready() { return wait_value_.ready(); }
+  void await_suspend(std::coroutine_handle<> continuation) {
+    wait_ = new communication_coroutine_wait_state<
+        communication_receive_operation>(wait_value_.state_);
+    wait_->start(continuation);
+  }
+  decltype(auto) await_resume() { return wait_value_.get(); }
+
+private:
+  wait_type wait_value_;
+  communication_coroutine_wait_state<communication_receive_operation> *wait_ =
+      nullptr;
+};
+
+} // namespace detail
+
+/** @brief Suspends until one asynchronous minifilter method completes. */
+template <typename T>
+detail::communication_async_call_awaiter<T>
+operator co_await(communication_async_call<T> &&call) noexcept {
+  return detail::communication_async_call_awaiter<T>(std::move(call));
+}
+
+/** @brief Suspends until one typed notification or stream record arrives. */
+template <typename Payload, bool Reliable>
+detail::communication_notification_wait_awaiter<Payload, Reliable>
+operator co_await(
+    communication_notification_wait<Payload, Reliable> &&wait) noexcept {
+  return detail::communication_notification_wait_awaiter<Payload, Reliable>(
+      std::move(wait));
+}
+
+} // namespace flt
+} // namespace ntl

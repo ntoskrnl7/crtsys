@@ -1,0 +1,591 @@
+/**
+ * @file parameters
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Typed Filter Manager operation parameter views.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "types"
+
+#include <fltKernel.h>
+
+namespace ntl::flt {
+namespace detail {
+
+/** @brief Validates and retains callback data for one operation type. */
+template <operation_id Expected> class operation_parameters {
+public:
+  /** @brief Returns true when the callback carries the expected operation. */
+  explicit operator bool() const noexcept { return data_ != nullptr; }
+
+protected:
+  explicit operation_parameters(PFLT_CALLBACK_DATA data) noexcept
+      : data_(data && data->Iopb &&
+                      data->Iopb->MajorFunction == static_cast<UCHAR>(Expected)
+                  ? data
+                  : nullptr) {}
+
+  PFLT_IO_PARAMETER_BLOCK iopb() const noexcept {
+    return data_ ? data_->Iopb : nullptr;
+  }
+
+  PFLT_CALLBACK_DATA callback() const noexcept { return data_; }
+
+  void dirty() const noexcept {
+    if (data_)
+      FltSetCallbackDataDirty(data_);
+  }
+
+private:
+  PFLT_CALLBACK_DATA data_ = nullptr;
+};
+
+} // namespace detail
+
+/** @brief Typed view of IRP_MJ_CREATE parameters. */
+class create_parameters
+    : public detail::operation_parameters<operation_id::create> {
+  using base = detail::operation_parameters<operation_id::create>;
+
+public:
+  /** @brief Wraps create parameters after validating the major function. */
+  explicit create_parameters(PFLT_CALLBACK_DATA data) noexcept : base(data) {}
+
+  PIO_SECURITY_CONTEXT security_context() const noexcept {
+    return iopb() ? iopb()->Parameters.Create.SecurityContext : nullptr;
+  }
+
+  /** @brief Returns the packed create options and disposition. */
+  ULONG options() const noexcept {
+    return iopb() ? iopb()->Parameters.Create.Options : 0;
+  }
+
+  /** @brief Returns the low 24-bit FILE_* create options. */
+  ULONG create_options() const noexcept { return options() & 0x00ffffffUL; }
+
+  /** @brief Returns the high 8-bit FILE_* create disposition. */
+  UCHAR disposition() const noexcept {
+    return static_cast<UCHAR>(options() >> 24);
+  }
+
+  USHORT file_attributes() const noexcept {
+    return iopb() ? iopb()->Parameters.Create.FileAttributes : 0;
+  }
+
+  USHORT share_access() const noexcept {
+    return iopb() ? iopb()->Parameters.Create.ShareAccess : 0;
+  }
+
+  ULONG ea_length() const noexcept {
+    return iopb() ? iopb()->Parameters.Create.EaLength : 0;
+  }
+
+  PVOID ea_buffer() const noexcept {
+    return iopb() ? iopb()->Parameters.Create.EaBuffer : nullptr;
+  }
+
+  LARGE_INTEGER allocation_size() const noexcept {
+    return iopb() ? iopb()->Parameters.Create.AllocationSize : LARGE_INTEGER{};
+  }
+
+  /** @brief Replaces the packed create options and marks callback data dirty.
+   */
+  void options(ULONG value) noexcept {
+    if (!iopb())
+      return;
+    iopb()->Parameters.Create.Options = value;
+    dirty();
+  }
+
+  /** @brief Replaces file attributes and marks callback data dirty. */
+  void file_attributes(USHORT value) noexcept {
+    if (!iopb())
+      return;
+    iopb()->Parameters.Create.FileAttributes = value;
+    dirty();
+  }
+
+  /** @brief Replaces share access and marks callback data dirty. */
+  void share_access(USHORT value) noexcept {
+    if (!iopb())
+      return;
+    iopb()->Parameters.Create.ShareAccess = value;
+    dirty();
+  }
+
+  /** @brief Replaces the EA buffer and marks callback data dirty. */
+  void ea(PVOID buffer, ULONG length) noexcept {
+    if (!iopb())
+      return;
+    iopb()->Parameters.Create.EaBuffer = buffer;
+    iopb()->Parameters.Create.EaLength = length;
+    dirty();
+  }
+
+  /** @brief Replaces allocation size and marks callback data dirty. */
+  void allocation_size(LARGE_INTEGER value) noexcept {
+    if (!iopb())
+      return;
+    iopb()->Parameters.Create.AllocationSize = value;
+    dirty();
+  }
+};
+
+/** @brief Typed view shared by IRP_MJ_READ and IRP_MJ_WRITE. */
+template <operation_id Expected>
+class transfer_parameters : public detail::operation_parameters<Expected> {
+  static_assert(Expected == operation_id::read ||
+                    Expected == operation_id::write,
+                "transfer_parameters supports only read and write");
+  using base = detail::operation_parameters<Expected>;
+
+public:
+  /** @brief Wraps transfer parameters after validating the major function. */
+  explicit transfer_parameters(PFLT_CALLBACK_DATA data) noexcept : base(data) {}
+
+  ULONG length() const noexcept {
+    if (!this->iopb())
+      return 0;
+    if constexpr (Expected == operation_id::read)
+      return this->iopb()->Parameters.Read.Length;
+    else
+      return this->iopb()->Parameters.Write.Length;
+  }
+
+  ULONG key() const noexcept {
+    if (!this->iopb())
+      return 0;
+    if constexpr (Expected == operation_id::read)
+      return this->iopb()->Parameters.Read.Key;
+    else
+      return this->iopb()->Parameters.Write.Key;
+  }
+
+  LARGE_INTEGER byte_offset() const noexcept {
+    if (!this->iopb())
+      return LARGE_INTEGER{};
+    if constexpr (Expected == operation_id::read)
+      return this->iopb()->Parameters.Read.ByteOffset;
+    else
+      return this->iopb()->Parameters.Write.ByteOffset;
+  }
+
+  PVOID buffer() const noexcept {
+    if (!this->iopb())
+      return nullptr;
+    if constexpr (Expected == operation_id::read)
+      return this->iopb()->Parameters.Read.ReadBuffer;
+    else
+      return this->iopb()->Parameters.Write.WriteBuffer;
+  }
+
+  PMDL mdl() const noexcept {
+    if (!this->iopb())
+      return nullptr;
+    if constexpr (Expected == operation_id::read)
+      return this->iopb()->Parameters.Read.MdlAddress;
+    else
+      return this->iopb()->Parameters.Write.MdlAddress;
+  }
+
+  void length(ULONG value) noexcept {
+    if (!this->iopb())
+      return;
+    if constexpr (Expected == operation_id::read)
+      this->iopb()->Parameters.Read.Length = value;
+    else
+      this->iopb()->Parameters.Write.Length = value;
+    this->dirty();
+  }
+
+  void key(ULONG value) noexcept {
+    if (!this->iopb())
+      return;
+    if constexpr (Expected == operation_id::read)
+      this->iopb()->Parameters.Read.Key = value;
+    else
+      this->iopb()->Parameters.Write.Key = value;
+    this->dirty();
+  }
+
+  void byte_offset(LARGE_INTEGER value) noexcept {
+    if (!this->iopb())
+      return;
+    if constexpr (Expected == operation_id::read)
+      this->iopb()->Parameters.Read.ByteOffset = value;
+    else
+      this->iopb()->Parameters.Write.ByteOffset = value;
+    this->dirty();
+  }
+
+  void buffer(PVOID value, PMDL mdl = nullptr) noexcept {
+    if (!this->iopb())
+      return;
+    if constexpr (Expected == operation_id::read) {
+      this->iopb()->Parameters.Read.ReadBuffer = value;
+      this->iopb()->Parameters.Read.MdlAddress = mdl;
+    } else {
+      this->iopb()->Parameters.Write.WriteBuffer = value;
+      this->iopb()->Parameters.Write.MdlAddress = mdl;
+    }
+    this->dirty();
+  }
+};
+
+using read_parameters = transfer_parameters<operation_id::read>;
+using write_parameters = transfer_parameters<operation_id::write>;
+
+/** @brief Typed view of IRP_MJ_QUERY_INFORMATION parameters. */
+class query_information_parameters
+    : public detail::operation_parameters<operation_id::query_information> {
+  using base = detail::operation_parameters<operation_id::query_information>;
+
+public:
+  explicit query_information_parameters(PFLT_CALLBACK_DATA data) noexcept
+      : base(data) {}
+
+  ULONG length() const noexcept {
+    return iopb() ? iopb()->Parameters.QueryFileInformation.Length : 0;
+  }
+
+  FILE_INFORMATION_CLASS information_class() const noexcept {
+    return iopb() ? iopb()->Parameters.QueryFileInformation.FileInformationClass
+                  : FileDirectoryInformation;
+  }
+
+  PVOID buffer() const noexcept {
+    return iopb() ? iopb()->Parameters.QueryFileInformation.InfoBuffer
+                  : nullptr;
+  }
+
+  void length(ULONG value) noexcept {
+    if (!iopb())
+      return;
+    iopb()->Parameters.QueryFileInformation.Length = value;
+    dirty();
+  }
+
+  void buffer(PVOID value) noexcept {
+    if (!iopb())
+      return;
+    iopb()->Parameters.QueryFileInformation.InfoBuffer = value;
+    dirty();
+  }
+};
+
+/** @brief Typed view of IRP_MJ_SET_INFORMATION parameters. */
+class set_information_parameters
+    : public detail::operation_parameters<operation_id::set_information> {
+  using base = detail::operation_parameters<operation_id::set_information>;
+
+public:
+  explicit set_information_parameters(PFLT_CALLBACK_DATA data) noexcept
+      : base(data) {}
+
+  ULONG length() const noexcept {
+    return iopb() ? iopb()->Parameters.SetFileInformation.Length : 0;
+  }
+
+  FILE_INFORMATION_CLASS information_class() const noexcept {
+    return iopb() ? iopb()->Parameters.SetFileInformation.FileInformationClass
+                  : FileDirectoryInformation;
+  }
+
+  ntl::file parent_of_target() const noexcept {
+    return ntl::file{iopb()
+                         ? iopb()->Parameters.SetFileInformation.ParentOfTarget
+                         : nullptr};
+  }
+
+  PVOID buffer() const noexcept {
+    return iopb() ? iopb()->Parameters.SetFileInformation.InfoBuffer : nullptr;
+  }
+
+  bool replace_if_exists() const noexcept {
+    return iopb() &&
+           iopb()->Parameters.SetFileInformation.ReplaceIfExists != FALSE;
+  }
+
+  void length(ULONG value) noexcept {
+    if (!iopb())
+      return;
+    iopb()->Parameters.SetFileInformation.Length = value;
+    dirty();
+  }
+
+  void buffer(PVOID value) noexcept {
+    if (!iopb())
+      return;
+    iopb()->Parameters.SetFileInformation.InfoBuffer = value;
+    dirty();
+  }
+};
+
+/** @brief Typed view of IRP_MJ_DIRECTORY_CONTROL parameters. */
+class directory_control_parameters
+    : public detail::operation_parameters<operation_id::directory_control> {
+  using base = detail::operation_parameters<operation_id::directory_control>;
+
+public:
+  explicit directory_control_parameters(PFLT_CALLBACK_DATA data) noexcept
+      : base(data) {}
+
+  UCHAR minor_function() const noexcept {
+    return iopb() ? iopb()->MinorFunction : 0xff;
+  }
+
+  bool is_query() const noexcept {
+    return minor_function() == IRP_MN_QUERY_DIRECTORY;
+  }
+
+  bool is_notify() const noexcept {
+    return minor_function() == IRP_MN_NOTIFY_CHANGE_DIRECTORY;
+  }
+
+  bool is_notify_ex() const noexcept {
+#ifdef IRP_MN_NOTIFY_CHANGE_DIRECTORY_EX
+    return minor_function() == IRP_MN_NOTIFY_CHANGE_DIRECTORY_EX;
+#else
+    return false;
+#endif
+  }
+
+  ULONG length() const noexcept {
+    if (!iopb())
+      return 0;
+    if (is_query())
+      return iopb()->Parameters.DirectoryControl.QueryDirectory.Length;
+    if (is_notify())
+      return iopb()->Parameters.DirectoryControl.NotifyDirectory.Length;
+    if (is_notify_ex())
+      return iopb()->Parameters.DirectoryControl.NotifyDirectoryEx.Length;
+    return 0;
+  }
+
+  PUNICODE_STRING file_name() const noexcept {
+    return is_query()
+               ? iopb()->Parameters.DirectoryControl.QueryDirectory.FileName
+               : nullptr;
+  }
+
+  FILE_INFORMATION_CLASS information_class() const noexcept {
+    return is_query() ? iopb()
+                            ->Parameters.DirectoryControl.QueryDirectory
+                            .FileInformationClass
+                      : FileDirectoryInformation;
+  }
+
+  PVOID buffer() const noexcept {
+    if (!iopb())
+      return nullptr;
+    if (is_query())
+      return iopb()->Parameters.DirectoryControl.QueryDirectory.DirectoryBuffer;
+    if (is_notify())
+      return iopb()
+          ->Parameters.DirectoryControl.NotifyDirectory.DirectoryBuffer;
+    if (is_notify_ex())
+      return iopb()
+          ->Parameters.DirectoryControl.NotifyDirectoryEx.DirectoryBuffer;
+    return nullptr;
+  }
+
+  PMDL mdl() const noexcept {
+    if (!iopb())
+      return nullptr;
+    if (is_query())
+      return iopb()->Parameters.DirectoryControl.QueryDirectory.MdlAddress;
+    if (is_notify())
+      return iopb()->Parameters.DirectoryControl.NotifyDirectory.MdlAddress;
+    if (is_notify_ex())
+      return iopb()->Parameters.DirectoryControl.NotifyDirectoryEx.MdlAddress;
+    return nullptr;
+  }
+};
+
+/** @brief Typed view shared by file-system and device-control operations. */
+template <operation_id Expected>
+class control_parameters : public detail::operation_parameters<Expected> {
+  static_assert(Expected == operation_id::file_system_control ||
+                    Expected == operation_id::device_control ||
+                    Expected == operation_id::internal_device_control,
+                "control_parameters supports only FSCTL and IOCTL operations");
+  using base = detail::operation_parameters<Expected>;
+
+public:
+  explicit control_parameters(PFLT_CALLBACK_DATA data) noexcept : base(data) {}
+
+  /** @brief Returns true for the dedicated fast-I/O IOCTL layout. */
+  bool is_fast_io() const noexcept {
+    if constexpr (Expected == operation_id::file_system_control)
+      return false;
+    else
+      return this->callback() && FLT_IS_FASTIO_OPERATION(this->callback());
+  }
+
+  ULONG code() const noexcept {
+    if (!this->iopb())
+      return 0;
+    if constexpr (Expected == operation_id::file_system_control)
+      return this->iopb()->Parameters.FileSystemControl.Common.FsControlCode;
+    else if (is_fast_io())
+      return this->iopb()->Parameters.DeviceIoControl.FastIo.IoControlCode;
+    else
+      return this->iopb()->Parameters.DeviceIoControl.Common.IoControlCode;
+  }
+
+  ULONG input_length() const noexcept {
+    if (!this->iopb())
+      return 0;
+    if constexpr (Expected == operation_id::file_system_control)
+      return this->iopb()
+          ->Parameters.FileSystemControl.Common.InputBufferLength;
+    else if (is_fast_io())
+      return this->iopb()->Parameters.DeviceIoControl.FastIo.InputBufferLength;
+    else
+      return this->iopb()->Parameters.DeviceIoControl.Common.InputBufferLength;
+  }
+
+  ULONG output_length() const noexcept {
+    if (!this->iopb())
+      return 0;
+    if constexpr (Expected == operation_id::file_system_control)
+      return this->iopb()
+          ->Parameters.FileSystemControl.Common.OutputBufferLength;
+    else if (is_fast_io())
+      return this->iopb()->Parameters.DeviceIoControl.FastIo.OutputBufferLength;
+    else
+      return this->iopb()->Parameters.DeviceIoControl.Common.OutputBufferLength;
+  }
+
+  ULONG method() const noexcept { return code() & 3UL; }
+
+  PVOID input_buffer() const noexcept {
+    if (!this->iopb())
+      return nullptr;
+    if constexpr (Expected == operation_id::file_system_control) {
+      if (method() == METHOD_BUFFERED)
+        return this->iopb()->Parameters.FileSystemControl.Buffered.SystemBuffer;
+      if (method() == METHOD_NEITHER)
+        return this->iopb()->Parameters.FileSystemControl.Neither.InputBuffer;
+      return this->iopb()
+          ->Parameters.FileSystemControl.Direct.InputSystemBuffer;
+    } else {
+      if (is_fast_io())
+        return this->iopb()->Parameters.DeviceIoControl.FastIo.InputBuffer;
+      if (method() == METHOD_BUFFERED)
+        return this->iopb()->Parameters.DeviceIoControl.Buffered.SystemBuffer;
+      if (method() == METHOD_NEITHER)
+        return this->iopb()->Parameters.DeviceIoControl.Neither.InputBuffer;
+      return this->iopb()->Parameters.DeviceIoControl.Direct.InputSystemBuffer;
+    }
+  }
+
+  PVOID output_buffer() const noexcept {
+    if (!this->iopb())
+      return nullptr;
+    if constexpr (Expected == operation_id::file_system_control) {
+      if (method() == METHOD_BUFFERED)
+        return this->iopb()->Parameters.FileSystemControl.Buffered.SystemBuffer;
+      if (method() == METHOD_NEITHER)
+        return this->iopb()->Parameters.FileSystemControl.Neither.OutputBuffer;
+      return this->iopb()->Parameters.FileSystemControl.Direct.OutputBuffer;
+    } else {
+      if (is_fast_io())
+        return this->iopb()->Parameters.DeviceIoControl.FastIo.OutputBuffer;
+      if (method() == METHOD_BUFFERED)
+        return this->iopb()->Parameters.DeviceIoControl.Buffered.SystemBuffer;
+      if (method() == METHOD_NEITHER)
+        return this->iopb()->Parameters.DeviceIoControl.Neither.OutputBuffer;
+      return this->iopb()->Parameters.DeviceIoControl.Direct.OutputBuffer;
+    }
+  }
+
+  PMDL output_mdl() const noexcept {
+    if (!this->iopb() || is_fast_io() || method() == METHOD_BUFFERED)
+      return nullptr;
+    if constexpr (Expected == operation_id::file_system_control) {
+      return method() == METHOD_NEITHER
+                 ? this->iopb()
+                       ->Parameters.FileSystemControl.Neither.OutputMdlAddress
+                 : this->iopb()
+                       ->Parameters.FileSystemControl.Direct.OutputMdlAddress;
+    } else {
+      return method() == METHOD_NEITHER
+                 ? this->iopb()
+                       ->Parameters.DeviceIoControl.Neither.OutputMdlAddress
+                 : this->iopb()
+                       ->Parameters.DeviceIoControl.Direct.OutputMdlAddress;
+    }
+  }
+};
+
+using file_system_control_parameters =
+    control_parameters<operation_id::file_system_control>;
+using device_control_parameters =
+    control_parameters<operation_id::device_control>;
+using internal_device_control_parameters =
+    control_parameters<operation_id::internal_device_control>;
+
+/** @brief Empty parameter view for operations with no typed NTL fields. */
+class no_parameters {
+public:
+  explicit no_parameters(PFLT_CALLBACK_DATA data) noexcept : data_(data) {}
+
+  /** @brief Returns true when callback data and its IOPB are present. */
+  explicit operator bool() const noexcept {
+    return data_ != nullptr && data_->Iopb != nullptr;
+  }
+
+private:
+  PFLT_CALLBACK_DATA data_ = nullptr;
+};
+
+/** @brief Maps a compile-time operation to its only legal parameter view. */
+template <operation_id Value> struct operation_parameter_traits {
+  using type = no_parameters;
+};
+
+template <> struct operation_parameter_traits<operation_id::create> {
+  using type = create_parameters;
+};
+
+template <> struct operation_parameter_traits<operation_id::read> {
+  using type = read_parameters;
+};
+
+template <> struct operation_parameter_traits<operation_id::write> {
+  using type = write_parameters;
+};
+
+template <> struct operation_parameter_traits<operation_id::query_information> {
+  using type = query_information_parameters;
+};
+
+template <> struct operation_parameter_traits<operation_id::set_information> {
+  using type = set_information_parameters;
+};
+
+template <> struct operation_parameter_traits<operation_id::directory_control> {
+  using type = directory_control_parameters;
+};
+
+template <>
+struct operation_parameter_traits<operation_id::file_system_control> {
+  using type = file_system_control_parameters;
+};
+
+template <> struct operation_parameter_traits<operation_id::device_control> {
+  using type = device_control_parameters;
+};
+
+template <>
+struct operation_parameter_traits<operation_id::internal_device_control> {
+  using type = internal_device_control_parameters;
+};
+
+template <operation_id Value>
+using operation_parameters_t = typename operation_parameter_traits<Value>::type;
+
+} // namespace ntl::flt

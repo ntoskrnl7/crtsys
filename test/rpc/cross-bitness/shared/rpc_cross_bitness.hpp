@@ -17,6 +17,7 @@
 #include <vector>
 
 #include <ntl/rpc/common>
+#include <ntl/ipc/shared_ring>
 
 enum class rpc_wire_mode : std::uint32_t {
   boundary_values = 0x10203040u,
@@ -145,6 +146,14 @@ struct rpc_cross_bitness_payload {
   }
 };
 
+struct rpc_shared_ring_record {
+  std::uint64_t sequence = 0;
+  std::uint32_t source = 0;
+  std::uint32_t checksum = 0;
+};
+
+using rpc_shared_ring = ntl::ipc::shared_ring<rpc_shared_ring_record, 8>;
+
 namespace crtsys_rpc_cross_bitness {
 
 constexpr std::uint32_t contract_version = 3;
@@ -183,6 +192,13 @@ constexpr auto slow_call =
     ntl::rpc::method<0xA0A, std::uint32_t(std::uint32_t)>{};
 constexpr auto request_stop = ntl::rpc::method<0xA0B, std::uint32_t()>{};
 constexpr auto slow_active = ntl::rpc::method<0xA0C, std::uint32_t()>{};
+constexpr auto fill_shared_ring =
+    ntl::rpc::method<0xA0D,
+                     std::uint32_t(ntl::ipc::buffer_token, std::uint32_t,
+                                   std::uint32_t)>{};
+constexpr auto consume_shared_ring =
+    ntl::rpc::method<0xA0E,
+                     std::uint64_t(ntl::ipc::buffer_token, std::uint32_t)>{};
 constexpr auto unavailable_method = ntl::rpc::method<0xAFD, void()>{};
 
 } // namespace crtsys_rpc_cross_bitness

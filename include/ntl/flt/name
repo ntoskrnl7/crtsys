@@ -1,0 +1,134 @@
+/**
+ * @file name
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief RAII access to Filter Manager file-name information.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include <fltKernel.h>
+
+#include "../result"
+#include "../status"
+
+#include <string_view>
+#include <utility>
+
+namespace ntl::flt {
+namespace detail {
+inline std::wstring_view unicode_view(const UNICODE_STRING &value) noexcept {
+  if (!value.Buffer)
+    return {};
+  return {value.Buffer, value.Length / sizeof(wchar_t)};
+}
+} // namespace detail
+
+/** @brief Owns a referenced FLT_FILE_NAME_INFORMATION structure. */
+class name_information {
+public:
+  /** @brief Creates an empty name-information owner. */
+  name_information() noexcept = default;
+
+  /** @brief Takes ownership of a referenced native name-information object. */
+  explicit name_information(PFLT_FILE_NAME_INFORMATION value) noexcept
+      : value_(value) {}
+
+  name_information(const name_information &) = delete;
+  name_information &operator=(const name_information &) = delete;
+
+  /** @brief Transfers the native reference. */
+  name_information(name_information &&other) noexcept
+      : value_(std::exchange(other.value_, nullptr)) {}
+
+  /** @brief Releases the current reference and takes another one. */
+  name_information &operator=(name_information &&other) noexcept {
+    if (this != &other) {
+      reset();
+      value_ = std::exchange(other.value_, nullptr);
+    }
+    return *this;
+  }
+
+  /** @brief Releases the Filter Manager name-information reference. */
+  ~name_information() noexcept { reset(); }
+
+  /**
+   * @brief Acquires another owner for the same cached name information.
+   * @return An independent RAII reference or an invalid-state status.
+   * @note Requires IRQL <= APC_LEVEL. The referenced information remains
+   * valid until every owner calls FltReleaseFileNameInformation.
+   */
+  ntl::result<name_information> try_reference() const noexcept {
+    if (!value_)
+      return ntl::unexpected(STATUS_INVALID_HANDLE);
+    if (KeGetCurrentIrql() > APC_LEVEL)
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+
+    FltReferenceFileNameInformation(value_);
+    return ntl::ok(name_information{value_});
+  }
+
+  /**
+   * @brief Parses the name into volume, directory, component, and extension.
+   * @note Follows the native FltParseFileNameInformation contract and must be
+   * called at IRQL <= APC_LEVEL.
+   */
+  ntl::status try_parse() noexcept {
+    if (!value_)
+      return STATUS_INVALID_HANDLE;
+    return FltParseFileNameInformation(value_);
+  }
+
+  /** @brief Returns the complete queried name. */
+  std::wstring_view name() const noexcept {
+    return value_ ? detail::unicode_view(value_->Name) : std::wstring_view{};
+  }
+
+  /** @brief Returns the parsed volume component. */
+  std::wstring_view volume() const noexcept {
+    return value_ ? detail::unicode_view(value_->Volume) : std::wstring_view{};
+  }
+
+  /** @brief Returns the parsed parent directory. */
+  std::wstring_view parent_directory() const noexcept {
+    return value_ ? detail::unicode_view(value_->ParentDir)
+                  : std::wstring_view{};
+  }
+
+  /** @brief Returns the parsed final path component. */
+  std::wstring_view final_component() const noexcept {
+    return value_ ? detail::unicode_view(value_->FinalComponent)
+                  : std::wstring_view{};
+  }
+
+  /** @brief Returns the parsed file extension. */
+  std::wstring_view extension() const noexcept {
+    return value_ ? detail::unicode_view(value_->Extension)
+                  : std::wstring_view{};
+  }
+
+  /** @brief Returns the parsed stream component. */
+  std::wstring_view stream() const noexcept {
+    return value_ ? detail::unicode_view(value_->Stream) : std::wstring_view{};
+  }
+
+  /** @brief Returns the native name-information pointer. */
+  PFLT_FILE_NAME_INFORMATION native() const noexcept { return value_; }
+
+  /** @brief Returns true when a native reference is owned. */
+  explicit operator bool() const noexcept { return value_ != nullptr; }
+
+  /** @brief Releases the owned native reference. */
+  void reset() noexcept {
+    if (value_) {
+      FltReleaseFileNameInformation(value_);
+      value_ = nullptr;
+    }
+  }
+
+private:
+  PFLT_FILE_NAME_INFORMATION value_ = nullptr;
+};
+
+} // namespace ntl::flt

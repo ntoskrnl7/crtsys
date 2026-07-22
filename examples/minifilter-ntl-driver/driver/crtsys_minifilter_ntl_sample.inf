@@ -1,0 +1,80 @@
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = "ActivityMonitor"
+ClassGuid   = {b86dff51-a31e-4bac-b3cf-e8cfe75c9fc2}
+Provider    = %ProviderName%
+DriverVer   = 07/16/2026,0.1.0.0
+CatalogFile = crtsys_minifilter_ntl_sample.cat
+PnpLockdown = 1
+
+[DestinationDirs]
+DriverCopyFiles.Downlevel = 12
+DriverCopyFiles.24H2      = 13
+
+[DefaultInstall.NTamd64]
+OptionDesc = %ServiceDescription%
+CopyFiles  = DriverCopyFiles.Downlevel
+
+[DefaultInstall.NTamd64.10.0...26100]
+OptionDesc = %ServiceDescription%
+CopyFiles  = DriverCopyFiles.24H2
+
+[DefaultInstall.NTamd64.Services]
+AddService = %ServiceName%,,ServiceInstall.Downlevel
+
+[DefaultInstall.NTamd64.10.0...26100.Services]
+AddService = %ServiceName%,,ServiceInstall.24H2
+
+[ServiceInstall.Downlevel]
+DisplayName    = %ServiceDescription%
+Description    = %ServiceDescription%
+ServiceBinary  = %12%\crtsys_minifilter_ntl_sample.sys
+ServiceType    = 2
+StartType      = 3
+ErrorControl   = 1
+LoadOrderGroup = "FSFilter Activity Monitor"
+Dependencies   = FltMgr
+AddReg         = Instances.AddRegistry.Downlevel
+
+[ServiceInstall.24H2]
+DisplayName    = %ServiceDescription%
+Description    = %ServiceDescription%
+ServiceBinary  = %13%\crtsys_minifilter_ntl_sample.sys
+ServiceType    = 2
+StartType      = 3
+ErrorControl   = 1
+LoadOrderGroup = "FSFilter Activity Monitor"
+Dependencies   = FltMgr
+AddReg         = Instances.AddRegistry.24H2
+
+[Instances.AddRegistry.Downlevel]
+HKR,"Instances","DefaultInstance",0x00000000,%DefaultInstance%
+HKR,"Instances\%DefaultInstance%","Altitude",0x00000000,%DefaultAltitude%
+HKR,"Instances\%DefaultInstance%","Flags",0x00010001,0
+
+[Instances.AddRegistry.24H2]
+HKR,"Parameters\Instances","DefaultInstance",0x00000000,%DefaultInstance%
+HKR,"Parameters\Instances\%DefaultInstance%","Altitude",0x00000000,%DefaultAltitude%
+HKR,"Parameters\Instances\%DefaultInstance%","Flags",0x00010001,0
+
+[DriverCopyFiles.Downlevel]
+crtsys_minifilter_ntl_sample.sys
+
+[DriverCopyFiles.24H2]
+crtsys_minifilter_ntl_sample.sys
+
+[SourceDisksFiles]
+crtsys_minifilter_ntl_sample.sys = 1,,
+
+[SourceDisksNames]
+1 = %DiskName%,,,
+
+[Strings]
+ProviderName       = "ntoskrnl7"
+ServiceName        = "CrtSysMinifilterNtlSample"
+ServiceDescription = "crtsys NTL minifilter sample"
+DefaultInstance    = "CrtSys NTL minifilter sample instance"
+; Development-only value. Obtain a unique Microsoft-assigned altitude before
+; distributing a real minifilter.
+DefaultAltitude    = "370030.127"
+DiskName           = "crtsys NTL minifilter sample installation media"

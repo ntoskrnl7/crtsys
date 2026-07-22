@@ -1,0 +1,536 @@
+/**
+ * @file context
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Typed C++ lifetime support for Filter Manager contexts.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "../result"
+
+#include <fltKernel.h>
+
+#include <cstddef>
+#include <new>
+#include <type_traits>
+#include <utility>
+
+namespace ntl::flt {
+
+/** @brief Filter Manager object to which a context is attached. */
+enum class context_scope {
+  volume,
+  instance,
+  file,
+  stream,
+  stream_handle,
+  transaction,
+};
+
+/** @brief Pool used by Filter Manager for a typed context. */
+enum class context_pool {
+  nonpaged,
+  nonpaged_nx,
+  paged,
+};
+
+namespace detail {
+
+constexpr ULONG make_context_tag(char a, char b, char c, char d) noexcept {
+  return static_cast<ULONG>(static_cast<unsigned char>(a)) |
+         (static_cast<ULONG>(static_cast<unsigned char>(b)) << 8) |
+         (static_cast<ULONG>(static_cast<unsigned char>(c)) << 16) |
+         (static_cast<ULONG>(static_cast<unsigned char>(d)) << 24);
+}
+
+template <context_scope Scope> constexpr ULONG default_context_tag() noexcept {
+  if constexpr (Scope == context_scope::volume)
+    return make_context_tag('N', 'T', 'L', 'v');
+  else if constexpr (Scope == context_scope::instance)
+    return make_context_tag('N', 'T', 'L', 'i');
+  else if constexpr (Scope == context_scope::file)
+    return make_context_tag('N', 'T', 'L', 'f');
+  else if constexpr (Scope == context_scope::stream)
+    return make_context_tag('N', 'T', 'L', 's');
+  else if constexpr (Scope == context_scope::stream_handle)
+    return make_context_tag('N', 'T', 'L', 'h');
+  else
+    return make_context_tag('N', 'T', 'L', 't');
+}
+
+constexpr POOL_TYPE native_context_pool(context_pool pool) noexcept {
+  switch (pool) {
+  case context_pool::nonpaged:
+    return NonPagedPool;
+  case context_pool::nonpaged_nx:
+    return NonPagedPoolNx;
+  case context_pool::paged:
+    return PagedPool;
+  }
+
+  return NonPagedPoolNx;
+}
+
+template <context_scope Scope> constexpr FLT_CONTEXT_TYPE native_context_type() {
+  if constexpr (Scope == context_scope::volume)
+    return FLT_VOLUME_CONTEXT;
+  else if constexpr (Scope == context_scope::instance)
+    return FLT_INSTANCE_CONTEXT;
+  else if constexpr (Scope == context_scope::file)
+    return FLT_FILE_CONTEXT;
+  else if constexpr (Scope == context_scope::stream)
+    return FLT_STREAM_CONTEXT;
+  else if constexpr (Scope == context_scope::stream_handle)
+    return FLT_STREAMHANDLE_CONTEXT;
+  else
+    return FLT_TRANSACTION_CONTEXT;
+}
+
+inline constexpr ULONG managed_context_signature =
+    make_context_tag('N', 'T', 'L', 'C');
+
+struct managed_context_header {
+  ULONG signature;
+  const void *type;
+  void (*destroy)(PFLT_CONTEXT) noexcept;
+};
+
+template <class T> struct managed_context_storage {
+  managed_context_header header;
+  alignas(T) unsigned char value[sizeof(T)];
+};
+
+template <class T> struct context_type_token {
+  inline static const unsigned char value = 0;
+};
+
+template <class T> constexpr const void *context_type() noexcept {
+  return &context_type_token<T>::value;
+}
+
+template <class T> T *context_value(PFLT_CONTEXT context) noexcept {
+  auto *storage = static_cast<managed_context_storage<T> *>(context);
+  return reinterpret_cast<T *>(storage->value);
+}
+
+template <class T> void destroy_context(PFLT_CONTEXT context) noexcept {
+  auto *storage = static_cast<managed_context_storage<T> *>(context);
+  context_value<T>(context)->~T();
+  storage->header.signature = 0;
+  storage->header.type = nullptr;
+  storage->header.destroy = nullptr;
+}
+
+inline void FLTAPI context_cleanup(PFLT_CONTEXT context,
+                                   FLT_CONTEXT_TYPE) noexcept {
+  if (!context)
+    return;
+
+  auto *header = static_cast<managed_context_header *>(context);
+  if (header->signature == managed_context_signature && header->destroy)
+    header->destroy(context);
+}
+
+template <class T, class... Args>
+void construct_context(PFLT_CONTEXT context, Args &&...args) noexcept {
+  static_assert(std::is_nothrow_constructible_v<T, Args...>,
+                "Filter Manager context constructors must be noexcept");
+
+  auto *storage = static_cast<managed_context_storage<T> *>(context);
+  storage->header = {};
+  ::new (storage->value) T(std::forward<Args>(args)...);
+  storage->header.type = context_type<T>();
+  storage->header.destroy = destroy_context<T>;
+  storage->header.signature = managed_context_signature;
+}
+
+template <class T> bool is_context_type(PFLT_CONTEXT context) noexcept {
+  if (!context)
+    return false;
+  const auto *header = static_cast<const managed_context_header *>(context);
+  return header->signature == managed_context_signature &&
+         header->type == context_type<T>();
+}
+
+struct native_context_objects {
+  PFLT_FILTER filter = nullptr;
+  PFLT_VOLUME volume = nullptr;
+  PFLT_INSTANCE instance = nullptr;
+  PFILE_OBJECT file = nullptr;
+  PKTRANSACTION transaction = nullptr;
+};
+
+template <context_scope Scope> struct context_api;
+
+template <> struct context_api<context_scope::volume> {
+  static bool valid(const native_context_objects &objects) noexcept {
+    return objects.filter && objects.volume;
+  }
+  static bool supports(const native_context_objects &objects) noexcept {
+    return valid(objects);
+  }
+  static NTSTATUS get(const native_context_objects &objects,
+                      PFLT_CONTEXT *context) noexcept {
+    return FltGetVolumeContext(objects.filter, objects.volume, context);
+  }
+  static NTSTATUS set(const native_context_objects &objects,
+                      PFLT_CONTEXT context,
+                      PFLT_CONTEXT *old_context) noexcept {
+    return FltSetVolumeContext(objects.volume, FLT_SET_CONTEXT_KEEP_IF_EXISTS,
+                               context, old_context);
+  }
+};
+
+template <> struct context_api<context_scope::instance> {
+  static bool valid(const native_context_objects &objects) noexcept {
+    return objects.filter && objects.instance;
+  }
+  static bool supports(const native_context_objects &objects) noexcept {
+    return valid(objects);
+  }
+  static NTSTATUS get(const native_context_objects &objects,
+                      PFLT_CONTEXT *context) noexcept {
+    return FltGetInstanceContext(objects.instance, context);
+  }
+  static NTSTATUS set(const native_context_objects &objects,
+                      PFLT_CONTEXT context,
+                      PFLT_CONTEXT *old_context) noexcept {
+    return FltSetInstanceContext(objects.instance,
+                                 FLT_SET_CONTEXT_KEEP_IF_EXISTS, context,
+                                 old_context);
+  }
+};
+
+template <> struct context_api<context_scope::file> {
+  static bool valid(const native_context_objects &objects) noexcept {
+    return objects.filter && objects.instance && objects.file;
+  }
+  static bool supports(const native_context_objects &objects) noexcept {
+    return valid(objects) &&
+           FltSupportsFileContextsEx(objects.file, objects.instance) != FALSE;
+  }
+  static NTSTATUS get(const native_context_objects &objects,
+                      PFLT_CONTEXT *context) noexcept {
+    return FltGetFileContext(objects.instance, objects.file, context);
+  }
+  static NTSTATUS set(const native_context_objects &objects,
+                      PFLT_CONTEXT context,
+                      PFLT_CONTEXT *old_context) noexcept {
+    return FltSetFileContext(objects.instance, objects.file,
+                             FLT_SET_CONTEXT_KEEP_IF_EXISTS, context,
+                             old_context);
+  }
+};
+
+template <> struct context_api<context_scope::stream> {
+  static bool valid(const native_context_objects &objects) noexcept {
+    return objects.filter && objects.instance && objects.file;
+  }
+  static bool supports(const native_context_objects &objects) noexcept {
+    return valid(objects) && FltSupportsStreamContexts(objects.file) != FALSE;
+  }
+  static NTSTATUS get(const native_context_objects &objects,
+                      PFLT_CONTEXT *context) noexcept {
+    return FltGetStreamContext(objects.instance, objects.file, context);
+  }
+  static NTSTATUS set(const native_context_objects &objects,
+                      PFLT_CONTEXT context,
+                      PFLT_CONTEXT *old_context) noexcept {
+    return FltSetStreamContext(objects.instance, objects.file,
+                               FLT_SET_CONTEXT_KEEP_IF_EXISTS, context,
+                               old_context);
+  }
+};
+
+template <> struct context_api<context_scope::stream_handle> {
+  static bool valid(const native_context_objects &objects) noexcept {
+    return objects.filter && objects.instance && objects.file;
+  }
+  static bool supports(const native_context_objects &objects) noexcept {
+    return valid(objects) &&
+           FltSupportsStreamHandleContexts(objects.file) != FALSE;
+  }
+  static NTSTATUS get(const native_context_objects &objects,
+                      PFLT_CONTEXT *context) noexcept {
+    return FltGetStreamHandleContext(objects.instance, objects.file, context);
+  }
+  static NTSTATUS set(const native_context_objects &objects,
+                      PFLT_CONTEXT context,
+                      PFLT_CONTEXT *old_context) noexcept {
+    return FltSetStreamHandleContext(objects.instance, objects.file,
+                                     FLT_SET_CONTEXT_KEEP_IF_EXISTS, context,
+                                     old_context);
+  }
+};
+
+template <> struct context_api<context_scope::transaction> {
+  static bool valid(const native_context_objects &objects) noexcept {
+    return objects.filter && objects.instance && objects.transaction;
+  }
+  static bool supports(const native_context_objects &objects) noexcept {
+    return valid(objects);
+  }
+  static NTSTATUS get(const native_context_objects &objects,
+                      PFLT_CONTEXT *context) noexcept {
+    return FltGetTransactionContext(objects.instance, objects.transaction,
+                                    context);
+  }
+  static NTSTATUS set(const native_context_objects &objects,
+                      PFLT_CONTEXT context,
+                      PFLT_CONTEXT *old_context) noexcept {
+    return FltSetTransactionContext(objects.instance, objects.transaction,
+                                    FLT_SET_CONTEXT_KEEP_IF_EXISTS, context,
+                                    old_context);
+  }
+};
+
+} // namespace detail
+
+/**
+ * @brief Declares one typed Filter Manager context used by a minifilter.
+ * @tparam T C++ state stored in the context.
+ * @tparam Scope Filter Manager object that owns the context.
+ *
+ * Use the public file_context, stream_context, stream_handle_context,
+ * instance_context, volume_context, or transaction_context aliases.
+ */
+template <class T, context_scope Scope> class context_definition {
+  static_assert(Scope != context_scope::volume,
+                "volume contexts use the NonPagedPool-only specialization");
+
+public:
+  using value_type = T;
+  static constexpr context_scope scope = Scope;
+
+  /**
+   * @brief Creates a context in NonPagedPoolNx with the default NTL tag.
+   */
+  constexpr context_definition() noexcept = default;
+
+  /** @brief Selects the allocation pool while retaining the default tag. */
+  constexpr explicit context_definition(context_pool pool) noexcept
+      : pool_(pool) {}
+
+  /** @brief Selects a diagnostic tag while retaining the scope's default. */
+  constexpr explicit context_definition(ULONG pool_tag) noexcept
+      : pool_tag_(pool_tag) {}
+
+  /** @brief Selects both the allocation pool and diagnostic pool tag. */
+  constexpr context_definition(context_pool pool, ULONG pool_tag) noexcept
+      : pool_(pool), pool_tag_(pool_tag) {}
+
+  /** @brief Returns the pool used by FltAllocateContext. */
+  constexpr context_pool pool() const noexcept { return pool_; }
+
+  /** @brief Returns the context pool tag registered with Filter Manager. */
+  constexpr ULONG pool_tag() const noexcept { return pool_tag_; }
+
+private:
+  context_pool pool_ = context_pool::nonpaged_nx;
+  ULONG pool_tag_ = detail::default_context_tag<Scope>();
+};
+
+/**
+ * @brief Declares volume state using Filter Manager's required NonPagedPool.
+ *
+ * Filter Manager does not permit callers to select another pool for a volume
+ * context, so this specialization deliberately exposes no pool constructor.
+ */
+template <class T>
+class context_definition<T, context_scope::volume> {
+public:
+  using value_type = T;
+  static constexpr context_scope scope = context_scope::volume;
+
+  /** @brief Creates a NonPagedPool volume context with the default NTL tag. */
+  constexpr context_definition() noexcept = default;
+
+  /** @brief Selects the diagnostic tag for the NonPagedPool allocation. */
+  constexpr explicit context_definition(ULONG pool_tag) noexcept
+      : pool_tag_(pool_tag) {}
+
+  /** @brief Returns Filter Manager's required volume-context pool. */
+  constexpr context_pool pool() const noexcept {
+    return context_pool::nonpaged;
+  }
+
+  /** @brief Returns the context pool tag registered with Filter Manager. */
+  constexpr ULONG pool_tag() const noexcept { return pool_tag_; }
+
+private:
+  ULONG pool_tag_ = detail::default_context_tag<context_scope::volume>();
+};
+
+/** @brief Declares state owned by one volume. */
+template <class T>
+using volume_context = context_definition<T, context_scope::volume>;
+
+/** @brief Declares state owned by one filter instance on a volume. */
+template <class T>
+using instance_context = context_definition<T, context_scope::instance>;
+
+/** @brief Declares state shared by all streams of one file in an instance. */
+template <class T>
+using file_context = context_definition<T, context_scope::file>;
+
+/** @brief Declares state owned by one file stream in an instance. */
+template <class T>
+using stream_context = context_definition<T, context_scope::stream>;
+
+/** @brief Declares state owned by one open FILE_OBJECT in an instance. */
+template <class T>
+using stream_handle_context =
+    context_definition<T, context_scope::stream_handle>;
+
+/** @brief Declares state owned by one file-system transaction. */
+template <class T>
+using transaction_context = context_definition<T, context_scope::transaction>;
+
+/**
+ * @brief Owns one reference returned by a Filter Manager context routine.
+ * @tparam T C++ context state.
+ * @tparam Scope Filter Manager object carrying the state.
+ *
+ * Destruction calls FltReleaseContext. The reference is move-only so each
+ * successful allocation/get/set result has one obvious release owner.
+ */
+template <class T, context_scope Scope> class context_ref {
+public:
+  context_ref() noexcept = default;
+  context_ref(const context_ref &) = delete;
+  context_ref &operator=(const context_ref &) = delete;
+
+  context_ref(context_ref &&other) noexcept : context_(other.release()) {}
+
+  context_ref &operator=(context_ref &&other) noexcept {
+    if (this != &other) {
+      reset();
+      context_ = other.release();
+    }
+    return *this;
+  }
+
+  /** @brief Releases the owned Filter Manager reference. */
+  ~context_ref() { reset(); }
+
+  /** @brief Returns the typed C++ state. */
+  T *get() const noexcept {
+    return context_ ? detail::context_value<T>(context_) : nullptr;
+  }
+
+  /** @brief Returns the typed state by reference. */
+  T &operator*() const noexcept { return *get(); }
+
+  /** @brief Provides member access to the typed state. */
+  T *operator->() const noexcept { return get(); }
+
+  /** @brief Returns true when a context reference is owned. */
+  explicit operator bool() const noexcept { return context_ != nullptr; }
+
+  /** @brief Returns the native context pointer without releasing ownership. */
+  PFLT_CONTEXT native_context() const noexcept { return context_; }
+
+  /** @brief Releases the reference now. */
+  void reset() noexcept {
+    if (context_) {
+      FltReleaseContext(context_);
+      context_ = nullptr;
+    }
+  }
+
+private:
+  template <class U, context_scope OtherScope>
+  friend ntl::result<context_ref<U, OtherScope>> detail_adopt_context(
+      PFLT_CONTEXT) noexcept;
+
+  explicit context_ref(PFLT_CONTEXT context) noexcept : context_(context) {}
+
+  PFLT_CONTEXT release() noexcept {
+    PFLT_CONTEXT result = context_;
+    context_ = nullptr;
+    return result;
+  }
+
+  PFLT_CONTEXT context_ = nullptr;
+};
+
+template <class T, context_scope Scope>
+ntl::result<context_ref<T, Scope>>
+detail_adopt_context(PFLT_CONTEXT context) noexcept {
+  if (!detail::is_context_type<T>(context)) {
+    if (context)
+      FltReleaseContext(context);
+    return ntl::unexpected(STATUS_OBJECT_TYPE_MISMATCH);
+  }
+  return ntl::ok(context_ref<T, Scope>{context});
+}
+
+namespace detail {
+
+template <class T, context_scope Scope>
+ntl::result<context_ref<T, Scope>>
+get_context(const native_context_objects &objects) noexcept {
+  if (KeGetCurrentIrql() > APC_LEVEL)
+    return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+  if (!context_api<Scope>::valid(objects))
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+
+  PFLT_CONTEXT context = nullptr;
+  const NTSTATUS status = context_api<Scope>::get(objects, &context);
+  if (!NT_SUCCESS(status))
+    return ntl::unexpected(status);
+  return detail_adopt_context<T, Scope>(context);
+}
+
+template <class T, context_scope Scope, class... Args>
+ntl::result<context_ref<T, Scope>> get_or_create_context(
+    const native_context_objects &objects,
+    const context_definition<T, Scope> &definition, Args &&...args) noexcept {
+  static_assert(alignof(managed_context_storage<T>) <=
+                    MEMORY_ALLOCATION_ALIGNMENT,
+                "Filter Manager context type requires unsupported alignment");
+  static_assert(std::is_nothrow_destructible_v<T>,
+                "Filter Manager context destructors must be noexcept");
+  static_assert(sizeof(managed_context_storage<T>) <= MAXUSHORT,
+                "Filter Manager context storage exceeds MAXUSHORT");
+
+  auto existing = get_context<T, Scope>(objects);
+  if (existing)
+    return existing;
+  if (existing.status() != STATUS_NOT_FOUND)
+    return ntl::unexpected(existing.status());
+
+  if (!context_api<Scope>::supports(objects))
+    return ntl::unexpected(STATUS_NOT_SUPPORTED);
+  const POOL_TYPE pool = native_context_pool(definition.pool());
+  PFLT_CONTEXT allocated = nullptr;
+  NTSTATUS status = FltAllocateContext(
+      objects.filter, native_context_type<Scope>(),
+      sizeof(managed_context_storage<T>), pool, &allocated);
+  if (!NT_SUCCESS(status))
+    return ntl::unexpected(status);
+
+  construct_context<T>(allocated, std::forward<Args>(args)...);
+  auto created_result = detail_adopt_context<T, Scope>(allocated);
+  if (!created_result)
+    return ntl::unexpected(created_result.status());
+  context_ref<T, Scope> created = std::move(*created_result);
+
+  PFLT_CONTEXT old_context = nullptr;
+  status = context_api<Scope>::set(objects, created.native_context(),
+                                   &old_context);
+  if (NT_SUCCESS(status))
+    return ntl::ok(std::move(created));
+
+  if (status == STATUS_FLT_CONTEXT_ALREADY_DEFINED && old_context)
+    return detail_adopt_context<T, Scope>(old_context);
+
+  if (old_context)
+    FltReleaseContext(old_context);
+  return ntl::unexpected(status);
+}
+
+} // namespace detail
+
+} // namespace ntl::flt

@@ -104,7 +104,7 @@ ntl::status ntl::main(ntl::driver& driver,
 }
 ```
 
-### WDM과 KMDF driver model
+### WDM, KMDF, minifilter driver model
 
 NuGet package는 WDK project의 기존 `DriverType` 설정을 읽습니다. KMDF project는
 기본적으로 일반 `DriverEntry`와 `WdfDriverCreate` 호출을 그대로 유지합니다.
@@ -128,6 +128,20 @@ crtsys_add_driver(my_ntl_kmdf_driver KMDF 1.15 NTL src/main.cpp)
 
 전체 동작은 [NTL KMDF driver/app 예제](../examples/kmdf-ntl-driver)에서 확인할
 수 있으며, API 계약은 [NTL KMDF 가이드](./ntl/kmdf.md)에 정리되어 있습니다.
+
+파일 시스템 minifilter는 Filter Manager driver model을 그대로 유지합니다.
+다음처럼 명시적으로 선택하면 crtsys가 `fltmgr.lib`를 링크하고 runtime 경계를
+관리한 뒤 `ntl::flt::main`을 호출합니다. Operation dispatch, instance, altitude
+순서와 teardown은 계속 Filter Manager가 소유합니다.
+
+```cmake
+crtsys_add_driver(my_minifilter MINIFILTER NTL src/main.cpp)
+```
+
+Visual Studio/NuGet project는 `CrtSysIsMinifilter=true`와
+`CrtSysUseNtlFltMain=true`를 사용합니다. 전체 코드는
+[NTL minifilter 예제](../examples/minifilter-ntl-driver), API 계약은
+[minifilter 가이드](./ntl/minifilter.md)에 정리되어 있습니다.
 
 ## Runtime Stack
 
@@ -192,13 +206,14 @@ flowchart TD
 | [NTL KMDF USB 템플릿](../examples/kmdf-usb-ntl-driver) | PnP USB device/interface/pipe와 continuous reader, user-mode 상태 조회 앱을 포함한 빌드 가능한 예제 |
 | [NTL KMDF WMI 예제](../examples/kmdf-wmi-ntl-driver) | MOF 기반 typed WMI query/set/method provider, event 전달과 `ROOT\\WMI` user-mode 검증 앱 |
 | [NTL KMDF 버스 예제](../examples/kmdf-bus-ntl-driver) | dynamic PDO plug/remove/eject 수명 주기와 버스/자식 function driver 사이 typed `QUERY_INTERFACE` 검증 예제 |
+| [NTL minifilter 예제](../examples/minifilter-ntl-driver) | typed create/write callback, RAII file-name information, file/stream/stream-handle context, 24H2 형식 INF, file-operation 실행 앱 |
 | [CI driver load tests](./ci-driver-load-tests.md) | optional self-hosted driver load/run workflow |
 
 ## Operational Boundaries
 
 | 경계 | 정책 |
 | --- | --- |
-| Driver model | WDM과 KMDF project는 정상적인 WDK driver로 남습니다. KMDF에서는 PnP, power, queue, request, dispatch를 WDF가 계속 소유합니다. Verifier, HVCI, unload safety, target OS validation, paging rule은 여전히 중요합니다. |
+| Driver model | WDM, KMDF, minifilter project는 정상적인 WDK driver로 남습니다. KMDF의 PnP/power/dispatch는 WDF가, minifilter callback과 instance는 Filter Manager가 계속 소유합니다. Verifier, HVCI, unload safety, target OS validation, paging rule은 여전히 중요합니다. |
 | IRQL | Runtime-backed C++/CRT/STL path는 특정 API가 더 넓은 계약을 문서화하지 않는 한 `PASSIVE_LEVEL`입니다. |
 | Stack | Kernel stack은 작습니다. exception-heavy 또는 STL-heavy path에는 `ntl::expand_stack` 사용을 고려하세요. |
 | TLS | MSVC function-local static은 지원하며, multi-driver compiler TLS slot isolation을 포함합니다. 이 지원 경로는 driver image 사이의 runtime compiler TLS slot 충돌을 막습니다. 그러나 사용자가 선언한 `thread_local T value`를 안전하게 만드는 기능은 아닙니다. kernel mode에서 GS 기반 TLS 가정은 thread별 user-mode TEB가 아니라 processor-local KPCR 쪽에 걸립니다. |

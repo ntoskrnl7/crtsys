@@ -1,0 +1,2559 @@
+/**
+ * @file communication_client
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief User-mode client for typed minifilter communication ports.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "port_common"
+
+#include "../handle"
+#include "../rpc/common"
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <Windows.h>
+#include <fltUser.h>
+
+#pragma comment(lib, "FltLib.lib")
+
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <deque>
+#include <functional>
+#include <limits>
+#include <memory>
+#include <mutex>
+#include <stdexcept>
+#include <string>
+#include <system_error>
+#include <thread>
+#include <tuple>
+#include <type_traits>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+
+#if defined(__cpp_lib_jthread) && __cpp_lib_jthread >= 201911L
+#include <stop_token>
+#define NTL_FLT_HAS_STOP_TOKEN 1
+#else
+#define NTL_FLT_HAS_STOP_TOKEN 0
+#endif
+
+namespace ntl {
+namespace flt {
+
+template <typename Stream> class communication_client_stream;
+
+/** @brief Preserves an HRESULT returned by a Filter Manager user API. */
+class communication_error : public std::runtime_error {
+public:
+  communication_error(HRESULT result, const char *message)
+      : std::runtime_error(message), result_(result) {}
+
+  /** @brief Returns the original Filter Manager HRESULT. */
+  HRESULT result() const noexcept { return result_; }
+
+private:
+  HRESULT result_;
+};
+
+namespace detail {
+
+template <typename Tuple, std::size_t... Index>
+std::vector<unsigned char>
+serialize_port_arguments(Tuple &arguments, std::index_sequence<Index...>) {
+  std::vector<unsigned char> bytes;
+  zpp::serializer::memory_output_archive archive(bytes);
+  archive(std::get<Index>(arguments)...);
+  return bytes;
+}
+
+inline std::vector<unsigned char>
+make_port_request(communication_operation operation, std::uint32_t id,
+                  const void *payload, std::size_t payload_size) {
+  if (payload_size > (std::numeric_limits<std::uint32_t>::max)() ||
+      payload_size > (std::numeric_limits<DWORD>::max)() -
+                         sizeof(communication_request_header))
+    throw std::length_error("NTL minifilter message exceeds DWORD capacity");
+
+  communication_request_header header{};
+  header.operation = operation;
+  header.id = id;
+  header.payload_size = static_cast<std::uint32_t>(payload_size);
+
+  std::vector<unsigned char> request(sizeof(header) + payload_size);
+  std::memcpy(request.data(), &header, sizeof(header));
+  if (payload_size)
+    std::memcpy(request.data() + sizeof(header), payload, payload_size);
+  return request;
+}
+
+inline void send_port_message(const std::shared_ptr<ntl::unique_handle> &port,
+                              const std::vector<unsigned char> &request,
+                              void *output, DWORD output_size,
+                              DWORD &returned) {
+  if (!port || !*port)
+    throw std::system_error(ERROR_INVALID_HANDLE, std::system_category(),
+                            "NTL minifilter port is not connected");
+  returned = 0;
+  const HRESULT result = FilterSendMessage(
+      port->get(), const_cast<unsigned char *>(request.data()),
+      static_cast<DWORD>(request.size()), output, output_size, &returned);
+  if (FAILED(result))
+    throw communication_error(result, "NTL minifilter message failed");
+}
+
+inline bool disconnected_result(HRESULT result) noexcept {
+  return result == HRESULT_FROM_WIN32(ERROR_INVALID_HANDLE) ||
+         result == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND) ||
+         result == HRESULT_FROM_WIN32(ERROR_PIPE_NOT_CONNECTED);
+}
+
+struct communication_batch_record_view {
+  std::uint64_t sequence = 0;
+  const unsigned char *payload = nullptr;
+  std::uint32_t payload_size = 0;
+};
+
+inline bool parse_communication_batch(
+    const void *payload, std::size_t payload_size,
+    communication_batch_header &header,
+    communication_batch_record_view
+        (&records)[ntl::rpc::maximum_batch_records]) noexcept {
+  if (!payload || payload_size < sizeof(header))
+    return false;
+
+  const auto *const bytes = static_cast<const unsigned char *>(payload);
+  std::memcpy(&header, bytes, sizeof(header));
+  if (header.version != communication_batch_version || header.count == 0 ||
+      header.count > ntl::rpc::maximum_batch_records)
+    return false;
+
+  std::size_t offset = sizeof(header);
+  for (std::uint32_t index = 0; index != header.count; ++index) {
+    if (payload_size - offset < sizeof(communication_batch_record_header))
+      return false;
+    communication_batch_record_header record{};
+    std::memcpy(&record, bytes + offset, sizeof(record));
+    offset += sizeof(record);
+    if (record.reserved != 0 || record.sequence == 0 ||
+        record.payload_size > payload_size - offset)
+      return false;
+    for (std::uint32_t previous = 0; previous != index; ++previous)
+      if (records[previous].sequence == record.sequence)
+        return false;
+    records[index] =
+        {record.sequence, bytes + offset, record.payload_size};
+    offset += record.payload_size;
+  }
+  return offset == payload_size;
+}
+
+inline std::uint64_t inbound_key(communication_inbound_kind kind,
+                                 std::uint32_t id) noexcept {
+  return (static_cast<std::uint64_t>(kind) << 32) | id;
+}
+
+class communication_async_operation;
+class communication_receive_operation;
+class communication_client_lifetime;
+template <typename T> class communication_async_call_awaiter;
+template <typename Payload, bool Reliable>
+class communication_notification_wait_awaiter;
+
+template <typename Callback, typename Tuple, std::size_t... Index>
+auto invoke_client_callback(Callback &callback, Tuple &arguments,
+                            std::index_sequence<Index...>)
+    -> decltype(callback(std::get<Index>(arguments)...)) {
+  return callback(std::get<Index>(arguments)...);
+}
+
+class communication_client_request_handler {
+public:
+  virtual ~communication_client_request_handler() = default;
+  virtual std::size_t request_limit() const noexcept = 0;
+  virtual HRESULT invoke(const void *input, std::size_t input_size,
+                         std::vector<unsigned char> &output) noexcept = 0;
+};
+
+template <typename Method, typename Callback>
+class typed_communication_client_request_handler final
+    : public communication_client_request_handler {
+public:
+  explicit typed_communication_client_request_handler(Callback callback)
+      : callback_(std::move(callback)) {}
+
+  std::size_t request_limit() const noexcept override {
+    return Method::request_size();
+  }
+
+  HRESULT invoke(const void *input, std::size_t input_size,
+                 std::vector<unsigned char> &output) noexcept override {
+    try {
+      if (input_size > Method::request_size())
+        return HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
+      typename Method::argument_storage arguments{};
+      zpp::serializer::memory_view_input_archive archive(
+          static_cast<const unsigned char *>(input), input_size,
+          Method::decode_allocation());
+      deserialize(
+          archive, arguments,
+          std::make_index_sequence<
+              std::tuple_size<typename Method::argument_storage>::value>{});
+      if (archive.offset() != input_size)
+        return E_INVALIDARG;
+      return invoke_result(
+          arguments, output,
+          typename std::is_void<typename Method::return_type>::type{});
+    } catch (const zpp::serializer::out_of_range &) {
+      return E_INVALIDARG;
+    } catch (const std::bad_alloc &) {
+      return E_OUTOFMEMORY;
+    } catch (...) {
+      return E_FAIL;
+    }
+  }
+
+private:
+  template <typename Archive, typename Tuple, std::size_t... Index>
+  static void deserialize(Archive &archive, Tuple &arguments,
+                          std::index_sequence<Index...>) {
+    archive(std::get<Index>(arguments)...);
+  }
+
+  template <typename Tuple>
+  HRESULT invoke_result(Tuple &arguments, std::vector<unsigned char> &output,
+                        std::true_type) {
+    invoke_client_callback(
+        callback_, arguments,
+        std::make_index_sequence<std::tuple_size<Tuple>::value>{});
+    output.clear();
+    return S_OK;
+  }
+
+  template <typename Tuple>
+  HRESULT invoke_result(Tuple &arguments, std::vector<unsigned char> &output,
+                        std::false_type) {
+    typename Method::return_type value = invoke_client_callback(
+        callback_, arguments,
+        std::make_index_sequence<std::tuple_size<Tuple>::value>{});
+    output.resize(Method::response_size());
+    zpp::serializer::memory_view_output_archive archive(output.data(),
+                                                        output.size());
+    archive(value);
+    output.resize(archive.offset());
+    return S_OK;
+  }
+
+  Callback callback_;
+};
+
+class communication_client_state
+    : public std::enable_shared_from_this<communication_client_state> {
+public:
+  explicit communication_client_state(std::shared_ptr<ntl::unique_handle> port)
+      : port_(std::move(port)) {}
+  communication_client_state(const communication_client_state &) = delete;
+  communication_client_state &
+  operator=(const communication_client_state &) = delete;
+  ~communication_client_state();
+
+  const std::shared_ptr<ntl::unique_handle> &port() const noexcept {
+    return port_;
+  }
+  std::uint64_t next_request_id() noexcept;
+  void register_operation(
+      std::uint64_t id,
+      const std::shared_ptr<communication_async_operation> &operation);
+  void unregister_operation(std::uint64_t id) noexcept;
+  bool cancel(std::uint64_t id);
+  void open_session();
+  void resume_session(ntl::rpc::session_token token);
+  void preserve_session();
+  ntl::rpc::session_info session() const noexcept {
+    std::lock_guard<std::mutex> guard(session_lock_);
+    return session_;
+  }
+  void subscribe(std::uint32_t id, bool stream,
+                 std::uint32_t max_batch_records = 1);
+  void unsubscribe(std::uint32_t id, bool stream);
+  void acknowledge(std::uint32_t id, std::uint64_t sequence);
+  void acknowledge_batch(std::uint32_t id,
+                         const std::vector<std::uint64_t> &sequences);
+  void register_receive(
+      communication_inbound_kind kind, std::uint32_t id,
+      const std::shared_ptr<communication_receive_operation> &operation);
+  void unregister_receive(std::uint64_t waiter_id) noexcept;
+  void register_request_handler(
+      std::uint32_t id,
+      std::shared_ptr<communication_client_request_handler> handler);
+  void shutdown() noexcept;
+
+private:
+  void ensure_receiver();
+  void receiver_loop(HANDLE receive_port) noexcept;
+  void dispatch_inbound(const communication_inbound_header &header,
+                        const void *payload) noexcept;
+  void dispatch_request(HANDLE port, std::uint64_t message_id,
+                         const communication_inbound_header &header,
+                         const void *payload) noexcept;
+  void fail_all(HRESULT result) noexcept;
+
+  static constexpr std::size_t receiver_count = 4;
+
+  std::shared_ptr<ntl::unique_handle> port_;
+  std::atomic<std::uint64_t> next_request_id_{1};
+  std::mutex operations_lock_;
+  std::unordered_map<std::uint64_t,
+                     std::weak_ptr<communication_async_operation>>
+      operations_;
+  struct buffered_inbound {
+    communication_inbound_header header{};
+    std::vector<unsigned char> payload;
+  };
+  struct receive_waiter_entry {
+    std::uint64_t id = 0;
+    std::weak_ptr<communication_receive_operation> operation;
+  };
+  std::mutex receives_lock_;
+  std::unordered_map<std::uint64_t, std::deque<receive_waiter_entry>>
+      receive_waiters_;
+  std::unordered_map<std::uint64_t, std::uint64_t> receive_keys_;
+  std::unordered_map<std::uint64_t, std::deque<buffered_inbound>> buffered_;
+  std::unordered_set<std::uint32_t> notification_subscriptions_;
+  std::unordered_set<std::uint32_t> open_streams_;
+  std::unordered_map<std::uint32_t, std::uint32_t> subscription_batches_;
+  std::size_t buffered_count_ = 0;
+  static constexpr std::size_t maximum_buffered_messages = 256;
+  std::mutex request_handlers_lock_;
+  std::unordered_map<std::uint32_t,
+                     std::shared_ptr<communication_client_request_handler>>
+      request_handlers_;
+  mutable std::mutex session_lock_;
+  ntl::rpc::session_info session_{};
+  std::atomic<bool> preserve_session_{false};
+  std::mutex receiver_lock_;
+  std::vector<std::thread> receivers_;
+  bool receiver_started_ = false;
+  std::atomic<bool> stopping_{false};
+};
+
+class communication_client_lifetime {
+public:
+  explicit communication_client_lifetime(
+      std::shared_ptr<communication_client_state> state) noexcept
+      : state_(std::move(state)) {}
+  communication_client_lifetime(const communication_client_lifetime &) = delete;
+  communication_client_lifetime &
+  operator=(const communication_client_lifetime &) = delete;
+  ~communication_client_lifetime() { state_->shutdown(); }
+
+  const std::shared_ptr<communication_client_state> &state() const noexcept {
+    return state_;
+  }
+
+private:
+  std::shared_ptr<communication_client_state> state_;
+};
+
+class communication_async_operation {
+public:
+  communication_async_operation(
+      std::shared_ptr<communication_client_lifetime> client,
+      std::uint64_t request_id)
+      : client_(std::move(client)), request_id_(request_id),
+        event_(::CreateEventW(nullptr, TRUE, FALSE, nullptr)) {
+    if (!event_)
+      throw std::system_error(static_cast<int>(::GetLastError()),
+                              std::system_category(),
+                              "NTL minifilter async event creation failed");
+  }
+  communication_async_operation(const communication_async_operation &) = delete;
+  communication_async_operation &
+  operator=(const communication_async_operation &) = delete;
+  ~communication_async_operation() {
+    if (!ready_noexcept())
+      (void)cancel_noexcept();
+  }
+
+  bool ready() const {
+    const DWORD wait = ::WaitForSingleObject(event_.get(), 0);
+    if (wait == WAIT_OBJECT_0)
+      return true;
+    if (wait == WAIT_TIMEOUT)
+      return false;
+    throw std::system_error(static_cast<int>(::GetLastError()),
+                            std::system_category(),
+                            "NTL minifilter async wait failed");
+  }
+
+  bool wait_for(std::chrono::milliseconds timeout) {
+    const auto count = timeout.count();
+    const DWORD milliseconds =
+        count <= 0 ? 0
+        : count >= static_cast<decltype(count)>((INFINITE)-1)
+            ? (INFINITE)-1
+            : static_cast<DWORD>(count);
+    const DWORD wait = ::WaitForSingleObject(event_.get(), milliseconds);
+    if (wait == WAIT_OBJECT_0)
+      return true;
+    if (wait == WAIT_TIMEOUT)
+      return false;
+    throw std::system_error(static_cast<int>(::GetLastError()),
+                            std::system_category(),
+                            "NTL minifilter async wait failed");
+  }
+
+  void wait() {
+    const DWORD wait = ::WaitForSingleObject(event_.get(), INFINITE);
+    if (wait != WAIT_OBJECT_0)
+      throw std::system_error(static_cast<int>(::GetLastError()),
+                              std::system_category(),
+                              "NTL minifilter async wait failed");
+  }
+
+  bool cancel() {
+    if (ready())
+      return false;
+    return client_ ? client_->state()->cancel(request_id_) : false;
+  }
+
+  bool cancel_noexcept() noexcept {
+    try {
+      return cancel();
+    } catch (...) {
+      return false;
+    }
+  }
+
+  HANDLE completion_event() const noexcept { return event_.get(); }
+
+  void attach_cancellation_registration(
+      std::shared_ptr<void> registration) noexcept {
+    cancellation_registration_ = std::move(registration);
+  }
+
+  void complete(std::int32_t status, const void *payload,
+                std::size_t payload_size) noexcept {
+    std::lock_guard<std::mutex> guard(lock_);
+    if (completed_)
+      return;
+    try {
+      output_.resize(payload_size);
+      if (payload_size)
+        std::memcpy(output_.data(), payload, payload_size);
+      status_ = status;
+    } catch (...) {
+      transport_result_ = E_OUTOFMEMORY;
+      output_.clear();
+    }
+    completed_ = true;
+    ::SetEvent(event_.get());
+  }
+
+  void fail(HRESULT result) noexcept {
+    std::lock_guard<std::mutex> guard(lock_);
+    if (completed_)
+      return;
+    transport_result_ = result;
+    completed_ = true;
+    ::SetEvent(event_.get());
+  }
+
+  const std::vector<unsigned char> &output() {
+    wait();
+    std::lock_guard<std::mutex> guard(lock_);
+    if (FAILED(transport_result_))
+      throw communication_error(transport_result_,
+                                "NTL minifilter async transport failed");
+    if (status_ < 0)
+      throw communication_error(HRESULT_FROM_NT(status_),
+                                "NTL minifilter async method failed");
+    return output_;
+  }
+
+private:
+  bool ready_noexcept() const noexcept {
+    return ::WaitForSingleObject(event_.get(), 0) == WAIT_OBJECT_0;
+  }
+
+  std::shared_ptr<communication_client_lifetime> client_;
+  std::uint64_t request_id_ = 0;
+  ntl::unique_handle event_;
+  mutable std::mutex lock_;
+  std::vector<unsigned char> output_;
+  HRESULT transport_result_ = S_OK;
+  std::int32_t status_ = 0;
+  bool completed_ = false;
+  std::shared_ptr<void> cancellation_registration_;
+};
+
+class communication_receive_operation {
+public:
+  communication_receive_operation(
+      std::shared_ptr<communication_client_lifetime> client,
+      std::uint64_t waiter_id)
+      : client_(std::move(client)), waiter_id_(waiter_id),
+        event_(::CreateEventW(nullptr, TRUE, FALSE, nullptr)) {
+    if (!event_)
+      throw std::system_error(
+          static_cast<int>(::GetLastError()), std::system_category(),
+          "NTL minifilter notification event creation failed");
+  }
+
+  ~communication_receive_operation() {
+    if (client_)
+      client_->state()->unregister_receive(waiter_id_);
+  }
+
+  bool ready() const noexcept {
+    return ::WaitForSingleObject(event_.get(), 0) == WAIT_OBJECT_0;
+  }
+  HANDLE completion_event() const noexcept { return event_.get(); }
+  std::uint64_t id() const noexcept { return waiter_id_; }
+  bool wait_for(std::chrono::milliseconds timeout) const noexcept {
+    const auto count = timeout.count();
+    const DWORD wait =
+        count<0 ? INFINITE : count>(std::numeric_limits<DWORD>::max)()
+            ? (std::numeric_limits<DWORD>::max)()
+            : static_cast<DWORD>(count);
+    return ::WaitForSingleObject(event_.get(), wait) == WAIT_OBJECT_0;
+  }
+  void wait() const noexcept {
+    (void)::WaitForSingleObject(event_.get(), INFINITE);
+  }
+
+  bool cancel() {
+    if (!client_)
+      return false;
+    client_->state()->unregister_receive(waiter_id_);
+    fail(HRESULT_FROM_WIN32(ERROR_OPERATION_ABORTED));
+    return true;
+  }
+  bool cancel_noexcept() noexcept {
+    try {
+      return cancel();
+    } catch (...) {
+      return false;
+    }
+  }
+
+  void complete(const communication_inbound_header &header,
+                const void *payload) noexcept {
+    std::lock_guard<std::mutex> guard(lock_);
+    if (completed_)
+      return;
+    try {
+      header_ = header;
+      payload_.resize(header.payload_size);
+      if (header.payload_size)
+        std::memcpy(payload_.data(), payload, header.payload_size);
+    } catch (...) {
+      result_ = E_OUTOFMEMORY;
+      payload_.clear();
+    }
+    completed_ = true;
+    ::SetEvent(event_.get());
+  }
+
+  void fail(HRESULT result) noexcept {
+    std::lock_guard<std::mutex> guard(lock_);
+    if (completed_)
+      return;
+    result_ = result;
+    completed_ = true;
+    ::SetEvent(event_.get());
+  }
+
+  std::pair<communication_inbound_header, std::vector<unsigned char>> take() {
+    wait();
+    std::lock_guard<std::mutex> guard(lock_);
+    if (FAILED(result_))
+      throw communication_error(result_,
+                                "NTL minifilter notification receive failed");
+    return {header_, std::move(payload_)};
+  }
+
+  void attach_cancellation_registration(std::shared_ptr<void> registration) {
+    std::lock_guard<std::mutex> guard(lock_);
+    cancellation_registration_ = std::move(registration);
+  }
+
+private:
+  std::shared_ptr<communication_client_lifetime> client_;
+  std::uint64_t waiter_id_ = 0;
+  ntl::unique_handle event_;
+  mutable std::mutex lock_;
+  communication_inbound_header header_{};
+  std::vector<unsigned char> payload_;
+  HRESULT result_ = S_OK;
+  bool completed_ = false;
+  std::shared_ptr<void> cancellation_registration_;
+};
+
+inline communication_client_state::~communication_client_state() {
+  for (auto &receiver : receivers_) {
+    if (!receiver.joinable())
+      continue;
+    if (receiver.get_id() == std::this_thread::get_id())
+      receiver.detach();
+    else
+      receiver.join();
+  }
+}
+
+inline void communication_client_state::shutdown() noexcept {
+  if (!preserve_session_.load() && port_ && *port_) {
+    ntl::rpc::session_info current{};
+    {
+      std::lock_guard<std::mutex> guard(session_lock_);
+      current = session_;
+      session_ = {};
+    }
+    if (current.valid()) {
+      try {
+        const auto request = make_port_request(
+            communication_operation::close_session, 0, nullptr, 0);
+        DWORD returned = 0;
+        (void)FilterSendMessage(
+            port_->get(), const_cast<unsigned char *>(request.data()),
+            static_cast<DWORD>(request.size()), nullptr, 0, &returned);
+      } catch (...) {
+      }
+    }
+  }
+  stopping_.store(true);
+  if (port_ && *port_) {
+    (void)::CancelIoEx(port_->get(), nullptr);
+    // Closing the communication port is the documented final cancellation
+    // mechanism for pending FilterGetMessage calls. CancelIoEx alone is not
+    // sufficient on every Filter Manager/OS combination.
+    port_->reset();
+  }
+  for (auto &receiver : receivers_) {
+    if (receiver.joinable() && receiver.get_id() != std::this_thread::get_id())
+      receiver.join();
+  }
+  fail_all(HRESULT_FROM_WIN32(ERROR_OPERATION_ABORTED));
+}
+
+inline std::uint64_t communication_client_state::next_request_id() noexcept {
+  auto id = next_request_id_.fetch_add(1);
+  if (id == 0)
+    id = next_request_id_.fetch_add(1);
+  return id;
+}
+
+inline void communication_client_state::register_operation(
+    std::uint64_t id,
+    const std::shared_ptr<communication_async_operation> &operation) {
+  ensure_receiver();
+  std::lock_guard<std::mutex> guard(operations_lock_);
+  if (stopping_.load())
+    throw std::system_error(
+        ERROR_OPERATION_ABORTED, std::system_category(),
+        "NTL minifilter completion receiver is not available");
+  if (!operations_.emplace(id, operation).second)
+    throw std::logic_error("Duplicate NTL minifilter async request ID");
+}
+
+inline void
+communication_client_state::unregister_operation(std::uint64_t id) noexcept {
+  std::lock_guard<std::mutex> guard(operations_lock_);
+  operations_.erase(id);
+}
+
+inline bool communication_client_state::cancel(std::uint64_t id) {
+  communication_async_request cancellation{id};
+  const auto request =
+      make_port_request(communication_operation::cancel_async, 0, &cancellation,
+                        sizeof(cancellation));
+  DWORD returned = 0;
+  const HRESULT result = FilterSendMessage(
+      port_->get(), const_cast<unsigned char *>(request.data()),
+      static_cast<DWORD>(request.size()), nullptr, 0, &returned);
+  if (FAILED(result))
+    throw communication_error(result,
+                              "NTL minifilter async cancellation failed");
+  return true;
+}
+
+inline void communication_client_state::open_session() {
+  const auto request =
+      make_port_request(communication_operation::open_session, 0, nullptr, 0);
+  ntl::rpc::session_info session{};
+  DWORD returned = 0;
+  send_port_message(port_, request, &session, sizeof(session), returned);
+  if (returned != sizeof(session) || !session.valid())
+    throw std::runtime_error("NTL minifilter returned an invalid session");
+  std::lock_guard<std::mutex> guard(session_lock_);
+  session_ = session;
+}
+
+inline void
+communication_client_state::resume_session(ntl::rpc::session_token token) {
+  if (!token.valid())
+    throw std::invalid_argument("NTL minifilter session token is invalid");
+  const auto request = make_port_request(
+      communication_operation::resume_session, 0, &token, sizeof(token));
+  ntl::rpc::session_info session{};
+  DWORD returned = 0;
+  send_port_message(port_, request, &session, sizeof(session), returned);
+  if (returned != sizeof(session) || !session.valid() || session.token != token)
+    throw std::runtime_error("NTL minifilter returned an invalid session");
+  std::lock_guard<std::mutex> guard(session_lock_);
+  session_ = session;
+}
+
+inline void communication_client_state::preserve_session() {
+  ntl::rpc::session_info current{};
+  {
+    std::lock_guard<std::mutex> guard(session_lock_);
+    current = session_;
+  }
+  if (!current.valid())
+    throw std::logic_error("NTL minifilter client has no session");
+
+  const auto request =
+      make_port_request(communication_operation::detach_session, 0, nullptr, 0);
+  DWORD returned = 0;
+  send_port_message(port_, request, nullptr, 0, returned);
+  if (returned != 0)
+    throw std::runtime_error(
+        "NTL minifilter session detach returned output bytes");
+
+  {
+    std::lock_guard<std::mutex> guard(session_lock_);
+    session_ = {};
+  }
+  preserve_session_.store(true);
+  stopping_.store(true);
+  if (port_ && *port_) {
+    (void)::CancelIoEx(port_->get(), nullptr);
+    port_->reset();
+  }
+  for (auto &receiver : receivers_) {
+    if (receiver.joinable() && receiver.get_id() != std::this_thread::get_id())
+      receiver.join();
+  }
+  fail_all(HRESULT_FROM_WIN32(ERROR_OPERATION_ABORTED));
+}
+
+inline void
+communication_client_state::subscribe(std::uint32_t id, bool stream,
+                                      std::uint32_t max_batch_records) {
+  if (id == 0 || max_batch_records == 0 ||
+      max_batch_records > ntl::rpc::maximum_batch_records)
+    throw std::invalid_argument("NTL minifilter channel ID is invalid");
+
+  // FltSendMessage can deliver immediately after the server records the
+  // subscription. Post FilterGetMessage receives first so the initial
+  // reliable record cannot time out before this client starts listening.
+  ensure_receiver();
+  bool was_subscribed = false;
+  std::uint32_t previous_batch_records = 0;
+  {
+    std::lock_guard<std::mutex> guard(receives_lock_);
+    auto &subscriptions = stream ? open_streams_ : notification_subscriptions_;
+    const auto previous = subscription_batches_.find(id);
+    was_subscribed = subscriptions.count(id) != 0;
+    if (previous != subscription_batches_.end())
+      previous_batch_records = previous->second;
+    if (was_subscribed && previous != subscription_batches_.end() &&
+        previous->second == max_batch_records)
+      return;
+    subscriptions.insert(id);
+    subscription_batches_[id] = max_batch_records;
+  }
+  try {
+    const communication_subscription_request options{max_batch_records, 0};
+    const auto request =
+        make_port_request(stream ? communication_operation::open_stream
+                                 : communication_operation::subscribe,
+                          id, &options, sizeof(options));
+    DWORD returned = 0;
+    send_port_message(port_, request, nullptr, 0, returned);
+    if (returned != 0)
+      throw std::runtime_error(
+          "NTL minifilter subscription returned output bytes");
+  } catch (...) {
+    std::lock_guard<std::mutex> guard(receives_lock_);
+    auto &subscriptions = stream ? open_streams_ : notification_subscriptions_;
+    if (was_subscribed) {
+      subscriptions.insert(id);
+      subscription_batches_[id] = previous_batch_records;
+    } else {
+      subscriptions.erase(id);
+      subscription_batches_.erase(id);
+    }
+    throw;
+  }
+}
+
+inline void communication_client_state::unsubscribe(std::uint32_t id,
+                                                    bool stream) {
+  {
+    std::lock_guard<std::mutex> guard(receives_lock_);
+    auto &subscriptions = stream ? open_streams_ : notification_subscriptions_;
+    if (subscriptions.erase(id) == 0)
+      return;
+    subscription_batches_.erase(id);
+  }
+  const auto request =
+      make_port_request(stream ? communication_operation::close_stream
+                               : communication_operation::unsubscribe,
+                        id, nullptr, 0);
+  DWORD returned = 0;
+  send_port_message(port_, request, nullptr, 0, returned);
+  if (returned != 0)
+    throw std::runtime_error(
+        "NTL minifilter unsubscription returned output bytes");
+}
+
+inline void communication_client_state::acknowledge(std::uint32_t id,
+                                                    std::uint64_t sequence) {
+  communication_ack_request acknowledgement{sequence};
+  const auto request =
+      make_port_request(communication_operation::acknowledge, id,
+                        &acknowledgement, sizeof(acknowledgement));
+  DWORD returned = 0;
+  send_port_message(port_, request, nullptr, 0, returned);
+  if (returned != 0)
+    throw std::runtime_error("NTL minifilter ACK returned output bytes");
+}
+
+inline void communication_client_state::acknowledge_batch(
+    std::uint32_t id, const std::vector<std::uint64_t> &sequences) {
+  if (id == 0 || sequences.empty() ||
+      sequences.size() > ntl::rpc::maximum_batch_records)
+    throw std::invalid_argument("NTL minifilter batch ACK is invalid");
+  communication_ack_batch_header header{
+      static_cast<std::uint32_t>(sequences.size()), 0};
+  std::vector<unsigned char> payload(sizeof(header) +
+                                     sizeof(std::uint64_t) * sequences.size());
+  std::memcpy(payload.data(), &header, sizeof(header));
+  std::memcpy(payload.data() + sizeof(header), sequences.data(),
+              sizeof(std::uint64_t) * sequences.size());
+  const auto request =
+      make_port_request(communication_operation::acknowledge_batch, id,
+                        payload.data(), payload.size());
+  DWORD returned = 0;
+  send_port_message(port_, request, nullptr, 0, returned);
+  if (returned != 0)
+    throw std::runtime_error("NTL minifilter batch ACK returned output bytes");
+}
+
+inline void communication_client_state::register_receive(
+    communication_inbound_kind kind, std::uint32_t id,
+    const std::shared_ptr<communication_receive_operation> &operation) {
+  ensure_receiver();
+  buffered_inbound buffered;
+  bool has_buffered = false;
+  const auto key = inbound_key(kind, id);
+  {
+    std::lock_guard<std::mutex> guard(receives_lock_);
+    if (stopping_.load())
+      throw std::system_error(
+          ERROR_OPERATION_ABORTED, std::system_category(),
+          "NTL minifilter notification receiver is not available");
+    auto found = buffered_.find(key);
+    if (found != buffered_.end() && !found->second.empty()) {
+      buffered = std::move(found->second.front());
+      found->second.pop_front();
+      --buffered_count_;
+      if (found->second.empty())
+        buffered_.erase(found);
+      has_buffered = true;
+    } else if (kind == communication_inbound_kind::reliable_notification ||
+               kind == communication_inbound_kind::stream_record) {
+      // A delivery can arrive while subscribe() changes the server between
+      // batch and single-record mode. Consume an already buffered batch one
+      // record at a time instead of leaving it stranded under the old key.
+      const auto batch_key =
+          inbound_key(communication_inbound_kind::reliable_batch, id);
+      auto batch = buffered_.find(batch_key);
+      if (batch != buffered_.end() && !batch->second.empty()) {
+        auto &message = batch->second.front();
+        communication_batch_header batch_header{};
+        communication_batch_record_view
+            records[ntl::rpc::maximum_batch_records]{};
+        if (!parse_communication_batch(message.payload.data(),
+                                       message.payload.size(), batch_header,
+                                       records))
+          throw std::runtime_error(
+              "NTL minifilter buffered batch is invalid");
+
+        buffered.header = message.header;
+        buffered.header.kind = kind;
+        buffered.header.correlation = records[0].sequence;
+        buffered.header.payload_size = records[0].payload_size;
+        buffered.payload.assign(records[0].payload,
+                                records[0].payload + records[0].payload_size);
+        has_buffered = true;
+
+        if (batch_header.count == 1) {
+          batch->second.pop_front();
+          --buffered_count_;
+          if (batch->second.empty())
+            buffered_.erase(batch);
+        } else {
+          const auto consumed = sizeof(communication_batch_header) +
+                                sizeof(communication_batch_record_header) +
+                                records[0].payload_size;
+          message.payload.erase(
+              message.payload.begin() + sizeof(communication_batch_header),
+              message.payload.begin() + consumed);
+          --batch_header.count;
+          std::memcpy(message.payload.data(), &batch_header,
+                      sizeof(batch_header));
+          message.header.payload_size =
+              static_cast<std::uint32_t>(message.payload.size());
+        }
+      }
+    } else if (kind == communication_inbound_kind::reliable_batch) {
+      // The inverse transition is also legal. A one-record batch preserves
+      // the delivery sequence and lets batch users consume a frame that
+      // arrived just before the server accepted the new batch limit.
+      const auto single_kind = open_streams_.count(id) != 0
+                                   ? communication_inbound_kind::stream_record
+                                   : communication_inbound_kind::reliable_notification;
+      const auto single_key = inbound_key(single_kind, id);
+      auto single = buffered_.find(single_key);
+      if (single != buffered_.end() && !single->second.empty()) {
+        const auto &message = single->second.front();
+        if (message.header.correlation == 0 ||
+            message.header.payload_size != message.payload.size())
+          throw std::runtime_error(
+              "NTL minifilter buffered delivery is invalid");
+        communication_batch_header batch_header{};
+        batch_header.count = 1;
+        communication_batch_record_header record{};
+        record.sequence = message.header.correlation;
+        record.payload_size = message.header.payload_size;
+        buffered.header = message.header;
+        buffered.header.kind = communication_inbound_kind::reliable_batch;
+        buffered.header.correlation = 0;
+        buffered.header.payload_size = static_cast<std::uint32_t>(
+            sizeof(batch_header) + sizeof(record) + message.payload.size());
+        buffered.payload.resize(buffered.header.payload_size);
+        std::memcpy(buffered.payload.data(), &batch_header,
+                    sizeof(batch_header));
+        std::memcpy(buffered.payload.data() + sizeof(batch_header), &record,
+                    sizeof(record));
+        if (!message.payload.empty())
+          std::memcpy(buffered.payload.data() + sizeof(batch_header) +
+                          sizeof(record),
+                      message.payload.data(), message.payload.size());
+        single->second.pop_front();
+        --buffered_count_;
+        if (single->second.empty())
+          buffered_.erase(single);
+        has_buffered = true;
+      }
+    }
+
+    if (!has_buffered) {
+      receive_waiters_[key].push_back({operation->id(), operation});
+      receive_keys_.emplace(operation->id(), key);
+    }
+  }
+  if (has_buffered)
+    operation->complete(buffered.header, buffered.payload.data());
+}
+
+inline void communication_client_state::unregister_receive(
+    std::uint64_t waiter_id) noexcept {
+  std::lock_guard<std::mutex> guard(receives_lock_);
+  const auto active = receive_keys_.find(waiter_id);
+  if (active == receive_keys_.end())
+    return;
+  const auto key = active->second;
+  receive_keys_.erase(active);
+
+  const auto found = receive_waiters_.find(key);
+  if (found == receive_waiters_.end())
+    return;
+  auto &waiters = found->second;
+  for (auto current = waiters.begin(); current != waiters.end();) {
+    if (current->id == waiter_id || current->operation.expired())
+      current = waiters.erase(current);
+    else
+      ++current;
+  }
+  if (waiters.empty())
+    receive_waiters_.erase(found);
+}
+
+inline void communication_client_state::register_request_handler(
+    std::uint32_t id,
+    std::shared_ptr<communication_client_request_handler> handler) {
+  if (id == 0 || !handler)
+    throw std::invalid_argument(
+        "NTL minifilter app request handler is invalid");
+  {
+    std::lock_guard<std::mutex> handler_guard(request_handlers_lock_);
+    if (!request_handlers_.emplace(id, std::move(handler)).second)
+      throw std::logic_error("Duplicate minifilter app request method ID");
+  }
+  ensure_receiver();
+}
+
+inline void communication_client_state::ensure_receiver() {
+  std::lock_guard<std::mutex> guard(receiver_lock_);
+  if (stopping_.load())
+    throw std::system_error(
+        ERROR_OPERATION_ABORTED, std::system_category(),
+        "NTL minifilter completion receiver is not available");
+  if (receiver_started_)
+    return;
+  if (!port_ || !*port_)
+    throw std::system_error(ERROR_INVALID_HANDLE, std::system_category(),
+                            "NTL minifilter port is not connected");
+  auto self = shared_from_this();
+  const HANDLE receive_port = port_->get();
+  try {
+    receivers_.reserve(receiver_count);
+    for (std::size_t index = 0; index != receiver_count; ++index)
+      receivers_.emplace_back(
+          [self, receive_port] { self->receiver_loop(receive_port); });
+    receiver_started_ = true;
+  } catch (...) {
+    stopping_.store(true);
+    if (port_ && *port_) {
+      (void)::CancelIoEx(port_->get(), nullptr);
+      port_->reset();
+    }
+    for (auto &receiver : receivers_) {
+      if (receiver.joinable())
+        receiver.join();
+    }
+    receivers_.clear();
+    throw;
+  }
+}
+
+inline void
+communication_client_state::receiver_loop(HANDLE receive_port) noexcept {
+  struct message_buffer {
+    FILTER_MESSAGE_HEADER filter{};
+    communication_inbound_header inbound{};
+    unsigned char payload[communication_inbound_payload_limit]{};
+  };
+  static_assert(offsetof(message_buffer, inbound) ==
+                    sizeof(FILTER_MESSAGE_HEADER),
+                "Filter Manager payload must follow FILTER_MESSAGE_HEADER");
+
+  std::unique_ptr<message_buffer> message(new (std::nothrow) message_buffer{});
+  ntl::unique_handle event(::CreateEventW(nullptr, TRUE, FALSE, nullptr));
+  if (!message || !event) {
+    fail_all(E_OUTOFMEMORY);
+    return;
+  }
+  while (!stopping_.load()) {
+    std::memset(message.get(), 0, sizeof(*message));
+    OVERLAPPED overlapped{};
+    overlapped.hEvent = event.get();
+    ::ResetEvent(event.get());
+
+    DWORD received = 0;
+    HRESULT result = FilterGetMessage(receive_port, &message->filter,
+                                      sizeof(*message), &overlapped);
+    if (result == HRESULT_FROM_WIN32(ERROR_IO_PENDING)) {
+      const DWORD wait = ::WaitForSingleObject(event.get(), INFINITE);
+      if (wait != WAIT_OBJECT_0) {
+        fail_all(HRESULT_FROM_WIN32(::GetLastError()));
+        return;
+      }
+      if (!::GetOverlappedResult(receive_port, &overlapped, &received, FALSE)) {
+        const DWORD error = ::GetLastError();
+        if (stopping_.load() && error == ERROR_OPERATION_ABORTED)
+          return;
+        fail_all(HRESULT_FROM_WIN32(error));
+        return;
+      }
+      result = S_OK;
+    } else if (SUCCEEDED(result) &&
+               !::GetOverlappedResult(receive_port, &overlapped, &received,
+                                      FALSE)) {
+      fail_all(HRESULT_FROM_WIN32(::GetLastError()));
+      return;
+    }
+    if (FAILED(result)) {
+      if (!stopping_.load())
+        fail_all(result);
+      return;
+    }
+
+    const auto &inbound = message->inbound;
+    if (inbound.magic != communication_magic ||
+        inbound.version != communication_version || inbound.id == 0 ||
+        (inbound.kind == communication_inbound_kind::async_completion &&
+         inbound.correlation == 0) ||
+        inbound.kind < communication_inbound_kind::async_completion ||
+        inbound.kind > communication_inbound_kind::request ||
+        inbound.payload_size > communication_inbound_payload_limit ||
+        received < offsetof(message_buffer, payload) ||
+        inbound.payload_size > received - offsetof(message_buffer, payload)) {
+      fail_all(HRESULT_FROM_WIN32(ERROR_INVALID_DATA));
+      return;
+    }
+    if (inbound.kind == communication_inbound_kind::request)
+      dispatch_request(receive_port, message->filter.MessageId, inbound,
+                       message->payload);
+    else
+      dispatch_inbound(inbound, message->payload);
+  }
+}
+
+inline void communication_client_state::dispatch_request(
+    HANDLE port, std::uint64_t message_id,
+    const communication_inbound_header &header, const void *payload) noexcept {
+  std::shared_ptr<communication_client_request_handler> handler;
+  {
+    std::lock_guard<std::mutex> guard(request_handlers_lock_);
+    const auto found = request_handlers_.find(header.id);
+    if (found != request_handlers_.end())
+      handler = found->second;
+  }
+
+  HRESULT status = HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+  std::vector<unsigned char> output;
+  if (handler) {
+    if (header.payload_size > handler->request_limit())
+      status = HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
+    else
+      status = handler->invoke(payload, header.payload_size, output);
+  }
+
+  try {
+    if (output.size() > communication_inbound_payload_limit)
+      status = HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
+    if (FAILED(status))
+      output.clear();
+
+    communication_reply_header reply_header{};
+    reply_header.status = static_cast<std::int32_t>(status);
+    reply_header.payload_size = static_cast<std::uint32_t>(output.size());
+    std::vector<unsigned char> reply(sizeof(FILTER_REPLY_HEADER) +
+                                     sizeof(reply_header) + output.size());
+    auto *const filter_reply =
+        reinterpret_cast<PFILTER_REPLY_HEADER>(reply.data());
+    filter_reply->Status = S_OK;
+    filter_reply->MessageId = message_id;
+    std::memcpy(reply.data() + sizeof(FILTER_REPLY_HEADER), &reply_header,
+                sizeof(reply_header));
+    if (!output.empty())
+      std::memcpy(reply.data() + sizeof(FILTER_REPLY_HEADER) +
+                      sizeof(reply_header),
+                  output.data(), output.size());
+    const HRESULT result = FilterReplyMessage(port, filter_reply,
+                                              static_cast<DWORD>(reply.size()));
+    if (FAILED(result) && !disconnected_result(result))
+      fail_all(result);
+  } catch (...) {
+    fail_all(E_OUTOFMEMORY);
+  }
+}
+
+inline void communication_client_state::dispatch_inbound(
+    const communication_inbound_header &header, const void *payload) noexcept {
+  if (header.kind == communication_inbound_kind::async_completion) {
+    std::shared_ptr<communication_async_operation> operation;
+    {
+      std::lock_guard<std::mutex> guard(operations_lock_);
+      const auto found = operations_.find(header.correlation);
+      if (found != operations_.end()) {
+        operation = found->second.lock();
+        operations_.erase(found);
+      }
+    }
+    if (operation)
+      operation->complete(header.status, payload, header.payload_size);
+    return;
+  }
+
+  std::uint32_t requested_batch_records = 0;
+  communication_inbound_kind requested_single_kind =
+      communication_inbound_kind::reliable_notification;
+  {
+    std::lock_guard<std::mutex> guard(receives_lock_);
+    const auto configured = subscription_batches_.find(header.id);
+    if (configured != subscription_batches_.end()) {
+      requested_batch_records = configured->second;
+      if (open_streams_.count(header.id) != 0)
+        requested_single_kind = communication_inbound_kind::stream_record;
+    }
+  }
+
+  if (header.kind == communication_inbound_kind::reliable_batch &&
+      requested_batch_records == 1) {
+    communication_batch_header batch_header{};
+    communication_batch_record_view
+        records[ntl::rpc::maximum_batch_records]{};
+    if (!parse_communication_batch(payload, header.payload_size, batch_header,
+                                   records)) {
+      fail_all(HRESULT_FROM_WIN32(ERROR_INVALID_DATA));
+      return;
+    }
+    for (std::uint32_t index = 0; index != batch_header.count; ++index) {
+      auto single = header;
+      single.kind = requested_single_kind;
+      single.correlation = records[index].sequence;
+      single.payload_size = records[index].payload_size;
+      dispatch_inbound(single, records[index].payload);
+      if (stopping_.load())
+        return;
+    }
+    return;
+  }
+
+  if ((header.kind == communication_inbound_kind::reliable_notification ||
+       header.kind == communication_inbound_kind::stream_record) &&
+      requested_batch_records > 1) {
+    if (header.correlation == 0) {
+      fail_all(HRESULT_FROM_WIN32(ERROR_INVALID_DATA));
+      return;
+    }
+    try {
+      communication_batch_header batch_header{};
+      batch_header.count = 1;
+      communication_batch_record_header record{};
+      record.sequence = header.correlation;
+      record.payload_size = header.payload_size;
+      std::vector<unsigned char> batch(sizeof(batch_header) + sizeof(record) +
+                                       header.payload_size);
+      std::memcpy(batch.data(), &batch_header, sizeof(batch_header));
+      std::memcpy(batch.data() + sizeof(batch_header), &record,
+                  sizeof(record));
+      if (header.payload_size)
+        std::memcpy(batch.data() + sizeof(batch_header) + sizeof(record),
+                    payload, header.payload_size);
+      auto batch_frame = header;
+      batch_frame.kind = communication_inbound_kind::reliable_batch;
+      batch_frame.correlation = 0;
+      batch_frame.payload_size = static_cast<std::uint32_t>(batch.size());
+      dispatch_inbound(batch_frame, batch.data());
+    } catch (...) {
+      fail_all(E_OUTOFMEMORY);
+    }
+    return;
+  }
+
+  std::shared_ptr<communication_receive_operation> waiter;
+  const auto key = inbound_key(header.kind, header.id);
+  bool overflow = false;
+  {
+    std::lock_guard<std::mutex> guard(receives_lock_);
+    auto found = receive_waiters_.find(key);
+    if (found != receive_waiters_.end()) {
+      while (!found->second.empty()) {
+        auto entry = std::move(found->second.front());
+        found->second.pop_front();
+        auto candidate = entry.operation.lock();
+        if (!candidate) {
+          receive_keys_.erase(entry.id);
+          continue;
+        }
+        const auto active = receive_keys_.find(entry.id);
+        if (active == receive_keys_.end() || active->second != key)
+          continue;
+        receive_keys_.erase(active);
+        waiter = std::move(candidate);
+        break;
+      }
+      if (found->second.empty())
+        receive_waiters_.erase(found);
+    }
+
+    if (!waiter) {
+      if (buffered_count_ >= maximum_buffered_messages) {
+        overflow = header.kind != communication_inbound_kind::notification;
+      } else {
+        try {
+          buffered_inbound message{};
+          message.header = header;
+          message.payload.resize(header.payload_size);
+          if (header.payload_size)
+            std::memcpy(message.payload.data(), payload, header.payload_size);
+          buffered_[key].push_back(std::move(message));
+          ++buffered_count_;
+        } catch (...) {
+          overflow = header.kind != communication_inbound_kind::notification;
+        }
+      }
+    }
+  }
+  if (waiter)
+    waiter->complete(header, payload);
+  else if (overflow)
+    fail_all(HRESULT_FROM_WIN32(ERROR_NOT_ENOUGH_MEMORY));
+}
+
+inline void communication_client_state::fail_all(HRESULT result) noexcept {
+  const bool was_stopping = stopping_.exchange(true);
+  if (!was_stopping && port_ && *port_)
+    (void)::CancelIoEx(port_->get(), nullptr);
+  std::vector<std::shared_ptr<communication_async_operation>> pending;
+  {
+    std::lock_guard<std::mutex> guard(operations_lock_);
+    for (auto &entry : operations_) {
+      if (auto operation = entry.second.lock())
+        pending.push_back(std::move(operation));
+    }
+    operations_.clear();
+  }
+  for (auto &operation : pending)
+    operation->fail(result);
+
+  std::vector<std::shared_ptr<communication_receive_operation>> receives;
+  {
+    std::lock_guard<std::mutex> guard(receives_lock_);
+    for (auto &entry : receive_waiters_) {
+      for (auto &waiter : entry.second) {
+        if (auto operation = waiter.operation.lock())
+          receives.push_back(std::move(operation));
+      }
+    }
+    receive_waiters_.clear();
+    receive_keys_.clear();
+    buffered_.clear();
+    buffered_count_ = 0;
+  }
+  for (auto &operation : receives)
+    operation->fail(result);
+}
+
+#if NTL_FLT_HAS_STOP_TOKEN
+struct communication_stop_canceller {
+  std::weak_ptr<communication_async_operation> operation;
+  void operator()() const noexcept {
+    if (auto current = operation.lock())
+      (void)current->cancel_noexcept();
+  }
+};
+
+struct communication_receive_stop_canceller {
+  std::weak_ptr<communication_receive_operation> operation;
+  void operator()() const noexcept {
+    if (auto current = operation.lock())
+      (void)current->cancel_noexcept();
+  }
+};
+#endif
+
+} // namespace detail
+
+/** @brief Result of waiting for one asynchronous minifilter method. */
+enum class communication_wait_status { completed, timeout };
+
+/** @brief Move-only owner of one asynchronous minifilter method result. */
+template <typename T> class communication_async_call {
+public:
+  communication_async_call(const communication_async_call &) = delete;
+  communication_async_call &
+  operator=(const communication_async_call &) = delete;
+  communication_async_call(communication_async_call &&) noexcept = default;
+  communication_async_call &
+  operator=(communication_async_call &&) noexcept = default;
+
+  explicit operator bool() const noexcept { return state_ && !consumed_; }
+
+  /** @brief Reports whether the minifilter has sent the completion message. */
+  bool ready() const {
+    ensure_valid();
+    return state_->ready();
+  }
+
+  /** @brief Waits up to timeout for the completion message. */
+  communication_wait_status wait_for(std::chrono::milliseconds timeout) {
+    ensure_valid();
+    return state_->wait_for(timeout) ? communication_wait_status::completed
+                                     : communication_wait_status::timeout;
+  }
+
+  /** @brief Waits without a timeout. */
+  void wait() {
+    ensure_valid();
+    state_->wait();
+  }
+
+  /** @brief Requests cooperative cancellation of this method invocation. */
+  bool cancel() {
+    ensure_valid();
+    return state_->cancel();
+  }
+
+  /** @brief Waits, deserializes, and consumes the typed result. */
+  T get() {
+    ensure_valid();
+    const auto &output = state_->output();
+    zpp::serializer::memory_view_input_archive archive(
+        output.data(), output.size(), decode_allocation_);
+    T value{};
+    archive(value);
+    if (archive.offset() != output.size())
+      throw std::runtime_error(
+          "NTL minifilter async response contains trailing bytes");
+    consumed_ = true;
+    state_.reset();
+    return std::move(value);
+  }
+
+private:
+  friend class communication_client;
+  template <typename U> friend class detail::communication_async_call_awaiter;
+  communication_async_call(
+      std::shared_ptr<detail::communication_async_operation> state,
+      std::size_t decode_allocation)
+      : state_(std::move(state)), decode_allocation_(decode_allocation) {}
+
+  void ensure_valid() const {
+    if (!state_ || consumed_)
+      throw std::logic_error("NTL minifilter asynchronous call has no result");
+  }
+
+  std::shared_ptr<detail::communication_async_operation> state_;
+  std::size_t decode_allocation_ = 0;
+  bool consumed_ = false;
+};
+
+/** @brief Move-only owner of one asynchronous void minifilter method. */
+template <> class communication_async_call<void> {
+public:
+  communication_async_call(const communication_async_call &) = delete;
+  communication_async_call &
+  operator=(const communication_async_call &) = delete;
+  communication_async_call(communication_async_call &&) noexcept = default;
+  communication_async_call &
+  operator=(communication_async_call &&) noexcept = default;
+
+  explicit operator bool() const noexcept { return state_ && !consumed_; }
+  bool ready() const {
+    ensure_valid();
+    return state_->ready();
+  }
+  communication_wait_status wait_for(std::chrono::milliseconds timeout) {
+    ensure_valid();
+    return state_->wait_for(timeout) ? communication_wait_status::completed
+                                     : communication_wait_status::timeout;
+  }
+  void wait() {
+    ensure_valid();
+    state_->wait();
+  }
+  bool cancel() {
+    ensure_valid();
+    return state_->cancel();
+  }
+  void get() {
+    ensure_valid();
+    if (!state_->output().empty())
+      throw std::runtime_error(
+          "Void NTL minifilter method returned output bytes");
+    consumed_ = true;
+    state_.reset();
+  }
+
+private:
+  friend class communication_client;
+  template <typename U> friend class detail::communication_async_call_awaiter;
+  explicit communication_async_call(
+      std::shared_ptr<detail::communication_async_operation> state)
+      : state_(std::move(state)) {}
+
+  void ensure_valid() const {
+    if (!state_ || consumed_)
+      throw std::logic_error("NTL minifilter asynchronous call has no result");
+  }
+
+  std::shared_ptr<detail::communication_async_operation> state_;
+  bool consumed_ = false;
+};
+
+/** @brief Move-only owner of one typed minifilter notification receive. */
+template <typename Payload, bool Reliable>
+class communication_notification_wait {
+public:
+  using result_type = typename std::conditional<
+      Reliable, ntl::rpc::notification_delivery<Payload>, Payload>::type;
+
+  communication_notification_wait(const communication_notification_wait &) =
+      delete;
+  communication_notification_wait &
+  operator=(const communication_notification_wait &) = delete;
+  communication_notification_wait(communication_notification_wait &&) noexcept =
+      default;
+  communication_notification_wait &
+  operator=(communication_notification_wait &&) noexcept = default;
+
+  explicit operator bool() const noexcept { return state_ && !consumed_; }
+  bool ready() const {
+    ensure_valid();
+    return state_->ready();
+  }
+  communication_wait_status wait_for(std::chrono::milliseconds timeout) {
+    ensure_valid();
+    return state_->wait_for(timeout) ? communication_wait_status::completed
+                                     : communication_wait_status::timeout;
+  }
+  void wait() {
+    ensure_valid();
+    state_->wait();
+  }
+  bool cancel() {
+    ensure_valid();
+    return state_->cancel();
+  }
+
+  result_type get() {
+    ensure_valid();
+    auto received = state_->take();
+    auto &header = received.first;
+    auto &bytes = received.second;
+    zpp::serializer::memory_view_input_archive archive(
+        bytes.data(), bytes.size(), decode_allocation_);
+    Payload payload{};
+    archive(payload);
+    if (archive.offset() != bytes.size())
+      throw std::runtime_error(
+          "NTL minifilter notification contains trailing bytes");
+    consumed_ = true;
+    state_.reset();
+    return make_result(header, std::move(payload),
+                       std::integral_constant<bool, Reliable>{});
+  }
+
+private:
+  friend class communication_client;
+  template <typename U, bool R>
+  friend class detail::communication_notification_wait_awaiter;
+  communication_notification_wait(
+      std::shared_ptr<detail::communication_receive_operation> state,
+      std::size_t decode_allocation)
+      : state_(std::move(state)), decode_allocation_(decode_allocation) {}
+
+  static Payload make_result(const detail::communication_inbound_header &,
+                             Payload payload, std::false_type) {
+    return payload;
+  }
+  static ntl::rpc::notification_delivery<Payload>
+  make_result(const detail::communication_inbound_header &header,
+              Payload payload, std::true_type) {
+    if (header.correlation == 0 || header.session_id == 0)
+      throw std::runtime_error(
+          "NTL minifilter reliable notification has no sequence");
+    return ntl::rpc::notification_delivery<Payload>(header.correlation,
+                                                    std::move(payload));
+  }
+
+  void ensure_valid() const {
+    if (!state_ || consumed_)
+      throw std::logic_error("NTL minifilter notification has no result");
+  }
+
+  std::shared_ptr<detail::communication_receive_operation> state_;
+  std::size_t decode_allocation_ = 0;
+  bool consumed_ = false;
+};
+
+/** @brief Move-only owner of one bounded reliable-delivery batch. */
+template <typename Payload> class communication_batch_wait {
+public:
+  using result_type = ntl::rpc::notification_batch<Payload>;
+
+  communication_batch_wait(const communication_batch_wait &) = delete;
+  communication_batch_wait &
+  operator=(const communication_batch_wait &) = delete;
+  communication_batch_wait(communication_batch_wait &&) noexcept = default;
+  communication_batch_wait &
+  operator=(communication_batch_wait &&) noexcept = default;
+
+  explicit operator bool() const noexcept { return state_ && !consumed_; }
+  bool ready() const {
+    ensure_valid();
+    return state_->ready();
+  }
+  communication_wait_status wait_for(std::chrono::milliseconds timeout) {
+    ensure_valid();
+    return state_->wait_for(timeout) ? communication_wait_status::completed
+                                     : communication_wait_status::timeout;
+  }
+  void wait() {
+    ensure_valid();
+    state_->wait();
+  }
+  bool cancel() {
+    ensure_valid();
+    return state_->cancel();
+  }
+
+  result_type get() {
+    ensure_valid();
+    auto received = state_->take();
+    const auto &bytes = received.second;
+    if (bytes.size() < sizeof(detail::communication_batch_header))
+      throw std::runtime_error("NTL minifilter batch header is truncated");
+    detail::communication_batch_header header{};
+    std::memcpy(&header, bytes.data(), sizeof(header));
+    if (header.version != detail::communication_batch_version ||
+        header.count == 0 || header.count > ntl::rpc::maximum_batch_records)
+      throw std::runtime_error("NTL minifilter batch header is invalid");
+
+    std::vector<ntl::rpc::notification_delivery<Payload>> values;
+    values.reserve(header.count);
+    std::vector<std::uint64_t> sequences;
+    sequences.reserve(header.count);
+    std::size_t offset = sizeof(header);
+    for (std::uint32_t index = 0; index != header.count; ++index) {
+      if (bytes.size() - offset <
+          sizeof(detail::communication_batch_record_header))
+        throw std::runtime_error("NTL minifilter batch record is truncated");
+      detail::communication_batch_record_header record{};
+      std::memcpy(&record, bytes.data() + offset, sizeof(record));
+      offset += sizeof(record);
+      if (record.reserved != 0 || record.sequence == 0 ||
+          record.payload_size > bytes.size() - offset)
+        throw std::runtime_error("NTL minifilter batch record is invalid");
+      if (std::find(sequences.begin(), sequences.end(), record.sequence) !=
+          sequences.end())
+        throw std::runtime_error(
+            "NTL minifilter batch contains duplicate sequences");
+      sequences.push_back(record.sequence);
+      zpp::serializer::memory_view_input_archive archive(
+          bytes.data() + offset, record.payload_size, decode_allocation_);
+      Payload payload{};
+      archive(payload);
+      if (archive.offset() != record.payload_size)
+        throw std::runtime_error(
+            "NTL minifilter batch payload contains trailing bytes");
+      values.emplace_back(record.sequence, std::move(payload));
+      offset += record.payload_size;
+    }
+    if (offset != bytes.size())
+      throw std::runtime_error("NTL minifilter batch has trailing bytes");
+    consumed_ = true;
+    state_.reset();
+    return result_type(std::move(values));
+  }
+
+private:
+  friend class communication_client;
+  template <typename Stream> friend class communication_client_stream;
+  communication_batch_wait(
+      std::shared_ptr<detail::communication_receive_operation> state,
+      std::size_t decode_allocation)
+      : state_(std::move(state)), decode_allocation_(decode_allocation) {}
+
+  void ensure_valid() const {
+    if (!state_ || consumed_)
+      throw std::logic_error("NTL minifilter batch has no result");
+  }
+
+  std::shared_ptr<detail::communication_receive_operation> state_;
+  std::size_t decode_allocation_ = 0;
+  bool consumed_ = false;
+};
+
+/**
+ * @brief Owns one user allocation pinned by a minifilter port connection.
+ *
+ * Destruction unregisters before VirtualFree. Keep this object alive while the
+ * driver may use a token or shared ring backed by the allocation.
+ */
+class registered_port_region {
+public:
+  registered_port_region() noexcept = default;
+  registered_port_region(const registered_port_region &) = delete;
+  registered_port_region &operator=(const registered_port_region &) = delete;
+
+  registered_port_region(registered_port_region &&other) noexcept
+      : port_(std::move(other.port_)), region_(other.region_),
+        memory_(other.memory_), bytes_(other.bytes_) {
+    other.region_ = {};
+    other.memory_ = nullptr;
+    other.bytes_ = 0;
+  }
+
+  registered_port_region &operator=(registered_port_region &&other) noexcept {
+    if (this == &other)
+      return *this;
+    reset_noexcept();
+    port_ = std::move(other.port_);
+    region_ = other.region_;
+    memory_ = other.memory_;
+    bytes_ = other.bytes_;
+    other.region_ = {};
+    other.memory_ = nullptr;
+    other.bytes_ = 0;
+    return *this;
+  }
+
+  ~registered_port_region() { reset_noexcept(); }
+
+  explicit operator bool() const noexcept {
+    return memory_ != nullptr && region_.valid();
+  }
+  void *data() const noexcept { return memory_; }
+  std::size_t size() const noexcept { return bytes_; }
+  ntl::ipc::region_handle handle() const noexcept { return region_; }
+
+  /** @brief Creates a pointer-free token for a checked local subrange. */
+  ntl::ipc::buffer_token token(std::size_t offset, std::size_t length) const {
+    if (!*this || length == 0 || offset > bytes_ || length > bytes_ - offset)
+      throw std::out_of_range(
+          "NTL minifilter shared-region token is out of range");
+    return ntl::ipc::buffer_token{region_, static_cast<std::uint64_t>(offset),
+                                  static_cast<std::uint64_t>(length)};
+  }
+
+  /** @brief Unregisters the MDL before releasing the virtual allocation. */
+  void close() {
+    if (!memory_)
+      return;
+    if (region_.valid())
+      unregister_region(true);
+    release_memory();
+  }
+
+private:
+  friend class communication_client;
+
+  registered_port_region(std::shared_ptr<ntl::unique_handle> port,
+                         ntl::ipc::region_handle region, void *memory,
+                         std::size_t bytes) noexcept
+      : port_(std::move(port)), region_(region), memory_(memory),
+        bytes_(bytes) {}
+
+  void unregister_region(bool report_failure) {
+    if (!port_ || !*port_ || !region_.valid()) {
+      region_ = {};
+      return;
+    }
+
+    const auto request = detail::make_port_request(
+        detail::communication_operation::unregister_region, 0, &region_,
+        sizeof(region_));
+    DWORD returned = 0;
+    const HRESULT result = FilterSendMessage(
+        port_->get(), const_cast<unsigned char *>(request.data()),
+        static_cast<DWORD>(request.size()), nullptr, 0, &returned);
+    if (FAILED(result) && !detail::disconnected_result(result)) {
+      if (report_failure)
+        throw communication_error(
+            result, "NTL minifilter shared-region unregistration failed");
+      return;
+    }
+    region_ = {};
+  }
+
+  void release_memory() noexcept {
+    if (memory_)
+      ::VirtualFree(memory_, 0, MEM_RELEASE);
+    memory_ = nullptr;
+    bytes_ = 0;
+    region_ = {};
+    port_.reset();
+  }
+
+  void reset_noexcept() noexcept {
+    try {
+      if (region_.valid())
+        unregister_region(false);
+    } catch (...) {
+    }
+    if (!region_.valid()) {
+      release_memory();
+      return;
+    }
+
+    // A failed unregister on a still-connected port means the driver may
+    // retain an MDL. Preserve the virtual allocation until process teardown
+    // instead of releasing pages that could still be accessed by the kernel.
+    port_.reset();
+    memory_ = nullptr;
+    bytes_ = 0;
+    region_ = {};
+  }
+
+  std::shared_ptr<ntl::unique_handle> port_;
+  ntl::ipc::region_handle region_{};
+  void *memory_ = nullptr;
+  std::size_t bytes_ = 0;
+};
+
+/** @brief Typed user-mode owner of one Filter Manager client port handle. */
+class communication_client {
+public:
+  communication_client() = default;
+
+  /** @brief Connects to a named minifilter communication server port. */
+  static communication_client connect(const std::wstring &name) {
+    HANDLE native = INVALID_HANDLE_VALUE;
+    const HRESULT result = FilterConnectCommunicationPort(
+        name.c_str(), 0, nullptr, 0, nullptr, &native);
+    if (FAILED(result))
+      throw communication_error(result,
+                                "NTL minifilter port connection failed");
+    auto port = std::make_shared<ntl::unique_handle>(native);
+    auto state = std::make_shared<detail::communication_client_state>(port);
+    communication_client client(
+        port, std::make_shared<detail::communication_client_lifetime>(
+                  std::move(state)));
+    client.lifetime_->state()->open_session();
+    return client;
+  }
+
+  /** @brief Reconnects a port to a retained reliable-delivery session. */
+  static communication_client resume(const std::wstring &name,
+                                     ntl::rpc::session_token token) {
+    HANDLE native = INVALID_HANDLE_VALUE;
+    const HRESULT result = FilterConnectCommunicationPort(
+        name.c_str(), 0, nullptr, 0, nullptr, &native);
+    if (FAILED(result))
+      throw communication_error(result,
+                                "NTL minifilter port reconnection failed");
+    auto port = std::make_shared<ntl::unique_handle>(native);
+    auto state = std::make_shared<detail::communication_client_state>(port);
+    communication_client client(
+        port, std::make_shared<detail::communication_client_lifetime>(state));
+    state->resume_session(token);
+    return client;
+  }
+
+  explicit operator bool() const noexcept { return port_ && *port_; }
+  HANDLE native_handle() const noexcept {
+    return port_ ? port_->get() : nullptr;
+  }
+
+  /** @brief Returns the current reconnectable session identity. */
+  ntl::rpc::session_info session() const noexcept {
+    return lifetime_ ? lifetime_->state()->session() : ntl::rpc::session_info{};
+  }
+
+  /**
+   * @brief Registers one typed handler for driver-originated requests.
+   * @note Up to four handlers can run concurrently because the client keeps
+   * multiple FilterGetMessage operations pending to avoid receive gaps.
+   */
+  template <typename Method, typename Callback>
+  communication_client &on_request(const Method &, Callback callback) {
+    static_assert(ntl::rpc::is_method<Method>::value,
+                  "communication_client::on_request requires a method");
+    if (!lifetime_)
+      throw std::logic_error("NTL minifilter client has no connection");
+    using handler_type = detail::typed_communication_client_request_handler<
+        Method, typename std::decay<Callback>::type>;
+    lifetime_->state()->register_request_handler(
+        Method::id(), std::make_shared<handler_type>(std::move(callback)));
+    return *this;
+  }
+
+  /**
+   * @brief Detaches and preserves this session for a later resume().
+   * @note This closes the current client connection and cancels its pending
+   * operations. The returned token is the only way to resume the retained
+   * reliable queue.
+   */
+  ntl::rpc::session_token preserve_session() {
+    if (!lifetime_)
+      throw std::logic_error("NTL minifilter client has no session");
+    const auto current = lifetime_->state()->session();
+    if (!current.valid())
+      throw std::logic_error("NTL minifilter client has no session");
+    lifetime_->state()->preserve_session();
+    return current.token;
+  }
+
+  /** @brief Queries immutable wire and application contract metadata. */
+  communication_contract_info query_contract() const {
+    const auto request = detail::make_port_request(
+        detail::communication_operation::query_contract, 0, nullptr, 0);
+    std::vector<unsigned char> output(ntl::rpc::contract_response_size);
+    DWORD returned = 0;
+    detail::send_port_message(port_, request, output.data(),
+                              static_cast<DWORD>(output.size()), returned);
+    if (returned > output.size())
+      throw std::runtime_error(
+          "NTL minifilter returned invalid contract metadata");
+    output.resize(returned);
+    zpp::serializer::memory_view_input_archive archive(
+        output.data(), output.size(), ntl::rpc::default_decode_allocation);
+    communication_contract_info info;
+    archive(info);
+    if (archive.offset() != output.size())
+      throw std::runtime_error(
+          "NTL minifilter contract contains trailing bytes");
+    return info;
+  }
+
+  /** @brief Verifies one app-to-driver method and all advertised limits. */
+  template <typename Method> void require_method(const Method &method) const {
+    require_method_definition(method,
+                              communication_member_kind::app_to_driver_method);
+  }
+
+  /** @brief Verifies one driver-to-app method and all advertised limits. */
+  template <typename Method>
+  void require_client_method(const Method &method) const {
+    require_method_definition(method,
+                              communication_member_kind::driver_to_app_method);
+  }
+
+  /** @brief Verifies one reliable/best-effort notification channel. */
+  template <typename Notification>
+  void require_notification(const Notification &) const {
+    static_assert(ntl::rpc::is_notification<Notification>::value,
+                  "require_notification requires a notification");
+    const auto info = query_contract();
+    const auto *member =
+        info.find(Notification::id(), communication_member_kind::notification);
+    if (!member || member->response_size != Notification::response_size() ||
+        member->decode_allocation != Notification::decode_allocation() ||
+        member->max_batch_records != Notification::max_batch_records() ||
+        member->priority !=
+            static_cast<std::uint32_t>(Notification::priority()))
+      throw std::runtime_error("NTL minifilter notification contract mismatch");
+  }
+
+  /** @brief Verifies one bidirectional stream and all advertised limits. */
+  template <typename Stream> void require_stream(const Stream &) const {
+    static_assert(ntl::rpc::is_stream<Stream>::value,
+                  "require_stream requires a stream");
+    const auto info = query_contract();
+    const auto *member =
+        info.find(Stream::id(), communication_member_kind::stream);
+    if (!member || member->request_size != Stream::upload_size() ||
+        member->response_size != Stream::download_size() ||
+        member->decode_allocation != Stream::decode_allocation() ||
+        member->max_batch_records != Stream::max_batch_records() ||
+        member->priority != static_cast<std::uint32_t>(Stream::priority()))
+      throw std::runtime_error("NTL minifilter stream contract mismatch");
+  }
+
+  /** @brief Rejects an incompatible protocol, version, or capability set. */
+  void require_contract(std::uint32_t contract_version,
+                        std::uint64_t capabilities = 0) const {
+    const auto info = query_contract();
+    if (info.protocol_version() != detail::communication_version)
+      throw std::runtime_error("NTL minifilter protocol version mismatch");
+    if (info.contract_version() != contract_version)
+      throw std::runtime_error("NTL minifilter contract version mismatch");
+    if ((info.capability_mask() & capabilities) != capabilities)
+      throw std::runtime_error("NTL minifilter capabilities are unavailable");
+  }
+
+  /** @brief Waits synchronously for one best-effort typed notification. */
+  template <typename Notification>
+  typename Notification::payload_type
+  receive(const Notification &channel) const {
+    return receive_async(channel).get();
+  }
+
+  /** @brief Starts a cancellable best-effort notification receive. */
+  template <typename Notification>
+  communication_notification_wait<typename Notification::payload_type, false>
+  receive_async(const Notification &) const {
+    static_assert(
+        ntl::rpc::is_notification<Notification>::value,
+        "communication_client::receive_async requires a notification");
+    return submit_receive<Notification, false>(
+        detail::communication_inbound_kind::notification, false);
+  }
+
+  /** @brief Waits for one sequence-numbered replayable notification. */
+  template <typename Notification>
+  ntl::rpc::notification_delivery<typename Notification::payload_type>
+  receive_reliable(const Notification &channel) const {
+    return receive_reliable_async(channel).get();
+  }
+
+  /** @brief Starts a cancellable replayable notification receive. */
+  template <typename Notification>
+  communication_notification_wait<typename Notification::payload_type, true>
+  receive_reliable_async(const Notification &) const {
+    static_assert(ntl::rpc::is_notification<Notification>::value,
+                  "receive_reliable_async requires a notification");
+    return submit_receive<Notification, true>(
+        detail::communication_inbound_kind::reliable_notification, false);
+  }
+
+  /** @brief Waits for one bounded batch from a reliable channel. */
+  template <typename Notification>
+  ntl::rpc::notification_batch<typename Notification::payload_type>
+  receive_reliable_batch(const Notification &channel) const {
+    return receive_reliable_batch_async(channel).get();
+  }
+
+  /** @brief Starts a cancellable bounded reliable-channel batch receive. */
+  template <typename Notification>
+  communication_batch_wait<typename Notification::payload_type>
+  receive_reliable_batch_async(const Notification &) const {
+    static_assert(ntl::rpc::is_notification<Notification>::value,
+                  "receive_reliable_batch_async requires a notification");
+    return submit_batch<Notification>(false);
+  }
+
+#if NTL_FLT_HAS_STOP_TOKEN
+  /** @brief Binds a best-effort notification receive to a stop token. */
+  template <typename Notification>
+  communication_notification_wait<typename Notification::payload_type, false>
+  receive_async(std::stop_token token, const Notification &channel) const {
+    auto wait = receive_async(channel);
+    attach_receive_stop(token, wait.state_);
+    return wait;
+  }
+
+  /** @brief Binds a reliable notification receive to a stop token. */
+  template <typename Notification>
+  communication_notification_wait<typename Notification::payload_type, true>
+  receive_reliable_async(std::stop_token token,
+                         const Notification &channel) const {
+    auto wait = receive_reliable_async(channel);
+    attach_receive_stop(token, wait.state_);
+    return wait;
+  }
+
+  /** @brief Binds a reliable batch receive to a stop token. */
+  template <typename Notification>
+  communication_batch_wait<typename Notification::payload_type>
+  receive_reliable_batch_async(std::stop_token token,
+                               const Notification &channel) const {
+    auto wait = receive_reliable_batch_async(channel);
+    attach_receive_stop(token, wait.state_);
+    return wait;
+  }
+#endif
+
+  /** @brief ACKs one reliable delivery after application processing. */
+  template <typename Notification>
+  void acknowledge(
+      const Notification &,
+      const ntl::rpc::notification_delivery<typename Notification::payload_type>
+          &delivery) const {
+    static_assert(ntl::rpc::is_notification<Notification>::value,
+                  "communication_client::acknowledge requires a notification");
+    if (!lifetime_)
+      throw std::logic_error("NTL minifilter client has no connection");
+    lifetime_->state()->acknowledge(Notification::id(), delivery.sequence());
+  }
+
+  /** @brief ACKs every record in one batch with a single port message. */
+  template <typename Notification>
+  void acknowledge(
+      const Notification &,
+      const ntl::rpc::notification_batch<typename Notification::payload_type>
+          &batch) const {
+    static_assert(ntl::rpc::is_notification<Notification>::value,
+                  "communication_client::acknowledge requires a notification");
+    if (!lifetime_ || batch.empty())
+      throw std::logic_error("NTL minifilter client has no batch to ACK");
+    std::vector<std::uint64_t> sequences;
+    sequences.reserve(batch.size());
+    for (const auto &delivery : batch.values())
+      sequences.push_back(delivery.sequence());
+    lifetime_->state()->acknowledge_batch(Notification::id(), sequences);
+  }
+
+  /** @brief Opens one session-bound typed bidirectional stream. */
+  template <typename Stream>
+  communication_client_stream<Stream> open_stream(const Stream &channel);
+
+  /** @brief Invokes one shared `ntl::rpc::method` over FilterSendMessage. */
+  template <typename Method, typename... Arguments>
+  typename Method::return_type invoke(const Method &method,
+                                      Arguments &&...arguments) const {
+    static_assert(ntl::rpc::is_method<Method>::value,
+                  "communication_client::invoke requires ntl::rpc::method");
+    static_assert(sizeof...(Arguments) == Method::arity(),
+                  "Minifilter method argument count does not match");
+    using is_void = typename std::is_void<typename Method::return_type>::type;
+    return invoke_impl(method, is_void{},
+                       std::forward<Arguments>(arguments)...);
+  }
+
+  /**
+   * @brief Queues one method and completes it through overlapped
+   * FilterGetMessage.
+   * The returned call keeps the underlying port and completion receiver alive.
+   */
+  template <typename Method, typename... Arguments>
+  communication_async_call<typename Method::return_type>
+  invoke_async(const Method &method, Arguments &&...arguments) const {
+    static_assert(
+        ntl::rpc::is_method<Method>::value,
+        "communication_client::invoke_async requires ntl::rpc::method");
+    static_assert(sizeof...(Arguments) == Method::arity(),
+                  "Minifilter method argument count does not match");
+    return invoke_async_impl(
+        method, typename std::is_void<typename Method::return_type>::type{},
+        std::forward<Arguments>(arguments)...);
+  }
+
+#if NTL_FLT_HAS_STOP_TOKEN
+  /** @brief Cancels the asynchronous method when the stop token fires. */
+  template <typename Method, typename... Arguments>
+  communication_async_call<typename Method::return_type>
+  invoke_async(std::stop_token token, const Method &method,
+               Arguments &&...arguments) const {
+    auto call = invoke_async(method, std::forward<Arguments>(arguments)...);
+    using callback_type =
+        std::stop_callback<detail::communication_stop_canceller>;
+    auto registration = std::make_shared<callback_type>(
+        token, detail::communication_stop_canceller{call.state_});
+    call.state_->attach_cancellation_registration(std::move(registration));
+    return call;
+  }
+#endif
+
+  /** @brief Allocates and pins one connection-bound shared-memory region. */
+  registered_port_region
+  register_shared_region(std::size_t bytes,
+                         ntl::ipc::region_access access =
+                             ntl::ipc::region_access::driver_read_write) const {
+    if (!port_ || !*port_)
+      throw std::system_error(ERROR_INVALID_HANDLE, std::system_category(),
+                              "NTL minifilter port is not connected");
+    if (bytes == 0)
+      throw std::invalid_argument(
+          "NTL minifilter shared-region size is invalid");
+
+    void *const memory = ::VirtualAlloc(
+        nullptr, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    if (!memory)
+      throw std::system_error(static_cast<int>(::GetLastError()),
+                              std::system_category(),
+                              "NTL minifilter shared allocation failed");
+
+    try {
+      const auto registration =
+          ntl::ipc::region_registration::from(memory, bytes, access);
+      const auto request = detail::make_port_request(
+          detail::communication_operation::register_region, 0, &registration,
+          sizeof(registration));
+      ntl::ipc::region_handle region{};
+      DWORD returned = 0;
+      detail::send_port_message(port_, request, &region, sizeof(region),
+                                returned);
+      if (returned != sizeof(region) || !region.valid())
+        throw std::runtime_error(
+            "NTL minifilter returned an invalid shared-region handle");
+      return registered_port_region{port_, region, memory, bytes};
+    } catch (...) {
+      ::VirtualFree(memory, 0, MEM_RELEASE);
+      throw;
+    }
+  }
+
+private:
+  template <typename Stream> friend class communication_client_stream;
+
+  template <typename Method>
+  void require_method_definition(const Method &,
+                                 communication_member_kind kind) const {
+    static_assert(ntl::rpc::is_method<Method>::value,
+                  "require_method requires a method");
+    const auto info = query_contract();
+    const auto *member = info.find(Method::id(), kind);
+    if (!member || member->request_size != Method::request_size() ||
+        member->response_size != Method::response_size() ||
+        member->decode_allocation != Method::decode_allocation())
+      throw std::runtime_error("NTL minifilter method contract mismatch");
+  }
+  communication_client(
+      std::shared_ptr<ntl::unique_handle> port,
+      std::shared_ptr<detail::communication_client_lifetime> lifetime)
+      : port_(std::move(port)), lifetime_(std::move(lifetime)) {}
+
+  template <typename Notification, bool Reliable>
+  communication_notification_wait<typename Notification::payload_type, Reliable>
+  submit_receive(detail::communication_inbound_kind kind, bool stream) const {
+    if (!lifetime_ || !port_ || !*port_)
+      throw std::system_error(ERROR_INVALID_HANDLE, std::system_category(),
+                              "NTL minifilter port is not connected");
+    const auto &state = lifetime_->state();
+    state->subscribe(Notification::id(), stream);
+    const auto waiter_id = state->next_request_id();
+    auto operation = std::make_shared<detail::communication_receive_operation>(
+        lifetime_, waiter_id);
+    state->register_receive(kind, Notification::id(), operation);
+    return communication_notification_wait<typename Notification::payload_type,
+                                           Reliable>(
+        std::move(operation), Notification::decode_allocation());
+  }
+
+  template <typename Stream>
+  communication_notification_wait<typename Stream::record_type, true>
+  receive_stream_async() const {
+    using notification_type = typename Stream::download_notification_type;
+    return submit_receive<notification_type, true>(
+        detail::communication_inbound_kind::stream_record, true);
+  }
+
+  template <typename Stream>
+  communication_batch_wait<typename Stream::record_type>
+  receive_stream_batch_async() const {
+    using notification_type = typename Stream::download_notification_type;
+    return submit_batch<notification_type>(true);
+  }
+
+  template <typename Notification>
+  communication_batch_wait<typename Notification::payload_type>
+  submit_batch(bool stream) const {
+    if (!lifetime_ || !port_ || !*port_)
+      throw std::system_error(ERROR_INVALID_HANDLE, std::system_category(),
+                              "NTL minifilter port is not connected");
+    const auto &state = lifetime_->state();
+    state->subscribe(
+        Notification::id(), stream,
+        static_cast<std::uint32_t>(Notification::max_batch_records()));
+    const auto waiter_id = state->next_request_id();
+    auto operation = std::make_shared<detail::communication_receive_operation>(
+        lifetime_, waiter_id);
+    state->register_receive(detail::communication_inbound_kind::reliable_batch,
+                            Notification::id(), operation);
+    return communication_batch_wait<typename Notification::payload_type>(
+        std::move(operation), Notification::decode_allocation());
+  }
+
+#if NTL_FLT_HAS_STOP_TOKEN
+  static void attach_receive_stop(
+      std::stop_token token,
+      const std::shared_ptr<detail::communication_receive_operation> &state) {
+    using callback_type =
+        std::stop_callback<detail::communication_receive_stop_canceller>;
+    auto registration = std::make_shared<callback_type>(
+        token, detail::communication_receive_stop_canceller{state});
+    state->attach_cancellation_registration(std::move(registration));
+  }
+#endif
+
+  template <typename Method, typename... Arguments>
+  static std::vector<unsigned char>
+  serialize_method_arguments(Arguments &&...arguments) {
+    using storage = typename Method::argument_storage;
+    static_assert(std::is_constructible<storage, Arguments &&...>::value,
+                  "Arguments cannot initialize the minifilter method");
+    storage values(std::forward<Arguments>(arguments)...);
+    return detail::serialize_port_arguments(
+        values, std::make_index_sequence<std::tuple_size<storage>::value>{});
+  }
+
+  template <typename Method, typename... Arguments>
+  void invoke_impl(const Method &, std::true_type,
+                   Arguments &&...arguments) const {
+    const auto payload = serialize_method_arguments<Method>(
+        std::forward<Arguments>(arguments)...);
+    if (payload.size() > Method::request_size())
+      throw std::length_error(
+          "NTL minifilter request exceeded its method limit");
+    const auto request =
+        detail::make_port_request(detail::communication_operation::invoke,
+                                  Method::id(), payload.data(), payload.size());
+    DWORD returned = 0;
+    detail::send_port_message(port_, request, nullptr, 0, returned);
+    if (returned != 0)
+      throw std::runtime_error(
+          "Void NTL minifilter method returned output bytes");
+  }
+
+  template <typename Method, typename... Arguments>
+  typename Method::return_type invoke_impl(const Method &, std::false_type,
+                                           Arguments &&...arguments) const {
+    using return_type = typename Method::return_type;
+    static_assert(std::is_default_constructible<return_type>::value,
+                  "Minifilter method results must be default constructible");
+    if (Method::response_size() >
+        static_cast<std::size_t>((std::numeric_limits<DWORD>::max)()))
+      throw std::length_error(
+          "NTL minifilter response capacity exceeds DWORD capacity");
+
+    const auto payload = serialize_method_arguments<Method>(
+        std::forward<Arguments>(arguments)...);
+    if (payload.size() > Method::request_size())
+      throw std::length_error(
+          "NTL minifilter request exceeded its method limit");
+    const auto request =
+        detail::make_port_request(detail::communication_operation::invoke,
+                                  Method::id(), payload.data(), payload.size());
+    std::vector<unsigned char> output(Method::response_size());
+    DWORD returned = 0;
+    detail::send_port_message(port_, request, output.data(),
+                              static_cast<DWORD>(output.size()), returned);
+    if (returned > output.size())
+      throw std::runtime_error(
+          "NTL minifilter returned an invalid output size");
+
+    output.resize(returned);
+    zpp::serializer::memory_view_input_archive archive(
+        output.data(), output.size(), Method::decode_allocation());
+    return_type value{};
+    archive(value);
+    if (archive.offset() != output.size())
+      throw std::runtime_error(
+          "NTL minifilter response contains trailing bytes");
+    return std::move(value);
+  }
+
+  template <typename Method, typename... Arguments>
+  std::shared_ptr<detail::communication_async_operation>
+  submit_async(Arguments &&...arguments) const {
+    if (!lifetime_ || !port_ || !*port_)
+      throw std::system_error(ERROR_INVALID_HANDLE, std::system_category(),
+                              "NTL minifilter port is not connected");
+    if (Method::response_size() > detail::communication_inbound_payload_limit)
+      throw std::length_error(
+          "NTL minifilter async response exceeds receiver capacity");
+
+    auto arguments_bytes = serialize_method_arguments<Method>(
+        std::forward<Arguments>(arguments)...);
+    if (arguments_bytes.size() > Method::request_size())
+      throw std::length_error(
+          "NTL minifilter request exceeded its method limit");
+
+    const auto &state = lifetime_->state();
+    const std::uint64_t request_id = state->next_request_id();
+    auto operation = std::make_shared<detail::communication_async_operation>(
+        lifetime_, request_id);
+    state->register_operation(request_id, operation);
+
+    try {
+      detail::communication_async_request async_header{request_id};
+      std::vector<unsigned char> payload(sizeof(async_header) +
+                                         arguments_bytes.size());
+      std::memcpy(payload.data(), &async_header, sizeof(async_header));
+      if (!arguments_bytes.empty())
+        std::memcpy(payload.data() + sizeof(async_header),
+                    arguments_bytes.data(), arguments_bytes.size());
+      const auto request = detail::make_port_request(
+          detail::communication_operation::invoke_async, Method::id(),
+          payload.data(), payload.size());
+      DWORD returned = 0;
+      detail::send_port_message(port_, request, nullptr, 0, returned);
+      if (returned != 0)
+        throw std::runtime_error(
+            "NTL minifilter async submission returned output bytes");
+    } catch (...) {
+      state->unregister_operation(request_id);
+      operation->fail(HRESULT_FROM_WIN32(ERROR_OPERATION_ABORTED));
+      throw;
+    }
+    return operation;
+  }
+
+  template <typename Method, typename... Arguments>
+  communication_async_call<typename Method::return_type>
+  invoke_async_impl(const Method &, std::false_type,
+                    Arguments &&...arguments) const {
+    auto operation =
+        submit_async<Method>(std::forward<Arguments>(arguments)...);
+    return communication_async_call<typename Method::return_type>(
+        std::move(operation), Method::decode_allocation());
+  }
+
+  template <typename Method, typename... Arguments>
+  communication_async_call<void>
+  invoke_async_impl(const Method &, std::true_type,
+                    Arguments &&...arguments) const {
+    return communication_async_call<void>(
+        submit_async<Method>(std::forward<Arguments>(arguments)...));
+  }
+
+  std::shared_ptr<ntl::unique_handle> port_;
+  std::shared_ptr<detail::communication_client_lifetime> lifetime_;
+};
+
+/** @brief Session-bound facade for one typed bidirectional minifilter stream.
+ */
+template <typename Stream> class communication_client_stream {
+  static_assert(ntl::rpc::is_stream<Stream>::value,
+                "communication_client_stream requires ntl::rpc::stream");
+
+public:
+  using upload_type = typename Stream::upload_type;
+  using record_type = typename Stream::record_type;
+  using delivery_type = ntl::rpc::notification_delivery<record_type>;
+  using read_wait_type = communication_notification_wait<record_type, true>;
+  using batch_type = ntl::rpc::notification_batch<record_type>;
+  using batch_wait_type = communication_batch_wait<record_type>;
+
+  communication_client_stream(const communication_client_stream &) = delete;
+  communication_client_stream &
+  operator=(const communication_client_stream &) = delete;
+  communication_client_stream(communication_client_stream &&other) noexcept
+      : owner_(std::move(other.owner_)), open_(other.open_) {
+    other.open_ = false;
+  }
+  communication_client_stream &
+  operator=(communication_client_stream &&other) noexcept {
+    if (this == &other)
+      return *this;
+    close_noexcept();
+    owner_ = std::move(other.owner_);
+    open_ = other.open_;
+    other.open_ = false;
+    return *this;
+  }
+  ~communication_client_stream() { close_noexcept(); }
+
+  explicit operator bool() const noexcept {
+    return open_ && static_cast<bool>(owner_);
+  }
+
+  /** @brief Sends one app-to-driver stream record synchronously. */
+  void write(const upload_type &value) {
+    write_batch(std::vector<upload_type>{value});
+  }
+
+  /** @brief Sends a bounded ordered upload batch synchronously. */
+  void write_batch(const std::vector<upload_type> &values) {
+    ensure_open();
+    validate_batch(values.size());
+    owner_.invoke(Stream::upload_method(),
+                  typename Stream::upload_batch_type(values));
+  }
+
+  /** @brief Sends one app-to-driver record asynchronously. */
+  communication_async_call<void> write_async(const upload_type &value) {
+    return write_batch_async(std::vector<upload_type>{value});
+  }
+
+  /** @brief Sends a bounded upload batch asynchronously. */
+  communication_async_call<void>
+  write_batch_async(const std::vector<upload_type> &values) {
+    ensure_open();
+    validate_batch(values.size());
+    return owner_.invoke_async(Stream::upload_method(),
+                               typename Stream::upload_batch_type(values));
+  }
+
+#if NTL_FLT_HAS_STOP_TOKEN
+  communication_async_call<void> write_async(std::stop_token token,
+                                             const upload_type &value) {
+    return write_batch_async(token, std::vector<upload_type>{value});
+  }
+  communication_async_call<void>
+  write_batch_async(std::stop_token token,
+                    const std::vector<upload_type> &values) {
+    ensure_open();
+    validate_batch(values.size());
+    return owner_.invoke_async(token, Stream::upload_method(),
+                               typename Stream::upload_batch_type(values));
+  }
+#endif
+
+  /** @brief Waits synchronously for one driver-to-app stream record. */
+  delivery_type read() {
+    ensure_open();
+    return read_async().get();
+  }
+
+  /** @brief Starts one cancellable driver-to-app stream read. */
+  read_wait_type read_async() {
+    ensure_open();
+    return owner_.template receive_stream_async<Stream>();
+  }
+
+  /** @brief Waits for one bounded driver-to-app stream batch. */
+  batch_type read_batch() {
+    ensure_open();
+    return read_batch_async().get();
+  }
+
+  /** @brief Starts one cancellable bounded stream batch read. */
+  batch_wait_type read_batch_async() {
+    ensure_open();
+    return owner_.template receive_stream_batch_async<Stream>();
+  }
+
+#if NTL_FLT_HAS_STOP_TOKEN
+  read_wait_type read_async(std::stop_token token) {
+    auto wait = read_async();
+    communication_client::attach_receive_stop(token, wait.state_);
+    return wait;
+  }
+
+  batch_wait_type read_batch_async(std::stop_token token) {
+    auto wait = read_batch_async();
+    communication_client::attach_receive_stop(token, wait.state_);
+    return wait;
+  }
+#endif
+
+  /** @brief ACKs one processed stream delivery. */
+  void acknowledge(const delivery_type &delivery) {
+    ensure_open();
+    owner_.lifetime_->state()->acknowledge(Stream::id(), delivery.sequence());
+  }
+
+  /** @brief ACKs one processed stream batch with a single port message. */
+  void acknowledge(const batch_type &batch) {
+    ensure_open();
+    if (batch.empty())
+      throw std::invalid_argument("NTL minifilter stream batch is empty");
+    std::vector<std::uint64_t> sequences;
+    sequences.reserve(batch.size());
+    for (const auto &delivery : batch.values())
+      sequences.push_back(delivery.sequence());
+    owner_.lifetime_->state()->acknowledge_batch(Stream::id(), sequences);
+  }
+
+  /** @brief Closes this stream and discards its queued server records. */
+  void close() {
+    ensure_open();
+    owner_.lifetime_->state()->unsubscribe(Stream::id(), true);
+    open_ = false;
+    owner_ = {};
+  }
+
+private:
+  friend class communication_client;
+  explicit communication_client_stream(communication_client &owner)
+      : owner_(owner), open_(true) {
+    owner_.lifetime_->state()->subscribe(Stream::id(), true);
+  }
+
+  static void validate_batch(std::size_t count) {
+    if (count == 0 || count > Stream::max_batch_records())
+      throw std::length_error("NTL minifilter stream batch is out of range");
+  }
+  void ensure_open() const {
+    if (!open_ || !owner_)
+      throw std::logic_error("NTL minifilter stream is not open");
+  }
+  void close_noexcept() noexcept {
+    if (!open_ || !owner_)
+      return;
+    try {
+      owner_.lifetime_->state()->unsubscribe(Stream::id(), true);
+    } catch (...) {
+    }
+    owner_ = {};
+    open_ = false;
+  }
+
+  communication_client owner_;
+  bool open_ = false;
+};
+
+template <typename Stream>
+communication_client_stream<Stream>
+communication_client::open_stream(const Stream &) {
+  static_assert(ntl::rpc::is_stream<Stream>::value,
+                "communication_client::open_stream requires ntl::rpc::stream");
+  return communication_client_stream<Stream>(*this);
+}
+
+} // namespace flt
+
+#undef NTL_FLT_HAS_STOP_TOKEN
+} // namespace ntl

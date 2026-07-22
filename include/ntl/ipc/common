@@ -1,0 +1,275 @@
+/**
+ * @file common
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Transport-neutral NTL IPC wire contracts and memory views.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+
+namespace ntl {
+namespace ipc {
+
+/** @brief Access that a kernel transport may perform on a registered region. */
+enum class region_access : std::uint32_t {
+  none = 0,
+  driver_read = 1u << 0,
+  driver_write = 1u << 1,
+  driver_read_write = (1u << 0) | (1u << 1),
+};
+
+/** @brief Combines registered-region access flags. */
+constexpr region_access operator|(region_access left,
+                                  region_access right) noexcept {
+  return static_cast<region_access>(static_cast<std::uint32_t>(left) |
+                                    static_cast<std::uint32_t>(right));
+}
+
+/** @brief Intersects registered-region access flags. */
+constexpr region_access operator&(region_access left,
+                                  region_access right) noexcept {
+  return static_cast<region_access>(static_cast<std::uint32_t>(left) &
+                                    static_cast<std::uint32_t>(right));
+}
+
+/** @brief Reports whether every requested access bit is present. */
+constexpr bool has_access(region_access granted,
+                          region_access requested) noexcept {
+  return (granted & requested) == requested;
+}
+
+/**
+ * @brief Opaque identity assigned to one registered shared-memory region.
+ *
+ * Both fields have fixed width so a 32-bit app can exchange this value with a
+ * 64-bit driver. A generation change invalidates every old buffer token even
+ * when a transport later reuses the numeric region ID.
+ */
+struct region_handle {
+  std::uint64_t id = 0;
+  std::uint64_t generation = 0;
+
+  /** @brief Reports whether this value can identify a registered region. */
+  constexpr bool valid() const noexcept { return id != 0 && generation != 0; }
+
+  friend constexpr bool operator==(region_handle left,
+                                   region_handle right) noexcept {
+    return left.id == right.id && left.generation == right.generation;
+  }
+
+  friend constexpr bool operator!=(region_handle left,
+                                   region_handle right) noexcept {
+    return !(left == right);
+  }
+
+  /** @brief Serializes only the fixed-width wire fields. */
+  template <typename Archive, typename Self>
+  static void serialize(Archive &archive, Self &self) {
+    archive(self.id, self.generation);
+  }
+};
+
+/**
+ * @brief Pointer-free reference to a byte range in a registered region.
+ *
+ * Never place a native pointer or size_t in an IPC contract. The receiving
+ * transport validates this token against its own region table before exposing
+ * a local address.
+ */
+struct buffer_token {
+  region_handle region{};
+  std::uint64_t offset = 0;
+  std::uint64_t length = 0;
+
+  /** @brief Reports whether this token names a nonempty registered range. */
+  constexpr bool valid() const noexcept {
+    return region.valid() && length != 0 &&
+           offset <= (std::numeric_limits<std::uint64_t>::max)() - length;
+  }
+
+  /** @brief Serializes the pointer-free token for typed RPC contracts. */
+  template <typename Archive, typename Self>
+  static void serialize(Archive &archive, Self &self) {
+    archive(self.region, self.offset, self.length);
+  }
+};
+
+/**
+ * @brief Cross-bitness request to register caller-owned virtual memory.
+ *
+ * The address is encoded as an integer only on the wire. A kernel transport
+ * must probe and pin it in the original requestor process context before use.
+ */
+struct region_registration {
+  std::uint64_t user_address = 0;
+  std::uint64_t length = 0;
+  region_access access = region_access::none;
+  std::uint32_t reserved = 0;
+
+  /** @brief Creates a registration record from a local user address. */
+  static region_registration from(void *address, std::size_t bytes,
+                                  region_access requested_access) noexcept {
+    region_registration value{};
+    value.user_address = static_cast<std::uint64_t>(
+        reinterpret_cast<std::uintptr_t>(address));
+    value.length = static_cast<std::uint64_t>(bytes);
+    value.access = requested_access;
+    return value;
+  }
+
+  /** @brief Reports whether the wire fields describe a plausible request. */
+  constexpr bool valid() const noexcept {
+    return user_address != 0 && length != 0 && reserved == 0 &&
+           access != region_access::none &&
+           has_access(region_access::driver_read_write, access) &&
+           user_address <=
+               (std::numeric_limits<std::uint64_t>::max)() - length;
+  }
+};
+
+/** @brief Mutable local byte range returned after token validation. */
+class mutable_buffer_view {
+public:
+  constexpr mutable_buffer_view() noexcept = default;
+  mutable_buffer_view(void *data, std::size_t bytes) noexcept
+      : data_(static_cast<unsigned char *>(data)), bytes_(bytes) {}
+
+  /** @brief Returns the first byte, or nullptr for an empty view. */
+  unsigned char *data() const noexcept { return data_; }
+
+  /** @brief Returns the number of accessible bytes. */
+  constexpr std::size_t size() const noexcept { return bytes_; }
+
+  /** @brief Reports whether the view contains bytes. */
+  explicit constexpr operator bool() const noexcept {
+    return data_ != nullptr && bytes_ != 0;
+  }
+
+private:
+  unsigned char *data_ = nullptr;
+  std::size_t bytes_ = 0;
+};
+
+/** @brief Immutable local byte range returned after token validation. */
+class const_buffer_view {
+public:
+  constexpr const_buffer_view() noexcept = default;
+  const_buffer_view(const void *data, std::size_t bytes) noexcept
+      : data_(static_cast<const unsigned char *>(data)), bytes_(bytes) {}
+  const_buffer_view(mutable_buffer_view view) noexcept
+      : data_(view.data()), bytes_(view.size()) {}
+
+  /** @brief Returns the first byte, or nullptr for an empty view. */
+  const unsigned char *data() const noexcept { return data_; }
+
+  /** @brief Returns the number of accessible bytes. */
+  constexpr std::size_t size() const noexcept { return bytes_; }
+
+  /** @brief Reports whether the view contains bytes. */
+  explicit constexpr operator bool() const noexcept {
+    return data_ != nullptr && bytes_ != 0;
+  }
+
+private:
+  const unsigned char *data_ = nullptr;
+  std::size_t bytes_ = 0;
+};
+
+/** @brief Result of validating a region or shared-memory layout. */
+enum class validation_status : std::uint32_t {
+  success = 0,
+  invalid_argument,
+  insufficient_buffer,
+  misaligned_buffer,
+  stale_region,
+  access_denied,
+  range_overflow,
+  incompatible_layout,
+};
+
+/**
+ * @brief Transport-owned local mapping of one registered region.
+ *
+ * This class does not own or pin memory. IOCTL RPC and Filter Manager port
+ * adapters construct it from their own lifetime-managed region objects.
+ */
+class region_view {
+public:
+  constexpr region_view() noexcept = default;
+  region_view(region_handle handle, void *data, std::size_t bytes,
+              region_access access) noexcept
+      : handle_(handle), data_(static_cast<unsigned char *>(data)),
+        bytes_(bytes), access_(access) {}
+
+  /** @brief Returns the transport-assigned region identity. */
+  constexpr region_handle handle() const noexcept { return handle_; }
+
+  /** @brief Returns the locally mapped region size. */
+  constexpr std::size_t size() const noexcept { return bytes_; }
+
+  /** @brief Returns the access granted during registration. */
+  constexpr region_access access() const noexcept { return access_; }
+
+  /** @brief Resolves and validates a mutable pointer-free buffer token. */
+  validation_status resolve(buffer_token token, region_access required,
+                            mutable_buffer_view &result) const noexcept {
+    result = {};
+    if (!data_ || !handle_.valid() || !token.valid())
+      return validation_status::invalid_argument;
+    if (token.region != handle_)
+      return validation_status::stale_region;
+    if (!has_access(access_, required))
+      return validation_status::access_denied;
+    if (token.offset > bytes_ || token.length > bytes_ - token.offset)
+      return validation_status::range_overflow;
+
+    result = mutable_buffer_view{
+        data_ + static_cast<std::size_t>(token.offset),
+        static_cast<std::size_t>(token.length)};
+    return validation_status::success;
+  }
+
+  /** @brief Resolves and validates an immutable pointer-free buffer token. */
+  validation_status resolve(buffer_token token, region_access required,
+                            const_buffer_view &result) const noexcept {
+    mutable_buffer_view mutable_result;
+    const auto status = resolve(token, required, mutable_result);
+    result = status == validation_status::success
+                 ? const_buffer_view{mutable_result}
+                 : const_buffer_view{};
+    return status;
+  }
+
+  /** @brief Creates a pointer-free token for a validated local subrange. */
+  validation_status token(std::size_t offset, std::size_t length,
+                          buffer_token &result) const noexcept {
+    result = {};
+    if (!handle_.valid() || !data_ || length == 0)
+      return validation_status::invalid_argument;
+    if (offset > bytes_ || length > bytes_ - offset)
+      return validation_status::range_overflow;
+    result = buffer_token{handle_, static_cast<std::uint64_t>(offset),
+                          static_cast<std::uint64_t>(length)};
+    return validation_status::success;
+  }
+
+private:
+  region_handle handle_{};
+  unsigned char *data_ = nullptr;
+  std::size_t bytes_ = 0;
+  region_access access_ = region_access::none;
+};
+
+static_assert(sizeof(region_handle) == 16,
+              "NTL IPC region handles must be cross-bitness stable");
+static_assert(sizeof(buffer_token) == 32,
+              "NTL IPC buffer tokens must be cross-bitness stable");
+static_assert(sizeof(region_registration) == 24,
+              "NTL IPC registrations must be cross-bitness stable");
+
+} // namespace ipc
+} // namespace ntl
