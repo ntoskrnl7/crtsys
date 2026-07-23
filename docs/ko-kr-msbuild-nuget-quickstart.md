@@ -20,11 +20,21 @@ MSBuild restore가 가능하면 `msbuild /restore`로 충분합니다. `nuget.ex
 
 ## Visual Studio
 
-NuGet 설치 후 **프로젝트 속성 > Driver Settings > Driver Model**에서
-드라이버 모델에 맞는 crtsys 진입점을 선택합니다. WDK의 **Type of driver**를
-먼저 선택하면 해당 모델에 맞는 속성이 표시됩니다.
+NTL 방식의 WDM driver에서는 **NTL WDM**을 선택하고 `main.cpp`를 추가한 뒤
+`ntl::main`을 구현합니다.
 
-![Visual Studio crtsys 드라이버 모델 진입점 선택](./assets/visual-studio-driver-model-ui-ko-kr.gif)
+![Visual Studio에서 crtsys NTL WDM 진입점을 선택하고 ntl::main을 구현하는 화면](./assets/visual-studio-wdm-ntl-entrypoint-ko-kr.gif)
+
+NTL 방식의 KMDF driver에서는 **프로젝트 속성 > Driver Settings > Driver
+Model**에서 **Type of driver**를 **KMDF**로 설정하고 **NTL KMDF**를 선택한 뒤
+`ntl::kmdf::main`을 구현합니다.
+
+![Visual Studio에서 crtsys NTL KMDF 진입점을 선택하고 ntl::kmdf::main을 구현하는 화면](./assets/visual-studio-driver-model-ui-ko-kr.gif)
+
+Minifilter에서는 **NTL Minifilter**를 선택하고 `main.cpp`에
+`ntl::flt::main`을 구현합니다.
+
+![Visual Studio에서 crtsys NTL Minifilter 진입점을 선택하고 ntl::flt::main을 구현하는 화면](./assets/visual-studio-ntl-minifilter-entrypoint-ko-kr.gif)
 
 Visual Studio에서는 NuGet package UI를 사용하는 것이 가장 쉽습니다.
 
