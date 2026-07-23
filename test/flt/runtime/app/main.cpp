@@ -33,8 +33,9 @@ public:
       return;
     }
 
-    status_ = FilterAttach(filter_name, volume_.c_str(),
-                           secondary_instance_name, 0, nullptr);
+    status_ = FilterAttachAtAltitude(
+        filter_name, volume_.c_str(), secondary_altitude,
+        secondary_instance_name, 0, nullptr);
     attached_ = SUCCEEDED(status_);
   }
 
@@ -66,9 +67,36 @@ private:
 
 } // namespace
 
-int wmain() {
+int wmain(int argc, wchar_t **argv) {
   namespace fs = std::filesystem;
   using namespace crtsys_flt_runtime_test;
+
+  if (argc == 4 && std::wstring_view(argv[1]) == L"--security-probe") {
+    const bool expect_allowed = std::wstring_view(argv[3]) == L"allow";
+    const bool expect_denied = std::wstring_view(argv[3]) == L"deny";
+    if (!expect_allowed && !expect_denied) {
+      std::cerr << "security probe expectation must be 'allow' or 'deny'\n";
+      return 2;
+    }
+    try {
+      auto probe = ntl::flt::communication_client::connect(argv[2]);
+      (void)probe;
+      if (expect_denied) {
+        std::cerr << "NTL minifilter security probe was unexpectedly allowed\n";
+        return 1;
+      }
+      std::cout << "NTL minifilter security probe PASS (allowed)\n";
+      return 0;
+    } catch (const std::exception &failure) {
+      if (expect_denied) {
+        std::cout << "NTL minifilter security probe PASS (denied)\n";
+        return 0;
+      }
+      std::cerr << "NTL minifilter security probe rejected: "
+                << failure.what() << '\n';
+      return 1;
+    }
+  }
 
   const fs::path root = fs::temp_directory_path();
   const fs::path source = root / file_name;
@@ -106,6 +134,18 @@ int wmain() {
       std::cerr << "minifilter contract discovery mismatch\n";
       return 1;
     }
+    bool wrong_schema_rejected = false;
+    try {
+      constexpr ntl::rpc::method<0xA50, std::uint64_t(std::uint32_t)>
+          incompatible_ping{};
+      port.require_method(incompatible_ping);
+    } catch (const std::runtime_error &) {
+      wrong_schema_rejected = true;
+    }
+    if (!wrong_schema_rejected) {
+      std::cerr << "minifilter schema hash mismatch was not rejected\n";
+      return 1;
+    }
     communication_stage = "first typed call";
     if (ping(port, std::uint32_t{41}) != 42) {
       std::cerr << "typed minifilter communication returned a bad result\n";
@@ -123,6 +163,25 @@ int wmain() {
     if (!connect_rejected) {
       std::cerr << "minifilter on_connect rejection was not enforced\n";
       return 1;
+    }
+
+    {
+      auto allowed = ntl::flt::communication_client::connect(
+          security_allow_port_name);
+      (void)allowed;
+
+      bool denied = false;
+      try {
+        auto rejected = ntl::flt::communication_client::connect(
+            security_deny_port_name);
+        (void)rejected;
+      } catch (const ntl::flt::communication_error &) {
+        denied = true;
+      }
+      if (!denied) {
+        std::cerr << "minifilter port security descriptor was not enforced\n";
+        return 1;
+      }
     }
 
     {
@@ -574,6 +633,34 @@ int wmain() {
     if (!access_rejected) {
       std::cerr << "minifilter shared-region access was not rejected\n";
       return 1;
+    }
+
+    {
+      auto pool = region.make_buffer_pool(16);
+      auto first_result = pool.try_acquire(32);
+      auto second_result = pool.try_acquire(48);
+      if (!first_result || !second_result ||
+          first_result->token().region != region.handle() ||
+          second_result->token().region != region.handle()) {
+        std::cerr << "minifilter shared-buffer pool allocation failed\n";
+        return 1;
+      }
+      auto first = std::move(*first_result);
+      auto second = std::move(*second_result);
+      const auto first_offset = first.token().offset;
+      first.release();
+      auto reused_result = pool.try_acquire(16);
+      if (!reused_result || reused_result->token().offset != first_offset) {
+        std::cerr << "minifilter shared-buffer lease reuse failed\n";
+        return 1;
+      }
+      second.release();
+      reused_result->release();
+      auto whole_result = pool.try_acquire(shared_region_bytes);
+      if (!whole_result) {
+        std::cerr << "minifilter shared-buffer lease coalescing failed\n";
+        return 1;
+      }
     }
 
     bool region_quota_rejected = false;

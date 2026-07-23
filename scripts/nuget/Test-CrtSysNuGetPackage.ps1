@@ -179,18 +179,16 @@ $cmakeTestDirectory = Join-Path $testRoot 'cmake'
 New-Item -ItemType Directory -Force -Path $testProjectDirectory | Out-Null
 New-Item -ItemType Directory -Force -Path $cmakeTestDirectory | Out-Null
 
-Copy-Item -Path (Join-Path $testProjectSource '*') -Destination $testProjectDirectory -Recurse -Force
-foreach ($generatedDirectory in @(
-  '.vs',
-  'Debug',
-  'Release',
-  'obj',
-  'packages',
-  'external-packages'
+foreach ($sourceFile in @(
+  'README.md',
+  'crtsys_nuget_app_test.vcxproj',
+  'crtsys_nuget_test.vcxproj'
 )) {
-  Remove-Item -LiteralPath (Join-Path $testProjectDirectory $generatedDirectory) `
-    -Recurse -Force -ErrorAction SilentlyContinue
+  Copy-Item -LiteralPath (Join-Path $testProjectSource $sourceFile) `
+    -Destination $testProjectDirectory -Force
 }
+Copy-Item -LiteralPath (Join-Path $testProjectSource 'gtest') `
+  -Destination $testProjectDirectory -Recurse -Force
 Copy-Item -Path (Join-Path $repoRoot 'test\cmake\common') -Destination $cmakeTestDirectory -Recurse -Force
 if ($isDriverConsumer) {
   $driverTestDirectory = Join-Path $cmakeTestDirectory 'driver'

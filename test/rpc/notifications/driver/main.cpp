@@ -10,6 +10,7 @@
 #include <ntl/driver>
 #include <ntl/irql>
 #include <ntl/rpc/server>
+#include <ntl/rpc/registry_notification_store>
 #include <ntl/status>
 
 #include "rpc_notifications.hpp"
@@ -31,100 +32,52 @@ class counting_notification_store final
     : public ntl::rpc::notification_store {
 public:
   explicit counting_notification_store(
-      std::shared_ptr<notification_state> state) noexcept
-      : state_(std::move(state)) {
-    ExInitializeFastMutex(&lock_);
-  }
+      std::shared_ptr<notification_state> state,
+      std::shared_ptr<ntl::rpc::registry_notification_store> storage) noexcept
+      : state_(std::move(state)), storage_(std::move(storage)) {}
 
   ntl::status persist(
       const ntl::rpc::notification_record_view &view) noexcept override {
-    if (!view.session.valid() || view.notification_id == 0 ||
-        view.sequence == 0 || !view.data || view.size == 0)
-      return ntl::status{STATUS_INVALID_PARAMETER};
-    try {
-      stored_record record;
-      record.token = view.session;
-      record.notification_id = view.notification_id;
-      record.sequence = view.sequence;
-      record.terminal = view.terminal;
-      record.bytes.assign(view.data, view.data + view.size);
-      lock_guard guard(lock_);
-      records_.push_back(std::move(record));
+    const auto status = storage_->persist(view);
+    if (status.is_ok())
       state_->persisted.fetch_add(1, std::memory_order_relaxed);
-      return ntl::status::ok();
-    } catch (const std::bad_alloc &) {
-      return ntl::status{STATUS_INSUFFICIENT_RESOURCES};
-    }
+    return status;
   }
 
   ntl::status acknowledge(const ntl::rpc::session_token &token,
                           std::uint32_t notification_id,
                           std::uint64_t sequence) noexcept override {
-    lock_guard guard(lock_);
-    records_.erase(
-        std::remove_if(records_.begin(), records_.end(),
-                       [&](const stored_record &record) {
-                         return record.token == token &&
-                                record.notification_id == notification_id &&
-                                record.sequence == sequence;
-                       }),
-        records_.end());
-    state_->acknowledged.fetch_add(1, std::memory_order_relaxed);
-    return ntl::status::ok();
+    const auto status =
+        storage_->acknowledge(token, notification_id, sequence);
+    if (status.is_ok())
+      state_->acknowledged.fetch_add(1, std::memory_order_relaxed);
+    return status;
   }
 
   ntl::status restore(const ntl::rpc::session_token &token,
                       ntl::rpc::notification_restore_sink &sink) noexcept
       override {
-    lock_guard guard(lock_);
-    bool found = false;
-    for (const auto &record : records_) {
-      if (record.token != token)
-        continue;
-      found = true;
-      const auto status = sink.add(record.notification_id, record.sequence,
-                                   record.bytes.data(), record.bytes.size(),
-                                   record.terminal);
-      if (!status.is_ok())
-        return status;
-    }
-    return found ? ntl::status::ok() : ntl::status{STATUS_NOT_FOUND};
+    return storage_->restore(token, sink);
   }
 
   void erase_session(const ntl::rpc::session_token &token) noexcept override {
-    lock_guard guard(lock_);
-    records_.erase(
-        std::remove_if(records_.begin(), records_.end(),
-                       [&](const stored_record &record) {
-                         return record.token == token;
-                       }),
-        records_.end());
+    storage_->erase_session(token);
   }
 
 private:
-  class lock_guard {
-  public:
-    explicit lock_guard(FAST_MUTEX &lock) noexcept : lock_(&lock) {
-      ExAcquireFastMutex(lock_);
-    }
-    ~lock_guard() { ExReleaseFastMutex(lock_); }
-
-  private:
-    FAST_MUTEX *lock_;
-  };
-
-  struct stored_record {
-    ntl::rpc::session_token token{};
-    std::uint32_t notification_id = 0;
-    std::uint64_t sequence = 0;
-    bool terminal = false;
-    std::vector<unsigned char> bytes;
-  };
-
   std::shared_ptr<notification_state> state_;
-  FAST_MUTEX lock_{};
-  std::vector<stored_record> records_;
+  std::shared_ptr<ntl::rpc::registry_notification_store> storage_;
 };
+
+constexpr wchar_t notification_store_key[] =
+    L"\\Registry\\Machine\\Software\\CrtSysRpcNotificationStoreTest";
+
+void delete_notification_store_key() noexcept {
+  auto key = ntl::registry_key::open(notification_store_key, DELETE);
+  if (!key)
+    return;
+  (void)key->delete_key();
+}
 
 rpc_notification_message make_message(std::uint64_t sequence,
                                       std::uint32_t value_count) {
@@ -140,6 +93,13 @@ rpc_notification_message make_message(std::uint64_t sequence,
 } // namespace
 
 ntl::status ntl::main(ntl::driver &driver, const std::wstring &) {
+  delete_notification_store_key();
+  auto storage_key = ntl::registry_key::create(
+      notification_store_key, KEY_QUERY_VALUE | KEY_SET_VALUE,
+      REG_OPTION_VOLATILE);
+  if (!storage_key)
+    return storage_key.status();
+
   auto state = std::make_shared<notification_state>();
   ntl::rpc::server_options options(L"crtsys_rpc_notifications");
   options.contract_version(crtsys_rpc_notifications::contract_version)
@@ -153,7 +113,11 @@ ntl::status ntl::main(ntl::driver &driver, const std::wstring &) {
 
   auto server = ntl::rpc::make_server(driver, options);
   auto *const endpoint = server.get();
-  auto store = std::make_shared<counting_notification_store>(state);
+  auto registry_store =
+      std::make_shared<ntl::rpc::registry_notification_store>(
+          std::move(*storage_key));
+  auto store = std::make_shared<counting_notification_store>(
+      state, std::move(registry_store));
   server
       ->notification_storage(store)
       .on_session_open(
@@ -242,6 +206,7 @@ ntl::status ntl::main(ntl::driver &driver, const std::wstring &) {
 
   driver.on_unload([server, state]() mutable {
     server.reset();
+    delete_notification_store_key();
     DbgPrint("[crtsys RPC notifications] delivered=%lu dropped=%lu\n",
              state->delivered.load(std::memory_order_relaxed),
              state->dropped.load(std::memory_order_relaxed));

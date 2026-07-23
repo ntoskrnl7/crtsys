@@ -1,0 +1,102 @@
+/**
+ * @file registry_notification_store
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Optional registry persistence for minifilter communication records.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+
+#pragma once
+
+#include "../ipc/registry_record_store"
+#include "communication"
+
+#include <cstddef>
+#include <cstdint>
+#include <utility>
+
+namespace ntl {
+namespace flt {
+
+/**
+ * @brief Persists reliable minifilter records in a caller-owned registry key.
+ *
+ * One REG_BINARY value is maintained per reconnectable session. The adapter is
+ * inactive unless explicitly installed with
+ * communication_server::notification_storage(). All operations require
+ * PASSIVE_LEVEL because they call Zw registry APIs.
+ */
+class registry_notification_store final
+    : public communication_notification_store {
+public:
+  /** @brief Default maximum serialized bytes retained for one session. */
+  static constexpr std::size_t default_max_session_bytes =
+      ntl::ipc::detail::registry_record_store::default_max_session_bytes;
+
+  /**
+   * @brief Takes ownership of the key used for communication records.
+   * @param key Open registry key with query, set, and delete-value access.
+   * @param max_session_bytes Maximum serialized bytes retained per session.
+   */
+  explicit registry_notification_store(
+      ntl::registry_key key,
+      std::size_t max_session_bytes = default_max_session_bytes)
+      : records_(std::move(key), max_session_bytes) {}
+
+  registry_notification_store(const registry_notification_store &) = delete;
+  registry_notification_store &
+  operator=(const registry_notification_store &) = delete;
+
+  ntl::status
+  persist(const communication_record_view &record) noexcept override {
+    return records_.persist(record.session.high, record.session.low,
+                            record.channel_id,
+                            static_cast<std::uint32_t>(record.kind),
+                            record.sequence, record.data, record.size);
+  }
+
+  ntl::status acknowledge(const ntl::rpc::session_token &session,
+                          std::uint32_t channel_id,
+                          std::uint64_t sequence) noexcept override {
+    return records_.acknowledge(session.high, session.low, channel_id,
+                                sequence);
+  }
+
+  ntl::status acknowledge_batch(const ntl::rpc::session_token &session,
+                                std::uint32_t channel_id,
+                                const std::uint64_t *sequences,
+                                std::size_t count) noexcept override {
+    return records_.acknowledge_batch(session.high, session.low, channel_id,
+                                      sequences, count);
+  }
+
+  ntl::status restore(const ntl::rpc::session_token &session,
+                      communication_restore_sink &sink) noexcept override {
+    auto restored = records_.load(session.high, session.low);
+    if (!restored)
+      return restored.status();
+
+    for (const auto &record : *restored) {
+      if (record.kind >
+          static_cast<std::uint32_t>(communication_record_kind::stream))
+        return ntl::status{STATUS_DATA_ERROR};
+      const auto status = sink.add(
+          record.channel_id, record.sequence,
+          static_cast<communication_record_kind>(record.kind),
+          record.payload.data(), record.payload.size());
+      if (!status.is_ok())
+        return status;
+    }
+    return ntl::status::ok();
+  }
+
+  void erase_session(const ntl::rpc::session_token &session) noexcept override {
+    records_.erase(session.high, session.low);
+  }
+
+private:
+  ntl::ipc::detail::registry_record_store records_;
+};
+
+} // namespace flt
+} // namespace ntl

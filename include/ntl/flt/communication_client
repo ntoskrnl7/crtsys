@@ -10,6 +10,7 @@
 #include "port_common"
 
 #include "../handle"
+#include "../ipc/shared_buffer_pool"
 #include "../rpc/common"
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -364,6 +365,11 @@ public:
 
 private:
   std::shared_ptr<communication_client_state> state_;
+};
+
+struct communication_contract_cache {
+  std::mutex lock;
+  std::shared_ptr<communication_contract_info> info;
 };
 
 class communication_async_operation {
@@ -1678,10 +1684,11 @@ public:
 
   registered_port_region(registered_port_region &&other) noexcept
       : port_(std::move(other.port_)), region_(other.region_),
-        memory_(other.memory_), bytes_(other.bytes_) {
+        memory_(other.memory_), bytes_(other.bytes_), access_(other.access_) {
     other.region_ = {};
     other.memory_ = nullptr;
     other.bytes_ = 0;
+    other.access_ = ntl::ipc::region_access::none;
   }
 
   registered_port_region &operator=(registered_port_region &&other) noexcept {
@@ -1692,9 +1699,11 @@ public:
     region_ = other.region_;
     memory_ = other.memory_;
     bytes_ = other.bytes_;
+    access_ = other.access_;
     other.region_ = {};
     other.memory_ = nullptr;
     other.bytes_ = 0;
+    other.access_ = ntl::ipc::region_access::none;
     return *this;
   }
 
@@ -1706,6 +1715,21 @@ public:
   void *data() const noexcept { return memory_; }
   std::size_t size() const noexcept { return bytes_; }
   ntl::ipc::region_handle handle() const noexcept { return region_; }
+
+  /** @brief Returns the driver access granted to this registered region. */
+  ntl::ipc::region_access access() const noexcept { return access_; }
+
+  /** @brief Creates a variable-size lease pool over this registered region. */
+  ntl::ipc::shared_buffer_pool
+  make_buffer_pool(std::size_t alignment = alignof(void *)) const {
+    if (!*this)
+      throw std::system_error(ERROR_INVALID_HANDLE, std::system_category(),
+                              "NTL minifilter shared region is not registered");
+    return ntl::ipc::shared_buffer_pool{
+        ntl::ipc::region_view{region_, memory_, bytes_,
+                              access_},
+        alignment};
+  }
 
   /** @brief Creates a pointer-free token for a checked local subrange. */
   ntl::ipc::buffer_token token(std::size_t offset, std::size_t length) const {
@@ -1730,9 +1754,10 @@ private:
 
   registered_port_region(std::shared_ptr<ntl::unique_handle> port,
                          ntl::ipc::region_handle region, void *memory,
-                         std::size_t bytes) noexcept
+                         std::size_t bytes,
+                         ntl::ipc::region_access access) noexcept
       : port_(std::move(port)), region_(region), memory_(memory),
-        bytes_(bytes) {}
+        bytes_(bytes), access_(access) {}
 
   void unregister_region(bool report_failure) {
     if (!port_ || !*port_ || !region_.valid()) {
@@ -1761,6 +1786,7 @@ private:
       ::VirtualFree(memory_, 0, MEM_RELEASE);
     memory_ = nullptr;
     bytes_ = 0;
+    access_ = ntl::ipc::region_access::none;
     region_ = {};
     port_.reset();
   }
@@ -1782,6 +1808,7 @@ private:
     port_.reset();
     memory_ = nullptr;
     bytes_ = 0;
+    access_ = ntl::ipc::region_access::none;
     region_ = {};
   }
 
@@ -1789,6 +1816,7 @@ private:
   ntl::ipc::region_handle region_{};
   void *memory_ = nullptr;
   std::size_t bytes_ = 0;
+  ntl::ipc::region_access access_ = ntl::ipc::region_access::none;
 };
 
 /** @brief Typed user-mode owner of one Filter Manager client port handle. */
@@ -1851,6 +1879,7 @@ public:
                   "communication_client::on_request requires a method");
     if (!lifetime_)
       throw std::logic_error("NTL minifilter client has no connection");
+    require_client_method(Method{});
     using handler_type = detail::typed_communication_client_request_handler<
         Method, typename std::decay<Callback>::type>;
     lifetime_->state()->register_request_handler(
@@ -1893,6 +1922,25 @@ public:
     if (archive.offset() != output.size())
       throw std::runtime_error(
           "NTL minifilter contract contains trailing bytes");
+    const auto &members = info.members();
+    if (!std::is_sorted(
+            members.begin(), members.end(),
+            [](const communication_contract_member &left,
+               const communication_contract_member &right) {
+              return left.id < right.id ||
+                     (left.id == right.id &&
+                      static_cast<std::uint16_t>(left.kind) <
+                          static_cast<std::uint16_t>(right.kind));
+            }) ||
+        std::adjacent_find(
+            members.begin(), members.end(),
+            [](const communication_contract_member &left,
+               const communication_contract_member &right) {
+              return left.id == right.id && left.kind == right.kind;
+            }) != members.end() ||
+        info.schema_hash() != communication_schema_hash(members))
+      throw std::runtime_error(
+          "NTL minifilter contract has invalid schema metadata");
     return info;
   }
 
@@ -1914,14 +1962,15 @@ public:
   void require_notification(const Notification &) const {
     static_assert(ntl::rpc::is_notification<Notification>::value,
                   "require_notification requires a notification");
-    const auto info = query_contract();
+    const auto &info = contract_for_validation();
     const auto *member =
         info.find(Notification::id(), communication_member_kind::notification);
     if (!member || member->response_size != Notification::response_size() ||
         member->decode_allocation != Notification::decode_allocation() ||
         member->max_batch_records != Notification::max_batch_records() ||
         member->priority !=
-            static_cast<std::uint32_t>(Notification::priority()))
+            static_cast<std::uint32_t>(Notification::priority()) ||
+        member->schema_hash != Notification::schema_hash())
       throw std::runtime_error("NTL minifilter notification contract mismatch");
   }
 
@@ -1929,21 +1978,22 @@ public:
   template <typename Stream> void require_stream(const Stream &) const {
     static_assert(ntl::rpc::is_stream<Stream>::value,
                   "require_stream requires a stream");
-    const auto info = query_contract();
+    const auto &info = contract_for_validation();
     const auto *member =
         info.find(Stream::id(), communication_member_kind::stream);
     if (!member || member->request_size != Stream::upload_size() ||
         member->response_size != Stream::download_size() ||
         member->decode_allocation != Stream::decode_allocation() ||
         member->max_batch_records != Stream::max_batch_records() ||
-        member->priority != static_cast<std::uint32_t>(Stream::priority()))
+        member->priority != static_cast<std::uint32_t>(Stream::priority()) ||
+        member->schema_hash != Stream::schema_hash())
       throw std::runtime_error("NTL minifilter stream contract mismatch");
   }
 
   /** @brief Rejects an incompatible protocol, version, or capability set. */
   void require_contract(std::uint32_t contract_version,
                         std::uint64_t capabilities = 0) const {
-    const auto info = query_contract();
+    const auto &info = contract_for_validation();
     if (info.protocol_version() != detail::communication_version)
       throw std::runtime_error("NTL minifilter protocol version mismatch");
     if (info.contract_version() != contract_version)
@@ -2076,6 +2126,7 @@ public:
                   "communication_client::invoke requires ntl::rpc::method");
     static_assert(sizeof...(Arguments) == Method::arity(),
                   "Minifilter method argument count does not match");
+    require_method(method);
     using is_void = typename std::is_void<typename Method::return_type>::type;
     return invoke_impl(method, is_void{},
                        std::forward<Arguments>(arguments)...);
@@ -2094,6 +2145,7 @@ public:
         "communication_client::invoke_async requires ntl::rpc::method");
     static_assert(sizeof...(Arguments) == Method::arity(),
                   "Minifilter method argument count does not match");
+    require_method(method);
     return invoke_async_impl(
         method, typename std::is_void<typename Method::return_type>::type{},
         std::forward<Arguments>(arguments)...);
@@ -2147,7 +2199,7 @@ public:
       if (returned != sizeof(region) || !region.valid())
         throw std::runtime_error(
             "NTL minifilter returned an invalid shared-region handle");
-      return registered_port_region{port_, region, memory, bytes};
+      return registered_port_region{port_, region, memory, bytes, access};
     } catch (...) {
       ::VirtualFree(memory, 0, MEM_RELEASE);
       throw;
@@ -2162,12 +2214,21 @@ private:
                                  communication_member_kind kind) const {
     static_assert(ntl::rpc::is_method<Method>::value,
                   "require_method requires a method");
-    const auto info = query_contract();
+    const auto &info = contract_for_validation();
     const auto *member = info.find(Method::id(), kind);
     if (!member || member->request_size != Method::request_size() ||
         member->response_size != Method::response_size() ||
-        member->decode_allocation != Method::decode_allocation())
+        member->decode_allocation != Method::decode_allocation() ||
+        member->schema_hash != Method::schema_hash())
       throw std::runtime_error("NTL minifilter method contract mismatch");
+  }
+
+  const communication_contract_info &contract_for_validation() const {
+    std::lock_guard<std::mutex> guard(contract_cache_->lock);
+    if (!contract_cache_->info)
+      contract_cache_->info =
+          std::make_shared<communication_contract_info>(query_contract());
+    return *contract_cache_->info;
   }
   communication_client(
       std::shared_ptr<ntl::unique_handle> port,
@@ -2180,6 +2241,8 @@ private:
     if (!lifetime_ || !port_ || !*port_)
       throw std::system_error(ERROR_INVALID_HANDLE, std::system_category(),
                               "NTL minifilter port is not connected");
+    if (!stream)
+      require_notification(Notification{});
     const auto &state = lifetime_->state();
     state->subscribe(Notification::id(), stream);
     const auto waiter_id = state->next_request_id();
@@ -2212,6 +2275,8 @@ private:
     if (!lifetime_ || !port_ || !*port_)
       throw std::system_error(ERROR_INVALID_HANDLE, std::system_category(),
                               "NTL minifilter port is not connected");
+    if (!stream)
+      require_notification(Notification{});
     const auto &state = lifetime_->state();
     state->subscribe(
         Notification::id(), stream,
@@ -2370,6 +2435,8 @@ private:
 
   std::shared_ptr<ntl::unique_handle> port_;
   std::shared_ptr<detail::communication_client_lifetime> lifetime_;
+  std::shared_ptr<detail::communication_contract_cache> contract_cache_ =
+      std::make_shared<detail::communication_contract_cache>();
 };
 
 /** @brief Session-bound facade for one typed bidirectional minifilter stream.
@@ -2550,6 +2617,7 @@ communication_client_stream<Stream>
 communication_client::open_stream(const Stream &) {
   static_assert(ntl::rpc::is_stream<Stream>::value,
                 "communication_client::open_stream requires ntl::rpc::stream");
+  require_stream(Stream{});
   return communication_client_stream<Stream>(*this);
 }
 

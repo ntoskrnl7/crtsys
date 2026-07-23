@@ -1,0 +1,318 @@
+/**
+ * @file shared_buffer_pool
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief User-mode variable-size leases over a registered IPC region.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if defined(_DDK_DRIVER_) || defined(_NTDDK_) || defined(_NTIFS_) ||           \
+    defined(_WDMDDK_)
+#error "ntl::ipc::shared_buffer_pool is a user-mode registered-region helper"
+#endif
+
+#include "common"
+
+#include <cstddef>
+#include <cstdint>
+#include <algorithm>
+#include <limits>
+#include <memory>
+#include <mutex>
+#include <stdexcept>
+#include <utility>
+#include <vector>
+
+namespace ntl {
+namespace ipc {
+
+namespace detail {
+
+struct shared_buffer_extent {
+  std::size_t offset = 0;
+  std::size_t size = 0;
+};
+
+struct shared_buffer_pool_state {
+  shared_buffer_pool_state(region_view region_value,
+                           std::size_t alignment_value)
+      : region(region_value), alignment(alignment_value) {
+    free_extents.push_back(shared_buffer_extent{0, region.size()});
+  }
+
+  mutable std::mutex lock;
+  region_view region;
+  std::size_t alignment = 1;
+  std::vector<shared_buffer_extent> free_extents;
+};
+
+inline bool is_power_of_two(std::size_t value) noexcept {
+  return value != 0 && (value & (value - 1)) == 0;
+}
+
+inline std::size_t align_up(std::size_t value, std::size_t alignment) noexcept {
+  const auto remainder = value & (alignment - 1);
+  if (remainder == 0)
+    return value;
+  const auto increment = alignment - remainder;
+  if (value > (std::numeric_limits<std::size_t>::max)() - increment)
+    return 0;
+  return value + increment;
+}
+
+inline void coalesce(std::vector<shared_buffer_extent> &extents) noexcept {
+  if (extents.empty())
+    return;
+
+  std::size_t output = 0;
+  for (std::size_t index = 1; index != extents.size(); ++index) {
+    auto &current = extents[output];
+    const auto &next = extents[index];
+    if (current.offset <=
+            (std::numeric_limits<std::size_t>::max)() - current.size &&
+        current.offset + current.size == next.offset) {
+      current.size += next.size;
+    } else {
+      ++output;
+      extents[output] = next;
+    }
+  }
+  extents.resize(output + 1);
+}
+
+} // namespace detail
+
+/**
+ * @brief Move-only ownership of one variable-size shared-memory subrange.
+ *
+ * The lease owns only the subrange reservation. The registered region must
+ * remain alive until every lease and every token sent to the driver is no
+ * longer used.
+ */
+class buffer_lease {
+public:
+  buffer_lease() noexcept = default;
+  buffer_lease(const buffer_lease &) = delete;
+  buffer_lease &operator=(const buffer_lease &) = delete;
+
+  buffer_lease(buffer_lease &&other) noexcept
+      : state_(std::move(other.state_)), token_(other.token_),
+        data_(other.data_), size_(other.size_) {
+    other.token_ = {};
+    other.data_ = nullptr;
+    other.size_ = 0;
+  }
+
+  buffer_lease &operator=(buffer_lease &&other) noexcept {
+    if (this == &other)
+      return *this;
+    release();
+    state_ = std::move(other.state_);
+    token_ = other.token_;
+    data_ = other.data_;
+    size_ = other.size_;
+    other.token_ = {};
+    other.data_ = nullptr;
+    other.size_ = 0;
+    return *this;
+  }
+
+  ~buffer_lease() { release(); }
+
+  /** @brief Returns the pointer-free token for transport calls. */
+  buffer_token token() const noexcept { return token_; }
+
+  /** @brief Returns the local start address of the leased bytes. */
+  void *data() const noexcept { return data_; }
+
+  /** @brief Returns the leased byte count. */
+  std::size_t size() const noexcept { return size_; }
+
+  /** @brief Reports whether this object owns a live subrange reservation. */
+  explicit operator bool() const noexcept {
+    return static_cast<bool>(state_) && data_ != nullptr && size_ != 0 &&
+           token_.valid();
+  }
+
+  /** @brief Releases the subrange and coalesces it with adjacent free space. */
+  void release() noexcept {
+    if (!state_)
+      return;
+
+    const auto offset = static_cast<std::size_t>(token_.offset);
+    const auto size = size_;
+    try {
+      std::lock_guard<std::mutex> guard(state_->lock);
+      state_->free_extents.push_back({offset, size});
+      std::sort(state_->free_extents.begin(), state_->free_extents.end(),
+                [](const detail::shared_buffer_extent &left,
+                   const detail::shared_buffer_extent &right) noexcept {
+                  return left.offset < right.offset;
+                });
+      detail::coalesce(state_->free_extents);
+    } catch (...) {
+      // The reservation is no longer exposed after the lease is cleared. A
+      // failed bookkeeping allocation can only reduce future reuse.
+    }
+    state_.reset();
+    token_ = {};
+    data_ = nullptr;
+    size_ = 0;
+  }
+
+private:
+  friend class shared_buffer_pool;
+
+  buffer_lease(std::shared_ptr<detail::shared_buffer_pool_state> state,
+               buffer_token token, void *data, std::size_t size) noexcept
+      : state_(std::move(state)), token_(token), data_(data), size_(size) {}
+
+  std::shared_ptr<detail::shared_buffer_pool_state> state_;
+  buffer_token token_{};
+  void *data_ = nullptr;
+  std::size_t size_ = 0;
+};
+
+/** @brief Failure categories returned by the user-mode buffer pool. */
+enum class buffer_pool_status {
+  success,
+  invalid_argument,
+  no_space,
+};
+
+/**
+ * @brief Move-only value-or-status result returned by a shared buffer pool.
+ *
+ * This intentionally does not include NTSTATUS headers. The pool is a
+ * user-mode IPC helper and must remain safe to include with the Windows SDK.
+ */
+class buffer_lease_result {
+public:
+  buffer_lease_result() noexcept
+      : status_(buffer_pool_status::invalid_argument) {}
+
+  explicit buffer_lease_result(buffer_lease lease) noexcept
+      : lease_(std::move(lease)), status_(buffer_pool_status::success) {}
+
+  buffer_lease_result(buffer_pool_status status) noexcept : status_(status) {}
+
+  buffer_lease_result(const buffer_lease_result &) = delete;
+  buffer_lease_result &operator=(const buffer_lease_result &) = delete;
+  buffer_lease_result(buffer_lease_result &&) noexcept = default;
+  buffer_lease_result &operator=(buffer_lease_result &&) noexcept = default;
+
+  /** @brief Reports whether a lease was acquired. */
+  explicit operator bool() const noexcept {
+    return status_ == buffer_pool_status::success;
+  }
+
+  /** @brief Returns the pool-specific failure category. */
+  buffer_pool_status status() const noexcept { return status_; }
+
+  /** @brief Returns the acquired lease. */
+  buffer_lease &operator*() noexcept { return lease_; }
+  const buffer_lease &operator*() const noexcept { return lease_; }
+  buffer_lease *operator->() noexcept { return &lease_; }
+  const buffer_lease *operator->() const noexcept { return &lease_; }
+
+private:
+  buffer_lease lease_;
+  buffer_pool_status status_;
+};
+
+/**
+ * @brief First-fit allocator for variable-size leases in one registered region.
+ *
+ * This class does not allocate, pin, or unregister memory. Construct it from
+ * a user-mode registered region and keep that region alive for the pool's
+ * entire use. Each returned lease can be sent as a normal buffer_token to
+ * RPC or minifilter communication APIs.
+ */
+class shared_buffer_pool {
+public:
+  /**
+   * @brief Creates a pool over a complete registered region.
+   * @param region Registered local view returned by an IPC client.
+   * @param alignment Required power-of-two byte alignment for every lease.
+   */
+  explicit shared_buffer_pool(region_view region,
+                              std::size_t alignment = alignof(void *))
+      : state_(std::make_shared<detail::shared_buffer_pool_state>(
+            region, alignment)) {
+    if (!region.handle().valid() || !region.size() ||
+        region.access() == region_access::none ||
+        !detail::is_power_of_two(alignment))
+      throw std::invalid_argument("invalid NTL shared buffer pool layout");
+  }
+
+  /** @brief Creates a pool directly from a registered region's local fields. */
+  shared_buffer_pool(region_handle handle, void *data, std::size_t bytes,
+                     std::size_t alignment = alignof(void *))
+      : shared_buffer_pool(region_view{handle, data, bytes,
+                                       region_access::driver_read_write},
+                           alignment) {}
+
+  shared_buffer_pool(const shared_buffer_pool &) = delete;
+  shared_buffer_pool &operator=(const shared_buffer_pool &) = delete;
+  shared_buffer_pool(shared_buffer_pool &&) noexcept = default;
+  shared_buffer_pool &operator=(shared_buffer_pool &&) noexcept = default;
+
+  /** @brief Returns the number of bytes managed by this pool. */
+  std::size_t size() const noexcept { return state_->region.size(); }
+
+  /** @brief Returns the shared region identity used by every lease. */
+  region_handle handle() const noexcept { return state_->region.handle(); }
+
+  /**
+   * @brief Reserves one aligned variable-size subrange.
+   * @return A move-only lease or a buffer_pool_status describing why it was
+   * rejected.
+   */
+  [[nodiscard]] buffer_lease_result try_acquire(std::size_t bytes) {
+    if (!state_ || bytes == 0)
+      return buffer_pool_status::invalid_argument;
+
+    std::lock_guard<std::mutex> guard(state_->lock);
+    for (std::size_t index = 0; index != state_->free_extents.size();
+         ++index) {
+      const auto extent = state_->free_extents[index];
+      const auto aligned = detail::align_up(extent.offset, state_->alignment);
+      // Offset zero is a valid aligned result. A zero value is overflow only
+      // when the original extent itself was nonzero.
+      if ((aligned == 0 && extent.offset != 0) || aligned < extent.offset ||
+          aligned > extent.offset + extent.size)
+        continue;
+      const auto prefix = aligned - extent.offset;
+      if (prefix > extent.size || bytes > extent.size - prefix)
+        continue;
+
+      buffer_token token{};
+      if (state_->region.token(aligned, bytes, token) !=
+          validation_status::success)
+        return buffer_pool_status::invalid_argument;
+
+      const auto suffix_offset = aligned + bytes;
+      const auto suffix = extent.size - prefix - bytes;
+      state_->free_extents.erase(state_->free_extents.begin() + index);
+      if (prefix)
+        state_->free_extents.insert(state_->free_extents.begin() + index,
+                                    {extent.offset, prefix});
+      if (suffix)
+        state_->free_extents.insert(
+            state_->free_extents.begin() + index + (prefix ? 1 : 0),
+            {suffix_offset, suffix});
+
+      auto *const data = static_cast<unsigned char *>(state_->region.data()) +
+                         aligned;
+      return buffer_lease_result{buffer_lease{state_, token, data, bytes}};
+    }
+    return buffer_pool_status::no_space;
+  }
+
+private:
+  std::shared_ptr<detail::shared_buffer_pool_state> state_;
+};
+
+} // namespace ipc
+} // namespace ntl

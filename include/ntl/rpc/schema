@@ -1,0 +1,343 @@
+/**
+ * @file schema
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Automatic wire-schema fingerprints for NTL RPC descriptors.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+
+#pragma once
+
+#include "../deps/zpp/serializer.h"
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <tuple>
+#include <type_traits>
+#include <utility>
+
+#if (defined(_MSVC_LANG) && _MSVC_LANG >= 201703L) ||                          \
+    (!defined(_MSVC_LANG) && __cplusplus >= 201703L)
+#include <optional>
+#include <variant>
+#endif
+
+namespace ntl {
+namespace rpc {
+namespace detail {
+
+template <typename...> struct schema_voider { using type = void; };
+template <typename... Types>
+using schema_void_t = typename schema_voider<Types...>::type;
+
+template <typename T> struct schema_dependent_false : std::false_type {};
+
+class schema_hash_builder {
+public:
+  void byte(std::uint8_t value) noexcept {
+    value_ ^= value;
+    value_ *= 1099511628211ull;
+  }
+
+  void integer(std::uint64_t value) noexcept {
+    for (unsigned int shift = 0; shift != 64; shift += 8)
+      byte(static_cast<std::uint8_t>((value >> shift) & 0xffu));
+  }
+
+  std::uint64_t value() const noexcept { return value_; }
+
+private:
+  std::uint64_t value_ = 14695981039346656037ull;
+};
+
+enum class schema_tag : std::uint8_t {
+  format = 1,
+  void_type,
+  boolean,
+  signed_integer,
+  unsigned_integer,
+  floating_point,
+  enumeration,
+  fixed_array,
+  sequence,
+  pair,
+  tuple,
+  optional,
+  variant,
+  object,
+  contract,
+  method,
+  notification,
+  stream,
+};
+
+template <typename T, typename Enable = void> struct schema_writer;
+
+class schema_archive {
+public:
+  explicit schema_archive(schema_hash_builder &builder) noexcept
+      : builder_(&builder) {}
+
+  template <typename... Items> void operator()(Items &&...) {
+    append<Items...>();
+  }
+
+private:
+  template <typename... Items> void append() {
+    int unused[] = {
+        0,
+        (schema_writer<typename std::remove_cv<typename std::remove_reference<
+             Items>::type>::type>::write(*builder_),
+         0)...};
+    (void)unused;
+  }
+
+  schema_hash_builder *builder_;
+};
+
+template <typename T, typename = void>
+struct has_schema_serialize : std::false_type {};
+
+template <typename T>
+struct has_schema_serialize<
+    T, schema_void_t<decltype(T::serialize(std::declval<schema_archive &>(),
+                                           std::declval<T &>()))>>
+    : std::true_type {};
+
+template <typename T, typename = void>
+struct is_schema_container : std::false_type {};
+
+template <typename T>
+struct is_schema_container<
+    T, schema_void_t<typename T::value_type, typename T::const_iterator,
+                     decltype(std::declval<const T &>().begin()),
+                     decltype(std::declval<const T &>().end())>>
+    : std::true_type {};
+
+template <typename T> struct is_std_array : std::false_type {};
+template <typename T, std::size_t Size>
+struct is_std_array<std::array<T, Size>> : std::true_type {};
+
+template <typename T> struct is_std_pair : std::false_type {};
+template <typename First, typename Second>
+struct is_std_pair<std::pair<First, Second>> : std::true_type {};
+
+template <typename T> struct is_std_tuple : std::false_type {};
+template <typename... Items>
+struct is_std_tuple<std::tuple<Items...>> : std::true_type {};
+
+#if (defined(_MSVC_LANG) && _MSVC_LANG >= 201703L) ||                          \
+    (!defined(_MSVC_LANG) && __cplusplus >= 201703L)
+template <typename T> struct is_std_optional : std::false_type {};
+template <typename T>
+struct is_std_optional<std::optional<T>> : std::true_type {};
+
+template <typename T> struct is_std_variant : std::false_type {};
+template <typename... Items>
+struct is_std_variant<std::variant<Items...>> : std::true_type {};
+#endif
+
+template <typename T, typename Enable> struct schema_writer {
+  static void write(schema_hash_builder &) {
+    static_assert(schema_dependent_false<T>::value,
+                  "NTL RPC cannot derive a wire schema for this type; expose "
+                  "the same static serialize(Archive&, Self&) definition used "
+                  "by zpp::serializer");
+  }
+};
+
+template <> struct schema_writer<void, void> {
+  static void write(schema_hash_builder &builder) noexcept {
+    builder.byte(static_cast<std::uint8_t>(schema_tag::void_type));
+  }
+};
+
+template <> struct schema_writer<bool, void> {
+  static void write(schema_hash_builder &builder) noexcept {
+    builder.byte(static_cast<std::uint8_t>(schema_tag::boolean));
+    builder.integer(sizeof(bool));
+  }
+};
+
+template <typename T>
+struct schema_writer<
+    T, typename std::enable_if<std::is_integral<T>::value &&
+                               !std::is_same<T, bool>::value>::type> {
+  static void write(schema_hash_builder &builder) noexcept {
+    builder.byte(static_cast<std::uint8_t>(
+        std::is_signed<T>::value ? schema_tag::signed_integer
+                                 : schema_tag::unsigned_integer));
+    builder.integer(sizeof(T));
+  }
+};
+
+template <typename T>
+struct schema_writer<
+    T, typename std::enable_if<std::is_floating_point<T>::value>::type> {
+  static void write(schema_hash_builder &builder) noexcept {
+    builder.byte(static_cast<std::uint8_t>(schema_tag::floating_point));
+    builder.integer(sizeof(T));
+  }
+};
+
+template <typename T>
+struct schema_writer<T,
+                     typename std::enable_if<std::is_enum<T>::value>::type> {
+  static void write(schema_hash_builder &builder) noexcept {
+    builder.byte(static_cast<std::uint8_t>(schema_tag::enumeration));
+    schema_writer<typename std::underlying_type<T>::type>::write(builder);
+  }
+};
+
+template <typename T, std::size_t Size>
+struct schema_writer<T[Size], void> {
+  static void write(schema_hash_builder &builder) {
+    builder.byte(static_cast<std::uint8_t>(schema_tag::fixed_array));
+    builder.integer(Size);
+    schema_writer<typename std::remove_cv<T>::type>::write(builder);
+  }
+};
+
+template <typename T, std::size_t Size>
+struct schema_writer<std::array<T, Size>, void> {
+  static void write(schema_hash_builder &builder) {
+    builder.byte(static_cast<std::uint8_t>(schema_tag::fixed_array));
+    builder.integer(Size);
+    schema_writer<typename std::remove_cv<T>::type>::write(builder);
+  }
+};
+
+template <typename First, typename Second>
+struct schema_writer<std::pair<First, Second>, void> {
+  static void write(schema_hash_builder &builder) {
+    builder.byte(static_cast<std::uint8_t>(schema_tag::pair));
+    schema_writer<typename std::remove_cv<First>::type>::write(builder);
+    schema_writer<typename std::remove_cv<Second>::type>::write(builder);
+  }
+};
+
+template <typename Tuple, std::size_t... Index>
+void write_tuple_schema(schema_hash_builder &builder,
+                        std::index_sequence<Index...>) {
+  int unused[] = {
+      0,
+      (schema_writer<typename std::remove_cv<typename std::tuple_element<
+           Index, Tuple>::type>::type>::write(builder),
+       0)...};
+  (void)unused;
+}
+
+template <typename... Items>
+struct schema_writer<std::tuple<Items...>, void> {
+  static void write(schema_hash_builder &builder) {
+    builder.byte(static_cast<std::uint8_t>(schema_tag::tuple));
+    builder.integer(sizeof...(Items));
+    write_tuple_schema<std::tuple<Items...>>(
+        builder, std::index_sequence_for<Items...>{});
+  }
+};
+
+#if (defined(_MSVC_LANG) && _MSVC_LANG >= 201703L) ||                          \
+    (!defined(_MSVC_LANG) && __cplusplus >= 201703L)
+template <typename T> struct schema_writer<std::optional<T>, void> {
+  static void write(schema_hash_builder &builder) {
+    builder.byte(static_cast<std::uint8_t>(schema_tag::optional));
+    schema_writer<typename std::remove_cv<T>::type>::write(builder);
+  }
+};
+
+template <typename... Items>
+struct schema_writer<std::variant<Items...>, void> {
+  static void write(schema_hash_builder &builder) {
+    builder.byte(static_cast<std::uint8_t>(schema_tag::variant));
+    builder.integer(sizeof...(Items));
+    write_tuple_schema<std::tuple<Items...>>(
+        builder, std::index_sequence_for<Items...>{});
+  }
+};
+#endif
+
+template <typename T>
+struct schema_writer<
+    T, typename std::enable_if<is_schema_container<T>::value &&
+                               !is_std_array<T>::value>::type> {
+  static void write(schema_hash_builder &builder) {
+    builder.byte(static_cast<std::uint8_t>(schema_tag::sequence));
+    schema_writer<typename std::remove_cv<typename T::value_type>::type>::write(
+        builder);
+  }
+};
+
+template <typename T>
+struct schema_writer<
+    T, typename std::enable_if<has_schema_serialize<T>::value &&
+                               !is_schema_container<T>::value &&
+                               !is_std_array<T>::value &&
+                               !is_std_pair<T>::value &&
+                               !is_std_tuple<T>::value>::type> {
+  static void write(schema_hash_builder &builder) {
+    builder.byte(static_cast<std::uint8_t>(schema_tag::object));
+    T value{};
+    schema_archive archive(builder);
+    T::serialize(archive, value);
+    builder.byte(static_cast<std::uint8_t>(schema_tag::object));
+  }
+};
+
+template <typename T> void append_schema(schema_hash_builder &builder) {
+  using value_type =
+      typename std::remove_cv<typename std::remove_reference<T>::type>::type;
+  schema_writer<value_type>::write(builder);
+}
+
+template <typename... Types>
+void append_schemas(schema_hash_builder &builder) {
+  int unused[] = {0, (append_schema<Types>(builder), 0)...};
+  (void)unused;
+}
+
+template <typename Return, typename... Arguments>
+std::uint64_t method_schema_hash() {
+  schema_hash_builder builder;
+  builder.byte(static_cast<std::uint8_t>(schema_tag::format));
+  builder.integer(1);
+  builder.byte(static_cast<std::uint8_t>(schema_tag::method));
+  append_schema<Return>(builder);
+  builder.integer(sizeof...(Arguments));
+  append_schemas<typename std::decay<Arguments>::type...>(builder);
+  return builder.value();
+}
+
+template <typename Payload> std::uint64_t notification_schema_hash() {
+  schema_hash_builder builder;
+  builder.byte(static_cast<std::uint8_t>(schema_tag::format));
+  builder.integer(1);
+  builder.byte(static_cast<std::uint8_t>(schema_tag::notification));
+  append_schema<Payload>(builder);
+  return builder.value();
+}
+
+template <typename Upload, typename Download> std::uint64_t stream_schema_hash() {
+  schema_hash_builder builder;
+  builder.byte(static_cast<std::uint8_t>(schema_tag::format));
+  builder.integer(1);
+  builder.byte(static_cast<std::uint8_t>(schema_tag::stream));
+  append_schema<Upload>(builder);
+  append_schema<Download>(builder);
+  return builder.value();
+}
+
+} // namespace detail
+
+/** @brief Derives a stable wire-schema fingerprint from a serializable type. */
+template <typename T> std::uint64_t schema_hash() {
+  detail::schema_hash_builder builder;
+  builder.byte(static_cast<std::uint8_t>(detail::schema_tag::format));
+  builder.integer(1);
+  detail::append_schema<T>(builder);
+  return builder.value();
+}
+
+} // namespace rpc
+} // namespace ntl

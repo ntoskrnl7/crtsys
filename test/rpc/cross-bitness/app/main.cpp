@@ -186,6 +186,9 @@ int wmain() {
         crtsys_rpc_cross_bitness::contract_version + 1);
     ntl::rpc::contract_requirements missing_capability;
     missing_capability.capabilities(1ull << 63);
+    constexpr ntl::rpc::method<0xA01, std::uint64_t()> incompatible_architecture{};
+    ntl::rpc::contract_requirements wrong_schema;
+    wrong_schema.method(incompatible_architecture);
     ntl::rpc::contract_requirements missing_method;
     missing_method.method(crtsys_rpc_cross_bitness::unavailable_method);
     ntl::rpc::contract_requirements missing_transport_feature;
@@ -196,6 +199,9 @@ int wmain() {
         !expect_contract_mismatch(
             client, missing_capability,
             ntl::rpc::contract_mismatch_reason::capabilities) ||
+        !expect_contract_mismatch(
+            client, wrong_schema,
+            ntl::rpc::contract_mismatch_reason::schema_hash) ||
         !expect_contract_mismatch(
             client, missing_method,
             ntl::rpc::contract_mismatch_reason::method) ||
@@ -393,6 +399,43 @@ int wmain() {
       }
       if (!stale_token_rejected) {
         std::fwprintf(stderr, L"stale RPC shared-memory token was accepted\n");
+        return 1;
+      }
+    }
+
+    {
+      auto region = client.register_shared_region(
+          1024, ntl::ipc::region_access::driver_read_write);
+      auto pool = region.make_buffer_pool(16);
+      auto first_result = pool.try_acquire(128);
+      auto second_result = pool.try_acquire(256);
+      if (!first_result || !second_result ||
+          first_result->token().region != region.handle() ||
+          second_result->token().region != region.handle() ||
+          first_result->data() == second_result->data()) {
+        std::fwprintf(stderr, L"RPC shared-buffer pool allocation failed\n");
+        return 1;
+      }
+
+      auto first = std::move(*first_result);
+      auto second = std::move(*second_result);
+      const auto first_offset = first.token().offset;
+      first.release();
+      auto reused_result = pool.try_acquire(64);
+      if (!reused_result || reused_result->token().offset != first_offset) {
+        std::fwprintf(stderr,
+                      L"RPC shared-buffer pool did not reuse a released lease\n");
+        return 1;
+      }
+      auto reused = std::move(*reused_result);
+      std::memset(reused.data(), 0x5A, reused.size());
+      second.release();
+      reused.release();
+
+      auto whole_result = pool.try_acquire(1024);
+      if (!whole_result) {
+        std::fwprintf(stderr,
+                      L"RPC shared-buffer pool did not coalesce free leases\n");
         return 1;
       }
     }

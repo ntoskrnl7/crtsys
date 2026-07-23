@@ -17,6 +17,7 @@ inline constexpr wchar_t default_instance_name[] =
     L"CrtSys FLT runtime test instance";
 inline constexpr wchar_t secondary_instance_name[] =
     L"CrtSys FLT runtime test secondary instance";
+inline constexpr wchar_t secondary_altitude[] = L"370030.228";
 inline constexpr wchar_t drop_port_name[] = L"\\CrtSysFltDropPolicyPort";
 inline constexpr wchar_t byte_quota_port_name[] =
     L"\\CrtSysFltByteQuotaPort";
@@ -25,12 +26,17 @@ inline constexpr wchar_t connection_limit_port_name[] =
     L"\\CrtSysFltConnectionLimitPort";
 inline constexpr wchar_t session_limit_port_name[] =
     L"\\CrtSysFltSessionLimitPort";
+inline constexpr wchar_t security_allow_port_name[] =
+    L"\\CrtSysFltSecurityAllowPort";
+inline constexpr wchar_t security_deny_port_name[] =
+    L"\\CrtSysFltSecurityDenyPort";
+inline constexpr wchar_t security_administrators_port_name[] =
+    L"\\CrtSysFltSecurityAdministratorsPort";
 inline constexpr ntl::rpc::session_token restored_session_token{
     0x435254535953464cull, 0x54524553544f5245ull};
 inline constexpr std::wstring_view file_name = L"crtsys_flt_runtime_test.tmp";
 inline constexpr std::wstring_view renamed_file_name =
     L"crtsys_flt_runtime_test_renamed.tmp";
-
 struct ring_record {
   std::uint32_t sequence = 0;
   std::uint32_t value = 0;
@@ -98,8 +104,8 @@ NTL_FLT_DECLARE_NOTIFICATION_ID(crtsys_flt_runtime_test, 0xB00,
 NTL_FLT_DECLARE_STREAM_ID(crtsys_flt_runtime_test, 0xB01, numbers,
                           std::uint32_t, std::uint32_t)
 
-NTL_FLT_RPC_BEGIN_CONTRACT(crtsys_flt_runtime_test, L"\\CrtSysFltRuntimePort",
-                           1, 0x3ull)
+NTL_FLT_RPC_BEGIN_CONTRACT(crtsys_flt_runtime_test,
+                           L"\\CrtSysFltRuntimePort", 1, 0x3ull)
 
 NTL_FLT_REGISTER_NOTIFICATION(crtsys_flt_runtime_test, progress);
 

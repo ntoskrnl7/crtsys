@@ -109,10 +109,12 @@ NTL_RPC_END(demo_rpc)
 
 The default macros derive matching method IDs from this shared schema. Use the
 `NTL_ADD_CALLBACK_ID_N` variants with a stable vendor IOCTL function ID in the
-`0x800` through `0xFFF` range only when independently versioned binaries need a
-fixed wire ABI. For custom objects, provide a `zpp::serializer` serialization
+`0x800` through `0xFFF` range when method IDs must remain fixed after the schema
+is reordered. For custom objects, provide a `zpp::serializer` serialization
 function; the tested `point` class in
 [`test/cmake/common/rpc.hpp`](../test/cmake/common/rpc.hpp) shows the pattern.
+NTL reuses that field list to derive the method's wire-schema fingerprint; no
+separate numeric schema hash is required.
 
 ### Kernel Server
 

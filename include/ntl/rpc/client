@@ -10,6 +10,8 @@
 #include "../handle"
 #include "common"
 
+#include "../ipc/shared_buffer_pool"
+
 #include <chrono>
 #include <cstring>
 #include <limits>
@@ -46,6 +48,7 @@ enum class contract_mismatch_reason {
   contract_version,
   transport_features,
   capabilities,
+  schema_hash,
   method,
 };
 
@@ -99,7 +102,25 @@ public:
   template <typename Method> contract_requirements &method(const Method &) {
     static_assert(is_method<Method>::value,
                   "contract_requirements::method requires an RPC method");
-    method_ids_.push_back(static_cast<std::uint32_t>(Method::id()));
+    members_.push_back(contract_member::from_method<Method>());
+    return *this;
+  }
+
+  /** @brief Requires one exact typed notification channel. */
+  template <typename Notification>
+  contract_requirements &notification(const Notification &) {
+    static_assert(is_notification<Notification>::value,
+                  "contract_requirements::notification requires an RPC "
+                  "notification");
+    members_.push_back(contract_member::from_notification<Notification>());
+    return *this;
+  }
+
+  /** @brief Requires one exact typed bidirectional stream. */
+  template <typename Stream> contract_requirements &stream(const Stream &) {
+    static_assert(is_stream<Stream>::value,
+                  "contract_requirements::stream requires an RPC stream");
+    members_.push_back(contract_member::from_stream<Stream>());
     return *this;
   }
 
@@ -108,7 +129,7 @@ private:
   std::uint32_t contract_version_ = 0;
   std::uint64_t transport_features_ = 0;
   std::uint64_t capabilities_ = 0;
-  std::vector<std::uint32_t> method_ids_;
+  std::vector<contract_member> members_;
 
   friend class client;
 };
@@ -604,11 +625,13 @@ public:
 
   registered_region(registered_region &&other) noexcept
       : handle_(std::move(other.handle_)), session_(other.session_),
-        region_(other.region_), memory_(other.memory_), bytes_(other.bytes_) {
+        region_(other.region_), memory_(other.memory_), bytes_(other.bytes_),
+        access_(other.access_) {
     other.session_ = {};
     other.region_ = {};
     other.memory_ = nullptr;
     other.bytes_ = 0;
+    other.access_ = ntl::ipc::region_access::none;
   }
 
   registered_region &operator=(registered_region &&other) noexcept {
@@ -620,10 +643,12 @@ public:
     region_ = other.region_;
     memory_ = other.memory_;
     bytes_ = other.bytes_;
+    access_ = other.access_;
     other.session_ = {};
     other.region_ = {};
     other.memory_ = nullptr;
     other.bytes_ = 0;
+    other.access_ = ntl::ipc::region_access::none;
     return *this;
   }
 
@@ -643,6 +668,21 @@ public:
 
   /** @brief Returns the kernel-assigned region identity. */
   ntl::ipc::region_handle handle() const noexcept { return region_; }
+
+  /** @brief Returns the driver access granted to this registered region. */
+  ntl::ipc::region_access access() const noexcept { return access_; }
+
+  /** @brief Creates a variable-size lease pool over this registered region. */
+  ntl::ipc::shared_buffer_pool
+  make_buffer_pool(std::size_t alignment = alignof(void *)) const {
+    if (!*this)
+      throw std::system_error(ERROR_INVALID_HANDLE, std::system_category(),
+                              "NTL RPC shared region is not registered");
+    return ntl::ipc::shared_buffer_pool{
+        ntl::ipc::region_view{region_, memory_, bytes_,
+                              access_},
+        alignment};
+  }
 
   /** @brief Creates a checked pointer-free token for a subrange. */
   ntl::ipc::buffer_token token(std::size_t offset, std::size_t length) const {
@@ -671,9 +711,10 @@ private:
 
   registered_region(std::shared_ptr<ntl::unique_handle> handle,
                     session_token session, ntl::ipc::region_handle region,
-                    void *memory, std::size_t bytes) noexcept
+                    void *memory, std::size_t bytes,
+                    ntl::ipc::region_access access) noexcept
       : handle_(std::move(handle)), session_(session), region_(region),
-        memory_(memory), bytes_(bytes) {}
+        memory_(memory), bytes_(bytes), access_(access) {}
 
   void unregister_region(bool report_failure) {
     if (!handle_ || !*handle_ || !session_.valid() || !region_.valid()) {
@@ -724,6 +765,7 @@ private:
       ::VirtualFree(memory_, 0, MEM_RELEASE);
     memory_ = nullptr;
     bytes_ = 0;
+    access_ = ntl::ipc::region_access::none;
     session_ = {};
     handle_.reset();
   }
@@ -746,6 +788,7 @@ private:
     handle_.reset();
     memory_ = nullptr;
     bytes_ = 0;
+    access_ = ntl::ipc::region_access::none;
     session_ = {};
     region_ = {};
   }
@@ -755,6 +798,7 @@ private:
   ntl::ipc::region_handle region_{};
   void *memory_ = nullptr;
   std::size_t bytes_ = 0;
+  ntl::ipc::region_access access_ = ntl::ipc::region_access::none;
 };
 
 /** @brief Owns a user-mode handle to an NTL RPC device. */
@@ -830,6 +874,23 @@ public:
           std::adjacent_find(methods.begin(), methods.end()) != methods.end())
         throw std::runtime_error(
             "NTL RPC contract response has an invalid method table");
+      const auto &members = info.members();
+      if (!std::is_sorted(
+              members.begin(), members.end(),
+              [](const contract_member &left, const contract_member &right) {
+                return left.id < right.id ||
+                       (left.id == right.id &&
+                        static_cast<std::uint16_t>(left.kind) <
+                            static_cast<std::uint16_t>(right.kind));
+              }) ||
+          std::adjacent_find(
+              members.begin(), members.end(),
+              [](const contract_member &left, const contract_member &right) {
+                return left.id == right.id && left.kind == right.kind;
+              }) != members.end() ||
+          info.schema_hash() != contract_schema_hash(members))
+        throw std::runtime_error(
+            "NTL RPC contract response has invalid schema metadata");
       return info;
     } catch (const zpp::serializer::out_of_range &) {
       throw std::runtime_error("NTL RPC contract response is malformed");
@@ -871,11 +932,24 @@ public:
                               requirements.capabilities_,
                               info.capability_mask());
     }
-    for (const auto id : requirements.method_ids_) {
-      if (!info.supports_method(id)) {
+    for (const auto &required : requirements.members_) {
+      const auto *actual = info.find(required.id, required.kind);
+      if (!actual)
         throw contract_mismatch(contract_mismatch_reason::method,
-                                "NTL RPC method is unavailable", id, 0);
-      }
+                                "NTL RPC contract member is unavailable",
+                                required.id, 0);
+      if (actual->schema_hash != required.schema_hash)
+        throw contract_mismatch(contract_mismatch_reason::schema_hash,
+                                "NTL RPC member schema mismatch",
+                                required.schema_hash, actual->schema_hash);
+      if (actual->request_size != required.request_size ||
+          actual->response_size != required.response_size ||
+          actual->decode_allocation != required.decode_allocation ||
+          actual->max_batch_records != required.max_batch_records ||
+          actual->priority != required.priority)
+        throw contract_mismatch(contract_mismatch_reason::method,
+                                "NTL RPC member limits mismatch", required.id,
+                                actual->id);
     }
     return info;
   }
@@ -1013,7 +1087,7 @@ public:
     }
 
     return registered_region{handle_, session_.token, response.region, memory,
-                             bytes};
+                             bytes, access};
   }
 
   /** @brief ACKs a typed single-channel batch in delivery order. */

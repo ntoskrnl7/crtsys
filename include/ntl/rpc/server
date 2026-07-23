@@ -606,8 +606,8 @@ public:
 
 /**
  * @brief Optional application storage hooks for reliable notifications.
- * @note NTL does not perform file or registry I/O. Hooks run at PASSIVE_LEVEL
- * without an internal session lock held.
+ * @note The transport performs no storage I/O unless a store is explicitly
+ * installed. Hooks run at PASSIVE_LEVEL without an internal session lock held.
  */
 class notification_store {
 public:
@@ -2257,7 +2257,7 @@ public:
       const call_context &)>;
 
   dispatch_table(std::uint32_t contract_version, std::uint64_t capabilities,
-                 bool asynchronous, std::uint32_t max_pending_calls,
+                  bool asynchronous, std::uint32_t max_pending_calls,
                  std::uint32_t max_pending_notifications,
                  std::uint32_t max_sessions,
                  std::uint32_t max_reliable_per_session,
@@ -2428,6 +2428,7 @@ public:
           detail::invoke_method<Method>(fn, input, output, context);
         });
     method_ids_.push_back(static_cast<std::uint32_t>(Method::id()));
+    members_.push_back(contract_member::from_method<Method>());
   }
 
   template <typename Method, typename Authorization, typename Callback>
@@ -2460,6 +2461,7 @@ public:
           detail::invoke_method<Method>(fn, input, output, context);
         });
     method_ids_.push_back(static_cast<std::uint32_t>(Method::id()));
+    members_.push_back(contract_member::from_method<Method>());
   }
 
   template <typename Stream, typename Callback>
@@ -2507,6 +2509,8 @@ public:
                                                context);
         });
     method_ids_.push_back(static_cast<std::uint32_t>(upload_method::id()));
+    members_.push_back(contract_member::from_method<upload_method>());
+    members_.push_back(contract_member::from_stream<Stream>());
     notification_limits_.emplace(download_notification::id(),
                                  download_notification::response_size());
     sessions_.register_stream(download_notification::id(),
@@ -2570,6 +2574,8 @@ public:
                                                context);
         });
     method_ids_.push_back(static_cast<std::uint32_t>(upload_method::id()));
+    members_.push_back(contract_member::from_method<upload_method>());
+    members_.push_back(contract_member::from_stream<Stream>());
     notification_limits_.emplace(download_notification::id(),
                                  download_notification::response_size());
     sessions_.register_stream(download_notification::id(),
@@ -2651,6 +2657,7 @@ public:
     sessions_.register_notification(
         Notification::id(), Notification::response_size(),
         Notification::priority(), Notification::max_batch_records());
+    members_.push_back(contract_member::from_notification<Notification>());
   }
 
   void start() {
@@ -2659,6 +2666,13 @@ public:
       throw ntl::exception(STATUS_DELETE_PENDING,
                            "Cannot start a stopped NTL RPC server");
     std::sort(method_ids_.begin(), method_ids_.end());
+    std::sort(members_.begin(), members_.end(),
+              [](const contract_member &left, const contract_member &right) {
+                return left.id < right.id ||
+                       (left.id == right.id &&
+                        static_cast<std::uint16_t>(left.kind) <
+                            static_cast<std::uint16_t>(right.kind));
+              });
     const auto features =
         transport_features::current |
         (asynchronous_ ? transport_features::asynchronous_calls : 0) |
@@ -2673,7 +2687,7 @@ public:
              : 0) |
         (streams_registered_ ? transport_features::typed_streams : 0);
     contract_ = contract_info(current_protocol_version, contract_version_,
-                              features, capabilities_, method_ids_);
+                              features, capabilities_, method_ids_, members_);
     notifications_.start();
     InterlockedExchange(&started_, 1);
   }
@@ -3225,6 +3239,7 @@ private:
   std::unordered_map<unsigned long, dispatch_handler> handlers_;
   std::unordered_map<std::uint32_t, std::size_t> notification_limits_;
   std::vector<std::uint32_t> method_ids_;
+  std::vector<contract_member> members_;
   contract_info contract_;
   EX_RUNDOWN_REF rundown_{};
   FAST_MUTEX registration_lock_{};
@@ -3603,7 +3618,7 @@ inline std::shared_ptr<server> make_server(ntl::driver &driver,
   make_server(ntl::driver &driver,                                             \
               ntl::rpc::server_options rpc_options =                           \
                   ntl::rpc::server_options(L#_rpc_name_)) {                    \
-    rpc_options.contract_version(rpc_contract_version)                         \
+  rpc_options.contract_version(rpc_contract_version)                         \
         .capabilities(rpc_capabilities);                                       \
     auto rpc_server = ntl::rpc::make_server(driver, rpc_options);
 

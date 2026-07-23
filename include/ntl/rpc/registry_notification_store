@@ -1,0 +1,92 @@
+/**
+ * @file registry_notification_store
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Optional registry persistence for reliable RPC notifications.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+
+#pragma once
+
+#include "../ipc/registry_record_store"
+#include "server"
+
+#include <cstddef>
+#include <cstdint>
+#include <utility>
+
+namespace ntl {
+namespace rpc {
+
+/**
+ * @brief Persists reliable notification records in a caller-owned registry key.
+ *
+ * One REG_BINARY value is maintained per reconnectable session. The adapter is
+ * inactive unless it is explicitly installed with server::notification_storage.
+ * All operations require PASSIVE_LEVEL because they call Zw registry APIs.
+ */
+class registry_notification_store final : public notification_store {
+public:
+  /** @brief Default maximum serialized bytes retained for one session. */
+  static constexpr std::size_t default_max_session_bytes =
+      ntl::ipc::detail::registry_record_store::default_max_session_bytes;
+
+  /**
+   * @brief Takes ownership of the key used for notification records.
+   * @param key Open registry key with KEY_QUERY_VALUE and KEY_SET_VALUE access.
+   * @param max_session_bytes Maximum serialized bytes retained per session.
+   */
+  explicit registry_notification_store(
+      ntl::registry_key key,
+      std::size_t max_session_bytes = default_max_session_bytes)
+      : records_(std::move(key), max_session_bytes) {}
+
+  registry_notification_store(const registry_notification_store &) = delete;
+  registry_notification_store &
+  operator=(const registry_notification_store &) = delete;
+
+  ntl::status persist(const notification_record_view &record) noexcept override {
+    return records_.persist(record.session.high, record.session.low,
+                            record.notification_id,
+                            record.terminal ? terminal_record : data_record,
+                            record.sequence, record.data, record.size);
+  }
+
+  ntl::status acknowledge(const session_token &session,
+                          std::uint32_t notification_id,
+                          std::uint64_t sequence) noexcept override {
+    return records_.acknowledge(session.high, session.low, notification_id,
+                                sequence);
+  }
+
+  ntl::status restore(const session_token &session,
+                      notification_restore_sink &sink) noexcept override {
+    auto restored = records_.load(session.high, session.low);
+    if (!restored)
+      return restored.status();
+
+    for (const auto &record : *restored) {
+      if (record.kind != data_record && record.kind != terminal_record)
+        return ntl::status{STATUS_DATA_ERROR};
+      const auto status = sink.add(
+          record.channel_id, record.sequence, record.payload.data(),
+          record.payload.size(), record.kind == terminal_record);
+      if (!status.is_ok())
+        return status;
+    }
+    return ntl::status::ok();
+  }
+
+  void erase_session(const session_token &session) noexcept override {
+    records_.erase(session.high, session.low);
+  }
+
+private:
+  static constexpr std::uint32_t data_record = 0;
+  static constexpr std::uint32_t terminal_record = 1;
+
+  ntl::ipc::detail::registry_record_store records_;
+};
+
+} // namespace rpc
+} // namespace ntl
