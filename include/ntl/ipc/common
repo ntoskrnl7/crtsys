@@ -211,6 +211,9 @@ public:
   /** @brief Returns the locally mapped region size. */
   constexpr std::size_t size() const noexcept { return bytes_; }
 
+  /** @brief Returns the locally mapped start address without changing ownership. */
+  void *data() const noexcept { return data_; }
+
   /** @brief Returns the access granted during registration. */
   constexpr region_access access() const noexcept { return access_; }
 

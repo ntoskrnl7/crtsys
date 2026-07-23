@@ -208,6 +208,26 @@ jobs:
             -Configuration Debug `
             -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}'
 
+      - name: Build NTL minifilter x86 client fixture
+        if: matrix.project == 'driver' && matrix.arch == 'x86' && matrix.config == 'Debug'
+        shell: pwsh
+        run: |
+          ./scripts/ci/Build-CrtSys.ps1 `
+            -Project flt-cross-bitness-app `
+            -Architecture x86 `
+            -Configuration Debug `
+            -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}'
+
+      - name: Build NTL minifilter verifier stress fixture
+        if: matrix.project == 'driver' && matrix.arch == 'x64' && matrix.config == 'Debug'
+        shell: pwsh
+        run: |
+          ./scripts/ci/Build-CrtSys.ps1 `
+            -Project flt-verifier-stress `
+            -Architecture x64 `
+            -Configuration Debug `
+            -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}'
+
       - name: Test-sign driver
         if: matrix.project == 'driver' && matrix.config == 'Debug'
         shell: pwsh
@@ -349,6 +369,15 @@ jobs:
             -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}' `
             -PlatformToolset v142
 
+          if ('${{ matrix.arch }}' -eq 'x86') {
+            ./scripts/ci/Build-CrtSys.ps1 `
+              -Project flt-cross-bitness-app `
+              -Architecture x86 `
+              -Configuration Debug `
+              -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}' `
+              -PlatformToolset v142
+          }
+
   build-vs2026:
     name: VS2026/v145 ${{ matrix.project }} ${{ matrix.arch }} ${{ matrix.config }}
     runs-on: windows-2025-vs2026
@@ -480,6 +509,22 @@ jobs:
             $parameters.WdkVersion = $wdkVersion
           }
           ./scripts/ci/Build-CrtSys.ps1 @parameters
+
+          if ('${{ matrix.project }}' -eq 'driver' -and
+              '${{ matrix.arch }}' -eq 'x86' -and
+              '${{ matrix.config }}' -eq 'Debug') {
+            $crossParameters = @{
+              Project = 'flt-cross-bitness-app'
+              Architecture = 'x86'
+              Configuration = 'Debug'
+              WindowsSdkVersion = '${{ env.CRTSYS_VS2026_WINDOWS_SDK_VERSION }}'
+              PlatformToolset = 'v145'
+            }
+            if (-not [string]::IsNullOrWhiteSpace($wdkVersion)) {
+              $crossParameters.WdkVersion = $wdkVersion
+            }
+            ./scripts/ci/Build-CrtSys.ps1 @crossParameters
+          }
 
   driver-load-test-preflight:
     name: Driver load test preflight

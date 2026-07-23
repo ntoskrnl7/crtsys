@@ -201,8 +201,9 @@ public:
 
 /**
  * @brief Optional external storage for reliable minifilter deliveries.
- * @note NTL performs no file or registry I/O. Hooks run at PASSIVE_LEVEL and
- * without the communication server's connection or session mutex held.
+ * @note The transport performs no storage I/O unless a store is explicitly
+ * installed. Hooks run at PASSIVE_LEVEL without the communication server's
+ * connection or session mutex held.
  */
 class communication_notification_store {
 public:
@@ -418,6 +419,7 @@ struct communication_channel_definition {
   std::size_t decode_allocation = 0;
   ntl::rpc::delivery_priority priority = ntl::rpc::delivery_priority::normal;
   std::size_t max_batch_records = 1;
+  std::uint64_t schema_hash = 0;
   bool stream = false;
 };
 
@@ -425,6 +427,7 @@ struct communication_method_definition {
   std::size_t request_size = 0;
   std::size_t response_size = 0;
   std::size_t decode_allocation = 0;
+  std::uint64_t schema_hash = 0;
 };
 
 struct communication_delivery_record {
@@ -506,6 +509,7 @@ public:
   virtual std::size_t request_limit() const noexcept = 0;
   virtual std::size_t response_limit() const noexcept = 0;
   virtual std::size_t decode_limit() const noexcept = 0;
+  virtual std::uint64_t schema_hash() const noexcept = 0;
   virtual NTSTATUS invoke(const communication_context &context,
                           const void *input, std::size_t input_size,
                           std::vector<unsigned char> &output) noexcept = 0;
@@ -530,6 +534,9 @@ public:
   }
   std::size_t decode_limit() const noexcept override {
     return Method::decode_allocation();
+  }
+  std::uint64_t schema_hash() const noexcept override {
+    return Method::schema_hash();
   }
 
   NTSTATUS invoke(const communication_context &context, const void *input,
@@ -618,6 +625,9 @@ public:
   }
   std::size_t decode_limit() const noexcept override {
     return inner_.decode_limit();
+  }
+  std::uint64_t schema_hash() const noexcept override {
+    return inner_.schema_hash();
   }
 
   NTSTATUS invoke(const communication_context &context, const void *input,
@@ -1095,6 +1105,7 @@ struct communication_server_state {
             static_cast<std::uint32_t>(entry.second->response_limit());
         member.decode_allocation =
             static_cast<std::uint32_t>(entry.second->decode_limit());
+        member.schema_hash = entry.second->schema_hash();
         members.push_back(member);
       }
       for (const auto &entry : client_methods) {
@@ -1107,6 +1118,7 @@ struct communication_server_state {
             static_cast<std::uint32_t>(entry.second.response_size);
         member.decode_allocation =
             static_cast<std::uint32_t>(entry.second.decode_allocation);
+        member.schema_hash = entry.second.schema_hash;
         members.push_back(member);
       }
       for (const auto &entry : channels) {
@@ -1124,6 +1136,7 @@ struct communication_server_state {
         member.max_batch_records =
             static_cast<std::uint32_t>(entry.second.max_batch_records);
         member.priority = static_cast<std::uint32_t>(entry.second.priority);
+        member.schema_hash = entry.second.schema_hash;
         members.push_back(member);
       }
       std::sort(members.begin(), members.end(),
@@ -2736,6 +2749,7 @@ public:
     definition.decode_allocation = Notification::decode_allocation();
     definition.priority = Notification::priority();
     definition.max_batch_records = Notification::max_batch_records();
+    definition.schema_hash = Notification::schema_hash();
     const auto inserted =
         state_->channels.emplace(Notification::id(), definition);
     if (!inserted.second)
@@ -2761,6 +2775,7 @@ public:
     definition.request_size = Method::request_size();
     definition.response_size = Method::response_size();
     definition.decode_allocation = Method::decode_allocation();
+    definition.schema_hash = Method::schema_hash();
     const auto inserted =
         state_->client_methods.emplace(Method::id(), definition);
     if (!inserted.second)
@@ -2812,6 +2827,7 @@ private:
     definition.decode_allocation = Stream::decode_allocation();
     definition.priority = Stream::priority();
     definition.max_batch_records = Stream::max_batch_records();
+    definition.schema_hash = Stream::schema_hash();
     definition.stream = true;
     const auto inserted = state_->channels.emplace(Stream::id(), definition);
     if (!inserted.second)

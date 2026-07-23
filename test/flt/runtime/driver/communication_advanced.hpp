@@ -19,5 +19,7 @@ ntl::status add_byte_quota_test_port(ntl::flt::driver &driver);
 ntl::status add_reject_test_port(ntl::flt::driver &driver);
 ntl::status add_connection_limit_test_port(ntl::flt::driver &driver);
 ntl::status add_session_limit_test_port(ntl::flt::driver &driver);
+ntl::status add_security_test_ports(ntl::flt::driver &driver);
+ntl::status test_registry_notification_store();
 
 } // namespace crtsys_flt_runtime_test

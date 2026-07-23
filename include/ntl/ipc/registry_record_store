@@ -1,0 +1,306 @@
+/**
+ * @file registry_record_store
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Registry-backed storage for reconnectable IPC delivery records.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+
+#pragma once
+
+#include "../registry"
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <limits>
+#include <mutex>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace ntl {
+namespace ipc {
+namespace detail {
+
+struct registry_delivery_record {
+  std::uint32_t channel_id = 0;
+  std::uint32_t kind = 0;
+  std::uint64_t sequence = 0;
+  std::vector<unsigned char> payload;
+};
+
+class registry_record_store {
+public:
+  static constexpr std::size_t default_max_session_bytes = 4 * 1024 * 1024;
+
+  explicit registry_record_store(
+      ntl::registry_key key,
+      std::size_t max_session_bytes = default_max_session_bytes)
+      : key_(std::move(key)), max_session_bytes_(max_session_bytes) {
+    if (!key_ || max_session_bytes_ < blob_header_size + record_header_size ||
+        max_session_bytes_ > (std::numeric_limits<ULONG>::max)())
+      throw ntl::exception(STATUS_INVALID_PARAMETER,
+                           "NTL registry record store options are invalid");
+  }
+
+  registry_record_store(const registry_record_store &) = delete;
+  registry_record_store &operator=(const registry_record_store &) = delete;
+
+  ntl::status persist(std::uint64_t token_high, std::uint64_t token_low,
+                      std::uint32_t channel_id, std::uint32_t kind,
+                      std::uint64_t sequence, const void *data,
+                      std::size_t size) noexcept {
+    if (channel_id == 0 || sequence == 0 || (!data && size != 0))
+      return ntl::status{STATUS_INVALID_PARAMETER};
+    try {
+      std::lock_guard<std::mutex> guard(lock_);
+      std::vector<registry_delivery_record> records;
+      bool found = false;
+      auto status = load_unlocked(token_high, token_low, records, found);
+      if (!status.is_ok())
+        return status;
+
+      const auto duplicate =
+          std::find_if(records.begin(), records.end(),
+                       [=](const registry_delivery_record &record) {
+                         return record.channel_id == channel_id &&
+                                record.sequence == sequence;
+                       });
+      if (duplicate != records.end())
+        return ntl::status{STATUS_OBJECT_NAME_COLLISION};
+
+      registry_delivery_record record;
+      record.channel_id = channel_id;
+      record.kind = kind;
+      record.sequence = sequence;
+      const auto *bytes = static_cast<const unsigned char *>(data);
+      if (size != 0)
+        record.payload.assign(bytes, bytes + size);
+      records.push_back(std::move(record));
+      return save_unlocked(token_high, token_low, records);
+    } catch (const std::bad_alloc &) {
+      return ntl::status{STATUS_INSUFFICIENT_RESOURCES};
+    } catch (...) {
+      return ntl::status{STATUS_UNSUCCESSFUL};
+    }
+  }
+
+  ntl::status acknowledge(std::uint64_t token_high, std::uint64_t token_low,
+                          std::uint32_t channel_id,
+                          std::uint64_t sequence) noexcept {
+    return acknowledge_batch(token_high, token_low, channel_id, &sequence, 1);
+  }
+
+  ntl::status acknowledge_batch(std::uint64_t token_high,
+                                std::uint64_t token_low,
+                                std::uint32_t channel_id,
+                                const std::uint64_t *sequences,
+                                std::size_t count) noexcept {
+    if (channel_id == 0 || !sequences || count == 0)
+      return ntl::status{STATUS_INVALID_PARAMETER};
+    try {
+      std::lock_guard<std::mutex> guard(lock_);
+      std::vector<registry_delivery_record> records;
+      bool found = false;
+      auto status = load_unlocked(token_high, token_low, records, found);
+      if (!status.is_ok() || !found)
+        return status;
+
+      records.erase(
+          std::remove_if(records.begin(), records.end(),
+                         [=](const registry_delivery_record &record) {
+                           return record.channel_id == channel_id &&
+                                  std::find(sequences, sequences + count,
+                                            record.sequence) !=
+                                      sequences + count;
+                         }),
+          records.end());
+      return save_unlocked(token_high, token_low, records);
+    } catch (const std::bad_alloc &) {
+      return ntl::status{STATUS_INSUFFICIENT_RESOURCES};
+    } catch (...) {
+      return ntl::status{STATUS_UNSUCCESSFUL};
+    }
+  }
+
+  ntl::result<std::vector<registry_delivery_record>>
+  load(std::uint64_t token_high, std::uint64_t token_low) noexcept {
+    try {
+      std::lock_guard<std::mutex> guard(lock_);
+      std::vector<registry_delivery_record> records;
+      bool found = false;
+      const auto status =
+          load_unlocked(token_high, token_low, records, found);
+      if (!status.is_ok())
+        return ntl::unexpected(static_cast<NTSTATUS>(status));
+      if (!found)
+        return ntl::unexpected(STATUS_NOT_FOUND);
+      return ntl::ok(std::move(records));
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNSUCCESSFUL);
+    }
+  }
+
+  void erase(std::uint64_t token_high, std::uint64_t token_low) noexcept {
+    try {
+      std::lock_guard<std::mutex> guard(lock_);
+      (void)key_.delete_value(value_name(token_high, token_low));
+    } catch (...) {
+    }
+  }
+
+private:
+  static constexpr std::uint32_t blob_magic = 0x52544c4eu; // "NLTR"
+  static constexpr std::uint32_t blob_version = 1;
+  static constexpr std::size_t blob_header_size = 16;
+  static constexpr std::size_t record_header_size = 24;
+
+  static void append_u32(std::vector<std::uint8_t> &output,
+                         std::uint32_t value) {
+    for (unsigned int shift = 0; shift != 32; shift += 8)
+      output.push_back(static_cast<std::uint8_t>((value >> shift) & 0xffu));
+  }
+
+  static void append_u64(std::vector<std::uint8_t> &output,
+                         std::uint64_t value) {
+    for (unsigned int shift = 0; shift != 64; shift += 8)
+      output.push_back(static_cast<std::uint8_t>((value >> shift) & 0xffu));
+  }
+
+  static bool read_u32(const std::vector<std::uint8_t> &input,
+                       std::size_t &offset, std::uint32_t &value) noexcept {
+    if (offset > input.size() || input.size() - offset < sizeof(value))
+      return false;
+    value = 0;
+    for (unsigned int shift = 0; shift != 32; shift += 8)
+      value |= static_cast<std::uint32_t>(input[offset++]) << shift;
+    return true;
+  }
+
+  static bool read_u64(const std::vector<std::uint8_t> &input,
+                       std::size_t &offset, std::uint64_t &value) noexcept {
+    if (offset > input.size() || input.size() - offset < sizeof(value))
+      return false;
+    value = 0;
+    for (unsigned int shift = 0; shift != 64; shift += 8)
+      value |= static_cast<std::uint64_t>(input[offset++]) << shift;
+    return true;
+  }
+
+  static std::wstring value_name(std::uint64_t high, std::uint64_t low) {
+    static const wchar_t digits[] = L"0123456789ABCDEF";
+    std::wstring name(32, L'0');
+    for (std::size_t index = 0; index != 16; ++index) {
+      name[index] = digits[(high >> ((15 - index) * 4)) & 0xfu];
+      name[16 + index] = digits[(low >> ((15 - index) * 4)) & 0xfu];
+    }
+    return name;
+  }
+
+  ntl::status load_unlocked(
+      std::uint64_t token_high, std::uint64_t token_low,
+      std::vector<registry_delivery_record> &records, bool &found) const {
+    found = false;
+    auto blob = key_.query_binary(value_name(token_high, token_low));
+    if (!blob) {
+      const auto status = static_cast<NTSTATUS>(blob.status());
+      if (status == STATUS_OBJECT_NAME_NOT_FOUND || status == STATUS_NOT_FOUND)
+        return ntl::status::ok();
+      return blob.status();
+    }
+    found = true;
+    if (blob->size() < blob_header_size || blob->size() > max_session_bytes_)
+      return ntl::status{STATUS_DATA_ERROR};
+
+    std::size_t offset = 0;
+    std::uint32_t magic = 0;
+    std::uint32_t version = 0;
+    std::uint32_t count = 0;
+    std::uint32_t reserved = 0;
+    if (!read_u32(*blob, offset, magic) ||
+        !read_u32(*blob, offset, version) ||
+        !read_u32(*blob, offset, count) ||
+        !read_u32(*blob, offset, reserved) || magic != blob_magic ||
+        version != blob_version || reserved != 0)
+      return ntl::status{STATUS_DATA_ERROR};
+
+    if (count > (blob->size() - blob_header_size) / record_header_size)
+      return ntl::status{STATUS_DATA_ERROR};
+
+    records.reserve(count);
+    for (std::uint32_t index = 0; index != count; ++index) {
+      registry_delivery_record record;
+      std::uint32_t payload_size = 0;
+      if (!read_u32(*blob, offset, record.channel_id) ||
+          !read_u32(*blob, offset, record.kind) ||
+          !read_u64(*blob, offset, record.sequence) ||
+          !read_u32(*blob, offset, payload_size) ||
+          !read_u32(*blob, offset, reserved) || reserved != 0 ||
+          record.channel_id == 0 || record.sequence == 0 ||
+          offset > blob->size() || payload_size > blob->size() - offset)
+        return ntl::status{STATUS_DATA_ERROR};
+      record.payload.assign(blob->begin() + offset,
+                            blob->begin() + offset + payload_size);
+      offset += payload_size;
+      records.push_back(std::move(record));
+    }
+    return offset == blob->size() ? ntl::status::ok()
+                                  : ntl::status{STATUS_DATA_ERROR};
+  }
+
+  ntl::status save_unlocked(
+      std::uint64_t token_high, std::uint64_t token_low,
+      const std::vector<registry_delivery_record> &records) const {
+    if (records.empty()) {
+      const auto status = key_.delete_value(value_name(token_high, token_low));
+      const auto native = static_cast<NTSTATUS>(status);
+      return native == STATUS_OBJECT_NAME_NOT_FOUND ||
+                     native == STATUS_NOT_FOUND
+                 ? ntl::status::ok()
+                 : status;
+    }
+
+    if (records.size() > (std::numeric_limits<std::uint32_t>::max)())
+      return ntl::status{STATUS_QUOTA_EXCEEDED};
+
+    std::size_t required = blob_header_size;
+    for (const auto &record : records) {
+      if (required > max_session_bytes_ ||
+          record_header_size > max_session_bytes_ - required ||
+          record.payload.size() >
+              max_session_bytes_ - required - record_header_size ||
+          record.payload.size() >
+              (std::numeric_limits<std::uint32_t>::max)())
+        return ntl::status{STATUS_QUOTA_EXCEEDED};
+      required += record_header_size + record.payload.size();
+    }
+
+    std::vector<std::uint8_t> blob;
+    blob.reserve(required);
+    append_u32(blob, blob_magic);
+    append_u32(blob, blob_version);
+    append_u32(blob, static_cast<std::uint32_t>(records.size()));
+    append_u32(blob, 0);
+    for (const auto &record : records) {
+      append_u32(blob, record.channel_id);
+      append_u32(blob, record.kind);
+      append_u64(blob, record.sequence);
+      append_u32(blob, static_cast<std::uint32_t>(record.payload.size()));
+      append_u32(blob, 0);
+      blob.insert(blob.end(), record.payload.begin(), record.payload.end());
+    }
+    return key_.set_binary(value_name(token_high, token_low), blob);
+  }
+
+  ntl::registry_key key_;
+  std::size_t max_session_bytes_;
+  std::mutex lock_;
+};
+
+} // namespace detail
+} // namespace ipc
+} // namespace ntl

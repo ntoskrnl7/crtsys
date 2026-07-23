@@ -100,7 +100,8 @@ include(${crtsys_SOURCE_DIR}/cmake/CrtSys.cmake)
 crtsys_add_driver(my_driver src/main.cpp)
 ```
 
-`CRTSYS_NTL_MAIN`을 켜면 C++ 진입점 wrapper를 사용할 수 있습니다.
+`CRTSYS_NTL_MAIN`을 켜면 C++ 진입점 wrapper를 사용할 수 있습니다. 이 경우
+`DriverEntry`를 직접 작성하지 않고 `ntl::main`을 정의합니다.
 
 ```cpp
 #include <ntl/driver>
@@ -115,13 +116,23 @@ ntl::status ntl::main(ntl::driver& driver,
 }
 ```
 
+`CRTSYS_NTL_MAIN`을 끄면 일반 WDK 드라이버처럼 `DriverEntry`를 직접
+작성하고 초기화를 수동으로 처리하면 됩니다.
+
 ### WDM, KMDF, minifilter driver model
 
-NuGet package에서 **Project Properties > Driver Settings > Driver Model**의
-WDK `Type of driver`를 먼저 `KMDF`로 설정하면 **crtsys KMDF entry point**가
-표시됩니다. 여기서 `NTL KMDF` 또는 `No NTL entry point`를 선택할 수 있습니다.
+NuGet package는 WDK project의 기존 `DriverType` 설정을 읽습니다. KMDF
+project는 기본적으로 일반 `DriverEntry`와 `WdfDriverCreate` 경로를 사용합니다.
+NTL 스타일 진입점을 사용하려면 **Project Properties > Driver Settings >
+Driver Model**에서 WDK `Type of driver`를 `KMDF`로 설정한 뒤 `NTL KMDF`를
+선택하고 `ntl::kmdf::main`을 구현합니다. `No NTL entry point`를 선택하면
+기존 KMDF 진입점이 유지됩니다.
 
-![Visual Studio crtsys 드라이버 모델 진입점 선택](./assets/visual-studio-driver-model-ui-ko-kr.gif)
+MSBuild property로 직접 지정하는 경우에는 다음과 같습니다.
+
+```xml
+<CrtSysUseNtlKmdfMain>true</CrtSysUseNtlKmdfMain>
+```
 
 두 방식 모두 PnP, power, queue,
 request, object lifetime, dispatch 처리를 WDF가 소유하며, crtsys는 WDF
@@ -200,7 +211,7 @@ flowchart TD
 | `std::filesystem` | Driver-tested | path, directory, copy, metadata, time, link-oriented path를 matrix에서 coverage |
 | Concurrency | Driver-tested | thread, synchronization, async/future, atomic wait/notify |
 | Locale / chrono / charconv | Driver-tested | locale facet, timezone/chrono path, integer/floating char conversion |
-| NTL driver helpers | Driver-tested | `ntl::main`, driver/device helper, RPC, IRQL helper, stack expansion |
+| NTL driver helpers | Driver-tested | `ntl::main`, driver/device helper, symbolic link/event/work item RAII, RPC, IRQL helper, pool allocator, stack expansion |
 | `thread_local` | 사용자 변수 용도 미지원 | kernel GS는 user-mode TEB가 아니라 processor-local KPCR이므로 사용자 `thread_local`은 thread별 storage가 아님 |
 
 상세 matrix는 의도적으로 test-linked 형태입니다. Kernel driver test suite에서
@@ -215,10 +226,10 @@ flowchart TD
 | [MSBuild/NuGet 빠른 시작](./ko-kr-msbuild-nuget-quickstart.md) | Visual Studio, Build Tools-only, CI package 소비 |
 | [설계 근거](./ko-kr-design-rationale.md) | IRQL, pool, stack, unload, 운영 경계 |
 | [기능 지원 현황](./ko-kr-feature-coverage.md) | Driver-tested C++/CRT/STL matrix와 known gap |
-| [NTL API](./ko-kr-ntl-api.md) | Driver helper API, entry wrapper, synchronization, SEH helper |
+| [NTL API](./ko-kr-ntl-api.md) | Driver helper API, entry wrapper, synchronization, pool allocator, SEH helper |
 | [사용 예제](./ko-kr-usage-examples.md) | Driver-side NTL 예제 |
-| [NTL sample driver](../examples/ntl-driver) | Visual Studio/NuGet 및 CMake로 빌드 가능한 typed IOCTL driver/app 예제 |
-| [NTL RPC sample driver](../examples/ntl-rpc-driver) | Visual Studio/NuGet 및 CMake로 빌드 가능한 shared RPC schema driver/app 예제 |
+| [NTL sample driver](../examples/ntl-driver) | `ntl::main`, device endpoint, typed IOCTL, remove lock, registry config, passive executor, pool-backed PMR를 사용하는 Visual Studio/NuGet 및 CMake driver/app 예제 |
+| [NTL RPC sample driver](../examples/ntl-rpc-driver) | shared NTL RPC schema를 사용하는 Visual Studio/NuGet 및 CMake driver/app 예제 |
 | [NTL KMDF 예제](../examples/kmdf-ntl-driver) | `ntl::kmdf::main`, C++ WDF context, typed file/request와 manual queue 취소, WDF lock/lookaside/collection/string/DPC 유틸리티, deferred callback, passive callback 안의 STL 사용을 보여주는 driver/app 예제 |
 | [NTL KMDF DMA 템플릿](../examples/kmdf-dma-ntl-driver) | 실제 하드웨어용 PnP packet-DMA transaction, scatter/gather, common buffer와 interrupt-DPC 연결 예제 |
 | [NTL KMDF USB 템플릿](../examples/kmdf-usb-ntl-driver) | PnP USB device/interface/pipe와 continuous reader, user-mode 상태 조회 앱을 포함한 빌드 가능한 예제 |
@@ -324,10 +335,15 @@ cmake -S . -B build_x64 -A x64 -DCRTSYS_ENABLE_DIAGNOSTIC_BREAKPOINTS=OFF
 
 ## NuGet 패키지 상세
 
-`crtsys`의 NuGet 배포는 Visual Studio/MSBuild 프로젝트용
-`crtsys.<version>.nupkg`입니다. Package workflow는 게시된 package로
-WDK consumer project도 빌드하며, 저장소의 smoke project는
-[`test/nuget`](../test/nuget)에 있습니다.
+`crtsys`는 native MSBuild import와 미리 빌드된 driver library를 포함한
+NuGet package를 배포합니다. v142/v143에서는 `x86`, `x64`, `ARM`, `ARM64`의
+`Debug`/`Release`를 제공하고, v145에서는 `x86`, `x64`, `ARM64`를
+제공합니다. Package workflow는 선택한 toolset이 지원하는 각 packaged
+architecture에 대해 WDK consumer project를 빌드합니다. 저장소의 smoke
+project는 [`test/nuget`](../test/nuget)에 있습니다.
+
+NuGet 배포물은 Visual Studio/MSBuild project용
+`crtsys.<version>.nupkg`입니다.
 
 ## GitHub Release prebuilt 번들 상세
 
@@ -343,6 +359,7 @@ prebuilt bundle은 source에서 `crtsys`를 fetch/build하지 않고, CMake
 배포물입니다.
 
 `prebuilt.zip`은 GitHub Release 전용 번들이며 NuGet 패키지가 아닙니다.
+전체 packaging 및 publishing 명령은 `nuget/README.md`를 참고하세요.
 
 ## CMake install
 
@@ -370,8 +387,20 @@ install 흐름은 다음 스모크 테스트로 확인할 수 있습니다.
 .\scripts\cmake\Test-CrtSysInstall.ps1 -Architecture x64 -Configuration Release
 ```
 
-릴리스/게시 방법, release helper, Trusted Publishing 설정은 `nuget/README.md`에
-모아서 정리해두었습니다. 자세한 앱/드라이버 동작 방식도 같은 문서에서 확인하세요.
+`main`에서 새 버전을 게시하려면 다음 helper를 사용할 수 있습니다.
+
+```powershell
+.\scripts\release\Prepare-CrtSysRelease.ps1 -Version <version> -Push
+```
+
+이 helper는 `include/.internal/version`을 갱신하고 version bump를 commit한
+뒤 일치하는 `v<version>` tag를 만들고 commit과 tag를 push합니다. Tag push가
+`Package` workflow를 시작합니다.
+
+같은 작업은 GitHub UI의 **Actions > Release > Run workflow**에서도 할 수
+있습니다. Branch protection이 `main` 직접 push를 막는 경우에는 local helper를
+사용하거나 release rule을 먼저 조정해야 합니다. 전체 packaging 및
+publishing 명령과 Trusted Publishing 설정은 `nuget/README.md`를 참고하세요.
 
 ## 이 저장소 빌드
 
@@ -435,6 +464,7 @@ WinDbg 또는 일반적인 커널 디버깅 환경에서 확인하세요.
 
 ```text
 cmake/             CrtSys.cmake를 포함한 CMake 헬퍼
+examples/          빌드 가능한 작은 sample project
 include/ntl/       NTL C++ 헬퍼 헤더
 include/.internal/ 내부 버전 및 toolchain 호환 헤더
 src/               crtsys 런타임 및 CRT/STL 호환 코드

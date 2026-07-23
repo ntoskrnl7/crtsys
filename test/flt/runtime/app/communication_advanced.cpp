@@ -48,6 +48,15 @@ bool test_contract(ntl::flt::communication_client &client) {
     version_mismatch_rejected = true;
   }
 
+  bool schema_mismatch_rejected = false;
+  try {
+    constexpr ntl::rpc::method<0xA50, std::uint64_t(std::uint32_t)>
+        incompatible_ping{};
+    client.require_method(incompatible_ping);
+  } catch (const std::runtime_error &) {
+    schema_mismatch_rejected = true;
+  }
+
   bool mismatch_rejected = false;
   try {
     constexpr auto incompatible = ping_method.max_request_size<128>();
@@ -55,7 +64,8 @@ bool test_contract(ntl::flt::communication_client &client) {
   } catch (const std::runtime_error &) {
     mismatch_rejected = true;
   }
-  return version_mismatch_rejected && mismatch_rejected;
+  return version_mismatch_rejected && schema_mismatch_rejected &&
+         mismatch_rejected;
 }
 
 bool test_connection_and_bidirectional_request(

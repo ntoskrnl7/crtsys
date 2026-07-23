@@ -17,6 +17,7 @@ Headers:
 - [`include/ntl/rpc/server`](../../include/ntl/rpc/server)
 - [`include/ntl/rpc/client`](../../include/ntl/rpc/client)
 - [`include/ntl/rpc/coroutine`](../../include/ntl/rpc/coroutine), optional C++20
+- [`include/ntl/rpc/registry_notification_store`](../../include/ntl/rpc/registry_notification_store), optional registry persistence
 
 ## Shared Contract And Implementation
 
@@ -57,10 +58,10 @@ serialization code on both sides. These default forms derive an ID from the
 shared schema line and are the convenient choice when the driver and app build
 from the same contract header.
 
-Use `NTL_ADD_CALLBACK_ID_0` through `NTL_ADD_CALLBACK_ID_5` when independently
-versioned driver and app binaries must retain the same method IDs even after
-the schema is reformatted or reordered. This is an optional ABI-stability
-control, not the required form for normal shared-header use.
+Use `NTL_ADD_CALLBACK_ID_0` through `NTL_ADD_CALLBACK_ID_5` when method IDs must
+remain unchanged after the shared schema is reformatted or reordered. This is
+an optional ABI-stability control, not the required form for normal shared-header
+use.
 
 Long-running callbacks can use `NTL_ADD_CALLBACK_CONTEXT_0` through
 `NTL_ADD_CALLBACK_CONTEXT_5`, or their explicit-ID
@@ -551,12 +552,32 @@ In-memory sessions expire after `session_retention_ms()` while disconnected.
 NTL can optionally bridge a longer lifetime through
 `notification_storage(std::shared_ptr<notification_store>)`. The store receives
 serialized records before publication, ACK removal, token restoration, and
-explicit-session deletion. NTL itself performs no file or registry I/O. Store
-hooks run at `PASSIVE_LEVEL` without the internal session lock held, and should
-be idempotent because disconnect, retry, and shutdown can race with external
-storage failures. Retention expiry releases only the in-memory copy; it does
-not call `erase_session()`. The external store can therefore restore the token
-later when it retained session metadata or at least one unacknowledged record.
+explicit-session deletion. No storage I/O occurs unless a store is installed.
+Store hooks run at `PASSIVE_LEVEL` without the internal session lock held, and
+should be idempotent because disconnect, retry, and shutdown can race with
+external storage failures. Retention expiry releases only the in-memory copy;
+it does not call `erase_session()`. The external store can therefore restore
+the token later when it retained at least one unacknowledged record.
+
+For registry-backed recovery, include
+`<ntl/rpc/registry_notification_store>` and explicitly install the provided
+adapter:
+
+```cpp
+auto key = ntl::registry_key::create(
+    L"\\Registry\\Machine\\Software\\DemoRpcNotifications",
+    KEY_QUERY_VALUE | KEY_SET_VALUE);
+if (!key)
+  return key.status();
+
+server->notification_storage(
+    std::make_shared<ntl::rpc::registry_notification_store>(
+        std::move(*key)));
+```
+
+It maintains one bounded `REG_BINARY` value per session and removes records
+after ACK. The caller chooses the key, ACL, volatile or nonvolatile lifetime,
+and cleanup policy.
 Restored records may be supplied in any order. NTL sorts them by the original
 session sequence and rejects duplicate sequences, terminal markers on ordinary
 notifications, and stream records that appear after that stream's terminal
@@ -803,11 +824,11 @@ and byte quotas are configured through `server_options`. See
 [`test/rpc/cross-bitness`](../../test/rpc/cross-bitness) for the x64-driver with
 x64/x86-client VM coverage.
 
-## Contract Compatibility
+## Contract Check
 
-An app and driver that are released independently should validate their shared
-contract once after opening the endpoint. Contract discovery is a reserved
-query, not a header added to every RPC request:
+An app can validate the shared contract once after opening the endpoint.
+Contract discovery is a reserved query, not a header added to every RPC
+request:
 
 ```cpp
 ntl::rpc::client client(L"demo_rpc");
@@ -826,30 +847,41 @@ const auto server_contract = client.require_contract(requirements);
 
 `NTL_RPC_BEGIN_CONTRACT(Name, Version, Capabilities)` publishes the application
 contract version, application-defined capability bits, and every registered
-method ID. `NTL_RPC_BEGIN(Name)` remains the compact form and publishes version
-`1` with no application capability bits.
+typed member. `NTL_RPC_BEGIN(Name)` remains the compact form and publishes
+version `1` with no application capability bits.
 
 The reported values have separate meanings:
 
 - `protocol_version()` is the NTL wire format version. NTL validates it
   automatically in `require_contract()`.
-- `contract_version()` is the application's exact schema/API version.
+- `contract_version()` is the application's semantic protocol revision. Change
+  it when behavior changes without changing serialized field types.
 - `transport_feature_mask()` describes NTL protections such as resource limits,
   endpoint security, immutable dispatch, and rundown shutdown.
 - `capability_mask()` contains application-defined optional feature bits.
 - `method_ids()` is the sorted set of methods registered before `start()`.
+- `members()` contains methods, notifications, and streams together with their
+  fixed-width limits and automatically derived wire-schema fingerprints.
+- `schema_hash()` is the aggregate fingerprint derived from those members. It
+  is not supplied by the application.
+
+NTL derives fingerprints from return, argument, payload, upload, and download
+types. User-defined objects reuse their existing
+`static serialize(Archive&, Self&)` field list, so C++14 and later require no
+second schema declaration. Compiler type names and host pointer widths are not
+hashed; fixed-width wire fields therefore compare identically across x86 and
+x64 clients.
 
 `query_contract()` returns this metadata without imposing application policy.
 `require_contract()` checks selected requirements and throws
 `ntl::rpc::contract_mismatch`; its `reason()`, `expected()`, and `actual()`
 members distinguish protocol, application version, transport feature,
-capability, and missing-method failures. This lets an app report a clear
+capability, schema-hash, and missing-method failures. This lets an app report a clear
 driver/app version mismatch before invoking a business method.
 
-Use explicit `NTL_ADD_CALLBACK_ID_*` IDs for independently updated binaries.
-Line-derived IDs are convenient when both sides always build from the same
-header, but source reordering changes those IDs and therefore is not a stable
-published contract.
+Use explicit `NTL_ADD_CALLBACK_ID_*` IDs when method IDs must remain stable
+after the shared schema is reordered. Line-derived IDs are convenient when both
+sides always build from the same header, but source reordering changes those IDs.
 
 ## Bounded Responses
 

@@ -118,6 +118,10 @@ void observe_cached_names(ntl::flt::related_objects objects) noexcept {
 ntl::status ntl::flt::main(ntl::flt::driver &driver, std::wstring_view) {
   using namespace crtsys_flt_runtime_test;
 
+  const auto registry_store_status = test_registry_notification_store();
+  if (registry_store_status.is_err())
+    return registry_store_status;
+
   auto messages = make_server();
   const auto publisher = messages.publisher();
   configure_advanced_communication_tests(messages, publisher);
@@ -219,6 +223,9 @@ ntl::status ntl::flt::main(ntl::flt::driver &driver, std::wstring_view) {
   const auto session_limit_status = add_session_limit_test_port(driver);
   if (session_limit_status.is_err())
     return session_limit_status;
+  const auto security_status = add_security_test_ports(driver);
+  if (security_status.is_err())
+    return security_status;
 
   ntl::flt::registration callbacks;
   callbacks

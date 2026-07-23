@@ -139,6 +139,25 @@ view after those checks succeed.
 
 RPC remains the control plane and shared memory is the optional data plane for
 high-volume traffic. The registered-region and shared-ring paths are verified
-against both an x64 app and an x86 app. An arbitrary-size `shared_buffer_pool`
-lease layer is intentionally not part of the current API; it requires a
-separate ownership and lifetime contract for variable-size buffers.
+against both an x64 app and an x86 app. User-mode code can also create an
+`ntl::ipc::shared_buffer_pool` over a registered region:
+
+```cpp
+auto region = client.register_shared_region(4096);
+auto pool = region.make_buffer_pool(16);
+auto lease_result = pool.try_acquire(512);
+if (!lease_result)
+  throw std::runtime_error("shared lease allocation failed");
+
+auto lease = std::move(*lease_result);
+std::memset(lease.data(), 0, lease.size());
+client.invoke(write_payload, lease.token());
+```
+
+`buffer_lease` is move-only. Releasing it returns the subrange to the pool and
+coalesces adjacent free ranges. The pool owns reservations only: keep the
+`registered_region` alive while leases or tokens are in use. The driver still
+validates each token against its connection-scoped pinned-region registry, so
+the pool does not weaken range, generation, access, or unload checks. The same
+pool is available from a minifilter `registered_port_region` through
+`make_buffer_pool()`.

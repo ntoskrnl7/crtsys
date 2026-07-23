@@ -2,7 +2,8 @@ param(
   [Parameter(Mandatory = $true)]
   [ValidateSet('app', 'driver', 'kmdf-verifier-stress',
                'rpc-lifecycle-stress', 'rpc-async', 'rpc-notifications',
-               'rpc-security', 'rpc-streaming', 'flt-runtime')]
+               'rpc-security', 'rpc-streaming', 'flt-runtime',
+               'flt-cross-bitness-app', 'flt-verifier-stress')]
   [string] $Project,
 
   [Parameter(Mandatory = $true)]
@@ -30,6 +31,10 @@ $sourceDir = if ($Project -eq 'kmdf-verifier-stress') {
   Join-Path $repoRoot 'test\kmdf\verifier-stress'
 } elseif ($Project -eq 'flt-runtime') {
   Join-Path $repoRoot 'test\flt\runtime'
+} elseif ($Project -eq 'flt-cross-bitness-app') {
+  Join-Path $repoRoot 'test\flt\cross-bitness'
+} elseif ($Project -eq 'flt-verifier-stress') {
+  Join-Path $repoRoot 'test\flt\verifier-stress'
 } elseif ($Project -eq 'rpc-lifecycle-stress') {
   Join-Path $repoRoot 'test\rpc\lifecycle-stress'
 } elseif ($Project -eq 'rpc-async') {

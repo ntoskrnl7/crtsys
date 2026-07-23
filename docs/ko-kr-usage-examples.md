@@ -66,9 +66,8 @@ user-mode wrapper를 같이 생성합니다. 드라이버는 schema 전에
 개수입니다. macro가 이 정보를 이용해 양쪽의 함수 인자와 직렬화 코드를
 생성합니다. 기본형은 공유 schema의 line에서 양쪽에 같은 ID를 만들므로,
 드라이버와 앱이 같은 계약 헤더를 사용하는 일반적인 경우에 적합합니다.
-서로 독립적으로 버전이 바뀌는 바이너리가 schema 재배치 뒤에도 같은 wire
-ABI를 유지해야 할 때만 `NTL_ADD_CALLBACK_ID_N`으로 `0x800`부터 `0xFFF`
-범위의 ID를 명시하세요.
+schema 재배치 뒤에도 같은 method ID를 유지해야 할 때
+`NTL_ADD_CALLBACK_ID_N`으로 `0x800`부터 `0xFFF` 범위의 ID를 명시하세요.
 
 ### 공유 Schema
 
@@ -97,6 +96,8 @@ NTL_RPC_END(demo_rpc)
 
 custom object는 `zpp::serializer` serialization function을 제공해야 합니다.
 테스트의 `point` class가 그 패턴을 보여줍니다.
+NTL은 같은 필드 목록에서 method의 wire schema fingerprint를 자동으로
+계산하므로 별도의 숫자 hash를 지정할 필요가 없습니다.
 
 ### 커널 Server
 

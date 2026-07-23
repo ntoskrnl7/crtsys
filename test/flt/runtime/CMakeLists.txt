@@ -20,6 +20,32 @@ add_executable(crtsys_flt_runtime_test_app
   app/main.cpp
 )
 
+foreach(_security_probe IN ITEMS allowed denied)
+  add_executable(crtsys_flt_security_probe_${_security_probe}
+    app/security_probe.cpp
+  )
+  target_include_directories(crtsys_flt_security_probe_${_security_probe}
+    PRIVATE
+      "${crtsys_SOURCE_DIR}/include"
+      "${CMAKE_CURRENT_LIST_DIR}/shared"
+  )
+  target_link_libraries(crtsys_flt_security_probe_${_security_probe}
+    PRIVATE FltLib.lib
+  )
+  target_compile_definitions(crtsys_flt_security_probe_${_security_probe}
+    PRIVATE
+      CRTSYS_SECURITY_PROBE_EXPECT_ALLOWED=$<IF:$<STREQUAL:${_security_probe},allowed>,1,0>
+  )
+  target_compile_options(crtsys_flt_security_probe_${_security_probe}
+    PRIVATE
+      /W4
+      /WX
+      /EHsc
+      "$<$<CONFIG:Debug>:/MTd>"
+      "$<$<CONFIG:Release>:/MT>"
+  )
+endforeach()
+
 target_include_directories(crtsys_flt_runtime_test_app
   PRIVATE
     "${crtsys_SOURCE_DIR}/include"
@@ -46,3 +72,5 @@ target_compile_options(crtsys_flt_runtime_test_app
 include("${crtsys_SOURCE_DIR}/cmake/std-cxx.cmake")
 set_std_cxx_latest(crtsys_flt_runtime_test)
 set_std_cxx_latest(crtsys_flt_runtime_test_app)
+set_std_cxx_latest(crtsys_flt_security_probe_allowed)
+set_std_cxx_latest(crtsys_flt_security_probe_denied)

@@ -528,7 +528,7 @@ auto client = product_messages::connect();
 const auto answer = product_messages::query_count(client, std::uint32_t{41});
 ```
 
-The explicit client argument is intentional: calls, shared regions, and future
+The explicit client argument is intentional: calls, shared regions, and
 connection state all stay on the same Filter Manager connection instead of
 silently reconnecting for each generated function.
 
@@ -577,19 +577,16 @@ every remaining client before the server state is destroyed.
 
 ### Contract, Sessions, Notifications, And Streams
 
-Use `NTL_FLT_RPC_BEGIN_CONTRACT` when the app and minifilter can be updated
-independently. `connect()` queries the running endpoint and rejects a different
-application version or missing capability bits before the first method call:
-
-```cpp
-NTL_FLT_RPC_BEGIN_CONTRACT(product_messages, L"\\ProductPort", 1, 0x5ull)
-```
+Use `NTL_FLT_RPC_BEGIN_CONTRACT` when the app and minifilter should validate
+their shared contract. `connect()` queries the endpoint and rejects a
+different application version or missing capability bits before the first
+method call.
 
 The contract query also advertises every app-to-driver method,
 driver-to-app method, notification, and stream with fixed-width request,
-response, decode-allocation, batch, and priority limits. Apps can fail before
-normal traffic begins when a shared descriptor does not match the running
-driver:
+response, decode-allocation, batch, priority limits, and an automatically
+derived wire-schema fingerprint. Apps can fail before normal traffic begins
+when a shared descriptor does not match the running driver:
 
 ```cpp
 auto contract = client.query_contract();
@@ -599,10 +596,12 @@ client.require_notification(product_messages::progress_notification);
 client.require_stream(product_messages::numbers_stream);
 ```
 
-The explicit application contract version is the schema identity. NTL does
-not hash compiler type names because those strings are not stable across x86,
-x64, or MSVC toolsets. Change the contract version when a serialized type or
-method signature changes incompatibly.
+The explicit application contract version identifies semantic API or lifecycle
+changes. NTL derives each member fingerprint from its serialized field types
+and checks it when that typed member is used. User-defined types reuse their
+existing `static serialize(Archive&, Self&)` field list, including in C++14.
+Compiler type names are excluded because they are not stable across x86, x64,
+or MSVC toolsets.
 
 ### Connections And Driver-To-App Requests
 
@@ -686,13 +685,27 @@ auto replayed = product_messages::progress_reliable(resumed);
 resumed.acknowledge(product_messages::progress_notification, replayed);
 ```
 
-Reliable queues live only while the minifilter remains loaded. They are not a
-disk-backed event log. A product that needs persistence across unload or reboot
-can install `communication_notification_store`. NTL calls `persist()` before a
-record becomes visible, removes it after an explicit ACK, and calls `restore()`
-when an in-memory session token is absent. The hook is the policy boundary:
-NTL itself performs no file or registry I/O and provides no built-in disk
-format.
+Reliable queues live only while the minifilter remains loaded unless external
+storage is explicitly installed. A custom store can derive from
+`communication_notification_store`. NTL also provides the optional
+`registry_notification_store`:
+
+```cpp
+auto key = ntl::registry_key::create(
+    L"\\Registry\\Machine\\Software\\ProductFilterNotifications",
+    KEY_QUERY_VALUE | KEY_SET_VALUE);
+if (!key)
+  return key.status();
+
+messages.notification_storage(
+    std::make_shared<ntl::flt::registry_notification_store>(
+        std::move(*key)));
+```
+
+It maintains one bounded `REG_BINARY` value per reconnectable session. NTL
+calls `persist()` before a record becomes visible, removes it after an explicit
+ACK, and calls `restore()` when an in-memory session token is absent. No
+storage I/O occurs unless a store is installed.
 
 Storage hooks run at `PASSIVE_LEVEL`, without NTL connection or session locks,
 and must be thread-safe. The `communication_record_view::data` range is valid
@@ -808,6 +821,13 @@ and access before exposing the pinned range. Destroy or `close()` the
 `registered_port_region` only after all sync or async calls using its tokens
 have completed;
 unregistration releases the MDL before the app frees the virtual allocation.
+
+For variable-size payloads, `registered_port_region::make_buffer_pool()` creates
+an `ntl::ipc::shared_buffer_pool`. Its move-only leases reserve subranges and
+return the range to the pool on destruction; the driver still receives and
+validates an ordinary `buffer_token`. The registered port region must outlive
+all leases. The runtime fixture exercises allocation, release, reuse, and
+coalescing through the minifilter adapter.
 
 Message callbacks run at `PASSIVE_LEVEL`. NTL copies Filter Manager's
 unaligned user buffers under structured exception handling before decoding,

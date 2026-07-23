@@ -15,5 +15,6 @@
 #include "name"
 #include "parameters"
 #include "registration"
+#include "registry_notification_store"
 #include "rpc"
 #include "types"

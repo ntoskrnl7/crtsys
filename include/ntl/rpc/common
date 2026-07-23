@@ -18,6 +18,7 @@
 
 #include "../deps/zpp/serializer.h"
 #include "../ipc/common"
+#include "schema"
 
 #include <algorithm>
 #include <cstddef>
@@ -123,7 +124,8 @@ constexpr std::uint64_t detailed_contract = 1ull << 16;
 /** @brief All transport features implemented by this NTL version. */
 constexpr std::uint64_t current =
     resource_limits | secure_endpoint | immutable_dispatch | rundown_shutdown |
-    caller_security_context | client_sessions | shared_memory_regions;
+    caller_security_context | client_sessions | shared_memory_regions |
+    detailed_contract;
 } // namespace transport_features
 
 /** @brief Opaque 128-bit capability used to reconnect one RPC session. */
@@ -154,6 +156,100 @@ struct session_info {
   bool valid() const noexcept { return token.valid() && id != 0; }
 };
 
+struct method_tag;
+struct notification_tag;
+struct stream_tag;
+
+/** @brief Identifies one typed member published by an RPC endpoint. */
+enum class contract_member_kind : std::uint16_t {
+  method = 1,
+  notification = 2,
+  stream = 3,
+};
+
+/** @brief Fixed-width resource limits and automatic schema for one member. */
+struct contract_member {
+  std::uint32_t id = 0;
+  contract_member_kind kind = contract_member_kind::method;
+  std::uint16_t reserved = 0;
+  std::uint32_t request_size = 0;
+  std::uint32_t response_size = 0;
+  std::uint32_t decode_allocation = 0;
+  std::uint32_t max_batch_records = 0;
+  std::uint32_t priority = 0;
+  std::uint64_t schema_hash = 0;
+
+  template <typename Method> static contract_member from_method() {
+    contract_member member{};
+    member.id = static_cast<std::uint32_t>(Method::id());
+    member.kind = contract_member_kind::method;
+    member.request_size = static_cast<std::uint32_t>(Method::request_size());
+    member.response_size = static_cast<std::uint32_t>(Method::response_size());
+    member.decode_allocation =
+        static_cast<std::uint32_t>(Method::decode_allocation());
+    member.schema_hash = Method::schema_hash();
+    return member;
+  }
+
+  template <typename Notification> static contract_member from_notification() {
+    contract_member member{};
+    member.id = static_cast<std::uint32_t>(Notification::id());
+    member.kind = contract_member_kind::notification;
+    member.response_size =
+        static_cast<std::uint32_t>(Notification::response_size());
+    member.decode_allocation =
+        static_cast<std::uint32_t>(Notification::decode_allocation());
+    member.max_batch_records =
+        static_cast<std::uint32_t>(Notification::max_batch_records());
+    member.priority = static_cast<std::uint32_t>(Notification::priority());
+    member.schema_hash = Notification::schema_hash();
+    return member;
+  }
+
+  template <typename Stream> static contract_member from_stream() {
+    contract_member member{};
+    member.id = static_cast<std::uint32_t>(Stream::id());
+    member.kind = contract_member_kind::stream;
+    member.request_size = static_cast<std::uint32_t>(Stream::upload_size());
+    member.response_size = static_cast<std::uint32_t>(Stream::download_size());
+    member.decode_allocation =
+        static_cast<std::uint32_t>(Stream::decode_allocation());
+    member.max_batch_records =
+        static_cast<std::uint32_t>(Stream::max_batch_records());
+    member.priority = static_cast<std::uint32_t>(Stream::priority());
+    member.schema_hash = Stream::schema_hash();
+    return member;
+  }
+
+  friend zpp::serializer::access;
+  template <typename Archive, typename Self>
+  static void serialize(Archive &archive, Self &self) {
+    archive(self.id, self.kind, self.reserved, self.request_size,
+            self.response_size, self.decode_allocation,
+            self.max_batch_records, self.priority, self.schema_hash);
+  }
+};
+
+inline std::uint64_t
+contract_schema_hash(const std::vector<contract_member> &members) noexcept {
+  detail::schema_hash_builder builder;
+  builder.byte(static_cast<std::uint8_t>(detail::schema_tag::format));
+  builder.integer(1);
+  builder.byte(static_cast<std::uint8_t>(detail::schema_tag::contract));
+  builder.integer(members.size());
+  for (const auto &member : members) {
+    builder.integer(member.id);
+    builder.integer(static_cast<std::uint16_t>(member.kind));
+    builder.integer(member.request_size);
+    builder.integer(member.response_size);
+    builder.integer(member.decode_allocation);
+    builder.integer(member.max_batch_records);
+    builder.integer(member.priority);
+    builder.integer(member.schema_hash);
+  }
+  return builder.value();
+}
+
 /** @brief Describes one running RPC server's wire and application contract. */
 class contract_info {
 public:
@@ -164,11 +260,14 @@ public:
   contract_info(std::uint32_t protocol_version, std::uint32_t contract_version,
                 std::uint64_t transport_feature_mask,
                 std::uint64_t capability_mask,
-                std::vector<std::uint32_t> method_ids)
+                std::vector<std::uint32_t> method_ids,
+                std::vector<contract_member> members)
       : protocol_version_(protocol_version),
         contract_version_(contract_version),
         transport_features_(transport_feature_mask),
-        capabilities_(capability_mask), method_ids_(std::move(method_ids)) {}
+        capabilities_(capability_mask), method_ids_(std::move(method_ids)),
+        members_(std::move(members)),
+        schema_hash_(contract_schema_hash(members_)) {}
 
   /** @brief Returns the NTL RPC wire protocol version. */
   std::uint32_t protocol_version() const noexcept { return protocol_version_; }
@@ -184,6 +283,9 @@ public:
   /** @brief Returns application-defined capability bits. */
   std::uint64_t capability_mask() const noexcept { return capabilities_; }
 
+  /** @brief Returns the automatically derived endpoint schema fingerprint. */
+  std::uint64_t schema_hash() const noexcept { return schema_hash_; }
+
   /** @brief Returns sorted application method IDs supported by the server. */
   const std::vector<std::uint32_t> &method_ids() const noexcept {
     return method_ids_;
@@ -194,9 +296,64 @@ public:
     return std::binary_search(method_ids_.begin(), method_ids_.end(), id);
   }
 
-  /** @brief Reports whether the server publishes a typed method. */
-  template <typename Method> bool supports(const Method &) const noexcept {
-    return supports_method(static_cast<std::uint32_t>(Method::id()));
+  const std::vector<contract_member> &members() const noexcept {
+    return members_;
+  }
+
+  const contract_member *find(std::uint32_t id,
+                              contract_member_kind kind) const noexcept {
+    const auto found =
+        std::find_if(members_.begin(), members_.end(),
+                     [=](const contract_member &member) {
+                       return member.id == id && member.kind == kind;
+                     });
+    return found == members_.end() ? nullptr : &*found;
+  }
+
+  /** @brief Reports whether the exact typed method is published. */
+  template <typename Method>
+  typename std::enable_if<std::is_base_of<method_tag, Method>::value,
+                          bool>::type
+  supports(const Method &) const noexcept {
+    const auto *member =
+        find(static_cast<std::uint32_t>(Method::id()),
+             contract_member_kind::method);
+    return member && member->request_size == Method::request_size() &&
+           member->response_size == Method::response_size() &&
+           member->decode_allocation == Method::decode_allocation() &&
+           member->schema_hash == Method::schema_hash();
+  }
+
+  /** @brief Reports whether the exact notification channel is published. */
+  template <typename Notification>
+  typename std::enable_if<
+      std::is_base_of<notification_tag, Notification>::value, bool>::type
+  supports(const Notification &) const noexcept {
+    const auto *member =
+        find(static_cast<std::uint32_t>(Notification::id()),
+             contract_member_kind::notification);
+    return member && member->request_size == 0 &&
+           member->response_size == Notification::response_size() &&
+           member->decode_allocation == Notification::decode_allocation() &&
+           member->max_batch_records == Notification::max_batch_records() &&
+           member->priority ==
+               static_cast<std::uint32_t>(Notification::priority()) &&
+           member->schema_hash == Notification::schema_hash();
+  }
+
+  /** @brief Reports whether the exact bidirectional stream is published. */
+  template <typename Stream>
+  typename std::enable_if<std::is_base_of<stream_tag, Stream>::value,
+                          bool>::type
+  supports(const Stream &) const noexcept {
+    const auto *member = find(static_cast<std::uint32_t>(Stream::id()),
+                              contract_member_kind::stream);
+    return member && member->request_size == Stream::upload_size() &&
+           member->response_size == Stream::download_size() &&
+           member->decode_allocation == Stream::decode_allocation() &&
+           member->max_batch_records == Stream::max_batch_records() &&
+           member->priority == static_cast<std::uint32_t>(Stream::priority()) &&
+           member->schema_hash == Stream::schema_hash();
   }
 
 private:
@@ -205,13 +362,16 @@ private:
   std::uint64_t transport_features_ = 0;
   std::uint64_t capabilities_ = 0;
   std::vector<std::uint32_t> method_ids_;
+  std::vector<contract_member> members_;
+  std::uint64_t schema_hash_ = 0;
 
 public:
   friend zpp::serializer::access;
   template <typename Archive, typename Self>
   static void serialize(Archive &archive, Self &self) {
     archive(self.protocol_version_, self.contract_version_,
-            self.transport_features_, self.capabilities_, self.method_ids_);
+            self.transport_features_, self.capabilities_, self.method_ids_,
+            self.members_, self.schema_hash_);
   }
 };
 
@@ -454,6 +614,11 @@ public:
     return DecodeAllocation;
   }
 
+  /** @brief Derives the method wire schema from its return and argument types. */
+  static std::uint64_t schema_hash() {
+    return detail::method_schema_hash<Return, Arguments...>();
+  }
+
   /**
    * @brief Returns the same method contract with an explicit response limit.
    */
@@ -531,6 +696,11 @@ public:
   /** @brief Returns the maximum records accepted by one batch receive. */
   static constexpr std::size_t max_batch_records() noexcept {
     return BatchRecords;
+  }
+
+  /** @brief Derives the notification wire schema from its payload type. */
+  static std::uint64_t schema_hash() {
+    return detail::notification_schema_hash<Payload>();
   }
 
   /** @brief Returns the same channel with an explicit payload capacity. */
@@ -752,6 +922,11 @@ public:
   /** @brief Returns the maximum records accepted by one batch receive. */
   static constexpr std::size_t max_batch_records() noexcept {
     return BatchRecords;
+  }
+
+  /** @brief Derives both stream directions from their serialized types. */
+  static std::uint64_t schema_hash() {
+    return detail::stream_schema_hash<Upload, Download>();
   }
 
   /** @brief Returns the same stream with an explicit download priority. */
