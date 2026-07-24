@@ -1,6 +1,6 @@
 # crtsys
 
-Familiar MSVC C++ runtime and STL experience for Windows kernel drivers (`.sys`).
+A modern C++ development platform for Windows kernel drivers (`.sys`).
 
 [![CMake](https://github.com/ntoskrnl7/crtsys/actions/workflows/cmake.yml/badge.svg)](https://github.com/ntoskrnl7/crtsys/actions/workflows/cmake.yml)
 ![GitHub](https://img.shields.io/github/license/ntoskrnl7/crtsys)
@@ -12,10 +12,20 @@ Familiar MSVC C++ runtime and STL experience for Windows kernel drivers (`.sys`)
 
 [Korean documentation](./docs/ko-kr.md)
 
-`crtsys` brings MSVC CRT/STL/VCRT/UCRT source paths into Windows kernel drivers.
-Driver code keeps familiar MSVC C++ headers and STL types while runtime
-dependencies are mapped onto a kernel-mode substrate with explicit driver-test
-coverage and IRQL contracts.
+`crtsys` brings the Microsoft C++ runtime ecosystem (CRT, STL, VCRT, and UCRT)
+into Windows kernel drivers without maintaining a separate STL fork. It uses
+the MSVC headers and selected runtime source paths installed with Visual Studio
+or Build Tools, preserving the familiar MSVC development experience while
+minimizing divergence from upstream STL.
+
+Driver code keeps the familiar MSVC C++ headers and STL types, while an
+include-resolution compatibility overlay and kernel runtime layer adapt the
+paths that require kernel-specific behavior. Runtime dependencies are mapped
+onto a kernel-mode substrate with explicit driver-test coverage, documented
+lifecycle behavior, and IRQL contracts.
+
+The goal of `crtsys` is to let kernel developers use modern C++ development
+patterns while staying aligned with the MSVC toolchain and upstream STL.
 
 The coverage matrix lists features verified by driver tests. Unlisted APIs may
 also work, but are not yet part of the verified set.
