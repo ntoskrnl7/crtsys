@@ -20,6 +20,7 @@ set(CRTSYS_NTL_MAIN ON)
 CPMAddPackage(NAME crtsys SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}/../../..)
 include(${crtsys_SOURCE_DIR}/cmake/CrtSys.cmake)
 target_compile_definitions(crtsys PRIVATE "CRTSYS_ENABLE_STACKTRACE_TEST_HOOKS")
+target_compile_definitions(crtsys PRIVATE "CRTSYS_ENABLE_RUNTIME_DIAGNOSTIC_TEST_HOOKS")
 
 set(CRTSYS_TEST_NLOHMANN_JSON ON)
 
@@ -82,6 +83,7 @@ target_compile_options(crtsys_test PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/GR>")
 # driver test harness with /WX under older MSVC toolsets.
 target_compile_definitions(crtsys_test PRIVATE "_CRT_SECURE_NO_WARNINGS")
 target_compile_definitions(crtsys_test PRIVATE "CRTSYS_ENABLE_STACKTRACE_TEST_HOOKS")
+target_compile_definitions(crtsys_test PRIVATE "CRTSYS_ENABLE_RUNTIME_DIAGNOSTIC_TEST_HOOKS")
 
 if (NOT CRTSYS_TEST_BREAKPOINT)
     target_compile_definitions(crtsys_test PRIVATE "CRTSYS_TEST_NO_BREAKPOINT")

@@ -184,6 +184,9 @@ void run();
 namespace jthread_constructor_test {
 void run();
 }
+namespace jthread_lifetime_semantic_test {
+void run();
+}
 namespace stop_source_test {
 void run();
 }
@@ -837,6 +840,8 @@ bool ntl_resource_test();
 
 bool ntl_pool_allocator_test();
 
+bool ntl_pool_irql_policy_test();
+
 bool ntl_lookaside_list_test();
 
 bool ntl_result_test();
@@ -870,6 +875,8 @@ bool ntl_wait_helpers_test();
 bool ntl_work_item_test();
 
 bool ntl_passive_executor_test();
+
+bool ntl_passive_coroutine_test();
 
 namespace {
 int g_driver_test_failures = 0;
@@ -1029,6 +1036,7 @@ void cpp_std_tests() {
   CRTSYS_RUN_CPPREFERENCE_TEST(jthread_constructor_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(stop_source_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(stop_callback_test);
+  CRTSYS_RUN_DRIVER_SEMANTIC_TEST(jthread_lifetime_semantic_test);
   CRTSYS_RUN_DRIVER_SEMANTIC_TEST(threading_semantic_edge_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(array_test);
   CRTSYS_RUN_CPPREFERENCE_TEST(vector_test);
@@ -1257,6 +1265,7 @@ void ntl_test() {
   run_boolean_test("ntl_spin_lock_test", ntl_spin_lock_test);
   run_boolean_test("ntl_resource_test", ntl_resource_test);
   run_boolean_test("ntl_pool_allocator_test", ntl_pool_allocator_test);
+  run_boolean_test("ntl_pool_irql_policy_test", ntl_pool_irql_policy_test);
   run_boolean_test("ntl_lookaside_list_test", ntl_lookaside_list_test);
   run_boolean_test("ntl_result_test", ntl_result_test);
   run_boolean_test("ntl_irp_device_control_helpers_test",
@@ -1276,6 +1285,7 @@ void ntl_test() {
   run_boolean_test("ntl_wait_helpers_test", ntl_wait_helpers_test);
   run_boolean_test("ntl_work_item_test", ntl_work_item_test);
   run_boolean_test("ntl_passive_executor_test", ntl_passive_executor_test);
+  run_boolean_test("ntl_passive_coroutine_test", ntl_passive_coroutine_test);
 }
 
 int test_all() {

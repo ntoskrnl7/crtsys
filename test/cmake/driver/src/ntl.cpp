@@ -1,13 +1,14 @@
-#include <ntl/event>
-#include <ntl/expand_stack>
-#include <ntl/except>
+#include <ntl/coroutine>
 #include <ntl/device>
 #include <ntl/device_endpoint>
 #include <ntl/device_interface>
+#include <ntl/event>
+#include <ntl/except>
+#include <ntl/expand_stack>
 #include <ntl/handle>
 #include <ntl/ioctl>
-#include <ntl/irp>
 #include <ntl/ipc/all>
+#include <ntl/irp>
 #include <ntl/irql>
 #include <ntl/lookaside_list>
 #include <ntl/mdl>
@@ -23,11 +24,12 @@
 #include <ntl/wait>
 #include <ntl/work_item>
 
-#include <memory_resource>
 #include <atomic>
-#include <cstring>
 #include <cstdint>
+#include <cstring>
+#include <exception>
 #include <memory>
+#include <memory_resource>
 #include <numeric>
 #include <string>
 #include <type_traits>
@@ -537,6 +539,61 @@ struct dpc_passive_executor_test_context {
   std::atomic<ntl::irql> passive_irql{ntl::irql::dispatch};
 };
 
+#if NTL_HAS_COROUTINE_SUPPORT
+struct passive_coroutine_test_context {
+  ntl::event completed{ntl::event_type::notification, false};
+  std::atomic<ntl::irql> before_suspend{ntl::irql::passive};
+  std::atomic<ntl::irql> after_resume{ntl::irql::dispatch};
+  std::atomic<NTSTATUS> queue_status{STATUS_UNSUCCESSFUL};
+};
+
+class passive_coroutine_test_task {
+public:
+  struct promise_type {
+    passive_coroutine_test_task get_return_object() noexcept {
+      return passive_coroutine_test_task{
+          std::coroutine_handle<promise_type>::from_promise(*this)};
+    }
+
+    std::suspend_always initial_suspend() const noexcept { return {}; }
+    std::suspend_always final_suspend() const noexcept { return {}; }
+    void return_void() const noexcept {}
+    void unhandled_exception() const noexcept { std::terminate(); }
+  };
+
+  explicit passive_coroutine_test_task(
+      std::coroutine_handle<promise_type> handle) noexcept
+      : handle_(handle) {}
+
+  passive_coroutine_test_task(const passive_coroutine_test_task &) = delete;
+  passive_coroutine_test_task &
+  operator=(const passive_coroutine_test_task &) = delete;
+
+  passive_coroutine_test_task(passive_coroutine_test_task &&other) noexcept
+      : handle_(std::exchange(other.handle_, {})) {}
+
+  ~passive_coroutine_test_task() {
+    if (handle_)
+      handle_.destroy();
+  }
+
+  void resume() const { handle_.resume(); }
+
+private:
+  std::coroutine_handle<promise_type> handle_;
+};
+
+passive_coroutine_test_task
+resume_coroutine_on_passive(passive_coroutine_test_context *context,
+                            ntl::passive_executor executor) {
+  context->before_suspend.store(ntl::current_irql());
+  const ntl::status status = co_await ntl::resume_on_passive(executor);
+  context->queue_status.store(static_cast<NTSTATUS>(status));
+  context->after_resume.store(ntl::current_irql());
+  context->completed.set();
+}
+#endif
+
 struct timer_dpc_test_context {
   ntl::event fired{ntl::event_type::notification, false};
   std::atomic<long> count{0};
@@ -562,8 +619,7 @@ void timer_dpc_test_routine(void *context, void *system_argument1,
 
 void dpc_to_passive_executor_test_routine(void *context, void *,
                                           void *) noexcept {
-  auto *const state =
-      static_cast<dpc_passive_executor_test_context *>(context);
+  auto *const state = static_cast<dpc_passive_executor_test_context *>(context);
   state->dpc_irql.store(ntl::current_irql());
 
   if (!state->executor) {
@@ -642,8 +698,8 @@ bool ntl_expand_stack_test() {
 
 bool ntl_seh_try_except_test() {
   const auto ret = ntl::seh::try_except([]() { raise_seh_test_status(); });
-  return !std::get<0>(ret) &&
-         std::get<1>(ret) == static_cast<unsigned long>(STATUS_ACCESS_VIOLATION);
+  return !std::get<0>(ret) && std::get<1>(ret) == static_cast<unsigned long>(
+                                                      STATUS_ACCESS_VIOLATION);
 }
 
 bool ntl_irql_test() {
@@ -892,15 +948,14 @@ bool ntl_pool_allocator_test() {
     return false;
   ntl::free_pool(raw, "NTLr");
 
-  auto raw_result = ntl::try_allocate_pool(
-      80, ntl::pool_kind::nonpaged, ntl::pool_option::none, "NTRr");
+  auto raw_result = ntl::try_allocate_pool(80, ntl::pool_kind::nonpaged,
+                                           ntl::pool_option::none, "NTRr");
   if (!raw_result || !raw_result.value())
     return false;
   ntl::free_pool(raw_result.value(), "NTRr");
 
-  void *const raw_multichar =
-      ntl::allocate_pool(64, ntl::pool_kind::nonpaged, ntl::pool_option::none,
-                         'mLTN');
+  void *const raw_multichar = ntl::allocate_pool(
+      64, ntl::pool_kind::nonpaged, ntl::pool_option::none, 'mLTN');
   if (!raw_multichar)
     return false;
   ntl::free_pool(raw_multichar, 'mLTN');
@@ -970,8 +1025,8 @@ bool ntl_pool_allocator_test() {
     return false;
 
   using string_tag_allocator =
-      ntl::pool_allocator<int, ntl::pool_kind::nonpaged,
-                          ntl::pool_option::none, ntl::pool_tag("NTLs")>;
+      ntl::pool_allocator<int, ntl::pool_kind::nonpaged, ntl::pool_option::none,
+                          ntl::pool_tag("NTLs")>;
   std::vector<int, string_tag_allocator> string_tag_values;
   string_tag_values.assign({13, 14});
   if (string_tag_values[0] != 13 || string_tag_values[1] != 14)
@@ -992,12 +1047,46 @@ bool ntl_pool_allocator_test() {
   if (std::accumulate(pmr_values.begin(), pmr_values.end(), 0) != 27)
     return false;
 
-  ntl::pmr::pool_resource paged_resource{
-      ntl::pool_kind::paged, ntl::pool_option::none, "NTLp"};
+  ntl::pmr::pool_resource paged_resource{ntl::pool_kind::paged,
+                                         ntl::pool_option::none, "NTLp"};
   std::pmr::vector<int> paged_pmr_values{&paged_resource};
   paged_pmr_values.push_back(11);
   paged_pmr_values.push_back(12);
   return paged_pmr_values[0] == 11 && paged_pmr_values[1] == 12;
+}
+
+bool ntl_pool_irql_policy_test() {
+  if (ntl::maximum_pool_irql(ntl::pool_kind::paged) != APC_LEVEL ||
+      ntl::maximum_pool_irql(ntl::pool_kind::nonpaged) != DISPATCH_LEVEL ||
+      !ntl::require_pool_irql(ntl::pool_kind::paged).is_ok())
+    return false;
+
+  {
+    auto raised_irql = ntl::raise_irql_to_dpc_level();
+
+    if (!ntl::require_pool_irql(ntl::pool_kind::nonpaged).is_ok())
+      return false;
+    if (static_cast<NTSTATUS>(ntl::require_pool_allocator_irql()) !=
+        STATUS_INVALID_DEVICE_STATE)
+      return false;
+    if (static_cast<NTSTATUS>(ntl::require_pool_irql(ntl::pool_kind::paged)) !=
+        STATUS_INVALID_DEVICE_STATE)
+      return false;
+
+    auto paged = ntl::try_allocate_pool(64, ntl::pool_kind::paged,
+                                        ntl::pool_option::none, "NTPi");
+    if (paged ||
+        static_cast<NTSTATUS>(paged.status()) != STATUS_INVALID_DEVICE_STATE)
+      return false;
+
+    void *const resident = ntl::allocate_pool(64, ntl::pool_kind::nonpaged,
+                                              ntl::pool_option::none, "NTNi");
+    if (!resident)
+      return false;
+    ntl::free_pool(resident, ntl::pool_kind::nonpaged, "NTNi");
+  }
+
+  return true;
 }
 
 bool ntl_lookaside_list_test() {
@@ -1094,8 +1183,8 @@ bool ntl_result_test() {
     return false;
   buffer_result->reset();
 
-  auto raw_result = ntl::try_allocate_pool(
-      24, ntl::pool_kind::nonpaged, ntl::pool_option::none, "NTRr");
+  auto raw_result = ntl::try_allocate_pool(24, ntl::pool_kind::nonpaged,
+                                           ntl::pool_option::none, "NTRr");
   if (!raw_result || !raw_result.value())
     return false;
   ntl::free_pool(raw_result.value(), "NTRr");
@@ -1103,19 +1192,16 @@ bool ntl_result_test() {
   const auto object_count_before = g_pool_test_object_count;
   auto object_result = ntl::try_make_pool<pool_test_object>(
       ntl::pool_kind::nonpaged, ntl::pool_option::none, "NTRo", 23);
-  if (!object_result || !object_result->get() ||
-      (*object_result)->value != 23)
+  if (!object_result || !object_result->get() || (*object_result)->value != 23)
     return false;
   object_result->reset();
   if (g_pool_test_object_count != object_count_before)
     return false;
 
-  auto failure =
-      ntl::result<int>::failure(STATUS_OBJECT_NAME_NOT_FOUND);
+  auto failure = ntl::result<int>::failure(STATUS_OBJECT_NAME_NOT_FOUND);
   if (failure || failure.has_value() || failure.value_or(7) != 7)
     return false;
-  if (static_cast<NTSTATUS>(failure.status()) !=
-      STATUS_OBJECT_NAME_NOT_FOUND)
+  if (static_cast<NTSTATUS>(failure.status()) != STATUS_OBJECT_NAME_NOT_FOUND)
     return false;
 
   bool caught_value_exception = false;
@@ -1123,8 +1209,7 @@ bool ntl_result_test() {
     (void)failure.value();
   } catch (const ntl::exception &e) {
     caught_value_exception =
-        static_cast<NTSTATUS>(e.get_status()) ==
-        STATUS_OBJECT_NAME_NOT_FOUND;
+        static_cast<NTSTATUS>(e.get_status()) == STATUS_OBJECT_NAME_NOT_FOUND;
   }
   if (!caught_value_exception)
     return false;
@@ -1141,8 +1226,7 @@ bool ntl_result_test() {
     return false;
   void_success.value();
 
-  ntl::result<void> void_failure =
-      ntl::unexpected(STATUS_ACCESS_DENIED);
+  ntl::result<void> void_failure = ntl::unexpected(STATUS_ACCESS_DENIED);
   if (void_failure || void_failure.has_value())
     return false;
   if (static_cast<NTSTATUS>(void_failure.status()) != STATUS_ACCESS_DENIED)
@@ -1177,8 +1261,7 @@ bool ntl_irp_device_control_helpers_test() {
     return false;
 
   request.set_result(STATUS_BUFFER_TOO_SMALL, 4);
-  if (request.status() != STATUS_BUFFER_TOO_SMALL ||
-      request.information() != 4)
+  if (request.status() != STATUS_BUFFER_TOO_SMALL || request.information() != 4)
     return false;
 
   const device_control_helper_payload input{0x12345678};
@@ -1190,7 +1273,8 @@ bool ntl_irp_device_control_helpers_test() {
     return false;
 
   ntl::device_control::in_buffer short_in(&input, sizeof(input) - 1);
-  if (short_in.can_read(sizeof(input)) || short_in.as<device_control_helper_payload>())
+  if (short_in.can_read(sizeof(input)) ||
+      short_in.as<device_control_helper_payload>())
     return false;
 
   alignas(device_control_helper_payload) unsigned char output[sizeof(input)]{};
@@ -1199,8 +1283,8 @@ bool ntl_irp_device_control_helpers_test() {
   if (!out.can_write(sizeof(reply)) || !out.write(reply) ||
       out.size != sizeof(reply))
     return false;
-  const auto *written = reinterpret_cast<const device_control_helper_payload *>(
-      output);
+  const auto *written =
+      reinterpret_cast<const device_control_helper_payload *>(output);
   if (written->value != reply.value)
     return false;
   auto *typed_output = out.as<device_control_helper_payload>();
@@ -1257,10 +1341,8 @@ bool ntl_ioctl_test() {
 
   const auto code = ntl_test_ioctl::control_code();
   if (!ntl::is_ioctl<ntl_test_ioctl>(code) ||
-      ntl::is_ioctl<ntl_test_ioctl>(
-          ntl::device_control::code{CTL_CODE(FILE_DEVICE_UNKNOWN, 0x811,
-                                             METHOD_BUFFERED,
-                                             FILE_READ_DATA)}))
+      ntl::is_ioctl<ntl_test_ioctl>(ntl::device_control::code{CTL_CODE(
+          FILE_DEVICE_UNKNOWN, 0x811, METHOD_BUFFERED, FILE_READ_DATA)}))
     return false;
 
   const ioctl_test_input input{0x1234};
@@ -1357,9 +1439,8 @@ bool ntl_device_control_pipeline_test() {
   ntl::device_control::in_buffer in(&input, sizeof(input));
   ntl::device_control::out_buffer out(&output, sizeof(output));
 
-  auto status =
-      dispatch.handle(ntl_pipeline_ioctl::control_code(), in, out,
-                      reinterpret_cast<void *>(0x1000));
+  auto status = dispatch.handle(ntl_pipeline_ioctl::control_code(), in, out,
+                                reinterpret_cast<void *>(0x1000));
   if (status != STATUS_SUCCESS || out.size != sizeof(output) ||
       output.value != input.value + 1 ||
       output.checksum != (input.value ^ 0xa5a5a5a5u) ||
@@ -1379,17 +1460,15 @@ bool ntl_device_control_pipeline_test() {
   ntl::device_control::in_buffer short_in(&input, sizeof(input) - 1);
   ntl::device_control::out_buffer short_input_out(&output, sizeof(output));
   status = dispatch.handle(ntl_pipeline_ioctl::control_code(), short_in,
-                           short_input_out,
-                           reinterpret_cast<void *>(0x1002));
+                           short_input_out, reinterpret_cast<void *>(0x1002));
   if (status != STATUS_INVALID_PARAMETER || short_input_out.size != 0 ||
       dispatch.handled_count != 1)
     return false;
 
   unsigned char small_output[sizeof(ioctl_pipeline_output) - 1]{};
-  ntl::device_control::out_buffer small_out(small_output,
-                                            sizeof(small_output));
-  status = dispatch.handle(ntl_pipeline_ioctl::control_code(), in,
-                           small_out, reinterpret_cast<void *>(0x1003));
+  ntl::device_control::out_buffer small_out(small_output, sizeof(small_output));
+  status = dispatch.handle(ntl_pipeline_ioctl::control_code(), in, small_out,
+                           reinterpret_cast<void *>(0x1003));
   if (status != STATUS_BUFFER_TOO_SMALL || small_out.size != 0 ||
       dispatch.handled_count != 1)
     return false;
@@ -1397,8 +1476,7 @@ bool ntl_device_control_pipeline_test() {
   dispatch.begin_teardown();
 
   ntl::device_control::out_buffer teardown_out(&output, sizeof(output));
-  status = dispatch.handle(ntl_pipeline_ioctl::control_code(), in,
-                           teardown_out,
+  status = dispatch.handle(ntl_pipeline_ioctl::control_code(), in, teardown_out,
                            reinterpret_cast<void *>(0x1004));
   return status == STATUS_DELETE_PENDING && teardown_out.size == 0 &&
          dispatch.handled_count == 1;
@@ -1437,9 +1515,8 @@ bool ntl_mdl_test() {
 
   ntl::mdl empty;
   auto invalid_address = empty.system_address();
-  return !invalid_address &&
-         static_cast<NTSTATUS>(invalid_address.status()) ==
-             STATUS_INVALID_PARAMETER;
+  return !invalid_address && static_cast<NTSTATUS>(invalid_address.status()) ==
+                                 STATUS_INVALID_PARAMETER;
 }
 
 bool ntl_remove_lock_test() {
@@ -1471,8 +1548,7 @@ bool ntl_remove_lock_test() {
 
   auto after_remove = lock.acquire(reinterpret_cast<void *>(4));
   return !after_remove &&
-         static_cast<NTSTATUS>(after_remove.status()) ==
-             STATUS_DELETE_PENDING;
+         static_cast<NTSTATUS>(after_remove.status()) == STATUS_DELETE_PENDING;
 }
 
 bool ntl_device_interface_test() {
@@ -1545,8 +1621,7 @@ bool ntl_registry_test() {
   auto created =
       ntl::registry_key::create(key_path, KEY_READ | KEY_WRITE | DELETE,
                                 REG_OPTION_VOLATILE, &disposition);
-  if (!created ||
-      disposition != ntl::registry_disposition::created_new_key)
+  if (!created || disposition != ntl::registry_disposition::created_new_key)
     return false;
 
   ntl::registry_key key(std::move(*created));
@@ -1588,9 +1663,8 @@ bool ntl_registry_test() {
   if (!raw_name || raw_name->type != REG_SZ || raw_name->data.empty())
     return false;
 
-  auto parameters = ntl::registry_key::create(parameters_path,
-                                             KEY_READ | KEY_WRITE | DELETE,
-                                             REG_OPTION_VOLATILE);
+  auto parameters = ntl::registry_key::create(
+      parameters_path, KEY_READ | KEY_WRITE | DELETE, REG_OPTION_VOLATILE);
   if (!parameters)
     return false;
   if (!parameters->set_dword(L"Enabled", 1).is_ok())
@@ -1627,9 +1701,8 @@ bool ntl_registry_test() {
   if (!key.delete_value(L"Flags").is_ok())
     return false;
   auto missing_value = key.query_dword(L"Flags");
-  if (missing_value ||
-      static_cast<NTSTATUS>(missing_value.status()) !=
-          STATUS_OBJECT_NAME_NOT_FOUND)
+  if (missing_value || static_cast<NTSTATUS>(missing_value.status()) !=
+                           STATUS_OBJECT_NAME_NOT_FOUND)
     return false;
 
   ntl::registry_key moved(std::move(key));
@@ -1653,15 +1726,13 @@ bool ntl_registry_test() {
     return false;
 
   auto missing_key = ntl::registry_key::open(key_path, KEY_READ);
-  return !missing_key &&
-         static_cast<NTSTATUS>(missing_key.status()) ==
-             STATUS_OBJECT_NAME_NOT_FOUND;
+  return !missing_key && static_cast<NTSTATUS>(missing_key.status()) ==
+                             STATUS_OBJECT_NAME_NOT_FOUND;
 }
 
 bool ntl_symbolic_link_test() {
   const std::wstring link_name = L"\\DosDevices\\CrtSysNtlSymbolicLinkTest";
-  const std::wstring target_name =
-      L"\\Device\\CrtSysNtlSymbolicLinkTarget";
+  const std::wstring target_name = L"\\Device\\CrtSysNtlSymbolicLinkTarget";
 
   if (ntl::dos_device_name(L"CrtSysNtlSymbolicLinkTest") != link_name ||
       ntl::device_target_name(L"CrtSysNtlSymbolicLinkTarget") != target_name)
@@ -1671,8 +1742,7 @@ bool ntl_symbolic_link_test() {
 
   {
     ntl::symbolic_link link(link_name, target_name);
-    if (!link || link.name() != link_name ||
-        link.target_name() != target_name)
+    if (!link || link.name() != link_name || link.target_name() != target_name)
       return false;
 
     ntl::symbolic_link moved(std::move(link));
@@ -1796,8 +1866,7 @@ bool ntl_timer_dpc_test() {
     return false;
 
   LARGE_INTEGER zero_timeout{};
-  if (static_cast<NTSTATUS>(cancel_timer.wait(&zero_timeout)) !=
-      STATUS_TIMEOUT)
+  if (static_cast<NTSTATUS>(cancel_timer.wait(&zero_timeout)) != STATUS_TIMEOUT)
     return false;
 
   return !cancel_timer.signaled();
@@ -1805,8 +1874,8 @@ bool ntl_timer_dpc_test() {
 
 bool ntl_system_thread_test() {
   system_thread_test_context context;
-  auto created = ntl::system_thread::create(system_thread_test_routine,
-                                            &context);
+  auto created =
+      ntl::system_thread::create(system_thread_test_routine, &context);
   if (!created || !created->get())
     return false;
 
@@ -1819,8 +1888,8 @@ bool ntl_system_thread_test() {
     return false;
 
   system_thread_test_context moved_context;
-  auto moved_created = ntl::system_thread::create(system_thread_test_routine,
-                                                  &moved_context);
+  auto moved_created =
+      ntl::system_thread::create(system_thread_test_routine, &moved_context);
   if (!moved_created || !moved_created->get())
     return false;
 
@@ -1860,8 +1929,8 @@ bool ntl_wait_helpers_test() {
     return false;
 
   system_thread_test_context thread_context;
-  auto created = ntl::system_thread::create(system_thread_test_routine,
-                                            &thread_context);
+  auto created =
+      ntl::system_thread::create(system_thread_test_routine, &thread_context);
   if (!created || !created->get())
     return false;
 
@@ -1920,21 +1989,25 @@ bool ntl_passive_executor_test() {
   ntl::passive_executor executor{DelayedWorkQueue, "NTLe"};
 
   passive_executor_test_context inline_context;
-  if (!executor.execute([&] {
-        inline_context.observed_irql.store(ntl::current_irql());
-        inline_context.value.store(11);
-      }).is_ok())
+  if (!executor
+           .execute([&] {
+             inline_context.observed_irql.store(ntl::current_irql());
+             inline_context.value.store(11);
+           })
+           .is_ok())
     return false;
   if (inline_context.value.load() != 11 ||
       inline_context.observed_irql.load() != ntl::irql::passive)
     return false;
 
   passive_executor_test_context posted_context;
-  if (!executor.post([state = &posted_context] {
-        state->observed_irql.store(ntl::current_irql());
-        state->value.store(12);
-        state->completed.set();
-      }).is_ok())
+  if (!executor
+           .post([state = &posted_context] {
+             state->observed_irql.store(ntl::current_irql());
+             state->value.store(12);
+             state->completed.set();
+           })
+           .is_ok())
     return false;
   auto timeout = ntl::relative_due_time_ms(5000);
   if (!posted_context.completed.wait(&timeout).is_ok())
@@ -1969,8 +2042,7 @@ bool ntl_passive_executor_test() {
   timeout = ntl::relative_due_time_ms(5000);
   if (!dpc_context.dpc_completed.wait(&timeout).is_ok())
     return false;
-  if (static_cast<NTSTATUS>(dpc_context.post_status.load()) !=
-      STATUS_SUCCESS)
+  if (static_cast<NTSTATUS>(dpc_context.post_status.load()) != STATUS_SUCCESS)
     return false;
   timeout = ntl::relative_due_time_ms(5000);
   if (!dpc_context.passive_completed.wait(&timeout).is_ok())
@@ -1989,6 +2061,29 @@ bool ntl_passive_executor_test() {
     return false;
 
   return owned_value.load() == 14;
+}
+
+bool ntl_passive_coroutine_test() {
+#if NTL_HAS_COROUTINE_SUPPORT
+  passive_coroutine_test_context context;
+  ntl::passive_executor executor{DelayedWorkQueue, "NTLc"};
+  auto task = resume_coroutine_on_passive(&context, executor);
+
+  {
+    auto raised_irql = ntl::raise_irql_to_dpc_level();
+    task.resume();
+    if (context.before_suspend.load() != ntl::irql::dispatch)
+      return false;
+  }
+
+  if (!context.completed.wait().is_ok())
+    return false;
+
+  return context.queue_status.load() == STATUS_SUCCESS &&
+         context.after_resume.load() == ntl::irql::passive;
+#else
+  return true;
+#endif
 }
 
 //
@@ -2063,9 +2158,9 @@ TEST(ntl_test, ntl_irql_test) {
     EXPECT_FALSE(ntl::is_irql_at_most(ntl::irql::passive));
     EXPECT_EQ(static_cast<NTSTATUS>(ntl::require_passive_level()),
               STATUS_INVALID_DEVICE_STATE);
-    EXPECT_EQ(static_cast<NTSTATUS>(
-                  ntl::require_irql_at_most(ntl::irql::passive)),
-              STATUS_INVALID_DEVICE_STATE);
+    EXPECT_EQ(
+        static_cast<NTSTATUS>(ntl::require_irql_at_most(ntl::irql::passive)),
+        STATUS_INVALID_DEVICE_STATE);
     EXPECT_TRUE(ntl::require_irql_at_most(ntl::irql::apc).is_ok());
   }
   EXPECT_EQ(ntl::current_irql(), old_irql);
@@ -2204,17 +2299,13 @@ TEST(ntl_test, ntl_lookaside_list_test) {
   EXPECT_TRUE(ntl_lookaside_list_test());
 }
 
-TEST(ntl_test, ntl_result_test) {
-  EXPECT_TRUE(ntl_result_test());
-}
+TEST(ntl_test, ntl_result_test) { EXPECT_TRUE(ntl_result_test()); }
 
 TEST(ntl_test, ntl_irp_device_control_helpers_test) {
   EXPECT_TRUE(ntl_irp_device_control_helpers_test());
 }
 
-TEST(ntl_test, ntl_ioctl_test) {
-  EXPECT_TRUE(ntl_ioctl_test());
-}
+TEST(ntl_test, ntl_ioctl_test) { EXPECT_TRUE(ntl_ioctl_test()); }
 
 TEST(ntl_test, ntl_mdl_test) {
   EXPECT_TRUE(ntl_mdl_test());
@@ -2244,33 +2335,23 @@ TEST(ntl_test, ntl_handle_object_test) {
   EXPECT_TRUE(ntl_handle_object_test());
 }
 
-TEST(ntl_test, ntl_registry_test) {
-  EXPECT_TRUE(ntl_registry_test());
-}
+TEST(ntl_test, ntl_registry_test) { EXPECT_TRUE(ntl_registry_test()); }
 
 TEST(ntl_test, ntl_symbolic_link_test) {
   EXPECT_TRUE(ntl_symbolic_link_test());
 }
 
-TEST(ntl_test, ntl_event_test) {
-  EXPECT_TRUE(ntl_event_test());
-}
+TEST(ntl_test, ntl_event_test) { EXPECT_TRUE(ntl_event_test()); }
 
-TEST(ntl_test, ntl_timer_dpc_test) {
-  EXPECT_TRUE(ntl_timer_dpc_test());
-}
+TEST(ntl_test, ntl_timer_dpc_test) { EXPECT_TRUE(ntl_timer_dpc_test()); }
 
 TEST(ntl_test, ntl_system_thread_test) {
   EXPECT_TRUE(ntl_system_thread_test());
 }
 
-TEST(ntl_test, ntl_wait_helpers_test) {
-  EXPECT_TRUE(ntl_wait_helpers_test());
-}
+TEST(ntl_test, ntl_wait_helpers_test) { EXPECT_TRUE(ntl_wait_helpers_test()); }
 
-TEST(ntl_test, ntl_work_item_test) {
-  EXPECT_TRUE(ntl_work_item_test());
-}
+TEST(ntl_test, ntl_work_item_test) { EXPECT_TRUE(ntl_work_item_test()); }
 
 TEST(ntl_test, ntl_passive_executor_test) {
   EXPECT_TRUE(ntl_passive_executor_test());

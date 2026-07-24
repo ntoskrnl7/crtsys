@@ -30,6 +30,8 @@
     <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\fiopen.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\fiopen.cpp" />
     <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\filesystem.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\filesystem.cpp">
       <PreprocessorDefinitions>_WIN32_WINNT=0x0A00;NTDDI_VERSION=0x0A000002;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ForcedIncludeFiles>$(MSBuildThisFileDirectory)custom\misc\filesystem_irql_guard.h;%(ForcedIncludeFiles)</ForcedIncludeFiles>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
     </ClCompile>
     <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\format.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\format.cpp" />
     <ClCompile Condition="exists('$(VC_CRT_SourcePath.Split(%3B)[0])\stl\print.cpp')" Include="$(VC_CRT_SourcePath.Split(%3B)[0])\stl\print.cpp" />

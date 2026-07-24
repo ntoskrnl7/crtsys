@@ -1,0 +1,97 @@
+/**
+ * @file coroutine
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Kernel coroutine execution-context helpers.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "passive_executor"
+#include "status"
+
+#if ((defined(_MSVC_LANG) && _MSVC_LANG >= 202002L) ||                         \
+     (!defined(_MSVC_LANG) && __cplusplus >= 202002L)) &&                      \
+    __has_include(<coroutine>)
+#define NTL_HAS_COROUTINE_SUPPORT 1
+#include <coroutine>
+#else
+#define NTL_HAS_COROUTINE_SUPPORT 0
+#endif
+
+namespace ntl {
+
+#if NTL_HAS_COROUTINE_SUPPORT
+/**
+ * @brief Awaiter that resumes a suspended coroutine at PASSIVE_LEVEL.
+ *
+ * The coroutine continues inline when it is already at PASSIVE_LEVEL.
+ * Otherwise its continuation is posted through ntl::passive_executor.
+ * The coroutine frame must remain alive until the continuation runs.
+ */
+class resume_on_passive_awaiter {
+public:
+  /**
+   * @brief Captures the executor policy used for deferred resumption.
+   */
+  explicit resume_on_passive_awaiter(
+      const ntl::passive_executor &executor) noexcept
+      : executor_(executor) {}
+
+  /**
+   * @brief Avoids suspension when the current context is already passive.
+   */
+  bool await_ready() noexcept {
+    if (!ntl::is_passive_level())
+      return false;
+
+    status_ = ntl::status{STATUS_SUCCESS};
+    return true;
+  }
+
+  /**
+   * @brief Posts the coroutine continuation to a passive system worker.
+   * @return true when the coroutine was suspended and queued.
+   */
+  bool await_suspend(std::coroutine_handle<> continuation) noexcept {
+    status_ = executor_.post([continuation]() noexcept {
+#if DBG
+      if (!ntl::is_passive_level()) {
+        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_WARNING_LEVEL,
+                   "[ntl] passive coroutine resumed at IRQL %lu.\n",
+                   static_cast<unsigned long>(KeGetCurrentIrql()));
+      }
+#endif
+      continuation.resume();
+    });
+    return status_.is_ok();
+  }
+
+  /**
+   * @brief Returns the queue result after the coroutine resumes.
+   */
+  ntl::status await_resume() const noexcept { return status_; }
+
+private:
+  ntl::passive_executor executor_;
+  ntl::status status_{STATUS_PENDING};
+};
+
+/**
+ * @brief Creates an awaiter that continues the current coroutine at
+ * PASSIVE_LEVEL.
+ */
+inline resume_on_passive_awaiter
+resume_on_passive(const ntl::passive_executor &executor) noexcept {
+  return resume_on_passive_awaiter{executor};
+}
+
+/**
+ * @brief Uses a default delayed work-queue executor for passive resumption.
+ */
+inline resume_on_passive_awaiter resume_on_passive() noexcept {
+  return resume_on_passive_awaiter{ntl::passive_executor{}};
+}
+#endif
+
+} // namespace ntl

@@ -30,7 +30,7 @@ if (!buffer) {
   return STATUS_INSUFFICIENT_RESOURCES;
 }
 
-ntl::free_pool(buffer, "BUF1");
+ntl::free_pool(buffer, ntl::pool_kind::nonpaged, "BUF1");
 ```
 
 Raw nonpaged allocation with `NTSTATUS` propagation:
@@ -44,7 +44,7 @@ if (!buffer) {
   return buffer.status();
 }
 
-ntl::free_pool(buffer.value(), "BUF2");
+ntl::free_pool(buffer.value(), ntl::pool_kind::nonpaged, "BUF2");
 ```
 
 Raw nonpaged allocation with RAII cleanup:
@@ -188,6 +188,10 @@ if (!r) {
 ntl::free_pool(r.value(), "BUF3");
 ```
 
+The short `free_pool(pointer, tag)` form denotes nonpaged pool. When the
+allocation kind is selected dynamically, pass that same kind to
+`free_pool(pointer, kind, tag)` so NTL can validate the correct release IRQL.
+
 For allocator template arguments, C++14-compatible code cannot pass `"BUF2"` as
 a non-type template parameter. Use `ntl::pool_tag("BUF2")` or the traditional
 WDK reversed multi-character literal:
@@ -208,13 +212,25 @@ already uses reversed tags.
 
 Raw pool allocation follows the underlying WDK primitive:
 
-- Nonpaged pool allocation/free can follow the WDK nonpaged pool contract.
-- Paged pool allocation must only happen where pageable allocation is legal.
+- Nonpaged pool allocation/free is valid through `DISPATCH_LEVEL`.
+- Paged pool allocation/free is valid through `APC_LEVEL`.
+- `ntl::maximum_pool_irql()`, `ntl::is_pool_irql_valid()`, and
+  `ntl::require_pool_irql()` expose that native pool-kind contract.
 
 STL and PMR usage is more restrictive. A container operation can allocate,
 destroy elements, compare values, move objects, throw, or call user code.
-Treat STL containers using `ntl::pool_allocator` as `PASSIVE_LEVEL` unless the
-exact operation, element type, callbacks, and surrounding storage are audited.
+NTL therefore documents `pool_allocator` and `pmr::pool_resource` operations as
+`PASSIVE_LEVEL`. `ntl::is_pool_allocator_irql_valid()` and
+`ntl::require_pool_allocator_irql()` expose that contract, and Debug builds
+print a warning when the allocator or PMR allocation hooks are reached above
+`PASSIVE_LEVEL`.
+
+That diagnostic is intentionally not a claim that every illegal use can be
+detected. If a vector already has spare capacity, `push_back()` may not call its
+allocator at all. It can still touch paged storage, construct or move an
+element, invoke user code, or throw. A nonpaged allocator only controls where
+the container's allocation lives; it does not make an arbitrary STL object or
+operation safe at `DISPATCH_LEVEL`.
 
 Avoid these patterns:
 
@@ -237,6 +253,11 @@ packets.reserve(64);
 // Later, use preallocated resident storage in a separately audited hot path.
 ```
 
+The later operation is valid only when the container storage and every object
+it touches are resident and the exact operation performs no allocation,
+deallocation, wait, exception, or unaudited callback. Creating a container at
+one IRQL does not grant permission to mutate it at another IRQL.
+
 ## API Summary
 
 - `ntl::pool_tag("TAGx")`
@@ -249,8 +270,15 @@ packets.reserve(64);
 - `ntl::try_allocate_pool(bytes, kind, options, "TAGx")`
 - `ntl::try_allocate_pool(bytes, kind, "TAGx")`
 - `ntl::try_allocate_pool(bytes, "TAGx")`
+- `ntl::maximum_pool_irql(kind)`
+- `ntl::is_pool_irql_valid(kind)`
+- `ntl::require_pool_irql(kind)`
+- `ntl::is_pool_allocator_irql_valid()`
+- `ntl::require_pool_allocator_irql()`
 - `ntl::free_pool(pointer, tag)`
 - `ntl::free_pool(pointer, "TAGx")`
+- `ntl::free_pool(pointer, kind, tag)`
+- `ntl::free_pool(pointer, kind, "TAGx")`
 - `ntl::pool_deleter<T>`
 - `ntl::pool_ptr<T>`
 - `ntl::pool_buffer`
@@ -290,3 +318,5 @@ The driver test suite exercises:
 - `std::vector` with nonpaged and paged pool allocators
 - template tags via both `ntl::pool_tag("TAGx")` and `'xGAT'`
 - `std::pmr::vector` with `ntl::pmr::pool_resource`
+- native paged/nonpaged IRQL policy at raised `DISPATCH_LEVEL`
+- the explicit PASSIVE_LEVEL allocator-policy status at raised IRQL

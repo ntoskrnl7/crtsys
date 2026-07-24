@@ -32,6 +32,51 @@ enum class pool_kind {
   nonpaged_execute,
 };
 
+/**
+ * @brief Returns the highest IRQL allowed by the native pool kind.
+ */
+inline KIRQL maximum_pool_irql(pool_kind kind) noexcept {
+  return kind == pool_kind::paged ? APC_LEVEL : DISPATCH_LEVEL;
+}
+
+/**
+ * @brief Returns whether raw allocation or release is legal at the current
+ * IRQL for the selected pool kind.
+ */
+inline bool is_pool_irql_valid(pool_kind kind) noexcept {
+  return KeGetCurrentIrql() <= maximum_pool_irql(kind);
+}
+
+/**
+ * @brief Validates the native WDK IRQL contract for a pool kind.
+ */
+inline ntl::status require_pool_irql(pool_kind kind) noexcept {
+  return is_pool_irql_valid(kind) ? ntl::status{STATUS_SUCCESS}
+                                  : ntl::status{STATUS_INVALID_DEVICE_STATE};
+}
+
+/**
+ * @brief Returns whether an STL or PMR pool operation is in its supported
+ * execution context.
+ *
+ * Raw WDK pool allocation has a wider native IRQL contract. Generic STL and
+ * PMR operations remain PASSIVE_LEVEL-only because they may also construct,
+ * destroy, move, compare, invoke user code, or throw.
+ */
+inline bool is_pool_allocator_irql_valid() noexcept {
+  return KeGetCurrentIrql() == PASSIVE_LEVEL;
+}
+
+/**
+ * @brief Validates the PASSIVE_LEVEL contract of STL and PMR pool
+ * operations.
+ */
+inline ntl::status require_pool_allocator_irql() noexcept {
+  return is_pool_allocator_irql_valid()
+             ? ntl::status{STATUS_SUCCESS}
+             : ntl::status{STATUS_INVALID_DEVICE_STATE};
+}
+
 enum class pool_option : unsigned long long {
   /// No additional allocation option.
   none = 0,
@@ -121,7 +166,7 @@ inline constexpr ULONG default_pool_tag = pool_tag("NTLp");
 
 namespace detail {
 
-#if defined(POOL_FLAG_NON_PAGED) && defined(NTDDI_VERSION) &&                 \
+#if defined(POOL_FLAG_NON_PAGED) && defined(NTDDI_VERSION) &&                  \
     defined(NTDDI_WIN10_VB) && (NTDDI_VERSION >= NTDDI_WIN10_VB)
 #define NTL_HAS_EX_ALLOCATE_POOL2 1
 #else
@@ -136,6 +181,35 @@ inline constexpr bool pool_uses_ex_allocate_pool2 = false;
 
 inline bool pool_alignment_supported(std::size_t alignment) noexcept {
   return alignment <= MEMORY_ALLOCATION_ALIGNMENT;
+}
+
+inline bool validate_raw_pool_irql(pool_kind kind,
+                                   const char *operation) noexcept {
+  if (ntl::is_pool_irql_valid(kind))
+    return true;
+
+#if DBG
+  DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_WARNING_LEVEL,
+             "[ntl] %s rejected at IRQL %lu for %s pool.\n", operation,
+             static_cast<unsigned long>(KeGetCurrentIrql()),
+             kind == pool_kind::paged ? "paged" : "nonpaged");
+#else
+  UNREFERENCED_PARAMETER(operation);
+#endif
+  return false;
+}
+
+inline void diagnose_stl_pool_irql(const char *operation) noexcept {
+  if (ntl::is_pool_allocator_irql_valid())
+    return;
+
+#if DBG
+  DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_WARNING_LEVEL,
+             "[ntl] %s requires PASSIVE_LEVEL (current IRQL=%lu).\n", operation,
+             static_cast<unsigned long>(KeGetCurrentIrql()));
+#else
+  UNREFERENCED_PARAMETER(operation);
+#endif
 }
 
 #if NTL_HAS_EX_ALLOCATE_POOL2
@@ -202,8 +276,8 @@ inline bool to_legacy_pool_type(pool_kind kind, pool_option options,
 
 #if defined(POOL_RAISE_IF_ALLOCATION_FAILURE)
   if (has_pool_option(options, pool_option::raise_on_failure)) {
-    pool_type = static_cast<POOL_TYPE>(pool_type |
-                                       POOL_RAISE_IF_ALLOCATION_FAILURE);
+    pool_type =
+        static_cast<POOL_TYPE>(pool_type | POOL_RAISE_IF_ALLOCATION_FAILURE);
   }
 #else
   if (has_pool_option(options, pool_option::raise_on_failure)) {
@@ -218,7 +292,8 @@ inline bool to_legacy_pool_type(pool_kind kind, pool_option options,
 inline void *allocate_pool_bytes(std::size_t bytes, std::size_t alignment,
                                  pool_kind kind, pool_option options,
                                  ULONG tag) noexcept {
-  if (!pool_alignment_supported(alignment)) {
+  if (!validate_raw_pool_irql(kind, "raw pool allocation") ||
+      !pool_alignment_supported(alignment)) {
     return nullptr;
   }
 
@@ -243,10 +318,12 @@ inline void *allocate_pool_bytes(std::size_t bytes, std::size_t alignment,
 #endif
 }
 
-inline void free_pool_bytes(void *pointer, ULONG tag) noexcept {
+inline void free_pool_bytes(void *pointer, pool_kind kind, ULONG tag) noexcept {
   if (!pointer) {
     return;
   }
+  if (!validate_raw_pool_irql(kind, "raw pool release"))
+    return;
 
 #if NTL_HAS_EX_ALLOCATE_POOL2
   ExFreePool2(pointer, tag, nullptr, 0);
@@ -281,6 +358,10 @@ inline void *allocate_pool(std::size_t bytes,
 try_allocate_pool(std::size_t bytes, pool_kind kind = pool_kind::nonpaged,
                   pool_option options = pool_option::none,
                   ULONG tag = default_pool_tag) noexcept {
+  const auto irql_status = ntl::require_pool_irql(kind);
+  if (!irql_status.is_ok())
+    return ntl::unexpected(static_cast<NTSTATUS>(irql_status));
+
   void *const storage = allocate_pool(bytes, kind, options, tag);
   if (!storage)
     return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
@@ -293,13 +374,13 @@ try_allocate_pool(std::size_t bytes, pool_kind kind = pool_kind::nonpaged,
  */
 template <std::size_t N>
 inline void *allocate_pool(std::size_t bytes, pool_kind kind,
-                           pool_option options,
-                           const char (&tag)[N]) noexcept {
+                           pool_option options, const char (&tag)[N]) noexcept {
   return allocate_pool(bytes, kind, options, pool_tag(tag));
 }
 
 /**
- * @brief Allocates raw bytes from kernel pool using a string-literal tag and result.
+ * @brief Allocates raw bytes from kernel pool using a string-literal tag and
+ * result.
  */
 template <std::size_t N>
 [[nodiscard]] inline ntl::result<void *>
@@ -331,18 +412,18 @@ try_allocate_pool(std::size_t bytes, pool_kind kind,
  * @brief Allocates raw bytes from nonpaged pool using a string-literal tag.
  */
 template <std::size_t N>
-inline void *allocate_pool(std::size_t bytes,
-                           const char (&tag)[N]) noexcept {
+inline void *allocate_pool(std::size_t bytes, const char (&tag)[N]) noexcept {
   return allocate_pool(bytes, pool_kind::nonpaged, pool_option::none,
                        pool_tag(tag));
 }
 
 /**
- * @brief Allocates raw bytes from nonpaged pool using a string-literal tag and result.
+ * @brief Allocates raw bytes from nonpaged pool using a string-literal tag and
+ * result.
  */
 template <std::size_t N>
-[[nodiscard]] inline ntl::result<void *> try_allocate_pool(
-    std::size_t bytes, const char (&tag)[N]) noexcept {
+[[nodiscard]] inline ntl::result<void *>
+try_allocate_pool(std::size_t bytes, const char (&tag)[N]) noexcept {
   return try_allocate_pool(bytes, pool_kind::nonpaged, pool_option::none,
                            pool_tag(tag));
 }
@@ -351,7 +432,15 @@ template <std::size_t N>
  * @brief Frees raw bytes allocated by allocate_pool.
  */
 inline void free_pool(void *pointer, ULONG tag = default_pool_tag) noexcept {
-  detail::free_pool_bytes(pointer, tag);
+  detail::free_pool_bytes(pointer, pool_kind::nonpaged, tag);
+}
+
+/**
+ * @brief Frees raw bytes while validating the selected pool kind's IRQL.
+ */
+inline void free_pool(void *pointer, pool_kind kind,
+                      ULONG tag = default_pool_tag) noexcept {
+  detail::free_pool_bytes(pointer, kind, tag);
 }
 
 /**
@@ -363,6 +452,16 @@ inline void free_pool(void *pointer, const char (&tag)[N]) noexcept {
 }
 
 /**
+ * @brief Frees raw bytes using an explicit pool kind and string-literal
+ * tag.
+ */
+template <std::size_t N>
+inline void free_pool(void *pointer, pool_kind kind,
+                      const char (&tag)[N]) noexcept {
+  free_pool(pointer, kind, pool_tag(tag));
+}
+
+/**
  * @brief Deleter for pool_ptr and pool_buffer.
  * @tparam T Object type stored in pool.
  */
@@ -371,13 +470,17 @@ public:
   /**
    * @brief Creates a deleter that frees with a native pool tag.
    */
-  constexpr pool_deleter(ULONG tag = default_pool_tag) noexcept : tag_(tag) {}
+  constexpr pool_deleter(ULONG tag = default_pool_tag,
+                         pool_kind kind = pool_kind::nonpaged) noexcept
+      : tag_(tag), kind_(kind) {}
 
   /**
    * @brief Creates a deleter that frees with a string-literal tag.
    */
   template <std::size_t N>
-  constexpr pool_deleter(const char (&tag)[N]) noexcept : tag_(pool_tag(tag)) {}
+  constexpr pool_deleter(const char (&tag)[N],
+                         pool_kind kind = pool_kind::nonpaged) noexcept
+      : tag_(pool_tag(tag)), kind_(kind) {}
 
   /**
    * @brief Destroys the object and frees its pool allocation.
@@ -386,18 +489,25 @@ public:
     if (!pointer) {
       return;
     }
+    if (!detail::validate_raw_pool_irql(kind_, "pool object destruction"))
+      return;
 
     pointer->~T();
-    detail::free_pool_bytes(pointer, tag_);
+    detail::free_pool_bytes(pointer, kind_, tag_);
   }
 
   /**
    * @brief Returns the pool tag used for deallocation.
    */
   constexpr ULONG tag() const noexcept { return tag_; }
+  /**
+   * @brief Returns the pool kind used for deallocation.
+   */
+  constexpr pool_kind kind() const noexcept { return kind_; }
 
 private:
   ULONG tag_;
+  pool_kind kind_;
 };
 
 template <> class pool_deleter<void> {
@@ -405,28 +515,37 @@ public:
   /**
    * @brief Creates a byte-buffer deleter that frees with a native pool tag.
    */
-  constexpr pool_deleter(ULONG tag = default_pool_tag) noexcept : tag_(tag) {}
+  constexpr pool_deleter(ULONG tag = default_pool_tag,
+                         pool_kind kind = pool_kind::nonpaged) noexcept
+      : tag_(tag), kind_(kind) {}
 
   /**
    * @brief Creates a byte-buffer deleter that frees with a string-literal tag.
    */
   template <std::size_t N>
-  constexpr pool_deleter(const char (&tag)[N]) noexcept : tag_(pool_tag(tag)) {}
+  constexpr pool_deleter(const char (&tag)[N],
+                         pool_kind kind = pool_kind::nonpaged) noexcept
+      : tag_(pool_tag(tag)), kind_(kind) {}
 
   /**
    * @brief Frees the raw pool allocation.
    */
   void operator()(void *pointer) const noexcept {
-    detail::free_pool_bytes(pointer, tag_);
+    detail::free_pool_bytes(pointer, kind_, tag_);
   }
 
   /**
    * @brief Returns the pool tag used for deallocation.
    */
   constexpr ULONG tag() const noexcept { return tag_; }
+  /**
+   * @brief Returns the pool kind used for deallocation.
+   */
+  constexpr pool_kind kind() const noexcept { return kind_; }
 
 private:
   ULONG tag_;
+  pool_kind kind_;
 };
 
 /**
@@ -447,21 +566,26 @@ inline pool_buffer make_pool_buffer(std::size_t bytes,
                                     pool_option options = pool_option::none,
                                     ULONG tag = default_pool_tag) noexcept {
   return pool_buffer{allocate_pool(bytes, kind, options, tag),
-                     pool_deleter<void>{tag}};
+                     pool_deleter<void>{tag, kind}};
 }
 
 /**
- * @brief Allocates a raw byte buffer and returns NTSTATUS on allocation failure.
+ * @brief Allocates a raw byte buffer and returns NTSTATUS on allocation
+ * failure.
  */
 [[nodiscard]] inline ntl::result<pool_buffer>
 try_make_pool_buffer(std::size_t bytes, pool_kind kind = pool_kind::nonpaged,
                      pool_option options = pool_option::none,
                      ULONG tag = default_pool_tag) noexcept {
+  const auto irql_status = ntl::require_pool_irql(kind);
+  if (!irql_status.is_ok())
+    return ntl::unexpected(static_cast<NTSTATUS>(irql_status));
+
   void *const storage = allocate_pool(bytes, kind, options, tag);
   if (!storage)
     return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
 
-  return pool_buffer{storage, pool_deleter<void>{tag}};
+  return pool_buffer{storage, pool_deleter<void>{tag, kind}};
 }
 
 /**
@@ -514,7 +638,8 @@ inline pool_buffer make_pool_buffer(std::size_t bytes,
 }
 
 /**
- * @brief Allocates a nonpaged raw byte buffer using a string-literal tag and result.
+ * @brief Allocates a nonpaged raw byte buffer using a string-literal tag and
+ * result.
  */
 template <std::size_t N>
 [[nodiscard]] inline ntl::result<pool_buffer>
@@ -544,9 +669,9 @@ template <class T, class... Args>
 
   try {
     return pool_ptr<T>{new (storage) T(std::forward<Args>(args)...),
-                       pool_deleter<T>{tag}};
+                       pool_deleter<T>{tag, kind}};
   } catch (...) {
-    detail::free_pool_bytes(storage, tag);
+    detail::free_pool_bytes(storage, kind, tag);
     throw;
   }
 }
@@ -581,7 +706,8 @@ template <class T, std::size_t N, class... Args>
 }
 
 /**
- * @brief Constructs an object in kernel pool and returns NTSTATUS on allocation failure.
+ * @brief Constructs an object in kernel pool and returns NTSTATUS on allocation
+ * failure.
  *
  * Object-construction exceptions still propagate after freeing the temporary
  * pool storage; only pool allocation failure is represented as NTSTATUS.
@@ -596,6 +722,10 @@ try_make_pool(pool_kind kind, pool_option options, ULONG tag, Args &&...args) {
   static_assert(alignof(T) <= MEMORY_ALLOCATION_ALIGNMENT,
                 "ntl::try_make_pool supports WDK pool alignment only");
 
+  const auto irql_status = ntl::require_pool_irql(kind);
+  if (!irql_status.is_ok())
+    return ntl::unexpected(static_cast<NTSTATUS>(irql_status));
+
   void *const storage =
       detail::allocate_pool_bytes(sizeof(T), alignof(T), kind, options, tag);
   if (!storage)
@@ -603,15 +733,16 @@ try_make_pool(pool_kind kind, pool_option options, ULONG tag, Args &&...args) {
 
   try {
     return pool_ptr<T>{new (storage) T(std::forward<Args>(args)...),
-                       pool_deleter<T>{tag}};
+                       pool_deleter<T>{tag, kind}};
   } catch (...) {
-    detail::free_pool_bytes(storage, tag);
+    detail::free_pool_bytes(storage, kind, tag);
     throw;
   }
 }
 
 /**
- * @brief Constructs an object in kernel pool using a string-literal tag and result.
+ * @brief Constructs an object in kernel pool using a string-literal tag and
+ * result.
  */
 template <class T, std::size_t N, class... Args>
 [[nodiscard]] ntl::result<pool_ptr<T>>
@@ -632,13 +763,14 @@ try_make_pool(pool_kind kind, const char (&tag)[N], Args &&...args) {
 }
 
 /**
- * @brief Constructs an object in nonpaged pool using a string-literal tag and result.
+ * @brief Constructs an object in nonpaged pool using a string-literal tag and
+ * result.
  */
 template <class T, std::size_t N, class... Args>
 [[nodiscard]] ntl::result<pool_ptr<T>> try_make_pool(const char (&tag)[N],
                                                      Args &&...args) {
-  return try_make_pool<T>(pool_kind::nonpaged, pool_option::none,
-                          pool_tag(tag), std::forward<Args>(args)...);
+  return try_make_pool<T>(pool_kind::nonpaged, pool_option::none, pool_tag(tag),
+                          std::forward<Args>(args)...);
 }
 
 /**
@@ -649,8 +781,7 @@ template <class T, std::size_t N, class... Args>
  * @tparam Tag Native pool tag.
  */
 template <class T, pool_kind Kind = pool_kind::nonpaged,
-          pool_option Options = pool_option::none,
-          ULONG Tag = default_pool_tag>
+          pool_option Options = pool_option::none, ULONG Tag = default_pool_tag>
 class pool_allocator {
 public:
   using value_type = T;
@@ -684,10 +815,10 @@ public:
     if (count > max_size()) {
       throw std::bad_array_new_length();
     }
+    detail::diagnose_stl_pool_irql("STL pool allocation");
 
-    void *const pointer =
-        detail::allocate_pool_bytes(count * sizeof(T), alignof(T), Kind,
-                                    Options, Tag);
+    void *const pointer = detail::allocate_pool_bytes(
+        count * sizeof(T), alignof(T), Kind, Options, Tag);
     if (!pointer) {
       throw std::bad_alloc();
     }
@@ -699,7 +830,8 @@ public:
    * @brief Frees storage allocated by this allocator.
    */
   void deallocate(T *pointer, size_type) noexcept {
-    detail::free_pool_bytes(pointer, Tag);
+    detail::diagnose_stl_pool_irql("STL pool release");
+    detail::free_pool_bytes(pointer, Kind, Tag);
   }
 
   /**
@@ -728,9 +860,9 @@ public:
  */
 template <class T, class U, pool_kind LKind, pool_option LOptions, ULONG LTag,
           pool_kind RKind, pool_option ROptions, ULONG RTag>
-constexpr bool operator==(
-    const pool_allocator<T, LKind, LOptions, LTag> &,
-    const pool_allocator<U, RKind, ROptions, RTag> &) noexcept {
+constexpr bool
+operator==(const pool_allocator<T, LKind, LOptions, LTag> &,
+           const pool_allocator<U, RKind, ROptions, RTag> &) noexcept {
   return LKind == RKind && LOptions == ROptions && LTag == RTag;
 }
 
@@ -739,9 +871,9 @@ constexpr bool operator==(
  */
 template <class T, class U, pool_kind LKind, pool_option LOptions, ULONG LTag,
           pool_kind RKind, pool_option ROptions, ULONG RTag>
-constexpr bool operator!=(
-    const pool_allocator<T, LKind, LOptions, LTag> &lhs,
-    const pool_allocator<U, RKind, ROptions, RTag> &rhs) noexcept {
+constexpr bool
+operator!=(const pool_allocator<T, LKind, LOptions, LTag> &lhs,
+           const pool_allocator<U, RKind, ROptions, RTag> &rhs) noexcept {
   return !(lhs == rhs);
 }
 
@@ -804,6 +936,8 @@ public:
 
 private:
   void *do_allocate(std::size_t bytes, std::size_t alignment) override {
+    detail::diagnose_stl_pool_irql("PMR pool allocation");
+
     void *const pointer =
         detail::allocate_pool_bytes(bytes, alignment, kind_, options_, tag_);
     if (!pointer) {
@@ -814,11 +948,12 @@ private:
   }
 
   void do_deallocate(void *pointer, std::size_t, std::size_t) override {
-    detail::free_pool_bytes(pointer, tag_);
+    detail::diagnose_stl_pool_irql("PMR pool release");
+    detail::free_pool_bytes(pointer, kind_, tag_);
   }
 
-  bool do_is_equal(const std::pmr::memory_resource &other) const
-      noexcept override {
+  bool
+  do_is_equal(const std::pmr::memory_resource &other) const noexcept override {
     return this == &other;
   }
 

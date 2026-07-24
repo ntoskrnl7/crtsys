@@ -778,6 +778,8 @@ CrtSysUninitializeRuntime (
     PAGED_CODE();
     UNREFERENCED_PARAMETER(DriverObject);
 
+    // LDK-created workers may still execute CRT code, so drain them first.
+    LdkPrepareForTermination();
     _cexit();
     if (CrtSyspTypeInfoInitialized) {
       __scrt_uninitialize_type_info();
