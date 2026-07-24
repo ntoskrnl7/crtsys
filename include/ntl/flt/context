@@ -72,7 +72,8 @@ constexpr POOL_TYPE native_context_pool(context_pool pool) noexcept {
   return NonPagedPoolNx;
 }
 
-template <context_scope Scope> constexpr FLT_CONTEXT_TYPE native_context_type() {
+template <context_scope Scope>
+constexpr FLT_CONTEXT_TYPE native_context_type() {
   if constexpr (Scope == context_scope::volume)
     return FLT_VOLUME_CONTEXT;
   else if constexpr (Scope == context_scope::instance)
@@ -196,9 +197,8 @@ template <> struct context_api<context_scope::instance> {
   static NTSTATUS set(const native_context_objects &objects,
                       PFLT_CONTEXT context,
                       PFLT_CONTEXT *old_context) noexcept {
-    return FltSetInstanceContext(objects.instance,
-                                 FLT_SET_CONTEXT_KEEP_IF_EXISTS, context,
-                                 old_context);
+    return FltSetInstanceContext(
+        objects.instance, FLT_SET_CONTEXT_KEEP_IF_EXISTS, context, old_context);
   }
 };
 
@@ -337,8 +337,7 @@ private:
  * Filter Manager does not permit callers to select another pool for a volume
  * context, so this specialization deliberately exposes no pool constructor.
  */
-template <class T>
-class context_definition<T, context_scope::volume> {
+template <class T> class context_definition<T, context_scope::volume> {
 public:
   using value_type = T;
   static constexpr context_scope scope = context_scope::volume;
@@ -428,6 +427,21 @@ public:
   /** @brief Returns true when a context reference is owned. */
   explicit operator bool() const noexcept { return context_ != nullptr; }
 
+  /**
+   * @brief Explicitly acquires and returns another Filter Manager
+   * reference.
+   *
+   * The returned owner is independent from this object. An
+   * empty owner
+   * produces another empty owner.
+   */
+  context_ref reference() const noexcept {
+    if (!context_)
+      return {};
+    FltReferenceContext(context_);
+    return context_ref{context_};
+  }
+
   /** @brief Returns the native context pointer without releasing ownership. */
   PFLT_CONTEXT native_context() const noexcept { return context_; }
 
@@ -441,8 +455,8 @@ public:
 
 private:
   template <class U, context_scope OtherScope>
-  friend ntl::result<context_ref<U, OtherScope>> detail_adopt_context(
-      PFLT_CONTEXT) noexcept;
+  friend ntl::result<context_ref<U, OtherScope>>
+      detail_adopt_context(PFLT_CONTEXT) noexcept;
 
   explicit context_ref(PFLT_CONTEXT context) noexcept : context_(context) {}
 
@@ -484,9 +498,10 @@ get_context(const native_context_objects &objects) noexcept {
 }
 
 template <class T, context_scope Scope, class... Args>
-ntl::result<context_ref<T, Scope>> get_or_create_context(
-    const native_context_objects &objects,
-    const context_definition<T, Scope> &definition, Args &&...args) noexcept {
+ntl::result<context_ref<T, Scope>>
+get_or_create_context(const native_context_objects &objects,
+                      const context_definition<T, Scope> &definition,
+                      Args &&...args) noexcept {
   static_assert(alignof(managed_context_storage<T>) <=
                     MEMORY_ALLOCATION_ALIGNMENT,
                 "Filter Manager context type requires unsupported alignment");
@@ -505,9 +520,9 @@ ntl::result<context_ref<T, Scope>> get_or_create_context(
     return ntl::unexpected(STATUS_NOT_SUPPORTED);
   const POOL_TYPE pool = native_context_pool(definition.pool());
   PFLT_CONTEXT allocated = nullptr;
-  NTSTATUS status = FltAllocateContext(
-      objects.filter, native_context_type<Scope>(),
-      sizeof(managed_context_storage<T>), pool, &allocated);
+  NTSTATUS status =
+      FltAllocateContext(objects.filter, native_context_type<Scope>(),
+                         sizeof(managed_context_storage<T>), pool, &allocated);
   if (!NT_SUCCESS(status))
     return ntl::unexpected(status);
 
@@ -518,8 +533,8 @@ ntl::result<context_ref<T, Scope>> get_or_create_context(
   context_ref<T, Scope> created = std::move(*created_result);
 
   PFLT_CONTEXT old_context = nullptr;
-  status = context_api<Scope>::set(objects, created.native_context(),
-                                   &old_context);
+  status =
+      context_api<Scope>::set(objects, created.native_context(), &old_context);
   if (NT_SUCCESS(status))
     return ntl::ok(std::move(created));
 

@@ -59,7 +59,10 @@ typedef struct _CRTSYS_SHARED_COMPILER_TLS_RUNTIME {
     ULONG Version;
     ULONG Size;
     volatile LONG ReferenceCount;
+    PVOID CanonicalSectionViewBase;
+    PVOID CanonicalRuntimeBase;
     PVOID CanonicalSlots;
+    PMDL CanonicalMdl;
     KSPIN_LOCK Lock;
     ULONG SlotBitmap[CRTSYS_COMPILER_TLS_BITMAP_COUNT];
     PVOID Slots[CRTSYS_COMPILER_TLS_SLOT_COUNT];
@@ -70,8 +73,94 @@ PCRTSYS_SHARED_COMPILER_TLS_RUNTIME CrtSyspCompilerTlsRuntime = NULL;
 PVOID CrtSyspCompilerTlsRuntimeViewBase = NULL;
 PVOID *CrtSyspCompilerTlsSlots = NULL;
 HANDLE CrtSyspCompilerTlsSectionHandle = NULL;
+HANDLE CrtSyspCompilerTlsGateHandle = NULL;
+PMDL CrtSyspCompilerTlsRuntimeViewMdl = NULL;
 ULONG CrtSyspCompilerTlsIndex = CRTSYS_COMPILER_TLS_INDEX_INVALID;
 BOOLEAN CrtSyspTypeInfoInitialized = FALSE;
+
+NTSTATUS
+CrtSysOpenSharedCompilerTlsGate (
+    _Out_ PHANDLE GateHandle
+    )
+{
+    UNICODE_STRING gateName;
+    RtlInitUnicodeString(&gateName,
+                         L"\\KernelObjects\\CrtSysCompilerTlsRuntimeGate_v1");
+
+    OBJECT_ATTRIBUTES objectAttributes;
+    InitializeObjectAttributes(&objectAttributes,
+                               &gateName,
+                               OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE |
+                                   OBJ_OPENIF,
+                               NULL,
+                               NULL);
+
+    return ZwCreateEvent(GateHandle,
+                         EVENT_MODIFY_STATE | SYNCHRONIZE,
+                         &objectAttributes,
+                         SynchronizationEvent,
+                         TRUE);
+}
+
+NTSTATUS
+CrtSysLockSharedCompilerTlsView (
+    _In_ PVOID ViewBase,
+    _Out_ PMDL *ViewMdl,
+    _Out_ PVOID *RuntimeBase
+    )
+{
+    PMDL mdl = IoAllocateMdl(ViewBase,
+                            sizeof(CRTSYS_SHARED_COMPILER_TLS_RUNTIME),
+                            FALSE,
+                            FALSE,
+                            NULL);
+    if (mdl == NULL) {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    NTSTATUS status = STATUS_SUCCESS;
+    __try {
+        MmProbeAndLockPages(mdl, KernelMode, IoModifyAccess);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        status = GetExceptionCode();
+    }
+
+    if (!NT_SUCCESS(status)) {
+        if ((mdl->MdlFlags & MDL_PAGES_LOCKED) != 0) {
+            MmUnlockPages(mdl);
+        }
+        IoFreeMdl(mdl);
+        return status;
+    }
+
+    PVOID runtimeBase = MmGetSystemAddressForMdlSafe(
+        mdl,
+        NormalPagePriority | MdlMappingNoExecute);
+    if (runtimeBase == NULL) {
+        MmUnlockPages(mdl);
+        IoFreeMdl(mdl);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    *ViewMdl = mdl;
+    *RuntimeBase = runtimeBase;
+    return STATUS_SUCCESS;
+}
+
+VOID
+CrtSysUnlockSharedCompilerTlsView (
+    _In_opt_ PMDL ViewMdl
+    )
+{
+    if (ViewMdl == NULL) {
+        return;
+    }
+
+    if ((ViewMdl->MdlFlags & MDL_PAGES_LOCKED) != 0) {
+        MmUnlockPages(ViewMdl);
+    }
+    IoFreeMdl(ViewMdl);
+}
 
 NTSTATUS
 CrtSysMapSharedCompilerTlsRuntime (
@@ -80,6 +169,18 @@ CrtSysMapSharedCompilerTlsRuntime (
 {
     if (CrtSyspCompilerTlsRuntime != NULL) {
         return STATUS_SUCCESS;
+    }
+
+    HANDLE gateHandle = NULL;
+    NTSTATUS status = CrtSysOpenSharedCompilerTlsGate(&gateHandle);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    status = ZwWaitForSingleObject(gateHandle, FALSE, NULL);
+    if (!NT_SUCCESS(status)) {
+        ZwClose(gateHandle);
+        return status;
     }
 
     UNICODE_STRING sectionName;
@@ -97,13 +198,13 @@ CrtSysMapSharedCompilerTlsRuntime (
     maximumSize.QuadPart = sizeof(CRTSYS_SHARED_COMPILER_TLS_RUNTIME);
 
     HANDLE sectionHandle = NULL;
-    NTSTATUS status = ZwCreateSection(&sectionHandle,
-                                      SECTION_ALL_ACCESS,
-                                      &objectAttributes,
-                                      &maximumSize,
-                                      PAGE_READWRITE,
-                                      SEC_COMMIT,
-                                      NULL);
+    status = ZwCreateSection(&sectionHandle,
+                             SECTION_ALL_ACCESS,
+                             &objectAttributes,
+                             &maximumSize,
+                             PAGE_READWRITE,
+                             SEC_COMMIT,
+                             NULL);
     if (status == STATUS_OBJECT_NAME_COLLISION) {
         status = ZwOpenSection(&sectionHandle,
                                SECTION_ALL_ACCESS,
@@ -111,6 +212,8 @@ CrtSysMapSharedCompilerTlsRuntime (
     }
 
     if (!NT_SUCCESS(status)) {
+        ZwSetEvent(gateHandle, NULL);
+        ZwClose(gateHandle);
         return status;
     }
 
@@ -123,6 +226,8 @@ CrtSysMapSharedCompilerTlsRuntime (
                                        NULL);
     if (!NT_SUCCESS(status)) {
         ZwClose(sectionHandle);
+        ZwSetEvent(gateHandle, NULL);
+        ZwClose(gateHandle);
         return status;
     }
 
@@ -132,42 +237,65 @@ CrtSysMapSharedCompilerTlsRuntime (
     ObDereferenceObject(sectionObject);
     if (!NT_SUCCESS(status)) {
         ZwClose(sectionHandle);
+        ZwSetEvent(gateHandle, NULL);
+        ZwClose(gateHandle);
+        return status;
+    }
+
+    if (viewSize < sizeof(CRTSYS_SHARED_COMPILER_TLS_RUNTIME)) {
+        MmUnmapViewInSystemSpace(viewBase);
+        ZwClose(sectionHandle);
+        ZwSetEvent(gateHandle, NULL);
+        ZwClose(gateHandle);
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    PMDL viewMdl = NULL;
+    PVOID runtimeBase = NULL;
+    status = CrtSysLockSharedCompilerTlsView(
+        viewBase,
+        &viewMdl,
+        &runtimeBase);
+    if (!NT_SUCCESS(status)) {
+        MmUnmapViewInSystemSpace(viewBase);
+        ZwClose(sectionHandle);
+        ZwSetEvent(gateHandle, NULL);
+        ZwClose(gateHandle);
         return status;
     }
 
     PCRTSYS_SHARED_COMPILER_TLS_RUNTIME runtime =
-        (PCRTSYS_SHARED_COMPILER_TLS_RUNTIME)viewBase;
+        (PCRTSYS_SHARED_COMPILER_TLS_RUNTIME)runtimeBase;
 
-    LONG initState = InterlockedCompareExchange(&runtime->InitState, 1, 0);
-    if (initState == 0) {
+    if (runtime->InitState == 0) {
+        runtime->InitState = 1;
         runtime->Magic = CRTSYS_COMPILER_TLS_SECTION_MAGIC;
         runtime->Version = CRTSYS_COMPILER_TLS_SECTION_VERSION;
         runtime->Size = sizeof(*runtime);
         runtime->ReferenceCount = 0;
+        runtime->CanonicalSectionViewBase = viewBase;
+        runtime->CanonicalRuntimeBase = runtimeBase;
         runtime->CanonicalSlots = runtime->Slots;
+        runtime->CanonicalMdl = viewMdl;
         KeInitializeSpinLock(&runtime->Lock);
         RtlZeroMemory(runtime->SlotBitmap, sizeof(runtime->SlotBitmap));
         RtlZeroMemory(runtime->Slots, sizeof(runtime->Slots));
         InterlockedExchange(&runtime->InitState, 2);
-    } else {
-        for (ULONG waitCount = 0;
-             InterlockedCompareExchange(&runtime->InitState, 2, 2) != 2;
-             ++waitCount) {
-            if (waitCount == 10000000u) {
-                MmUnmapViewInSystemSpace(viewBase);
-                ZwClose(sectionHandle);
-                return STATUS_IO_TIMEOUT;
-            }
-            YieldProcessor();
-        }
     }
 
     if (runtime->Magic != CRTSYS_COMPILER_TLS_SECTION_MAGIC ||
         runtime->Version != CRTSYS_COMPILER_TLS_SECTION_VERSION ||
         runtime->Size != sizeof(*runtime) ||
-        runtime->CanonicalSlots == NULL) {
+        runtime->InitState != 2 ||
+        runtime->CanonicalSectionViewBase == NULL ||
+        runtime->CanonicalRuntimeBase == NULL ||
+        runtime->CanonicalSlots == NULL ||
+        runtime->CanonicalMdl == NULL) {
+        CrtSysUnlockSharedCompilerTlsView(viewMdl);
         MmUnmapViewInSystemSpace(viewBase);
         ZwClose(sectionHandle);
+        ZwSetEvent(gateHandle, NULL);
+        ZwClose(gateHandle);
         return STATUS_REVISION_MISMATCH;
     }
 
@@ -175,8 +303,11 @@ CrtSysMapSharedCompilerTlsRuntime (
     CrtSyspCompilerTlsRuntimeViewBase = viewBase;
     CrtSyspCompilerTlsSlots = (PVOID *)runtime->CanonicalSlots;
     CrtSyspCompilerTlsSectionHandle = sectionHandle;
+    CrtSyspCompilerTlsGateHandle = gateHandle;
+    CrtSyspCompilerTlsRuntimeViewMdl = viewMdl;
     InterlockedIncrement(&runtime->ReferenceCount);
 
+    ZwSetEvent(gateHandle, NULL);
     return STATUS_SUCCESS;
 }
 
@@ -257,35 +388,51 @@ CrtSysUnmapSharedCompilerTlsRuntime (
     }
 
     PVOID const viewBase = CrtSyspCompilerTlsRuntimeViewBase;
-    PVOID const canonicalBase =
-        (PUCHAR)CrtSyspCompilerTlsRuntime->CanonicalSlots -
-        FIELD_OFFSET(CRTSYS_SHARED_COMPILER_TLS_RUNTIME, Slots);
+    PMDL const viewMdl = CrtSyspCompilerTlsRuntimeViewMdl;
+    HANDLE const gateHandle = CrtSyspCompilerTlsGateHandle;
+    HANDLE const sectionHandle = CrtSyspCompilerTlsSectionHandle;
+
+    if (gateHandle == NULL ||
+        !NT_SUCCESS(ZwWaitForSingleObject(gateHandle, FALSE, NULL))) {
+        return;
+    }
+
+    PVOID const canonicalSectionViewBase =
+        CrtSyspCompilerTlsRuntime->CanonicalSectionViewBase;
+    PMDL const canonicalMdl =
+        CrtSyspCompilerTlsRuntime->CanonicalMdl;
+    BOOLEAN const ownsCanonicalView = viewMdl == canonicalMdl;
     LONG const remainingReferences =
         InterlockedDecrement(&CrtSyspCompilerTlsRuntime->ReferenceCount);
-    HANDLE const sectionHandle = CrtSyspCompilerTlsSectionHandle;
 
     //
     // Keep the first mapping alive while any crtsys-linked driver still uses
-    // the shared slots vector. If the owner of the canonical mapping unloads
-    // first, later drivers keep using that mapping until the shared refcount
-    // reaches zero.
+    // the shared slots vector. Its MDL system mapping keeps both the slot
+    // vector and the embedded spin lock fault-free even if the owner of the
+    // canonical mapping unloads first.
     //
-    if (viewBase != canonicalBase) {
+    if (!ownsCanonicalView) {
+        CrtSysUnlockSharedCompilerTlsView(viewMdl);
         MmUnmapViewInSystemSpace(viewBase);
     }
 
     if (remainingReferences == 0) {
-        MmUnmapViewInSystemSpace(canonicalBase);
+        CrtSysUnlockSharedCompilerTlsView(canonicalMdl);
+        MmUnmapViewInSystemSpace(canonicalSectionViewBase);
     }
 
     CrtSyspCompilerTlsRuntime = NULL;
     CrtSyspCompilerTlsRuntimeViewBase = NULL;
     CrtSyspCompilerTlsSlots = NULL;
     CrtSyspCompilerTlsSectionHandle = NULL;
+    CrtSyspCompilerTlsGateHandle = NULL;
+    CrtSyspCompilerTlsRuntimeViewMdl = NULL;
 
     if (sectionHandle != NULL) {
         ZwClose(sectionHandle);
     }
+    ZwSetEvent(gateHandle, NULL);
+    ZwClose(gateHandle);
 }
 
 VOID
@@ -637,13 +784,14 @@ CrtSysUninitializeRuntime (
       CrtSyspTypeInfoInitialized = FALSE;
     }
 
-    __scrt_uninitialize_crt(
-#if DBG
-        false,
-#else
-        true,
-#endif
-        false);
+    //
+    // A driver unload is not process termination.  Passing terminating=true
+    // makes the release UCRT deliberately skip its uninitializers because a
+    // user process would reclaim the address space immediately.  Kernel image
+    // unload has no equivalent reclamation for pool allocated by LDK-backed
+    // critical sections, so always perform the full UCRT teardown here.
+    //
+    __scrt_uninitialize_crt(false, false);
 
 #if CRTSYS_USE_LIBCNTPR
     CrtSyspUninitializeForLibcntpr();

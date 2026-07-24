@@ -1,5 +1,8 @@
 # KMDF Verifier Stress Test
 
+See the [KMDF test index](../README.md) for the distinction between repository
+tests and the public examples.
+
 This is a test fixture, not an onboarding example. It deliberately combines:
 
 - concurrent open, close, and transform IOCTL operations;
@@ -15,9 +18,10 @@ only the matching driver counter may advance.
 ## Build
 
 ```powershell
-cmake -S test\kmdf\verifier-stress `
-  -B test\kmdf\verifier-stress\build_x64 -A x64
-cmake --build test\kmdf\verifier-stress\build_x64 --config Debug
+.\scripts\ci\Build-CrtSys.ps1 `
+  -Project kmdf-verifier-stress `
+  -Architecture x64 `
+  -Configuration Release
 ```
 
 The app accepts optional iteration and worker counts:
@@ -41,3 +45,15 @@ passes without a verifier breakpoint or bugcheck. Record `verifier /query`
 after the run so its load/unload and Special Pool counters demonstrate that
 the target was actually verified. Reset persistent verifier settings and
 reboot the guest after testing.
+
+The companion VM repository wraps the driver/app runner with the expected
+service name and app arguments:
+
+```powershell
+D:\projects\crtsys-vm-test\Run-CrtSysKmdfVerifierStressInVm.ps1 `
+  -DriverPath .\test\kmdf\verifier-stress\build_x64\Release\crtsys_kmdf_verifier_stress.sys `
+  -AppPath .\test\kmdf\verifier-stress\build_x64\Release\crtsys_kmdf_verifier_stress_app.exe `
+  -Iterations 64 `
+  -Workers 4 `
+  -LoadCycles 3
+```

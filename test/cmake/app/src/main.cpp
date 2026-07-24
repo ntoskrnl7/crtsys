@@ -3,6 +3,8 @@
 
 #include <chrono>
 #include <cstddef>
+#include <cstring>
+#include <string>
 #include <system_error>
 #include <type_traits>
 
@@ -17,6 +19,8 @@ extern "C" std::size_t ntl_rpc_cxx14_async_operation_size() noexcept {
 }
 
 namespace {
+static_assert(sizeof(ntl::ipc::mapped_buffer_descriptor) == 40,
+              "mapped descriptors must remain x86/x64 stable");
 static_assert(std::is_move_constructible<ntl::flt::communication_client>::value,
               "The minifilter app client must remain movable");
 
@@ -65,6 +69,43 @@ TEST(ntl_ipc, pointer_free_region_and_bounded_ring) {
     EXPECT_EQ(value.value, index + 100);
   }
   EXPECT_FALSE(consumer.try_read(value));
+}
+
+TEST(ntl_ipc, mapped_descriptor_validation) {
+  alignas(16) unsigned char storage[64]{};
+  ntl::ipc::mapped_buffer_descriptor descriptor{
+      7, 11,
+      static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(storage)),
+      sizeof(storage),
+      static_cast<std::uint32_t>(ntl::ipc::map_access::read_write), 0};
+
+  ntl::ipc::mapped_client_buffer mapped;
+  EXPECT_EQ(ntl::ipc::mapped_client_buffer::open(descriptor, 11, mapped),
+            ntl::ipc::validation_status::success);
+  ASSERT_TRUE(mapped);
+  EXPECT_EQ(mapped.data(), storage);
+  EXPECT_EQ(mapped.writable_data(), storage);
+  EXPECT_EQ(mapped.size(), sizeof(storage));
+
+  EXPECT_EQ(ntl::ipc::mapped_client_buffer::open(descriptor, 12, mapped),
+            ntl::ipc::validation_status::stale_region);
+  EXPECT_FALSE(mapped);
+
+  descriptor.access = 0xFFFFFFFFu;
+  EXPECT_EQ(ntl::ipc::mapped_client_buffer::open(descriptor, 11, mapped),
+            ntl::ipc::validation_status::access_denied);
+
+  descriptor.access =
+      static_cast<std::uint32_t>(ntl::ipc::map_access::read);
+  EXPECT_EQ(ntl::ipc::mapped_client_buffer::open(descriptor, 11, mapped),
+            ntl::ipc::validation_status::success);
+  EXPECT_EQ(mapped.writable_data(), nullptr);
+
+  descriptor.mapped_address =
+      (std::numeric_limits<std::uint64_t>::max)() - 3;
+  descriptor.length = 8;
+  EXPECT_NE(ntl::ipc::mapped_client_buffer::open(descriptor, 11, mapped),
+            ntl::ipc::validation_status::success);
 }
 
 TEST(ntl_rpc_client, invoke_callback_by_invoke_method) {
@@ -182,6 +223,55 @@ TEST(ntl_rpc_client, invoke_generated_async_wrapper) {
 
 #include "common/test_device.h"
 
+namespace {
+
+HANDLE open_test_device() noexcept {
+  return CreateFileW(L"\\\\.\\CrtSysTestDevice",
+                     GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+                     0, nullptr);
+}
+
+bool address_is_unmapped(std::uint64_t address) noexcept {
+  unsigned char value = 0;
+  SIZE_T copied = 0;
+  const auto pointer =
+      reinterpret_cast<const void *>(static_cast<std::uintptr_t>(address));
+  return ReadProcessMemory(GetCurrentProcess(), pointer, &value, sizeof(value),
+                           &copied) == FALSE &&
+         copied == 0;
+}
+
+bool begin_user_mapping(HANDLE device, test_mapping_begin_result &result) {
+  DWORD returned = 0;
+  return DeviceIoControl(device, TEST_DEVICE_MAPPING_BEGIN_CTL, nullptr, 0,
+                         &result, sizeof(result), &returned, nullptr) != FALSE &&
+         returned == sizeof(result);
+}
+
+int run_mapping_exit_child() {
+  const HANDLE device = open_test_device();
+  if (device == INVALID_HANDLE_VALUE)
+    return 70;
+
+  test_mapping_begin_result result{};
+  if (!begin_user_mapping(device, result))
+    return 71;
+  ntl::ipc::mapped_buffer_descriptor descriptor{
+      result.mapping_id, result.generation, result.mapped_address,
+      result.length, result.access, result.reserved};
+  ntl::ipc::mapped_client_buffer mapped;
+  if (ntl::ipc::mapped_client_buffer::open(descriptor, result.generation,
+                                           mapped) !=
+      ntl::ipc::validation_status::success)
+    return 72;
+  std::memset(mapped.writable_data(), test_mapping_user_value,
+              result.pattern_bytes);
+  TerminateProcess(GetCurrentProcess(), 73);
+  return 74;
+}
+
+} // namespace
+
 TEST(ntl_device, device_io_control) {
   HANDLE hDevice = CreateFileW(
       L"\\\\?\\Global\\GLOBALROOT\\Device\\" TEST_DEVICE_NAME,
@@ -228,6 +318,177 @@ TEST(ntl_device, device_io_control) {
   }
 }
 
+TEST(ntl_device, mapped_buffer_forced_unmap_and_disconnect) {
+  HANDLE device = open_test_device();
+  ASSERT_NE(device, INVALID_HANDLE_VALUE);
+
+  test_mapping_begin_result begin{};
+  ASSERT_TRUE(begin_user_mapping(device, begin));
+  SYSTEM_INFO system_info{};
+  GetSystemInfo(&system_info);
+  ASSERT_EQ(begin.length,
+            static_cast<unsigned long long>(system_info.dwPageSize));
+  ASSERT_EQ(begin.pattern_bytes, test_mapping_pattern_bytes);
+
+  const ntl::ipc::mapped_buffer_descriptor descriptor{
+      begin.mapping_id, begin.generation, begin.mapped_address, begin.length,
+      begin.access, begin.reserved};
+  ntl::ipc::mapped_client_buffer mapped;
+  ASSERT_EQ(ntl::ipc::mapped_client_buffer::open(
+                descriptor, begin.generation, mapped),
+            ntl::ipc::validation_status::success);
+  ASSERT_NE(mapped.writable_data(), nullptr);
+  auto *const bytes = static_cast<unsigned char *>(mapped.writable_data());
+  for (unsigned long index = 0; index != begin.pattern_bytes; ++index)
+    ASSERT_EQ(bytes[index],
+              static_cast<unsigned char>(test_mapping_initial_seed + index));
+  std::memset(bytes, test_mapping_user_value, begin.pattern_bytes);
+
+  const test_mapping_close_request close_request{
+      test_mapping_user_value, {0, 0, 0, 0, 0, 0, 0}};
+  test_mapping_close_result close_result{};
+  DWORD returned = 0;
+  ASSERT_TRUE(DeviceIoControl(device, TEST_DEVICE_MAPPING_CLOSE_CTL,
+                              const_cast<test_mapping_close_request *>(
+                                  &close_request),
+                              sizeof(close_request), &close_result,
+                              sizeof(close_result), &returned, nullptr));
+  EXPECT_EQ(returned, sizeof(close_result));
+  EXPECT_EQ(close_result.observed_bytes, test_mapping_pattern_bytes);
+  EXPECT_EQ(close_result.mappings_before, 1u);
+  EXPECT_EQ(close_result.mappings_after, 0u);
+  EXPECT_NE(close_result.generation_before, close_result.generation_after);
+  EXPECT_TRUE(address_is_unmapped(begin.mapped_address));
+  ASSERT_TRUE(CloseHandle(device));
+
+  device = open_test_device();
+  ASSERT_NE(device, INVALID_HANDLE_VALUE);
+  begin = {};
+  ASSERT_TRUE(begin_user_mapping(device, begin));
+  ASSERT_TRUE(CloseHandle(device));
+  EXPECT_TRUE(address_is_unmapped(begin.mapped_address));
+
+  device = open_test_device();
+  ASSERT_NE(device, INVALID_HANDLE_VALUE);
+  test_device_state state{};
+  returned = 0;
+  ASSERT_TRUE(DeviceIoControl(device, TEST_DEVICE_STATE_CTL, nullptr, 0, &state,
+                              sizeof(state), &returned, nullptr));
+  EXPECT_EQ(returned, sizeof(state));
+  EXPECT_EQ(state.active_mappings, 0u);
+  EXPECT_GE(state.explicit_mapping_closes, 1u);
+  EXPECT_GE(state.cleanup_mapping_closes, 1u);
+  EXPECT_TRUE(CloseHandle(device));
+}
+
+TEST(ntl_device, automatic_irp_io_buffer_semantics_and_copy_back) {
+  const HANDLE device = open_test_device();
+  ASSERT_NE(device, INVALID_HANDLE_VALUE);
+  DWORD returned = 0;
+
+  test_auto_io_buffer buffered{test_auto_io_magic, 0x12345678};
+  ASSERT_TRUE(DeviceIoControl(device, TEST_DEVICE_AUTO_BUFFERED_CTL, &buffered,
+                              sizeof(buffered), &buffered, sizeof(buffered),
+                              &returned, nullptr));
+  EXPECT_EQ(returned, sizeof(buffered));
+  EXPECT_EQ(buffered.magic, test_auto_io_magic);
+  EXPECT_EQ(buffered.value, 0x12345678u ^ test_auto_io_mask);
+
+  const test_auto_io_header buffered_tail_header{test_auto_io_magic,
+                                                 0x10293847};
+  test_auto_io_extended_result buffered_tail_result{};
+  ASSERT_TRUE(DeviceIoControl(
+      device, TEST_DEVICE_AUTO_BUFFERED_TAIL_CTL,
+      const_cast<test_auto_io_header *>(&buffered_tail_header),
+      sizeof(buffered_tail_header), &buffered_tail_result,
+      sizeof(buffered_tail_result), &returned, nullptr));
+  EXPECT_EQ(returned, sizeof(buffered_tail_result));
+  EXPECT_EQ(buffered_tail_result.magic, test_auto_io_magic);
+  EXPECT_EQ(buffered_tail_result.value,
+            buffered_tail_header.sequence ^ test_auto_io_mask);
+  EXPECT_EQ(buffered_tail_result.tail_zero_0, 0u);
+  EXPECT_EQ(buffered_tail_result.tail_zero_1, 0u);
+
+  const test_auto_io_header in_direct_header{test_auto_io_magic, 0x13572468};
+  test_auto_io_buffer in_direct_payload{test_auto_io_magic,
+                                        in_direct_header.sequence};
+  returned = 99;
+  ASSERT_TRUE(DeviceIoControl(
+      device, TEST_DEVICE_AUTO_IN_DIRECT_CTL,
+      const_cast<test_auto_io_header *>(&in_direct_header),
+      sizeof(in_direct_header), &in_direct_payload, sizeof(in_direct_payload),
+      &returned, nullptr));
+  EXPECT_EQ(returned, 0u);
+
+  const test_auto_io_header out_direct_header{test_auto_io_magic, 0x24681357};
+  test_auto_io_result out_direct_result{};
+  ASSERT_TRUE(DeviceIoControl(
+      device, TEST_DEVICE_AUTO_OUT_DIRECT_CTL,
+      const_cast<test_auto_io_header *>(&out_direct_header),
+      sizeof(out_direct_header), &out_direct_result, sizeof(out_direct_result),
+      &returned, nullptr));
+  EXPECT_EQ(returned, sizeof(out_direct_result));
+  EXPECT_EQ(out_direct_result.magic, test_auto_io_magic);
+  EXPECT_EQ(out_direct_result.value,
+            out_direct_header.sequence ^ test_auto_io_mask);
+
+  const test_auto_io_header neither_header{test_auto_io_magic, 0x11223344};
+  test_auto_io_result neither_result{};
+  ASSERT_TRUE(DeviceIoControl(
+      device, TEST_DEVICE_AUTO_NEITHER_CTL,
+      const_cast<test_auto_io_header *>(&neither_header),
+      sizeof(neither_header), &neither_result, sizeof(neither_result),
+      &returned, nullptr));
+  EXPECT_EQ(returned, sizeof(neither_result));
+  EXPECT_EQ(neither_result.magic, test_auto_io_magic);
+  EXPECT_EQ(neither_result.value, neither_header.sequence ^ test_auto_io_mask);
+
+  EXPECT_TRUE(CloseHandle(device));
+}
+
+TEST(ntl_device, process_exit_closes_mapped_view) {
+  HANDLE probe = open_test_device();
+  ASSERT_NE(probe, INVALID_HANDLE_VALUE);
+  test_device_state before{};
+  DWORD returned = 0;
+  ASSERT_TRUE(DeviceIoControl(probe, TEST_DEVICE_STATE_CTL, nullptr, 0, &before,
+                              sizeof(before), &returned, nullptr));
+  ASSERT_TRUE(CloseHandle(probe));
+
+  wchar_t executable[MAX_PATH]{};
+  ASSERT_NE(GetModuleFileNameW(nullptr, executable, MAX_PATH), 0u);
+  std::wstring command = L"\"";
+  command += executable;
+  command += L"\" --ntl-mapping-exit-child";
+  STARTUPINFOW startup{};
+  startup.cb = sizeof(startup);
+  PROCESS_INFORMATION process{};
+  ASSERT_TRUE(CreateProcessW(nullptr, &command[0], nullptr, nullptr, FALSE, 0,
+                             nullptr, nullptr, &startup, &process));
+  ASSERT_EQ(WaitForSingleObject(process.hProcess, 10000), WAIT_OBJECT_0);
+  DWORD exit_code = 0;
+  ASSERT_TRUE(GetExitCodeProcess(process.hProcess, &exit_code));
+  EXPECT_EQ(exit_code, 73u);
+  CloseHandle(process.hThread);
+  CloseHandle(process.hProcess);
+
+  HANDLE device = INVALID_HANDLE_VALUE;
+  for (unsigned attempt = 0; attempt != 100; ++attempt) {
+    device = open_test_device();
+    if (device != INVALID_HANDLE_VALUE)
+      break;
+    Sleep(20);
+  }
+  ASSERT_NE(device, INVALID_HANDLE_VALUE);
+  test_device_state after{};
+  returned = 0;
+  ASSERT_TRUE(DeviceIoControl(device, TEST_DEVICE_STATE_CTL, nullptr, 0, &after,
+                              sizeof(after), &returned, nullptr));
+  EXPECT_EQ(after.active_mappings, 0u);
+  EXPECT_GT(after.cleanup_mapping_closes, before.cleanup_mapping_closes);
+  EXPECT_TRUE(CloseHandle(device));
+}
+
 TEST(ntl_device, opens_through_dos_device_symbolic_link) {
   HANDLE hDevice =
       CreateFileW(L"\\\\.\\CrtSysTestDevice", GENERIC_READ | GENERIC_WRITE, 0,
@@ -245,6 +506,8 @@ TEST(ntl_device, opens_through_dos_device_symbolic_link) {
 }
 
 int main(int argc, char **argv) {
+  if (argc == 2 && std::strcmp(argv[1], "--ntl-mapping-exit-child") == 0)
+    return run_mapping_exit_child();
   testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }

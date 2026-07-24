@@ -1,7 +1,8 @@
 param(
   [string] $DriverPath = 'test\cmake\driver\build_x64\Debug\crtsys_test.sys',
   [string] $AppPath = 'test\cmake\app\build_x64\Debug\crtsys_test_app.exe',
-  [string] $ServiceName = 'CrtSysTest'
+  [string] $ServiceName = 'CrtSysTest',
+  [switch] $RequireVerifier
 )
 
 Set-StrictMode -Version Latest
@@ -27,6 +28,22 @@ function Assert-TestSigningEnabled {
   }
 }
 
+function Assert-DriverVerifierTarget {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string] $DriverName
+  )
+
+  $settings = & verifier.exe /querysettings 2>&1
+  if ($LASTEXITCODE -ne 0) {
+    throw "verifier.exe /querysettings failed: $($settings -join [Environment]::NewLine)"
+  }
+  if (($settings -join [Environment]::NewLine) -notmatch
+      [regex]::Escape($DriverName)) {
+    throw "Driver Verifier is not configured for '$DriverName'. Configure it and reboot before running with -RequireVerifier."
+  }
+}
+
 function Invoke-Sc {
   param(
     [Parameter(Mandatory = $true)]
@@ -48,6 +65,10 @@ Assert-TestSigningEnabled
 
 $resolvedDriverPath = (Resolve-Path $DriverPath).Path
 $resolvedAppPath = (Resolve-Path $AppPath).Path
+if ($RequireVerifier) {
+  Assert-DriverVerifierTarget -DriverName (
+    [System.IO.Path]::GetFileName($resolvedDriverPath))
+}
 
 $queryExitCode = Invoke-Sc -Arguments @('query', $ServiceName) -AllowFailure
 if ($queryExitCode -eq 0) {

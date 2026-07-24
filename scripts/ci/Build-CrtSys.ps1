@@ -1,6 +1,9 @@
 param(
   [Parameter(Mandatory = $true)]
   [ValidateSet('app', 'driver', 'kmdf-verifier-stress',
+               'kmdf-example-basic', 'kmdf-example-pnp',
+               'kmdf-example-bus', 'kmdf-example-dma',
+               'kmdf-example-usb', 'kmdf-example-wmi',
                'rpc-lifecycle-stress', 'rpc-async', 'rpc-notifications',
                'rpc-security', 'rpc-streaming', 'flt-runtime',
                'flt-cross-bitness-app', 'flt-verifier-stress')]
@@ -27,7 +30,10 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-$sourceDir = if ($Project -eq 'kmdf-verifier-stress') {
+$sourceDir = if ($Project -like 'kmdf-example-*') {
+  $sample = $Project.Substring(('kmdf-example-').Length)
+  Join-Path $repoRoot "examples\kmdf\$sample"
+} elseif ($Project -eq 'kmdf-verifier-stress') {
   Join-Path $repoRoot 'test\kmdf\verifier-stress'
 } elseif ($Project -eq 'flt-runtime') {
   Join-Path $repoRoot 'test\flt\runtime'

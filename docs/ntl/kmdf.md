@@ -300,7 +300,7 @@ if (!queue)
 
 For a complete non-PnP control-device flow with an application, typed request
 buffers, STL use, symbolic-link creation, and queue callbacks, see the
-[NTL KMDF sample](../../examples/kmdf-ntl-driver).
+[NTL KMDF sample](../../examples/kmdf/basic).
 
 ## File Objects
 
@@ -766,7 +766,7 @@ The WDF parent remains the final teardown fallback.
 Package builds instantiate these typed DMA callbacks on every supported
 toolset and architecture. Runtime DMA execution requires matching hardware
 resources and is therefore not claimed by the software-only VM smoke test.
-The buildable [KMDF DMA driver template](../../examples/kmdf-dma-ntl-driver)
+The buildable [KMDF DMA driver template](../../examples/kmdf/dma)
 shows the complete request, scatter/gather programming, interrupt-DPC
 completion, transaction release, and request-completion flow.
 
@@ -822,7 +822,7 @@ Package builds instantiate the USB device, interface, pipe, synchronous and
 formatted-transfer, and continuous-reader surfaces for every supported
 toolset and architecture. Runtime USB validation requires a device whose
 descriptor and endpoint protocol match the driver. The buildable
-[KMDF USB driver template](../../examples/kmdf-usb-ntl-driver) deliberately
+[KMDF USB driver template](../../examples/kmdf/usb) deliberately
 uses a placeholder hardware ID so it cannot be installed accidentally for an
 unrelated USB device.
 
@@ -975,7 +975,7 @@ The resulting `pdo` facade supports parent lookup, identification/address
 round trips, missing/eject requests, ejection relations, and PnP/power
 capabilities. A statically allocated child can be attached with
 `device::try_add_static_child()`. The buildable
-[KMDF bus sample](../../examples/kmdf-bus-ntl-driver) exercises dynamic plug,
+[KMDF bus sample](../../examples/kmdf/bus) exercises dynamic plug,
 missing, and eject transitions against a real child function driver.
 
 ### PDO Events And Resource Requirements
@@ -1177,7 +1177,7 @@ for event-only providers. WDF does not permit an explicit
 passive contract on supported parent objects such as the device or queue, and
 always follow each native KMDF WMI callback's documented IRQL contract.
 
-The buildable [KMDF WMI sample](../../examples/kmdf-wmi-ntl-driver) compiles
+The buildable [KMDF WMI sample](../../examples/kmdf/wmi) compiles
 and validates a binary MOF resource, runs typed query/set/method callbacks,
 subscribes to an event from user mode, triggers it through a device interface,
 and verifies the event payload through `ROOT\\WMI`.

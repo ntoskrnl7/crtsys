@@ -118,8 +118,17 @@ template <typename Func> auto benchmark(Func test_func, int iterations) {
 }
 
 void run() {
+#if defined(CRTSYS_TEST_EXTENDED_PMR_BENCHMARK)
   constexpr int iterations{100};
   constexpr int total_nodes{2'00'000};
+#else
+  // Keep the normal kernel/Driver Verifier suite a semantic smoke test.
+  // The extended setting preserves the original cppreference-scale
+  // benchmark without making every driver load perform 80 million list
+  // insertions through verified pool allocation paths.
+  constexpr int iterations{2};
+  constexpr int total_nodes{2'048};
+#endif
 
   auto default_std_alloc = [total_nodes] {
     std::list<int> list;

@@ -89,11 +89,22 @@ private:
  * Acquire a guard for each dispatch path that must finish before remove/unload.
  * Then call release_and_wait from the remove/unload path after the object stops
  * accepting new work.
+ *
+ * The object must reside in stable, nonpaged storage whose lifetime is tied to
+ * the device object (normally its device extension). It must not be placed on
+ * the stack, moved, reconstructed, or reinitialized at the same address, even
+ * after release_and_wait returns. A remove lock is permanently in the removing
+ * state after release_and_wait.
  */
 class remove_lock {
 public:
   /**
    * @brief Initializes the native remove lock.
+   *
+   * The caller is responsible for providing stable, nonpaged object storage.
+   * Windows does not permit a remove lock to be reinitialized at an address
+   * that has already held an initialized remove lock.
+   *
    * @param tag Pool-style debugging tag for the lock.
    * @param max_locked_minutes Native MaxLockedMinutes argument.
    * @param high_watermark Native HighWatermark argument.
@@ -136,6 +147,9 @@ public:
   /**
    * @brief Releases the remove path reference and waits for outstanding guards.
    * @param tag Caller-defined tracking tag.
+   *
+   * This is a terminal transition. The object cannot be acquired, reset, or
+   * initialized again after this call.
    */
   void release_and_wait(void *tag = nullptr) noexcept {
     if (InterlockedCompareExchange(&removing_, 1, 0) != 0)

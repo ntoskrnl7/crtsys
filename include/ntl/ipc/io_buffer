@@ -1,0 +1,564 @@
+/**
+ * @file io_buffer
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Automatic IRP input/output buffer export to a user process.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "mapped_buffer"
+
+#include <algorithm>
+#include <cstddef>
+#include <cstring>
+#include <memory>
+
+namespace ntl::ipc {
+
+/** @brief Policy for kernel buffers that cannot safely be mapped in place. */
+enum class kernel_buffer_policy {
+  copy_to_isolated_pages,
+  reject,
+};
+
+/** Policy for page padding around caller-owned user MDLs. */
+enum class user_mdl_policy {
+  /** Copy a partial-page MDL through isolated, fully zeroed pages. */
+  isolate_partial_pages,
+  /** Trusted-service opt-in: map the MDL even when page padding is visible. */
+  allow_page_padding_exposure,
+};
+
+/** @brief Controls access and safe fallback behavior for one IRP export. */
+struct map_io_options {
+  map_access input_access = map_access::read;
+  map_access output_access = map_access::read_write;
+  kernel_buffer_policy kernel_buffers =
+      kernel_buffer_policy::copy_to_isolated_pages;
+  user_mdl_policy user_mdls = user_mdl_policy::isolate_partial_pages;
+  /** Maximum isolated staging storage for one logical buffer. */
+  std::size_t max_staging_bytes = 16u * 1024u * 1024u;
+  /** Paging I/O cannot safely wait on a user-mode service by default. */
+  bool allow_paging_io = false;
+};
+
+namespace detail {
+
+inline constexpr UCHAR user_fs_request_minor = 0x00;
+inline constexpr UCHAR kernel_call_minor = 0x04;
+
+struct probe_call_context {
+  ntl::mdl *descriptor = nullptr;
+  KPROCESSOR_MODE mode = UserMode;
+  LOCK_OPERATION operation = IoReadAccess;
+};
+
+inline NTSTATUS NTAPI probe_call(void *opaque) noexcept {
+  auto *context = static_cast<probe_call_context *>(opaque);
+  const auto locked = context->descriptor->probe_and_lock_pages(
+      context->mode, context->operation);
+  return locked ? STATUS_SUCCESS : static_cast<NTSTATUS>(locked.status());
+}
+
+inline ntl::status guarded_copy(void *destination, const void *source,
+                                std::size_t bytes) noexcept {
+  if (bytes == 0)
+    return STATUS_SUCCESS;
+  if (!destination || !source)
+    return STATUS_INVALID_PARAMETER;
+  NTSTATUS status = STATUS_SUCCESS;
+  const auto guarded = ntl::seh::try_except(
+      [&]() { RtlCopyMemory(destination, source, bytes); });
+  if (!std::get<0>(guarded))
+    status = static_cast<NTSTATUS>(std::get<1>(guarded));
+  return status;
+}
+
+struct copy_call_context {
+  void *destination = nullptr;
+  const void *source = nullptr;
+  std::size_t bytes = 0;
+};
+
+inline NTSTATUS NTAPI copy_call(void *opaque) noexcept {
+  auto *context = static_cast<copy_call_context *>(opaque);
+  return static_cast<NTSTATUS>(
+      guarded_copy(context->destination, context->source, context->bytes));
+}
+
+inline ntl::status guarded_copy_in_process(PEPROCESS process, void *destination,
+                                           const void *source,
+                                           std::size_t bytes) noexcept {
+  if (!process)
+    return guarded_copy(destination, source, bytes);
+  copy_call_context context{destination, source, bytes};
+  return invoke_in_process(process, &copy_call, &context);
+}
+
+class staged_io_buffer {
+public:
+  staged_io_buffer(std::shared_ptr<page_buffer> pages, void *original,
+                   std::size_t copy_back_bytes,
+                   ntl::unique_object<PEPROCESS> process) noexcept
+      : pages_(std::move(pages)), original_(original),
+        copy_back_bytes_(copy_back_bytes), process_(std::move(process)) {}
+
+  ~staged_io_buffer() { (void)finalize(); }
+
+  ntl::status finalize() noexcept {
+    if (finalized_)
+      return final_status_;
+    finalized_ = true;
+    if (copy_back_bytes_ && pages_ && original_)
+      final_status_ = guarded_copy_in_process(process_.get(), original_,
+                                              pages_->data(),
+                                              copy_back_bytes_);
+    return final_status_;
+  }
+
+  const std::shared_ptr<page_buffer> &pages() const noexcept { return pages_; }
+
+private:
+  std::shared_ptr<page_buffer> pages_;
+  void *original_ = nullptr;
+  std::size_t copy_back_bytes_ = 0;
+  ntl::unique_object<PEPROCESS> process_;
+  bool finalized_ = false;
+  ntl::status final_status_{STATUS_SUCCESS};
+};
+
+inline ntl::status
+finalize_staged_mapping(std::shared_ptr<void> &retained) noexcept {
+  if (!retained)
+    return STATUS_SUCCESS;
+  auto staged = std::static_pointer_cast<staged_io_buffer>(retained);
+  const auto status = staged->finalize();
+  retained.reset();
+  return status;
+}
+
+inline ntl::result<std::shared_ptr<staged_io_buffer>>
+make_staging(void *original, std::size_t bytes, std::size_t copy_in_bytes,
+             std::size_t copy_back_bytes,
+             PEPROCESS copy_process = nullptr) noexcept {
+  if (!original || bytes == 0 || copy_in_bytes > bytes ||
+      copy_back_bytes > bytes)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  auto pages = page_buffer::try_create(bytes);
+  if (!pages)
+    return ntl::unexpected(pages.status());
+  ntl::unique_object<PEPROCESS> process;
+  if (copy_process) {
+    ObReferenceObject(copy_process);
+    process.reset(copy_process);
+  }
+  if (copy_in_bytes) {
+    const auto copied = guarded_copy_in_process(process.get(), (*pages)->data(),
+                                                original, copy_in_bytes);
+    if (!copied.is_ok())
+      return ntl::unexpected(static_cast<NTSTATUS>(copied));
+  }
+  try {
+    return ntl::ok(std::make_shared<staged_io_buffer>(
+        *pages, original, copy_back_bytes, std::move(process)));
+  } catch (...) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  }
+}
+
+inline ntl::result<mapped_buffer_view>
+map_user_range(void *address, std::size_t bytes, LOCK_OPERATION operation,
+               KPROCESSOR_MODE mode, PEPROCESS requestor_process,
+               process_connection &connection, map_access access) noexcept {
+  if (!address || bytes == 0 || bytes > MAXULONG)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  auto native = ntl::mdl::allocate(address, static_cast<ULONG>(bytes));
+  if (!native)
+    return ntl::unexpected(native.status());
+  probe_call_context context{&*native, mode, operation};
+  const NTSTATUS locked =
+      mode == UserMode
+          ? detail::invoke_in_process(requestor_process, &probe_call, &context)
+          : probe_call(&context);
+  if (!NT_SUCCESS(locked))
+    return ntl::unexpected(locked);
+  try {
+    auto owner = std::make_shared<ntl::mdl>(std::move(*native));
+    return try_map_owned_mdl(owner, 0, bytes, connection, access);
+  } catch (...) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  }
+}
+
+inline ntl::result<mapped_buffer_view>
+map_irp_user_range(PIRP irp, void *address, std::size_t bytes,
+                   LOCK_OPERATION operation, process_connection &connection,
+                   map_access access) noexcept {
+  if (irp->RequestorMode == KernelMode)
+    return map_user_range(address, bytes, operation, KernelMode, nullptr,
+                          connection, access);
+  void *requestor_opaque = nullptr;
+  const NTSTATUS referenced =
+      reference_requestor_process(irp, &requestor_opaque);
+  if (!NT_SUCCESS(referenced))
+    return ntl::unexpected(referenced);
+  auto *requestor = static_cast<PEPROCESS>(requestor_opaque);
+  ntl::unique_object<PEPROCESS> owner{requestor};
+  return map_user_range(address, bytes, operation, UserMode, requestor,
+                        connection, access);
+}
+
+inline ntl::result<mapped_buffer_view>
+map_kernel_range(void *address, std::size_t bytes,
+                 std::size_t copy_in_bytes, std::size_t copy_back_bytes,
+                 process_connection &connection, map_access access,
+                 kernel_buffer_policy policy,
+                 PEPROCESS copy_process = nullptr) noexcept {
+  if (policy == kernel_buffer_policy::reject)
+    return ntl::unexpected(STATUS_NOT_SUPPORTED);
+  auto staged = make_staging(address, bytes, copy_in_bytes, copy_back_bytes,
+                             copy_process);
+  if (!staged)
+    return ntl::unexpected(staged.status());
+  auto mapped = detail_try_map_mdl_retained(
+      (*staged)->pages()->native_mdl(), 0, bytes, connection, access, MmCached,
+      std::static_pointer_cast<void>(*staged), &finalize_staged_mapping);
+  return mapped;
+}
+
+} // namespace detail
+
+namespace detail {
+
+// Shared implementation for the explicitly named pre-completion and
+// post-completion public entry points below.
+[[nodiscard]] inline ntl::result<mapped_io_buffers>
+try_map_io_buffers_impl(PDEVICE_OBJECT device, PIRP irp,
+                        process_connection &connection,
+                        bool completed,
+                        map_io_options options) noexcept {
+  if (!device || !irp || !connection)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+    return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+  if (options.max_staging_bytes == 0 ||
+      (options.input_access != map_access::read &&
+       options.input_access != map_access::read_write) ||
+      (options.output_access != map_access::read &&
+       options.output_access != map_access::read_write) ||
+      (options.kernel_buffers != kernel_buffer_policy::copy_to_isolated_pages &&
+       options.kernel_buffers != kernel_buffer_policy::reject) ||
+      (options.user_mdls != user_mdl_policy::isolate_partial_pages &&
+       options.user_mdls != user_mdl_policy::allow_page_padding_exposure))
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  PIO_STACK_LOCATION stack = IoGetCurrentIrpStackLocation(irp);
+  if (!stack)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  if ((irp->Flags & IRP_PAGING_IO) != 0 && !options.allow_paging_io)
+    return ntl::unexpected(STATUS_NOT_SUPPORTED);
+
+  const auto staging_fits = [&](std::size_t bytes) noexcept {
+    std::size_t charge = 0;
+    return detail::isolated_page_charge(bytes, charge) &&
+           charge <= options.max_staging_bytes;
+  };
+
+  mapped_io_buffers_builder builder;
+  const auto map_direct =
+      [&](std::size_t length, map_access access, bool copy_in,
+          bool copy_back) -> ntl::result<mapped_buffer_view> {
+    if (!irp->MdlAddress)
+      return ntl::unexpected(STATUS_INVALID_USER_BUFFER);
+    if (!detail::mdl_describes_resident_pages(irp->MdlAddress))
+      return ntl::unexpected(STATUS_INVALID_USER_BUFFER);
+    if (length > static_cast<std::size_t>(MmGetMdlByteCount(irp->MdlAddress)))
+      return ntl::unexpected(STATUS_INVALID_BUFFER_SIZE);
+    void *const mdl_virtual_address =
+        MmGetMdlVirtualAddress(irp->MdlAddress);
+    const auto mdl_virtual_value =
+        reinterpret_cast<ULONG_PTR>(mdl_virtual_address);
+    const auto system_range_start =
+        reinterpret_cast<ULONG_PTR>(detail::query_system_range_start());
+    const bool caller_user_mdl =
+        irp->RequestorMode == UserMode &&
+        (irp->MdlAddress->MdlFlags & MDL_SOURCE_IS_NONPAGED_POOL) == 0 &&
+        mdl_virtual_address != nullptr && mdl_virtual_value < system_range_start &&
+        MmGetMdlByteCount(irp->MdlAddress) <=
+            system_range_start - mdl_virtual_value;
+    const bool page_safe =
+        detail::mdl_mapping_is_page_isolated(irp->MdlAddress, 0, length);
+    if (caller_user_mdl &&
+        (page_safe ||
+         options.user_mdls == user_mdl_policy::allow_page_padding_exposure))
+      return try_map_mdl(borrowed_mdl_view{irp->MdlAddress}, 0, length,
+                         connection, access);
+    if (!staging_fits(length))
+      return ntl::unexpected(STATUS_QUOTA_EXCEEDED);
+    void *const system_address =
+        MmGetSystemAddressForMdlSafe(irp->MdlAddress, NormalPagePriority);
+    if (!system_address)
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    return detail::map_kernel_range(
+        system_address, length, copy_in ? length : 0,
+        copy_back ? length : 0, connection, access, options.kernel_buffers);
+  };
+
+  const auto map_neither =
+      [&](void *address, std::size_t length, LOCK_OPERATION operation,
+          map_access access, bool copy_in,
+          bool copy_back) -> ntl::result<mapped_buffer_view> {
+    if (irp->RequestorMode == UserMode) {
+      const auto native_address = reinterpret_cast<std::uintptr_t>(address);
+      const bool page_safe = address && (native_address % PAGE_SIZE) == 0 &&
+                             (length % PAGE_SIZE) == 0;
+      if (page_safe ||
+          options.user_mdls == user_mdl_policy::allow_page_padding_exposure)
+        return detail::map_irp_user_range(irp, address, length, operation,
+                                          connection, access);
+      if (!staging_fits(length))
+        return ntl::unexpected(STATUS_QUOTA_EXCEEDED);
+      void *requestor_opaque = nullptr;
+      const NTSTATUS referenced =
+          detail::reference_requestor_process(irp, &requestor_opaque);
+      if (!NT_SUCCESS(referenced))
+        return ntl::unexpected(referenced);
+      auto *requestor = static_cast<PEPROCESS>(requestor_opaque);
+      ntl::unique_object<PEPROCESS> owner{requestor};
+      return detail::map_kernel_range(
+          address, length, copy_in ? length : 0, copy_back ? length : 0,
+          connection, access, options.kernel_buffers, requestor);
+    }
+    if (!staging_fits(length))
+      return ntl::unexpected(STATUS_QUOTA_EXCEEDED);
+    return detail::map_kernel_range(
+        address, length, copy_in ? length : 0, copy_back ? length : 0,
+        connection, access, options.kernel_buffers);
+  };
+
+  if (stack->MajorFunction == IRP_MJ_READ ||
+      stack->MajorFunction == IRP_MJ_WRITE) {
+    const bool read = stack->MajorFunction == IRP_MJ_READ;
+    const std::size_t length =
+        read ? stack->Parameters.Read.Length : stack->Parameters.Write.Length;
+    if (read && completed && NT_ERROR(irp->IoStatus.Status))
+      return ntl::unexpected(irp->IoStatus.Status);
+    const std::size_t visible_length =
+        read && completed
+            ? (std::min)(length,
+                         static_cast<std::size_t>(irp->IoStatus.Information))
+            : length;
+    if (visible_length == 0)
+      return ntl::unexpected(STATUS_INVALID_BUFFER_SIZE);
+
+    ntl::result<mapped_buffer_view> mapped =
+        ntl::unexpected(STATUS_INVALID_DEVICE_REQUEST);
+    if ((device->Flags & DO_DIRECT_IO) != 0) {
+      mapped = map_direct(
+          visible_length, read ? options.output_access : options.input_access,
+          !read || completed,
+          read ? options.output_access == map_access::read_write
+               : options.input_access == map_access::read_write);
+    } else if ((device->Flags & DO_BUFFERED_IO) != 0) {
+      if (!staging_fits(visible_length))
+        return ntl::unexpected(STATUS_QUOTA_EXCEEDED);
+      const bool writable =
+          read ? options.output_access == map_access::read_write
+               : options.input_access == map_access::read_write;
+      mapped = detail::map_kernel_range(
+          irp->AssociatedIrp.SystemBuffer, visible_length,
+          (!read || completed) ? visible_length : 0,
+          writable ? visible_length : 0,
+          connection, read ? options.output_access : options.input_access,
+          options.kernel_buffers);
+    } else {
+      mapped = map_neither(
+          irp->UserBuffer, visible_length, read ? IoModifyAccess : IoReadAccess,
+          read ? options.output_access : options.input_access,
+          !read || completed,
+          read || options.input_access == map_access::read_write);
+    }
+    if (!mapped)
+      return ntl::unexpected(mapped.status());
+    if (read)
+      builder.output(std::move(*mapped));
+    else
+      builder.input(std::move(*mapped));
+    return ntl::ok(builder.build());
+  }
+
+  const bool file_system_control =
+      stack->MajorFunction == IRP_MJ_FILE_SYSTEM_CONTROL;
+  const bool device_control =
+      stack->MajorFunction == IRP_MJ_DEVICE_CONTROL ||
+      stack->MajorFunction == IRP_MJ_INTERNAL_DEVICE_CONTROL;
+  if (!file_system_control && !device_control)
+    return ntl::unexpected(STATUS_NOT_SUPPORTED);
+
+  if (file_system_control &&
+      stack->MinorFunction != detail::user_fs_request_minor &&
+      stack->MinorFunction != detail::kernel_call_minor)
+    return ntl::unexpected(STATUS_NOT_SUPPORTED);
+
+  const ULONG code = file_system_control
+                         ? stack->Parameters.FileSystemControl.FsControlCode
+                         : stack->Parameters.DeviceIoControl.IoControlCode;
+  const ULONG method = METHOD_FROM_CTL_CODE(code);
+  const std::size_t input_length =
+      file_system_control
+          ? stack->Parameters.FileSystemControl.InputBufferLength
+          : stack->Parameters.DeviceIoControl.InputBufferLength;
+  const std::size_t requested_output_length =
+      file_system_control
+          ? stack->Parameters.FileSystemControl.OutputBufferLength
+          : stack->Parameters.DeviceIoControl.OutputBufferLength;
+  const bool completed_output_has_data =
+      !completed || !NT_ERROR(irp->IoStatus.Status);
+  const std::size_t output_length =
+      completed && completed_output_has_data
+          ? (std::min)(requested_output_length,
+                       static_cast<std::size_t>(irp->IoStatus.Information))
+      : completed ? 0
+                  : requested_output_length;
+  const bool has_logical_input =
+      input_length != 0 ||
+      (method == METHOD_IN_DIRECT && requested_output_length != 0);
+  if (completed && !completed_output_has_data && !has_logical_input)
+    return ntl::unexpected(irp->IoStatus.Status);
+  if (!has_logical_input && output_length == 0)
+    return ntl::unexpected(STATUS_INVALID_BUFFER_SIZE);
+
+  if (method == METHOD_BUFFERED) {
+    const std::size_t bytes = (std::max)(input_length, output_length);
+    if (bytes == 0)
+      return ntl::unexpected(STATUS_INVALID_BUFFER_SIZE);
+    if (!staging_fits(bytes))
+      return ntl::unexpected(STATUS_QUOTA_EXCEEDED);
+    const auto native_access =
+        (output_length && options.output_access == map_access::read_write) ||
+                (input_length && options.input_access == map_access::read_write)
+            ? map_access::read_write
+            : map_access::read;
+    auto whole = detail::map_kernel_range(
+        irp->AssociatedIrp.SystemBuffer, bytes,
+        completed ? bytes : input_length,
+        (std::max)(
+            output_length != 0 &&
+                    options.output_access == map_access::read_write
+                ? output_length
+                : std::size_t{0},
+            input_length != 0 &&
+                    options.input_access == map_access::read_write
+                ? input_length
+                : std::size_t{0}),
+        connection, native_access, options.kernel_buffers);
+    if (!whole)
+      return ntl::unexpected(whole.status());
+    if (input_length) {
+      auto input = whole->subview(0, input_length, options.input_access);
+      if (!input)
+        return ntl::unexpected(input.status());
+      builder.input(std::move(*input));
+    }
+    if (output_length) {
+      auto output = whole->subview(0, output_length, options.output_access);
+      if (!output)
+        return ntl::unexpected(output.status());
+      builder.output(std::move(*output));
+    }
+    return ntl::ok(builder.build());
+  }
+
+  if (method == METHOD_IN_DIRECT || method == METHOD_OUT_DIRECT) {
+    if (input_length) {
+      auto input = detail::map_kernel_range(
+          irp->AssociatedIrp.SystemBuffer, input_length, input_length,
+          options.input_access == map_access::read_write ? input_length : 0,
+          connection,
+          options.input_access, options.kernel_buffers);
+      if (!input)
+        return ntl::unexpected(input.status());
+      builder.control_input(std::move(*input));
+    }
+    const std::size_t direct_length =
+        method == METHOD_IN_DIRECT ? requested_output_length : output_length;
+    if (direct_length) {
+      const auto direct_access = method == METHOD_IN_DIRECT
+                                     ? options.input_access
+                                     : options.output_access;
+      auto output = map_direct(direct_length, direct_access,
+                               method == METHOD_IN_DIRECT || completed,
+                               direct_access == map_access::read_write);
+      if (!output)
+        return ntl::unexpected(output.status());
+      if (method == METHOD_IN_DIRECT)
+        builder.input(std::move(*output));
+      else
+        builder.output(std::move(*output));
+    }
+    return ntl::ok(builder.build());
+  }
+
+  if (input_length) {
+    void *const neither_input =
+        file_system_control
+            ? stack->Parameters.FileSystemControl.Type3InputBuffer
+            : stack->Parameters.DeviceIoControl.Type3InputBuffer;
+    auto input = map_neither(neither_input, input_length,
+                             options.input_access == map_access::read_write
+                                 ? IoModifyAccess
+                                 : IoReadAccess,
+                             options.input_access, true,
+                             options.input_access == map_access::read_write);
+    if (!input)
+      return ntl::unexpected(input.status());
+    builder.input(std::move(*input));
+  }
+  if (output_length) {
+    auto output = map_neither(irp->UserBuffer, output_length, IoModifyAccess,
+                              options.output_access, completed,
+                              options.output_access == map_access::read_write);
+    if (!output)
+      return ntl::unexpected(output.status());
+    builder.output(std::move(*output));
+  }
+  return ntl::ok(builder.build());
+}
+
+} // namespace detail
+
+/**
+ * @brief Maps logical buffers before the I/O result is complete.
+ *
+ * Call this at PASSIVE_LEVEL while the IRP and all borrowed MDLs remain live.
+ * NTL discovers the transfer method from the IRP and device object. Output
+ * views use the requested capacity; use try_map_completed_io_buffers() after
+ * completion so output is initialized and clamped to IoStatus.Information.
+ * Buffered/kernel storage and partial-page user MDLs use isolated staging;
+ * exact full-page user MDLs retain their original payload pages zero-copy.
+ */
+[[nodiscard]] inline ntl::result<mapped_io_buffers>
+try_map_io_buffers(PDEVICE_OBJECT device, PIRP irp,
+                   process_connection &connection,
+                   map_io_options options = {}) noexcept {
+  return detail::try_map_io_buffers_impl(device, irp, connection, false,
+                                         options);
+}
+
+/**
+ * @brief Maps logical buffers after the I/O result has completed.
+ *
+ * Call this at PASSIVE_LEVEL while the IRP and all borrowed MDLs remain live.
+ * NTL discovers the transfer method from the IRP and device object. Output is
+ * clamped to IoStatus.Information. Hard-error completions are rejected when no
+ * logical input remains useful to the caller.
+ */
+[[nodiscard]] inline ntl::result<mapped_io_buffers>
+try_map_completed_io_buffers(PDEVICE_OBJECT device, PIRP irp,
+                             process_connection &connection,
+                             map_io_options options = {}) noexcept {
+  return detail::try_map_io_buffers_impl(device, irp, connection, true,
+                                         options);
+}
+
+} // namespace ntl::ipc

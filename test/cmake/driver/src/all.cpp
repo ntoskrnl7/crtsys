@@ -1,4 +1,5 @@
 #include <exception>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 
@@ -872,10 +873,19 @@ bool ntl_passive_executor_test();
 
 namespace {
 int g_driver_test_failures = 0;
+constexpr const char *driver_test_failure_log_path =
+    "C:\\crtsys-driver-test-failures.log";
 
 void record_test_failure(const char *name, const char *message) {
   ++g_driver_test_failures;
   std::cerr << "[crtsys] FAIL " << name << ": " << message << '\n';
+
+  // Kernel debugger output can be unavailable after a failed DriverEntry.
+  // Preserve the same failure record in the guest so automated VM runners can
+  // report the exact test instead of only the Service Control error.
+  std::ofstream failure_log(driver_test_failure_log_path, std::ios::app);
+  if (failure_log)
+    failure_log << "[crtsys] FAIL " << name << ": " << message << '\n';
 }
 
 template <typename Fn> void run_cppreference_test(const char *name, Fn fn) {
@@ -1270,6 +1280,9 @@ void ntl_test() {
 
 int test_all() {
   g_driver_test_failures = 0;
+  {
+    std::ofstream failure_log(driver_test_failure_log_path, std::ios::trunc);
+  }
 
 #if CRTSYS_ENABLE_FAILURE_HARNESS_SELF_TEST
   // Default-off sanity check for the harness itself: the driver should report a
@@ -1291,4 +1304,14 @@ int test_all() {
   }
 
   return g_driver_test_failures;
+}
+
+void record_driver_entry_failure(const char *stage, long code) {
+  std::cerr << "[crtsys] FAIL " << stage << ": code=0x" << std::hex
+            << static_cast<unsigned long>(code) << std::dec << '\n';
+
+  std::ofstream failure_log(driver_test_failure_log_path, std::ios::app);
+  if (failure_log)
+    failure_log << "[crtsys] FAIL " << stage << ": code=0x" << std::hex
+                << static_cast<unsigned long>(code) << std::dec << '\n';
 }

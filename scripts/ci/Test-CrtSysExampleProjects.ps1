@@ -18,6 +18,33 @@ foreach ($requiredFile in @('Directory.Build.props', 'Directory.Build.targets'))
   }
 }
 
+$groupedSamples = [ordered]@{
+  kmdf = @('basic', 'pnp', 'bus', 'dma', 'usb', 'wmi')
+  minifilter = @('basic', 'communication', 'swap-buffers')
+}
+
+foreach ($group in $groupedSamples.GetEnumerator()) {
+  $groupRoot = Join-Path $examplesRoot $group.Key
+  if (-not (Test-Path -LiteralPath (Join-Path $groupRoot 'README.md') -PathType Leaf)) {
+    $errors.Add("Missing grouped-example index: $groupRoot\README.md")
+  }
+
+  foreach ($sample in $group.Value) {
+    $sampleRoot = Join-Path $groupRoot $sample
+    foreach ($requiredFile in @('CMakeLists.txt', 'README.md')) {
+      if (-not (Test-Path -LiteralPath (Join-Path $sampleRoot $requiredFile) -PathType Leaf)) {
+        $errors.Add("Missing $($group.Key)/$sample example file: $requiredFile")
+      }
+    }
+    if (@(Get-ChildItem -LiteralPath $sampleRoot -Filter '*.sln' -File -ErrorAction SilentlyContinue).Count -eq 0) {
+      $errors.Add("Missing Visual Studio solution under examples/$($group.Key)/$sample.")
+    }
+    if (@(Get-ChildItem -LiteralPath $sampleRoot -Filter '*.vcxproj' -File -ErrorAction SilentlyContinue).Count -eq 0) {
+      $errors.Add("Missing Visual Studio project under examples/$($group.Key)/$sample.")
+    }
+  }
+}
+
 $sharedPropsPath = Join-Path $examplesRoot 'Directory.Build.props'
 if (Test-Path -LiteralPath $sharedPropsPath -PathType Leaf) {
   $sharedProps = Get-Content -LiteralPath $sharedPropsPath -Raw
@@ -63,7 +90,12 @@ if ($LASTEXITCODE -ne 0) {
 $projects = @(
   @($trackedProjectPaths + $untrackedProjectPaths) |
     Sort-Object -Unique |
-    ForEach-Object { Get-Item -LiteralPath (Join-Path $repoRoot $_) }
+    ForEach-Object {
+      $projectPath = Join-Path $repoRoot $_
+      if (Test-Path -LiteralPath $projectPath -PathType Leaf) {
+        Get-Item -LiteralPath $projectPath
+      }
+    }
 )
 
 foreach ($project in $projects) {

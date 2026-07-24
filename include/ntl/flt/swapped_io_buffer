@@ -1,0 +1,1389 @@
+/**
+ * @file swapped_io_buffer
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Operation-neutral minifilter input/output buffer swapping.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "io_buffer"
+
+#include <algorithm>
+#include <cstddef>
+#include <memory>
+#include <new>
+#include <optional>
+#include <type_traits>
+#include <utility>
+
+namespace ntl::flt {
+
+/**
+ * @brief Selects logical buffers only for operations that can expose both.
+ *
+ * Input includes a control input when the operation has one. Read, write, and
+ * other single-direction operations infer their only valid selection and do
+ * not accept this argument.
+ */
+enum class swap_buffer {
+  input,
+  output,
+  all,
+};
+
+/** @brief Controls allocation and execution policy for buffer replacement. */
+struct swap_io_options {
+  /** Zero derives the target volume's sector size for noncached read/write. */
+  std::size_t noncached_alignment = 0;
+  /** Paging I/O user round trips are rejected unless explicitly opted in. */
+  bool allow_paging_io = false;
+  /** Maximum isolated replacement storage for one operation. */
+  std::size_t max_replacement_bytes = 16u * 1024u * 1024u;
+};
+
+class swapped_io_buffers;
+
+namespace detail {
+template <operation_id Operation>
+inline constexpr bool input_only_swap_operation_v =
+    Operation == operation_id::create || Operation == operation_id::write ||
+    Operation == operation_id::set_information ||
+    Operation == operation_id::set_ea ||
+    Operation == operation_id::set_volume_information ||
+    Operation == operation_id::set_security ||
+    Operation == operation_id::set_quota;
+
+template <operation_id Operation>
+inline constexpr bool output_only_swap_operation_v =
+    Operation == operation_id::read ||
+    Operation == operation_id::query_information ||
+    Operation == operation_id::query_volume_information ||
+    Operation == operation_id::directory_control ||
+    Operation == operation_id::query_security;
+
+template <operation_id Operation>
+inline constexpr bool selectable_swap_operation_v =
+    Operation == operation_id::query_ea ||
+    Operation == operation_id::query_quota ||
+    Operation == operation_id::file_system_control ||
+    Operation == operation_id::device_control ||
+    Operation == operation_id::internal_device_control;
+
+template <operation_id Operation>
+inline constexpr bool unambiguous_swap_operation_v =
+    input_only_swap_operation_v<Operation> ||
+    output_only_swap_operation_v<Operation>;
+
+template <operation_id Operation>
+ntl::result<swapped_io_buffers>
+try_swap_io_buffers_impl(callback_data_impl<Operation> data,
+                         swap_buffer selection,
+                         swap_io_options options) noexcept;
+} // namespace detail
+
+class swapped_buffer_view {
+public:
+  swapped_buffer_view() noexcept = default;
+  swapped_buffer_view(const swapped_buffer_view &) = delete;
+  swapped_buffer_view &operator=(const swapped_buffer_view &) = delete;
+  swapped_buffer_view(swapped_buffer_view &&) noexcept = default;
+  swapped_buffer_view &operator=(swapped_buffer_view &&) noexcept = default;
+
+  explicit operator bool() const noexcept {
+    return static_cast<bool>(pages_) && length_ != 0;
+  }
+  void *data() const noexcept {
+    return pages_ ? static_cast<unsigned char *>(pages_->data()) + offset_
+                  : nullptr;
+  }
+  std::size_t size() const noexcept { return length_; }
+
+  ntl::result<ntl::ipc::mapped_buffer_view>
+  try_map(ntl::ipc::process_connection &connection,
+          ntl::ipc::map_access access =
+              ntl::ipc::map_access::read_write) const noexcept {
+    if (!*this)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    if (!user_mapping_allowed_)
+      return ntl::unexpected(STATUS_NOT_SUPPORTED);
+    if (active_mapping_ && active_mapping_->is_open())
+      return ntl::unexpected(STATUS_DEVICE_BUSY);
+    auto mapped = ntl::ipc::try_map_page_buffer(pages_, offset_, length_,
+                                                connection, access);
+    if (mapped)
+      active_mapping_ = *mapped;
+    return mapped;
+  }
+
+private:
+  friend class swapped_io_buffers;
+  template <operation_id Operation>
+  friend ntl::result<swapped_io_buffers>
+  detail::try_swap_io_buffers_impl(detail::callback_data_impl<Operation>,
+                                   swap_buffer,
+                                   swap_io_options) noexcept;
+  swapped_buffer_view(std::shared_ptr<ntl::ipc::page_buffer> pages,
+                      std::size_t length, std::size_t offset,
+                      bool user_mapping_allowed) noexcept
+      : pages_(std::move(pages)), offset_(offset), length_(length),
+        user_mapping_allowed_(user_mapping_allowed) {}
+
+  std::shared_ptr<ntl::ipc::page_buffer> pages_;
+  std::size_t offset_ = 0;
+  std::size_t length_ = 0;
+  bool user_mapping_allowed_ = true;
+  mutable std::optional<ntl::ipc::mapped_buffer_view> active_mapping_;
+};
+
+namespace detail {
+
+inline constexpr ULONG swapped_context_pool_tag = ntl::pool_tag("cSwN");
+
+struct swap_slot {
+  swap_slot() noexcept = default;
+  swap_slot(std::shared_ptr<ntl::ipc::page_buffer> page_storage,
+            void *original_buffer, PMDL original_descriptor,
+            std::size_t logical_length, PMDL replacement_descriptor) noexcept
+      : pages(std::move(page_storage)), original(original_buffer),
+        original_mdl(original_descriptor), length(logical_length),
+        replacement_mdl(replacement_descriptor) {}
+  swap_slot(const swap_slot &) = delete;
+  swap_slot &operator=(const swap_slot &) = delete;
+  swap_slot(swap_slot &&other) noexcept
+      : pages(std::move(other.pages)), original(other.original),
+        original_mdl(other.original_mdl), length(other.length),
+        replacement_mdl(other.replacement_mdl),
+        mdl_transferred(other.mdl_transferred) {
+    other.replacement_mdl = nullptr;
+    other.mdl_transferred = false;
+  }
+  swap_slot &operator=(swap_slot &&other) noexcept {
+    if (this == &other)
+      return *this;
+    release_untransferred_mdl();
+    pages = std::move(other.pages);
+    original = other.original;
+    original_mdl = other.original_mdl;
+    length = other.length;
+    replacement_mdl = other.replacement_mdl;
+    mdl_transferred = other.mdl_transferred;
+    other.replacement_mdl = nullptr;
+    other.mdl_transferred = false;
+    return *this;
+  }
+  ~swap_slot() { release_untransferred_mdl(); }
+
+  void transfer_mdl_to_filter_manager() noexcept {
+    if (replacement_mdl)
+      mdl_transferred = true;
+  }
+
+  std::shared_ptr<ntl::ipc::page_buffer> pages;
+  void *original = nullptr;
+  PMDL original_mdl = nullptr;
+  std::size_t length = 0;
+  PMDL replacement_mdl = nullptr;
+  bool mdl_transferred = false;
+
+private:
+  void release_untransferred_mdl() noexcept {
+    if (replacement_mdl && !mdl_transferred)
+      IoFreeMdl(replacement_mdl);
+    replacement_mdl = nullptr;
+  }
+};
+
+inline ntl::result<swap_slot>
+make_swap_slot(const std::shared_ptr<ntl::ipc::page_buffer> &pages,
+               void *original, PMDL original_mdl, std::size_t logical_length,
+               bool system_buffer) noexcept {
+  if (!pages || logical_length == 0 || logical_length > pages->size())
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  PMDL replacement_mdl = nullptr;
+  if (!system_buffer) {
+    PMDL const backing_mdl = pages->native_mdl();
+    if (pages->size() > MAXULONG || !backing_mdl ||
+        !ntl::ipc::detail::mdl_describes_resident_pages(backing_mdl) ||
+        pages->size() >
+            static_cast<std::size_t>(MmGetMdlByteCount(backing_mdl)))
+      return ntl::unexpected(STATUS_INVALID_BUFFER_SIZE);
+    replacement_mdl =
+        IoAllocateMdl(pages->data(), static_cast<ULONG>(pages->size()), FALSE,
+                      FALSE, nullptr);
+    if (!replacement_mdl)
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    // The isolated backing already owns the locked-page MDL. Derive the MDL
+    // handed to Filter Manager from that source rather than rebuilding the
+    // PFN description from its temporary system mapping. IoBuildPartialMdl
+    // validates VirtualAddress against MmGetMdlVirtualAddress(SourceMdl), not
+    // against MappedSystemVa. In particular, an MDL returned by
+    // MmAllocatePagesForMdlEx can have StartVa == nullptr while its temporary
+    // kernel mapping is non-null, so pages->data() is not a valid source-MDL
+    // range address here. Filter Manager owns and frees this partial MDL after
+    // it is installed; page_buffer retains the source MDL and pages through
+    // post-operation completion.
+    IoBuildPartialMdl(backing_mdl, replacement_mdl,
+                      MmGetMdlVirtualAddress(backing_mdl),
+                      static_cast<ULONG>(pages->size()));
+  }
+  return ntl::ok(swap_slot{pages, original, original_mdl, logical_length,
+                           replacement_mdl});
+}
+
+inline ntl::result<std::size_t>
+query_noncached_alignment(PFLT_INSTANCE instance) noexcept {
+  if (!instance)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  PFLT_VOLUME volume = nullptr;
+  NTSTATUS status = FltGetVolumeFromInstance(instance, &volume);
+  if (!NT_SUCCESS(status))
+    return ntl::unexpected(status);
+  PDEVICE_OBJECT device = nullptr;
+  status = FltGetDiskDeviceObject(volume, &device);
+  FltObjectDereference(volume);
+  if (!NT_SUCCESS(status))
+    return ntl::unexpected(status);
+  const std::size_t alignment =
+      (std::max)(static_cast<std::size_t>(device->SectorSize),
+                 std::size_t{512});
+  ObDereferenceObject(device);
+  return ntl::ok(alignment);
+}
+
+inline ntl::result<std::size_t>
+round_transfer_length(std::size_t length, std::size_t alignment) noexcept {
+  if (length == 0 || alignment < 512 || alignment > MAXULONG ||
+      (alignment & (alignment - 1)) != 0 || length > MAXULONG)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  const auto remainder = length % alignment;
+  if (remainder == 0)
+    return ntl::ok(length);
+  const auto extra = alignment - remainder;
+  if (extra > static_cast<std::size_t>(MAXULONG) - length)
+    return ntl::unexpected(STATUS_INVALID_BUFFER_SIZE);
+  return ntl::ok(length + extra);
+}
+
+inline void *original_system_address(const swap_slot &slot) noexcept {
+  if (slot.original_mdl)
+    return MmGetSystemAddressForMdlSafe(slot.original_mdl, NormalPagePriority);
+  return slot.original;
+}
+
+struct process_copy_context {
+  void *destination = nullptr;
+  const void *source = nullptr;
+  std::size_t bytes = 0;
+};
+
+inline NTSTATUS NTAPI process_copy_call(void *opaque) noexcept {
+  auto *context = static_cast<process_copy_context *>(opaque);
+  return static_cast<NTSTATUS>(ntl::ipc::detail::guarded_copy(
+      context->destination, context->source, context->bytes));
+}
+
+inline ntl::status copy_in_requestor_process(PFLT_CALLBACK_DATA data,
+                                             void *destination,
+                                             const void *source,
+                                             std::size_t bytes) noexcept {
+  if (!data)
+    return STATUS_INVALID_PARAMETER;
+  const bool destination_is_kernel =
+      destination && reinterpret_cast<ULONG_PTR>(destination) >=
+                         reinterpret_cast<ULONG_PTR>(MmSystemRangeStart);
+  const bool source_is_kernel =
+      source && reinterpret_cast<ULONG_PTR>(source) >=
+                    reinterpret_cast<ULONG_PTR>(MmSystemRangeStart);
+  if (destination_is_kernel && source_is_kernel)
+    return ntl::ipc::detail::guarded_copy(destination, source, bytes);
+  PEPROCESS requestor = FltGetRequestorProcess(data);
+  if (!requestor)
+    return STATUS_INVALID_CID;
+  ObReferenceObject(requestor);
+  ntl::unique_object<PEPROCESS> owner{requestor};
+  process_copy_context context{destination, source, bytes};
+  return ntl::ipc::detail::invoke_in_process(requestor, &process_copy_call,
+                                             &context);
+}
+
+} // namespace detail
+
+/**
+ * @brief Owns replacement input/output pages installed into one IOPB.
+ *
+ * Keep this move-only value in the Filter Manager completion context until the
+ * post-operation callback. Its destructor restores original IOPB pointers
+ * before releasing replacement pages.
+ */
+class swapped_io_buffers {
+public:
+  swapped_io_buffers() noexcept = default;
+  swapped_io_buffers(const swapped_io_buffers &) = delete;
+  swapped_io_buffers &operator=(const swapped_io_buffers &) = delete;
+
+  swapped_io_buffers(swapped_io_buffers &&other) noexcept
+      : data_(other.data_),
+        control_input_slot_(std::move(other.control_input_slot_)),
+        input_slot_(std::move(other.input_slot_)),
+        output_slot_(std::move(other.output_slot_)),
+        input_(std::move(other.input_)), output_(std::move(other.output_)),
+        control_input_(std::move(other.control_input_)),
+        installed_(other.installed_),
+        released_to_filter_manager_(other.released_to_filter_manager_) {
+    other.control_input_slot_.reset();
+    other.input_slot_.reset();
+    other.output_slot_.reset();
+    other.input_.reset();
+    other.output_.reset();
+    other.control_input_.reset();
+    other.data_ = nullptr;
+    other.installed_ = false;
+    other.released_to_filter_manager_ = false;
+  }
+
+  swapped_io_buffers &operator=(swapped_io_buffers &&other) noexcept {
+    if (this == &other)
+      return *this;
+    (void)complete();
+    // Move assignment is used by optional registry storage. Do not overwrite
+    // a live installed/mapped owner when cleanup could not run at this IRQL.
+    if (installed_ || control_input_slot_ || input_slot_ || output_slot_ ||
+        control_input_ || input_ || output_) {
+      NT_ASSERT(FALSE);
+      return *this;
+    }
+    data_ = other.data_;
+    control_input_slot_ = std::move(other.control_input_slot_);
+    input_slot_ = std::move(other.input_slot_);
+    output_slot_ = std::move(other.output_slot_);
+    input_ = std::move(other.input_);
+    output_ = std::move(other.output_);
+    control_input_ = std::move(other.control_input_);
+    installed_ = other.installed_;
+    released_to_filter_manager_ = other.released_to_filter_manager_;
+    other.control_input_slot_.reset();
+    other.input_slot_.reset();
+    other.output_slot_.reset();
+    other.input_.reset();
+    other.output_.reset();
+    other.control_input_.reset();
+    other.data_ = nullptr;
+    other.installed_ = false;
+    other.released_to_filter_manager_ = false;
+    return *this;
+  }
+
+  ~swapped_io_buffers() { (void)complete(); }
+
+  const swapped_buffer_view *input() const noexcept {
+    return input_ ? &*input_ : nullptr;
+  }
+  const swapped_buffer_view *output() const noexcept {
+    return output_ ? &*output_ : nullptr;
+  }
+  const swapped_buffer_view *control_input() const noexcept {
+    return control_input_ ? &*control_input_ : nullptr;
+  }
+
+  /** Reports whether user mode can still access any replacement buffer. */
+  bool has_open_user_mappings() const noexcept {
+    return has_open_user_mapping();
+  }
+
+  /** Transfers this owner into a Filter Manager completion-context pointer. */
+  ntl::result<void *> release_completion_context() noexcept {
+    if (!installed_)
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+    if (has_open_user_mapping())
+      return ntl::unexpected(STATUS_DEVICE_BUSY);
+    clear_inactive_mapping_records();
+    auto created = ntl::try_make_pool<swapped_io_buffers>(
+        ntl::pool_kind::nonpaged, ntl::pool_option::none,
+        detail::swapped_context_pool_tag, std::move(*this));
+    if (!created)
+      return ntl::unexpected(created.status());
+    auto *context = created->release();
+    context->transfer_replacement_mdls();
+    return ntl::ok(static_cast<void *>(context));
+  }
+
+  /** Reclaims a context produced by release_completion_context(). */
+  static ntl::result<swapped_io_buffers>
+  adopt_completion_context(void *context) noexcept {
+    if (!context)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    auto *owner = static_cast<swapped_io_buffers *>(context);
+    swapped_io_buffers result{std::move(*owner)};
+    ntl::pool_deleter<swapped_io_buffers>{detail::swapped_context_pool_tag}(
+        owner);
+    return ntl::ok(std::move(result));
+  }
+
+  /** Closes all user mappings while retaining replacement pages/IOPB state. */
+  ntl::status close_user_mappings() noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return STATUS_INVALID_DEVICE_STATE;
+    NTSTATUS first = STATUS_SUCCESS;
+    const auto close_one = [&](auto &view) {
+      if (!view || !view->active_mapping_)
+        return;
+      const auto status = view->active_mapping_->close();
+      if (first == STATUS_SUCCESS && !status.is_ok())
+        first = static_cast<NTSTATUS>(status);
+      if (!view->active_mapping_->is_open())
+        view->active_mapping_.reset();
+    };
+    close_one(control_input_);
+    close_one(input_);
+    close_one(output_);
+    return first;
+  }
+
+  /** Installs prepared replacement buffers into the callback IOPB. */
+  ntl::status apply() noexcept {
+    if (installed_)
+      return STATUS_SUCCESS;
+    if (!data_ || !data_->Iopb)
+      return STATUS_INVALID_DEVICE_STATE;
+    if (input_ && input_->active_mapping_ && input_->active_mapping_->is_open())
+      return STATUS_DEVICE_BUSY;
+    if (control_input_ && control_input_->active_mapping_ &&
+        control_input_->active_mapping_->is_open())
+      return STATUS_DEVICE_BUSY;
+    if (output_ && output_->active_mapping_ &&
+        output_->active_mapping_->is_open())
+      return STATUS_DEVICE_BUSY;
+    auto *iopb = data_->Iopb;
+    switch (iopb->MajorFunction) {
+    case IRP_MJ_CREATE:
+      iopb->Parameters.Create.EaBuffer = input_slot_->pages->data();
+      break;
+    case IRP_MJ_WRITE:
+      iopb->Parameters.Write.WriteBuffer = input_slot_->pages->data();
+      iopb->Parameters.Write.MdlAddress = input_slot_->replacement_mdl;
+      break;
+    case IRP_MJ_READ:
+      iopb->Parameters.Read.ReadBuffer = output_slot_->pages->data();
+      iopb->Parameters.Read.MdlAddress = output_slot_->replacement_mdl;
+      break;
+    case IRP_MJ_SET_INFORMATION:
+      iopb->Parameters.SetFileInformation.InfoBuffer =
+          input_slot_->pages->data();
+      break;
+    case IRP_MJ_QUERY_INFORMATION:
+      iopb->Parameters.QueryFileInformation.InfoBuffer =
+          output_slot_->pages->data();
+      break;
+    case IRP_MJ_SET_EA:
+      iopb->Parameters.SetEa.EaBuffer = input_slot_->pages->data();
+      iopb->Parameters.SetEa.MdlAddress = input_slot_->replacement_mdl;
+      break;
+    case IRP_MJ_QUERY_EA:
+      if (input_slot_)
+        iopb->Parameters.QueryEa.EaList = input_slot_->pages->data();
+      if (output_slot_) {
+        iopb->Parameters.QueryEa.EaBuffer = output_slot_->pages->data();
+        iopb->Parameters.QueryEa.MdlAddress = output_slot_->replacement_mdl;
+      }
+      break;
+    case IRP_MJ_SET_VOLUME_INFORMATION:
+      iopb->Parameters.SetVolumeInformation.VolumeBuffer =
+          input_slot_->pages->data();
+      break;
+    case IRP_MJ_QUERY_VOLUME_INFORMATION:
+      iopb->Parameters.QueryVolumeInformation.VolumeBuffer =
+          output_slot_->pages->data();
+      break;
+    case IRP_MJ_SET_SECURITY:
+      iopb->Parameters.SetSecurity.SecurityDescriptor =
+          input_slot_->pages->data();
+      break;
+    case IRP_MJ_QUERY_SECURITY:
+      iopb->Parameters.QuerySecurity.SecurityBuffer =
+          output_slot_->pages->data();
+      iopb->Parameters.QuerySecurity.MdlAddress = output_slot_->replacement_mdl;
+      break;
+    case IRP_MJ_QUERY_QUOTA:
+      if (input_slot_)
+        iopb->Parameters.QueryQuota.SidList =
+            static_cast<PFILE_GET_QUOTA_INFORMATION>(
+                input_slot_->pages->data());
+      if (output_slot_) {
+        iopb->Parameters.QueryQuota.QuotaBuffer = output_slot_->pages->data();
+        iopb->Parameters.QueryQuota.MdlAddress = output_slot_->replacement_mdl;
+      }
+      break;
+    case IRP_MJ_SET_QUOTA:
+      iopb->Parameters.SetQuota.QuotaBuffer = input_slot_->pages->data();
+      iopb->Parameters.SetQuota.MdlAddress = input_slot_->replacement_mdl;
+      break;
+    case IRP_MJ_DIRECTORY_CONTROL:
+      if (iopb->MinorFunction == IRP_MN_QUERY_DIRECTORY) {
+        iopb->Parameters.DirectoryControl.QueryDirectory.DirectoryBuffer =
+            output_slot_->pages->data();
+        iopb->Parameters.DirectoryControl.QueryDirectory.MdlAddress =
+            output_slot_->replacement_mdl;
+      } else if (iopb->MinorFunction == IRP_MN_NOTIFY_CHANGE_DIRECTORY) {
+        iopb->Parameters.DirectoryControl.NotifyDirectory.DirectoryBuffer =
+            output_slot_->pages->data();
+        iopb->Parameters.DirectoryControl.NotifyDirectory.MdlAddress =
+            output_slot_->replacement_mdl;
+#ifdef IRP_MN_NOTIFY_CHANGE_DIRECTORY_EX
+      } else if (iopb->MinorFunction == IRP_MN_NOTIFY_CHANGE_DIRECTORY_EX) {
+        iopb->Parameters.DirectoryControl.NotifyDirectoryEx.DirectoryBuffer =
+            output_slot_->pages->data();
+        iopb->Parameters.DirectoryControl.NotifyDirectoryEx.MdlAddress =
+            output_slot_->replacement_mdl;
+#endif
+      } else {
+        return STATUS_NOT_SUPPORTED;
+      }
+      break;
+    case IRP_MJ_FILE_SYSTEM_CONTROL: {
+      const ULONG method =
+          iopb->Parameters.FileSystemControl.Common.FsControlCode & 3UL;
+      if (method == METHOD_BUFFERED) {
+        const auto &slot = input_slot_ ? input_slot_ : output_slot_;
+        iopb->Parameters.FileSystemControl.Buffered.SystemBuffer =
+            slot->pages->data();
+      } else if (method == METHOD_NEITHER) {
+        if (input_slot_)
+          iopb->Parameters.FileSystemControl.Neither.InputBuffer =
+              input_slot_->pages->data();
+        if (output_slot_) {
+          iopb->Parameters.FileSystemControl.Neither.OutputBuffer =
+              output_slot_->pages->data();
+          iopb->Parameters.FileSystemControl.Neither.OutputMdlAddress =
+              output_slot_->replacement_mdl;
+        }
+      } else {
+        if (control_input_slot_)
+          iopb->Parameters.FileSystemControl.Direct.InputSystemBuffer =
+              control_input_slot_->pages->data();
+        const auto &slot =
+            method == METHOD_IN_DIRECT ? input_slot_ : output_slot_;
+        if (slot) {
+          iopb->Parameters.FileSystemControl.Direct.OutputBuffer =
+              slot->pages->data();
+          iopb->Parameters.FileSystemControl.Direct.OutputMdlAddress =
+              slot->replacement_mdl;
+        }
+      }
+      break;
+    }
+    case IRP_MJ_DEVICE_CONTROL:
+    case IRP_MJ_INTERNAL_DEVICE_CONTROL: {
+      const ULONG method =
+          iopb->Parameters.DeviceIoControl.Common.IoControlCode & 3UL;
+      if (method == METHOD_BUFFERED) {
+        const auto &slot = input_slot_ ? input_slot_ : output_slot_;
+        iopb->Parameters.DeviceIoControl.Buffered.SystemBuffer =
+            slot->pages->data();
+      } else if (method == METHOD_NEITHER) {
+        if (input_slot_)
+          iopb->Parameters.DeviceIoControl.Neither.InputBuffer =
+              input_slot_->pages->data();
+        if (output_slot_) {
+          iopb->Parameters.DeviceIoControl.Neither.OutputBuffer =
+              output_slot_->pages->data();
+          iopb->Parameters.DeviceIoControl.Neither.OutputMdlAddress =
+              output_slot_->replacement_mdl;
+        }
+      } else {
+        if (control_input_slot_)
+          iopb->Parameters.DeviceIoControl.Direct.InputSystemBuffer =
+              control_input_slot_->pages->data();
+        const auto &slot =
+            method == METHOD_IN_DIRECT ? input_slot_ : output_slot_;
+        if (slot) {
+          iopb->Parameters.DeviceIoControl.Direct.OutputBuffer =
+              slot->pages->data();
+          iopb->Parameters.DeviceIoControl.Direct.OutputMdlAddress =
+              slot->replacement_mdl;
+        }
+      }
+      break;
+    }
+    default:
+      return STATUS_NOT_SUPPORTED;
+    }
+    FltSetCallbackDataDirty(data_);
+    installed_ = true;
+    return STATUS_SUCCESS;
+  }
+
+  /**
+   * @brief Stabilizes an original user output buffer before pending post I/O.
+   *
+   * Call this at PASSIVE_LEVEL after Filter Manager has restored the original
+   * post-operation parameters and before an asynchronous user-mode round trip.
+   * The generated MDL remains installed in callback data and is therefore
+   * unlocked/freed by Filter Manager when the post operation is completed.
+   */
+  ntl::status
+  prepare_output_copy_back(std::size_t valid_bytes) noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return STATUS_INVALID_DEVICE_STATE;
+    if (!data_ || !output_slot_ || !output_slot_->pages)
+      return STATUS_INVALID_DEVICE_STATE;
+    if (valid_bytes > output_slot_->length)
+      return STATUS_INVALID_BUFFER_SIZE;
+    if (valid_bytes == 0 || output_slot_->original_mdl ||
+        !output_slot_->replacement_mdl || !FLT_IS_IRP_OPERATION(data_))
+      return STATUS_SUCCESS;
+    if (!FlagOn(data_->Flags, FLTFL_CALLBACK_DATA_POST_OPERATION))
+      return STATUS_INVALID_DEVICE_STATE;
+
+    const NTSTATUS locked = FltLockUserBuffer(data_);
+    if (!NT_SUCCESS(locked))
+      return locked;
+    const auto refreshed = detail::describe_operation_buffers(
+        data_, detail::io_buffer_phase::post);
+    if (!refreshed.output_mdl || refreshed.output_length < valid_bytes)
+      return STATUS_INVALID_DEVICE_STATE;
+    output_slot_->original = refreshed.output;
+    output_slot_->original_mdl = refreshed.output_mdl;
+    return STATUS_SUCCESS;
+  }
+
+  /** @brief Copies valid replacement output bytes to the original buffer. */
+  ntl::status copy_output_to_original(std::size_t valid_bytes) noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return STATUS_INVALID_DEVICE_STATE;
+    if (!data_ || !output_slot_ || !output_slot_->pages)
+      return STATUS_INVALID_DEVICE_STATE;
+    if (valid_bytes > output_slot_->length)
+      return STATUS_INVALID_BUFFER_SIZE;
+    if (output_ && output_->active_mapping_ &&
+        output_->active_mapping_->is_open())
+      return STATUS_DEVICE_BUSY;
+    if (valid_bytes == 0)
+      return STATUS_SUCCESS;
+    /*
+     * Do not lock an original user buffer before swapping it.  A pre-op
+     * FltLockUserBuffer-created MDL would be overwritten by the replacement
+     * MDL and would be neither the original incoming MDL nor the swapped MDL
+     * tracked by Filter Manager.  Lock it only in post, after Filter Manager
+     * has restored the original parameters. prepare_output_copy_back normally
+     * does this before a user-mode round trip; this call is the synchronous
+     * fallback. Leave the MDL installed so callback-data teardown owns the
+     * unlock/free.
+     */
+    const auto prepared = prepare_output_copy_back(valid_bytes);
+    if (!prepared.is_ok())
+      return prepared;
+    void *const destination = detail::original_system_address(*output_slot_);
+    if (!destination)
+      return STATUS_INSUFFICIENT_RESOURCES;
+    if (output_slot_->original_mdl)
+      return ntl::ipc::detail::guarded_copy(
+          destination, output_slot_->pages->data(), valid_bytes);
+    return detail::copy_in_requestor_process(
+        data_, destination, output_slot_->pages->data(), valid_bytes);
+  }
+
+  template <operation_id Operation>
+  ntl::status copy_back(post_operation<Operation> operation) noexcept {
+    const auto data = operation.data().native();
+    if (!data || data != data_)
+      return STATUS_INVALID_PARAMETER;
+    if (NT_ERROR(data->IoStatus.Status))
+      return data->IoStatus.Status;
+    return copy_output_to_original(
+        (std::min)(output_slot_ ? output_slot_->length : std::size_t{0},
+                   static_cast<std::size_t>(data->IoStatus.Information)));
+  }
+
+  /**
+   * @brief Restores original IOPB pointers and releases replacement pages.
+   *
+   * Cleanup-only completion is DISPATCH-safe after release_completion_context
+   * has pruned all closed user-mapping records. Closing a live mapping still
+   * requires PASSIVE_LEVEL.
+   */
+  ntl::status complete() noexcept {
+    const auto irql = KeGetCurrentIrql();
+    if (irql > DISPATCH_LEVEL)
+      return STATUS_INVALID_DEVICE_STATE;
+    ntl::status status{STATUS_SUCCESS};
+    if (irql == PASSIVE_LEVEL) {
+      status = close_user_mappings();
+    } else if (has_mapping_record()) {
+      return STATUS_INVALID_DEVICE_STATE;
+    }
+    restore();
+    input_.reset();
+    output_.reset();
+    control_input_.reset();
+    control_input_slot_.reset();
+    input_slot_.reset();
+    output_slot_.reset();
+    return status;
+  }
+
+private:
+  template <operation_id Operation>
+  friend ntl::result<swapped_io_buffers>
+  detail::try_swap_io_buffers_impl(detail::callback_data_impl<Operation>,
+                                   swap_buffer,
+                                   swap_io_options) noexcept;
+
+  bool has_open_user_mapping() const noexcept {
+    const auto is_open = [](const auto &view) {
+      return view && view->active_mapping_ && view->active_mapping_->is_open();
+    };
+    return is_open(control_input_) || is_open(input_) || is_open(output_);
+  }
+
+  bool has_mapping_record() const noexcept {
+    const auto present = [](const auto &view) {
+      return view && view->active_mapping_.has_value();
+    };
+    return present(control_input_) || present(input_) || present(output_);
+  }
+
+  void clear_inactive_mapping_records() noexcept {
+    const auto clear = [](auto &view) {
+      if (view && view->active_mapping_ && !view->active_mapping_->is_open())
+        view->active_mapping_.reset();
+    };
+    clear(control_input_);
+    clear(input_);
+    clear(output_);
+  }
+
+  void transfer_replacement_mdls() noexcept {
+    if (control_input_slot_)
+      control_input_slot_->transfer_mdl_to_filter_manager();
+    if (input_slot_)
+      input_slot_->transfer_mdl_to_filter_manager();
+    if (output_slot_)
+      output_slot_->transfer_mdl_to_filter_manager();
+    released_to_filter_manager_ = true;
+  }
+
+  void restore() noexcept {
+    if (!installed_ || !data_ || !data_->Iopb)
+      return;
+    // Filter Manager restores the original operation parameters before it
+    // invokes post-operation callbacks. Once this owner has been released as
+    // a completion context, rewriting the already-restored IOPB (and marking
+    // it dirty again) would be both redundant and misleading.
+    if (released_to_filter_manager_) {
+      installed_ = false;
+      return;
+    }
+    auto *const iopb = data_->Iopb;
+    switch (iopb->MajorFunction) {
+    case IRP_MJ_CREATE:
+      iopb->Parameters.Create.EaBuffer = input_slot_->original;
+      break;
+    case IRP_MJ_WRITE:
+      iopb->Parameters.Write.WriteBuffer = input_slot_->original;
+      iopb->Parameters.Write.MdlAddress = input_slot_->original_mdl;
+      break;
+    case IRP_MJ_READ:
+      iopb->Parameters.Read.ReadBuffer = output_slot_->original;
+      iopb->Parameters.Read.MdlAddress = output_slot_->original_mdl;
+      break;
+    case IRP_MJ_SET_INFORMATION:
+      iopb->Parameters.SetFileInformation.InfoBuffer = input_slot_->original;
+      break;
+    case IRP_MJ_QUERY_INFORMATION:
+      iopb->Parameters.QueryFileInformation.InfoBuffer = output_slot_->original;
+      break;
+    case IRP_MJ_SET_EA:
+      iopb->Parameters.SetEa.EaBuffer = input_slot_->original;
+      iopb->Parameters.SetEa.MdlAddress = input_slot_->original_mdl;
+      break;
+    case IRP_MJ_QUERY_EA:
+      if (input_slot_)
+        iopb->Parameters.QueryEa.EaList = input_slot_->original;
+      if (output_slot_) {
+        iopb->Parameters.QueryEa.EaBuffer = output_slot_->original;
+        iopb->Parameters.QueryEa.MdlAddress = output_slot_->original_mdl;
+      }
+      break;
+    case IRP_MJ_SET_VOLUME_INFORMATION:
+      iopb->Parameters.SetVolumeInformation.VolumeBuffer =
+          input_slot_->original;
+      break;
+    case IRP_MJ_QUERY_VOLUME_INFORMATION:
+      iopb->Parameters.QueryVolumeInformation.VolumeBuffer =
+          output_slot_->original;
+      break;
+    case IRP_MJ_SET_SECURITY:
+      iopb->Parameters.SetSecurity.SecurityDescriptor = input_slot_->original;
+      break;
+    case IRP_MJ_QUERY_SECURITY:
+      iopb->Parameters.QuerySecurity.SecurityBuffer = output_slot_->original;
+      iopb->Parameters.QuerySecurity.MdlAddress = output_slot_->original_mdl;
+      break;
+    case IRP_MJ_QUERY_QUOTA:
+      if (input_slot_)
+        iopb->Parameters.QueryQuota.SidList =
+            static_cast<PFILE_GET_QUOTA_INFORMATION>(input_slot_->original);
+      if (output_slot_) {
+        iopb->Parameters.QueryQuota.QuotaBuffer = output_slot_->original;
+        iopb->Parameters.QueryQuota.MdlAddress = output_slot_->original_mdl;
+      }
+      break;
+    case IRP_MJ_SET_QUOTA:
+      iopb->Parameters.SetQuota.QuotaBuffer = input_slot_->original;
+      iopb->Parameters.SetQuota.MdlAddress = input_slot_->original_mdl;
+      break;
+    case IRP_MJ_DIRECTORY_CONTROL:
+      if (iopb->MinorFunction == IRP_MN_QUERY_DIRECTORY) {
+        iopb->Parameters.DirectoryControl.QueryDirectory.DirectoryBuffer =
+            output_slot_->original;
+        iopb->Parameters.DirectoryControl.QueryDirectory.MdlAddress =
+            output_slot_->original_mdl;
+      } else if (iopb->MinorFunction == IRP_MN_NOTIFY_CHANGE_DIRECTORY) {
+        iopb->Parameters.DirectoryControl.NotifyDirectory.DirectoryBuffer =
+            output_slot_->original;
+        iopb->Parameters.DirectoryControl.NotifyDirectory.MdlAddress =
+            output_slot_->original_mdl;
+#ifdef IRP_MN_NOTIFY_CHANGE_DIRECTORY_EX
+      } else if (iopb->MinorFunction == IRP_MN_NOTIFY_CHANGE_DIRECTORY_EX) {
+        iopb->Parameters.DirectoryControl.NotifyDirectoryEx.DirectoryBuffer =
+            output_slot_->original;
+        iopb->Parameters.DirectoryControl.NotifyDirectoryEx.MdlAddress =
+            output_slot_->original_mdl;
+#endif
+      }
+      break;
+    case IRP_MJ_FILE_SYSTEM_CONTROL: {
+      const ULONG method =
+          iopb->Parameters.FileSystemControl.Common.FsControlCode & 3UL;
+      if (method == METHOD_BUFFERED) {
+        const auto &slot = input_slot_ ? input_slot_ : output_slot_;
+        iopb->Parameters.FileSystemControl.Buffered.SystemBuffer =
+            slot->original;
+      } else if (method == METHOD_NEITHER) {
+        if (input_slot_)
+          iopb->Parameters.FileSystemControl.Neither.InputBuffer =
+              input_slot_->original;
+        if (output_slot_) {
+          iopb->Parameters.FileSystemControl.Neither.OutputBuffer =
+              output_slot_->original;
+          iopb->Parameters.FileSystemControl.Neither.OutputMdlAddress =
+              output_slot_->original_mdl;
+        }
+      } else {
+        if (control_input_slot_)
+          iopb->Parameters.FileSystemControl.Direct.InputSystemBuffer =
+              control_input_slot_->original;
+        const auto &slot =
+            method == METHOD_IN_DIRECT ? input_slot_ : output_slot_;
+        if (slot) {
+          iopb->Parameters.FileSystemControl.Direct.OutputBuffer =
+              slot->original;
+          iopb->Parameters.FileSystemControl.Direct.OutputMdlAddress =
+              slot->original_mdl;
+        }
+      }
+      break;
+    }
+    case IRP_MJ_DEVICE_CONTROL:
+    case IRP_MJ_INTERNAL_DEVICE_CONTROL: {
+      const ULONG method =
+          iopb->Parameters.DeviceIoControl.Common.IoControlCode & 3UL;
+      if (method == METHOD_BUFFERED) {
+        const auto &slot = input_slot_ ? input_slot_ : output_slot_;
+        iopb->Parameters.DeviceIoControl.Buffered.SystemBuffer = slot->original;
+      } else if (method == METHOD_NEITHER) {
+        if (input_slot_)
+          iopb->Parameters.DeviceIoControl.Neither.InputBuffer =
+              input_slot_->original;
+        if (output_slot_) {
+          iopb->Parameters.DeviceIoControl.Neither.OutputBuffer =
+              output_slot_->original;
+          iopb->Parameters.DeviceIoControl.Neither.OutputMdlAddress =
+              output_slot_->original_mdl;
+        }
+      } else {
+        if (control_input_slot_)
+          iopb->Parameters.DeviceIoControl.Direct.InputSystemBuffer =
+              control_input_slot_->original;
+        const auto &slot =
+            method == METHOD_IN_DIRECT ? input_slot_ : output_slot_;
+        if (slot) {
+          iopb->Parameters.DeviceIoControl.Direct.OutputBuffer = slot->original;
+          iopb->Parameters.DeviceIoControl.Direct.OutputMdlAddress =
+              slot->original_mdl;
+        }
+      }
+      break;
+    }
+    default:
+      break;
+    }
+    FltSetCallbackDataDirty(data_);
+    installed_ = false;
+  }
+
+  PFLT_CALLBACK_DATA data_ = nullptr;
+  std::optional<detail::swap_slot> control_input_slot_;
+  std::optional<detail::swap_slot> input_slot_;
+  std::optional<detail::swap_slot> output_slot_;
+  std::optional<swapped_buffer_view> input_;
+  std::optional<swapped_buffer_view> output_;
+  std::optional<swapped_buffer_view> control_input_;
+  bool installed_ = false;
+  bool released_to_filter_manager_ = false;
+};
+
+/**
+ * @brief Replaces the logical input/output buffers of a supported operation.
+ *
+ * Supported operations include create EA, read/write, information, directory,
+ * EA, volume, security, quota, FSCTL, and IOCTL buffers. The operation type
+ * selects the correct IOPB member; the caller never selects a buffering method.
+ */
+template <operation_id Operation>
+[[nodiscard]] ntl::result<swapped_io_buffers>
+detail::try_swap_io_buffers_impl(detail::callback_data_impl<Operation> data,
+                                 swap_buffer selection,
+                                 swap_io_options options) noexcept {
+  if (!data.native() || !data.native_iopb())
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+    return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+
+  auto *const native = data.native();
+  if (FLT_IS_FASTIO_OPERATION(native))
+    return ntl::unexpected(STATUS_NOT_SUPPORTED);
+  auto *const iopb = native->Iopb;
+  if (options.max_replacement_bytes == 0)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  if (selection != swap_buffer::input && selection != swap_buffer::output &&
+      selection != swap_buffer::all)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  const bool select_input =
+      selection == swap_buffer::input || selection == swap_buffer::all;
+  const bool select_output =
+      selection == swap_buffer::output || selection == swap_buffer::all;
+  if (FlagOn(iopb->IrpFlags, IRP_PAGING_IO) && !options.allow_paging_io)
+    return ntl::unexpected(STATUS_NOT_SUPPORTED);
+  const bool operation_system_buffer = FLT_IS_SYSTEM_BUFFER(native) != FALSE;
+  const bool user_mapping_allowed = !FlagOn(iopb->IrpFlags, IRP_PAGING_IO);
+  swapped_io_buffers result;
+  result.data_ = native;
+
+  void *input = nullptr;
+  PMDL input_mdl = nullptr;
+  std::size_t input_length = 0;
+  void *output = nullptr;
+  PMDL output_mdl = nullptr;
+  std::size_t output_length = 0;
+  void *control_input = nullptr;
+  std::size_t control_input_length = 0;
+  bool buffered_shared = false;
+
+  switch (iopb->MajorFunction) {
+  case IRP_MJ_CREATE:
+    input = iopb->Parameters.Create.EaBuffer;
+    input_length = iopb->Parameters.Create.EaLength;
+    break;
+  case IRP_MJ_WRITE:
+    input = iopb->Parameters.Write.WriteBuffer;
+    input_mdl = iopb->Parameters.Write.MdlAddress;
+    input_length = iopb->Parameters.Write.Length;
+    break;
+  case IRP_MJ_READ:
+    output = iopb->Parameters.Read.ReadBuffer;
+    output_mdl = iopb->Parameters.Read.MdlAddress;
+    output_length = iopb->Parameters.Read.Length;
+    break;
+  case IRP_MJ_SET_INFORMATION:
+    input = iopb->Parameters.SetFileInformation.InfoBuffer;
+    input_length = iopb->Parameters.SetFileInformation.Length;
+    break;
+  case IRP_MJ_QUERY_INFORMATION:
+    output = iopb->Parameters.QueryFileInformation.InfoBuffer;
+    output_length = iopb->Parameters.QueryFileInformation.Length;
+    break;
+  case IRP_MJ_SET_EA:
+    input = iopb->Parameters.SetEa.EaBuffer;
+    input_mdl = iopb->Parameters.SetEa.MdlAddress;
+    input_length = iopb->Parameters.SetEa.Length;
+    break;
+  case IRP_MJ_QUERY_EA:
+    input = iopb->Parameters.QueryEa.EaList;
+    input_length = iopb->Parameters.QueryEa.EaListLength;
+    output = iopb->Parameters.QueryEa.EaBuffer;
+    output_mdl = iopb->Parameters.QueryEa.MdlAddress;
+    output_length = iopb->Parameters.QueryEa.Length;
+    break;
+  case IRP_MJ_SET_VOLUME_INFORMATION:
+    input = iopb->Parameters.SetVolumeInformation.VolumeBuffer;
+    input_length = iopb->Parameters.SetVolumeInformation.Length;
+    break;
+  case IRP_MJ_QUERY_VOLUME_INFORMATION:
+    output = iopb->Parameters.QueryVolumeInformation.VolumeBuffer;
+    output_length = iopb->Parameters.QueryVolumeInformation.Length;
+    break;
+  case IRP_MJ_SET_SECURITY:
+    input = iopb->Parameters.SetSecurity.SecurityDescriptor;
+    if (input)
+      input_length = detail::security_descriptor_length(
+          native, iopb->Parameters.SetSecurity.SecurityDescriptor);
+    break;
+  case IRP_MJ_QUERY_SECURITY:
+    output = iopb->Parameters.QuerySecurity.SecurityBuffer;
+    output_mdl = iopb->Parameters.QuerySecurity.MdlAddress;
+    output_length = iopb->Parameters.QuerySecurity.Length;
+    break;
+  case IRP_MJ_QUERY_QUOTA:
+    input = iopb->Parameters.QueryQuota.SidList;
+    input_length = iopb->Parameters.QueryQuota.SidListLength;
+    output = iopb->Parameters.QueryQuota.QuotaBuffer;
+    output_mdl = iopb->Parameters.QueryQuota.MdlAddress;
+    output_length = iopb->Parameters.QueryQuota.Length;
+    break;
+  case IRP_MJ_SET_QUOTA:
+    input = iopb->Parameters.SetQuota.QuotaBuffer;
+    input_mdl = iopb->Parameters.SetQuota.MdlAddress;
+    input_length = iopb->Parameters.SetQuota.Length;
+    break;
+  case IRP_MJ_DIRECTORY_CONTROL:
+    if (iopb->MinorFunction == IRP_MN_QUERY_DIRECTORY) {
+      output = iopb->Parameters.DirectoryControl.QueryDirectory.DirectoryBuffer;
+      output_mdl = iopb->Parameters.DirectoryControl.QueryDirectory.MdlAddress;
+      output_length = iopb->Parameters.DirectoryControl.QueryDirectory.Length;
+    } else if (iopb->MinorFunction == IRP_MN_NOTIFY_CHANGE_DIRECTORY) {
+      output =
+          iopb->Parameters.DirectoryControl.NotifyDirectory.DirectoryBuffer;
+      output_mdl = iopb->Parameters.DirectoryControl.NotifyDirectory.MdlAddress;
+      output_length = iopb->Parameters.DirectoryControl.NotifyDirectory.Length;
+#ifdef IRP_MN_NOTIFY_CHANGE_DIRECTORY_EX
+    } else if (iopb->MinorFunction == IRP_MN_NOTIFY_CHANGE_DIRECTORY_EX) {
+      output =
+          iopb->Parameters.DirectoryControl.NotifyDirectoryEx.DirectoryBuffer;
+      output_mdl =
+          iopb->Parameters.DirectoryControl.NotifyDirectoryEx.MdlAddress;
+      output_length =
+          iopb->Parameters.DirectoryControl.NotifyDirectoryEx.Length;
+#endif
+    } else {
+      return ntl::unexpected(STATUS_NOT_SUPPORTED);
+    }
+    break;
+  case IRP_MJ_FILE_SYSTEM_CONTROL: {
+    if (!detail::supports_fsctl_buffer_layout(iopb->MinorFunction))
+      return ntl::unexpected(STATUS_NOT_SUPPORTED);
+    const ULONG method =
+        iopb->Parameters.FileSystemControl.Common.FsControlCode & 3UL;
+    control_input_length =
+        iopb->Parameters.FileSystemControl.Common.InputBufferLength;
+    output_length =
+        iopb->Parameters.FileSystemControl.Common.OutputBufferLength;
+    if (method == METHOD_BUFFERED) {
+      buffered_shared = true;
+      input = iopb->Parameters.FileSystemControl.Buffered.SystemBuffer;
+      output = input;
+      input_length = control_input_length;
+      control_input_length = 0;
+    } else if (method == METHOD_NEITHER) {
+      input = iopb->Parameters.FileSystemControl.Neither.InputBuffer;
+      input_length = control_input_length;
+      control_input_length = 0;
+      output = iopb->Parameters.FileSystemControl.Neither.OutputBuffer;
+      output_mdl = iopb->Parameters.FileSystemControl.Neither.OutputMdlAddress;
+    } else {
+      control_input =
+          iopb->Parameters.FileSystemControl.Direct.InputSystemBuffer;
+      const auto direct = iopb->Parameters.FileSystemControl.Direct;
+      if (method == METHOD_IN_DIRECT) {
+        input = direct.OutputBuffer;
+        input_mdl = direct.OutputMdlAddress;
+        input_length = output_length;
+        output_length = 0;
+      } else {
+        output = direct.OutputBuffer;
+        output_mdl = direct.OutputMdlAddress;
+      }
+    }
+    break;
+  }
+  case IRP_MJ_DEVICE_CONTROL:
+  case IRP_MJ_INTERNAL_DEVICE_CONTROL: {
+    const ULONG method =
+        iopb->Parameters.DeviceIoControl.Common.IoControlCode & 3UL;
+    control_input_length =
+        iopb->Parameters.DeviceIoControl.Common.InputBufferLength;
+    output_length = iopb->Parameters.DeviceIoControl.Common.OutputBufferLength;
+    if (method == METHOD_BUFFERED) {
+      buffered_shared = true;
+      input = iopb->Parameters.DeviceIoControl.Buffered.SystemBuffer;
+      output = input;
+      input_length = control_input_length;
+      control_input_length = 0;
+    } else if (method == METHOD_NEITHER) {
+      input = iopb->Parameters.DeviceIoControl.Neither.InputBuffer;
+      input_length = control_input_length;
+      control_input_length = 0;
+      output = iopb->Parameters.DeviceIoControl.Neither.OutputBuffer;
+      output_mdl = iopb->Parameters.DeviceIoControl.Neither.OutputMdlAddress;
+    } else {
+      control_input = iopb->Parameters.DeviceIoControl.Direct.InputSystemBuffer;
+      const auto direct = iopb->Parameters.DeviceIoControl.Direct;
+      if (method == METHOD_IN_DIRECT) {
+        input = direct.OutputBuffer;
+        input_mdl = direct.OutputMdlAddress;
+        input_length = output_length;
+        output_length = 0;
+      } else {
+        output = direct.OutputBuffer;
+        output_mdl = direct.OutputMdlAddress;
+      }
+    }
+    break;
+  }
+  default:
+    return ntl::unexpected(STATUS_NOT_SUPPORTED);
+  }
+
+  if (iopb->MajorFunction == IRP_MJ_SET_SECURITY && input && input_length == 0)
+    return ntl::unexpected(STATUS_INVALID_SECURITY_DESCR);
+
+  std::size_t input_allocation_length = input_length;
+  std::size_t output_allocation_length = output_length;
+  bool input_has_mdl_field = false;
+  bool output_has_mdl_field = false;
+  switch (iopb->MajorFunction) {
+  case IRP_MJ_WRITE:
+  case IRP_MJ_SET_EA:
+  case IRP_MJ_SET_QUOTA:
+    input_has_mdl_field = true;
+    break;
+  case IRP_MJ_READ:
+  case IRP_MJ_QUERY_EA:
+  case IRP_MJ_QUERY_SECURITY:
+  case IRP_MJ_QUERY_QUOTA:
+  case IRP_MJ_DIRECTORY_CONTROL:
+    output_has_mdl_field = true;
+    break;
+  case IRP_MJ_FILE_SYSTEM_CONTROL: {
+    const ULONG method =
+        iopb->Parameters.FileSystemControl.Common.FsControlCode & 3UL;
+    input_has_mdl_field = method == METHOD_IN_DIRECT;
+    output_has_mdl_field =
+        method == METHOD_OUT_DIRECT || method == METHOD_NEITHER;
+    break;
+  }
+  case IRP_MJ_DEVICE_CONTROL:
+  case IRP_MJ_INTERNAL_DEVICE_CONTROL: {
+    const ULONG method =
+        iopb->Parameters.DeviceIoControl.Common.IoControlCode & 3UL;
+    input_has_mdl_field = method == METHOD_IN_DIRECT;
+    output_has_mdl_field =
+        method == METHOD_OUT_DIRECT || method == METHOD_NEITHER;
+    break;
+  }
+  default:
+    break;
+  }
+  if ((iopb->MajorFunction == IRP_MJ_READ ||
+       iopb->MajorFunction == IRP_MJ_WRITE) &&
+      FlagOn(iopb->IrpFlags, IRP_NOCACHE)) {
+    std::size_t alignment = options.noncached_alignment;
+    if (alignment == 0) {
+      const auto queried =
+          detail::query_noncached_alignment(iopb->TargetInstance);
+      if (!queried)
+        return ntl::unexpected(queried.status());
+      alignment = *queried;
+    }
+    if (input_length) {
+      const auto rounded =
+          detail::round_transfer_length(input_length, alignment);
+      if (!rounded)
+        return ntl::unexpected(rounded.status());
+      input_allocation_length = *rounded;
+    }
+    if (output_length) {
+      const auto rounded =
+          detail::round_transfer_length(output_length, alignment);
+      if (!rounded)
+        return ntl::unexpected(rounded.status());
+      output_allocation_length = *rounded;
+    }
+  }
+
+  std::size_t replacement_bytes = 0;
+  const bool buffered_selected =
+      buffered_shared && ((select_input && input_length != 0) ||
+                          (select_output && output_length != 0));
+  const auto add_replacement = [&](std::size_t bytes) noexcept {
+    std::size_t charge = 0;
+    if (!ntl::ipc::detail::isolated_page_charge(bytes, charge) ||
+        charge > options.max_replacement_bytes - replacement_bytes)
+      return false;
+    replacement_bytes += charge;
+    return true;
+  };
+  if (buffered_selected) {
+    if (!add_replacement((std::max)(input_length, output_length)))
+      return ntl::unexpected(STATUS_QUOTA_EXCEEDED);
+  } else {
+    if (control_input && control_input_length && select_input &&
+        !add_replacement(control_input_length))
+      return ntl::unexpected(STATUS_QUOTA_EXCEEDED);
+    if ((input || input_mdl) && input_length && select_input &&
+        !add_replacement(input_allocation_length))
+      return ntl::unexpected(STATUS_QUOTA_EXCEEDED);
+    if ((output || output_mdl) && output_length && select_output &&
+        !add_replacement(output_allocation_length))
+      return ntl::unexpected(STATUS_QUOTA_EXCEEDED);
+  }
+
+  if (buffered_selected) {
+    const auto capacity = (std::max)(input_length, output_length);
+    if (!input || capacity == 0)
+      return ntl::unexpected(STATUS_INVALID_BUFFER_SIZE);
+    auto pages = ntl::ipc::page_buffer::try_create(capacity);
+    if (!pages)
+      return ntl::unexpected(pages.status());
+    if (input_length) {
+      const auto copied = detail::copy_in_requestor_process(
+          native, (*pages)->data(), input, input_length);
+      if (!copied.is_ok())
+        return ntl::unexpected(static_cast<NTSTATUS>(copied));
+    }
+    if (input_length) {
+      auto slot =
+          detail::make_swap_slot(*pages, input, nullptr, input_length, true);
+      if (!slot)
+        return ntl::unexpected(slot.status());
+      result.input_slot_.emplace(std::move(*slot));
+      if (select_input)
+        result.input_ =
+            swapped_buffer_view{*pages, input_length, 0, user_mapping_allowed};
+    }
+    if (output_length) {
+      auto slot =
+          detail::make_swap_slot(*pages, output, nullptr, output_length, true);
+      if (!slot)
+        return ntl::unexpected(slot.status());
+      result.output_slot_.emplace(std::move(*slot));
+      // Buffered input/output share one pointer. Output copy-back is mandatory
+      // even when only input transformation was requested.
+      result.output_ =
+          swapped_buffer_view{*pages, output_length, 0, user_mapping_allowed};
+    }
+    input = nullptr;
+    output = nullptr;
+  }
+
+  if (control_input && control_input_length && select_input) {
+    auto pages = ntl::ipc::page_buffer::try_create(control_input_length);
+    if (!pages)
+      return ntl::unexpected(pages.status());
+    const auto copied = detail::copy_in_requestor_process(
+        native, (*pages)->data(), control_input, control_input_length);
+    if (!copied.is_ok())
+      return ntl::unexpected(static_cast<NTSTATUS>(copied));
+    auto slot = detail::make_swap_slot(*pages, control_input, nullptr,
+                                       control_input_length, true);
+    if (!slot)
+      return ntl::unexpected(slot.status());
+    result.control_input_slot_.emplace(std::move(*slot));
+    result.control_input_ = swapped_buffer_view{*pages, control_input_length, 0,
+                                                user_mapping_allowed};
+  }
+
+  if ((input || input_mdl) && input_length && select_input) {
+    if (input_mdl &&
+        (!ntl::ipc::detail::mdl_describes_resident_pages(input_mdl) ||
+         input_length > static_cast<std::size_t>(MmGetMdlByteCount(input_mdl))))
+      return ntl::unexpected(STATUS_INVALID_BUFFER_SIZE);
+    auto pages = ntl::ipc::page_buffer::try_create(input_allocation_length);
+    if (!pages)
+      return ntl::unexpected(pages.status());
+    void *source =
+        input_mdl ? MmGetSystemAddressForMdlSafe(input_mdl, NormalPagePriority)
+                  : input;
+    if (!source)
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    const auto copied =
+        input_mdl ? ntl::ipc::detail::guarded_copy((*pages)->data(), source,
+                                                   input_length)
+                  : detail::copy_in_requestor_process(native, (*pages)->data(),
+                                                      source, input_length);
+    if (!copied.is_ok())
+      return ntl::unexpected(static_cast<NTSTATUS>(copied));
+    auto slot =
+        detail::make_swap_slot(*pages, input, input_mdl, input_length,
+                               operation_system_buffer || !input_has_mdl_field);
+    if (!slot)
+      return ntl::unexpected(slot.status());
+    result.input_slot_.emplace(std::move(*slot));
+    result.input_ =
+        swapped_buffer_view{*pages, input_length, 0, user_mapping_allowed};
+  }
+
+  if ((output || output_mdl) && output_length && select_output) {
+    if (output_mdl &&
+        (!ntl::ipc::detail::mdl_describes_resident_pages(output_mdl) ||
+         output_length >
+             static_cast<std::size_t>(MmGetMdlByteCount(output_mdl))))
+      return ntl::unexpected(STATUS_INVALID_BUFFER_SIZE);
+    auto pages = ntl::ipc::page_buffer::try_create(output_allocation_length);
+    if (!pages)
+      return ntl::unexpected(pages.status());
+    RtlZeroMemory((*pages)->data(), output_length);
+    auto slot = detail::make_swap_slot(
+        *pages, output, output_mdl, output_length,
+        operation_system_buffer || !output_has_mdl_field);
+    if (!slot)
+      return ntl::unexpected(slot.status());
+    result.output_slot_.emplace(std::move(*slot));
+    result.output_ =
+        swapped_buffer_view{*pages, output_length, 0, user_mapping_allowed};
+  }
+
+  if (!result.control_input_slot_ && !result.input_slot_ &&
+      !result.output_slot_)
+    return ntl::unexpected(STATUS_NOT_SUPPORTED);
+
+  return ntl::ok(std::move(result));
+}
+
+/**
+ * @brief Replaces the only logical buffer of a single-direction operation.
+ *
+ * Read/query operations select output; write/set operations select input.
+ */
+template <
+    operation_id Operation,
+    std::enable_if_t<detail::unambiguous_swap_operation_v<Operation>, int> = 0>
+[[nodiscard]] ntl::result<swapped_io_buffers>
+try_swap_io_buffers(pre_operation<Operation> operation,
+                    swap_io_options options = {}) noexcept {
+  constexpr auto selection =
+      detail::input_only_swap_operation_v<Operation> ? swap_buffer::input
+                                                     : swap_buffer::output;
+  return detail::try_swap_io_buffers_impl(operation.data(), selection,
+                                          options);
+}
+
+/**
+ * @brief Replaces selected buffers of an operation that can expose both.
+ *
+ * The explicit selection is required for EA/quota queries and control
+ * operations.
+ */
+template <
+    operation_id Operation,
+    std::enable_if_t<detail::selectable_swap_operation_v<Operation>, int> = 0>
+[[nodiscard]] ntl::result<swapped_io_buffers>
+try_swap_io_buffers(pre_operation<Operation> operation,
+                    swap_buffer selection,
+                    swap_io_options options = {}) noexcept {
+  return detail::try_swap_io_buffers_impl(operation.data(), selection,
+                                          options);
+}
+
+} // namespace ntl::flt

@@ -542,6 +542,11 @@ fixed-width request ID. Multiple calls can be outstanding on one client, while
 `communication_port_options::max_pending_async()` bounds pending work and
 copied request memory independently for each connection (64 by default):
 
+Kernel async callbacks and driver-to-app delivery are queued with
+`queue_filter_work_item`, not a raw executive work item. Filter Manager rejects
+new work after deletion begins and retains the filter rundown reference until
+each successfully queued callback actually returns.
+
 ```cpp
 auto first = product_messages::query_count_async(client, 40);
 auto second = product_messages::query_count_async(client, 41);
@@ -859,14 +864,20 @@ The callback's native Filter Manager contract always wins:
 - Facades are non-owning unless their documentation explicitly says RAII.
   Do not retain callback data or related-object views after the callback.
 
-The buildable [minifilter sample](../../examples/minifilter-ntl-driver) keeps
-the onboarding path focused on typed create/read/write/cleanup callbacks and a
-cached stream-name context. Its flags-less post-create callback demonstrates
-normal-completion-only work without exposing draining state. The standalone
+The buildable [minifilter sample catalog](../../examples/minifilter) separates
+three onboarding concerns. [`basic`](../../examples/minifilter/basic) covers
+typed create/read/write/cleanup callbacks and a cached stream-name context;
+its flags-less post-create callback is normal-completion-only.
+[`communication`](../../examples/minifilter/communication) isolates Filter
+Manager port, typed RPC, notification, stream, and shared-ring behavior.
+[`swap-buffers`](../../examples/minifilter/swap-buffers) applies a
+demonstration XOR only to `.ntlxor` files by swapping pre-WRITE input and
+pre-READ output, deferring unsafe work to `PASSIVE_LEVEL`, and bounding the
+post-READ transform with `IoStatus.Information`. The standalone
 [runtime fixture](../../test/flt/runtime) covers file, stream, stream-handle,
 and instance contexts, typed RAII completion-state lifetime, conditional
-WhenSafe processing, and automatic plus manual instances at two development
-altitudes.
+WhenSafe processing, user-service mapped transformations, and automatic plus
+manual instances at two development altitudes.
 
 Microsoft references:
 

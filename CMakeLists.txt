@@ -223,7 +223,7 @@ crtsys_generate_msvc_future_overlay(CRTSYS_MSVC_FUTURE_OVERLAY_DIR)
 # Add source files.
 #
 
-file(GLOB SOURCE_FILES
+file(GLOB SOURCE_FILES CONFIGURE_DEPENDS
   src/*.cpp
 
   # misc
@@ -240,7 +240,7 @@ file(GLOB SOURCE_FILES
 
   # ucrt
   src/custom/ucrt/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/*.cpp
-  src/custom/ucrt/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/*/*.cpp  
+  src/custom/ucrt/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/*/*.cpp
   )
 
 file(GLOB RAW_PDB_SOURCE_FILES
@@ -278,7 +278,7 @@ if (UCXXRT_ENABLED)
   list(REMOVE_ITEM SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/custom/crt/math/ftol3.c)
 
   CPMAddPackage("gh:ntoskrnl7/ucxxrt#master")
- 
+
   file(GLOB_RECURSE UCXXRT_SOURCE_FILES
     ${ucxxrt_SOURCE_DIR}/src/*.cpp
     ${ucxxrt_SOURCE_DIR}/vcruntime/*.cpp
@@ -286,7 +286,7 @@ if (UCXXRT_ENABLED)
     )
   list(REMOVE_ITEM UCXXRT_SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/vcruntime/crt.cpp)
   list(REMOVE_ITEM UCXXRT_SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/vcruntime/locales.cpp)
-  list(REMOVE_ITEM UCXXRT_SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/vcruntime/thread.cpp)  
+  list(REMOVE_ITEM UCXXRT_SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/vcruntime/thread.cpp)
   if(NOT "${CMAKE_VS_PLATFORM_NAME}" STREQUAL "Win32" AND NOT "${CMAKE_VS_PLATFORM_NAME}" STREQUAL "x64" )
     list(REMOVE_ITEM UCXXRT_SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/vcruntime/x86_exception_filter.cpp)
   endif()
@@ -469,13 +469,24 @@ endif()
 set_target_properties(crtsys PROPERTIES VS_USER_PROPS "${CMAKE_CURRENT_SOURCE_DIR}/src/stl.props;${VS_PROPS}")
 
 #
-# set library output path (release only)
+# Set the distributable library output path for a top-level build only.
+# Dependency builds must keep their archive inside their own binary tree:
+# separate test/consumer configurations can compile crtsys with different
+# private definitions, and writing all of them to one source-tree lib path
+# lets an unrelated build silently replace another configuration's archive.
 #
-string(TOLOWER "${CMAKE_VS_PLATFORM_NAME}" PLATFROM_SHORT_NAME)
-if(PLATFROM_SHORT_NAME STREQUAL "win32")
-    set(PLATFROM_SHORT_NAME "x86")
+if(CRTSYS_IS_TOP_LEVEL)
+  string(TOLOWER "${CMAKE_VS_PLATFORM_NAME}" PLATFROM_SHORT_NAME)
+  if(PLATFROM_SHORT_NAME STREQUAL "win32")
+      set(PLATFROM_SHORT_NAME "x86")
+  endif()
+  set_target_properties(
+    crtsys
+    PROPERTIES
+      ARCHIVE_OUTPUT_DIRECTORY_RELEASE
+        ${CMAKE_CURRENT_SOURCE_DIR}/lib/${PLATFROM_SHORT_NAME}
+  )
 endif()
-set_target_properties(crtsys PROPERTIES ARCHIVE_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/lib/${PLATFROM_SHORT_NAME})
 
 if("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "Win32")
   set(CRTSYS_NATIVE_ARCH x86)

@@ -1,0 +1,198 @@
+/**
+ * @file deferred_io
+ * @brief Filter-Manager-aware PASSIVE_LEVEL continuations for pended I/O.
+ */
+#pragma once
+
+#include "io_buffer"
+#include "work_item"
+
+#include "../pool_allocator"
+
+namespace ntl::flt {
+
+/** Result filled by a deferred pre-operation routine. */
+struct deferred_pre_completion {
+  pre_result result = pre_result::complete;
+  void *completion_context = nullptr;
+};
+
+/**
+ * PASSIVE_LEVEL pre work. Return STATUS_PENDING only after transferring the
+ * operation to another owner such as pending_pre_operation_queue.
+ */
+using deferred_pre_routine = ntl::status (*)(
+    PFLT_CALLBACK_DATA, void *, deferred_pre_completion &) noexcept;
+
+/**
+ * PASSIVE_LEVEL post work. Return STATUS_PENDING only after transferring the
+ * operation to another owner such as pending_post_operation_registry.
+ */
+using deferred_post_routine =
+    ntl::status (*)(PFLT_CALLBACK_DATA, void *) noexcept;
+
+namespace detail {
+
+inline constexpr ULONG deferred_io_pool_tag = ntl::pool_tag("dIoN");
+
+struct deferred_pre_work {
+  deferred_pre_routine routine = nullptr;
+  void *context = nullptr;
+};
+
+struct deferred_post_work {
+  deferred_post_routine routine = nullptr;
+  void *context = nullptr;
+};
+
+inline void destroy_deferred_pre_work(deferred_pre_work *work) noexcept {
+  ntl::pool_deleter<deferred_pre_work>{deferred_io_pool_tag}(work);
+}
+
+inline void destroy_deferred_post_work(deferred_post_work *work) noexcept {
+  ntl::pool_deleter<deferred_post_work>{deferred_io_pool_tag}(work);
+}
+
+inline void FLTAPI run_deferred_pre(PFLT_DEFERRED_IO_WORKITEM item,
+                                    PFLT_CALLBACK_DATA data,
+                                    void *opaque) noexcept {
+  auto *work = static_cast<deferred_pre_work *>(opaque);
+  deferred_pre_completion completion{};
+  const ntl::status status =
+      work && work->routine
+          ? work->routine(data, work->context, completion)
+          : ntl::status{STATUS_INVALID_PARAMETER};
+  FltFreeDeferredIoWorkItem(item);
+  destroy_deferred_pre_work(work);
+
+  if (static_cast<NTSTATUS>(status) == STATUS_PENDING)
+    return;
+  if (!status.is_ok()) {
+    data->IoStatus.Status = static_cast<NTSTATUS>(status);
+    data->IoStatus.Information = 0;
+    completion.result = pre_result::complete;
+    completion.completion_context = nullptr;
+  }
+
+  const bool valid_result =
+      completion.result == pre_result::complete ||
+      completion.result == pre_result::success_no_callback ||
+      completion.result == pre_result::success_with_callback;
+  if (!valid_result ||
+      (completion.result != pre_result::success_with_callback &&
+       completion.completion_context != nullptr)) {
+    data->IoStatus.Status = STATUS_INVALID_DEVICE_STATE;
+    data->IoStatus.Information = 0;
+    completion.result = pre_result::complete;
+    completion.completion_context = nullptr;
+  }
+  FltCompletePendedPreOperation(
+      data, static_cast<FLT_PREOP_CALLBACK_STATUS>(completion.result),
+      completion.completion_context);
+}
+
+inline void FLTAPI run_deferred_post(PFLT_DEFERRED_IO_WORKITEM item,
+                                     PFLT_CALLBACK_DATA data,
+                                     void *opaque) noexcept {
+  auto *work = static_cast<deferred_post_work *>(opaque);
+  const ntl::status status =
+      work && work->routine
+          ? work->routine(data, work->context)
+          : ntl::status{STATUS_INVALID_PARAMETER};
+  FltFreeDeferredIoWorkItem(item);
+  destroy_deferred_post_work(work);
+
+  if (static_cast<NTSTATUS>(status) == STATUS_PENDING)
+    return;
+  if (!status.is_ok()) {
+    data->IoStatus.Status = static_cast<NTSTATUS>(status);
+    data->IoStatus.Information = 0;
+  }
+  FltCompletePendedPostOperation(data);
+}
+
+} // namespace detail
+
+/**
+ * Queues an IRP pre-operation to a Filter Manager worker at PASSIVE_LEVEL.
+ * On success the caller must return pre_result::pending.
+ */
+[[nodiscard]] inline ntl::status queue_pre_operation_at_passive(
+    PFLT_CALLBACK_DATA data, deferred_pre_routine routine,
+    void *context = nullptr,
+    WORK_QUEUE_TYPE queue_type = DelayedWorkQueue) noexcept {
+  if (!data || !routine || !FLT_IS_IRP_OPERATION(data) ||
+      KeGetCurrentIrql() > DISPATCH_LEVEL)
+    return STATUS_INVALID_PARAMETER;
+  PFLT_DEFERRED_IO_WORKITEM item = FltAllocateDeferredIoWorkItem();
+  if (!item)
+    return STATUS_INSUFFICIENT_RESOURCES;
+  auto created = ntl::try_make_pool<detail::deferred_pre_work>(
+      ntl::pool_kind::nonpaged, ntl::pool_option::none,
+      detail::deferred_io_pool_tag,
+      detail::deferred_pre_work{routine, context});
+  if (!created) {
+    FltFreeDeferredIoWorkItem(item);
+    return created.status();
+  }
+  auto *const work = created->release();
+  const NTSTATUS status = FltQueueDeferredIoWorkItem(
+      item, data, &detail::run_deferred_pre, queue_type, work);
+  if (!NT_SUCCESS(status)) {
+    detail::destroy_deferred_pre_work(work);
+    FltFreeDeferredIoWorkItem(item);
+  }
+  return status;
+}
+
+/**
+ * Queues an IRP post-operation to a Filter Manager worker at PASSIVE_LEVEL.
+ * On success the caller must return post_result::more_processing_required.
+ */
+[[nodiscard]] inline ntl::status queue_post_operation_at_passive(
+    PFLT_CALLBACK_DATA data, deferred_post_routine routine,
+    void *context = nullptr,
+    WORK_QUEUE_TYPE queue_type = DelayedWorkQueue) noexcept {
+  if (!data || !routine || !FLT_IS_IRP_OPERATION(data) ||
+      KeGetCurrentIrql() > DISPATCH_LEVEL)
+    return STATUS_INVALID_PARAMETER;
+  PFLT_DEFERRED_IO_WORKITEM item = FltAllocateDeferredIoWorkItem();
+  if (!item)
+    return STATUS_INSUFFICIENT_RESOURCES;
+  auto created = ntl::try_make_pool<detail::deferred_post_work>(
+      ntl::pool_kind::nonpaged, ntl::pool_option::none,
+      detail::deferred_io_pool_tag,
+      detail::deferred_post_work{routine, context});
+  if (!created) {
+    FltFreeDeferredIoWorkItem(item);
+    return created.status();
+  }
+  auto *const work = created->release();
+  const NTSTATUS status = FltQueueDeferredIoWorkItem(
+      item, data, &detail::run_deferred_post, queue_type, work);
+  if (!NT_SUCCESS(status)) {
+    detail::destroy_deferred_post_work(work);
+    FltFreeDeferredIoWorkItem(item);
+  }
+  return status;
+}
+
+template <operation_id Operation>
+[[nodiscard]] inline ntl::status queue_pre_operation_at_passive(
+    pre_operation<Operation> operation, deferred_pre_routine routine,
+    void *context = nullptr,
+    WORK_QUEUE_TYPE queue_type = DelayedWorkQueue) noexcept {
+  return queue_pre_operation_at_passive(operation.data().native(), routine,
+                                        context, queue_type);
+}
+
+template <operation_id Operation>
+[[nodiscard]] inline ntl::status queue_post_operation_at_passive(
+    post_operation<Operation> operation, deferred_post_routine routine,
+    void *context = nullptr,
+    WORK_QUEUE_TYPE queue_type = DelayedWorkQueue) noexcept {
+  return queue_post_operation_at_passive(operation.data().native(), routine,
+                                         context, queue_type);
+}
+
+} // namespace ntl::flt

@@ -30,8 +30,21 @@
 #include <memory>
 #include <numeric>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
+
+template <class T, class = void>
+struct supports_boolean_negation : std::false_type {};
+
+template <class T>
+struct supports_boolean_negation<
+    T, std::void_t<decltype(!std::declval<T>())>> : std::true_type {};
+
+static_assert(!supports_boolean_negation<ntl::status>::value,
+              "ntl::status must not be tested as a Boolean; use is_ok/is_err");
+
+void record_driver_entry_failure(const char *stage, long code);
 
 extern "C" NTSYSAPI NTSTATUS NTAPI
 ZwCreateEvent(_Out_ PHANDLE EventHandle, _In_ ACCESS_MASK DesiredAccess,
@@ -87,6 +100,17 @@ struct ioctl_pipeline_output {
   std::uint32_t value;
   std::uint32_t checksum;
 };
+
+// IO_REMOVE_LOCK storage must remain at a unique, nonpaged address for the
+// lifetime of the driver. In particular, Driver Verifier rejects
+// reinitializing a released lock when a later stack frame reuses its address.
+// Each single-shot test therefore receives its own image-lifetime lock.
+struct remove_lock_test_storage {
+  ntl::remove_lock pipeline{ntl::pool_tag("NTPp")};
+  ntl::remove_lock standalone{ntl::pool_tag("NTRm")};
+};
+
+remove_lock_test_storage g_remove_lock_test_storage;
 
 struct ipc_ring_test_record {
   std::uint32_t sequence;
@@ -160,6 +184,325 @@ bool ntl_ipc_test_impl() {
   }
   return !reader.try_read(record) && reader.readable() == 0 &&
          writer.writable() == 4;
+}
+
+bool ntl_mapped_buffer_lifetime_test_impl() {
+  const auto fail = [](const char *stage, long code) {
+    record_driver_entry_failure(stage, code);
+    return false;
+  };
+
+  if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+    return fail("mapped_lifetime.passive_level", KeGetCurrentIrql());
+  MDL synthetic_mdl{};
+  synthetic_mdl.ByteCount = PAGE_SIZE;
+  if (!ntl::ipc::detail::mdl_mapping_is_page_isolated(
+          &synthetic_mdl, 0, PAGE_SIZE) ||
+      ntl::ipc::detail::mdl_mapping_is_page_isolated(
+          &synthetic_mdl, 0, PAGE_SIZE / 2))
+    return fail("mapped_lifetime.page_isolation", 1);
+  synthetic_mdl.ByteOffset = 1;
+  if (ntl::ipc::detail::mdl_mapping_is_page_isolated(
+          &synthetic_mdl, 0, PAGE_SIZE))
+    return fail("mapped_lifetime.unaligned_isolation", 1);
+  std::size_t charge = 0;
+  if (!ntl::ipc::detail::mdl_mapping_charge(&synthetic_mdl, charge) ||
+      charge != PAGE_SIZE * 2 ||
+      !ntl::ipc::detail::isolated_page_charge(1, charge) ||
+      charge != PAGE_SIZE)
+    return fail("mapped_lifetime.mapping_charge",
+                static_cast<long>(charge));
+  auto connection =
+      ntl::ipc::process_connection::try_capture_current_process();
+  if (!connection)
+    return fail("mapped_lifetime.capture_connection",
+                static_cast<NTSTATUS>(connection.status()));
+  auto pages = ntl::ipc::page_buffer::try_create(PAGE_SIZE);
+  if (!pages)
+    return fail("mapped_lifetime.create_pages",
+                static_cast<NTSTATUS>(pages.status()));
+
+  auto mapped = ntl::ipc::try_map_page_buffer(
+      *pages, 16, 128, *connection, ntl::ipc::map_access::read_write);
+  if (!mapped)
+    return fail("mapped_lifetime.map_first",
+                static_cast<NTSTATUS>(mapped.status()));
+  if (connection->mapping_count() != 1)
+    return fail("mapped_lifetime.first_count",
+                static_cast<long>(connection->mapping_count()));
+  auto copied = *mapped;
+  const auto descriptor = mapped->descriptor();
+  if (!descriptor.valid() || descriptor.generation != connection->generation() ||
+      descriptor.length != 128 ||
+      descriptor.access !=
+          static_cast<std::uint32_t>(ntl::ipc::map_access::read_write))
+    return fail("mapped_lifetime.first_descriptor",
+                static_cast<long>(descriptor.access));
+  const auto first_close = mapped->close();
+  if (!first_close.is_ok())
+    return fail("mapped_lifetime.close_first",
+                static_cast<NTSTATUS>(first_close));
+  if (mapped->is_open() || copied.is_open() ||
+      connection->mapping_count() != 0)
+    return fail("mapped_lifetime.first_close_state",
+                static_cast<long>(connection->mapping_count()));
+
+  auto forced = ntl::ipc::try_map_page_buffer(
+      *pages, 0, 64, *connection, ntl::ipc::map_access::read);
+  if (!forced)
+    return fail("mapped_lifetime.map_forced",
+                static_cast<NTSTATUS>(forced.status()));
+  if (connection->mapping_count() != 1)
+    return fail("mapped_lifetime.forced_count",
+                static_cast<long>(connection->mapping_count()));
+  const auto forced_copy = *forced;
+  const auto connection_close = connection->close();
+  if (!connection_close.is_ok())
+    return fail("mapped_lifetime.close_connection",
+                static_cast<NTSTATUS>(connection_close));
+  if (forced_copy.is_open() || connection->mapping_count() != 0)
+    return fail("mapped_lifetime.connection_close_state",
+                static_cast<long>(connection->mapping_count()));
+
+  auto rejected = ntl::ipc::try_map_page_buffer(
+      *pages, 0, 64, *connection, ntl::ipc::map_access::read);
+  if (rejected ||
+      static_cast<NTSTATUS>(rejected.status()) != STATUS_DELETE_PENDING)
+    return fail("mapped_lifetime.reject_closed_connection",
+                rejected ? STATUS_SUCCESS
+                         : static_cast<NTSTATUS>(rejected.status()));
+
+  auto limited = ntl::ipc::process_connection::try_capture_current_process(
+      {.max_mappings = 1, .max_mapped_bytes = PAGE_SIZE});
+  if (!limited)
+    return fail("mapped_lifetime.capture_limited_connection",
+                static_cast<NTSTATUS>(limited.status()));
+  auto first = ntl::ipc::try_map_page_buffer(
+      *pages, 0, 64, *limited, ntl::ipc::map_access::read);
+  if (!first)
+    return fail("mapped_lifetime.map_limited_first",
+                static_cast<NTSTATUS>(first.status()));
+  auto over_quota = ntl::ipc::try_map_page_buffer(
+      *pages, 64, 64, *limited, ntl::ipc::map_access::read);
+  if (over_quota ||
+      static_cast<NTSTATUS>(over_quota.status()) != STATUS_QUOTA_EXCEEDED)
+    return fail("mapped_lifetime.enforce_quota",
+                over_quota ? STATUS_SUCCESS
+                           : static_cast<NTSTATUS>(over_quota.status()));
+  auto invalid_access = ntl::ipc::try_map_page_buffer(
+      *pages, 0, 64, *limited,
+      static_cast<ntl::ipc::map_access>(0xffffffffu));
+  if (invalid_access)
+    return fail("mapped_lifetime.reject_invalid_access", STATUS_SUCCESS);
+  const auto limited_first_close = first->close();
+  if (!limited_first_close.is_ok())
+    return fail("mapped_lifetime.close_limited_first",
+                static_cast<NTSTATUS>(limited_first_close));
+  const auto limited_close = limited->close();
+  if (!limited_close.is_ok())
+    return fail("mapped_lifetime.close_limited_connection",
+                static_cast<NTSTATUS>(limited_close));
+  return true;
+}
+
+bool ntl_irp_io_buffer_semantics_test_impl() {
+  const auto fail = [](const char *stage, long code) {
+    record_driver_entry_failure(stage, code);
+    return false;
+  };
+
+  if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+    return fail("irp_io_buffer.passive_level", KeGetCurrentIrql());
+
+  auto connection =
+      ntl::ipc::process_connection::try_capture_current_process(
+          {.max_mappings = 4, .max_mapped_bytes = PAGE_SIZE * 4});
+  if (!connection)
+    return fail("irp_io_buffer.capture_connection",
+                static_cast<NTSTATUS>(connection.status()));
+  auto storage = ntl::ipc::page_buffer::try_create(PAGE_SIZE);
+  if (!storage)
+    return fail("irp_io_buffer.create_storage",
+                static_cast<NTSTATUS>(storage.status()));
+
+  struct irp_deleter {
+    void operator()(PIRP value) const noexcept {
+      if (value)
+        IoFreeIrp(value);
+    }
+  };
+  std::unique_ptr<IRP, irp_deleter> request{IoAllocateIrp(1, FALSE)};
+  if (!request)
+    return fail("irp_io_buffer.allocate_irp", STATUS_INSUFFICIENT_RESOURCES);
+  IoSetNextIrpStackLocation(request.get());
+  auto *const stack = IoGetCurrentIrpStackLocation(request.get());
+  if (!stack)
+    return fail("irp_io_buffer.current_stack", STATUS_INVALID_PARAMETER);
+
+  DEVICE_OBJECT device{};
+  device.Flags = DO_BUFFERED_IO;
+  request->RequestorMode = KernelMode;
+  request->AssociatedIrp.SystemBuffer = (*storage)->data();
+
+  const auto reset = [&](UCHAR major) noexcept {
+    RtlZeroMemory(stack, sizeof(*stack));
+    stack->MajorFunction = major;
+    stack->DeviceObject = &device;
+    request->Flags = 0;
+    request->IoStatus.Status = STATUS_SUCCESS;
+    request->IoStatus.Information = 0;
+    request->AssociatedIrp.SystemBuffer = (*storage)->data();
+  };
+
+  // A WRITE is logical input only.
+  reset(IRP_MJ_WRITE);
+  stack->Parameters.Write.Length = 16;
+  const unsigned char write_pattern[16] = {
+      0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+      0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f};
+  RtlCopyMemory((*storage)->data(), write_pattern, sizeof(write_pattern));
+  {
+    auto mapped = ntl::ipc::try_map_io_buffers(
+        &device, request.get(), *connection);
+    if (!mapped)
+      return fail("irp_io_buffer.map_write",
+                  static_cast<NTSTATUS>(mapped.status()));
+    if (!mapped->input() || mapped->output() || mapped->control_input() ||
+        mapped->input()->size() != sizeof(write_pattern) ||
+        mapped->input()->access() != ntl::ipc::map_access::read)
+      return fail("irp_io_buffer.write_shape", STATUS_DATA_ERROR);
+    unsigned char observed[sizeof(write_pattern)]{};
+    const auto copied = ntl::ipc::detail::guarded_copy(
+        observed, mapped->input()->target_address(), sizeof(observed));
+    if (!copied.is_ok() ||
+        RtlCompareMemory(observed, write_pattern, sizeof(observed)) !=
+            sizeof(observed))
+      return fail("irp_io_buffer.write_contents",
+                  static_cast<NTSTATUS>(copied));
+    const auto closed = mapped->close();
+    if (!closed.is_ok() || mapped->has_open_mappings())
+      return fail("irp_io_buffer.close_write",
+                  static_cast<NTSTATUS>(closed));
+  }
+
+  // A READ is logical output only, and writable staging copies back only when
+  // its mapping is closed.
+  reset(IRP_MJ_READ);
+  stack->Parameters.Read.Length = 16;
+  RtlFillMemory((*storage)->data(), 16, 0xcc);
+  const unsigned char read_result[16] = {
+      0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7,
+      0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf};
+  {
+    auto mapped = ntl::ipc::try_map_io_buffers(
+        &device, request.get(), *connection);
+    if (!mapped)
+      return fail("irp_io_buffer.map_read",
+                  static_cast<NTSTATUS>(mapped.status()));
+    if (mapped->input() || !mapped->output() || mapped->control_input() ||
+        mapped->output()->size() != sizeof(read_result) ||
+        mapped->output()->access() != ntl::ipc::map_access::read_write)
+      return fail("irp_io_buffer.read_shape", STATUS_DATA_ERROR);
+    const auto copied = ntl::ipc::detail::guarded_copy(
+        mapped->output()->target_address(), read_result, sizeof(read_result));
+    if (!copied.is_ok())
+      return fail("irp_io_buffer.write_read_result",
+                  static_cast<NTSTATUS>(copied));
+    const auto closed = mapped->close();
+    if (!closed.is_ok() ||
+        RtlCompareMemory((*storage)->data(), read_result,
+                         sizeof(read_result)) != sizeof(read_result))
+      return fail("irp_io_buffer.read_copy_back",
+                  static_cast<NTSTATUS>(closed));
+  }
+
+  // Completed output is clamped to IoStatus.Information. Warning statuses
+  // preserve partial data, and bytes beyond the completed range are untouched.
+  reset(IRP_MJ_READ);
+  stack->Parameters.Read.Length = 16;
+  request->IoStatus.Status = STATUS_BUFFER_OVERFLOW;
+  request->IoStatus.Information = 5;
+  RtlFillMemory((*storage)->data(), 16, 0x5a);
+  {
+    auto mapped = ntl::ipc::try_map_completed_io_buffers(
+        &device, request.get(), *connection);
+    if (!mapped)
+      return fail("irp_io_buffer.map_completed_read",
+                  static_cast<NTSTATUS>(mapped.status()));
+    if (!mapped->output() || mapped->output()->size() != 5)
+      return fail("irp_io_buffer.completed_read_length", STATUS_DATA_ERROR);
+    const unsigned char partial[5] = {1, 2, 3, 4, 5};
+    const auto copied = ntl::ipc::detail::guarded_copy(
+        mapped->output()->target_address(), partial, sizeof(partial));
+    if (!copied.is_ok())
+      return fail("irp_io_buffer.write_partial_read",
+                  static_cast<NTSTATUS>(copied));
+    const auto closed = mapped->close();
+    const auto *const bytes =
+        static_cast<const unsigned char *>((*storage)->data());
+    if (!closed.is_ok() ||
+        RtlCompareMemory(bytes, partial, sizeof(partial)) != sizeof(partial) ||
+        bytes[sizeof(partial)] != 0x5a)
+      return fail("irp_io_buffer.partial_copy_back",
+                  static_cast<NTSTATUS>(closed));
+  }
+
+  reset(IRP_MJ_READ);
+  stack->Parameters.Read.Length = 16;
+  request->IoStatus.Status = STATUS_ACCESS_DENIED;
+  request->IoStatus.Information = 7;
+  {
+    auto mapped = ntl::ipc::try_map_completed_io_buffers(
+        &device, request.get(), *connection);
+    if (mapped ||
+        static_cast<NTSTATUS>(mapped.status()) != STATUS_ACCESS_DENIED)
+      return fail("irp_io_buffer.reject_failed_read",
+                  mapped ? STATUS_SUCCESS
+                         : static_cast<NTSTATUS>(mapped.status()));
+  }
+
+  // Generic FSCTL IRPs use the common buffer layout only for the documented
+  // user/kernel request minors.
+  reset(IRP_MJ_FILE_SYSTEM_CONTROL);
+  stack->MinorFunction = 0x00; // IRP_MN_USER_FS_REQUEST
+  stack->Parameters.FileSystemControl.FsControlCode =
+      CTL_CODE(FILE_DEVICE_UNKNOWN, 0x900, METHOD_BUFFERED, FILE_ANY_ACCESS);
+  stack->Parameters.FileSystemControl.InputBufferLength = 8;
+  stack->Parameters.FileSystemControl.OutputBufferLength = 16;
+  {
+    auto mapped = ntl::ipc::try_map_io_buffers(
+        &device, request.get(), *connection);
+    if (!mapped || !mapped->input() || !mapped->output() ||
+        mapped->control_input() || mapped->input()->size() != 8 ||
+        mapped->output()->size() != 16 ||
+        mapped->input()->descriptor().mapping_id !=
+            mapped->output()->descriptor().mapping_id)
+      return fail("irp_io_buffer.fsctl_buffered_shape",
+                  mapped ? STATUS_DATA_ERROR
+                         : static_cast<NTSTATUS>(mapped.status()));
+    const auto closed = mapped->close();
+    if (!closed.is_ok())
+      return fail("irp_io_buffer.close_fsctl",
+                  static_cast<NTSTATUS>(closed));
+  }
+  stack->MinorFunction = 0x01; // IRP_MN_MOUNT_VOLUME, no common buffer layout
+  {
+    auto mapped = ntl::ipc::try_map_io_buffers(
+        &device, request.get(), *connection);
+    if (mapped || static_cast<NTSTATUS>(mapped.status()) != STATUS_NOT_SUPPORTED)
+      return fail("irp_io_buffer.reject_nonbuffer_fsctl",
+                  mapped ? STATUS_SUCCESS
+                         : static_cast<NTSTATUS>(mapped.status()));
+  }
+
+  if (connection->mapping_count() != 0)
+    return fail("irp_io_buffer.mapping_count",
+                static_cast<long>(connection->mapping_count()));
+  const auto closed = connection->close();
+  if (!closed.is_ok())
+    return fail("irp_io_buffer.close_connection",
+                static_cast<NTSTATUS>(closed));
+  return true;
 }
 
 void delete_symbolic_link_if_present(const std::wstring &link_name) {
@@ -663,6 +1006,10 @@ bool ntl_lookaside_list_test() {
   using nonpaged_list =
       ntl::lookaside_list<lookaside_test_object, ntl::pool_kind::nonpaged,
                           ntl::pool_option::none, ntl::pool_tag("NTLl")>;
+  static_assert(sizeof(lookaside_test_object) <= sizeof(SLIST_ENTRY),
+                "This test object must not exceed the native SLIST minimum");
+  static_assert(nonpaged_list::entry_size() == sizeof(SLIST_ENTRY),
+                "Lookaside entries must satisfy the native SLIST minimum");
   nonpaged_list list;
 
   lookaside_test_object *const raw = list.allocate();
@@ -937,7 +1284,10 @@ bool ntl_ioctl_test() {
 }
 
 struct ioctl_pipeline_dispatch {
-  ntl::remove_lock remove_lock{ntl::pool_tag("NTPp")};
+  explicit ioctl_pipeline_dispatch(ntl::remove_lock &lock) noexcept
+      : remove_lock(lock) {}
+
+  ntl::remove_lock &remove_lock;
   std::uint32_t handled_count = 0;
 
   NTSTATUS handle(const ntl::device_control::code &code,
@@ -961,9 +1311,16 @@ struct ioctl_pipeline_dispatch {
       return STATUS_INVALID_PARAMETER;
     }
 
-    alignas(ioctl_pipeline_output) unsigned char scratch_storage[sizeof(
-        ioctl_pipeline_output)]{};
-    auto scratch = ntl::mdl::allocate(scratch_storage, sizeof(scratch_storage));
+    auto scratch_storage = ntl::try_make_pool_buffer(
+        sizeof(ioctl_pipeline_output), ntl::pool_kind::nonpaged,
+        ntl::pool_option::none, "NTPm");
+    if (!scratch_storage) {
+      out.clear();
+      return static_cast<NTSTATUS>(scratch_storage.status());
+    }
+
+    auto scratch =
+        ntl::mdl::allocate(scratch_storage->get(), sizeof(ioctl_pipeline_output));
     if (!scratch) {
       out.clear();
       return static_cast<NTSTATUS>(scratch.status());
@@ -993,7 +1350,7 @@ struct ioctl_pipeline_dispatch {
 };
 
 bool ntl_device_control_pipeline_test() {
-  ioctl_pipeline_dispatch dispatch;
+  ioctl_pipeline_dispatch dispatch(g_remove_lock_test_storage.pipeline);
 
   const ioctl_pipeline_input input{0x12345678};
   ioctl_pipeline_output output{};
@@ -1048,23 +1405,29 @@ bool ntl_device_control_pipeline_test() {
 }
 
 bool ntl_mdl_test() {
-  alignas(16) unsigned char buffer[64]{};
-  buffer[0] = 0x5a;
+  constexpr ULONG buffer_size = 64;
+  auto buffer = ntl::try_make_pool_buffer(
+      buffer_size, ntl::pool_kind::nonpaged, ntl::pool_option::none, "NTMd");
+  if (!buffer)
+    return false;
 
-  auto native_mdl = ntl::mdl::allocate(buffer, sizeof(buffer));
+  auto *const bytes = static_cast<unsigned char *>(buffer->get());
+  bytes[0] = 0x5a;
+
+  auto native_mdl = ntl::mdl::allocate(bytes, buffer_size);
   if (!native_mdl || !*native_mdl || native_mdl->get() == nullptr)
     return false;
-  if (native_mdl->byte_count() != sizeof(buffer) ||
-      native_mdl->virtual_address() != buffer)
+  if (native_mdl->byte_count() != buffer_size ||
+      native_mdl->virtual_address() != bytes)
     return false;
 
   native_mdl->build_for_nonpaged_pool();
   auto system_address = native_mdl->system_address();
-  if (!system_address || *system_address != buffer)
+  if (!system_address || *system_address != bytes)
     return false;
 
   ntl::mdl moved(std::move(*native_mdl));
-  if (*native_mdl || !moved || moved.byte_count() != sizeof(buffer))
+  if (*native_mdl || !moved || moved.byte_count() != buffer_size)
     return false;
 
   PMDL const released = moved.release();
@@ -1080,7 +1443,7 @@ bool ntl_mdl_test() {
 }
 
 bool ntl_remove_lock_test() {
-  ntl::remove_lock lock{ntl::pool_tag("NTRm")};
+  auto &lock = g_remove_lock_test_storage.standalone;
 
   auto first = lock.acquire(reinterpret_cast<void *>(1));
   if (!first || !*first)
@@ -1853,19 +2216,25 @@ TEST(ntl_test, ntl_ioctl_test) {
   EXPECT_TRUE(ntl_ioctl_test());
 }
 
-TEST(ntl_test, ntl_device_control_pipeline_test) {
-  EXPECT_TRUE(ntl_device_control_pipeline_test());
-}
-
 TEST(ntl_test, ntl_mdl_test) {
   EXPECT_TRUE(ntl_mdl_test());
 }
 
 TEST(ntl_test, ntl_ipc_test) { EXPECT_TRUE(ntl_ipc_test_impl()); }
 
-TEST(ntl_test, ntl_remove_lock_test) {
-  EXPECT_TRUE(ntl_remove_lock_test());
+TEST(ntl_test, ntl_mapped_buffer_lifetime_test) {
+  EXPECT_TRUE(ntl_mapped_buffer_lifetime_test_impl());
 }
+
+TEST(ntl_test, ntl_irp_io_buffer_semantics_test) {
+  EXPECT_TRUE(ntl_irp_io_buffer_semantics_test_impl());
+}
+
+// The DriverEntry boolean-test harness is the single owner of
+// ntl_device_control_pipeline_test and ntl_remove_lock_test. Both deliberately
+// call remove_lock::release_and_wait(), which is a terminal operation. Registering
+// either test here would execute the same image-lifetime remove lock a second
+// time after teardown and turn a valid one-shot test into a false GTest failure.
 
 TEST(ntl_test, ntl_device_interface_test) {
   EXPECT_TRUE(ntl_device_interface_test());

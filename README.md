@@ -1,6 +1,6 @@
 # crtsys
 
-Familiar MSVC C++ runtime and STL experience for Windows kernel drivers (`.sys`).
+A modern C++ development platform for Windows kernel drivers (`.sys`).
 
 [![CMake](https://github.com/ntoskrnl7/crtsys/actions/workflows/cmake.yml/badge.svg)](https://github.com/ntoskrnl7/crtsys/actions/workflows/cmake.yml)
 ![GitHub](https://img.shields.io/github/license/ntoskrnl7/crtsys)
@@ -12,10 +12,20 @@ Familiar MSVC C++ runtime and STL experience for Windows kernel drivers (`.sys`)
 
 [Korean documentation](./docs/ko-kr.md)
 
-`crtsys` brings MSVC CRT/STL/VCRT/UCRT source paths into Windows kernel drivers.
-Driver code keeps familiar MSVC C++ headers and STL types while runtime
-dependencies are mapped onto a kernel-mode substrate with explicit driver-test
-coverage and IRQL contracts.
+`crtsys` brings the Microsoft C++ runtime ecosystem (CRT, STL, VCRT, and UCRT)
+into Windows kernel drivers without maintaining a separate STL fork. It uses
+the MSVC headers and selected runtime source paths installed with Visual Studio
+or Build Tools, preserving the familiar MSVC development experience while
+minimizing divergence from upstream STL.
+
+Driver code keeps the familiar MSVC C++ headers and STL types, while an
+include-resolution compatibility overlay and kernel runtime layer adapt the
+paths that require kernel-specific behavior. Runtime dependencies are mapped
+onto a kernel-mode substrate with explicit driver-test coverage, documented
+lifecycle behavior, and IRQL contracts.
+
+The goal of `crtsys` is to let kernel developers use modern C++ development
+patterns while staying aligned with the MSVC toolchain and upstream STL.
 
 The coverage matrix lists features verified by driver tests. Unlisted APIs may
 also work, but are not yet part of the verified set.
@@ -136,7 +146,7 @@ crtsys_add_driver(my_kmdf_driver KMDF 1.15 src/main.cpp)
 crtsys_add_driver(my_ntl_kmdf_driver KMDF 1.15 NTL src/main.cpp)
 ```
 
-See the complete [NTL KMDF driver/app sample](./examples/kmdf-ntl-driver)
+See the complete [NTL KMDF driver/app sample](./examples/kmdf/basic)
 and the [NTL KMDF API guide](./docs/ntl/kmdf.md).
 
 File-system minifilters remain Filter Manager drivers. Select the model
@@ -150,7 +160,7 @@ crtsys_add_driver(my_minifilter MINIFILTER NTL src/main.cpp)
 
 Visual Studio/NuGet projects use `CrtSysIsMinifilter=true` and
 `CrtSysUseNtlFltMain=true`. See the
-[NTL minifilter sample](./examples/minifilter-ntl-driver) and
+[NTL minifilter sample catalog](./examples/minifilter) and
 [API guide](./docs/ntl/minifilter.md).
 
 ## Runtime Stack
@@ -211,12 +221,14 @@ may compile or work.
 | [Usage Examples](./docs/usage-examples.md) | Small driver-side NTL examples |
 | [NTL sample driver](./examples/ntl-driver) | Complete Visual Studio/NuGet and CMake driver sample using `ntl::main`, device endpoint, typed IOCTLs, remove lock, registry config, passive executor, and pool-backed PMR |
 | [NTL RPC sample driver](./examples/ntl-rpc-driver) | Complete Visual Studio/NuGet and CMake driver/app pair using the shared NTL RPC schema |
-| [NTL KMDF sample](./examples/kmdf-ntl-driver) | `ntl::kmdf::main`, C++ WDF contexts, typed file/request and manual-queue cancellation, common WDF object utilities, deferred callbacks, and STL in passive KMDF callbacks |
-| [NTL KMDF DMA template](./examples/kmdf-dma-ntl-driver) | Buildable PnP packet-DMA transaction, scatter/gather, common-buffer, and interrupt-DPC integration template for real hardware |
-| [NTL KMDF USB template](./examples/kmdf-usb-ntl-driver) | Buildable PnP USB device/interface/pipe and continuous-reader template with a user-mode inspection app |
-| [NTL KMDF WMI sample](./examples/kmdf-wmi-ntl-driver) | MOF-backed typed WMI query/set/method providers, event delivery, and a `ROOT\\WMI` user-mode verifier |
-| [NTL KMDF bus sample](./examples/kmdf-bus-ntl-driver) | Dynamic PDO plug/remove/eject lifecycle and a typed `QUERY_INTERFACE` contract between bus and child function drivers |
-| [NTL minifilter sample](./examples/minifilter-ntl-driver) | Typed create/write callbacks, RAII file-name information, file/stream/stream-handle contexts, a 24H2-format INF, and a file-operation exerciser |
+| [NTL KMDF samples](./examples/kmdf) | Independent basic, PnP, bus, DMA, USB, and WMI projects |
+| [NTL KMDF basic sample](./examples/kmdf/basic) | `ntl::kmdf::main`, C++ WDF contexts, typed file/request and manual-queue cancellation, common WDF object utilities, deferred callbacks, and STL in passive KMDF callbacks |
+| [NTL KMDF PnP sample](./examples/kmdf/pnp) | Root-enumerated PnP/power lifecycle, resources, device interface, idle policy, and typed IOCTL |
+| [NTL KMDF DMA template](./examples/kmdf/dma) | Buildable PnP packet-DMA transaction, scatter/gather, common-buffer, and interrupt-DPC integration template for real hardware |
+| [NTL KMDF USB template](./examples/kmdf/usb) | Buildable PnP USB device/interface/pipe and continuous-reader template with a user-mode inspection app |
+| [NTL KMDF WMI sample](./examples/kmdf/wmi) | MOF-backed typed WMI query/set/method providers, event delivery, and a `ROOT\\WMI` user-mode verifier |
+| [NTL KMDF bus sample](./examples/kmdf/bus) | Dynamic PDO plug/remove/eject lifecycle and a typed `QUERY_INTERFACE` contract between bus and child function drivers |
+| [NTL minifilter samples](./examples/minifilter) | Independent basic callback/context, Filter Manager communication, and safe swapped-buffer driver/app examples |
 | [CI Driver Load Tests](./docs/ci-driver-load-tests.md) | Optional self-hosted driver load/run workflow |
 
 ## Operational Boundaries

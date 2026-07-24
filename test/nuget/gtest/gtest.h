@@ -139,6 +139,17 @@ inline int RunAllTests() {
     }                                                                         \
   } while (false)
 
+#define ASSERT_NE(actual, expected)                                           \
+  do {                                                                        \
+    const auto& actual_value = (actual);                                      \
+    const auto& expected_value = (expected);                                  \
+    if (!(actual_value != expected_value)) {                                  \
+      ::testing::record_failure(__FILE__, __LINE__,                           \
+                                "ASSERT_NE(" #actual ", " #expected ")");   \
+      return;                                                                 \
+    }                                                                         \
+  } while (false)
+
 #define EXPECT_GT(actual, expected)                                           \
   do {                                                                        \
     const auto& actual_value = (actual);                                      \
@@ -146,6 +157,16 @@ inline int RunAllTests() {
     if (!(actual_value > expected_value)) {                                   \
       ::testing::record_failure(__FILE__, __LINE__,                           \
                                 "EXPECT_GT(" #actual ", " #expected ")");   \
+    }                                                                         \
+  } while (false)
+
+#define EXPECT_GE(actual, expected)                                           \
+  do {                                                                        \
+    const auto& actual_value = (actual);                                      \
+    const auto& expected_value = (expected);                                  \
+    if (!(actual_value >= expected_value)) {                                  \
+      ::testing::record_failure(__FILE__, __LINE__,                           \
+                                "EXPECT_GE(" #actual ", " #expected ")");   \
     }                                                                         \
   } while (false)
 
