@@ -909,6 +909,11 @@ void run() {
 
 namespace filesystem_semantic_edge_test {
 namespace {
+#if defined(_DEBUG) && defined(CRTSYS_ENABLE_RUNTIME_DIAGNOSTIC_TEST_HOOKS)
+extern "C" LONG __cdecl
+__crtsys_runtime_test_filesystem_irql_check_count() noexcept;
+#endif
+
 void expect(bool condition, const char *message) {
   if (!condition) {
     throw std::runtime_error(message);
@@ -927,9 +932,18 @@ void run() {
   const fs::path sandbox{"sandbox"};
   remove_sandbox(sandbox);
 
+#if defined(_DEBUG) && defined(CRTSYS_ENABLE_RUNTIME_DIAGNOSTIC_TEST_HOOKS)
+  const LONG checks_before_create =
+      __crtsys_runtime_test_filesystem_irql_check_count();
+#endif
   const bool created_sandbox = fs::create_directory(sandbox);
   (void)created_sandbox;
   assert(created_sandbox);
+#if defined(_DEBUG) && defined(CRTSYS_ENABLE_RUNTIME_DIAGNOSTIC_TEST_HOOKS)
+  expect(__crtsys_runtime_test_filesystem_irql_check_count() >
+             checks_before_create,
+         "filesystem PASSIVE_LEVEL diagnostic hook was not reached");
+#endif
 
   std::error_code ec;
   const fs::path missing = sandbox / "missing.txt";

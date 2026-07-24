@@ -1445,6 +1445,58 @@ void run() {
 }
 } // namespace stop_callback_test
 
+namespace jthread_lifetime_semantic_test {
+namespace {
+void expect(bool condition, const char *message) {
+  if (!condition)
+    throw std::runtime_error(message);
+}
+} // namespace
+
+void run() {
+  using namespace std::chrono_literals;
+
+  std::atomic<bool> destructor_worker_exited{false};
+  {
+    std::promise<void> started;
+    auto started_future = started.get_future();
+    std::jthread worker([&](std::stop_token token) {
+      started.set_value();
+      while (!token.stop_requested())
+        std::this_thread::sleep_for(1ms);
+      destructor_worker_exited.store(true);
+    });
+
+    started_future.get();
+  }
+  expect(destructor_worker_exited.load(),
+         "jthread destructor did not request stop and join");
+
+  std::atomic<long> callback_count{0};
+  std::atomic<bool> explicit_worker_exited{false};
+  std::promise<void> started;
+  auto started_future = started.get_future();
+  std::jthread worker([&](std::stop_token token) {
+    started.set_value();
+    while (!token.stop_requested())
+      std::this_thread::sleep_for(1ms);
+    explicit_worker_exited.store(true);
+  });
+  started_future.get();
+
+  std::stop_callback callback(worker.get_stop_token(),
+                              [&] { callback_count.fetch_add(1); });
+  expect(worker.request_stop(), "first jthread stop request was rejected");
+  expect(!worker.request_stop(),
+         "second jthread stop request unexpectedly succeeded");
+  worker.join();
+
+  expect(explicit_worker_exited.load(), "stopped jthread did not exit");
+  expect(callback_count.load() == 1,
+         "jthread stop callback did not execute exactly once");
+}
+} // namespace jthread_lifetime_semantic_test
+
 //
 // Driver semantic edge coverage for thread/future paths that are already
 // covered by cppreference examples above. This intentionally avoids strict

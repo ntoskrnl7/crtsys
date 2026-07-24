@@ -46,6 +46,7 @@ For buildable samples, see:
 | [Wait helpers](./wait.md) | Common timeout and wait-status helpers for event, timer, and system-thread wrappers |
 | [Work item](./work-item.md) | Deferring resident work to a `PASSIVE_LEVEL` system worker thread |
 | [Passive executor](./passive-executor.md) | Inline-or-defer policy for running callables at `PASSIVE_LEVEL` |
+| [Kernel coroutine context](./coroutine.md) | Optional C++20 awaiter for resuming an explicitly deferred continuation at `PASSIVE_LEVEL` |
 | [Pool allocator](./pool-allocator.md) | Kernel pool-backed ownership helpers, STL allocators, PMR resources, pool tags, and IRQL rules |
 | [Lookaside list](./lookaside-list.md) | Fixed-size kernel object cache wrapper over `LOOKASIDE_LIST_EX` |
 | [MDL helper](./mdl.md) | RAII ownership for MDLs allocated by `IoAllocateMdl` |

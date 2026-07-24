@@ -69,6 +69,9 @@ The executor and captured state must remain valid until the posted work has
 completed. Driver unload paths should cancel/drain the source of DPCs and wait
 for the posted passive work before freeing the state or unloading code.
 
+For C++20 coroutines, [`ntl::resume_on_passive()`](./coroutine.md) uses the same
+executor policy to move one explicit continuation to `PASSIVE_LEVEL`.
+
 ## API
 
 - `ntl::passive_executor(queue_type = DelayedWorkQueue, tag = default_pool_tag)`
@@ -105,3 +108,4 @@ The driver test covers:
 - `execute()` from raised IRQL deferring to a worker thread
 - DPC callback handoff through `post()`
 - caller-owned `passive_work_item` through `queue_and_wait()`
+- C++20 coroutine continuation from `DISPATCH_LEVEL` to `PASSIVE_LEVEL`

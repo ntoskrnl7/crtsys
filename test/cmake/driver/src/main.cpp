@@ -41,10 +41,12 @@ void install_driver_gtest_failure_listener() {
 } // namespace
 
 #if CRTSYS_USE_NTL_MAIN
+#include <chrono>
 #include <iostream>
 #include <ntl/device_endpoint>
 #include <ntl/driver>
 #include <ntl/ipc/all>
+#include <thread>
 
 #include <ntl/rpc/server>
 // rpc server stub code
@@ -452,7 +454,19 @@ ntl::status ntl::main(ntl::driver &driver, const std::wstring &registry_path) {
   rpc_options.asynchronous().max_pending_calls(32);
   auto rpc_server = test_rpc::init(driver, rpc_options);
 
-  driver.on_unload([registry_path, test_endpoint, rpc_server]() mutable {
+  auto lifetime_worker =
+      std::make_shared<std::jthread>([](std::stop_token token) {
+        using namespace std::chrono_literals;
+        while (!token.stop_requested())
+          std::this_thread::sleep_for(10ms);
+      });
+
+  driver.on_unload([registry_path, test_endpoint, rpc_server,
+                    lifetime_worker]() mutable {
+    lifetime_worker->request_stop();
+    if (lifetime_worker->joinable())
+      lifetime_worker->join();
+
     auto test_dev = test_endpoint->device();
     if (test_dev)
       std::wcout << L"delete device :" << test_dev->name() << " - "
