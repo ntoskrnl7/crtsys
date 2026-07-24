@@ -155,7 +155,7 @@ crtsys_add_driver(my_kmdf_driver KMDF 1.15 src/main.cpp)
 crtsys_add_driver(my_ntl_kmdf_driver KMDF 1.15 NTL src/main.cpp)
 ```
 
-전체 동작은 [NTL KMDF driver/app 예제](../examples/kmdf-ntl-driver)에서 확인할
+전체 동작은 [NTL KMDF driver/app 예제](../examples/kmdf/basic)에서 확인할
 수 있으며, API 계약은 [NTL KMDF 가이드](./ntl/kmdf.md)에 정리되어 있습니다.
 
 파일 시스템 minifilter는 Filter Manager driver model을 그대로 유지합니다.
@@ -230,11 +230,13 @@ flowchart TD
 | [사용 예제](./ko-kr-usage-examples.md) | Driver-side NTL 예제 |
 | [NTL sample driver](../examples/ntl-driver) | `ntl::main`, device endpoint, typed IOCTL, remove lock, registry config, passive executor, pool-backed PMR를 사용하는 Visual Studio/NuGet 및 CMake driver/app 예제 |
 | [NTL RPC sample driver](../examples/ntl-rpc-driver) | shared NTL RPC schema를 사용하는 Visual Studio/NuGet 및 CMake driver/app 예제 |
-| [NTL KMDF 예제](../examples/kmdf-ntl-driver) | `ntl::kmdf::main`, C++ WDF context, typed file/request와 manual queue 취소, WDF lock/lookaside/collection/string/DPC 유틸리티, deferred callback, passive callback 안의 STL 사용을 보여주는 driver/app 예제 |
-| [NTL KMDF DMA 템플릿](../examples/kmdf-dma-ntl-driver) | 실제 하드웨어용 PnP packet-DMA transaction, scatter/gather, common buffer와 interrupt-DPC 연결 예제 |
-| [NTL KMDF USB 템플릿](../examples/kmdf-usb-ntl-driver) | PnP USB device/interface/pipe와 continuous reader, user-mode 상태 조회 앱을 포함한 빌드 가능한 예제 |
-| [NTL KMDF WMI 예제](../examples/kmdf-wmi-ntl-driver) | MOF 기반 typed WMI query/set/method provider, event 전달과 `ROOT\\WMI` user-mode 검증 앱 |
-| [NTL KMDF 버스 예제](../examples/kmdf-bus-ntl-driver) | dynamic PDO plug/remove/eject 수명 주기와 버스/자식 function driver 사이 typed `QUERY_INTERFACE` 검증 예제 |
+| [NTL KMDF 예제 모음](../examples/kmdf) | basic, PnP, bus, DMA, USB, WMI를 독립 프로젝트로 분류한 예제 모음 |
+| [NTL KMDF 기본 예제](../examples/kmdf/basic) | `ntl::kmdf::main`, C++ WDF context, typed file/request와 manual queue 취소, WDF lock/lookaside/collection/string/DPC 유틸리티, deferred callback, passive callback 안의 STL 사용을 보여주는 driver/app 예제 |
+| [NTL KMDF PnP 예제](../examples/kmdf/pnp) | root-enumerated PnP/power 수명 주기, resource, device interface, idle policy와 typed IOCTL 예제 |
+| [NTL KMDF DMA 템플릿](../examples/kmdf/dma) | 실제 하드웨어용 PnP packet-DMA transaction, scatter/gather, common buffer와 interrupt-DPC 연결 예제 |
+| [NTL KMDF USB 템플릿](../examples/kmdf/usb) | PnP USB device/interface/pipe와 continuous reader, user-mode 상태 조회 앱을 포함한 빌드 가능한 예제 |
+| [NTL KMDF WMI 예제](../examples/kmdf/wmi) | MOF 기반 typed WMI query/set/method provider, event 전달과 `ROOT\\WMI` user-mode 검증 앱 |
+| [NTL KMDF 버스 예제](../examples/kmdf/bus) | dynamic PDO plug/remove/eject 수명 주기와 버스/자식 function driver 사이 typed `QUERY_INTERFACE` 검증 예제 |
 | [NTL minifilter 예제 모음](../examples/minifilter) | 기본 callback/context, Filter Manager 통신, swapped-buffer를 독립 프로젝트로 분리한 driver/app 예제 |
 | [CI driver load tests](./ci-driver-load-tests.md) | optional self-hosted driver load/run workflow |
 

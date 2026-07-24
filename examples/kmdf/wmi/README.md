@@ -12,6 +12,12 @@ Build `crtsys_kmdf_wmi_ntl_sample_vs.sln` in Visual Studio, or configure this
 directory with CMake. The WDK MOF tools generate and validate the binary MOF
 before it is embedded as the `CrtSysKmdfWmi` resource.
 
+```powershell
+cmake -S examples\kmdf\wmi `
+      -B artifacts\examples\kmdf-wmi -A x64
+cmake --build artifacts\examples\kmdf-wmi --config Debug
+```
+
 Install the root-enumerated test device from an elevated PowerShell session:
 
 ```powershell

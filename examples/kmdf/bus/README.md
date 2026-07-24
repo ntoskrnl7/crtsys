@@ -49,7 +49,7 @@ Remove it with:
 ## CMake
 
 ```powershell
-cmake -S examples\kmdf-bus-ntl-driver `
-      -B artifacts\examples\kmdf-bus-ntl-driver -A x64
-cmake --build artifacts\examples\kmdf-bus-ntl-driver --config Debug
+cmake -S examples\kmdf\bus `
+      -B artifacts\examples\kmdf-bus -A x64
+cmake --build artifacts\examples\kmdf-bus --config Debug
 ```

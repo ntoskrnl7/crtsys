@@ -142,6 +142,18 @@ jobs:
             -Configuration Debug `
             -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}'
 
+      - name: Build grouped KMDF examples
+        if: matrix.project == 'driver' && matrix.config == 'Debug' && (matrix.arch == 'x86' || matrix.arch == 'x64')
+        shell: pwsh
+        run: |
+          foreach ($sample in @('basic', 'pnp', 'bus', 'dma', 'usb', 'wmi')) {
+            ./scripts/ci/Build-CrtSys.ps1 `
+              -Project "kmdf-example-$sample" `
+              -Architecture '${{ matrix.arch }}' `
+              -Configuration Debug `
+              -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}'
+          }
+
       - name: Build RPC lifecycle, async, notification, security, and streaming fixtures
         if: matrix.project == 'driver' && matrix.arch == 'x64' && matrix.config == 'Debug'
         shell: pwsh

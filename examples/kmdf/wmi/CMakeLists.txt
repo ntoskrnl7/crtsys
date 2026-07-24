@@ -2,9 +2,9 @@ cmake_minimum_required(VERSION 3.14 FATAL_ERROR)
 
 project(crtsys_kmdf_wmi_ntl_sample LANGUAGES C CXX RC)
 
-include("${CMAKE_CURRENT_LIST_DIR}/../../cmake/CPM.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/../../../cmake/CPM.cmake")
 
-CPMAddPackage(NAME crtsys SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../..")
+CPMAddPackage(NAME crtsys SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../../..")
 include("${crtsys_SOURCE_DIR}/cmake/CrtSys.cmake")
 
 find_program(CRTSYS_MOFCOMP_EXECUTABLE mofcomp.exe
@@ -59,6 +59,7 @@ target_compile_options(crtsys_kmdf_wmi_ntl_sample PRIVATE
 target_compile_options(crtsys_kmdf_wmi_ntl_sample_app PRIVATE
   "$<$<COMPILE_LANGUAGE:CXX>:/W4>"
   "$<$<COMPILE_LANGUAGE:CXX>:/WX>"
+  "$<$<COMPILE_LANGUAGE:CXX>:/EHsc>"
   "$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Debug>>:/MTd>"
   "$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:/MT>"
 )

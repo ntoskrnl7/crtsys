@@ -23,10 +23,10 @@ Move general CRT/STL processing to a passive WDF work item or queue callback.
 ## CMake build
 
 ```powershell
-cmake -S examples/kmdf-usb-ntl-driver `
-      -B artifacts/examples/kmdf-usb-ntl-driver `
+cmake -S examples/kmdf/usb `
+      -B artifacts/examples/kmdf-usb `
       -A x64
-cmake --build artifacts/examples/kmdf-usb-ntl-driver --config Debug
+cmake --build artifacts/examples/kmdf-usb --config Debug
 ```
 
 ## Visual Studio

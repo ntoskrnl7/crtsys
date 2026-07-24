@@ -44,7 +44,7 @@ ordinary I/O from being mistaken for reserved-request fallback traffic.
 
 This sample intentionally remains a non-PnP control device. For typed child
 enumeration and PDO creation, use the separate
-[KMDF bus and PDO sample](../kmdf-bus-ntl-driver).
+[KMDF bus and PDO sample](../bus).
 
 ## Visual Studio and NuGet
 
@@ -64,9 +64,10 @@ when you need the ordinary KMDF entry model.
 
 ## CMake
 
-```bat
-cmake -S examples\kmdf-ntl-driver -B examples\kmdf-ntl-driver\build_x64 -A x64
-cmake --build examples\kmdf-ntl-driver\build_x64 --config Debug
+```powershell
+cmake -S examples\kmdf\basic `
+      -B artifacts\examples\kmdf-basic -A x64
+cmake --build artifacts\examples\kmdf-basic --config Debug
 ```
 
 The KMDF version is selected on the existing driver helper:

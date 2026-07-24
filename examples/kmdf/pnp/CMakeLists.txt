@@ -2,9 +2,9 @@ cmake_minimum_required(VERSION 3.14 FATAL_ERROR)
 
 project(crtsys_kmdf_pnp_ntl_sample LANGUAGES C CXX)
 
-include("${CMAKE_CURRENT_LIST_DIR}/../../cmake/CPM.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/../../../cmake/CPM.cmake")
 
-CPMAddPackage(NAME crtsys SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../..")
+CPMAddPackage(NAME crtsys SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../../..")
 include("${crtsys_SOURCE_DIR}/cmake/CrtSys.cmake")
 
 crtsys_add_driver(crtsys_kmdf_pnp_ntl_sample

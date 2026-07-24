@@ -37,10 +37,10 @@ lock implementation at `DISPATCH_LEVEL`.
 ## CMake build
 
 ```powershell
-cmake -S examples/kmdf-dma-ntl-driver `
-      -B artifacts/examples/kmdf-dma-ntl-driver `
+cmake -S examples/kmdf/dma `
+      -B artifacts/examples/kmdf-dma `
       -A x64
-cmake --build artifacts/examples/kmdf-dma-ntl-driver --config Debug
+cmake --build artifacts/examples/kmdf-dma --config Debug
 ```
 
 ## Visual Studio

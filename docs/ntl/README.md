@@ -13,10 +13,11 @@ For buildable samples, see:
 
 - [NTL typed IOCTL sample driver](../../examples/ntl-driver)
 - [NTL RPC sample driver](../../examples/ntl-rpc-driver)
-- [NTL KMDF DMA driver template](../../examples/kmdf-dma-ntl-driver)
-- [NTL KMDF USB driver template](../../examples/kmdf-usb-ntl-driver)
-- [NTL KMDF WMI driver/app sample](../../examples/kmdf-wmi-ntl-driver)
-- [NTL KMDF bus/PDO driver/app sample](../../examples/kmdf-bus-ntl-driver)
+- [NTL KMDF driver/app samples](../../examples/kmdf)
+- [NTL KMDF DMA driver template](../../examples/kmdf/dma)
+- [NTL KMDF USB driver template](../../examples/kmdf/usb)
+- [NTL KMDF WMI driver/app sample](../../examples/kmdf/wmi)
+- [NTL KMDF bus/PDO driver/app sample](../../examples/kmdf/bus)
 - [NTL minifilter driver/app samples](../../examples/minifilter)
 
 ## Topics
