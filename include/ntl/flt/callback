@@ -116,6 +116,20 @@ public:
   }
 
   /**
+   * @brief Updates the operation's native I/O completion result.
+   *
+   * This is valid in both pre-operation completion and post-operation failure
+   * paths. It does not dirty operation parameters.
+   */
+  void set_io_status(ntl::status value,
+                     ULONG_PTR information = 0) noexcept {
+    if (!value_)
+      return;
+    value_->IoStatus.Status = value;
+    value_->IoStatus.Information = information;
+  }
+
+  /**
    * @brief Completes the operation in a pre-operation callback.
    * @param value Completion status.
    * @param information Operation-specific completion information.
@@ -123,10 +137,7 @@ public:
    * Return pre_result::complete from the callback after calling this method.
    */
   void complete(ntl::status value, ULONG_PTR information = 0) noexcept {
-    if (!value_)
-      return;
-    value_->IoStatus.Status = value;
-    value_->IoStatus.Information = information;
+    set_io_status(value, information);
   }
 
   /** @brief Marks native I/O parameter modifications as dirty. */

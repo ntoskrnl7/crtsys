@@ -17,7 +17,7 @@ For buildable samples, see:
 - [NTL KMDF USB driver template](../../examples/kmdf-usb-ntl-driver)
 - [NTL KMDF WMI driver/app sample](../../examples/kmdf-wmi-ntl-driver)
 - [NTL KMDF bus/PDO driver/app sample](../../examples/kmdf-bus-ntl-driver)
-- [NTL minifilter driver/app sample](../../examples/minifilter-ntl-driver)
+- [NTL minifilter driver/app samples](../../examples/minifilter)
 
 ## Topics
 
@@ -48,6 +48,7 @@ For buildable samples, see:
 | [Pool allocator](./pool-allocator.md) | Kernel pool-backed ownership helpers, STL allocators, PMR resources, pool tags, and IRQL rules |
 | [Lookaside list](./lookaside-list.md) | Fixed-size kernel object cache wrapper over `LOOKASIDE_LIST_EX` |
 | [MDL helper](./mdl.md) | RAII ownership for MDLs allocated by `IoAllocateMdl` |
+| [I/O buffer mapping and minifilter swapping](./io-buffer-mapping.md) | IRP/minifilter input-output mappings and operation-neutral swapped buffers |
 | [Symbolic link](./symbolic-link.md) | RAII wrapper over `IoCreateSymbolicLink` / `IoDeleteSymbolicLink` |
 | [Unicode string](./unicode-string.md) | Adapting `std::wstring` storage to `UNICODE_STRING` |
 

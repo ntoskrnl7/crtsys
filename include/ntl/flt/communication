@@ -10,10 +10,11 @@
 #include <fltKernel.h>
 
 #include "port_common"
+#include "work_item"
 
 #include "../except"
 #include "../ipc/kernel_region"
-#include "../passive_executor"
+#include "../ipc/mapped_buffer"
 #include "../result"
 #include "../rpc/common"
 #include "../status"
@@ -51,6 +52,10 @@ struct communication_server_state;
 struct communication_async_state;
 
 struct communication_connection_public_state {
+  explicit communication_connection_public_state(
+      ntl::ipc::process_connection process_value) noexcept
+      : process(std::move(process_value)) {}
+
   template <typename T> static const void *type_key() noexcept {
     static const unsigned char key = 0;
     return &key;
@@ -60,6 +65,7 @@ struct communication_connection_public_state {
   HANDLE process_id = nullptr;
   std::atomic<std::uint64_t> session_id{0};
   std::atomic<bool> connected{true};
+  ntl::ipc::process_connection process;
   mutable std::mutex state_lock;
   std::shared_ptr<void> user_state;
   const void *user_state_type = nullptr;
@@ -109,6 +115,22 @@ public:
   /** @brief Returns the process that opened the Filter Manager port. */
   HANDLE process_id() const noexcept {
     return state_ ? state_->process_id : nullptr;
+  }
+
+  /**
+   * @brief Returns the referenced process and mapping registry captured
+   * when
+   * this Filter Manager connection was accepted.
+   *
+   * Copies
+   * share one registry. Disconnect rejects new mappings and
+   * synchronously
+   * closes every outstanding view before invoking the
+   * disconnect
+   * observer.
+   */
+  ntl::ipc::process_connection mapping_process() const noexcept {
+    return state_ ? state_->process : ntl::ipc::process_connection{};
   }
 
   /** @brief Returns the currently attached reconnectable session ID. */
@@ -293,6 +315,13 @@ public:
     return *this;
   }
 
+  /** @brief Sets per-client process-mapped I/O-buffer VAD quotas. */
+  communication_port_options &
+  process_mapping_limits(ntl::ipc::process_connection_limits value) noexcept {
+    process_mapping_limits_ = value;
+    return *this;
+  }
+
   /**
    * @brief Uses a caller-owned security descriptor instead of the Filter
    * Manager default descriptor.
@@ -319,6 +348,9 @@ public:
   ntl::ipc::region_limits shared_region_limits() const noexcept {
     return region_limits_;
   }
+  ntl::ipc::process_connection_limits process_mapping_limits() const noexcept {
+    return process_mapping_limits_;
+  }
   PSECURITY_DESCRIPTOR security_descriptor() const noexcept {
     return security_descriptor_;
   }
@@ -332,6 +364,7 @@ private:
   communication_overflow_policy reliable_overflow_ =
       communication_overflow_policy::reject_newest;
   ntl::ipc::region_limits region_limits_{};
+  ntl::ipc::process_connection_limits process_mapping_limits_{};
   PSECURITY_DESCRIPTOR security_descriptor_ = nullptr;
 };
 
@@ -382,10 +415,11 @@ struct communication_connection_state {
   communication_connection_state(communication_server_state *owner_value,
                                  PFLT_PORT port_value, std::uint64_t id_value,
                                  HANDLE process_id,
-                                 ntl::ipc::region_limits limits)
+                                 ntl::ipc::region_limits limits,
+                                 ntl::ipc::process_connection process)
       : owner(owner_value), port(port_value), id(id_value), regions(limits),
-        public_state(
-            std::make_shared<communication_connection_public_state>()) {
+        public_state(std::make_shared<communication_connection_public_state>(
+            std::move(process))) {
     public_state->id = id_value;
     public_state->process_id = process_id;
     ExInitializeRundownProtection(&operations);
@@ -779,10 +813,15 @@ struct communication_server_state {
     if (id == 0)
       id = owner->next_connection_id.fetch_add(1);
     communication_connection_state *connection = nullptr;
+    auto mapping_process =
+        ntl::ipc::process_connection::try_capture_current_process(
+            owner->options.process_mapping_limits());
+    if (!mapping_process)
+      return static_cast<NTSTATUS>(mapping_process.status());
     try {
       connection = new communication_connection_state(
           owner, client_port, id, PsGetCurrentProcessId(),
-          owner->options.shared_region_limits());
+          owner->options.shared_region_limits(), std::move(*mapping_process));
     } catch (const std::bad_alloc &) {
       return STATUS_INSUFFICIENT_RESOURCES;
     } catch (...) {
@@ -813,6 +852,7 @@ struct communication_server_state {
         std::lock_guard<std::mutex> guard(owner->connections_lock);
         owner->connections.erase(connection);
         connection->public_state->connected.store(false);
+        (void)connection->public_state->process.close();
         delete connection;
         return hook_status;
       }
@@ -836,6 +876,8 @@ struct communication_server_state {
     auto *const owner = connection->owner;
     ExWaitForRundownProtectionRelease(&connection->operations);
     connection->regions.close();
+    connection->public_state->connected.store(false);
+    (void)connection->public_state->process.close();
 
     const auto session_id = connection->session_id.load();
     if (owner && session_id != 0) {
@@ -855,7 +897,6 @@ struct communication_server_state {
       owner->connections.erase(connection);
     }
     connection->public_state->session_id.store(0);
-    connection->public_state->connected.store(false);
     if (owner && connection->port)
       FltCloseClientPort(owner->filter, &connection->port);
     if (owner && owner->on_disconnect) {
@@ -1052,10 +1093,8 @@ struct communication_server_state {
       return STATUS_UNSUCCESSFUL;
     }
 
-    const auto queue_status =
-        ntl::passive_executor(DelayedWorkQueue, "NFlt").post([async] {
-          async->connection->owner->complete_async(async);
-        });
+    const auto queue_status = ntl::flt::queue_filter_work_item(
+        filter, [async] { async->connection->owner->complete_async(async); });
     if (queue_status.is_ok())
       return STATUS_SUCCESS;
 
@@ -1639,6 +1678,14 @@ struct communication_server_state {
         payload.size() > channel->second.response_size)
       return ntl::status{STATUS_INVALID_PARAMETER};
 
+    std::shared_ptr<const std::vector<unsigned char>> queued_payload;
+    try {
+      queued_payload =
+          std::make_shared<const std::vector<unsigned char>>(payload);
+    } catch (const std::bad_alloc &) {
+      return ntl::status{STATUS_INSUFFICIENT_RESOURCES};
+    }
+
     std::vector<std::pair<communication_connection_state *, std::uint64_t>>
         recipients;
     try {
@@ -1663,21 +1710,20 @@ struct communication_server_state {
     for (const auto &recipient : recipients) {
       auto *const connection = recipient.first;
       const auto session_id = recipient.second;
-      const auto status =
-          ntl::passive_executor(DelayedWorkQueue, "NFlt")
-              .post([this, connection, session_id, id, payload] {
-                if (connection->session_id.load() != session_id) {
-                  ExReleaseRundownProtection(&connection->operations);
-                  return;
-                }
-                communication_inbound_header frame{};
-                frame.kind = communication_inbound_kind::notification;
-                frame.id = id;
-                frame.session_id = session_id;
-                (void)send_inbound(connection, frame, payload,
-                                   -100LL * 10LL * 1000LL);
-                ExReleaseRundownProtection(&connection->operations);
-              });
+      const auto status = ntl::flt::queue_filter_work_item(
+          filter, [this, connection, session_id, id, queued_payload] {
+            if (connection->session_id.load() != session_id) {
+              ExReleaseRundownProtection(&connection->operations);
+              return;
+            }
+            communication_inbound_header frame{};
+            frame.kind = communication_inbound_kind::notification;
+            frame.id = id;
+            frame.session_id = session_id;
+            (void)send_inbound(connection, frame, *queued_payload,
+                               -100LL * 10LL * 1000LL);
+            ExReleaseRundownProtection(&connection->operations);
+          });
       if (status.is_ok()) {
         ++queued;
       } else {
@@ -1695,6 +1741,14 @@ struct communication_server_state {
     if (!target || channel == channels.end() || channel->second.stream ||
         payload.size() > channel->second.response_size)
       return ntl::status{STATUS_INVALID_PARAMETER};
+
+    std::shared_ptr<const std::vector<unsigned char>> queued_payload;
+    try {
+      queued_payload =
+          std::make_shared<const std::vector<unsigned char>>(payload);
+    } catch (const std::bad_alloc &) {
+      return ntl::status{STATUS_INSUFFICIENT_RESOURCES};
+    }
 
     communication_connection_state *connection = nullptr;
     std::uint64_t session_id = 0;
@@ -1723,21 +1777,20 @@ struct communication_server_state {
       }
     }
 
-    const auto queued =
-        ntl::passive_executor(DelayedWorkQueue, "NFlt")
-            .post([this, connection, session_id, id, payload] {
-              if (connection->session_id.load() != session_id) {
-                ExReleaseRundownProtection(&connection->operations);
-                return;
-              }
-              communication_inbound_header frame{};
-              frame.kind = communication_inbound_kind::notification;
-              frame.id = id;
-              frame.session_id = session_id;
-              (void)send_inbound(connection, frame, payload,
-                                 -100LL * 10LL * 1000LL);
-              ExReleaseRundownProtection(&connection->operations);
-            });
+    const auto queued = ntl::flt::queue_filter_work_item(
+        filter, [this, connection, session_id, id, queued_payload] {
+          if (connection->session_id.load() != session_id) {
+            ExReleaseRundownProtection(&connection->operations);
+            return;
+          }
+          communication_inbound_header frame{};
+          frame.kind = communication_inbound_kind::notification;
+          frame.id = id;
+          frame.session_id = session_id;
+          (void)send_inbound(connection, frame, *queued_payload,
+                             -100LL * 10LL * 1000LL);
+          ExReleaseRundownProtection(&connection->operations);
+        });
     if (!queued.is_ok())
       ExReleaseRundownProtection(&connection->operations);
     return queued;
@@ -1798,8 +1851,8 @@ struct communication_server_state {
       // FilterReplyMessage requires FILTER_REPLY_HEADER in user mode, but
       // Filter Manager consumes that header and copies only the caller-defined
       // reply bytes into FltSendMessage's ReplyBuffer.
-      const auto reply_capacity = sizeof(communication_reply_header) +
-                                  definition->second.response_size;
+      const auto reply_capacity =
+          sizeof(communication_reply_header) + definition->second.response_size;
       if (reply_capacity > (std::numeric_limits<ULONG>::max)()) {
         status = STATUS_INVALID_BUFFER_SIZE;
       } else {
@@ -1810,7 +1863,12 @@ struct communication_server_state {
         status = FltSendMessage(filter, &connection->port, message.data(),
                                 static_cast<ULONG>(message.size()),
                                 reply.data(), &reply_length, &timeout);
-        if (NT_SUCCESS(status)) {
+        // FltSendMessage deliberately returns STATUS_TIMEOUT as a
+        // success-severity NTSTATUS. A typed request still has no result in
+        // that case, so normalize it to a failure before result decoding.
+        if (status == STATUS_TIMEOUT) {
+          status = STATUS_IO_TIMEOUT;
+        } else if (NT_SUCCESS(status)) {
           if (reply_length < sizeof(communication_reply_header)) {
             status = STATUS_INVALID_BUFFER_SIZE;
           } else {
@@ -2046,15 +2104,36 @@ struct communication_server_state {
       return;
     }
 
-    const auto queue_status =
-        ntl::passive_executor(DelayedWorkQueue, "NFlt")
-            .post([this, connection, session_id, id, batch_delivery,
-                   sequences] {
-              if (batch_delivery)
-                deliver_reliable_batch(connection, session_id, id, sequences);
-              else
-                deliver_reliable(connection, session_id, id, sequences.front());
-            });
+    std::shared_ptr<const std::vector<std::uint64_t>> queued_sequences;
+    try {
+      queued_sequences = std::make_shared<const std::vector<std::uint64_t>>(
+          std::move(sequences));
+    } catch (...) {
+      {
+        std::lock_guard<std::mutex> guard(sessions_lock);
+        const auto found = sessions.find(session_id);
+        if (found != sessions.end()) {
+          for (auto &record : found->second->deliveries)
+            if (record.id == id &&
+                std::find(sequences.begin(), sequences.end(),
+                          record.sequence) != sequences.end())
+              record.in_flight = false;
+        }
+      }
+      ExReleaseRundownProtection(&connection->operations);
+      return;
+    }
+
+    const auto queue_status = ntl::flt::queue_filter_work_item(
+        filter,
+        [this, connection, session_id, id, batch_delivery, queued_sequences] {
+          if (batch_delivery)
+            deliver_reliable_batch(connection, session_id, id,
+                                   *queued_sequences);
+          else
+            deliver_reliable(connection, session_id, id,
+                             queued_sequences->front());
+        });
     if (queue_status.is_ok())
       return;
     {
@@ -2062,8 +2141,9 @@ struct communication_server_state {
       const auto found = sessions.find(session_id);
       if (found != sessions.end()) {
         for (auto &record : found->second->deliveries)
-          if (record.id == id && std::find(sequences.begin(), sequences.end(),
-                                           record.sequence) != sequences.end())
+          if (record.id == id &&
+              std::find(queued_sequences->begin(), queued_sequences->end(),
+                        record.sequence) != queued_sequences->end())
             record.in_flight = false;
       }
     }

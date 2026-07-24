@@ -1,0 +1,53 @@
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = "ActivityMonitor"
+ClassGuid   = {b86dff51-a31e-4bac-b3cf-e8cfe75c9fc2}
+Provider    = %ProviderName%
+DriverVer   = 07/16/2026,0.1.0.0
+CatalogFile = crtsys_minifilter_communication_sample.cat
+PnpLockdown = 1
+
+[DestinationDirs]
+DriverCopyFiles = 13
+
+[DefaultInstall.NTamd64]
+OptionDesc = %ServiceDescription%
+CopyFiles  = DriverCopyFiles
+
+[DefaultInstall.NTamd64.Services]
+AddService = %ServiceName%,,ServiceInstall
+
+[ServiceInstall]
+DisplayName    = %ServiceDescription%
+Description    = %ServiceDescription%
+ServiceBinary  = %13%\crtsys_minifilter_communication_sample.sys
+ServiceType    = 2
+StartType      = 3
+ErrorControl   = 1
+LoadOrderGroup = "FSFilter Activity Monitor"
+Dependencies   = FltMgr
+AddReg         = Instances.AddRegistry
+
+[Instances.AddRegistry]
+HKR,"Parameters\Instances","DefaultInstance",0x00000000,%DefaultInstance%
+HKR,"Parameters\Instances\%DefaultInstance%","Altitude",0x00000000,%DefaultAltitude%
+HKR,"Parameters\Instances\%DefaultInstance%","Flags",0x00010001,0
+
+[DriverCopyFiles]
+crtsys_minifilter_communication_sample.sys
+
+[SourceDisksFiles]
+crtsys_minifilter_communication_sample.sys = 1,,
+
+[SourceDisksNames]
+1 = %DiskName%,,,
+
+[Strings]
+ProviderName       = "ntoskrnl7"
+ServiceName        = "CrtSysMinifilterCommunicationSample"
+ServiceDescription = "crtsys NTL minifilter communication sample"
+DefaultInstance    = "CrtSys NTL communication sample instance"
+; Development-only value. Obtain a unique Microsoft-assigned altitude before
+; distributing a real minifilter.
+DefaultAltitude    = "370030.128"
+DiskName           = "crtsys NTL minifilter communication sample media"

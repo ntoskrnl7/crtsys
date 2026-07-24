@@ -1,0 +1,961 @@
+/**
+ * @file mapped_buffer
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Process-scoped user mappings for existing locked-page MDLs.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if !defined(_DDK_DRIVER_) && !defined(_NTDDK_) && !defined(_NTIFS_) &&        \
+    !defined(_WDMDDK_)
+#error "ntl::ipc::mapped_buffer is a kernel-mode helper"
+#endif
+
+#ifndef _NTDDK_
+#include <wdm.h>
+#endif
+
+#include "../except"
+#include "../handle"
+#include "../mdl"
+#include "../pool_allocator"
+#include "../result"
+#include "common"
+#include "detail/process_bridge"
+
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <mutex>
+#include <new>
+#include <optional>
+#include <unordered_map>
+#include <utility>
+
+namespace ntl::ipc {
+
+/**
+ * @brief Non-owning view of an already locked MDL.
+ *
+ * The caller keeps the MDL and its described pages alive until every returned
+ * mapping is closed. This type records ownership; it does not make an unsafe
+ * kernel-pool MDL suitable for exposure to an untrusted process.
+ */
+class borrowed_mdl_view {
+public:
+  constexpr borrowed_mdl_view() noexcept = default;
+  explicit constexpr borrowed_mdl_view(PMDL mdl) noexcept : mdl_(mdl) {}
+  explicit constexpr operator bool() const noexcept { return mdl_ != nullptr; }
+  PMDL native() const noexcept { return mdl_; }
+  std::size_t size() const noexcept {
+    return mdl_ ? static_cast<std::size_t>(MmGetMdlByteCount(mdl_)) : 0;
+  }
+
+private:
+  PMDL mdl_ = nullptr;
+};
+
+/** Per-client limits for user VADs retained by a connection. */
+struct process_connection_limits {
+  std::size_t max_mappings = 256;
+  std::size_t max_mapped_bytes = 512u * 1024u * 1024u;
+};
+
+namespace detail {
+class mapped_mdl_state;
+using retained_cleanup_routine =
+    ntl::status (*)(std::shared_ptr<void> &) noexcept;
+
+/**
+ * Reports whether mapping the complete MDL exposes exactly the requested
+ * pages, with no leading/trailing bytes outside the logical range.
+ */
+inline bool mdl_mapping_is_page_isolated(PMDL mdl, std::size_t offset,
+                                         std::size_t length) noexcept {
+  if (!mdl || offset != 0 || length == 0 ||
+      length != static_cast<std::size_t>(MmGetMdlByteCount(mdl)) ||
+      MmGetMdlByteOffset(mdl) != 0)
+    return false;
+  return length % PAGE_SIZE == 0;
+}
+
+inline bool mdl_describes_resident_pages(PMDL mdl) noexcept {
+  return mdl &&
+         (mdl->MdlFlags &
+          (MDL_PAGES_LOCKED | MDL_SOURCE_IS_NONPAGED_POOL | MDL_PARTIAL)) != 0;
+}
+
+inline bool mdl_mapping_charge(PMDL mdl, std::size_t &bytes) noexcept {
+  if (!mdl)
+    return false;
+  const auto byte_count = static_cast<std::uint64_t>(MmGetMdlByteCount(mdl));
+  const auto byte_offset = static_cast<std::uint64_t>(MmGetMdlByteOffset(mdl));
+  if (byte_count == 0)
+    return false;
+  const auto pages =
+      (byte_offset + byte_count + PAGE_SIZE - 1u) / PAGE_SIZE;
+  const auto span = pages * PAGE_SIZE;
+  if (span > static_cast<std::uint64_t>(SIZE_MAX))
+    return false;
+  bytes = static_cast<std::size_t>(span);
+  return true;
+}
+
+inline bool isolated_page_charge(std::size_t bytes,
+                                 std::size_t &charge) noexcept {
+  if (bytes == 0)
+    return false;
+  const auto span =
+      ((static_cast<std::uint64_t>(bytes) + PAGE_SIZE - 1u) / PAGE_SIZE) *
+      PAGE_SIZE;
+  if (span > static_cast<std::uint64_t>(SIZE_MAX))
+    return false;
+  charge = static_cast<std::size_t>(span);
+  return true;
+}
+
+inline std::atomic<std::uint64_t> connection_generation_seed{0};
+inline constexpr ULONG mapped_state_pool_tag = ntl::pool_tag("mMpN");
+inline constexpr ULONG page_buffer_pool_tag = ntl::pool_tag("bMpN");
+
+inline std::uint64_t next_connection_generation() noexcept {
+  for (;;) {
+    const auto value =
+        connection_generation_seed.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (value != 0)
+      return value;
+  }
+}
+
+struct process_connection_state {
+  process_connection_state(ntl::unique_object<PEPROCESS> process_value,
+                           HANDLE process_id_value,
+                           process_connection_limits limits_value,
+                           std::uint64_t generation_value) noexcept
+      : process(std::move(process_value)), process_id(process_id_value),
+        limits(limits_value), generation(generation_value) {
+    KeInitializeEvent(&mapping_attempts_idle, NotificationEvent, TRUE);
+  }
+
+  process_connection_state(const process_connection_state &) = delete;
+  process_connection_state &
+  operator=(const process_connection_state &) = delete;
+  ~process_connection_state();
+
+  ntl::result<std::pair<std::uint64_t, std::uint64_t>>
+  register_mapping(const std::shared_ptr<mapped_mdl_state> &mapping) noexcept;
+  bool begin_mapping_attempt() noexcept;
+  void end_mapping_attempt() noexcept;
+  void unregister_mapping(std::uint64_t id,
+                          const mapped_mdl_state *expected) noexcept;
+  ntl::status close_all() noexcept;
+  std::size_t mapping_count() const noexcept;
+  bool accepts_mappings() const noexcept;
+  std::uint64_t current_generation() const noexcept;
+
+  ntl::unique_object<PEPROCESS> process;
+  HANDLE process_id = nullptr;
+  std::mutex close_lock;
+  mutable std::mutex lock;
+  std::unordered_map<std::uint64_t, std::shared_ptr<mapped_mdl_state>> mappings;
+  process_connection_limits limits{};
+  std::size_t mapped_bytes = 0;
+  std::uint64_t next_id = 0;
+  std::uint64_t generation = 0;
+  std::size_t active_mapping_attempts = 0;
+  KEVENT mapping_attempts_idle{};
+  bool accepting = true;
+  bool close_started = false;
+  std::atomic<NTSTATUS> rundown_status{STATUS_SUCCESS};
+  std::atomic<bool> rundown_complete{false};
+};
+} // namespace detail
+
+/**
+ * @brief Connection-scoped owner of process mappings and disconnect rundown.
+ *
+ * Capture this while handling the intended client's connect/create request.
+ * close() rejects new mappings and synchronously unmaps every registered view.
+ */
+class process_connection {
+public:
+  process_connection() noexcept = default;
+
+  [[nodiscard]] static ntl::result<process_connection>
+  try_capture_current_process(process_connection_limits limits = {}) noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+    if (limits.max_mappings == 0 || limits.max_mapped_bytes == 0)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    PEPROCESS process = PsGetCurrentProcess();
+    if (!process)
+      return ntl::unexpected(STATUS_INVALID_CID);
+    ObReferenceObject(process);
+    ntl::unique_object<PEPROCESS> process_owner{process};
+    const HANDLE process_id = detail::query_process_id(process);
+    if (!process_id)
+      return ntl::unexpected(STATUS_INVALID_CID);
+    try {
+      auto state = std::make_shared<detail::process_connection_state>(
+          std::move(process_owner), process_id, limits,
+          detail::next_connection_generation());
+      return ntl::ok(process_connection{std::move(state)});
+    } catch (...) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+  }
+
+  explicit operator bool() const noexcept {
+    return static_cast<bool>(state_) && static_cast<bool>(state_->process);
+  }
+
+  PEPROCESS process() const noexcept {
+    return state_ ? state_->process.get() : nullptr;
+  }
+  HANDLE process_id() const noexcept {
+    return state_ ? state_->process_id : nullptr;
+  }
+  std::size_t mapping_count() const noexcept {
+    return state_ ? state_->mapping_count() : 0;
+  }
+  bool accepts_mappings() const noexcept {
+    return state_ && state_->accepts_mappings();
+  }
+  std::uint64_t generation() const noexcept {
+    return state_ ? state_->current_generation() : 0;
+  }
+
+  /** @brief Rejects new mappings and synchronously removes every live view. */
+  ntl::status close() noexcept {
+    return state_ ? state_->close_all() : ntl::status{STATUS_SUCCESS};
+  }
+
+private:
+  friend class mapped_buffer_view;
+  friend ntl::result<mapped_buffer_view>
+  try_map_mdl(borrowed_mdl_view, std::size_t, std::size_t, process_connection &,
+              map_access, MEMORY_CACHING_TYPE) noexcept;
+  friend ntl::result<mapped_buffer_view>
+  detail_try_map_mdl_retained(PMDL, std::size_t, std::size_t,
+                              process_connection &, map_access,
+                              MEMORY_CACHING_TYPE, std::shared_ptr<void>,
+                              detail::retained_cleanup_routine) noexcept;
+
+  explicit process_connection(
+      std::shared_ptr<detail::process_connection_state> state) noexcept
+      : state_(std::move(state)) {}
+
+  std::shared_ptr<detail::process_connection_state> state_;
+};
+
+namespace detail {
+
+struct map_call_context {
+  PMDL mdl = nullptr;
+  MEMORY_CACHING_TYPE cache = MmCached;
+  ULONG priority = NormalPagePriority;
+  void *address = nullptr;
+};
+
+inline NTSTATUS NTAPI map_call(void *opaque) noexcept {
+  auto *const context = static_cast<map_call_context *>(opaque);
+  const auto guarded = ntl::seh::try_except([&]() {
+    context->address =
+        MmMapLockedPagesSpecifyCache(context->mdl, UserMode, context->cache,
+                                     nullptr, FALSE, context->priority);
+  });
+  if (!std::get<0>(guarded))
+    return static_cast<NTSTATUS>(std::get<1>(guarded));
+  return context->address ? STATUS_SUCCESS : STATUS_INSUFFICIENT_RESOURCES;
+}
+
+struct unmap_call_context {
+  PMDL mdl = nullptr;
+  void *address = nullptr;
+};
+
+inline NTSTATUS NTAPI unmap_call(void *opaque) noexcept {
+  auto *const context = static_cast<unmap_call_context *>(opaque);
+  const auto guarded = ntl::seh::try_except(
+      [&]() { MmUnmapLockedPages(context->address, context->mdl); });
+  return std::get<0>(guarded) ? STATUS_SUCCESS
+                              : static_cast<NTSTATUS>(std::get<1>(guarded));
+}
+
+class mapped_mdl_state : public std::enable_shared_from_this<mapped_mdl_state> {
+public:
+  mapped_mdl_state(PEPROCESS process, PMDL mdl, void *address,
+                   std::size_t mapped_bytes, std::size_t mapping_charge_bytes,
+                   map_access native_access,
+                   std::weak_ptr<process_connection_state> connection,
+                   std::shared_ptr<void> keepalive,
+                   retained_cleanup_routine retained_cleanup) noexcept
+      : process_(process), mdl_(mdl), address_(address),
+        mapped_bytes_(mapped_bytes),
+        mapping_charge_bytes_(mapping_charge_bytes),
+        native_access_(native_access),
+        connection_(std::move(connection)), keepalive_(std::move(keepalive)),
+        retained_cleanup_(retained_cleanup) {
+    ObReferenceObject(process_);
+    KeInitializeEvent(&close_event_, NotificationEvent, TRUE);
+  }
+
+  mapped_mdl_state(const mapped_mdl_state &) = delete;
+  mapped_mdl_state &operator=(const mapped_mdl_state &) = delete;
+
+  ~mapped_mdl_state() {
+    NT_ASSERT(KeGetCurrentIrql() == PASSIVE_LEVEL);
+    (void)close();
+    if (process_)
+      ObDereferenceObject(process_);
+  }
+
+  void identity(std::uint64_t id, std::uint64_t generation) noexcept {
+    std::lock_guard<std::mutex> guard(lock_);
+    id_ = id;
+    generation_ = generation;
+  }
+
+  ntl::status close() noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return STATUS_INVALID_DEVICE_STATE;
+
+    void *address = nullptr;
+    PMDL mdl = nullptr;
+    std::uint64_t id = 0;
+    for (;;) {
+      bool wait = false;
+      {
+        std::lock_guard<std::mutex> guard(lock_);
+        if (closing_) {
+          wait = true;
+        } else if (!address_) {
+          return close_status_;
+        } else {
+          closing_ = true;
+          KeClearEvent(&close_event_);
+          address = address_;
+          mdl = mdl_;
+          id = id_;
+        }
+      }
+      if (!wait)
+        break;
+      (void)KeWaitForSingleObject(&close_event_, Executive, KernelMode, FALSE,
+                                  nullptr);
+    }
+
+    unmap_call_context context{mdl, address};
+    NTSTATUS status =
+        detail::invoke_in_process(process_, &unmap_call, &context);
+    if (status == STATUS_PROCESS_IS_TERMINATING) {
+      if (PsGetCurrentProcess() == process_) {
+        // The current address space is still usable for this call even though
+        // the exit rundown can no longer be acquired.
+        status = unmap_call(&context);
+      } else {
+        // Do not release the MDL/pages until process teardown has removed the
+        // user VAD. EPROCESS is a waitable dispatcher object.
+        status = KeWaitForSingleObject(process_, Executive, KernelMode, FALSE,
+                                       nullptr);
+      }
+    }
+
+    {
+      std::lock_guard<std::mutex> guard(lock_);
+      if (!NT_SUCCESS(status)) {
+        closing_ = false;
+        KeSetEvent(&close_event_, IO_NO_INCREMENT, FALSE);
+        return status;
+      }
+      address_ = nullptr;
+      mdl_ = nullptr;
+    }
+
+    // Copy-back/owned-MDL cleanup runs only after the user mapping is gone.
+    NTSTATUS cleanup_status = STATUS_SUCCESS;
+    if (retained_cleanup_)
+      cleanup_status = static_cast<NTSTATUS>(retained_cleanup_(keepalive_));
+    else
+      keepalive_.reset();
+    if (const auto connection = connection_.lock())
+      connection->unregister_mapping(id, this);
+    {
+      std::lock_guard<std::mutex> guard(lock_);
+      close_status_ = cleanup_status;
+      closing_ = false;
+      KeSetEvent(&close_event_, IO_NO_INCREMENT, FALSE);
+    }
+    return NT_SUCCESS(cleanup_status) ? status : cleanup_status;
+  }
+
+  mapped_buffer_descriptor
+  descriptor(std::size_t offset, std::size_t length,
+             map_access logical_access) const noexcept {
+    std::lock_guard<std::mutex> guard(lock_);
+    if (!address_ || closing_ || id_ == 0 || generation_ == 0 || length == 0 ||
+        offset > mapped_bytes_ || length > mapped_bytes_ - offset)
+      return {};
+    if (logical_access != map_access::read &&
+        logical_access != map_access::read_write)
+      return {};
+    if (logical_access == map_access::read_write &&
+        native_access_ != map_access::read_write)
+      return {};
+    const auto address = reinterpret_cast<std::uintptr_t>(
+        static_cast<unsigned char *>(address_) + offset);
+    return mapped_buffer_descriptor{id_,
+                                    generation_,
+                                    static_cast<std::uint64_t>(address),
+                                    static_cast<std::uint64_t>(length),
+                                    static_cast<std::uint32_t>(logical_access),
+                                    0};
+  }
+
+  void *address(std::size_t offset, std::size_t length) const noexcept {
+    std::lock_guard<std::mutex> guard(lock_);
+    if (!address_ || closing_ || length == 0 || offset > mapped_bytes_ ||
+        length > mapped_bytes_ - offset)
+      return nullptr;
+    return static_cast<unsigned char *>(address_) + offset;
+  }
+
+  std::size_t mapped_bytes() const noexcept { return mapped_bytes_; }
+  std::size_t mapping_charge_bytes() const noexcept {
+    return mapping_charge_bytes_;
+  }
+
+  bool is_open() const noexcept {
+    std::lock_guard<std::mutex> guard(lock_);
+    return address_ != nullptr;
+  }
+
+private:
+  PEPROCESS process_ = nullptr;
+  mutable std::mutex lock_;
+  PMDL mdl_ = nullptr;
+  void *address_ = nullptr;
+  bool closing_ = false;
+  ntl::status close_status_{STATUS_SUCCESS};
+  KEVENT close_event_{};
+  std::size_t mapped_bytes_ = 0;
+  std::size_t mapping_charge_bytes_ = 0;
+  map_access native_access_ = map_access::read;
+  std::uint64_t id_ = 0;
+  std::uint64_t generation_ = 0;
+  std::weak_ptr<process_connection_state> connection_;
+  std::shared_ptr<void> keepalive_;
+  retained_cleanup_routine retained_cleanup_ = nullptr;
+};
+
+inline process_connection_state::~process_connection_state() {
+  if (!rundown_complete.load(std::memory_order_acquire)) {
+    NT_ASSERT(KeGetCurrentIrql() == PASSIVE_LEVEL);
+    if (KeGetCurrentIrql() == PASSIVE_LEVEL) {
+      (void)close_all();
+      if (!rundown_complete.load(std::memory_order_acquire) && process) {
+        // A live target-process VAD may not outlive this registry or a
+        // borrowed MDL. MmUnmapLockedPages has no normal failure return; if
+        // an exceptional teardown path nevertheless left one installed,
+        // retain every backing object until process teardown removes the VAD,
+        // then make one final close pass. This is intentionally fail-safe
+        // rather than releasing request-owned memory underneath user mode.
+        (void)KeWaitForSingleObject(process.get(), Executive, KernelMode,
+                                    FALSE, nullptr);
+        (void)close_all();
+      }
+      NT_ASSERT(rundown_complete.load(std::memory_order_acquire));
+    }
+  }
+}
+
+inline ntl::result<std::pair<std::uint64_t, std::uint64_t>>
+process_connection_state::register_mapping(
+    const std::shared_ptr<mapped_mdl_state> &mapping) noexcept {
+  if (!mapping)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  try {
+    std::lock_guard<std::mutex> guard(lock);
+    if (!accepting)
+      return ntl::unexpected(STATUS_DELETE_PENDING);
+    const auto charge = mapping->mapping_charge_bytes();
+    if (mappings.size() >= limits.max_mappings ||
+        mapped_bytes > limits.max_mapped_bytes ||
+        charge > limits.max_mapped_bytes - mapped_bytes)
+      return ntl::unexpected(STATUS_QUOTA_EXCEEDED);
+    do {
+      if (++next_id == 0)
+        ++next_id;
+    } while (mappings.find(next_id) != mappings.end());
+    const auto inserted = mappings.emplace(next_id, mapping);
+    if (!inserted.second)
+      return ntl::unexpected(STATUS_OBJECT_NAME_COLLISION);
+    mapped_bytes += charge;
+    mapping->identity(next_id, generation);
+    return ntl::ok(std::make_pair(next_id, generation));
+  } catch (...) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  }
+}
+
+inline bool process_connection_state::begin_mapping_attempt() noexcept {
+  std::lock_guard<std::mutex> guard(lock);
+  if (!accepting || active_mapping_attempts == SIZE_MAX)
+    return false;
+  if (active_mapping_attempts++ == 0)
+    KeClearEvent(&mapping_attempts_idle);
+  return true;
+}
+
+inline void process_connection_state::end_mapping_attempt() noexcept {
+  std::lock_guard<std::mutex> guard(lock);
+  NT_ASSERT(active_mapping_attempts != 0);
+  if (active_mapping_attempts != 0 && --active_mapping_attempts == 0)
+    KeSetEvent(&mapping_attempts_idle, IO_NO_INCREMENT, FALSE);
+}
+
+inline void process_connection_state::unregister_mapping(
+    std::uint64_t id, const mapped_mdl_state *expected) noexcept {
+  std::lock_guard<std::mutex> guard(lock);
+  const auto found = mappings.find(id);
+  if (found != mappings.end() && found->second.get() == expected) {
+    const auto bytes = found->second->mapping_charge_bytes();
+    mappings.erase(found);
+    mapped_bytes = bytes <= mapped_bytes ? mapped_bytes - bytes : 0;
+  }
+}
+
+inline ntl::status process_connection_state::close_all() noexcept {
+  if (rundown_complete.load(std::memory_order_acquire)) {
+    return ntl::status{rundown_status.load(std::memory_order_relaxed)};
+  }
+  if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+    return STATUS_INVALID_DEVICE_STATE;
+  std::lock_guard<std::mutex> close_guard(close_lock);
+  if (rundown_complete.load(std::memory_order_acquire))
+    return ntl::status{rundown_status.load(std::memory_order_relaxed)};
+  {
+    std::lock_guard<std::mutex> guard(lock);
+    if (!close_started) {
+      close_started = true;
+      accepting = false;
+      if (++generation == 0)
+        ++generation;
+    }
+  }
+  // A mapping can already have passed its initial accepting check while its
+  // user VAD is not yet in the registry. Wait until every such attempt either
+  // registers or rejects and unmaps before declaring disconnect complete.
+  (void)KeWaitForSingleObject(&mapping_attempts_idle, Executive, KernelMode,
+                              FALSE, nullptr);
+
+  for (;;) {
+    std::shared_ptr<mapped_mdl_state> item;
+    {
+      std::lock_guard<std::mutex> guard(lock);
+      if (mappings.empty()) {
+        mapped_bytes = 0;
+        rundown_complete.store(true, std::memory_order_release);
+        return ntl::status{rundown_status.load(std::memory_order_relaxed)};
+      }
+      item = mappings.begin()->second;
+    }
+    const auto status = item->close();
+    if (!status.is_ok()) {
+      NTSTATUS expected = STATUS_SUCCESS;
+      (void)rundown_status.compare_exchange_strong(
+          expected, static_cast<NTSTATUS>(status), std::memory_order_relaxed);
+      // A cleanup failure occurs after unregister and must not prevent the
+      // remaining mappings from closing. An open item means unmap made no
+      // progress, so retrying the same registry entry would spin forever.
+      if (item->is_open())
+        return ntl::status{rundown_status.load(std::memory_order_relaxed)};
+    }
+  }
+}
+
+inline std::size_t process_connection_state::mapping_count() const noexcept {
+  std::lock_guard<std::mutex> guard(lock);
+  return mappings.size();
+}
+
+inline bool process_connection_state::accepts_mappings() const noexcept {
+  std::lock_guard<std::mutex> guard(lock);
+  return accepting;
+}
+
+inline std::uint64_t
+process_connection_state::current_generation() const noexcept {
+  std::lock_guard<std::mutex> guard(lock);
+  return generation;
+}
+
+} // namespace detail
+
+/** Page-isolated nonpaged storage suitable for a user mapping. */
+class page_buffer {
+public:
+  page_buffer(const page_buffer &) = delete;
+  page_buffer &operator=(const page_buffer &) = delete;
+
+  ~page_buffer() {
+    NT_ASSERT(KeGetCurrentIrql() <= DISPATCH_LEVEL);
+    if (system_address_)
+      MmUnmapLockedPages(system_address_, mdl_);
+    if (mdl_) {
+      MmFreePagesFromMdl(mdl_);
+      ExFreePool(mdl_);
+    }
+  }
+
+  [[nodiscard]] static ntl::result<std::shared_ptr<page_buffer>>
+  try_create(std::size_t bytes, MEMORY_CACHING_TYPE cache = MmCached) noexcept {
+    if (bytes == 0 || bytes > static_cast<std::size_t>(MAXULONG))
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+    PHYSICAL_ADDRESS low{};
+    PHYSICAL_ADDRESS high{};
+    PHYSICAL_ADDRESS skip{};
+    high.QuadPart = MAXLONGLONG;
+    ULONG flags = 0;
+#ifdef MM_ALLOCATE_FULLY_REQUIRED
+    flags |= MM_ALLOCATE_FULLY_REQUIRED;
+#endif
+#ifdef MM_ALLOCATE_NO_EXECUTE
+    flags |= MM_ALLOCATE_NO_EXECUTE;
+#endif
+    PMDL mdl = MmAllocatePagesForMdlEx(low, high, skip, bytes, cache, flags);
+    if (!mdl || MmGetMdlByteCount(mdl) < bytes) {
+      if (mdl) {
+        MmFreePagesFromMdl(mdl);
+        ExFreePool(mdl);
+      }
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+    void *const address =
+        MmMapLockedPagesSpecifyCache(mdl, KernelMode, cache, nullptr, FALSE,
+                                     NormalPagePriority | MdlMappingNoExecute);
+    if (!address) {
+      MmFreePagesFromMdl(mdl);
+      ExFreePool(mdl);
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+    RtlZeroMemory(address, MmGetMdlByteCount(mdl));
+    void *const owner_storage = ntl::allocate_pool(
+        sizeof(page_buffer), ntl::pool_kind::nonpaged, ntl::pool_option::none,
+        detail::page_buffer_pool_tag);
+    if (!owner_storage) {
+      MmUnmapLockedPages(address, mdl);
+      MmFreePagesFromMdl(mdl);
+      ExFreePool(mdl);
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+    auto *const owner =
+        new (owner_storage) page_buffer(mdl, address, bytes, cache);
+    try {
+      using allocator =
+          ntl::nonpaged_pool_allocator<page_buffer,
+                                       detail::page_buffer_pool_tag>;
+      return ntl::ok(std::shared_ptr<page_buffer>(
+          owner, ntl::pool_deleter<page_buffer>{detail::page_buffer_pool_tag},
+          allocator{}));
+    } catch (...) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+  }
+
+  void *data() const noexcept { return system_address_; }
+  std::size_t size() const noexcept { return bytes_; }
+  PMDL native_mdl() const noexcept { return mdl_; }
+  MEMORY_CACHING_TYPE cache_type() const noexcept { return cache_; }
+
+private:
+  page_buffer(PMDL mdl, void *address, std::size_t bytes,
+              MEMORY_CACHING_TYPE cache) noexcept
+      : mdl_(mdl), system_address_(address), bytes_(bytes), cache_(cache) {}
+  PMDL mdl_ = nullptr;
+  void *system_address_ = nullptr;
+  std::size_t bytes_ = 0;
+  MEMORY_CACHING_TYPE cache_ = MmCached;
+};
+
+/** @brief Copyable weak logical view invalidated by owner close/disconnect. */
+class mapped_buffer_view {
+public:
+  mapped_buffer_view() noexcept = default;
+
+  explicit operator bool() const noexcept {
+    return target_address() != nullptr;
+  }
+  void *target_address() const noexcept {
+    const auto state = state_.lock();
+    return state ? state->address(offset_, length_) : nullptr;
+  }
+
+  bool is_open() const noexcept {
+    const auto state = state_.lock();
+    return state && state->address(offset_, length_) != nullptr;
+  }
+
+  /** Explicitly unmaps the shared mapping; all copied views become invalid. */
+  ntl::status close() const noexcept {
+    const auto state = state_.lock();
+    return state ? state->close() : ntl::status{STATUS_SUCCESS};
+  }
+  std::size_t size() const noexcept { return length_; }
+  map_access access() const noexcept { return access_; }
+  mapped_buffer_descriptor descriptor() const noexcept {
+    const auto state = state_.lock();
+    return state ? state->descriptor(offset_, length_, access_)
+                 : mapped_buffer_descriptor{};
+  }
+  ntl::result<mapped_buffer_view> subview(std::size_t offset,
+                                          std::size_t length) const noexcept {
+    return subview(offset, length, access_);
+  }
+  ntl::result<mapped_buffer_view> subview(std::size_t offset,
+                                          std::size_t length,
+                                          map_access access) const noexcept {
+    if (length == 0 || offset > length_ || length > length_ - offset ||
+        state_.expired() ||
+        (access != map_access::read && access != map_access::read_write) ||
+        (access == map_access::read_write && access_ != map_access::read_write))
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    return ntl::ok(
+        mapped_buffer_view{state_, offset_ + offset, length, access});
+  }
+
+private:
+  friend class mapped_io_buffers_builder;
+  friend ntl::result<mapped_buffer_view>
+  detail_try_map_mdl_retained(PMDL, std::size_t, std::size_t,
+                              process_connection &, map_access,
+                              MEMORY_CACHING_TYPE, std::shared_ptr<void>,
+                              detail::retained_cleanup_routine) noexcept;
+  mapped_buffer_view(std::weak_ptr<detail::mapped_mdl_state> state,
+                     std::size_t offset, std::size_t length,
+                     map_access access) noexcept
+      : state_(std::move(state)), offset_(offset), length_(length),
+        access_(access) {}
+  std::weak_ptr<detail::mapped_mdl_state> state_;
+  std::size_t offset_ = 0;
+  std::size_t length_ = 0;
+  map_access access_ = map_access::read;
+};
+
+[[nodiscard]] inline ntl::result<mapped_buffer_view>
+detail_try_map_mdl_retained(
+    PMDL mdl, std::size_t offset, std::size_t length,
+    process_connection &connection, map_access access,
+    MEMORY_CACHING_TYPE cache, std::shared_ptr<void> keepalive,
+    detail::retained_cleanup_routine retained_cleanup = nullptr) noexcept {
+  if (!detail::mdl_describes_resident_pages(mdl) || !connection ||
+      length == 0 ||
+      (access != map_access::read && access != map_access::read_write) ||
+      offset > static_cast<std::size_t>(MmGetMdlByteCount(mdl)) ||
+      length > static_cast<std::size_t>(MmGetMdlByteCount(mdl)) - offset)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+    return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+  std::size_t mapping_charge_bytes = 0;
+  if (!detail::mdl_mapping_charge(mdl, mapping_charge_bytes))
+    return ntl::unexpected(STATUS_INVALID_BUFFER_SIZE);
+
+  auto connection_state = connection.state_;
+  if (!connection_state || !connection_state->begin_mapping_attempt())
+    return ntl::unexpected(STATUS_DELETE_PENDING);
+  struct mapping_attempt_guard {
+    std::shared_ptr<detail::process_connection_state> state;
+    ~mapping_attempt_guard() {
+      if (state)
+        state->end_mapping_attempt();
+    }
+  } attempt{connection_state};
+
+  detail::map_call_context call{mdl, cache, NormalPagePriority, nullptr};
+  call.priority |= MdlMappingNoExecute;
+  if (access == map_access::read)
+    call.priority |= MdlMappingNoWrite;
+  const NTSTATUS mapped =
+      detail::invoke_in_process(connection_state->process.get(),
+                                &detail::map_call, &call);
+  if (!NT_SUCCESS(mapped))
+    return ntl::unexpected(mapped);
+
+  try {
+    auto owner = std::allocate_shared<detail::mapped_mdl_state>(
+        ntl::nonpaged_pool_allocator<detail::mapped_mdl_state,
+                                     detail::mapped_state_pool_tag>{},
+        connection_state->process.get(), mdl, call.address,
+        MmGetMdlByteCount(mdl), mapping_charge_bytes, access,
+        connection_state, std::move(keepalive), retained_cleanup);
+    const auto registered = connection_state->register_mapping(owner);
+    if (!registered) {
+      (void)owner->close();
+      return ntl::unexpected(registered.status());
+    }
+    return ntl::ok(mapped_buffer_view{owner, offset, length, access});
+  } catch (...) {
+    detail::unmap_call_context cleanup{mdl, call.address};
+    (void)detail::invoke_in_process(connection_state->process.get(),
+                                    &detail::unmap_call, &cleanup);
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  }
+}
+
+/**
+ * @brief Maps a caller-owned, already locked MDL.
+ *
+ * This low-level API maps the MDL's page span. The target process can address
+ * leading/trailing page padding even when the returned logical view is smaller.
+ */
+[[nodiscard]] inline ntl::result<mapped_buffer_view>
+try_map_mdl(borrowed_mdl_view borrowed, std::size_t offset, std::size_t length,
+            process_connection &connection,
+            map_access access = map_access::read_write,
+            MEMORY_CACHING_TYPE cache = MmCached) noexcept {
+  return detail_try_map_mdl_retained(borrowed.native(), offset, length,
+                                     connection, access, cache, {});
+}
+
+/** @brief Maps page-isolated NTL storage and retains it until unmap. */
+[[nodiscard]] inline ntl::result<mapped_buffer_view>
+try_map_page_buffer(const std::shared_ptr<page_buffer> &buffer,
+                    std::size_t offset, std::size_t length,
+                    process_connection &connection,
+                    map_access access = map_access::read_write) noexcept {
+  if (!buffer)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  return detail_try_map_mdl_retained(buffer->native_mdl(), offset, length,
+                                     connection, access, buffer->cache_type(),
+                                     buffer);
+}
+
+/** @brief Maps and retains an NTL-owned user-page MDL. */
+[[nodiscard]] inline ntl::result<mapped_buffer_view>
+try_map_owned_mdl(const std::shared_ptr<ntl::mdl> &descriptor,
+                  std::size_t offset, std::size_t length,
+                  process_connection &connection,
+                  map_access access = map_access::read_write,
+                  MEMORY_CACHING_TYPE cache = MmCached) noexcept {
+  if (!descriptor || !*descriptor)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  return detail_try_map_mdl_retained(descriptor->get(), offset, length,
+                                     connection, access, cache, descriptor);
+}
+
+/** @brief Input/output presentation that owns every underlying mapping. */
+class mapped_io_buffers {
+public:
+  mapped_io_buffers() noexcept = default;
+  mapped_io_buffers(const mapped_io_buffers &) = delete;
+  mapped_io_buffers &operator=(const mapped_io_buffers &) = delete;
+  mapped_io_buffers(mapped_io_buffers &&) noexcept = default;
+  mapped_io_buffers &operator=(mapped_io_buffers &&other) noexcept {
+    if (this == &other)
+      return *this;
+    (void)close();
+    if (input_ || output_ || control_input_ || input_owner_ || output_owner_ ||
+        control_input_owner_) {
+      NT_ASSERT(FALSE);
+      return *this;
+    }
+    input_ = std::move(other.input_);
+    output_ = std::move(other.output_);
+    control_input_ = std::move(other.control_input_);
+    input_owner_ = std::move(other.input_owner_);
+    output_owner_ = std::move(other.output_owner_);
+    control_input_owner_ = std::move(other.control_input_owner_);
+    return *this;
+  }
+  ~mapped_io_buffers() { (void)close(); }
+
+  const mapped_buffer_view *input() const noexcept {
+    return input_ ? &*input_ : nullptr;
+  }
+  const mapped_buffer_view *output() const noexcept {
+    return output_ ? &*output_ : nullptr;
+  }
+  /** IOCTL header/control input when a direct MDL is also present. */
+  const mapped_buffer_view *control_input() const noexcept {
+    return control_input_ ? &*control_input_ : nullptr;
+  }
+
+  /** Reports whether any underlying target-process VAD is still installed. */
+  bool has_open_mappings() const noexcept {
+    const auto open = [](const auto &owner) noexcept {
+      return owner && owner->is_open();
+    };
+    return open(input_owner_) || open(output_owner_) ||
+           open(control_input_owner_);
+  }
+
+  ntl::status close() noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return STATUS_INVALID_DEVICE_STATE;
+    NTSTATUS first_failure = STATUS_SUCCESS;
+    if (input_owner_) {
+      const auto status = input_owner_->close();
+      if (!status.is_ok())
+        first_failure = static_cast<NTSTATUS>(status);
+    }
+    if (output_owner_ && output_owner_ != input_owner_) {
+      const auto status = output_owner_->close();
+      if (first_failure == STATUS_SUCCESS && !status.is_ok())
+        first_failure = static_cast<NTSTATUS>(status);
+    }
+    if (control_input_owner_ && control_input_owner_ != input_owner_ &&
+        control_input_owner_ != output_owner_) {
+      const auto status = control_input_owner_->close();
+      if (first_failure == STATUS_SUCCESS && !status.is_ok())
+        first_failure = static_cast<NTSTATUS>(status);
+    }
+    const auto clear_if_closed = [](auto &view, auto &owner) noexcept {
+      if (!owner || !view || !view->is_open()) {
+        view.reset();
+        owner.reset();
+      }
+    };
+    clear_if_closed(input_, input_owner_);
+    clear_if_closed(output_, output_owner_);
+    clear_if_closed(control_input_, control_input_owner_);
+    return first_failure;
+  }
+
+private:
+  friend class mapped_io_buffers_builder;
+  std::optional<mapped_buffer_view> input_;
+  std::optional<mapped_buffer_view> output_;
+  std::optional<mapped_buffer_view> control_input_;
+  std::shared_ptr<detail::mapped_mdl_state> input_owner_;
+  std::shared_ptr<detail::mapped_mdl_state> output_owner_;
+  std::shared_ptr<detail::mapped_mdl_state> control_input_owner_;
+};
+
+class mapped_io_buffers_builder {
+public:
+  mapped_io_buffers_builder &input(mapped_buffer_view value) noexcept {
+    value_.input_owner_ = value.state_.lock();
+    value_.input_.emplace(std::move(value));
+    return *this;
+  }
+  mapped_io_buffers_builder &output(mapped_buffer_view value) noexcept {
+    value_.output_owner_ = value.state_.lock();
+    value_.output_.emplace(std::move(value));
+    return *this;
+  }
+  mapped_io_buffers_builder &control_input(mapped_buffer_view value) noexcept {
+    value_.control_input_owner_ = value.state_.lock();
+    value_.control_input_.emplace(std::move(value));
+    return *this;
+  }
+  mapped_io_buffers build() noexcept { return std::move(value_); }
+
+private:
+  mapped_io_buffers value_;
+};
+
+} // namespace ntl::ipc

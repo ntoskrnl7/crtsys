@@ -119,7 +119,11 @@ public:
   }
 
   /**
-   * @brief Describes nonpaged memory with this MDL.
+   * @brief Describes nonpaged-pool memory with this MDL.
+   *
+   * The described range must come from nonpaged pool. Kernel-stack, pageable,
+   * locked user, and other tradable memory must not be passed to
+   * MmBuildMdlForNonPagedPool.
    */
   void build_for_nonpaged_pool() noexcept {
     if (mdl_)

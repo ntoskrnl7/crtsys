@@ -13,6 +13,8 @@
 #if defined(_DDK_DRIVER_) || defined(_NTDDK_) || defined(_NTIFS_) ||           \
     defined(_WDMDDK_)
 #include "kernel_region"
+#include "io_buffer"
+#include "mapped_buffer"
 #else
 #include "shared_buffer_pool"
 #endif

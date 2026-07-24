@@ -1,0 +1,28 @@
+/**
+ * @file process_bridge
+ * @brief Compiled NTIFS bridge for process-attached IPC operations.
+ */
+#pragma once
+
+#ifndef _NTDDK_
+#include <wdm.h>
+#endif
+
+namespace ntl::ipc::detail {
+
+using attached_process_routine = NTSTATUS(NTAPI *)(void *) noexcept;
+
+/**
+ * @brief Runs a nonblocking routine in a referenced process address space.
+ *
+ * The compiled implementation uses the WDK KAPC_STATE definition and process
+ * exit synchronization. Call only at PASSIVE_LEVEL.
+ */
+NTSTATUS NTAPI invoke_in_process(void *process,
+                                 attached_process_routine routine,
+                                 void *context) noexcept;
+NTSTATUS NTAPI reference_requestor_process(PIRP irp, void **process) noexcept;
+HANDLE NTAPI query_process_id(void *process) noexcept;
+void *NTAPI query_system_range_start() noexcept;
+
+} // namespace ntl::ipc::detail

@@ -1,0 +1,560 @@
+/**
+ * @file io_buffer
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Input/output mapping adapters for Filter Manager operations.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "callback"
+
+#include "../ipc/io_buffer"
+
+#include <algorithm>
+#include <cstddef>
+#include <memory>
+
+namespace ntl::flt {
+
+template <operation_id Operation> class pre_operation {
+public:
+  explicit pre_operation(detail::callback_data_impl<Operation> data) noexcept
+      : data_(data) {}
+  detail::callback_data_impl<Operation> data() const noexcept { return data_; }
+
+private:
+  detail::callback_data_impl<Operation> data_;
+};
+
+template <operation_id Operation> class post_operation {
+public:
+  explicit post_operation(detail::callback_data_impl<Operation> data) noexcept
+      : data_(data) {}
+  detail::callback_data_impl<Operation> data() const noexcept { return data_; }
+
+private:
+  detail::callback_data_impl<Operation> data_;
+};
+
+template <operation_id Operation>
+pre_operation<Operation>
+as_pre(detail::callback_data_impl<Operation> data) noexcept {
+  return pre_operation<Operation>{data};
+}
+
+template <operation_id Operation>
+post_operation<Operation>
+as_post(detail::callback_data_impl<Operation> data) noexcept {
+  return post_operation<Operation>{data};
+}
+
+using mapped_operation_buffers = ntl::ipc::mapped_io_buffers;
+
+namespace detail {
+
+/** Internal callback phase; the public surface uses pre/post wrapper types. */
+enum class io_buffer_phase {
+  pre,
+  post,
+};
+
+template <operation_id Operation>
+ntl::result<mapped_operation_buffers>
+try_map_io_buffers_impl(callback_data_impl<Operation> data,
+                        io_buffer_phase phase,
+                        ntl::ipc::process_connection &connection,
+                        ntl::ipc::map_io_options options) noexcept;
+
+struct operation_buffer_layout {
+  void *control_input = nullptr;
+  std::size_t control_input_length = 0;
+  void *input = nullptr;
+  std::size_t input_length = 0;
+  PMDL input_mdl = nullptr;
+  void *output = nullptr;
+  std::size_t output_length = 0;
+  PMDL output_mdl = nullptr;
+};
+
+struct security_descriptor_length_context {
+  PSECURITY_DESCRIPTOR descriptor = nullptr;
+  std::size_t length = 0;
+};
+
+inline NTSTATUS NTAPI query_security_descriptor_length(void *opaque) noexcept {
+  auto *context = static_cast<security_descriptor_length_context *>(opaque);
+  const auto guarded = ntl::seh::try_except([&]() {
+    context->length = RtlLengthSecurityDescriptor(context->descriptor);
+  });
+  return std::get<0>(guarded) ? STATUS_SUCCESS
+                              : static_cast<NTSTATUS>(std::get<1>(guarded));
+}
+
+inline std::size_t
+security_descriptor_length(PFLT_CALLBACK_DATA data,
+                           PSECURITY_DESCRIPTOR descriptor) noexcept {
+  if (!descriptor)
+    return 0;
+  security_descriptor_length_context context{descriptor, 0};
+  NTSTATUS status = STATUS_SUCCESS;
+  const bool user_address = reinterpret_cast<ULONG_PTR>(descriptor) <
+                            reinterpret_cast<ULONG_PTR>(MmSystemRangeStart);
+  if (user_address) {
+    PEPROCESS requestor = data ? FltGetRequestorProcess(data) : nullptr;
+    if (!requestor)
+      return 0;
+    ObReferenceObject(requestor);
+    ntl::unique_object<PEPROCESS> owner{requestor};
+    status = ntl::ipc::detail::invoke_in_process(
+        requestor, &query_security_descriptor_length, &context);
+  } else {
+    status = query_security_descriptor_length(&context);
+  }
+  return NT_SUCCESS(status) ? context.length : 0;
+}
+
+inline bool output_status_has_data(NTSTATUS status) noexcept {
+  return !NT_ERROR(status);
+}
+
+inline bool supports_fsctl_buffer_layout(UCHAR minor_function) noexcept {
+  if (minor_function == IRP_MN_USER_FS_REQUEST)
+    return true;
+#ifdef IRP_MN_KERNEL_CALL
+  if (minor_function == IRP_MN_KERNEL_CALL)
+    return true;
+#endif
+  return false;
+}
+
+inline operation_buffer_layout
+describe_operation_buffers(PFLT_CALLBACK_DATA data,
+                           io_buffer_phase phase) noexcept {
+  operation_buffer_layout value{};
+  if (!data || !data->Iopb)
+    return value;
+
+  auto *const iopb = data->Iopb;
+  switch (iopb->MajorFunction) {
+  case IRP_MJ_CREATE:
+    if (phase == io_buffer_phase::pre && iopb->Parameters.Create.EaLength) {
+      value.input = iopb->Parameters.Create.EaBuffer;
+      value.input_length = iopb->Parameters.Create.EaLength;
+    }
+    break;
+  case IRP_MJ_WRITE:
+    if (phase == io_buffer_phase::pre) {
+      value.input = iopb->Parameters.Write.WriteBuffer;
+      value.input_length = iopb->Parameters.Write.Length;
+      value.input_mdl = iopb->Parameters.Write.MdlAddress;
+    }
+    break;
+  case IRP_MJ_READ:
+    if (phase == io_buffer_phase::post &&
+        output_status_has_data(data->IoStatus.Status)) {
+      value.output = iopb->Parameters.Read.ReadBuffer;
+      value.output_length =
+          (std::min)(static_cast<std::size_t>(iopb->Parameters.Read.Length),
+                     static_cast<std::size_t>(data->IoStatus.Information));
+      value.output_mdl = iopb->Parameters.Read.MdlAddress;
+    }
+    break;
+  case IRP_MJ_SET_INFORMATION:
+    if (phase == io_buffer_phase::pre) {
+      value.input = iopb->Parameters.SetFileInformation.InfoBuffer;
+      value.input_length = iopb->Parameters.SetFileInformation.Length;
+    }
+    break;
+  case IRP_MJ_QUERY_INFORMATION:
+    if (phase == io_buffer_phase::post &&
+        output_status_has_data(data->IoStatus.Status)) {
+      value.output = iopb->Parameters.QueryFileInformation.InfoBuffer;
+      value.output_length =
+          (std::min)(static_cast<std::size_t>(
+                         iopb->Parameters.QueryFileInformation.Length),
+                     static_cast<std::size_t>(data->IoStatus.Information));
+    }
+    break;
+  case IRP_MJ_SET_EA:
+    if (phase == io_buffer_phase::pre) {
+      value.input = iopb->Parameters.SetEa.EaBuffer;
+      value.input_length = iopb->Parameters.SetEa.Length;
+      value.input_mdl = iopb->Parameters.SetEa.MdlAddress;
+    }
+    break;
+  case IRP_MJ_QUERY_EA:
+    if (phase == io_buffer_phase::pre &&
+        iopb->Parameters.QueryEa.EaListLength) {
+      value.input = iopb->Parameters.QueryEa.EaList;
+      value.input_length = iopb->Parameters.QueryEa.EaListLength;
+    } else if (phase == io_buffer_phase::post &&
+               output_status_has_data(data->IoStatus.Status)) {
+      value.output = iopb->Parameters.QueryEa.EaBuffer;
+      value.output_length =
+          (std::min)(static_cast<std::size_t>(iopb->Parameters.QueryEa.Length),
+                     static_cast<std::size_t>(data->IoStatus.Information));
+      value.output_mdl = iopb->Parameters.QueryEa.MdlAddress;
+    }
+    break;
+  case IRP_MJ_SET_VOLUME_INFORMATION:
+    if (phase == io_buffer_phase::pre) {
+      value.input = iopb->Parameters.SetVolumeInformation.VolumeBuffer;
+      value.input_length = iopb->Parameters.SetVolumeInformation.Length;
+    }
+    break;
+  case IRP_MJ_QUERY_VOLUME_INFORMATION:
+    if (phase == io_buffer_phase::post &&
+        output_status_has_data(data->IoStatus.Status)) {
+      value.output = iopb->Parameters.QueryVolumeInformation.VolumeBuffer;
+      value.output_length =
+          (std::min)(static_cast<std::size_t>(
+                         iopb->Parameters.QueryVolumeInformation.Length),
+                     static_cast<std::size_t>(data->IoStatus.Information));
+    }
+    break;
+  case IRP_MJ_SET_SECURITY:
+    if (phase == io_buffer_phase::pre &&
+        iopb->Parameters.SetSecurity.SecurityDescriptor) {
+      value.input = iopb->Parameters.SetSecurity.SecurityDescriptor;
+      value.input_length = security_descriptor_length(
+          data, iopb->Parameters.SetSecurity.SecurityDescriptor);
+    }
+    break;
+  case IRP_MJ_QUERY_QUOTA:
+    if (phase == io_buffer_phase::pre &&
+        iopb->Parameters.QueryQuota.SidListLength) {
+      value.input = iopb->Parameters.QueryQuota.SidList;
+      value.input_length = iopb->Parameters.QueryQuota.SidListLength;
+    } else if (phase == io_buffer_phase::post &&
+               output_status_has_data(data->IoStatus.Status)) {
+      value.output = iopb->Parameters.QueryQuota.QuotaBuffer;
+      value.output_length =
+          (std::min)(static_cast<std::size_t>(
+                         iopb->Parameters.QueryQuota.Length),
+                     static_cast<std::size_t>(data->IoStatus.Information));
+      value.output_mdl = iopb->Parameters.QueryQuota.MdlAddress;
+    }
+    break;
+  case IRP_MJ_SET_QUOTA:
+    if (phase == io_buffer_phase::pre) {
+      value.input = iopb->Parameters.SetQuota.QuotaBuffer;
+      value.input_length = iopb->Parameters.SetQuota.Length;
+      value.input_mdl = iopb->Parameters.SetQuota.MdlAddress;
+    }
+    break;
+  case IRP_MJ_QUERY_SECURITY:
+    if (phase == io_buffer_phase::post &&
+        output_status_has_data(data->IoStatus.Status)) {
+      value.output = iopb->Parameters.QuerySecurity.SecurityBuffer;
+      value.output_length =
+          (std::min)(static_cast<std::size_t>(
+                         iopb->Parameters.QuerySecurity.Length),
+                     static_cast<std::size_t>(data->IoStatus.Information));
+      value.output_mdl = iopb->Parameters.QuerySecurity.MdlAddress;
+    }
+    break;
+  case IRP_MJ_DIRECTORY_CONTROL:
+    if (phase != io_buffer_phase::post ||
+        !output_status_has_data(data->IoStatus.Status))
+      break;
+    if (iopb->MinorFunction == IRP_MN_QUERY_DIRECTORY) {
+      value.output =
+          iopb->Parameters.DirectoryControl.QueryDirectory.DirectoryBuffer;
+      value.output_length =
+          (std::min)(static_cast<std::size_t>(iopb->Parameters.DirectoryControl
+                                                  .QueryDirectory.Length),
+                     static_cast<std::size_t>(data->IoStatus.Information));
+      value.output_mdl =
+          iopb->Parameters.DirectoryControl.QueryDirectory.MdlAddress;
+    } else if (iopb->MinorFunction == IRP_MN_NOTIFY_CHANGE_DIRECTORY) {
+      value.output =
+          iopb->Parameters.DirectoryControl.NotifyDirectory.DirectoryBuffer;
+      value.output_length =
+          (std::min)(static_cast<std::size_t>(iopb->Parameters.DirectoryControl
+                                                  .NotifyDirectory.Length),
+                     static_cast<std::size_t>(data->IoStatus.Information));
+      value.output_mdl =
+          iopb->Parameters.DirectoryControl.NotifyDirectory.MdlAddress;
+#ifdef IRP_MN_NOTIFY_CHANGE_DIRECTORY_EX
+    } else if (iopb->MinorFunction == IRP_MN_NOTIFY_CHANGE_DIRECTORY_EX) {
+      value.output =
+          iopb->Parameters.DirectoryControl.NotifyDirectoryEx.DirectoryBuffer;
+      value.output_length =
+          (std::min)(static_cast<std::size_t>(iopb->Parameters.DirectoryControl
+                                                  .NotifyDirectoryEx.Length),
+                     static_cast<std::size_t>(data->IoStatus.Information));
+      value.output_mdl =
+          iopb->Parameters.DirectoryControl.NotifyDirectoryEx.MdlAddress;
+#endif
+    }
+    break;
+  case IRP_MJ_FILE_SYSTEM_CONTROL: {
+    if (!supports_fsctl_buffer_layout(iopb->MinorFunction))
+      break;
+    const ULONG method =
+        iopb->Parameters.FileSystemControl.Common.FsControlCode & 3UL;
+    const auto input_length = static_cast<std::size_t>(
+        iopb->Parameters.FileSystemControl.Common.InputBufferLength);
+    const auto output_length = static_cast<std::size_t>(
+        iopb->Parameters.FileSystemControl.Common.OutputBufferLength);
+    if (phase == io_buffer_phase::pre && input_length) {
+      if (method == METHOD_IN_DIRECT || method == METHOD_OUT_DIRECT) {
+        value.control_input_length = input_length;
+        value.control_input =
+            iopb->Parameters.FileSystemControl.Direct.InputSystemBuffer;
+      } else {
+        value.input_length = input_length;
+        value.input =
+            method == METHOD_BUFFERED
+                ? iopb->Parameters.FileSystemControl.Buffered.SystemBuffer
+                : iopb->Parameters.FileSystemControl.Neither.InputBuffer;
+      }
+    }
+    if (phase == io_buffer_phase::pre && method == METHOD_IN_DIRECT &&
+        output_length) {
+      value.input_length = output_length;
+      value.input = iopb->Parameters.FileSystemControl.Direct.OutputBuffer;
+      value.input_mdl =
+          iopb->Parameters.FileSystemControl.Direct.OutputMdlAddress;
+    }
+    if (phase == io_buffer_phase::post && output_length &&
+        output_status_has_data(data->IoStatus.Status) &&
+        method != METHOD_IN_DIRECT) {
+      value.output_length =
+          (std::min)(output_length,
+                     static_cast<std::size_t>(data->IoStatus.Information));
+      value.output =
+          method == METHOD_BUFFERED
+              ? iopb->Parameters.FileSystemControl.Buffered.SystemBuffer
+          : method == METHOD_NEITHER
+              ? iopb->Parameters.FileSystemControl.Neither.OutputBuffer
+              : iopb->Parameters.FileSystemControl.Direct.OutputBuffer;
+      if (method == METHOD_NEITHER)
+        value.output_mdl =
+            iopb->Parameters.FileSystemControl.Neither.OutputMdlAddress;
+      else if (method != METHOD_BUFFERED)
+        value.output_mdl =
+            iopb->Parameters.FileSystemControl.Direct.OutputMdlAddress;
+    }
+    break;
+  }
+  case IRP_MJ_DEVICE_CONTROL:
+  case IRP_MJ_INTERNAL_DEVICE_CONTROL: {
+    if (FLT_IS_FASTIO_OPERATION(data))
+      break;
+    const ULONG method =
+        iopb->Parameters.DeviceIoControl.Common.IoControlCode & 3UL;
+    const auto input_length = static_cast<std::size_t>(
+        iopb->Parameters.DeviceIoControl.Common.InputBufferLength);
+    const auto output_length = static_cast<std::size_t>(
+        iopb->Parameters.DeviceIoControl.Common.OutputBufferLength);
+    if (phase == io_buffer_phase::pre && input_length) {
+      if (method == METHOD_IN_DIRECT || method == METHOD_OUT_DIRECT) {
+        value.control_input_length = input_length;
+        value.control_input =
+            iopb->Parameters.DeviceIoControl.Direct.InputSystemBuffer;
+      } else {
+        value.input_length = input_length;
+        value.input =
+            method == METHOD_BUFFERED
+                ? iopb->Parameters.DeviceIoControl.Buffered.SystemBuffer
+                : iopb->Parameters.DeviceIoControl.Neither.InputBuffer;
+      }
+    }
+    if (phase == io_buffer_phase::pre && method == METHOD_IN_DIRECT &&
+        output_length) {
+      value.input_length = output_length;
+      value.input = iopb->Parameters.DeviceIoControl.Direct.OutputBuffer;
+      value.input_mdl =
+          iopb->Parameters.DeviceIoControl.Direct.OutputMdlAddress;
+    }
+    if (phase == io_buffer_phase::post && output_length &&
+        output_status_has_data(data->IoStatus.Status) &&
+        method != METHOD_IN_DIRECT) {
+      value.output_length =
+          (std::min)(output_length,
+                     static_cast<std::size_t>(data->IoStatus.Information));
+      value.output =
+          method == METHOD_BUFFERED
+              ? iopb->Parameters.DeviceIoControl.Buffered.SystemBuffer
+          : method == METHOD_NEITHER
+              ? iopb->Parameters.DeviceIoControl.Neither.OutputBuffer
+              : iopb->Parameters.DeviceIoControl.Direct.OutputBuffer;
+      if (method == METHOD_NEITHER)
+        value.output_mdl =
+            iopb->Parameters.DeviceIoControl.Neither.OutputMdlAddress;
+      else if (method != METHOD_BUFFERED)
+        value.output_mdl =
+            iopb->Parameters.DeviceIoControl.Direct.OutputMdlAddress;
+    }
+    break;
+  }
+  default:
+    break;
+  }
+  return value;
+}
+
+inline ntl::result<ntl::ipc::mapped_buffer_view> map_filter_buffer(
+    PFLT_CALLBACK_DATA data, void *address, std::size_t bytes, PMDL mdl,
+    bool output, ntl::ipc::process_connection &connection,
+    ntl::ipc::map_io_options options, bool lock_user_buffer = true) noexcept {
+  if ((!address && !mdl) || bytes == 0)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  if (mdl && (!ntl::ipc::detail::mdl_describes_resident_pages(mdl) ||
+              bytes > static_cast<std::size_t>(MmGetMdlByteCount(mdl))))
+    return ntl::unexpected(STATUS_INVALID_BUFFER_SIZE);
+  const auto access = output ? options.output_access : options.input_access;
+
+  if (!mdl && lock_user_buffer && data && FLT_IS_IRP_OPERATION(data)) {
+    const NTSTATUS locked = FltLockUserBuffer(data);
+    if (NT_SUCCESS(locked)) {
+      const auto refreshed = describe_operation_buffers(
+          data, output ? io_buffer_phase::post : io_buffer_phase::pre);
+      mdl = output ? refreshed.output_mdl : refreshed.input_mdl;
+    } else if (locked != STATUS_NOT_SUPPORTED &&
+               locked != STATUS_INVALID_DEVICE_REQUEST) {
+      return ntl::unexpected(locked);
+    }
+  }
+
+  if (mdl && (!ntl::ipc::detail::mdl_describes_resident_pages(mdl) ||
+              bytes > static_cast<std::size_t>(MmGetMdlByteCount(mdl))))
+    return ntl::unexpected(STATUS_INVALID_BUFFER_SIZE);
+
+  void *const mdl_virtual_address = mdl ? MmGetMdlVirtualAddress(mdl) : nullptr;
+  const auto mdl_virtual_value =
+      reinterpret_cast<ULONG_PTR>(mdl_virtual_address);
+  const auto system_range_start =
+      reinterpret_cast<ULONG_PTR>(MmSystemRangeStart);
+  const bool caller_user_mdl =
+      mdl && data && data->RequestorMode == UserMode &&
+      (mdl->MdlFlags & MDL_SOURCE_IS_NONPAGED_POOL) == 0 &&
+      mdl_virtual_address && mdl_virtual_value < system_range_start &&
+      MmGetMdlByteCount(mdl) <= system_range_start - mdl_virtual_value;
+  const bool page_safe =
+      mdl && ntl::ipc::detail::mdl_mapping_is_page_isolated(mdl, 0, bytes);
+  if (caller_user_mdl &&
+      (page_safe || options.user_mdls ==
+                        ntl::ipc::user_mdl_policy::allow_page_padding_exposure))
+    return ntl::ipc::try_map_mdl(ntl::ipc::borrowed_mdl_view{mdl}, 0, bytes,
+                                 connection, access);
+
+  if (mdl) {
+    address = MmGetSystemAddressForMdlSafe(mdl, NormalPagePriority);
+    if (!address)
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  }
+
+  std::size_t staging_charge = 0;
+  if (!ntl::ipc::detail::isolated_page_charge(bytes, staging_charge) ||
+      staging_charge > options.max_staging_bytes)
+    return ntl::unexpected(STATUS_QUOTA_EXCEEDED);
+
+  PEPROCESS copy_process = nullptr;
+  const bool user_address =
+      address && reinterpret_cast<ULONG_PTR>(address) <
+                     reinterpret_cast<ULONG_PTR>(MmSystemRangeStart);
+  if (data && user_address && !mdl) {
+    copy_process = FltGetRequestorProcess(data);
+    if (!copy_process)
+      return ntl::unexpected(STATUS_INVALID_CID);
+  }
+  return ntl::ipc::detail::map_kernel_range(
+      address, bytes, bytes,
+      access == ntl::ipc::map_access::read_write ? bytes : 0,
+      connection, access, options.kernel_buffers, copy_process);
+}
+
+} // namespace detail
+
+/**
+ * @brief Maps the logical input/output valid at one minifilter callback phase.
+ */
+template <operation_id Operation>
+[[nodiscard]] ntl::result<mapped_operation_buffers>
+detail::try_map_io_buffers_impl(
+    detail::callback_data_impl<Operation> data, detail::io_buffer_phase phase,
+    ntl::ipc::process_connection &connection,
+    ntl::ipc::map_io_options options) noexcept {
+  if (!data.native() || !connection)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+    return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+  if (options.max_staging_bytes == 0 ||
+      (options.input_access != ntl::ipc::map_access::read &&
+       options.input_access != ntl::ipc::map_access::read_write) ||
+      (options.output_access != ntl::ipc::map_access::read &&
+       options.output_access != ntl::ipc::map_access::read_write) ||
+      (options.kernel_buffers !=
+           ntl::ipc::kernel_buffer_policy::copy_to_isolated_pages &&
+       options.kernel_buffers != ntl::ipc::kernel_buffer_policy::reject) ||
+      (options.user_mdls != ntl::ipc::user_mdl_policy::isolate_partial_pages &&
+       options.user_mdls !=
+           ntl::ipc::user_mdl_policy::allow_page_padding_exposure))
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  if (data.native()->Iopb &&
+      FlagOn(data.native()->Iopb->IrpFlags, IRP_PAGING_IO) &&
+      !options.allow_paging_io)
+    return ntl::unexpected(STATUS_NOT_SUPPORTED);
+  if (data.native()->Iopb &&
+      data.native()->Iopb->MajorFunction == IRP_MJ_SET_SECURITY &&
+      data.native()->Iopb->Parameters.SetSecurity.SecurityDescriptor &&
+      detail::security_descriptor_length(
+          data.native(),
+          data.native()->Iopb->Parameters.SetSecurity.SecurityDescriptor) == 0)
+    return ntl::unexpected(STATUS_INVALID_SECURITY_DESCR);
+
+  const auto layout = detail::describe_operation_buffers(data.native(), phase);
+  if (layout.control_input_length == 0 && layout.input_length == 0 &&
+      layout.output_length == 0)
+    return ntl::unexpected(STATUS_NOT_SUPPORTED);
+
+  ntl::ipc::mapped_io_buffers_builder builder;
+  if (layout.control_input_length) {
+    auto control = detail::map_filter_buffer(
+        data.native(), layout.control_input, layout.control_input_length,
+        nullptr, false, connection, options, false);
+    if (!control)
+      return ntl::unexpected(control.status());
+    builder.control_input(std::move(*control));
+  }
+  if (layout.input_length) {
+    auto input = detail::map_filter_buffer(
+        data.native(), layout.input, layout.input_length, layout.input_mdl,
+        false, connection, options);
+    if (!input)
+      return ntl::unexpected(input.status());
+    builder.input(std::move(*input));
+  }
+  if (layout.output_length) {
+    auto output = detail::map_filter_buffer(
+        data.native(), layout.output, layout.output_length, layout.output_mdl,
+        true, connection, options);
+    if (!output)
+      return ntl::unexpected(output.status());
+    builder.output(std::move(*output));
+  }
+  return ntl::ok(builder.build());
+}
+
+template <operation_id Operation>
+[[nodiscard]] ntl::result<mapped_operation_buffers>
+try_map_io_buffers(pre_operation<Operation> operation,
+                   ntl::ipc::process_connection &connection,
+                   ntl::ipc::map_io_options options = {}) noexcept {
+  return detail::try_map_io_buffers_impl(
+      operation.data(), detail::io_buffer_phase::pre, connection, options);
+}
+
+template <operation_id Operation>
+[[nodiscard]] ntl::result<mapped_operation_buffers>
+try_map_io_buffers(post_operation<Operation> operation,
+                   ntl::ipc::process_connection &connection,
+                   ntl::ipc::map_io_options options = {}) noexcept {
+  return detail::try_map_io_buffers_impl(
+      operation.data(), detail::io_buffer_phase::post, connection, options);
+}
+
+} // namespace ntl::flt

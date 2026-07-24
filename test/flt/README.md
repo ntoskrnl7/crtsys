@@ -7,7 +7,7 @@ make the public samples harder to read.
 test matrix. It verifies operation-tag callback syntax, operation/callback
 type rejection, operation-specific parameter access, and generic lambdas with
 `auto` parameters without adding test-only statements to
-`examples/minifilter-ntl-driver`. The generic form is compile-supported, while
+`examples/minifilter`. The generic form is compile-supported, while
 the public sample uses explicit callback-data types because current C++ editor
 completion engines do not reliably list members for contextually instantiated
 generic-lambda parameters.
@@ -28,6 +28,15 @@ detach coverage out of the onboarding example while remaining buildable and
 loadable as a real minifilter in the VM. Its communication test also owns the
 protocol-negative, quota, coroutine, disconnect, and unload-lifetime checks;
 the onboarding sample is intentionally kept shorter.
+
+`runtime/io_buffer_*` adds a separate filter/app pair for mapped/swapped I/O
+buffers. It maps replacement pages into the process connected through the
+Filter Manager port and verifies user-mode pre-write encryption, post-read
+decryption/copy-back, VAD invalidation, disconnected-service rejection,
+PASSIVE deferral, Fast I/O retry, unload/reload ownership, active
+timeout/disconnect/teardown cancellation for both pended directions, and the
+actual ciphertext persisted below the filter. See
+[`runtime/IO-BUFFER-README.md`](runtime/IO-BUFFER-README.md).
 
 `cross-bitness/` is a user-mode-only build fixture. Configure it as Win32 and
 run its x86 app against the x64 driver produced by `runtime/`. The shared

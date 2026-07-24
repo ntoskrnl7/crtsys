@@ -169,7 +169,7 @@ crtsys_add_driver(my_minifilter MINIFILTER NTL src/main.cpp)
 
 Visual Studio/NuGet project는 `CrtSysIsMinifilter=true`와
 `CrtSysUseNtlFltMain=true`를 사용합니다. 전체 코드는
-[NTL minifilter 예제](../examples/minifilter-ntl-driver), API 계약은
+[NTL minifilter 예제 모음](../examples/minifilter), API 계약은
 [minifilter 가이드](./ntl/minifilter.md)에 정리되어 있습니다.
 
 ## Runtime Stack
@@ -235,7 +235,7 @@ flowchart TD
 | [NTL KMDF USB 템플릿](../examples/kmdf-usb-ntl-driver) | PnP USB device/interface/pipe와 continuous reader, user-mode 상태 조회 앱을 포함한 빌드 가능한 예제 |
 | [NTL KMDF WMI 예제](../examples/kmdf-wmi-ntl-driver) | MOF 기반 typed WMI query/set/method provider, event 전달과 `ROOT\\WMI` user-mode 검증 앱 |
 | [NTL KMDF 버스 예제](../examples/kmdf-bus-ntl-driver) | dynamic PDO plug/remove/eject 수명 주기와 버스/자식 function driver 사이 typed `QUERY_INTERFACE` 검증 예제 |
-| [NTL minifilter 예제](../examples/minifilter-ntl-driver) | typed create/write callback, RAII file-name information, file/stream/stream-handle context, 24H2 형식 INF, file-operation 실행 앱 |
+| [NTL minifilter 예제 모음](../examples/minifilter) | 기본 callback/context, Filter Manager 통신, swapped-buffer를 독립 프로젝트로 분리한 driver/app 예제 |
 | [CI driver load tests](./ci-driver-load-tests.md) | optional self-hosted driver load/run workflow |
 
 ## Operational Boundaries

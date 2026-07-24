@@ -150,7 +150,7 @@ crtsys_add_driver(my_minifilter MINIFILTER NTL src/main.cpp)
 
 Visual Studio/NuGet projects use `CrtSysIsMinifilter=true` and
 `CrtSysUseNtlFltMain=true`. See the
-[NTL minifilter sample](./examples/minifilter-ntl-driver) and
+[NTL minifilter sample catalog](./examples/minifilter) and
 [API guide](./docs/ntl/minifilter.md).
 
 ## Runtime Stack
@@ -216,7 +216,7 @@ may compile or work.
 | [NTL KMDF USB template](./examples/kmdf-usb-ntl-driver) | Buildable PnP USB device/interface/pipe and continuous-reader template with a user-mode inspection app |
 | [NTL KMDF WMI sample](./examples/kmdf-wmi-ntl-driver) | MOF-backed typed WMI query/set/method providers, event delivery, and a `ROOT\\WMI` user-mode verifier |
 | [NTL KMDF bus sample](./examples/kmdf-bus-ntl-driver) | Dynamic PDO plug/remove/eject lifecycle and a typed `QUERY_INTERFACE` contract between bus and child function drivers |
-| [NTL minifilter sample](./examples/minifilter-ntl-driver) | Typed create/write callbacks, RAII file-name information, file/stream/stream-handle contexts, a 24H2-format INF, and a file-operation exerciser |
+| [NTL minifilter samples](./examples/minifilter) | Independent basic callback/context, Filter Manager communication, and safe swapped-buffer driver/app examples |
 | [CI Driver Load Tests](./docs/ci-driver-load-tests.md) | Optional self-hosted driver load/run workflow |
 
 ## Operational Boundaries

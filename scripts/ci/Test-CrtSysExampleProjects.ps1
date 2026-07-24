@@ -63,7 +63,12 @@ if ($LASTEXITCODE -ne 0) {
 $projects = @(
   @($trackedProjectPaths + $untrackedProjectPaths) |
     Sort-Object -Unique |
-    ForEach-Object { Get-Item -LiteralPath (Join-Path $repoRoot $_) }
+    ForEach-Object {
+      $projectPath = Join-Path $repoRoot $_
+      if (Test-Path -LiteralPath $projectPath -PathType Leaf) {
+        Get-Item -LiteralPath $projectPath
+      }
+    }
 )
 
 foreach ($project in $projects) {

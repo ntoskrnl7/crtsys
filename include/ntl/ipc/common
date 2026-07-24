@@ -22,6 +22,88 @@ enum class region_access : std::uint32_t {
   driver_read_write = (1u << 0) | (1u << 1),
 };
 
+/** @brief Access granted to a process-mapped I/O buffer. */
+enum class map_access : std::uint32_t {
+  read = 1,
+  read_write = 2,
+};
+
+enum class validation_status : std::uint32_t;
+
+/** @brief Cross-bitness-stable description of one process mapping. */
+struct mapped_buffer_descriptor {
+  std::uint64_t mapping_id = 0;
+  std::uint64_t generation = 0;
+  std::uint64_t mapped_address = 0;
+  std::uint64_t length = 0;
+  std::uint32_t access = 0;
+  std::uint32_t reserved = 0;
+
+  constexpr bool valid() const noexcept {
+    return mapping_id != 0 && generation != 0 && mapped_address != 0 &&
+           length != 0 && reserved == 0;
+  }
+
+  template <typename Archive, typename Self>
+  static void serialize(Archive &archive, Self &self) {
+    archive(self.mapping_id, self.generation, self.mapped_address, self.length,
+            self.access, self.reserved);
+  }
+};
+
+/** Cross-bitness identity for one asynchronous buffer round trip. */
+struct pending_request_id {
+  std::uint64_t id = 0;
+  std::uint64_t generation = 0;
+  constexpr bool valid() const noexcept { return id != 0 && generation != 0; }
+  friend constexpr bool operator==(pending_request_id left,
+                                   pending_request_id right) noexcept {
+    return left.id == right.id && left.generation == right.generation;
+  }
+  template <typename Archive, typename Self>
+  static void serialize(Archive &archive, Self &self) {
+    archive(self.id, self.generation);
+  }
+};
+
+/**
+ * @brief Validated, non-owning user-mode view of a mapped-buffer
+ * descriptor.
+ *
+ * The transport remains responsible for telling the driver
+ * when the mapping
+ * is no longer used. This wrapper only validates the
+ * cross-bitness wire value
+ * before converting it to a local pointer.
+ */
+class mapped_client_buffer {
+public:
+  constexpr mapped_client_buffer() noexcept = default;
+
+  static validation_status open(mapped_buffer_descriptor descriptor,
+                                std::uint64_t expected_generation,
+                                mapped_client_buffer &result) noexcept;
+
+  explicit constexpr operator bool() const noexcept {
+    return data_ != nullptr && bytes_ != 0;
+  }
+  const unsigned char *data() const noexcept { return data_; }
+  unsigned char *writable_data() const noexcept {
+    return access_ == map_access::read_write ? data_ : nullptr;
+  }
+  constexpr std::size_t size() const noexcept { return bytes_; }
+  constexpr map_access access() const noexcept { return access_; }
+  constexpr std::uint64_t mapping_id() const noexcept { return mapping_id_; }
+  constexpr std::uint64_t generation() const noexcept { return generation_; }
+
+private:
+  unsigned char *data_ = nullptr;
+  std::size_t bytes_ = 0;
+  map_access access_ = map_access::read;
+  std::uint64_t mapping_id_ = 0;
+  std::uint64_t generation_ = 0;
+};
+
 /** @brief Combines registered-region access flags. */
 constexpr region_access operator|(region_access left,
                                   region_access right) noexcept {
@@ -114,8 +196,8 @@ struct region_registration {
   static region_registration from(void *address, std::size_t bytes,
                                   region_access requested_access) noexcept {
     region_registration value{};
-    value.user_address = static_cast<std::uint64_t>(
-        reinterpret_cast<std::uintptr_t>(address));
+    value.user_address =
+        static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(address));
     value.length = static_cast<std::uint64_t>(bytes);
     value.access = requested_access;
     return value;
@@ -126,8 +208,7 @@ struct region_registration {
     return user_address != 0 && length != 0 && reserved == 0 &&
            access != region_access::none &&
            has_access(region_access::driver_read_write, access) &&
-           user_address <=
-               (std::numeric_limits<std::uint64_t>::max)() - length;
+           user_address <= (std::numeric_limits<std::uint64_t>::max)() - length;
   }
 };
 
@@ -191,6 +272,38 @@ enum class validation_status : std::uint32_t {
   incompatible_layout,
 };
 
+inline validation_status
+mapped_client_buffer::open(mapped_buffer_descriptor descriptor,
+                           std::uint64_t expected_generation,
+                           mapped_client_buffer &result) noexcept {
+  result = {};
+  if (!descriptor.valid() || expected_generation == 0)
+    return validation_status::invalid_argument;
+  if (descriptor.generation != expected_generation)
+    return validation_status::stale_region;
+  if (descriptor.access != static_cast<std::uint32_t>(map_access::read) &&
+      descriptor.access != static_cast<std::uint32_t>(map_access::read_write))
+    return validation_status::access_denied;
+  if (descriptor.mapped_address >
+          static_cast<std::uint64_t>(
+              (std::numeric_limits<std::uintptr_t>::max)()) ||
+      descriptor.length >
+          static_cast<std::uint64_t>((std::numeric_limits<std::size_t>::max)()))
+    return validation_status::incompatible_layout;
+  const auto address = static_cast<std::uintptr_t>(descriptor.mapped_address);
+  const auto bytes = static_cast<std::size_t>(descriptor.length);
+  if (bytes == 0 ||
+      address > (std::numeric_limits<std::uintptr_t>::max)() - bytes)
+    return validation_status::range_overflow;
+
+  result.data_ = reinterpret_cast<unsigned char *>(address);
+  result.bytes_ = bytes;
+  result.access_ = static_cast<map_access>(descriptor.access);
+  result.mapping_id_ = descriptor.mapping_id;
+  result.generation_ = descriptor.generation;
+  return validation_status::success;
+}
+
 /**
  * @brief Transport-owned local mapping of one registered region.
  *
@@ -211,7 +324,8 @@ public:
   /** @brief Returns the locally mapped region size. */
   constexpr std::size_t size() const noexcept { return bytes_; }
 
-  /** @brief Returns the locally mapped start address without changing ownership. */
+  /** @brief Returns the locally mapped start address without changing
+   * ownership. */
   void *data() const noexcept { return data_; }
 
   /** @brief Returns the access granted during registration. */
@@ -230,9 +344,8 @@ public:
     if (token.offset > bytes_ || token.length > bytes_ - token.offset)
       return validation_status::range_overflow;
 
-    result = mutable_buffer_view{
-        data_ + static_cast<std::size_t>(token.offset),
-        static_cast<std::size_t>(token.length)};
+    result = mutable_buffer_view{data_ + static_cast<std::size_t>(token.offset),
+                                 static_cast<std::size_t>(token.length)};
     return validation_status::success;
   }
 
@@ -273,6 +386,10 @@ static_assert(sizeof(buffer_token) == 32,
               "NTL IPC buffer tokens must be cross-bitness stable");
 static_assert(sizeof(region_registration) == 24,
               "NTL IPC registrations must be cross-bitness stable");
+static_assert(sizeof(mapped_buffer_descriptor) == 40,
+              "NTL mapped-buffer descriptors must be cross-bitness stable");
+static_assert(sizeof(pending_request_id) == 16,
+              "NTL pending request IDs must be cross-bitness stable");
 
 } // namespace ipc
 } // namespace ntl

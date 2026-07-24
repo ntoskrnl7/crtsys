@@ -45,6 +45,14 @@ public:
   operator NTSTATUS() const { return status_; }
 
   /**
+   * @brief Prevents accidental STATUS_SUCCESS == 0 Boolean inversion.
+   *
+   * Use is_ok()/is_err() when testing a status. The native NTSTATUS
+   * conversion remains available for kernel API boundaries.
+   */
+  explicit operator bool() const = delete;
+
+  /**
    * @brief Returns STATUS_SUCCESS.
    */
   static status ok() { return status{STATUS_SUCCESS}; }

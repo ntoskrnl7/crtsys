@@ -1164,7 +1164,11 @@ inline void communication_client_state::dispatch_request(
                   output.data(), output.size());
     const HRESULT result = FilterReplyMessage(port, filter_reply,
                                               static_cast<DWORD>(reply.size()));
-    if (FAILED(result) && !disconnected_result(result))
+    // The kernel sender may legitimately time out while the user callback is
+    // still running. Its eventual reply then has no waiter; this is local to
+    // that request and must not tear down every FilterGetMessage receiver.
+    if (FAILED(result) && result != ERROR_FLT_NO_WAITER_FOR_REPLY &&
+        !disconnected_result(result))
       fail_all(result);
   } catch (...) {
     fail_all(E_OUTOFMEMORY);

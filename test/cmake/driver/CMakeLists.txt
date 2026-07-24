@@ -10,6 +10,11 @@ include(../../../cmake/CPM.cmake)
 
 option(CRTSYS_TEST_BREAKPOINT "Break into the kernel debugger when the test driver loads" OFF)
 option(CRTSYS_ENABLE_FAILURE_HARNESS_SELF_TEST "Enable an intentional driver-test failure to verify exception capture" OFF)
+option(
+    CRTSYS_TEST_EXTENDED_PMR_BENCHMARK
+    "Run the long cppreference PMR allocation benchmark in the kernel test driver"
+    OFF
+)
 
 set(CRTSYS_NTL_MAIN ON)
 CPMAddPackage(NAME crtsys SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}/../../..)
@@ -89,6 +94,10 @@ endif()
 
 if (CRTSYS_ENABLE_FAILURE_HARNESS_SELF_TEST)
     target_compile_definitions(crtsys_test PRIVATE "CRTSYS_ENABLE_FAILURE_HARNESS_SELF_TEST=1")
+endif()
+
+if (CRTSYS_TEST_EXTENDED_PMR_BENCHMARK)
+    target_compile_definitions(crtsys_test PRIVATE "CRTSYS_TEST_EXTENDED_PMR_BENCHMARK=1")
 endif()
 
 target_link_libraries(crtsys_test gtest)

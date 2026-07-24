@@ -1,0 +1,771 @@
+/**
+ * @file pending_io
+ * @brief Cancel-safe pending minifilter buffer round trips.
+ */
+#pragma once
+
+#include "swapped_io_buffer"
+
+#include <atomic>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <unordered_map>
+
+namespace ntl::flt {
+
+class pending_pre_operation_queue;
+
+namespace detail {
+
+inline std::atomic<std::uint64_t> pending_generation_seed{0};
+inline constexpr ULONG pending_pre_state_pool_tag = ntl::pool_tag("pPnN");
+
+inline std::uint64_t next_pending_generation() noexcept {
+  for (;;) {
+    const auto value =
+        pending_generation_seed.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (value != 0)
+      return value;
+  }
+}
+
+class pending_pre_state {
+public:
+  pending_pre_state(pending_pre_operation_queue *owner,
+                    ntl::ipc::pending_request_id key, PFLT_CALLBACK_DATA data,
+                    std::optional<ntl::ipc::mapped_io_buffers> mapped,
+                    std::optional<swapped_io_buffers> swapped) noexcept;
+
+  void schedule_cancel(NTSTATUS status) noexcept;
+
+  pending_pre_operation_queue *owner = nullptr;
+  ntl::ipc::pending_request_id key{};
+  PFLT_CALLBACK_DATA data = nullptr;
+  FLT_CALLBACK_DATA_QUEUE_IO_CONTEXT queue_context{};
+  std::optional<ntl::ipc::mapped_io_buffers> mapped;
+  std::optional<swapped_io_buffers> swapped;
+  LIST_ENTRY cancel_link{};
+  volatile LONG cancel_queued = 0;
+  NTSTATUS cancel_status = STATUS_CANCELLED;
+  NTSTATUS cleanup_status = STATUS_SUCCESS;
+  // 0: still in CBDQ, 1: detached/retryable, 2: finish in progress.
+  volatile LONG finish_phase = 0;
+  bool shutdown_attempted = false;
+};
+
+} // namespace detail
+
+/**
+ * @brief Per-instance cancel-safe queue for pended pre-operation round trips.
+ *
+ * Initialize this in instance setup, call pend() from an IRP pre callback, and
+ * return pre_result::pending with a null completion context. Replies call
+ * resume(); timeout/disconnect paths call cancel() or cancel_all().
+ */
+class pending_pre_operation_queue {
+public:
+  pending_pre_operation_queue() noexcept
+      : generation_(detail::next_pending_generation()) {}
+  pending_pre_operation_queue(const pending_pre_operation_queue &) = delete;
+  pending_pre_operation_queue &
+  operator=(const pending_pre_operation_queue &) = delete;
+  ~pending_pre_operation_queue() {
+    NT_ASSERT(!initialized_ || KeGetCurrentIrql() == PASSIVE_LEVEL);
+    shutdown(STATUS_CANCELLED);
+  }
+
+  ntl::status initialize(PFLT_INSTANCE instance,
+                         std::size_t max_pending = 256) noexcept {
+    if (!instance || max_pending == 0 || KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return STATUS_INVALID_PARAMETER;
+    if (initialized_)
+      return STATUS_ALREADY_INITIALIZED;
+    InitializeListHead(&head_);
+    KeInitializeSpinLock(&queue_lock_);
+    KeInitializeEvent(&empty_event_, NotificationEvent, TRUE);
+    instance_ = instance;
+    max_pending_ = max_pending;
+    const NTSTATUS status = FltCbdqInitialize(
+        instance, &queue_, &insert_io, &remove_io, &peek_next_io,
+        &acquire_queue, &release_queue, &complete_canceled_io);
+    if (!NT_SUCCESS(status)) {
+      instance_ = nullptr;
+      return status;
+    }
+    InitializeListHead(&cancel_head_);
+    KeInitializeSpinLock(&cancel_lock_);
+    KeInitializeEvent(&cancel_event_, SynchronizationEvent, FALSE);
+    stop_worker_ = 0;
+    HANDLE worker = nullptr;
+    const NTSTATUS created =
+        PsCreateSystemThread(&worker, THREAD_ALL_ACCESS, nullptr, nullptr,
+                             nullptr, &cancel_worker, this);
+    if (!NT_SUCCESS(created)) {
+      FltCbdqDisable(&queue_);
+      instance_ = nullptr;
+      return created;
+    }
+    worker_handle_ = worker;
+    initialized_ = true;
+    InterlockedExchange(&accepting_, 1);
+    return STATUS_SUCCESS;
+  }
+
+  ntl::result<ntl::ipc::pending_request_id>
+  pend(PFLT_CALLBACK_DATA data,
+       std::optional<ntl::ipc::mapped_io_buffers> mapped = std::nullopt,
+       std::optional<swapped_io_buffers> swapped = std::nullopt) noexcept {
+    if (!initialized_ || InterlockedCompareExchange(&accepting_, 0, 0) == 0 ||
+        !data || !FLT_IS_IRP_OPERATION(data) ||
+        KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+    if (!data->Iopb || FlagOn(data->Iopb->IrpFlags, IRP_PAGING_IO))
+      return ntl::unexpected(STATUS_NOT_SUPPORTED);
+
+    std::shared_ptr<detail::pending_pre_state> state;
+    ntl::ipc::pending_request_id key{};
+    try {
+      {
+        std::lock_guard<std::mutex> guard(registry_lock_);
+        if (InterlockedCompareExchange(&accepting_, 0, 0) == 0)
+          return ntl::unexpected(STATUS_DELETE_PENDING);
+        if (requests_.size() >= max_pending_)
+          return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+        // A wrapped identifier must never alias a still-pending request. The
+        // 64-bit wrap is theoretical in practice, but the registry is also a
+        // protocol boundary and therefore must not rely on probability.
+        do {
+          if (++next_id_ == 0)
+            ++next_id_;
+        } while (requests_.find(next_id_) != requests_.end());
+        key = {next_id_, generation_};
+      }
+      state = std::allocate_shared<detail::pending_pre_state>(
+          ntl::nonpaged_pool_allocator<detail::pending_pre_state,
+                                       detail::pending_pre_state_pool_tag>{},
+          this, key, data, std::move(mapped), std::move(swapped));
+      {
+        std::lock_guard<std::mutex> guard(registry_lock_);
+        if (InterlockedCompareExchange(&accepting_, 0, 0) == 0)
+          return ntl::unexpected(STATUS_DELETE_PENDING);
+        const auto inserted = requests_.emplace(key.id, state);
+        if (!inserted.second)
+          return ntl::unexpected(STATUS_OBJECTID_EXISTS);
+        KeClearEvent(&empty_event_);
+      }
+    } catch (...) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+
+    const NTSTATUS inserted =
+        FltCbdqInsertIo(&queue_, data, &state->queue_context, state.get());
+    if (!NT_SUCCESS(inserted)) {
+      // Cancellation can win while Filter Manager is inserting the I/O. Once
+      // its completion callback queued our PASSIVE_LEVEL worker, this request
+      // is ours to complete and the caller must still return FLT_PREOP_PENDING.
+      if (InterlockedCompareExchange(&state->cancel_queued, 0, 0) != 0)
+        return ntl::ok(key);
+      erase(key, state.get());
+      return ntl::unexpected(inserted);
+    }
+    return ntl::ok(key);
+  }
+
+  template <operation_id Operation>
+  ntl::result<ntl::ipc::pending_request_id>
+  pend(pre_operation<Operation> operation,
+       std::optional<ntl::ipc::mapped_io_buffers> mapped = std::nullopt,
+       std::optional<swapped_io_buffers> swapped = std::nullopt) noexcept {
+    return pend(operation.data().native(), std::move(mapped),
+                std::move(swapped));
+  }
+
+  /** Applies transformed input and resumes the lower stack with a post-op. */
+  ntl::status resume(ntl::ipc::pending_request_id key) noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return STATUS_INVALID_DEVICE_STATE;
+    auto state = find(key);
+    if (!state)
+      return STATUS_NOT_FOUND;
+    const auto claimed = claim_finish(state, true);
+    if (!claimed.is_ok())
+      return claimed;
+    return finish(state, STATUS_SUCCESS, true);
+  }
+
+  /** Removes and completes one request on timeout/transport failure. */
+  ntl::status cancel(ntl::ipc::pending_request_id key,
+                     NTSTATUS status = STATUS_CANCELLED) noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return STATUS_INVALID_DEVICE_STATE;
+    auto state = find(key);
+    if (!state)
+      return STATUS_NOT_FOUND;
+    const auto claimed = claim_finish(state, true);
+    if (!claimed.is_ok())
+      return claimed;
+    return finish(state, status, false);
+  }
+
+  /** Disables insertion, cancels all requests, and waits for cancel workers. */
+  void shutdown(NTSTATUS status = STATUS_CANCELLED) noexcept {
+    if (!initialized_ || KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return;
+    InterlockedExchange(&accepting_, 0);
+    FltCbdqDisable(&queue_);
+    {
+      std::lock_guard<std::mutex> guard(registry_lock_);
+      for (auto &entry : requests_)
+        entry.second->shutdown_attempted = false;
+    }
+    for (;;) {
+      PFLT_CALLBACK_DATA data = FltCbdqRemoveNextIo(&queue_, nullptr);
+      if (!data)
+        break;
+      auto *state =
+          static_cast<detail::pending_pre_state *>(data->QueueContext[0]);
+      if (state)
+        state->schedule_cancel(status);
+    }
+    // A prior reply may already have detached the request from CBDQ but left
+    // it retryable because its user VAD could not be removed. Retry such
+    // states once; if a VAD is still live, empty_event_ intentionally remains
+    // unsignaled until the owner closes the process registry and calls
+    // cancel() again.
+    for (;;) {
+      std::shared_ptr<detail::pending_pre_state> retry;
+      {
+        std::lock_guard<std::mutex> guard(registry_lock_);
+        for (auto &entry : requests_) {
+          if (!entry.second->shutdown_attempted &&
+              InterlockedCompareExchange(&entry.second->finish_phase, 2, 1) ==
+                  1) {
+            retry = entry.second;
+            retry->shutdown_attempted = true;
+            break;
+          }
+        }
+      }
+      if (!retry)
+        break;
+      const auto retried = finish(retry, status, false);
+      if (!retried.is_ok() &&
+          InterlockedCompareExchange(&retry->finish_phase, 0, 0) == 1)
+        continue;
+    }
+    (void)KeWaitForSingleObject(&empty_event_, Executive, KernelMode, FALSE,
+                                nullptr);
+    InterlockedExchange(&stop_worker_, 1);
+    KeSetEvent(&cancel_event_, IO_NO_INCREMENT, FALSE);
+    if (worker_handle_) {
+      (void)ZwWaitForSingleObject(worker_handle_, FALSE, nullptr);
+      ZwClose(worker_handle_);
+      worker_handle_ = nullptr;
+    }
+    {
+      std::lock_guard<std::mutex> guard(registry_lock_);
+      generation_ = detail::next_pending_generation();
+    }
+    initialized_ = false;
+    instance_ = nullptr;
+  }
+
+  std::size_t size() const noexcept {
+    std::lock_guard<std::mutex> guard(registry_lock_);
+    return requests_.size();
+  }
+
+private:
+  friend class detail::pending_pre_state;
+
+  void enqueue_cancel(detail::pending_pre_state *state) noexcept {
+    KIRQL irql = PASSIVE_LEVEL;
+    KeAcquireSpinLock(&cancel_lock_, &irql);
+    InsertTailList(&cancel_head_, &state->cancel_link);
+    KeReleaseSpinLock(&cancel_lock_, irql);
+    KeSetEvent(&cancel_event_, IO_NO_INCREMENT, FALSE);
+  }
+
+  static void NTAPI cancel_worker(void *parameter) noexcept {
+    auto *self = static_cast<pending_pre_operation_queue *>(parameter);
+    for (;;) {
+      (void)KeWaitForSingleObject(&self->cancel_event_, Executive, KernelMode,
+                                  FALSE, nullptr);
+      for (;;) {
+        detail::pending_pre_state *state = nullptr;
+        KIRQL irql = PASSIVE_LEVEL;
+        KeAcquireSpinLock(&self->cancel_lock_, &irql);
+        if (!IsListEmpty(&self->cancel_head_)) {
+          PLIST_ENTRY entry = RemoveHeadList(&self->cancel_head_);
+          state =
+              CONTAINING_RECORD(entry, detail::pending_pre_state, cancel_link);
+          InitializeListHead(&state->cancel_link);
+        }
+        KeReleaseSpinLock(&self->cancel_lock_, irql);
+        if (!state)
+          break;
+        auto keepalive = self->find(state->key);
+        if (keepalive &&
+            InterlockedCompareExchange(&keepalive->finish_phase, 2, 0) == 0)
+          (void)self->finish(keepalive, state->cancel_status, false);
+      }
+      if (InterlockedCompareExchange(&self->stop_worker_, 0, 0) != 0)
+        break;
+    }
+    PsTerminateSystemThread(STATUS_SUCCESS);
+  }
+
+  static pending_pre_operation_queue *from(PFLT_CALLBACK_DATA_QUEUE queue) {
+    return CONTAINING_RECORD(queue, pending_pre_operation_queue, queue_);
+  }
+
+  static void FLTAPI acquire_queue(PFLT_CALLBACK_DATA_QUEUE queue,
+                                   PKIRQL irql) noexcept {
+    auto *self = from(queue);
+    NT_ASSERT(irql != nullptr);
+    KeAcquireSpinLock(&self->queue_lock_, irql);
+  }
+  static void FLTAPI release_queue(PFLT_CALLBACK_DATA_QUEUE queue,
+                                   KIRQL irql) noexcept {
+    KeReleaseSpinLock(&from(queue)->queue_lock_, irql);
+  }
+  static NTSTATUS FLTAPI insert_io(PFLT_CALLBACK_DATA_QUEUE queue,
+                                   PFLT_CALLBACK_DATA data,
+                                   void *context) noexcept {
+    auto *state = static_cast<detail::pending_pre_state *>(context);
+    if (!state)
+      return STATUS_INVALID_PARAMETER;
+    data->QueueContext[0] = state;
+    InsertTailList(&from(queue)->head_, &data->QueueLinks);
+    return STATUS_SUCCESS;
+  }
+  static void FLTAPI remove_io(PFLT_CALLBACK_DATA_QUEUE,
+                               PFLT_CALLBACK_DATA data) noexcept {
+    RemoveEntryList(&data->QueueLinks);
+    InitializeListHead(&data->QueueLinks);
+  }
+  static PFLT_CALLBACK_DATA FLTAPI peek_next_io(PFLT_CALLBACK_DATA_QUEUE queue,
+                                                PFLT_CALLBACK_DATA data,
+                                                void *) noexcept {
+    auto *self = from(queue);
+    PLIST_ENTRY entry = data ? data->QueueLinks.Flink : self->head_.Flink;
+    if (entry == &self->head_)
+      return nullptr;
+    return CONTAINING_RECORD(entry, FLT_CALLBACK_DATA, QueueLinks);
+  }
+  static void FLTAPI complete_canceled_io(PFLT_CALLBACK_DATA_QUEUE,
+                                          PFLT_CALLBACK_DATA data) noexcept {
+    auto *state =
+        static_cast<detail::pending_pre_state *>(data->QueueContext[0]);
+    if (state)
+      state->schedule_cancel(STATUS_CANCELLED);
+  }
+
+  std::shared_ptr<detail::pending_pre_state>
+  find(ntl::ipc::pending_request_id key) noexcept {
+    if (!key.valid())
+      return {};
+    std::lock_guard<std::mutex> guard(registry_lock_);
+    const auto found = requests_.find(key.id);
+    if (found == requests_.end() ||
+        found->second->key.generation != key.generation)
+      return {};
+    return found->second;
+  }
+
+  void erase(ntl::ipc::pending_request_id key,
+             const detail::pending_pre_state *expected) noexcept {
+    std::lock_guard<std::mutex> guard(registry_lock_);
+    const auto found = requests_.find(key.id);
+    if (found != requests_.end() && found->second.get() == expected)
+      requests_.erase(found);
+    if (requests_.empty())
+      KeSetEvent(&empty_event_, IO_NO_INCREMENT, FALSE);
+  }
+
+  ntl::status
+  claim_finish(const std::shared_ptr<detail::pending_pre_state> &state,
+               bool remove_from_queue) noexcept {
+    LONG phase = InterlockedCompareExchange(&state->finish_phase, 0, 0);
+    if (phase == 1) {
+      return InterlockedCompareExchange(&state->finish_phase, 2, 1) == 1
+                 ? ntl::status{STATUS_SUCCESS}
+                 : ntl::status{STATUS_DEVICE_BUSY};
+    }
+    if (phase != 0)
+      return STATUS_DEVICE_BUSY;
+    if (remove_from_queue && !FltCbdqRemoveIo(&queue_, &state->queue_context))
+      return STATUS_CANCELLED;
+    return InterlockedCompareExchange(&state->finish_phase, 2, 0) == 0
+               ? ntl::status{STATUS_SUCCESS}
+               : ntl::status{STATUS_DEVICE_BUSY};
+  }
+
+  ntl::status finish(const std::shared_ptr<detail::pending_pre_state> &state,
+                     NTSTATUS status, bool resume_io) noexcept {
+    NTSTATUS cleanup = state->cleanup_status;
+    if (state->mapped) {
+      const auto closed = state->mapped->close();
+      if (cleanup == STATUS_SUCCESS && !closed.is_ok())
+        cleanup = static_cast<NTSTATUS>(closed);
+      if (!closed.is_ok() && state->mapped->has_open_mappings()) {
+        state->cleanup_status = cleanup;
+        InterlockedExchange(&state->finish_phase, 1);
+        return ntl::status{cleanup};
+      }
+      state->mapped.reset();
+    }
+    if (state->swapped) {
+      const auto closed = state->swapped->close_user_mappings();
+      if (cleanup == STATUS_SUCCESS && !closed.is_ok())
+        cleanup = static_cast<NTSTATUS>(closed);
+      if (!closed.is_ok() && state->swapped->has_open_user_mappings()) {
+        state->cleanup_status = cleanup;
+        InterlockedExchange(&state->finish_phase, 1);
+        return ntl::status{cleanup};
+      }
+    }
+    if (!NT_SUCCESS(cleanup)) {
+      status = cleanup;
+      resume_io = false;
+    }
+
+    void *completion = nullptr;
+    if (resume_io && state->swapped) {
+      const auto applied = state->swapped->apply();
+      if (!applied.is_ok()) {
+        status = static_cast<NTSTATUS>(applied);
+        resume_io = false;
+      } else {
+        auto released = state->swapped->release_completion_context();
+        if (!released) {
+          status = static_cast<NTSTATUS>(released.status());
+          resume_io = false;
+        } else {
+          completion = *released;
+        }
+      }
+    }
+
+    if (!resume_io) {
+      if (state->swapped)
+        state->swapped->complete();
+      state->data->IoStatus.Status = status;
+      state->data->IoStatus.Information = 0;
+      FltCompletePendedPreOperation(state->data, FLT_PREOP_COMPLETE, nullptr);
+    } else {
+      FltCompletePendedPreOperation(state->data,
+                                    completion ? FLT_PREOP_SUCCESS_WITH_CALLBACK
+                                               : FLT_PREOP_SUCCESS_NO_CALLBACK,
+                                    completion);
+    }
+    erase(state->key, state.get());
+    return status;
+  }
+
+  FLT_CALLBACK_DATA_QUEUE queue_{};
+  LIST_ENTRY head_{};
+  KSPIN_LOCK queue_lock_{};
+  mutable std::mutex registry_lock_;
+  std::unordered_map<std::uint64_t, std::shared_ptr<detail::pending_pre_state>>
+      requests_;
+  KEVENT empty_event_{};
+  LIST_ENTRY cancel_head_{};
+  KSPIN_LOCK cancel_lock_{};
+  KEVENT cancel_event_{};
+  HANDLE worker_handle_ = nullptr;
+  volatile LONG stop_worker_ = 0;
+  PFLT_INSTANCE instance_ = nullptr;
+  std::size_t max_pending_ = 0;
+  std::uint64_t next_id_ = 0;
+  std::uint64_t generation_ = 0;
+  bool initialized_ = false;
+  volatile LONG accepting_ = 0;
+};
+
+/** Registry for safe post-operation round trips (post I/O is no longer
+ * IRP-cancelable). */
+class pending_post_operation_registry {
+  struct state {
+    ntl::ipc::pending_request_id key{};
+    PFLT_CALLBACK_DATA data = nullptr;
+    std::optional<ntl::ipc::mapped_io_buffers> mapped;
+    std::optional<swapped_io_buffers> swapped;
+    NTSTATUS cleanup_status = STATUS_SUCCESS;
+    bool finishing = false;
+    bool shutdown_attempted = false;
+  };
+
+public:
+  pending_post_operation_registry() noexcept {
+    KeInitializeEvent(&empty_event_, NotificationEvent, TRUE);
+    KeInitializeEvent(&idle_event_, NotificationEvent, TRUE);
+    generation_ = detail::next_pending_generation();
+  }
+  pending_post_operation_registry(const pending_post_operation_registry &) =
+      delete;
+  pending_post_operation_registry &
+  operator=(const pending_post_operation_registry &) = delete;
+  ~pending_post_operation_registry() {
+    const bool already_shutdown =
+        InterlockedCompareExchange(&shutdown_complete_, 0, 0) != 0;
+    NT_ASSERT(already_shutdown || KeGetCurrentIrql() == PASSIVE_LEVEL);
+    if (!already_shutdown)
+      shutdown(STATUS_CANCELLED);
+  }
+
+  ntl::result<ntl::ipc::pending_request_id>
+  pend(PFLT_CALLBACK_DATA data,
+       std::optional<ntl::ipc::mapped_io_buffers> mapped = std::nullopt,
+       std::optional<swapped_io_buffers> swapped = std::nullopt) noexcept {
+    if (!data || !FLT_IS_IRP_OPERATION(data) ||
+        KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    if (!data->Iopb || FlagOn(data->Iopb->IrpFlags, IRP_PAGING_IO))
+      return ntl::unexpected(STATUS_NOT_SUPPORTED);
+    try {
+      std::lock_guard<std::mutex> guard(lock_);
+      if (!accepting_)
+        return ntl::unexpected(STATUS_DELETE_PENDING);
+      if (requests_.size() >= max_pending_)
+        return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+      do {
+        if (++next_id_ == 0)
+          ++next_id_;
+      } while (requests_.find(next_id_) != requests_.end());
+      auto value = std::make_shared<state>();
+      value->key = {next_id_, generation_};
+      value->data = data;
+      value->mapped = std::move(mapped);
+      value->swapped = std::move(swapped);
+      const auto inserted = requests_.emplace(value->key.id, value);
+      if (!inserted.second)
+        return ntl::unexpected(STATUS_OBJECTID_EXISTS);
+      KeClearEvent(&empty_event_);
+      return ntl::ok(value->key);
+    } catch (...) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+  }
+
+  template <operation_id Operation>
+  ntl::result<ntl::ipc::pending_request_id>
+  pend(post_operation<Operation> operation,
+       std::optional<ntl::ipc::mapped_io_buffers> mapped = std::nullopt,
+       std::optional<swapped_io_buffers> swapped = std::nullopt) noexcept {
+    return pend(operation.data().native(), std::move(mapped),
+                std::move(swapped));
+  }
+
+  ntl::status reply(ntl::ipc::pending_request_id key) noexcept {
+    return finish(take(key), STATUS_SUCCESS, true);
+  }
+  ntl::status cancel(ntl::ipc::pending_request_id key,
+                     NTSTATUS status = STATUS_CANCELLED) noexcept {
+    return finish(take(key), status, false);
+  }
+
+  void shutdown(NTSTATUS status = STATUS_CANCELLED) noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return;
+    std::lock_guard<std::mutex> lifecycle_guard(lifecycle_lock_);
+    {
+      std::lock_guard<std::mutex> guard(lock_);
+      shutting_down_ = true;
+      accepting_ = false;
+      generation_ = detail::next_pending_generation();
+      for (auto &entry : requests_)
+        entry.second->shutdown_attempted = false;
+    }
+    (void)KeWaitForSingleObject(&idle_event_, Executive, KernelMode, FALSE,
+                                nullptr);
+    for (;;) {
+      std::shared_ptr<state> value;
+      {
+        std::lock_guard<std::mutex> guard(lock_);
+        if (requests_.empty())
+          break;
+        for (auto &entry : requests_) {
+          if (!entry.second->finishing && !entry.second->shutdown_attempted) {
+            value = entry.second;
+            value->finishing = true;
+            value->shutdown_attempted = true;
+            ++active_finishes_;
+            KeClearEvent(&idle_event_);
+            break;
+          }
+        }
+      }
+      if (!value) {
+        (void)KeWaitForSingleObject(&empty_event_, Executive, KernelMode, FALSE,
+                                    nullptr);
+        break;
+      }
+      const auto finished = finish(value, status, false);
+      bool retained = false;
+      {
+        std::lock_guard<std::mutex> guard(lock_);
+        const auto found = requests_.find(value->key.id);
+        retained =
+            found != requests_.end() && found->second.get() == value.get();
+      }
+      if (retained) {
+        // A live VAD makes I/O completion unsafe. Keep the request registered
+        // so another thread can close the process registry and retry cancel().
+        (void)KeWaitForSingleObject(&empty_event_, Executive, KernelMode, FALSE,
+                                    nullptr);
+      }
+      (void)finished;
+    }
+    KeSetEvent(&empty_event_, IO_NO_INCREMENT, FALSE);
+    {
+      std::lock_guard<std::mutex> guard(lock_);
+      InterlockedExchange(&shutdown_complete_, 1);
+      shutting_down_ = false;
+    }
+  }
+
+  void reopen(std::size_t max_pending = 256) noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL || max_pending == 0)
+      return;
+    std::lock_guard<std::mutex> lifecycle_guard(lifecycle_lock_);
+    std::lock_guard<std::mutex> guard(lock_);
+    if (!shutting_down_ && requests_.empty() && active_finishes_ == 0) {
+      max_pending_ = max_pending;
+      accepting_ = true;
+      InterlockedExchange(&shutdown_complete_, 0);
+    }
+  }
+
+  std::size_t size() const noexcept {
+    std::lock_guard<std::mutex> guard(lock_);
+    return requests_.size();
+  }
+
+private:
+  std::shared_ptr<state> take(ntl::ipc::pending_request_id key) noexcept {
+    if (!key.valid() || KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return {};
+    std::lock_guard<std::mutex> guard(lock_);
+    const auto found = requests_.find(key.id);
+    if (found == requests_.end() ||
+        found->second->key.generation != key.generation ||
+        found->second->finishing)
+      return {};
+    auto value = found->second;
+    value->finishing = true;
+    ++active_finishes_;
+    KeClearEvent(&idle_event_);
+    return value;
+  }
+
+  ntl::status finish(const std::shared_ptr<state> &value, NTSTATUS status,
+                     bool copy_back) noexcept {
+    if (!value)
+      return STATUS_NOT_FOUND;
+    bool completed = false;
+    const auto result = finish_detached(value, status, copy_back, completed);
+    {
+      std::lock_guard<std::mutex> guard(lock_);
+      NT_ASSERT(active_finishes_ != 0);
+      if (active_finishes_ != 0)
+        --active_finishes_;
+      if (completed)
+        requests_.erase(value->key.id);
+      else
+        value->finishing = false;
+      if (requests_.empty())
+        KeSetEvent(&empty_event_, IO_NO_INCREMENT, FALSE);
+      if (active_finishes_ == 0)
+        KeSetEvent(&idle_event_, IO_NO_INCREMENT, FALSE);
+    }
+    return result;
+  }
+
+  static ntl::status finish_detached(const std::shared_ptr<state> &value,
+                                     NTSTATUS status, bool copy_back,
+                                     bool &completed) noexcept {
+    completed = false;
+    NTSTATUS result = status == STATUS_SUCCESS ? value->cleanup_status : status;
+    if (value->mapped) {
+      const auto closed = value->mapped->close();
+      if (result == STATUS_SUCCESS && !closed.is_ok())
+        result = static_cast<NTSTATUS>(closed);
+      if (!closed.is_ok() && value->mapped->has_open_mappings()) {
+        if (value->cleanup_status == STATUS_SUCCESS)
+          value->cleanup_status = static_cast<NTSTATUS>(closed);
+        return result;
+      }
+      value->mapped.reset();
+    }
+    if (value->swapped) {
+      const auto closed = value->swapped->close_user_mappings();
+      if (result == STATUS_SUCCESS && !closed.is_ok())
+        result = static_cast<NTSTATUS>(closed);
+      if (!closed.is_ok() && value->swapped->has_open_user_mappings()) {
+        if (value->cleanup_status == STATUS_SUCCESS)
+          value->cleanup_status = static_cast<NTSTATUS>(closed);
+        return result;
+      }
+      if (copy_back && value->swapped->output() && NT_SUCCESS(result) &&
+          !NT_ERROR(value->data->IoStatus.Status)) {
+        const auto copied = value->swapped->copy_output_to_original(
+            (std::min)(value->swapped->output()->size(),
+                       static_cast<std::size_t>(
+                           value->data->IoStatus.Information)));
+        if (!copied.is_ok())
+          result = static_cast<NTSTATUS>(copied);
+      }
+      value->swapped->complete();
+      value->swapped.reset();
+    }
+    if (!NT_SUCCESS(result)) {
+      value->data->IoStatus.Status = result;
+      value->data->IoStatus.Information = 0;
+    }
+    FltCompletePendedPostOperation(value->data);
+    completed = true;
+    return result;
+  }
+
+  std::mutex lifecycle_lock_;
+  mutable std::mutex lock_;
+  std::unordered_map<std::uint64_t, std::shared_ptr<state>> requests_;
+  KEVENT empty_event_{};
+  KEVENT idle_event_{};
+  std::size_t active_finishes_ = 0;
+  std::size_t max_pending_ = 256;
+  std::uint64_t next_id_ = 0;
+  std::uint64_t generation_ = 0;
+  bool accepting_ = true;
+  bool shutting_down_ = false;
+  volatile LONG shutdown_complete_ = 0;
+};
+
+using pending_pre_operation = pending_pre_operation_queue;
+using pending_post_operation = pending_post_operation_registry;
+
+namespace detail {
+
+inline pending_pre_state::pending_pre_state(
+    pending_pre_operation_queue *owner_value,
+    ntl::ipc::pending_request_id key_value, PFLT_CALLBACK_DATA data_value,
+    std::optional<ntl::ipc::mapped_io_buffers> mapped_value,
+    std::optional<swapped_io_buffers> swapped_value) noexcept
+    : owner(owner_value), key(key_value), data(data_value),
+      mapped(std::move(mapped_value)), swapped(std::move(swapped_value)) {
+  InitializeListHead(&cancel_link);
+}
+
+inline void pending_pre_state::schedule_cancel(NTSTATUS status) noexcept {
+  if (InterlockedCompareExchange(&cancel_queued, 1, 0) == 0) {
+    cancel_status = status;
+    KeMemoryBarrier();
+    owner->enqueue_cancel(this);
+  }
+}
+
+} // namespace detail
+
+} // namespace ntl::flt

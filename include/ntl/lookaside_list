@@ -59,6 +59,10 @@ constexpr bool lookaside_depth_supported(USHORT depth) noexcept {
           depth <= EX_MAXIMUM_LOOKASIDE_DEPTH_LIMIT);
 }
 
+template <class T> constexpr SIZE_T lookaside_entry_size() noexcept {
+  return sizeof(T) < sizeof(SLIST_ENTRY) ? sizeof(SLIST_ENTRY) : sizeof(T);
+}
+
 } // namespace detail
 
 /**
@@ -129,7 +133,8 @@ public:
     const NTSTATUS status = ExInitializeLookasideListEx(
         &list_, nullptr, nullptr,
         detail::to_lookaside_pool_type(Kind, Options),
-        detail::to_lookaside_flags(Options), sizeof(T), Tag, depth);
+        detail::to_lookaside_flags(Options),
+        detail::lookaside_entry_size<T>(), Tag, depth);
     if (!NT_SUCCESS(status)) {
       throw ntl::exception(status, "ExInitializeLookasideListEx failed.");
     }
@@ -245,6 +250,15 @@ public:
    * @brief Returns the pool tag encoded in this lookaside list type.
    */
   static constexpr ULONG tag() noexcept { return Tag; }
+  /**
+   * @brief Returns the native allocation size of each lookaside entry.
+   *
+   * A freed entry stores an SLIST_ENTRY, so native lookaside storage cannot be
+   * smaller than SLIST_ENTRY even when T itself is smaller.
+   */
+  static constexpr SIZE_T entry_size() noexcept {
+    return detail::lookaside_entry_size<T>();
+  }
 
 private:
   LOOKASIDE_LIST_EX list_{};

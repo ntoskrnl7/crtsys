@@ -1,0 +1,118 @@
+/**
+ * @file work_item
+ * @brief Filter-Manager-rundown-aware detached work items.
+ */
+#pragma once
+
+#include <fltKernel.h>
+#include <intrin.h>
+
+#include "../pool_allocator"
+#include "../status"
+
+#include <type_traits>
+#include <utility>
+
+namespace ntl::flt {
+namespace detail {
+
+inline constexpr ULONG generic_work_pool_tag = ntl::pool_tag("gIoN");
+
+/*
+ * Keep a return address in this driver while Filter Verifier observes the
+ * release.  If this is emitted as a tail jump to FltFreeGenericWorkItem,
+ * verifier cannot attribute the release to the allocating filter and reports
+ * a stale FLT_GENERIC_WORKITEM record during unload.
+ */
+__declspec(noinline) inline void
+free_generic_work_item(PFLT_GENERIC_WORKITEM item) noexcept {
+  FltFreeGenericWorkItem(item);
+  __nop();
+}
+
+template <class Callable> struct generic_work {
+  template <class Fn>
+  explicit generic_work(Fn &&callable) : callable(std::forward<Fn>(callable)) {}
+
+  static void FLTAPI invoke(PFLT_GENERIC_WORKITEM item, PVOID,
+                            PVOID opaque) noexcept {
+    auto *const work = static_cast<generic_work *>(opaque);
+    try {
+      work->callable();
+    } catch (...) {
+      // Detached work has no caller-visible exception channel.
+    }
+    ntl::pool_deleter<generic_work>{generic_work_pool_tag}(work);
+    free_generic_work_item(item);
+  }
+
+  Callable callable;
+};
+
+template <class Callable>
+[[nodiscard]] ntl::status
+queue_generic_work_item(PVOID object, Callable &&callable,
+                        WORK_QUEUE_TYPE queue_type) noexcept {
+  if (!object || KeGetCurrentIrql() > DISPATCH_LEVEL)
+    return STATUS_INVALID_PARAMETER;
+
+  using work_type = generic_work<std::decay_t<Callable>>;
+  PFLT_GENERIC_WORKITEM item = FltAllocateGenericWorkItem();
+  if (!item)
+    return STATUS_INSUFFICIENT_RESOURCES;
+
+  try {
+    auto created = ntl::try_make_pool<work_type>(
+        ntl::pool_kind::nonpaged, ntl::pool_option::none, generic_work_pool_tag,
+        std::forward<Callable>(callable));
+    if (!created) {
+      free_generic_work_item(item);
+      return created.status();
+    }
+
+    auto *const work = created->release();
+    const NTSTATUS status = FltQueueGenericWorkItem(
+        item, object, &work_type::invoke, queue_type, work);
+    if (!NT_SUCCESS(status)) {
+      ntl::pool_deleter<work_type>{generic_work_pool_tag}(work);
+      free_generic_work_item(item);
+    }
+    return status;
+  } catch (...) {
+    free_generic_work_item(item);
+    return STATUS_UNSUCCESSFUL;
+  }
+}
+
+} // namespace detail
+
+/**
+ * Queues detached PASSIVE_LEVEL work against a minifilter instance.
+ *
+ * Filter Manager holds its filter rundown reference until the worker routine
+ * returns. Use this instead of a raw ExQueueWorkItem for work that can overlap
+ * instance teardown or filter unload.
+ */
+template <class Callable>
+[[nodiscard]] ntl::status queue_instance_work_item(
+    PFLT_INSTANCE instance, Callable &&callable,
+    WORK_QUEUE_TYPE queue_type = DelayedWorkQueue) noexcept {
+  return detail::queue_generic_work_item(
+      instance, std::forward<Callable>(callable), queue_type);
+}
+
+/**
+ * Queues detached PASSIVE_LEVEL work against a minifilter registration.
+ *
+ * Filter Manager rejects new work after unload starts and retains filter
+ * rundown until a successfully queued worker routine returns.
+ */
+template <class Callable>
+[[nodiscard]] ntl::status
+queue_filter_work_item(PFLT_FILTER filter, Callable &&callable,
+                       WORK_QUEUE_TYPE queue_type = DelayedWorkQueue) noexcept {
+  return detail::queue_generic_work_item(
+      filter, std::forward<Callable>(callable), queue_type);
+}
+
+} // namespace ntl::flt
