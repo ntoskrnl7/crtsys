@@ -3,11 +3,10 @@
 This directory owns minifilter API contract and runtime fixtures that would
 make the public samples harder to read.
 
-The repository-wide completion status and next implementation order live in
-the
-[`Windows minifilter sample parity`](../../docs/ntl/minifilter-sample-parity.md)
-matrix. Update that matrix only when the corresponding compile and runtime
-evidence has changed.
+The repository-wide mapping from Microsoft samples to NTL mechanisms lives in
+the [`WDK minifilter sample coverage`](WDK-SAMPLE-COVERAGE.md) matrix. Update
+that matrix only when the corresponding public API, compile contract, or
+runtime evidence has changed.
 
 `compile/registration_and_ownership.cpp` is the single-file usage contract for
 name-provider registration, transaction enlist/removal, data-scan section
@@ -85,7 +84,7 @@ opens from a nonexistent visible graft to a physical backing directory,
 prevents direct backing access, translates generated names, and adjusts parent
 directory enumeration, hard-link queries, and name-bearing FSCTL output. The
 verifier app proves the mapping before and after filter unload across NTFS/ReFS
-and x64/WOW64 callers. The exact covered parity slice and filesystem-specific
+and x64/WOW64 callers. The exact covered surface and filesystem-specific
 unsupported operations are listed in
 [`runtime/NAME-CHANGER-README.md`](runtime/NAME-CHANGER-README.md).
 

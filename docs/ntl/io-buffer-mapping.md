@@ -196,9 +196,10 @@ Adapters cover create EA, read/write, query/set file information, query/set EA,
 query/set volume information, query/set security, query/set quota, directory
 query/notification (including extended notification), FSCTL, and IOCTL.
 Post-output length is bounded by `IoStatus.Information`, including warning
-statuses such as `STATUS_BUFFER_OVERFLOW`. Where necessary, NTL calls
-`FltLockUserBuffer`; raw user pointers are copied in the Filter Manager
-requestor process.
+statuses such as `STATUS_BUFFER_OVERFLOW`. NTL may call `FltLockUserBuffer`
+while mapping a pre-operation buffer, but never creates a new MDL from the
+post-operation mapping overload. A post-operation user pointer without an
+existing MDL is copied in the referenced Filter Manager requestor process.
 
 The mapping helpers require `PASSIVE_LEVEL`. If a pre/post callback is not
 already safe, queue it first:
@@ -218,14 +219,67 @@ run cleanup-only `complete()` (which is DISPATCH-safe after transfer), and
 return finished processing. Do not attempt user mapping or raw-buffer copy-back
 on that fallback path.
 
+## Prepared post-output access
+
+Use `prepared_output_buffer` when a minifilter must inspect or modify the
+original output in a safe post callback without replacing it. Preparation runs
+in pre-operation, uses `FltDecodeParameters` to locate the operation's output,
+and locks a user-address buffer only when the operation exposes an MDL field.
+Filter Manager owns any MDL created by `FltLockUserBuffer`.
+
+```cpp
+struct fsctl_state {
+  ntl::flt::prepared_fsctl_output_buffer prepared_output;
+
+  explicit fsctl_state(
+      ntl::flt::prepared_fsctl_output_buffer&& output) noexcept
+      : prepared_output(std::move(output)) {}
+};
+
+auto prepared =
+    ntl::flt::try_prepare_output_buffer(ntl::flt::as_pre(data));
+if (!prepared ||
+    completion.try_emplace(std::move(*prepared)).is_err())
+  return ntl::flt::pre_result::success_no_callback;
+return ntl::flt::pre_result::success_with_callback;
+```
+
+The paired safe callback gets a scoped mutable view:
+
+```cpp
+void finish_fsctl(
+    ntl::flt::safe_file_system_control_operation operation,
+    ntl::flt::related_objects,
+    ntl::flt::completion_ref<fsctl_state> completion) noexcept {
+  auto data = operation.data();
+  const ntl::status accessed = completion->prepared_output.try_visit(
+      operation,
+      [&](ntl::flt::prepared_output_buffer_view view) noexcept {
+        rewrite_records(view.data(), view.valid_size(), view.capacity());
+      });
+  if (accessed.is_err())
+    data.set_io_status(accessed, 0);
+}
+```
+
+`try_visit()` never calls `FltLockUserBuffer`, never frees an MDL, bounds
+`valid_size()` by `IoStatus.Information`, and runs the complete visitor inside
+NTL's SEH guard. The pointer must not escape the visitor. If a lower filter no
+longer presents the MDL or system buffer validated in pre-operation, access
+fails instead of creating new post-operation ownership.
+
 ## Operation-neutral minifilter swapping
 
 `swapped_io_buffers` exposes `input()`, `output()`, and `control_input()` while
 selecting the correct IOPB fields internally. It is not limited to read/write.
 It supports the minifilter operations listed above plus buffered, direct, and
-neither FSCTL/IOCTL layouts. Unsupported minors and Fast I/O return
-`STATUS_NOT_SUPPORTED`; a pre callback can disallow Fast I/O and retry on the
-IRP path.
+neither FSCTL/IOCTL layouts. Because a METHOD_NEITHER control code can impose
+pointer rules not represented by the method bits, such replacement is rejected
+by default. Set `allow_unverified_method_neither_control` only after validating
+that exact control code against the target stack; use
+`prepared_output_buffer` to modify an original output instead. Unsupported
+minors and Fast I/O return `STATUS_NOT_SUPPORTED`; a pre callback can disallow
+Fast I/O and retry on the IRP path.
 
 The operation type also controls whether a buffer selector is legal:
 

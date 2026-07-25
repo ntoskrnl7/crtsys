@@ -147,7 +147,7 @@ The observed filesystem split is intentional:
   and does not require rewrite counters for operations the filesystem
   rejected.
 
-This remains a focused NameChanger parity fixture rather than a claim that
+This remains a focused NameChanger coverage fixture rather than a claim that
 every filesystem accepts every API. The current Find-by-SID implementation
 grows one internal real-mapping batch up to 16 MiB and then paginates its
 translated records through the caller's stream-handle context. A result set

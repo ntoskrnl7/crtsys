@@ -4,11 +4,14 @@ The catalog has two deliberate layers:
 
 - **examples** keep one driver idea readable from entry point to app; and
 - **runtime fixtures** retain the large compatibility, failure, filesystem,
-  WOW64, and Driver Verifier matrices needed to claim WDK-sample parity.
+  WOW64, and Driver Verifier matrices needed to document WDK-sample coverage.
 
 The small examples are complete for the behavior they describe. They are not
 silently presented as production versions of the much larger Microsoft
 samples.
+
+The repository-wide mechanism and verification mapping is maintained in the
+[WDK minifilter sample coverage matrix](../../test/flt/WDK-SAMPLE-COVERAGE.md).
 
 | Sample | WDK counterpart | Primary lesson |
 | --- | --- | --- |
@@ -35,7 +38,7 @@ The recommended first pass is `basic`, `control-device`, `communication`,
 | NameChanger | typed name APIs in the main guide | [`NAME-CHANGER-README.md`](../../test/flt/runtime/NAME-CHANGER-README.md) |
 | Delete | typed set-information APIs in the main guide | [`DELETE-README.md`](../../test/flt/runtime/DELETE-README.md) |
 
-NameChanger intentionally remains a parity fixture instead of a misleading
+NameChanger intentionally remains a coverage fixture instead of a misleading
 200-line example. Its contract is the combination of create redirection, name
 generation and normalization, directory enumeration, query-information,
 rename/hard-link destinations, notifications, and name-bearing FSCTL results.
