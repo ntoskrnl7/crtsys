@@ -1,0 +1,88 @@
+/**
+ * @file data_scan
+ * @brief Filter Manager data-scan section helpers.
+ */
+#pragma once
+
+#include "context"
+#include "types"
+
+#include "../result"
+#include "../status"
+
+#include <fltKernel.h>
+
+namespace ntl::flt {
+
+#if FLT_MGR_WIN8
+
+/** @brief Options forwarded to FltCreateSectionForDataScan. */
+struct data_scan_section_options {
+  ACCESS_MASK desired_access = SECTION_MAP_READ;
+  POBJECT_ATTRIBUTES object_attributes = nullptr;
+  PLARGE_INTEGER maximum_size = nullptr;
+  ULONG page_protection = PAGE_READONLY;
+  ULONG allocation_attributes = SEC_COMMIT;
+  ULONG flags = 0;
+};
+
+/**
+ * @brief Native outputs produced when a data-scan section is created.
+ *
+ * The caller decides whether the handle belongs to kernel or user mode and is
+ * responsible for closing it. The referenced section object must likewise be
+ * dereferenced by the caller. Closing Filter Manager's section association is
+ * a separate operation tied to the section context.
+ */
+struct data_scan_section {
+  HANDLE handle = nullptr;
+  PVOID object = nullptr;
+  LARGE_INTEGER file_size{};
+};
+
+/** @brief Enables Filter Manager data-scan support for one instance. */
+[[nodiscard]] inline ntl::status
+try_register_for_data_scan(instance target) noexcept {
+  if (!target)
+    return STATUS_INVALID_PARAMETER;
+  if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+    return STATUS_INVALID_DEVICE_STATE;
+  return FltRegisterForDataScan(target.native_handle());
+}
+
+/** @brief Creates a data-scan section using an allocated section context. */
+template <class T>
+[[nodiscard]] ntl::result<data_scan_section> try_create_data_scan_section(
+    instance target, ntl::file file,
+    const context_ref<T, context_scope::section> &context,
+    const data_scan_section_options &options = {}) noexcept {
+  if (!target || !file.native_object() || !context)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+    return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+
+  data_scan_section section;
+  const NTSTATUS status = FltCreateSectionForDataScan(
+      target.native_handle(), file.native_object(), context.native_context(),
+      options.desired_access, options.object_attributes, options.maximum_size,
+      options.page_protection, options.allocation_attributes, options.flags,
+      &section.handle, &section.object, &section.file_size);
+  if (!NT_SUCCESS(status))
+    return ntl::unexpected(status);
+  return section;
+}
+
+/** @brief Closes Filter Manager's association with a data-scan context. */
+template <class T>
+[[nodiscard]] ntl::status close_data_scan_section(
+    const context_ref<T, context_scope::section> &context) noexcept {
+  if (!context)
+    return STATUS_INVALID_PARAMETER;
+  if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+    return STATUS_INVALID_DEVICE_STATE;
+  return FltCloseSectionForDataScan(context.native_context());
+}
+
+#endif // FLT_MGR_WIN8
+
+} // namespace ntl::flt

@@ -314,6 +314,7 @@ endif()
 wdk_add_library(
     crtsys
     EXTENDED_CPP_FEATURES
+    WINVER 0x0602
     STATIC
     ${SOURCE_FILES}
     )

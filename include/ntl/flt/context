@@ -26,6 +26,9 @@ enum class context_scope {
   stream,
   stream_handle,
   transaction,
+#if FLT_MGR_WIN8
+  section,
+#endif
 };
 
 /** @brief Pool used by Filter Manager for a typed context. */
@@ -55,6 +58,10 @@ template <context_scope Scope> constexpr ULONG default_context_tag() noexcept {
     return make_context_tag('N', 'T', 'L', 's');
   else if constexpr (Scope == context_scope::stream_handle)
     return make_context_tag('N', 'T', 'L', 'h');
+#if FLT_MGR_WIN8
+  else if constexpr (Scope == context_scope::section)
+    return make_context_tag('N', 'T', 'L', 'x');
+#endif
   else
     return make_context_tag('N', 'T', 'L', 't');
 }
@@ -84,6 +91,10 @@ constexpr FLT_CONTEXT_TYPE native_context_type() {
     return FLT_STREAM_CONTEXT;
   else if constexpr (Scope == context_scope::stream_handle)
     return FLT_STREAMHANDLE_CONTEXT;
+#if FLT_MGR_WIN8
+  else if constexpr (Scope == context_scope::section)
+    return FLT_SECTION_CONTEXT;
+#endif
   else
     return FLT_TRANSACTION_CONTEXT;
 }
@@ -181,14 +192,18 @@ template <> struct context_api<context_scope::volume> {
     return FltSetVolumeContext(objects.volume, FLT_SET_CONTEXT_KEEP_IF_EXISTS,
                                context, old_context);
   }
+  static NTSTATUS remove(const native_context_objects &objects,
+                         PFLT_CONTEXT *old_context) noexcept {
+    return FltDeleteVolumeContext(objects.filter, objects.volume, old_context);
+  }
 };
 
 template <> struct context_api<context_scope::instance> {
   static bool valid(const native_context_objects &objects) noexcept {
-    return objects.filter && objects.instance;
+    return objects.instance != nullptr;
   }
   static bool supports(const native_context_objects &objects) noexcept {
-    return valid(objects);
+    return objects.filter && objects.instance;
   }
   static NTSTATUS get(const native_context_objects &objects,
                       PFLT_CONTEXT *context) noexcept {
@@ -199,6 +214,10 @@ template <> struct context_api<context_scope::instance> {
                       PFLT_CONTEXT *old_context) noexcept {
     return FltSetInstanceContext(
         objects.instance, FLT_SET_CONTEXT_KEEP_IF_EXISTS, context, old_context);
+  }
+  static NTSTATUS remove(const native_context_objects &objects,
+                         PFLT_CONTEXT *old_context) noexcept {
+    return FltDeleteInstanceContext(objects.instance, old_context);
   }
 };
 
@@ -221,6 +240,10 @@ template <> struct context_api<context_scope::file> {
                              FLT_SET_CONTEXT_KEEP_IF_EXISTS, context,
                              old_context);
   }
+  static NTSTATUS remove(const native_context_objects &objects,
+                         PFLT_CONTEXT *old_context) noexcept {
+    return FltDeleteFileContext(objects.instance, objects.file, old_context);
+  }
 };
 
 template <> struct context_api<context_scope::stream> {
@@ -240,6 +263,10 @@ template <> struct context_api<context_scope::stream> {
     return FltSetStreamContext(objects.instance, objects.file,
                                FLT_SET_CONTEXT_KEEP_IF_EXISTS, context,
                                old_context);
+  }
+  static NTSTATUS remove(const native_context_objects &objects,
+                         PFLT_CONTEXT *old_context) noexcept {
+    return FltDeleteStreamContext(objects.instance, objects.file, old_context);
   }
 };
 
@@ -262,6 +289,11 @@ template <> struct context_api<context_scope::stream_handle> {
                                      FLT_SET_CONTEXT_KEEP_IF_EXISTS, context,
                                      old_context);
   }
+  static NTSTATUS remove(const native_context_objects &objects,
+                         PFLT_CONTEXT *old_context) noexcept {
+    return FltDeleteStreamHandleContext(objects.instance, objects.file,
+                                        old_context);
+  }
 };
 
 template <> struct context_api<context_scope::transaction> {
@@ -282,6 +314,11 @@ template <> struct context_api<context_scope::transaction> {
     return FltSetTransactionContext(objects.instance, objects.transaction,
                                     FLT_SET_CONTEXT_KEEP_IF_EXISTS, context,
                                     old_context);
+  }
+  static NTSTATUS remove(const native_context_objects &objects,
+                         PFLT_CONTEXT *old_context) noexcept {
+    return FltDeleteTransactionContext(objects.instance, objects.transaction,
+                                       old_context);
   }
 };
 
@@ -386,6 +423,36 @@ using stream_handle_context =
 template <class T>
 using transaction_context = context_definition<T, context_scope::transaction>;
 
+#if FLT_MGR_WIN8
+/** @brief Declares state supplied to one Filter Manager data-scan section. */
+template <class T>
+using section_context = context_definition<T, context_scope::section>;
+#endif
+
+/**
+ * @brief Non-owning typed view of a context borrowed by a native callback.
+ *
+ * Transaction and section notification callbacks receive PFLT_CONTEXT
+ * directly from Filter Manager. The pointer remains valid for the callback
+ * duration and must not be released by this view.
+ */
+template <class T> class context_view {
+public:
+  explicit context_view(PFLT_CONTEXT context) noexcept
+      : context_(detail::is_context_type<T>(context) ? context : nullptr) {}
+
+  T *get() const noexcept {
+    return context_ ? detail::context_value<T>(context_) : nullptr;
+  }
+  T &operator*() const noexcept { return *get(); }
+  T *operator->() const noexcept { return get(); }
+  explicit operator bool() const noexcept { return context_ != nullptr; }
+  PFLT_CONTEXT native_context() const noexcept { return context_; }
+
+private:
+  PFLT_CONTEXT context_ = nullptr;
+};
+
 /**
  * @brief Owns one reference returned by a Filter Manager context routine.
  * @tparam T C++ context state.
@@ -480,6 +547,42 @@ detail_adopt_context(PFLT_CONTEXT context) noexcept {
   return ntl::ok(context_ref<T, Scope>{context});
 }
 
+#if FLT_MGR_WIN8
+/**
+ * @brief Allocates a typed section context before FltCreateSectionForDataScan.
+ *
+ * Section contexts are not attached through FltSetXxxContext and therefore
+ * use an explicit allocation helper rather than related_objects.
+ */
+template <class T, class... Args>
+ntl::result<context_ref<T, context_scope::section>>
+try_allocate_section_context(
+    PFLT_FILTER filter, const section_context<T> &definition,
+    Args &&...args) noexcept {
+  static_assert(alignof(detail::managed_context_storage<T>) <=
+                    MEMORY_ALLOCATION_ALIGNMENT,
+                "Filter Manager context type requires unsupported alignment");
+  static_assert(std::is_nothrow_destructible_v<T>,
+                "Filter Manager context destructors must be noexcept");
+  static_assert(sizeof(detail::managed_context_storage<T>) <= MAXUSHORT,
+                "Filter Manager context storage exceeds MAXUSHORT");
+
+  if (!filter)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  if (KeGetCurrentIrql() > APC_LEVEL)
+    return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+
+  PFLT_CONTEXT allocated = nullptr;
+  const NTSTATUS status = FltAllocateContext(
+      filter, FLT_SECTION_CONTEXT, sizeof(detail::managed_context_storage<T>),
+      detail::native_context_pool(definition.pool()), &allocated);
+  if (!NT_SUCCESS(status))
+    return ntl::unexpected(status);
+  detail::construct_context<T>(allocated, std::forward<Args>(args)...);
+  return detail_adopt_context<T, context_scope::section>(allocated);
+}
+#endif
+
 namespace detail {
 
 template <class T, context_scope Scope>
@@ -544,6 +647,26 @@ get_or_create_context(const native_context_objects &objects,
   if (old_context)
     FltReleaseContext(old_context);
   return ntl::unexpected(status);
+}
+
+template <class T, context_scope Scope>
+ntl::result<context_ref<T, Scope>>
+remove_context(const native_context_objects &objects) noexcept {
+  if (!context_api<Scope>::valid(objects))
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  if (KeGetCurrentIrql() > APC_LEVEL)
+    return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+
+  PFLT_CONTEXT removed = nullptr;
+  const NTSTATUS status = context_api<Scope>::remove(objects, &removed);
+  if (!NT_SUCCESS(status))
+    return ntl::unexpected(status);
+  if (!is_context_type<T>(removed)) {
+    if (removed)
+      FltReleaseContext(removed);
+    return ntl::unexpected(STATUS_OBJECT_TYPE_MISMATCH);
+  }
+  return detail_adopt_context<T, Scope>(removed);
 }
 
 } // namespace detail

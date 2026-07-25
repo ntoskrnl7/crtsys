@@ -1,0 +1,284 @@
+/**
+ * @file registration_callback
+ * @brief Typed views for non-operation FLT_REGISTRATION callbacks.
+ */
+#pragma once
+
+#include "callback"
+#include "name"
+#include "types"
+
+#include "../status"
+
+#include <fltKernel.h>
+
+#include <algorithm>
+#include <cstddef>
+#include <string_view>
+#include <utility>
+
+namespace ntl::flt {
+
+/** @brief View of one FLT_FILE_NAME_OPTIONS value. */
+class file_name_options {
+public:
+  explicit file_name_options(FLT_FILE_NAME_OPTIONS value) noexcept
+      : value_(value) {}
+
+  bool normalized() const noexcept {
+    return FltGetFileNameFormat(value_) == FLT_FILE_NAME_NORMALIZED;
+  }
+  bool opened() const noexcept {
+    return FltGetFileNameFormat(value_) == FLT_FILE_NAME_OPENED;
+  }
+  bool short_name() const noexcept {
+    return FltGetFileNameFormat(value_) == FLT_FILE_NAME_SHORT;
+  }
+  bool query_default() const noexcept {
+    return FltGetFileNameQueryMethod(value_) == FLT_FILE_NAME_QUERY_DEFAULT;
+  }
+  bool query_cache_only() const noexcept {
+    return FltGetFileNameQueryMethod(value_) == FLT_FILE_NAME_QUERY_CACHE_ONLY;
+  }
+  bool query_filesystem_only() const noexcept {
+    return FltGetFileNameQueryMethod(value_) ==
+           FLT_FILE_NAME_QUERY_FILESYSTEM_ONLY;
+  }
+  bool always_allow_cache_lookup() const noexcept {
+    return FltGetFileNameQueryMethod(value_) ==
+           FLT_FILE_NAME_QUERY_ALWAYS_ALLOW_CACHE_LOOKUP;
+  }
+  FLT_FILE_NAME_OPTIONS native() const noexcept { return value_; }
+
+private:
+  FLT_FILE_NAME_OPTIONS value_ = 0;
+};
+
+/** @brief View of FLT_NORMALIZE_NAME_FLAGS. */
+class normalize_name_flags {
+public:
+  explicit normalize_name_flags(FLT_NORMALIZE_NAME_FLAGS value) noexcept
+      : value_(value) {}
+
+  bool case_sensitive() const noexcept {
+    return (value_ & FLTFL_NORMALIZE_NAME_CASE_SENSITIVE) != 0;
+  }
+  bool destination_file_name() const noexcept {
+    return (value_ & FLTFL_NORMALIZE_NAME_DESTINATION_FILE_NAME) != 0;
+  }
+  FLT_NORMALIZE_NAME_FLAGS native() const noexcept { return value_; }
+
+private:
+  FLT_NORMALIZE_NAME_FLAGS value_ = 0;
+};
+
+/**
+ * @brief Non-owning in/out slot shared across one name-normalization sequence.
+ */
+class normalization_context {
+public:
+  explicit normalization_context(PVOID *value = nullptr) noexcept
+      : value_(value) {}
+
+  void *get() const noexcept { return value_ ? *value_ : nullptr; }
+  template <class T> T *get() const noexcept {
+    return static_cast<T *>(get());
+  }
+  void set(void *context) const noexcept {
+    if (value_)
+      *value_ = context;
+  }
+  template <class T> void set(T *context) const noexcept {
+    set(static_cast<void *>(context));
+  }
+  void *release() const noexcept {
+    if (!value_)
+      return nullptr;
+    return std::exchange(*value_, nullptr);
+  }
+  explicit operator bool() const noexcept { return value_ != nullptr; }
+  PVOID *native() const noexcept { return value_; }
+
+private:
+  PVOID *value_ = nullptr;
+};
+
+/** @brief Bounded output view for one FILE_NAMES_INFORMATION buffer. */
+class normalized_name_output {
+public:
+  normalized_name_output(PFILE_NAMES_INFORMATION value, ULONG bytes) noexcept
+      : value_(value), bytes_(bytes) {}
+
+  ntl::status try_assign(std::wstring_view name) const noexcept {
+    const std::size_t header =
+        FIELD_OFFSET(FILE_NAMES_INFORMATION, FileName);
+    if (!value_ || bytes_ < header)
+      return STATUS_BUFFER_TOO_SMALL;
+    const std::size_t capacity =
+        (static_cast<std::size_t>(bytes_) - header) / sizeof(wchar_t);
+    if (name.size() > capacity)
+      return STATUS_BUFFER_TOO_SMALL;
+
+    value_->NextEntryOffset = 0;
+    value_->FileIndex = 0;
+    value_->FileNameLength =
+        static_cast<ULONG>(name.size() * sizeof(wchar_t));
+    if (!name.empty())
+      RtlCopyMemory(value_->FileName, name.data(), value_->FileNameLength);
+    return STATUS_SUCCESS;
+  }
+
+  ULONG size_bytes() const noexcept { return bytes_; }
+  PFILE_NAMES_INFORMATION native() const noexcept { return value_; }
+  explicit operator bool() const noexcept { return value_ != nullptr; }
+
+private:
+  PFILE_NAMES_INFORMATION value_ = nullptr;
+  ULONG bytes_ = 0;
+};
+
+/** @brief Inputs supplied to a file-name generation callback. */
+class name_generation_request {
+public:
+  name_generation_request(instance target_instance, ntl::file target_file,
+                          callback_data_view data,
+                          file_name_options options) noexcept
+      : instance_(target_instance), file_(target_file), data_(data),
+        options_(options) {}
+
+  instance target_instance() const noexcept { return instance_; }
+  ntl::file target_file() const noexcept { return file_; }
+  callback_data_view callback_data() const noexcept { return data_; }
+  file_name_options options() const noexcept { return options_; }
+
+  /**
+   * @brief Queries the name supplied by the provider below this filter.
+   *
+   * The helper chooses the callback-data or unsafe Filter Manager API as
+   * required and removes REQUEST_FROM_CURRENT_PROVIDER to avoid recursion.
+   */
+  ntl::result<name_information>
+  try_query_lower_name(FLT_FILE_NAME_OPTIONS options) const noexcept {
+    if (!data_ && (!file_ || !instance_))
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    options &= ~FLT_FILE_NAME_REQUEST_FROM_CURRENT_PROVIDER;
+
+    PFLT_FILE_NAME_INFORMATION information = nullptr;
+    const NTSTATUS result =
+        data_ ? FltGetFileNameInformation(data_.native(), options, &information)
+              : FltGetFileNameInformationUnsafe(
+                    file_.native_object(), instance_.native_handle(), options,
+                    &information);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return ntl::ok(name_information{information});
+  }
+
+private:
+  instance instance_;
+  ntl::file file_;
+  callback_data_view data_;
+  file_name_options options_;
+};
+
+/** @brief Outputs supplied to a file-name generation callback. */
+class name_generation_output {
+public:
+  name_generation_output(PBOOLEAN cache, PFLT_NAME_CONTROL name) noexcept
+      : cache_(cache), name_(name) {}
+
+  name_control name() const noexcept { return name_; }
+  void set_cache(bool value) const noexcept {
+    if (cache_)
+      *cache_ = value ? TRUE : FALSE;
+  }
+  explicit operator bool() const noexcept {
+    return cache_ != nullptr && static_cast<bool>(name_);
+  }
+
+private:
+  PBOOLEAN cache_ = nullptr;
+  name_control name_;
+};
+
+/** @brief Inputs supplied while normalizing one path component. */
+class name_normalization_request {
+public:
+  name_normalization_request(instance target_instance, ntl::file target_file,
+                             PCUNICODE_STRING parent_directory,
+                             USHORT volume_name_bytes,
+                             PCUNICODE_STRING component,
+                             normalize_name_flags flags) noexcept
+      : instance_(target_instance), file_(target_file),
+        parent_directory_(parent_directory
+                              ? detail::unicode_view(*parent_directory)
+                              : std::wstring_view{}),
+        volume_name_bytes_(volume_name_bytes),
+        component_(component ? detail::unicode_view(*component)
+                             : std::wstring_view{}),
+        flags_(flags) {}
+
+  instance target_instance() const noexcept { return instance_; }
+  ntl::file target_file() const noexcept { return file_; }
+  std::wstring_view parent_directory() const noexcept {
+    return parent_directory_;
+  }
+  std::wstring_view volume_name() const noexcept {
+    const std::size_t characters = (std::min)(
+        parent_directory_.size(),
+        static_cast<std::size_t>(volume_name_bytes_ / sizeof(wchar_t)));
+    return parent_directory_.substr(0, characters);
+  }
+  USHORT volume_name_size_bytes() const noexcept {
+    return volume_name_bytes_;
+  }
+  std::wstring_view component() const noexcept { return component_; }
+  normalize_name_flags flags() const noexcept { return flags_; }
+
+private:
+  instance instance_;
+  ntl::file file_;
+  std::wstring_view parent_directory_;
+  USHORT volume_name_bytes_ = 0;
+  std::wstring_view component_;
+  normalize_name_flags flags_;
+};
+
+/** @brief Outputs shared by legacy and extended normalization callbacks. */
+class name_normalization_output {
+public:
+  name_normalization_output(PFILE_NAMES_INFORMATION expanded_name, ULONG bytes,
+                            PVOID *context) noexcept
+      : expanded_name_(expanded_name, bytes), context_(context) {}
+
+  normalized_name_output expanded_name() const noexcept {
+    return expanded_name_;
+  }
+  normalization_context context() const noexcept { return context_; }
+
+private:
+  normalized_name_output expanded_name_;
+  normalization_context context_;
+};
+
+using generate_file_name_callback = ntl::status (*)(
+    name_generation_request request, name_generation_output output) noexcept;
+using normalize_name_component_callback = ntl::status (*)(
+    name_normalization_request request,
+    name_normalization_output output) noexcept;
+using normalize_context_cleanup_callback =
+    void (*)(normalization_context context) noexcept;
+
+#if FLT_MGR_LONGHORN
+template <class T>
+using transaction_notification_callback = ntl::status (*)(
+    related_objects objects, context_view<T> context,
+    transaction_notifications notifications) noexcept;
+#endif
+
+template <class T>
+using section_notification_callback = ntl::status (*)(
+    instance target_instance, context_view<T> context,
+    callback_data_view data) noexcept;
+
+} // namespace ntl::flt

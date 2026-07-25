@@ -671,6 +671,13 @@ bool ntl_expand_stack_test() {
   if (result != 6)
     return false;
 
+  std::wstring lvalue_storage = L"expanded-stack lvalue";
+  std::wstring_view lvalue_view = lvalue_storage;
+  const auto observed_lvalue = ntl::expand_stack(
+      [](std::wstring_view value) { return std::wstring(value); }, lvalue_view);
+  if (observed_lvalue != lvalue_storage)
+    return false;
+
   std::string t1;
   std::string t2;
   std::string t3;
@@ -2109,6 +2116,13 @@ TEST(ntl_test, ntl_expand_stack_test) {
       [](int i, long l, double d) -> long { return (long)(i + l + d); }, 1, 2,
       3.0);
   EXPECT_EQ(result, 6);
+
+  std::wstring lvalue_storage = L"expanded-stack lvalue";
+  std::wstring_view lvalue_view = lvalue_storage;
+  EXPECT_EQ(ntl::expand_stack(
+                [](std::wstring_view value) { return std::wstring(value); },
+                lvalue_view),
+            lvalue_storage);
 
   std::string t1;
   std::string t2;

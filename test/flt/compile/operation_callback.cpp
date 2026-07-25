@@ -17,54 +17,72 @@ namespace ntl_flt_compile_test {
 template <typename T, typename = void>
 struct has_input_member : std::false_type {};
 template <typename T>
-struct has_input_member<T,
-                        std::void_t<decltype(std::declval<T &>().input)>>
+struct has_input_member<T, std::void_t<decltype(std::declval<T &>().input)>>
     : std::true_type {};
 
 template <typename T, typename = void>
 struct has_output_member : std::false_type {};
 template <typename T>
-struct has_output_member<T,
-                         std::void_t<decltype(std::declval<T &>().output)>>
+struct has_output_member<T, std::void_t<decltype(std::declval<T &>().output)>>
     : std::true_type {};
 
 template <typename T, typename = void>
 struct has_completed_member : std::false_type {};
 template <typename T>
 struct has_completed_member<
-    T, std::void_t<decltype(std::declval<T &>().completed)>>
-    : std::true_type {};
+    T, std::void_t<decltype(std::declval<T &>().completed)>> : std::true_type {
+};
 
 static_assert(sizeof(ntl::ipc::mapped_buffer_descriptor) == 40);
 static_assert(std::is_copy_constructible_v<ntl::ipc::process_connection>);
-static_assert(std::is_same_v<
-              decltype(std::declval<
-                           const ntl::flt::communication_connection &>()
-                           .mapping_process()),
-              ntl::ipc::process_connection>);
-static_assert(std::is_same_v<
-              decltype(std::declval<ntl::flt::communication_port_options &>()
-                           .process_mapping_limits(
-                               std::declval<
-                                   ntl::ipc::process_connection_limits>())),
-              ntl::flt::communication_port_options &>);
+static_assert(
+    std::is_same_v<
+        decltype(std::declval<const ntl::flt::communication_connection &>()
+                     .mapping_process()),
+        ntl::ipc::process_connection>);
+static_assert(
+    std::is_same_v<
+        decltype(std::declval<ntl::flt::communication_port_options &>()
+                     .process_mapping_limits(
+                         std::declval<ntl::ipc::process_connection_limits>())),
+        ntl::flt::communication_port_options &>);
 static_assert(!std::is_copy_constructible_v<ntl::ipc::mapped_io_buffers>);
 static_assert(std::is_move_constructible_v<ntl::ipc::mapped_io_buffers>);
 static_assert(!std::is_copy_constructible_v<ntl::flt::swapped_io_buffers>);
 static_assert(std::is_move_constructible_v<ntl::flt::swapped_io_buffers>);
 static_assert(!std::is_copy_constructible_v<ntl::flt::swapped_buffer_view>);
 static_assert(std::is_move_constructible_v<ntl::flt::swapped_buffer_view>);
+static_assert(
+    !std::is_copy_constructible_v<ntl::flt::prepared_fsctl_output_buffer>);
+static_assert(std::is_nothrow_move_constructible_v<
+              ntl::flt::prepared_fsctl_output_buffer>);
+static_assert(
+    std::is_trivially_copyable_v<ntl::flt::safe_file_system_control_operation>);
+static_assert(!std::is_same_v<ntl::flt::safe_file_system_control_operation,
+                              ntl::flt::file_system_control_callback_data>);
+static_assert(!std::is_constructible_v<
+              ntl::flt::safe_file_system_control_operation,
+              ntl::flt::file_system_control_callback_data>);
 static_assert(std::is_copy_constructible_v<ntl::ipc::borrowed_mdl_view>);
 static_assert(ntl::ipc::map_io_options{}.user_mdls ==
               ntl::ipc::user_mdl_policy::isolate_partial_pages);
 static_assert(!has_completed_member<ntl::ipc::map_io_options>::value);
 static_assert(!has_input_member<ntl::flt::swap_io_options>::value);
 static_assert(!has_output_member<ntl::flt::swap_io_options>::value);
-static_assert(!std::is_copy_constructible_v<
-              ntl::flt::pending_pre_operation_queue>);
-static_assert(!std::is_copy_constructible_v<
-              ntl::flt::pending_post_operation_registry>);
+static_assert(
+    !ntl::flt::swap_io_options{}.allow_unverified_method_neither_control);
+static_assert(
+    !std::is_copy_constructible_v<ntl::flt::pending_pre_operation_queue>);
+static_assert(
+    !std::is_copy_constructible_v<ntl::flt::pending_post_operation_registry>);
 static_assert(sizeof(ntl::ipc::pending_request_id) == 16);
+static_assert(!std::is_copy_constructible_v<ntl::flt::callback_data_owner>);
+static_assert(
+    std::is_nothrow_move_constructible_v<ntl::flt::callback_data_owner>);
+using allocated_callback_data = decltype(ntl::flt::try_allocate_callback_data(
+    std::declval<ntl::flt::instance>()));
+static_assert(std::is_same_v<allocated_callback_data,
+                             ntl::result<ntl::flt::callback_data_owner>>);
 
 using mapped_read_result = decltype(ntl::flt::try_map_io_buffers(
     ntl::flt::as_post(std::declval<ntl::flt::read_callback_data>()),
@@ -75,49 +93,48 @@ using mapped_completed_irp_result =
         std::declval<ntl::ipc::process_connection &>()));
 using swapped_write_result = decltype(ntl::flt::try_swap_io_buffers(
     ntl::flt::as_pre(std::declval<ntl::flt::write_callback_data>())));
-static_assert(std::is_same_v<
-              mapped_read_result,
-              ntl::result<ntl::flt::mapped_operation_buffers>>);
-static_assert(std::is_same_v<
-              swapped_write_result,
-              ntl::result<ntl::flt::swapped_io_buffers>>);
-static_assert(std::is_same_v<
-              mapped_completed_irp_result,
-              ntl::result<ntl::ipc::mapped_io_buffers>>);
+using prepared_fsctl_result =
+    decltype(ntl::flt::try_prepare_output_buffer(ntl::flt::as_pre(
+        std::declval<ntl::flt::file_system_control_callback_data>())));
+static_assert(std::is_same_v<mapped_read_result,
+                             ntl::result<ntl::flt::mapped_operation_buffers>>);
+static_assert(std::is_same_v<swapped_write_result,
+                             ntl::result<ntl::flt::swapped_io_buffers>>);
+static_assert(
+    std::is_same_v<prepared_fsctl_result,
+                   ntl::result<ntl::flt::prepared_fsctl_output_buffer>>);
+static_assert(std::is_same_v<mapped_completed_irp_result,
+                             ntl::result<ntl::ipc::mapped_io_buffers>>);
 
 template <typename... Data>
 inline constexpr bool mapped_pre_surface_v =
-    (std::is_same_v<
-         decltype(ntl::flt::try_map_io_buffers(
-             ntl::flt::as_pre(std::declval<Data>()),
-             std::declval<ntl::ipc::process_connection &>())),
-         ntl::result<ntl::flt::mapped_operation_buffers>> &&
+    (std::is_same_v<decltype(ntl::flt::try_map_io_buffers(
+                        ntl::flt::as_pre(std::declval<Data>()),
+                        std::declval<ntl::ipc::process_connection &>())),
+                    ntl::result<ntl::flt::mapped_operation_buffers>> &&
      ...);
 
 template <typename... Data>
 inline constexpr bool mapped_post_surface_v =
-    (std::is_same_v<
-         decltype(ntl::flt::try_map_io_buffers(
-             ntl::flt::as_post(std::declval<Data>()),
-             std::declval<ntl::ipc::process_connection &>())),
-         ntl::result<ntl::flt::mapped_operation_buffers>> &&
+    (std::is_same_v<decltype(ntl::flt::try_map_io_buffers(
+                        ntl::flt::as_post(std::declval<Data>()),
+                        std::declval<ntl::ipc::process_connection &>())),
+                    ntl::result<ntl::flt::mapped_operation_buffers>> &&
      ...);
 
 template <typename... Data>
 inline constexpr bool unambiguous_swapped_pre_surface_v =
-    (std::is_same_v<
-         decltype(ntl::flt::try_swap_io_buffers(
-             ntl::flt::as_pre(std::declval<Data>()))),
-         ntl::result<ntl::flt::swapped_io_buffers>> &&
+    (std::is_same_v<decltype(ntl::flt::try_swap_io_buffers(
+                        ntl::flt::as_pre(std::declval<Data>()))),
+                    ntl::result<ntl::flt::swapped_io_buffers>> &&
      ...);
 
 template <typename... Data>
 inline constexpr bool selectable_swapped_pre_surface_v =
-    (std::is_same_v<
-         decltype(ntl::flt::try_swap_io_buffers(
-             ntl::flt::as_pre(std::declval<Data>()),
-             ntl::flt::swap_buffer::all)),
-         ntl::result<ntl::flt::swapped_io_buffers>> &&
+    (std::is_same_v<decltype(ntl::flt::try_swap_io_buffers(
+                        ntl::flt::as_pre(std::declval<Data>()),
+                        ntl::flt::swap_buffer::all)),
+                    ntl::result<ntl::flt::swapped_io_buffers>> &&
      ...);
 
 using create_data_for_buffers = ntl::flt::create_callback_data;
@@ -134,13 +151,11 @@ using query_volume_data_for_buffers =
 using set_volume_data_for_buffers =
     ntl::flt::set_volume_information_callback_data;
 using directory_data_for_buffers = ntl::flt::directory_control_callback_data;
-using fsctl_data_for_buffers =
-    ntl::flt::file_system_control_callback_data;
+using fsctl_data_for_buffers = ntl::flt::file_system_control_callback_data;
 using ioctl_data_for_buffers = ntl::flt::device_control_callback_data;
 using internal_ioctl_data_for_buffers =
     ntl::flt::internal_device_control_callback_data;
-using query_security_data_for_buffers =
-    ntl::flt::query_security_callback_data;
+using query_security_data_for_buffers = ntl::flt::query_security_callback_data;
 using set_security_data_for_buffers = ntl::flt::set_security_callback_data;
 using query_quota_data_for_buffers = ntl::flt::query_quota_callback_data;
 using set_quota_data_for_buffers = ntl::flt::set_quota_callback_data;
@@ -161,11 +176,10 @@ static_assert(mapped_post_surface_v<
 static_assert(unambiguous_swapped_pre_surface_v<
               create_data_for_buffers, read_data_for_buffers,
               write_data_for_buffers, query_information_data_for_buffers,
-              set_information_data_for_buffers,
-              set_ea_data_for_buffers, query_volume_data_for_buffers,
-              set_volume_data_for_buffers, directory_data_for_buffers,
-              query_security_data_for_buffers, set_security_data_for_buffers,
-              set_quota_data_for_buffers>);
+              set_information_data_for_buffers, set_ea_data_for_buffers,
+              query_volume_data_for_buffers, set_volume_data_for_buffers,
+              directory_data_for_buffers, query_security_data_for_buffers,
+              set_security_data_for_buffers, set_quota_data_for_buffers>);
 static_assert(selectable_swapped_pre_surface_v<
               query_ea_data_for_buffers, query_quota_data_for_buffers,
               fsctl_data_for_buffers, ioctl_data_for_buffers,
@@ -175,17 +189,17 @@ template <typename Data, typename = void>
 struct can_map_without_typed_phase : std::false_type {};
 template <typename Data>
 struct can_map_without_typed_phase<
-    Data, std::void_t<decltype(ntl::flt::try_map_io_buffers(
-              std::declval<Data>(),
-              std::declval<ntl::ipc::process_connection &>()))>>
+    Data,
+    std::void_t<decltype(ntl::flt::try_map_io_buffers(
+        std::declval<Data>(), std::declval<ntl::ipc::process_connection &>()))>>
     : std::true_type {};
 
 template <typename Data, typename = void>
 struct can_swap_without_typed_pre : std::false_type {};
 template <typename Data>
 struct can_swap_without_typed_pre<
-    Data, std::void_t<decltype(
-              ntl::flt::try_swap_io_buffers(std::declval<Data>()))>>
+    Data,
+    std::void_t<decltype(ntl::flt::try_swap_io_buffers(std::declval<Data>()))>>
     : std::true_type {};
 
 template <typename Data, typename = void>
@@ -193,25 +207,25 @@ struct can_swap_pre_without_selection : std::false_type {};
 template <typename Data>
 struct can_swap_pre_without_selection<
     Data, std::void_t<decltype(ntl::flt::try_swap_io_buffers(
-              ntl::flt::as_pre(std::declval<Data>())))>>
-    : std::true_type {};
+              ntl::flt::as_pre(std::declval<Data>())))>> : std::true_type {};
 
 template <typename Data, typename = void>
 struct can_swap_pre_with_selection : std::false_type {};
 template <typename Data>
 struct can_swap_pre_with_selection<
-    Data, std::void_t<decltype(ntl::flt::try_swap_io_buffers(
-              ntl::flt::as_pre(std::declval<Data>()),
-              ntl::flt::swap_buffer::all))>>
+    Data,
+    std::void_t<decltype(ntl::flt::try_swap_io_buffers(
+        ntl::flt::as_pre(std::declval<Data>()), ntl::flt::swap_buffer::all))>>
     : std::true_type {};
 
 template <typename Data, typename = void>
 struct can_swap_pre_with_policy_as_selection : std::false_type {};
 template <typename Data>
 struct can_swap_pre_with_policy_as_selection<
-    Data, std::void_t<decltype(ntl::flt::try_swap_io_buffers(
-              ntl::flt::as_pre(std::declval<Data>()),
-              ntl::flt::swap_io_options{}))>> : std::true_type {};
+    Data,
+    std::void_t<decltype(ntl::flt::try_swap_io_buffers(
+        ntl::flt::as_pre(std::declval<Data>()), ntl::flt::swap_io_options{}))>>
+    : std::true_type {};
 
 template <typename Data, typename = void>
 struct can_swap_pre_with_selection_and_policy : std::false_type {};
@@ -219,69 +233,132 @@ template <typename Data>
 struct can_swap_pre_with_selection_and_policy<
     Data, std::void_t<decltype(ntl::flt::try_swap_io_buffers(
               ntl::flt::as_pre(std::declval<Data>()),
-              ntl::flt::swap_buffer::all,
-              ntl::flt::swap_io_options{}))>> : std::true_type {};
+              ntl::flt::swap_buffer::all, ntl::flt::swap_io_options{}))>>
+    : std::true_type {};
+
+template <typename Data, typename = void>
+struct can_prepare_output : std::false_type {};
+template <typename Data>
+struct can_prepare_output<
+    Data, std::void_t<decltype(ntl::flt::try_prepare_output_buffer(
+              ntl::flt::as_pre(std::declval<Data>())))>> : std::true_type {};
+
+template <typename Phase, typename = void>
+struct can_prepare_output_from_phase : std::false_type {};
+template <typename Phase>
+struct can_prepare_output_from_phase<
+    Phase, std::void_t<decltype(ntl::flt::try_prepare_output_buffer(
+               std::declval<Phase>()))>> : std::true_type {};
+
+struct prepared_output_visitor {
+  void operator()(ntl::flt::prepared_output_buffer_view) noexcept;
+};
+
+template <typename Operation, typename = void>
+struct can_visit_prepared_fsctl_output : std::false_type {};
+template <typename Operation>
+struct can_visit_prepared_fsctl_output<
+    Operation,
+    std::void_t<
+        decltype(std::declval<const ntl::flt::prepared_fsctl_output_buffer &>()
+                     .try_visit(std::declval<Operation>(),
+                                prepared_output_visitor{}))>> : std::true_type {
+};
 
 static_assert(
     !can_map_without_typed_phase<ntl::flt::read_callback_data>::value);
 static_assert(
     !can_swap_without_typed_pre<ntl::flt::write_callback_data>::value);
+static_assert(
+    can_prepare_output<ntl::flt::file_system_control_callback_data>::value);
+static_assert(
+    can_prepare_output<ntl::flt::directory_control_callback_data>::value);
+static_assert(can_prepare_output<ntl::flt::read_callback_data>::value);
+static_assert(
+    can_prepare_output<ntl::flt::query_information_callback_data>::value);
+static_assert(can_prepare_output<ntl::flt::query_ea_callback_data>::value);
+static_assert(can_prepare_output<
+              ntl::flt::query_volume_information_callback_data>::value);
+static_assert(can_prepare_output<ntl::flt::device_control_callback_data>::value);
+static_assert(can_prepare_output<
+              ntl::flt::internal_device_control_callback_data>::value);
+static_assert(
+    can_prepare_output<ntl::flt::query_security_callback_data>::value);
+static_assert(can_prepare_output<ntl::flt::query_quota_callback_data>::value);
+static_assert(!can_prepare_output<ntl::flt::write_callback_data>::value);
+static_assert(!can_prepare_output<ntl::flt::set_information_callback_data>::value);
+static_assert(!can_prepare_output<ntl::flt::set_ea_callback_data>::value);
+static_assert(
+    !can_prepare_output<ntl::flt::set_security_callback_data>::value);
+static_assert(!can_prepare_output<ntl::flt::set_quota_callback_data>::value);
+static_assert(!can_prepare_output<ntl::flt::cleanup_callback_data>::value);
+static_assert(!can_prepare_output_from_phase<ntl::flt::post_operation<
+                  ntl::flt::operation_id::file_system_control>>::value);
+static_assert(can_visit_prepared_fsctl_output<
+              ntl::flt::safe_file_system_control_operation>::value);
+static_assert(!can_visit_prepared_fsctl_output<
+              ntl::flt::safe_directory_control_operation>::value);
 static_assert(!can_swap_without_typed_pre<
               ntl::flt::post_operation<ntl::flt::operation_id::read>>::value);
-static_assert(can_swap_pre_without_selection<
-              ntl::flt::read_callback_data>::value);
-static_assert(!can_swap_pre_with_selection<
-              ntl::flt::read_callback_data>::value);
-static_assert(!can_swap_pre_without_selection<
-              ntl::flt::query_ea_callback_data>::value);
-static_assert(can_swap_pre_with_selection<
-              ntl::flt::query_ea_callback_data>::value);
+static_assert(
+    can_swap_pre_without_selection<ntl::flt::read_callback_data>::value);
+static_assert(
+    !can_swap_pre_with_selection<ntl::flt::read_callback_data>::value);
+static_assert(
+    !can_swap_pre_without_selection<ntl::flt::query_ea_callback_data>::value);
+static_assert(
+    can_swap_pre_with_selection<ntl::flt::query_ea_callback_data>::value);
 static_assert(!can_swap_pre_with_policy_as_selection<
               ntl::flt::query_ea_callback_data>::value);
 static_assert(can_swap_pre_with_selection_and_policy<
               ntl::flt::query_ea_callback_data>::value);
-static_assert(!can_swap_pre_without_selection<
-              ntl::flt::cleanup_callback_data>::value);
-static_assert(!can_swap_pre_with_selection<
-              ntl::flt::cleanup_callback_data>::value);
-static_assert(std::is_same_v<
-              decltype(std::declval<ntl::ipc::mapped_io_buffers &>()
-                           .control_input()),
-              const ntl::ipc::mapped_buffer_view *>);
-static_assert(std::is_same_v<
-              decltype(std::declval<ntl::flt::swapped_io_buffers &>()
-                           .control_input()),
-              const ntl::flt::swapped_buffer_view *>);
+static_assert(
+    !can_swap_pre_without_selection<ntl::flt::cleanup_callback_data>::value);
+static_assert(
+    !can_swap_pre_with_selection<ntl::flt::cleanup_callback_data>::value);
+static_assert(
+    std::is_same_v<
+        decltype(std::declval<ntl::ipc::mapped_io_buffers &>().control_input()),
+        const ntl::ipc::mapped_buffer_view *>);
+static_assert(
+    std::is_same_v<decltype(std::declval<ntl::flt::swapped_io_buffers &>()
+                                .control_input()),
+                   const ntl::flt::swapped_buffer_view *>);
 static_assert(std::is_same_v<
               decltype(std::declval<ntl::flt::swapped_io_buffers &>().apply()),
               ntl::status>);
+static_assert(
+    std::is_same_v<decltype(std::declval<const ntl::ipc::mapped_io_buffers &>()
+                                .has_open_mappings()),
+                   bool>);
+static_assert(
+    std::is_same_v<decltype(std::declval<const ntl::flt::swapped_io_buffers &>()
+                                .has_open_user_mappings()),
+                   bool>);
+static_assert(
+    std::is_same_v<
+        decltype(std::declval<ntl::flt::swapped_io_buffers &>().complete()),
+        ntl::status>);
 static_assert(std::is_same_v<
-              decltype(std::declval<
-                           const ntl::ipc::mapped_io_buffers &>()
-                           .has_open_mappings()),
-              bool>);
-static_assert(std::is_same_v<
-              decltype(std::declval<
-                           const ntl::flt::swapped_io_buffers &>()
-                           .has_open_user_mappings()),
-              bool>);
-static_assert(std::is_same_v<
-              decltype(std::declval<ntl::flt::swapped_io_buffers &>()
-                           .complete()),
+              decltype(std::declval<ntl::flt::swapped_io_buffers &&>()
+                           .release_to_completion(std::declval<
+                                                  ntl::flt::completion_slot<
+                                                      ntl::flt::
+                                                          swapped_io_buffers>
+                                                      &>())),
               ntl::status>);
-static_assert(std::is_same_v<
-              decltype(std::declval<ntl::flt::swapped_io_buffers &>().copy_back(
-                  ntl::flt::as_post(
-                      std::declval<ntl::flt::read_callback_data>()))),
-              ntl::status>);
+static_assert(
+    std::is_same_v<
+        decltype(std::declval<ntl::flt::swapped_io_buffers &>().copy_back(
+            ntl::flt::as_post(std::declval<ntl::flt::read_callback_data>()))),
+        ntl::status>);
 
 using swapped_fsctl_result = decltype(ntl::flt::try_swap_io_buffers(
     ntl::flt::as_pre(
         std::declval<ntl::flt::file_system_control_callback_data>()),
     ntl::flt::swap_buffer::all));
 using swapped_ioctl_result = decltype(ntl::flt::try_swap_io_buffers(
-    ntl::flt::as_pre(
-        std::declval<ntl::flt::device_control_callback_data>()),
+    ntl::flt::as_pre(std::declval<ntl::flt::device_control_callback_data>()),
     ntl::flt::swap_buffer::all));
 static_assert(std::is_same_v<swapped_fsctl_result, swapped_write_result>);
 static_assert(std::is_same_v<swapped_ioctl_result, swapped_write_result>);
@@ -299,40 +376,139 @@ static_assert(std::is_same_v<swapped_create_result, swapped_write_result>);
 static_assert(std::is_same_v<swapped_query_ea_result, swapped_write_result>);
 static_assert(std::is_same_v<swapped_query_quota_result, swapped_write_result>);
 static_assert(std::is_same_v<swapped_set_quota_result, swapped_write_result>);
-static_assert(std::is_same_v<
-              decltype(std::declval<ntl::flt::pending_pre_operation_queue &>()
-                           .resume(std::declval<
-                               ntl::ipc::pending_request_id>())),
-              ntl::status>);
+static_assert(
+    std::is_same_v<
+        decltype(std::declval<ntl::flt::pending_pre_operation_queue &>().resume(
+            std::declval<ntl::ipc::pending_request_id>())),
+        ntl::status>);
 
-ntl::status deferred_pre_test_routine(
-    PFLT_CALLBACK_DATA, void *, ntl::flt::deferred_pre_completion &) noexcept;
+ntl::status
+deferred_pre_test_routine(PFLT_CALLBACK_DATA, void *,
+                          ntl::flt::deferred_pre_completion &) noexcept;
 ntl::status deferred_post_test_routine(PFLT_CALLBACK_DATA, void *) noexcept;
-static_assert(std::is_same_v<
-              decltype(ntl::flt::queue_pre_operation_at_passive(
-                  static_cast<PFLT_CALLBACK_DATA>(nullptr),
-                  &deferred_pre_test_routine)),
-              ntl::status>);
-static_assert(std::is_same_v<
-              decltype(ntl::flt::queue_post_operation_at_passive(
-                  static_cast<PFLT_CALLBACK_DATA>(nullptr),
-                  &deferred_post_test_routine)),
-              ntl::status>);
-static_assert(std::is_same_v<
-              decltype(std::declval<
-                           ntl::flt::pending_post_operation_registry &>()
-                           .reply(std::declval<
-                               ntl::ipc::pending_request_id>())),
-              ntl::status>);
+static_assert(std::is_same_v<decltype(ntl::flt::queue_pre_operation_at_passive(
+                                 static_cast<PFLT_CALLBACK_DATA>(nullptr),
+                                 &deferred_pre_test_routine)),
+                             ntl::status>);
+static_assert(std::is_same_v<decltype(ntl::flt::queue_post_operation_at_passive(
+                                 static_cast<PFLT_CALLBACK_DATA>(nullptr),
+                                 &deferred_post_test_routine)),
+                             ntl::status>);
+static_assert(
+    std::is_same_v<
+        decltype(std::declval<ntl::flt::pending_post_operation_registry &>()
+                     .reply(std::declval<ntl::ipc::pending_request_id>())),
+        ntl::status>);
 
 using close_data = ntl::flt::callback_data<ntl::flt::operation::close>;
 using create_data = ntl::flt::callback_data<ntl::flt::operation::create>;
+using network_query_open_data = ntl::flt::network_query_open_callback_data;
+using set_information_data = ntl::flt::set_information_callback_data;
+using cleanup_data = ntl::flt::cleanup_callback_data;
+
+template <class T, class = void>
+struct exposes_native_destination_buffer : std::false_type {};
+
+template <class T>
+struct exposes_native_destination_buffer<
+    T, std::void_t<decltype(std::declval<T>().native())>> : std::true_type {};
+
+template <class T, class = void>
+struct exposes_native_disposition_buffer : std::false_type {};
+
+template <class T>
+struct exposes_native_disposition_buffer<
+    T, std::void_t<decltype(std::declval<T>().native())>> : std::true_type {};
+
+template <class Phase, class = void>
+struct can_complete_reparse : std::false_type {};
+
+template <class Phase>
+struct can_complete_reparse<
+    Phase, std::void_t<decltype(ntl::flt::try_complete_reparse(
+               std::declval<Phase>(), std::declval<std::wstring_view>(),
+               ntl::flt::reparse_name_kind::absolute))>> : std::true_type {};
+
+template <class Phase, class = void>
+struct can_query_destination_name : std::false_type {};
+
+template <class Phase>
+struct can_query_destination_name<
+    Phase, std::void_t<decltype(ntl::flt::try_query_destination_name(
+               std::declval<Phase>(),
+               FLT_FILE_NAME_NORMALIZED | FLT_FILE_NAME_QUERY_DEFAULT))>>
+    : std::true_type {};
+
+template <class Phase, class = void>
+struct can_get_tunneled_name : std::false_type {};
+
+template <class Phase>
+struct can_get_tunneled_name<
+    Phase, std::void_t<decltype(ntl::flt::try_get_tunneled_name(
+               std::declval<Phase>(),
+               std::declval<const ntl::flt::name_information &>()))>>
+    : std::true_type {};
+
+template <class Phase, class = void>
+struct can_query_cleanup_deletion : std::false_type {};
+
+template <class Phase>
+struct can_query_cleanup_deletion<
+    Phase, std::void_t<decltype(ntl::flt::try_query_cleanup_deletion(
+               std::declval<Phase>()))>> : std::true_type {};
+
+template <class Phase, class = void>
+struct can_cancel_file_open : std::false_type {};
+
+template <class Phase>
+struct can_cancel_file_open<Phase,
+                            std::void_t<decltype(ntl::flt::try_cancel_file_open(
+                                std::declval<Phase>()))>> : std::true_type {};
 
 static_assert(std::is_same_v<close_data, ntl::flt::close_callback_data>);
 static_assert(std::is_same_v<create_data, ntl::flt::create_callback_data>);
 static_assert(
     std::is_same_v<ntl::flt::callback_data<ntl::flt::operation::cleanup>,
                    ntl::flt::cleanup_callback_data>);
+static_assert(std::is_same_v<
+              decltype(std::declval<network_query_open_data>().parameters()),
+              ntl::flt::network_query_open_parameters>);
+static_assert(std::is_same_v<decltype(std::declval<set_information_data>()
+                                          .parameters()
+                                          .destination()),
+                             ntl::flt::destination_information_view>);
+static_assert(std::is_same_v<decltype(std::declval<set_information_data>()
+                                          .parameters()
+                                          .disposition()),
+                             ntl::flt::disposition_information_view>);
+static_assert(!exposes_native_destination_buffer<
+              ntl::flt::destination_information_view>::value);
+static_assert(!exposes_native_disposition_buffer<
+              ntl::flt::disposition_information_view>::value);
+static_assert(can_complete_reparse<
+              ntl::flt::pre_operation<ntl::flt::operation_id::create>>::value);
+static_assert(!can_complete_reparse<
+              ntl::flt::post_operation<ntl::flt::operation_id::create>>::value);
+static_assert(!can_complete_reparse<create_data>::value);
+static_assert(can_query_destination_name<ntl::flt::pre_operation<
+                  ntl::flt::operation_id::set_information>>::value);
+static_assert(!can_query_destination_name<ntl::flt::post_operation<
+                  ntl::flt::operation_id::set_information>>::value);
+static_assert(can_get_tunneled_name<
+              ntl::flt::post_operation<ntl::flt::operation_id::create>>::value);
+static_assert(!can_get_tunneled_name<
+              ntl::flt::pre_operation<ntl::flt::operation_id::create>>::value);
+static_assert(
+    can_query_cleanup_deletion<
+        ntl::flt::post_operation<ntl::flt::operation_id::cleanup>>::value);
+static_assert(!can_query_cleanup_deletion<
+              ntl::flt::pre_operation<ntl::flt::operation_id::cleanup>>::value);
+static_assert(!can_query_cleanup_deletion<cleanup_data>::value);
+static_assert(can_cancel_file_open<
+              ntl::flt::post_operation<ntl::flt::operation_id::create>>::value);
+static_assert(!can_cancel_file_open<
+              ntl::flt::pre_operation<ntl::flt::operation_id::create>>::value);
+static_assert(!can_cancel_file_open<create_data>::value);
 
 static_assert(
     std::is_same_v<
@@ -341,6 +517,48 @@ static_assert(
 static_assert(std::is_same_v<
               decltype(std::declval<create_data>().parameters().disposition()),
               UCHAR>);
+static_assert(
+    std::is_same_v<
+        decltype(std::declval<create_data>().parameters().delete_on_close()),
+        bool>);
+static_assert(
+    std::is_same_v<decltype(std::declval<create_data>()
+                                .parameters()
+                                .try_replace_target_name(
+                                    std::declval<std::wstring_view>())),
+                   ntl::status>);
+static_assert(std::is_same_v<decltype(std::declval<create_data>()
+                                          .parameters()
+                                          .clear_related_target()),
+                             void>);
+static_assert(std::is_same_v<decltype(ntl::flt::try_complete_reparse(
+                                 ntl::flt::as_pre(std::declval<create_data>()),
+                                 std::declval<std::wstring_view>(),
+                                 ntl::flt::reparse_name_kind::absolute)),
+                             ntl::status>);
+static_assert(
+    std::is_same_v<decltype(ntl::flt::try_query_destination_name(
+                       ntl::flt::as_pre(std::declval<set_information_data>()),
+                       FLT_FILE_NAME_NORMALIZED | FLT_FILE_NAME_QUERY_DEFAULT)),
+                   ntl::result<ntl::flt::name_information>>);
+static_assert(
+    std::is_same_v<decltype(ntl::flt::try_reissue_destination(
+                       ntl::flt::as_pre(std::declval<set_information_data>()),
+                       std::declval<std::wstring_view>())),
+                   ntl::status>);
+static_assert(
+    std::is_same_v<decltype(ntl::flt::try_get_tunneled_name(
+                       ntl::flt::as_post(std::declval<create_data>()),
+                       std::declval<const ntl::flt::name_information &>())),
+                   ntl::result<ntl::flt::name_information>>);
+static_assert(
+    std::is_same_v<decltype(ntl::flt::try_query_cleanup_deletion(
+                       ntl::flt::as_post(std::declval<cleanup_data>()))),
+                   ntl::result<ntl::flt::cleanup_deletion_state>>);
+static_assert(
+    std::is_same_v<decltype(ntl::flt::try_cancel_file_open(
+                       ntl::flt::as_post(std::declval<create_data>()))),
+                   ntl::status>);
 
 ntl::flt::pre_result close_callback(close_data, ntl::flt::related_objects,
                                     void *&) noexcept;
@@ -361,7 +579,7 @@ ntl::flt::post_continuation
     normal_read_immediate_callback(ntl::flt::read_callback_data,
                                    ntl::flt::related_objects) noexcept;
 
-void normal_read_safe_callback(ntl::flt::read_callback_data,
+void normal_read_safe_callback(ntl::flt::safe_read_operation,
                                ntl::flt::related_objects) noexcept;
 
 struct completion_state {
@@ -370,6 +588,81 @@ struct completion_state {
 
   unsigned long value;
 };
+
+struct operation_status_state {
+  explicit operation_status_state(unsigned long value) noexcept
+      : value(value) {}
+  ~operation_status_state() noexcept = default;
+
+  unsigned long value;
+};
+
+using directory_status_snapshot = ntl::flt::operation_status_snapshot<
+    ntl::flt::operation_id::directory_control>;
+
+void directory_status_callback(directory_status_snapshot snapshot,
+                               ntl::flt::related_objects, ntl::status,
+                               operation_status_state &state) noexcept {
+  (void)snapshot.parameters().is_notify();
+  (void)snapshot.parameters().length();
+  (void)state.value;
+}
+
+void stateless_directory_status_callback(directory_status_snapshot snapshot,
+                                         ntl::flt::related_objects,
+                                         ntl::status) noexcept {
+  (void)snapshot.parameters().is_notify();
+}
+
+ntl::flt::pre_result
+request_directory_status(ntl::flt::directory_control_callback_data data,
+                         ntl::flt::related_objects, void *&) noexcept {
+  (void)data.try_request_operation_status(&directory_status_callback, 7UL);
+  (void)
+      data.try_request_operation_status<&stateless_directory_status_callback>();
+  return ntl::flt::pre_result::success_no_callback;
+}
+
+template <class Snapshot, class = void>
+struct snapshot_parameters_are_mutable : std::false_type {};
+
+template <class Snapshot>
+struct snapshot_parameters_are_mutable<
+    Snapshot, std::void_t<decltype(std::declval<const Snapshot &>()
+                                       .parameters()
+                                       .notification(nullptr, 0, 0))>>
+    : std::true_type {};
+
+static_assert(
+    std::is_same_v<decltype(std::declval<const directory_status_snapshot &>()
+                                .parameters()),
+                   const ntl::flt::directory_control_parameters &>);
+static_assert(
+    !snapshot_parameters_are_mutable<directory_status_snapshot>::value);
+static_assert(!std::is_same_v<ntl::flt::operation_status_callback<
+                                  ntl::flt::operation_id::directory_control,
+                                  operation_status_state>,
+                              PFLT_GET_OPERATION_STATUS_CALLBACK>);
+static_assert(
+    std::is_convertible_v<decltype(&directory_status_callback),
+                          ntl::flt::operation_status_callback<
+                              ntl::flt::operation_id::directory_control,
+                              operation_status_state>>);
+static_assert(
+    !std::is_convertible_v<PFLT_GET_OPERATION_STATUS_CALLBACK,
+                           ntl::flt::operation_status_callback<
+                               ntl::flt::operation_id::directory_control,
+                               operation_status_state>>);
+static_assert(std::is_same_v<
+              decltype(std::declval<ntl::flt::directory_control_callback_data>()
+                           .try_request_operation_status(
+                               &directory_status_callback, 7UL)),
+              ntl::status>);
+static_assert(std::is_same_v<
+              decltype(std::declval<ntl::flt::directory_control_callback_data>()
+                           .template try_request_operation_status<
+                               &stateless_directory_status_callback>()),
+              ntl::status>);
 
 ntl::flt::pre_result completion_read_callback(
     ntl::flt::read_callback_data, ntl::flt::related_objects,
@@ -389,7 +682,7 @@ ntl::flt::post_continuation typed_read_immediate_callback(
     ntl::flt::completion_ref<completion_state>) noexcept;
 
 void typed_read_safe_callback(
-    ntl::flt::read_callback_data, ntl::flt::related_objects,
+    ntl::flt::safe_read_operation, ntl::flt::related_objects,
     ntl::flt::completion_ref<completion_state>) noexcept;
 
 ntl::flt::post_continuation
@@ -400,87 +693,79 @@ void invalid_read_post_callback(ntl::flt::read_callback_data,
                                 ntl::flt::related_objects, void *,
                                 ntl::flt::post_operation_flags) noexcept;
 
-void read_when_safe_callback(ntl::flt::read_callback_data,
+void read_when_safe_callback(ntl::flt::safe_read_operation,
                              ntl::flt::related_objects, void *) noexcept;
 
 // Generic callbacks are valid C++. Keep compile coverage here even though
 // current C++ editor completion engines do not list members for `auto data`.
-const auto generic_create_pre_callback =
-    [](auto data, auto objects, auto &completion_context) noexcept {
-      static_assert(std::is_same_v<decltype(data),
-                                   ntl::flt::create_callback_data>);
-      static_assert(std::is_same_v<decltype(objects),
-                                   ntl::flt::related_objects>);
-      static_assert(std::is_same_v<decltype(completion_context), void *&>);
+const auto generic_create_pre_callback = [](auto data, auto objects,
+                                            auto &completion_context) noexcept {
+  static_assert(std::is_same_v<decltype(data), ntl::flt::create_callback_data>);
+  static_assert(std::is_same_v<decltype(objects), ntl::flt::related_objects>);
+  static_assert(std::is_same_v<decltype(completion_context), void *&>);
 
-      (void)data.parameters().create_options();
-      completion_context = nullptr;
-      return ntl::flt::pre_result::success_with_callback;
-    };
+  (void)data.parameters().create_options();
+  completion_context = nullptr;
+  return ntl::flt::pre_result::success_with_callback;
+};
 
-const auto generic_create_post_callback =
-    [](auto data, auto objects, auto completion_context, auto flags) noexcept {
-      static_assert(std::is_same_v<decltype(data),
-                                   ntl::flt::create_callback_data>);
-      static_assert(std::is_same_v<decltype(objects),
-                                   ntl::flt::related_objects>);
-      static_assert(std::is_same_v<decltype(completion_context), void *>);
-      static_assert(std::is_same_v<decltype(flags),
-                                   ntl::flt::post_operation_flags>);
-
-      (void)data.io_status();
-      data.set_io_status(STATUS_SUCCESS);
-      return ntl::flt::post_result::finished;
-    };
-
-const auto generic_cleanup_pre_callback = [](auto data,
-                                             auto objects) noexcept {
-  static_assert(std::is_same_v<decltype(data),
-                               ntl::flt::cleanup_callback_data>);
+const auto generic_create_post_callback = [](auto data, auto objects,
+                                             auto completion_context,
+                                             auto flags) noexcept {
+  static_assert(std::is_same_v<decltype(data), ntl::flt::create_callback_data>);
+  static_assert(std::is_same_v<decltype(objects), ntl::flt::related_objects>);
+  static_assert(std::is_same_v<decltype(completion_context), void *>);
   static_assert(
-      std::is_same_v<decltype(objects), ntl::flt::related_objects>);
+      std::is_same_v<decltype(flags), ntl::flt::post_operation_flags>);
+
+  (void)data.io_status();
+  data.set_io_status(STATUS_SUCCESS);
+  return ntl::flt::post_result::finished;
+};
+
+const auto generic_cleanup_pre_callback = [](auto data, auto objects) noexcept {
+  static_assert(
+      std::is_same_v<decltype(data), ntl::flt::cleanup_callback_data>);
+  static_assert(std::is_same_v<decltype(objects), ntl::flt::related_objects>);
   return ntl::flt::pre_result::success_with_callback;
 };
 
 const auto generic_cleanup_post_callback = [](auto data,
                                               auto objects) noexcept {
-  static_assert(std::is_same_v<decltype(data),
-                               ntl::flt::cleanup_callback_data>);
   static_assert(
-      std::is_same_v<decltype(objects), ntl::flt::related_objects>);
+      std::is_same_v<decltype(data), ntl::flt::cleanup_callback_data>);
+  static_assert(std::is_same_v<decltype(objects), ntl::flt::related_objects>);
   (void)data.io_status();
 };
 
-static_assert(std::is_convertible_v<
-              decltype(generic_create_pre_callback),
-              ntl::flt::pre_operation_callback<
-                  ntl::flt::operation_id::create>>);
-static_assert(std::is_convertible_v<
-              decltype(generic_create_post_callback),
-              ntl::flt::post_operation_callback<
-                  ntl::flt::operation_id::create>>);
-static_assert(std::is_convertible_v<
-              decltype(generic_cleanup_pre_callback),
-              ntl::flt::normal_pre_operation_callback<
-                  ntl::flt::operation_id::cleanup>>);
-static_assert(std::is_convertible_v<
-              decltype(generic_cleanup_post_callback),
-              ntl::flt::normal_post_operation_callback<
-                  ntl::flt::operation_id::cleanup>>);
+static_assert(
+    std::is_convertible_v<
+        decltype(generic_create_pre_callback),
+        ntl::flt::pre_operation_callback<ntl::flt::operation_id::create>>);
+static_assert(
+    std::is_convertible_v<
+        decltype(generic_create_post_callback),
+        ntl::flt::post_operation_callback<ntl::flt::operation_id::create>>);
+static_assert(std::is_convertible_v<decltype(generic_cleanup_pre_callback),
+                                    ntl::flt::normal_pre_operation_callback<
+                                        ntl::flt::operation_id::cleanup>>);
+static_assert(std::is_convertible_v<decltype(generic_cleanup_post_callback),
+                                    ntl::flt::normal_post_operation_callback<
+                                        ntl::flt::operation_id::cleanup>>);
 
 using generic_create_registration =
     decltype(std::declval<ntl::flt::registration &>().on(
         ntl::flt::operation::create, generic_create_pre_callback,
         generic_create_post_callback));
-static_assert(std::is_same_v<generic_create_registration,
-                             ntl::flt::registration &>);
+static_assert(
+    std::is_same_v<generic_create_registration, ntl::flt::registration &>);
 
 using generic_cleanup_registration =
     decltype(std::declval<ntl::flt::registration &>().on(
         ntl::flt::operation::cleanup, generic_cleanup_pre_callback,
         generic_cleanup_post_callback));
-static_assert(std::is_same_v<generic_cleanup_registration,
-                             ntl::flt::registration &>);
+static_assert(
+    std::is_same_v<generic_cleanup_registration, ntl::flt::registration &>);
 
 template <typename Callback, typename = void>
 struct can_register_close : std::false_type {};

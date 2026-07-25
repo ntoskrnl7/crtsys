@@ -11,17 +11,74 @@
 #include "registration"
 #include "types"
 
+#include "../device_endpoint"
 #include "../status"
 
 #include <fltKernel.h>
 
+#include <cstddef>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 namespace ntl::flt {
+
+class driver_initializer;
+
+namespace detail {
+
+/**
+ * @brief Destroys FLT_REGISTRATION in the translation unit that created it.
+ *
+ * FLT_REGISTRATION changes size with NTDDI_VERSION. A stateful deleter keeps
+ * delete (including a possible sized delete) in the consumer translation unit
+ * instead of letting a differently targeted prebuilt crtsys.lib destroy it.
+ */
+struct native_registration_deleter {
+  using destroy_function = void (*)(PFLT_REGISTRATION) noexcept;
+
+  void operator()(PFLT_REGISTRATION value) const noexcept {
+    if (value && destroy)
+      destroy(value);
+  }
+
+  destroy_function destroy = nullptr;
+};
+
+using native_registration_owner =
+    std::unique_ptr<FLT_REGISTRATION, native_registration_deleter>;
+
+/**
+ * @brief Allocates the target-specific native registration safely.
+ *
+ * NativeSize is part of the instantiation name, so Win7 and Win8+ consumers
+ * cannot accidentally share the allocation/deallocation helper COMDAT.
+ */
+template <std::size_t NativeSize = sizeof(FLT_REGISTRATION)>
+native_registration_owner try_make_native_registration() noexcept {
+  static_assert(NativeSize == sizeof(FLT_REGISTRATION),
+                "native registration size must match the consumer WDK view");
+  try {
+    auto *value = new FLT_REGISTRATION{};
+    return native_registration_owner{
+        value,
+        native_registration_deleter{
+            +[](PFLT_REGISTRATION registration) noexcept {
+              static_assert(
+                  NativeSize == sizeof(FLT_REGISTRATION),
+                  "native registration must be destroyed by its creator");
+              delete registration;
+            }}};
+  } catch (...) {
+    return native_registration_owner{nullptr, native_registration_deleter{}};
+  }
+}
+
+} // namespace detail
 
 /**
  * @brief Owns one registered minifilter for the lifetime of the driver image.
@@ -51,6 +108,27 @@ class driver {
       PCFLT_RELATED_OBJECTS, FLT_INSTANCE_TEARDOWN_FLAGS) noexcept;
   friend void FLTAPI detail::instance_teardown_complete_trampoline(
       PCFLT_RELATED_OBJECTS, FLT_INSTANCE_TEARDOWN_FLAGS) noexcept;
+  friend NTSTATUS FLTAPI detail::generate_file_name_trampoline(
+      PFLT_INSTANCE, PFILE_OBJECT, PFLT_CALLBACK_DATA, FLT_FILE_NAME_OPTIONS,
+      PBOOLEAN, PFLT_NAME_CONTROL) noexcept;
+  friend NTSTATUS FLTAPI detail::normalize_name_component_trampoline(
+      PFLT_INSTANCE, PCUNICODE_STRING, USHORT, PCUNICODE_STRING,
+      PFILE_NAMES_INFORMATION, ULONG, FLT_NORMALIZE_NAME_FLAGS,
+      PVOID *) noexcept;
+  friend void FLTAPI
+  detail::normalize_context_cleanup_trampoline(PVOID *) noexcept;
+#if FLT_MGR_LONGHORN
+  friend NTSTATUS FLTAPI detail::transaction_notification_trampoline(
+      PCFLT_RELATED_OBJECTS, PFLT_CONTEXT, ULONG) noexcept;
+  friend NTSTATUS FLTAPI detail::normalize_name_component_ex_trampoline(
+      PFLT_INSTANCE, PFILE_OBJECT, PCUNICODE_STRING, USHORT, PCUNICODE_STRING,
+      PFILE_NAMES_INFORMATION, ULONG, FLT_NORMALIZE_NAME_FLAGS,
+      PVOID *) noexcept;
+#endif
+#if FLT_MGR_WIN8
+  friend NTSTATUS FLTAPI detail::section_notification_trampoline(
+      PFLT_INSTANCE, PFLT_CONTEXT, PFLT_CALLBACK_DATA) noexcept;
+#endif
   friend class driver_initializer;
 
 public:
@@ -101,6 +179,55 @@ public:
   }
 
   /**
+   * @brief Queues a typed legacy control device owned by this minifilter.
+   * @tparam Extension Optional ntl::device extension payload.
+   * @param options WDM device options. A non-empty short device name is
+   * required.
+   * @param configure Callback that registers typed create/cleanup/close/IOCTL
+   * handlers on the device before its DOS link is published. It may return
+   * void or ntl::status.
+   * @param link_name Optional full DOS link name. Empty selects
+   * "\\DosDevices\\" + options.name().
+   * @return STATUS_SUCCESS when queued, or an allocation/argument error.
+   *
+   * The native device is created during start(), after FltRegisterFilter and
+   * before FltStartFiltering. Its symbolic link and DEVICE_OBJECT are removed
+   * automatically on startup failure or accepted minifilter unload.
+   *
+   * If an optional unload must be rejected while the CDO is referenced, keep
+   * that policy in registration::on_unload; mandatory unload still proceeds.
+   */
+  template <class Extension = void, class Configure>
+  ntl::status add_control_device(ntl::device_options options,
+                                 Configure &&configure,
+                                 std::wstring link_name = {}) noexcept {
+    using configure_type = std::decay_t<Configure>;
+    using configure_result =
+        std::invoke_result_t<configure_type &, ntl::device<Extension> &>;
+    static_assert(std::is_void_v<configure_result> ||
+                      std::is_same_v<configure_result, ntl::status>,
+                  "control-device configure callback must return void or "
+                  "ntl::status");
+
+    if (filter_ || options.name().empty())
+      return STATUS_INVALID_DEVICE_STATE;
+    if (!link_name.empty() && link_name.front() != L'\\')
+      return STATUS_INVALID_PARAMETER;
+
+    try {
+      control_devices_.push_back(
+          std::make_unique<control_device_binding<Extension, configure_type>>(
+              std::move(options), std::forward<Configure>(configure),
+              std::move(link_name)));
+      return STATUS_SUCCESS;
+    } catch (const std::bad_alloc &) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    } catch (...) {
+      return STATUS_UNSUCCESSFUL;
+    }
+  }
+
+  /**
    * @brief Registers the callback table and starts filtering.
    * @param callbacks Persistent callback configuration moved into the driver.
    * @return FltRegisterFilter or FltStartFiltering status.
@@ -121,44 +248,86 @@ public:
     }
     registration_ = std::move(callbacks);
 
-    native_registration_ = {};
-    native_registration_.Size = sizeof(native_registration_);
-    native_registration_.Version = FLT_REGISTRATION_VERSION;
-    native_registration_.Flags = registration_.flags_;
-    native_registration_.OperationRegistration =
+    native_registration_ = detail::try_make_native_registration<>();
+    if (!native_registration_)
+      return STATUS_INSUFFICIENT_RESOURCES;
+
+    auto &native_registration = *native_registration_;
+    native_registration.Size = sizeof(native_registration);
+    native_registration.Version = FLT_REGISTRATION_VERSION;
+    native_registration.Flags = registration_.flags_;
+    native_registration.OperationRegistration =
         registration_.native_operations_.size() > 1
             ? registration_.native_operations_.data()
             : nullptr;
-    native_registration_.ContextRegistration =
+    native_registration.ContextRegistration =
         registration_.native_contexts_.size() > 1
             ? registration_.native_contexts_.data()
             : nullptr;
-    native_registration_.FilterUnloadCallback =
+    native_registration.FilterUnloadCallback =
         detail::filter_unload_trampoline;
-    native_registration_.InstanceSetupCallback =
+    native_registration.InstanceSetupCallback =
         registration_.instance_setup_callback_
             ? detail::instance_setup_trampoline
             : nullptr;
-    native_registration_.InstanceQueryTeardownCallback =
+    native_registration.InstanceQueryTeardownCallback =
         registration_.instance_query_teardown_callback_
             ? detail::instance_query_teardown_trampoline
             : nullptr;
-    native_registration_.InstanceTeardownStartCallback =
+    native_registration.InstanceTeardownStartCallback =
         registration_.instance_teardown_start_callback_
             ? detail::instance_teardown_start_trampoline
             : nullptr;
-    native_registration_.InstanceTeardownCompleteCallback =
+    native_registration.InstanceTeardownCompleteCallback =
         registration_.instance_teardown_complete_callback_
             ? detail::instance_teardown_complete_trampoline
             : nullptr;
+    native_registration.GenerateFileNameCallback =
+        registration_.generate_file_name_callback_
+            ? detail::generate_file_name_trampoline
+            : nullptr;
+    native_registration.NormalizeNameComponentCallback =
+        registration_.normalize_name_component_callback_
+            ? detail::normalize_name_component_trampoline
+            : nullptr;
+    native_registration.NormalizeContextCleanupCallback =
+        registration_.normalize_context_cleanup_callback_
+            ? detail::normalize_context_cleanup_trampoline
+            : nullptr;
+#if FLT_MGR_LONGHORN
+    native_registration.TransactionNotificationCallback =
+        registration_.transaction_notification_callback_
+            ? detail::transaction_notification_trampoline
+            : nullptr;
+    native_registration.NormalizeNameComponentExCallback =
+        registration_.normalize_name_component_ex_callback_
+            ? detail::normalize_name_component_ex_trampoline
+            : nullptr;
+#endif
+#if FLT_MGR_WIN8
+    native_registration.SectionNotificationCallback =
+        registration_.section_notification_callback_
+            ? detail::section_notification_trampoline
+            : nullptr;
+#endif
 
-    NTSTATUS result =
-        FltRegisterFilter(driver_object_, &native_registration_, &filter_);
-    if (!NT_SUCCESS(result))
+    NTSTATUS result = FltRegisterFilter(driver_object_,
+                                        native_registration_.get(), &filter_);
+    if (!NT_SUCCESS(result)) {
+      native_registration_.reset();
       return result;
+    }
 
     for (auto &binding : communication_ports_) {
       result = binding->server.start(filter_, binding->name, binding->options);
+      if (!NT_SUCCESS(result)) {
+        unregister_filter();
+        return result;
+      }
+    }
+
+    for (auto &binding : control_devices_) {
+      result = binding->start(control_driver_);
       if (!NT_SUCCESS(result)) {
         unregister_filter();
         return result;
@@ -185,6 +354,71 @@ public:
   PDRIVER_OBJECT native_driver() const noexcept { return driver_object_; }
 
 private:
+  struct control_device_binding_base {
+    virtual ~control_device_binding_base() = default;
+    virtual ntl::status start(ntl::driver &owner) noexcept = 0;
+    virtual void reset() noexcept = 0;
+  };
+
+  template <class Extension, class Configure>
+  struct control_device_binding final : control_device_binding_base {
+    control_device_binding(ntl::device_options options, Configure configure,
+                           std::wstring link_name)
+        : options(std::move(options)), configure(std::move(configure)),
+          link_name(std::move(link_name)) {}
+
+    ntl::status start(ntl::driver &owner) noexcept override {
+      if (endpoint)
+        return STATUS_INVALID_DEVICE_STATE;
+
+      try {
+        auto created_device = owner.try_create_device<Extension>(options);
+        if (!created_device)
+          return created_device.status();
+        auto device = std::move(*created_device);
+
+        using configure_result =
+            std::invoke_result_t<Configure &, ntl::device<Extension> &>;
+        if constexpr (std::is_void_v<configure_result>) {
+          std::invoke(configure, *device);
+        } else {
+          const ntl::status status = std::invoke(configure, *device);
+          if (status.is_err())
+            return status;
+        }
+
+        std::wstring published_link =
+            link_name.empty() ? ntl::dos_device_name(options.name())
+                              : link_name;
+        auto created_link = ntl::try_create_symbolic_link(
+            std::move(published_link),
+            ntl::device_target_name(options.name()));
+        if (!created_link)
+          return created_link.status();
+
+        endpoint = ntl::device_endpoint<Extension>{
+            std::move(device), std::move(*created_link)};
+        return STATUS_SUCCESS;
+      } catch (const ntl::exception &error) {
+        reset();
+        return error.get_status();
+      } catch (const std::bad_alloc &) {
+        reset();
+        return STATUS_INSUFFICIENT_RESOURCES;
+      } catch (...) {
+        reset();
+        return STATUS_UNSUCCESSFUL;
+      }
+    }
+
+    void reset() noexcept override { endpoint.reset(); }
+
+    ntl::device_options options;
+    Configure configure;
+    std::wstring link_name;
+    ntl::device_endpoint<Extension> endpoint;
+  };
+
   struct communication_binding {
     communication_binding(std::wstring name_value,
                           communication_server &&server_value,
@@ -198,25 +432,33 @@ private:
   };
 
   explicit driver(PDRIVER_OBJECT driver_object) noexcept
-      : driver_object_(driver_object) {}
+      : driver_object_(driver_object), control_driver_(driver_object) {}
 
   void unregister_filter() noexcept {
     for (auto &binding : communication_ports_)
       binding->server.close_listener();
+    for (auto &binding : control_devices_)
+      binding->reset();
     if (filter_) {
       FltUnregisterFilter(filter_);
       filter_ = nullptr;
     }
+    native_registration_.reset();
     communication_ports_.clear();
     started_ = false;
   }
 
   PDRIVER_OBJECT driver_object_ = nullptr;
+  ntl::driver control_driver_;
   PFLT_FILTER filter_ = nullptr;
   bool started_ = false;
   registration registration_;
-  FLT_REGISTRATION native_registration_{};
+  // FLT_REGISTRATION is target-version dependent, so the fixed-layout driver
+  // owns it indirectly and destroys it through the consumer that allocated it.
+  detail::native_registration_owner native_registration_{
+      nullptr, detail::native_registration_deleter{}};
   std::vector<std::unique_ptr<communication_binding>> communication_ports_;
+  std::vector<std::unique_ptr<control_device_binding_base>> control_devices_;
 };
 
 #if _X86_

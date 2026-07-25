@@ -239,9 +239,9 @@ inline NTL_INVOKE_RESULT(Fn, Args...)
     expand_stack(expand_stack_options &&opts, Fn &&f, Args &&... args) {
   struct context_t {
     context_t(Fn &&f, Args &&... args)
-        : f(f), args(std::make_tuple(std::forward<Args>(args)...)) {}
+        : f(f), args(std::forward<Args>(args)...) {}
     Fn &f;
-    std::tuple<Args...> args;
+    std::tuple<std::decay_t<Args>...> args;
   };
   context_t ctx(std::forward<Fn &&>(f), std::forward<Args>(args)...);
 

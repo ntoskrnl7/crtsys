@@ -12,6 +12,7 @@
 #include "../result"
 #include "../status"
 
+#include <limits>
 #include <string_view>
 #include <utility>
 
@@ -23,6 +24,79 @@ inline std::wstring_view unicode_view(const UNICODE_STRING &value) noexcept {
   return {value.Buffer, value.Length / sizeof(wchar_t)};
 }
 } // namespace detail
+
+/**
+ * @brief Non-owning output view supplied to a file-name provider callback.
+ *
+ * Filter Manager owns the control structure and its backing buffer. Growing
+ * the buffer keeps that ownership with Filter Manager.
+ */
+class name_control {
+public:
+  explicit name_control(PFLT_NAME_CONTROL value) noexcept : value_(value) {}
+
+  /** @brief Returns the current generated name. */
+  std::wstring_view name() const noexcept {
+    return value_ ? detail::unicode_view(value_->Name) : std::wstring_view{};
+  }
+
+  /** @brief Ensures capacity for exactly the requested byte count. */
+  ntl::status try_grow(USHORT bytes) noexcept {
+    if (!value_)
+      return STATUS_INVALID_PARAMETER;
+    if (KeGetCurrentIrql() > APC_LEVEL)
+      return STATUS_INVALID_DEVICE_STATE;
+    return FltCheckAndGrowNameControl(value_, bytes);
+  }
+
+  /** @brief Replaces the generated name, growing the native buffer as needed. */
+  ntl::status try_assign(std::wstring_view value) noexcept {
+    constexpr std::size_t maximum_characters =
+        (static_cast<std::size_t>((std::numeric_limits<USHORT>::max)()) /
+         sizeof(wchar_t));
+    if (!value_ || value.size() > maximum_characters)
+      return value_ ? STATUS_NAME_TOO_LONG : STATUS_INVALID_PARAMETER;
+
+    const auto bytes = static_cast<USHORT>(value.size() * sizeof(wchar_t));
+    const ntl::status status = try_grow(bytes);
+    if (status.is_err())
+      return status;
+    if (bytes != 0)
+      RtlCopyMemory(value_->Name.Buffer, value.data(), bytes);
+    value_->Name.Length = bytes;
+    return STATUS_SUCCESS;
+  }
+
+  /** @brief Appends one component to the generated name. */
+  ntl::status try_append(std::wstring_view suffix) noexcept {
+    if (!value_)
+      return STATUS_INVALID_PARAMETER;
+    const std::size_t old_characters =
+        value_->Name.Length / sizeof(wchar_t);
+    constexpr std::size_t maximum_characters =
+        (static_cast<std::size_t>((std::numeric_limits<USHORT>::max)()) /
+         sizeof(wchar_t));
+    if (suffix.size() > maximum_characters - old_characters)
+      return STATUS_NAME_TOO_LONG;
+
+    const auto new_bytes = static_cast<USHORT>(
+        (old_characters + suffix.size()) * sizeof(wchar_t));
+    const ntl::status status = try_grow(new_bytes);
+    if (status.is_err())
+      return status;
+    if (!suffix.empty())
+      RtlCopyMemory(value_->Name.Buffer + old_characters, suffix.data(),
+                    suffix.size() * sizeof(wchar_t));
+    value_->Name.Length = new_bytes;
+    return STATUS_SUCCESS;
+  }
+
+  PFLT_NAME_CONTROL native() const noexcept { return value_; }
+  explicit operator bool() const noexcept { return value_ != nullptr; }
+
+private:
+  PFLT_NAME_CONTROL value_ = nullptr;
+};
 
 /** @brief Owns a referenced FLT_FILE_NAME_INFORMATION structure. */
 class name_information {

@@ -7,13 +7,19 @@
  */
 #pragma once
 
-#include "../rpc/common"
+#if !defined(NTL_USER_MODE) && !defined(CRTSYS_USE_MINIFILTER) &&             \
+    !defined(_DDK_DRIVER_) && !defined(_NTDDK_) && !defined(_NTIFS_) &&       \
+    !defined(_WDMDDK_)
+#define NTL_USER_MODE
+#endif
 
 #if defined(NTL_USER_MODE)
 #include "communication_client"
 #else
 #include "communication"
 #endif
+
+#include "../rpc/common"
 
 #define NTL_FLT_RPC_DETAIL_JOIN_INNER(_left_, _right_) _left_##_right_
 #define NTL_FLT_RPC_DETAIL_JOIN(_left_, _right_)                               \

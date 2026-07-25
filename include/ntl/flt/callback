@@ -12,15 +12,88 @@
 #include "parameters"
 #include "types"
 
+#include "../pool_allocator"
 #include "../result"
 #include "../status"
 
 #include <fltKernel.h>
 
 #include <cstddef>
+#include <new>
 #include <type_traits>
+#include <utility>
 
 namespace ntl::flt {
+
+/**
+ * @brief Non-owning callback data whose major operation is known only at
+ *
+ * runtime.
+ *
+ * Registration callbacks such as name generation and
+ * section-conflict
+ * notification are not registered for one IRP_MJ_* value.
+ * This view exposes
+ * their common callback-data state without permitting
+ * access to the native
+ * FLT_PARAMETERS union.
+ */
+class callback_data_view {
+public:
+  explicit callback_data_view(PFLT_CALLBACK_DATA value = nullptr) noexcept
+      : value_(value) {}
+
+  explicit operator bool() const noexcept {
+    return value_ != nullptr && value_->Iopb != nullptr;
+  }
+
+  operation_id major_function() const noexcept {
+    return static_cast<operation_id>(
+        value_ && value_->Iopb ? value_->Iopb->MajorFunction : 0xff);
+  }
+  UCHAR minor_function() const noexcept {
+    return value_ && value_->Iopb ? value_->Iopb->MinorFunction : 0xff;
+  }
+  ULONG irp_flags() const noexcept {
+    return value_ && value_->Iopb ? value_->Iopb->IrpFlags : 0;
+  }
+  UCHAR operation_flags() const noexcept {
+    return value_ && value_->Iopb ? value_->Iopb->OperationFlags : 0;
+  }
+  ntl::file target_file() const noexcept {
+    return ntl::file{value_ && value_->Iopb ? value_->Iopb->TargetFileObject
+                                            : nullptr};
+  }
+  instance target_instance() const noexcept {
+    return instance{value_ && value_->Iopb ? value_->Iopb->TargetInstance
+                                           : nullptr};
+  }
+  KPROCESSOR_MODE requestor_mode() const noexcept {
+    return value_ ? value_->RequestorMode : KernelMode;
+  }
+  bool is_irp_operation() const noexcept {
+    return value_ && FLT_IS_IRP_OPERATION(value_);
+  }
+  bool is_fast_io_operation() const noexcept {
+    return value_ && FLT_IS_FASTIO_OPERATION(value_);
+  }
+  bool is_fsfilter_operation() const noexcept {
+    return value_ && FLT_IS_FS_FILTER_OPERATION(value_);
+  }
+  ntl::status io_status() const noexcept {
+    return value_ ? value_->IoStatus.Status : STATUS_INVALID_PARAMETER;
+  }
+  ULONG_PTR information() const noexcept {
+    return value_ ? value_->IoStatus.Information : 0;
+  }
+  PFLT_IO_PARAMETER_BLOCK native_iopb() const noexcept {
+    return value_ ? value_->Iopb : nullptr;
+  }
+  PFLT_CALLBACK_DATA native() const noexcept { return value_; }
+
+private:
+  PFLT_CALLBACK_DATA value_ = nullptr;
+};
 
 namespace detail {
 
@@ -36,12 +109,128 @@ struct operation_tag_traits<read_write_operation_tag<Operation>> {
   static constexpr operation_id value = Operation;
 };
 
+inline constexpr ULONG operation_status_pool_tag = ntl::pool_tag("NTFs");
+
+template <operation_id Operation, class State> struct operation_status_request;
+template <operation_id Operation, auto Callback>
+struct stateless_operation_status_request;
+
+} // namespace detail
+
+/**
+ * @brief Read-only, operation-typed IOPB snapshot delivered after
+ * IoCallDriver
+ * returns.
+ *
+ * Filter Manager captures the IOPB when the
+ * request is made. The view is valid
+ * only during the operation-status
+ * callback. parameters() returns a const
+ * reference so the captured request
+ * cannot be modified.
+ */
+template <operation_id Operation> class operation_status_snapshot {
+public:
+  using parameters_type = operation_parameters_t<Operation>;
+  static constexpr operation_id operation = Operation;
+
+  constexpr operation_id major_function() const noexcept { return Operation; }
+  UCHAR minor_function() const noexcept {
+    return value_ ? value_->MinorFunction : 0xff;
+  }
+  ULONG irp_flags() const noexcept { return value_ ? value_->IrpFlags : 0; }
+  UCHAR operation_flags() const noexcept {
+    return value_ ? value_->OperationFlags : 0;
+  }
+  ntl::file target_file() const noexcept {
+    return ntl::file{value_ ? value_->TargetFileObject : nullptr};
+  }
+  instance target_instance() const noexcept {
+    return instance{value_ ? value_->TargetInstance : nullptr};
+  }
+  const parameters_type &parameters() const noexcept { return parameters_; }
+  explicit operator bool() const noexcept { return value_ != nullptr; }
+
+private:
+  template <operation_id, class> friend struct detail::operation_status_request;
+  template <operation_id, auto>
+  friend struct detail::stateless_operation_status_request;
+
+  explicit operation_status_snapshot(PFLT_IO_PARAMETER_BLOCK value) noexcept
+      : value_(value && value->MajorFunction == static_cast<UCHAR>(Operation)
+                   ? value
+                   : nullptr),
+        parameters_(value_) {}
+
+  PFLT_IO_PARAMETER_BLOCK value_ = nullptr;
+  parameters_type parameters_;
+};
+
+/**
+ * @brief Typed callback invoked with the immediate lower-stack return
+ * status.
+ *
+ * State is constructed in nonpaged pool before the request and
+ * destroyed
+ * automatically after this callback, or immediately if the request
+ * fails.
+ */
+template <operation_id Operation, class State>
+using operation_status_callback = void (*)(
+    operation_status_snapshot<Operation> snapshot, related_objects objects,
+    ntl::status operation_status, State &state) noexcept;
+
+/** @brief Typed operation-status callback with no per-request state. */
+template <operation_id Operation>
+using stateless_operation_status_callback =
+    void (*)(operation_status_snapshot<Operation> snapshot,
+             related_objects objects, ntl::status operation_status) noexcept;
+
+namespace detail {
+
+template <operation_id Operation, auto Callback>
+struct stateless_operation_status_request {
+  static void FLTAPI complete(PCFLT_RELATED_OBJECTS objects,
+                              PFLT_IO_PARAMETER_BLOCK snapshot, NTSTATUS status,
+                              PVOID) noexcept {
+    Callback(operation_status_snapshot<Operation>{snapshot},
+             related_objects{objects}, ntl::status{status});
+  }
+};
+
+template <operation_id Operation, class State> struct operation_status_request {
+  using callback_type = operation_status_callback<Operation, State>;
+
+  template <class... Args>
+  operation_status_request(callback_type callback, Args &&...args) noexcept
+      : callback(callback), state(std::forward<Args>(args)...) {}
+
+  static void FLTAPI complete(PCFLT_RELATED_OBJECTS objects,
+                              PFLT_IO_PARAMETER_BLOCK snapshot, NTSTATUS status,
+                              PVOID requester_context) noexcept {
+    auto *const request =
+        static_cast<operation_status_request *>(requester_context);
+    if (!request)
+      return;
+
+    request->callback(operation_status_snapshot<Operation>{snapshot},
+                      related_objects{objects}, ntl::status{status},
+                      request->state);
+    request->~operation_status_request();
+    ntl::free_pool(request, operation_status_pool_tag);
+  }
+
+  callback_type callback;
+  State state;
+};
+
 /**
  * @brief Non-owning mutable callback data for exactly one major operation.
- * @tparam Operation Major operation selected by registration::on().
- *
- * The operation is part of the C++ type. parameters() therefore exposes only
- * the FLT_PARAMETERS member valid for that registration.
+
+ * * @tparam Operation Major operation selected by registration::on().
+ * The
+ * operation is part of the C++ type. parameters() therefore exposes only the
+ * FLT_PARAMETERS member valid for that registration.
  */
 template <operation_id Operation> class callback_data_impl {
 public:
@@ -62,15 +251,33 @@ public:
   UCHAR minor_function() const noexcept {
     return value_ && value_->Iopb ? value_->Iopb->MinorFunction : 0xff;
   }
+  void minor_function(UCHAR value) noexcept {
+    if (!value_ || !value_->Iopb)
+      return;
+    value_->Iopb->MinorFunction = value;
+    FltSetCallbackDataDirty(value_);
+  }
 
   /** @brief Returns the IRP flags copied into the Filter Manager IOPB. */
   ULONG irp_flags() const noexcept {
     return value_ && value_->Iopb ? value_->Iopb->IrpFlags : 0;
   }
+  void irp_flags(ULONG value) noexcept {
+    if (!value_ || !value_->Iopb)
+      return;
+    value_->Iopb->IrpFlags = value;
+    FltSetCallbackDataDirty(value_);
+  }
 
   /** @brief Returns the operation-specific SL_* flags. */
   UCHAR operation_flags() const noexcept {
     return value_ && value_->Iopb ? value_->Iopb->OperationFlags : 0;
+  }
+  void operation_flags(UCHAR value) noexcept {
+    if (!value_ || !value_->Iopb)
+      return;
+    value_->Iopb->OperationFlags = value;
+    FltSetCallbackDataDirty(value_);
   }
 
   /** @brief Returns the target kernel FILE_OBJECT facade. */
@@ -121,8 +328,7 @@ public:
    * This is valid in both pre-operation completion and post-operation failure
    * paths. It does not dirty operation parameters.
    */
-  void set_io_status(ntl::status value,
-                     ULONG_PTR information = 0) noexcept {
+  void set_io_status(ntl::status value, ULONG_PTR information = 0) noexcept {
     if (!value_)
       return;
     value_->IoStatus.Status = value;
@@ -177,7 +383,90 @@ public:
   }
 
   /**
+   * @brief Requests lower-stack status without allocating per-request
+   * state.
+   *
+   * Callback is a compile-time function pointer with the typed
+   * snapshot,
+   * related objects, and operation status parameters.
+   */
+  template <auto Callback>
+  [[nodiscard]] ntl::status try_request_operation_status() const noexcept {
+    using callback_type = stateless_operation_status_callback<Operation>;
+    static_assert(
+        std::is_convertible_v<decltype(Callback), callback_type>,
+        "A stateless operation-status callback must be a captureless noexcept "
+        "callback whose snapshot type matches this operation");
+
+    callback_type callback = Callback;
+    if (!value_ || !callback)
+      return STATUS_INVALID_PARAMETER;
+
+    using request_type =
+        stateless_operation_status_request<Operation, Callback>;
+    return FltRequestOperationStatusCallback(value_, &request_type::complete,
+                                             nullptr);
+  }
+
+  /**
+   * @brief Requests the status returned by the lower stack for this
+   * operation.
+   *
+   * This helper is legal only while executing the
+   * pre-operation callback for
+   * an IRP-based request, and is not supported
+   * for IRP_MJ_CLOSE. Filter Manager
+   * enforces those native restrictions.
+   * The typed State is kept in nonpaged
+   * pool until the callback runs;
+   * failure destroys it before returning.
+   *
+   * This is normally useful
+   * only for oplock FSCTLs and directory-change
+   * notifications, where
+   * STATUS_PENDING is a meaningful lower-stack result.
+   */
+  template <class State, class... Args>
+  [[nodiscard]] ntl::status try_request_operation_status(
+      operation_status_callback<Operation, State> callback,
+      Args &&...args) const noexcept {
+    static_assert(!std::is_void_v<State>,
+                  "Operation-status state must be an object type");
+    static_assert(!std::is_array_v<State>,
+                  "Operation-status state cannot be an array");
+    static_assert(std::is_nothrow_constructible_v<State, Args...>,
+                  "Operation-status state construction must be noexcept");
+    static_assert(std::is_nothrow_destructible_v<State>,
+                  "Operation-status state destruction must be noexcept");
+    static_assert(alignof(State) <= MEMORY_ALLOCATION_ALIGNMENT,
+                  "Operation-status state requires unsupported pool alignment");
+
+    if (!value_ || !callback)
+      return STATUS_INVALID_PARAMETER;
+
+    using request_type = operation_status_request<Operation, State>;
+    static_assert(alignof(request_type) <= MEMORY_ALLOCATION_ALIGNMENT,
+                  "Operation-status request requires unsupported alignment");
+    void *const storage =
+        ntl::allocate_pool(sizeof(request_type), ntl::pool_kind::nonpaged,
+                           ntl::pool_option::none, operation_status_pool_tag);
+    if (!storage)
+      return STATUS_INSUFFICIENT_RESOURCES;
+
+    auto *const request =
+        new (storage) request_type(callback, std::forward<Args>(args)...);
+    const NTSTATUS result = FltRequestOperationStatusCallback(
+        value_, &request_type::complete, request);
+    if (!NT_SUCCESS(result)) {
+      request->~request_type();
+      ntl::free_pool(request, operation_status_pool_tag);
+    }
+    return result;
+  }
+
+  /**
    * @brief Returns the native Filter Manager I/O parameter block.
+   *
    * @note This explicit escape hatch bypasses compile-time union selection.
    */
   PFLT_IO_PARAMETER_BLOCK native_iopb() const noexcept {
@@ -231,10 +520,8 @@ using internal_device_control_callback_data =
 using shutdown_callback_data = callback_data<operation::shutdown>;
 using lock_control_callback_data = callback_data<operation::lock_control>;
 using cleanup_callback_data = callback_data<operation::cleanup>;
-using create_mailslot_callback_data =
-    callback_data<operation::create_mailslot>;
-using query_security_callback_data =
-    callback_data<operation::query_security>;
+using create_mailslot_callback_data = callback_data<operation::create_mailslot>;
+using query_security_callback_data = callback_data<operation::query_security>;
 using set_security_callback_data = callback_data<operation::set_security>;
 using power_callback_data = callback_data<operation::power>;
 using system_control_callback_data = callback_data<operation::system_control>;
@@ -267,8 +554,66 @@ using prepare_mdl_write_callback_data =
 using mdl_write_complete_callback_data =
     callback_data<operation::mdl_write_complete>;
 using volume_mount_callback_data = callback_data<operation::volume_mount>;
-using volume_dismount_callback_data =
-    callback_data<operation::volume_dismount>;
+using volume_dismount_callback_data = callback_data<operation::volume_dismount>;
+
+namespace detail {
+class safe_post_operation_access;
+} // namespace detail
+
+/**
+ * @brief Operation-typed view delivered only by an NTL safe post callback.
+ *
+ * Unlike callback_data, this type records that Filter Manager dispatched the
+ * callback through FltDoCompletionProcessingWhenSafe and therefore guarantees
+ * IRQL <= APC_LEVEL. The wrapped callback data remains owned by Filter Manager
+ * and is valid only for the duration of the callback.
+ */
+template <operation_id Operation> class safe_post_operation {
+public:
+  /** @brief Returns the operation-typed callback data for ordinary accessors.
+   */
+  detail::callback_data_impl<Operation> data() const noexcept { return data_; }
+
+private:
+  friend class detail::safe_post_operation_access;
+
+  explicit safe_post_operation(
+      detail::callback_data_impl<Operation> data) noexcept
+      : data_(data) {}
+
+  detail::callback_data_impl<Operation> data_;
+};
+
+namespace detail {
+/** @brief Constructs safe-post tokens only inside NTL's native trampoline. */
+class safe_post_operation_access {
+public:
+  template <operation_id Operation>
+  static safe_post_operation<Operation>
+  make(callback_data_impl<Operation> data) noexcept {
+    return safe_post_operation<Operation>{data};
+  }
+};
+} // namespace detail
+
+using safe_read_operation = safe_post_operation<operation_id::read>;
+using safe_query_information_operation =
+    safe_post_operation<operation_id::query_information>;
+using safe_query_ea_operation = safe_post_operation<operation_id::query_ea>;
+using safe_query_volume_information_operation =
+    safe_post_operation<operation_id::query_volume_information>;
+using safe_directory_control_operation =
+    safe_post_operation<operation_id::directory_control>;
+using safe_file_system_control_operation =
+    safe_post_operation<operation_id::file_system_control>;
+using safe_device_control_operation =
+    safe_post_operation<operation_id::device_control>;
+using safe_internal_device_control_operation =
+    safe_post_operation<operation_id::internal_device_control>;
+using safe_query_security_operation =
+    safe_post_operation<operation_id::query_security>;
+using safe_query_quota_operation =
+    safe_post_operation<operation_id::query_quota>;
 
 /** @brief Typed pre-operation callback used by registration::on(). */
 template <operation_id Operation>
@@ -321,9 +666,8 @@ using normal_immediate_post_operation_callback =
 
 /** @brief Flags-less safe continuation invoked at IRQL <= APC_LEVEL. */
 template <operation_id Operation>
-using normal_safe_post_operation_callback =
-    void (*)(detail::callback_data_impl<Operation> data,
-             related_objects objects) noexcept;
+using normal_safe_post_operation_callback = void (*)(
+    safe_post_operation<Operation> operation, related_objects objects) noexcept;
 
 /** @brief Pre-operation callback that constructs typed completion state. */
 template <operation_id Operation, class Completion>
@@ -368,9 +712,9 @@ using normal_completion_immediate_post_operation_callback =
 
 /** @brief Typed safe continuation invoked at IRQL <= APC_LEVEL. */
 template <operation_id Operation, class Completion>
-using normal_completion_safe_post_operation_callback = void (*)(
-    detail::callback_data_impl<Operation> data, related_objects objects,
-    completion_ref<Completion> completion) noexcept;
+using normal_completion_safe_post_operation_callback =
+    void (*)(safe_post_operation<Operation> operation, related_objects objects,
+             completion_ref<Completion> completion) noexcept;
 
 /**
  * @brief Immediate portion of a mixed direct/safe post-operation callback.
@@ -394,7 +738,7 @@ using immediate_post_operation_callback = post_continuation (*)(
  */
 template <operation_id Operation>
 using safe_post_operation_callback =
-    void (*)(detail::callback_data_impl<Operation> data,
-             related_objects objects, void *completion_context) noexcept;
+    void (*)(safe_post_operation<Operation> operation, related_objects objects,
+             void *completion_context) noexcept;
 
 } // namespace ntl::flt

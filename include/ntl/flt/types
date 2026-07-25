@@ -236,10 +236,42 @@ enum class operation_flags : unsigned long {
 
 /** @brief Combines operation registration flags. */
 constexpr operation_flags operator|(operation_flags left,
-                                    operation_flags right) noexcept {
+                                     operation_flags right) noexcept {
   return static_cast<operation_flags>(static_cast<unsigned long>(left) |
                                       static_cast<unsigned long>(right));
 }
+
+#if FLT_MGR_LONGHORN
+/** @brief KTM notifications requested and delivered for a transaction. */
+enum class transaction_notifications : NOTIFICATION_MASK {
+  none = 0,
+  commit = TRANSACTION_NOTIFY_COMMIT,
+  commit_finalize = TRANSACTION_NOTIFY_COMMIT_FINALIZE,
+  prepare = TRANSACTION_NOTIFY_PREPARE,
+  preprepare = TRANSACTION_NOTIFY_PREPREPARE,
+  rollback = TRANSACTION_NOTIFY_ROLLBACK,
+};
+
+constexpr transaction_notifications
+operator|(transaction_notifications left,
+          transaction_notifications right) noexcept {
+  return static_cast<transaction_notifications>(
+      static_cast<NOTIFICATION_MASK>(left) |
+      static_cast<NOTIFICATION_MASK>(right));
+}
+
+constexpr transaction_notifications
+operator&(transaction_notifications left,
+          transaction_notifications right) noexcept {
+  return static_cast<transaction_notifications>(
+      static_cast<NOTIFICATION_MASK>(left) &
+      static_cast<NOTIFICATION_MASK>(right));
+}
+
+constexpr bool any(transaction_notifications value) noexcept {
+  return value != transaction_notifications::none;
+}
+#endif
 
 /** @brief Move-only rundown reference returned by explicit attachment. */
 class instance_ref {
@@ -397,6 +429,20 @@ public:
    * @note Runs at PASSIVE_LEVEL because the result owns dynamic strings.
    */
   ntl::result<instance_information> try_information() const noexcept;
+
+  /**
+   * @brief Gets a typed context attached to this instance.
+   *
+   * This overload is useful in registration callbacks, such as file-name
+   * generation, which receive an instance but no FLT_RELATED_OBJECTS.
+   */
+  template <class T>
+  ntl::result<context_ref<T, context_scope::instance>>
+  try_get(const instance_context<T> &) const noexcept {
+    detail::native_context_objects objects{};
+    objects.instance = value_;
+    return detail::get_context<T, context_scope::instance>(objects);
+  }
 
 private:
   PFLT_INSTANCE value_ = nullptr;
@@ -699,6 +745,35 @@ public:
     return detail::get_or_create_context<T, Scope>(
         context_objects(), definition, std::forward<Args>(args)...);
   }
+
+  /**
+   * @brief Removes an installed typed context and owns the removed reference.
+   *
+   * The returned reference remains valid until released even though the
+   * context is no longer attached to its Filter Manager object.
+   */
+  template <class T, context_scope Scope>
+  ntl::result<context_ref<T, Scope>>
+  try_remove(const context_definition<T, Scope> &) const noexcept {
+    return detail::remove_context<T, Scope>(context_objects());
+  }
+
+#if FLT_MGR_LONGHORN
+  /**
+   * @brief Enlists an installed transaction context for KTM notifications.
+   */
+  template <class T>
+  ntl::status try_enlist(const context_ref<T, context_scope::transaction> &state,
+                         transaction_notifications notifications) const noexcept {
+    if (!value_ || !value_->Instance || !value_->Transaction || !state)
+      return STATUS_INVALID_PARAMETER;
+    if (KeGetCurrentIrql() > APC_LEVEL)
+      return STATUS_INVALID_DEVICE_STATE;
+    return FltEnlistInTransaction(value_->Instance, value_->Transaction,
+                                  state.native_context(),
+                                  static_cast<NOTIFICATION_MASK>(notifications));
+  }
+#endif
 
 private:
   detail::native_context_objects context_objects() const noexcept {

@@ -407,7 +407,10 @@ inline ntl::result<ntl::ipc::mapped_buffer_view> map_filter_buffer(
     return ntl::unexpected(STATUS_INVALID_BUFFER_SIZE);
   const auto access = output ? options.output_access : options.input_access;
 
-  if (!mdl && lock_user_buffer && data && FLT_IS_IRP_OPERATION(data)) {
+  const bool post_operation =
+      data && FlagOn(data->Flags, FLTFL_CALLBACK_DATA_POST_OPERATION);
+  if (!mdl && lock_user_buffer && data && !post_operation &&
+      FLT_IS_IRP_OPERATION(data)) {
     const NTSTATUS locked = FltLockUserBuffer(data);
     if (NT_SUCCESS(locked)) {
       const auto refreshed = describe_operation_buffers(
@@ -523,7 +526,8 @@ detail::try_map_io_buffers_impl(
   if (layout.input_length) {
     auto input = detail::map_filter_buffer(
         data.native(), layout.input, layout.input_length, layout.input_mdl,
-        false, connection, options);
+        false, connection, options,
+        phase == detail::io_buffer_phase::pre);
     if (!input)
       return ntl::unexpected(input.status());
     builder.input(std::move(*input));
@@ -531,7 +535,8 @@ detail::try_map_io_buffers_impl(
   if (layout.output_length) {
     auto output = detail::map_filter_buffer(
         data.native(), layout.output, layout.output_length, layout.output_mdl,
-        true, connection, options);
+        true, connection, options,
+        phase == detail::io_buffer_phase::pre);
     if (!output)
       return ntl::unexpected(output.status());
     builder.output(std::move(*output));
