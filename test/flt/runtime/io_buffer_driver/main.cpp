@@ -1,5 +1,3 @@
-#include <fltKernel.h>
-
 #include <ntl/flt/all>
 #include <ntl/irql>
 #include <ntl/pool_allocator>
@@ -31,6 +29,8 @@ std::atomic<std::uint32_t> pending_pre_cancels{0};
 std::atomic<std::uint32_t> pending_post_cancels{0};
 std::atomic<std::uint32_t> active_pre_requests{0};
 std::atomic<std::uint32_t> active_post_requests{0};
+std::atomic<std::uint32_t> swapped_directory_queries{0};
+std::atomic<std::uint32_t> swapped_fsctl_outputs{0};
 
 inline constexpr std::size_t max_pending_operations = 32;
 inline constexpr ULONG deferred_write_pre_pool_tag = ntl::pool_tag("wPdN");
@@ -268,6 +268,10 @@ runtime_state query_runtime_state() noexcept {
       pre_test_gate.waiters.load(std::memory_order_acquire);
   state.waiting_post_requests =
       post_test_gate.waiters.load(std::memory_order_acquire);
+  state.swapped_directory_queries =
+      swapped_directory_queries.load(std::memory_order_acquire);
+  state.swapped_fsctl_outputs =
+      swapped_fsctl_outputs.load(std::memory_order_acquire);
   state.waiting_pre_address =
       pre_test_gate.mapped_address.load(std::memory_order_acquire);
   state.waiting_post_address =
@@ -283,6 +287,16 @@ template <class Data> bool targets_runtime_file(Data data) noexcept {
   if (!name || name->try_parse().is_err())
     return false;
   return name->final_component() == target_file_name;
+}
+
+template <class Data> bool targets_runtime_directory(Data data) noexcept {
+  if (!ntl::is_irql_at_most(ntl::irql::apc))
+    return false;
+  auto name = data.try_query_name(FLT_FILE_NAME_NORMALIZED |
+                                  FLT_FILE_NAME_QUERY_DEFAULT);
+  if (!name || name->try_parse().is_err())
+    return false;
+  return name->final_component() == target_directory_name;
 }
 
 template <class Data>
@@ -627,6 +641,164 @@ ntl::flt::post_result read_post(ntl::flt::read_callback_data data,
   return ntl::flt::post_result::finished;
 }
 
+ntl::flt::pre_result prepare_directory_swap(
+    ntl::flt::directory_control_callback_data data,
+    ntl::flt::related_objects,
+    ntl::flt::completion_slot<ntl::flt::swapped_io_buffers>
+        &completion) noexcept {
+  if (!data.parameters().is_query() ||
+      data.parameters().information_class() != FileNamesInformation ||
+      !targets_runtime_directory(data))
+    return ntl::flt::pre_result::success_no_callback;
+  if (data.is_fast_io_operation())
+    return ntl::flt::pre_result::disallow_fast_io;
+
+  auto swapped = ntl::flt::try_swap_io_buffers(ntl::flt::as_pre(data));
+  if (!swapped)
+    return fail_pre(data, swapped.status());
+  const ntl::status applied = swapped->apply();
+  if (!applied.is_ok())
+    return fail_pre(data, applied);
+  const ntl::status released =
+      std::move(*swapped).release_to_completion(completion);
+  if (!released.is_ok())
+    return fail_pre(data, released);
+  return ntl::flt::pre_result::success_with_callback;
+}
+
+ntl::flt::pre_result prepare_fsctl_swap(
+    ntl::flt::file_system_control_callback_data data,
+    ntl::flt::related_objects,
+    ntl::flt::completion_slot<ntl::flt::swapped_io_buffers>
+        &completion) noexcept {
+  if (data.parameters().code() != FSCTL_GET_COMPRESSION ||
+      !targets_runtime_file(data))
+    return ntl::flt::pre_result::success_no_callback;
+  if (data.is_fast_io_operation())
+    return ntl::flt::pre_result::disallow_fast_io;
+
+  auto swapped = ntl::flt::try_swap_io_buffers(
+      ntl::flt::as_pre(data), ntl::flt::swap_buffer::output);
+  if (!swapped)
+    return fail_pre(data, swapped.status());
+  const ntl::status applied = swapped->apply();
+  if (!applied.is_ok())
+    return fail_pre(data, applied);
+  const ntl::status released =
+      std::move(*swapped).release_to_completion(completion);
+  if (!released.is_ok())
+    return fail_pre(data, released);
+  return ntl::flt::pre_result::success_with_callback;
+}
+
+template <class Data>
+ntl::flt::post_continuation swapped_output_post(
+    Data data, ntl::flt::related_objects,
+    ntl::flt::completion_ref<ntl::flt::swapped_io_buffers>
+        completion) noexcept {
+  if (!completion)
+    return ntl::flt::post_continuation::finished;
+  if (NT_ERROR(static_cast<NTSTATUS>(data.io_status()))) {
+    (void)completion->complete();
+    return ntl::flt::post_continuation::finished;
+  }
+  return ntl::flt::post_continuation::when_safe;
+}
+
+bool rewrite_file_names_information(void *buffer,
+                                    std::size_t bytes) noexcept {
+  if (!buffer)
+    return false;
+  constexpr std::size_t name_offset =
+      offsetof(FILE_NAMES_INFORMATION, FileName);
+  auto *const base = static_cast<unsigned char *>(buffer);
+  std::size_t offset = 0;
+  bool rewritten = false;
+  while (offset < bytes) {
+    if (name_offset > bytes - offset)
+      return false;
+    auto *const entry =
+        reinterpret_cast<FILE_NAMES_INFORMATION *>(base + offset);
+    if ((entry->FileNameLength % sizeof(wchar_t)) != 0 ||
+        entry->FileNameLength > bytes - offset - name_offset)
+      return false;
+    const std::wstring_view name{
+        entry->FileName, entry->FileNameLength / sizeof(wchar_t)};
+    if (name == directory_source_name) {
+      static_assert(directory_source_name.size() ==
+                    directory_swapped_name.size());
+      RtlCopyMemory(entry->FileName, directory_swapped_name.data(),
+                    entry->FileNameLength);
+      rewritten = true;
+    }
+    if (entry->NextEntryOffset == 0)
+      return rewritten;
+    if (entry->NextEntryOffset < name_offset ||
+        entry->NextEntryOffset > bytes - offset)
+      return false;
+    offset += entry->NextEntryOffset;
+  }
+  return rewritten;
+}
+
+void finish_directory_swap(
+    ntl::flt::safe_directory_control_operation operation,
+    ntl::flt::related_objects,
+    ntl::flt::completion_ref<ntl::flt::swapped_io_buffers>
+        completion) noexcept {
+  if (!completion)
+    return;
+  auto data = operation.data();
+  const std::size_t valid_bytes =
+      (std::min)(completion->output() ? completion->output()->size()
+                                     : std::size_t{0},
+                 static_cast<std::size_t>(data.information()));
+  if (valid_bytes == 0 ||
+      !rewrite_file_names_information(completion->output()->data(),
+                                      valid_bytes)) {
+    data.set_io_status(STATUS_DATA_ERROR, 0);
+    (void)completion->complete();
+    return;
+  }
+  const ntl::status copied =
+      completion->copy_back(ntl::flt::as_post(data));
+  if (!copied.is_ok()) {
+    data.set_io_status(copied, 0);
+  } else {
+    swapped_directory_queries.fetch_add(1, std::memory_order_relaxed);
+  }
+  (void)completion->complete();
+}
+
+void finish_fsctl_swap(
+    ntl::flt::safe_file_system_control_operation operation,
+    ntl::flt::related_objects,
+    ntl::flt::completion_ref<ntl::flt::swapped_io_buffers>
+        completion) noexcept {
+  if (!completion)
+    return;
+  auto data = operation.data();
+  const std::size_t valid_bytes =
+      (std::min)(completion->output() ? completion->output()->size()
+                                     : std::size_t{0},
+                 static_cast<std::size_t>(data.information()));
+  if (valid_bytes < sizeof(fsctl_output_marker)) {
+    data.set_io_status(STATUS_DATA_ERROR, 0);
+    (void)completion->complete();
+    return;
+  }
+  RtlCopyMemory(completion->output()->data(), &fsctl_output_marker,
+                sizeof(fsctl_output_marker));
+  const ntl::status copied =
+      completion->copy_back(ntl::flt::as_post(data));
+  if (!copied.is_ok()) {
+    data.set_io_status(copied, 0);
+  } else {
+    swapped_fsctl_outputs.fetch_add(1, std::memory_order_relaxed);
+  }
+  (void)completion->complete();
+}
+
 } // namespace
 
 ntl::status ntl::flt::main(ntl::flt::driver &driver, std::wstring_view) {
@@ -705,6 +877,15 @@ ntl::status ntl::flt::main(ntl::flt::driver &driver, std::wstring_view) {
           ntl::flt::operation_flags::skip_paging_io)
       .on(ntl::flt::operation::read, &read_pre, &read_post,
           ntl::flt::operation_flags::skip_paging_io)
+      .on_with_completion<ntl::flt::swapped_io_buffers>(
+          ntl::flt::operation::directory_control, &prepare_directory_swap,
+          &swapped_output_post<ntl::flt::directory_control_callback_data>,
+          &finish_directory_swap)
+      .on_with_completion<ntl::flt::swapped_io_buffers>(
+          ntl::flt::operation::file_system_control, &prepare_fsctl_swap,
+          &swapped_output_post<
+              ntl::flt::file_system_control_callback_data>,
+          &finish_fsctl_swap)
       .on_unload([](ntl::flt::unload_flags) noexcept {
         DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL,
                    "[crtsys FLT I/O buffer runtime] writes=%lu reads=%lu "
@@ -712,7 +893,8 @@ ntl::status ntl::flt::main(ntl::flt::driver &driver, std::wstring_view) {
                    "user-mapped-writes=%lu user-mapped-reads=%lu "
                    "pending-pre-resumes=%lu pending-post-replies=%lu "
                    "pending-pre-cancels=%lu pending-post-cancels=%lu "
-                   "active-pre=%lu active-post=%lu\n",
+                   "active-pre=%lu active-post=%lu "
+                   "directory=%lu fsctl=%lu\n",
                    swapped_writes.load(std::memory_order_relaxed),
                    swapped_reads.load(std::memory_order_relaxed),
                    deferred_pre_operations.load(std::memory_order_relaxed),
@@ -725,7 +907,9 @@ ntl::status ntl::flt::main(ntl::flt::driver &driver, std::wstring_view) {
                    pending_pre_cancels.load(std::memory_order_relaxed),
                    pending_post_cancels.load(std::memory_order_relaxed),
                    active_pre_requests.load(std::memory_order_relaxed),
-                   active_post_requests.load(std::memory_order_relaxed));
+                   active_post_requests.load(std::memory_order_relaxed),
+                   swapped_directory_queries.load(std::memory_order_relaxed),
+                   swapped_fsctl_outputs.load(std::memory_order_relaxed));
         return ntl::status{STATUS_SUCCESS};
       })
       .context(io_buffer_instance_context);

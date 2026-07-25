@@ -12,10 +12,9 @@ include("${CMAKE_CURRENT_LIST_DIR}/../../../cmake/CPM.cmake")
 CPMAddPackage(NAME crtsys SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../../..")
 include("${crtsys_SOURCE_DIR}/cmake/CrtSys.cmake")
 
+include("${CMAKE_CURRENT_LIST_DIR}/../runtime/app/runtime_sources.cmake")
 add_executable(crtsys_flt_runtime_x86_app
-  "${CMAKE_CURRENT_LIST_DIR}/../runtime/app/communication_advanced.cpp"
-  "${CMAKE_CURRENT_LIST_DIR}/../runtime/app/coroutine_runtime.cpp"
-  "${CMAKE_CURRENT_LIST_DIR}/../runtime/app/main.cpp"
+  ${CRTSYS_FLT_RUNTIME_APP_SOURCES}
 )
 
 target_include_directories(crtsys_flt_runtime_x86_app
@@ -24,7 +23,9 @@ target_include_directories(crtsys_flt_runtime_x86_app
     "${CMAKE_CURRENT_LIST_DIR}/../runtime/shared"
 )
 
-target_link_libraries(crtsys_flt_runtime_x86_app PRIVATE FltLib.lib)
+target_link_libraries(crtsys_flt_runtime_x86_app
+  PRIVATE ${CRTSYS_FLT_RUNTIME_APP_LIBRARIES}
+)
 
 target_compile_options(crtsys_flt_runtime_x86_app
   PRIVATE
