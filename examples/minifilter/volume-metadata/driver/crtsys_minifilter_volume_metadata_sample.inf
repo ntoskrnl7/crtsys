@@ -1,0 +1,51 @@
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = "ActivityMonitor"
+ClassGuid   = {b86dff51-a31e-4bac-b3cf-e8cfe75c9fc2}
+Provider    = %ProviderName%
+DriverVer   = 07/25/2026,0.1.0.0
+CatalogFile = crtsys_minifilter_volume_metadata_sample.cat
+PnpLockdown = 1
+
+[DestinationDirs]
+DriverCopyFiles = 13
+
+[DefaultInstall.NTamd64]
+OptionDesc = %ServiceDescription%
+CopyFiles  = DriverCopyFiles
+
+[DefaultInstall.NTamd64.Services]
+AddService = %ServiceName%,,ServiceInstall
+
+[ServiceInstall]
+DisplayName    = %ServiceDescription%
+Description    = %ServiceDescription%
+ServiceBinary  = %13%\crtsys_minifilter_volume_metadata_sample.sys
+ServiceType    = 2
+StartType      = 3
+ErrorControl   = 1
+LoadOrderGroup = "FSFilter Activity Monitor"
+Dependencies   = FltMgr
+AddReg         = Instances.AddRegistry
+
+[Instances.AddRegistry]
+HKR,"Parameters\Instances","DefaultInstance",0x00000000,%DefaultInstance%
+HKR,"Parameters\Instances\%DefaultInstance%","Altitude",0x00000000,%DefaultAltitude%
+HKR,"Parameters\Instances\%DefaultInstance%","Flags",0x00010001,0
+
+[DriverCopyFiles]
+crtsys_minifilter_volume_metadata_sample.sys
+
+[SourceDisksFiles]
+crtsys_minifilter_volume_metadata_sample.sys = 1,,
+
+[SourceDisksNames]
+1 = %DiskName%,,,
+
+[Strings]
+ProviderName       = "ntoskrnl7"
+ServiceName        = "CrtSysMinifilterVolumeMetadataSample"
+ServiceDescription = "crtsys NTL volume-metadata minifilter sample"
+DefaultInstance    = "CrtSys NTL volume-metadata sample instance"
+DefaultAltitude    = "370030.132"
+DiskName           = "crtsys NTL volume-metadata minifilter sample media"

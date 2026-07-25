@@ -1,0 +1,30 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "crtsys_minifilter_control_device_sample", "crtsys_minifilter_control_device_sample.vcxproj", "{39A5101A-186A-433F-AEEE-6EC780837333}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "crtsys_minifilter_control_device_sample_app", "crtsys_minifilter_control_device_sample_app.vcxproj", "{F8B64991-9975-480E-BF97-EEEFEA5F2489}"
+	ProjectSection(ProjectDependencies) = postProject
+		{39A5101A-186A-433F-AEEE-6EC780837333} = {39A5101A-186A-433F-AEEE-6EC780837333}
+	EndProjectSection
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|x64 = Debug|x64
+		Release|x64 = Release|x64
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{39A5101A-186A-433F-AEEE-6EC780837333}.Debug|x64.ActiveCfg = Debug|x64
+		{39A5101A-186A-433F-AEEE-6EC780837333}.Debug|x64.Build.0 = Debug|x64
+		{39A5101A-186A-433F-AEEE-6EC780837333}.Release|x64.ActiveCfg = Release|x64
+		{39A5101A-186A-433F-AEEE-6EC780837333}.Release|x64.Build.0 = Release|x64
+		{F8B64991-9975-480E-BF97-EEEFEA5F2489}.Debug|x64.ActiveCfg = Debug|x64
+		{F8B64991-9975-480E-BF97-EEEFEA5F2489}.Debug|x64.Build.0 = Debug|x64
+		{F8B64991-9975-480E-BF97-EEEFEA5F2489}.Release|x64.ActiveCfg = Release|x64
+		{F8B64991-9975-480E-BF97-EEEFEA5F2489}.Release|x64.Build.0 = Release|x64
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+EndGlobal

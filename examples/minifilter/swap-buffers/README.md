@@ -30,6 +30,9 @@ The sample follows the critical ownership rule: it never calls
 `FltLockUserBuffer` on an original buffer before overwriting the IOPB with a
 replacement MDL. For read copy-back, the original output is stabilized in the
 post-operation path after Filter Manager has restored the original parameters.
+That validation never creates a new post-operation MDL: an existing MDL is
+borrowed, while an un-MDL'd user address is copied under SEH in the referenced
+requestor process.
 
 The implementation uses `ntl::is_passive_level()` for execution-context
 decisions and returns `ntl::status` from its internal and deferred completion

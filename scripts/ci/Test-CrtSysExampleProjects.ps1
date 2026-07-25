@@ -20,7 +20,14 @@ foreach ($requiredFile in @('Directory.Build.props', 'Directory.Build.targets'))
 
 $groupedSamples = [ordered]@{
   kmdf = @('basic', 'pnp', 'bus', 'dma', 'usb', 'wmi')
-  minifilter = @('basic', 'communication', 'swap-buffers')
+  minifilter = @(
+    'basic',
+    'communication',
+    'control-device',
+    'operation-log',
+    'swap-buffers',
+    'volume-metadata'
+  )
 }
 
 foreach ($group in $groupedSamples.GetEnumerator()) {
