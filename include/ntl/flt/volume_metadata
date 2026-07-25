@@ -1,0 +1,618 @@
+/**
+ * @file volume_metadata
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Per-volume metadata-file and snapshot-update coordination.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "types"
+
+#include "../result"
+#include "../status"
+
+#include <fltKernel.h>
+
+#include <atomic>
+#include <cstddef>
+#include <limits>
+#include <new>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace ntl::flt {
+
+/** Options used when opening a minifilter-owned per-volume metadata file. */
+struct volume_metadata_open_options {
+  ACCESS_MASK desired_access = FILE_ALL_ACCESS;
+  ULONG file_attributes = FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN;
+  ULONG share_access = FILE_SHARE_READ;
+  ULONG create_disposition = FILE_OPEN_IF;
+  ULONG create_options =
+      FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT;
+  bool create_system_volume_information = false;
+};
+
+class volume_metadata_file;
+
+/**
+ * @brief Declares nonpaged instance state that owns a volume_metadata_file.
+ *
+ * volume_metadata_file embeds ERESOURCE and KEVENT synchronization objects.
+ * Windows requires their storage to remain resident, so metadata state must
+ * not use a paged Filter Manager context. This definition deliberately omits
+ * the context_pool constructor to make the supported allocation policy the
+ * default and only choice.
+ */
+template <class T>
+class volume_metadata_instance_context final : public instance_context<T> {
+  using base_type = instance_context<T>;
+
+public:
+  constexpr volume_metadata_instance_context() noexcept = default;
+
+  /** Selects a diagnostic tag while retaining NonPagedPoolNx. */
+  constexpr explicit volume_metadata_instance_context(ULONG pool_tag) noexcept
+      : base_type(pool_tag) {}
+};
+
+/**
+ * @brief Proves that one metadata update may run while snapshots are unpaused.
+ *
+ * The guard is move-only and may be destroyed on a different thread. This is
+ * important because a minifilter post-operation callback is not generally
+ * required to run on the pre-operation callback's thread.
+ */
+class volume_metadata_update {
+  friend class volume_metadata_file;
+
+public:
+  volume_metadata_update() noexcept = default;
+  volume_metadata_update(const volume_metadata_update &) = delete;
+  volume_metadata_update &operator=(const volume_metadata_update &) = delete;
+
+  volume_metadata_update(volume_metadata_update &&other) noexcept
+      : owner_(std::exchange(other.owner_, nullptr)) {}
+
+  volume_metadata_update &
+  operator=(volume_metadata_update &&other) noexcept;
+
+  ~volume_metadata_update();
+
+  /** Returns true while this object owns an active update admission. */
+  explicit operator bool() const noexcept { return owner_ != nullptr; }
+
+  /** Releases the update admission before destruction. */
+  void reset() noexcept;
+
+private:
+  explicit volume_metadata_update(volume_metadata_file *owner) noexcept
+      : owner_(owner) {}
+
+  volume_metadata_file *owner_ = nullptr;
+};
+
+/**
+ * @brief Pauses new metadata updates until a snapshot post-operation completes.
+ *
+ * Unlike an ERESOURCE guard, this token may cross callback threads safely.
+ */
+class volume_metadata_snapshot_hold {
+  friend class volume_metadata_file;
+
+public:
+  volume_metadata_snapshot_hold() noexcept = default;
+  volume_metadata_snapshot_hold(const volume_metadata_snapshot_hold &) = delete;
+  volume_metadata_snapshot_hold &
+  operator=(const volume_metadata_snapshot_hold &) = delete;
+
+  volume_metadata_snapshot_hold(
+      volume_metadata_snapshot_hold &&other) noexcept
+      : owner_(std::exchange(other.owner_, nullptr)) {}
+
+  volume_metadata_snapshot_hold &
+  operator=(volume_metadata_snapshot_hold &&other) noexcept;
+
+  ~volume_metadata_snapshot_hold();
+
+  /** Returns true while metadata updates remain paused. */
+  explicit operator bool() const noexcept { return owner_ != nullptr; }
+
+  /** Resumes metadata updates before destruction. */
+  void reset() noexcept;
+
+private:
+  explicit volume_metadata_snapshot_hold(
+      volume_metadata_file *owner) noexcept
+      : owner_(owner) {}
+
+  volume_metadata_file *owner_ = nullptr;
+};
+
+/**
+ * @brief Owns one metadata file below a specific minifilter instance.
+ *
+ * Store this object in an instance context. `try_release_for()` closes the
+ * file before an implicit/explicit volume lock, dismount, or query-remove;
+ * `try_reopen_for()` reopens it only for the same triggering FILE_OBJECT.
+ *
+ * File-system calls run with the state resource released and a transition bit
+ * set. Recursive callbacks therefore receive STATUS_FILE_LOCK_CONFLICT instead
+ * of deadlocking on the instance resource.
+ *
+ * Call `try_close()` from instance teardown at PASSIVE_LEVEL. The destructor
+ * is a final safety net and requires the same IRQL when a file remains open.
+ *
+ * The containing object must reside in nonpaged storage. When using a Filter
+ * Manager instance context, declare it with volume_metadata_instance_context.
+ */
+class volume_metadata_file {
+  friend class volume_metadata_update;
+  friend class volume_metadata_snapshot_hold;
+
+public:
+  /**
+   * @brief Creates unopened per-instance metadata state.
+   * @param objects Related objects from instance setup.
+   * @param relative_path Volume-relative path beginning with a backslash.
+   */
+  volume_metadata_file(related_objects objects,
+                       std::wstring &&relative_path) noexcept
+      : filter_(objects.filter().native_handle()),
+        instance_(objects.instance().native_handle()),
+        volume_(objects.volume().native_handle()),
+        relative_path_(std::move(relative_path)) {
+    resource_status_ = ExInitializeResourceLite(&resource_);
+    resource_initialized_ = NT_SUCCESS(resource_status_);
+    KeInitializeEvent(&updates_drained_, NotificationEvent, TRUE);
+  }
+
+  volume_metadata_file(const volume_metadata_file &) = delete;
+  volume_metadata_file &operator=(const volume_metadata_file &) = delete;
+  volume_metadata_file(volume_metadata_file &&) = delete;
+  volume_metadata_file &operator=(volume_metadata_file &&) = delete;
+
+  ~volume_metadata_file() {
+    if (file_handle_ || file_object_) {
+      NT_ASSERT(KeGetCurrentIrql() == PASSIVE_LEVEL);
+      if (KeGetCurrentIrql() == PASSIVE_LEVEL)
+        (void)close_owned(file_handle_, file_object_);
+    }
+    if (resource_initialized_)
+      ExDeleteResourceLite(&resource_);
+  }
+
+  /** Opens or creates the configured metadata file. Runs at PASSIVE_LEVEL. */
+  [[nodiscard]] ntl::status
+  try_open(volume_metadata_open_options options = {}) noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return STATUS_INVALID_DEVICE_STATE;
+    if (!valid())
+      return resource_status_.is_err() ? resource_status_
+                                       : ntl::status{STATUS_INVALID_PARAMETER};
+
+    ntl::result<std::wstring> full_path = try_full_path();
+    if (!full_path)
+      return full_path.status();
+
+    lock_exclusive();
+    if (transition_) {
+      unlock_exclusive();
+      return STATUS_FILE_LOCK_CONFLICT;
+    }
+    if (file_handle_ && file_object_) {
+      unlock_exclusive();
+      return STATUS_SUCCESS;
+    }
+    transition_ = true;
+    unlock_exclusive();
+
+    HANDLE opened_handle = nullptr;
+    PFILE_OBJECT opened_object = nullptr;
+    const ntl::status status =
+        open_path(*full_path, options, opened_handle, opened_object);
+
+    lock_exclusive();
+    if (status.is_ok()) {
+      file_handle_ = opened_handle;
+      file_object_ = opened_object;
+      ++open_generation_;
+    }
+    transition_ = false;
+    unlock_exclusive();
+    return status;
+  }
+
+  /**
+   * Closes metadata and remembers the volume FILE_OBJECT that caused it.
+   * Repeated release requests are harmless and preserve the first trigger.
+   */
+  [[nodiscard]] ntl::status try_release_for(ntl::file trigger) noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return STATUS_INVALID_DEVICE_STATE;
+    if (!valid() || !trigger)
+      return STATUS_INVALID_PARAMETER;
+
+    lock_exclusive();
+    if (transition_) {
+      unlock_exclusive();
+      return STATUS_FILE_LOCK_CONFLICT;
+    }
+
+    if (!reopen_trigger_)
+      reopen_trigger_ = trigger.native_object();
+    if (!file_handle_ && !file_object_) {
+      unlock_exclusive();
+      return STATUS_SUCCESS;
+    }
+
+    HANDLE closing_handle = std::exchange(file_handle_, nullptr);
+    PFILE_OBJECT closing_object = std::exchange(file_object_, nullptr);
+    transition_ = true;
+    unlock_exclusive();
+
+    const ntl::status status =
+        close_owned(closing_handle, closing_object);
+
+    lock_exclusive();
+    transition_ = false;
+    unlock_exclusive();
+    return status;
+  }
+
+  /**
+   * Reopens metadata only when `trigger` is the FILE_OBJECT that released it.
+   * The trigger is consumed after the reopen attempt, matching cleanup/unlock
+   * and cancel-remove lifetime.
+   */
+  [[nodiscard]] ntl::status
+  try_reopen_for(ntl::file trigger,
+                 volume_metadata_open_options options = {}) noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return STATUS_INVALID_DEVICE_STATE;
+    if (!valid() || !trigger)
+      return STATUS_INVALID_PARAMETER;
+
+    options.create_disposition = FILE_OPEN;
+    ntl::result<std::wstring> full_path = try_full_path();
+    if (!full_path)
+      return full_path.status();
+
+    lock_exclusive();
+    if (transition_) {
+      unlock_exclusive();
+      return STATUS_FILE_LOCK_CONFLICT;
+    }
+    if (reopen_trigger_ != trigger.native_object()) {
+      unlock_exclusive();
+      return STATUS_SUCCESS;
+    }
+    if (file_handle_ && file_object_) {
+      reopen_trigger_ = nullptr;
+      unlock_exclusive();
+      return STATUS_SUCCESS;
+    }
+    transition_ = true;
+    unlock_exclusive();
+
+    HANDLE opened_handle = nullptr;
+    PFILE_OBJECT opened_object = nullptr;
+    const ntl::status status =
+        open_path(*full_path, options, opened_handle, opened_object);
+
+    lock_exclusive();
+    if (status.is_ok()) {
+      file_handle_ = opened_handle;
+      file_object_ = opened_object;
+      ++open_generation_;
+    }
+    reopen_trigger_ = nullptr;
+    transition_ = false;
+    unlock_exclusive();
+    return status;
+  }
+
+  /** Closes metadata without installing a reopen trigger. */
+  [[nodiscard]] ntl::status try_close() noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return STATUS_INVALID_DEVICE_STATE;
+    if (!valid())
+      return STATUS_INVALID_PARAMETER;
+
+    lock_exclusive();
+    if (transition_) {
+      unlock_exclusive();
+      return STATUS_FILE_LOCK_CONFLICT;
+    }
+    HANDLE closing_handle = std::exchange(file_handle_, nullptr);
+    PFILE_OBJECT closing_object = std::exchange(file_object_, nullptr);
+    reopen_trigger_ = nullptr;
+    if (!closing_handle && !closing_object) {
+      unlock_exclusive();
+      return STATUS_SUCCESS;
+    }
+    transition_ = true;
+    unlock_exclusive();
+
+    const ntl::status status =
+        close_owned(closing_handle, closing_object);
+
+    lock_exclusive();
+    transition_ = false;
+    unlock_exclusive();
+    return status;
+  }
+
+  /**
+   * Attempts to admit one metadata update.
+   * Returns STATUS_DEVICE_BUSY while a snapshot hold is active.
+   */
+  [[nodiscard]] ntl::result<volume_metadata_update>
+  try_begin_update() noexcept {
+    if (updates_paused_.load(std::memory_order_acquire))
+      return ntl::unexpected(STATUS_DEVICE_BUSY);
+
+    KeClearEvent(&updates_drained_);
+    active_updates_.fetch_add(1, std::memory_order_acq_rel);
+    if (updates_paused_.load(std::memory_order_acquire)) {
+      finish_update();
+      return ntl::unexpected(STATUS_DEVICE_BUSY);
+    }
+    return ntl::ok(volume_metadata_update{this});
+  }
+
+  /**
+   * Stops new updates and waits for admitted updates to drain.
+   * The returned move-only token resumes updates from post-operation cleanup.
+   */
+  [[nodiscard]] ntl::result<volume_metadata_snapshot_hold>
+  try_hold_updates_for_snapshot() noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+
+    bool expected = false;
+    if (!updates_paused_.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel,
+            std::memory_order_acquire))
+      return ntl::unexpected(STATUS_DEVICE_BUSY);
+
+    while (active_updates_.load(std::memory_order_acquire) != 0) {
+      const NTSTATUS wait_status =
+          KeWaitForSingleObject(&updates_drained_, Executive, KernelMode,
+                                FALSE, nullptr);
+      if (!NT_SUCCESS(wait_status)) {
+        updates_paused_.store(false, std::memory_order_release);
+        return ntl::unexpected(wait_status);
+      }
+    }
+    return ntl::ok(volume_metadata_snapshot_hold{this});
+  }
+
+  /** Returns whether both the metadata handle and file reference are owned. */
+  bool is_open() noexcept {
+    if (!valid())
+      return false;
+    lock_shared();
+    const bool result = file_handle_ && file_object_ && !transition_;
+    unlock_shared();
+    return result;
+  }
+
+  /** Returns whether a close/open file-system operation is in flight. */
+  bool transitioning() noexcept {
+    if (!valid())
+      return false;
+    lock_shared();
+    const bool result = transition_;
+    unlock_shared();
+    return result;
+  }
+
+  /** Monotonically counts successful initial opens and reopens. */
+  std::uint64_t open_generation() noexcept {
+    if (!valid())
+      return 0;
+    lock_shared();
+    const std::uint64_t result = open_generation_;
+    unlock_shared();
+    return result;
+  }
+
+  bool updates_paused() const noexcept {
+    return updates_paused_.load(std::memory_order_acquire);
+  }
+
+  ULONG active_updates() const noexcept {
+    return active_updates_.load(std::memory_order_acquire);
+  }
+
+private:
+  bool valid() const noexcept {
+    return resource_initialized_ && filter_ && instance_ && volume_ &&
+           !relative_path_.empty() && relative_path_.front() == L'\\';
+  }
+
+  void lock_exclusive() noexcept {
+    KeEnterCriticalRegion();
+    (void)ExAcquireResourceExclusiveLite(&resource_, TRUE);
+  }
+
+  void unlock_exclusive() noexcept {
+    ExReleaseResourceLite(&resource_);
+    KeLeaveCriticalRegion();
+  }
+
+  void lock_shared() noexcept {
+    KeEnterCriticalRegion();
+    (void)ExAcquireResourceSharedLite(&resource_, TRUE);
+  }
+
+  void unlock_shared() noexcept {
+    ExReleaseResourceLite(&resource_);
+    KeLeaveCriticalRegion();
+  }
+
+  ntl::result<std::wstring> try_full_path() const noexcept {
+    ULONG required = 0;
+    NTSTATUS status = FltGetVolumeName(volume_, nullptr, &required);
+    if (status != STATUS_BUFFER_TOO_SMALL &&
+        status != STATUS_BUFFER_OVERFLOW)
+      return ntl::unexpected(status);
+    if (required == 0 ||
+        required > (std::numeric_limits<USHORT>::max)())
+      return ntl::unexpected(STATUS_NAME_TOO_LONG);
+
+    try {
+      std::vector<wchar_t> buffer(
+          (required + sizeof(wchar_t) - 1) / sizeof(wchar_t));
+      UNICODE_STRING volume_name{};
+      volume_name.Buffer = buffer.data();
+      volume_name.MaximumLength = static_cast<USHORT>(required);
+      status = FltGetVolumeName(volume_, &volume_name, &required);
+      if (!NT_SUCCESS(status))
+        return ntl::unexpected(status);
+
+      std::wstring path(volume_name.Buffer,
+                        volume_name.Length / sizeof(wchar_t));
+      path.append(relative_path_);
+      if (path.size() >
+          (std::numeric_limits<USHORT>::max)() / sizeof(wchar_t))
+        return ntl::unexpected(STATUS_NAME_TOO_LONG);
+      return ntl::ok(std::move(path));
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNSUCCESSFUL);
+    }
+  }
+
+  ntl::status open_path(const std::wstring &path,
+                        const volume_metadata_open_options &options,
+                        HANDLE &opened_handle,
+                        PFILE_OBJECT &opened_object) noexcept {
+    UNICODE_STRING name{};
+    name.Buffer = const_cast<PWCH>(path.data());
+    name.Length = static_cast<USHORT>(path.size() * sizeof(wchar_t));
+    name.MaximumLength = name.Length;
+    OBJECT_ATTRIBUTES attributes{};
+    InitializeObjectAttributes(&attributes, &name,
+                               OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE,
+                               nullptr, nullptr);
+
+    const auto attempt = [&]() noexcept {
+      IO_STATUS_BLOCK io_status{};
+      return ntl::status{FltCreateFileEx(
+          filter_, instance_, &opened_handle, &opened_object,
+          options.desired_access, &attributes, &io_status, nullptr,
+          options.file_attributes, options.share_access,
+          options.create_disposition, options.create_options, nullptr, 0, 0)};
+    };
+
+    ntl::status status = attempt();
+    if (status == STATUS_OBJECT_PATH_NOT_FOUND &&
+        options.create_system_volume_information) {
+      status = FltCreateSystemVolumeInformationFolder(instance_);
+      if (status.is_ok())
+        status = attempt();
+    }
+
+    if (status.is_err()) {
+      (void)close_owned(opened_handle, opened_object);
+      return status;
+    }
+    if (!opened_handle || !opened_object) {
+      (void)close_owned(opened_handle, opened_object);
+      return STATUS_INVALID_DEVICE_STATE;
+    }
+    return STATUS_SUCCESS;
+  }
+
+  static ntl::status close_owned(HANDLE &handle,
+                                 PFILE_OBJECT &object) noexcept {
+    if (object) {
+      ObDereferenceObject(object);
+      object = nullptr;
+    }
+    if (!handle)
+      return STATUS_SUCCESS;
+    const ntl::status status{FltClose(handle)};
+    handle = nullptr;
+    return status;
+  }
+
+  void finish_update() noexcept {
+    const ULONG previous =
+        active_updates_.fetch_sub(1, std::memory_order_acq_rel);
+    NT_ASSERT(previous != 0);
+    if (previous == 1)
+      KeSetEvent(&updates_drained_, IO_NO_INCREMENT, FALSE);
+  }
+
+  void resume_updates() noexcept {
+    const bool was_paused =
+        updates_paused_.exchange(false, std::memory_order_acq_rel);
+    NT_ASSERT(was_paused);
+    (void)was_paused;
+  }
+
+  PFLT_FILTER filter_ = nullptr;
+  PFLT_INSTANCE instance_ = nullptr;
+  PFLT_VOLUME volume_ = nullptr;
+  std::wstring relative_path_;
+
+  ERESOURCE resource_{};
+  ntl::status resource_status_{STATUS_UNSUCCESSFUL};
+  bool resource_initialized_ = false;
+  bool transition_ = false;
+  HANDLE file_handle_ = nullptr;
+  PFILE_OBJECT file_object_ = nullptr;
+  PFILE_OBJECT reopen_trigger_ = nullptr;
+  std::uint64_t open_generation_ = 0;
+
+  std::atomic<bool> updates_paused_{false};
+  std::atomic<ULONG> active_updates_{0};
+  KEVENT updates_drained_{};
+};
+
+inline volume_metadata_update &
+volume_metadata_update::operator=(volume_metadata_update &&other) noexcept {
+  if (this != &other) {
+    reset();
+    owner_ = std::exchange(other.owner_, nullptr);
+  }
+  return *this;
+}
+
+inline volume_metadata_update::~volume_metadata_update() { reset(); }
+
+inline void volume_metadata_update::reset() noexcept {
+  if (owner_) {
+    owner_->finish_update();
+    owner_ = nullptr;
+  }
+}
+
+inline volume_metadata_snapshot_hold &
+volume_metadata_snapshot_hold::operator=(
+    volume_metadata_snapshot_hold &&other) noexcept {
+  if (this != &other) {
+    reset();
+    owner_ = std::exchange(other.owner_, nullptr);
+  }
+  return *this;
+}
+
+inline volume_metadata_snapshot_hold::~volume_metadata_snapshot_hold() {
+  reset();
+}
+
+inline void volume_metadata_snapshot_hold::reset() noexcept {
+  if (owner_) {
+    owner_->resume_updates();
+    owner_ = nullptr;
+  }
+}
+
+} // namespace ntl::flt

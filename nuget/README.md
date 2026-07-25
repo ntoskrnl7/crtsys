@@ -230,6 +230,12 @@ project into a driver project.
   `build/native/lib/native/v145/x64/Release`. ARM is provided for v142/v143;
   v145 carries x86/x64/ARM64.
 
+The NTL minifilter entry supports Windows 7+ consumers even though the
+prebuilt library itself is compiled with the Windows 8 Filter Manager
+declarations. Its public owner layouts are target-version invariant, and the
+native `FLT_REGISTRATION` is created and destroyed by the consumer translation
+unit so that its size and version match the project's `NTDDI_VERSION`.
+
 ## Release artifacts
 
 - `crtsys-<version>-prebuilt.zip`  

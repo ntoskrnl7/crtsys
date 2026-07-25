@@ -11,25 +11,57 @@
 
 #include <fltKernel.h>
 
+#include <limits>
+#include <string_view>
+
 namespace ntl::flt {
+
+/** Volume-lifecycle FSCTL recognized by file_system_control_parameters. */
+enum class volume_control_request {
+  other,
+  lock,
+  unlock,
+  dismount,
+};
+
+/** PnP lifecycle request recognized by pnp_parameters. */
+enum class pnp_request {
+  other,
+  query_remove,
+  cancel_remove,
+  surprise_removal,
+};
+
 namespace detail {
 
-/** @brief Validates and retains callback data for one operation type. */
+inline constexpr ULONG disposition_ignore_readonly_attribute = 0x00000010UL;
+
+/**
+ * @brief Validates and retains callback data or an immutable IOPB snapshot.
+ *
+ * A snapshot has no callback-data owner, so dirty() is intentionally a no-op.
+ * Snapshot users receive these parameter views through a const reference and
+ * therefore cannot call the mutable pre/post-operation setters.
+ */
 template <operation_id Expected> class operation_parameters {
 public:
-  /** @brief Returns true when the callback carries the expected operation. */
-  explicit operator bool() const noexcept { return data_ != nullptr; }
+  /** @brief Returns true when the view carries the expected operation. */
+  explicit operator bool() const noexcept { return iopb_ != nullptr; }
 
 protected:
   explicit operation_parameters(PFLT_CALLBACK_DATA data) noexcept
       : data_(data && data->Iopb &&
                       data->Iopb->MajorFunction == static_cast<UCHAR>(Expected)
                   ? data
+                  : nullptr),
+        iopb_(data_ ? data_->Iopb : nullptr) {}
+
+  explicit operation_parameters(PFLT_IO_PARAMETER_BLOCK iopb) noexcept
+      : iopb_(iopb && iopb->MajorFunction == static_cast<UCHAR>(Expected)
+                  ? iopb
                   : nullptr) {}
 
-  PFLT_IO_PARAMETER_BLOCK iopb() const noexcept {
-    return data_ ? data_->Iopb : nullptr;
-  }
+  PFLT_IO_PARAMETER_BLOCK iopb() const noexcept { return iopb_; }
 
   PFLT_CALLBACK_DATA callback() const noexcept { return data_; }
 
@@ -40,6 +72,7 @@ protected:
 
 private:
   PFLT_CALLBACK_DATA data_ = nullptr;
+  PFLT_IO_PARAMETER_BLOCK iopb_ = nullptr;
 };
 
 } // namespace detail
@@ -52,6 +85,8 @@ class create_parameters
 public:
   /** @brief Wraps create parameters after validating the major function. */
   explicit create_parameters(PFLT_CALLBACK_DATA data) noexcept : base(data) {}
+  explicit create_parameters(PFLT_IO_PARAMETER_BLOCK iopb) noexcept
+      : base(iopb) {}
 
   PIO_SECURITY_CONTEXT security_context() const noexcept {
     return iopb() ? iopb()->Parameters.Create.SecurityContext : nullptr;
@@ -70,12 +105,27 @@ public:
     return static_cast<UCHAR>(options() >> 24);
   }
 
+  /** @brief Returns whether the open requests deletion at final close. */
+  bool delete_on_close() const noexcept {
+    return (create_options() & FILE_DELETE_ON_CLOSE) != 0;
+  }
+
   USHORT file_attributes() const noexcept {
     return iopb() ? iopb()->Parameters.Create.FileAttributes : 0;
   }
 
   USHORT share_access() const noexcept {
     return iopb() ? iopb()->Parameters.Create.ShareAccess : 0;
+  }
+
+  /**
+   * @brief Returns whether a volume open denies write and delete sharing.
+   *
+   * On NTFS, ReFS, and FAT this is the implicit-lock pattern used by autochk.
+   * Pair it with `objects.file().is_volume_open()`.
+   */
+  bool is_implicit_volume_lock_candidate() const noexcept {
+    return (share_access() & (FILE_SHARE_WRITE | FILE_SHARE_DELETE)) == 0;
   }
 
   ULONG ea_length() const noexcept {
@@ -131,6 +181,39 @@ public:
     iopb()->Parameters.Create.AllocationSize = value;
     dirty();
   }
+
+  /**
+   * @brief Replaces the name sent to the lower file system.
+   *
+   *
+   * This is the typed pre-create counterpart of IoReplaceFileObjectName.
+   *
+   * The I/O manager owns the replacement after this call returns.
+   */
+  ntl::status try_replace_target_name(std::wstring_view value) noexcept {
+    if (!iopb() || !iopb()->TargetFileObject)
+      return STATUS_INVALID_PARAMETER;
+    if (value.empty())
+      return STATUS_OBJECT_NAME_INVALID;
+    constexpr std::size_t maximum_characters =
+        (static_cast<std::size_t>((std::numeric_limits<USHORT>::max)()) /
+         sizeof(wchar_t));
+    if (value.size() > maximum_characters)
+      return STATUS_NAME_TOO_LONG;
+
+    const auto bytes = static_cast<USHORT>(value.size() * sizeof(wchar_t));
+    return IoReplaceFileObjectName(iopb()->TargetFileObject,
+                                   const_cast<PWCH>(value.data()), bytes);
+  }
+
+  /**
+   * @brief Clears a relative-open parent after installing an absolute
+   * name.
+   */
+  void clear_related_target() noexcept {
+    if (iopb() && iopb()->TargetFileObject)
+      iopb()->TargetFileObject->RelatedFileObject = nullptr;
+  }
 };
 
 /** @brief Typed view shared by IRP_MJ_READ and IRP_MJ_WRITE. */
@@ -144,6 +227,8 @@ class transfer_parameters : public detail::operation_parameters<Expected> {
 public:
   /** @brief Wraps transfer parameters after validating the major function. */
   explicit transfer_parameters(PFLT_CALLBACK_DATA data) noexcept : base(data) {}
+  explicit transfer_parameters(PFLT_IO_PARAMETER_BLOCK iopb) noexcept
+      : base(iopb) {}
 
   ULONG length() const noexcept {
     if (!this->iopb())
@@ -237,6 +322,55 @@ public:
 using read_parameters = transfer_parameters<operation_id::read>;
 using write_parameters = transfer_parameters<operation_id::write>;
 
+/** @brief Read-only IRP_MJ_NETWORK_QUERY_OPEN parameters. */
+class network_query_open_parameters
+    : public detail::operation_parameters<operation_id::network_query_open> {
+  using base =
+      detail::operation_parameters<operation_id::network_query_open>;
+
+public:
+  explicit network_query_open_parameters(PFLT_CALLBACK_DATA data) noexcept
+      : base(data) {}
+  explicit network_query_open_parameters(
+      PFLT_IO_PARAMETER_BLOCK iopb) noexcept
+      : base(iopb) {}
+
+  PIRP irp() const noexcept {
+    return iopb() ? iopb()->Parameters.NetworkQueryOpen.Irp : nullptr;
+  }
+
+  PFILE_NETWORK_OPEN_INFORMATION output() const noexcept {
+    return iopb() ? iopb()->Parameters.NetworkQueryOpen.NetworkInformation
+                  : nullptr;
+  }
+
+  PIO_STACK_LOCATION stack_location() const noexcept {
+    return irp() ? IoGetCurrentIrpStackLocation(irp()) : nullptr;
+  }
+
+  ULONG create_options() const noexcept {
+    const auto *const stack = stack_location();
+    return stack ? stack->Parameters.Create.Options : 0;
+  }
+
+  UCHAR stack_flags() const noexcept {
+    const auto *const stack = stack_location();
+    return stack ? stack->Flags : 0;
+  }
+
+  bool paging_file() const noexcept {
+    return (stack_flags() & SL_OPEN_PAGING_FILE) != 0;
+  }
+
+  bool open_by_file_id() const noexcept {
+    return (create_options() & FILE_OPEN_BY_FILE_ID) != 0;
+  }
+
+  bool case_sensitive() const noexcept {
+    return (stack_flags() & SL_CASE_SENSITIVE) != 0;
+  }
+};
+
 /** @brief Typed view of IRP_MJ_QUERY_INFORMATION parameters. */
 class query_information_parameters
     : public detail::operation_parameters<operation_id::query_information> {
@@ -245,6 +379,8 @@ class query_information_parameters
 public:
   explicit query_information_parameters(PFLT_CALLBACK_DATA data) noexcept
       : base(data) {}
+  explicit query_information_parameters(PFLT_IO_PARAMETER_BLOCK iopb) noexcept
+      : base(iopb) {}
 
   ULONG length() const noexcept {
     return iopb() ? iopb()->Parameters.QueryFileInformation.Length : 0;
@@ -273,6 +409,113 @@ public:
     iopb()->Parameters.QueryFileInformation.InfoBuffer = value;
     dirty();
   }
+
+  void information_class(FILE_INFORMATION_CLASS value) noexcept {
+    if (!iopb())
+      return;
+    iopb()->Parameters.QueryFileInformation.FileInformationClass = value;
+    dirty();
+  }
+};
+
+/** @brief Kind of rename/link destination carried by set-information. */
+enum class destination_information_kind {
+  none,
+  rename,
+  hard_link,
+};
+
+/**
+ * @brief Validated read-only destination from FILE_RENAME/LINK_INFORMATION.
+ */
+class destination_information_view {
+public:
+  destination_information_view() noexcept = default;
+
+  destination_information_kind kind() const noexcept { return kind_; }
+  FILE_INFORMATION_CLASS information_class() const noexcept {
+    return information_class_;
+  }
+  HANDLE root_directory() const noexcept { return root_directory_; }
+  std::wstring_view name() const noexcept { return name_; }
+  ULONG flags() const noexcept { return flags_; }
+  bool extended() const noexcept { return extended_; }
+  bool replace_if_exists() const noexcept { return (flags_ & 1UL) != 0; }
+  explicit operator bool() const noexcept {
+    return kind_ != destination_information_kind::none && !name_.empty();
+  }
+
+private:
+  friend class set_information_parameters;
+
+  destination_information_view(destination_information_kind kind,
+                               FILE_INFORMATION_CLASS information_class,
+                               HANDLE root_directory, std::wstring_view name,
+                               ULONG flags, bool extended) noexcept
+      : kind_(kind), information_class_(information_class),
+        root_directory_(root_directory), name_(name), flags_(flags),
+        extended_(extended) {}
+
+  destination_information_kind kind_ = destination_information_kind::none;
+  FILE_INFORMATION_CLASS information_class_ = FileDirectoryInformation;
+  HANDLE root_directory_ = nullptr;
+  std::wstring_view name_;
+  ULONG flags_ = 0;
+  bool extended_ = false;
+};
+
+/** @brief State controlled by one delete-disposition request. */
+enum class disposition_state_kind {
+  none,
+  delete_disposition,
+  delete_on_close,
+};
+
+/**
+ * @brief Validated read-only FILE_DISPOSITION_INFORMATION[_EX] view.
+ */
+class disposition_information_view {
+public:
+  disposition_information_view() noexcept = default;
+
+  FILE_INFORMATION_CLASS information_class() const noexcept {
+    return information_class_;
+  }
+  disposition_state_kind state_kind() const noexcept { return state_kind_; }
+  ULONG flags() const noexcept { return flags_; }
+  bool extended() const noexcept { return extended_; }
+  bool delete_requested() const noexcept {
+    return (flags_ & FILE_DISPOSITION_DELETE) != 0;
+  }
+  bool posix_semantics() const noexcept {
+    return (flags_ & FILE_DISPOSITION_POSIX_SEMANTICS) != 0;
+  }
+  bool force_image_section_check() const noexcept {
+    return (flags_ & FILE_DISPOSITION_FORCE_IMAGE_SECTION_CHECK) != 0;
+  }
+  bool on_close() const noexcept {
+    return (flags_ & FILE_DISPOSITION_ON_CLOSE) != 0;
+  }
+  bool ignore_readonly_attribute() const noexcept {
+    return (flags_ & detail::disposition_ignore_readonly_attribute) != 0;
+  }
+  explicit operator bool() const noexcept {
+    return state_kind_ != disposition_state_kind::none;
+  }
+
+private:
+  friend class set_information_parameters;
+
+  disposition_information_view(FILE_INFORMATION_CLASS information_class,
+                               disposition_state_kind state_kind, ULONG flags,
+                               bool extended) noexcept
+      : information_class_(information_class), state_kind_(state_kind),
+        flags_(flags), extended_(extended) {}
+
+  FILE_INFORMATION_CLASS information_class_ = FileDirectoryInformation;
+  disposition_state_kind state_kind_ = disposition_state_kind::none;
+  ULONG flags_ = 0;
+  bool extended_ = false;
 };
 
 /** @brief Typed view of IRP_MJ_SET_INFORMATION parameters. */
@@ -283,6 +526,8 @@ class set_information_parameters
 public:
   explicit set_information_parameters(PFLT_CALLBACK_DATA data) noexcept
       : base(data) {}
+  explicit set_information_parameters(PFLT_IO_PARAMETER_BLOCK iopb) noexcept
+      : base(iopb) {}
 
   ULONG length() const noexcept {
     return iopb() ? iopb()->Parameters.SetFileInformation.Length : 0;
@@ -308,6 +553,108 @@ public:
            iopb()->Parameters.SetFileInformation.ReplaceIfExists != FALSE;
   }
 
+  /**
+   * @brief Validates and returns a rename or hard-link destination.
+   *
+   * The view is tied to the current callback and does not own the input
+   * buffer.
+   */
+  destination_information_view destination() const noexcept {
+    if (!iopb())
+      return {};
+
+    const FILE_INFORMATION_CLASS type = information_class();
+    const bool rename =
+        type == FileRenameInformation ||
+        type == FileRenameInformationBypassAccessCheck ||
+        type == FileRenameInformationEx ||
+        type == FileRenameInformationExBypassAccessCheck;
+    const bool link =
+        type == FileLinkInformation || type == FileLinkInformationEx ||
+        type == FileLinkInformationExBypassAccessCheck;
+    if (!rename && !link)
+      return {};
+
+    const ULONG bytes = length();
+    const std::size_t header =
+        rename ? FIELD_OFFSET(FILE_RENAME_INFORMATION, FileName)
+               : FIELD_OFFSET(FILE_LINK_INFORMATION, FileName);
+    if (!buffer() || bytes < header)
+      return {};
+
+    HANDLE root = nullptr;
+    ULONG name_bytes = 0;
+    PWCHAR name = nullptr;
+    ULONG flags = 0;
+    const bool extended =
+        type == FileRenameInformationEx ||
+        type == FileRenameInformationExBypassAccessCheck ||
+        type == FileLinkInformationEx ||
+        type == FileLinkInformationExBypassAccessCheck;
+    if (rename) {
+      const auto *const information =
+          static_cast<const FILE_RENAME_INFORMATION *>(buffer());
+      root = information->RootDirectory;
+      name_bytes = information->FileNameLength;
+      name = const_cast<PWCHAR>(information->FileName);
+      flags = extended ? *reinterpret_cast<const ULONG *>(information)
+                       : (information->ReplaceIfExists ? 1UL : 0UL);
+    } else {
+      const auto *const information =
+          static_cast<const FILE_LINK_INFORMATION *>(buffer());
+      root = information->RootDirectory;
+      name_bytes = information->FileNameLength;
+      name = const_cast<PWCHAR>(information->FileName);
+      flags = extended ? *reinterpret_cast<const ULONG *>(information)
+                       : (information->ReplaceIfExists ? 1UL : 0UL);
+    }
+
+    if (name_bytes == 0 || (name_bytes % sizeof(wchar_t)) != 0 ||
+        name_bytes > bytes - header)
+      return {};
+    return {rename ? destination_information_kind::rename
+                   : destination_information_kind::hard_link,
+            type, root,
+            std::wstring_view{name, name_bytes / sizeof(wchar_t)}, flags,
+            extended};
+  }
+
+  /**
+   * @brief Validates and returns a legacy or extended delete disposition.
+   *
+   * The view copies the small disposition value and never exposes the native
+   * callback buffer.
+   */
+  disposition_information_view disposition() const noexcept {
+    if (!iopb() || !buffer())
+      return {};
+
+    const FILE_INFORMATION_CLASS type = information_class();
+    if (type == FileDispositionInformation) {
+      if (length() < sizeof(FILE_DISPOSITION_INFORMATION))
+        return {};
+      const auto *const information =
+          static_cast<const FILE_DISPOSITION_INFORMATION *>(buffer());
+      const ULONG flags =
+          information->DeleteFile ? FILE_DISPOSITION_DELETE : 0UL;
+      return {type, disposition_state_kind::delete_disposition, flags, false};
+    }
+
+    if (type == FileDispositionInformationEx) {
+      if (length() < sizeof(FILE_DISPOSITION_INFORMATION_EX))
+        return {};
+      const auto *const information =
+          static_cast<const FILE_DISPOSITION_INFORMATION_EX *>(buffer());
+      const ULONG flags = information->Flags;
+      return {type,
+              (flags & FILE_DISPOSITION_ON_CLOSE) != 0
+                  ? disposition_state_kind::delete_on_close
+                  : disposition_state_kind::delete_disposition,
+              flags, true};
+    }
+    return {};
+  }
+
   void length(ULONG value) noexcept {
     if (!iopb())
       return;
@@ -331,6 +678,8 @@ class directory_control_parameters
 public:
   explicit directory_control_parameters(PFLT_CALLBACK_DATA data) noexcept
       : base(data) {}
+  explicit directory_control_parameters(PFLT_IO_PARAMETER_BLOCK iopb) noexcept
+      : base(iopb) {}
 
   UCHAR minor_function() const noexcept {
     return iopb() ? iopb()->MinorFunction : 0xff;
@@ -402,6 +751,21 @@ public:
       return iopb()->Parameters.DirectoryControl.NotifyDirectoryEx.MdlAddress;
     return nullptr;
   }
+
+  /**
+   * @brief Configures an IRP_MN_NOTIFY_CHANGE_DIRECTORY request.
+   */
+  void notification(PVOID buffer, ULONG length, ULONG completion_filter,
+                    PMDL mdl = nullptr) noexcept {
+    if (!iopb() || !is_notify())
+      return;
+    auto &notify = iopb()->Parameters.DirectoryControl.NotifyDirectory;
+    notify.DirectoryBuffer = buffer;
+    notify.Length = length;
+    notify.CompletionFilter = completion_filter;
+    notify.MdlAddress = mdl;
+    dirty();
+  }
 };
 
 /** @brief Typed view shared by file-system and device-control operations. */
@@ -415,6 +779,8 @@ class control_parameters : public detail::operation_parameters<Expected> {
 
 public:
   explicit control_parameters(PFLT_CALLBACK_DATA data) noexcept : base(data) {}
+  explicit control_parameters(PFLT_IO_PARAMETER_BLOCK iopb) noexcept
+      : base(iopb) {}
 
   /** @brief Returns true for the dedicated fast-I/O IOCTL layout. */
   bool is_fast_io() const noexcept {
@@ -519,6 +885,32 @@ public:
                        ->Parameters.DeviceIoControl.Direct.OutputMdlAddress;
     }
   }
+
+  /** Classifies the explicit volume lifecycle FSCTLs. */
+  volume_control_request volume_request() const noexcept {
+    if constexpr (Expected != operation_id::file_system_control) {
+      return volume_control_request::other;
+    } else {
+      switch (code()) {
+      case FSCTL_LOCK_VOLUME:
+        return volume_control_request::lock;
+      case FSCTL_UNLOCK_VOLUME:
+        return volume_control_request::unlock;
+      case FSCTL_DISMOUNT_VOLUME:
+        return volume_control_request::dismount;
+      default:
+        return volume_control_request::other;
+      }
+    }
+  }
+
+  /** Returns whether this is the volume snapshot flush-and-hold IOCTL. */
+  bool is_snapshot_flush_and_hold() const noexcept {
+    if constexpr (Expected != operation_id::device_control)
+      return false;
+    else
+      return code() == IOCTL_VOLSNAP_FLUSH_AND_HOLD_WRITES;
+  }
 };
 
 using file_system_control_parameters =
@@ -528,18 +920,43 @@ using device_control_parameters =
 using internal_device_control_parameters =
     control_parameters<operation_id::internal_device_control>;
 
+/** @brief Typed view of IRP_MJ_PNP lifecycle requests. */
+class pnp_parameters
+    : public detail::operation_parameters<operation_id::pnp> {
+  using base = detail::operation_parameters<operation_id::pnp>;
+
+public:
+  explicit pnp_parameters(PFLT_CALLBACK_DATA data) noexcept : base(data) {}
+  explicit pnp_parameters(PFLT_IO_PARAMETER_BLOCK iopb) noexcept : base(iopb) {}
+
+  pnp_request request() const noexcept {
+    if (!iopb())
+      return pnp_request::other;
+    switch (iopb()->MinorFunction) {
+    case IRP_MN_QUERY_REMOVE_DEVICE:
+      return pnp_request::query_remove;
+    case IRP_MN_CANCEL_REMOVE_DEVICE:
+      return pnp_request::cancel_remove;
+    case IRP_MN_SURPRISE_REMOVAL:
+      return pnp_request::surprise_removal;
+    default:
+      return pnp_request::other;
+    }
+  }
+};
+
 /** @brief Empty parameter view for operations with no typed NTL fields. */
 class no_parameters {
 public:
-  explicit no_parameters(PFLT_CALLBACK_DATA data) noexcept : data_(data) {}
+  explicit no_parameters(PFLT_CALLBACK_DATA data) noexcept
+      : iopb_(data ? data->Iopb : nullptr) {}
+  explicit no_parameters(PFLT_IO_PARAMETER_BLOCK iopb) noexcept : iopb_(iopb) {}
 
-  /** @brief Returns true when callback data and its IOPB are present. */
-  explicit operator bool() const noexcept {
-    return data_ != nullptr && data_->Iopb != nullptr;
-  }
+  /** @brief Returns true when an IOPB is present. */
+  explicit operator bool() const noexcept { return iopb_ != nullptr; }
 
 private:
-  PFLT_CALLBACK_DATA data_ = nullptr;
+  PFLT_IO_PARAMETER_BLOCK iopb_ = nullptr;
 };
 
 /** @brief Maps a compile-time operation to its only legal parameter view. */
@@ -557,6 +974,11 @@ template <> struct operation_parameter_traits<operation_id::read> {
 
 template <> struct operation_parameter_traits<operation_id::write> {
   using type = write_parameters;
+};
+
+template <>
+struct operation_parameter_traits<operation_id::network_query_open> {
+  using type = network_query_open_parameters;
 };
 
 template <> struct operation_parameter_traits<operation_id::query_information> {
@@ -583,6 +1005,10 @@ template <> struct operation_parameter_traits<operation_id::device_control> {
 template <>
 struct operation_parameter_traits<operation_id::internal_device_control> {
   using type = internal_device_control_parameters;
+};
+
+template <> struct operation_parameter_traits<operation_id::pnp> {
+  using type = pnp_parameters;
 };
 
 template <operation_id Value>

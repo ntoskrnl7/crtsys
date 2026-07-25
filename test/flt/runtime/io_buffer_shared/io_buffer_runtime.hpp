@@ -16,6 +16,13 @@ inline constexpr wchar_t altitude[] = L"370030.229";
 inline constexpr wchar_t port_name[] = L"\\CrtSysFltIoBufferRuntimeTestPort";
 inline constexpr std::wstring_view target_file_name =
     L"crtsys_flt_io_buffer_runtime_test.bin";
+inline constexpr std::wstring_view target_directory_name =
+    L"crtsys_flt_io_buffer_directory";
+inline constexpr std::wstring_view directory_source_name =
+    L"source-entry.bin";
+inline constexpr std::wstring_view directory_swapped_name =
+    L"swappedentry.bin";
+inline constexpr std::uint16_t fsctl_output_marker = 0x7ff0;
 inline constexpr std::uint8_t transform_key = 0xA7;
 inline constexpr std::size_t payload_bytes = 4096;
 inline constexpr std::uint32_t transform_timeout_milliseconds = 2000;
@@ -40,6 +47,8 @@ struct runtime_state {
   std::uint32_t pending_post_cancels = 0;
   std::uint32_t waiting_pre_requests = 0;
   std::uint32_t waiting_post_requests = 0;
+  std::uint32_t swapped_directory_queries = 0;
+  std::uint32_t swapped_fsctl_outputs = 0;
   std::uint64_t waiting_pre_address = 0;
   std::uint64_t waiting_post_address = 0;
 
@@ -49,6 +58,7 @@ struct runtime_state {
             self.pending_pre_resumes, self.pending_post_replies,
             self.pending_pre_cancels, self.pending_post_cancels,
             self.waiting_pre_requests, self.waiting_post_requests,
+            self.swapped_directory_queries, self.swapped_fsctl_outputs,
             self.waiting_pre_address, self.waiting_post_address);
   }
 };

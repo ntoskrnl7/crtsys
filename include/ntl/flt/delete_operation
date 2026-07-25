@@ -1,0 +1,49 @@
+/**
+ * @file delete_operation
+ * @brief Phase-typed verification of file or stream deletion at cleanup.
+ */
+#pragma once
+
+#include "io_buffer"
+
+#include "../result"
+
+#include <fltKernel.h>
+
+namespace ntl::flt {
+
+/** @brief Result of querying a deletion candidate after cleanup completes. */
+enum class cleanup_deletion_state {
+  present,
+  deleted,
+};
+
+/**
+ * @brief Determines whether the cleaned-up file object was actually deleted.
+ *
+ * A delete disposition is only a candidate until cleanup completes. Call this
+ * helper from a synchronized post-cleanup callback at PASSIVE_LEVEL. A
+ * STATUS_FILE_DELETED query result is returned as the deleted value; every
+ * other failed query remains an error.
+ */
+inline ntl::result<cleanup_deletion_state> try_query_cleanup_deletion(
+    post_operation<operation_id::cleanup> operation) noexcept {
+  const auto data = operation.data();
+  if (!data.native() || !data.target_instance() || !data.target_file())
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+    return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+
+  FILE_STANDARD_INFORMATION information{};
+  const NTSTATUS status = FltQueryInformationFile(
+      data.target_instance().native_handle(),
+      data.target_file().native_object(), &information, sizeof(information),
+      FileStandardInformation, nullptr);
+  if (status == STATUS_FILE_DELETED)
+    return ntl::ok(cleanup_deletion_state::deleted);
+  if (!NT_SUCCESS(status))
+    return ntl::unexpected(status);
+  return ntl::ok(cleanup_deletion_state::present);
+}
+
+} // namespace ntl::flt

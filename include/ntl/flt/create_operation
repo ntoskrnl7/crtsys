@@ -1,0 +1,46 @@
+/**
+ * @file create_operation
+ * @brief Phase-typed post-create file-open operations.
+ */
+#pragma once
+
+#include "io_buffer"
+
+#include "../status"
+
+#include <fltKernel.h>
+
+namespace ntl::flt {
+
+/**
+ * @brief Cancels a successful file open from its post-create callback.
+ *
+ * The helper rejects reparses, an already-created user handle, non-error
+ * completion statuses, and calls outside PASSIVE_LEVEL. On success it closes
+ * the lower-stack open and completes the original create with `status`.
+ */
+inline ntl::status try_cancel_file_open(
+    post_operation<operation_id::create> operation,
+    NTSTATUS status = STATUS_ACCESS_DENIED) noexcept {
+  auto data = operation.data();
+  if (!data.native() || !data.target_instance() || !data.target_file())
+    return STATUS_INVALID_PARAMETER;
+  if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+    return STATUS_INVALID_DEVICE_STATE;
+  if (!NT_ERROR(status))
+    return STATUS_INVALID_PARAMETER;
+
+  const NTSTATUS create_status = static_cast<NTSTATUS>(data.io_status());
+  if (!NT_SUCCESS(create_status) || create_status == STATUS_REPARSE)
+    return STATUS_INVALID_DEVICE_STATE;
+
+  PFILE_OBJECT file = data.target_file().native_object();
+  if (FlagOn(file->Flags, FO_HANDLE_CREATED))
+    return STATUS_INVALID_DEVICE_STATE;
+
+  FltCancelFileOpen(data.target_instance().native_handle(), file);
+  data.complete(status, 0);
+  return STATUS_SUCCESS;
+}
+
+} // namespace ntl::flt

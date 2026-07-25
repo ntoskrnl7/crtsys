@@ -68,7 +68,7 @@ foreach ($relativePath in @($tracked + $untracked | Sort-Object -Unique)) {
 }
 
 if ($errors.Count -ne 0) {
-  $errors | ForEach-Object { Write-Error $_ }
+  $errors | ForEach-Object { Write-Error $_ -ErrorAction Continue }
   throw "Found $($errors.Count) hard-coded NTSTATUS literal(s)."
 }
 

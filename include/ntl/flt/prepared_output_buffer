@@ -1,0 +1,301 @@
+/**
+ * @file prepared_output_buffer
+ * @author jungkwang.lee (ntoskrnl7@gmail.com)
+ * @brief Phase-aware access to output buffers across minifilter completion.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include "io_buffer"
+
+#include "../except"
+#include "../status"
+
+#include <algorithm>
+#include <cstddef>
+#include <tuple>
+#include <type_traits>
+#include <utility>
+
+namespace ntl::flt {
+
+/**
+ * @brief Mutable output bytes valid only while a prepared-buffer visitor runs.
+ *
+ * capacity() is the writable size supplied in pre-operation. valid_size() is
+ * bounded by both capacity() and IoStatus.Information for successful and
+ * warning completions.
+ */
+class prepared_output_buffer_view {
+public:
+  constexpr prepared_output_buffer_view() noexcept = default;
+
+  constexpr void *data() const noexcept { return data_; }
+  constexpr std::size_t capacity() const noexcept { return capacity_; }
+  constexpr std::size_t valid_size() const noexcept { return valid_size_; }
+  constexpr explicit operator bool() const noexcept {
+    return data_ != nullptr && capacity_ != 0;
+  }
+
+private:
+  template <operation_id> friend class prepared_output_buffer;
+
+  constexpr prepared_output_buffer_view(void *data, std::size_t capacity,
+                                        std::size_t valid_size) noexcept
+      : data_(data), capacity_(capacity), valid_size_(valid_size) {}
+
+  void *data_ = nullptr;
+  std::size_t capacity_ = 0;
+  std::size_t valid_size_ = 0;
+};
+
+namespace detail {
+
+template <operation_id Operation>
+inline constexpr bool output_buffer_operation_v =
+    Operation == operation_id::read ||
+    Operation == operation_id::query_information ||
+    Operation == operation_id::query_ea ||
+    Operation == operation_id::query_volume_information ||
+    Operation == operation_id::directory_control ||
+    Operation == operation_id::file_system_control ||
+    Operation == operation_id::device_control ||
+    Operation == operation_id::internal_device_control ||
+    Operation == operation_id::query_security ||
+    Operation == operation_id::query_quota;
+
+struct decoded_output_buffer {
+  PMDL *mdl_address = nullptr;
+  PVOID *buffer_address = nullptr;
+  PULONG length_address = nullptr;
+  LOCK_OPERATION desired_access = IoReadAccess;
+};
+
+inline ntl::result<decoded_output_buffer>
+try_decode_output_buffer(PFLT_CALLBACK_DATA data) noexcept {
+  if (!data || !data->Iopb)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+
+  decoded_output_buffer result;
+  const NTSTATUS decoded =
+      FltDecodeParameters(data, &result.mdl_address, &result.buffer_address,
+                          &result.length_address, &result.desired_access);
+  if (!NT_SUCCESS(decoded))
+    return ntl::unexpected(decoded);
+  if (!result.buffer_address || !result.length_address)
+    return ntl::unexpected(STATUS_NOT_SUPPORTED);
+  if (result.desired_access == IoReadAccess)
+    return ntl::unexpected(STATUS_INVALID_DEVICE_REQUEST);
+  return ntl::ok(result);
+}
+
+inline bool is_user_address(const void *address) noexcept {
+  return address && reinterpret_cast<ULONG_PTR>(address) <
+                        reinterpret_cast<ULONG_PTR>(MmSystemRangeStart);
+}
+
+} // namespace detail
+
+/**
+ * @brief Records a pre-validated output-buffer path for one typed operation.
+ *
+ * This object does not own or free an MDL. When a user buffer must survive
+ * arbitrary post-operation thread context, try_prepare_output_buffer locks it
+ * during pre-operation and Filter Manager owns the resulting MDL. The object
+ * merely requires that an MDL (or a genuine system buffer) still be present
+ * before a safe-post visitor can access the bytes.
+ */
+template <operation_id Operation> class prepared_output_buffer {
+  static_assert(detail::output_buffer_operation_v<Operation>,
+                "This operation has no supported post-output buffer");
+
+public:
+  prepared_output_buffer() noexcept = default;
+  prepared_output_buffer(const prepared_output_buffer &) = delete;
+  prepared_output_buffer &operator=(const prepared_output_buffer &) = delete;
+
+  prepared_output_buffer(prepared_output_buffer &&other) noexcept
+      : data_(std::exchange(other.data_, nullptr)),
+        capacity_(std::exchange(other.capacity_, 0)),
+        requires_mdl_(std::exchange(other.requires_mdl_, false)) {}
+
+  prepared_output_buffer &operator=(prepared_output_buffer &&other) noexcept {
+    if (this != &other) {
+      data_ = std::exchange(other.data_, nullptr);
+      capacity_ = std::exchange(other.capacity_, 0);
+      requires_mdl_ = std::exchange(other.requires_mdl_, false);
+    }
+    return *this;
+  }
+
+  ~prepared_output_buffer() noexcept = default;
+
+  constexpr explicit operator bool() const noexcept {
+    return data_ != nullptr && capacity_ != 0;
+  }
+
+  constexpr std::size_t capacity() const noexcept { return capacity_; }
+
+  /**
+   * @brief Runs all output-buffer references inside one guarded safe-post use.
+   *
+   * The visitor must be noexcept and must not retain view.data(). An MDL is
+   * mapped when present. A raw address is accepted only when Filter Manager
+   * identifies it as a system buffer, or the original request is kernel-mode
+   * and the address is in system space. This function never calls
+   * FltLockUserBuffer and never allocates or frees an MDL.
+   */
+  template <class Visitor>
+  [[nodiscard]] ntl::status try_visit(safe_post_operation<Operation> operation,
+                                      Visitor &&visitor) const noexcept {
+    static_assert(noexcept(std::declval<Visitor &>()(
+                      std::declval<prepared_output_buffer_view>())),
+                  "A prepared output-buffer visitor must be noexcept");
+
+    const auto data = operation.data();
+    if (!data_ || data.native() != data_)
+      return STATUS_INVALID_PARAMETER;
+    if (KeGetCurrentIrql() > APC_LEVEL)
+      return STATUS_INVALID_DEVICE_STATE;
+
+    auto decoded = detail::try_decode_output_buffer(data.native());
+    if (!decoded)
+      return decoded.status();
+
+    const std::size_t current_capacity =
+        static_cast<std::size_t>(*decoded->length_address);
+    const std::size_t capacity = (std::min)(capacity_, current_capacity);
+    if (capacity == 0)
+      return STATUS_INVALID_BUFFER_SIZE;
+
+    void *address = *decoded->buffer_address;
+    PMDL mdl = decoded->mdl_address ? *decoded->mdl_address : nullptr;
+    if (mdl) {
+      if (static_cast<std::size_t>(MmGetMdlByteCount(mdl)) < capacity)
+        return STATUS_INVALID_BUFFER_SIZE;
+      address = MmGetSystemAddressForMdlSafe(mdl, NormalPagePriority |
+                                                      MdlMappingNoExecute);
+      if (!address)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    } else {
+      if (requires_mdl_)
+        return STATUS_INVALID_USER_BUFFER;
+      const bool system_buffer = FLT_IS_SYSTEM_BUFFER(data.native()) != FALSE;
+      const bool trusted_kernel_address = data.requestor_mode() == KernelMode &&
+                                          !detail::is_user_address(address);
+      if (!system_buffer && !trusted_kernel_address)
+        return STATUS_INVALID_USER_BUFFER;
+    }
+    if (!address)
+      return STATUS_INVALID_USER_BUFFER;
+
+    const std::size_t valid_size =
+        NT_ERROR(static_cast<NTSTATUS>(data.io_status()))
+            ? 0
+            : (std::min)(capacity,
+                         static_cast<std::size_t>(data.information()));
+    const auto guarded = ntl::seh::try_except([&]() {
+      visitor(prepared_output_buffer_view{address, capacity, valid_size});
+    });
+    return std::get<0>(guarded)
+               ? ntl::status::ok()
+               : ntl::status{static_cast<NTSTATUS>(std::get<1>(guarded))};
+  }
+
+private:
+  template <operation_id Value,
+            std::enable_if_t<detail::output_buffer_operation_v<Value>, int>>
+  friend ntl::result<prepared_output_buffer<Value>>
+      try_prepare_output_buffer(pre_operation<Value>) noexcept;
+
+  prepared_output_buffer(PFLT_CALLBACK_DATA data, std::size_t capacity,
+                         bool requires_mdl) noexcept
+      : data_(data), capacity_(capacity), requires_mdl_(requires_mdl) {}
+
+  PFLT_CALLBACK_DATA data_ = nullptr;
+  std::size_t capacity_ = 0;
+  bool requires_mdl_ = false;
+};
+
+/**
+ * @brief Stabilizes one output buffer during an IRP pre-operation callback.
+ *
+ * User-address buffers are locked only when the decoded operation exposes an
+ * MDL field. System buffers are left untouched. Filter Manager owns every MDL
+ * created by FltLockUserBuffer.
+ */
+template <
+    operation_id Operation,
+    std::enable_if_t<detail::output_buffer_operation_v<Operation>, int> = 0>
+[[nodiscard]] ntl::result<prepared_output_buffer<Operation>>
+try_prepare_output_buffer(pre_operation<Operation> operation) noexcept {
+  const auto data = operation.data();
+  if (!data.native() || !data.native_iopb())
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  if (!data.is_irp_operation() || data.is_fast_io_operation())
+    return ntl::unexpected(STATUS_NOT_SUPPORTED);
+
+  auto decoded = detail::try_decode_output_buffer(data.native());
+  if (!decoded)
+    return ntl::unexpected(decoded.status());
+
+  const std::size_t capacity =
+      static_cast<std::size_t>(*decoded->length_address);
+  if (capacity == 0)
+    return ntl::unexpected(STATUS_INVALID_BUFFER_SIZE);
+
+  void *const address = *decoded->buffer_address;
+  PMDL mdl = decoded->mdl_address ? *decoded->mdl_address : nullptr;
+  bool requires_mdl = mdl != nullptr;
+  const bool system_buffer = FLT_IS_SYSTEM_BUFFER(data.native()) != FALSE;
+  const bool user_address = detail::is_user_address(address);
+
+  if (!mdl && !system_buffer && user_address) {
+    if (!decoded->mdl_address)
+      return ntl::unexpected(STATUS_NOT_SUPPORTED);
+    if (KeGetCurrentIrql() > APC_LEVEL)
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+    const NTSTATUS locked = FltLockUserBuffer(data.native());
+    if (!NT_SUCCESS(locked))
+      return ntl::unexpected(locked);
+
+    decoded = detail::try_decode_output_buffer(data.native());
+    if (!decoded)
+      return ntl::unexpected(decoded.status());
+    mdl = decoded->mdl_address ? *decoded->mdl_address : nullptr;
+    if (!mdl)
+      return ntl::unexpected(STATUS_INVALID_USER_BUFFER);
+    requires_mdl = true;
+  } else if (!mdl && !system_buffer && data.requestor_mode() == UserMode) {
+    // A user request must not smuggle an unmarked kernel address into the
+    // direct path. A cooperating lower filter should provide an MDL or set
+    // the Filter Manager system-buffer flag.
+    return ntl::unexpected(STATUS_INVALID_USER_BUFFER);
+  }
+
+  return ntl::ok(
+      prepared_output_buffer<Operation>{data.native(), capacity, requires_mdl});
+}
+
+using prepared_read_output_buffer = prepared_output_buffer<operation_id::read>;
+using prepared_query_information_output_buffer =
+    prepared_output_buffer<operation_id::query_information>;
+using prepared_query_ea_output_buffer =
+    prepared_output_buffer<operation_id::query_ea>;
+using prepared_query_volume_information_output_buffer =
+    prepared_output_buffer<operation_id::query_volume_information>;
+using prepared_directory_output_buffer =
+    prepared_output_buffer<operation_id::directory_control>;
+using prepared_fsctl_output_buffer =
+    prepared_output_buffer<operation_id::file_system_control>;
+using prepared_ioctl_output_buffer =
+    prepared_output_buffer<operation_id::device_control>;
+using prepared_internal_ioctl_output_buffer =
+    prepared_output_buffer<operation_id::internal_device_control>;
+using prepared_query_security_output_buffer =
+    prepared_output_buffer<operation_id::query_security>;
+using prepared_query_quota_output_buffer =
+    prepared_output_buffer<operation_id::query_quota>;
+
+} // namespace ntl::flt

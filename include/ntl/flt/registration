@@ -8,6 +8,7 @@
 #pragma once
 
 #include "callback"
+#include "registration_callback"
 #include "types"
 
 #include "../except"
@@ -20,6 +21,10 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
+
+#if !FLT_MGR_WIN7
+#error "ntl::flt requires a Windows 7 or later Filter Manager target"
+#endif
 
 namespace ntl::flt {
 class driver;
@@ -83,6 +88,43 @@ void FLTAPI instance_teardown_start_trampoline(
 
 void FLTAPI instance_teardown_complete_trampoline(
     PCFLT_RELATED_OBJECTS objects, FLT_INSTANCE_TEARDOWN_FLAGS flags) noexcept;
+
+NTSTATUS FLTAPI generate_file_name_trampoline(PFLT_INSTANCE instance,
+                                              PFILE_OBJECT file,
+                                              PFLT_CALLBACK_DATA data,
+                                              FLT_FILE_NAME_OPTIONS options,
+                                              PBOOLEAN cache,
+                                              PFLT_NAME_CONTROL name) noexcept;
+
+NTSTATUS FLTAPI normalize_name_component_trampoline(
+    PFLT_INSTANCE instance, PCUNICODE_STRING parent_directory,
+    USHORT volume_name_length, PCUNICODE_STRING component,
+    PFILE_NAMES_INFORMATION expanded_name, ULONG expanded_name_length,
+    FLT_NORMALIZE_NAME_FLAGS flags, PVOID *normalization_context) noexcept;
+
+void FLTAPI
+normalize_context_cleanup_trampoline(PVOID *normalization_context) noexcept;
+
+#if FLT_MGR_LONGHORN
+NTSTATUS
+    FLTAPI transaction_notification_trampoline(PCFLT_RELATED_OBJECTS objects,
+                                               PFLT_CONTEXT context,
+                                               ULONG notifications) noexcept;
+
+NTSTATUS FLTAPI normalize_name_component_ex_trampoline(
+    PFLT_INSTANCE instance, PFILE_OBJECT file,
+    PCUNICODE_STRING parent_directory, USHORT volume_name_length,
+    PCUNICODE_STRING component, PFILE_NAMES_INFORMATION expanded_name,
+    ULONG expanded_name_length, FLT_NORMALIZE_NAME_FLAGS flags,
+    PVOID *normalization_context) noexcept;
+#endif
+
+#if FLT_MGR_WIN8
+NTSTATUS
+    FLTAPI section_notification_trampoline(PFLT_INSTANCE instance,
+                                           PFLT_CONTEXT context,
+                                           PFLT_CALLBACK_DATA data) noexcept;
+#endif
 
 /** @brief Owns one operation-typed pre-callback behind a stable erased ABI. */
 class pre_callback_slot {
@@ -436,7 +478,8 @@ public:
     safe_invoke_ = [](void *object, PFLT_CALLBACK_DATA data,
                       PCFLT_RELATED_OBJECTS objects, void *) noexcept {
       const auto callbacks = static_cast<callback_pair *>(object);
-      callbacks->safe(detail::callback_data_impl<Operation>{data},
+      callbacks->safe(detail::safe_post_operation_access::make(
+                          detail::callback_data_impl<Operation>{data}),
                       related_objects{objects});
     };
     destroy_ = [](void *object) noexcept {
@@ -493,7 +536,9 @@ public:
                       void *completion_context) noexcept {
       const auto callbacks = static_cast<callback_pair *>(object);
       callbacks->safe(
-          detail::callback_data_impl<Operation>{data}, related_objects{objects},
+          detail::safe_post_operation_access::make(
+              detail::callback_data_impl<Operation>{data}),
+          related_objects{objects},
           detail::completion_access::view<Completion>(completion_context));
     };
     cleanup_ = &detail::completion_access::destroy<Completion>;
@@ -548,7 +593,8 @@ public:
                       PCFLT_RELATED_OBJECTS objects,
                       void *completion_context) noexcept {
       const auto callbacks = static_cast<callback_pair *>(object);
-      callbacks->safe(detail::callback_data_impl<Operation>{data},
+      callbacks->safe(detail::safe_post_operation_access::make(
+                          detail::callback_data_impl<Operation>{data}),
                       related_objects{objects}, completion_context);
     };
     destroy_ = [](void *object) noexcept {
@@ -650,6 +696,182 @@ struct operation_callback_slot {
   post_callback_slot post;
 };
 
+#if FLT_MGR_LONGHORN
+/** @brief Registration-time erasure for one typed transaction callback. */
+class transaction_callback_slot {
+public:
+  transaction_callback_slot() noexcept = default;
+  transaction_callback_slot(const transaction_callback_slot &) = delete;
+  transaction_callback_slot &
+  operator=(const transaction_callback_slot &) = delete;
+  transaction_callback_slot(transaction_callback_slot &&other) noexcept {
+    move_from(other);
+  }
+  transaction_callback_slot &
+  operator=(transaction_callback_slot &&other) noexcept {
+    if (this != &other) {
+      reset();
+      move_from(other);
+    }
+    return *this;
+  }
+  ~transaction_callback_slot() { reset(); }
+
+  template <class T, class Callback>
+  ntl::status set(Callback callback) noexcept {
+    using pointer = transaction_notification_callback<T>;
+    static_assert(
+        std::is_convertible_v<Callback, pointer>,
+        "A transaction callback must be a captureless noexcept callback with "
+        "related_objects, context_view<T>, and transaction_notifications");
+    if (*this)
+      return STATUS_OBJECT_NAME_COLLISION;
+    pointer value = callback;
+    if (!value)
+      return STATUS_INVALID_PARAMETER;
+    try {
+      object_ = new pointer(value);
+    } catch (...) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    invoke_ = [](void *object, PCFLT_RELATED_OBJECTS objects,
+                 PFLT_CONTEXT context, ULONG notifications) noexcept {
+      context_view<T> typed_context{context};
+      if (!typed_context)
+        return ntl::status{STATUS_OBJECT_TYPE_MISMATCH};
+      const auto typed = *static_cast<pointer *>(object);
+      return typed(related_objects{objects}, typed_context,
+                   static_cast<transaction_notifications>(notifications));
+    };
+    destroy_ = [](void *object) noexcept {
+      delete static_cast<pointer *>(object);
+    };
+    return STATUS_SUCCESS;
+  }
+
+  ntl::status invoke(PCFLT_RELATED_OBJECTS objects, PFLT_CONTEXT context,
+                     ULONG notifications) const noexcept {
+    return invoke_(object_, objects, context, notifications);
+  }
+  explicit operator bool() const noexcept { return invoke_ != nullptr; }
+  void reset() noexcept {
+    if (destroy_)
+      destroy_(object_);
+    object_ = nullptr;
+    invoke_ = nullptr;
+    destroy_ = nullptr;
+  }
+
+private:
+  using invoke_function = ntl::status (*)(void *, PCFLT_RELATED_OBJECTS,
+                                          PFLT_CONTEXT, ULONG) noexcept;
+  using destroy_function = void (*)(void *) noexcept;
+
+  void move_from(transaction_callback_slot &other) noexcept {
+    object_ = other.object_;
+    invoke_ = other.invoke_;
+    destroy_ = other.destroy_;
+    other.object_ = nullptr;
+    other.invoke_ = nullptr;
+    other.destroy_ = nullptr;
+  }
+
+  void *object_ = nullptr;
+  invoke_function invoke_ = nullptr;
+  destroy_function destroy_ = nullptr;
+};
+#endif
+
+/**
+ * @brief Registration-time erasure for one typed data-scan callback.
+ *
+ * This storage deliberately exists even when the consumer targets Windows 7.
+ * crtsys is distributed as a prebuilt library compiled against the Windows 8
+ * Filter Manager surface. Keeping this slot unconditional makes
+ * ntl::flt::registration ABI-identical for every supported Windows target;
+ * the public section-notification API remains gated by FLT_MGR_WIN8 below.
+ */
+class section_callback_slot {
+public:
+  section_callback_slot() noexcept = default;
+  section_callback_slot(const section_callback_slot &) = delete;
+  section_callback_slot &operator=(const section_callback_slot &) = delete;
+  section_callback_slot(section_callback_slot &&other) noexcept {
+    move_from(other);
+  }
+  section_callback_slot &operator=(section_callback_slot &&other) noexcept {
+    if (this != &other) {
+      reset();
+      move_from(other);
+    }
+    return *this;
+  }
+  ~section_callback_slot() { reset(); }
+
+  template <class T, class Callback>
+  ntl::status set(Callback callback) noexcept {
+    using pointer = section_notification_callback<T>;
+    static_assert(
+        std::is_convertible_v<Callback, pointer>,
+        "A section callback must be a captureless noexcept callback with "
+        "instance, context_view<T>, and callback_data_view");
+    if (*this)
+      return STATUS_OBJECT_NAME_COLLISION;
+    pointer value = callback;
+    if (!value)
+      return STATUS_INVALID_PARAMETER;
+    try {
+      object_ = new pointer(value);
+    } catch (...) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    invoke_ = [](void *object, PFLT_INSTANCE instance_value,
+                 PFLT_CONTEXT context, PFLT_CALLBACK_DATA data) noexcept {
+      context_view<T> typed_context{context};
+      if (!typed_context)
+        return ntl::status{STATUS_OBJECT_TYPE_MISMATCH};
+      const auto typed = *static_cast<pointer *>(object);
+      return typed(instance{instance_value}, typed_context,
+                   callback_data_view{data});
+    };
+    destroy_ = [](void *object) noexcept {
+      delete static_cast<pointer *>(object);
+    };
+    return STATUS_SUCCESS;
+  }
+
+  ntl::status invoke(PFLT_INSTANCE instance_value, PFLT_CONTEXT context,
+                     PFLT_CALLBACK_DATA data) const noexcept {
+    return invoke_(object_, instance_value, context, data);
+  }
+  explicit operator bool() const noexcept { return invoke_ != nullptr; }
+  void reset() noexcept {
+    if (destroy_)
+      destroy_(object_);
+    object_ = nullptr;
+    invoke_ = nullptr;
+    destroy_ = nullptr;
+  }
+
+private:
+  using invoke_function = ntl::status (*)(void *, PFLT_INSTANCE, PFLT_CONTEXT,
+                                          PFLT_CALLBACK_DATA) noexcept;
+  using destroy_function = void (*)(void *) noexcept;
+
+  void move_from(section_callback_slot &other) noexcept {
+    object_ = other.object_;
+    invoke_ = other.invoke_;
+    destroy_ = other.destroy_;
+    other.object_ = nullptr;
+    other.invoke_ = nullptr;
+    other.destroy_ = nullptr;
+  }
+
+  void *object_ = nullptr;
+  invoke_function invoke_ = nullptr;
+  destroy_function destroy_ = nullptr;
+};
+
 template <operation_id Operation, typename Callback>
 inline constexpr bool is_pre_callback_v =
     std::is_convertible_v<Callback, pre_operation_callback<Operation>>;
@@ -742,6 +964,27 @@ class registration {
       PCFLT_RELATED_OBJECTS, FLT_INSTANCE_TEARDOWN_FLAGS) noexcept;
   friend void FLTAPI detail::instance_teardown_complete_trampoline(
       PCFLT_RELATED_OBJECTS, FLT_INSTANCE_TEARDOWN_FLAGS) noexcept;
+  friend NTSTATUS FLTAPI detail::generate_file_name_trampoline(
+      PFLT_INSTANCE, PFILE_OBJECT, PFLT_CALLBACK_DATA, FLT_FILE_NAME_OPTIONS,
+      PBOOLEAN, PFLT_NAME_CONTROL) noexcept;
+  friend NTSTATUS FLTAPI detail::normalize_name_component_trampoline(
+      PFLT_INSTANCE, PCUNICODE_STRING, USHORT, PCUNICODE_STRING,
+      PFILE_NAMES_INFORMATION, ULONG, FLT_NORMALIZE_NAME_FLAGS,
+      PVOID *) noexcept;
+  friend void FLTAPI
+  detail::normalize_context_cleanup_trampoline(PVOID *) noexcept;
+#if FLT_MGR_LONGHORN
+  friend NTSTATUS FLTAPI detail::transaction_notification_trampoline(
+      PCFLT_RELATED_OBJECTS, PFLT_CONTEXT, ULONG) noexcept;
+  friend NTSTATUS FLTAPI detail::normalize_name_component_ex_trampoline(
+      PFLT_INSTANCE, PFILE_OBJECT, PCUNICODE_STRING, USHORT, PCUNICODE_STRING,
+      PFILE_NAMES_INFORMATION, ULONG, FLT_NORMALIZE_NAME_FLAGS,
+      PVOID *) noexcept;
+#endif
+#if FLT_MGR_WIN8
+  friend NTSTATUS FLTAPI detail::section_notification_trampoline(
+      PFLT_INSTANCE, PFLT_CONTEXT, PFLT_CALLBACK_DATA) noexcept;
+#endif
 
 public:
   /** @brief Creates an empty registration that supports service-stop unload. */
@@ -1385,6 +1628,95 @@ public:
     return *this;
   }
 
+  /** @brief Registers the Filter Manager file-name generation callback. */
+  registration &
+  on_generate_file_name(generate_file_name_callback callback) noexcept {
+    generate_file_name_callback_ = callback;
+    return *this;
+  }
+
+  /** @brief Registers the legacy file-name component normalizer. */
+  registration &on_normalize_name_component(
+      normalize_name_component_callback callback) noexcept {
+    normalize_name_component_callback_ = callback;
+    return *this;
+  }
+
+  /** @brief Registers cleanup for name normalization context state. */
+  registration &on_normalize_context_cleanup(
+      normalize_context_cleanup_callback callback) noexcept {
+    normalize_context_cleanup_callback_ = callback;
+    return *this;
+  }
+
+#if FLT_MGR_LONGHORN
+  /**
+   * @brief Registers a transaction context and its typed KTM
+   * notification.
+   */
+  template <class T, class Callback>
+  registration &
+  on_transaction_notification(const transaction_context<T> &definition,
+                              Callback callback) {
+    const ntl::status result =
+        try_on_transaction_notification(definition, std::move(callback));
+    if (result.is_err())
+      throw ntl::exception(result,
+                           "Invalid transaction notification registration");
+    return *this;
+  }
+
+  template <class T, class Callback>
+  ntl::status
+  try_on_transaction_notification(const transaction_context<T> &definition,
+                                  Callback callback) noexcept {
+    ntl::status result =
+        transaction_notification_callback_.template set<T>(callback);
+    if (result.is_err())
+      return result;
+    result = try_context(definition);
+    if (result.is_err())
+      transaction_notification_callback_.reset();
+    return result;
+  }
+
+  /** @brief Registers transaction-aware file-name component normalization. */
+  registration &on_normalize_name_component_ex(
+      normalize_name_component_callback callback) noexcept {
+    normalize_name_component_ex_callback_ = callback;
+    return *this;
+  }
+#endif
+
+#if FLT_MGR_WIN8
+  /**
+   * @brief Registers a section context and its typed conflict
+   * notification.
+   */
+  template <class T, class Callback>
+  registration &on_section_notification(const section_context<T> &definition,
+                                        Callback callback) {
+    const ntl::status result =
+        try_on_section_notification(definition, std::move(callback));
+    if (result.is_err())
+      throw ntl::exception(result, "Invalid section notification registration");
+    return *this;
+  }
+
+  template <class T, class Callback>
+  ntl::status try_on_section_notification(const section_context<T> &definition,
+                                          Callback callback) noexcept {
+    ntl::status result =
+        section_notification_callback_.template set<T>(callback);
+    if (result.is_err())
+      return result;
+    result = try_context(definition);
+    if (result.is_err())
+      section_notification_callback_.reset();
+    return result;
+  }
+#endif
+
   /** @brief Enables native FLT_REGISTRATION flags. */
   registration &flags(FLT_REGISTRATION_FLAGS value) noexcept {
     flags_ = value;
@@ -1730,6 +2062,19 @@ private:
       detail::allow_manual_detach;
   instance_teardown_callback instance_teardown_start_callback_ = nullptr;
   instance_teardown_callback instance_teardown_complete_callback_ = nullptr;
+  generate_file_name_callback generate_file_name_callback_ = nullptr;
+  normalize_name_component_callback normalize_name_component_callback_ =
+      nullptr;
+  normalize_context_cleanup_callback normalize_context_cleanup_callback_ =
+      nullptr;
+#if FLT_MGR_LONGHORN
+  detail::transaction_callback_slot transaction_notification_callback_;
+  normalize_name_component_callback normalize_name_component_ex_callback_ =
+      nullptr;
+#endif
+  // Keep the slot in every Windows 7+ build. Its presence is part of the
+  // prebuilt-library ABI; only the API that can populate it is Win8-gated.
+  detail::section_callback_slot section_notification_callback_;
   FLT_REGISTRATION_FLAGS flags_ = 0;
 };
 

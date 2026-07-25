@@ -61,9 +61,13 @@ file(GLOB SOURCE_FILES
     )
 
   list(APPEND SOURCE_FILES
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../flt/compile/registration_and_ownership.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../flt/compile/operation_callback.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../flt/compile/context.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../flt/compile/control_device.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../flt/compile/instance.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../flt/compile/rpc_header_self_contained.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../flt/compile/volume_metadata.cpp
   )
 
 if (NOT CRTSYS_TEST_NLOHMANN_JSON)
@@ -78,6 +82,7 @@ if(MSVC_VERSION GREATER_EQUAL 1950)
 endif()
 
 crtsys_add_driver(crtsys_test ${SOURCE_FILES})
+target_link_libraries(crtsys_test WDK::FLTMGR)
 target_compile_options(crtsys_test PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/GR>")
 # Keep cppreference examples such as std::fopen intact while building the
 # driver test harness with /WX under older MSVC toolsets.
@@ -104,10 +109,76 @@ endif()
 
 target_link_libraries(crtsys_test gtest)
 
+# crtsys.lib is built against the Windows 8 Filter Manager surface while the
+# supported consumer range starts at Windows 7. The provider's template symbol
+# encodes both public owner sizes; the Win8 consumer can link only when the
+# layouts are identical across that prebuilt-library boundary.
+wdk_add_library(
+    crtsys_flt_abi_win7
+    EXTENDED_CPP_FEATURES
+    WINVER 0x0601
+    STATIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../flt/compile/abi_win7_provider.cpp
+)
+wdk_add_library(
+    crtsys_flt_abi_win8
+    EXTENDED_CPP_FEATURES
+    WINVER 0x0602
+    STATIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../flt/compile/abi_win8_consumer.cpp
+)
+target_link_libraries(crtsys_flt_abi_win7 PRIVATE crtsys)
+target_link_libraries(crtsys_flt_abi_win8 PRIVATE crtsys)
+crtsys_apply_driver_settings(
+    crtsys_flt_abi_win7
+    "${crtsys_SOURCE_DIR}"
+    FALSE
+    FALSE
+    FALSE
+)
+crtsys_apply_driver_settings(
+    crtsys_flt_abi_win8
+    "${crtsys_SOURCE_DIR}"
+    FALSE
+    FALSE
+    FALSE
+)
+target_compile_definitions(
+    crtsys_flt_abi_win7
+    PRIVATE
+        _KERNEL32_
+        _ITERATOR_DEBUG_LEVEL=0
+        _HAS_EXCEPTIONS
+)
+target_compile_definitions(
+    crtsys_flt_abi_win8
+    PRIVATE
+        _KERNEL32_
+        _ITERATOR_DEBUG_LEVEL=0
+        _HAS_EXCEPTIONS
+)
+target_compile_options(
+    crtsys_flt_abi_win7
+    PRIVATE
+        "$<$<COMPILE_LANGUAGE:C,CXX>:/MT>"
+)
+target_compile_options(
+    crtsys_flt_abi_win8
+    PRIVATE
+        "$<$<COMPILE_LANGUAGE:C,CXX>:/MT>"
+)
+target_link_libraries(
+    crtsys_test
+    crtsys_flt_abi_win7
+    crtsys_flt_abi_win8
+)
+
 target_include_directories(crtsys_test PRIVATE ${CMAKE_CURRENT_LIST_DIR}/..)
 
 include(../../../cmake/std-cxx.cmake)
 set_std_cxx_latest(crtsys_test)
+set_std_cxx_latest(crtsys_flt_abi_win7)
+set_std_cxx_latest(crtsys_flt_abi_win8)
 
 crtsys_add_driver(crtsys_multi_a multi_instance/driver.cpp)
 target_compile_definitions(crtsys_multi_a PRIVATE "CRTSYS_MULTI_INSTANCE_ID=1")

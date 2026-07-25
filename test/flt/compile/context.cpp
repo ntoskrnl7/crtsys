@@ -32,12 +32,29 @@ inline constexpr ntl::flt::stream_handle_context<stream_state>
     paged_handle_state_context{ntl::flt::context_pool::paged};
 inline constexpr ntl::flt::instance_context<stream_state>
     executable_nonpaged_instance_context{ntl::flt::context_pool::nonpaged};
+#if FLT_MGR_WIN8
+inline constexpr ntl::flt::section_context<stream_state>
+    section_state_context{};
+using section_reference =
+    ntl::flt::context_ref<stream_state, ntl::flt::context_scope::section>;
+using section_allocate_result = decltype(ntl::flt::try_allocate_section_context(
+    std::declval<PFLT_FILTER>(), section_state_context));
+using section_create_result = decltype(ntl::flt::try_create_data_scan_section(
+    std::declval<ntl::flt::instance>(), std::declval<ntl::file>(),
+    std::declval<const section_reference &>()));
+static_assert(std::is_same_v<section_allocate_result,
+                             ntl::result<section_reference>>);
+static_assert(std::is_same_v<section_create_result,
+                             ntl::result<ntl::flt::data_scan_section>>);
+#endif
 
 using file_reference =
     ntl::flt::context_ref<file_state, ntl::flt::context_scope::file>;
+using borrowed_file_context = ntl::flt::context_view<file_state>;
 using volume_definition = ntl::flt::volume_context<stream_state>;
 
 static_assert(!std::is_copy_constructible_v<file_reference>);
+static_assert(std::is_copy_constructible_v<borrowed_file_context>);
 static_assert(std::is_nothrow_move_constructible_v<file_reference>);
 static_assert(
     std::is_same_v<decltype(std::declval<const file_reference &>().reference()),
@@ -75,9 +92,13 @@ using get_result = decltype(std::declval<ntl::flt::related_objects>().try_get(
 using create_result =
     decltype(std::declval<ntl::flt::related_objects>().try_get_or_create(
         file_state_context, ULONG{7}));
+using remove_result =
+    decltype(std::declval<ntl::flt::related_objects>().try_remove(
+        file_state_context));
 
 static_assert(std::is_same_v<get_result, ntl::result<file_reference>>);
 static_assert(std::is_same_v<create_result, ntl::result<file_reference>>);
+static_assert(std::is_same_v<remove_result, ntl::result<file_reference>>);
 
 [[maybe_unused]] void compile_registration_surface() {
   ntl::flt::registration callbacks;
@@ -86,6 +107,9 @@ static_assert(std::is_same_v<create_result, ntl::result<file_reference>>);
       .context(volume_state_context)
       .context(paged_handle_state_context)
       .context(executable_nonpaged_instance_context);
+#if FLT_MGR_WIN8
+  callbacks.context(section_state_context);
+#endif
 }
 
 } // namespace ntl_flt_context_compile_test

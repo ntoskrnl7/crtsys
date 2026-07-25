@@ -32,7 +32,7 @@ For buildable samples, see:
 | [Registry](./registry.md) | RAII wrapper for Zw registry keys, driver `Parameters` lookup, and typed value query/set helpers |
 | [Driver, device, and IRP helpers](./driver-device-irp.md) | `ntl::main`, `ntl::driver`, `ntl::device`, `ntl::device_endpoint`, dispatch callbacks, and `ntl::irp` |
 | [KMDF helpers](./kmdf.md) | Optional `ntl::kmdf::main`, C++ contexts, typed I/O, manual queues and cancellation, hardware resources, power policy, DMA/USB/WMI, common WDF objects, interrupt/timer/work-item, child-list/PDO, typed query interfaces, registry, and device-property facades |
-| [Minifilter helpers](./minifilter.md) | `ntl::flt::main`, typed pre/post callbacks and contexts, typed communication ports, and connection-bound shared regions |
+| [Minifilter helpers](./minifilter.md) | `ntl::flt::main`, typed pre/post callbacks and contexts, per-volume metadata, owned legacy control devices, typed communication ports, and shared regions |
 | [Device-control pattern](./device-control-pattern.md) | Practical `IOCTL` dispatch pattern using typed IOCTLs, remove locks, MDLs, and output reporting |
 | [Typed IOCTL helper](./ioctl.md) | Compile-time `CTL_CODE` descriptors tied to request/reply payload types |
 | [Device interface](./device-interface.md) | PnP `IoRegisterDeviceInterface` ownership and enable/disable helper |

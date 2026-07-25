@@ -1,6 +1,11 @@
 #include "communication_advanced.hpp"
 #include "coroutine_runtime.hpp"
+#include "data_scan_runtime.hpp"
+#include "mini_spy_runtime.hpp"
+#include "operation_status_runtime.hpp"
 #include "runtime_test.hpp"
+#include "self_issued_io_runtime.hpp"
+#include "transaction_runtime.hpp"
 
 #include <Windows.h>
 #include <fltUser.h>
@@ -33,9 +38,9 @@ public:
       return;
     }
 
-    status_ = FilterAttachAtAltitude(
-        filter_name, volume_.c_str(), secondary_altitude,
-        secondary_instance_name, 0, nullptr);
+    status_ =
+        FilterAttachAtAltitude(filter_name, volume_.c_str(), secondary_altitude,
+                               secondary_instance_name, 0, nullptr);
     attached_ = SUCCEEDED(status_);
   }
 
@@ -92,8 +97,8 @@ int wmain(int argc, wchar_t **argv) {
         std::cout << "NTL minifilter security probe PASS (denied)\n";
         return 0;
       }
-      std::cerr << "NTL minifilter security probe rejected: "
-                << failure.what() << '\n';
+      std::cerr << "NTL minifilter security probe rejected: " << failure.what()
+                << '\n';
       return 1;
     }
   }
@@ -154,8 +159,7 @@ int wmain(int argc, wchar_t **argv) {
 
     bool connect_rejected = false;
     try {
-      auto rejected =
-          ntl::flt::communication_client::connect(reject_port_name);
+      auto rejected = ntl::flt::communication_client::connect(reject_port_name);
       (void)rejected;
     } catch (const ntl::flt::communication_error &) {
       connect_rejected = true;
@@ -166,14 +170,14 @@ int wmain(int argc, wchar_t **argv) {
     }
 
     {
-      auto allowed = ntl::flt::communication_client::connect(
-          security_allow_port_name);
+      auto allowed =
+          ntl::flt::communication_client::connect(security_allow_port_name);
       (void)allowed;
 
       bool denied = false;
       try {
-        auto rejected = ntl::flt::communication_client::connect(
-            security_deny_port_name);
+        auto rejected =
+            ntl::flt::communication_client::connect(security_deny_port_name);
         (void)rejected;
       } catch (const ntl::flt::communication_error &) {
         denied = true;
@@ -185,12 +189,12 @@ int wmain(int argc, wchar_t **argv) {
     }
 
     {
-      auto first = ntl::flt::communication_client::connect(
-          connection_limit_port_name);
+      auto first =
+          ntl::flt::communication_client::connect(connection_limit_port_name);
       bool second_rejected = false;
       try {
-        auto second = ntl::flt::communication_client::connect(
-            connection_limit_port_name);
+        auto second =
+            ntl::flt::communication_client::connect(connection_limit_port_name);
         (void)second;
       } catch (const ntl::flt::communication_error &) {
         second_rejected = true;
@@ -206,8 +210,8 @@ int wmain(int argc, wchar_t **argv) {
           ntl::flt::communication_client::connect(session_limit_port_name);
       bool second_rejected = false;
       try {
-        auto second = ntl::flt::communication_client::connect(
-            session_limit_port_name);
+        auto second =
+            ntl::flt::communication_client::connect(session_limit_port_name);
         (void)second;
       } catch (const ntl::flt::communication_error &) {
         second_rejected = true;
@@ -607,7 +611,8 @@ int wmain(int argc, wchar_t **argv) {
     }
 
     const auto out_of_range_token = ntl::ipc::buffer_token{
-        region.handle(), static_cast<std::uint64_t>(shared_region_bytes - 1), 2};
+        region.handle(), static_cast<std::uint64_t>(shared_region_bytes - 1),
+        2};
     bool range_rejected = false;
     try {
       (void)port.invoke(shared_ring_method, out_of_range_token, output_token);
@@ -625,8 +630,7 @@ int wmain(int argc, wchar_t **argv) {
         read_only_region.token(0, test_ring::required_bytes());
     bool access_rejected = false;
     try {
-      (void)port.invoke(shared_ring_method, read_only_token,
-                        read_only_token);
+      (void)port.invoke(shared_ring_method, read_only_token, read_only_token);
     } catch (const ntl::flt::communication_error &) {
       access_rejected = true;
     }
@@ -697,9 +701,9 @@ int wmain(int argc, wchar_t **argv) {
             std::memcpy(frame.data() + sizeof(header), payload.data(),
                         payload.size());
           DWORD returned = 0;
-          return FilterSendMessage(
-              port.native_handle(), frame.data(),
-              static_cast<DWORD>(frame.size()), nullptr, 0, &returned);
+          return FilterSendMessage(port.native_handle(), frame.data(),
+                                   static_cast<DWORD>(frame.size()), nullptr, 0,
+                                   &returned);
         };
     auto malformed = ntl::flt::detail::communication_request_header{};
     malformed.payload_size = 1;
@@ -756,6 +760,47 @@ int wmain(int argc, wchar_t **argv) {
     auto coroutine_client = connect();
     if (!run_coroutine_runtime_tests(coroutine_client)) {
       std::cerr << "minifilter coroutine communication failed\n";
+      return 1;
+    }
+
+    communication_stage = "transaction runtime";
+    std::string transaction_failure;
+    if (!run_transaction_runtime_tests(port, root, transaction_failure)) {
+      std::cerr << "minifilter transaction runtime failed: "
+                << transaction_failure << '\n';
+      return 1;
+    }
+
+    communication_stage = "data-scan runtime";
+    std::string data_scan_failure;
+    if (!run_data_scan_runtime_tests(port, root, data_scan_failure)) {
+      std::cerr << "minifilter data-scan runtime failed: " << data_scan_failure
+                << '\n';
+      return 1;
+    }
+
+    communication_stage = "operation-status runtime";
+    std::string operation_status_failure;
+    if (!run_operation_status_runtime_tests(port, root,
+                                            operation_status_failure)) {
+      std::cerr << "minifilter operation-status runtime failed: "
+                << operation_status_failure << '\n';
+      return 1;
+    }
+
+    communication_stage = "self-issued I/O runtime";
+    std::string self_io_failure;
+    if (!run_self_issued_io_runtime_tests(port, root, self_io_failure)) {
+      std::cerr << "minifilter self-issued I/O runtime failed: "
+                << self_io_failure << '\n';
+      return 1;
+    }
+
+    communication_stage = "MiniSpy runtime";
+    std::string mini_spy_failure;
+    if (!run_mini_spy_runtime_tests(port, root, mini_spy_failure)) {
+      std::cerr << "minifilter MiniSpy runtime failed: "
+                << mini_spy_failure << '\n';
       return 1;
     }
   } catch (const ntl::flt::communication_error &failure) {

@@ -6,6 +6,7 @@
 #include "../include/ntl/flt/driver"
 // clang-format on
 
+#include "ntl_device_dispatch.h"
 #include "runtime_internal.h"
 
 #include <functional>
@@ -28,6 +29,13 @@ class driver_initializer {
 public:
   static std::unique_ptr<driver> make_driver(PDRIVER_OBJECT object) {
     return std::unique_ptr<driver>(new driver(object));
+  }
+
+  static ntl::status dispatch_control_device(driver &owner,
+                                             PDEVICE_OBJECT device_object,
+                                             PIRP irp) noexcept {
+    return ntl::device_dispatch_invoker::invoke(
+        owner.control_driver_, device_object, irp);
   }
 };
 
@@ -178,8 +186,121 @@ void FLTAPI instance_teardown_complete_trampoline(
   if (callback)
     callback(related_objects{objects}, flags);
 }
+
+NTSTATUS FLTAPI generate_file_name_trampoline(
+    PFLT_INSTANCE instance_value, PFILE_OBJECT file,
+    PFLT_CALLBACK_DATA data, FLT_FILE_NAME_OPTIONS options, PBOOLEAN cache,
+    PFLT_NAME_CONTROL name) noexcept {
+  if (!this_filter_driver || !instance_value || !file || !cache || !name)
+    return STATUS_INVALID_PARAMETER;
+  const auto callback =
+      this_filter_driver->registration_.generate_file_name_callback_;
+  if (!callback)
+    return STATUS_NOT_SUPPORTED;
+  *cache = FALSE;
+  return static_cast<NTSTATUS>(callback(
+      name_generation_request{instance{instance_value}, ntl::file{file},
+                              callback_data_view{data},
+                              file_name_options{options}},
+      name_generation_output{cache, name}));
+}
+
+NTSTATUS FLTAPI normalize_name_component_trampoline(
+    PFLT_INSTANCE instance_value, PCUNICODE_STRING parent_directory,
+    USHORT volume_name_length, PCUNICODE_STRING component,
+    PFILE_NAMES_INFORMATION expanded_name, ULONG expanded_name_length,
+    FLT_NORMALIZE_NAME_FLAGS flags, PVOID *normalization_context) noexcept {
+  if (!this_filter_driver || !instance_value || !parent_directory ||
+      !component || !expanded_name || !normalization_context)
+    return STATUS_INVALID_PARAMETER;
+  const auto callback =
+      this_filter_driver->registration_.normalize_name_component_callback_;
+  if (!callback)
+    return STATUS_NOT_SUPPORTED;
+  return static_cast<NTSTATUS>(callback(
+      name_normalization_request{
+          instance{instance_value}, ntl::file{}, parent_directory,
+          volume_name_length, component, normalize_name_flags{flags}},
+      name_normalization_output{expanded_name, expanded_name_length,
+                                normalization_context}));
+}
+
+void FLTAPI normalize_context_cleanup_trampoline(
+    PVOID *context_slot) noexcept {
+  if (!this_filter_driver)
+    return;
+  const auto callback =
+      this_filter_driver->registration_.normalize_context_cleanup_callback_;
+  if (callback)
+    callback(normalization_context{context_slot});
+}
+
+#if FLT_MGR_LONGHORN
+NTSTATUS FLTAPI transaction_notification_trampoline(
+    PCFLT_RELATED_OBJECTS objects, PFLT_CONTEXT context,
+    ULONG notifications) noexcept {
+  if (!this_filter_driver || !objects || !context)
+    return STATUS_INVALID_PARAMETER;
+  const auto &callback =
+      this_filter_driver->registration_.transaction_notification_callback_;
+  if (!callback)
+    return STATUS_NOT_SUPPORTED;
+  return static_cast<NTSTATUS>(
+      callback.invoke(objects, context, notifications));
+}
+
+NTSTATUS FLTAPI normalize_name_component_ex_trampoline(
+    PFLT_INSTANCE instance_value, PFILE_OBJECT file,
+    PCUNICODE_STRING parent_directory, USHORT volume_name_length,
+    PCUNICODE_STRING component, PFILE_NAMES_INFORMATION expanded_name,
+    ULONG expanded_name_length, FLT_NORMALIZE_NAME_FLAGS flags,
+    PVOID *normalization_context) noexcept {
+  if (!this_filter_driver || !instance_value || !file || !parent_directory ||
+      !component || !expanded_name || !normalization_context)
+    return STATUS_INVALID_PARAMETER;
+  const auto callback =
+      this_filter_driver->registration_.normalize_name_component_ex_callback_;
+  if (!callback)
+    return STATUS_NOT_SUPPORTED;
+  return static_cast<NTSTATUS>(callback(
+      name_normalization_request{
+          instance{instance_value}, ntl::file{file}, parent_directory,
+          volume_name_length, component, normalize_name_flags{flags}},
+      name_normalization_output{expanded_name, expanded_name_length,
+                                normalization_context}));
+}
+#endif
+
+#if FLT_MGR_WIN8
+NTSTATUS FLTAPI section_notification_trampoline(
+    PFLT_INSTANCE instance_value, PFLT_CONTEXT context,
+    PFLT_CALLBACK_DATA data) noexcept {
+  if (!this_filter_driver || !instance_value || !context || !data)
+    return STATUS_INVALID_PARAMETER;
+  const auto &callback =
+      this_filter_driver->registration_.section_notification_callback_;
+  if (!callback)
+    return STATUS_NOT_SUPPORTED;
+  return static_cast<NTSTATUS>(
+      callback.invoke(instance_value, context, data));
+}
+#endif
 } // namespace detail
 } // namespace ntl::flt
+
+static NTSTATUS
+CrtSysNtlFltDispatchRoutine(PDEVICE_OBJECT device_object, PIRP irp) {
+  if (this_filter_driver) {
+    return static_cast<NTSTATUS>(
+        ntl::flt::driver_initializer::dispatch_control_device(
+            *this_filter_driver, device_object, irp));
+  }
+
+  irp->IoStatus.Status = STATUS_INVALID_DEVICE_REQUEST;
+  irp->IoStatus.Information = 0;
+  IoCompleteRequest(irp, IO_NO_INCREMENT);
+  return STATUS_INVALID_DEVICE_REQUEST;
+}
 
 EXTERN_C
 NTSTATUS
@@ -195,6 +316,9 @@ CrtSysNtlFltDriverEntry(PDRIVER_OBJECT driver_object,
   try {
     this_filter_driver =
         ntl::flt::driver_initializer::make_driver(driver_object);
+    for (int index = 0; index <= IRP_MJ_MAXIMUM_FUNCTION; ++index)
+      driver_object->MajorFunction[index] = CrtSysNtlFltDispatchRoutine;
+
     const std::wstring_view path{
         registry_path->Buffer,
         static_cast<std::size_t>(registry_path->Length / sizeof(wchar_t))};

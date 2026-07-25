@@ -38,6 +38,16 @@ struct swap_io_options {
   std::size_t noncached_alignment = 0;
   /** Paging I/O user round trips are rejected unless explicitly opted in. */
   bool allow_paging_io = false;
+  /**
+   * METHOD_NEITHER control codes can impose pointer rules beyond
+   * CTL_CODE.
+   *
+   * Keep replacement disabled unless the specific FSCTL/IOCTL has been
+   * verified to accept a minifilter-supplied kernel buffer and MDL. Inspecting
+   * or modifying an original output should normally use prepared_output_buffer
+   * instead.
+   */
+  bool allow_unverified_method_neither_control = false;
   /** Maximum isolated replacement storage for one operation. */
   std::size_t max_replacement_bytes = 16u * 1024u * 1024u;
 };
@@ -120,9 +130,8 @@ private:
   friend class swapped_io_buffers;
   template <operation_id Operation>
   friend ntl::result<swapped_io_buffers>
-  detail::try_swap_io_buffers_impl(detail::callback_data_impl<Operation>,
-                                   swap_buffer,
-                                   swap_io_options) noexcept;
+      detail::try_swap_io_buffers_impl(detail::callback_data_impl<Operation>,
+                                       swap_buffer, swap_io_options) noexcept;
   swapped_buffer_view(std::shared_ptr<ntl::ipc::page_buffer> pages,
                       std::size_t length, std::size_t offset,
                       bool user_mapping_allowed) noexcept
@@ -420,6 +429,29 @@ public:
     return ntl::ok(std::move(result));
   }
 
+  /**
+   * @brief Transfers an installed owner into typed post-completion state.
+   *
+   * Use this with registration::on_with_completion when a callback does not
+   * need a raw Filter Manager completion-context pointer. Replacement MDLs are
+   * transferred exactly as they are by release_completion_context(), while
+   * the returned move-only owner retains the replacement pages and original
+   * buffer metadata needed for post-operation copy-back.
+   */
+  ntl::status release_to_completion(
+      completion_slot<swapped_io_buffers> &completion) && noexcept {
+    if (!installed_)
+      return STATUS_INVALID_DEVICE_STATE;
+    if (has_open_user_mapping())
+      return STATUS_DEVICE_BUSY;
+    clear_inactive_mapping_records();
+    const ntl::status stored = completion.try_emplace(std::move(*this));
+    if (!stored.is_ok())
+      return stored;
+    completion->transfer_replacement_mdls();
+    return STATUS_SUCCESS;
+  }
+
   /** Closes all user mappings while retaining replacement pages/IOPB state. */
   ntl::status close_user_mappings() noexcept {
     if (KeGetCurrentIrql() != PASSIVE_LEVEL)
@@ -614,36 +646,39 @@ public:
   }
 
   /**
-   * @brief Stabilizes an original user output buffer before pending post I/O.
+   * @brief Validates original-output copy-back before pending post I/O.
    *
-   * Call this at PASSIVE_LEVEL after Filter Manager has restored the original
-   * post-operation parameters and before an asynchronous user-mode round trip.
-   * The generated MDL remains installed in callback data and is therefore
-   * unlocked/freed by Filter Manager when the post operation is completed.
+   * This never calls FltLockUserBuffer in post-operation. Existing MDLs remain
+   * borrowed, system addresses are used directly, and an un-MDL'd user address
+   * is copied later while attached to the referenced requestor process.
    */
-  ntl::status
-  prepare_output_copy_back(std::size_t valid_bytes) noexcept {
+  ntl::status prepare_output_copy_back(std::size_t valid_bytes) noexcept {
     if (KeGetCurrentIrql() != PASSIVE_LEVEL)
       return STATUS_INVALID_DEVICE_STATE;
     if (!data_ || !output_slot_ || !output_slot_->pages)
       return STATUS_INVALID_DEVICE_STATE;
     if (valid_bytes > output_slot_->length)
       return STATUS_INVALID_BUFFER_SIZE;
-    if (valid_bytes == 0 || output_slot_->original_mdl ||
-        !output_slot_->replacement_mdl || !FLT_IS_IRP_OPERATION(data_))
+    if (valid_bytes == 0)
       return STATUS_SUCCESS;
-    if (!FlagOn(data_->Flags, FLTFL_CALLBACK_DATA_POST_OPERATION))
+    if (!FLT_IS_IRP_OPERATION(data_) ||
+        !FlagOn(data_->Flags, FLTFL_CALLBACK_DATA_POST_OPERATION))
       return STATUS_INVALID_DEVICE_STATE;
-
-    const NTSTATUS locked = FltLockUserBuffer(data_);
-    if (!NT_SUCCESS(locked))
-      return locked;
-    const auto refreshed = detail::describe_operation_buffers(
-        data_, detail::io_buffer_phase::post);
-    if (!refreshed.output_mdl || refreshed.output_length < valid_bytes)
+    if (output_slot_->original_mdl)
+      return STATUS_SUCCESS;
+    if (!output_slot_->original)
+      return STATUS_INVALID_USER_BUFFER;
+    if (FLT_IS_SYSTEM_BUFFER(data_))
+      return reinterpret_cast<ULONG_PTR>(output_slot_->original) >=
+                     reinterpret_cast<ULONG_PTR>(MmSystemRangeStart)
+                 ? ntl::status{STATUS_SUCCESS}
+                 : ntl::status{STATUS_INVALID_USER_BUFFER};
+    if (!output_slot_->replacement_mdl)
       return STATUS_INVALID_DEVICE_STATE;
-    output_slot_->original = refreshed.output;
-    output_slot_->original_mdl = refreshed.output_mdl;
+    if (reinterpret_cast<ULONG_PTR>(output_slot_->original) <
+            reinterpret_cast<ULONG_PTR>(MmSystemRangeStart) &&
+        !FltGetRequestorProcess(data_))
+      return STATUS_INVALID_CID;
     return STATUS_SUCCESS;
   }
 
@@ -661,14 +696,10 @@ public:
     if (valid_bytes == 0)
       return STATUS_SUCCESS;
     /*
-     * Do not lock an original user buffer before swapping it.  A pre-op
-     * FltLockUserBuffer-created MDL would be overwritten by the replacement
-     * MDL and would be neither the original incoming MDL nor the swapped MDL
-     * tracked by Filter Manager.  Lock it only in post, after Filter Manager
-     * has restored the original parameters. prepare_output_copy_back normally
-     * does this before a user-mode round trip; this call is the synchronous
-     * fallback. Leave the MDL installed so callback-data teardown owns the
-     * unlock/free.
+     * Never create a new MDL in post-operation. Existing MDLs are borrowed;
+     * otherwise copy_in_requestor_process guards the original user address in
+     * the requestor process. prepare_output_copy_back performs the same
+     * validation before asynchronous user-mode work is started.
      */
     const auto prepared = prepare_output_copy_back(valid_bytes);
     if (!prepared.is_ok())
@@ -725,9 +756,8 @@ public:
 private:
   template <operation_id Operation>
   friend ntl::result<swapped_io_buffers>
-  detail::try_swap_io_buffers_impl(detail::callback_data_impl<Operation>,
-                                   swap_buffer,
-                                   swap_io_options) noexcept;
+      detail::try_swap_io_buffers_impl(detail::callback_data_impl<Operation>,
+                                       swap_buffer, swap_io_options) noexcept;
 
   bool has_open_user_mapping() const noexcept {
     const auto is_open = [](const auto &view) {
@@ -1075,6 +1105,9 @@ detail::try_swap_io_buffers_impl(detail::callback_data_impl<Operation> data,
       return ntl::unexpected(STATUS_NOT_SUPPORTED);
     const ULONG method =
         iopb->Parameters.FileSystemControl.Common.FsControlCode & 3UL;
+    if (method == METHOD_NEITHER &&
+        !options.allow_unverified_method_neither_control)
+      return ntl::unexpected(STATUS_NOT_SUPPORTED);
     control_input_length =
         iopb->Parameters.FileSystemControl.Common.InputBufferLength;
     output_length =
@@ -1111,6 +1144,9 @@ detail::try_swap_io_buffers_impl(detail::callback_data_impl<Operation> data,
   case IRP_MJ_INTERNAL_DEVICE_CONTROL: {
     const ULONG method =
         iopb->Parameters.DeviceIoControl.Common.IoControlCode & 3UL;
+    if (method == METHOD_NEITHER &&
+        !options.allow_unverified_method_neither_control)
+      return ntl::unexpected(STATUS_NOT_SUPPORTED);
     control_input_length =
         iopb->Parameters.DeviceIoControl.Common.InputBufferLength;
     output_length = iopb->Parameters.DeviceIoControl.Common.OutputBufferLength;
@@ -1362,11 +1398,10 @@ template <
 [[nodiscard]] ntl::result<swapped_io_buffers>
 try_swap_io_buffers(pre_operation<Operation> operation,
                     swap_io_options options = {}) noexcept {
-  constexpr auto selection =
-      detail::input_only_swap_operation_v<Operation> ? swap_buffer::input
-                                                     : swap_buffer::output;
-  return detail::try_swap_io_buffers_impl(operation.data(), selection,
-                                          options);
+  constexpr auto selection = detail::input_only_swap_operation_v<Operation>
+                                 ? swap_buffer::input
+                                 : swap_buffer::output;
+  return detail::try_swap_io_buffers_impl(operation.data(), selection, options);
 }
 
 /**
@@ -1379,11 +1414,9 @@ template <
     operation_id Operation,
     std::enable_if_t<detail::selectable_swap_operation_v<Operation>, int> = 0>
 [[nodiscard]] ntl::result<swapped_io_buffers>
-try_swap_io_buffers(pre_operation<Operation> operation,
-                    swap_buffer selection,
+try_swap_io_buffers(pre_operation<Operation> operation, swap_buffer selection,
                     swap_io_options options = {}) noexcept {
-  return detail::try_swap_io_buffers_impl(operation.data(), selection,
-                                          options);
+  return detail::try_swap_io_buffers_impl(operation.data(), selection, options);
 }
 
 } // namespace ntl::flt

@@ -12,6 +12,7 @@ EXTERN_C DRIVER_UNLOAD DriverUnload;
 
 int test_all();
 void record_driver_entry_failure(const char *stage, long code);
+extern "C" void crtsys_flt_require_cross_target_abi() noexcept;
 
 #include <gtest/gtest.h>
 #include <string>
@@ -333,6 +334,7 @@ ntl::status test_automatic_io_mapping(
 } // namespace
 
 ntl::status ntl::main(ntl::driver &driver, const std::wstring &registry_path) {
+  crtsys_flt_require_cross_target_abi();
 
 #ifndef CRTSYS_TEST_NO_BREAKPOINT
   KdBreakPoint();
@@ -497,6 +499,7 @@ DriverEntry (
   // clang-format on
   PAGED_CODE();
   UNREFERENCED_PARAMETER(RegistryPath);
+  crtsys_flt_require_cross_target_abi();
 
 #ifndef CRTSYS_TEST_NO_BREAKPOINT
   KdBreakPoint();

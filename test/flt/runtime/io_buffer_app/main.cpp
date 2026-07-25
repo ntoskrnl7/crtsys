@@ -7,6 +7,7 @@
 #include "io_buffer_runtime.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -34,6 +35,26 @@ std::condition_variable timeout_condition;
 bool timeout_handler_entered = false;
 bool timeout_handler_release = false;
 bool timeout_handler_completed = false;
+
+struct native_io_status_block {
+  union {
+    LONG status;
+    void *pointer;
+  };
+  ULONG_PTR information;
+};
+
+struct file_names_information_record {
+  ULONG next_entry_offset;
+  ULONG file_index;
+  ULONG file_name_length;
+  WCHAR file_name[1];
+};
+
+using nt_query_directory_file_fn = LONG(NTAPI *)(
+    HANDLE, HANDLE, void *, void *, native_io_status_block *, void *, ULONG,
+    ULONG, BOOLEAN, void *, BOOLEAN);
+inline constexpr ULONG file_names_information_class = 12;
 
 [[noreturn]] void fail(const char *operation, DWORD error = GetLastError()) {
   char message[192]{};
@@ -479,6 +500,115 @@ void verify_ciphertext(const std::vector<std::uint8_t> &ciphertext,
   }
 }
 
+void verify_directory_control_swap() {
+  namespace fs = std::filesystem;
+  const fs::path directory =
+      fs::temp_directory_path() / target_directory_name;
+  const fs::path source = directory / directory_source_name;
+  std::error_code ignored;
+  fs::remove_all(directory, ignored);
+  if (!fs::create_directories(directory))
+    throw std::runtime_error("failed to create directory-swap fixture");
+  write_bytes(source, std::vector<std::uint8_t>{0x5a}, CREATE_NEW);
+
+  HANDLE handle = CreateFileW(
+      directory.c_str(), FILE_LIST_DIRECTORY | SYNCHRONIZE,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+      OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+  if (handle == INVALID_HANDLE_VALUE)
+    fail("CreateFileW(directory-swap)");
+
+  const auto query = reinterpret_cast<nt_query_directory_file_fn>(
+      GetProcAddress(GetModuleHandleW(L"ntdll.dll"),
+                     "NtQueryDirectoryFile"));
+  if (!query) {
+    CloseHandle(handle);
+    throw std::runtime_error("NtQueryDirectoryFile is unavailable");
+  }
+
+  std::array<unsigned char, 4096> buffer{};
+  native_io_status_block io_status{};
+  const LONG status = query(
+      handle, nullptr, nullptr, nullptr, &io_status, buffer.data(),
+      static_cast<ULONG>(buffer.size()), file_names_information_class, FALSE,
+      nullptr, TRUE);
+  const DWORD close_error = CloseHandle(handle) ? ERROR_SUCCESS : GetLastError();
+  if (status < 0)
+    fail("NtQueryDirectoryFile(directory-swap)",
+         static_cast<DWORD>(status));
+  if (close_error != ERROR_SUCCESS)
+    fail("CloseHandle(directory-swap)", close_error);
+
+  bool found_source = false;
+  bool found_swapped = false;
+  std::size_t offset = 0;
+  constexpr std::size_t name_offset =
+      offsetof(file_names_information_record, file_name);
+  while (offset < io_status.information) {
+    if (name_offset > io_status.information - offset)
+      throw std::runtime_error("directory-swap returned a truncated record");
+    const auto *const entry =
+        reinterpret_cast<const file_names_information_record *>(
+            buffer.data() + offset);
+    if ((entry->file_name_length % sizeof(wchar_t)) != 0 ||
+        entry->file_name_length >
+            io_status.information - offset - name_offset)
+      throw std::runtime_error("directory-swap returned an invalid name");
+    const std::wstring_view name{
+        entry->file_name, entry->file_name_length / sizeof(wchar_t)};
+    found_source = found_source || name == directory_source_name;
+    found_swapped = found_swapped || name == directory_swapped_name;
+    if (entry->next_entry_offset == 0)
+      break;
+    if (entry->next_entry_offset > io_status.information - offset)
+      throw std::runtime_error(
+          "directory-swap returned an invalid record chain");
+    offset += entry->next_entry_offset;
+  }
+
+  fs::remove_all(directory, ignored);
+  if (found_source || !found_swapped)
+    throw std::runtime_error(
+        "directory-control replacement was not copied to the caller");
+  std::printf("swapbuffers_directory_control=PASS\n");
+}
+
+void verify_fsctl_swap(const std::filesystem::path &path) {
+  HANDLE file = CreateFileW(
+      path.c_str(), FILE_READ_ATTRIBUTES,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (file == INVALID_HANDLE_VALUE)
+    fail("CreateFileW(fsctl-swap)");
+
+  std::uint16_t compression = 0;
+  DWORD returned = 0;
+  const BOOL completed =
+      DeviceIoControl(file, FSCTL_GET_COMPRESSION, nullptr, 0, &compression,
+                      sizeof(compression), &returned, nullptr);
+  const DWORD error = completed ? ERROR_SUCCESS : GetLastError();
+  const DWORD close_error = CloseHandle(file) ? ERROR_SUCCESS : GetLastError();
+  if (!completed)
+    fail("FSCTL_GET_COMPRESSION", error);
+  if (close_error != ERROR_SUCCESS)
+    fail("CloseHandle(fsctl-swap)", close_error);
+  if (returned != sizeof(compression) || compression != fsctl_output_marker)
+    throw std::runtime_error(
+        "METHOD_BUFFERED FSCTL replacement was not copied to the caller");
+  std::printf("swapbuffers_fsctl_method_buffered=PASS\n");
+}
+
+void verify_extended_swaps(ntl::flt::communication_client &client,
+                           const std::filesystem::path &path) {
+  verify_directory_control_swap();
+  verify_fsctl_swap(path);
+  const auto state = client.invoke(query_runtime_state_method);
+  if (state.swapped_directory_queries == 0 ||
+      state.swapped_fsctl_outputs == 0)
+    throw std::runtime_error(
+        "driver did not observe both extended swapped-buffer operations");
+}
+
 } // namespace
 
 int wmain() {
@@ -528,6 +658,7 @@ int wmain() {
         normal_state.active_post_requests != 0)
       throw std::runtime_error(
           "normal I/O did not drain both pending registries");
+    verify_extended_swaps(transform_service, path);
 
     transform_service = {};
     verify_read_fails_without_service(path);

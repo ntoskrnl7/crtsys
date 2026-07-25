@@ -1,0 +1,488 @@
+/**
+ * @file callback_data_owner
+ * @brief Ownership for Filter Manager callback data allocated by a minifilter.
+ */
+#pragma once
+
+#include "callback"
+#include "types"
+
+#include "../pool_allocator"
+#include "../result"
+#include "../status"
+
+#include <fltKernel.h>
+
+#include <type_traits>
+#include <utility>
+
+namespace ntl::flt {
+
+namespace detail {
+class async_callback_data_state;
+}
+
+/**
+ * @brief Copyable cancellation and completion handle for generated async I/O.
+ *
+ * The handle never owns the callback data itself. Its shared state coordinates
+ * FltCancelIo with an inline or concurrent Filter Manager completion so the
+ * callback data cannot be freed while cancellation is still using it.
+ */
+class async_callback_data_operation {
+public:
+  async_callback_data_operation() noexcept = default;
+  async_callback_data_operation(
+      const async_callback_data_operation &other) noexcept;
+  async_callback_data_operation &
+  operator=(const async_callback_data_operation &other) noexcept;
+  async_callback_data_operation(async_callback_data_operation &&other) noexcept;
+  async_callback_data_operation &
+  operator=(async_callback_data_operation &&other) noexcept;
+  ~async_callback_data_operation();
+
+  /** @brief Requests cancellation if the generated I/O is still outstanding. */
+  bool cancel() noexcept;
+
+  /** @brief Returns true after the typed completion callback has returned. */
+  bool completed() const noexcept;
+
+  /**
+   * @brief Waits until the typed completion callback returns.
+   * @param timeout Optional native relative or absolute timeout.
+   */
+  ntl::status wait(PLARGE_INTEGER timeout = nullptr) const noexcept;
+
+  explicit operator bool() const noexcept { return state_ != nullptr; }
+  void reset() noexcept;
+
+private:
+  friend class callback_data_owner;
+  explicit async_callback_data_operation(
+      detail::async_callback_data_state *state) noexcept
+      : state_(state) {}
+
+  detail::async_callback_data_state *state_ = nullptr;
+};
+
+/** @brief Move-only owner for callback data returned by
+ * FltAllocateCallbackData. */
+class callback_data_owner {
+public:
+  callback_data_owner() noexcept = default;
+  explicit callback_data_owner(PFLT_CALLBACK_DATA value) noexcept
+      : value_(value) {}
+  callback_data_owner(const callback_data_owner &) = delete;
+  callback_data_owner &operator=(const callback_data_owner &) = delete;
+  callback_data_owner(callback_data_owner &&other) noexcept
+      : value_(other.release()) {}
+  callback_data_owner &operator=(callback_data_owner &&other) noexcept {
+    if (this != &other) {
+      reset();
+      value_ = other.release();
+    }
+    return *this;
+  }
+  ~callback_data_owner() { reset(); }
+
+  PFLT_CALLBACK_DATA native() const noexcept { return value_; }
+  PFLT_IO_PARAMETER_BLOCK iopb() const noexcept {
+    return value_ ? value_->Iopb : nullptr;
+  }
+  callback_data_view view() const noexcept {
+    return callback_data_view{value_};
+  }
+  explicit operator bool() const noexcept { return value_ != nullptr; }
+
+  /**
+   * @brief Selects and initializes the typed IOPB member for generated I/O.
+   *
+   * Reusing a callback-data owner clears the IOPB separately with try_reuse().
+   * Call prepare() after allocation or reuse, then configure only the returned
+   * operation-specific parameter view.
+   */
+  template <class OperationTag>
+  auto prepare(OperationTag, UCHAR minor_function = 0) noexcept {
+    constexpr operation_id operation = detail::operation_tag_traits<
+        std::remove_cv_t<std::remove_reference_t<OperationTag>>>::value;
+    if (value_ && value_->Iopb) {
+      RtlZeroMemory(&value_->Iopb->Parameters,
+                    sizeof(value_->Iopb->Parameters));
+      value_->Iopb->MajorFunction = static_cast<UCHAR>(operation);
+      value_->Iopb->MinorFunction = minor_function;
+      value_->Iopb->OperationFlags = 0;
+      value_->Iopb->IrpFlags = 0;
+    }
+    return detail::callback_data_impl<operation>{value_};
+  }
+
+  /** @brief Resets the request for another operation. */
+  ntl::status try_reuse() noexcept {
+    if (!value_)
+      return STATUS_INVALID_PARAMETER;
+    if (KeGetCurrentIrql() > APC_LEVEL)
+      return STATUS_INVALID_DEVICE_STATE;
+    FltReuseCallbackData(value_);
+    return STATUS_SUCCESS;
+  }
+
+  /** @brief Sends the configured request synchronously. */
+  ntl::status perform_synchronously() noexcept {
+    if (!value_ || !value_->Iopb)
+      return STATUS_INVALID_PARAMETER;
+    const bool paging = FlagOn(value_->Iopb->IrpFlags, IRP_PAGING_IO) != 0;
+    if ((!paging && KeGetCurrentIrql() != PASSIVE_LEVEL) ||
+        (paging && KeGetCurrentIrql() > APC_LEVEL))
+      return STATUS_INVALID_DEVICE_STATE;
+    FltPerformSynchronousIo(value_);
+    return value_->IoStatus.Status;
+  }
+
+  /**
+   * @brief Issues asynchronous I/O and transfers ownership to its completion.
+   *
+   * Filter Manager invokes Completion even when submission returns an error.
+   * Ownership therefore transfers immediately before FltPerformAsynchronousIo
+   * and the callback receives the owner directly.
+   */
+  template <auto Completion>
+  ntl::status release_and_perform_asynchronously() noexcept {
+    static_assert(
+        std::is_nothrow_invocable_r_v<void, decltype(Completion),
+                                      callback_data_owner>,
+        "An async completion must be noexcept void(callback_data_owner)");
+    if (!valid_async_submission())
+      return STATUS_INVALID_PARAMETER;
+    const ntl::status irql_status = validate_async_irql();
+    if (irql_status.is_err())
+      return irql_status;
+    return FltPerformAsynchronousIo(
+        release(), async_completion_trampoline<Completion>, nullptr);
+  }
+
+  /**
+   * @brief Issues asynchronous I/O with a borrowed nonpaged completion context.
+   */
+  template <auto Completion, class Context>
+  ntl::status release_and_perform_asynchronously(Context *context) noexcept {
+    static_assert(std::is_nothrow_invocable_r_v<void, decltype(Completion),
+                                                callback_data_owner, Context *>,
+                  "An async completion must be noexcept "
+                  "void(callback_data_owner, Context*)");
+    if (!valid_async_submission())
+      return STATUS_INVALID_PARAMETER;
+    const ntl::status irql_status = validate_async_irql();
+    if (irql_status.is_err())
+      return irql_status;
+    return FltPerformAsynchronousIo(
+        release(), async_context_completion_trampoline<Completion, Context>,
+        context);
+  }
+
+  /**
+   * @brief Issues async I/O and returns a race-safe cancellation handle.
+   *
+   * Unlike release_and_perform_asynchronously(), the returned handle remains
+   * usable after ownership transfers to Filter Manager. Completion and
+   * cancellation are synchronized even when completion occurs inline.
+   */
+  template <auto Completion>
+  ntl::result<async_callback_data_operation>
+  try_perform_asynchronously() noexcept;
+
+  /**
+   * @brief Issues async I/O with a borrowed nonpaged completion context.
+   *
+   * Context must remain valid until operation.wait() succeeds or completed()
+   * becomes true.
+   */
+  template <auto Completion, class Context>
+  ntl::result<async_callback_data_operation>
+  try_perform_asynchronously(Context *context) noexcept;
+
+  void reset() noexcept {
+    if (value_)
+      FltFreeCallbackData(std::exchange(value_, nullptr));
+  }
+  PFLT_CALLBACK_DATA release() noexcept {
+    return std::exchange(value_, nullptr);
+  }
+
+private:
+  bool valid_async_submission() const noexcept {
+    return value_ != nullptr && value_->Iopb != nullptr;
+  }
+  ntl::status validate_async_irql() const noexcept {
+    const bool paging = FlagOn(value_->Iopb->IrpFlags, IRP_PAGING_IO) != 0;
+    if ((!paging && KeGetCurrentIrql() != PASSIVE_LEVEL) ||
+        (paging && KeGetCurrentIrql() > APC_LEVEL))
+      return STATUS_INVALID_DEVICE_STATE;
+    return STATUS_SUCCESS;
+  }
+
+  template <auto Completion>
+  static void FLTAPI async_completion_trampoline(PFLT_CALLBACK_DATA data,
+                                                 PFLT_CONTEXT) noexcept {
+    Completion(callback_data_owner{data});
+  }
+
+  template <auto Completion, class Context>
+  static void FLTAPI async_context_completion_trampoline(
+      PFLT_CALLBACK_DATA data, PFLT_CONTEXT context) noexcept {
+    Completion(callback_data_owner{data}, static_cast<Context *>(context));
+  }
+
+  PFLT_CALLBACK_DATA value_ = nullptr;
+};
+
+namespace detail {
+
+inline constexpr ULONG async_callback_data_pool_tag = ntl::pool_tag("aIoN");
+
+class async_callback_data_state {
+public:
+  using complete_function = void (*)(async_callback_data_state *,
+                                     PFLT_CALLBACK_DATA) noexcept;
+  using destroy_function = void (*)(async_callback_data_state *) noexcept;
+
+  async_callback_data_state(PFLT_CALLBACK_DATA data, complete_function complete,
+                            destroy_function destroy) noexcept
+      : data_(data), complete_(complete), destroy_(destroy) {
+    KeInitializeSpinLock(&lock_);
+    KeInitializeEvent(&completed_event_, NotificationEvent, FALSE);
+  }
+
+  void add_ref() noexcept { InterlockedIncrement(&references_); }
+
+  void release_ref() noexcept {
+    if (InterlockedDecrement(&references_) == 0)
+      destroy_(this);
+  }
+
+  bool cancel() noexcept {
+    if (KeGetCurrentIrql() > DISPATCH_LEVEL)
+      return false;
+
+    PFLT_CALLBACK_DATA data = nullptr;
+    KIRQL irql = PASSIVE_LEVEL;
+    KeAcquireSpinLock(&lock_, &irql);
+    if (data_) {
+      data = data_;
+      ++active_cancellers_;
+    }
+    KeReleaseSpinLock(&lock_, irql);
+    if (!data)
+      return false;
+
+    const bool cancelled = FltCancelIo(data) != FALSE;
+
+    PFLT_CALLBACK_DATA deferred_completion = nullptr;
+    KeAcquireSpinLock(&lock_, &irql);
+    --active_cancellers_;
+    if (active_cancellers_ == 0 && deferred_completion_) {
+      deferred_completion = deferred_completion_;
+      deferred_completion_ = nullptr;
+    }
+    KeReleaseSpinLock(&lock_, irql);
+
+    if (deferred_completion)
+      finish(deferred_completion);
+    return cancelled;
+  }
+
+  bool completed() const noexcept {
+    return KeReadStateEvent(const_cast<PRKEVENT>(&completed_event_)) != 0;
+  }
+
+  ntl::status wait(PLARGE_INTEGER timeout) const noexcept {
+    if (completed())
+      return STATUS_SUCCESS;
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return STATUS_INVALID_DEVICE_STATE;
+    return KeWaitForSingleObject(const_cast<PRKEVENT>(&completed_event_),
+                                 Executive, KernelMode, FALSE, timeout);
+  }
+
+  static void FLTAPI completion_trampoline(PFLT_CALLBACK_DATA data,
+                                           PFLT_CONTEXT context) noexcept {
+    static_cast<async_callback_data_state *>(context)->on_completion(data);
+  }
+
+protected:
+  ~async_callback_data_state() = default;
+
+private:
+  void on_completion(PFLT_CALLBACK_DATA data) noexcept {
+    bool finish_now = false;
+    KIRQL irql = PASSIVE_LEVEL;
+    KeAcquireSpinLock(&lock_, &irql);
+    data_ = nullptr;
+    if (active_cancellers_ == 0) {
+      finish_now = true;
+    } else {
+      deferred_completion_ = data;
+    }
+    KeReleaseSpinLock(&lock_, irql);
+
+    if (finish_now)
+      finish(data);
+  }
+
+  void finish(PFLT_CALLBACK_DATA data) noexcept {
+    complete_(this, data);
+    KeSetEvent(&completed_event_, IO_NO_INCREMENT, FALSE);
+    // Releases the reference reserved for Filter Manager's completion.
+    release_ref();
+  }
+
+  mutable KSPIN_LOCK lock_{};
+  mutable KEVENT completed_event_{};
+  PFLT_CALLBACK_DATA data_ = nullptr;
+  PFLT_CALLBACK_DATA deferred_completion_ = nullptr;
+  LONG active_cancellers_ = 0;
+  volatile LONG references_ = 2;
+  complete_function complete_ = nullptr;
+  destroy_function destroy_ = nullptr;
+};
+
+template <auto Completion, class Context>
+class async_callback_data_state_impl final : public async_callback_data_state {
+public:
+  async_callback_data_state_impl(PFLT_CALLBACK_DATA data,
+                                 Context *context) noexcept
+      : async_callback_data_state(data, &complete, &destroy),
+        context_(context) {}
+
+private:
+  static void complete(async_callback_data_state *state,
+                       PFLT_CALLBACK_DATA data) noexcept {
+    auto *const self = static_cast<async_callback_data_state_impl *>(state);
+    if constexpr (std::is_void_v<Context>)
+      Completion(callback_data_owner{data});
+    else
+      Completion(callback_data_owner{data}, self->context_);
+  }
+
+  static void destroy(async_callback_data_state *state) noexcept {
+    ntl::pool_deleter<async_callback_data_state_impl>{
+        async_callback_data_pool_tag}(
+        static_cast<async_callback_data_state_impl *>(state));
+  }
+
+  Context *context_ = nullptr;
+};
+
+} // namespace detail
+
+inline async_callback_data_operation::async_callback_data_operation(
+    const async_callback_data_operation &other) noexcept
+    : state_(other.state_) {
+  if (state_)
+    state_->add_ref();
+}
+
+inline async_callback_data_operation &async_callback_data_operation::operator=(
+    const async_callback_data_operation &other) noexcept {
+  if (this != &other) {
+    reset();
+    state_ = other.state_;
+    if (state_)
+      state_->add_ref();
+  }
+  return *this;
+}
+
+inline async_callback_data_operation::async_callback_data_operation(
+    async_callback_data_operation &&other) noexcept
+    : state_(std::exchange(other.state_, nullptr)) {}
+
+inline async_callback_data_operation &async_callback_data_operation::operator=(
+    async_callback_data_operation &&other) noexcept {
+  if (this != &other) {
+    reset();
+    state_ = std::exchange(other.state_, nullptr);
+  }
+  return *this;
+}
+
+inline async_callback_data_operation::~async_callback_data_operation() {
+  reset();
+}
+
+inline bool async_callback_data_operation::cancel() noexcept {
+  return state_ && state_->cancel();
+}
+
+inline bool async_callback_data_operation::completed() const noexcept {
+  return state_ && state_->completed();
+}
+
+inline ntl::status
+async_callback_data_operation::wait(PLARGE_INTEGER timeout) const noexcept {
+  return state_ ? state_->wait(timeout) : ntl::status{STATUS_INVALID_PARAMETER};
+}
+
+inline void async_callback_data_operation::reset() noexcept {
+  if (state_)
+    std::exchange(state_, nullptr)->release_ref();
+}
+
+template <auto Completion>
+ntl::result<async_callback_data_operation>
+callback_data_owner::try_perform_asynchronously() noexcept {
+  static_assert(
+      std::is_nothrow_invocable_r_v<void, decltype(Completion),
+                                    callback_data_owner>,
+      "An async completion must be noexcept void(callback_data_owner)");
+  return try_perform_asynchronously<Completion>(static_cast<void *>(nullptr));
+}
+
+template <auto Completion, class Context>
+ntl::result<async_callback_data_operation>
+callback_data_owner::try_perform_asynchronously(Context *context) noexcept {
+  static_assert(
+      std::is_void_v<Context> ||
+          std::is_nothrow_invocable_r_v<void, decltype(Completion),
+                                        callback_data_owner, Context *>,
+      "An async completion must be noexcept "
+      "void(callback_data_owner, Context*)");
+  if (!valid_async_submission())
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  const ntl::status irql_status = validate_async_irql();
+  if (irql_status.is_err())
+    return ntl::unexpected(irql_status);
+
+  using state_type =
+      detail::async_callback_data_state_impl<Completion, Context>;
+  auto created = ntl::try_make_pool<state_type>(
+      ntl::pool_kind::nonpaged, ntl::pool_option::none,
+      detail::async_callback_data_pool_tag, value_, context);
+  if (!created)
+    return ntl::unexpected(created.status());
+
+  auto *const state = created->release();
+  async_callback_data_operation operation{state};
+  const NTSTATUS status = FltPerformAsynchronousIo(
+      release(), &detail::async_callback_data_state::completion_trampoline,
+      state);
+  if (!NT_SUCCESS(status))
+    return ntl::unexpected(status);
+  return operation;
+}
+
+/** @brief Allocates callback data targeting an instance and optional file. */
+[[nodiscard]] inline ntl::result<callback_data_owner>
+try_allocate_callback_data(instance target, ntl::file file = {}) noexcept {
+  if (!target)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  if (KeGetCurrentIrql() > APC_LEVEL)
+    return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+  PFLT_CALLBACK_DATA data = nullptr;
+  const NTSTATUS status = FltAllocateCallbackData(target.native_handle(),
+                                                  file.native_object(), &data);
+  if (!NT_SUCCESS(status))
+    return ntl::unexpected(status);
+  return callback_data_owner{data};
+}
+
+} // namespace ntl::flt

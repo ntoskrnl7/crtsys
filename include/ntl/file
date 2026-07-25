@@ -60,6 +60,11 @@ public:
     return object_ ? object_->DeviceObject : nullptr;
   }
 
+  /** @brief Returns whether this FILE_OBJECT represents a direct volume open. */
+  bool is_volume_open() const noexcept {
+    return object_ && (object_->Flags & FO_VOLUME_OPEN) != 0;
+  }
+
   /** @brief Returns the native FILE_OBJECT pointer. */
   PFILE_OBJECT native_object() const noexcept { return object_; }
 

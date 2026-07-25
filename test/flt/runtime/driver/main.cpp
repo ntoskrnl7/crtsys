@@ -1,11 +1,12 @@
-#include <fltKernel.h>
-
 #include <ntl/flt/all>
 #include <ntl/ipc/shared_ring>
 #include <ntl/irql>
 
 #include "../shared/runtime_test.hpp"
 #include "communication_advanced.hpp"
+#include "mini_spy_runtime.hpp"
+#include "operation_status_runtime.hpp"
+#include "ownership_runtime.hpp"
 
 #include <atomic>
 #include <cstdint>
@@ -34,7 +35,8 @@ std::atomic<std::uint32_t> completion_states_destroyed{0};
 struct io_completion_state {
   static constexpr std::uint32_t expected_marker = 0x43525453;
 
-  io_completion_state() noexcept {
+  explicit io_completion_state(bool mini_spy = false) noexcept
+      : mini_spy_target(mini_spy) {
     completion_states_created.fetch_add(1, std::memory_order_relaxed);
   }
 
@@ -43,6 +45,7 @@ struct io_completion_state {
   }
 
   std::uint32_t marker = expected_marker;
+  bool mini_spy_target = false;
 };
 
 struct instance_state {
@@ -70,9 +73,11 @@ struct file_state {
 struct stream_state {
   ntl::flt::name_information cached_name;
   std::atomic<std::uint32_t> writes{0};
+  bool mini_spy_target = false;
 
-  explicit stream_state(ntl::flt::name_information &&name) noexcept
-      : cached_name(std::move(name)) {}
+  explicit stream_state(ntl::flt::name_information &&name,
+                        bool mini_spy = false) noexcept
+      : cached_name(std::move(name)), mini_spy_target(mini_spy) {}
   ~stream_state() noexcept {
     stream_context_writes.fetch_add(writes.load(std::memory_order_relaxed),
                                     std::memory_order_relaxed);
@@ -81,8 +86,10 @@ struct stream_state {
 
 struct stream_handle_state {
   std::atomic<std::uint32_t> writes{0};
+  bool mini_spy_target = false;
 
-  stream_handle_state() noexcept = default;
+  explicit stream_handle_state(bool mini_spy = false) noexcept
+      : mini_spy_target(mini_spy) {}
   ~stream_handle_state() noexcept {
     stream_handle_context_writes.fetch_add(
         writes.load(std::memory_order_relaxed), std::memory_order_relaxed);
@@ -113,6 +120,26 @@ void observe_cached_names(ntl::flt::related_objects objects) noexcept {
       cached_stream_name_uses.fetch_add(1, std::memory_order_relaxed);
   }
 }
+
+template <class Data> bool targets_mini_spy_file(Data data) noexcept {
+  if (!ntl::is_irql_at_most(ntl::irql::apc))
+    return false;
+  auto name = data.try_query_name(FLT_FILE_NAME_NORMALIZED |
+                                  FLT_FILE_NAME_QUERY_DEFAULT);
+  if (!name || name->try_parse().is_err())
+    return false;
+  return name->final_component().starts_with(
+      crtsys_flt_runtime_test::mini_spy_file_prefix);
+}
+
+bool stream_handle_targets_mini_spy(
+    ntl::flt::related_objects objects) noexcept {
+  if (auto state = objects.try_get(stream_handle_state_context))
+    return (*state)->mini_spy_target;
+  if (auto state = objects.try_get(stream_state_context))
+    return (*state)->mini_spy_target;
+  return false;
+}
 } // namespace
 
 ntl::status ntl::flt::main(ntl::flt::driver &driver, std::wstring_view) {
@@ -122,9 +149,13 @@ ntl::status ntl::flt::main(ntl::flt::driver &driver, std::wstring_view) {
   if (registry_store_status.is_err())
     return registry_store_status;
 
+  initialize_mini_spy_runtime();
   auto messages = make_server();
   const auto publisher = messages.publisher();
   configure_advanced_communication_tests(messages, publisher);
+  configure_ownership_runtime_messages(messages);
+  configure_operation_status_runtime_messages(messages);
+  configure_mini_spy_runtime_messages(messages);
   messages.on(publish_progress_method,
               [publisher](const ntl::flt::communication_context &context,
                           std::uint32_t value, bool reliable) -> std::uint64_t {
@@ -201,9 +232,8 @@ ntl::status ntl::flt::main(ntl::flt::driver &driver, std::wstring_view) {
   region_limits.max_regions(2).max_bytes(shared_region_bytes * 2);
 
   ntl::flt::communication_port_options port_options;
-  port_options.max_pending_async(8)
-      .max_reliable_records(4)
-      .region_limits(region_limits);
+  port_options.max_pending_async(8).max_reliable_records(4).region_limits(
+      region_limits);
   const auto port_status = driver.add_communication_port(
       port_name, std::move(messages), port_options);
   if (port_status.is_err())
@@ -243,11 +273,17 @@ ntl::status ntl::flt::main(ntl::flt::driver &driver, std::wstring_view) {
             if (!name || name->try_parse().is_err() ||
                 name->extension() != L"tmp")
               return ntl::flt::pre_result::success_no_callback;
+            const bool mini_spy_target =
+                name->final_component().starts_with(mini_spy_file_prefix);
+            if (mini_spy_target) {
+              record_mini_spy_operation(mini_spy_operation::create,
+                                        mini_spy_phase::pre, STATUS_PENDING);
+            }
 
             // The object moves into Filter Manager's CompletionContext only
             // when this callback requests a post operation. Otherwise the
             // slot destroys it before pre-operation returns.
-            if (completion.try_emplace().is_err())
+            if (completion.try_emplace(mini_spy_target).is_err())
               return ntl::flt::pre_result::success_no_callback;
             return ntl::flt::pre_result::success_with_callback;
           },
@@ -261,10 +297,19 @@ ntl::status ntl::flt::main(ntl::flt::driver &driver, std::wstring_view) {
                 completion->marker == io_completion_state::expected_marker)
               completion_states_observed.fetch_add(1,
                                                    std::memory_order_relaxed);
+            if (completion && completion->mini_spy_target) {
+              record_mini_spy_operation(
+                  mini_spy_operation::create, mini_spy_phase::post,
+                  static_cast<NTSTATUS>(data.io_status()),
+                  static_cast<std::uint32_t>(data.information()));
+            }
 
             if (!data.io_status().is_ok())
               return;
 
+            observe_transaction_create(data, objects);
+            observe_data_scan_create(data, objects);
+            observe_self_issued_io_create(data, objects);
             successful_create_count.fetch_add(1, std::memory_order_relaxed);
             auto name = data.try_query_name(FLT_FILE_NAME_NORMALIZED |
                                             FLT_FILE_NAME_QUERY_DEFAULT);
@@ -276,17 +321,28 @@ ntl::status ntl::flt::main(ntl::flt::driver &driver, std::wstring_view) {
               (void)objects.try_get_or_create(file_state_context,
                                               std::move(*cached_file_name));
             }
-            (void)objects.try_get_or_create(stream_state_context,
-                                            std::move(*name));
-            (void)objects.try_get_or_create(stream_handle_state_context);
+            (void)objects.try_get_or_create(
+                stream_state_context, std::move(*name),
+                completion && completion->mini_spy_target);
+            (void)objects.try_get_or_create(
+                stream_handle_state_context,
+                completion && completion->mini_spy_target);
           })
       .on_with_completion<io_completion_state>(
           ntl::flt::operation::read,
-          [](ntl::flt::read_callback_data, ntl::flt::related_objects,
+          [](ntl::flt::read_callback_data data,
+             ntl::flt::related_objects objects,
              ntl::flt::completion_slot<io_completion_state>
                  &completion) noexcept {
             read_count.fetch_add(1, std::memory_order_relaxed);
-            if (completion.try_emplace().is_err())
+            const bool mini_spy_target =
+                stream_handle_targets_mini_spy(objects);
+            if (mini_spy_target) {
+              record_mini_spy_operation(
+                  mini_spy_operation::read, mini_spy_phase::pre,
+                  STATUS_PENDING, data.parameters().length());
+            }
+            if (completion.try_emplace(mini_spy_target).is_err())
               return ntl::flt::pre_result::success_no_callback;
             return ntl::flt::pre_result::success_with_callback;
           },
@@ -297,6 +353,12 @@ ntl::status ntl::flt::main(ntl::flt::driver &driver, std::wstring_view) {
                 completion->marker == io_completion_state::expected_marker)
               completion_states_observed.fetch_add(1,
                                                    std::memory_order_relaxed);
+            if (completion && completion->mini_spy_target) {
+              record_mini_spy_operation(
+                  mini_spy_operation::read, mini_spy_phase::post,
+                  static_cast<NTSTATUS>(data.io_status()),
+                  static_cast<std::uint32_t>(data.information()));
+            }
 
             if (!data.io_status().is_ok())
               return ntl::flt::post_continuation::finished;
@@ -307,7 +369,7 @@ ntl::status ntl::flt::main(ntl::flt::driver &driver, std::wstring_view) {
             // current IRQL is already safe.
             return ntl::flt::post_continuation::when_safe;
           },
-          [](ntl::flt::read_callback_data, ntl::flt::related_objects objects,
+          [](ntl::flt::safe_read_operation, ntl::flt::related_objects objects,
              ntl::flt::completion_ref<io_completion_state>
                  completion) noexcept {
             if (completion &&
@@ -321,6 +383,11 @@ ntl::status ntl::flt::main(ntl::flt::driver &driver, std::wstring_view) {
             write_count.fetch_add(1, std::memory_order_relaxed);
             written_bytes.fetch_add(data.parameters().length(),
                                     std::memory_order_relaxed);
+            if (stream_handle_targets_mini_spy(objects)) {
+              record_mini_spy_operation(
+                  mini_spy_operation::write, mini_spy_phase::pre,
+                  STATUS_PENDING, data.parameters().length());
+            }
 
             if (ntl::is_irql_at_most(ntl::irql::apc)) {
               if (auto state = objects.try_get(file_state_context))
@@ -338,6 +405,10 @@ ntl::status ntl::flt::main(ntl::flt::driver &driver, std::wstring_view) {
           [](ntl::flt::callback_data<ntl::flt::operation::cleanup>,
              ntl::flt::related_objects objects, void *&) noexcept {
             cleanup_count.fetch_add(1, std::memory_order_relaxed);
+            if (stream_handle_targets_mini_spy(objects)) {
+              record_mini_spy_operation(mini_spy_operation::cleanup,
+                                        mini_spy_phase::pre, STATUS_PENDING);
+            }
             observe_cached_names(objects);
             return ntl::flt::pre_result::success_no_callback;
           })
@@ -345,12 +416,20 @@ ntl::status ntl::flt::main(ntl::flt::driver &driver, std::wstring_view) {
           [](ntl::flt::callback_data<ntl::flt::operation::close>,
              ntl::flt::related_objects objects, void *&) noexcept {
             close_count.fetch_add(1, std::memory_order_relaxed);
+            if (stream_handle_targets_mini_spy(objects)) {
+              record_mini_spy_operation(mini_spy_operation::close,
+                                        mini_spy_phase::pre, STATUS_PENDING);
+            }
             observe_cached_names(objects);
             return ntl::flt::pre_result::success_no_callback;
           })
       .on_instance_setup([](ntl::flt::related_objects objects,
                             FLT_INSTANCE_SETUP_FLAGS flags, DEVICE_TYPE,
-                            FLT_FILESYSTEM_TYPE) noexcept {
+                            FLT_FILESYSTEM_TYPE filesystem_type) noexcept {
+        if (filesystem_type == FLT_FSTYPE_NTFS ||
+            filesystem_type == FLT_FSTYPE_REFS) {
+          (void)prepare_ownership_instance(objects);
+        }
         auto information = objects.instance().try_information();
         if (!information)
           return information.status();
@@ -376,12 +455,15 @@ ntl::status ntl::flt::main(ntl::flt::driver &driver, std::wstring_view) {
         }
       })
       .on_unload([](ntl::flt::unload_flags) noexcept {
+        const auto mini_spy = close_mini_spy_runtime();
+        close_ownership_runtime();
         DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL,
                    "[crtsys FLT runtime] create=%lu successful=%lu read=%lu "
                    "completed=%lu write=%lu bytes=%lu cleanup=%lu close=%lu "
                    "contexts(file=%lu stream=%lu handle=%lu) "
                    "cached(file=%lu stream=%lu) "
-                   "completion(created=%lu observed=%lu destroyed=%lu)\n",
+                   "completion(created=%lu observed=%lu destroyed=%lu) "
+                   "minispy(dropped=%llu discarded=%lu)\n",
                    create_count.load(std::memory_order_relaxed),
                    successful_create_count.load(std::memory_order_relaxed),
                    read_count.load(std::memory_order_relaxed),
@@ -397,7 +479,8 @@ ntl::status ntl::flt::main(ntl::flt::driver &driver, std::wstring_view) {
                    cached_stream_name_uses.load(std::memory_order_relaxed),
                    completion_states_created.load(std::memory_order_relaxed),
                    completion_states_observed.load(std::memory_order_relaxed),
-                   completion_states_destroyed.load(std::memory_order_relaxed));
+                   completion_states_destroyed.load(std::memory_order_relaxed),
+                   mini_spy.dropped, mini_spy.discarded_on_close);
         return ntl::status{STATUS_SUCCESS};
       })
       .context(file_state_context)
@@ -405,5 +488,7 @@ ntl::status ntl::flt::main(ntl::flt::driver &driver, std::wstring_view) {
       .context(stream_handle_state_context)
       .context(instance_state_context);
 
+  configure_ownership_runtime_registration(callbacks);
+  configure_operation_status_runtime_registration(callbacks);
   return driver.start(std::move(callbacks));
 }

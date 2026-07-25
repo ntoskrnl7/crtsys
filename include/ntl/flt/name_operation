@@ -1,0 +1,203 @@
+/**
+ * @file name_operation
+ * @brief Phase-typed reparse, destination-name, and tunneled-name helpers.
+ */
+#pragma once
+
+#include "io_buffer"
+#include "name"
+
+#include "../pool_allocator"
+#include "../result"
+#include "../status"
+
+#include <fltKernel.h>
+
+#include <cstddef>
+#include <limits>
+#include <string_view>
+#include <type_traits>
+
+namespace ntl::flt {
+
+/** @brief Relationship of a replacement create name to RelatedFileObject. */
+enum class reparse_name_kind {
+  /** Keep the existing related file object for a relative replacement. */
+  relative,
+  /** Clear the related file object for an absolute replacement. */
+  absolute,
+};
+
+/**
+ * @brief Replaces a pre-create name and completes it as a simulated reparse.
+ *
+ * On success the caller must return pre_result::complete. The I/O result is
+ * set to STATUS_REPARSE with IO_REPARSE only after IoReplaceFileObjectName
+ * succeeds.
+ */
+inline ntl::status
+try_complete_reparse(pre_operation<operation_id::create> operation,
+                     std::wstring_view replacement,
+                     reparse_name_kind kind) noexcept {
+  auto data = operation.data();
+  if (!data.native() || !data.is_irp_operation() || replacement.empty())
+    return STATUS_INVALID_PARAMETER;
+  if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+    return STATUS_INVALID_DEVICE_STATE;
+
+  auto parameters = data.parameters();
+  const ntl::status replaced =
+      parameters.try_replace_target_name(replacement);
+  if (replaced.is_err())
+    return replaced;
+  if (kind == reparse_name_kind::absolute)
+    parameters.clear_related_target();
+
+  data.complete(STATUS_REPARSE, IO_REPARSE);
+  return STATUS_SUCCESS;
+}
+
+/**
+ * @brief Resolves a pre-rename or pre-hard-link destination name.
+ *
+ * destination_information_view validates the callback buffer before this
+ * helper passes its typed fields to FltGetDestinationFileNameInformation.
+ */
+inline ntl::result<name_information> try_query_destination_name(
+    pre_operation<operation_id::set_information> operation,
+    FLT_FILE_NAME_OPTIONS options) noexcept {
+  const auto data = operation.data();
+  const auto destination = data.parameters().destination();
+  if (!data.native() || !destination || !data.target_instance() ||
+      !data.target_file())
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  if (KeGetCurrentIrql() > APC_LEVEL)
+    return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+
+  PFLT_FILE_NAME_INFORMATION information = nullptr;
+  const NTSTATUS status = FltGetDestinationFileNameInformation(
+      data.target_instance().native_handle(),
+      data.target_file().native_object(), destination.root_directory(),
+      const_cast<PWCH>(destination.name().data()),
+      static_cast<ULONG>(destination.name().size() * sizeof(wchar_t)), options,
+      &information);
+  if (!NT_SUCCESS(status))
+    return ntl::unexpected(status);
+  return ntl::ok(name_information{information});
+}
+
+namespace detail {
+inline constexpr ULONG destination_information_pool_tag =
+    ntl::pool_tag("NTFd");
+
+inline ntl::status complete_destination_failure(
+    set_information_callback_data data, ntl::status status) noexcept {
+  data.complete(status);
+  return status;
+}
+} // namespace detail
+
+/**
+ * @brief Reissues a rename/link below this instance and completes the original.
+ *
+ * The original information class and flags are preserved. replacement must be
+ * a same-volume destination suitable for FltSetInformationFile, normally the
+ * full name returned by try_query_destination_name after policy rewriting.
+ * The caller must return pre_result::complete for both success and failure.
+ */
+inline ntl::status try_reissue_destination(
+    pre_operation<operation_id::set_information> operation,
+    std::wstring_view replacement) noexcept {
+  auto data = operation.data();
+  const auto destination = data.parameters().destination();
+  if (!data.native() || !destination || !data.target_instance() ||
+      !data.target_file() || replacement.empty()) {
+    return detail::complete_destination_failure(data,
+                                                STATUS_INVALID_PARAMETER);
+  }
+  if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+    return detail::complete_destination_failure(
+        data, STATUS_INVALID_DEVICE_STATE);
+
+  constexpr std::size_t maximum_ulong =
+      static_cast<std::size_t>((std::numeric_limits<ULONG>::max)());
+  if (replacement.size() > maximum_ulong / sizeof(wchar_t))
+    return detail::complete_destination_failure(data, STATUS_NAME_TOO_LONG);
+  const std::size_t name_bytes = replacement.size() * sizeof(wchar_t);
+  const std::size_t header =
+      destination.kind() == destination_information_kind::rename
+          ? FIELD_OFFSET(FILE_RENAME_INFORMATION, FileName)
+          : FIELD_OFFSET(FILE_LINK_INFORMATION, FileName);
+  if (name_bytes > maximum_ulong || header > maximum_ulong - name_bytes)
+    return detail::complete_destination_failure(data, STATUS_NAME_TOO_LONG);
+
+  const auto buffer_bytes = static_cast<ULONG>(header + name_bytes);
+  void *const buffer =
+      ntl::allocate_pool(buffer_bytes, ntl::pool_kind::paged,
+                         ntl::pool_option::none,
+                         detail::destination_information_pool_tag);
+  if (!buffer)
+    return detail::complete_destination_failure(
+        data, STATUS_INSUFFICIENT_RESOURCES);
+  RtlZeroMemory(buffer, buffer_bytes);
+
+  if (destination.kind() == destination_information_kind::rename) {
+    auto *const information =
+        static_cast<PFILE_RENAME_INFORMATION>(buffer);
+    if (destination.extended())
+      *reinterpret_cast<PULONG>(information) = destination.flags();
+    else
+      information->ReplaceIfExists = destination.replace_if_exists();
+    information->RootDirectory = nullptr;
+    information->FileNameLength = static_cast<ULONG>(name_bytes);
+    RtlCopyMemory(information->FileName, replacement.data(), name_bytes);
+  } else {
+    auto *const information = static_cast<PFILE_LINK_INFORMATION>(buffer);
+    if (destination.extended())
+      *reinterpret_cast<PULONG>(information) = destination.flags();
+    else
+      information->ReplaceIfExists = destination.replace_if_exists();
+    information->RootDirectory = nullptr;
+    information->FileNameLength = static_cast<ULONG>(name_bytes);
+    RtlCopyMemory(information->FileName, replacement.data(), name_bytes);
+  }
+
+  const ntl::status status = FltSetInformationFile(
+      data.target_instance().native_handle(),
+      data.target_file().native_object(), buffer, buffer_bytes,
+      destination.information_class());
+  ntl::free_pool(buffer, detail::destination_information_pool_tag);
+  data.complete(status);
+  return status;
+}
+
+/**
+ * @brief Looks up a tunneled normalized name in a create/set-info post callback.
+ *
+ * The caller retains preoperation_name until this call returns. A successful
+ * result may contain an empty name_information when no tunneled name exists.
+ */
+template <
+    operation_id Operation,
+    std::enable_if_t<Operation == operation_id::create ||
+                         Operation == operation_id::set_information,
+                     int> = 0>
+ntl::result<name_information>
+try_get_tunneled_name(post_operation<Operation> operation,
+                      const name_information &preoperation_name) noexcept {
+  const auto data = operation.data();
+  if (!data.native() || !preoperation_name)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  if (KeGetCurrentIrql() > APC_LEVEL)
+    return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+
+  PFLT_FILE_NAME_INFORMATION information = nullptr;
+  const NTSTATUS status =
+      FltGetTunneledName(data.native(), preoperation_name.native(),
+                        &information);
+  if (!NT_SUCCESS(status))
+    return ntl::unexpected(status);
+  return ntl::ok(name_information{information});
+}
+
+} // namespace ntl::flt

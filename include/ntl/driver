@@ -26,6 +26,10 @@
 #include <memory>
 #include <unordered_map>
 
+namespace ntl::flt {
+class driver;
+}
+
 namespace ntl {
 namespace detail {
 namespace driver {
@@ -54,6 +58,7 @@ class driver {
   friend class driver_initializer;
   friend class driver_unload_invoker;
   friend class device_dispatch_invoker;
+  friend class flt::driver;
 
 private:
   driver(PDRIVER_OBJECT driver)
