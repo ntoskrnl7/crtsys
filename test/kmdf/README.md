@@ -1,11 +1,17 @@
 # KMDF tests
 
-The directories below contain automated or stress-oriented KMDF fixtures. They
-are kept separate from the onboarding examples under
+The directories below contain compile, runtime, and stress-oriented KMDF
+fixtures. They are kept separate from the onboarding examples under
 [`examples/kmdf`](../../examples/kmdf/README.md).
+
+The repository-wide mapping from Microsoft samples to typed NTL mechanisms is
+maintained in the
+[WDK KMDF sample coverage matrix](WDK-SAMPLE-COVERAGE.md).
 
 | Test | Purpose |
 | --- | --- |
+| [`compile`](compile) | Compile-time callback, object, request, context, PnP, filter, bus, DMA, USB, and WMI contracts. |
+| [`runtime`](runtime) | Software-only build/staging and VM orchestration for control, PnP, echo/cancel, reference ABI, bus, filter, WMI, restart, unload, cross-bitness, Driver Verifier, crash checks, and verifier restoration. |
 | [`verifier-stress`](verifier-stress/README.md) | Repeated queue, request, timer, work-item, object-lifetime, and unload exercise intended for Driver Verifier runs. |
 
 Build the verifier fixture through the same CI entry point used by the

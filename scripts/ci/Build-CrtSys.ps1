@@ -1,8 +1,10 @@
 param(
   [Parameter(Mandatory = $true)]
-  [ValidateSet('app', 'driver', 'kmdf-verifier-stress',
+  [ValidateSet('app', 'driver', 'kmdf-compile', 'kmdf-verifier-stress',
                'kmdf-example-basic', 'kmdf-example-pnp',
-               'kmdf-example-bus', 'kmdf-example-dma',
+               'kmdf-example-echo', 'kmdf-example-bus',
+               'kmdf-example-filter-stack', 'kmdf-example-reference',
+               'kmdf-example-dma',
                'kmdf-example-usb', 'kmdf-example-wmi',
                'rpc-lifecycle-stress', 'rpc-async', 'rpc-notifications',
                'rpc-security', 'rpc-streaming', 'flt-runtime',
@@ -35,6 +37,8 @@ $sourceDir = if ($Project -like 'kmdf-example-*') {
   Join-Path $repoRoot "examples\kmdf\$sample"
 } elseif ($Project -eq 'kmdf-verifier-stress') {
   Join-Path $repoRoot 'test\kmdf\verifier-stress'
+} elseif ($Project -eq 'kmdf-compile') {
+  Join-Path $repoRoot 'test\kmdf\compile'
 } elseif ($Project -eq 'flt-runtime') {
   Join-Path $repoRoot 'test\flt\runtime'
 } elseif ($Project -eq 'flt-cross-bitness-app') {
