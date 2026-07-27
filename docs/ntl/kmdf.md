@@ -6,6 +6,10 @@ NTL KMDF support is an optional C++ surface over the normal KMDF object model.
 It does not replace WDF dispatch, PnP, power, queue, request, parent-child
 lifetime, or synchronization rules.
 
+Use the [KMDF driver engineering checklist](./kmdf-driver-checklist.md) during
+design and review. It collects the ownership transitions, cancellation state
+machine, PnP/power ordering, ABI rules, and release gate in one place.
+
 ## Select The Entry Model
 
 Visual Studio/MSBuild projects keep `<DriverType>KMDF</DriverType>` and opt in:

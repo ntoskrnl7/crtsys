@@ -19,7 +19,17 @@ foreach ($requiredFile in @('Directory.Build.props', 'Directory.Build.targets'))
 }
 
 $groupedSamples = [ordered]@{
-  kmdf = @('basic', 'pnp', 'bus', 'dma', 'usb', 'wmi')
+  kmdf = @(
+    'basic',
+    'echo',
+    'pnp',
+    'bus',
+    'filter-stack',
+    'reference',
+    'dma',
+    'usb',
+    'wmi'
+  )
   minifilter = @(
     'basic',
     'communication',

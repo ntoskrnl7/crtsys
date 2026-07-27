@@ -221,13 +221,16 @@ may compile or work.
 | [Usage Examples](./docs/usage-examples.md) | Small driver-side NTL examples |
 | [NTL sample driver](./examples/ntl-driver) | Complete Visual Studio/NuGet and CMake driver sample using `ntl::main`, device endpoint, typed IOCTLs, remove lock, registry config, passive executor, and pool-backed PMR |
 | [NTL RPC sample driver](./examples/ntl-rpc-driver) | Complete Visual Studio/NuGet and CMake driver/app pair using the shared NTL RPC schema |
-| [NTL KMDF samples](./examples/kmdf) | Independent basic, PnP, bus, DMA, USB, and WMI projects |
+| [NTL KMDF samples](./examples/kmdf) | Independent control, PnP, echo/cancel, reference, bus, filter-stack, DMA, USB, and WMI projects |
 | [NTL KMDF basic sample](./examples/kmdf/basic) | `ntl::kmdf::main`, C++ WDF contexts, typed file/request and manual-queue cancellation, common WDF object utilities, deferred callbacks, and STL in passive KMDF callbacks |
 | [NTL KMDF PnP sample](./examples/kmdf/pnp) | Root-enumerated PnP/power lifecycle, resources, device interface, idle policy, and typed IOCTL |
+| [NTL KMDF echo sample](./examples/kmdf/echo) | Timer-backed asynchronous I/O, cancellation races, queue synchronization, restart, and unload-safe ownership |
+| [NTL KMDF reference driver](./examples/kmdf/reference) | Production-oriented software device with a versioned ABI, per-handle sessions, PnP/power state, passive cancellation, and x64/WOW64 clients |
+| [NTL KMDF filter-stack sample](./examples/kmdf/filter-stack) | Root-enumerated target and upper filter with request forwarding, completion, lower-target lifetime, and observable layer traversal |
+| [NTL KMDF bus sample](./examples/kmdf/bus) | Dynamic PDO plug/remove/eject lifecycle and a typed `QUERY_INTERFACE` contract between bus and child function drivers |
 | [NTL KMDF DMA template](./examples/kmdf/dma) | Buildable PnP packet-DMA transaction, scatter/gather, common-buffer, and interrupt-DPC integration template for real hardware |
 | [NTL KMDF USB template](./examples/kmdf/usb) | Buildable PnP USB device/interface/pipe and continuous-reader template with a user-mode inspection app |
 | [NTL KMDF WMI sample](./examples/kmdf/wmi) | MOF-backed typed WMI query/set/method providers, event delivery, and a `ROOT\\WMI` user-mode verifier |
-| [NTL KMDF bus sample](./examples/kmdf/bus) | Dynamic PDO plug/remove/eject lifecycle and a typed `QUERY_INTERFACE` contract between bus and child function drivers |
 | [NTL minifilter samples](./examples/minifilter) | Independent typed callback/context, control-device, communication, MiniSpy-style operation-log, swapped-buffer, and MetadataManager-style driver/app examples with WDK sample-coverage mapping |
 | [CI Driver Load Tests](./docs/ci-driver-load-tests.md) | Optional self-hosted driver load/run workflow |
 
