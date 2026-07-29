@@ -490,7 +490,7 @@ jobs:
             $parameters.WdkVersion = $wdkVersion
           }
 
-          foreach ($driverModel in @('NTL', 'WDM', 'KMDF', 'NTL_KMDF', 'NTL_FLT')) {
+          foreach ($driverModel in @('NTL', 'WDM', 'KMDF', 'NTL_KMDF', 'NTL_FLT', 'NTL_WFP')) {
             $parameters.DriverModel = $driverModel
             ./scripts/nuget/Test-CrtSysReleaseAssets.ps1 @parameters
           }

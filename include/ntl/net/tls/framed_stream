@@ -1,0 +1,233 @@
+/**
+ * @file tls_framed_stream
+ * @brief Bounded incremental message framing over decrypted TLS.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/tls/framed_stream is a user-mode header"
+#endif
+
+#include <ntl/net/io/async_framed_stream>
+#include <ntl/net/framing>
+#include <ntl/net/tls/stream>
+
+#include <algorithm>
+#include <atomic>
+#include <cstddef>
+#include <cstring>
+#include <limits>
+#include <optional>
+#include <span>
+#include <stdexcept>
+#include <system_error>
+#include <utility>
+#include <vector>
+
+namespace ntl::net {
+
+/**
+ * @brief Bounded single-reader framed stream over one handshaken tls_stream.
+ *
+ * TLS records, TCP reads, and application messages have independent
+ * boundaries. This adapter retains decrypted suffix bytes until the next
+ * message and invokes the same no-throw Framer contract used by
+ * async_framed_stream.
+ */
+template <class Framer> class tls_framed_stream {
+public:
+  tls_framed_stream(
+      tls_stream &stream, Framer framer,
+      ntl::net::framing::frame_limits limits = {},
+      std::size_t receive_chunk_size = 4096)
+      : stream_(&stream), framer_(std::move(framer)), limits_(limits),
+        receive_chunk_size_(receive_chunk_size) {
+    if (limits_.maximum_frame_size == 0 || receive_chunk_size_ == 0)
+      throw std::invalid_argument(
+          "tls_framed_stream requires positive limits");
+  }
+
+  tls_framed_stream(const tls_framed_stream &) = delete;
+  tls_framed_stream &
+  operator=(const tls_framed_stream &) = delete;
+  tls_framed_stream(tls_framed_stream &&) = delete;
+  tls_framed_stream &operator=(tls_framed_stream &&) = delete;
+
+  std::size_t buffered_size() const noexcept { return buffer_.size(); }
+  std::size_t maximum_frame_size() const noexcept {
+    return limits_.maximum_frame_size;
+  }
+
+  /**
+   * @brief Seeds plaintext already read by a preceding protocol framer.
+   *
+   * This is used for protocol upgrades where the read completing the HTTP
+   * message may also contain bytes from the upgraded protocol.
+   */
+  void append_buffered(std::span<const std::byte> bytes) {
+    if (reading_.load(std::memory_order_acquire))
+      throw std::system_error(
+          ERROR_BUSY, std::system_category(),
+          "cannot seed a TLS framer during a read");
+    if (bytes.size() > limits_.maximum_frame_size - buffer_.size())
+      throw std::system_error(
+          ERROR_BUFFER_OVERFLOW, std::system_category(),
+          "seeded TLS framed bytes exceed the frame limit");
+    buffer_.insert(buffer_.end(), bytes.begin(), bytes.end());
+  }
+
+  /**
+   * @brief Transfers decrypted suffix bytes to the next protocol owner.
+   */
+  std::vector<std::byte> release_buffered() {
+    if (reading_.load(std::memory_order_acquire))
+      throw std::system_error(
+          ERROR_BUSY, std::system_category(),
+          "cannot release TLS framed bytes during a read");
+    return std::exchange(buffer_, {});
+  }
+
+  detail::tls_task<std::optional<framed_message>>
+  read_frame_or_eof() {
+    if (reading_.exchange(true, std::memory_order_acq_rel))
+      throw std::system_error(
+          ERROR_BUSY, std::system_category(),
+          "concurrent TLS framed read");
+    struct reader_release {
+      std::atomic<bool> *reading;
+      ~reader_release() {
+        reading->store(false, std::memory_order_release);
+      }
+    } release{&reading_};
+
+    for (;;) {
+      const auto bytes = ntl::net::scatter_view::from_contiguous(
+          std::span<const std::byte>(
+              buffer_.data(), buffer_.size()));
+      const auto result = ntl::net::framing::probe(
+          framer_, bytes, limits_);
+      switch (result.state()) {
+      case ntl::net::framing::probe_state::complete: {
+        std::vector<std::byte> frame(result.frame_size());
+        if (!frame.empty())
+          std::memcpy(
+              frame.data(), buffer_.data(), frame.size());
+        buffer_.erase(
+            buffer_.begin(),
+            buffer_.begin() +
+                static_cast<std::ptrdiff_t>(frame.size()));
+        reset_framer();
+        co_return framed_message(
+            std::move(frame), result.content_offset(),
+            result.content_size());
+      }
+
+      case ntl::net::framing::probe_state::malformed:
+        throw_probe_error(result.error());
+        break;
+
+      case ntl::net::framing::probe_state::need_more:
+        break;
+      }
+
+      const std::size_t current = buffer_.size();
+      if (current >= limits_.maximum_frame_size)
+        throw std::system_error(
+            ERROR_BUFFER_OVERFLOW, std::system_category(),
+            "TLS framed message exceeds its limit");
+      const std::size_t room =
+          limits_.maximum_frame_size - current;
+      const std::size_t growth =
+          (std::min)(receive_chunk_size_, room);
+      const std::size_t target = (std::max)(
+          result.required_total(), current + growth);
+      if (target <= current ||
+          target > limits_.maximum_frame_size)
+        throw std::system_error(
+            ERROR_BUFFER_OVERFLOW, std::system_category(),
+            "TLS framed message made no bounded progress");
+
+      buffer_.resize(target);
+      const std::size_t received = co_await stream_->read_some(
+          std::span<std::byte>(
+              buffer_.data() + current, target - current));
+      buffer_.resize(current + received);
+      if (received == 0) {
+        if (current == 0)
+          co_return std::nullopt;
+        const auto final_bytes =
+            ntl::net::scatter_view::from_contiguous(
+                std::span<const std::byte>(
+                    buffer_.data(), buffer_.size()));
+        const auto final = ntl::net::framing::finish(
+            framer_, final_bytes, limits_);
+        if (final.state() ==
+            ntl::net::framing::probe_state::complete) {
+          std::vector<std::byte> frame(final.frame_size());
+          if (!frame.empty())
+            std::memcpy(
+                frame.data(), buffer_.data(), frame.size());
+          buffer_.erase(
+              buffer_.begin(),
+              buffer_.begin() +
+                  static_cast<std::ptrdiff_t>(frame.size()));
+          reset_framer();
+          co_return framed_message(
+              std::move(frame), final.content_offset(),
+              final.content_size());
+        }
+        throw_probe_error(final.error());
+      }
+    }
+  }
+
+  detail::tls_task<framed_message> read_frame() {
+    auto result = co_await read_frame_or_eof();
+    if (!result)
+      throw std::system_error(
+          ERROR_HANDLE_EOF, std::system_category(),
+          "TLS stream ended before a framed message");
+    co_return std::move(*result);
+  }
+
+private:
+  [[noreturn]] static void throw_probe_error(NTSTATUS status) {
+    DWORD error = ERROR_INVALID_DATA;
+    switch (status) {
+    case STATUS_BUFFER_OVERFLOW:
+    case STATUS_BUFFER_TOO_SMALL:
+      error = ERROR_BUFFER_OVERFLOW;
+      break;
+    case STATUS_INSUFFICIENT_RESOURCES:
+      error = ERROR_NOT_ENOUGH_MEMORY;
+      break;
+    case STATUS_IO_TIMEOUT:
+      error = ERROR_TIMEOUT;
+      break;
+    case STATUS_CANCELLED:
+      error = ERROR_OPERATION_ABORTED;
+      break;
+    default:
+      break;
+    }
+    throw std::system_error(
+        static_cast<int>(error), std::system_category(),
+        "tls_framed_stream::read_frame");
+  }
+
+  void reset_framer() noexcept {
+    if constexpr (requires(Framer &value) { value.reset(); })
+      framer_.reset();
+  }
+
+  tls_stream *stream_ = nullptr;
+  Framer framer_;
+  ntl::net::framing::frame_limits limits_{};
+  std::size_t receive_chunk_size_ = 4096;
+  std::vector<std::byte> buffer_;
+  std::atomic<bool> reading_{false};
+};
+
+} // namespace ntl::net

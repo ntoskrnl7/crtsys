@@ -429,6 +429,15 @@ public:
   }
 
   /**
+   * @brief Observes the owned DEVICE_OBJECT without transferring ownership.
+   *
+   * The returned pointer is valid only while this device owner remains alive.
+   * It is intended for kernel subsystems, such as WFP, that bind their own
+   * registration lifetime to a device object.
+   */
+  PDEVICE_OBJECT native_handle() const noexcept { return object_; }
+
+  /**
    * @brief Releases ownership of the native DEVICE_OBJECT.
    */
   PDEVICE_OBJECT detach() {

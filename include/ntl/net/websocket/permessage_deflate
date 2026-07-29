@@ -1,0 +1,347 @@
+/**
+ * @file websocket_permessage_deflate
+ * @brief RFC 7692 negotiation and bounded message decompression.
+ *
+ * Link the consuming target with zlib.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/websocket/permessage_deflate is a user-mode header"
+#endif
+
+#include <ntl/result>
+#include <ntl/status>
+#include <ntl/net/websocket/framing>
+
+#include <algorithm>
+#include <array>
+#include <charconv>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <span>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include <zlib.h>
+
+namespace ntl::net::websocket {
+
+struct permessage_deflate_parameters {
+  bool enabled = false;
+  bool client_no_context_takeover = false;
+  bool server_no_context_takeover = false;
+  std::uint8_t client_max_window_bits = 15;
+  std::uint8_t server_max_window_bits = 15;
+};
+
+namespace detail {
+
+inline std::string_view trim_ows(std::string_view value) noexcept {
+  while (!value.empty() &&
+         (value.front() == ' ' || value.front() == '\t'))
+    value.remove_prefix(1);
+  while (!value.empty() &&
+         (value.back() == ' ' || value.back() == '\t'))
+    value.remove_suffix(1);
+  return value;
+}
+
+inline bool ascii_equal_ci(
+    std::string_view left, std::string_view right) noexcept {
+  if (left.size() != right.size())
+    return false;
+  for (std::size_t index = 0; index != left.size(); ++index) {
+    const auto lower = [](char character) noexcept {
+      return character >= 'A' && character <= 'Z'
+                 ? static_cast<char>(
+                       character + ('a' - 'A'))
+                 : character;
+    };
+    if (lower(left[index]) != lower(right[index]))
+      return false;
+  }
+  return true;
+}
+
+inline ntl::result<std::uint8_t>
+parse_window_bits(std::string_view value) noexcept {
+  value = trim_ows(value);
+  if (value.size() >= 2 && value.front() == '"' &&
+      value.back() == '"') {
+    value.remove_prefix(1);
+    value.remove_suffix(1);
+  }
+  unsigned parsed = 0;
+  const auto converted = std::from_chars(
+      value.data(), value.data() + value.size(), parsed);
+  if (converted.ec != std::errc{} ||
+      converted.ptr != value.data() + value.size() ||
+      parsed < 8 || parsed > 15)
+    return ntl::unexpected(STATUS_DATA_ERROR);
+  return ntl::ok(static_cast<std::uint8_t>(parsed));
+}
+
+} // namespace detail
+
+/**
+ * @brief Parses one server-selected permessage-deflate extension.
+ *
+ * This parser is intentionally for the server response, not a client offer:
+ * both max_window_bits parameters therefore require an explicit value.
+ * Unknown extensions or duplicate/unknown parameters are rejected.
+ */
+inline ntl::result<permessage_deflate_parameters>
+parse_permessage_deflate_response(
+    std::string_view field_value) noexcept {
+  permessage_deflate_parameters result;
+  field_value = detail::trim_ows(field_value);
+  if (field_value.empty())
+    return ntl::ok(result);
+  if (field_value.find(',') != std::string_view::npos)
+    return ntl::unexpected(STATUS_NOT_SUPPORTED);
+
+  const std::size_t first_semicolon =
+      field_value.find(';');
+  const std::string_view extension = detail::trim_ows(
+      field_value.substr(0, first_semicolon));
+  if (!detail::ascii_equal_ci(
+          extension, "permessage-deflate"))
+    return ntl::unexpected(STATUS_NOT_SUPPORTED);
+  result.enabled = true;
+
+  bool client_no_context_seen = false;
+  bool server_no_context_seen = false;
+  bool client_window_seen = false;
+  bool server_window_seen = false;
+  std::size_t position =
+      first_semicolon == std::string_view::npos
+          ? field_value.size()
+          : first_semicolon + 1;
+  while (position < field_value.size()) {
+    const std::size_t semicolon =
+        field_value.find(';', position);
+    const std::size_t end =
+        semicolon == std::string_view::npos
+            ? field_value.size()
+            : semicolon;
+    const std::string_view parameter =
+        detail::trim_ows(
+            field_value.substr(position, end - position));
+    if (parameter.empty())
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    const std::size_t equals = parameter.find('=');
+    const std::string_view name = detail::trim_ows(
+        parameter.substr(0, equals));
+    const bool has_value = equals != std::string_view::npos;
+    const std::string_view value =
+        has_value ? parameter.substr(equals + 1)
+                  : std::string_view{};
+
+    if (detail::ascii_equal_ci(
+            name, "client_no_context_takeover")) {
+      if (client_no_context_seen || has_value)
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      client_no_context_seen = true;
+      result.client_no_context_takeover = true;
+    } else if (detail::ascii_equal_ci(
+                   name, "server_no_context_takeover")) {
+      if (server_no_context_seen || has_value)
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      server_no_context_seen = true;
+      result.server_no_context_takeover = true;
+    } else if (detail::ascii_equal_ci(
+                   name, "client_max_window_bits")) {
+      if (client_window_seen || !has_value)
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      const auto parsed = detail::parse_window_bits(value);
+      if (!parsed)
+        return ntl::unexpected(parsed.status());
+      client_window_seen = true;
+      result.client_max_window_bits = *parsed;
+    } else if (detail::ascii_equal_ci(
+                   name, "server_max_window_bits")) {
+      if (server_window_seen || !has_value)
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      const auto parsed = detail::parse_window_bits(value);
+      if (!parsed)
+        return ntl::unexpected(parsed.status());
+      server_window_seen = true;
+      result.server_max_window_bits = *parsed;
+    } else {
+      return ntl::unexpected(STATUS_NOT_SUPPORTED);
+    }
+    if (semicolon == std::string_view::npos)
+      break;
+    position = semicolon + 1;
+  }
+  return ntl::ok(result);
+}
+
+/**
+ * @brief Directional RFC 7692 inflater with a decoded-message bound.
+ *
+ * One instance belongs to one connection direction. It preserves the zlib
+ * dictionary between compressed messages unless the negotiated peer-side
+ * no_context_takeover parameter requires a reset.
+ */
+class permessage_deflate_decoder {
+public:
+  permessage_deflate_decoder(
+      std::uint8_t window_bits, bool no_context_takeover,
+      std::size_t maximum_message_size) noexcept
+      : window_bits_(window_bits),
+        no_context_takeover_(no_context_takeover),
+        maximum_message_size_(maximum_message_size) {}
+
+  permessage_deflate_decoder(
+      const permessage_deflate_decoder &) = delete;
+  permessage_deflate_decoder &
+  operator=(const permessage_deflate_decoder &) = delete;
+
+  ~permessage_deflate_decoder() { release(); }
+
+  void reset() noexcept { release(); }
+
+  ntl::result<std::vector<std::byte>>
+  decode(std::span<const std::byte> payload,
+         bool compressed) noexcept {
+    if (maximum_message_size_ == 0 || window_bits_ < 8 ||
+        window_bits_ > 15)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    if (!compressed) {
+      if (payload.size() > maximum_message_size_)
+        return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+      try {
+        return ntl::ok(std::vector<std::byte>(
+            payload.begin(), payload.end()));
+      } catch (...) {
+        return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+      }
+    }
+    if (!initialize())
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+
+    constexpr std::array<std::byte, 4> tail{
+        std::byte{0x00}, std::byte{0x00},
+        std::byte{0xff}, std::byte{0xff}};
+    std::vector<std::byte> output;
+    try {
+      output.reserve(
+          (std::min)(maximum_message_size_,
+                     payload.size() * 2 + 64));
+    } catch (...) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+
+    const auto inflate_part =
+        [this, &output](
+            std::span<const std::byte> input)
+        -> ntl::status {
+      std::size_t offset = 0;
+      do {
+        const std::size_t available =
+            (std::min)(
+                input.size() - offset,
+                static_cast<std::size_t>(
+                    (std::numeric_limits<uInt>::max)()));
+        stream_.next_in = reinterpret_cast<Bytef *>(
+            const_cast<std::byte *>(input.data() + offset));
+        stream_.avail_in = static_cast<uInt>(available);
+        do {
+          if (output.size() == maximum_message_size_)
+            return STATUS_BUFFER_OVERFLOW;
+          std::array<std::byte, 16 * 1024> buffer{};
+          const std::size_t capacity =
+              (std::min)(
+                  buffer.size(),
+                  maximum_message_size_ - output.size());
+          stream_.next_out =
+              reinterpret_cast<Bytef *>(buffer.data());
+          stream_.avail_out = static_cast<uInt>(capacity);
+          const int status =
+              ::inflate(&stream_, Z_SYNC_FLUSH);
+          const std::size_t produced =
+              capacity - stream_.avail_out;
+          try {
+            output.insert(
+                output.end(), buffer.begin(),
+                buffer.begin() +
+                    static_cast<std::ptrdiff_t>(produced));
+          } catch (...) {
+            return STATUS_INSUFFICIENT_RESOURCES;
+          }
+          if (status != Z_OK && status != Z_BUF_ERROR)
+            return status == Z_MEM_ERROR
+                       ? STATUS_INSUFFICIENT_RESOURCES
+                       : STATUS_DATA_ERROR;
+          if (status == Z_BUF_ERROR && produced == 0 &&
+              stream_.avail_in != 0)
+            return STATUS_DATA_ERROR;
+        } while (stream_.avail_in != 0 ||
+                 stream_.avail_out == 0);
+        offset += available;
+      } while (offset != input.size());
+      return ntl::status::ok();
+    };
+
+    ntl::status status = inflate_part(payload);
+    if (status.is_ok())
+      status = inflate_part(tail);
+    if (!status.is_ok()) {
+      release();
+      return ntl::unexpected(status);
+    }
+    if (stream_.avail_in != 0) {
+      release();
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    }
+    if (no_context_takeover_)
+      release();
+    return ntl::ok(std::move(output));
+  }
+
+private:
+  bool initialize() noexcept {
+    if (initialized_)
+      return true;
+    stream_ = {};
+    initialized_ =
+        ::inflateInit2(
+            &stream_, -static_cast<int>(window_bits_)) == Z_OK;
+    return initialized_;
+  }
+
+  void release() noexcept {
+    if (initialized_)
+      (void)::inflateEnd(&stream_);
+    stream_ = {};
+    initialized_ = false;
+  }
+
+  z_stream stream_{};
+  std::uint8_t window_bits_ = 15;
+  bool no_context_takeover_ = false;
+  std::size_t maximum_message_size_ = 0;
+  bool initialized_ = false;
+};
+
+inline permessage_deflate_decoder
+make_permessage_deflate_decoder(
+    const permessage_deflate_parameters &parameters,
+    sender_role sender,
+    std::size_t maximum_message_size) noexcept {
+  const bool client = sender == sender_role::client;
+  return permessage_deflate_decoder(
+      client ? parameters.client_max_window_bits
+             : parameters.server_max_window_bits,
+      client ? parameters.client_no_context_takeover
+             : parameters.server_no_context_takeover,
+      maximum_message_size);
+}
+
+} // namespace ntl::net::websocket

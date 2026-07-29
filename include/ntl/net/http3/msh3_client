@@ -1,0 +1,836 @@
+/**
+ * @file http3_msh3_client
+ * @brief Bounded synchronous HTTP/3 client for the msh3/MsQuic backend.
+ *
+ * This optional user-mode header requires msh3.h and a target that links
+ * msh3. The system-trust client delegates certificate validation to MsQuic.
+ * The private-CA client receives the peer certificate and applies an exact
+ * application-owned CA, DNS-name, and server-auth policy. Deliberately no
+ * certificate-validation bypass is exposed by this API.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/http3/msh3_client is a user-mode header"
+#endif
+
+#ifndef _WIN32
+#error "ntl/net/http3/msh3_client currently requires Windows"
+#endif
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <windows.h>
+
+#include <msh3.h>
+
+#include <ntl/result>
+#include <ntl/status>
+#include <ntl/net/tls/certificate>
+
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <limits>
+#include <memory>
+#include <mutex>
+#include <new>
+#include <optional>
+#include <span>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+namespace ntl::net::http3::msh3_client {
+
+inline constexpr std::uint64_t h3_internal_error = 0x102;
+inline constexpr std::uint64_t h3_request_rejected = 0x10b;
+
+struct header {
+  std::string name;
+  std::string value;
+};
+
+enum class address_family : std::uint8_t {
+  ipv4 = 4,
+  ipv6 = 6,
+};
+
+/**
+ * @brief Optional physical peer distinct from the logical HTTPS authority.
+ *
+ * A managed inspection client uses the original server_name for SNI and
+ * :authority while connecting to an explicitly provisioned proxy endpoint.
+ * Address bytes are stored in network order.
+ */
+struct peer_endpoint {
+  address_family family = address_family::ipv4;
+  std::array<std::byte, 16> address{};
+  std::uint16_t port = 0;
+
+  static constexpr peer_endpoint
+  ipv4_loopback(std::uint16_t value) noexcept {
+    peer_endpoint result;
+    result.family = address_family::ipv4;
+    result.address[0] = std::byte{127};
+    result.address[1] = std::byte{0};
+    result.address[2] = std::byte{0};
+    result.address[3] = std::byte{1};
+    result.port = value;
+    return result;
+  }
+
+  static constexpr peer_endpoint
+  ipv6_loopback(std::uint16_t value) noexcept {
+    peer_endpoint result;
+    result.family = address_family::ipv6;
+    result.address[15] = std::byte{1};
+    result.port = value;
+    return result;
+  }
+};
+
+struct request {
+  std::string server_name;
+  std::uint16_t port = 443;
+  std::optional<peer_endpoint> peer;
+  std::string method = "GET";
+  std::string path = "/";
+  std::vector<header> headers;
+  std::vector<std::byte> body;
+};
+
+struct response {
+  unsigned status = 0;
+  std::vector<header> headers;
+  std::vector<std::byte> body;
+};
+
+struct client_limits {
+  std::size_t maximum_request_headers = 128;
+  std::size_t maximum_request_header_bytes = 32 * 1024;
+  std::size_t maximum_request_body_bytes = 2 * 1024 * 1024;
+  std::size_t maximum_response_headers = 256;
+  std::size_t maximum_response_header_bytes = 64 * 1024;
+  std::size_t maximum_response_body_bytes = 4 * 1024 * 1024;
+  std::chrono::milliseconds connect_timeout =
+      std::chrono::seconds(30);
+  std::chrono::milliseconds response_timeout =
+      std::chrono::seconds(30);
+  std::chrono::milliseconds shutdown_timeout =
+      std::chrono::seconds(5);
+};
+
+namespace detail {
+
+inline bool is_ascii_dns_name(
+    std::string_view name) noexcept {
+  if (name.empty() || name.size() > 253)
+    return false;
+  for (const unsigned char value : name) {
+    const bool valid =
+        (value >= 'a' && value <= 'z') ||
+        (value >= 'A' && value <= 'Z') ||
+        (value >= '0' && value <= '9') ||
+        value == '-' || value == '.';
+    if (!valid)
+      return false;
+  }
+  return name.front() != '.' && name.back() != '.';
+}
+
+inline bool is_token(
+    std::string_view value) noexcept {
+  if (value.empty())
+    return false;
+  for (const unsigned char character : value) {
+    const bool valid =
+        (character >= 'A' && character <= 'Z') ||
+        (character >= 'a' && character <= 'z') ||
+        (character >= '0' && character <= '9') ||
+        std::string_view("!#$%&'*+-.^_`|~").find(
+            static_cast<char>(character)) !=
+            std::string_view::npos;
+    if (!valid)
+      return false;
+  }
+  return true;
+}
+
+inline bool is_lowercase_header_name(
+    std::string_view name) noexcept {
+  if (name.empty())
+    return false;
+  for (const unsigned char value : name) {
+    const bool valid =
+        (value >= 'a' && value <= 'z') ||
+        (value >= '0' && value <= '9') ||
+        std::string_view("!#$%&'*+-.^_`|~").find(
+            static_cast<char>(value)) !=
+            std::string_view::npos;
+    if (!valid)
+      return false;
+  }
+  return true;
+}
+
+inline ntl::status validate_request(
+    const request &message,
+    const client_limits &limits) noexcept {
+  if (!is_ascii_dns_name(message.server_name) ||
+      message.port == 0 ||
+      (message.peer && message.peer->port == 0) ||
+      !is_token(message.method) ||
+      message.path.empty() ||
+      message.path.front() != '/' ||
+      message.path.find_first_of("\r\n") !=
+          std::string::npos ||
+      message.headers.size() >
+          limits.maximum_request_headers ||
+      message.body.size() >
+          limits.maximum_request_body_bytes ||
+      message.body.size() >
+          (std::numeric_limits<std::uint32_t>::max)())
+    return STATUS_INVALID_PARAMETER;
+
+  std::size_t header_bytes =
+      7 + message.method.size() +
+      5 + message.path.size() +
+      7 + 5 +
+      10 + message.server_name.size();
+  if (header_bytes >
+      limits.maximum_request_header_bytes)
+    return STATUS_BUFFER_OVERFLOW;
+  for (const auto &field : message.headers) {
+    if (!is_lowercase_header_name(field.name) ||
+        field.name.front() == ':' ||
+        field.value.find_first_of("\r\n") !=
+            std::string::npos ||
+        field.name.size() >
+            limits.maximum_request_header_bytes -
+                header_bytes ||
+        field.value.size() >
+            limits.maximum_request_header_bytes -
+                header_bytes - field.name.size())
+      return STATUS_DATA_ERROR;
+    header_bytes += field.name.size() + field.value.size();
+  }
+  return ntl::status::ok();
+}
+
+struct api_owner {
+  MSH3_API *value = ::MsH3ApiOpen();
+  ~api_owner() {
+    if (value)
+      ::MsH3ApiClose(value);
+  }
+};
+
+struct configuration_owner {
+  MSH3_CONFIGURATION *value = nullptr;
+  ~configuration_owner() {
+    if (value)
+      ::MsH3ConfigurationClose(value);
+  }
+};
+
+struct connection_owner {
+  MSH3_CONNECTION *value = nullptr;
+  ~connection_owner() {
+    if (value)
+      ::MsH3ConnectionClose(value);
+  }
+};
+
+struct request_owner {
+  MSH3_REQUEST *value = nullptr;
+  ~request_owner() {
+    if (value)
+      ::MsH3RequestClose(value);
+  }
+};
+
+struct connection_state {
+  std::mutex lock;
+  std::condition_variable changed;
+  ntl::net::tls_peer_certificate_policy
+      *certificate_policy = nullptr;
+  std::wstring server_name;
+  bool certificate_seen = false;
+  bool certificate_approved = false;
+  bool connected = false;
+  bool shutdown_complete = false;
+  ntl::status failure = ntl::status::ok();
+};
+
+struct request_state {
+  explicit request_state(
+      const client_limits &configured) noexcept
+      : limits(&configured) {}
+
+  const client_limits *limits = nullptr;
+  std::mutex lock;
+  std::condition_variable changed;
+  response message;
+  std::size_t header_bytes = 0;
+  bool status_seen = false;
+  bool response_complete = false;
+  bool shutdown_complete = false;
+  ntl::status failure = ntl::status::ok();
+};
+
+inline void record_connection_failure(
+    connection_state &state,
+    ntl::status failure) noexcept {
+  {
+    std::lock_guard guard(state.lock);
+    if (state.failure.is_ok())
+      state.failure = failure;
+  }
+  state.changed.notify_all();
+}
+
+inline MSH3_STATUS MSH3_CALL connection_callback(
+    MSH3_CONNECTION *handle,
+    void *context,
+    MSH3_CONNECTION_EVENT *event) noexcept {
+  auto &state =
+      *static_cast<connection_state *>(context);
+  switch (event->Type) {
+  case MSH3_CONNECTION_EVENT_CONNECTED:
+    {
+      std::lock_guard guard(state.lock);
+      state.connected = true;
+    }
+    state.changed.notify_all();
+    break;
+  case MSH3_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT:
+    record_connection_failure(
+        state,
+        ntl::status(static_cast<NTSTATUS>(
+            event->SHUTDOWN_INITIATED_BY_TRANSPORT.Status)));
+    break;
+  case MSH3_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_PEER:
+    record_connection_failure(
+        state, STATUS_CONNECTION_ABORTED);
+    break;
+  case MSH3_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
+    {
+      std::lock_guard guard(state.lock);
+      state.shutdown_complete = true;
+      if (!state.connected && state.failure.is_ok())
+        state.failure = STATUS_CONNECTION_ABORTED;
+    }
+    state.changed.notify_all();
+    break;
+  case MSH3_CONNECTION_EVENT_NEW_REQUEST:
+    ::MsH3RequestClose(event->NEW_REQUEST.Request);
+    break;
+  case MSH3_CONNECTION_EVENT_PEER_CERTIFICATE_RECEIVED:
+    {
+      std::lock_guard guard(state.lock);
+      state.certificate_seen = true;
+    }
+    if (!state.certificate_policy ||
+        !state.certificate_policy->verify(
+            reinterpret_cast<PCCERT_CONTEXT>(
+                event->PEER_CERTIFICATE_RECEIVED.Certificate),
+            state.server_name)) {
+      record_connection_failure(
+          state, STATUS_QUIC_TLS_UNKNOWN_CA);
+      return E_ACCESSDENIED;
+    }
+    {
+      std::lock_guard guard(state.lock);
+      state.certificate_approved = true;
+    }
+    state.changed.notify_all();
+    return MSH3_STATUS_SUCCESS;
+  default:
+    return E_NOTIMPL;
+  }
+  (void)handle;
+  return MSH3_STATUS_SUCCESS;
+}
+
+inline bool parse_status(
+    std::string_view text,
+    unsigned &value) noexcept {
+  if (text.size() != 3)
+    return false;
+  unsigned parsed = 0;
+  for (const unsigned char character : text) {
+    if (character < '0' || character > '9')
+      return false;
+    parsed = parsed * 10 +
+             static_cast<unsigned>(character - '0');
+  }
+  if (parsed < 100 || parsed > 999)
+    return false;
+  value = parsed;
+  return true;
+}
+
+inline void abort_request(
+    MSH3_REQUEST *handle,
+    request_state &state,
+    ntl::status failure) noexcept {
+  {
+    std::lock_guard guard(state.lock);
+    if (state.failure.is_ok())
+      state.failure = failure;
+  }
+  state.changed.notify_all();
+  ::MsH3RequestShutdown(
+      handle, MSH3_REQUEST_SHUTDOWN_FLAG_ABORT,
+      h3_request_rejected);
+}
+
+inline MSH3_STATUS MSH3_CALL request_callback(
+    MSH3_REQUEST *handle,
+    void *context,
+    MSH3_REQUEST_EVENT *event) noexcept {
+  auto &state =
+      *static_cast<request_state *>(context);
+  try {
+    switch (event->Type) {
+    case MSH3_REQUEST_EVENT_HEADER_RECEIVED: {
+      const MSH3_HEADER &field =
+          *event->HEADER_RECEIVED.Header;
+      const std::string_view name(
+          field.Name, field.NameLength);
+      const std::string_view value(
+          field.Value, field.ValueLength);
+      ntl::status callback_failure =
+          ntl::status::ok();
+      {
+        std::lock_guard guard(state.lock);
+        if (field.NameLength >
+                state.limits->
+                    maximum_response_header_bytes -
+                    state.header_bytes ||
+            field.ValueLength >
+                state.limits->
+                    maximum_response_header_bytes -
+                    state.header_bytes -
+                    field.NameLength) {
+          state.failure = STATUS_BUFFER_OVERFLOW;
+        } else if (name == ":status") {
+          unsigned status = 0;
+          if (state.status_seen ||
+              !parse_status(value, status))
+            state.failure = STATUS_DATA_ERROR;
+          else {
+            state.status_seen = true;
+            state.message.status = status;
+            state.header_bytes +=
+                field.NameLength + field.ValueLength;
+          }
+        } else if (
+            name.empty() || name.front() == ':' ||
+            !is_lowercase_header_name(name) ||
+            value.find_first_of("\r\n") !=
+                std::string_view::npos ||
+            state.message.headers.size() >=
+                state.limits->
+                    maximum_response_headers) {
+          state.failure = STATUS_DATA_ERROR;
+        } else {
+          state.message.headers.push_back(
+              {std::string(name), std::string(value)});
+          state.header_bytes +=
+              field.NameLength + field.ValueLength;
+        }
+        callback_failure = state.failure;
+        if (callback_failure.is_ok())
+          break;
+      }
+      abort_request(
+          handle, state, callback_failure);
+      break;
+    }
+    case MSH3_REQUEST_EVENT_DATA_RECEIVED: {
+      const std::size_t length =
+          event->DATA_RECEIVED.Length;
+      ntl::status callback_failure =
+          ntl::status::ok();
+      {
+        std::lock_guard guard(state.lock);
+        if (state.message.body.size() >
+                state.limits->maximum_response_body_bytes ||
+            length >
+            state.limits->maximum_response_body_bytes -
+                state.message.body.size()) {
+          state.failure = STATUS_BUFFER_OVERFLOW;
+        } else {
+          const auto *first =
+              reinterpret_cast<const std::byte *>(
+                  event->DATA_RECEIVED.Data);
+          state.message.body.insert(
+              state.message.body.end(),
+              first, first + length);
+        }
+        callback_failure = state.failure;
+      }
+      if (!callback_failure.is_ok()) {
+        abort_request(
+            handle, state, callback_failure);
+        break;
+      }
+      // Returning MSH3_STATUS_SUCCESS consumes the complete indication
+      // synchronously. MsH3RequestCompleteReceive is only paired with a
+      // callback that returned MSH3_STATUS_PENDING.
+      break;
+    }
+    case MSH3_REQUEST_EVENT_PEER_SEND_SHUTDOWN:
+      {
+        std::lock_guard guard(state.lock);
+        if (!state.status_seen && state.failure.is_ok())
+          state.failure = STATUS_DATA_ERROR;
+        state.response_complete = true;
+      }
+      state.changed.notify_all();
+      break;
+    case MSH3_REQUEST_EVENT_PEER_SEND_ABORTED:
+    case MSH3_REQUEST_EVENT_PEER_RECEIVE_ABORTED:
+      abort_request(
+          handle, state, STATUS_CONNECTION_ABORTED);
+      break;
+    case MSH3_REQUEST_EVENT_SHUTDOWN_COMPLETE:
+      {
+        std::lock_guard guard(state.lock);
+        state.shutdown_complete = true;
+        if (!state.response_complete &&
+            state.failure.is_ok())
+          state.failure = STATUS_CONNECTION_ABORTED;
+      }
+      state.changed.notify_all();
+      break;
+    case MSH3_REQUEST_EVENT_IDEAL_SEND_SIZE:
+    case MSH3_REQUEST_EVENT_SEND_COMPLETE:
+    case MSH3_REQUEST_EVENT_SEND_SHUTDOWN_COMPLETE:
+      break;
+    default:
+      return E_NOTIMPL;
+    }
+  } catch (const std::bad_alloc &) {
+    abort_request(
+        handle, state, STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    abort_request(
+        handle, state, STATUS_UNHANDLED_EXCEPTION);
+  }
+  return MSH3_STATUS_SUCCESS;
+}
+
+template <class State, class Predicate>
+inline bool wait_for(
+    State &state,
+    std::chrono::milliseconds timeout,
+    Predicate predicate) noexcept {
+  try {
+    std::unique_lock lock(state.lock);
+    return state.changed.wait_for(
+        lock, timeout, std::move(predicate));
+  } catch (...) {
+    return false;
+  }
+}
+
+inline void shutdown_and_wait(
+    request_owner &request_handle,
+    request_state *request_status,
+    connection_owner &connection_handle,
+    connection_state &connection_status,
+    std::chrono::milliseconds timeout) noexcept {
+  if (request_handle.value) {
+    ::MsH3RequestShutdown(
+        request_handle.value,
+        MSH3_REQUEST_SHUTDOWN_FLAG_ABORT, 0);
+  }
+  if (connection_handle.value)
+    ::MsH3ConnectionShutdown(
+        connection_handle.value, 0);
+
+  if (request_status) {
+    (void)wait_for(
+        *request_status, timeout,
+        [request_status] {
+          return request_status->shutdown_complete;
+        });
+  }
+  (void)wait_for(
+      connection_status, timeout,
+      [&connection_status] {
+        return connection_status.shutdown_complete;
+      });
+}
+
+} // namespace detail
+
+/**
+ * @brief Sends bounded HTTP/3 requests with mandatory Windows trust checking.
+ *
+ * The class intentionally has no "ignore certificate errors" option. A
+ * managed application must provision its inspection authority through an
+ * explicit trust policy before using this client.
+ */
+class system_trust_client {
+public:
+  explicit system_trust_client(
+      client_limits limits = {}) noexcept
+      : limits_(limits) {}
+
+  ntl::result<response> send(
+      const request &message) const noexcept {
+    const ntl::status valid =
+        detail::validate_request(message, limits_);
+    if (!valid.is_ok())
+      return ntl::unexpected(
+          static_cast<NTSTATUS>(valid));
+
+    try {
+      detail::api_owner api;
+      if (!api.value)
+        return ntl::unexpected(STATUS_UNSUCCESSFUL);
+
+      MSH3_SETTINGS settings{};
+      settings.IsSet.IdleTimeoutMs = 1;
+      settings.IdleTimeoutMs =
+          static_cast<std::uint64_t>(
+              limits_.response_timeout.count());
+      detail::configuration_owner configuration{
+          ::MsH3ConfigurationOpen(
+              api.value, &settings, sizeof(settings))};
+      if (!configuration.value)
+        return ntl::unexpected(STATUS_UNSUCCESSFUL);
+
+      MSH3_CREDENTIAL_CONFIG credentials{};
+      credentials.Type = MSH3_CREDENTIAL_TYPE_NONE;
+      credentials.Flags =
+          private_policy_
+              ? static_cast<MSH3_CREDENTIAL_FLAGS>(
+                    MSH3_CREDENTIAL_FLAG_CLIENT |
+                    MSH3_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION |
+                    MSH3_CREDENTIAL_FLAG_INDICATE_CERTIFICATE_RECEIVED)
+              : MSH3_CREDENTIAL_FLAG_CLIENT;
+      const MSH3_STATUS credential_status =
+          ::MsH3ConfigurationLoadCredential(
+              configuration.value, &credentials);
+      if (MSH3_FAILED(credential_status))
+        return ntl::unexpected(
+            static_cast<NTSTATUS>(credential_status));
+
+      detail::connection_state connection_status;
+      connection_status.certificate_policy =
+          private_policy_.get();
+      connection_status.server_name.assign(
+          message.server_name.begin(),
+          message.server_name.end());
+      detail::connection_owner connection{
+          ::MsH3ConnectionOpen(
+              api.value, &detail::connection_callback,
+              &connection_status)};
+      if (!connection.value)
+        return ntl::unexpected(STATUS_UNSUCCESSFUL);
+
+      MSH3_ADDR address{};
+      if (message.peer) {
+        if (message.peer->family ==
+            address_family::ipv4) {
+          address.Ipv4.sin_family = AF_INET;
+          std::memcpy(
+              &address.Ipv4.sin_addr,
+              message.peer->address.data(),
+              sizeof(address.Ipv4.sin_addr));
+        } else {
+          address.Ipv6.sin6_family = AF_INET6;
+          std::memcpy(
+              &address.Ipv6.sin6_addr,
+              message.peer->address.data(),
+              sizeof(address.Ipv6.sin6_addr));
+        }
+        MSH3_SET_PORT(
+            &address, message.peer->port);
+      } else {
+        MSH3_SET_PORT(&address, message.port);
+      }
+      const MSH3_STATUS start_status =
+          ::MsH3ConnectionStart(
+              connection.value, configuration.value,
+              message.server_name.c_str(), &address);
+      if (MSH3_FAILED(start_status))
+        return ntl::unexpected(
+            static_cast<NTSTATUS>(start_status));
+
+      const bool connection_ready =
+          detail::wait_for(
+              connection_status, limits_.connect_timeout,
+              [&connection_status] {
+                return connection_status.connected ||
+                       connection_status.shutdown_complete ||
+                       !connection_status.failure.is_ok();
+              });
+      bool usable_connection = false;
+      ntl::status connection_failure =
+          ntl::status::ok();
+      {
+        std::lock_guard guard(connection_status.lock);
+        usable_connection =
+            connection_ready &&
+            connection_status.connected &&
+            connection_status.failure.is_ok();
+        connection_failure =
+            !connection_ready
+                ? ntl::status(
+                      private_policy_ &&
+                              !connection_status.certificate_seen
+                          ? STATUS_QUIC_TLS_CERTIFICATE_UNKNOWN
+                          : STATUS_IO_TIMEOUT)
+                : connection_status.failure.is_ok()
+                      ? ntl::status(
+                            STATUS_CONNECTION_ABORTED)
+                      : connection_status.failure;
+      }
+      if (!usable_connection) {
+        detail::request_owner no_request;
+        detail::shutdown_and_wait(
+            no_request, nullptr, connection,
+            connection_status,
+            limits_.shutdown_timeout);
+        return ntl::unexpected(
+            static_cast<NTSTATUS>(
+                connection_failure));
+      }
+
+      detail::request_state response_status(limits_);
+      detail::request_owner request_handle{
+          ::MsH3RequestOpen(
+              connection.value, &detail::request_callback,
+              &response_status, MSH3_REQUEST_FLAG_NONE)};
+      if (!request_handle.value) {
+        detail::shutdown_and_wait(
+            request_handle, &response_status, connection,
+            connection_status, limits_.shutdown_timeout);
+        return ntl::unexpected(STATUS_UNSUCCESSFUL);
+      }
+      ::MsH3RequestSetReceiveEnabled(
+          request_handle.value, true);
+
+      std::vector<header> fields;
+      fields.reserve(message.headers.size() + 4);
+      fields.push_back({":method", message.method});
+      fields.push_back({":path", message.path});
+      fields.push_back({":scheme", "https"});
+      fields.push_back(
+          {":authority", message.server_name});
+      fields.insert(
+          fields.end(),
+          message.headers.begin(), message.headers.end());
+      std::vector<MSH3_HEADER> native_headers;
+      native_headers.reserve(fields.size());
+      for (const auto &field : fields) {
+        native_headers.push_back(
+            {field.name.data(), field.name.size(),
+             field.value.data(), field.value.size()});
+      }
+
+      if (!::MsH3RequestSend(
+              request_handle.value,
+              MSH3_REQUEST_SEND_FLAG_FIN,
+              native_headers.data(),
+              native_headers.size(),
+              message.body.empty()
+                  ? nullptr
+                  : message.body.data(),
+              static_cast<std::uint32_t>(
+                  message.body.size()),
+              nullptr)) {
+        detail::shutdown_and_wait(
+            request_handle, &response_status, connection,
+            connection_status, limits_.shutdown_timeout);
+        return ntl::unexpected(STATUS_UNSUCCESSFUL);
+      }
+
+      const bool response_ready =
+          detail::wait_for(
+              response_status, limits_.response_timeout,
+              [&response_status] {
+                return response_status.response_complete ||
+                       response_status.shutdown_complete ||
+                       !response_status.failure.is_ok();
+              });
+      ntl::status result_status = ntl::status::ok();
+      response result;
+      {
+        std::lock_guard guard(response_status.lock);
+        if (!response_ready)
+          result_status = STATUS_IO_TIMEOUT;
+        else if (!response_status.failure.is_ok())
+          result_status = response_status.failure;
+        else if (!response_status.response_complete ||
+                 !response_status.status_seen)
+          result_status = STATUS_CONNECTION_ABORTED;
+        else
+          result = std::move(response_status.message);
+      }
+
+      detail::shutdown_and_wait(
+          request_handle, &response_status, connection,
+          connection_status, limits_.shutdown_timeout);
+      if (!result_status.is_ok())
+        return ntl::unexpected(
+            static_cast<NTSTATUS>(result_status));
+      return ntl::ok(std::move(result));
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(
+          STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(
+          STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+private:
+  system_trust_client(
+      PCCERT_CONTEXT authority,
+      client_limits limits)
+      : limits_(limits),
+        private_policy_(
+            std::make_unique<
+                ntl::net::certificate_authority_policy>(
+                authority)) {}
+
+  friend class private_ca_client;
+
+  client_limits limits_;
+  std::unique_ptr<
+      ntl::net::certificate_authority_policy>
+      private_policy_;
+};
+
+/**
+ * @brief HTTP/3 client bound to one application-owned inspection CA.
+ *
+ * The authority is copied into a private in-memory chain engine. Validation
+ * includes the requested DNS name and server-auth EKU and performs no network
+ * trust lookup or Windows/browser trust-store write.
+ */
+class private_ca_client final : public system_trust_client {
+public:
+  explicit private_ca_client(
+      PCCERT_CONTEXT authority,
+      client_limits limits = {})
+      : system_trust_client(authority, limits) {}
+};
+
+} // namespace ntl::net::http3::msh3_client

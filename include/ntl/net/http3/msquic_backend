@@ -1,0 +1,876 @@
+/**
+ * @file http3_msquic_backend
+ * @brief Raw MsQuic stream and Datagram adapter for HTTP/3 extensions.
+ *
+ * This optional user-mode header requires msquic.h. It complements the
+ * decoded msh3 request/response backend when extended CONNECT,
+ * WebTransport streams, or QUIC DATAGRAM callbacks are required.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/http3/msquic_backend is a user-mode header"
+#endif
+
+#ifndef _WIN32
+#error "ntl/net/http3/msquic_backend currently requires Windows"
+#endif
+
+#include <msquic.h>
+
+#include <ntl/net/http3/backend>
+#include <ntl/net/http3/framing>
+#include <ntl/result>
+#include <ntl/net/buffer/scatter_view>
+#include <ntl/status>
+
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <memory>
+#include <mutex>
+#include <new>
+#include <span>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
+namespace ntl::net::http3::msquic_backend {
+
+inline constexpr std::uint64_t h3_internal_error = 0x102;
+inline constexpr std::uint64_t qpack_encoder_stream_type = 0x02;
+inline constexpr std::uint64_t qpack_decoder_stream_type = 0x03;
+inline constexpr std::uint64_t webtransport_bidirectional_signal = 0x41;
+
+struct connection_limits {
+  std::size_t maximum_streams = 1024;
+  std::size_t maximum_receive_indication = 1024 * 1024;
+  std::size_t maximum_send_size = 4 * 1024 * 1024;
+  std::size_t maximum_prefix_bytes = 8;
+  std::chrono::milliseconds shutdown_timeout{
+      std::chrono::seconds(15)};
+};
+
+enum class connection_role : std::uint8_t {
+  client,
+  server,
+};
+
+inline constexpr quic_backend_capabilities capabilities{
+    .available = true,
+    .tls13_termination = true,
+    .destination_redirection = false,
+    .qpack_dynamic_table = true,
+    .bidirectional_streams = true,
+    .unidirectional_streams = true,
+    .quic_datagrams = true,
+    .extended_connect = true,
+    .webtransport = true,
+    .origin_client = true,
+    .encrypted_client_hello = false,
+    .arbitrary_browser_server_identity = false};
+
+namespace detail {
+
+inline ntl::status from_quic_status(
+    QUIC_STATUS value) noexcept {
+  return QUIC_SUCCEEDED(value)
+             ? ntl::status::ok()
+             : ntl::status{STATUS_UNSUCCESSFUL};
+}
+
+struct send_context {
+  explicit send_context(
+      ntl::net::scatter_view source,
+      std::size_t maximum) {
+    if (source.size() > maximum)
+      throw std::length_error(
+          "MsQuic send exceeds the configured bound");
+    bytes.resize(source.size());
+    if (!bytes.empty()) {
+      const ntl::status copied = source.copy_to(bytes);
+      if (!copied.is_ok())
+        throw std::runtime_error(
+            "MsQuic send source could not be copied");
+    }
+    buffer.Length = static_cast<std::uint32_t>(bytes.size());
+    buffer.Buffer =
+        reinterpret_cast<std::uint8_t *>(bytes.data());
+  }
+
+  QUIC_BUFFER buffer{};
+  std::vector<std::byte> bytes;
+};
+
+} // namespace detail
+
+/**
+ * @brief Owns one already-configured or newly-started MsQuic connection.
+ *
+ * `try_connect()` is the client factory. `try_accept()` is called from a
+ * QUIC_LISTENER_EVENT_NEW_CONNECTION callback before that callback returns.
+ * Both install all callbacks before the handshake can deliver application
+ * data. The sink must outlive the connection.
+ */
+class connection final : public quic_transport_backend {
+public:
+  connection(const connection &) = delete;
+  connection &operator=(const connection &) = delete;
+
+  ~connection() override {
+    stop();
+    (void)wait_for_shutdown(limits_.shutdown_timeout);
+    close_handles();
+  }
+
+  static ntl::result<std::unique_ptr<connection>>
+  try_connect(
+      const QUIC_API_TABLE *api,
+      HQUIC registration,
+      HQUIC configuration,
+      std::string server_name,
+      std::uint16_t port,
+      quic_backend_sink &sink,
+      QUIC_ADDRESS_FAMILY family =
+          QUIC_ADDRESS_FAMILY_UNSPEC,
+      connection_limits limits = {}) noexcept {
+    if (!api || !registration || !configuration ||
+        server_name.empty() || port == 0 ||
+        !valid_limits(limits))
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    try {
+      auto result = std::unique_ptr<connection>(
+          new (std::nothrow) connection(
+              api, sink, connection_role::client, limits));
+      if (!result)
+        return ntl::unexpected(
+            STATUS_INSUFFICIENT_RESOURCES);
+
+      HQUIC handle = nullptr;
+      const QUIC_STATUS opened = api->ConnectionOpen(
+          registration, &connection_callback, result.get(),
+          &handle);
+      if (QUIC_FAILED(opened))
+        return ntl::unexpected(STATUS_UNSUCCESSFUL);
+      result->handle_ = handle;
+
+      const QUIC_STATUS started = api->ConnectionStart(
+          handle, configuration, family, server_name.c_str(),
+          port);
+      if (QUIC_FAILED(started))
+        return ntl::unexpected(STATUS_UNSUCCESSFUL);
+      result->started_.store(true, std::memory_order_release);
+      return ntl::ok(std::move(result));
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(
+          STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+  static ntl::result<std::unique_ptr<connection>>
+  try_accept(
+      const QUIC_API_TABLE *api,
+      HQUIC accepted_connection,
+      HQUIC configuration,
+      quic_backend_sink &sink,
+      connection_limits limits = {}) noexcept {
+    if (!api || !accepted_connection || !configuration ||
+        !valid_limits(limits))
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    try {
+      auto result = std::unique_ptr<connection>(
+          new (std::nothrow) connection(
+              api, sink, connection_role::server, limits));
+      if (!result)
+        return ntl::unexpected(
+            STATUS_INSUFFICIENT_RESOURCES);
+      result->handle_ = accepted_connection;
+      api->SetCallbackHandler(
+          accepted_connection,
+          reinterpret_cast<void *>(&connection_callback),
+          result.get());
+      const QUIC_STATUS configured =
+          api->ConnectionSetConfiguration(
+              accepted_connection, configuration);
+      if (QUIC_FAILED(configured)) {
+        result->handle_ = nullptr;
+        return ntl::unexpected(STATUS_UNSUCCESSFUL);
+      }
+      result->started_.store(true, std::memory_order_release);
+      return ntl::ok(std::move(result));
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(
+          STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+  quic_backend_capabilities
+  capabilities() const noexcept override {
+    auto result = msquic_backend::capabilities;
+    result.origin_client =
+        role_ == connection_role::client;
+    return result;
+  }
+
+  ntl::status run(quic_backend_sink &sink) noexcept override {
+    if (&sink != sink_)
+      return STATUS_INVALID_PARAMETER;
+    std::unique_lock lock(state_lock_);
+    state_changed_.wait(lock, [this] { return shutdown_complete_; });
+    return terminal_status_;
+  }
+
+  ntl::status write_stream(
+      std::uint64_t stream_id,
+      ntl::net::scatter_view plaintext,
+      bool final) noexcept override {
+    if ((!plaintext && !final) ||
+        plaintext.size() > limits_.maximum_send_size)
+      return STATUS_INVALID_PARAMETER;
+    auto stream = find_stream(stream_id);
+    if (!stream)
+      return STATUS_NOT_FOUND;
+    return send_on_stream(*stream, plaintext, final);
+  }
+
+  ntl::status write_qpack_decoder_stream(
+      ntl::net::scatter_view plaintext) noexcept override {
+    if (!plaintext ||
+        plaintext.size() > limits_.maximum_send_size)
+      return STATUS_INVALID_PARAMETER;
+
+    // Opening the mandatory decoder stream is a one-time operation. Keep the
+    // check, stream creation, type prefix, and publication in one critical
+    // section so concurrent QPACK acknowledgements cannot create two decoder
+    // streams and strand one of them.
+    std::lock_guard qpack_guard(qpack_stream_lock_);
+    std::uint64_t stream_id = 0;
+    {
+      std::lock_guard guard(state_lock_);
+      stream_id = qpack_decoder_stream_id_;
+    }
+    if (stream_id == invalid_stream_id) {
+      const ntl::status opened =
+          open_unidirectional_stream(stream_id);
+      if (!opened.is_ok())
+        return opened;
+      std::vector<std::byte> prefix;
+      const ntl::status encoded = append_quic_varint(
+          prefix, qpack_decoder_stream_type);
+      if (!encoded.is_ok())
+        return encoded;
+      const ntl::status sent = write_stream(
+          stream_id,
+          ntl::net::scatter_view::from_contiguous(
+              std::span<const std::byte>(prefix)),
+          false);
+      if (!sent.is_ok())
+        return sent;
+      std::lock_guard guard(state_lock_);
+      if (qpack_decoder_stream_id_ == invalid_stream_id)
+        qpack_decoder_stream_id_ = stream_id;
+      else
+        stream_id = qpack_decoder_stream_id_;
+    }
+    return write_stream(stream_id, plaintext, false);
+  }
+
+  ntl::status open_bidirectional_stream(
+      std::uint64_t &stream_id) noexcept override {
+    return open_stream(false, stream_id);
+  }
+
+  ntl::status open_unidirectional_stream(
+      std::uint64_t &stream_id) noexcept override {
+    return open_stream(true, stream_id);
+  }
+
+  ntl::status send_datagram(
+      ntl::net::scatter_view plaintext) noexcept override {
+    if (!plaintext ||
+        plaintext.size() > limits_.maximum_send_size ||
+        plaintext.size() >
+            (std::numeric_limits<std::uint32_t>::max)())
+      return STATUS_INVALID_PARAMETER;
+    if (!handle_ ||
+        stopping_.load(std::memory_order_acquire))
+      return STATUS_INVALID_DEVICE_STATE;
+
+    detail::send_context *context = nullptr;
+    try {
+      context = new detail::send_context(
+          plaintext, limits_.maximum_send_size);
+    } catch (const std::bad_alloc &) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    } catch (const std::length_error &) {
+      return STATUS_BUFFER_OVERFLOW;
+    } catch (...) {
+      return STATUS_UNHANDLED_EXCEPTION;
+    }
+    const QUIC_STATUS sent = api_->DatagramSend(
+        handle_, &context->buffer, 1,
+        QUIC_SEND_FLAG_NONE, context);
+    if (QUIC_FAILED(sent)) {
+      delete context;
+      return STATUS_UNSUCCESSFUL;
+    }
+    return ntl::status::ok();
+  }
+
+  void stop() noexcept override {
+    if (!handle_ ||
+        stopping_.exchange(true, std::memory_order_acq_rel))
+      return;
+    api_->ConnectionShutdown(
+        handle_, QUIC_CONNECTION_SHUTDOWN_FLAG_NONE,
+        h3_internal_error);
+  }
+
+  bool wait_for_shutdown(
+      std::chrono::milliseconds timeout) noexcept {
+    std::unique_lock lock(state_lock_);
+    return state_changed_.wait_for(
+        lock, timeout,
+        [this] {
+          return shutdown_complete_ && streams_.empty();
+        });
+  }
+
+  connection_role role() const noexcept { return role_; }
+
+private:
+  enum class stream_kind : std::uint8_t {
+    undecided_bidirectional,
+    request,
+    extension_bidirectional,
+    undecided_unidirectional,
+    qpack_encoder,
+    extension_unidirectional,
+    local,
+  };
+
+  struct stream_state {
+    connection *owner = nullptr;
+    HQUIC handle = nullptr;
+    std::uint64_t id = invalid_stream_id;
+    stream_kind kind = stream_kind::local;
+    std::vector<std::byte> prefix;
+    bool final_delivered = false;
+  };
+
+  static constexpr std::uint64_t invalid_stream_id =
+      (std::numeric_limits<std::uint64_t>::max)();
+
+  connection(
+      const QUIC_API_TABLE *api,
+      quic_backend_sink &sink,
+      connection_role role,
+      connection_limits limits) noexcept
+      : api_(api), sink_(&sink), role_(role), limits_(limits) {}
+
+  static bool valid_limits(
+      const connection_limits &limits) noexcept {
+    return limits.maximum_streams != 0 &&
+           limits.maximum_receive_indication != 0 &&
+           limits.maximum_send_size != 0 &&
+           limits.maximum_prefix_bytes >= 8 &&
+           limits.shutdown_timeout.count() > 0;
+  }
+
+  static QUIC_STATUS QUIC_API connection_callback(
+      HQUIC,
+      void *context,
+      QUIC_CONNECTION_EVENT *event) noexcept {
+    auto *self = static_cast<connection *>(context);
+    if (!self || !event)
+      return QUIC_STATUS_INVALID_PARAMETER;
+    return self->on_connection_event(*event);
+  }
+
+  static QUIC_STATUS QUIC_API stream_callback(
+      HQUIC,
+      void *context,
+      QUIC_STREAM_EVENT *event) noexcept {
+    auto *state = static_cast<stream_state *>(context);
+    if (!state || !state->owner || !event)
+      return QUIC_STATUS_INVALID_PARAMETER;
+    return state->owner->on_stream_event(*state, *event);
+  }
+
+  QUIC_STATUS
+  on_connection_event(QUIC_CONNECTION_EVENT &event) noexcept {
+    switch (event.Type) {
+    case QUIC_CONNECTION_EVENT_CONNECTED: {
+      const std::string_view alpn(
+          reinterpret_cast<const char *>(
+              event.CONNECTED.NegotiatedAlpn),
+          event.CONNECTED.NegotiatedAlpnLength);
+      const ntl::status result =
+          invoke_sink([&] { return sink_->on_connected(alpn); });
+      if (!result.is_ok()) {
+        fail(result);
+        return QUIC_STATUS_ABORTED;
+      }
+      connected_.store(true, std::memory_order_release);
+      return QUIC_STATUS_SUCCESS;
+    }
+    case QUIC_CONNECTION_EVENT_PEER_STREAM_STARTED:
+      return accept_stream(
+          event.PEER_STREAM_STARTED.Stream,
+          (event.PEER_STREAM_STARTED.Flags &
+           QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL) != 0);
+    case QUIC_CONNECTION_EVENT_DATAGRAM_RECEIVED: {
+      const QUIC_BUFFER *buffer =
+          event.DATAGRAM_RECEIVED.Buffer;
+      if (!buffer ||
+          buffer->Length >
+              limits_.maximum_receive_indication) {
+        fail(STATUS_BUFFER_OVERFLOW);
+        return QUIC_STATUS_ABORTED;
+      }
+      const auto bytes =
+          ntl::net::scatter_view::from_contiguous(
+              std::span<const std::byte>(
+                  reinterpret_cast<const std::byte *>(
+                      buffer->Buffer),
+                  buffer->Length));
+      const ntl::status result = invoke_sink(
+          [&] { return sink_->on_datagram(bytes); });
+      if (!result.is_ok()) {
+        fail(result);
+        return QUIC_STATUS_ABORTED;
+      }
+      return QUIC_STATUS_SUCCESS;
+    }
+    case QUIC_CONNECTION_EVENT_DATAGRAM_SEND_STATE_CHANGED:
+      if (QUIC_DATAGRAM_SEND_STATE_IS_FINAL(
+              event.DATAGRAM_SEND_STATE_CHANGED.State)) {
+        delete static_cast<detail::send_context *>(
+            event.DATAGRAM_SEND_STATE_CHANGED.ClientContext);
+        event.DATAGRAM_SEND_STATE_CHANGED.ClientContext = nullptr;
+      }
+      return QUIC_STATUS_SUCCESS;
+    case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT:
+      set_terminal(STATUS_CONNECTION_ABORTED);
+      return QUIC_STATUS_SUCCESS;
+    case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_PEER:
+      set_terminal(STATUS_CONNECTION_DISCONNECTED);
+      return QUIC_STATUS_SUCCESS;
+    case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE: {
+      {
+        std::lock_guard guard(state_lock_);
+        shutdown_complete_ = true;
+      }
+      const NTSTATUS status =
+          static_cast<NTSTATUS>(terminal_status_);
+      invoke_sink_void(
+          [&] { sink_->on_closed(status); });
+      state_changed_.notify_all();
+      return QUIC_STATUS_SUCCESS;
+    }
+    default:
+      return QUIC_STATUS_SUCCESS;
+    }
+  }
+
+  QUIC_STATUS accept_stream(
+      HQUIC handle, bool unidirectional) noexcept {
+    std::shared_ptr<stream_state> state;
+    try {
+      state = std::make_shared<stream_state>();
+    } catch (...) {
+      api_->StreamShutdown(
+          handle, QUIC_STREAM_SHUTDOWN_FLAG_ABORT,
+          h3_internal_error);
+      return QUIC_STATUS_OUT_OF_MEMORY;
+    }
+    state->owner = this;
+    state->handle = handle;
+    state->kind =
+        unidirectional
+            ? stream_kind::undecided_unidirectional
+            : stream_kind::undecided_bidirectional;
+    std::uint32_t size = sizeof(state->id);
+    const QUIC_STATUS queried = api_->GetParam(
+        handle, QUIC_PARAM_STREAM_ID, &size, &state->id);
+    if (QUIC_FAILED(queried)) {
+      api_->StreamShutdown(
+          handle, QUIC_STREAM_SHUTDOWN_FLAG_ABORT,
+          h3_internal_error);
+      return queried;
+    }
+    {
+      std::lock_guard guard(state_lock_);
+      if (streams_.size() >= limits_.maximum_streams ||
+          streams_.contains(state->id)) {
+        api_->StreamShutdown(
+            handle, QUIC_STREAM_SHUTDOWN_FLAG_ABORT,
+            h3_internal_error);
+        return QUIC_STATUS_OUT_OF_MEMORY;
+      }
+      streams_.emplace(state->id, state);
+    }
+    api_->SetCallbackHandler(
+        handle, reinterpret_cast<void *>(&stream_callback),
+        state.get());
+    return QUIC_STATUS_SUCCESS;
+  }
+
+  QUIC_STATUS on_stream_event(
+      stream_state &state,
+      QUIC_STREAM_EVENT &event) noexcept {
+    switch (event.Type) {
+    case QUIC_STREAM_EVENT_RECEIVE: {
+      if (event.RECEIVE.TotalBufferLength >
+              limits_.maximum_receive_indication ||
+          event.RECEIVE.TotalBufferLength >
+              (std::numeric_limits<std::size_t>::max)())
+        return abort_stream(state, STATUS_BUFFER_OVERFLOW);
+      std::vector<std::byte> bytes;
+      try {
+        bytes.reserve(static_cast<std::size_t>(
+            event.RECEIVE.TotalBufferLength));
+        for (std::uint32_t index = 0;
+             index != event.RECEIVE.BufferCount; ++index) {
+          const auto &buffer = event.RECEIVE.Buffers[index];
+          bytes.insert(
+              bytes.end(),
+              reinterpret_cast<const std::byte *>(buffer.Buffer),
+              reinterpret_cast<const std::byte *>(
+                  buffer.Buffer + buffer.Length));
+        }
+      } catch (...) {
+        return abort_stream(
+            state, STATUS_INSUFFICIENT_RESOURCES);
+      }
+      const bool final =
+          (event.RECEIVE.Flags & QUIC_RECEIVE_FLAG_FIN) != 0;
+      const ntl::status consumed =
+          consume_stream(state, bytes, final);
+      if (!consumed.is_ok())
+        return abort_stream(state, consumed);
+      return QUIC_STATUS_SUCCESS;
+    }
+    case QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN:
+      if (!state.final_delivered) {
+        const ntl::status consumed =
+            consume_stream(state, {}, true);
+        if (!consumed.is_ok())
+          return abort_stream(state, consumed);
+      }
+      return QUIC_STATUS_SUCCESS;
+    case QUIC_STREAM_EVENT_PEER_SEND_ABORTED:
+    case QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED:
+      api_->StreamShutdown(
+          state.handle, QUIC_STREAM_SHUTDOWN_FLAG_ABORT,
+          h3_internal_error);
+      return QUIC_STATUS_SUCCESS;
+    case QUIC_STREAM_EVENT_SEND_COMPLETE:
+      delete static_cast<detail::send_context *>(
+          event.SEND_COMPLETE.ClientContext);
+      event.SEND_COMPLETE.ClientContext = nullptr;
+      return QUIC_STATUS_SUCCESS;
+    case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE:
+      remove_stream(state.id, state.handle);
+      return QUIC_STATUS_SUCCESS;
+    default:
+      return QUIC_STATUS_SUCCESS;
+    }
+  }
+
+  ntl::status consume_stream(
+      stream_state &state,
+      std::span<const std::byte> incoming,
+      bool final) noexcept {
+    if (state.final_delivered)
+      return STATUS_INVALID_DEVICE_STATE;
+
+    std::vector<std::byte> combined;
+    std::span<const std::byte> payload = incoming;
+    if (state.kind ==
+            stream_kind::undecided_bidirectional ||
+        state.kind ==
+            stream_kind::undecided_unidirectional) {
+      try {
+        if (state.prefix.size() + incoming.size() >
+            limits_.maximum_receive_indication)
+          return STATUS_BUFFER_OVERFLOW;
+        state.prefix.insert(
+            state.prefix.end(), incoming.begin(), incoming.end());
+      } catch (...) {
+        return STATUS_INSUFFICIENT_RESOURCES;
+      }
+      if (state.prefix.empty() && final)
+        return STATUS_END_OF_FILE;
+      const auto view =
+          ntl::net::scatter_view::from_contiguous(
+              std::span<const std::byte>(state.prefix));
+      const auto prefix = read_quic_varint(view);
+      if (!prefix) {
+        if (prefix.status() == STATUS_BUFFER_TOO_SMALL &&
+            !final &&
+            state.prefix.size() <
+                limits_.maximum_prefix_bytes)
+          return ntl::status::ok();
+        return prefix.status() == STATUS_BUFFER_TOO_SMALL
+                   ? ntl::status{STATUS_END_OF_FILE}
+                   : prefix.status();
+      }
+
+      if (state.kind ==
+          stream_kind::undecided_bidirectional) {
+        state.kind =
+            prefix->value ==
+                    webtransport_bidirectional_signal
+                ? stream_kind::extension_bidirectional
+                : stream_kind::request;
+        combined = std::move(state.prefix);
+        payload = combined;
+      } else if (
+          prefix->value == qpack_encoder_stream_type) {
+        state.kind = stream_kind::qpack_encoder;
+        combined.assign(
+            state.prefix.begin() +
+                static_cast<std::ptrdiff_t>(
+                    prefix->encoded_size),
+            state.prefix.end());
+        payload = combined;
+        state.prefix.clear();
+      } else {
+        state.kind =
+            stream_kind::extension_unidirectional;
+        combined = std::move(state.prefix);
+        payload = combined;
+      }
+    }
+
+    const auto bytes =
+        payload.empty()
+            ? ntl::net::scatter_view{}
+            : ntl::net::scatter_view::from_contiguous(payload);
+    ntl::status result = ntl::status::ok();
+    switch (state.kind) {
+    case stream_kind::request:
+      result = invoke_sink([&] {
+        return sink_->on_request_stream(
+            state.id, bytes, final);
+      });
+      break;
+    case stream_kind::extension_bidirectional:
+      result = invoke_sink([&] {
+        return sink_->on_peer_bidirectional_stream(
+            state.id, bytes, final);
+      });
+      break;
+    case stream_kind::qpack_encoder:
+      if (!payload.empty()) {
+        result = invoke_sink([&] {
+          return sink_->on_qpack_encoder_stream(bytes);
+        });
+      } else if (!final) {
+        result = ntl::status::ok();
+      }
+      break;
+    case stream_kind::extension_unidirectional:
+      result = invoke_sink([&] {
+        return sink_->on_peer_unidirectional_stream(
+            state.id, bytes, final);
+      });
+      break;
+    default:
+      result = STATUS_INVALID_DEVICE_STATE;
+      break;
+    }
+    if (result.is_ok() && final)
+      state.final_delivered = true;
+    return result;
+  }
+
+  QUIC_STATUS abort_stream(
+      stream_state &state,
+      ntl::status status) noexcept {
+    set_terminal(static_cast<NTSTATUS>(status));
+    api_->StreamShutdown(
+        state.handle, QUIC_STREAM_SHUTDOWN_FLAG_ABORT,
+        h3_internal_error);
+    return QUIC_STATUS_ABORTED;
+  }
+
+  ntl::status open_stream(
+      bool unidirectional,
+      std::uint64_t &stream_id) noexcept {
+    stream_id = invalid_stream_id;
+    if (!handle_ ||
+        stopping_.load(std::memory_order_acquire))
+      return STATUS_INVALID_DEVICE_STATE;
+
+    std::shared_ptr<stream_state> state;
+    try {
+      state = std::make_shared<stream_state>();
+    } catch (...) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    state->owner = this;
+    state->kind =
+        unidirectional
+            ? stream_kind::extension_unidirectional
+            : stream_kind::extension_bidirectional;
+    HQUIC stream = nullptr;
+    const QUIC_STATUS opened = api_->StreamOpen(
+        handle_,
+        unidirectional
+            ? QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL
+            : QUIC_STREAM_OPEN_FLAG_NONE,
+        &stream_callback, state.get(), &stream);
+    if (QUIC_FAILED(opened))
+      return STATUS_UNSUCCESSFUL;
+    state->handle = stream;
+    const QUIC_STATUS started = api_->StreamStart(
+        stream,
+        static_cast<QUIC_STREAM_START_FLAGS>(
+            QUIC_STREAM_START_FLAG_IMMEDIATE |
+            QUIC_STREAM_START_FLAG_SHUTDOWN_ON_FAIL));
+    if (QUIC_FAILED(started)) {
+      api_->StreamClose(stream);
+      return STATUS_UNSUCCESSFUL;
+    }
+    std::uint32_t size = sizeof(state->id);
+    const QUIC_STATUS queried = api_->GetParam(
+        stream, QUIC_PARAM_STREAM_ID, &size, &state->id);
+    if (QUIC_FAILED(queried)) {
+      api_->StreamShutdown(
+          stream, QUIC_STREAM_SHUTDOWN_FLAG_ABORT,
+          h3_internal_error);
+      return STATUS_UNSUCCESSFUL;
+    }
+    {
+      std::lock_guard guard(state_lock_);
+      if (streams_.size() >= limits_.maximum_streams ||
+          streams_.contains(state->id)) {
+        api_->StreamShutdown(
+            stream, QUIC_STREAM_SHUTDOWN_FLAG_ABORT,
+            h3_internal_error);
+        return STATUS_QUOTA_EXCEEDED;
+      }
+      streams_.emplace(state->id, state);
+    }
+    stream_id = state->id;
+    return ntl::status::ok();
+  }
+
+  ntl::status send_on_stream(
+      stream_state &stream,
+      ntl::net::scatter_view plaintext,
+      bool final) noexcept {
+    detail::send_context *context = nullptr;
+    try {
+      context = new detail::send_context(
+          plaintext, limits_.maximum_send_size);
+    } catch (const std::bad_alloc &) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    } catch (const std::length_error &) {
+      return STATUS_BUFFER_OVERFLOW;
+    } catch (...) {
+      return STATUS_UNHANDLED_EXCEPTION;
+    }
+    const QUIC_STATUS sent = api_->StreamSend(
+        stream.handle,
+        context->buffer.Length == 0 ? nullptr : &context->buffer,
+        context->buffer.Length == 0 ? 0u : 1u,
+        final ? QUIC_SEND_FLAG_FIN : QUIC_SEND_FLAG_NONE,
+        context);
+    if (QUIC_FAILED(sent)) {
+      delete context;
+      return STATUS_UNSUCCESSFUL;
+    }
+    return ntl::status::ok();
+  }
+
+  std::shared_ptr<stream_state>
+  find_stream(std::uint64_t id) noexcept {
+    std::lock_guard guard(state_lock_);
+    const auto found = streams_.find(id);
+    return found == streams_.end()
+               ? std::shared_ptr<stream_state>{}
+               : found->second;
+  }
+
+  void remove_stream(
+      std::uint64_t id, HQUIC handle) noexcept {
+    {
+      std::lock_guard guard(state_lock_);
+      streams_.erase(id);
+    }
+    api_->StreamClose(handle);
+    state_changed_.notify_all();
+  }
+
+  template <class Invoke>
+  ntl::status invoke_sink(Invoke &&invoke) noexcept {
+    std::lock_guard guard(sink_lock_);
+    try {
+      return invoke();
+    } catch (...) {
+      return STATUS_UNHANDLED_EXCEPTION;
+    }
+  }
+
+  template <class Invoke>
+  void invoke_sink_void(Invoke &&invoke) noexcept {
+    std::lock_guard guard(sink_lock_);
+    try {
+      invoke();
+    } catch (...) {
+    }
+  }
+
+  void fail(ntl::status status) noexcept {
+    set_terminal(static_cast<NTSTATUS>(status));
+    stop();
+  }
+
+  void set_terminal(NTSTATUS status) noexcept {
+    std::lock_guard guard(state_lock_);
+    if (terminal_status_.is_ok())
+      terminal_status_ = status;
+  }
+
+  void close_handles() noexcept {
+    HQUIC handle = std::exchange(handle_, nullptr);
+    if (handle)
+      api_->ConnectionClose(handle);
+  }
+
+  const QUIC_API_TABLE *api_ = nullptr;
+  quic_backend_sink *sink_ = nullptr;
+  connection_role role_ = connection_role::client;
+  connection_limits limits_{};
+  HQUIC handle_ = nullptr;
+  std::atomic<bool> started_{false};
+  std::atomic<bool> connected_{false};
+  std::atomic<bool> stopping_{false};
+  std::mutex sink_lock_;
+  std::mutex qpack_stream_lock_;
+  std::mutex state_lock_;
+  std::condition_variable state_changed_;
+  std::unordered_map<
+      std::uint64_t, std::shared_ptr<stream_state>>
+      streams_;
+  std::uint64_t qpack_decoder_stream_id_ =
+      invalid_stream_id;
+  ntl::status terminal_status_ = ntl::status::ok();
+  bool shutdown_complete_ = false;
+};
+
+} // namespace ntl::net::http3::msquic_backend

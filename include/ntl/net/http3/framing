@@ -1,0 +1,464 @@
+/**
+ * @file http3_framing
+ * @brief Bounded HTTP/3 frame parsing above a decrypted QUIC stream.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/http3/framing is a user-mode header"
+#endif
+
+#include <ntl/net/framing>
+#include <ntl/result>
+#include <ntl/net/buffer/scatter_view>
+#include <ntl/status>
+
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <new>
+#include <span>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace ntl::net::http3 {
+
+inline constexpr std::uint64_t maximum_quic_varint =
+    (std::uint64_t{1} << 62) - 1;
+
+struct quic_varint {
+  std::uint64_t value = 0;
+  std::size_t encoded_size = 0;
+};
+
+inline ntl::result<quic_varint>
+read_quic_varint(ntl::net::scatter_view bytes,
+                 std::size_t offset = 0) noexcept {
+  if (!bytes || offset >= bytes.size())
+    return ntl::unexpected(STATUS_BUFFER_TOO_SMALL);
+  const auto first = bytes.read<std::uint8_t>(offset);
+  if (!first)
+    return ntl::unexpected(first.status());
+  const std::size_t encoded_size =
+      std::size_t{1} << (*first >> 6);
+  if (encoded_size > bytes.size() - offset)
+    return ntl::unexpected(STATUS_BUFFER_TOO_SMALL);
+
+  std::uint64_t value =
+      static_cast<std::uint64_t>(*first & 0x3fu);
+  for (std::size_t index = 1; index != encoded_size;
+       ++index) {
+    const auto octet =
+        bytes.read<std::uint8_t>(offset + index);
+    if (!octet)
+      return ntl::unexpected(octet.status());
+    value = (value << 8) | *octet;
+  }
+  return ntl::ok(quic_varint{value, encoded_size});
+}
+
+inline constexpr std::size_t
+quic_varint_size(std::uint64_t value) noexcept {
+  return value <= 63
+             ? 1
+             : value <= 16383
+                   ? 2
+                   : value <= 1073741823
+                         ? 4
+                         : value <= maximum_quic_varint ? 8 : 0;
+}
+
+inline ntl::status append_quic_varint(
+    std::vector<std::byte> &output,
+    std::uint64_t value) noexcept {
+  const std::size_t size = quic_varint_size(value);
+  if (size == 0)
+    return STATUS_INTEGER_OVERFLOW;
+  try {
+    const std::size_t begin = output.size();
+    output.resize(begin + size);
+    for (std::size_t index = 0; index != size; ++index) {
+      output[begin + size - index - 1] =
+          static_cast<std::byte>(value & 0xffu);
+      value >>= 8;
+    }
+    const std::uint8_t prefix =
+        size == 1 ? 0x00u
+                  : size == 2 ? 0x40u
+                              : size == 4 ? 0x80u : 0xc0u;
+    output[begin] |= static_cast<std::byte>(prefix);
+    return ntl::status::ok();
+  } catch (const std::bad_alloc &) {
+    return STATUS_INSUFFICIENT_RESOURCES;
+  } catch (...) {
+    return STATUS_UNHANDLED_EXCEPTION;
+  }
+}
+
+enum class frame_type : std::uint64_t {
+  data = 0x0,
+  headers = 0x1,
+  cancel_push = 0x3,
+  settings = 0x4,
+  push_promise = 0x5,
+  goaway = 0x7,
+  max_push_id = 0xd,
+};
+
+struct frame_limits {
+  std::uint64_t maximum_payload_size = 1024 * 1024;
+};
+
+struct frame_header {
+  std::uint64_t raw_type = 0;
+  std::uint64_t payload_size = 0;
+  std::size_t header_size = 0;
+
+  frame_type type() const noexcept {
+    return static_cast<frame_type>(raw_type);
+  }
+};
+
+inline ntl::result<frame_header>
+inspect_header(ntl::net::scatter_view bytes,
+               frame_limits limits = {}) noexcept {
+  if (!bytes || limits.maximum_payload_size == 0)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  const auto type = read_quic_varint(bytes);
+  if (!type)
+    return ntl::unexpected(type.status());
+  const auto length =
+      read_quic_varint(bytes, type->encoded_size);
+  if (!length)
+    return ntl::unexpected(length.status());
+  if (length->value > limits.maximum_payload_size ||
+      length->value >
+          (std::numeric_limits<std::size_t>::max)())
+    return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+  return ntl::ok(frame_header{
+      type->value, length->value,
+      type->encoded_size + length->encoded_size});
+}
+
+/**
+ * @brief Frames one HTTP/3 frame on one decrypted QUIC stream.
+ *
+ * QUIC stream boundaries, TLS, connection IDs, loss recovery, and QPACK
+ * encoder/decoder streams remain owned by the QUIC backend.
+ */
+class frame_framer {
+public:
+  explicit constexpr frame_framer(
+      frame_limits limits = {}) noexcept
+      : limits_(limits) {}
+
+  ntl::net::framing::frame_probe
+  probe(ntl::net::scatter_view bytes) const noexcept {
+    if (!bytes)
+      return ntl::net::framing::frame_probe::malformed(
+          STATUS_INVALID_PARAMETER);
+    const auto header = inspect_header(bytes, limits_);
+    if (!header) {
+      const NTSTATUS status =
+          static_cast<NTSTATUS>(header.status());
+      if (status == STATUS_BUFFER_TOO_SMALL) {
+        if (bytes.size() >= 16)
+          return ntl::net::framing::frame_probe::malformed();
+        return ntl::net::framing::frame_probe::need_more(
+            bytes.size() + 1);
+      }
+      return ntl::net::framing::frame_probe::malformed(status);
+    }
+    if (header->payload_size >
+        (std::numeric_limits<std::size_t>::max)() -
+            header->header_size)
+      return ntl::net::framing::frame_probe::malformed(
+          STATUS_BUFFER_OVERFLOW);
+    const std::size_t total =
+        header->header_size +
+        static_cast<std::size_t>(header->payload_size);
+    if (bytes.size() < total)
+      return ntl::net::framing::frame_probe::need_more(total);
+    return ntl::net::framing::frame_probe::complete(
+        total, header->header_size,
+        static_cast<std::size_t>(header->payload_size));
+  }
+
+private:
+  frame_limits limits_{};
+};
+
+class frame_view {
+public:
+  static ntl::result<frame_view>
+  parse(ntl::net::scatter_view wire,
+        frame_limits limits = {}) noexcept {
+    const auto header = inspect_header(wire, limits);
+    if (!header)
+      return ntl::unexpected(header.status());
+    if (header->payload_size >
+            (std::numeric_limits<std::size_t>::max)() ||
+        header->header_size > wire.size() ||
+        static_cast<std::size_t>(header->payload_size) >
+            wire.size() - header->header_size)
+      return ntl::unexpected(STATUS_BUFFER_TOO_SMALL);
+    auto payload = wire.subview(
+        header->header_size,
+        static_cast<std::size_t>(header->payload_size));
+    if (!payload)
+      return ntl::unexpected(payload.status());
+    return ntl::ok(frame_view(*header, *payload));
+  }
+
+  const frame_header &header() const noexcept { return header_; }
+  ntl::net::scatter_view payload() const noexcept { return payload_; }
+
+private:
+  frame_view(frame_header header,
+             ntl::net::scatter_view payload) noexcept
+      : header_(header), payload_(payload) {}
+
+  frame_header header_{};
+  ntl::net::scatter_view payload_;
+};
+
+struct header_field {
+  std::string name;
+  std::string value;
+  bool never_index = false;
+};
+
+struct decoded_headers {
+  std::vector<header_field> fields;
+  std::size_t decoded_bytes = 0;
+};
+
+/**
+ * @brief Stateful QPACK adapter owned by one QUIC connection.
+ *
+ * A backend may return STATUS_RETRY while a header block is waiting for the
+ * peer's QPACK encoder stream. The QUIC owner is responsible for resuming the
+ * blocked request stream after delivering that encoder-stream data.
+ */
+class qpack_decoder {
+public:
+  virtual ~qpack_decoder() = default;
+  virtual void reset() noexcept = 0;
+  virtual ntl::result<decoded_headers>
+  decode(std::uint64_t stream_id, ntl::net::scatter_view encoded,
+         std::size_t maximum_decoded_size) noexcept = 0;
+
+  /**
+   * @brief Delivers bytes from the peer's QPACK encoder stream.
+   *
+   * A zero-capacity decoder returns STATUS_NOT_SUPPORTED for non-empty
+   * input. Stateful decoders retain incomplete instructions until more bytes
+   * arrive and unblock request streams only after complete instructions have
+   * been applied.
+   */
+  virtual ntl::status consume_encoder_stream(
+      ntl::net::scatter_view encoded) noexcept {
+    return encoded ? ntl::status(STATUS_NOT_SUPPORTED)
+                   : ntl::status::ok();
+  }
+
+  /**
+   * @brief Removes pending Section Acknowledgment, Stream Cancellation, and
+   * Insert Count Increment instructions for the local decoder stream.
+   */
+  virtual ntl::result<std::vector<std::byte>>
+  take_decoder_stream() noexcept {
+    return ntl::ok(std::vector<std::byte>{});
+  }
+
+  /**
+   * @brief Abandons QPACK state associated with one request stream.
+   */
+  virtual ntl::status
+  cancel_stream(std::uint64_t) noexcept {
+    return ntl::status::ok();
+  }
+};
+
+template <class Decoder>
+class qpack_decoder_adapter final : public qpack_decoder {
+public:
+  template <class... Args>
+  explicit qpack_decoder_adapter(Args &&...args)
+      : decoder_(std::forward<Args>(args)...) {}
+
+  void reset() noexcept override {
+    static_assert(noexcept(decoder_.reset()),
+                  "QPACK decoder reset must be noexcept");
+    decoder_.reset();
+  }
+
+  ntl::result<decoded_headers>
+  decode(std::uint64_t stream_id, ntl::net::scatter_view encoded,
+         std::size_t maximum_decoded_size) noexcept override {
+    static_assert(noexcept(decoder_.decode(
+                      stream_id, encoded,
+                      maximum_decoded_size)),
+                  "QPACK decoder decode must be noexcept");
+    auto decoded = decoder_.decode(
+        stream_id, encoded, maximum_decoded_size);
+    if (decoded &&
+        decoded->decoded_bytes > maximum_decoded_size)
+      return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+    return decoded;
+  }
+
+  ntl::status consume_encoder_stream(
+      ntl::net::scatter_view encoded) noexcept override {
+    if constexpr (requires {
+                    decoder_.consume_encoder_stream(encoded);
+                  }) {
+      static_assert(noexcept(
+          decoder_.consume_encoder_stream(encoded)));
+      return decoder_.consume_encoder_stream(encoded);
+    } else {
+      return encoded ? ntl::status(STATUS_NOT_SUPPORTED)
+                     : ntl::status::ok();
+    }
+  }
+
+  ntl::result<std::vector<std::byte>>
+  take_decoder_stream() noexcept override {
+    if constexpr (requires {
+                    decoder_.take_decoder_stream();
+                  }) {
+      static_assert(noexcept(
+          decoder_.take_decoder_stream()));
+      return decoder_.take_decoder_stream();
+    } else {
+      return ntl::ok(std::vector<std::byte>{});
+    }
+  }
+
+  ntl::status cancel_stream(
+      std::uint64_t stream_id) noexcept override {
+    if constexpr (requires {
+                    decoder_.cancel_stream(stream_id);
+                  }) {
+      static_assert(noexcept(
+          decoder_.cancel_stream(stream_id)));
+      return decoder_.cancel_stream(stream_id);
+    } else {
+      return ntl::status::ok();
+    }
+  }
+
+  Decoder &underlying() noexcept { return decoder_; }
+
+private:
+  Decoder decoder_;
+};
+
+/**
+ * @brief Applies a caller-selected QPACK decoder with an output bound.
+ *
+ * Decoder must provide
+ * result<decoded_headers> decode(stream_id, scatter_view, size_t) noexcept.
+ * The QUIC backend owns blocked-stream wakeup and encoder-stream delivery.
+ */
+template <class Decoder>
+ntl::result<decoded_headers>
+decode_header_block(Decoder &decoder, std::uint64_t stream_id,
+                    ntl::net::scatter_view encoded,
+                    std::size_t maximum_decoded_size) noexcept {
+  if (!encoded || maximum_decoded_size == 0)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  static_assert(noexcept(decoder.decode(
+                    stream_id, encoded, maximum_decoded_size)),
+                "QPACK decoder must be noexcept");
+  auto decoded = decoder.decode(
+      stream_id, encoded, maximum_decoded_size);
+  if (!decoded)
+    return decoded;
+  if (decoded->decoded_bytes > maximum_decoded_size)
+    return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+  return decoded;
+}
+
+class inspection_sink {
+public:
+  virtual ~inspection_sink() = default;
+  virtual ntl::status
+  on_headers(std::uint64_t stream_id,
+             std::span<const header_field> fields) noexcept = 0;
+  virtual ntl::status
+  on_data(std::uint64_t stream_id,
+          ntl::net::scatter_view data) noexcept = 0;
+  /**
+   * @brief Reports the QUIC FIN after every buffered HTTP/3 frame.
+   *
+   * HTTP/3 has no HTTP/2-style END_STREAM frame flag. The QUIC transport
+   * supplies message completion through the request-stream FIN instead.
+   */
+  virtual ntl::status
+  on_stream_end(std::uint64_t) noexcept {
+    return ntl::status::ok();
+  }
+};
+
+/**
+ * @brief Routes frames from decrypted HTTP/3 request streams.
+ *
+ * QUIC transport and stream ownership remain in the selected backend. A
+ * STATUS_RETRY result from QPACK is preserved so that backend can resume the
+ * blocked request after processing encoder-stream instructions.
+ */
+class stream_inspector {
+public:
+  explicit stream_inspector(
+      qpack_decoder &decoder,
+      std::size_t maximum_decoded_header_size =
+          256 * 1024) noexcept
+      : decoder_(&decoder),
+        maximum_decoded_header_size_(
+            maximum_decoded_header_size) {}
+
+  void reset() noexcept { decoder_->reset(); }
+
+  ntl::status consume(
+      std::uint64_t stream_id, const frame_view &frame,
+      inspection_sink &sink) noexcept {
+    switch (frame.header().type()) {
+    case frame_type::headers: {
+      auto decoded = decoder_->decode(
+          stream_id, frame.payload(),
+          maximum_decoded_header_size_);
+      if (!decoded)
+        return decoded.status();
+      if (decoded->decoded_bytes >
+          maximum_decoded_header_size_)
+        return STATUS_BUFFER_OVERFLOW;
+      return sink.on_headers(
+          stream_id, decoded->fields);
+    }
+    case frame_type::data:
+      return sink.on_data(stream_id, frame.payload());
+    case frame_type::push_promise:
+      // PUSH_PROMISE is valid on a request stream. A policy that
+      // inspects pushed responses can provide a richer router.
+      return ntl::status::ok();
+    case frame_type::cancel_push:
+    case frame_type::settings:
+    case frame_type::goaway:
+    case frame_type::max_push_id:
+      // These frames belong to the HTTP/3 control stream.
+      return STATUS_DATA_ERROR;
+    }
+    // Unknown extension frames are ignored as required by HTTP/3.
+    return ntl::status::ok();
+  }
+
+private:
+  qpack_decoder *decoder_;
+  std::size_t maximum_decoded_header_size_ = 0;
+};
+
+} // namespace ntl::net::http3

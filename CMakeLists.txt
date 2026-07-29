@@ -527,6 +527,7 @@ if(CRTSYS_ENABLE_INSTALL)
       cmake/CPM.cmake
       cmake/CrtSys.cmake
       cmake/FindWDK.cmake
+      cmake/NtlContentCodecs.cmake
       cmake/pkg-utils.cmake
       cmake/std-cxx.cmake
     DESTINATION "${CRTSYS_INSTALL_CMAKEDIR}"

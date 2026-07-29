@@ -1,0 +1,20 @@
+/**
+ * @file standard_content_decoders
+ * @brief Registration helper for common HTTP Content-Encoding backends.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include <ntl/net/inspection/content_decoder_brotli>
+#include <ntl/net/inspection/content_decoder_zlib>
+
+namespace ntl::net::inspection {
+
+inline void register_standard_content_decoders(
+    content_decoder_registry &registry) {
+  register_zlib_content_decoders(registry);
+  register_brotli_content_decoder(registry);
+}
+
+} // namespace ntl::net::inspection

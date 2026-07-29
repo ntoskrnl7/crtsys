@@ -1,0 +1,291 @@
+/**
+ * @file http3_backend
+ * @brief QUIC backend boundary and bounded HTTP/3 stream assembly.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/http3/backend is a user-mode header"
+#endif
+
+#include <ntl/net/http3/framing>
+#include <ntl/result>
+#include <ntl/net/buffer/scatter_view>
+#include <ntl/status>
+
+#include <cstddef>
+#include <cstdint>
+#include <span>
+#include <string_view>
+#include <unordered_map>
+#include <vector>
+
+namespace ntl::net::http3 {
+
+struct quic_backend_capabilities {
+  bool available = false;
+  bool tls13_termination = false;
+  bool destination_redirection = false;
+  bool qpack_dynamic_table = false;
+  bool bidirectional_streams = false;
+  bool unidirectional_streams = false;
+  bool quic_datagrams = false;
+  bool extended_connect = false;
+  bool webtransport = false;
+  bool origin_client = false;
+  bool encrypted_client_hello = false;
+  /**
+   * True only when the selected, unmodified browser will accept the
+   * backend's per-origin server identity for QUIC. Installing a private CA
+   * in the Windows trust store is not, by itself, evidence of this.
+   */
+  bool arbitrary_browser_server_identity = false;
+
+  constexpr bool
+  ready_for_transparent_browser() const noexcept {
+    return available && tls13_termination &&
+           destination_redirection &&
+           arbitrary_browser_server_identity;
+  }
+};
+
+class quic_backend_sink {
+public:
+  virtual ~quic_backend_sink() = default;
+  virtual ntl::status
+  on_connected(std::string_view negotiated_alpn) noexcept = 0;
+  virtual ntl::status on_request_stream(
+      std::uint64_t stream_id, ntl::net::scatter_view plaintext,
+      bool final) noexcept = 0;
+  virtual ntl::status on_qpack_encoder_stream(
+      ntl::net::scatter_view plaintext) noexcept = 0;
+  virtual ntl::status on_peer_bidirectional_stream(
+      std::uint64_t, ntl::net::scatter_view, bool) noexcept {
+    return STATUS_NOT_SUPPORTED;
+  }
+  virtual ntl::status on_peer_unidirectional_stream(
+      std::uint64_t, ntl::net::scatter_view, bool) noexcept {
+    return STATUS_NOT_SUPPORTED;
+  }
+  virtual ntl::status on_datagram(
+      ntl::net::scatter_view) noexcept {
+    return STATUS_NOT_SUPPORTED;
+  }
+  virtual void on_closed(NTSTATUS status) noexcept = 0;
+};
+
+/**
+ * @brief Adapter implemented by MsQuic, another QUIC stack, or a test replay.
+ *
+ * WFP classifies or redirects UDP. The backend, not WFP and not the HTTP/3
+ * parser, owns QUIC packet protection, TLS 1.3, loss recovery, connection IDs,
+ * flow control, stream lifetimes, and QPACK control-stream scheduling.
+ */
+class quic_transport_backend {
+public:
+  virtual ~quic_transport_backend() = default;
+  virtual quic_backend_capabilities
+  capabilities() const noexcept = 0;
+  virtual ntl::status run(quic_backend_sink &sink) noexcept = 0;
+  virtual ntl::status write_stream(
+      std::uint64_t stream_id, ntl::net::scatter_view plaintext,
+      bool final) noexcept = 0;
+  virtual ntl::status write_qpack_decoder_stream(
+      ntl::net::scatter_view) noexcept {
+    return STATUS_NOT_SUPPORTED;
+  }
+  virtual ntl::status open_bidirectional_stream(
+      std::uint64_t &) noexcept {
+    return STATUS_NOT_SUPPORTED;
+  }
+  virtual ntl::status open_unidirectional_stream(
+      std::uint64_t &) noexcept {
+    return STATUS_NOT_SUPPORTED;
+  }
+  virtual ntl::status send_datagram(
+      ntl::net::scatter_view) noexcept {
+    return STATUS_NOT_SUPPORTED;
+  }
+  virtual void stop() noexcept = 0;
+};
+
+struct connection_limits {
+  std::size_t maximum_concurrent_request_streams = 256;
+  std::size_t maximum_buffered_bytes_per_stream =
+      2 * 1024 * 1024;
+  frame_limits frames{};
+};
+
+/**
+ * @brief Reassembles HTTP/3 frames from arbitrarily split QUIC stream data.
+ */
+class connection_inspector {
+public:
+  connection_inspector(
+      qpack_decoder &decoder, connection_limits limits = {},
+      std::size_t maximum_decoded_header_size =
+          256 * 1024) noexcept
+      : frame_inspector_(decoder, maximum_decoded_header_size),
+        decoder_(&decoder),
+        limits_(limits) {}
+
+  void reset() noexcept {
+    streams_.clear();
+    frame_inspector_.reset();
+  }
+
+  ntl::status consume_qpack_encoder_stream(
+      ntl::net::scatter_view plaintext) noexcept {
+    if (!plaintext)
+      return STATUS_INVALID_PARAMETER;
+    return decoder_->consume_encoder_stream(plaintext);
+  }
+
+  ntl::result<std::vector<std::byte>>
+  take_qpack_decoder_stream() noexcept {
+    return decoder_->take_decoder_stream();
+  }
+
+  ntl::status consume_request_stream(
+      std::uint64_t stream_id, ntl::net::scatter_view plaintext,
+      bool final, inspection_sink &sink) noexcept {
+    if ((!plaintext && !final) ||
+        limits_.maximum_concurrent_request_streams == 0 ||
+        limits_.maximum_buffered_bytes_per_stream == 0 ||
+        limits_.frames.maximum_payload_size == 0)
+      return STATUS_INVALID_PARAMETER;
+    try {
+      auto found = streams_.find(stream_id);
+      if (found == streams_.end()) {
+        if (streams_.size() >=
+            limits_.maximum_concurrent_request_streams)
+          return STATUS_QUOTA_EXCEEDED;
+        found = streams_.try_emplace(stream_id).first;
+      }
+      auto &state = found->second;
+      if (state.final)
+        return STATUS_INVALID_DEVICE_STATE;
+      auto &buffer = state.buffer;
+      if (plaintext) {
+        if (plaintext.size() >
+            limits_.maximum_buffered_bytes_per_stream -
+                buffer.size())
+          return STATUS_BUFFER_OVERFLOW;
+        const ntl::status copied = plaintext.for_each_chunk(
+            [&buffer](
+                std::span<const std::byte> chunk) noexcept {
+              try {
+                buffer.insert(
+                    buffer.end(), chunk.begin(), chunk.end());
+                return true;
+              } catch (...) {
+                return false;
+              }
+            });
+        if (!copied.is_ok())
+          return STATUS_INSUFFICIENT_RESOURCES;
+      }
+
+      state.final = final;
+      return drain(stream_id, found, sink);
+    } catch (...) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+  }
+
+  /**
+   * @brief Retries a request stream after encoder instructions unblocked it.
+   */
+  ntl::status resume_request_stream(
+      std::uint64_t stream_id,
+      inspection_sink &sink) noexcept {
+    try {
+      const auto found = streams_.find(stream_id);
+      if (found == streams_.end())
+        return STATUS_NOT_FOUND;
+      return drain(stream_id, found, sink);
+    } catch (...) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+  }
+
+  ntl::status cancel_request_stream(
+      std::uint64_t stream_id) noexcept {
+    try {
+      const auto found = streams_.find(stream_id);
+      if (found == streams_.end())
+        return STATUS_NOT_FOUND;
+      const ntl::status canceled =
+          decoder_->cancel_stream(stream_id);
+      streams_.erase(found);
+      return canceled;
+    } catch (...) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+  }
+
+private:
+  struct request_stream_state {
+    std::vector<std::byte> buffer;
+    bool final = false;
+  };
+
+  using stream_map = std::unordered_map<
+      std::uint64_t, request_stream_state>;
+
+  ntl::status drain(
+      std::uint64_t stream_id,
+      stream_map::iterator found,
+      inspection_sink &sink) noexcept {
+    auto &state = found->second;
+    auto &buffer = state.buffer;
+    frame_framer framer(limits_.frames);
+    for (;;) {
+      if (buffer.empty())
+        break;
+      const auto bytes =
+          ntl::net::scatter_view::from_contiguous(
+              std::span<const std::byte>(buffer));
+      const auto probe = framer.probe(bytes);
+      if (probe.state() ==
+          ntl::net::framing::probe_state::need_more)
+        break;
+      if (probe.state() ==
+          ntl::net::framing::probe_state::malformed)
+        return probe.error();
+      auto wire = bytes.subview(0, probe.frame_size());
+      if (!wire)
+        return wire.status();
+      const auto frame =
+          frame_view::parse(*wire, limits_.frames);
+      if (!frame)
+        return frame.status();
+      const ntl::status inspected =
+          frame_inspector_.consume(stream_id, *frame, sink);
+      if (!inspected.is_ok())
+        return inspected;
+      buffer.erase(
+          buffer.begin(),
+          buffer.begin() +
+              static_cast<std::ptrdiff_t>(
+                  probe.frame_size()));
+    }
+    if (!state.final)
+      return ntl::status::ok();
+    if (!buffer.empty())
+      return STATUS_END_OF_FILE;
+    const ntl::status ended =
+        sink.on_stream_end(stream_id);
+    streams_.erase(found);
+    return ended;
+  }
+
+  stream_inspector frame_inspector_;
+  qpack_decoder *decoder_ = nullptr;
+  connection_limits limits_{};
+  stream_map streams_;
+};
+
+} // namespace ntl::net::http3

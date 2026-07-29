@@ -1,0 +1,200 @@
+/**
+ * @file http_extended_connect
+ * @brief HTTP/2 and HTTP/3 extended CONNECT validation contracts.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/http/extended_connect is a user-mode header"
+#endif
+
+#include <ntl/result>
+#include <ntl/status>
+
+#include <cstddef>
+#include <new>
+#include <span>
+#include <string>
+#include <string_view>
+#include <utility>
+
+namespace ntl::net::http {
+
+struct connect_request {
+  bool extended = false;
+  bool capsule_protocol = false;
+  std::string protocol;
+  std::string scheme;
+  std::string authority;
+  std::string path;
+  std::string origin;
+};
+
+struct connect_validation_options {
+  bool peer_enabled_extended_connect = false;
+  bool browser_origin_required = false;
+  std::size_t maximum_field_bytes = 64 * 1024;
+};
+
+namespace connect_detail {
+
+inline bool is_lowercase_name(
+    std::string_view name) noexcept {
+  if (name.empty())
+    return false;
+  for (const unsigned char value : name) {
+    if (value >= 'A' && value <= 'Z')
+      return false;
+  }
+  return true;
+}
+
+inline bool valid_capsule_protocol_true(
+    std::string_view value) noexcept {
+  while (!value.empty() &&
+         (value.front() == ' ' || value.front() == '\t'))
+    value.remove_prefix(1);
+  while (!value.empty() &&
+         (value.back() == ' ' || value.back() == '\t'))
+    value.remove_suffix(1);
+  if (!value.starts_with("?1"))
+    return false;
+  value.remove_prefix(2);
+  if (value.empty())
+    return true;
+  if (value.front() != ';')
+    return false;
+  // RFC 8941 parameters are deliberately forwarded rather than interpreted,
+  // but commas would turn the field into a List instead of a Boolean Item.
+  return value.find(',') == std::string_view::npos;
+}
+
+} // namespace connect_detail
+
+/**
+ * @brief Validates a decoded HTTP/2 or HTTP/3 CONNECT header section.
+ *
+ * HeaderField needs string-like `name` and `value` members. The function
+ * enforces pseudo-header ordering and uniqueness, peer negotiation for
+ * extended CONNECT, Capsule Protocol message constraints, and an optional
+ * browser Origin requirement.
+ */
+template <class HeaderField>
+ntl::result<connect_request>
+validate_connect_request(
+    std::span<const HeaderField> fields,
+    connect_validation_options options = {}) noexcept {
+  if (fields.empty() || options.maximum_field_bytes == 0)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  try {
+    connect_request output;
+    std::string method;
+    bool regular_seen = false;
+    bool method_seen = false;
+    bool protocol_seen = false;
+    bool scheme_seen = false;
+    bool authority_seen = false;
+    bool path_seen = false;
+    bool origin_seen = false;
+    bool capsule_seen = false;
+    bool capsule_forbidden_field_seen = false;
+    std::size_t decoded_bytes = 0;
+
+    for (const auto &field : fields) {
+      const std::string_view name(field.name);
+      const std::string_view value(field.value);
+      if (!connect_detail::is_lowercase_name(name) ||
+          name.size() >
+              options.maximum_field_bytes - decoded_bytes ||
+          value.size() >
+              options.maximum_field_bytes - decoded_bytes -
+                  name.size())
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      decoded_bytes += name.size() + value.size();
+
+      const bool pseudo = name.front() == ':';
+      if (pseudo && regular_seen)
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      if (!pseudo)
+        regular_seen = true;
+
+      if (name == ":method") {
+        if (method_seen)
+          return ntl::unexpected(STATUS_DATA_ERROR);
+        method_seen = true;
+        method.assign(value);
+      } else if (name == ":protocol") {
+        if (protocol_seen)
+          return ntl::unexpected(STATUS_DATA_ERROR);
+        protocol_seen = true;
+        output.protocol.assign(value);
+      } else if (name == ":scheme") {
+        if (scheme_seen)
+          return ntl::unexpected(STATUS_DATA_ERROR);
+        scheme_seen = true;
+        output.scheme.assign(value);
+      } else if (name == ":authority") {
+        if (authority_seen)
+          return ntl::unexpected(STATUS_DATA_ERROR);
+        authority_seen = true;
+        output.authority.assign(value);
+      } else if (name == ":path") {
+        if (path_seen)
+          return ntl::unexpected(STATUS_DATA_ERROR);
+        path_seen = true;
+        output.path.assign(value);
+      } else if (name == ":status" || name == ":") {
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      } else if (name == "origin") {
+        if (origin_seen)
+          return ntl::unexpected(STATUS_DATA_ERROR);
+        origin_seen = true;
+        output.origin.assign(value);
+      } else if (name == "capsule-protocol") {
+        if (capsule_seen)
+          return ntl::unexpected(STATUS_DATA_ERROR);
+        capsule_seen = true;
+        output.capsule_protocol =
+            connect_detail::valid_capsule_protocol_true(value);
+      } else if (name == "content-length" ||
+                 name == "content-type" ||
+                 name == "transfer-encoding") {
+        capsule_forbidden_field_seen = true;
+      } else if (pseudo) {
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      }
+    }
+
+    if (!method_seen || method != "CONNECT" ||
+        !authority_seen || output.authority.empty())
+      return ntl::unexpected(STATUS_DATA_ERROR);
+
+    output.extended = protocol_seen;
+    if (!output.extended) {
+      if (scheme_seen || path_seen || capsule_seen)
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      return ntl::ok(std::move(output));
+    }
+
+    if (!options.peer_enabled_extended_connect ||
+        output.protocol.empty() || !scheme_seen ||
+        output.scheme.empty() || !path_seen ||
+        output.path.empty())
+      return ntl::unexpected(STATUS_NOT_SUPPORTED);
+    if (output.capsule_protocol &&
+        capsule_forbidden_field_seen)
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    if (options.browser_origin_required &&
+        output.origin.empty())
+      return ntl::unexpected(STATUS_ACCESS_DENIED);
+    return ntl::ok(std::move(output));
+  } catch (const std::bad_alloc &) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+}
+
+} // namespace ntl::net::http

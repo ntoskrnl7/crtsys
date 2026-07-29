@@ -120,12 +120,18 @@ if ($LASTEXITCODE -ne 0) {
 
 foreach ($requiredPath in @(
   "include\ntl\driver",
+  "include\ntl\net\inspection\standard_content_decoders",
+  "include\ntl\net\websocket\permessage_deflate",
+  "include\ntl\net\http3\backend",
+  "include\ntl\net\http3\qpack",
+  "include\ntl\net\tls\inspection_frontend",
   "include\ntl\kmdf\pdo",
   "include\ntl\kmdf\query_interface",
   "include\ntl\kmdf\resource_requirements",
   "include\.internal\adjust_link_order",
   "share\crtsys\cmake\crtsys-config.cmake",
   "share\crtsys\cmake\CrtSys.cmake",
+  "share\crtsys\cmake\NtlContentCodecs.cmake",
   "lib\native\v143\$Architecture\$Configuration\crtsys.lib",
   "lib\native\v143\$Architecture\$Configuration\Ldk.lib"
 )) {

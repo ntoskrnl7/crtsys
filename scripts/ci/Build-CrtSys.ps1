@@ -8,7 +8,15 @@ param(
                'kmdf-example-usb', 'kmdf-example-wmi',
                'rpc-lifecycle-stress', 'rpc-async', 'rpc-notifications',
                'rpc-security', 'rpc-streaming', 'flt-runtime',
-               'flt-cross-bitness-app', 'flt-verifier-stress')]
+               'flt-cross-bitness-app', 'flt-verifier-stress',
+               'wfp-compile', 'wfp-ale-connect-block',
+               'wfp-datagram-proxy', 'wfp-async-inspection',
+               'wfp-flow-monitor', 'wfp-stream-edit',
+               'wfp-connect-redirect', 'wfp-bind-redirect',
+               'wfp-tls-inspection-proxy',
+               'wfp-browser-https-inspection',
+               'wfp-udp-content-filter',
+               'wfp-tcp-content-filter')]
   [string] $Project,
 
   [Parameter(Mandatory = $true)]
@@ -45,6 +53,13 @@ $sourceDir = if ($Project -like 'kmdf-example-*') {
   Join-Path $repoRoot 'test\flt\cross-bitness'
 } elseif ($Project -eq 'flt-verifier-stress') {
   Join-Path $repoRoot 'test\flt\verifier-stress'
+  } elseif ($Project -eq 'wfp-compile') {
+    Join-Path $repoRoot 'test\wfp\compile'
+} elseif ($Project -eq 'wfp-ale-connect-block') {
+  Join-Path $repoRoot 'examples\wfp\ale-connect-block'
+} elseif ($Project -like 'wfp-*') {
+  $sample = $Project.Substring(('wfp-').Length)
+  Join-Path $repoRoot "examples\wfp\$sample"
 } elseif ($Project -eq 'rpc-lifecycle-stress') {
   Join-Path $repoRoot 'test\rpc\lifecycle-stress'
 } elseif ($Project -eq 'rpc-async') {

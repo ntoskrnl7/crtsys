@@ -1,0 +1,21 @@
+/**
+ * @file all
+ * @brief Platform-appropriate ntl::wfp umbrella header.
+ */
+#pragma once
+
+#include "layers"
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#include "callout"
+#include "classify"
+#include "connect_redirect"
+#include "flow"
+#include "injection"
+#include "packet"
+#include "stream"
+#include "stream_reader"
+#else
+#include "connect_redirect"
+#include "management"
+#endif

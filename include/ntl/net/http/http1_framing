@@ -1,0 +1,650 @@
+/**
+ * @file http1_framing
+ * @brief Bounded HTTP/1.0 and HTTP/1.1 message boundary detection.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include <ntl/net/framing>
+
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+
+namespace ntl::net::http {
+
+enum class http1_message_kind : std::uint8_t {
+  request = 1,
+  response = 2,
+};
+
+struct http1_framing_limits {
+  std::size_t maximum_header_size = 32 * 1024;
+  std::size_t maximum_body_size = 1024 * 1024;
+  std::size_t maximum_chunk_line_size = 4 * 1024;
+  std::size_t maximum_trailer_size = 16 * 1024;
+  bool allow_close_delimited_response = false;
+};
+
+namespace detail {
+
+inline bool byte_at(ntl::net::scatter_view bytes, std::size_t offset,
+                    std::uint8_t &value) noexcept {
+  const auto result = bytes.read<std::uint8_t>(offset);
+  if (!result)
+    return false;
+  value = *result;
+  return true;
+}
+
+inline std::uint8_t ascii_lower(std::uint8_t value) noexcept {
+  return value >= 'A' && value <= 'Z'
+             ? static_cast<std::uint8_t>(value + ('a' - 'A'))
+             : value;
+}
+
+inline bool is_ows(std::uint8_t value) noexcept {
+  return value == ' ' || value == '\t';
+}
+
+inline bool is_tchar(std::uint8_t value) noexcept {
+  if ((value >= '0' && value <= '9') ||
+      (value >= 'A' && value <= 'Z') ||
+      (value >= 'a' && value <= 'z'))
+    return true;
+  switch (value) {
+  case '!':
+  case '#':
+  case '$':
+  case '%':
+  case '&':
+  case '\'':
+  case '*':
+  case '+':
+  case '-':
+  case '.':
+  case '^':
+  case '_':
+  case '`':
+  case '|':
+  case '~':
+    return true;
+  default:
+    return false;
+  }
+}
+
+inline bool range_equal_ci(ntl::net::scatter_view bytes,
+                           std::size_t begin, std::size_t end,
+                           const char *text,
+                           std::size_t text_size) noexcept {
+  if (end < begin || end - begin != text_size)
+    return false;
+  for (std::size_t index = 0; index != text_size; ++index) {
+    std::uint8_t value = 0;
+    if (!byte_at(bytes, begin + index, value) ||
+        ascii_lower(value) !=
+            ascii_lower(static_cast<std::uint8_t>(text[index])))
+      return false;
+  }
+  return true;
+}
+
+inline bool find_crlf(ntl::net::scatter_view bytes, std::size_t begin,
+                      std::size_t end,
+                      std::size_t &position) noexcept {
+  if (begin > end || end > bytes.size())
+    return false;
+  for (std::size_t index = begin; index + 1 < end; ++index) {
+    std::uint8_t first = 0;
+    std::uint8_t second = 0;
+    if (!byte_at(bytes, index, first) ||
+        !byte_at(bytes, index + 1, second))
+      return false;
+    if (first == '\r' && second == '\n') {
+      position = index;
+      return true;
+    }
+  }
+  return false;
+}
+
+inline bool valid_http_version(ntl::net::scatter_view bytes,
+                               std::size_t begin,
+                               std::size_t end) noexcept {
+  return range_equal_ci(bytes, begin, end, "HTTP/1.0", 8) ||
+         range_equal_ci(bytes, begin, end, "HTTP/1.1", 8);
+}
+
+inline bool parse_request_line(ntl::net::scatter_view bytes,
+                               std::size_t end) noexcept {
+  std::size_t first_space = end;
+  std::size_t second_space = end;
+  for (std::size_t index = 0; index != end; ++index) {
+    std::uint8_t value = 0;
+    if (!byte_at(bytes, index, value))
+      return false;
+    if (value == ' ') {
+      if (first_space == end)
+        first_space = index;
+      else if (second_space == end)
+        second_space = index;
+      else
+        return false;
+    } else if (value < 0x21 || value == 0x7f) {
+      return false;
+    }
+  }
+  if (first_space == 0 || second_space <= first_space + 1 ||
+      second_space + 1 >= end)
+    return false;
+  for (std::size_t index = 0; index != first_space; ++index) {
+    std::uint8_t value = 0;
+    if (!byte_at(bytes, index, value) || !is_tchar(value))
+      return false;
+  }
+  return valid_http_version(bytes, second_space + 1, end);
+}
+
+inline bool parse_response_line(ntl::net::scatter_view bytes,
+                                std::size_t end,
+                                unsigned &status) noexcept {
+  if (end < 12 || !valid_http_version(bytes, 0, 8))
+    return false;
+  std::uint8_t separator = 0;
+  if (!byte_at(bytes, 8, separator) || separator != ' ')
+    return false;
+  status = 0;
+  for (std::size_t index = 9; index != 12; ++index) {
+    std::uint8_t value = 0;
+    if (!byte_at(bytes, index, value) ||
+        value < '0' || value > '9')
+      return false;
+    status = status * 10 + static_cast<unsigned>(value - '0');
+  }
+  if (end != 12) {
+    if (!byte_at(bytes, 12, separator) || separator != ' ')
+      return false;
+    for (std::size_t index = 13; index != end; ++index) {
+      std::uint8_t value = 0;
+      if (!byte_at(bytes, index, value) ||
+          value == '\r' || value == '\n' ||
+          (value < 0x20 && value != '\t') || value == 0x7f)
+        return false;
+    }
+  }
+  return status >= 100 && status <= 999;
+}
+
+inline bool parse_decimal(ntl::net::scatter_view bytes,
+                          std::size_t begin, std::size_t end,
+                          std::size_t &value) noexcept {
+  while (begin != end) {
+    std::uint8_t byte = 0;
+    if (!byte_at(bytes, begin, byte) || !is_ows(byte))
+      break;
+    ++begin;
+  }
+  while (end != begin) {
+    std::uint8_t byte = 0;
+    if (!byte_at(bytes, end - 1, byte) || !is_ows(byte))
+      break;
+    --end;
+  }
+  if (begin == end)
+    return false;
+  value = 0;
+  for (std::size_t index = begin; index != end; ++index) {
+    std::uint8_t byte = 0;
+    if (!byte_at(bytes, index, byte) ||
+        byte < '0' || byte > '9')
+      return false;
+    const std::size_t digit =
+        static_cast<std::size_t>(byte - '0');
+    if (value >
+        ((std::numeric_limits<std::size_t>::max)() - digit) / 10)
+      return false;
+    value = value * 10 + digit;
+  }
+  return true;
+}
+
+struct parsed_headers {
+  bool has_content_length = false;
+  std::size_t content_length = 0;
+  bool has_transfer_encoding = false;
+  bool chunked_seen = false;
+  bool final_transfer_is_chunked = false;
+};
+
+inline bool parse_transfer_encoding(
+    ntl::net::scatter_view bytes, std::size_t begin, std::size_t end,
+    parsed_headers &headers) noexcept {
+  std::size_t cursor = begin;
+  bool found_token = false;
+  while (cursor < end) {
+    while (cursor < end) {
+      std::uint8_t value = 0;
+      if (!byte_at(bytes, cursor, value))
+        return false;
+      if (!is_ows(value))
+        break;
+      ++cursor;
+    }
+    const std::size_t token_begin = cursor;
+    while (cursor < end) {
+      std::uint8_t value = 0;
+      if (!byte_at(bytes, cursor, value))
+        return false;
+      if (!is_tchar(value))
+        break;
+      ++cursor;
+    }
+    if (cursor == token_begin)
+      return false;
+    const bool chunked = range_equal_ci(
+        bytes, token_begin, cursor, "chunked", 7);
+    while (cursor < end) {
+      std::uint8_t value = 0;
+      if (!byte_at(bytes, cursor, value))
+        return false;
+      if (!is_ows(value))
+        break;
+      ++cursor;
+    }
+    if (cursor < end) {
+      std::uint8_t value = 0;
+      if (!byte_at(bytes, cursor, value))
+        return false;
+      if (value == ';') {
+        if (chunked)
+          return false;
+        ++cursor;
+        while (cursor < end) {
+          if (!byte_at(bytes, cursor, value))
+            return false;
+          if (value == ',')
+            break;
+          if ((value < 0x20 && value != '\t') || value == 0x7f)
+            return false;
+          ++cursor;
+        }
+      }
+    }
+    if (headers.chunked_seen)
+      return false;
+    headers.chunked_seen = headers.chunked_seen || chunked;
+    headers.final_transfer_is_chunked = chunked;
+    found_token = true;
+    while (cursor < end) {
+      std::uint8_t value = 0;
+      if (!byte_at(bytes, cursor, value))
+        return false;
+      if (!is_ows(value))
+        break;
+      ++cursor;
+    }
+    if (cursor == end)
+      break;
+    std::uint8_t comma = 0;
+    if (!byte_at(bytes, cursor, comma) || comma != ',')
+      return false;
+    ++cursor;
+  }
+  return found_token;
+}
+
+inline bool parse_headers(ntl::net::scatter_view bytes,
+                          std::size_t first_header,
+                          std::size_t header_end,
+                          parsed_headers &headers) noexcept {
+  std::size_t line = first_header;
+  while (line + 2 <= header_end) {
+    std::size_t line_end = 0;
+    if (!find_crlf(bytes, line, header_end, line_end))
+      return false;
+    if (line_end == line)
+      return line_end + 2 == header_end;
+
+    std::uint8_t first = 0;
+    if (!byte_at(bytes, line, first) || is_ows(first))
+      return false;
+    std::size_t colon = line_end;
+    for (std::size_t index = line; index != line_end; ++index) {
+      std::uint8_t value = 0;
+      if (!byte_at(bytes, index, value))
+        return false;
+      if (value == ':') {
+        colon = index;
+        break;
+      }
+      if (!is_tchar(value))
+        return false;
+    }
+    if (colon == line || colon == line_end)
+      return false;
+
+    for (std::size_t index = colon + 1; index != line_end; ++index) {
+      std::uint8_t value = 0;
+      if (!byte_at(bytes, index, value) ||
+          (value < 0x20 && value != '\t') || value == 0x7f)
+        return false;
+    }
+
+    if (range_equal_ci(
+            bytes, line, colon, "content-length", 14)) {
+      std::size_t length = 0;
+      if (!parse_decimal(
+              bytes, colon + 1, line_end, length) ||
+          (headers.has_content_length &&
+           headers.content_length != length))
+        return false;
+      headers.has_content_length = true;
+      headers.content_length = length;
+    } else if (range_equal_ci(
+                   bytes, line, colon,
+                   "transfer-encoding", 17)) {
+      if (headers.chunked_seen)
+        return false;
+      if (!parse_transfer_encoding(
+              bytes, colon + 1, line_end, headers))
+        return false;
+      headers.has_transfer_encoding = true;
+    }
+    line = line_end + 2;
+  }
+  return false;
+}
+
+inline ntl::net::framing::frame_probe
+need_one_more(std::size_t available) noexcept {
+  if (available ==
+      (std::numeric_limits<std::size_t>::max)())
+    return ntl::net::framing::frame_probe::malformed(
+        STATUS_BUFFER_OVERFLOW);
+  return ntl::net::framing::frame_probe::need_more(available + 1);
+}
+
+inline ntl::net::framing::frame_probe probe_chunked(
+    ntl::net::scatter_view bytes, std::size_t position,
+    http1_framing_limits limits) noexcept {
+  std::size_t decoded_body = 0;
+  for (;;) {
+    const std::size_t line_limit =
+        position >
+                (std::numeric_limits<std::size_t>::max)() -
+                    limits.maximum_chunk_line_size
+            ? (std::numeric_limits<std::size_t>::max)()
+            : position + limits.maximum_chunk_line_size;
+    const std::size_t search_end =
+        (std::min)(bytes.size(), line_limit);
+    std::size_t line_end = 0;
+    if (!find_crlf(bytes, position, search_end, line_end)) {
+      if (bytes.size() >= line_limit)
+        return ntl::net::framing::frame_probe::malformed(
+            STATUS_BUFFER_OVERFLOW);
+      return need_one_more(bytes.size());
+    }
+
+    std::size_t cursor = position;
+    std::size_t chunk_size = 0;
+    bool has_digit = false;
+    for (; cursor != line_end; ++cursor) {
+      std::uint8_t value = 0;
+      if (!byte_at(bytes, cursor, value))
+        return ntl::net::framing::frame_probe::malformed();
+      if (value == ';')
+        break;
+      unsigned digit = 0;
+      if (value >= '0' && value <= '9')
+        digit = static_cast<unsigned>(value - '0');
+      else if (value >= 'a' && value <= 'f')
+        digit = static_cast<unsigned>(value - 'a' + 10);
+      else if (value >= 'A' && value <= 'F')
+        digit = static_cast<unsigned>(value - 'A' + 10);
+      else
+        return ntl::net::framing::frame_probe::malformed();
+      has_digit = true;
+      if (chunk_size >
+          ((std::numeric_limits<std::size_t>::max)() - digit) / 16)
+        return ntl::net::framing::frame_probe::malformed(
+            STATUS_BUFFER_OVERFLOW);
+      chunk_size = chunk_size * 16 + digit;
+    }
+    if (!has_digit)
+      return ntl::net::framing::frame_probe::malformed();
+    if (cursor != line_end) {
+      for (++cursor; cursor != line_end; ++cursor) {
+        std::uint8_t value = 0;
+        if (!byte_at(bytes, cursor, value) ||
+            (value < 0x20 && value != '\t') || value == 0x7f)
+          return ntl::net::framing::frame_probe::malformed();
+      }
+    }
+    position = line_end + 2;
+
+    if (chunk_size == 0) {
+      const std::size_t trailer_begin = position;
+      for (;;) {
+        if (position - trailer_begin >
+            limits.maximum_trailer_size)
+          return ntl::net::framing::frame_probe::malformed(
+              STATUS_BUFFER_OVERFLOW);
+        std::size_t trailer_end = 0;
+        const std::size_t remaining =
+            limits.maximum_trailer_size -
+            (position - trailer_begin);
+        const std::size_t trailer_limit =
+            position >
+                    (std::numeric_limits<std::size_t>::max)() -
+                        remaining
+                ? (std::numeric_limits<std::size_t>::max)()
+                : position + remaining;
+        const std::size_t search =
+            (std::min)(bytes.size(), trailer_limit);
+        if (!find_crlf(bytes, position, search, trailer_end)) {
+          if (bytes.size() >= trailer_limit)
+            return ntl::net::framing::frame_probe::malformed(
+                STATUS_BUFFER_OVERFLOW);
+          return need_one_more(bytes.size());
+        }
+        if (trailer_end == position) {
+          const std::size_t total = trailer_end + 2;
+          return ntl::net::framing::frame_probe::complete(
+              total, 0, total);
+        }
+        std::uint8_t first = 0;
+        if (!byte_at(bytes, position, first) || is_ows(first))
+          return ntl::net::framing::frame_probe::malformed();
+        bool colon = false;
+        for (std::size_t index = position;
+             index != trailer_end; ++index) {
+          std::uint8_t value = 0;
+          if (!byte_at(bytes, index, value))
+            return ntl::net::framing::frame_probe::malformed();
+          if (value == ':') {
+            colon = index != position;
+            break;
+          }
+          if (!is_tchar(value))
+            return ntl::net::framing::frame_probe::malformed();
+        }
+        if (!colon)
+          return ntl::net::framing::frame_probe::malformed();
+        position = trailer_end + 2;
+      }
+    }
+
+    if (chunk_size > limits.maximum_body_size - decoded_body)
+      return ntl::net::framing::frame_probe::malformed(
+          STATUS_BUFFER_OVERFLOW);
+    decoded_body += chunk_size;
+    if (position >
+            (std::numeric_limits<std::size_t>::max)() -
+                chunk_size - 2)
+      return ntl::net::framing::frame_probe::malformed(
+          STATUS_BUFFER_OVERFLOW);
+    const std::size_t required = position + chunk_size + 2;
+    if (bytes.size() < required)
+      return ntl::net::framing::frame_probe::need_more(required);
+    std::uint8_t cr = 0;
+    std::uint8_t lf = 0;
+    if (!byte_at(bytes, position + chunk_size, cr) ||
+        !byte_at(bytes, position + chunk_size + 1, lf) ||
+        cr != '\r' || lf != '\n')
+      return ntl::net::framing::frame_probe::malformed();
+    position = required;
+  }
+}
+
+} // namespace detail
+
+/**
+ * @brief Frames one bounded, self-delimiting HTTP/1.x request or response.
+ *
+ * Requests without Content-Length or Transfer-Encoding have no body.
+ * Responses require an explicit body boundary except 1xx, 204, and 304
+ * unless the caller explicitly enables authenticated/transport EOF
+ * finalization for a close-delimited response.
+ * Transfer-Encoding is accepted only when its final coding is chunked.
+ * The returned content is the complete wire message; chunk decoding and
+ * content decoding are deliberately separate policy stages.
+ */
+class http1_message_framer {
+public:
+  explicit constexpr http1_message_framer(
+      http1_message_kind kind,
+      http1_framing_limits limits = {}) noexcept
+      : kind_(kind), limits_(limits) {}
+
+  ntl::net::framing::frame_probe
+  probe(ntl::net::scatter_view bytes) const noexcept {
+    return probe_impl(bytes, false);
+  }
+
+  ntl::net::framing::frame_probe
+  finish(ntl::net::scatter_view bytes) const noexcept {
+    return probe_impl(bytes, true);
+  }
+
+private:
+  ntl::net::framing::frame_probe
+  probe_impl(ntl::net::scatter_view bytes, bool end_of_stream) const noexcept {
+    if (!bytes || limits_.maximum_header_size < 4 ||
+        limits_.maximum_body_size == 0 ||
+        limits_.maximum_chunk_line_size < 3 ||
+        limits_.maximum_trailer_size < 2)
+      return ntl::net::framing::frame_probe::malformed(
+          STATUS_INVALID_PARAMETER);
+
+    std::size_t header_end = 0;
+    unsigned terminator = 0;
+    for (std::size_t index = 0;
+         index != bytes.size() && header_end == 0; ++index) {
+      std::uint8_t value = 0;
+      if (!detail::byte_at(bytes, index, value))
+        return ntl::net::framing::frame_probe::malformed();
+      switch (terminator) {
+      case 0:
+        terminator = value == '\r' ? 1u : 0u;
+        break;
+      case 1:
+        terminator = value == '\n'
+                         ? 2u
+                         : (value == '\r' ? 1u : 0u);
+        break;
+      case 2:
+        terminator = value == '\r' ? 3u : 0u;
+        break;
+      default:
+        if (value == '\n') {
+          header_end = index + 1;
+        } else {
+          terminator = value == '\r' ? 1u : 0u;
+        }
+        break;
+      }
+    }
+    if (header_end == 0) {
+      if (bytes.size() >= limits_.maximum_header_size)
+        return ntl::net::framing::frame_probe::malformed(
+            STATUS_BUFFER_OVERFLOW);
+      return detail::need_one_more(bytes.size());
+    }
+    if (header_end > limits_.maximum_header_size)
+      return ntl::net::framing::frame_probe::malformed(
+          STATUS_BUFFER_OVERFLOW);
+
+    std::size_t start_line_end = 0;
+    if (!detail::find_crlf(
+            bytes, 0, header_end, start_line_end) ||
+        start_line_end == 0)
+      return ntl::net::framing::frame_probe::malformed();
+
+    unsigned response_status = 0;
+    const bool valid_start =
+        kind_ == http1_message_kind::request
+            ? detail::parse_request_line(bytes, start_line_end)
+            : detail::parse_response_line(
+                  bytes, start_line_end, response_status);
+    if (!valid_start)
+      return ntl::net::framing::frame_probe::malformed();
+
+    detail::parsed_headers headers;
+    if (!detail::parse_headers(
+            bytes, start_line_end + 2, header_end, headers) ||
+        (headers.has_content_length &&
+         headers.has_transfer_encoding) ||
+        (headers.has_transfer_encoding &&
+         !headers.final_transfer_is_chunked))
+      return ntl::net::framing::frame_probe::malformed();
+
+    if (headers.has_transfer_encoding)
+      return detail::probe_chunked(bytes, header_end, limits_);
+
+    if (headers.has_content_length) {
+      if (headers.content_length > limits_.maximum_body_size ||
+          header_end >
+              (std::numeric_limits<std::size_t>::max)() -
+                  headers.content_length)
+        return ntl::net::framing::frame_probe::malformed(
+            STATUS_BUFFER_OVERFLOW);
+      const std::size_t total =
+          header_end + headers.content_length;
+      if (bytes.size() < total)
+        return ntl::net::framing::frame_probe::need_more(total);
+      return ntl::net::framing::frame_probe::complete(
+          total, 0, total);
+    }
+
+    if (kind_ == http1_message_kind::response &&
+        !((response_status >= 100 && response_status < 200) ||
+          response_status == 204 || response_status == 304)) {
+      if (!limits_.allow_close_delimited_response)
+        return ntl::net::framing::frame_probe::malformed(
+            STATUS_NOT_SUPPORTED);
+      const std::size_t body_size = bytes.size() - header_end;
+      if (body_size > limits_.maximum_body_size)
+        return ntl::net::framing::frame_probe::malformed(
+            STATUS_BUFFER_OVERFLOW);
+      if (!end_of_stream) {
+        if (bytes.size() ==
+            (std::numeric_limits<std::size_t>::max)())
+          return ntl::net::framing::frame_probe::malformed(
+              STATUS_BUFFER_OVERFLOW);
+        return ntl::net::framing::frame_probe::need_more(
+            bytes.size() + 1);
+      }
+      return ntl::net::framing::frame_probe::complete(
+          bytes.size(), 0, bytes.size());
+    }
+    return ntl::net::framing::frame_probe::complete(
+        header_end, 0, header_end);
+  }
+
+  http1_message_kind kind_ = http1_message_kind::request;
+  http1_framing_limits limits_{};
+};
+
+} // namespace ntl::net::http

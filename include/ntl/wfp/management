@@ -1,0 +1,1125 @@
+/**
+ * @file management
+ * @brief Transactional, dynamic-session WFP policy management.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/wfp/management is a user-mode header"
+#endif
+
+#include "connect_redirect"
+#include "layers"
+
+#include <atomic>
+#include <functional>
+#include <memory>
+#include <span>
+#include <stdexcept>
+#include <string>
+#include <system_error>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+namespace ntl::wfp {
+
+class management_error : public std::system_error {
+public:
+  management_error(DWORD code, const char *operation)
+      : std::system_error(static_cast<int>(code), std::system_category(),
+                          operation) {}
+};
+
+/**
+ * @brief Owning WFP application identifier derived from an executable path.
+ */
+class application_id {
+public:
+  static application_id from_path(std::wstring_view path) {
+    if (path.empty())
+      throw std::invalid_argument(
+          "WFP application path cannot be empty");
+    const std::wstring owned(path);
+    FWP_BYTE_BLOB *native = nullptr;
+    const DWORD status =
+        ::FwpmGetAppIdFromFileName0(owned.c_str(), &native);
+    if (status != ERROR_SUCCESS)
+      throw management_error(
+          status, "FwpmGetAppIdFromFileName0");
+    struct native_release {
+      FWP_BYTE_BLOB *value;
+      ~native_release() {
+        if (value)
+          ::FwpmFreeMemory0(
+              reinterpret_cast<void **>(&value));
+      }
+    } release{native};
+    if (!native || native->size == 0 || !native->data)
+      throw std::runtime_error(
+          "WFP returned an empty application identifier");
+    return application_id(std::vector<std::uint8_t>(
+        native->data, native->data + native->size));
+  }
+
+  static application_id current_process() {
+    std::vector<wchar_t> path(32768);
+    const DWORD length = ::GetModuleFileNameW(
+        nullptr, path.data(), static_cast<DWORD>(path.size()));
+    if (length == 0)
+      throw management_error(
+          ::GetLastError(), "GetModuleFileNameW");
+    if (length >= path.size())
+      throw std::system_error(
+          ERROR_BUFFER_OVERFLOW, std::system_category(),
+          "current executable path exceeds the Windows limit");
+    return from_path(
+        std::wstring_view(path.data(), length));
+  }
+
+  std::span<const std::uint8_t> bytes() const noexcept {
+    return bytes_;
+  }
+
+private:
+  explicit application_id(std::vector<std::uint8_t> bytes)
+      : bytes_(std::move(bytes)) {}
+
+  std::vector<std::uint8_t> bytes_;
+};
+
+struct provider_spec {
+  provider_key key;
+  std::wstring name;
+  std::wstring description;
+};
+
+struct sublayer_spec {
+  sublayer_key key;
+  std::wstring name;
+  std::wstring description;
+  std::uint16_t weight = 0x100;
+};
+
+template <class Layer> struct callout_spec {
+  callout_key<Layer> key;
+  std::wstring name;
+  std::wstring description;
+};
+
+/**
+ * @brief A terminating local-proxy filter for ALE connect redirection.
+ *
+ * The proxy PID and host-order port are mandatory constructor data. The
+ * native action, raw context encoding, and CLEAR_ACTION_RIGHT flag cannot be
+ * changed by application code.
+ */
+template <class Layer> class connect_redirect_filter_builder {
+public:
+  connect_redirect_filter_builder(filter_key<Layer> key,
+                                  std::wstring name,
+                                  local_proxy_target target)
+      : key_(key), name_(std::move(name)),
+        context_(target.filter_context()) {
+    static_assert(detail::connect_redirect_layer<Layer>,
+                  "connect_redirect_filter_builder requires an "
+                  "ALE_CONNECT_REDIRECT layer");
+    if (!target.valid())
+      throw std::invalid_argument(
+          "a connect redirect target needs a nonzero PID and port");
+  }
+
+  connect_redirect_filter_builder &
+  description(std::wstring value) {
+    description_ = std::move(value);
+    return *this;
+  }
+
+  connect_redirect_filter_builder &
+  weight(std::uint8_t value) noexcept {
+    weight_ = value;
+    return *this;
+  }
+
+  connect_redirect_filter_builder &
+  protocol_equal(std::uint8_t protocol) {
+    conditions_.push_back(
+        scalar_condition(FWPM_CONDITION_IP_PROTOCOL, protocol));
+    return *this;
+  }
+
+  connect_redirect_filter_builder &
+  local_port_equal(std::uint16_t port) {
+    conditions_.push_back(
+        scalar_condition(FWPM_CONDITION_IP_LOCAL_PORT, port));
+    return *this;
+  }
+
+  connect_redirect_filter_builder &
+  remote_port_equal(std::uint16_t port) {
+    conditions_.push_back(
+        scalar_condition(FWPM_CONDITION_IP_REMOTE_PORT, port));
+    return *this;
+  }
+
+  /**
+   * @brief Selects only connections created by one executable identity.
+   *
+   * The identifier bytes are copied into the builder, so a temporary
+   * application_id cannot leave a dangling native condition pointer.
+   */
+  connect_redirect_filter_builder &
+  application_equal(const application_id &application) {
+    add_blob_condition(
+        FWPM_CONDITION_ALE_APP_ID, application.bytes());
+    return *this;
+  }
+
+  /**
+   * @brief Selects one host-order IPv4 remote address.
+   */
+  connect_redirect_filter_builder &
+  remote_address_v4_equal(std::uint32_t address) {
+    static_assert(
+        std::is_same_v<
+            Layer, layers::ale_connect_redirect_v4>,
+        "remote_address_v4_equal requires the IPv4 redirect layer");
+    conditions_.push_back(
+        scalar_condition(
+            FWPM_CONDITION_IP_REMOTE_ADDRESS, address));
+    return *this;
+  }
+
+private:
+  friend class policy_transaction;
+
+  struct owned_blob {
+    explicit owned_blob(std::span<const std::uint8_t> source)
+        : bytes(source.begin(), source.end()) {
+      if (bytes.empty() ||
+          bytes.size() >
+              (std::numeric_limits<UINT32>::max)())
+        throw std::invalid_argument(
+            "WFP byte-blob condition has an invalid size");
+      native.size = static_cast<UINT32>(bytes.size());
+      native.data = bytes.data();
+    }
+
+    std::vector<std::uint8_t> bytes;
+    FWP_BYTE_BLOB native{};
+  };
+
+  void add_blob_condition(
+      const GUID &field,
+      std::span<const std::uint8_t> bytes) {
+    auto storage = std::make_unique<owned_blob>(bytes);
+    FWPM_FILTER_CONDITION0 condition{};
+    condition.fieldKey = field;
+    condition.matchType = FWP_MATCH_EQUAL;
+    condition.conditionValue.type = FWP_BYTE_BLOB_TYPE;
+    condition.conditionValue.byteBlob = &storage->native;
+    conditions_.push_back(condition);
+    blobs_.push_back(std::move(storage));
+  }
+
+  static FWPM_FILTER_CONDITION0
+  scalar_condition(const GUID &field, std::uint8_t value) {
+    FWPM_FILTER_CONDITION0 condition{};
+    condition.fieldKey = field;
+    condition.matchType = FWP_MATCH_EQUAL;
+    condition.conditionValue.type = FWP_UINT8;
+    condition.conditionValue.uint8 = value;
+    return condition;
+  }
+
+  static FWPM_FILTER_CONDITION0
+  scalar_condition(const GUID &field, std::uint16_t value) {
+    FWPM_FILTER_CONDITION0 condition{};
+    condition.fieldKey = field;
+    condition.matchType = FWP_MATCH_EQUAL;
+    condition.conditionValue.type = FWP_UINT16;
+    condition.conditionValue.uint16 = value;
+    return condition;
+  }
+
+  static FWPM_FILTER_CONDITION0
+  scalar_condition(const GUID &field, std::uint32_t value) {
+    FWPM_FILTER_CONDITION0 condition{};
+    condition.fieldKey = field;
+    condition.matchType = FWP_MATCH_EQUAL;
+    condition.conditionValue.type = FWP_UINT32;
+    condition.conditionValue.uint32 = value;
+    return condition;
+  }
+
+  filter_key<Layer> key_;
+  std::wstring name_;
+  std::wstring description_;
+  std::uint8_t weight_ = 8;
+  std::uint64_t context_ = 0;
+  std::vector<FWPM_FILTER_CONDITION0> conditions_;
+  std::vector<std::unique_ptr<owned_blob>> blobs_;
+};
+
+/**
+ * @brief A terminating ALE bind-redirect filter.
+ *
+ * The callback owns the typed address/port target. Policy code may only
+ * select a valid bind-redirect layer and supported ALE conditions.
+ */
+template <class Layer> class bind_redirect_filter_builder {
+public:
+  bind_redirect_filter_builder(
+      filter_key<Layer> key, std::wstring name,
+      bind_redirect_selector selector)
+      : key_(key), name_(std::move(name)),
+        context_(selector.filter_context()) {
+    static_assert(detail::bind_redirect_layer<Layer>,
+                  "bind_redirect_filter_builder requires an "
+                  "ALE_BIND_REDIRECT layer");
+    if (!selector.valid())
+      throw std::invalid_argument(
+          "a bind redirect filter needs a nonzero policy selector");
+  }
+
+  bind_redirect_filter_builder &
+  description(std::wstring value) {
+    description_ = std::move(value);
+    return *this;
+  }
+
+  bind_redirect_filter_builder &
+  weight(std::uint8_t value) noexcept {
+    weight_ = value;
+    return *this;
+  }
+
+  bind_redirect_filter_builder &
+  protocol_equal(std::uint8_t protocol) {
+    conditions_.push_back(
+        scalar_condition(FWPM_CONDITION_IP_PROTOCOL, protocol));
+    return *this;
+  }
+
+  bind_redirect_filter_builder &
+  local_port_equal(std::uint16_t port) {
+    conditions_.push_back(
+        scalar_condition(FWPM_CONDITION_IP_LOCAL_PORT, port));
+    return *this;
+  }
+
+  bind_redirect_filter_builder &
+  application_equal(const application_id &application) {
+    auto storage =
+        std::make_unique<owned_blob>(application.bytes());
+    FWPM_FILTER_CONDITION0 condition{};
+    condition.fieldKey = FWPM_CONDITION_ALE_APP_ID;
+    condition.matchType = FWP_MATCH_EQUAL;
+    condition.conditionValue.type = FWP_BYTE_BLOB_TYPE;
+    condition.conditionValue.byteBlob = &storage->native;
+    conditions_.push_back(condition);
+    blobs_.push_back(std::move(storage));
+    return *this;
+  }
+
+private:
+  friend class policy_transaction;
+
+  struct owned_blob {
+    explicit owned_blob(std::span<const std::uint8_t> source)
+        : bytes(source.begin(), source.end()) {
+      if (bytes.empty() ||
+          bytes.size() >
+              (std::numeric_limits<UINT32>::max)())
+        throw std::invalid_argument(
+            "WFP byte-blob condition has an invalid size");
+      native.size = static_cast<UINT32>(bytes.size());
+      native.data = bytes.data();
+    }
+    std::vector<std::uint8_t> bytes;
+    FWP_BYTE_BLOB native{};
+  };
+
+  static FWPM_FILTER_CONDITION0
+  scalar_condition(const GUID &field, std::uint8_t value) {
+    FWPM_FILTER_CONDITION0 condition{};
+    condition.fieldKey = field;
+    condition.matchType = FWP_MATCH_EQUAL;
+    condition.conditionValue.type = FWP_UINT8;
+    condition.conditionValue.uint8 = value;
+    return condition;
+  }
+
+  static FWPM_FILTER_CONDITION0
+  scalar_condition(const GUID &field, std::uint16_t value) {
+    FWPM_FILTER_CONDITION0 condition{};
+    condition.fieldKey = field;
+    condition.matchType = FWP_MATCH_EQUAL;
+    condition.conditionValue.type = FWP_UINT16;
+    condition.conditionValue.uint16 = value;
+    return condition;
+  }
+
+  filter_key<Layer> key_;
+  std::wstring name_;
+  std::wstring description_;
+  std::uint8_t weight_ = 8;
+  std::uint64_t context_ = 0;
+  std::vector<FWPM_FILTER_CONDITION0> conditions_;
+  std::vector<std::unique_ptr<owned_blob>> blobs_;
+};
+
+/**
+ * @brief A typed terminating-callout filter for one compile-time WFP layer.
+ *
+ * Only conditions valid for the ALE authorization layer family are exposed.
+ * Native condition arrays and action types are deliberately not public.
+ */
+template <class Layer> class filter_builder {
+public:
+  filter_builder(filter_key<Layer> key, std::wstring name)
+      : key_(key), name_(std::move(name)) {
+    static_assert(detail::ale_authorization_layer<Layer>,
+                  "filter_builder is limited to ALE authorization layers");
+  }
+
+  filter_builder &description(std::wstring value) {
+    description_ = std::move(value);
+    return *this;
+  }
+
+  filter_builder &weight(std::uint8_t value) noexcept {
+    weight_ = value;
+    return *this;
+  }
+
+  filter_builder &protocol_equal(std::uint8_t protocol) {
+    conditions_.push_back(
+        scalar_condition(FWPM_CONDITION_IP_PROTOCOL, protocol));
+    return *this;
+  }
+
+  filter_builder &local_port_equal(std::uint16_t port) {
+    conditions_.push_back(
+        scalar_condition(FWPM_CONDITION_IP_LOCAL_PORT, port));
+    return *this;
+  }
+
+  filter_builder &remote_port_equal(std::uint16_t port) {
+    conditions_.push_back(
+        scalar_condition(FWPM_CONDITION_IP_REMOTE_PORT, port));
+    return *this;
+  }
+
+  /**
+   * @brief Selects only connections created by one executable identity.
+   */
+  filter_builder &
+  application_equal(const application_id &application) {
+    add_blob_condition(
+        FWPM_CONDITION_ALE_APP_ID, application.bytes());
+    return *this;
+  }
+
+  filter_builder &context(std::uint64_t value) noexcept {
+    context_ = value;
+    return *this;
+  }
+
+private:
+  friend class policy_transaction;
+
+  struct owned_blob {
+    explicit owned_blob(std::span<const std::uint8_t> source)
+        : bytes(source.begin(), source.end()) {
+      if (bytes.empty() ||
+          bytes.size() >
+              (std::numeric_limits<UINT32>::max)())
+        throw std::invalid_argument(
+            "WFP byte-blob condition has an invalid size");
+      native.size = static_cast<UINT32>(bytes.size());
+      native.data = bytes.data();
+    }
+
+    std::vector<std::uint8_t> bytes;
+    FWP_BYTE_BLOB native{};
+  };
+
+  void add_blob_condition(
+      const GUID &field,
+      std::span<const std::uint8_t> bytes) {
+    auto storage = std::make_unique<owned_blob>(bytes);
+    FWPM_FILTER_CONDITION0 condition{};
+    condition.fieldKey = field;
+    condition.matchType = FWP_MATCH_EQUAL;
+    condition.conditionValue.type = FWP_BYTE_BLOB_TYPE;
+    condition.conditionValue.byteBlob = &storage->native;
+    conditions_.push_back(condition);
+    blobs_.push_back(std::move(storage));
+  }
+
+  static FWPM_FILTER_CONDITION0 scalar_condition(const GUID &field,
+                                                  std::uint8_t value) {
+    FWPM_FILTER_CONDITION0 condition{};
+    condition.fieldKey = field;
+    condition.matchType = FWP_MATCH_EQUAL;
+    condition.conditionValue.type = FWP_UINT8;
+    condition.conditionValue.uint8 = value;
+    return condition;
+  }
+
+  static FWPM_FILTER_CONDITION0 scalar_condition(const GUID &field,
+                                                  std::uint16_t value) {
+    FWPM_FILTER_CONDITION0 condition{};
+    condition.fieldKey = field;
+    condition.matchType = FWP_MATCH_EQUAL;
+    condition.conditionValue.type = FWP_UINT16;
+    condition.conditionValue.uint16 = value;
+    return condition;
+  }
+
+  filter_key<Layer> key_;
+  std::wstring name_;
+  std::wstring description_;
+  std::uint8_t weight_ = 8;
+  std::uint64_t context_ = 0;
+  std::vector<FWPM_FILTER_CONDITION0> conditions_;
+  std::vector<std::unique_ptr<owned_blob>> blobs_;
+};
+
+/**
+ * @brief A non-terminating inspection filter.
+ *
+ * This builder is used for flow establishment, datagram, transport, and
+ * monitor-only stream callouts. Its action type is fixed to
+ * FWP_ACTION_CALLOUT_INSPECTION by add_inspection_filter().
+ */
+template <class Layer> class inspection_filter_builder {
+public:
+  inspection_filter_builder(filter_key<Layer> key, std::wstring name)
+      : key_(key), name_(std::move(name)) {
+    static_assert(detail::known_layer<Layer>,
+                  "unsupported ntl::wfp layer tag");
+  }
+
+  inspection_filter_builder &description(std::wstring value) {
+    description_ = std::move(value);
+    return *this;
+  }
+
+  inspection_filter_builder &weight(std::uint8_t value) noexcept {
+    weight_ = value;
+    return *this;
+  }
+
+  inspection_filter_builder &protocol_equal(std::uint8_t protocol) {
+    conditions_.push_back(
+        scalar_condition(FWPM_CONDITION_IP_PROTOCOL, protocol));
+    return *this;
+  }
+
+  inspection_filter_builder &direction_equal(std::uint32_t direction) {
+    conditions_.push_back(
+        scalar_condition(FWPM_CONDITION_DIRECTION, direction));
+    return *this;
+  }
+
+  inspection_filter_builder &local_port_equal(std::uint16_t port) {
+    conditions_.push_back(
+        scalar_condition(FWPM_CONDITION_IP_LOCAL_PORT, port));
+    return *this;
+  }
+
+  inspection_filter_builder &remote_port_equal(std::uint16_t port) {
+    conditions_.push_back(
+        scalar_condition(FWPM_CONDITION_IP_REMOTE_PORT, port));
+    return *this;
+  }
+
+  inspection_filter_builder &context(std::uint64_t value) noexcept {
+    context_ = value;
+    return *this;
+  }
+
+private:
+  friend class policy_transaction;
+
+  static FWPM_FILTER_CONDITION0 scalar_condition(const GUID &field,
+                                                  std::uint8_t value) {
+    FWPM_FILTER_CONDITION0 condition{};
+    condition.fieldKey = field;
+    condition.matchType = FWP_MATCH_EQUAL;
+    condition.conditionValue.type = FWP_UINT8;
+    condition.conditionValue.uint8 = value;
+    return condition;
+  }
+
+  static FWPM_FILTER_CONDITION0 scalar_condition(const GUID &field,
+                                                  std::uint16_t value) {
+    FWPM_FILTER_CONDITION0 condition{};
+    condition.fieldKey = field;
+    condition.matchType = FWP_MATCH_EQUAL;
+    condition.conditionValue.type = FWP_UINT16;
+    condition.conditionValue.uint16 = value;
+    return condition;
+  }
+
+  static FWPM_FILTER_CONDITION0 scalar_condition(const GUID &field,
+                                                  std::uint32_t value) {
+    FWPM_FILTER_CONDITION0 condition{};
+    condition.fieldKey = field;
+    condition.matchType = FWP_MATCH_EQUAL;
+    condition.conditionValue.type = FWP_UINT32;
+    condition.conditionValue.uint32 = value;
+    return condition;
+  }
+
+  filter_key<Layer> key_;
+  std::wstring name_;
+  std::wstring description_;
+  std::uint8_t weight_ = 8;
+  std::uint64_t context_ = 0;
+  std::vector<FWPM_FILTER_CONDITION0> conditions_;
+};
+
+/**
+ * @brief A terminating packet filter for datagram and transport layers.
+ *
+ * The action is fixed by add_packet_filter(). Applications can only select
+ * typed scalar conditions; they cannot construct an incompatible native
+ * action or forget CLEAR_ACTION_RIGHT.
+ */
+template <class Layer> class packet_filter_builder {
+public:
+  packet_filter_builder(filter_key<Layer> key, std::wstring name)
+      : key_(key), name_(std::move(name)) {
+    static_assert(detail::packet_decision_layer<Layer>,
+                  "packet_filter_builder requires a packet decision layer");
+  }
+
+  packet_filter_builder &description(std::wstring value) {
+    description_ = std::move(value);
+    return *this;
+  }
+
+  packet_filter_builder &weight(std::uint8_t value) noexcept {
+    weight_ = value;
+    return *this;
+  }
+
+  packet_filter_builder &protocol_equal(std::uint8_t protocol) {
+    conditions_.push_back(
+        scalar_condition(FWPM_CONDITION_IP_PROTOCOL, protocol));
+    return *this;
+  }
+
+  packet_filter_builder &local_port_equal(std::uint16_t port) {
+    conditions_.push_back(
+        scalar_condition(FWPM_CONDITION_IP_LOCAL_PORT, port));
+    return *this;
+  }
+
+  packet_filter_builder &remote_port_equal(std::uint16_t port) {
+    conditions_.push_back(
+        scalar_condition(FWPM_CONDITION_IP_REMOTE_PORT, port));
+    return *this;
+  }
+
+  packet_filter_builder &direction_equal(std::uint32_t direction) {
+    conditions_.push_back(
+        scalar_condition(FWPM_CONDITION_DIRECTION, direction));
+    return *this;
+  }
+
+  packet_filter_builder &context(std::uint64_t value) noexcept {
+    context_ = value;
+    return *this;
+  }
+
+private:
+  friend class policy_transaction;
+
+  static FWPM_FILTER_CONDITION0 scalar_condition(const GUID &field,
+                                                  std::uint8_t value) {
+    FWPM_FILTER_CONDITION0 condition{};
+    condition.fieldKey = field;
+    condition.matchType = FWP_MATCH_EQUAL;
+    condition.conditionValue.type = FWP_UINT8;
+    condition.conditionValue.uint8 = value;
+    return condition;
+  }
+
+  static FWPM_FILTER_CONDITION0 scalar_condition(const GUID &field,
+                                                  std::uint16_t value) {
+    FWPM_FILTER_CONDITION0 condition{};
+    condition.fieldKey = field;
+    condition.matchType = FWP_MATCH_EQUAL;
+    condition.conditionValue.type = FWP_UINT16;
+    condition.conditionValue.uint16 = value;
+    return condition;
+  }
+
+  static FWPM_FILTER_CONDITION0 scalar_condition(const GUID &field,
+                                                  std::uint32_t value) {
+    FWPM_FILTER_CONDITION0 condition{};
+    condition.fieldKey = field;
+    condition.matchType = FWP_MATCH_EQUAL;
+    condition.conditionValue.type = FWP_UINT32;
+    condition.conditionValue.uint32 = value;
+    return condition;
+  }
+
+  filter_key<Layer> key_;
+  std::wstring name_;
+  std::wstring description_;
+  std::uint8_t weight_ = 8;
+  std::uint64_t context_ = 0;
+  std::vector<FWPM_FILTER_CONDITION0> conditions_;
+};
+
+/**
+ * @brief A terminating stream-edit filter.
+ *
+ * Only stream layers are accepted. The terminating action and clear-right
+ * flag are selected by add_stream_filter(), never by application code.
+ */
+template <class Layer> class stream_filter_builder {
+public:
+  stream_filter_builder(filter_key<Layer> key, std::wstring name)
+      : key_(key), name_(std::move(name)) {
+    static_assert(detail::stream_layer<Layer>,
+                  "stream_filter_builder requires a stream layer");
+  }
+
+  stream_filter_builder &description(std::wstring value) {
+    description_ = std::move(value);
+    return *this;
+  }
+
+  stream_filter_builder &weight(std::uint8_t value) noexcept {
+    weight_ = value;
+    return *this;
+  }
+
+  stream_filter_builder &local_port_equal(std::uint16_t port) {
+    conditions_.push_back(
+        scalar_condition(FWPM_CONDITION_IP_LOCAL_PORT, port));
+    return *this;
+  }
+
+  stream_filter_builder &remote_port_equal(std::uint16_t port) {
+    conditions_.push_back(
+        scalar_condition(FWPM_CONDITION_IP_REMOTE_PORT, port));
+    return *this;
+  }
+
+  stream_filter_builder &context(std::uint64_t value) noexcept {
+    context_ = value;
+    return *this;
+  }
+
+private:
+  friend class policy_transaction;
+
+  static FWPM_FILTER_CONDITION0 scalar_condition(const GUID &field,
+                                                  std::uint16_t value) {
+    FWPM_FILTER_CONDITION0 condition{};
+    condition.fieldKey = field;
+    condition.matchType = FWP_MATCH_EQUAL;
+    condition.conditionValue.type = FWP_UINT16;
+    condition.conditionValue.uint16 = value;
+    return condition;
+  }
+
+  filter_key<Layer> key_;
+  std::wstring name_;
+  std::wstring description_;
+  std::uint8_t weight_ = 8;
+  std::uint64_t context_ = 0;
+  std::vector<FWPM_FILTER_CONDITION0> conditions_;
+};
+
+/**
+ * @brief An unknown-action stream filter for connection-level stream actions.
+ *
+ * Use this only when the callback may return drop_connection() or needs WFP
+ * to arbitrate permit/block/continue. The native action remains fixed and is
+ * not writable by application code.
+ */
+template <class Layer> class stream_control_filter_builder {
+public:
+  stream_control_filter_builder(filter_key<Layer> key, std::wstring name)
+      : key_(key), name_(std::move(name)) {
+    static_assert(detail::stream_layer<Layer>,
+                  "stream_control_filter_builder requires a stream layer");
+  }
+
+  stream_control_filter_builder &description(std::wstring value) {
+    description_ = std::move(value);
+    return *this;
+  }
+
+  stream_control_filter_builder &weight(std::uint8_t value) noexcept {
+    weight_ = value;
+    return *this;
+  }
+
+  stream_control_filter_builder &local_port_equal(std::uint16_t port) {
+    conditions_.push_back(
+        scalar_condition(FWPM_CONDITION_IP_LOCAL_PORT, port));
+    return *this;
+  }
+
+  stream_control_filter_builder &remote_port_equal(std::uint16_t port) {
+    conditions_.push_back(
+        scalar_condition(FWPM_CONDITION_IP_REMOTE_PORT, port));
+    return *this;
+  }
+
+  stream_control_filter_builder &context(std::uint64_t value) noexcept {
+    context_ = value;
+    return *this;
+  }
+
+private:
+  friend class policy_transaction;
+
+  static FWPM_FILTER_CONDITION0 scalar_condition(const GUID &field,
+                                                  std::uint16_t value) {
+    FWPM_FILTER_CONDITION0 condition{};
+    condition.fieldKey = field;
+    condition.matchType = FWP_MATCH_EQUAL;
+    condition.conditionValue.type = FWP_UINT16;
+    condition.conditionValue.uint16 = value;
+    return condition;
+  }
+
+  filter_key<Layer> key_;
+  std::wstring name_;
+  std::wstring description_;
+  std::uint8_t weight_ = 8;
+  std::uint64_t context_ = 0;
+  std::vector<FWPM_FILTER_CONDITION0> conditions_;
+};
+
+class provider_ref {
+public:
+  provider_ref(const provider_ref &) = default;
+  provider_ref &operator=(const provider_ref &) = default;
+
+private:
+  friend class policy_transaction;
+  provider_ref(provider_key key, std::uint64_t transaction) noexcept
+      : key_(key), transaction_(transaction) {}
+
+  provider_key key_;
+  std::uint64_t transaction_ = 0;
+};
+
+class sublayer_ref {
+public:
+  sublayer_ref(const sublayer_ref &) = default;
+  sublayer_ref &operator=(const sublayer_ref &) = default;
+
+private:
+  friend class policy_transaction;
+  sublayer_ref(sublayer_key key, provider_key provider,
+               std::uint64_t transaction) noexcept
+      : key_(key), provider_(provider), transaction_(transaction) {}
+
+  sublayer_key key_;
+  provider_key provider_;
+  std::uint64_t transaction_ = 0;
+};
+
+template <class Layer> class callout_ref {
+public:
+  callout_ref(const callout_ref &) = default;
+  callout_ref &operator=(const callout_ref &) = default;
+
+private:
+  friend class policy_transaction;
+  callout_ref(callout_key<Layer> key, provider_key provider,
+              std::uint64_t transaction) noexcept
+      : key_(key), provider_(provider), transaction_(transaction) {}
+
+  callout_key<Layer> key_;
+  provider_key provider_;
+  std::uint64_t transaction_ = 0;
+};
+
+/**
+ * @brief Transaction-scoped policy writer.
+ *
+ * Instances can only be created by dynamic_session::install and cannot be
+ * copied, moved, committed, or aborted by application code.
+ */
+class policy_transaction {
+public:
+  policy_transaction(const policy_transaction &) = delete;
+  policy_transaction &operator=(const policy_transaction &) = delete;
+  policy_transaction(policy_transaction &&) = delete;
+  policy_transaction &operator=(policy_transaction &&) = delete;
+
+  provider_ref add_provider(const provider_spec &spec) {
+    FWPM_PROVIDER0 provider{};
+    provider.providerKey = spec.key.native();
+    provider.displayData.name =
+        const_cast<wchar_t *>(spec.name.c_str());
+    provider.displayData.description =
+        const_cast<wchar_t *>(spec.description.c_str());
+    check(FwpmProviderAdd0(engine_, &provider, nullptr),
+          "FwpmProviderAdd0");
+    return provider_ref(spec.key, transaction_);
+  }
+
+  sublayer_ref add_sublayer(const provider_ref &owner,
+                            const sublayer_spec &spec) {
+    require_current(owner.transaction_);
+    GUID provider_key = owner.key_.native();
+    FWPM_SUBLAYER0 sublayer{};
+    sublayer.subLayerKey = spec.key.native();
+    sublayer.providerKey = &provider_key;
+    sublayer.displayData.name =
+        const_cast<wchar_t *>(spec.name.c_str());
+    sublayer.displayData.description =
+        const_cast<wchar_t *>(spec.description.c_str());
+    sublayer.weight = spec.weight;
+    check(FwpmSubLayerAdd0(engine_, &sublayer, nullptr),
+          "FwpmSubLayerAdd0");
+    return sublayer_ref(spec.key, owner.key_, transaction_);
+  }
+
+  template <class Layer>
+  callout_ref<Layer> add_callout(const provider_ref &owner,
+                                 const callout_spec<Layer> &spec) {
+    static_assert(detail::known_layer<Layer>,
+                  "unsupported ntl::wfp layer tag");
+    require_current(owner.transaction_);
+    GUID provider_key = owner.key_.native();
+    FWPM_CALLOUT0 callout{};
+    callout.calloutKey = spec.key.native();
+    callout.providerKey = &provider_key;
+    callout.displayData.name =
+        const_cast<wchar_t *>(spec.name.c_str());
+    callout.displayData.description =
+        const_cast<wchar_t *>(spec.description.c_str());
+    callout.applicableLayer = Layer::policy_key();
+    check(FwpmCalloutAdd0(engine_, &callout, nullptr, nullptr),
+          "FwpmCalloutAdd0");
+    return callout_ref<Layer>(spec.key, owner.key_, transaction_);
+  }
+
+  template <class Layer>
+  void add_filter(const sublayer_ref &sublayer,
+                  const callout_ref<Layer> &callout,
+                  filter_builder<Layer> &builder) {
+    static_assert(detail::ale_authorization_layer<Layer>,
+                  "add_filter() is limited to ALE authorization layers");
+    add_callout_filter(sublayer, callout, builder,
+                       FWP_ACTION_CALLOUT_TERMINATING,
+                       FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT);
+  }
+
+  template <class Layer>
+  void add_connect_redirect_filter(
+      const sublayer_ref &sublayer,
+      const callout_ref<Layer> &callout,
+      connect_redirect_filter_builder<Layer> &builder) {
+    static_assert(detail::connect_redirect_layer<Layer>,
+                  "add_connect_redirect_filter() requires an "
+                  "ALE_CONNECT_REDIRECT layer");
+    add_callout_filter(sublayer, callout, builder,
+                       FWP_ACTION_CALLOUT_TERMINATING,
+                       FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT);
+  }
+
+  template <class Layer>
+  void add_bind_redirect_filter(
+      const sublayer_ref &sublayer,
+      const callout_ref<Layer> &callout,
+      bind_redirect_filter_builder<Layer> &builder) {
+    static_assert(detail::bind_redirect_layer<Layer>,
+                  "add_bind_redirect_filter() requires an "
+                  "ALE_BIND_REDIRECT layer");
+    add_callout_filter(sublayer, callout, builder,
+                       FWP_ACTION_CALLOUT_TERMINATING,
+                       FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT);
+  }
+
+  template <class Layer>
+  void add_inspection_filter(
+      const sublayer_ref &sublayer, const callout_ref<Layer> &callout,
+      inspection_filter_builder<Layer> &builder) {
+    static_assert(detail::known_layer<Layer>,
+                  "unsupported ntl::wfp layer tag");
+    add_callout_filter(sublayer, callout, builder,
+                       FWP_ACTION_CALLOUT_INSPECTION, 0);
+  }
+
+  template <class Layer>
+  void add_packet_filter(const sublayer_ref &sublayer,
+                         const callout_ref<Layer> &callout,
+                         packet_filter_builder<Layer> &builder) {
+    static_assert(detail::packet_decision_layer<Layer>,
+                  "add_packet_filter() requires a packet decision layer");
+    add_callout_filter(sublayer, callout, builder,
+                       FWP_ACTION_CALLOUT_TERMINATING,
+                       FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT);
+  }
+
+  template <class Layer>
+  void add_stream_filter(const sublayer_ref &sublayer,
+                         const callout_ref<Layer> &callout,
+                         stream_filter_builder<Layer> &builder) {
+    static_assert(detail::stream_layer<Layer>,
+                  "add_stream_filter() requires a stream layer");
+    add_callout_filter(sublayer, callout, builder,
+                       FWP_ACTION_CALLOUT_TERMINATING,
+                       FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT);
+  }
+
+  template <class Layer>
+  void add_stream_control_filter(
+      const sublayer_ref &sublayer, const callout_ref<Layer> &callout,
+      stream_control_filter_builder<Layer> &builder) {
+    static_assert(detail::stream_layer<Layer>,
+                  "add_stream_control_filter() requires a stream layer");
+    add_callout_filter(sublayer, callout, builder,
+                       FWP_ACTION_CALLOUT_UNKNOWN, 0);
+  }
+
+private:
+  template <class Layer, class Builder>
+  void add_callout_filter(const sublayer_ref &sublayer,
+                          const callout_ref<Layer> &callout,
+                          Builder &builder, FWP_ACTION_TYPE action,
+                          UINT32 flags) {
+    require_current(sublayer.transaction_);
+    require_current(callout.transaction_);
+    if (!IsEqualGUID(sublayer.provider_.native(),
+                     callout.provider_.native()))
+      throw std::logic_error(
+          "WFP sublayer and callout belong to different providers");
+
+    GUID provider_key = sublayer.provider_.native();
+    FWP_VALUE0 weight{};
+    weight.type = FWP_UINT8;
+    weight.uint8 = builder.weight_;
+
+    FWPM_FILTER0 filter{};
+    filter.filterKey = builder.key_.native();
+    filter.providerKey = &provider_key;
+    filter.displayData.name =
+        const_cast<wchar_t *>(builder.name_.c_str());
+    filter.displayData.description =
+        const_cast<wchar_t *>(builder.description_.c_str());
+    filter.layerKey = Layer::policy_key();
+    filter.subLayerKey = sublayer.key_.native();
+    filter.weight = weight;
+    filter.numFilterConditions =
+        static_cast<UINT32>(builder.conditions_.size());
+    filter.filterCondition = builder.conditions_.empty()
+                                 ? nullptr
+                                 : builder.conditions_.data();
+    filter.action.type = action;
+    filter.action.calloutKey = callout.key_.native();
+    filter.rawContext = builder.context_;
+    filter.flags = flags;
+    check(FwpmFilterAdd0(engine_, &filter, nullptr, nullptr),
+          "FwpmFilterAdd0");
+  }
+
+  friend class dynamic_session;
+  policy_transaction(HANDLE engine, std::uint64_t transaction) noexcept
+      : engine_(engine), transaction_(transaction) {}
+
+  static void check(DWORD result, const char *operation) {
+    if (result != ERROR_SUCCESS)
+      throw management_error(result, operation);
+  }
+
+  void require_current(std::uint64_t transaction) const {
+    if (transaction != transaction_)
+      throw std::logic_error(
+          "WFP policy reference belongs to another transaction");
+  }
+
+  HANDLE engine_ = nullptr;
+  std::uint64_t transaction_ = 0;
+};
+
+/**
+ * @brief Move-only dynamic WFP engine session.
+ *
+ * All objects created by this session disappear when it closes, including on
+ * process failure. Policy changes can only be made through install(), which
+ * commits on normal return and aborts on every exception.
+ */
+class dynamic_session {
+public:
+  explicit dynamic_session(std::wstring name = L"ntl::wfp dynamic session") {
+    FWPM_SESSION0 session{};
+    session.displayData.name = const_cast<wchar_t *>(name.c_str());
+    session.flags = FWPM_SESSION_FLAG_DYNAMIC;
+    const DWORD result =
+        FwpmEngineOpen0(nullptr, RPC_C_AUTHN_WINNT, nullptr, &session,
+                        &engine_);
+    if (result != ERROR_SUCCESS)
+      throw management_error(result, "FwpmEngineOpen0");
+  }
+
+  dynamic_session(const dynamic_session &) = delete;
+  dynamic_session &operator=(const dynamic_session &) = delete;
+
+  dynamic_session(dynamic_session &&other) noexcept
+      : engine_(std::exchange(other.engine_, nullptr)) {}
+
+  dynamic_session &operator=(dynamic_session &&other) noexcept {
+    if (this != &other) {
+      close();
+      engine_ = std::exchange(other.engine_, nullptr);
+    }
+    return *this;
+  }
+
+  ~dynamic_session() { close(); }
+
+  template <class Function> void install(Function &&function) {
+    static_assert(
+        std::is_invocable_v<Function, policy_transaction &>,
+        "install callback must accept ntl::wfp::policy_transaction&");
+    check(FwpmTransactionBegin0(engine_, 0), "FwpmTransactionBegin0");
+
+    policy_transaction transaction(engine_, next_transaction());
+    try {
+      std::invoke(std::forward<Function>(function), transaction);
+      check(FwpmTransactionCommit0(engine_), "FwpmTransactionCommit0");
+    } catch (...) {
+      (void)FwpmTransactionAbort0(engine_);
+      throw;
+    }
+  }
+
+private:
+  static void check(DWORD result, const char *operation) {
+    if (result != ERROR_SUCCESS)
+      throw management_error(result, operation);
+  }
+
+  void close() noexcept {
+    if (engine_) {
+      (void)FwpmEngineClose0(engine_);
+      engine_ = nullptr;
+    }
+  }
+
+  static std::uint64_t next_transaction() noexcept {
+    static std::atomic<std::uint64_t> value{1};
+    return value.fetch_add(1, std::memory_order_relaxed);
+  }
+
+  HANDLE engine_ = nullptr;
+};
+
+} // namespace ntl::wfp

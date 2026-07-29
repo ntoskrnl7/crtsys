@@ -1,0 +1,681 @@
+/**
+ * @file http3_inspection_proxy
+ * @brief Transport-neutral, bounded HTTP/3 inspection proxy policy.
+ *
+ * The QUIC backend terminates TLS 1.3 and decodes HTTP/3. This layer owns
+ * pseudo-header validation, SNI/authority binding, body/header quotas,
+ * Content-Encoding decoding, typed inspection verdicts, and the requirement
+ * for an actual HTTP/3 origin leg. The origin adapter never receives an
+ * unvalidated raw request.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/http3/inspection_proxy is a user-mode header"
+#endif
+
+#include <ntl/net/inspection/content_decoder>
+#include <ntl/net/inspection/core>
+#include <ntl/result>
+#include <ntl/net/buffer/scatter_view>
+#include <ntl/status>
+
+#include <charconv>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <new>
+#include <span>
+#include <string>
+#include <string_view>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+namespace ntl::net::http3 {
+
+struct proxy_header {
+  std::string name;
+  std::string value;
+};
+
+/**
+ * @brief Raw decoded request supplied by an HTTP/3 server backend.
+ *
+ * headers still contains the HTTP/3 pseudo-fields. inspection_proxy validates
+ * their order and uniqueness before constructing origin_request.
+ */
+struct incoming_request {
+  std::string server_name;
+  std::vector<proxy_header> headers;
+  std::vector<std::byte> body;
+};
+
+/**
+ * @brief Validated request visible to policy and the origin transport.
+ */
+struct origin_request {
+  std::string server_name;
+  std::string method;
+  std::string scheme;
+  std::string authority;
+  std::string path;
+  std::vector<proxy_header> headers;
+  std::vector<std::byte> body;
+};
+
+struct origin_response {
+  unsigned status = 0;
+  std::vector<proxy_header> headers;
+  std::vector<std::byte> body;
+  std::string negotiated_protocol;
+};
+
+/**
+ * @brief Sends only a request already validated by inspection_proxy.
+ *
+ * Implementations validate origin trust normally and report the actual
+ * negotiated application protocol. send() can be called concurrently.
+ */
+class origin_transport {
+public:
+  virtual ~origin_transport() = default;
+  virtual ntl::result<origin_response>
+  send(const origin_request &request) noexcept = 0;
+};
+
+struct proxy_limits {
+  std::size_t maximum_request_headers = 128;
+  std::size_t maximum_request_header_bytes = 32 * 1024;
+  std::size_t maximum_request_body_bytes = 2 * 1024 * 1024;
+  std::size_t maximum_response_headers = 256;
+  std::size_t maximum_response_header_bytes = 48 * 1024;
+  std::size_t maximum_response_body_bytes = 4 * 1024 * 1024;
+  std::size_t maximum_decoded_body_bytes = 4 * 1024 * 1024;
+  std::size_t maximum_expansion_ratio = 64;
+  std::size_t maximum_coding_layers = 4;
+  bool require_http3_origin = true;
+};
+
+struct request_view {
+  const origin_request &message;
+  std::string_view content_type;
+  std::string_view content_encoding;
+  std::span<const std::byte> decoded_body;
+};
+
+struct response_view {
+  const origin_request &request;
+  const origin_response &message;
+  std::string_view content_type;
+  std::string_view content_encoding;
+  std::span<const std::byte> decoded_body;
+};
+
+/**
+ * @brief Synchronous policy invoked after all structural checks and decoding.
+ *
+ * The views have callback lifetime. Implementations used by a concurrent
+ * server must be thread-safe. A block or invalid verdict is fail-closed.
+ */
+class inspection_policy {
+public:
+  virtual ~inspection_policy() = default;
+
+  virtual ntl::net::inspection::verdict inspect_request(
+      const request_view &) noexcept {
+    return ntl::net::inspection::verdict::permit;
+  }
+
+  virtual ntl::net::inspection::verdict inspect_response(
+      const response_view &response) noexcept = 0;
+
+  virtual void on_failure(NTSTATUS) noexcept {}
+};
+
+class permit_all_policy final : public inspection_policy {
+public:
+  ntl::net::inspection::verdict inspect_response(
+      const response_view &) noexcept override {
+    return ntl::net::inspection::verdict::permit;
+  }
+};
+
+template <class Function>
+class functional_origin_transport final
+    : public origin_transport {
+public:
+  explicit functional_origin_transport(Function function)
+      : function_(std::move(function)) {}
+
+  ntl::result<origin_response>
+  send(const origin_request &request) noexcept override {
+    try {
+      return function_(request);
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(
+          STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(
+          STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+private:
+  Function function_;
+};
+
+template <class Function>
+auto make_origin_transport(Function &&function) {
+  return functional_origin_transport<
+      std::decay_t<Function>>(
+      std::forward<Function>(function));
+}
+
+template <class RequestFunction, class ResponseFunction>
+class functional_inspection_policy final
+    : public inspection_policy {
+public:
+  functional_inspection_policy(
+      RequestFunction request,
+      ResponseFunction response)
+      : request_(std::move(request)),
+        response_(std::move(response)) {}
+
+  ntl::net::inspection::verdict inspect_request(
+      const request_view &request) noexcept override {
+    try {
+      return static_cast<ntl::net::inspection::verdict>(
+          request_(request));
+    } catch (...) {
+      return ntl::net::inspection::verdict::block;
+    }
+  }
+
+  ntl::net::inspection::verdict inspect_response(
+      const response_view &response) noexcept override {
+    try {
+      return static_cast<ntl::net::inspection::verdict>(
+          response_(response));
+    } catch (...) {
+      return ntl::net::inspection::verdict::block;
+    }
+  }
+
+private:
+  RequestFunction request_;
+  ResponseFunction response_;
+};
+
+template <class RequestFunction, class ResponseFunction>
+auto make_inspection_policy(
+    RequestFunction &&request,
+    ResponseFunction &&response) {
+  return functional_inspection_policy<
+      std::decay_t<RequestFunction>,
+      std::decay_t<ResponseFunction>>(
+      std::forward<RequestFunction>(request),
+      std::forward<ResponseFunction>(response));
+}
+
+namespace inspection_proxy_detail {
+
+inline bool ascii_equal_ci(
+    std::string_view left,
+    std::string_view right) noexcept {
+  if (left.size() != right.size())
+    return false;
+  for (std::size_t index = 0; index != left.size(); ++index) {
+    const auto lower = [](unsigned char value) noexcept {
+      return value >= 'A' && value <= 'Z'
+                 ? static_cast<unsigned char>(
+                       value + ('a' - 'A'))
+                 : value;
+    };
+    if (lower(static_cast<unsigned char>(left[index])) !=
+        lower(static_cast<unsigned char>(right[index])))
+      return false;
+  }
+  return true;
+}
+
+inline bool is_ascii_dns_name(
+    std::string_view name) noexcept {
+  if (name.empty() || name.size() > 253 ||
+      name.front() == '.' || name.back() == '.')
+    return false;
+  std::size_t label_size = 0;
+  for (const unsigned char character : name) {
+    if (character == '.') {
+      if (label_size == 0 || label_size > 63)
+        return false;
+      label_size = 0;
+      continue;
+    }
+    const bool valid =
+        (character >= 'a' && character <= 'z') ||
+        (character >= 'A' && character <= 'Z') ||
+        (character >= '0' && character <= '9') ||
+        character == '-';
+    if (!valid)
+      return false;
+    ++label_size;
+  }
+  return label_size != 0 && label_size <= 63;
+}
+
+inline bool is_token(std::string_view value) noexcept {
+  if (value.empty())
+    return false;
+  for (const unsigned char character : value) {
+    const bool valid =
+        (character >= 'A' && character <= 'Z') ||
+        (character >= 'a' && character <= 'z') ||
+        (character >= '0' && character <= '9') ||
+        std::string_view("!#$%&'*+-.^_`|~").find(
+            static_cast<char>(character)) !=
+            std::string_view::npos;
+    if (!valid)
+      return false;
+  }
+  return true;
+}
+
+inline bool is_lowercase_header_name(
+    std::string_view name) noexcept {
+  if (name.empty())
+    return false;
+  for (const unsigned char character : name) {
+    const bool valid =
+        (character >= 'a' && character <= 'z') ||
+        (character >= '0' && character <= '9') ||
+        std::string_view("!#$%&'*+-.^_`|~").find(
+            static_cast<char>(character)) !=
+            std::string_view::npos;
+    if (!valid)
+      return false;
+  }
+  return true;
+}
+
+inline bool forbidden_connection_header(
+    std::string_view name) noexcept {
+  return name == "connection" ||
+         name == "keep-alive" ||
+         name == "proxy-connection" ||
+         name == "transfer-encoding" ||
+         name == "upgrade" || name == "host";
+}
+
+inline ntl::result<std::size_t>
+parse_content_length(std::string_view value) noexcept {
+  std::size_t parsed = 0;
+  const auto converted = std::from_chars(
+      value.data(), value.data() + value.size(), parsed);
+  if (value.empty() || converted.ec != std::errc{} ||
+      converted.ptr != value.data() + value.size())
+    return ntl::unexpected(STATUS_DATA_ERROR);
+  return ntl::ok(parsed);
+}
+
+struct message_metadata {
+  std::string content_type;
+  std::string content_encoding;
+};
+
+inline ntl::result<message_metadata>
+metadata_from_headers(
+    const std::vector<proxy_header> &headers) noexcept {
+  try {
+    message_metadata result;
+    bool content_type_seen = false;
+    for (const auto &field : headers) {
+      if (field.name == "content-type") {
+        if (content_type_seen)
+          return ntl::unexpected(STATUS_DATA_ERROR);
+        result.content_type = field.value;
+        content_type_seen = true;
+      } else if (field.name == "content-encoding") {
+        if (!result.content_encoding.empty())
+          result.content_encoding.append(", ");
+        result.content_encoding.append(field.value);
+      }
+    }
+    return ntl::ok(std::move(result));
+  } catch (const std::bad_alloc &) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+}
+
+inline ntl::status verdict_status(
+    ntl::net::inspection::verdict verdict) noexcept {
+  switch (verdict) {
+  case ntl::net::inspection::verdict::permit:
+    return ntl::status::ok();
+  case ntl::net::inspection::verdict::block:
+    return STATUS_ACCESS_DENIED;
+  case ntl::net::inspection::verdict::drop_flow:
+    return STATUS_CONNECTION_ABORTED;
+  default:
+    return STATUS_INVALID_PARAMETER;
+  }
+}
+
+} // namespace inspection_proxy_detail
+
+/**
+ * @brief Bounded HTTP/3 request, origin, decoding, and verdict composition.
+ *
+ * The decoder registry must not be mutated while forward() is active.
+ * origin_transport and inspection_policy are non-owning and may be invoked
+ * concurrently.
+ */
+class inspection_proxy {
+public:
+  inspection_proxy(
+      origin_transport &origin,
+      inspection_policy &policy,
+      const ntl::net::inspection::content_decoder_registry &decoders,
+      proxy_limits limits = {}) noexcept
+      : origin_(&origin),
+        policy_(&policy),
+        decoders_(&decoders),
+        limits_(limits) {}
+
+  inspection_proxy(const inspection_proxy &) = delete;
+  inspection_proxy &
+  operator=(const inspection_proxy &) = delete;
+
+  ntl::result<origin_response>
+  forward(incoming_request incoming) const noexcept {
+    if (!valid_limits())
+      return fail(STATUS_INVALID_PARAMETER);
+    try {
+      auto parsed = validate_request(std::move(incoming));
+      if (!parsed)
+        return fail(
+            static_cast<NTSTATUS>(parsed.status()));
+      origin_request request = std::move(*parsed);
+
+      auto request_metadata =
+          inspection_proxy_detail::metadata_from_headers(
+              request.headers);
+      if (!request_metadata)
+        return fail(static_cast<NTSTATUS>(
+            request_metadata.status()));
+      std::vector<std::byte> decoded_request_storage;
+      auto decoded_request = decode_body(
+          request.body, request_metadata->content_encoding,
+          limits_.maximum_request_body_bytes,
+          decoded_request_storage);
+      if (!decoded_request)
+        return fail(
+            static_cast<NTSTATUS>(decoded_request.status()));
+      const ntl::status request_verdict =
+          inspection_proxy_detail::verdict_status(
+              policy_->inspect_request(
+                  {request,
+                   request_metadata->content_type,
+                   request_metadata->content_encoding,
+                   *decoded_request}));
+      if (!request_verdict.is_ok())
+        return fail(
+            static_cast<NTSTATUS>(request_verdict));
+
+      auto received = origin_->send(request);
+      if (!received)
+        return fail(
+            static_cast<NTSTATUS>(received.status()));
+      origin_response response = std::move(*received);
+      const ntl::status response_valid =
+          validate_response(response);
+      if (!response_valid.is_ok())
+        return fail(
+            static_cast<NTSTATUS>(response_valid));
+
+      auto response_metadata =
+          inspection_proxy_detail::metadata_from_headers(
+              response.headers);
+      if (!response_metadata)
+        return fail(static_cast<NTSTATUS>(
+            response_metadata.status()));
+      std::vector<std::byte> decoded_response_storage;
+      auto decoded_response = decode_body(
+          response.body,
+          response_metadata->content_encoding,
+          limits_.maximum_response_body_bytes,
+          decoded_response_storage);
+      if (!decoded_response)
+        return fail(static_cast<NTSTATUS>(
+            decoded_response.status()));
+      const ntl::status response_verdict =
+          inspection_proxy_detail::verdict_status(
+              policy_->inspect_response(
+                  {request, response,
+                   response_metadata->content_type,
+                   response_metadata->content_encoding,
+                   *decoded_response}));
+      if (!response_verdict.is_ok())
+        return fail(
+            static_cast<NTSTATUS>(response_verdict));
+      return ntl::ok(std::move(response));
+    } catch (const std::bad_alloc &) {
+      return fail(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return fail(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+private:
+  bool valid_limits() const noexcept {
+    return origin_ && policy_ && decoders_ &&
+           limits_.maximum_request_headers != 0 &&
+           limits_.maximum_request_header_bytes != 0 &&
+           limits_.maximum_request_body_bytes != 0 &&
+           limits_.maximum_response_headers != 0 &&
+           limits_.maximum_response_header_bytes != 0 &&
+           limits_.maximum_response_body_bytes != 0 &&
+           limits_.maximum_decoded_body_bytes != 0 &&
+           limits_.maximum_expansion_ratio != 0 &&
+           limits_.maximum_coding_layers != 0;
+  }
+
+  ntl::result<origin_request>
+  validate_request(incoming_request incoming) const noexcept {
+    using namespace inspection_proxy_detail;
+    try {
+      if (!is_ascii_dns_name(incoming.server_name) ||
+          incoming.headers.size() >
+              limits_.maximum_request_headers ||
+          incoming.body.size() >
+              limits_.maximum_request_body_bytes)
+        return ntl::unexpected(STATUS_INVALID_PARAMETER);
+
+      origin_request result;
+      result.server_name = std::move(incoming.server_name);
+      result.body = std::move(incoming.body);
+      result.headers.reserve(incoming.headers.size());
+      bool method_seen = false;
+      bool scheme_seen = false;
+      bool authority_seen = false;
+      bool path_seen = false;
+      bool ordinary_seen = false;
+      bool content_length_seen = false;
+      std::size_t header_bytes = 0;
+
+      for (auto &field : incoming.headers) {
+        if (field.name.size() >
+                limits_.maximum_request_header_bytes -
+                    header_bytes ||
+            field.value.size() >
+                limits_.maximum_request_header_bytes -
+                    header_bytes - field.name.size())
+          return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+        header_bytes +=
+            field.name.size() + field.value.size();
+        if (field.value.find_first_of("\r\n") !=
+            std::string::npos)
+          return ntl::unexpected(STATUS_DATA_ERROR);
+
+        if (!field.name.empty() &&
+            field.name.front() == ':') {
+          if (ordinary_seen)
+            return ntl::unexpected(STATUS_DATA_ERROR);
+          if (field.name == ":method" && !method_seen) {
+            result.method = std::move(field.value);
+            method_seen = true;
+          } else if (
+              field.name == ":scheme" && !scheme_seen) {
+            result.scheme = std::move(field.value);
+            scheme_seen = true;
+          } else if (
+              field.name == ":authority" &&
+              !authority_seen) {
+            result.authority = std::move(field.value);
+            authority_seen = true;
+          } else if (
+              field.name == ":path" && !path_seen) {
+            result.path = std::move(field.value);
+            path_seen = true;
+          } else {
+            return ntl::unexpected(STATUS_DATA_ERROR);
+          }
+          continue;
+        }
+
+        ordinary_seen = true;
+        if (!is_lowercase_header_name(field.name) ||
+            forbidden_connection_header(field.name))
+          return ntl::unexpected(STATUS_DATA_ERROR);
+        if (field.name == "content-length") {
+          if (content_length_seen)
+            return ntl::unexpected(STATUS_DATA_ERROR);
+          auto length = parse_content_length(field.value);
+          if (!length || *length != result.body.size())
+            return ntl::unexpected(STATUS_DATA_ERROR);
+          content_length_seen = true;
+        }
+        result.headers.push_back(std::move(field));
+      }
+
+      const bool authority_matches =
+          ascii_equal_ci(
+              result.authority, result.server_name) ||
+          ascii_equal_ci(
+              result.authority,
+              result.server_name + ":443");
+      if (!method_seen || !scheme_seen ||
+          !authority_seen || !path_seen ||
+          !is_token(result.method) ||
+          result.method == "CONNECT" ||
+          !ascii_equal_ci(result.scheme, "https") ||
+          !authority_matches || result.path.empty() ||
+          result.path.front() != '/' ||
+          result.path.find_first_of("\r\n") !=
+              std::string::npos)
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      return ntl::ok(std::move(result));
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(
+          STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(
+          STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+  ntl::status validate_response(
+      const origin_response &response) const noexcept {
+    using namespace inspection_proxy_detail;
+    if (response.status < 100 || response.status > 999 ||
+        response.headers.size() >
+            limits_.maximum_response_headers ||
+        response.body.size() >
+            limits_.maximum_response_body_bytes ||
+        response.negotiated_protocol.empty() ||
+        (limits_.require_http3_origin &&
+         response.negotiated_protocol != "h3"))
+      return STATUS_DATA_ERROR;
+
+    std::size_t header_bytes = 0;
+    bool content_length_seen = false;
+    for (const auto &field : response.headers) {
+      if (field.name.size() >
+              limits_.maximum_response_header_bytes -
+                  header_bytes ||
+          field.value.size() >
+              limits_.maximum_response_header_bytes -
+                  header_bytes - field.name.size())
+        return STATUS_BUFFER_OVERFLOW;
+      header_bytes +=
+          field.name.size() + field.value.size();
+      if (!is_lowercase_header_name(field.name) ||
+          field.name.front() == ':' ||
+          forbidden_connection_header(field.name) ||
+          field.value.find_first_of("\r\n") !=
+              std::string::npos)
+        return STATUS_DATA_ERROR;
+      if (field.name == "content-length") {
+        if (content_length_seen)
+          return STATUS_DATA_ERROR;
+        auto length = parse_content_length(field.value);
+        if (!length || *length != response.body.size())
+          return STATUS_DATA_ERROR;
+        content_length_seen = true;
+      }
+    }
+    return ntl::status::ok();
+  }
+
+  ntl::result<std::span<const std::byte>>
+  decode_body(
+      const std::vector<std::byte> &body,
+      std::string_view content_encoding,
+      std::size_t maximum_encoded_size,
+      std::vector<std::byte> &storage) const noexcept {
+    using inspection_proxy_detail::ascii_equal_ci;
+    if (content_encoding.empty() ||
+        ascii_equal_ci(content_encoding, "identity"))
+      return ntl::ok(
+          std::span<const std::byte>(body));
+
+    auto decoded =
+        ntl::net::inspection::decode_content_encoding(
+            *decoders_,
+            ntl::net::scatter_view::from_contiguous(
+                std::span<const std::byte>(body)),
+            content_encoding,
+            {.maximum_encoded_size =
+                 maximum_encoded_size,
+             .maximum_decoded_size =
+                 limits_.maximum_decoded_body_bytes,
+             .maximum_expansion_ratio =
+                 limits_.maximum_expansion_ratio,
+             .maximum_coding_layers =
+                 limits_.maximum_coding_layers});
+    if (!decoded)
+      return ntl::unexpected(decoded.status());
+    storage = std::move(*decoded);
+    return ntl::ok(
+        std::span<const std::byte>(storage));
+  }
+
+  ntl::result<origin_response>
+  fail(NTSTATUS status) const noexcept {
+    if (policy_)
+      policy_->on_failure(status);
+    return ntl::unexpected(status);
+  }
+
+  origin_transport *origin_ = nullptr;
+  inspection_policy *policy_ = nullptr;
+  const ntl::net::inspection::content_decoder_registry
+      *decoders_ = nullptr;
+  proxy_limits limits_{};
+};
+
+} // namespace ntl::net::http3

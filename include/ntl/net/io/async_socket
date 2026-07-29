@@ -1,0 +1,478 @@
+/**
+ * @file async_socket
+ * @brief IOCP-backed user-mode coroutine socket operations.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/io/async_socket is a user-mode header"
+#endif
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <windows.h>
+
+#if !defined(__cpp_impl_coroutine) || __cpp_impl_coroutine < 201902L
+#error "ntl/net/io/async_socket requires C++20 coroutine support"
+#endif
+
+#include <algorithm>
+#include <atomic>
+#include <condition_variable>
+#include <coroutine>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <mutex>
+#include <span>
+#include <system_error>
+#include <thread>
+#include <utility>
+
+namespace ntl::net {
+
+template <class Framer> class async_framed_stream;
+
+namespace detail {
+
+struct iocp_operation {
+  OVERLAPPED overlapped{};
+  void *owner = nullptr;
+  void (*complete)(void *, DWORD, DWORD) noexcept = nullptr;
+};
+
+static_assert(offsetof(iocp_operation, overlapped) == 0);
+
+} // namespace detail
+
+/**
+ * @brief Owns one IO completion port and its coroutine-resume worker.
+ *
+ * Socket completion continuations run on the worker thread. Sockets and their
+ * owning tasks must be cancelled and drained before this context is destroyed.
+ */
+class io_completion_context {
+public:
+  io_completion_context() {
+    port_ = ::CreateIoCompletionPort(
+        INVALID_HANDLE_VALUE, nullptr, 0, 0);
+    if (!port_)
+      throw std::system_error(
+          static_cast<int>(::GetLastError()), std::system_category(),
+          "CreateIoCompletionPort");
+
+    try {
+      worker_ = std::thread([this] { run(); });
+    } catch (...) {
+      (void)::CloseHandle(port_);
+      port_ = nullptr;
+      throw;
+    }
+  }
+
+  io_completion_context(const io_completion_context &) = delete;
+  io_completion_context &
+  operator=(const io_completion_context &) = delete;
+  io_completion_context(io_completion_context &&) = delete;
+  io_completion_context &operator=(io_completion_context &&) = delete;
+
+  ~io_completion_context() {
+    {
+      std::unique_lock lock(lifecycle_lock_);
+      stopping_ = true;
+      idle_.wait(lock, [this] { return outstanding_ == 0; });
+    }
+
+    if (port_)
+      (void)::PostQueuedCompletionStatus(port_, 0, 0, nullptr);
+    if (worker_.joinable())
+      worker_.join();
+    if (port_)
+      (void)::CloseHandle(port_);
+  }
+
+  void associate(SOCKET socket) {
+    if (socket == INVALID_SOCKET)
+      throw std::system_error(
+          WSAENOTSOCK, std::system_category(),
+          "IOCP socket association");
+
+    {
+      std::lock_guard lock(lifecycle_lock_);
+      if (stopping_)
+        throw std::system_error(
+            ERROR_OPERATION_ABORTED, std::system_category(),
+            "IOCP context is stopping");
+    }
+
+    const HANDLE handle =
+        reinterpret_cast<HANDLE>(static_cast<UINT_PTR>(socket));
+    if (!::CreateIoCompletionPort(handle, port_, 0, 0))
+      throw std::system_error(
+          static_cast<int>(::GetLastError()), std::system_category(),
+          "CreateIoCompletionPort(socket)");
+  }
+
+  void wait_for_idle() {
+    std::unique_lock lock(lifecycle_lock_);
+    idle_.wait(lock, [this] { return outstanding_ == 0; });
+  }
+
+  std::size_t outstanding_operations() const noexcept {
+    std::lock_guard lock(lifecycle_lock_);
+    return outstanding_;
+  }
+
+private:
+  friend class detail_socket_operation;
+  template <class> friend class async_framed_stream;
+
+  bool begin_operation() noexcept {
+    std::lock_guard lock(lifecycle_lock_);
+    if (stopping_)
+      return false;
+    ++outstanding_;
+    return true;
+  }
+
+  void end_operation() noexcept {
+    std::lock_guard lock(lifecycle_lock_);
+    if (outstanding_ != 0)
+      --outstanding_;
+    if (outstanding_ == 0)
+      idle_.notify_all();
+  }
+
+  void run() noexcept {
+    for (;;) {
+      DWORD transferred = 0;
+      ULONG_PTR key = 0;
+      OVERLAPPED *overlapped = nullptr;
+      const BOOL succeeded = ::GetQueuedCompletionStatus(
+          port_, &transferred, &key, &overlapped, INFINITE);
+      (void)key;
+
+      if (!overlapped)
+        break;
+
+      const DWORD error =
+          succeeded ? ERROR_SUCCESS : ::GetLastError();
+      auto *operation =
+          reinterpret_cast<detail::iocp_operation *>(overlapped);
+      if (operation->complete)
+        operation->complete(operation->owner, transferred, error);
+    }
+  }
+
+  HANDLE port_ = nullptr;
+  std::thread worker_;
+  mutable std::mutex lifecycle_lock_;
+  std::condition_variable idle_;
+  std::size_t outstanding_ = 0;
+  bool stopping_ = false;
+};
+
+/**
+ * @brief Awaiter for one or more overlapped stream-socket transfers.
+ */
+class detail_socket_operation {
+public:
+  enum class transfer_kind {
+    read_some,
+    read_exactly,
+    write_all,
+  };
+
+  detail_socket_operation(io_completion_context *context, SOCKET socket,
+                          std::span<std::byte> bytes,
+                          transfer_kind kind) noexcept
+      : context_(context), socket_(socket), data_(bytes.data()),
+        size_(bytes.size()), kind_(kind) {
+    native_.owner = this;
+    native_.complete = &detail_socket_operation::completed;
+  }
+
+  detail_socket_operation(io_completion_context *context, SOCKET socket,
+                          std::span<const std::byte> bytes,
+                          transfer_kind kind) noexcept
+      : context_(context), socket_(socket),
+        data_(const_cast<std::byte *>(bytes.data())), size_(bytes.size()),
+        kind_(kind) {
+    native_.owner = this;
+    native_.complete = &detail_socket_operation::completed;
+  }
+
+  detail_socket_operation(const detail_socket_operation &) = delete;
+  detail_socket_operation &
+  operator=(const detail_socket_operation &) = delete;
+  detail_socket_operation(detail_socket_operation &&) = delete;
+  detail_socket_operation &
+  operator=(detail_socket_operation &&) = delete;
+
+  bool await_ready() noexcept {
+    if (size_ == 0) {
+      error_ = ERROR_SUCCESS;
+      return true;
+    }
+    if (!context_ || socket_ == INVALID_SOCKET) {
+      error_ = WSAENOTSOCK;
+      return true;
+    }
+    return false;
+  }
+
+  bool await_suspend(std::coroutine_handle<> continuation) noexcept {
+    continuation_ = continuation;
+    if (!context_->begin_operation()) {
+      error_ = ERROR_OPERATION_ABORTED;
+      return false;
+    }
+    counted_ = true;
+
+    if (!submit()) {
+      counted_ = false;
+      context_->end_operation();
+      return false;
+    }
+
+    const phase previous =
+        phase_.exchange(phase::suspended, std::memory_order_acq_rel);
+    return previous != phase::completed;
+  }
+
+  std::size_t await_resume() {
+    if (error_ != ERROR_SUCCESS)
+      throw std::system_error(
+          static_cast<int>(error_), std::system_category(),
+          operation_name());
+    return transferred_;
+  }
+
+private:
+  enum class phase : std::uint8_t {
+    submitting,
+    suspended,
+    completed,
+  };
+
+  const char *operation_name() const noexcept {
+    switch (kind_) {
+    case transfer_kind::read_some:
+      return "WSARecv(read_some)";
+    case transfer_kind::read_exactly:
+      return "WSARecv(read_exactly)";
+    case transfer_kind::write_all:
+      return "WSASend(write_all)";
+    }
+    return "overlapped socket operation";
+  }
+
+  bool submit() noexcept {
+    native_.overlapped = {};
+    const std::size_t remaining = size_ - transferred_;
+    const ULONG request = static_cast<ULONG>((std::min)(
+        remaining,
+        static_cast<std::size_t>(
+            (std::numeric_limits<ULONG>::max)())));
+    WSABUF buffer{};
+    buffer.buf = reinterpret_cast<char *>(data_ + transferred_);
+    buffer.len = request;
+
+    DWORD ignored = 0;
+    int result = 0;
+    if (kind_ == transfer_kind::write_all) {
+      result = ::WSASend(socket_, &buffer, 1, &ignored, 0,
+                         &native_.overlapped, nullptr);
+    } else {
+      receive_flags_ = 0;
+      result = ::WSARecv(socket_, &buffer, 1, &ignored,
+                         &receive_flags_, &native_.overlapped, nullptr);
+    }
+
+    if (result == 0)
+      return true;
+    const DWORD error = static_cast<DWORD>(::WSAGetLastError());
+    if (error == WSA_IO_PENDING)
+      return true;
+    error_ = error;
+    return false;
+  }
+
+  static void completed(void *owner, DWORD transferred,
+                        DWORD error) noexcept {
+    static_cast<detail_socket_operation *>(owner)->on_completed(
+        transferred, error);
+  }
+
+  void on_completed(DWORD transferred, DWORD error) noexcept {
+    if (error != ERROR_SUCCESS) {
+      finish(error);
+      return;
+    }
+
+    if (transferred == 0) {
+      if (kind_ == transfer_kind::read_some) {
+        finish(ERROR_SUCCESS);
+      } else if (kind_ == transfer_kind::read_exactly) {
+        finish(ERROR_HANDLE_EOF);
+      } else {
+        finish(WSAECONNABORTED);
+      }
+      return;
+    }
+
+    transferred_ += transferred;
+    if (kind_ == transfer_kind::read_some ||
+        transferred_ == size_) {
+      finish(ERROR_SUCCESS);
+      return;
+    }
+
+    if (!submit())
+      finish(error_);
+  }
+
+  void finish(DWORD error) noexcept {
+    error_ = error;
+    if (counted_) {
+      counted_ = false;
+      context_->end_operation();
+    }
+
+    const phase previous =
+        phase_.exchange(phase::completed, std::memory_order_acq_rel);
+    if (previous == phase::suspended && continuation_)
+      continuation_.resume();
+  }
+
+  detail::iocp_operation native_{};
+  io_completion_context *context_ = nullptr;
+  SOCKET socket_ = INVALID_SOCKET;
+  std::byte *data_ = nullptr;
+  std::size_t size_ = 0;
+  std::size_t transferred_ = 0;
+  transfer_kind kind_ = transfer_kind::read_some;
+  std::atomic<phase> phase_{phase::submitting};
+  std::coroutine_handle<> continuation_{};
+  DWORD receive_flags_ = 0;
+  DWORD error_ = ERROR_IO_PENDING;
+  bool counted_ = false;
+};
+
+/**
+ * @brief Move-only overlapped socket associated with an IOCP context.
+ */
+class async_socket {
+public:
+  async_socket() noexcept = default;
+
+  async_socket(io_completion_context &context, SOCKET socket)
+      : context_(&context), socket_(socket) {
+    if (socket_ == INVALID_SOCKET)
+      throw std::system_error(
+          WSAENOTSOCK, std::system_category(), "async_socket");
+    try {
+      context_->associate(socket_);
+    } catch (...) {
+      (void)::closesocket(socket_);
+      socket_ = INVALID_SOCKET;
+      context_ = nullptr;
+      throw;
+    }
+  }
+
+  async_socket(const async_socket &) = delete;
+  async_socket &operator=(const async_socket &) = delete;
+
+  async_socket(async_socket &&other) noexcept
+      : context_(nullptr), socket_(INVALID_SOCKET) {
+    std::lock_guard lock(other.socket_lock_);
+    context_ = std::exchange(other.context_, nullptr);
+    socket_ = std::exchange(other.socket_, INVALID_SOCKET);
+  }
+
+  async_socket &operator=(async_socket &&other) noexcept {
+    if (this != &other) {
+      std::scoped_lock lock(socket_lock_, other.socket_lock_);
+      const SOCKET previous =
+          std::exchange(socket_, INVALID_SOCKET);
+      context_ = nullptr;
+      if (previous != INVALID_SOCKET)
+        (void)::closesocket(previous);
+      context_ = std::exchange(other.context_, nullptr);
+      socket_ = std::exchange(other.socket_, INVALID_SOCKET);
+    }
+    return *this;
+  }
+
+  ~async_socket() { close(); }
+
+  explicit operator bool() const noexcept {
+    std::lock_guard lock(socket_lock_);
+    return context_ && socket_ != INVALID_SOCKET;
+  }
+
+  SOCKET native_handle() const noexcept {
+    std::lock_guard lock(socket_lock_);
+    return socket_;
+  }
+
+  detail_socket_operation
+  read_some(std::span<std::byte> destination) noexcept {
+    std::lock_guard lock(socket_lock_);
+    return detail_socket_operation(
+        context_, socket_, destination,
+        detail_socket_operation::transfer_kind::read_some);
+  }
+
+  detail_socket_operation
+  read_exactly(std::span<std::byte> destination) noexcept {
+    std::lock_guard lock(socket_lock_);
+    return detail_socket_operation(
+        context_, socket_, destination,
+        detail_socket_operation::transfer_kind::read_exactly);
+  }
+
+  detail_socket_operation
+  write_all(std::span<const std::byte> source) noexcept {
+    std::lock_guard lock(socket_lock_);
+    return detail_socket_operation(
+        context_, socket_, source,
+        detail_socket_operation::transfer_kind::write_all);
+  }
+
+  bool cancel() noexcept {
+    std::lock_guard lock(socket_lock_);
+    if (socket_ == INVALID_SOCKET)
+      return false;
+    const HANDLE handle =
+        reinterpret_cast<HANDLE>(static_cast<UINT_PTR>(socket_));
+    if (::CancelIoEx(handle, nullptr))
+      return true;
+    return ::GetLastError() == ERROR_NOT_FOUND;
+  }
+
+  void close() noexcept {
+    SOCKET socket = INVALID_SOCKET;
+    {
+      std::lock_guard lock(socket_lock_);
+      socket = std::exchange(socket_, INVALID_SOCKET);
+      context_ = nullptr;
+    }
+    if (socket != INVALID_SOCKET)
+      (void)::closesocket(socket);
+  }
+
+private:
+  template <class> friend class async_framed_stream;
+
+  mutable std::mutex socket_lock_;
+  io_completion_context *context_ = nullptr;
+  SOCKET socket_ = INVALID_SOCKET;
+};
+
+} // namespace ntl::net

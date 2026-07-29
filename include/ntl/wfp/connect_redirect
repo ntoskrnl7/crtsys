@@ -1,0 +1,548 @@
+/**
+ * @file connect_redirect
+ * @brief Safe WFP connect-redirection and user-mode proxy handoff.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <mstcpip.h>
+#include <limits>
+#include <stdexcept>
+#include <system_error>
+#include <vector>
+#endif
+
+#include "layers"
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#include "../pool_allocator"
+#include "../result"
+#include "classify"
+#endif
+
+#include <cstddef>
+#include <cstdint>
+#include <array>
+#include <type_traits>
+#include <utility>
+
+namespace ntl::wfp {
+
+/**
+ * @brief Whether WFP should retain a proxy's original-destination blob.
+ */
+enum class original_destination_context : std::uint8_t {
+  preserve,
+  omit,
+};
+
+/**
+ * @brief A localhost proxy selected by a redirect filter.
+ *
+ * The port is in host byte order. Both values must be nonzero.
+ */
+struct local_proxy_target {
+  std::uint32_t process_id = 0;
+  std::uint16_t port = 0;
+  /**
+   * Keep this enabled when the proxy will query the original destination
+   * through SIO_QUERY_WFP_CONNECTION_REDIRECT_CONTEXT. An explicit managed
+   * endpoint that already owns the authority may disable it, avoiding a
+   * flow-lifetime allocation that WFP would otherwise own until teardown.
+   */
+  original_destination_context context =
+      original_destination_context::preserve;
+
+  constexpr bool valid() const noexcept {
+    return process_id != 0 && port != 0;
+  }
+
+  constexpr std::uint64_t filter_context() const noexcept {
+    constexpr std::uint64_t no_redirect_context = 1ull << 63;
+    const std::uint64_t target =
+        (static_cast<std::uint64_t>(process_id) << 16) |
+        static_cast<std::uint64_t>(port);
+    return context == original_destination_context::preserve
+               ? target
+               : target | no_redirect_context;
+  }
+
+  static constexpr local_proxy_target
+  from_filter_context(std::uint64_t value) noexcept {
+    constexpr std::uint64_t no_redirect_context = 1ull << 63;
+    return {
+        static_cast<std::uint32_t>((value >> 16) & 0xffffffffu),
+        static_cast<std::uint16_t>(value & 0xffffu),
+        (value & no_redirect_context) == 0
+            ? original_destination_context::preserve
+            : original_destination_context::omit,
+    };
+  }
+};
+
+/**
+ * @brief New IPv4 bind identity for ALE bind redirection.
+ *
+ * Address and port are in host byte order. A zero address selects INADDR_ANY;
+ * a zero port requests an ephemeral port. The reservation token is optional.
+ */
+struct local_bind_target_v4 {
+  std::uint32_t address = 0;
+  std::uint16_t port = 0;
+  std::uint64_t port_reservation_token = 0;
+};
+
+/**
+ * @brief New IPv6 bind identity for ALE bind redirection.
+ *
+ * Address bytes are in network order. A zero address selects in6addr_any; a
+ * zero port requests an ephemeral port. The reservation token is optional.
+ */
+struct local_bind_target_v6 {
+  std::array<std::uint8_t, 16> address{};
+  std::uint32_t scope_id = 0;
+  std::uint16_t port = 0;
+  std::uint64_t port_reservation_token = 0;
+};
+
+/**
+ * @brief Opaque nonzero selector carried from one bind filter to its callout.
+ *
+ * A selector identifies driver-owned bind policy; it is deliberately not a
+ * serialized sockaddr. This keeps IPv6 addresses and port-reservation tokens
+ * out of the 64-bit native filter context and prevents user mode from
+ * manufacturing a partial bind target.
+ */
+struct bind_redirect_selector {
+  std::uint64_t value = 0;
+
+  constexpr bool valid() const noexcept { return value != 0; }
+  constexpr std::uint64_t filter_context() const noexcept {
+    return value;
+  }
+
+  static constexpr bind_redirect_selector
+  from_filter_context(std::uint64_t value) noexcept {
+    return {value};
+  }
+};
+
+namespace detail {
+
+inline constexpr std::uint32_t redirect_context_magic = 0x52544c4eu;
+inline constexpr std::uint16_t redirect_context_version = 1;
+
+struct connect_redirect_context {
+  std::uint32_t magic = redirect_context_magic;
+  std::uint16_t version = redirect_context_version;
+  std::uint16_t size = sizeof(connect_redirect_context);
+  SOCKADDR_STORAGE original_remote{};
+  SOCKADDR_STORAGE original_local{};
+};
+
+static_assert(std::is_trivially_copyable_v<connect_redirect_context>);
+
+} // namespace detail
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+
+/**
+ * @brief Move-only owner of a WFP redirect handle.
+ *
+ * redirect() performs loop detection, writable-layer acquisition, context
+ * ownership transfer, and fail-closed action selection as one operation.
+ */
+class connect_redirector {
+public:
+  connect_redirector(const connect_redirector &) = delete;
+  connect_redirector &operator=(const connect_redirector &) = delete;
+
+  connect_redirector(connect_redirector &&other) noexcept
+      : handle_(std::exchange(other.handle_, nullptr)) {}
+
+  connect_redirector &operator=(connect_redirector &&other) noexcept {
+    if (this != &other) {
+      reset();
+      handle_ = std::exchange(other.handle_, nullptr);
+    }
+    return *this;
+  }
+
+  ~connect_redirector() { reset(); }
+
+  static ntl::result<connect_redirector>
+  try_create(provider_key provider) noexcept {
+    HANDLE handle = nullptr;
+    const NTSTATUS status =
+        FwpsRedirectHandleCreate0(&provider.native(), 0, &handle);
+    if (!NT_SUCCESS(status))
+      return ntl::unexpected(status);
+    return ntl::ok(connect_redirector(handle));
+  }
+
+  /**
+   * @brief Redirects this TCP or connected-UDP flow to a localhost proxy.
+   *
+   * A connection already seen through this redirect handle is permitted
+   * without another redirect. Every native failure returns block.
+   */
+  template <class Layer>
+  decision redirect(const classify_event<Layer> &event,
+                    local_proxy_target target) const noexcept {
+    static_assert(detail::connect_redirect_layer<Layer>,
+                  "redirect() requires an ALE_CONNECT_REDIRECT layer");
+
+    if (!handle_ || !target.valid() || !event.metadata_ ||
+        !event.classify_context_ || !event.filter_ || !event.output_)
+      return decision::block;
+
+    if ((event.metadata_->currentMetadataValues &
+         FWPS_METADATA_FIELD_REDIRECT_RECORD_HANDLE) != 0 &&
+        event.metadata_->redirectRecords) {
+      const auto state = FwpsQueryConnectionRedirectState0(
+          event.metadata_->redirectRecords, handle_, nullptr);
+      if (state == FWPS_CONNECTION_REDIRECTED_BY_SELF ||
+          state == FWPS_CONNECTION_PREVIOUSLY_REDIRECTED_BY_SELF)
+        return decision::permit;
+    }
+
+    UINT64 classify_handle = 0;
+    NTSTATUS status = FwpsAcquireClassifyHandle0(
+        const_cast<void *>(event.classify_context_), 0, &classify_handle);
+    if (!NT_SUCCESS(status))
+      return decision::block;
+
+    void *writable = nullptr;
+    status = FwpsAcquireWritableLayerDataPointer0(
+        classify_handle, event.filter_->filterId, 0, &writable,
+        event.output_);
+    if (!NT_SUCCESS(status)) {
+      FwpsReleaseClassifyHandle0(classify_handle);
+      return decision::block;
+    }
+
+    auto *request = static_cast<FWPS_CONNECT_REQUEST0 *>(writable);
+    if (request->previousVersion &&
+        request->previousVersion->modifierFilterId ==
+            event.filter_->filterId) {
+      event.output_->actionType = FWP_ACTION_PERMIT;
+      event.output_->rights |= FWPS_RIGHT_ACTION_WRITE;
+      FwpsApplyModifiedLayerData0(classify_handle, request, 0);
+      FwpsReleaseClassifyHandle0(classify_handle);
+      return decision::permit;
+    }
+
+    detail::connect_redirect_context *context = nullptr;
+    if (target.context ==
+        original_destination_context::preserve) {
+      context = static_cast<detail::connect_redirect_context *>(
+          ntl::allocate_pool(
+              sizeof(detail::connect_redirect_context),
+              ntl::pool_kind::nonpaged, ntl::pool_option::none,
+              ntl::pool_tag("rClN")));
+      if (!context) {
+        FwpsApplyModifiedLayerData0(classify_handle, request, 0);
+        FwpsReleaseClassifyHandle0(classify_handle);
+        return decision::block;
+      }
+
+      RtlZeroMemory(context, sizeof(*context));
+      context->magic = detail::redirect_context_magic;
+      context->version = detail::redirect_context_version;
+      context->size = sizeof(*context);
+      RtlCopyMemory(&context->original_remote,
+                    &request->remoteAddressAndPort,
+                    sizeof(SOCKADDR_STORAGE));
+      RtlCopyMemory(&context->original_local,
+                    &request->localAddressAndPort,
+                    sizeof(SOCKADDR_STORAGE));
+    }
+
+    RtlZeroMemory(&request->remoteAddressAndPort,
+                  sizeof(request->remoteAddressAndPort));
+    if constexpr (std::is_same_v<Layer,
+                                 layers::ale_connect_redirect_v4>) {
+      auto *address = reinterpret_cast<SOCKADDR_IN *>(
+          &request->remoteAddressAndPort);
+      address->sin_family = AF_INET;
+      address->sin_port = RtlUshortByteSwap(target.port);
+      address->sin_addr.S_un.S_addr =
+          RtlUlongByteSwap(INADDR_LOOPBACK);
+    } else {
+      auto *address = reinterpret_cast<SOCKADDR_IN6 *>(
+          &request->remoteAddressAndPort);
+      IN6ADDR_SETLOOPBACK(address);
+      address->sin6_port = RtlUshortByteSwap(target.port);
+    }
+
+    request->localRedirectTargetPID = target.process_id;
+    request->localRedirectHandle = handle_;
+    request->localRedirectContext = context;
+    request->localRedirectContextSize =
+        context ? sizeof(*context) : 0;
+
+    event.output_->actionType = FWP_ACTION_PERMIT;
+    event.output_->rights |= FWPS_RIGHT_ACTION_WRITE;
+    FwpsApplyModifiedLayerData0(classify_handle, request, 0);
+    FwpsReleaseClassifyHandle0(classify_handle);
+    return decision::permit;
+  }
+
+  explicit operator bool() const noexcept { return handle_ != nullptr; }
+
+  void reset() noexcept {
+    HANDLE handle = std::exchange(handle_, nullptr);
+    if (handle)
+      FwpsRedirectHandleDestroy0(handle);
+  }
+
+private:
+  explicit connect_redirector(HANDLE handle) noexcept : handle_(handle) {}
+  HANDLE handle_ = nullptr;
+};
+
+/**
+ * @brief Applies one typed ALE bind redirect and always pairs writable-data
+ * acquisition with apply/release.
+ */
+class bind_redirector {
+public:
+  template <class Layer>
+  static decision redirect(
+      const classify_event<Layer> &event,
+      const local_bind_target_v4 &target) noexcept {
+    static_assert(
+        std::is_same_v<Layer, layers::ale_bind_redirect_v4>,
+        "an IPv4 bind target requires ALE_BIND_REDIRECT_V4");
+    return redirect_impl(event, target);
+  }
+
+  template <class Layer>
+  static decision redirect(
+      const classify_event<Layer> &event,
+      const local_bind_target_v6 &target) noexcept {
+    static_assert(
+        std::is_same_v<Layer, layers::ale_bind_redirect_v6>,
+        "an IPv6 bind target requires ALE_BIND_REDIRECT_V6");
+    return redirect_impl(event, target);
+  }
+
+private:
+  template <class Layer, class Target>
+  static decision redirect_impl(
+      const classify_event<Layer> &event,
+      const Target &target) noexcept {
+    static_assert(detail::bind_redirect_layer<Layer>,
+                  "bind redirect requires an ALE_BIND_REDIRECT layer");
+    if (!event.classify_context_ || !event.filter_ || !event.output_)
+      return decision::block;
+
+    UINT64 classify_handle = 0;
+    NTSTATUS status = FwpsAcquireClassifyHandle0(
+        const_cast<void *>(event.classify_context_), 0, &classify_handle);
+    if (!NT_SUCCESS(status))
+      return decision::block;
+
+    void *writable = nullptr;
+    status = FwpsAcquireWritableLayerDataPointer0(
+        classify_handle, event.filter_->filterId, 0, &writable,
+        event.output_);
+    if (!NT_SUCCESS(status)) {
+      FwpsReleaseClassifyHandle0(classify_handle);
+      return decision::block;
+    }
+
+    auto *request = static_cast<FWPS_BIND_REQUEST0 *>(writable);
+    if (request->previousVersion &&
+        request->previousVersion->modifierFilterId ==
+            event.filter_->filterId) {
+      event.output_->actionType = FWP_ACTION_PERMIT;
+      event.output_->rights |= FWPS_RIGHT_ACTION_WRITE;
+      FwpsApplyModifiedLayerData0(classify_handle, request, 0);
+      FwpsReleaseClassifyHandle0(classify_handle);
+      return decision::permit;
+    }
+
+    RtlZeroMemory(
+        &request->localAddressAndPort,
+        sizeof(request->localAddressAndPort));
+    if constexpr (std::is_same_v<Target, local_bind_target_v4>) {
+      auto *address = reinterpret_cast<SOCKADDR_IN *>(
+          &request->localAddressAndPort);
+      address->sin_family = AF_INET;
+      address->sin_port = RtlUshortByteSwap(target.port);
+      address->sin_addr.S_un.S_addr =
+          RtlUlongByteSwap(target.address);
+    } else {
+      auto *address = reinterpret_cast<SOCKADDR_IN6 *>(
+          &request->localAddressAndPort);
+      address->sin6_family = AF_INET6;
+      address->sin6_port = RtlUshortByteSwap(target.port);
+      address->sin6_scope_id = target.scope_id;
+      RtlCopyMemory(
+          &address->sin6_addr, target.address.data(),
+          target.address.size());
+    }
+    request->portReservationToken = target.port_reservation_token;
+
+    event.output_->actionType = FWP_ACTION_PERMIT;
+    event.output_->rights |= FWPS_RIGHT_ACTION_WRITE;
+    FwpsApplyModifiedLayerData0(classify_handle, request, 0);
+    FwpsReleaseClassifyHandle0(classify_handle);
+    return decision::permit;
+  }
+};
+
+#else
+
+/**
+ * @brief Captured WFP handoff for one accepted redirected connection.
+ *
+ * The redirect records remain opaque. connect_original() applies them before
+ * connect(), which both preserves WFP attribution and prevents redirect
+ * loops.
+ */
+class redirected_connection {
+public:
+  redirected_connection(const redirected_connection &) = delete;
+  redirected_connection &
+  operator=(const redirected_connection &) = delete;
+  redirected_connection(redirected_connection &&) noexcept = default;
+  redirected_connection &
+  operator=(redirected_connection &&) noexcept = default;
+
+  static redirected_connection capture(SOCKET accepted) {
+    if (accepted == INVALID_SOCKET)
+      throw std::system_error(WSAENOTSOCK, std::system_category(),
+                              "redirected_connection::capture");
+
+    const auto records = query_blob(
+        accepted, SIO_QUERY_WFP_CONNECTION_REDIRECT_RECORDS);
+
+    detail::connect_redirect_context context{};
+    DWORD returned = 0;
+    if (::WSAIoctl(
+            accepted, SIO_QUERY_WFP_CONNECTION_REDIRECT_CONTEXT,
+            nullptr, 0, &context, static_cast<DWORD>(sizeof(context)),
+            &returned, nullptr, nullptr) == SOCKET_ERROR)
+      throw_last_socket_error(
+          "SIO_QUERY_WFP_CONNECTION_REDIRECT_CONTEXT");
+    if (returned != sizeof(context) ||
+        context.magic != detail::redirect_context_magic ||
+        context.version != detail::redirect_context_version ||
+        context.size != sizeof(context))
+      throw std::runtime_error("unsupported WFP redirect context");
+
+    return redirected_connection(
+        context.original_remote, context.original_local, records);
+  }
+
+  const SOCKADDR_STORAGE &original_destination() const noexcept {
+    return original_remote_;
+  }
+
+  const SOCKADDR_STORAGE &original_source() const noexcept {
+    return original_local_;
+  }
+
+  /**
+   * @brief Creates an overlapped TCP socket and connects to the original
+   * destination with the captured redirect records already attached.
+   *
+   * The caller owns the returned SOCKET.
+   */
+  SOCKET connect_original(
+      DWORD socket_flags = WSA_FLAG_OVERLAPPED) const {
+    const ADDRESS_FAMILY family = original_remote_.ss_family;
+    if (family != AF_INET && family != AF_INET6)
+      throw std::system_error(WSAEAFNOSUPPORT, std::system_category(),
+                              "WFP original destination family");
+
+    SOCKET outbound = ::WSASocketW(
+        family, SOCK_STREAM, IPPROTO_TCP, nullptr, 0, socket_flags);
+    if (outbound == INVALID_SOCKET)
+      throw_last_socket_error("WSASocketW(proxy outbound)");
+
+    try {
+      DWORD returned = 0;
+      if (records_.size() >
+          (std::numeric_limits<DWORD>::max)())
+        throw std::overflow_error("WFP redirect records are too large");
+      if (::WSAIoctl(
+              outbound, SIO_SET_WFP_CONNECTION_REDIRECT_RECORDS,
+              const_cast<std::byte *>(records_.data()),
+              static_cast<DWORD>(records_.size()), nullptr, 0,
+              &returned, nullptr, nullptr) == SOCKET_ERROR)
+        throw_last_socket_error(
+            "SIO_SET_WFP_CONNECTION_REDIRECT_RECORDS");
+
+      const int address_size =
+          family == AF_INET ? sizeof(SOCKADDR_IN)
+                            : sizeof(SOCKADDR_IN6);
+      if (::connect(outbound,
+                    reinterpret_cast<const sockaddr *>(
+                        &original_remote_),
+                    address_size) == SOCKET_ERROR)
+        throw_last_socket_error("connect(original destination)");
+      return outbound;
+    } catch (...) {
+      (void)::closesocket(outbound);
+      throw;
+    }
+  }
+
+private:
+  redirected_connection(
+      const SOCKADDR_STORAGE &remote, const SOCKADDR_STORAGE &local,
+      std::vector<std::byte> records) noexcept
+      : original_remote_(remote), original_local_(local),
+        records_(std::move(records)) {}
+
+  [[noreturn]] static void
+  throw_last_socket_error(const char *operation) {
+    throw std::system_error(WSAGetLastError(),
+                            std::system_category(), operation);
+  }
+
+  static std::vector<std::byte>
+  query_blob(SOCKET socket, DWORD operation) {
+    std::vector<std::byte> result(1024);
+    DWORD returned = 0;
+    int queried = ::WSAIoctl(
+        socket, operation, nullptr, 0, result.data(),
+        static_cast<DWORD>(result.size()), &returned, nullptr,
+        nullptr);
+    if (queried == SOCKET_ERROR) {
+      const int error = WSAGetLastError();
+      if (error != ERROR_INSUFFICIENT_BUFFER ||
+          returned <= result.size())
+        throw std::system_error(
+            error, std::system_category(),
+            "SIO_QUERY_WFP_CONNECTION_REDIRECT_RECORDS");
+      result.resize(returned);
+      queried = ::WSAIoctl(
+          socket, operation, nullptr, 0, result.data(),
+          static_cast<DWORD>(result.size()), &returned, nullptr,
+          nullptr);
+      if (queried == SOCKET_ERROR)
+        throw_last_socket_error(
+            "SIO_QUERY_WFP_CONNECTION_REDIRECT_RECORDS");
+    }
+    if (returned == 0)
+      throw std::runtime_error("WFP returned empty redirect records");
+    result.resize(returned);
+    return result;
+  }
+
+  SOCKADDR_STORAGE original_remote_{};
+  SOCKADDR_STORAGE original_local_{};
+  std::vector<std::byte> records_;
+};
+
+#endif
+
+} // namespace ntl::wfp

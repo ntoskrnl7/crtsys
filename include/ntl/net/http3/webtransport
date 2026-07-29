@@ -1,0 +1,305 @@
+/**
+ * @file webtransport_http3
+ * @brief Bounded WebTransport over HTTP/3 draft-16 contracts.
+ *
+ * The WebTransport HTTP/3 specification is still an Internet-Draft as of
+ * July 2026. Volatile wire constants and validation rules are intentionally
+ * isolated in this header.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/http3/webtransport is a user-mode header"
+#endif
+
+#include <ntl/net/http/datagram>
+#include <ntl/net/http/extended_connect>
+#include <ntl/net/http3/framing>
+#include <ntl/result>
+#include <ntl/net/buffer/scatter_view>
+#include <ntl/status>
+
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <span>
+#include <string_view>
+
+namespace ntl::net::http3::webtransport {
+
+inline constexpr unsigned draft_revision = 16;
+inline constexpr std::string_view upgrade_token =
+    "webtransport-h3";
+
+inline constexpr std::uint64_t settings_wt_enabled =
+    0x2c7cf000;
+inline constexpr std::uint64_t
+    settings_wt_initial_max_streams_unidirectional = 0x2b64;
+inline constexpr std::uint64_t
+    settings_wt_initial_max_streams_bidirectional = 0x2b65;
+inline constexpr std::uint64_t
+    settings_wt_initial_max_data = 0x2b61;
+
+inline constexpr std::uint64_t
+    bidirectional_stream_signal = 0x41;
+inline constexpr std::uint64_t
+    unidirectional_stream_type = 0x54;
+
+inline constexpr std::uint64_t wt_close_session = 0x2843;
+inline constexpr std::uint64_t wt_drain_session = 0x78ae;
+inline constexpr std::uint64_t wt_max_streams_bidirectional =
+    0x190b4d3f;
+inline constexpr std::uint64_t wt_max_streams_unidirectional =
+    0x190b4d40;
+inline constexpr std::uint64_t wt_data_blocked = 0x190b4d41;
+inline constexpr std::uint64_t
+    wt_streams_blocked_bidirectional = 0x190b4d43;
+inline constexpr std::uint64_t
+    wt_streams_blocked_unidirectional = 0x190b4d44;
+inline constexpr std::uint64_t wt_max_data = 0x190b4d3d;
+
+inline constexpr std::uint64_t
+    wt_buffered_stream_rejected = 0x3994bd84;
+inline constexpr std::uint64_t wt_session_gone = 0x170d7b68;
+inline constexpr std::uint64_t wt_flow_control_error = 0x045d4487;
+
+struct prerequisites {
+  bool peer_enabled_extended_connect = false;
+  bool peer_enabled_webtransport = false;
+  bool local_h3_datagram = false;
+  bool peer_h3_datagram = false;
+  bool local_quic_datagram = false;
+  bool peer_quic_datagram = false;
+  bool local_reset_stream_at = false;
+  bool peer_reset_stream_at = false;
+
+  bool ready() const noexcept {
+    return peer_enabled_extended_connect &&
+           peer_enabled_webtransport &&
+           local_h3_datagram && peer_h3_datagram &&
+           local_quic_datagram && peer_quic_datagram &&
+           local_reset_stream_at && peer_reset_stream_at;
+  }
+};
+
+template <class HeaderField>
+ntl::result<ntl::net::http::connect_request>
+validate_session_request(
+    std::span<const HeaderField> fields,
+    prerequisites negotiated,
+    bool browser_client = true,
+    std::size_t maximum_field_bytes =
+        64 * 1024) noexcept {
+  if (!negotiated.ready())
+    return ntl::unexpected(STATUS_NOT_SUPPORTED);
+  auto request = ntl::net::http::validate_connect_request(
+      fields,
+      {.peer_enabled_extended_connect = true,
+       .browser_origin_required = browser_client,
+       .maximum_field_bytes = maximum_field_bytes});
+  if (!request)
+    return ntl::unexpected(request.status());
+  if (!request->extended ||
+      request->protocol != upgrade_token ||
+      request->scheme != "https")
+    return ntl::unexpected(STATUS_DATA_ERROR);
+  return request;
+}
+
+enum class stream_direction {
+  bidirectional,
+  unidirectional,
+};
+
+struct stream_prefix {
+  stream_direction direction =
+      stream_direction::bidirectional;
+  std::uint64_t session_id = 0;
+  std::size_t header_size = 0;
+  ntl::net::scatter_view body;
+};
+
+inline bool valid_session_id(
+    std::uint64_t session_id) noexcept {
+  return (session_id & 0x3u) == 0 &&
+         session_id <= maximum_quic_varint;
+}
+
+inline ntl::result<stream_prefix>
+parse_stream_prefix(
+    stream_direction direction,
+    ntl::net::scatter_view wire) noexcept {
+  if (!wire)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  const auto signal = read_quic_varint(wire);
+  if (!signal)
+    return ntl::unexpected(signal.status());
+  const std::uint64_t expected =
+      direction == stream_direction::bidirectional
+          ? bidirectional_stream_signal
+          : unidirectional_stream_type;
+  if (signal->value != expected)
+    return ntl::unexpected(STATUS_DATA_ERROR);
+  const auto session = read_quic_varint(
+      wire, signal->encoded_size);
+  if (!session)
+    return ntl::unexpected(session.status());
+  if (!valid_session_id(session->value))
+    return ntl::unexpected(STATUS_DATA_ERROR);
+  const std::size_t header_size =
+      signal->encoded_size + session->encoded_size;
+  auto body = wire.subview(
+      header_size, wire.size() - header_size);
+  if (!body)
+    return ntl::unexpected(body.status());
+  return ntl::ok(stream_prefix{
+      direction, session->value, header_size, *body});
+}
+
+enum class capsule_kind {
+  unknown,
+  close_session,
+  drain_session,
+  maximum_bidirectional_streams,
+  maximum_unidirectional_streams,
+  bidirectional_streams_blocked,
+  unidirectional_streams_blocked,
+  maximum_data,
+  data_blocked,
+};
+
+struct inspected_capsule {
+  capsule_kind kind = capsule_kind::unknown;
+  std::uint64_t value = 0;
+};
+
+inline ntl::result<inspected_capsule>
+inspect_capsule(
+    const ntl::net::http::capsule_view &capsule) noexcept {
+  const std::uint64_t type = capsule.header().type;
+  if (type == wt_drain_session) {
+    if (capsule.payload().size() != 0)
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    return ntl::ok(inspected_capsule{
+        capsule_kind::drain_session, 0});
+  }
+  if (type == wt_close_session) {
+    // Four octets of application error code followed by at most 1024
+    // octets of UTF-8 diagnostic text. UTF-8 validation belongs to the
+    // text-policy adapter.
+    if (capsule.payload().size() < 4 ||
+        capsule.payload().size() > 4 + 1024)
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    return ntl::ok(inspected_capsule{
+        capsule_kind::close_session, 0});
+  }
+
+  capsule_kind kind = capsule_kind::unknown;
+  if (type == wt_max_streams_bidirectional)
+    kind = capsule_kind::maximum_bidirectional_streams;
+  else if (type == wt_max_streams_unidirectional)
+    kind = capsule_kind::maximum_unidirectional_streams;
+  else if (type == wt_streams_blocked_bidirectional)
+    kind = capsule_kind::bidirectional_streams_blocked;
+  else if (type == wt_streams_blocked_unidirectional)
+    kind = capsule_kind::unidirectional_streams_blocked;
+  else if (type == wt_max_data)
+    kind = capsule_kind::maximum_data;
+  else if (type == wt_data_blocked)
+    kind = capsule_kind::data_blocked;
+  else
+    return ntl::ok(inspected_capsule{});
+
+  const auto value =
+      read_quic_varint(capsule.payload());
+  if (!value ||
+      value->encoded_size != capsule.payload().size())
+    return ntl::unexpected(STATUS_DATA_ERROR);
+  if ((kind == capsule_kind::maximum_bidirectional_streams ||
+       kind == capsule_kind::maximum_unidirectional_streams ||
+       kind == capsule_kind::bidirectional_streams_blocked ||
+       kind == capsule_kind::unidirectional_streams_blocked) &&
+      value->value > (std::uint64_t{1} << 60))
+    return ntl::unexpected(STATUS_INTEGER_OVERFLOW);
+  return ntl::ok(inspected_capsule{kind, value->value});
+}
+
+struct session_limits {
+  std::uint64_t maximum_bidirectional_streams = 64;
+  std::uint64_t maximum_unidirectional_streams = 64;
+  std::uint64_t maximum_stream_data = 16 * 1024 * 1024;
+  std::size_t maximum_datagram_payload = 64 * 1024;
+  std::uint64_t maximum_datagrams = 1'000'000;
+};
+
+/**
+ * @brief Fail-closed accounting for one WebTransport session.
+ *
+ * QUIC still owns per-stream flow control. This guard supplies the additional
+ * per-session stream/data/datagram bounds required by the WebTransport
+ * intermediary.
+ */
+class session_guard {
+public:
+  explicit constexpr session_guard(
+      session_limits limits = {}) noexcept
+      : limits_(limits) {}
+
+  ntl::status open_stream(
+      stream_direction direction) noexcept {
+    std::uint64_t &count =
+        direction == stream_direction::bidirectional
+            ? bidirectional_streams_
+            : unidirectional_streams_;
+    const std::uint64_t limit =
+        direction == stream_direction::bidirectional
+            ? limits_.maximum_bidirectional_streams
+            : limits_.maximum_unidirectional_streams;
+    if (count >= limit)
+      return STATUS_QUOTA_EXCEEDED;
+    ++count;
+    return ntl::status::ok();
+  }
+
+  ntl::status consume_stream_data(
+      std::size_t bytes) noexcept {
+    if (bytes >
+        limits_.maximum_stream_data - stream_data_)
+      return STATUS_QUOTA_EXCEEDED;
+    stream_data_ += bytes;
+    return ntl::status::ok();
+  }
+
+  ntl::status consume_datagram(
+      std::size_t bytes) noexcept {
+    if (bytes > limits_.maximum_datagram_payload ||
+        datagrams_ >= limits_.maximum_datagrams)
+      return STATUS_QUOTA_EXCEEDED;
+    ++datagrams_;
+    return ntl::status::ok();
+  }
+
+  std::uint64_t bidirectional_streams() const noexcept {
+    return bidirectional_streams_;
+  }
+  std::uint64_t unidirectional_streams() const noexcept {
+    return unidirectional_streams_;
+  }
+  std::uint64_t stream_data() const noexcept {
+    return stream_data_;
+  }
+  std::uint64_t datagrams() const noexcept {
+    return datagrams_;
+  }
+
+private:
+  session_limits limits_{};
+  std::uint64_t bidirectional_streams_ = 0;
+  std::uint64_t unidirectional_streams_ = 0;
+  std::uint64_t stream_data_ = 0;
+  std::uint64_t datagrams_ = 0;
+};
+
+} // namespace ntl::net::http3::webtransport

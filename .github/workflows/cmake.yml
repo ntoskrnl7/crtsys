@@ -152,6 +152,37 @@ jobs:
             -Configuration Debug `
             -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}'
 
+      - name: Build WFP compile contracts and samples
+        if: matrix.project == 'driver' && matrix.config == 'Debug' && (matrix.arch == 'x86' || matrix.arch == 'x64')
+        shell: pwsh
+        run: |
+          ./scripts/ci/Build-CrtSys.ps1 `
+            -Project wfp-compile `
+            -Architecture '${{ matrix.arch }}' `
+            -Configuration Debug `
+            -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}'
+
+          if ('${{ matrix.arch }}' -eq 'x64') {
+            foreach ($wfpProject in @(
+              'wfp-ale-connect-block',
+              'wfp-datagram-proxy',
+              'wfp-async-inspection',
+              'wfp-flow-monitor',
+              'wfp-stream-edit',
+               'wfp-connect-redirect',
+               'wfp-tls-inspection-proxy',
+               'wfp-browser-https-inspection',
+               'wfp-udp-content-filter',
+              'wfp-tcp-content-filter'
+            )) {
+              ./scripts/ci/Build-CrtSys.ps1 `
+                -Project $wfpProject `
+                -Architecture x64 `
+                -Configuration Debug `
+                -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}'
+            }
+          }
+
       - name: Build grouped KMDF examples
         if: matrix.project == 'driver' && matrix.config == 'Debug' && (matrix.arch == 'x86' || matrix.arch == 'x64')
         shell: pwsh
@@ -504,7 +535,7 @@ jobs:
 
           ./scripts/ci/Build-CrtSys.ps1 @parameters
 
-      - name: Build v145 RPC streaming and minifilter fixtures
+      - name: Build v145 RPC streaming, minifilter, and WFP fixtures
         if: matrix.project == 'driver' && matrix.config == 'Debug'
         shell: pwsh
         run: |
@@ -540,6 +571,31 @@ jobs:
             $parameters.WdkVersion = $wdkVersion
           }
           ./scripts/ci/Build-CrtSys.ps1 @parameters
+
+          if ('${{ matrix.arch }}' -eq 'x64') {
+            foreach ($wfpProject in @(
+              'wfp-compile',
+              'wfp-ale-connect-block',
+              'wfp-datagram-proxy',
+              'wfp-async-inspection',
+              'wfp-flow-monitor',
+              'wfp-stream-edit',
+               'wfp-connect-redirect',
+               'wfp-tls-inspection-proxy',
+               'wfp-browser-https-inspection',
+               'wfp-udp-content-filter',
+              'wfp-tcp-content-filter'
+            )) {
+              $wfpParameters = @{
+                Project = $wfpProject
+                Architecture = 'x64'
+                Configuration = 'Debug'
+                WindowsSdkVersion = '${{ env.CRTSYS_VS2026_WINDOWS_SDK_VERSION }}'
+                PlatformToolset = 'v145'
+              }
+              ./scripts/ci/Build-CrtSys.ps1 @wfpParameters
+            }
+          }
 
           if ('${{ matrix.project }}' -eq 'driver' -and
               '${{ matrix.arch }}' -eq 'x86' -and

@@ -163,6 +163,26 @@ Visual Studio/NuGet projects use `CrtSysIsMinifilter=true` and
 [NTL minifilter sample catalog](./examples/minifilter) and
 [API guide](./docs/ntl/minifilter.md).
 
+Windows Filtering Platform callout drivers select the model explicitly in
+CMake. The helper links `fwpkclnt.lib`, uses the NTL entry wrapper, and keeps
+kernel callout registration separate from user-mode policy management:
+
+```cmake
+crtsys_add_driver(my_wfp_callout WFP NTL src/main.cpp)
+```
+
+See the [WFP ALE connect-block driver/controller](./examples/wfp/ale-connect-block),
+its [Korean walkthrough](./examples/wfp/ale-connect-block/README.ko-KR.md), the
+ [typed API and ownership guide](./docs/ntl/wfp.md), the
+ [connect-redirect coroutine TCP proxy](./examples/wfp/connect-redirect), the
+ [Schannel TLS inspection proxy](./examples/wfp/tls-inspection-proxy), the
+ [separate browser HTTPS inspection example](./examples/wfp/browser-https-inspection), the
+ [UDP content-filter](./examples/wfp/udp-content-filter) and
+[TCP content-filter](./examples/wfp/tcp-content-filter) driver/app samples, the
+[content inspection and framing guide](./docs/ntl/inspection.md), the
+[user-mode TLS stream guide](./docs/ntl/tls-stream.md), and the
+[WDK sample coverage map](./test/wfp/WDK-SAMPLE-COVERAGE.md).
+
 ## Runtime Stack
 
 ```mermaid
@@ -232,6 +252,12 @@ may compile or work.
 | [NTL KMDF USB template](./examples/kmdf/usb) | Buildable PnP USB device/interface/pipe and continuous-reader template with a user-mode inspection app |
 | [NTL KMDF WMI sample](./examples/kmdf/wmi) | MOF-backed typed WMI query/set/method providers, event delivery, and a `ROOT\\WMI` user-mode verifier |
 | [NTL minifilter samples](./examples/minifilter) | Independent typed callback/context, control-device, communication, MiniSpy-style operation-log, swapped-buffer, and MetadataManager-style driver/app examples with WDK sample-coverage mapping |
+| [NTL WFP ALE connect-block](./examples/wfp/ale-connect-block) | A purpose-named, step-by-step driver/controller sample that blocks one selected outbound IPv4 TCP connection and proves recovery after dynamic policy removal |
+| [NTL WFP connect-redirect](./examples/wfp/connect-redirect) | A local TCP proxy foundation that safely hands the original destination and opaque WFP redirect records to user mode, relays both directions with coroutines, and prevents redirect loops |
+| [NTL WFP TLS inspection-proxy](./examples/wfp/tls-inspection-proxy) | An authorized connect-redirect and two-leg Schannel proxy with bounded ClientHello/SNI identity selection, per-host certificate issuance/cache, HTTP/1.1 plaintext framing, and typed content policy outside the kernel |
+| [NTL WFP browser HTTPS inspection](./examples/wfp/browser-https-inspection) | An independent browser-scoped driver/app example that keeps a dynamic redirect policy active, terminates two Schannel legs, and records bounded uncompressed HTML response bodies |
+| [NTL WFP UDP content-filter](./examples/wfp/udp-content-filter) | A fail-closed driver/policy-coroutine sample for complete outbound UDP datagrams; permit reinjects the retained clone and block discards only that datagram |
+| [NTL WFP TCP content-filter](./examples/wfp/tcp-content-filter) | A fail-closed driver/policy-coroutine sample for explicitly framed inbound TCP application messages; permit resumes exactly one frame and block drops the whole flow |
 | [CI Driver Load Tests](./docs/ci-driver-load-tests.md) | Optional self-hosted driver load/run workflow |
 
 ## Operational Boundaries

@@ -1,0 +1,265 @@
+/**
+ * @file flow
+ * @brief Typed ownership and unload draining for WFP flow contexts.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/wfp/flow is a kernel-mode header"
+#endif
+
+#include "../status"
+#include "classify"
+#include "layers"
+
+#include <cstdint>
+#include <memory>
+#include <new>
+#include <type_traits>
+#include <utility>
+
+namespace ntl::wfp {
+
+namespace detail {
+
+class flow_registration_base {
+public:
+  flow_registration_base(const flow_registration_base &) = delete;
+  flow_registration_base &
+  operator=(const flow_registration_base &) = delete;
+  virtual ~flow_registration_base() = default;
+
+  virtual ntl::status drain() noexcept = 0;
+
+protected:
+  flow_registration_base() = default;
+};
+
+template <class Layer, class Context> class flow_registration_state;
+
+template <class Layer, class Context> struct flow_context_holder {
+  flow_context_holder(
+      flow_registration_state<Layer, Context> &registration,
+      UINT64 flow, std::unique_ptr<Context> &&owned) noexcept
+      : owner(&registration), flow_id(flow), context(std::move(owned)) {
+    InitializeListHead(&link);
+  }
+
+  LIST_ENTRY link{};
+  flow_registration_state<Layer, Context> *owner;
+  UINT64 flow_id;
+  bool linked = false;
+  bool removal_requested = false;
+  std::unique_ptr<Context> context;
+};
+
+template <class Layer, class Context>
+class flow_registration_state final : public flow_registration_base {
+public:
+  using holder_type = flow_context_holder<Layer, Context>;
+
+  flow_registration_state() noexcept {
+    KeInitializeSpinLock(&lock_);
+    InitializeListHead(&flows_);
+    ExInitializeRundownProtection(&rundown_);
+  }
+
+  void activate(UINT32 callout_id) noexcept { callout_id_ = callout_id; }
+
+  ntl::status associate(UINT64 flow_id,
+                        std::unique_ptr<Context> context) noexcept {
+    if (!flow_id || !context || !callout_id_)
+      return STATUS_INVALID_PARAMETER;
+    if (!ExAcquireRundownProtection(&rundown_))
+      return STATUS_DELETE_PENDING;
+
+    auto *holder = new (std::nothrow) holder_type(
+        *this, flow_id, std::move(context));
+    if (!holder) {
+      ExReleaseRundownProtection(&rundown_);
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    // Serialize the native association with unload.  WFP's own samples use
+    // the same ordering: once accepting_ becomes false, no context can be
+    // associated after drain() has taken its inventory.
+    KIRQL old_irql;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    NTSTATUS result = STATUS_DELETE_PENDING;
+    if (accepting_) {
+      result = FwpsFlowAssociateContext0(
+          flow_id, Layer::runtime_id, callout_id_,
+          reinterpret_cast<UINT64>(holder));
+      if (NT_SUCCESS(result)) {
+        InsertTailList(&flows_, &holder->link);
+        holder->linked = true;
+      }
+    }
+    KeReleaseSpinLock(&lock_, old_irql);
+
+    if (!NT_SUCCESS(result)) {
+      delete holder;
+      ExReleaseRundownProtection(&rundown_);
+    }
+    return result;
+  }
+
+  void deleted(flow_context_holder<Layer, Context> &holder) noexcept {
+    unlink(holder);
+    delete &holder;
+    ExReleaseRundownProtection(&rundown_);
+  }
+
+  ntl::status drain() noexcept override {
+    if (drained_)
+      return ntl::status::ok();
+
+    NT_ASSERT(KeGetCurrentIrql() == PASSIVE_LEVEL);
+
+    KIRQL old_irql;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    accepting_ = false;
+    KeReleaseSpinLock(&lock_, old_irql);
+
+    for (;;) {
+      UINT64 flow_id = 0;
+
+      KeAcquireSpinLock(&lock_, &old_irql);
+      for (LIST_ENTRY *entry = flows_.Flink; entry != &flows_;
+           entry = entry->Flink) {
+        auto *holder = CONTAINING_RECORD(entry, holder_type, link);
+        if (!holder->removal_requested) {
+          holder->removal_requested = true;
+          flow_id = holder->flow_id;
+          break;
+        }
+      }
+      KeReleaseSpinLock(&lock_, old_irql);
+
+      if (!flow_id)
+        break;
+
+      const NTSTATUS result = FwpsFlowRemoveContext0(
+          flow_id, Layer::runtime_id, callout_id_);
+      if (result != STATUS_SUCCESS && result != STATUS_PENDING &&
+          result != STATUS_UNSUCCESSFUL) {
+        KeAcquireSpinLock(&lock_, &old_irql);
+        for (LIST_ENTRY *entry = flows_.Flink; entry != &flows_;
+             entry = entry->Flink) {
+          auto *holder = CONTAINING_RECORD(entry, holder_type, link);
+          if (holder->flow_id == flow_id) {
+            holder->removal_requested = false;
+            break;
+          }
+        }
+        KeReleaseSpinLock(&lock_, old_irql);
+        return result;
+      }
+    }
+
+    ExWaitForRundownProtectionRelease(&rundown_);
+    drained_ = true;
+    return ntl::status::ok();
+  }
+
+private:
+  void unlink(flow_context_holder<Layer, Context> &holder) noexcept {
+    KIRQL old_irql;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    if (holder.linked) {
+      RemoveEntryList(&holder.link);
+      InitializeListHead(&holder.link);
+      holder.linked = false;
+    }
+    KeReleaseSpinLock(&lock_, old_irql);
+  }
+
+  UINT32 callout_id_ = 0;
+  KSPIN_LOCK lock_{};
+  LIST_ENTRY flows_{};
+  EX_RUNDOWN_REF rundown_{};
+  bool accepting_ = true;
+  bool drained_ = false;
+};
+
+template <class Layer, class Context> struct flow_delete_adapter {
+  static void NTAPI invoke(UINT16, UINT32, UINT64 flow_context) noexcept {
+    if (!flow_context)
+      return;
+    auto *holder =
+        reinterpret_cast<flow_context_holder<Layer, Context> *>(
+            flow_context);
+    holder->owner->deleted(*holder);
+  }
+};
+
+template <class Layer, class Context, auto Callback>
+struct detail_flow_classify_adapter {
+  static_assert(
+      std::is_nothrow_invocable_r_v<decision, decltype(Callback),
+                                    const classify_event<Layer> &, Context *>,
+      "a contextual WFP callback must be noexcept and return decision");
+
+  static void NTAPI invoke(
+      const FWPS_INCOMING_VALUES0 *values,
+      const FWPS_INCOMING_METADATA_VALUES0 *metadata, void *layer_data,
+      const void *classify_context, const FWPS_FILTER2 *filter,
+      UINT64 flow_context, FWPS_CLASSIFY_OUT0 *output) noexcept {
+    if (!output)
+      return;
+
+    classify_event<Layer> event(values, metadata, layer_data,
+                                classify_context, filter, flow_context,
+                                output);
+    auto *holder =
+        reinterpret_cast<flow_context_holder<Layer, Context> *>(
+            flow_context);
+    Context *context = holder ? holder->context.get() : nullptr;
+    detail::apply_decision(Callback(event, context), filter, *output);
+  }
+};
+
+} // namespace detail
+
+/**
+ * @brief A registration-scoped capability for attaching Context objects to
+ * one WFP layer.
+ *
+ * On successful association, WFP owns the context through an internal holder.
+ * On failure, the holder deletes it. The registration tracks every successful
+ * association so callout_driver::reset() can remove and drain all contexts
+ * before unregistering the callout.
+ */
+template <class Layer, class Context> class flow_target {
+public:
+  static_assert(detail::flow_context_layer<Layer>,
+                "flow_target requires a flow-context-capable WFP layer");
+  static_assert(std::is_nothrow_destructible_v<Context>,
+                "a WFP flow context destructor must be noexcept");
+
+  flow_target(const flow_target &) = default;
+  flow_target &operator=(const flow_target &) = default;
+
+  ntl::status associate(std::uint64_t flow_handle,
+                        std::unique_ptr<Context> context) const noexcept {
+    if (!state_)
+      return STATUS_INVALID_DEVICE_STATE;
+    return state_->associate(flow_handle, std::move(context));
+  }
+
+  explicit operator bool() const noexcept {
+    return static_cast<bool>(state_);
+  }
+
+private:
+  template <std::size_t> friend class callout_driver;
+
+  explicit flow_target(
+      std::shared_ptr<detail::flow_registration_state<Layer, Context>>
+          state) noexcept
+      : state_(std::move(state)) {}
+
+  std::shared_ptr<detail::flow_registration_state<Layer, Context>> state_;
+};
+
+} // namespace ntl::wfp

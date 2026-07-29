@@ -1,0 +1,666 @@
+/**
+ * @file async_byte_stream
+ * @brief Bounded single-reader coroutine byte stream for kernel producers.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/net/io/async_byte_stream is a kernel-mode header"
+#endif
+
+#include <ntl/coroutine>
+#include <ntl/net/buffer/owned_bytes>
+#include <ntl/pool_allocator>
+#include <ntl/net/buffer/scatter_view>
+#include <ntl/status>
+
+#include <atomic>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <limits>
+#include <span>
+#include <type_traits>
+#include <utility>
+
+namespace ntl::net {
+
+#if NTL_HAS_COROUTINE_SUPPORT
+
+struct read_options {
+  std::chrono::milliseconds timeout =
+      (std::chrono::milliseconds::max)();
+};
+
+namespace detail {
+
+class byte_stream_state {
+public:
+  byte_stream_state(ntl::net::owned_bytes &&storage,
+                    WORK_QUEUE_TYPE queue_type) noexcept
+      : storage_(std::move(storage)), queue_type_(queue_type) {
+    KeInitializeSpinLock(&lock_);
+    KeInitializeEvent(&idle_, NotificationEvent, TRUE);
+    KeInitializeTimer(&timer_);
+    KeInitializeDpc(&timer_dpc_, &byte_stream_state::timer_expired, this);
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4996)
+#endif
+    for (auto &slot : resume_slots_) {
+      slot.owner = this;
+      ExInitializeWorkItem(&slot.work,
+                           &byte_stream_state::resume_waiter, &slot);
+    }
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+  }
+
+  byte_stream_state(const byte_stream_state &) = delete;
+  byte_stream_state &operator=(const byte_stream_state &) = delete;
+
+  void add_ref() noexcept {
+    references_.fetch_add(1, std::memory_order_relaxed);
+  }
+
+  void release() noexcept {
+    if (references_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+      ntl::pool_deleter<byte_stream_state>{
+          ntl::pool_tag("sAtN"), ntl::pool_kind::nonpaged}(this);
+    }
+  }
+
+  std::size_t capacity() const noexcept { return storage_.size(); }
+
+  std::size_t buffered_size() noexcept {
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    const std::size_t result = size_;
+    KeReleaseSpinLock(&lock_, old_irql);
+    return result;
+  }
+
+  ntl::status append(ntl::net::scatter_view source) noexcept {
+    if (!source)
+      return STATUS_INVALID_PARAMETER;
+    if (source.empty())
+      return ntl::status::ok();
+
+    resume_slot *resume = nullptr;
+    bool release_timer_reference = false;
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&lock_, &old_irql);
+
+    if (closed_) {
+      KeReleaseSpinLock(&lock_, old_irql);
+      return STATUS_DELETE_PENDING;
+    }
+    if (source.size() > capacity() - size_) {
+      KeReleaseSpinLock(&lock_, old_irql);
+      return STATUS_BUFFER_OVERFLOW;
+    }
+
+    std::size_t tail = (head_ + size_) % capacity();
+    std::size_t appended = 0;
+    const ntl::status copied = source.for_each_chunk(
+        [&](std::span<const std::byte> chunk) noexcept {
+          std::size_t consumed = 0;
+          while (consumed != chunk.size()) {
+            const std::size_t contiguous =
+                (std::min)(chunk.size() - consumed, capacity() - tail);
+            std::memcpy(storage_.data() + tail,
+                        chunk.data() + consumed, contiguous);
+            consumed += contiguous;
+            appended += contiguous;
+            tail = (tail + contiguous) % capacity();
+          }
+        });
+    if (!copied.is_ok() || appended != source.size()) {
+      KeReleaseSpinLock(&lock_, old_irql);
+      return copied.is_ok() ? ntl::status{STATUS_DATA_ERROR} : copied;
+    }
+
+    size_ += appended;
+    if (waiter_ && size_ >= requested_) {
+      complete_wait_locked(ntl::status::ok(), true, resume,
+                           release_timer_reference);
+    }
+    update_idle_locked();
+    KeReleaseSpinLock(&lock_, old_irql);
+
+    if (resume)
+      queue_resume_work(*resume);
+    if (release_timer_reference)
+      release();
+    return ntl::status::ok();
+  }
+
+  void close(ntl::status status) noexcept {
+    resume_slot *resume = nullptr;
+    bool release_timer_reference = false;
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    if (!closed_) {
+      closed_ = true;
+      close_status_ = status;
+      if (waiter_ && size_ < requested_) {
+        complete_wait_locked(status, true, resume,
+                             release_timer_reference);
+      }
+    }
+    update_idle_locked();
+    KeReleaseSpinLock(&lock_, old_irql);
+
+    if (resume)
+      queue_resume_work(*resume);
+    if (release_timer_reference)
+      release();
+  }
+
+  bool ready(std::size_t requested, read_options options,
+             ntl::status &status) noexcept {
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    bool result = false;
+    bool reader_in_flight = waiter_ != nullptr;
+    for (const auto &slot : resume_slots_)
+      reader_in_flight =
+          reader_in_flight || slot.queued || slot.active;
+
+    // Force await_suspend() to perform the continuation-aware ownership
+    // check while another read is registered or resuming.
+    if (reader_in_flight) {
+      result = false;
+    } else if (requested > capacity()) {
+      status = STATUS_BUFFER_OVERFLOW;
+      result = true;
+    } else if (size_ >= requested) {
+      status = ntl::status::ok();
+      result = true;
+    } else if (closed_) {
+      status = close_status_;
+      result = true;
+    } else if (options.timeout <= std::chrono::milliseconds::zero()) {
+      status = STATUS_IO_TIMEOUT;
+      result = true;
+    }
+    KeReleaseSpinLock(&lock_, old_irql);
+    return result;
+  }
+
+  bool begin_wait(std::coroutine_handle<> continuation,
+                  std::size_t requested, read_options options,
+                  ntl::status *completion) noexcept {
+    if (!completion)
+      return false;
+
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    bool another_reader = waiter_ != nullptr;
+    for (const auto &slot : resume_slots_) {
+      if (slot.queued ||
+          (slot.active && slot.handle != continuation)) {
+        another_reader = true;
+        break;
+      }
+    }
+    if (another_reader) {
+      *completion = STATUS_DEVICE_BUSY;
+      KeReleaseSpinLock(&lock_, old_irql);
+      return false;
+    }
+    if (requested > capacity()) {
+      *completion = STATUS_BUFFER_OVERFLOW;
+      KeReleaseSpinLock(&lock_, old_irql);
+      return false;
+    }
+    if (size_ >= requested) {
+      *completion = ntl::status::ok();
+      KeReleaseSpinLock(&lock_, old_irql);
+      return false;
+    }
+    if (closed_) {
+      *completion = close_status_;
+      KeReleaseSpinLock(&lock_, old_irql);
+      return false;
+    }
+    if (options.timeout <= std::chrono::milliseconds::zero()) {
+      *completion = STATUS_IO_TIMEOUT;
+      KeReleaseSpinLock(&lock_, old_irql);
+      return false;
+    }
+
+    waiter_ = continuation;
+    waiter_status_ = completion;
+    requested_ = requested;
+    *completion = STATUS_PENDING;
+    KeClearEvent(&idle_);
+
+    if (options.timeout != (std::chrono::milliseconds::max)()) {
+      const auto count = options.timeout.count();
+      const auto maximum =
+          (std::numeric_limits<LONGLONG>::max)() / 10000;
+      const LONGLONG milliseconds =
+          count > maximum ? maximum : static_cast<LONGLONG>(count);
+      LARGE_INTEGER due_time{};
+      due_time.QuadPart = -milliseconds * 10000;
+      add_ref();
+      timer_reference_ = true;
+      (void)KeSetTimer(&timer_, due_time, &timer_dpc_);
+    }
+
+    KeReleaseSpinLock(&lock_, old_irql);
+    return true;
+  }
+
+  ntl::status consume(std::span<std::byte> destination) noexcept {
+    if (destination.size() > capacity())
+      return STATUS_BUFFER_OVERFLOW;
+
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    if (size_ < destination.size()) {
+      const ntl::status result =
+          closed_ ? close_status_ : ntl::status{STATUS_BUFFER_TOO_SMALL};
+      KeReleaseSpinLock(&lock_, old_irql);
+      return result;
+    }
+
+    std::size_t copied = 0;
+    while (copied != destination.size()) {
+      const std::size_t contiguous =
+          (std::min)(destination.size() - copied, capacity() - head_);
+      std::memcpy(destination.data() + copied, storage_.data() + head_,
+                  contiguous);
+      copied += contiguous;
+      head_ = (head_ + contiguous) % capacity();
+      size_ -= contiguous;
+    }
+    KeReleaseSpinLock(&lock_, old_irql);
+    return ntl::status::ok();
+  }
+
+  void abandon(std::coroutine_handle<> continuation) noexcept {
+    bool release_timer_reference = false;
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    if (waiter_ == continuation) {
+      waiter_ = {};
+      waiter_status_ = nullptr;
+      requested_ = 0;
+      release_timer_reference = cancel_timer_locked();
+    }
+    for (auto &slot : resume_slots_) {
+      if (slot.queued && slot.handle == continuation)
+        slot.handle = {};
+    }
+    update_idle_locked();
+    KeReleaseSpinLock(&lock_, old_irql);
+    if (release_timer_reference)
+      release();
+  }
+
+  ntl::status wait_for_idle() noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return STATUS_INVALID_DEVICE_STATE;
+    return KeWaitForSingleObject(&idle_, Executive, KernelMode, FALSE,
+                                 nullptr);
+  }
+
+private:
+  struct resume_slot {
+    WORK_QUEUE_ITEM work{};
+    byte_stream_state *owner = nullptr;
+    std::coroutine_handle<> handle{};
+    bool queued = false;
+    bool active = false;
+  };
+
+  ~byte_stream_state() = default;
+  friend class ntl::pool_deleter<byte_stream_state>;
+
+  bool cancel_timer_locked() noexcept {
+    if (!timer_reference_)
+      return false;
+    if (!KeCancelTimer(&timer_))
+      return false;
+    timer_reference_ = false;
+    return true;
+  }
+
+  void complete_wait_locked(ntl::status status, bool cancel_timer,
+                            resume_slot *&resume,
+                            bool &release_timer_reference) noexcept {
+    if (!waiter_)
+      return;
+    for (auto &slot : resume_slots_) {
+      if (!slot.queued && !slot.active) {
+        resume = &slot;
+        break;
+      }
+    }
+    if (!resume) {
+      if (waiter_status_)
+        *waiter_status_ = STATUS_INSUFFICIENT_RESOURCES;
+      return;
+    }
+    if (waiter_status_)
+      *waiter_status_ = status;
+    resume->handle = waiter_;
+    resume->queued = true;
+    waiter_ = {};
+    waiter_status_ = nullptr;
+    requested_ = 0;
+    add_ref();
+    if (cancel_timer)
+      release_timer_reference = cancel_timer_locked();
+  }
+
+  void update_idle_locked() noexcept {
+    bool resume_pending = false;
+    for (const auto &slot : resume_slots_)
+      resume_pending = resume_pending || slot.queued || slot.active;
+    if (!waiter_ && !resume_pending && !timer_reference_) {
+      KeSetEvent(&idle_, IO_NO_INCREMENT, FALSE);
+    } else {
+      KeClearEvent(&idle_);
+    }
+  }
+
+  void queue_resume_work(resume_slot &slot) noexcept {
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4996)
+#endif
+    ExQueueWorkItem(&slot.work, queue_type_);
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+  }
+
+  static void NTAPI resume_waiter(void *context) noexcept {
+    auto *const slot = static_cast<resume_slot *>(context);
+    auto *const self = slot->owner;
+    std::coroutine_handle<> continuation{};
+
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&self->lock_, &old_irql);
+    continuation = slot->handle;
+    slot->queued = false;
+    slot->active = continuation != nullptr;
+    self->update_idle_locked();
+    KeReleaseSpinLock(&self->lock_, old_irql);
+
+    if (continuation)
+      continuation.resume();
+
+    KeAcquireSpinLock(&self->lock_, &old_irql);
+    slot->active = false;
+    slot->handle = {};
+    self->update_idle_locked();
+    KeReleaseSpinLock(&self->lock_, old_irql);
+    self->release();
+  }
+
+  static void NTAPI timer_expired(KDPC *, void *context, void *,
+                                  void *) noexcept {
+    auto *const self = static_cast<byte_stream_state *>(context);
+    resume_slot *resume = nullptr;
+    bool release_timer_reference = false;
+
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&self->lock_, &old_irql);
+    if (self->timer_reference_) {
+      self->timer_reference_ = false;
+      release_timer_reference = true;
+      if (self->waiter_) {
+        bool ignored_timer_release = false;
+        self->complete_wait_locked(
+            STATUS_IO_TIMEOUT, false, resume,
+            ignored_timer_release);
+      }
+    }
+    self->update_idle_locked();
+    KeReleaseSpinLock(&self->lock_, old_irql);
+
+    if (resume)
+      self->queue_resume_work(*resume);
+    if (release_timer_reference)
+      self->release();
+  }
+
+  std::atomic<std::uint32_t> references_{1};
+  ntl::net::owned_bytes storage_;
+  KSPIN_LOCK lock_{};
+  KEVENT idle_{};
+  KTIMER timer_{};
+  KDPC timer_dpc_{};
+  resume_slot resume_slots_[2]{};
+  WORK_QUEUE_TYPE queue_type_ = DelayedWorkQueue;
+
+  std::size_t head_ = 0;
+  std::size_t size_ = 0;
+  std::size_t requested_ = 0;
+  std::coroutine_handle<> waiter_{};
+  ntl::status *waiter_status_ = nullptr;
+  bool timer_reference_ = false;
+  bool closed_ = false;
+  ntl::status close_status_{STATUS_END_OF_FILE};
+};
+
+class read_awaiter_base {
+public:
+  read_awaiter_base(byte_stream_state *state, std::size_t requested,
+                    read_options options) noexcept
+      : state_(state), requested_(requested), options_(options) {
+    if (state_)
+      state_->add_ref();
+  }
+
+  read_awaiter_base(const read_awaiter_base &) = delete;
+  read_awaiter_base &operator=(const read_awaiter_base &) = delete;
+  read_awaiter_base(read_awaiter_base &&) = delete;
+  read_awaiter_base &operator=(read_awaiter_base &&) = delete;
+
+  ~read_awaiter_base() {
+    if (state_) {
+      if (registered_)
+        state_->abandon(continuation_);
+      state_->release();
+    }
+  }
+
+  bool await_ready() noexcept {
+    if (!state_) {
+      status_ = STATUS_INVALID_DEVICE_STATE;
+      return true;
+    }
+    return state_->ready(requested_, options_, status_);
+  }
+
+  bool await_suspend(std::coroutine_handle<> continuation) noexcept {
+    continuation_ = continuation;
+    registered_ =
+        state_->begin_wait(continuation, requested_, options_, &status_);
+    return registered_;
+  }
+
+protected:
+  ntl::status finish_wait() noexcept {
+    registered_ = false;
+    return status_;
+  }
+
+  byte_stream_state *state_ = nullptr;
+  std::size_t requested_ = 0;
+
+private:
+  read_options options_{};
+  std::coroutine_handle<> continuation_{};
+  ntl::status status_{STATUS_PENDING};
+  bool registered_ = false;
+};
+
+class read_into_awaiter final : public read_awaiter_base {
+public:
+  read_into_awaiter(byte_stream_state *state,
+                    std::span<std::byte> destination,
+                    read_options options) noexcept
+      : read_awaiter_base(state, destination.size(), options),
+        destination_(destination) {}
+
+  ntl::status await_resume() noexcept {
+    const ntl::status status = finish_wait();
+    if (!status.is_ok())
+      return status;
+    return state_->consume(destination_);
+  }
+
+private:
+  std::span<std::byte> destination_;
+};
+
+template <class T>
+class read_value_awaiter final : public read_awaiter_base {
+public:
+  static_assert(std::is_trivially_copyable_v<T>,
+                "read_exactly<T> requires a trivially copyable type");
+
+  read_value_awaiter(byte_stream_state *state,
+                     read_options options) noexcept
+      : read_awaiter_base(state, sizeof(T), options) {}
+
+  ntl::result<T> await_resume() noexcept {
+    const ntl::status status = finish_wait();
+    if (!status.is_ok())
+      return ntl::unexpected(status);
+    const ntl::status consumed = state_->consume(
+        std::as_writable_bytes(std::span<T>(&value_, 1)));
+    if (!consumed.is_ok())
+      return ntl::unexpected(consumed);
+    return ntl::ok(value_);
+  }
+
+private:
+  T value_{};
+};
+
+} // namespace detail
+
+/**
+ * @brief Fixed-capacity, single-reader coroutine byte stream.
+ *
+ * Producers may append fragmented callback data without retaining it. Awaited
+ * continuations always resume on the selected system work queue at
+ * PASSIVE_LEVEL. One coroutine may wait at a time; a competing waiter
+ * completes with STATUS_DEVICE_BUSY.
+ *
+ * The coroutine frame and every destination span must remain alive through
+ * await_resume(). Before destroying an owner that may still issue another
+ * read, call cancel_and_wait() at PASSIVE_LEVEL and wait for the owning
+ * coroutine task to finish.
+ */
+class async_byte_stream {
+public:
+  async_byte_stream() noexcept = default;
+  async_byte_stream(const async_byte_stream &) = delete;
+  async_byte_stream &operator=(const async_byte_stream &) = delete;
+
+  async_byte_stream(async_byte_stream &&other) noexcept
+      : state_(std::exchange(other.state_, nullptr)) {}
+
+  async_byte_stream &operator=(async_byte_stream &&other) noexcept {
+    if (this != &other) {
+      reset();
+      state_ = std::exchange(other.state_, nullptr);
+    }
+    return *this;
+  }
+
+  ~async_byte_stream() { reset(); }
+
+  static ntl::result<async_byte_stream>
+  try_create(std::size_t capacity,
+             WORK_QUEUE_TYPE queue_type = DelayedWorkQueue) noexcept {
+    if (capacity == 0)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+
+    auto storage = ntl::net::owned_bytes::try_allocate(
+        capacity, ntl::net::buffer_limits{capacity}, ntl::pool_tag("qAtN"));
+    if (!storage)
+      return ntl::unexpected(storage.status());
+
+    auto state = ntl::try_make_pool<detail::byte_stream_state>(
+        ntl::pool_kind::nonpaged, ntl::pool_option::none,
+        ntl::pool_tag("sAtN"), std::move(*storage), queue_type);
+    if (!state)
+      return ntl::unexpected(state.status());
+    return ntl::ok(async_byte_stream(state->release()));
+  }
+
+  explicit operator bool() const noexcept { return state_ != nullptr; }
+  std::size_t capacity() const noexcept {
+    return state_ ? state_->capacity() : 0;
+  }
+  std::size_t buffered_size() const noexcept {
+    return state_ ? state_->buffered_size() : 0;
+  }
+
+  ntl::status
+  append_received_data(ntl::net::scatter_view data) noexcept {
+    return state_ ? state_->append(data)
+                  : ntl::status{STATUS_INVALID_DEVICE_STATE};
+  }
+
+  detail::read_into_awaiter
+  read_exactly(std::span<std::byte> destination,
+               read_options options = {}) noexcept {
+    return detail::read_into_awaiter(state_, destination, options);
+  }
+
+  template <class T>
+  detail::read_value_awaiter<T>
+  read_exactly(read_options options = {}) noexcept {
+    return detail::read_value_awaiter<T>(state_, options);
+  }
+
+  void close(ntl::status status = STATUS_END_OF_FILE) noexcept {
+    if (state_)
+      state_->close(status);
+  }
+
+  void cancel() noexcept {
+    if (state_)
+      state_->close(STATUS_CANCELLED);
+  }
+
+  ntl::status cancel_and_wait() noexcept {
+    if (!state_)
+      return ntl::status::ok();
+    state_->close(STATUS_CANCELLED);
+    return state_->wait_for_idle();
+  }
+
+  void reset() noexcept {
+    detail::byte_stream_state *const state =
+        std::exchange(state_, nullptr);
+    if (state) {
+      state->close(STATUS_CANCELLED);
+      state->release();
+    }
+  }
+
+private:
+  explicit async_byte_stream(detail::byte_stream_state *state) noexcept
+      : state_(state) {}
+
+  detail::byte_stream_state *state_ = nullptr;
+};
+
+#endif // NTL_HAS_COROUTINE_SUPPORT
+
+} // namespace ntl::net

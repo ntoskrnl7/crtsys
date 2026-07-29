@@ -1,0 +1,262 @@
+/**
+ * @file http_datagram
+ * @brief Bounded RFC 9297 HTTP/3 Datagram and Capsule Protocol parsing.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/http/datagram is a user-mode header"
+#endif
+
+#include <ntl/net/framing>
+#include <ntl/net/http3/framing>
+#include <ntl/result>
+#include <ntl/net/buffer/scatter_view>
+#include <ntl/status>
+
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <new>
+#include <span>
+#include <vector>
+
+namespace ntl::net::http {
+
+inline constexpr std::uint64_t datagram_capsule_type = 0x00;
+inline constexpr std::uint64_t settings_h3_datagram = 0x33;
+inline constexpr std::uint64_t h3_datagram_error = 0x33;
+inline constexpr std::uint64_t maximum_quarter_stream_id =
+    (std::uint64_t{1} << 60) - 1;
+
+struct datagram_limits {
+  std::size_t maximum_payload_size = 64 * 1024;
+};
+
+/**
+ * @brief View over the payload of a QUIC DATAGRAM frame used by HTTP/3.
+ */
+class http3_datagram_view {
+public:
+  static ntl::result<http3_datagram_view>
+  parse(ntl::net::scatter_view wire,
+        datagram_limits limits = {}) noexcept {
+    if (!wire || limits.maximum_payload_size == 0)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    const auto quarter =
+        ntl::net::http3::read_quic_varint(wire);
+    if (!quarter)
+      return ntl::unexpected(quarter.status());
+    if (quarter->value > maximum_quarter_stream_id)
+      return ntl::unexpected(STATUS_INTEGER_OVERFLOW);
+    const std::size_t payload_size =
+        wire.size() - quarter->encoded_size;
+    if (payload_size > limits.maximum_payload_size)
+      return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+    auto payload =
+        wire.subview(quarter->encoded_size, payload_size);
+    if (!payload)
+      return ntl::unexpected(payload.status());
+    return ntl::ok(http3_datagram_view(
+        quarter->value * 4, *payload));
+  }
+
+  std::uint64_t request_stream_id() const noexcept {
+    return request_stream_id_;
+  }
+
+  ntl::net::scatter_view payload() const noexcept {
+    return payload_;
+  }
+
+private:
+  http3_datagram_view(
+      std::uint64_t request_stream_id,
+      ntl::net::scatter_view payload) noexcept
+      : request_stream_id_(request_stream_id),
+        payload_(payload) {}
+
+  std::uint64_t request_stream_id_ = 0;
+  ntl::net::scatter_view payload_;
+};
+
+inline ntl::result<std::vector<std::byte>>
+encode_http3_datagram(
+    std::uint64_t request_stream_id,
+    std::span<const std::byte> payload,
+    datagram_limits limits = {}) noexcept {
+  if (limits.maximum_payload_size == 0 ||
+      payload.size() > limits.maximum_payload_size ||
+      (request_stream_id & 0x3u) != 0 ||
+      request_stream_id / 4 > maximum_quarter_stream_id)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  try {
+    std::vector<std::byte> result;
+    result.reserve(
+        ntl::net::http3::quic_varint_size(
+            request_stream_id / 4) +
+        payload.size());
+    const ntl::status encoded =
+        ntl::net::http3::append_quic_varint(
+            result, request_stream_id / 4);
+    if (!encoded.is_ok())
+      return ntl::unexpected(
+          static_cast<NTSTATUS>(encoded));
+    result.insert(result.end(), payload.begin(), payload.end());
+    return ntl::ok(std::move(result));
+  } catch (const std::bad_alloc &) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+}
+
+struct capsule_header {
+  std::uint64_t type = 0;
+  std::uint64_t payload_size = 0;
+  std::size_t header_size = 0;
+};
+
+inline ntl::result<capsule_header>
+inspect_capsule_header(
+    ntl::net::scatter_view wire,
+    datagram_limits limits = {}) noexcept {
+  if (!wire || limits.maximum_payload_size == 0)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  const auto type = ntl::net::http3::read_quic_varint(wire);
+  if (!type)
+    return ntl::unexpected(type.status());
+  const auto length = ntl::net::http3::read_quic_varint(
+      wire, type->encoded_size);
+  if (!length)
+    return ntl::unexpected(length.status());
+  if (length->value > limits.maximum_payload_size ||
+      length->value >
+          (std::numeric_limits<std::size_t>::max)())
+    return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+  return ntl::ok(capsule_header{
+      type->value, length->value,
+      type->encoded_size + length->encoded_size});
+}
+
+class capsule_framer {
+public:
+  explicit constexpr capsule_framer(
+      datagram_limits limits = {}) noexcept
+      : limits_(limits) {}
+
+  ntl::net::framing::frame_probe
+  probe(ntl::net::scatter_view bytes) const noexcept {
+    if (!bytes)
+      return ntl::net::framing::frame_probe::malformed(
+          STATUS_INVALID_PARAMETER);
+    const auto header =
+        inspect_capsule_header(bytes, limits_);
+    if (!header) {
+      const NTSTATUS status =
+          static_cast<NTSTATUS>(header.status());
+      if (status == STATUS_BUFFER_TOO_SMALL) {
+        if (bytes.size() >= 16)
+          return ntl::net::framing::frame_probe::malformed();
+        return ntl::net::framing::frame_probe::need_more(
+            bytes.size() + 1);
+      }
+      return ntl::net::framing::frame_probe::malformed(status);
+    }
+    if (header->payload_size >
+        (std::numeric_limits<std::size_t>::max)() -
+            header->header_size)
+      return ntl::net::framing::frame_probe::malformed(
+          STATUS_BUFFER_OVERFLOW);
+    const std::size_t total =
+        header->header_size +
+        static_cast<std::size_t>(header->payload_size);
+    if (bytes.size() < total)
+      return ntl::net::framing::frame_probe::need_more(total);
+    return ntl::net::framing::frame_probe::complete(
+        total, header->header_size,
+        static_cast<std::size_t>(header->payload_size));
+  }
+
+private:
+  datagram_limits limits_{};
+};
+
+class capsule_view {
+public:
+  static ntl::result<capsule_view>
+  parse(ntl::net::scatter_view wire,
+        datagram_limits limits = {}) noexcept {
+    const auto header =
+        inspect_capsule_header(wire, limits);
+    if (!header)
+      return ntl::unexpected(header.status());
+    if (header->header_size > wire.size() ||
+        header->payload_size >
+            wire.size() - header->header_size)
+      return ntl::unexpected(STATUS_BUFFER_TOO_SMALL);
+    auto payload = wire.subview(
+        header->header_size,
+        static_cast<std::size_t>(header->payload_size));
+    if (!payload)
+      return ntl::unexpected(payload.status());
+    return ntl::ok(capsule_view(*header, *payload));
+  }
+
+  const capsule_header &header() const noexcept {
+    return header_;
+  }
+
+  bool is_datagram() const noexcept {
+    return header_.type == datagram_capsule_type;
+  }
+
+  ntl::net::scatter_view payload() const noexcept {
+    return payload_;
+  }
+
+private:
+  capsule_view(
+      capsule_header header,
+      ntl::net::scatter_view payload) noexcept
+      : header_(header), payload_(payload) {}
+
+  capsule_header header_{};
+  ntl::net::scatter_view payload_;
+};
+
+inline ntl::result<std::vector<std::byte>>
+encode_capsule(
+    std::uint64_t type,
+    std::span<const std::byte> payload,
+    datagram_limits limits = {}) noexcept {
+  if (type > ntl::net::http3::maximum_quic_varint ||
+      limits.maximum_payload_size == 0 ||
+      payload.size() > limits.maximum_payload_size)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  try {
+    std::vector<std::byte> result;
+    result.reserve(
+        ntl::net::http3::quic_varint_size(type) +
+        ntl::net::http3::quic_varint_size(payload.size()) +
+        payload.size());
+    ntl::status encoded =
+        ntl::net::http3::append_quic_varint(result, type);
+    if (encoded.is_ok())
+      encoded = ntl::net::http3::append_quic_varint(
+          result, payload.size());
+    if (!encoded.is_ok())
+      return ntl::unexpected(
+          static_cast<NTSTATUS>(encoded));
+    result.insert(result.end(), payload.begin(), payload.end());
+    return ntl::ok(std::move(result));
+  } catch (const std::bad_alloc &) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+}
+
+} // namespace ntl::net::http

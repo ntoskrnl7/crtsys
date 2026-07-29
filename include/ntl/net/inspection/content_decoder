@@ -1,0 +1,405 @@
+/**
+ * @file content_decoder
+ * @brief User-mode adapter point for bounded content transformations.
+ *
+ * Compression backends adapt to this push/final contract and registry.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/inspection/content_decoder is a user-mode header"
+#endif
+
+#include <ntl/net/inspection/core>
+#include <ntl/result>
+#include <ntl/net/buffer/scatter_view>
+#include <ntl/status>
+
+#include <cstddef>
+#include <functional>
+#include <memory>
+#include <span>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+namespace ntl::net::inspection {
+
+enum class decode_state : std::uint8_t {
+  complete = 1,
+  need_more_input = 2,
+  malformed = 3,
+};
+
+class decode_result {
+public:
+  static constexpr decode_result complete() noexcept {
+    return decode_result(decode_state::complete, STATUS_SUCCESS);
+  }
+  static constexpr decode_result need_more_input() noexcept {
+    return decode_result(decode_state::need_more_input, STATUS_SUCCESS);
+  }
+  static constexpr decode_result
+  malformed(NTSTATUS status = STATUS_DATA_ERROR) noexcept {
+    return decode_result(decode_state::malformed, status);
+  }
+
+  constexpr decode_state state() const noexcept { return state_; }
+  constexpr NTSTATUS error() const noexcept { return error_; }
+
+private:
+  constexpr decode_result(decode_state state, NTSTATUS error) noexcept
+      : state_(state), error_(error) {}
+
+  decode_state state_ = decode_state::malformed;
+  NTSTATUS error_ = STATUS_DATA_ERROR;
+};
+
+/**
+ * @brief Bounded destination supplied to an external decoder adapter.
+ */
+class decoded_output {
+public:
+  explicit decoded_output(std::size_t maximum_size) noexcept
+      : maximum_size_(maximum_size) {}
+
+  ntl::status append(std::span<const std::byte> bytes) noexcept {
+    if (bytes.size() > maximum_size_ - size())
+      return STATUS_BUFFER_OVERFLOW;
+    try {
+      bytes_.insert(bytes_.end(), bytes.begin(), bytes.end());
+      return ntl::status::ok();
+    } catch (...) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+  }
+
+  ntl::status append(ntl::net::scatter_view bytes) noexcept {
+    if (!bytes)
+      return STATUS_INVALID_PARAMETER;
+    if (bytes.size() > maximum_size_ - size())
+      return STATUS_BUFFER_OVERFLOW;
+    ntl::status result = ntl::status::ok();
+    const ntl::status visited = bytes.for_each_chunk(
+        [this, &result](std::span<const std::byte> chunk) noexcept {
+          result = append(chunk);
+          return result.is_ok();
+        });
+    return visited.is_ok() ? result : visited;
+  }
+
+  std::size_t size() const noexcept { return bytes_.size(); }
+  std::size_t maximum_size() const noexcept { return maximum_size_; }
+  std::span<const std::byte> bytes() const noexcept { return bytes_; }
+
+  std::vector<std::byte> release() noexcept {
+    return std::move(bytes_);
+  }
+
+private:
+  std::vector<std::byte> bytes_;
+  std::size_t maximum_size_ = 0;
+};
+
+/**
+ * @brief Pass-through adapter for uncompressed content and contract tests.
+ */
+class identity_content_decoder {
+public:
+  void reset() noexcept {}
+
+  decode_result decode(ntl::net::scatter_view input, bool final,
+                       decoded_output &output) noexcept {
+    const ntl::status appended = output.append(input);
+    if (!appended.is_ok())
+      return decode_result::malformed(
+          static_cast<NTSTATUS>(appended));
+    return final ? decode_result::complete()
+                 : decode_result::need_more_input();
+  }
+};
+
+struct decode_limits {
+  std::size_t maximum_encoded_size = 1024 * 1024;
+  std::size_t maximum_decoded_size = 4 * 1024 * 1024;
+  std::size_t maximum_expansion_ratio = 64;
+  std::size_t maximum_coding_layers = 4;
+};
+
+/**
+ * @brief Runtime-polymorphic adapter used by content_decoder_registry.
+ */
+class content_decoder {
+public:
+  virtual ~content_decoder() = default;
+  virtual void reset() noexcept = 0;
+  virtual decode_result decode(ntl::net::scatter_view input, bool final,
+                               decoded_output &output) noexcept = 0;
+};
+
+template <class Decoder>
+class content_decoder_adapter final : public content_decoder {
+public:
+  template <class... Args>
+  explicit content_decoder_adapter(Args &&...args)
+      : decoder_(std::forward<Args>(args)...) {}
+
+  void reset() noexcept override {
+    static_assert(noexcept(decoder_.reset()),
+                  "decoder::reset must be noexcept");
+    decoder_.reset();
+  }
+
+  decode_result decode(ntl::net::scatter_view input, bool final,
+                       decoded_output &output) noexcept override {
+    static_assert(noexcept(decoder_.decode(input, final, output)),
+                  "decoder::decode must be noexcept");
+    return decoder_.decode(input, final, output);
+  }
+
+  Decoder &underlying() noexcept { return decoder_; }
+
+private:
+  Decoder decoder_;
+};
+
+/**
+ * @brief Maps normalized HTTP Content-Encoding tokens to decoder factories.
+ *
+ * A factory returns a fresh decoder so simultaneous HTTP streams never share
+ * compression state accidentally. Registry mutation must finish before
+ * concurrent create() calls begin.
+ */
+class content_decoder_registry {
+public:
+  using factory =
+      std::function<std::unique_ptr<content_decoder>()>;
+
+  void add(std::string encoding, factory create) {
+    normalize(encoding);
+    if (encoding.empty() || !create)
+      throw std::invalid_argument(
+          "content decoder registration requires a name and factory");
+    for (auto &entry : entries_) {
+      if (entry.encoding == encoding) {
+        entry.create = std::move(create);
+        return;
+      }
+    }
+    entries_.push_back(
+        entry{std::move(encoding), std::move(create)});
+  }
+
+  std::unique_ptr<content_decoder>
+  create(std::string_view encoding) const {
+    std::string normalized(encoding);
+    normalize(normalized);
+    for (const auto &entry : entries_) {
+      if (entry.encoding == normalized)
+        return entry.create();
+    }
+    return {};
+  }
+
+  bool contains(std::string_view encoding) const {
+    std::string normalized(encoding);
+    normalize(normalized);
+    for (const auto &entry : entries_) {
+      if (entry.encoding == normalized)
+        return true;
+    }
+    return false;
+  }
+
+private:
+  struct entry {
+    std::string encoding;
+    factory create;
+  };
+
+  static void normalize(std::string &value) {
+    std::size_t first = 0;
+    while (first != value.size() &&
+           (value[first] == ' ' || value[first] == '\t'))
+      ++first;
+    std::size_t last = value.size();
+    while (last != first &&
+           (value[last - 1] == ' ' ||
+            value[last - 1] == '\t'))
+      --last;
+    if (first != 0 || last != value.size())
+      value = value.substr(first, last - first);
+    for (char &character : value) {
+      if (character >= 'A' && character <= 'Z')
+        character = static_cast<char>(
+            character + ('a' - 'A'));
+    }
+  }
+
+  std::vector<entry> entries_;
+};
+
+/**
+ * @brief Decodes one complete framed message with an application adapter.
+ *
+ * Decoder must provide reset() and
+ * decode(scatter_view, bool final, decoded_output&) noexcept. Stateful
+ * connection-wide compression uses its own owner rather than this per-message
+ * convenience function.
+ */
+template <class Decoder>
+ntl::result<std::vector<std::byte>>
+decode_complete(Decoder &decoder, ntl::net::scatter_view encoded,
+                std::size_t maximum_decoded_size) noexcept {
+  if (!encoded || maximum_decoded_size == 0)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+
+  static_assert(noexcept(decoder.reset()),
+                "decoder::reset must be noexcept");
+  static_assert(noexcept(decoder.decode(
+                    encoded, true,
+                    std::declval<decoded_output &>())),
+                "decoder::decode must be noexcept");
+
+  decoder.reset();
+  decoded_output output(maximum_decoded_size);
+  const decode_result decoded =
+      decoder.decode(encoded, true, output);
+  if (decoded.state() != decode_state::complete) {
+    const NTSTATUS status =
+        decoded.state() == decode_state::need_more_input
+            ? STATUS_END_OF_FILE
+            : (decoded.error() == STATUS_SUCCESS
+                   ? STATUS_DATA_ERROR
+                   : decoded.error());
+    return ntl::unexpected(status);
+  }
+  return ntl::ok(output.release());
+}
+
+template <class Decoder>
+ntl::result<std::vector<std::byte>>
+decode_complete(Decoder &decoder, ntl::net::scatter_view encoded,
+                decode_limits limits) noexcept {
+  if (!encoded || limits.maximum_encoded_size == 0 ||
+      limits.maximum_decoded_size == 0 ||
+      limits.maximum_expansion_ratio == 0)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  if (encoded.size() > limits.maximum_encoded_size)
+    return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+
+  auto decoded = decode_complete(
+      decoder, encoded, limits.maximum_decoded_size);
+  if (!decoded)
+    return decoded;
+  if (encoded.empty()) {
+    if (!decoded->empty())
+      return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+  } else if (decoded->size() / encoded.size() >
+                 limits.maximum_expansion_ratio ||
+             (decoded->size() % encoded.size() != 0 &&
+              decoded->size() / encoded.size() ==
+                  limits.maximum_expansion_ratio)) {
+    return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+  }
+  return decoded;
+}
+
+/**
+ * @brief Decodes an HTTP Content-Encoding list in reverse application order.
+ *
+ * For `Content-Encoding: gzip, br`, the sender applied gzip and then Brotli,
+ * so this function asks the registry for `br` first and `gzip` second.
+ * Compression implementations remain explicit application adapters.
+ */
+inline ntl::result<std::vector<std::byte>>
+decode_content_encoding(
+    const content_decoder_registry &registry,
+    ntl::net::scatter_view encoded,
+    std::string_view content_encoding,
+    decode_limits limits = {}) noexcept {
+  if (!encoded || limits.maximum_encoded_size == 0 ||
+      limits.maximum_decoded_size == 0 ||
+      limits.maximum_expansion_ratio == 0 ||
+      limits.maximum_coding_layers == 0)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  if (encoded.size() > limits.maximum_encoded_size)
+    return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+
+  try {
+    std::vector<std::string> codings;
+    std::size_t position = 0;
+    while (position <= content_encoding.size()) {
+      const std::size_t comma =
+          content_encoding.find(',', position);
+      const std::size_t end =
+          comma == std::string_view::npos
+              ? content_encoding.size()
+              : comma;
+      std::string coding(
+          content_encoding.substr(position, end - position));
+      std::size_t first = 0;
+      while (first != coding.size() &&
+             (coding[first] == ' ' || coding[first] == '\t'))
+        ++first;
+      std::size_t last = coding.size();
+      while (last != first &&
+             (coding[last - 1] == ' ' ||
+              coding[last - 1] == '\t'))
+        --last;
+      coding = coding.substr(first, last - first);
+      for (char &character : coding) {
+        if (character >= 'A' && character <= 'Z')
+          character = static_cast<char>(
+              character + ('a' - 'A'));
+      }
+      if (!coding.empty() && coding != "identity")
+        codings.push_back(std::move(coding));
+      if (comma == std::string_view::npos)
+        break;
+      position = comma + 1;
+    }
+    if (codings.size() > limits.maximum_coding_layers)
+      return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+
+    std::vector<std::byte> current;
+    const ntl::status copied = encoded.for_each_chunk(
+        [&current](std::span<const std::byte> chunk) noexcept {
+          try {
+            current.insert(
+                current.end(), chunk.begin(), chunk.end());
+            return true;
+          } catch (...) {
+            return false;
+          }
+        });
+    if (!copied.is_ok())
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+
+    decode_limits stage_limits = limits;
+    stage_limits.maximum_encoded_size =
+        limits.maximum_decoded_size;
+    for (auto coding = codings.rbegin();
+         coding != codings.rend(); ++coding) {
+      auto decoder = registry.create(*coding);
+      if (!decoder)
+        return ntl::unexpected(STATUS_NOT_SUPPORTED);
+      const auto view = ntl::net::scatter_view::from_contiguous(
+          std::span<const std::byte>(current));
+      auto decoded =
+          decode_complete(*decoder, view, stage_limits);
+      if (!decoded)
+        return decoded;
+      current = std::move(*decoded);
+    }
+    return ntl::ok(std::move(current));
+  } catch (...) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  }
+}
+
+} // namespace ntl::net::inspection
