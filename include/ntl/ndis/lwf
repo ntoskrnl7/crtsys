@@ -1,0 +1,455 @@
+/**
+ * @file ndis/lwf
+ * @brief Rule-safe pass-through NDIS lightweight-filter lifecycle.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/ndis/lwf is a kernel-mode header"
+#endif
+
+#include "../result"
+#include "../status"
+#include "nbl"
+
+#include <ndis.h>
+
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <new>
+#include <span>
+#include <string_view>
+#include <type_traits>
+#include <utility>
+
+namespace ntl::ndis {
+
+struct filter_driver_identity {
+  const wchar_t *friendly_name = nullptr;
+  const wchar_t *unique_name = nullptr;
+  const wchar_t *service_name = nullptr;
+  std::uint8_t major_driver_version = 1;
+  std::uint8_t minor_driver_version = 0;
+};
+
+class attach_event {
+public:
+  std::wstring_view module_name() const noexcept {
+    return view(parameters_ ? parameters_->FilterModuleGuidName
+                            : nullptr);
+  }
+  std::wstring_view miniport_name() const noexcept {
+    return view(parameters_ ? parameters_->BaseMiniportName
+                            : nullptr);
+  }
+  std::wstring_view miniport_instance_name() const noexcept {
+    return view(parameters_
+                    ? parameters_->BaseMiniportInstanceName
+                    : nullptr);
+  }
+  NET_IFINDEX interface_index() const noexcept {
+    return parameters_ ? parameters_->BaseMiniportIfIndex : 0;
+  }
+  NDIS_MEDIUM media_type() const noexcept {
+    return parameters_ ? parameters_->MiniportMediaType
+                       : NdisMediumMax;
+  }
+  std::span<const std::uint8_t>
+  current_mac_address() const noexcept {
+    if (!parameters_)
+      return {};
+    return {parameters_->CurrentMacAddress,
+            parameters_->MacAddressLength};
+  }
+
+private:
+  template <class> friend class lightweight_filter;
+  explicit attach_event(
+      const NDIS_FILTER_ATTACH_PARAMETERS *parameters) noexcept
+      : parameters_(parameters) {}
+
+  static std::wstring_view view(
+      const NDIS_STRING *value) noexcept {
+    if (!value || !value->Buffer)
+      return {};
+    return {value->Buffer,
+            static_cast<std::size_t>(
+                value->Length / sizeof(wchar_t))};
+  }
+
+  const NDIS_FILTER_ATTACH_PARAMETERS *parameters_ = nullptr;
+};
+
+class pause_event {
+private:
+  template <class> friend class lightweight_filter;
+  explicit pause_event(
+      const NDIS_FILTER_PAUSE_PARAMETERS *parameters) noexcept
+      : parameters_(parameters) {}
+  const NDIS_FILTER_PAUSE_PARAMETERS *parameters_ = nullptr;
+};
+
+class restart_event {
+private:
+  template <class> friend class lightweight_filter;
+  explicit restart_event(
+      const NDIS_FILTER_RESTART_PARAMETERS *parameters) noexcept
+      : parameters_(parameters) {}
+  const NDIS_FILTER_RESTART_PARAMETERS *parameters_ = nullptr;
+};
+
+class send_event {
+public:
+  net_buffer_list_chain_view packets() const noexcept {
+    return packets_;
+  }
+  NDIS_PORT_NUMBER port() const noexcept { return port_; }
+  ULONG flags() const noexcept { return flags_; }
+  bool dispatch_level() const noexcept {
+    return NDIS_TEST_SEND_AT_DISPATCH_LEVEL(flags_) != FALSE;
+  }
+
+private:
+  template <class> friend class lightweight_filter;
+  send_event(NET_BUFFER_LIST *packets, NDIS_PORT_NUMBER port,
+             ULONG flags) noexcept
+      : packets_(packets), port_(port), flags_(flags) {}
+  net_buffer_list_chain_view packets_;
+  NDIS_PORT_NUMBER port_ = 0;
+  ULONG flags_ = 0;
+};
+
+class send_complete_event {
+public:
+  net_buffer_list_chain_view packets() const noexcept {
+    return packets_;
+  }
+  ULONG flags() const noexcept { return flags_; }
+  bool dispatch_level() const noexcept {
+    return NDIS_TEST_SEND_COMPLETE_AT_DISPATCH_LEVEL(flags_) != FALSE;
+  }
+
+private:
+  template <class> friend class lightweight_filter;
+  send_complete_event(NET_BUFFER_LIST *packets,
+                      ULONG flags) noexcept
+      : packets_(packets), flags_(flags) {}
+  net_buffer_list_chain_view packets_;
+  ULONG flags_ = 0;
+};
+
+class receive_event {
+public:
+  net_buffer_list_chain_view packets() const noexcept {
+    return packets_;
+  }
+  NDIS_PORT_NUMBER port() const noexcept { return port_; }
+  ULONG indicated_count() const noexcept { return count_; }
+  ULONG flags() const noexcept { return flags_; }
+  bool dispatch_level() const noexcept {
+    return NDIS_TEST_RECEIVE_AT_DISPATCH_LEVEL(flags_) != FALSE;
+  }
+  bool can_pend() const noexcept {
+    return NDIS_TEST_RECEIVE_CAN_PEND(flags_) != FALSE;
+  }
+
+private:
+  template <class> friend class lightweight_filter;
+  receive_event(NET_BUFFER_LIST *packets, NDIS_PORT_NUMBER port,
+                ULONG count, ULONG flags) noexcept
+      : packets_(packets), port_(port), count_(count),
+        flags_(flags) {}
+  net_buffer_list_chain_view packets_;
+  NDIS_PORT_NUMBER port_ = 0;
+  ULONG count_ = 0;
+  ULONG flags_ = 0;
+};
+
+enum class filter_module_state : std::uint8_t {
+  paused,
+  running,
+  pausing,
+  detaching,
+};
+
+/**
+ * @brief Owns one pass-through LWF registration and typed module callbacks.
+ *
+ * Module must be constructible from attach_event. Optional noexcept methods:
+ * on_restart(restart_event), on_pause(pause_event), on_send(send_event),
+ * on_send_complete(send_complete_event), and on_receive(receive_event).
+ * This monitor profile never transfers NBL ownership to Module. Forwarding,
+ * completion, return, pause, and detach remain adapter-owned.
+ */
+template <class Module> class lightweight_filter {
+public:
+  lightweight_filter(const lightweight_filter &) = delete;
+  lightweight_filter &operator=(const lightweight_filter &) = delete;
+  ~lightweight_filter() { reset(); }
+
+  static ntl::result<std::shared_ptr<lightweight_filter>>
+  try_create(PDRIVER_OBJECT driver,
+             filter_driver_identity identity) noexcept {
+    if (!driver || !identity.friendly_name ||
+        !identity.unique_name || !identity.service_name)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+
+    std::shared_ptr<lightweight_filter> self;
+    try {
+      self = std::shared_ptr<lightweight_filter>(
+          new (std::nothrow) lightweight_filter());
+    } catch (...) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+    if (!self)
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+
+    NDIS_FILTER_DRIVER_CHARACTERISTICS characteristics{};
+    characteristics.Header.Type =
+        NDIS_OBJECT_TYPE_FILTER_DRIVER_CHARACTERISTICS;
+    characteristics.Header.Revision =
+        NDIS_FILTER_CHARACTERISTICS_REVISION_2;
+    characteristics.Header.Size =
+        NDIS_SIZEOF_FILTER_DRIVER_CHARACTERISTICS_REVISION_2;
+    characteristics.MajorNdisVersion = 6;
+    characteristics.MinorNdisVersion = 30;
+    characteristics.MajorDriverVersion =
+        identity.major_driver_version;
+    characteristics.MinorDriverVersion =
+        identity.minor_driver_version;
+
+    RtlInitUnicodeString(
+        &characteristics.FriendlyName, identity.friendly_name);
+    RtlInitUnicodeString(
+        &characteristics.UniqueName, identity.unique_name);
+    RtlInitUnicodeString(
+        &characteristics.ServiceName, identity.service_name);
+    characteristics.AttachHandler = &attach;
+    characteristics.DetachHandler = &detach;
+    characteristics.RestartHandler = &restart;
+    characteristics.PauseHandler = &pause;
+    characteristics.SendNetBufferListsHandler = &send;
+    characteristics.SendNetBufferListsCompleteHandler =
+        &send_complete;
+    characteristics.ReceiveNetBufferListsHandler = &receive;
+    characteristics.ReturnNetBufferListsHandler = &return_receive;
+
+    NDIS_HANDLE registration = nullptr;
+    const NDIS_STATUS status = NdisFRegisterFilterDriver(
+        driver, self.get(), &characteristics, &registration);
+    if (status != NDIS_STATUS_SUCCESS)
+      return ntl::unexpected(static_cast<NTSTATUS>(status));
+    self->registration_ = registration;
+    return ntl::ok(std::move(self));
+  }
+
+  void reset() noexcept {
+    NDIS_HANDLE registration =
+        std::exchange(registration_, nullptr);
+    if (registration)
+      NdisFDeregisterFilterDriver(registration);
+  }
+
+  std::size_t attached_modules() const noexcept {
+    return attached_.load(std::memory_order_acquire);
+  }
+
+private:
+  struct module_holder {
+    template <class... Args>
+    explicit module_holder(
+        lightweight_filter &owner_value,
+        NDIS_HANDLE filter_handle_value,
+        Args &&...args)
+        : owner(&owner_value),
+          filter_handle(filter_handle_value),
+          module(std::forward<Args>(args)...) {}
+
+    lightweight_filter *owner = nullptr;
+    NDIS_HANDLE filter_handle = nullptr;
+    std::atomic<filter_module_state> state{
+        filter_module_state::paused};
+    Module module;
+  };
+
+  lightweight_filter() = default;
+
+  static NDIS_STATUS attach(
+      NDIS_HANDLE filter_handle, NDIS_HANDLE driver_context,
+      NDIS_FILTER_ATTACH_PARAMETERS *parameters) noexcept {
+    auto *owner =
+        static_cast<lightweight_filter *>(driver_context);
+    if (!owner || !filter_handle || !parameters)
+      return NDIS_STATUS_INVALID_PARAMETER;
+
+    module_holder *holder = nullptr;
+    try {
+      holder = new (std::nothrow) module_holder(
+          *owner, filter_handle, attach_event(parameters));
+    } catch (...) {
+      return NDIS_STATUS_RESOURCES;
+    }
+    if (!holder)
+      return NDIS_STATUS_RESOURCES;
+
+    NDIS_FILTER_ATTRIBUTES attributes{};
+    attributes.Header.Type = NDIS_OBJECT_TYPE_FILTER_ATTRIBUTES;
+    attributes.Header.Revision =
+        NDIS_FILTER_ATTRIBUTES_REVISION_1;
+    attributes.Header.Size =
+        NDIS_SIZEOF_FILTER_ATTRIBUTES_REVISION_1;
+    const NDIS_STATUS status = NdisFSetAttributes(
+        filter_handle, holder, &attributes);
+    if (status != NDIS_STATUS_SUCCESS) {
+      delete holder;
+      return status;
+    }
+    owner->attached_.fetch_add(1, std::memory_order_acq_rel);
+    return NDIS_STATUS_SUCCESS;
+  }
+
+  static void detach(NDIS_HANDLE module_context) noexcept {
+    auto *holder = static_cast<module_holder *>(module_context);
+    if (!holder)
+      return;
+    holder->state.store(
+        filter_module_state::detaching,
+        std::memory_order_release);
+    lightweight_filter *const owner = holder->owner;
+    delete holder;
+    if (owner)
+      owner->attached_.fetch_sub(1, std::memory_order_acq_rel);
+  }
+
+  static NDIS_STATUS restart(
+      NDIS_HANDLE module_context,
+      NDIS_FILTER_RESTART_PARAMETERS *parameters) noexcept {
+    auto *holder = static_cast<module_holder *>(module_context);
+    if (!holder)
+      return NDIS_STATUS_INVALID_PARAMETER;
+    if constexpr (requires(Module &module, restart_event event) {
+                    module.on_restart(event);
+                  }) {
+      static_assert(noexcept(holder->module.on_restart(
+                        restart_event(parameters))),
+                    "Module::on_restart must be noexcept");
+      const ntl::status result =
+          holder->module.on_restart(restart_event(parameters));
+      if (!result.is_ok())
+        return static_cast<NDIS_STATUS>(
+            static_cast<NTSTATUS>(result));
+    }
+    holder->state.store(
+        filter_module_state::running,
+        std::memory_order_release);
+    return NDIS_STATUS_SUCCESS;
+  }
+
+  static NDIS_STATUS pause(
+      NDIS_HANDLE module_context,
+      NDIS_FILTER_PAUSE_PARAMETERS *parameters) noexcept {
+    auto *holder = static_cast<module_holder *>(module_context);
+    if (!holder)
+      return NDIS_STATUS_INVALID_PARAMETER;
+    holder->state.store(
+        filter_module_state::pausing,
+        std::memory_order_release);
+    if constexpr (requires(Module &module, pause_event event) {
+                    module.on_pause(event);
+                  }) {
+      static_assert(noexcept(holder->module.on_pause(
+                        pause_event(parameters))),
+                    "Module::on_pause must be noexcept");
+      const ntl::status result =
+          holder->module.on_pause(pause_event(parameters));
+      if (!result.is_ok())
+        return static_cast<NDIS_STATUS>(
+            static_cast<NTSTATUS>(result));
+    }
+    holder->state.store(
+        filter_module_state::paused,
+        std::memory_order_release);
+    return NDIS_STATUS_SUCCESS;
+  }
+
+  static void send(
+      NDIS_HANDLE module_context, NET_BUFFER_LIST *packets,
+      NDIS_PORT_NUMBER port, ULONG flags) noexcept {
+    auto *holder = static_cast<module_holder *>(module_context);
+    if (!holder)
+      return;
+    if (holder->state.load(std::memory_order_acquire) ==
+        filter_module_state::running) {
+      if constexpr (requires(Module &module, send_event event) {
+                      module.on_send(event);
+                    }) {
+        static_assert(noexcept(holder->module.on_send(
+                          send_event(packets, port, flags))),
+                      "Module::on_send must be noexcept");
+        holder->module.on_send(send_event(packets, port, flags));
+      }
+    }
+    NdisFSendNetBufferLists(
+        holder->filter_handle, packets, port, flags);
+  }
+
+  static void send_complete(
+      NDIS_HANDLE module_context, NET_BUFFER_LIST *packets,
+      ULONG flags) noexcept {
+    auto *holder = static_cast<module_holder *>(module_context);
+    if (!holder)
+      return;
+    if constexpr (requires(
+                      Module &module, send_complete_event event) {
+                    module.on_send_complete(event);
+                  }) {
+      static_assert(noexcept(holder->module.on_send_complete(
+                        send_complete_event(packets, flags))),
+                    "Module::on_send_complete must be noexcept");
+      holder->module.on_send_complete(
+          send_complete_event(packets, flags));
+    }
+    NdisFSendNetBufferListsComplete(
+        holder->filter_handle, packets, flags);
+  }
+
+  static void receive(
+      NDIS_HANDLE module_context, NET_BUFFER_LIST *packets,
+      NDIS_PORT_NUMBER port, ULONG count, ULONG flags) noexcept {
+    auto *holder = static_cast<module_holder *>(module_context);
+    if (!holder)
+      return;
+    if (holder->state.load(std::memory_order_acquire) ==
+        filter_module_state::running) {
+      if constexpr (requires(Module &module, receive_event event) {
+                      module.on_receive(event);
+                    }) {
+        static_assert(noexcept(holder->module.on_receive(
+                          receive_event(
+                              packets, port, count, flags))),
+                      "Module::on_receive must be noexcept");
+        holder->module.on_receive(
+            receive_event(packets, port, count, flags));
+      }
+    }
+    NdisFIndicateReceiveNetBufferLists(
+        holder->filter_handle, packets, port, count, flags);
+  }
+
+  static void return_receive(
+      NDIS_HANDLE module_context, NET_BUFFER_LIST *packets,
+      ULONG flags) noexcept {
+    auto *holder = static_cast<module_holder *>(module_context);
+    if (!holder)
+      return;
+    NdisFReturnNetBufferLists(
+        holder->filter_handle, packets, flags);
+  }
+
+  NDIS_HANDLE registration_ = nullptr;
+  std::atomic<std::size_t> attached_{0};
+};
+
+} // namespace ntl::ndis

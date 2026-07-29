@@ -1,0 +1,275 @@
+/**
+ * @file ndis/nbl
+ * @brief Callback-scoped NBL views and explicit clone ownership.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/ndis/nbl is a kernel-mode header"
+#endif
+
+#include "../result"
+#include <ntl/net/buffer/scatter_view>
+#include "../status"
+#include "metadata"
+
+#include <ndis.h>
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <span>
+#include <utility>
+
+namespace ntl::ndis {
+
+namespace detail {
+
+inline std::size_t nbl_chain_byte_count(
+    const NET_BUFFER_LIST *chain) noexcept {
+  std::size_t total = 0;
+  for (auto *list = chain; list;
+       list = NET_BUFFER_LIST_NEXT_NBL(list)) {
+    for (auto *buffer = NET_BUFFER_LIST_FIRST_NB(list); buffer;
+         buffer = NET_BUFFER_NEXT_NB(buffer)) {
+      const std::size_t length = NET_BUFFER_DATA_LENGTH(buffer);
+      if (length >
+          (std::numeric_limits<std::size_t>::max)() - total)
+        return 0;
+      total += length;
+    }
+  }
+  return total;
+}
+
+inline ntl::status enumerate_nbl_bytes(
+    const void *source, std::size_t base_offset, std::size_t offset,
+    std::size_t length, ntl::net::detail::scatter_visit visit,
+    void *context) noexcept {
+  if (!source || !visit ||
+      offset > (std::numeric_limits<std::size_t>::max)() - base_offset)
+    return STATUS_INVALID_PARAMETER;
+  if (length == 0)
+    return ntl::status::ok();
+
+  std::size_t skip = base_offset + offset;
+  std::size_t remaining = length;
+  auto *chain = const_cast<NET_BUFFER_LIST *>(
+      static_cast<const NET_BUFFER_LIST *>(source));
+  for (auto *list = chain; list && remaining != 0;
+       list = NET_BUFFER_LIST_NEXT_NBL(list)) {
+    for (auto *buffer = NET_BUFFER_LIST_FIRST_NB(list);
+         buffer && remaining != 0;
+         buffer = NET_BUFFER_NEXT_NB(buffer)) {
+      const std::size_t buffer_length =
+          NET_BUFFER_DATA_LENGTH(buffer);
+      if (skip >= buffer_length) {
+        skip -= buffer_length;
+        continue;
+      }
+
+      std::size_t buffer_skip = skip;
+      skip = 0;
+      std::size_t buffer_remaining = buffer_length;
+      MDL *mdl = NET_BUFFER_CURRENT_MDL(buffer);
+      std::size_t mdl_offset =
+          NET_BUFFER_CURRENT_MDL_OFFSET(buffer);
+      while (mdl && buffer_remaining != 0 && remaining != 0) {
+        const std::size_t mdl_length = MmGetMdlByteCount(mdl);
+        if (mdl_offset > mdl_length)
+          return STATUS_DATA_ERROR;
+        const std::size_t segment_length =
+            (std::min)(mdl_length - mdl_offset, buffer_remaining);
+        if (buffer_skip >= segment_length) {
+          buffer_skip -= segment_length;
+          buffer_remaining -= segment_length;
+          mdl = mdl->Next;
+          mdl_offset = 0;
+          continue;
+        }
+
+        const std::size_t available =
+            segment_length - buffer_skip;
+        const std::size_t take =
+            (std::min)(available, remaining);
+        auto *mapped = static_cast<const std::byte *>(
+            MmGetSystemAddressForMdlSafe(
+                mdl, static_cast<MM_PAGE_PRIORITY>(
+                         NormalPagePriority |
+                         MdlMappingNoExecute)));
+        if (!mapped)
+          return STATUS_INSUFFICIENT_RESOURCES;
+        if (!visit(context,
+                   std::span<const std::byte>(
+                       mapped + mdl_offset + buffer_skip, take)))
+          return ntl::status::ok();
+        remaining -= take;
+        buffer_remaining -= segment_length;
+        buffer_skip = 0;
+        mdl = mdl->Next;
+        mdl_offset = 0;
+      }
+      if (buffer_remaining != 0 && remaining != 0)
+        return STATUS_DATA_ERROR;
+    }
+  }
+  return remaining == 0 ? ntl::status::ok()
+                        : ntl::status{STATUS_BUFFER_TOO_SMALL};
+}
+
+} // namespace detail
+
+class net_buffer_list_view {
+public:
+  explicit operator bool() const noexcept { return list_ != nullptr; }
+  NET_BUFFER_LIST *native_handle() const noexcept { return list_; }
+
+  std::size_t byte_count() const noexcept {
+    return detail::nbl_chain_byte_count(list_);
+  }
+
+  ntl::net::scatter_view bytes() const noexcept {
+    const std::size_t length = byte_count();
+    if (!list_ || length == 0)
+      return {};
+    return ntl::net::scatter_view::from_source(
+        list_, 0, length, &detail::enumerate_nbl_bytes);
+  }
+
+  checksum_metadata checksum() const noexcept {
+    return checksum_metadata(
+        list_ ? NET_BUFFER_LIST_INFO(
+                    list_, TcpIpChecksumNetBufferListInfo)
+              : nullptr);
+  }
+
+  large_send_metadata large_send() const noexcept {
+    return large_send_metadata(
+        list_ ? NET_BUFFER_LIST_INFO(
+                    list_, TcpLargeSendNetBufferListInfo)
+              : nullptr);
+  }
+
+  receive_segment_coalescing_metadata
+  receive_segment_coalescing() const noexcept {
+    return receive_segment_coalescing_metadata(
+        list_ ? NET_BUFFER_LIST_INFO(
+                    list_, TcpRecvSegCoalesceInfo)
+              : nullptr);
+  }
+
+  vlan_metadata vlan() const noexcept {
+    return vlan_metadata(
+        list_ ? NET_BUFFER_LIST_INFO(
+                    list_, Ieee8021QNetBufferListInfo)
+              : nullptr);
+  }
+
+  receive_hash_metadata receive_hash() const noexcept {
+    if (!list_)
+      return {};
+    return {
+        NET_BUFFER_LIST_GET_HASH_VALUE(list_),
+        NET_BUFFER_LIST_GET_HASH_TYPE(list_),
+        NET_BUFFER_LIST_GET_HASH_FUNCTION(list_)};
+  }
+
+private:
+  friend class net_buffer_list_chain_view;
+  friend class cloned_net_buffer_list;
+  explicit net_buffer_list_view(NET_BUFFER_LIST *list) noexcept
+      : list_(list) {}
+  NET_BUFFER_LIST *list_ = nullptr;
+};
+
+class net_buffer_list_chain_view {
+public:
+  explicit net_buffer_list_chain_view(
+      NET_BUFFER_LIST *chain = nullptr) noexcept
+      : chain_(chain) {}
+
+  explicit operator bool() const noexcept { return chain_ != nullptr; }
+  NET_BUFFER_LIST *native_handle() const noexcept { return chain_; }
+
+  std::size_t list_count() const noexcept {
+    std::size_t count = 0;
+    for (auto *list = chain_; list;
+         list = NET_BUFFER_LIST_NEXT_NBL(list))
+      ++count;
+    return count;
+  }
+
+  std::size_t byte_count() const noexcept {
+    return detail::nbl_chain_byte_count(chain_);
+  }
+
+  template <class Visit>
+  ntl::status for_each(Visit &&visit) const
+      noexcept(noexcept(visit(net_buffer_list_view(nullptr)))) {
+    for (auto *list = chain_; list;
+         list = NET_BUFFER_LIST_NEXT_NBL(list)) {
+      if (!visit(net_buffer_list_view(list)))
+        break;
+    }
+    return ntl::status::ok();
+  }
+
+private:
+  NET_BUFFER_LIST *chain_ = nullptr;
+};
+
+class cloned_net_buffer_list {
+public:
+  cloned_net_buffer_list(const cloned_net_buffer_list &) = delete;
+  cloned_net_buffer_list &
+  operator=(const cloned_net_buffer_list &) = delete;
+
+  cloned_net_buffer_list(cloned_net_buffer_list &&other) noexcept
+      : list_(std::exchange(other.list_, nullptr)) {}
+  cloned_net_buffer_list &
+  operator=(cloned_net_buffer_list &&other) noexcept {
+    if (this != &other) {
+      reset();
+      list_ = std::exchange(other.list_, nullptr);
+    }
+    return *this;
+  }
+  ~cloned_net_buffer_list() { reset(); }
+
+  static ntl::result<cloned_net_buffer_list>
+  try_create(NET_BUFFER_LIST *source,
+             NDIS_HANDLE nbl_pool = nullptr,
+             NDIS_HANDLE net_buffer_pool = nullptr) noexcept {
+    if (!source)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    NET_BUFFER_LIST *clone = NdisAllocateCloneNetBufferList(
+        source, nbl_pool, net_buffer_pool, 0);
+    if (!clone)
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    return ntl::ok(cloned_net_buffer_list(clone));
+  }
+
+  explicit operator bool() const noexcept { return list_ != nullptr; }
+  NET_BUFFER_LIST *native_handle() const noexcept { return list_; }
+  net_buffer_list_view view() const noexcept {
+    return net_buffer_list_view(list_);
+  }
+
+  NET_BUFFER_LIST *release() noexcept {
+    return std::exchange(list_, nullptr);
+  }
+
+  void reset() noexcept {
+    NET_BUFFER_LIST *list = std::exchange(list_, nullptr);
+    if (list)
+      NdisFreeCloneNetBufferList(list, 0);
+  }
+
+private:
+  explicit cloned_net_buffer_list(
+      NET_BUFFER_LIST *list) noexcept : list_(list) {}
+  NET_BUFFER_LIST *list_ = nullptr;
+};
+
+} // namespace ntl::ndis
