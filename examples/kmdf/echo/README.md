@@ -1,5 +1,7 @@
 # NTL KMDF echo and cancellation sample
 
+[한국어 설명](./README.ko-KR.md)
+
 This root-enumerated PnP driver keeps one delayed echo request in a
 sequential KMDF queue. A one-shot WDF timer completes the request, while the
 request's cancellation callback handles `CancelIoEx`.

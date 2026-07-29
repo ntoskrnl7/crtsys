@@ -43,17 +43,12 @@ listed by `verifier /query` before running the app. A representative run uses
 The test is successful only when every app invocation and service transition
 passes without a verifier breakpoint or bugcheck. Record `verifier /query`
 after the run so its load/unload and Special Pool counters demonstrate that
-the target was actually verified. Reset persistent verifier settings and
-reboot the guest after testing.
+the target was actually verified. Restore the guest's prior Verifier settings
+and reboot after testing.
 
-The companion VM repository wraps the driver/app runner with the expected
-service name and app arguments:
-
-```powershell
-D:\projects\crtsys-vm-test\Run-CrtSysKmdfVerifierStressInVm.ps1 `
-  -DriverPath .\test\kmdf\verifier-stress\build_x64\Release\crtsys_kmdf_verifier_stress.sys `
-  -AppPath .\test\kmdf\verifier-stress\build_x64\Release\crtsys_kmdf_verifier_stress_app.exe `
-  -Iterations 64 `
-  -Workers 4 `
-  -LoadCycles 3
-```
+The in-repository
+[`Run-KmdfVmAcceptance.ps1`](../runtime/Run-KmdfVmAcceptance.ps1) stages this
+fixture and controls its iteration, worker, and load-cycle counts through
+`StressIterations`, `StressWorkers`, and `StressLoadCycles`. See the
+[runtime fixture guide](../runtime/README.md) for the complete disposable-VM
+workflow.

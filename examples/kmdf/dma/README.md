@@ -1,5 +1,7 @@
 # NTL KMDF DMA Driver Template
 
+[한국어 설명](./README.ko-KR.md)
+
 This buildable driver template demonstrates the complete NTL/KMDF packet-DMA
 control flow:
 

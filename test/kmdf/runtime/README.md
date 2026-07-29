@@ -83,18 +83,20 @@ only while invoking `vmrun`, redacts credential arguments from errors, and
 does not write them to generated scripts or logs.
 
 ```powershell
+$vmxPath = Read-Host 'Path to the disposable test VMX'
 $vmPassword = Read-Host 'VM encryption password' -AsSecureString
+$guestUser = Read-Host 'Guest user'
 $guestPassword = Read-Host 'Guest password' -AsSecureString
+$existingVerifierTargets = @(
+  # Copy exact .sys names from verifier /querysettings, if any.
+)
 
 .\Run-KmdfVmAcceptance.ps1 `
-  -VmxPath 'D:\VMs\Win11_25H2_KD\Windows 11 x64 25H2.vmx' `
+  -VmxPath $vmxPath `
   -VmPassword $vmPassword `
-  -GuestUser test `
+  -GuestUser $guestUser `
   -GuestPassword $guestPassword `
-  -RestoreDriverFileName @(
-    'previous_driver_one.sys',
-    'previous_driver_two.sys'
-  ) `
+  -RestoreDriverFileName $existingVerifierTargets `
   -RestoreBootMode Persistent
 ```
 
@@ -103,55 +105,20 @@ set of local outputs. The acceptance wrapper also accepts `-SkipBuild` for the
 same purpose. An empty `RestoreDriverFileName` resets Verifier instead of
 inventing a prior configuration.
 
-## Recorded validation
+## Acceptance criteria
 
-On 2026-07-26, the new `echo` and `filter-stack` paths were validated on
-Windows 11 Pro for Workstations x64, build 26200:
+A complete host acceptance run must satisfy all of these conditions:
 
-- the x64 driver packages passed with both x64 and WOW64 applications;
-- Echo observed two timer completions, one `CancelIoEx` cancellation, and
-  PASSIVE_LEVEL execution;
-- the filter stack reported both layer bits, target and completion callbacks,
-  `PrepareHardware`, and D0 entry;
-- both samples passed a device restart followed by a second application run;
-  and
-- every run removed the root device successfully.
+- every software-only sample passes with its x64 application and, when staged,
+  its WOW64 application;
+- every applicable PnP sample passes a device restart and a second application
+  run;
+- every temporary Verifier target is active and records driver load/unload;
+- the stress fixture completes the configured cancellation races, workers, and
+  load cycles;
+- no test device, service, imported test certificate, crash event, or new dump
+  remains after cleanup; and
+- the exact caller-supplied Verifier target list and boot mode are restored.
 
-On 2026-07-27, the same six cases were repeated in a controlled `Oneboot`
-Driver Verifier session targeting:
-
-- `crtsys_kmdf_echo_ntl_sample.sys`;
-- `crtsys_kmdf_filter_stack_target.sys`; and
-- `crtsys_kmdf_filter_stack_filter.sys`.
-
-All six cases passed under the standard flags, including Special Pool, IRQL,
-I/O, deadlock, DDI compliance, and WDF verification. The final active query
-reported all three modules loaded and 675 of 675 successful pool allocations
-served from Special Pool, with no failed or intentionally failed allocations.
-No bugcheck or unexpected-reboot event and no new dump were recorded after the
-Verifier boot. The root devices were absent after cleanup. The VM's original
-Persistent Verifier configuration for its three minifilter binaries was then
-restored and confirmed active after another reboot.
-
-Later on 2026-07-27, the complete host acceptance gate passed on the same
-Windows 11 x64 build 26200 VM:
-
-- `basic`, `pnp`, `echo`, `reference`, `bus`, `filter-stack`, and `wmi`
-  passed with both x64 and WOW64 applications;
-- every applicable PnP case passed a device restart and second x64/WOW64 run;
-- all ten participating driver binaries were listed as active Verifier
-  targets and were observed loaded;
-- the stress fixture passed 64 cancellation races with four workers across
-  three independent driver load/unload cycles;
-- Verifier reported 3,100 of 3,100 successful pool allocations served from
-  Special Pool, with zero failed, intentionally failed, untagged, or
-  untracked allocations;
-- no test device remained present and no bugcheck, unexpected-reboot event,
-  or dump was recorded after the Verifier boot; and
-- the VM's original Persistent three-minifilter Verifier configuration was
-  restored and confirmed after the final reboot.
-
-The host-side logs are stored under the ignored `artifacts` directory using
-the `kmdf-{echo,filter-stack}-win11-25h2-*.log` and
-`kmdf-verifier-*-20260727.*` names. The complete gate above is recorded under
-`artifacts/kmdf-acceptance-win11-25h2-20260727-v5`.
+Host logs are written to the configurable `LogRoot`; retain that directory as a
+CI or release artifact.

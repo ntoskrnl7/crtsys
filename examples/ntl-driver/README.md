@@ -1,5 +1,7 @@
 # NTL Sample Driver
 
+[한국어 설명](./README.ko-KR.md)
+
 This sample is a small WDK driver that uses the NTL helper layer shipped with
 `crtsys`. It is meant to show a practical driver shape rather than a test
 harness.

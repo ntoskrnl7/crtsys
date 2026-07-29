@@ -1,5 +1,7 @@
 # NTL minifilter control-device sample
 
+[한국어 설명](./README.ko-KR.md)
+
 This sample implements the reusable part of the WDK `cdo` sample with typed
 NTL ownership. It shows a legacy control device beside a minifilter without
 putting raw WDM dispatch or `fltKernel.h` in application driver code.

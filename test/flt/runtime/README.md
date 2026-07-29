@@ -86,3 +86,20 @@ lifetime; see [`CDO-README.md`](CDO-README.md).
 cmake -S test\flt\runtime -B test\flt\runtime\build_x64 -A x64
 cmake --build test\flt\runtime\build_x64 --config Debug
 ```
+
+## Disposable VM execution
+
+Run every kernel fixture in a disposable, test-signing-enabled VM with a
+kernel debugger available. For the selected fixture:
+
+1. stage its `.sys`, INF, catalog or test-signing certificate, and application;
+2. install and load the minifilter using the staged INF and service name;
+3. enable Driver Verifier when the target guide requires it;
+4. run the application against an explicitly selected disposable NTFS or ReFS
+   volume;
+5. unload and remove the service and test instance; and
+6. verify application success, driver unload, crash/dump absence, and
+   restoration of the guest's prior Verifier configuration.
+
+Host paths, VM products, credentials, and guest staging roots are parameters of
+the test environment; none are fixed by these fixtures.

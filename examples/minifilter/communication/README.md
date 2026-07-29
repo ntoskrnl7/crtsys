@@ -1,5 +1,7 @@
 # NTL minifilter communication sample
 
+[한국어 설명](./README.ko-KR.md)
+
 This sample isolates Filter Manager communication from file-I/O policy. The
 driver registers an NTL typed communication port and the application exercises:
 

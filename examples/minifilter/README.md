@@ -1,5 +1,7 @@
 # NTL minifilter samples
 
+[한국어 설명](./README.ko-KR.md)
+
 The catalog has two deliberate layers:
 
 - **examples** keep one driver idea readable from entry point to app; and

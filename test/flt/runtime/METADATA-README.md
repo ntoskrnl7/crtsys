@@ -12,7 +12,7 @@ callbacks coordinate that file.
 The specialized context intentionally cannot select paged pool: the embedded
 `ERESOURCE` and `KEVENT` synchronization storage must remain resident.
 
-The disposable ReFS E: VM test verifies:
+The disposable NTFS/ReFS test-volume run verifies:
 
 - implicit volume-lock detection, metadata release, and cleanup reopen;
 - snapshot pre/post update exclusion with a move-only cross-thread hold;
@@ -31,6 +31,6 @@ metadata_manager=PASS filesystem=ReFS implicit=1 explicit_lock=1 snapshot=1
 dismount_path=success_detach_remount remount_opens=2
 ```
 
-This scenario passes with Standard Driver Verifier flags `0x1209BB` targeting
-the metadata driver. The complete fixed runner log is written under
-`artifacts/flt-metadata-win11-25h2/refs-verifier-fixed.log`.
+Validate this scenario with Standard Driver Verifier flags `0x1209BB`
+targeting the metadata driver. Preserve the resulting logs in the test
+environment's configured artifact destination.

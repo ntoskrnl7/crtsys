@@ -58,8 +58,8 @@ The following gates apply where they are relevant to a row:
 - PnP query/cancel/surprise paths that require deterministic removable-device
   hardware remain compile-covered when no repeatable runtime harness exists.
 - NameChanger keeps unsupported information classes and filesystem-rejected
-  FSCTLs explicit. It does not claim that every filesystem accepts every
-  operation.
+  FSCTLs explicit. Filesystem-specific operation acceptance remains part of
+  the runtime matrix.
 - Behaviors listed by a Microsoft sample as future work are not counted as NTL
   coverage requirements.
 

@@ -1,5 +1,7 @@
 # NTL KMDF WMI sample
 
+[한국어 설명](./README.ko-KR.md)
+
 This PnP driver demonstrates the typed `ntl::kmdf` WMI surface end to end:
 
 - a MOF-backed data provider with query, whole-instance set, set-item, and

@@ -72,7 +72,7 @@ captures the backing entry before loading the filter, and then verifies:
    `FileId64ExtdDirectoryInformation`, and
    `FileId64ExtdBothDirectoryInformation`. A target may reject an information
    class before the filter sees it; every class accepted by the target is
-   required to pass the full checks. The older Win11KD guest accepts eight of
+   required to pass the full checks. Windows 11 build 22000 accepts eight of
    ten on both NTFS and ReFS 3.7 and rejects the two `FileId64Extd*` classes.
    The Windows 11 25H2 build 26200 guest accepts and E2E-verifies all ten on
    both NTFS and ReFS 3.14 with x64 and WOW64 clients. The same four-way matrix
@@ -129,8 +129,8 @@ does not replace, the Windows 11 25H2 filesystem-backed E2E result.
 
 The NTFS/ReFS matrix is a portability and ownership test, not a claim that
 ReFS enables an operation unavailable on NTFS. Both filesystems expose the
-same eight classes on the older Win11KD target and the same ten classes on the
-Windows 11 25H2 target. ReFS remains valuable because a second filesystem can
+same eight classes on Windows 11 build 22000 and the same ten classes on
+Windows 11 build 26200. ReFS remains valuable because a second filesystem can
 exercise different result-buffer, metadata, and Filter Manager paths and
 expose assumptions hidden by an NTFS-only run.
 

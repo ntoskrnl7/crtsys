@@ -1,5 +1,7 @@
 # NTL KMDF PnP sample
 
+[한국어 설명](./README.ko-KR.md)
+
 This sample is a root-enumerated KMDF device that demonstrates typed NTL
 wrappers across the PnP and power lifecycle:
 

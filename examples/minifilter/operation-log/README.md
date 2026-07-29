@@ -1,5 +1,7 @@
 # NTL minifilter operation-log sample
 
+[한국어 설명](./README.ko-KR.md)
+
 This is the small, readable counterpart of the WDK **MiniSpy** sample. It keeps
 the complete path visible in one example:
 
