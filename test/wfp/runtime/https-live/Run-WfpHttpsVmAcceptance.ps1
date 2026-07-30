@@ -270,7 +270,8 @@ try {
     DurationSeconds = $BrowserDurationSeconds
     RequireQuicBlockedFallback = $requireQuicBlockedFallbackLiteral
   }
-  if ($captureBrowserNetLogLiteral) {
+  if ($captureBrowserNetLogLiteral -or
+      $requireQuicBlockedFallbackLiteral) {
     `$browserArguments.NetLogPath =
         Join-Path `$root 'browser-log\edge-netlog.json'
   }

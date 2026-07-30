@@ -29,6 +29,7 @@
 namespace ntl::wfp {
 
 class policy_transaction;
+class dynamic_session;
 template <std::size_t> class callout_driver;
 class connect_redirector;
 class bind_redirector;
@@ -36,9 +37,13 @@ class bind_redirector;
 class provider_key {
 public:
   constexpr explicit provider_key(const GUID &value) noexcept : value_(value) {}
+  bool matches(const GUID &value) const noexcept {
+    return ::IsEqualGUID(value_, value);
+  }
 
 private:
   friend class policy_transaction;
+  friend class dynamic_session;
   friend class connect_redirector;
   constexpr const GUID &native() const noexcept { return value_; }
   GUID value_{};
@@ -47,9 +52,13 @@ private:
 class sublayer_key {
 public:
   constexpr explicit sublayer_key(const GUID &value) noexcept : value_(value) {}
+  bool matches(const GUID &value) const noexcept {
+    return ::IsEqualGUID(value_, value);
+  }
 
 private:
   friend class policy_transaction;
+  friend class dynamic_session;
   constexpr const GUID &native() const noexcept { return value_; }
   GUID value_{};
 };
@@ -57,9 +66,13 @@ private:
 template <class Layer> class callout_key {
 public:
   constexpr explicit callout_key(const GUID &value) noexcept : value_(value) {}
+  bool matches(const GUID &value) const noexcept {
+    return ::IsEqualGUID(value_, value);
+  }
 
 private:
   friend class policy_transaction;
+  friend class dynamic_session;
   template <std::size_t> friend class callout_driver;
   constexpr const GUID &native() const noexcept { return value_; }
   GUID value_{};
@@ -68,9 +81,13 @@ private:
 template <class Layer> class filter_key {
 public:
   constexpr explicit filter_key(const GUID &value) noexcept : value_(value) {}
+  bool matches(const GUID &value) const noexcept {
+    return ::IsEqualGUID(value_, value);
+  }
 
 private:
   friend class policy_transaction;
+  friend class dynamic_session;
   constexpr const GUID &native() const noexcept { return value_; }
   GUID value_{};
 };

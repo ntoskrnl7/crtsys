@@ -6,6 +6,9 @@ param(
   [ValidateSet('v143', 'v145')]
   [string] $PlatformToolset = 'v145',
 
+  [ValidatePattern('^(_[A-Za-z0-9]+)?$')]
+  [string] $BuildDirectorySuffix = '',
+
   [string] $WindowsSdkVersion = '10.0.22621.0',
 
   [string] $OutputRoot = '',
@@ -75,6 +78,12 @@ Copy-Item -LiteralPath (
     Join-Path $PSScriptRoot 'Start-WfpBrowserHttpsInspection.ps1') `
     -Destination $packageRoot.FullName
 Copy-Item -LiteralPath (
+    Join-Path $PSScriptRoot 'Test-EdgeNetLogQuicPolicy.ps1') `
+    -Destination $packageRoot.FullName
+Copy-Item -LiteralPath (
+    Join-Path $PSScriptRoot 'Test-WfpQuicTelemetry.ps1') `
+    -Destination $packageRoot.FullName
+Copy-Item -LiteralPath (
     Join-Path $PSScriptRoot 'Start-BrowserHttp3SpkiDiagnostic.ps1') `
     -Destination $packageRoot.FullName
 Copy-Item -LiteralPath (
@@ -101,7 +110,7 @@ $certificates = @()
 foreach ($sample in $samples) {
   $buildRoot = Join-Path $repoRoot (
       "examples\wfp\$($sample.Directory)\" +
-      "build_x64_$PlatformToolset\$Configuration")
+      "build_x64_$PlatformToolset$BuildDirectorySuffix\$Configuration")
   $driverSource = Join-Path $buildRoot "$($sample.BaseName).sys"
   $applicationSource =
       Join-Path $buildRoot "$($sample.BaseName)_app.exe"
@@ -146,7 +155,7 @@ foreach ($sample in $samples) {
 
 $browserBuildRoot = Join-Path $repoRoot (
     "examples\wfp\browser-https-inspection\" +
-    "build_x64_$PlatformToolset\$Configuration")
+    "build_x64_$PlatformToolset$BuildDirectorySuffix\$Configuration")
 $managedClientSource =
     Join-Path $browserBuildRoot 'crtsys_ntl_managed_http3_client.exe'
 if (-not (Test-Path -LiteralPath $managedClientSource -PathType Leaf)) {

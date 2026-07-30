@@ -1,6 +1,13 @@
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
 #include <guiddef.h>
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#include <wdm.h>
+#else
+#include <winioctl.h>
+#endif
 #include <ntl/wfp/layers>
 
 namespace wfp_browser_https_inspection {
@@ -12,6 +19,76 @@ using quic_layer_v6 = ntl::wfp::layers::ale_auth_connect_v6;
 
 inline constexpr wchar_t service_name[] =
     L"crtsys_wfp_browser_https_inspection";
+inline constexpr wchar_t device_name[] =
+    L"CrtSysWfpBrowserHttpsInspection";
+inline constexpr wchar_t user_device_path[] =
+    L"\\\\.\\CrtSysWfpBrowserHttpsInspection";
+
+inline constexpr std::uint32_t telemetry_version = 1;
+
+inline std::uint64_t hash_application_id(
+    const std::uint8_t *data, std::size_t size) noexcept {
+  constexpr std::uint64_t offset =
+      14695981039346656037ull;
+  constexpr std::uint64_t prime = 1099511628211ull;
+  std::uint64_t result = offset;
+  for (std::size_t index = 0; index != size; ++index) {
+    result ^= data[index];
+    result *= prime;
+  }
+  return result;
+}
+
+struct alignas(8) quic_layer_telemetry {
+  std::uint64_t classify_hits;
+  std::uint64_t block_decisions;
+  std::uint64_t action_write_available;
+  std::uint64_t action_write_missing;
+  std::uint64_t initial_permit;
+  std::uint64_t last_filter_id;
+  std::uint64_t last_process_id;
+  std::uint64_t last_application_id_hash;
+  std::uint32_t last_application_id_size;
+  std::uint32_t last_remote_address_v4;
+  std::uint32_t last_remote_address_v6[4];
+  std::uint16_t last_remote_port;
+  std::uint16_t last_filter_flags;
+  std::uint8_t last_protocol;
+  std::uint8_t address_family;
+  std::uint16_t reserved;
+};
+
+struct alignas(8) quic_telemetry {
+  std::uint32_t version;
+  std::uint32_t size;
+  quic_layer_telemetry ipv4;
+  quic_layer_telemetry ipv6;
+};
+
+struct query_telemetry_contract {
+  static constexpr unsigned long device_type = FILE_DEVICE_UNKNOWN;
+  static constexpr unsigned long function = 0x945;
+  static constexpr unsigned long method = METHOD_BUFFERED;
+  static constexpr unsigned long access = FILE_READ_DATA;
+  using input_type = void;
+  using output_type = quic_telemetry;
+};
+
+inline constexpr unsigned long query_telemetry_ioctl =
+    CTL_CODE(query_telemetry_contract::device_type,
+             query_telemetry_contract::function,
+             query_telemetry_contract::method,
+             query_telemetry_contract::access);
+
+static_assert(sizeof(quic_layer_telemetry) == 96);
+static_assert(sizeof(quic_telemetry) == 200);
+
+// {007C33EA-42FB-46A5-870D-D50108E34B4E}
+inline constexpr GUID device_class_guid{
+    0x007c33ea,
+    0x42fb,
+    0x46a5,
+    {0x87, 0x0d, 0xd5, 0x01, 0x08, 0xe3, 0x4b, 0x4e}};
 
 // {D2DC0D78-E0DA-4509-9CBA-7EFC7FB7F3F8}
 inline constexpr ntl::wfp::provider_key provider_key{GUID{

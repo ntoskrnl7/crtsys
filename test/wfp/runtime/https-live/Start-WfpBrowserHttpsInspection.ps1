@@ -71,6 +71,27 @@ function Stop-TestBrowser([string] $ProfilePath) {
   }
 }
 
+function Wait-NetLogStable([string] $Path) {
+  $previousLength = -1L
+  $stableSamples = 0
+  for ($attempt = 0; $attempt -lt 50; ++$attempt) {
+    if (Test-Path -LiteralPath $Path -PathType Leaf) {
+      $length = (Get-Item -LiteralPath $Path).Length
+      if ($length -gt 0 -and $length -eq $previousLength) {
+        ++$stableSamples
+        if ($stableSamples -ge 3) {
+          return
+        }
+      } else {
+        $stableSamples = 0
+        $previousLength = $length
+      }
+    }
+    Start-Sleep -Milliseconds 100
+  }
+  throw "Edge NetLog did not become stable: $Path"
+}
+
 Assert-Administrator
 $root = (Resolve-Path -LiteralPath $PackageRoot).Path
 $driver = Join-Path $root 'crtsys_wfp_browser_https_inspection.sys'
@@ -95,6 +116,21 @@ foreach ($targetUrl in $Urls) {
 }
 New-Item -ItemType Directory -Path $LogDirectory -Force | Out-Null
 $LogDirectory = (Resolve-Path -LiteralPath $LogDirectory).Path
+if ($RequireQuicBlockedFallback -and
+    [string]::IsNullOrWhiteSpace($NetLogPath)) {
+  $NetLogPath = Join-Path $LogDirectory 'edge-netlog.json'
+}
+$netLogAnalyzer =
+    Join-Path $root 'Test-EdgeNetLogQuicPolicy.ps1'
+$telemetryAnalyzer =
+    Join-Path $root 'Test-WfpQuicTelemetry.ps1'
+if ($RequireQuicBlockedFallback) {
+  foreach ($analyzer in @($netLogAnalyzer, $telemetryAnalyzer)) {
+    if (-not (Test-Path -LiteralPath $analyzer -PathType Leaf)) {
+      throw "QUIC policy analyzer is missing: $analyzer"
+    }
+  }
+}
 $profile = Join-Path $LogDirectory (
     'edge-profile-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $profile | Out-Null
@@ -106,6 +142,7 @@ $proxy = $null
 $importedThumbprint = $null
 $certificate = $null
 $sessionStartedUtc = [DateTime]::UtcNow
+$resolvedNetLogPath = ''
 
 Remove-Item -LiteralPath $proxyStdout, $proxyStderr, $caPath, $stopPath `
     -Force -ErrorAction SilentlyContinue
@@ -245,6 +282,22 @@ $browserArguments = @(
           'quic-policy=blocked-for-tcp-fallback')) {
     throw 'The browser runtime did not report fail-closed QUIC policy.'
   }
+  if ($RequireQuicBlockedFallback -and
+      -not $proxyOutput.Contains(
+          'NTL WFP QUIC telemetry:')) {
+    throw 'The browser runtime did not report kernel QUIC telemetry.'
+  }
+  if ($RequireQuicBlockedFallback) {
+    & $telemetryAnalyzer -ProxyLogPath $proxyStdout `
+        -ResultPath (Join-Path $LogDirectory 'quic-telemetry.json') `
+        -RequireObservedBlock |
+        ForEach-Object { Write-Host $_ }
+  }
+  if ($RequireQuicBlockedFallback -and
+      -not $proxyOutput.Contains(
+          'NTL WFP policy diagnostics: verified')) {
+    throw 'The browser runtime did not verify the active WFP policy.'
+  }
   $html = @(
     Get-ChildItem -LiteralPath $LogDirectory -Filter '*.html' -File |
         Where-Object {
@@ -265,6 +318,20 @@ $browserArguments = @(
     if ($hostHtml.Count -eq 0) {
       throw (
           "No decrypted HTML response was logged for $targetHost.")
+    }
+  }
+  Stop-TestBrowser $profile
+  if ($RequireQuicBlockedFallback) {
+    Wait-NetLogStable $resolvedNetLogPath
+    foreach ($targetHost in @(
+        $Urls | ForEach-Object { $_.DnsSafeHost } |
+            Sort-Object -Unique)) {
+      $resultPath =
+          Join-Path $LogDirectory "quic-policy-$targetHost.json"
+      & $netLogAnalyzer -NetLogPath $resolvedNetLogPath `
+          -TargetHost $targetHost -ResultPath $resultPath `
+          -RequireBlocked |
+          ForEach-Object { Write-Host $_ }
     }
   }
   Write-Host (

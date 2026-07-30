@@ -11,9 +11,12 @@
 #include "connect_redirect"
 #include "layers"
 
+#include <algorithm>
 #include <atomic>
 #include <functional>
+#include <limits>
 #include <memory>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -29,6 +32,61 @@ public:
   management_error(DWORD code, const char *operation)
       : std::system_error(static_cast<int>(code), std::system_category(),
                           operation) {}
+};
+
+/**
+ * @brief Pointer-free snapshot of one native WFP filter condition.
+ *
+ * Scalar values are copied into scalar_value. Byte blobs are represented by
+ * their size and FNV-1a hash so diagnostics can compare application
+ * identities without retaining or logging executable paths.
+ */
+struct policy_condition_diagnostic {
+  GUID field_key{};
+  FWP_MATCH_TYPE match_type = FWP_MATCH_EQUAL;
+  FWP_DATA_TYPE value_type = FWP_EMPTY;
+  std::uint64_t scalar_value = 0;
+  std::uint32_t blob_size = 0;
+  std::uint64_t blob_hash = 0;
+};
+
+/**
+ * @brief Pointer-free snapshot of a WFP filter and its effective placement.
+ */
+struct policy_filter_diagnostic {
+  GUID filter_key{};
+  GUID provider_key{};
+  bool has_provider = false;
+  GUID layer_key{};
+  GUID sublayer_key{};
+  GUID action_callout_key{};
+  std::uint64_t filter_id = 0;
+  std::uint64_t raw_context = 0;
+  FWP_ACTION_TYPE action_type = FWP_ACTION_NONE;
+  std::uint32_t flags = 0;
+  FWP_DATA_TYPE weight_type = FWP_EMPTY;
+  std::uint64_t weight_value = 0;
+  FWP_DATA_TYPE effective_weight_type = FWP_EMPTY;
+  std::uint64_t effective_weight_value = 0;
+  std::uint16_t sublayer_weight = 0;
+  std::vector<policy_condition_diagnostic> conditions;
+  bool conditions_truncated = false;
+
+  const policy_condition_diagnostic *
+  find_condition(const GUID &field) const noexcept {
+    for (const auto &condition : conditions)
+      if (::IsEqualGUID(condition.field_key, field))
+        return &condition;
+    return nullptr;
+  }
+};
+
+/**
+ * @brief Bounded filter inventory for one WFP layer.
+ */
+struct policy_filter_inventory {
+  std::vector<policy_filter_diagnostic> filters;
+  bool truncated = false;
 };
 
 /**
@@ -1101,7 +1159,275 @@ public:
     }
   }
 
+  /**
+   * @brief Tests whether this engine can resolve a provider by key.
+   */
+  bool provider_present(provider_key key) const {
+    FWPM_PROVIDER0 *native = nullptr;
+    const DWORD result =
+        FwpmProviderGetByKey0(engine_, &key.native(), &native);
+    native_owner<FWPM_PROVIDER0> owned(native);
+    if (result == static_cast<DWORD>(FWP_E_PROVIDER_NOT_FOUND))
+      return false;
+    check(result, "FwpmProviderGetByKey0");
+    return native != nullptr;
+  }
+
+  /**
+   * @brief Tests whether this engine can resolve a sublayer by key.
+   */
+  bool sublayer_present(sublayer_key key) const {
+    FWPM_SUBLAYER0 *native = nullptr;
+    const DWORD result =
+        FwpmSubLayerGetByKey0(engine_, &key.native(), &native);
+    native_owner<FWPM_SUBLAYER0> owned(native);
+    if (result == static_cast<DWORD>(FWP_E_SUBLAYER_NOT_FOUND))
+      return false;
+    check(result, "FwpmSubLayerGetByKey0");
+    return native != nullptr;
+  }
+
+  /**
+   * @brief Tests whether a typed callout exists on its declared layer.
+   */
+  template <class Layer>
+  bool callout_present(callout_key<Layer> key) const {
+    FWPM_CALLOUT0 *native = nullptr;
+    const DWORD result =
+        FwpmCalloutGetByKey0(engine_, &key.native(), &native);
+    native_owner<FWPM_CALLOUT0> owned(native);
+    if (result == static_cast<DWORD>(FWP_E_CALLOUT_NOT_FOUND))
+      return false;
+    check(result, "FwpmCalloutGetByKey0");
+    return native &&
+           ::IsEqualGUID(native->applicableLayer,
+                         Layer::policy_key());
+  }
+
+  /**
+   * @brief Returns a pointer-free snapshot of one typed filter.
+   */
+  template <class Layer>
+  std::optional<policy_filter_diagnostic>
+  inspect_filter(filter_key<Layer> key) const {
+    FWPM_FILTER0 *native = nullptr;
+    const DWORD result =
+        FwpmFilterGetByKey0(engine_, &key.native(), &native);
+    native_owner<FWPM_FILTER0> owned(native);
+    if (result == static_cast<DWORD>(FWP_E_FILTER_NOT_FOUND))
+      return std::nullopt;
+    check(result, "FwpmFilterGetByKey0");
+    if (!native ||
+        !::IsEqualGUID(native->layerKey, Layer::policy_key()))
+      return std::nullopt;
+    return snapshot_filter(*native);
+  }
+
+  /**
+   * @brief Enumerates a bounded, pointer-free inventory for one WFP layer.
+   *
+   * At most maximum_filters snapshots are returned. The method probes for
+   * one additional result and sets truncated when the layer contains more.
+   */
+  template <class Layer>
+  policy_filter_inventory
+  enumerate_filters(std::size_t maximum_filters = 256) const {
+    if (maximum_filters == 0 ||
+        maximum_filters >
+            (std::numeric_limits<UINT32>::max)())
+      throw std::invalid_argument(
+          "WFP filter inventory bound is invalid");
+
+    FWPM_FILTER_ENUM_TEMPLATE0 query{};
+    query.layerKey = Layer::policy_key();
+    query.enumType = FWP_FILTER_ENUM_FULLY_CONTAINED;
+
+    HANDLE enum_handle = nullptr;
+    check(FwpmFilterCreateEnumHandle0(
+              engine_, &query, &enum_handle),
+          "FwpmFilterCreateEnumHandle0");
+    struct enum_handle_guard {
+      HANDLE engine;
+      HANDLE value;
+      ~enum_handle_guard() {
+        if (value)
+          (void)FwpmFilterDestroyEnumHandle0(engine, value);
+      }
+    } enum_guard{engine_, enum_handle};
+
+    policy_filter_inventory inventory;
+    inventory.filters.reserve(maximum_filters);
+    while (inventory.filters.size() < maximum_filters) {
+      const auto remaining =
+          maximum_filters - inventory.filters.size();
+      const UINT32 requested = static_cast<UINT32>(
+          (std::min<std::size_t>)(remaining, 64));
+      FWPM_FILTER0 **entries = nullptr;
+      UINT32 returned = 0;
+      check(FwpmFilterEnum0(
+                engine_, enum_handle, requested, &entries, &returned),
+            "FwpmFilterEnum0");
+      native_owner<FWPM_FILTER0 *> owned(entries);
+      if (returned == 0)
+        return inventory;
+      for (UINT32 index = 0; index != returned; ++index) {
+        if (entries[index])
+          inventory.filters.push_back(
+              snapshot_filter(*entries[index]));
+      }
+    }
+
+    FWPM_FILTER0 **probe = nullptr;
+    UINT32 probe_count = 0;
+    check(FwpmFilterEnum0(
+              engine_, enum_handle, 1, &probe, &probe_count),
+          "FwpmFilterEnum0");
+    native_owner<FWPM_FILTER0 *> owned_probe(probe);
+    inventory.truncated = probe_count != 0;
+    return inventory;
+  }
+
 private:
+  struct native_memory_deleter {
+    template <class Value>
+    void operator()(Value *value) const noexcept {
+      if (!value)
+        return;
+      void *memory = value;
+      ::FwpmFreeMemory0(&memory);
+    }
+  };
+
+  template <class Value>
+  using native_owner =
+      std::unique_ptr<Value, native_memory_deleter>;
+
+  static std::uint64_t hash_bytes(
+      const std::uint8_t *data, std::size_t size) noexcept {
+    std::uint64_t value = 14695981039346656037ull;
+    for (std::size_t index = 0; index != size; ++index) {
+      value ^= data[index];
+      value *= 1099511628211ull;
+    }
+    return value;
+  }
+
+  static std::uint64_t scalar_value(
+      const FWP_VALUE0 &value) noexcept {
+    switch (value.type) {
+    case FWP_UINT8:
+      return value.uint8;
+    case FWP_UINT16:
+      return value.uint16;
+    case FWP_UINT32:
+      return value.uint32;
+    case FWP_UINT64:
+      return value.uint64 ? *value.uint64 : 0;
+    case FWP_INT8:
+      return static_cast<std::uint64_t>(value.int8);
+    case FWP_INT16:
+      return static_cast<std::uint64_t>(value.int16);
+    case FWP_INT32:
+      return static_cast<std::uint64_t>(value.int32);
+    case FWP_INT64:
+      return value.int64
+                 ? static_cast<std::uint64_t>(*value.int64)
+                 : 0;
+    default:
+      return 0;
+    }
+  }
+
+  static std::uint64_t scalar_value(
+      const FWP_CONDITION_VALUE0 &value) noexcept {
+    switch (value.type) {
+    case FWP_UINT8:
+      return value.uint8;
+    case FWP_UINT16:
+      return value.uint16;
+    case FWP_UINT32:
+      return value.uint32;
+    case FWP_UINT64:
+      return value.uint64 ? *value.uint64 : 0;
+    case FWP_INT8:
+      return static_cast<std::uint64_t>(value.int8);
+    case FWP_INT16:
+      return static_cast<std::uint64_t>(value.int16);
+    case FWP_INT32:
+      return static_cast<std::uint64_t>(value.int32);
+    case FWP_INT64:
+      return value.int64
+                 ? static_cast<std::uint64_t>(*value.int64)
+                 : 0;
+    default:
+      return 0;
+    }
+  }
+
+  static policy_condition_diagnostic snapshot_condition(
+      const FWPM_FILTER_CONDITION0 &native) noexcept {
+    policy_condition_diagnostic result{};
+    result.field_key = native.fieldKey;
+    result.match_type = native.matchType;
+    result.value_type = native.conditionValue.type;
+    result.scalar_value = scalar_value(native.conditionValue);
+    if (native.conditionValue.type == FWP_BYTE_BLOB_TYPE &&
+        native.conditionValue.byteBlob) {
+      const auto &blob = *native.conditionValue.byteBlob;
+      result.blob_size = blob.size;
+      if (blob.data)
+        result.blob_hash = hash_bytes(blob.data, blob.size);
+    }
+    return result;
+  }
+
+  policy_filter_diagnostic snapshot_filter(
+      const FWPM_FILTER0 &native) const {
+    policy_filter_diagnostic result{};
+    result.filter_key = native.filterKey;
+    if (native.providerKey) {
+      result.provider_key = *native.providerKey;
+      result.has_provider = true;
+    }
+    result.layer_key = native.layerKey;
+    result.sublayer_key = native.subLayerKey;
+    result.filter_id = native.filterId;
+    result.flags = native.flags;
+    result.action_type = native.action.type;
+    if ((native.action.type & FWP_ACTION_FLAG_CALLOUT) != 0)
+      result.action_callout_key = native.action.calloutKey;
+    if ((native.flags & FWPM_FILTER_FLAG_HAS_PROVIDER_CONTEXT) == 0)
+      result.raw_context = native.rawContext;
+    result.weight_type = native.weight.type;
+    result.weight_value = scalar_value(native.weight);
+    result.effective_weight_type = native.effectiveWeight.type;
+    result.effective_weight_value =
+        scalar_value(native.effectiveWeight);
+
+    FWPM_SUBLAYER0 *sublayer = nullptr;
+    const DWORD sublayer_result = FwpmSubLayerGetByKey0(
+        engine_, &native.subLayerKey, &sublayer);
+    native_owner<FWPM_SUBLAYER0> owned_sublayer(sublayer);
+    if (sublayer_result == ERROR_SUCCESS && sublayer)
+      result.sublayer_weight = sublayer->weight;
+    else if (sublayer_result !=
+             static_cast<DWORD>(FWP_E_SUBLAYER_NOT_FOUND))
+      check(sublayer_result, "FwpmSubLayerGetByKey0");
+
+    constexpr std::size_t maximum_conditions = 64;
+    const std::size_t condition_count =
+        (std::min<std::size_t>)(
+            native.numFilterConditions, maximum_conditions);
+    result.conditions.reserve(condition_count);
+    for (std::size_t index = 0;
+         index != condition_count; ++index)
+      result.conditions.push_back(
+          snapshot_condition(native.filterCondition[index]));
+    result.conditions_truncated =
+        native.numFilterConditions > maximum_conditions;
+    return result;
+  }
+
   static void check(DWORD result, const char *operation) {
     if (result != ERROR_SUCCESS)
       throw management_error(result, operation);

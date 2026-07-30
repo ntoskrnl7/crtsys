@@ -82,8 +82,21 @@ Run from an elevated PowerShell in the copied package:
 The script starts the sample driver and app, waits for readiness, temporarily
 trusts the generated inspection CA, and opens an isolated Edge profile. It
 does not disable QUIC, force QUIC, ignore certificate errors, or change Edge
-ECH policy. `-RequireQuicBlockedFallback` checks that the runtime installed
-the fail-closed QUIC policy while the requested host still produced HTML.
+ECH policy. `-RequireQuicBlockedFallback` requires all of the following:
+
+- the active provider, sublayer, callouts, filter action, and exact
+  application/UDP/443 conditions pass the bounded WFP policy diagnostic;
+- the kernel callout reports at least one matching classify with action-write
+  rights and a block decision;
+- Edge NetLog contains no direct target-host QUIC session that received and
+  authenticated public packets; and
+- the requested host still produced inspected HTML over TCP.
+
+The evidence directory includes `wfp-policy-diagnostics.log`,
+`quic-telemetry.json`, the original `edge-netlog.json`, and one
+`quic-policy-<host>.json` verdict. A run with no UDP/443 classify is
+inconclusive and fails the assertion instead of claiming that QUIC was
+blocked.
 
 Without `-DurationSeconds`, browse manually and press Enter to stop. Omitting
 the assertion switch does not change runtime behavior.

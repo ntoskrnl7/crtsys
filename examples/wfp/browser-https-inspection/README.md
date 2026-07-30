@@ -118,8 +118,13 @@ elevated PowerShell inside that package:
     -DurationSeconds 90
 ```
 
-`-RequireQuicBlockedFallback` is an automation assertion. It verifies the
-runtime's fail-closed WFP policy and does not alter the browser.
+`-RequireQuicBlockedFallback` is an automation assertion and does not alter
+the browser. It verifies the live WFP objects and exact filter conditions,
+requires a matching kernel UDP/443 classify and block, rejects target-host
+direct QUIC reachability from Edge NetLog, and requires inspected HTML over
+TCP. A run with no QUIC classify is reported as inconclusive rather than
+PASS. The log directory retains bounded policy, kernel telemetry, and NetLog
+verdict files.
 
 The managed path requires no driver, browser launch, browser flag, or trust
 store update:

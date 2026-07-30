@@ -119,8 +119,13 @@ VM에서 일반 브라우저 경로를 실행하는 방법은 다음과 같습�
     -DurationSeconds 90
 ```
 
-`-RequireQuicBlockedFallback`은 브라우저 설정 인자가 아니라 WFP의
-fail-closed QUIC 정책과 TCP 검사 성공을 확인하는 자동화 assertion입니다.
+`-RequireQuicBlockedFallback`은 브라우저 설정 인자가 아니라 자동화
+assertion입니다. 실행 중인 WFP 객체와 정확한 필터 조건을 검증하고, 커널에서
+해당 앱의 UDP/443 classify와 block이 실제로 한 번 이상 관찰되어야 하며, Edge
+NetLog에서 대상 호스트로 직접 도달한 QUIC 세션이 없어야 합니다. 동시에 TCP로
+검사된 HTML도 있어야 PASS입니다. QUIC classify가 한 번도 없으면 차단 성공으로
+오판하지 않고 검증 불충분으로 실패합니다. 로그 디렉터리에는 bounded 정책
+진단, 커널 텔레메트리, NetLog 판정 파일이 남습니다.
 
 관리형 HTTP/3 경로에는 드라이버, 브라우저 실행, 브라우저 인자 또는 신뢰
 저장소 변경이 필요 없습니다.

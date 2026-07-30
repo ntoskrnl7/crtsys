@@ -74,6 +74,12 @@ public:
     return value_->byteBlob;
   }
 
+  const FWP_BYTE_ARRAY16 *byte_array16() const noexcept {
+    if (!value_ || value_->type != FWP_BYTE_ARRAY16_TYPE)
+      return nullptr;
+    return value_->byteArray16;
+  }
+
   explicit operator bool() const noexcept { return value_ != nullptr; }
 
 private:
@@ -255,6 +261,24 @@ public:
   }
 
   filter_view filter() const noexcept { return filter_view(filter_); }
+
+  /**
+   * @brief Reports whether this callout may write the current action.
+   *
+   * This is diagnostic state only. Callbacks still return decision and cannot
+   * mutate FWPS_CLASSIFY_OUT directly.
+   */
+  bool action_write_available() const noexcept {
+    return output_ &&
+           (output_->rights & FWPS_RIGHT_ACTION_WRITE) != 0;
+  }
+
+  /**
+   * @brief Returns the action selected before this callout executes.
+   */
+  FWP_ACTION_TYPE current_action() const noexcept {
+    return output_ ? output_->actionType : FWP_ACTION_NONE;
+  }
 
   /**
    * @brief Observes callback-scoped packet data, when the layer supplies it.
