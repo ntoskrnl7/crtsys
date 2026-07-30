@@ -558,12 +558,19 @@ function(crtsys_add_driver _target)
             message(FATAL_ERROR "WDK::FWPKCLNT is required for WFP callout drivers.")
         endif()
         target_link_libraries(${_target} WDK::FWPKCLNT)
+        if(WDK_PLATFORM MATCHES "^ARM")
+            # Windows on ARM requires NDIS 6.30 or newer.
+            set(_crtsys_wfp_ndis_version NDIS630)
+        else()
+            set(_crtsys_wfp_ndis_version NDIS60)
+        endif()
         target_compile_definitions(
             ${_target}
             PUBLIC
                 CRTSYS_USE_WFP
-                NDIS60
+                ${_crtsys_wfp_ndis_version}
                 NDIS_SUPPORT_NDIS6
+                NTDDI_VERSION=NTDDI_WIN8
         )
     endif()
 

@@ -9,7 +9,7 @@
 
 namespace {
 
-constexpr bool is_udp(
+bool is_udp(
     const ntl::wfp::classify_event<
         wfp_bind_redirect::layer_v4> &event) noexcept {
   const auto protocol =
@@ -18,7 +18,7 @@ constexpr bool is_udp(
   return protocol && *protocol == IPPROTO_UDP;
 }
 
-constexpr bool is_udp(
+bool is_udp(
     const ntl::wfp::classify_event<
         wfp_bind_redirect::layer_v6> &event) noexcept {
   const auto protocol =

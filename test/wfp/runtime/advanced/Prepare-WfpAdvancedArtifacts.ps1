@@ -8,6 +8,8 @@ param(
 
   [string] $WindowsSdkVersion = '10.0.22621.0',
 
+  [string] $BuildRoot = '',
+
   [string] $OutputRoot = '',
 
   [switch] $SkipBuild
@@ -21,6 +23,11 @@ $buildScript = Join-Path $repoRoot 'scripts\ci\Build-CrtSys.ps1'
 $signScript = Join-Path $repoRoot 'scripts\ci\TestSign-Driver.ps1'
 if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
   $OutputRoot = Join-Path $repoRoot 'artifacts\wfp-advanced-staging'
+}
+if ([string]::IsNullOrWhiteSpace($BuildRoot)) {
+  $sdkDirectory = $WindowsSdkVersion -replace '[^A-Za-z0-9]+', '_'
+  $BuildRoot = Join-Path $repoRoot (
+      "artifacts\b\wfp-advanced-runtime\$PlatformToolset\$sdkDirectory")
 }
 
 $samples = @(
@@ -82,21 +89,27 @@ function Assert-SafeOutputRoot([string] $Path) {
   }
 }
 
+Assert-SafeOutputRoot $BuildRoot
+Assert-SafeOutputRoot $OutputRoot
+$resolvedBuildRoot = [IO.Path]::GetFullPath($BuildRoot)
+
 if (-not $SkipBuild) {
   foreach ($sample in $samples) {
+    $sampleBuildRoot =
+        Join-Path $resolvedBuildRoot $sample.Directory
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $buildScript `
         -Project $sample.Project -Architecture x64 `
         -Configuration $Configuration `
         -WindowsSdkVersion $WindowsSdkVersion `
         -WdkVersion $WindowsSdkVersion `
-        -PlatformToolset $PlatformToolset
+        -PlatformToolset $PlatformToolset `
+        -BuildDirectory $sampleBuildRoot
     if ($LASTEXITCODE -ne 0) {
       throw "The $($sample.Project) build failed."
     }
   }
 }
 
-Assert-SafeOutputRoot $OutputRoot
 $resolvedOutputRoot = [IO.Path]::GetFullPath($OutputRoot)
 if (Test-Path -LiteralPath $resolvedOutputRoot) {
   Remove-Item -LiteralPath $resolvedOutputRoot -Recurse -Force
@@ -104,9 +117,8 @@ if (Test-Path -LiteralPath $resolvedOutputRoot) {
 $packageRoot = New-Item -ItemType Directory -Force -Path $resolvedOutputRoot
 
 foreach ($sample in $samples) {
-  $buildRoot = Join-Path $repoRoot (
-      "examples\wfp\$($sample.Directory)\build_x64_$PlatformToolset\" +
-      $Configuration)
+  $buildRoot = Join-Path (
+      Join-Path $resolvedBuildRoot $sample.Directory) $Configuration
   $driverSource = Join-Path $buildRoot "$($sample.BaseName).sys"
   $appSource = Join-Path $buildRoot "$($sample.BaseName)_app.exe"
   $infSource = Join-Path $repoRoot (

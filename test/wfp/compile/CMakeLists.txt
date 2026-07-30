@@ -96,17 +96,27 @@ target_include_directories(crtsys_wfp_browser_http3_contracts
     "${crtsys_SOURCE_DIR}/examples/wfp/browser-https-inspection/app"
 )
 
-if(CMAKE_SIZEOF_VOID_P EQUAL 8)
-  target_compile_definitions(crtsys_wfp_scatter_contracts PRIVATE _AMD64_)
-  target_compile_definitions(crtsys_wfp_inspection_contracts PRIVATE _AMD64_)
-  target_compile_definitions(crtsys_wfp_protocol_contracts PRIVATE _AMD64_)
-  target_compile_definitions(crtsys_wfp_browser_http3_contracts PRIVATE _AMD64_)
+if(CMAKE_GENERATOR_PLATFORM MATCHES "^ARM64")
+  set(crtsys_wfp_contract_architecture _ARM64_)
+elseif(CMAKE_GENERATOR_PLATFORM MATCHES "^ARM")
+  set(crtsys_wfp_contract_architecture _ARM_)
+elseif(CMAKE_SIZEOF_VOID_P EQUAL 8)
+  set(crtsys_wfp_contract_architecture _AMD64_)
 else()
-  target_compile_definitions(crtsys_wfp_scatter_contracts PRIVATE _X86_)
-  target_compile_definitions(crtsys_wfp_inspection_contracts PRIVATE _X86_)
-  target_compile_definitions(crtsys_wfp_protocol_contracts PRIVATE _X86_)
-  target_compile_definitions(crtsys_wfp_browser_http3_contracts PRIVATE _X86_)
+  set(crtsys_wfp_contract_architecture _X86_)
 endif()
+target_compile_definitions(
+  crtsys_wfp_scatter_contracts
+  PRIVATE ${crtsys_wfp_contract_architecture})
+target_compile_definitions(
+  crtsys_wfp_inspection_contracts
+  PRIVATE ${crtsys_wfp_contract_architecture})
+target_compile_definitions(
+  crtsys_wfp_protocol_contracts
+  PRIVATE ${crtsys_wfp_contract_architecture})
+target_compile_definitions(
+  crtsys_wfp_browser_http3_contracts
+  PRIVATE ${crtsys_wfp_contract_architecture})
 
 target_link_libraries(crtsys_wfp_management_contracts
   PRIVATE

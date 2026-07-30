@@ -153,88 +153,113 @@ function Invoke-SampleApplication {
 Assert-Administrator
 $PackageRoot = (Resolve-Path -LiteralPath $PackageRoot).Path
 
-foreach ($sample in $samples) {
-  foreach ($extension in @('.sys', '_app.exe', '.cer')) {
-    $path = Join-Path $PackageRoot "$($sample.BaseName)$extension"
-    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-      throw "Required WFP runtime artifact was not found: $path"
-    }
-  }
-  $certificate = Join-Path $PackageRoot "$($sample.BaseName).cer"
-  & certutil.exe -f -addstore Root $certificate *> $null
-  if ($LASTEXITCODE -ne 0) {
-    throw "Root certificate import failed for $($sample.Name)."
-  }
-  & certutil.exe -f -addstore TrustedPublisher $certificate *> $null
-  if ($LASTEXITCODE -ne 0) {
-    throw "Publisher certificate import failed for $($sample.Name)."
-  }
-}
-
-foreach ($sample in $samples) {
-  $driver = Join-Path $PackageRoot "$($sample.BaseName).sys"
-  $application = Join-Path $PackageRoot "$($sample.BaseName)_app.exe"
-  Remove-ServiceIfPresent $sample.Service
-  try {
-    Write-Host "=== $($sample.Name): driver load ==="
-    & sc.exe create $sample.Service 'binPath=' $driver `
-        'type=' 'kernel' 'start=' 'demand' |
-        ForEach-Object { Write-Host $_ }
-    if ($LASTEXITCODE -ne 0) {
-      throw "Creating the $($sample.Name) service failed."
-    }
-
-    & sc.exe start $sample.Service | ForEach-Object { Write-Host $_ }
-    if ($LASTEXITCODE -ne 0) {
-      throw "Starting the $($sample.Name) service failed."
-    }
-
-    if ($sample.Name -eq 'stream-edit') {
-      Write-Host '=== stream-edit: coroutine socket self-test ==='
-      $selfTest =
-          Invoke-SampleApplication $application @('--coroutine-self-test')
-      $selfTest.Output | ForEach-Object { Write-Host $_ }
-      if ($selfTest.ExitCode -ne 0 -or
-          -not $selfTest.Text.Contains(
-              'NTL WFP stream-edit coroutine self-test ok:')) {
-        throw 'The stream-edit coroutine socket self-test failed.'
+$addedCertificates = [Collections.Generic.List[string]]::new()
+try {
+  foreach ($sample in $samples) {
+    foreach ($extension in @('.sys', '_app.exe', '.cer')) {
+      $path = Join-Path $PackageRoot "$($sample.BaseName)$extension"
+      if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw "Required WFP runtime artifact was not found: $path"
       }
     }
-    if ($null -ne $sample.PSObject.Properties['FailureMarker']) {
-      Write-Host "=== $($sample.Name): fail-closed self-test ==="
-      $selfTest =
-          Invoke-SampleApplication $application @('--failure-self-test')
-      $selfTest.Output | ForEach-Object { Write-Host $_ }
-      if ($selfTest.ExitCode -ne 0 -or
-          -not $selfTest.Text.Contains($sample.FailureMarker)) {
-        throw "The $($sample.Name) fail-closed self-test failed."
-      }
+    $certificate = Join-Path $PackageRoot "$($sample.BaseName).cer"
+    $certificateObject =
+        [Security.Cryptography.X509Certificates.X509Certificate2]::new(
+            $certificate)
+    try {
+      $thumbprint = $certificateObject.Thumbprint
+    } finally {
+      $certificateObject.Dispose()
     }
-    for ($iteration = 1; $iteration -le $Iterations; ++$iteration) {
-      Write-Host "=== $($sample.Name): iteration $iteration/$Iterations ==="
-      $run = Invoke-SampleApplication $application
-      $run.Output | ForEach-Object { Write-Host $_ }
-      if ($run.ExitCode -ne 0) {
+
+    foreach ($store in @('Root', 'TrustedPublisher')) {
+      $storePath =
+          "Cert:\LocalMachine\$store\$thumbprint"
+      if (Test-Path -LiteralPath $storePath -PathType Leaf) {
+        continue
+      }
+      & certutil.exe -f -addstore $store $certificate *> $null
+      if ($LASTEXITCODE -ne 0) {
         throw (
-          "$($sample.Name) iteration $iteration exited with " +
-          "$($run.ExitCode).")
+          "$store certificate import failed for $($sample.Name).")
       }
-      if (-not $run.Text.Contains($sample.Marker)) {
-        throw (
-          "$($sample.Name) iteration $iteration missed its proof marker.")
-      }
+      $addedCertificates.Add($storePath)
     }
-  } finally {
-    Write-Host "=== $($sample.Name): driver unload ==="
+  }
+
+  foreach ($sample in $samples) {
+    $driver = Join-Path $PackageRoot "$($sample.BaseName).sys"
+    $application = Join-Path $PackageRoot "$($sample.BaseName)_app.exe"
     Remove-ServiceIfPresent $sample.Service
+    try {
+      Write-Host "=== $($sample.Name): driver load ==="
+      & sc.exe create $sample.Service 'binPath=' $driver `
+          'type=' 'kernel' 'start=' 'demand' |
+          ForEach-Object { Write-Host $_ }
+      if ($LASTEXITCODE -ne 0) {
+        throw "Creating the $($sample.Name) service failed."
+      }
+
+      & sc.exe start $sample.Service | ForEach-Object { Write-Host $_ }
+      if ($LASTEXITCODE -ne 0) {
+        throw "Starting the $($sample.Name) service failed."
+      }
+
+      if ($sample.Name -eq 'stream-edit') {
+        Write-Host '=== stream-edit: coroutine socket self-test ==='
+        $selfTest =
+            Invoke-SampleApplication $application @('--coroutine-self-test')
+        $selfTest.Output | ForEach-Object { Write-Host $_ }
+        if ($selfTest.ExitCode -ne 0 -or
+            -not $selfTest.Text.Contains(
+                'NTL WFP stream-edit coroutine self-test ok:')) {
+          throw 'The stream-edit coroutine socket self-test failed.'
+        }
+      }
+      if ($null -ne $sample.PSObject.Properties['FailureMarker']) {
+        Write-Host "=== $($sample.Name): fail-closed self-test ==="
+        $selfTest =
+            Invoke-SampleApplication $application @('--failure-self-test')
+        $selfTest.Output | ForEach-Object { Write-Host $_ }
+        if ($selfTest.ExitCode -ne 0 -or
+            -not $selfTest.Text.Contains($sample.FailureMarker)) {
+          throw "The $($sample.Name) fail-closed self-test failed."
+        }
+      }
+      for ($iteration = 1; $iteration -le $Iterations; ++$iteration) {
+        Write-Host (
+          "=== $($sample.Name): iteration $iteration/$Iterations ===")
+        $run = Invoke-SampleApplication $application
+        $run.Output | ForEach-Object { Write-Host $_ }
+        if ($run.ExitCode -ne 0) {
+          throw (
+            "$($sample.Name) iteration $iteration exited with " +
+            "$($run.ExitCode).")
+        }
+        if (-not $run.Text.Contains($sample.Marker)) {
+          throw (
+            "$($sample.Name) iteration $iteration missed its proof marker.")
+        }
+      }
+    } finally {
+      Write-Host "=== $($sample.Name): driver unload ==="
+      Remove-ServiceIfPresent $sample.Service
+    }
+
+    & sc.exe query $sample.Service *> $null
+    if ($LASTEXITCODE -eq 0) {
+      throw "$($sample.Name) service remained installed after the suite."
+    }
   }
 
-  & sc.exe query $sample.Service *> $null
-  if ($LASTEXITCODE -eq 0) {
-    throw "$($sample.Name) service remained installed after the suite."
+  Write-Host (
+    "Advanced WFP suite passed: $($samples.Count) samples, " +
+    "$Iterations iterations each.")
+} finally {
+  for ($index = $addedCertificates.Count - 1; $index -ge 0; --$index) {
+    $storePath = $addedCertificates[$index]
+    if (Test-Path -LiteralPath $storePath -PathType Leaf) {
+      Remove-Item -LiteralPath $storePath -Force
+    }
   }
 }
-
-Write-Host (
-  "Advanced WFP suite passed: $($samples.Count) samples, " +
-  "$Iterations iterations each.")

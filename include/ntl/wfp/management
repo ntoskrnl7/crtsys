@@ -1241,6 +1241,7 @@ public:
     FWPM_FILTER_ENUM_TEMPLATE0 query{};
     query.layerKey = Layer::policy_key();
     query.enumType = FWP_FILTER_ENUM_FULLY_CONTAINED;
+    query.actionMask = 0xFFFFFFFFu;
 
     HANDLE enum_handle = nullptr;
     check(FwpmFilterCreateEnumHandle0(

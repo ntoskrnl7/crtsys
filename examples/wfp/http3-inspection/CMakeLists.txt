@@ -28,13 +28,18 @@ target_compile_options(crtsys_wfp_http3_inspection
     "$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:/MT>"
 )
 
-if(CMAKE_SIZEOF_VOID_P EQUAL 8)
-  target_compile_definitions(
-    crtsys_wfp_http3_inspection PRIVATE _AMD64_)
+if(CMAKE_GENERATOR_PLATFORM MATCHES "^ARM64")
+  set(crtsys_wfp_http3_architecture _ARM64_)
+elseif(CMAKE_GENERATOR_PLATFORM MATCHES "^ARM")
+  set(crtsys_wfp_http3_architecture _ARM_)
+elseif(CMAKE_SIZEOF_VOID_P EQUAL 8)
+  set(crtsys_wfp_http3_architecture _AMD64_)
 else()
-  target_compile_definitions(
-    crtsys_wfp_http3_inspection PRIVATE _X86_)
+  set(crtsys_wfp_http3_architecture _X86_)
 endif()
+target_compile_definitions(
+  crtsys_wfp_http3_inspection
+  PRIVATE ${crtsys_wfp_http3_architecture})
 
 include("${crtsys_SOURCE_DIR}/cmake/std-cxx.cmake")
 set_std_cxx_latest(crtsys_wfp_http3_inspection)

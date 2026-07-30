@@ -175,9 +175,10 @@ try {
     }
     $ready = Test-Path -LiteralPath $caPath -PathType Leaf
     if ($ready -and (Test-Path -LiteralPath $proxyStdout)) {
-      $readyText = [string](Get-Content -LiteralPath $proxyStdout -Raw)
-      $ready = $readyText.Contains(
-          'NTL WFP browser HTTPS inspection ready:')
+      $readyText = Get-Content -LiteralPath $proxyStdout -Raw
+      $ready = $null -ne $readyText -and
+          $readyText.Contains(
+              'NTL WFP browser HTTPS inspection ready:')
     }
     if (-not $ready) {
       Start-Sleep -Milliseconds 100

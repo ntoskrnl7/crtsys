@@ -53,36 +53,59 @@ foreach ($path in @($driver, $certificate, $testScript)) {
   }
 }
 
-& certutil.exe -f -addstore Root $certificate *> $null
-if ($LASTEXITCODE -ne 0) {
-  throw 'Importing the browser inspection driver root certificate failed.'
-}
-& certutil.exe -f -addstore TrustedPublisher $certificate *> $null
-if ($LASTEXITCODE -ne 0) {
-  throw 'Importing the browser inspection publisher certificate failed.'
-}
-
-Remove-DriverService
+$certificateObject =
+    [Security.Cryptography.X509Certificates.X509Certificate2]::new(
+        $certificate)
 try {
-  & sc.exe create crtsys_wfp_browser_https_inspection `
-      'binPath=' $driver 'type=' 'kernel' 'start=' 'demand' |
-      ForEach-Object { Write-Host $_ }
-  if ($LASTEXITCODE -ne 0) {
-    throw 'Creating the browser inspection driver service failed.'
-  }
-  & sc.exe start crtsys_wfp_browser_https_inspection |
-      ForEach-Object { Write-Host $_ }
-  if ($LASTEXITCODE -ne 0) {
-    throw 'Starting the browser inspection driver service failed.'
-  }
-
-  & $testScript -PackageRoot $PackageRoot -Url $Url
-  if ($LASTEXITCODE -ne 0) {
-    throw 'The WFP managed HTTP/3 redirect test failed.'
-  }
+  $thumbprint = $certificateObject.Thumbprint
 } finally {
-  Remove-DriverService
+  $certificateObject.Dispose()
 }
+$addedCertificates = [Collections.Generic.List[string]]::new()
+try {
+  foreach ($store in @('Root', 'TrustedPublisher')) {
+    $storePath = "Cert:\LocalMachine\$store\$thumbprint"
+    if (Test-Path -LiteralPath $storePath -PathType Leaf) {
+      continue
+    }
+    & certutil.exe -f -addstore $store $certificate *> $null
+    if ($LASTEXITCODE -ne 0) {
+      throw (
+        "Importing the browser inspection driver certificate into " +
+        "$store failed.")
+    }
+    $addedCertificates.Add($storePath)
+  }
 
-Wait-DriverServiceRemoved
-Write-Host 'WFP managed HTTP/3 driver suite passed.'
+  Remove-DriverService
+  try {
+    & sc.exe create crtsys_wfp_browser_https_inspection `
+        'binPath=' $driver 'type=' 'kernel' 'start=' 'demand' |
+        ForEach-Object { Write-Host $_ }
+    if ($LASTEXITCODE -ne 0) {
+      throw 'Creating the browser inspection driver service failed.'
+    }
+    & sc.exe start crtsys_wfp_browser_https_inspection |
+        ForEach-Object { Write-Host $_ }
+    if ($LASTEXITCODE -ne 0) {
+      throw 'Starting the browser inspection driver service failed.'
+    }
+
+    & $testScript -PackageRoot $PackageRoot -Url $Url
+    if ($LASTEXITCODE -ne 0) {
+      throw 'The WFP managed HTTP/3 redirect test failed.'
+    }
+  } finally {
+    Remove-DriverService
+    Wait-DriverServiceRemoved
+  }
+
+  Write-Host 'WFP managed HTTP/3 driver suite passed.'
+} finally {
+  for ($index = $addedCertificates.Count - 1; $index -ge 0; --$index) {
+    $storePath = $addedCertificates[$index]
+    if (Test-Path -LiteralPath $storePath -PathType Leaf) {
+      Remove-Item -LiteralPath $storePath -Force
+    }
+  }
+}
