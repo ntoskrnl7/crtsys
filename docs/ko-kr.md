@@ -56,6 +56,8 @@ NTL 방식의 WFP callout driver에서는 **NTL WFP**를 선택하고
 `ntl::main`을 구현합니다. NuGet package가 WFP build contract와
 `fwpkclnt.lib` 링크를 자동으로 적용합니다.
 
+![Visual Studio에서 crtsys NTL WFP 진입점을 선택하고 ntl::main을 구현하는 화면](./assets/visual-studio-ntl-wfp-entrypoint-ko-kr.gif)
+
 | 경로 | 사용할 때 | 시작점 |
 | --- | --- | --- |
 | NuGet / MSBuild | Visual Studio 또는 Build Tools WDK driver project | `PackageReference` 또는 `Install-Package crtsys` |

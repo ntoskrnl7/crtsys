@@ -56,6 +56,8 @@ For a Windows Filtering Platform callout driver, select **NTL WFP** and
 implement `ntl::main`. The NuGet package applies the WFP target definitions and
 links `fwpkclnt.lib`.
 
+![Visual Studio selecting the crtsys NTL WFP entry point and implementing ntl::main](./docs/assets/visual-studio-ntl-wfp-entrypoint.gif)
+
 | Path | Use when | Start here |
 | --- | --- | --- |
 | NuGet / MSBuild | Visual Studio or Build Tools WDK driver project | `PackageReference` or `Install-Package crtsys` |

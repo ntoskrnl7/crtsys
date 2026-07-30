@@ -78,6 +78,8 @@ NTDDI contract; it links `fwpkclnt.lib` and selects the `ntl::main` entry
 wrapper. Packet-processing projects that directly call NDIS routines must
 still add `ndis.lib` for those routines.
 
+![Visual Studio selecting the crtsys NTL WFP entry point and implementing ntl::main](./assets/visual-studio-ntl-wfp-entrypoint.gif)
+
 For an **Export driver**, no crtsys entry-point property is shown. Export drivers
 use the WDK export-driver entry model and must not select an NTL WDM, KMDF, or
 minifilter/WFP entry point.

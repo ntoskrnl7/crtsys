@@ -41,6 +41,8 @@ WFP callout driver에서는 WDK project type을 WDM으로 유지하고
 구현합니다. Package가 WFP와 architecture별 NDIS 전처리기 정의를 적용하고
 `fwpkclnt.lib`를 자동으로 링크합니다.
 
+![Visual Studio에서 crtsys NTL WFP 진입점을 선택하고 ntl::main을 구현하는 화면](./assets/visual-studio-ntl-wfp-entrypoint-ko-kr.gif)
+
 Visual Studio에서는 NuGet package UI를 사용하는 것이 가장 쉽습니다.
 
 ![Visual Studio NuGet package UI에서 crtsys를 설치하는 화면](./assets/visual-studio-nuget-package-ui-ko-kr.gif)
