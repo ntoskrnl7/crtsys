@@ -1,0 +1,15 @@
+#pragma once
+
+//
+// Windows SDK releases before 10.0.22621.0 do not expose the complete
+// QUIC TLS alert mapping in ntstatus.h. Keep the values in one internal
+// compatibility layer so public NTL headers can build against those SDKs
+// without replacing or modifying the installed Windows headers.
+//
+#ifndef STATUS_QUIC_TLS_CERTIFICATE_UNKNOWN
+#define STATUS_QUIC_TLS_CERTIFICATE_UNKNOWN ((NTSTATUS)0xC024012EL)
+#endif
+
+#ifndef STATUS_QUIC_TLS_UNKNOWN_CA
+#define STATUS_QUIC_TLS_UNKNOWN_CA ((NTSTATUS)0xC0240130L)
+#endif

@@ -9,6 +9,15 @@ namespace client = ntl::net::http3::msh3_client;
 
 namespace {
 
+static_assert(
+    static_cast<std::uint32_t>(
+        STATUS_QUIC_TLS_CERTIFICATE_UNKNOWN) ==
+    0xC024012Eu);
+static_assert(
+    static_cast<std::uint32_t>(
+        STATUS_QUIC_TLS_UNKNOWN_CA) ==
+    0xC0240130u);
+
 bool test_request_validation() {
   client::client_limits limits;
   client::request request;

@@ -579,7 +579,20 @@ function(crtsys_add_driver _target)
     )
 
     if(_crtsys_use_ntl_main OR _crtsys_use_ntl_kmdf_main OR _crtsys_use_ntl_flt_main)
-        target_compile_features(${_target} PRIVATE cxx_std_17)
+        target_compile_features(${_target} PRIVATE cxx_std_20)
+        set_target_properties(
+            ${_target}
+            PROPERTIES
+                CXX_STANDARD 20
+                CXX_STANDARD_REQUIRED YES
+                CXX_EXTENSIONS NO
+        )
+        if(MSVC)
+            target_compile_options(
+                ${_target}
+                PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>"
+            )
+        endif()
     endif()
 
     if(CRTSYS_USE_PREBUILT)

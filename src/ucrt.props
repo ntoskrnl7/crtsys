@@ -148,6 +148,7 @@
     </ClCompile>
     <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\misc\errno.cpp">
       <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <PreprocessorDefinitions Condition="'$(CrtSysUseLibcntpr)' == 'true'">%(PreprocessorDefinitions);_set_errno=__crtsys_internal_set_errno</PreprocessorDefinitions>
       <ObjectFileName>$(IntDir)\ucrt\%(Directory)%(FileName).obj</ObjectFileName>
       <LanguageStandard>stdcpp14</LanguageStandard>
       <DisableSpecificWarnings>4459</DisableSpecificWarnings>
@@ -332,6 +333,7 @@
     </ClCompile>
     <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\locale\localeconv.cpp">
       <PreprocessorDefinitions>%(PreprocessorDefinitions);_STL_COMPILER_PREPROCESSOR=0;_CORECRT_BUILD;_CRT_GLOBAL_STATE_ISOLATION;_CRT_DECLARE_GLOBAL_VARIABLES_DIRECTLY;__WARNING_UNUSED_ASSIGNMENT=28931</PreprocessorDefinitions>
+      <PreprocessorDefinitions Condition="'$(CrtSysUseLibcntpr)' == 'true'">%(PreprocessorDefinitions);localeconv=__crtsys_internal_localeconv</PreprocessorDefinitions>
       <CallingConvention>Cdecl</CallingConvention>
     </ClCompile>
     <ClCompile Include="$(UniversalCRT_SourcePath.Split(%3B)[0])\locale\get_qualified_locale.cpp">

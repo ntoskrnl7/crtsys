@@ -26,6 +26,8 @@
 #include <winsock2.h>
 #include <windows.h>
 
+#include <.internal/winsdk/ntstatus_quic_compat>
+
 #include <msh3.h>
 
 #include <ntl/result>

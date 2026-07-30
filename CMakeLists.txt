@@ -191,12 +191,21 @@ endif()
 
 include(cmake/CPM.cmake)
 
-if ("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "x64")
-  set(LDK_USE_RAISE_EXCEPTION ON)
-  set(LDK_USE_RTL_RAISE_EXCEPTION ON)
+if ("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "x64" AND
+    NOT CRTSYS_USE_LIBCNTPR)
+  set(LDK_USE_RAISE_EXCEPTION ON CACHE BOOL
+      "Set to ON to use ldk!RaiseException" FORCE)
+  set(LDK_USE_RTL_RAISE_EXCEPTION ON CACHE BOOL
+      "Set to ON to use ldk!RtlRaiseException" FORCE)
 else()
-  set(LDK_USE_RAISE_EXCEPTION OFF)
-  set(LDK_USE_RTL_RAISE_EXCEPTION OFF)
+  # libcntpr already supplies RaiseException and imports RtlRaiseException
+  # from the kernel. Building the Ldk definitions as well creates archive
+  # member collisions and previously forced every consuming driver to use
+  # /FORCE:MULTIPLE.
+  set(LDK_USE_RAISE_EXCEPTION OFF CACHE BOOL
+      "Set to ON to use ldk!RaiseException" FORCE)
+  set(LDK_USE_RTL_RAISE_EXCEPTION OFF CACHE BOOL
+      "Set to ON to use ldk!RtlRaiseException" FORCE)
 endif()
 if (NOT CRTSYS_ENABLE_DIAGNOSTIC_BREAKPOINTS)
   set(LDK_ENABLE_DIAGNOSTIC_BREAKPOINTS OFF CACHE BOOL "Set to OFF to suppress LDK diagnostic KdBreakPoint calls")
@@ -376,6 +385,10 @@ target_link_libraries(crtsys PRIVATE $<BUILD_INTERFACE:Ldk>)
 target_link_libraries(crtsys PRIVATE WDK::AUX_KLIB)
 if(CRTSYS_USE_LIBCNTPR)
   target_link_libraries(crtsys PRIVATE WDK::LIBCNTPR)
+  # src/ucrt*.props uses this global property to keep UCRT internal state
+  # while giving the two libcntpr-owned public entry points private names.
+  set_target_properties(
+    crtsys PROPERTIES VS_GLOBAL_CrtSysUseLibcntpr "true")
 endif()
 
 #
@@ -430,7 +443,9 @@ target_link_options(crtsys PUBLIC "$<$<CONFIG:Release>:/DEBUG>")
 #
 # Force File Output
 #
-if (CRTSYS_USE_LIBCNTPR)
+if (CRTSYS_USE_LIBCNTPR AND
+    "${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}" VERSION_LESS
+        "10.0.22000.0")
   # 10.0.17763.0
   # 10.0.22000.0
   # km/x64/libcntpr.lib(fpexcept.obj) : error LNK2005: RaiseException already defined in Ldk.lib(errhandlingapi.obj)
@@ -441,6 +456,8 @@ if (CRTSYS_USE_LIBCNTPR)
   # 10.0.17763.0
   # libcntpr.lib fflush
   # src\custom\ucrt\common\stdio\fflush.cpp fflush
+  # Older libcntpr archives still collide with kernel/UCRT members that
+  # cannot be isolated by the modern compatibility metadata below.
   target_link_options(crtsys PUBLIC "/FORCE:MULTIPLE")
 elseif(UCXXRT_ENABLED AND "${CMAKE_VS_PLATFORM_NAME}" STREQUAL "x64")
   # ntoskrnl.lib(ntoskrnl.exe) : error LNK2005: RtlRaiseException already defined in Ldk.lib(except.obj).
