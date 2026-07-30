@@ -382,7 +382,7 @@ private:
 #endif
   }
 
-  static void NTAPI resume_waiter(void *context) noexcept {
+  static void resume_waiter(void *context) noexcept {
     auto *const slot = static_cast<resume_slot *>(context);
     auto *const self = slot->owner;
     std::coroutine_handle<> continuation{};
@@ -406,8 +406,8 @@ private:
     self->release();
   }
 
-  static void NTAPI timer_expired(KDPC *, void *context, void *,
-                                  void *) noexcept {
+  static void timer_expired(KDPC *, void *context, void *,
+                            void *) noexcept {
     auto *const self = static_cast<byte_stream_state *>(context);
     resume_slot *resume = nullptr;
     bool release_timer_reference = false;

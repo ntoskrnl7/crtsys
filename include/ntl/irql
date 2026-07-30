@@ -12,6 +12,15 @@
 
 #include <ntddk.h>
 
+#if defined(_X86_) && defined(_WDM_INCLUDED_)
+extern "C" {
+_IRQL_saves_
+_DECL_HAL_KE_IMPORT
+KIRQL
+KeRaiseIrqlToSynchLevel(VOID);
+}
+#endif
+
 namespace ntl {
 /**
  * @brief Named KIRQL levels used by NTL helpers.
@@ -64,11 +73,21 @@ public:
   /**
    * @brief Raises the current processor to DISPATCH_LEVEL.
    */
-  raised_irql(to_dpc_level_t) : old_irql_(KeRaiseIrqlToDpcLevel()) {}
+  raised_irql(to_dpc_level_t) {
+    KeRaiseIrql(DISPATCH_LEVEL, &old_irql_);
+  }
   /**
    * @brief Raises the current processor to SYNCH_LEVEL.
    */
-  raised_irql(to_synch_level_t) : old_irql_(KeRaiseIrqlToSynchLevel()) {}
+  raised_irql(to_synch_level_t) {
+#if defined(_X86_)
+    old_irql_ = KeRaiseIrqlToSynchLevel();
+#else
+    // The WDK's non-x86 KeRaiseIrqlToSynchLevel inline uses IRQL 12,
+    // but WDM-only inclusion does not expose that NTDDK convenience helper.
+    KeRaiseIrql(static_cast<KIRQL>(12), &old_irql_);
+#endif
+  }
   /**
    * @brief Raises the current processor to an explicit IRQL.
    */

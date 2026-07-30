@@ -603,6 +603,12 @@ function(crtsys_add_driver _target)
         endif()
 
         target_link_libraries(${_target} crtsys)
+        # A source-tree consumer needs the same libcntpr duplicate-symbol
+        # policy as a prebuilt-package consumer. Link options placed on the
+        # static crtsys archive are not applied by every WDK generator path.
+        if(CRTSYS_USE_LIBCNTPR)
+            target_link_options(${_target} PRIVATE "/FORCE:MULTIPLE")
+        endif()
         if(NOT TARGET WDK::WDMSEC)
             message(FATAL_ERROR "WDK::WDMSEC is required for secure NTL control devices.")
         endif()

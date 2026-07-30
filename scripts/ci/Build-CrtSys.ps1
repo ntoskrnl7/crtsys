@@ -33,6 +33,8 @@ param(
   [ValidateSet('', 'v142', 'v143', 'v145')]
   [string] $PlatformToolset = '',
 
+  [string] $BuildDirectory = '',
+
   [switch] $NoBreakpoint
 )
 
@@ -96,7 +98,11 @@ if ($PlatformToolset) {
   $buildDirSuffix = "${Architecture}_${PlatformToolset}"
 }
 
-$buildDir = Join-Path $sourceDir "build_$buildDirSuffix"
+$buildDir = if ([string]::IsNullOrWhiteSpace($BuildDirectory)) {
+  Join-Path $sourceDir "build_$buildDirSuffix"
+} else {
+  [IO.Path]::GetFullPath($BuildDirectory)
+}
 
 $generatorToolset = 'host=x64'
 $generator = 'Visual Studio 17 2022'

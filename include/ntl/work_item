@@ -107,7 +107,7 @@ public:
   }
 
 private:
-  static void NTAPI invoke(void *context) noexcept {
+  static void invoke(void *context) noexcept {
     auto *const self = static_cast<work_item *>(context);
     NTSTATUS status = STATUS_SUCCESS;
 
