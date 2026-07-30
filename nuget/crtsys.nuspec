@@ -11,7 +11,7 @@
     <license type="file">LICENSE</license>
     <readme>README.md</readme>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
-    <tags>windows kernel driver wdk native cpp crt stl cmake</tags>
+    <tags>windows kernel driver wdk native cpp crt stl cmake wfp filtering-platform</tags>
   </metadata>
   <files>
     <file src="README.md" target="README.md" />

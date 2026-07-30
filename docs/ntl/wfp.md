@@ -17,8 +17,16 @@ The kernel and controller surfaces are deliberately separate:
 - `<ntl/wfp/management>` is user-only; and
 - `<ntl/wfp/all>` selects the correct side.
 
-The current CMake integration targets Windows 8 or later and links
-`fwpkclnt.lib` when `WFP` is selected.
+The build integration targets Windows 8 or later and links `fwpkclnt.lib` when
+WFP is selected. Visual Studio/NuGet consumers select **NTL WFP** on the
+**crtsys WDM entry point** property page, or set the equivalent MSBuild
+property:
+
+```xml
+<CrtSysWdmEntryPoint>NtlWfp</CrtSysWdmEntryPoint>
+```
+
+CMake consumers use:
 
 ```cmake
 crtsys_add_driver(my_callout WFP NTL src/main.cpp)

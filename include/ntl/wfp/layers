@@ -7,6 +7,7 @@
 #if defined(_KERNEL_MODE) || defined(_KERNEL32_)
 #define NTL_WFP_KERNEL_MODE
 #include <ndis.h>
+#include <.internal/winsdk/wfp_version_compat>
 #include <fwpmk.h>
 #include <fwpsk.h>
 #else

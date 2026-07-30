@@ -38,6 +38,8 @@ Install-Package crtsys
 - Driver projects (WDK) get automatic WDK linkage for
   `crtsys.lib` / `Ldk.lib` (x86/x64/ARM/ARM64 depending on the selected
   MSVC toolset).
+- WFP callout projects can select **NTL WFP** to receive the NTL entry wrapper,
+  WFP/NDIS target definitions, and `fwpkclnt.lib` automatically.
 
 What this NuGet package is for:
 
@@ -59,6 +61,20 @@ ntl::status ntl::main(ntl::driver& driver,
   return ntl::status::ok();
 }
 ```
+
+### WFP callout driver
+
+In Visual Studio, open **Project Properties > Driver Settings > Driver Model**
+and set **crtsys WDM entry point** to **NTL WFP**. A project file can make the
+same selection explicitly:
+
+```xml
+<CrtSysWdmEntryPoint>NtlWfp</CrtSysWdmEntryPoint>
+```
+
+The package uses `ntl::main`, targets the Windows 8 WFP callout contract,
+selects `NDIS60` or `NDIS630` for the target architecture, and links
+`fwpkclnt.lib`. Include `<ntl/wfp/all>` for the kernel callout surface.
 
 ### IOCTL sample (kernel + app pair)
 

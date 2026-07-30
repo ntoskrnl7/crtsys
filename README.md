@@ -52,6 +52,10 @@ For an NTL-style minifilter, select **NTL Minifilter** and implement
 
 ![Visual Studio selecting the crtsys NTL Minifilter entry point and implementing ntl::flt::main](./docs/assets/visual-studio-ntl-minifilter-entrypoint.gif)
 
+For a Windows Filtering Platform callout driver, select **NTL WFP** and
+implement `ntl::main`. The NuGet package applies the WFP target definitions and
+links `fwpkclnt.lib`.
+
 | Path | Use when | Start here |
 | --- | --- | --- |
 | NuGet / MSBuild | Visual Studio or Build Tools WDK driver project | `PackageReference` or `Install-Package crtsys` |
@@ -123,7 +127,7 @@ ntl::status ntl::main(ntl::driver& driver,
 }
 ```
 
-### WDM, KMDF, and minifilter driver models
+### WDM, KMDF, minifilter, and WFP driver models
 
 The NuGet package reads the WDK project's existing `DriverType` setting. A
 KMDF project uses its normal `DriverEntry` and `WdfDriverCreate` by default.
@@ -163,9 +167,13 @@ Visual Studio/NuGet projects use `CrtSysIsMinifilter=true` and
 [NTL minifilter sample catalog](./examples/minifilter) and
 [API guide](./docs/ntl/minifilter.md).
 
-Windows Filtering Platform callout drivers select the model explicitly in
-CMake. The helper links `fwpkclnt.lib`, uses the NTL entry wrapper, and keeps
-kernel callout registration separate from user-mode policy management:
+Windows Filtering Platform callout drivers select the model explicitly. In
+Visual Studio/NuGet projects, select **NTL WFP**, or set
+`<CrtSysWdmEntryPoint>NtlWfp</CrtSysWdmEntryPoint>`. The package applies the
+Windows 8 WFP contract, selects the architecture-appropriate NDIS definitions,
+links `fwpkclnt.lib`, and uses the `ntl::main` entry wrapper.
+
+CMake consumers use the equivalent helper:
 
 ```cmake
 crtsys_add_driver(my_wfp_callout WFP NTL src/main.cpp)

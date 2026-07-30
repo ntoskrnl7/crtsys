@@ -52,6 +52,10 @@ NTL 방식의 minifilter에서는 **NTL Minifilter**를 선택하고
 
 ![Visual Studio에서 crtsys NTL Minifilter 진입점을 선택하고 ntl::flt::main을 구현하는 화면](./assets/visual-studio-ntl-minifilter-entrypoint-ko-kr.gif)
 
+NTL 방식의 WFP callout driver에서는 **NTL WFP**를 선택하고
+`ntl::main`을 구현합니다. NuGet package가 WFP build contract와
+`fwpkclnt.lib` 링크를 자동으로 적용합니다.
+
 | 경로 | 사용할 때 | 시작점 |
 | --- | --- | --- |
 | NuGet / MSBuild | Visual Studio 또는 Build Tools WDK driver project | `PackageReference` 또는 `Install-Package crtsys` |
@@ -128,7 +132,7 @@ ntl::status ntl::main(ntl::driver& driver,
 `CRTSYS_NTL_MAIN`을 끄면 일반 WDK 드라이버처럼 `DriverEntry`를 직접
 작성하고 초기화를 수동으로 처리하면 됩니다.
 
-### WDM, KMDF, minifilter driver model
+### WDM, KMDF, minifilter, WFP driver model
 
 NuGet package는 WDK project의 기존 `DriverType` 설정을 읽습니다. KMDF
 project는 기본적으로 일반 `DriverEntry`와 `WdfDriverCreate` 경로를 사용합니다.
@@ -148,8 +152,8 @@ request, object lifetime, dispatch 처리를 WDF가 소유하며, crtsys는 WDF
 시작/unload 경로 전후의 C++ runtime 수명만 관리합니다.
 
 `ExportDriver`는 일반 WDM 드라이버가 아니라 WDK export-driver 모델입니다.
-따라서 export driver에서는 NTL WDM, NTL KMDF, NTL Minifilter 진입점을 선택하지
-말고 WDK의 export-driver 진입 모델을 유지해야 합니다.
+따라서 export driver에서는 NTL WDM, NTL KMDF, NTL Minifilter, NTL WFP
+진입점을 선택하지 말고 WDK의 export-driver 진입 모델을 유지해야 합니다.
 
 직접 `DriverEntry`를 정의하는 일반 WDM project는 다음 property를 사용합니다.
 
@@ -180,6 +184,24 @@ Visual Studio/NuGet project는 `CrtSysIsMinifilter=true`와
 `CrtSysUseNtlFltMain=true`를 사용합니다. 전체 코드는
 [NTL minifilter 예제 모음](../examples/minifilter), API 계약은
 [minifilter 가이드](./ntl/minifilter.md)에 정리되어 있습니다.
+
+Windows Filtering Platform callout driver는 Visual Studio/NuGet에서
+**NTL WFP**를 선택하거나 다음 property를 지정합니다.
+
+```xml
+<CrtSysWdmEntryPoint>NtlWfp</CrtSysWdmEntryPoint>
+```
+
+Package는 Windows 8 WFP 계약, architecture별 NDIS 정의와
+`fwpkclnt.lib` 링크를 적용하고 `ntl::main`을 호출합니다. CMake에서는
+같은 구성을 다음처럼 선택합니다.
+
+```cmake
+crtsys_add_driver(my_wfp_callout WFP NTL src/main.cpp)
+```
+
+API와 소유권 규칙은 [WFP 가이드](./ntl/wfp.md), 실행 가능한 구성은
+[WFP 예제 모음](../examples/wfp)에 정리되어 있습니다.
 
 ## Runtime Stack
 
@@ -221,6 +243,7 @@ flowchart TD
 | Concurrency | Driver-tested | thread, synchronization, async/future, atomic wait/notify |
 | Locale / chrono / charconv | Driver-tested | locale facet, timezone/chrono path, integer/floating char conversion |
 | NTL driver helpers | Driver-tested | `ntl::main`, driver/device helper, symbolic link/event/work item RAII, RPC, IRQL helper, pool allocator, stack expansion |
+| NTL WFP helpers | Driver-tested | typed callout, layer-safe policy, packet/stream ownership, injection, redirect와 user-mode inspection |
 | `thread_local` | 사용자 변수 용도 미지원 | kernel GS는 user-mode TEB가 아니라 processor-local KPCR이므로 사용자 `thread_local`은 thread별 storage가 아님 |
 
 상세 matrix는 의도적으로 test-linked 형태입니다. Kernel driver test suite에서
@@ -247,6 +270,8 @@ flowchart TD
 | [NTL KMDF WMI 예제](../examples/kmdf/wmi) | MOF 기반 typed WMI query/set/method provider, event 전달과 `ROOT\\WMI` user-mode 검증 앱 |
 | [NTL KMDF 버스 예제](../examples/kmdf/bus) | dynamic PDO plug/remove/eject 수명 주기와 버스/자식 function driver 사이 typed `QUERY_INTERFACE` 검증 예제 |
 | [NTL minifilter 예제 모음](../examples/minifilter) | 기본 callback/context, Filter Manager 통신, swapped-buffer를 독립 프로젝트로 분리한 driver/app 예제 |
+| [NTL WFP 가이드](./ntl/wfp.md) | typed callout, flow/packet/stream ownership, injection, redirect와 동적 정책 계약 |
+| [NTL WFP 예제 모음](../examples/wfp) | ALE, datagram, flow, stream, redirect, TLS/HTTPS와 TCP/UDP content-filter 예제 |
 | [CI driver load tests](./ci-driver-load-tests.md) | optional self-hosted driver load/run workflow |
 
 ## Operational Boundaries

@@ -139,12 +139,15 @@ foreach ($requiredPath in @(
   'include\ntl\wfp\all',
   'include\ntl\wfp\callout',
   'include\ntl\wfp\classify',
+  'include\ntl\wfp\connect_redirect',
   'include\ntl\wfp\flow',
   'include\ntl\wfp\injection',
   'include\ntl\wfp\layers',
   'include\ntl\wfp\management',
   'include\ntl\wfp\packet',
   'include\ntl\wfp\stream',
+  'include\ntl\wfp\stream_reader',
+  'include\.internal\winsdk\wfp_version_compat',
   'include\.internal\adjust_link_order'
 )) {
   $fullPath = Join-Path $bundleRoot $requiredPath
