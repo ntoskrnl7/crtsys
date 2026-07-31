@@ -75,6 +75,33 @@ if(CRTSYS_WFP_ENABLE_LIBFUZZER)
       VS_GLOBAL_EnableASAN "true")
     set_property(TARGET crtsys_wfp_protocol_libfuzzer PROPERTY
       VS_GLOBAL_EnableFuzzer "true")
+    if(CMAKE_VS_PLATFORM_NAME STREQUAL "x64")
+      set(crtsys_wfp_fuzzer_runtime_arch "x86_64")
+    elseif(CMAKE_VS_PLATFORM_NAME STREQUAL "Win32")
+      set(crtsys_wfp_fuzzer_runtime_arch "i386")
+    elseif(CMAKE_VS_PLATFORM_NAME STREQUAL "ARM64")
+      set(crtsys_wfp_fuzzer_runtime_arch "aarch64")
+    else()
+      message(FATAL_ERROR
+        "Unsupported ClangCL libFuzzer platform: ${CMAKE_VS_PLATFORM_NAME}")
+    endif()
+    execute_process(
+      COMMAND "${CMAKE_CXX_COMPILER}" -print-resource-dir
+      RESULT_VARIABLE crtsys_wfp_clang_resource_result
+      OUTPUT_VARIABLE crtsys_wfp_clang_resource_dir
+      OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(NOT crtsys_wfp_clang_resource_result EQUAL 0 OR
+       crtsys_wfp_clang_resource_dir STREQUAL "")
+      message(FATAL_ERROR "ClangCL did not report its resource directory")
+    endif()
+    set(crtsys_wfp_fuzzer_runtime
+      "${crtsys_wfp_clang_resource_dir}/lib/windows/clang_rt.fuzzer-${crtsys_wfp_fuzzer_runtime_arch}.lib")
+    if(NOT EXISTS "${crtsys_wfp_fuzzer_runtime}")
+      message(FATAL_ERROR
+        "The ClangCL libFuzzer runtime was not found: ${crtsys_wfp_fuzzer_runtime}")
+    endif()
+    target_link_libraries(crtsys_wfp_protocol_libfuzzer
+      PRIVATE "${crtsys_wfp_fuzzer_runtime}")
     target_link_options(crtsys_wfp_protocol_libfuzzer
       PRIVATE /INCREMENTAL:NO)
   else()
