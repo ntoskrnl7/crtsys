@@ -11,6 +11,7 @@
 
 #include <ntl/net/inspection/content_decoder>
 #include <ntl/net/inspection/standard_content_decoders>
+#include <ntl/net/inspection/standard_content_encoders>
 #include <ntl/net/http/datagram>
 #include <ntl/net/http/extended_connect>
 #include <ntl/net/http2/framing>
@@ -20,8 +21,14 @@
 #include <ntl/net/http3/qpack>
 #include <ntl/net/tls/inspection_policy>
 #include <ntl/net/http3/webtransport>
+#include <ntl/net/http3/webtransport_session>
+#include <ntl/net/http3/webtransport_transform>
+#include <ntl/net/grpc/framing>
+#include <ntl/net/grpc/transform>
+#include <ntl/net/tls/product_policy>
 #include <ntl/net/websocket/framing>
 #include <ntl/net/websocket/permessage_deflate>
+#include <ntl/net/websocket/transform>
 
 #include <brotli/encode.h>
 #include <zlib.h>
@@ -971,6 +978,367 @@ bool test_websocket_permessage_deflate() {
          oversized.status() == STATUS_BUFFER_OVERFLOW;
 }
 
+bool test_websocket_transform() {
+  namespace websocket = ntl::net::websocket;
+  websocket::message_transform_pipeline pipeline({1024, 4096, 4096, 4096, true});
+  pipeline.transform([](websocket::message &message) {
+    if (message.operation != websocket::opcode::text)
+      return websocket::rewrite_result::unchanged();
+    return websocket::rewrite_result::replace(
+        std::vector<std::byte>{byte('B'), byte('y'), byte('e')});
+  });
+  websocket::wire_transformer transformer(
+      websocket::sender_role::client, pipeline, std::nullopt,
+      [] { return std::array<std::byte, 4>{
+                 std::byte{5}, std::byte{6},
+                 std::byte{7}, std::byte{8}}; });
+  const std::array<std::byte, 8> input{
+      std::byte{0x81}, std::byte{0x82},
+      std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4},
+      byte(static_cast<char>('H' ^ 1)),
+      byte(static_cast<char>('i' ^ 2))};
+  auto outcome = transformer.consume(
+      ntl::net::scatter_view::from_contiguous(input));
+  if (outcome.action != websocket::rewrite_action::forward ||
+      !outcome.modified || outcome.wire.empty())
+    return false;
+  const auto view = ntl::net::scatter_view::from_contiguous(
+      std::span<const std::byte>(outcome.wire));
+  const auto header = websocket::inspect_header(
+      view, websocket::sender_role::client, {4096, 0});
+  if (!header || !header->masked)
+    return false;
+  const auto decoded = websocket::decode_payload(view, *header, 4096);
+  return decoded && *decoded ==
+      std::vector<std::byte>{byte('B'), byte('y'), byte('e')};
+}
+
+bool test_grpc_transform() {
+  ntl::net::inspection::content_decoder_registry decoders;
+  ntl::net::inspection::register_standard_content_decoders(decoders);
+  ntl::net::inspection::content_encoder_registry encoders;
+  ntl::net::inspection::register_standard_content_encoders(encoders);
+
+  ntl::net::grpc::message_transform_pipeline pipeline;
+  pipeline.transform([](ntl::net::grpc::semantic_message &message) {
+    message.payload.push_back(byte('!'));
+    return ntl::net::grpc::transform_result::replace(
+        std::move(message.payload));
+  });
+  const std::array<std::byte, 2> plain{byte('o'), byte('k')};
+  auto gzip = encoders.create("gzip");
+  if (!gzip)
+    return false;
+  auto compressed = ntl::net::inspection::encode_complete(
+      *gzip, plain, 4096);
+  if (!compressed)
+    return false;
+  auto wire = ntl::net::grpc::encode_message(*compressed, true, 4096);
+  if (!wire)
+    return false;
+
+  ntl::net::grpc::stream_transformer transformer(
+      ntl::net::grpc::direction::response, "gzip", pipeline,
+      decoders, encoders);
+  auto first = transformer.feed(
+      std::span<const std::byte>(*wire).first(3), false);
+  if (first.action != ntl::net::grpc::transform_action::forward ||
+      first.messages != 0 || !first.wire.empty())
+    return false;
+  auto second = transformer.feed(
+      std::span<const std::byte>(*wire).subspan(3), true);
+  if (second.action != ntl::net::grpc::transform_action::forward ||
+      second.messages != 1 || second.modified_messages != 1)
+    return false;
+  const auto output_view = ntl::net::scatter_view::from_contiguous(
+      std::span<const std::byte>(second.wire));
+  const auto header = ntl::net::grpc::inspect_header(output_view, 4096);
+  if (!header || !header->compressed)
+    return false;
+  auto decoder = decoders.create("gzip");
+  if (!decoder)
+    return false;
+  auto decoded = ntl::net::inspection::decode_complete(
+      *decoder,
+      *output_view.subview(5, header->payload_size), 4096);
+  return decoded && *decoded ==
+      std::vector<std::byte>{byte('o'), byte('k'), byte('!')};
+}
+
+bool test_webtransport_transform() {
+  namespace webtransport = ntl::net::http3::webtransport;
+  webtransport::transform_session session;
+  session.transform([](webtransport::payload &value) {
+    if (value.kind == webtransport::payload_kind::stream) {
+      auto bytes = value.bytes;
+      bytes.push_back(byte('!'));
+      return webtransport::transform_result::replace(std::move(bytes));
+    }
+    return webtransport::transform_result::unchanged();
+  });
+  if (!session.open_stream(
+          webtransport::stream_direction::bidirectional).is_ok())
+    return false;
+  webtransport::payload stream{
+      webtransport::payload_kind::stream, 0,
+      webtransport::stream_direction::bidirectional, 0,
+      {byte('w'), byte('t')}};
+  const auto rewritten = session.apply(stream);
+  if (rewritten.action != webtransport::transform_action::forward ||
+      !rewritten.modified || stream.bytes.size() != 3)
+    return false;
+
+  webtransport::transform_session capsule_session;
+  capsule_session.transform([](webtransport::payload &value) {
+    auto replacement = value.bytes;
+    replacement.push_back(std::byte{0});
+    return webtransport::transform_result::replace(
+        std::move(replacement));
+  });
+  webtransport::payload capsule{
+      webtransport::payload_kind::capsule, 0,
+      webtransport::stream_direction::bidirectional,
+      webtransport::wt_drain_session, {}};
+  const auto denied = capsule_session.apply(capsule);
+  return denied.action == webtransport::transform_action::block_session &&
+         denied.failure == STATUS_ACCESS_DENIED;
+}
+
+class recording_quic_backend final
+    : public ntl::net::http3::quic_transport_backend {
+public:
+  struct write_record {
+    std::uint64_t stream_id = 0;
+    std::vector<std::byte> bytes;
+    bool final = false;
+  };
+  struct reset_record {
+    std::uint64_t stream_id = 0;
+    std::uint64_t error_code = 0;
+    std::uint64_t reliable_size = 0;
+  };
+
+  ntl::net::http3::quic_backend_capabilities
+  capabilities() const noexcept override {
+    return {.available = true,
+            .tls13_termination = true,
+            .qpack_dynamic_table = false,
+            .bidirectional_streams = true,
+            .unidirectional_streams = true,
+            .quic_datagrams = true,
+            .reliable_reset_at = true,
+            .extended_connect = true,
+            .webtransport = true};
+  }
+  ntl::status run(ntl::net::http3::quic_backend_sink &) noexcept override {
+    return ntl::status::ok();
+  }
+  ntl::status write_stream(
+      std::uint64_t stream_id, ntl::net::scatter_view plaintext,
+      bool final) noexcept override {
+    try {
+      write_record record{stream_id, std::vector<std::byte>(plaintext.size()),
+                          final};
+      if (!record.bytes.empty()) {
+        const auto copied = plaintext.copy_to(record.bytes);
+        if (!copied.is_ok())
+          return copied;
+      }
+      writes.push_back(std::move(record));
+      return ntl::status::ok();
+    } catch (...) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+  }
+  ntl::status open_bidirectional_stream(
+      std::uint64_t &stream_id) noexcept override {
+    stream_id = next_bidirectional;
+    next_bidirectional += 4;
+    return ntl::status::ok();
+  }
+  ntl::status open_request_stream(
+      std::uint64_t &stream_id) noexcept override {
+    return open_bidirectional_stream(stream_id);
+  }
+  ntl::status open_unidirectional_stream(
+      std::uint64_t &stream_id) noexcept override {
+    stream_id = next_unidirectional;
+    next_unidirectional += 4;
+    return ntl::status::ok();
+  }
+  ntl::status send_datagram(
+      ntl::net::scatter_view plaintext) noexcept override {
+    try {
+      datagram.resize(plaintext.size());
+      return datagram.empty() ? ntl::status::ok()
+                              : plaintext.copy_to(datagram);
+    } catch (...) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+  }
+  ntl::status reset_stream_at(
+      std::uint64_t stream_id, std::uint64_t error_code,
+      std::uint64_t reliable_size) noexcept override {
+    resets.push_back({stream_id, error_code, reliable_size});
+    return ntl::status::ok();
+  }
+  void stop() noexcept override {}
+
+  std::vector<write_record> writes;
+  std::vector<reset_record> resets;
+  std::vector<std::byte> datagram;
+  std::uint64_t next_bidirectional = 0;
+  std::uint64_t next_unidirectional = 2;
+};
+
+bool test_webtransport_backend_session() {
+  namespace wt = ntl::net::http3::webtransport;
+  recording_quic_backend backend;
+  wt::backend_session client(backend);
+  client.set_negotiated_transport({true, true});
+  if (!client.send_local_settings(false).is_ok() || backend.writes.size() != 1)
+    return false;
+  const auto settings = wt::parse_control_stream(
+      ntl::net::scatter_view::from_contiguous(backend.writes[0].bytes));
+  if (!settings || !settings->client_ready() || settings->extended_connect ||
+      backend.writes[0].final)
+    return false;
+
+  if (!client.open_client({.authority = "example.test:443",
+                           .path = "/transport",
+                           .origin = "https://example.test"})
+           .is_ok() ||
+      !client.active() || client.session_id() != 0 ||
+      backend.writes.size() != 2 || backend.writes[1].final)
+    return false;
+  const auto connect_frame = ntl::net::http3::frame_view::parse(
+      ntl::net::scatter_view::from_contiguous(backend.writes[1].bytes));
+  if (!connect_frame ||
+      connect_frame->header().type() != ntl::net::http3::frame_type::headers)
+    return false;
+  ntl::net::http3::bounded_static_qpack_decoder decoder;
+  auto connect_headers = decoder.decode(
+      0, connect_frame->payload(), 64 * 1024);
+  if (!connect_headers)
+    return false;
+  const wt::prerequisites prerequisites{true, true, true, true,
+                                        true, true, true, true};
+  if (!wt::validate_session_request(
+          std::span<const ntl::net::http3::header_field>(
+              connect_headers->fields), prerequisites))
+    return false;
+
+  const std::array<std::byte, 3> payload{byte('w'), byte('t'), byte('!')};
+  auto bidi_stream = client.open_bidirectional_stream();
+  if (!bidi_stream || bidi_stream->reliable_prefix_size() == 0 ||
+      !client.write(*bidi_stream, std::span(payload).first(1)).is_ok() ||
+      !client.write(*bidi_stream, std::span(payload).subspan(1), true).is_ok() ||
+      bidi_stream->active())
+    return false;
+  auto uni_stream = client.open_unidirectional_stream();
+  if (!uni_stream ||
+      !client.write(*uni_stream, payload, true).is_ok() ||
+      !client.send_datagram(payload).is_ok())
+    return false;
+  const auto bidi = wt::parse_stream_prefix(
+      wt::stream_direction::bidirectional,
+      ntl::net::scatter_view::from_contiguous(backend.writes[2].bytes));
+  const auto uni = wt::parse_stream_prefix(
+      wt::stream_direction::unidirectional,
+      ntl::net::scatter_view::from_contiguous(backend.writes[5].bytes));
+  const auto datagram = ntl::net::http::http3_datagram_view::parse(
+      ntl::net::scatter_view::from_contiguous(backend.datagram));
+  if (!bidi || !uni || !datagram || bidi->session_id != 0 ||
+      uni->session_id != 0 || datagram->request_stream_id() != 0 ||
+      !bidi->body.empty() || !uni->body.empty() ||
+      backend.writes[3].bytes.size() != 1 ||
+      backend.writes[4].bytes.size() != 2 || !backend.writes[4].final ||
+      backend.writes[6].bytes.size() != payload.size() ||
+      !backend.writes[6].final)
+    return false;
+
+  auto reset_stream = client.open_bidirectional_stream();
+  if (!reset_stream ||
+      !client.write(*reset_stream, std::span(payload).first(1)).is_ok() ||
+      !client.reset(*reset_stream, 0x10203040).is_ok() ||
+      reset_stream->active() || backend.resets.size() != 1 ||
+      backend.resets[0].stream_id != reset_stream->id() ||
+      backend.resets[0].reliable_size !=
+          reset_stream->reliable_prefix_size() ||
+      backend.resets[0].error_code !=
+          wt::application_error_to_http3(0x10203040))
+    return false;
+  const auto mapped_zero = wt::application_error_from_http3(
+      wt::application_error_to_http3(0));
+  const auto mapped_max = wt::application_error_from_http3(
+      wt::application_error_to_http3(
+          (std::numeric_limits<std::uint32_t>::max)()));
+  if (!mapped_zero || *mapped_zero != 0 || !mapped_max ||
+      *mapped_max != (std::numeric_limits<std::uint32_t>::max)() ||
+      wt::application_error_from_http3(
+          wt::application_error_to_http3(30) - 1))
+    return false;
+
+  recording_quic_backend server_backend;
+  wt::backend_session server(server_backend);
+  server.set_negotiated_transport({true, true});
+  if (!server.send_local_settings(true).is_ok() ||
+      !server.accept_server(0).is_ok() || server_backend.writes.size() != 2)
+    return false;
+  const auto server_settings = wt::parse_control_stream(
+      ntl::net::scatter_view::from_contiguous(server_backend.writes[0].bytes));
+  const auto response_frame = ntl::net::http3::frame_view::parse(
+      ntl::net::scatter_view::from_contiguous(server_backend.writes[1].bytes));
+  if (!server_settings || !server_settings->server_ready() ||
+      !response_frame)
+    return false;
+  auto response_headers = decoder.decode(0, response_frame->payload(), 4096);
+  return response_headers && response_headers->fields.size() == 1 &&
+         response_headers->fields[0].name == ":status" &&
+         response_headers->fields[0].value == "200";
+}
+
+bool test_product_inspection_policy() {
+  using namespace ntl::net::inspection;
+  product_inspection_policy policy;
+  tls_inspection_observation observation;
+  observation.transport = encrypted_transport::quic;
+  observation.server_name = L"example.test";
+  observation.protocol_adapter_available = true;
+  observation.quic_backend_available = false;
+  inspection_capabilities capabilities;
+  capabilities.transparent_tcp_redirect = true;
+  capabilities.tcp_tls_frontend = true;
+  capabilities.managed_downstream_identity = true;
+  const auto fallback = policy.plan(observation, capabilities);
+  if (fallback.enforcement !=
+          inspection_enforcement::block_quic_for_tcp_fallback ||
+      !fallback.expects_tcp_retry)
+    return false;
+  observation.transport = encrypted_transport::tcp_tls;
+  observation.encrypted_client_hello_confirmed = true;
+  const auto ech = policy.plan(observation, capabilities);
+  if (ech.enforcement != inspection_enforcement::terminate ||
+      ech.issue != tls_inspection_issue::encrypted_client_hello)
+    return false;
+  observation.encrypted_client_hello_confirmed = false;
+  observation.protocol = application_protocol::http2;
+  capabilities.http2_adapter = true;
+  const auto inspect = policy.plan(observation, capabilities);
+  if (inspect.enforcement != inspection_enforcement::intercept)
+    return false;
+
+  product_inspection_options optional;
+  optional.requirement = inspection_requirement::when_possible;
+  product_inspection_policy optional_policy(optional);
+  observation.downstream_rejected_issued_certificate = true;
+  const auto pinned = optional_policy.plan(observation, capabilities);
+  return pinned.enforcement == inspection_enforcement::tunnel_unchanged &&
+         pinned.preserves_ciphertext &&
+         pinned.issue == tls_inspection_issue::certificate_pinning_rejected;
+}
+
+
 bool test_tls_policy() {
   const auto h2 =
       ntl::net::inspection::select_tls_application_protocol(
@@ -1047,12 +1415,24 @@ int main() {
     return 9;
   if (!test_tls_policy())
     return 10;
+  if (!test_websocket_transform())
+    return 11;
+  if (!test_grpc_transform())
+    return 12;
+  if (!test_webtransport_transform())
+    return 13;
+  if (!test_product_inspection_policy())
+    return 14;
+  if (!test_webtransport_backend_session())
+    return 15;
   std::cout
       << "NTL protocol adapters ok: websocket, http2, http3, "
          "static/dynamic-qpack, blocked-stream-resume, "
          "datagram, capsule, extended-connect, "
          "webtransport-draft16, quic-backend, permessage-deflate, "
          "gzip, deflate, br, "
-         "content-decoder, tls-policy\n";
+         "content-decoder, tls-policy, websocket-transform, "
+         "grpc-transform, webtransport-transform, webtransport-session, "
+         "product-policy\n";
   return 0;
 }

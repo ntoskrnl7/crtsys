@@ -16,7 +16,7 @@ The default deterministic run uses a loopback origin:
 4. the SNI selects a short-lived per-host identity from a bounded cache;
 5. `tls_framed_stream` produces one complete bounded HTTP/1.1 message;
 6. `ntl::net::inspection` permits `ALLOW` and drops `BLOCKME`; and
-7. closing the dynamic WFP session restores direct connectivity.
+7. closing the ephemeral WFP session restores direct connectivity.
 
 HTTP message boundaries come from validated `Content-Length` or final
 `chunked` framing. TLS, certificate issuance, HTTP framing, and plaintext

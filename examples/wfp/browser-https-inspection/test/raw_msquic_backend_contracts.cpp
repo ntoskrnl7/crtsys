@@ -64,7 +64,8 @@ static_assert(
     ntl::net::http3::msquic_backend::capabilities
         .quic_datagrams);
 static_assert(
-    ntl::net::http3::msquic_backend::capabilities.webtransport);
+    ntl::net::http3::msquic_backend::capabilities.webtransport ==
+    ntl::net::http3::msquic_backend::capabilities.reliable_reset_at);
 static_assert(
     !ntl::net::http3::msquic_backend::capabilities
          .arbitrary_browser_server_identity);
@@ -90,8 +91,9 @@ int main() {
   const auto capabilities =
       ntl::net::http3::msquic_backend::capabilities;
   return capabilities.extended_connect &&
-                 capabilities.webtransport &&
-                 capabilities.quic_datagrams
+                 capabilities.quic_datagrams &&
+                 capabilities.webtransport ==
+                     capabilities.reliable_reset_at
              ? 0
              : 1;
 }

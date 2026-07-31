@@ -27,6 +27,10 @@
 #include <ntl/net/io/async_socket>
 #include <ntl/net/inspection/content_decoder>
 #include <ntl/net/inspection/standard_content_decoders>
+#include <ntl/net/inspection/standard_content_encoders>
+#include <ntl/net/tls/product_backend>
+#include <ntl/net/http/transform>
+#include <ntl/net/grpc/transform>
 #include <ntl/net/inspection/core>
 #include <ntl/net/tls/certificate>
 #include <ntl/net/tls/inspection_frontend>
@@ -131,17 +135,13 @@ std::string format_quic_layer_telemetry(
   return output.str();
 }
 
-class inspectable_browser_identity_provider final
+class schannel_browser_identity_provider final
     : public ntl::net::tls_server_identity_provider {
 public:
-  explicit inspectable_browser_identity_provider(
-      ntl::net::cached_tls_server_identity_provider &inner,
-      ntl::net::inspection::ech_frontend_provider &ech,
-      ntl::net::inspection::downstream_trust_provider &trust,
+  explicit schannel_browser_identity_provider(
+      ntl::net::inspection::managed_tls_frontend &frontend,
       std::span<const std::uint8_t> application_id)
-      : inner_(&inner),
-        ech_(&ech),
-        trust_(&trust) {
+      : frontend_(&frontend) {
     application_id_.reserve(application_id.size());
     for (const std::uint8_t value : application_id)
       application_id_.push_back(
@@ -150,62 +150,26 @@ public:
 
   std::shared_ptr<ntl::net::tls_server_identity>
   select(const ntl::net::tls_client_hello &hello) override {
-    ntl::net::inspection::tls_inspection_observation observation;
-    observation.transport =
-        ntl::net::inspection::encrypted_transport::tcp_tls;
-    observation.protocol =
-        ntl::net::inspection::application_protocol::http1;
-    observation.server_name = hello.server_name();
-    observation.protocol_adapter_available = true;
-    observation.content_decoder_available = true;
-    const auto ech = ech_->inspect(hello);
-    if (!ech)
+    auto selected = frontend_->select(hello, application_id_);
+    if (!selected)
       throw std::system_error(
           static_cast<int>(
-              static_cast<NTSTATUS>(ech.status())),
+              static_cast<NTSTATUS>(selected.status())),
           std::system_category(),
-          "ECH frontend");
-    const ntl::status applied =
-        ntl::net::inspection::apply_ech_result(
-            observation, *ech);
-    if (!applied.is_ok())
-      throw std::system_error(
-          static_cast<int>(
-              static_cast<NTSTATUS>(applied)),
-          std::system_category(),
-          "ECH frontend result");
-    if (ech->state ==
-        ntl::net::inspection::ech_offer_state::decrypted)
+          "managed TLS frontend");
+    if (selected->transport !=
+        ntl::net::inspection::frontend_transport_kind::schannel)
       throw std::system_error(
           ERROR_NOT_SUPPORTED,
           std::system_category(),
           "decrypted ECH requires a frontend-owned TLS stream; "
           "Schannel cannot resume from an inner ClientHello");
-    const auto trust = trust_->classify(
-        {.application_id = application_id_,
-         .server_name = observation.server_name});
-    observation.downstream_trust_known =
-        trust != ntl::net::inspection::
-                     downstream_trust_state::unknown;
-    observation.downstream_rejected_issued_certificate =
-        trust ==
-        ntl::net::inspection::downstream_trust_state::pinned;
-    const auto decision = policy_.decide(observation);
-    if (decision.action !=
-        ntl::net::inspection::tls_inspection_action::inspect)
-      throw std::system_error(
-          ERROR_ACCESS_DISABLED_BY_POLICY,
-          std::system_category(),
-          "TLS ClientHello is not inspectable under policy");
-    return inner_->select(observation.server_name);
+    return selected->identity;
   }
 
 private:
-  ntl::net::cached_tls_server_identity_provider *inner_;
-  ntl::net::inspection::ech_frontend_provider *ech_;
-  ntl::net::inspection::downstream_trust_provider *trust_;
+  ntl::net::inspection::managed_tls_frontend *frontend_;
   std::vector<std::byte> application_id_;
-  ntl::net::inspection::explicit_tls_inspection_policy policy_;
 };
 
 std::atomic<bool> browser_inspection_stop{false};
@@ -250,6 +214,8 @@ public:
       ntl::net::inspection::origin_client_identity_provider
           &origin_identities,
       const ntl::net::inspection::content_decoder_registry &decoders,
+      const ntl::net::inspection::content_encoder_registry &encoders,
+      const ntl::net::http::transform_pipeline &transforms,
       browser_html_logger &logger,
       browser_connection_completion &completion)
       : inbound_(context, inbound_native.release()),
@@ -257,6 +223,8 @@ public:
         identities_(&identities),
         origin_identities_(&origin_identities),
         decoders_(&decoders),
+        encoders_(&encoders),
+        transforms_(&transforms),
         logger_(&logger),
         completion_(&completion) {}
 
@@ -289,6 +257,7 @@ private:
           self->inbound_, self->outbound_.native_handle(),
           *self->identities_, self->outbound_,
           *self->origin_identities_, *self->decoders_,
+          *self->encoders_, *self->transforms_,
           *self->logger_);
       if (result.html_path) {
         std::osyncstream(std::cout)
@@ -347,6 +316,8 @@ private:
   ntl::net::inspection::origin_client_identity_provider
       *origin_identities_;
   const ntl::net::inspection::content_decoder_registry *decoders_;
+  const ntl::net::inspection::content_encoder_registry *encoders_;
+  const ntl::net::http::transform_pipeline *transforms_;
   browser_html_logger *logger_;
   browser_connection_completion *completion_;
   std::optional<coroutine_task<unsigned>> task_;
@@ -375,10 +346,13 @@ public:
       ntl::net::inspection::origin_client_identity_provider
           &origin_identities,
       const ntl::net::inspection::content_decoder_registry &decoders,
+      const ntl::net::inspection::content_encoder_registry &encoders,
+      const ntl::net::http::transform_pipeline &transforms,
       browser_html_logger &logger) {
     auto connection = std::make_shared<browser_connection>(
         context, std::move(inbound), std::move(outbound),
-        identities, origin_identities, decoders, logger,
+        identities, origin_identities, decoders, encoders,
+        transforms, logger,
         completion_);
     connections_.push_back(connection);
     try {
@@ -496,18 +470,84 @@ int run_browser_inspection(
                 default_origin_identity);
   ntl::net::cached_tls_server_identity_provider
       identities(issuer, 256);
-  inspectable_browser_identity_provider
-      inspectable_identities(
-          identities, ech, downstream_trust,
-          browser_id.bytes());
+  ntl::net::inspection::bounded_tls_audit_sink tls_audit(1024);
+  ntl::net::inspection::managed_tls_frontend tls_frontend(
+      identities, ech, downstream_trust, tls_audit);
+  schannel_browser_identity_provider inspectable_identities(
+      tls_frontend, browser_id.bytes());
+  ntl::net::inspection::audited_origin_client_identity_provider
+      audited_origin_identities(origin_identities, tls_audit);
   ntl::net::inspection::content_decoder_registry content_decoders;
   ntl::net::inspection::register_standard_content_decoders(
        content_decoders);
+  ntl::net::inspection::content_encoder_registry content_encoders;
+  ntl::net::inspection::register_standard_content_encoders(
+      content_encoders);
+  ntl::net::grpc::message_transform_pipeline grpc_transforms;
+  grpc_transforms.inspect(
+      [](const ntl::net::grpc::semantic_message &) {
+        return ntl::net::inspection::verdict::permit;
+      });
+  ntl::net::http::transform_pipeline http_transforms;
+  http_transforms.requests().transform(
+      [](ntl::net::http::request_message &request) {
+        request.headers.erase("proxy-connection");
+        const auto connection = request.headers.first("connection");
+        const auto upgrade = request.headers.first("upgrade");
+        const bool websocket = connection && upgrade &&
+            ascii_contains_ci(*connection, "upgrade") &&
+            ascii_equal_ci(*upgrade, "websocket");
+        if (!websocket && request.wire_protocol ==
+                              ntl::net::http::protocol::http1)
+          request.headers.set("connection", "close");
+        return ntl::net::http::rewrite_result::headers_changed();
+      });
+  const auto grpc_content_type = [](std::string_view value) noexcept {
+    constexpr std::string_view prefix = "application/grpc";
+    return value.size() >= prefix.size() &&
+           ascii_equal_ci(value.substr(0, prefix.size()), prefix);
+  };
+  http_transforms.requests()
+      .when([grpc_content_type](const ntl::net::http::request_message &request) {
+        const auto value = request.headers.first("content-type");
+        return value && grpc_content_type(*value);
+      })
+      .transform([&](ntl::net::http::request_message &request) {
+        ntl::net::grpc::stream_transformer transformer(
+            ntl::net::grpc::direction::request,
+            std::string(request.headers.first("grpc-encoding").value_or("")),
+            grpc_transforms, content_decoders, content_encoders);
+        auto outcome = transformer.feed(request.body, true);
+        return outcome.action == ntl::net::grpc::transform_action::forward &&
+                       outcome.failure == STATUS_SUCCESS
+                   ? ntl::net::http::rewrite_result::replace_body(
+                         std::move(outcome.wire))
+                   : ntl::net::http::rewrite_result::block();
+      });
+  http_transforms.responses()
+      .when([grpc_content_type](const ntl::net::http::request_message &,
+                                const ntl::net::http::response_message &response) {
+        const auto value = response.headers.first("content-type");
+        return value && grpc_content_type(*value);
+      })
+      .transform([&](const ntl::net::http::request_message &,
+                     ntl::net::http::response_message &response) {
+        ntl::net::grpc::stream_transformer transformer(
+            ntl::net::grpc::direction::response,
+            std::string(response.headers.first("grpc-encoding").value_or("")),
+            grpc_transforms, content_decoders, content_encoders);
+        auto outcome = transformer.feed(response.body, true);
+        return outcome.action == ntl::net::grpc::transform_action::forward &&
+                       outcome.failure == STATUS_SUCCESS
+                   ? ntl::net::http::rewrite_result::replace_body(
+                         std::move(outcome.wire))
+                   : ntl::net::http::rewrite_result::block();
+      });
   auto proxy_listener_v4 = make_listener();
   auto proxy_listener_v6 = make_ipv6_listener();
-  std::optional<ntl::wfp::dynamic_session> policy;
-  policy.emplace(
-      L"crtsys ntl::wfp browser HTTPS inspection");
+  std::optional<ntl::wfp::policy_session> policy;
+  policy.emplace(ntl::wfp::policy_session::ephemeral(
+      L"crtsys ntl::wfp browser HTTPS inspection"));
   install_browser_policy(
       *policy, browser_id, proxy_listener_v4.port,
       proxy_listener_v6.port);
@@ -589,8 +629,9 @@ int run_browser_inspection(
           socket_owner(handoff.connect_original());
       connections.start(
           connection_io, std::move(inbound), std::move(outbound),
-          inspectable_identities, origin_identities,
-          content_decoders, logger);
+          inspectable_identities, audited_origin_identities,
+          content_decoders, content_encoders,
+          http_transforms, logger);
     } catch (const std::exception &error) {
       logger.record_error(error.what());
       std::osyncstream(std::cerr)
@@ -610,6 +651,10 @@ int run_browser_inspection(
   connections.wait_for_all();
   connection_io.wait_for_idle();
   logger.record_lifecycle("connection-tasks-drained");
+  logger.record_lifecycle(
+      "tls-audit events=" +
+      std::to_string(tls_audit.snapshot().size()) +
+      " discarded=" + std::to_string(tls_audit.discarded()));
 
   const auto final_telemetry =
       query_quic_telemetry(telemetry_device.get());

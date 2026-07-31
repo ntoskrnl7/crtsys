@@ -29,6 +29,7 @@
 
 #include <msh3.h>
 
+#include <ntl/net/http/transform>
 #include <ntl/net/http3/msh3_backend>
 #include <ntl/net/http3/standard_inspection_proxy>
 #include <ntl/net/tls/certificate>
@@ -425,11 +426,12 @@ public:
   browser_http3_request_handler(
       browser_html_logger &logger,
       ntl::net::http3::origin_transport &origin,
-      bool require_http3_origin)
+      bool require_http3_origin,
+      const ntl::net::http::transform_pipeline *transforms)
       : logger_(&logger),
         policy_(logger),
         proxy_(
-            origin, policy_,
+            origin, policy_, transforms,
             {.require_http3_origin =
                  require_http3_origin}) {}
 
@@ -492,7 +494,8 @@ public:
       ntl::net::inspection::origin_client_identity_provider
           *origin_identities,
       http3_origin_policy origin_policy,
-      ntl::net::http3::origin_transport *origin_transport)
+      ntl::net::http3::origin_transport *origin_transport,
+      const ntl::net::http::transform_pipeline *transforms)
       : api_(),
         settings_(make_settings(origin_policy)),
         identities_(
@@ -507,6 +510,7 @@ public:
                           origin_client_identity_provider &>(
                       default_origin_identity_),
             origin_policy),
+        default_transforms_(make_default_transforms()),
         handler_(
             logger,
             origin_transport
@@ -515,7 +519,8 @@ public:
                       ntl::net::http3::origin_transport &>(
                       default_origin_transport_),
             origin_policy ==
-                http3_origin_policy::require_http3),
+                http3_origin_policy::require_http3,
+            transforms ? transforms : &default_transforms_),
         backend_v4_(
             api_.value, identities_, handler_,
             backend_limits()),
@@ -618,6 +623,17 @@ private:
         .maximum_response_body_bytes = 4 * 1024 * 1024};
   }
 
+  static ntl::net::http::transform_pipeline
+  make_default_transforms() {
+    ntl::net::http::transform_pipeline transforms;
+    transforms.requests().transform(
+        [](ntl::net::http::request_message &request) {
+          request.headers.erase("proxy-connection");
+          return ntl::net::http::rewrite_result::headers_changed();
+        });
+    return transforms;
+  }
+
   [[noreturn]] static void throw_status(
       ntl::status status,
       const char *family) {
@@ -636,6 +652,7 @@ private:
       default_origin_identity_;
   winhttp_http3_origin_transport
       default_origin_transport_;
+  ntl::net::http::transform_pipeline default_transforms_;
   browser_http3_request_handler handler_;
   ntl::net::http3::msh3_backend::server backend_v4_;
   ntl::net::http3::msh3_backend::server backend_v6_;
@@ -649,12 +666,13 @@ browser_http3_service::browser_http3_service(
     ntl::net::inspection::origin_client_identity_provider
         *origin_identities,
     http3_origin_policy origin_policy,
-    ntl::net::http3::origin_transport *origin_transport)
+    ntl::net::http3::origin_transport *origin_transport,
+    const ntl::net::http::transform_pipeline *transforms)
     : implementation_(
           std::make_unique<implementation>(
               issuer, logger, listen_port,
               origin_identities, origin_policy,
-              origin_transport)) {}
+              origin_transport, transforms)) {}
 
 browser_http3_service::~browser_http3_service() = default;
 
@@ -802,9 +820,9 @@ int run_wfp_managed_http3_proxy(
 
   const auto client_id =
       ntl::wfp::application_id::from_path(client.wstring());
-  std::optional<ntl::wfp::dynamic_session> policy;
-  policy.emplace(
-      L"crtsys ntl::wfp managed HTTP/3 redirect");
+  std::optional<ntl::wfp::policy_session> policy;
+  policy.emplace(ntl::wfp::policy_session::ephemeral(
+      L"crtsys ntl::wfp managed HTTP/3 redirect"));
   install_managed_http3_redirect_policy(
       *policy, client_id, listen_port);
 

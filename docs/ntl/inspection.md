@@ -123,6 +123,193 @@ output, expansion ratio, CPU time, nesting, and dictionary selection all need
 explicit limits. A missing coding adapter returns `STATUS_NOT_SUPPORTED`; it
 does not reinterpret encoded bytes as plaintext.
 
+## One transform policy for HTTP/1.1, HTTP/2, and HTTP/3
+
+`<ntl/net/http/transform>` presents a complete decoded request or response to
+application policy. TLS records, HTTP/1 chunks, HTTP/2 frame boundaries,
+HPACK/QPACK state, and transport flow-control authority do not leak into that
+policy:
+
+```cpp
+ntl::net::http::transform_pipeline pipeline;
+
+pipeline.requests().transform(
+    [](ntl::net::http::request_message &request) {
+      request.headers.set("x-inspected-by", "ntl");
+      return ntl::net::http::rewrite_result::headers_changed();
+    });
+
+pipeline.responses()
+    .html()
+    .transform(
+        [](const ntl::net::http::request_message &,
+           ntl::net::http::response_message &response) {
+          std::string html(
+              reinterpret_cast<const char *>(response.body.data()),
+              response.body.size());
+          html.append("<!-- inspected -->");
+          return ntl::net::http::rewrite_result::replace_text(
+              std::move(html));
+        });
+```
+
+The callback body is the complete bounded content-decoded HTTP message body,
+not one TCP packet or one HTTP/2 DATA frame. A rule returns `unchanged`,
+`headers_changed`, a replacement body, `block`, `drop`, or an immediate
+semantic response. The default failure policy is fail-closed. An explicitly
+selected `forward_original` policy restores the whole pre-callback message;
+it never forwards a partially mutated object.
+
+Configure a pipeline before concurrent use. Callback objects are invoked as
+immutable objects; any shared state reached by a callback must provide its own
+synchronization. Ordinary fields and trailers are validated separately.
+Control characters, pseudo-fields in trailers, hop-by-hop fields, and
+framing fields such as trailer `Content-Length` are rejected before output.
+
+`<ntl/net/inspection/standard_content_encoders>` complements the decoder
+registry with bounded gzip, zlib `deflate`, and Brotli output. When a body is
+changed with `transformed_body_coding::preserve`, the adapter reapplies the
+original `Content-Encoding` chain in sender order, updates `Content-Length`,
+and removes invalidated response validators such as `ETag`, `Digest`, and
+`Content-MD5`. `identity` explicitly removes content coding.
+
+The wire adapters have distinct transport responsibilities:
+
+- `<ntl/net/http/http1_transform>` validates framing, decodes chunked
+  transfer coding, applies policy, and serializes a new HTTP/1.1 message.
+- `<ntl/net/http2/transform>` maintains independent stateful HPACK decoders
+  per connection direction, emits stateless HPACK, reconstructs
+  HEADERS/CONTINUATION/DATA, correlates multiplexed requests and responses,
+  and reports received flow-controlled bytes to the transport adapter.
+- `<ntl/net/http3/standard_inspection_proxy>` delegates QUIC streams, QPACK,
+  and flow control to the HTTP/3 backend, while applying the same transform
+  pipeline before origin forwarding and before the downstream response.
+
+All adapters validate header names, forbidden hop-by-hop fields, pseudo-field
+shape, content length, header/body quotas, coding depth, and re-encoded size.
+HEAD, 1xx, 204, and 304 responses retain legal representation metadata such
+as `Content-Length` and `Content-Encoding` without trying to decode or emit a
+message body. A policy cannot attach body bytes or trailers to those
+responses.
+HTTP/2 connection adapters must serialize concurrent writes, replenish only
+bytes they have retained, and obey the peer's connection and stream send
+windows. The browser HTTPS sample demonstrates that complete adapter.
+
+## Bounded asynchronous and streaming policy
+
+`<ntl/net/http/async_transform>` keeps protocol parsing synchronous but moves
+potentially slow application policy onto a fixed worker pool. The queue,
+concurrency, deadline, cancellation, and fail-open/fail-closed behavior are
+all explicit:
+
+```cpp
+ntl::net::http::async_transform_pipeline policy(
+    {}, {.maximum_concurrency = 8,
+         .maximum_queue_depth = 1024,
+         .timeout = std::chrono::milliseconds(250)});
+
+policy.responses().html().transform(
+    [](const auto&, auto& response, const auto& context) {
+      if (context.cancellation_requested())
+        return ntl::net::http::rewrite_result::block();
+      return decide_and_rewrite(response);
+    });
+
+auto outcome = co_await policy.apply(request, response, stop_token);
+```
+
+Configuration freezes on the first `apply`. A deadline or external stop
+requests cancellation from a running callback and completes only after that
+callback returns, so neither the pipeline nor its message can be destroyed
+while policy code still uses it. A queued operation can be cancelled
+immediately. `statistics()` reports submitted, completed, cancelled,
+timed-out, overloaded, queued, and running operations.
+
+`<ntl/net/http/stream_transform>` is for bodies that should not be retained as
+one complete allocation. It gives policy owned output per decoded plaintext
+chunk and tracks per-chunk, whole-stream, and expansion bounds:
+
+```cpp
+ntl::net::http::stream_transform_pipeline body_policy;
+body_policy.chunks().transform(
+    [](const auto&, const ntl::net::http::stream_chunk& chunk) {
+      return rewrite_chunk(chunk.bytes, chunk.input_offset, chunk.final);
+    });
+
+ntl::net::inspection::content_decoder_registry decoders;
+ntl::net::inspection::content_encoder_registry encoders;
+ntl::net::inspection::register_standard_content_decoders(decoders);
+ntl::net::inspection::register_standard_content_encoders(encoders);
+
+body_policy.prepare_headers(request, response);
+auto body = body_policy.open(request, response, decoders, encoders);
+if (!body)
+  block();
+auto output = body.consume(input_chunk, end_of_message);
+```
+
+Stateful application framing must be created per HTTP message. This keeps two
+multiplexed HTTP/2 or HTTP/3 streams from sharing a partial gRPC record (or a
+custom protocol parser):
+
+```cpp
+body_policy.chunks()
+    .when(is_grpc_message)
+    .transform_session([&](const auto& context) {
+      return make_grpc_chunk_transformer(context);
+    });
+```
+
+`<ntl/net/http/http1_stream_transform>` accepts arbitrary TLS plaintext splits,
+buffers only bounded framing state, validates fixed-length, chunked, trailers,
+and authenticated close-delimited completion, and emits chunked HTTP/1.1
+output. `<ntl/net/http2/stream_transform>` owns independent HPACK and message
+state per stream, reserializes HEADERS without dynamic-table coupling, emits
+DATA immediately, and reports the precise retained byte count for flow-control
+credit. `<ntl/net/http3/stream_transform>` consumes decoded QPACK HEADERS, DATA,
+and QUIC FIN events; its `streaming_inspection_sink` plugs directly into
+`connection_inspector`, while the caller retains QUIC stream-ID mapping and
+write scheduling.
+
+`prepare_headers` removes stale length and validators.
+`<ntl/net/inspection/content_stream>` owns one incremental codec chain per HTTP
+message. It decodes `gzip`, RFC 1950 `deflate`, `br`, or a registered coding
+chain across arbitrary input splits, invokes policy on plaintext chunks, and
+re-encodes the same chain without resetting compression state. Input, decoded,
+transformed, encoded, per-stage, expansion-ratio, and coding-depth bounds are
+independent. Final input verifies checksums and stream termination. Because
+emitted bytes cannot be recalled, streaming transform does not permit the
+complete-message `forward_original` failure mode. A late block resets the H2/H3
+stream (or closes the H1 connection); use the complete-message adapters when a
+verdict must be atomic before the first body byte is forwarded.
+
+## WebSocket, gRPC, and WebTransport transforms
+
+The same separation extends past ordinary HTTP messages:
+
+- `<ntl/net/websocket/transform>` assembles fragmented RFC 6455 messages,
+  validates UTF-8, decodes and re-encodes negotiated `permessage-deflate`,
+  enforces client masking, and fragments bounded rewritten output.
+- `<ntl/net/grpc/transform>` accepts arbitrary HTTP/2 or HTTP/3 DATA splits,
+  extracts complete five-byte-prefixed gRPC messages, applies the negotiated
+  `grpc-encoding`, invokes semantic policy, and emits a valid message stream.
+- `<ntl/net/http3/webtransport_transform>` applies per-session policy to
+  reliable streams, unreliable datagrams, and capsules while sharing the
+  WebTransport stream/data quotas. Authority-bearing flow-control capsules
+  may be inspected but not rewritten by content policy.
+- `<ntl/net/http3/webtransport_session>` supplies the actual draft-16 HTTP/3
+  SETTINGS, static-QPACK Extended CONNECT request/response, session stream
+  prefixes, HTTP Datagrams, and backend writes. Its move-only outbound stream
+  authority supports repeated bounded writes, FIN, and application resets.
+  Resets map the 32-bit WebTransport application error into the registered
+  HTTP/3 range and set MsQuic's reliable offset to the complete session prefix
+  before aborting the send side. The MsQuic adapter exposes this only when
+  QUIC Datagrams and reliable-reset-at were both negotiated.
+
+These adapters do not infer protobuf schemas, WebSocket subprotocols, or
+WebTransport application formats. Applications layer their schema parser on
+the complete bounded semantic payload.
+
 ## Reusable HTTP/3 inspection composition
 
 `<ntl/net/http3/inspection_proxy>` is the transport-neutral policy layer between
@@ -163,12 +350,15 @@ ntl::net::http3::standard_inspection_proxy proxy(origin, policy);
 auto response = proxy.forward(std::move(decoded_http3_request));
 ```
 
-`<ntl/net/http3/standard_inspection_proxy>` owns and registers the standard gzip,
-zlib `deflate`, and Brotli decoders; targets using it link
-`crtsys_ntl_content_codecs`. Use the lower-level `inspection_proxy` when the
-application supplies its own decoder registry. Origin and policy objects are
-non-owning and must outlive the proxy. A concurrent server requires
-thread-safe origin and policy implementations.
+`<ntl/net/http3/standard_inspection_proxy>` owns and registers the standard
+gzip, zlib `deflate`, and Brotli decoders. Its transform-pipeline overload
+also registers their matching encoders. Targets that transform compressed
+content link `crtsys_ntl_content_codecs`; that target carries both decoder
+and encoder backends. Use the lower-level
+`inspection_proxy` when the application supplies its own registries. Origin,
+legacy inspection policy, and transform objects are non-owning and must
+outlive the proxy. A concurrent server requires thread-safe origin and policy
+implementations.
 
 ## TLS and HTTPS boundary
 
@@ -192,10 +382,11 @@ handles RFC 6455 frames and fragmented messages after a validated upgrade.
 `<ntl/net/http3/qpack>` adds the bounded zero-dynamic-table QPACK profile, while
 dynamic QPACK remains an explicit provider contract. Transfer decoding,
 decompression, semantic policy, and QUIC transport remain explicit later
-stages. The browser example composes the HTTP/2 frame, HPACK, content-decoder,
-and WebSocket permessage-deflate layers into a transparent multiplexed relay,
-with bounded stream/body state while peer SETTINGS and flow control frames
-remain end-to-end. See
+stages. The browser example composes the HTTP/2 frame, HPACK, content
+decoder/encoder, and WebSocket permessage-deflate layers into a multiplexed
+transforming relay. It buffers only bounded complete messages, replenishes
+the retained receive window, obeys the destination send windows, and
+serializes the two policy directions onto one TLS writer per endpoint. See
 [User-mode Schannel TLS streams](./tls-stream.md) and the
 [`tls-inspection-proxy` sample](../../examples/wfp/tls-inspection-proxy).
 The long-running browser lifecycle and HTML logging workflow is demonstrated
@@ -214,3 +405,21 @@ unavailable QUIC backends are separate outcomes in
 observation because GREASE ECH has the same wire shape. Policy defaults fail
 closed. See
 [HTTP and WebSocket protocol inspection](./protocol-inspection.md).
+
+`<ntl/net/tls/product_policy>` converts those observations plus deployed
+capabilities into one executable action: intercept, unchanged ciphertext
+tunnel, metadata-only observation, terminate, or block QUIC and wait for the
+application's normal TCP retry. It never changes browser settings and never
+labels ECH, certificate pinning, or missing mTLS identity as “bypassed.” An
+ECH frontend and authorized mTLS identity provider remain product-supplied
+capabilities because WFP cannot manufacture their cryptographic authority.
+
+`<ntl/net/tls/product_backend>` turns those product capabilities into a
+single auditable selection. It combines the ECH provider, application/host
+trust classification, and the cached downstream certificate issuer. A
+non-ECH connection returns a Schannel server identity; successfully decrypted
+ECH returns the frontend-owned plaintext channel, because the outer TLS/QUIC
+state cannot be resumed in Schannel. Confirmed opaque ECH, pinned or unknown
+downstream trust, and missing origin mTLS identities are distinct fail-closed
+audit events. `audited_origin_client_identity_provider` adds the same bounded
+audit contract to an application-supplied mTLS selector.

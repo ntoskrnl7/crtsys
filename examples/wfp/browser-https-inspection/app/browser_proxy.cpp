@@ -140,6 +140,8 @@ coroutine_task<browser_proxy_result> run_browser_proxy(
     ntl::net::inspection::origin_client_identity_provider
         &origin_identities,
     const ntl::net::inspection::content_decoder_registry &decoders,
+    const ntl::net::inspection::content_encoder_registry &encoders,
+    const ntl::net::http::transform_pipeline &transforms,
     browser_html_logger &logger) {
   auto hello = co_await ntl::net::read_tls_client_hello(
       inbound_socket,
@@ -176,12 +178,14 @@ coroutine_task<browser_proxy_result> run_browser_proxy(
       ntl::net::inspection::application_protocol::http2) {
     co_return co_await relay_http2_connection(
         inbound_socket.native_handle(), outbound_socket,
-        inbound, outbound, server_name, decoders, logger);
+        inbound, outbound, server_name, decoders, encoders,
+        transforms, logger);
   }
 
   co_return co_await relay_http1_connection(
       inbound_socket.native_handle(), outbound_socket,
-      inbound, outbound, server_name, decoders, logger);
+      inbound, outbound, server_name, decoders, encoders,
+      transforms, logger);
 }
 
 } // namespace crtsys::wfp_sample::browser_https

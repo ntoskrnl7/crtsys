@@ -30,7 +30,8 @@
 namespace ntl::wfp {
 
 class policy_transaction;
-class dynamic_session;
+class policy_session;
+class policy_manifest;
 template <std::size_t> class callout_driver;
 class connect_redirector;
 class bind_redirector;
@@ -44,7 +45,8 @@ public:
 
 private:
   friend class policy_transaction;
-  friend class dynamic_session;
+  friend class policy_session;
+  friend class policy_manifest;
   friend class connect_redirector;
   constexpr const GUID &native() const noexcept { return value_; }
   GUID value_{};
@@ -59,7 +61,8 @@ public:
 
 private:
   friend class policy_transaction;
-  friend class dynamic_session;
+  friend class policy_session;
+  friend class policy_manifest;
   constexpr const GUID &native() const noexcept { return value_; }
   GUID value_{};
 };
@@ -73,7 +76,8 @@ public:
 
 private:
   friend class policy_transaction;
-  friend class dynamic_session;
+  friend class policy_session;
+  friend class policy_manifest;
   template <std::size_t> friend class callout_driver;
   constexpr const GUID &native() const noexcept { return value_; }
   GUID value_{};
@@ -88,7 +92,8 @@ public:
 
 private:
   friend class policy_transaction;
-  friend class dynamic_session;
+  friend class policy_session;
+  friend class policy_manifest;
   constexpr const GUID &native() const noexcept { return value_; }
   GUID value_{};
 };
@@ -649,7 +654,11 @@ struct egress_vswitch_ethernet {
 };
 
 /**
- * @brief High-throughput inbound transport layer with no fixed fields.
+ * @brief Microsoft-internal inbound fast-transport layer.
+ *
+ * Windows exposes the schema for diagnostics, but does not support third-party
+ * static filters or callouts on this layer. NTL therefore permits layer
+ * introspection only.
  */
 #ifdef NTL_WFP_HAS_FAST_LAYERS
 struct inbound_transport_fast {
@@ -663,7 +672,11 @@ struct inbound_transport_fast {
 };
 
 /**
- * @brief High-throughput outbound transport layer with no fixed fields.
+ * @brief Microsoft-internal outbound fast-transport layer.
+ *
+ * Windows exposes the schema for diagnostics, but does not support third-party
+ * static filters or callouts on this layer. NTL therefore permits layer
+ * introspection only.
  */
 struct outbound_transport_fast {
 #ifdef NTL_WFP_KERNEL_MODE
@@ -692,7 +705,9 @@ struct outbound_transport_fast {
 #endif
 
 /**
- * @brief IPv4 IPsec packet authorization/inspection layer.
+ * @brief IPv4 user-mode IPsec quick-mode policy layer.
+ *
+ * This is a BFE management layer, not a kernel callout layer.
  */
 struct ipsec_v4 {
   NTL_WFP_IPSEC_FIELDS(FWPS_FIELD_IPSEC_V4);
@@ -703,7 +718,9 @@ struct ipsec_v4 {
 };
 
 /**
- * @brief IPv6 IPsec packet authorization/inspection layer.
+ * @brief IPv6 user-mode IPsec quick-mode policy layer.
+ *
+ * This is a BFE management layer, not a kernel callout layer.
  */
 struct ipsec_v6 {
   NTL_WFP_IPSEC_FIELDS(FWPS_FIELD_IPSEC_V6);
@@ -786,6 +803,28 @@ template <>
 inline constexpr bool known_layer<layers::ipsec_v6> = true;
 
 template <class Layer>
+inline constexpr bool management_only_layer =
+    std::is_same_v<Layer, layers::ipsec_v4> ||
+    std::is_same_v<Layer, layers::ipsec_v6>;
+
+template <class Layer>
+inline constexpr bool internal_only_layer =
+#ifdef NTL_WFP_HAS_FAST_LAYERS
+    std::is_same_v<Layer, layers::inbound_transport_fast> ||
+    std::is_same_v<Layer, layers::outbound_transport_fast>;
+#else
+    false;
+#endif
+
+template <class Layer>
+inline constexpr bool filterable_layer =
+    known_layer<Layer> && !internal_only_layer<Layer>;
+
+template <class Layer>
+inline constexpr bool callout_layer =
+    filterable_layer<Layer> && !management_only_layer<Layer>;
+
+template <class Layer>
 inline constexpr bool stream_layer =
     std::is_same_v<Layer, layers::stream_v4> ||
     std::is_same_v<Layer, layers::stream_v6>;
@@ -808,7 +847,7 @@ inline constexpr bool flow_context_layer =
 
 template <class Layer>
 inline constexpr bool decision_layer =
-    known_layer<Layer> && !stream_layer<Layer>;
+    callout_layer<Layer> && !stream_layer<Layer>;
 
 template <class Layer>
 inline constexpr bool packet_decision_layer =
@@ -821,13 +860,7 @@ inline constexpr bool packet_decision_layer =
     std::is_same_v<Layer, layers::inbound_mac_frame_ethernet> ||
     std::is_same_v<Layer, layers::outbound_mac_frame_ethernet> ||
     std::is_same_v<Layer, layers::ingress_vswitch_ethernet> ||
-    std::is_same_v<Layer, layers::egress_vswitch_ethernet>
-#ifdef NTL_WFP_HAS_FAST_LAYERS
-    ||
-    std::is_same_v<Layer, layers::inbound_transport_fast> ||
-    std::is_same_v<Layer, layers::outbound_transport_fast>
-#endif
-    ;
+    std::is_same_v<Layer, layers::egress_vswitch_ethernet>;
 
 template <class Layer>
 inline constexpr bool ale_authorization_layer =

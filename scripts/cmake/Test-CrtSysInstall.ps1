@@ -74,7 +74,8 @@ function Invoke-CrtSysConsumerBuild {
   }
 
   Write-Host "Building $Label"
-  & cmake --build $BuildDirectory --config $Configuration --target crtsys_install_consumer --parallel
+  & cmake --build $BuildDirectory --config $Configuration --target `
+      crtsys_install_consumer crtsys_http_transform_consumer --parallel
   if ($LASTEXITCODE -ne 0) {
     throw "$Label build failed with exit code $LASTEXITCODE."
   }
@@ -83,8 +84,17 @@ function Invoke-CrtSysConsumerBuild {
   if (-not (Test-Path $driverPath)) {
     throw "$Label driver was not produced: $driverPath"
   }
+  $httpTransformPath = Join-Path $BuildDirectory (
+      "$Configuration\crtsys_http_transform_consumer.exe")
+  if (-not (Test-Path $httpTransformPath)) {
+    throw "$Label HTTP transform consumer was not produced: $httpTransformPath"
+  }
+  & $httpTransformPath
+  if ($LASTEXITCODE -ne 0) {
+    throw "$Label HTTP transform consumer failed with exit code $LASTEXITCODE."
+  }
 
-  Write-Host "$Label passed: $driverPath"
+  Write-Host "$Label passed: $driverPath; $httpTransformPath"
 }
 
 $configureArgs = @(
@@ -121,13 +131,37 @@ if ($LASTEXITCODE -ne 0) {
 foreach ($requiredPath in @(
   "include\ntl\driver",
   "include\ntl\net\inspection\standard_content_decoders",
+  "include\ntl\net\inspection\standard_content_encoders",
+  "include\ntl\net\inspection\content_encoder",
+  "include\ntl\net\inspection\content_encoder_brotli",
+  "include\ntl\net\inspection\content_encoder_zlib",
+  "include\ntl\net\inspection\content_stream",
   "include\ntl\net\websocket\permessage_deflate",
+  "include\ntl\net\http\http1_transform",
+  "include\ntl\net\http\http1_stream_transform",
+  "include\ntl\net\http\async_transform",
+  "include\ntl\net\http\stream_transform",
+  "include\ntl\net\http\transform",
+  "include\ntl\net\grpc\framing",
+  "include\ntl\net\grpc\transform",
+  "include\ntl\net\http2\transform",
+  "include\ntl\net\http2\stream_transform",
   "include\ntl\net\http3\backend",
+  "include\ntl\net\http3\inspection_proxy",
   "include\ntl\net\http3\qpack",
+  "include\ntl\net\http3\standard_inspection_proxy",
+  "include\ntl\net\http3\stream_transform",
+  "include\ntl\net\http3\webtransport_transform",
+  "include\ntl\net\http3\webtransport_session",
+  "include\ntl\net\tls\product_backend",
   "include\ntl\net\tls\inspection_frontend",
+  "include\ntl\net\tls\product_policy",
+  "include\ntl\net\websocket\transform",
   "include\ntl\kmdf\pdo",
   "include\ntl\kmdf\query_interface",
   "include\ntl\kmdf\resource_requirements",
+  "include\ntl\wfp\conditions",
+  "include\ntl\wfp\telemetry",
   "include\.internal\adjust_link_order",
   "share\crtsys\cmake\crtsys-config.cmake",
   "share\crtsys\cmake\CrtSys.cmake",

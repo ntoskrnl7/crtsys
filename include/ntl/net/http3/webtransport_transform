@@ -1,0 +1,205 @@
+/**
+ * @file webtransport_transform
+ * @brief Bounded semantic WebTransport stream/datagram/capsule policy.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/http3/webtransport_transform is a user-mode header"
+#endif
+
+#include <ntl/net/http3/webtransport>
+#include <ntl/net/inspection/core>
+
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <new>
+#include <span>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+namespace ntl::net::http3::webtransport {
+
+enum class payload_kind : std::uint8_t {
+  stream = 1,
+  datagram = 2,
+  capsule = 3,
+};
+
+struct payload {
+  payload_kind kind = payload_kind::stream;
+  std::uint64_t session_id = 0;
+  stream_direction direction = stream_direction::bidirectional;
+  std::uint64_t capsule_type = 0;
+  std::vector<std::byte> bytes;
+};
+
+enum class transform_action : std::uint8_t {
+  forward = 1,
+  block_session = 2,
+  drop = 3,
+};
+
+class transform_result {
+public:
+  static transform_result unchanged() noexcept { return {}; }
+  static transform_result replace(std::vector<std::byte> bytes) {
+    transform_result result;
+    result.modified_ = true;
+    result.bytes_ = std::move(bytes);
+    return result;
+  }
+  static transform_result block_session() noexcept {
+    transform_result result;
+    result.action_ = transform_action::block_session;
+    return result;
+  }
+  static transform_result drop() noexcept {
+    transform_result result;
+    result.action_ = transform_action::drop;
+    return result;
+  }
+  transform_action action() const noexcept { return action_; }
+  bool modified() const noexcept { return modified_; }
+  std::vector<std::byte> release_bytes() noexcept {
+    return std::move(bytes_);
+  }
+
+private:
+  transform_action action_ = transform_action::forward;
+  bool modified_ = false;
+  std::vector<std::byte> bytes_;
+};
+
+struct transform_outcome {
+  transform_action action = transform_action::forward;
+  bool modified = false;
+  NTSTATUS failure = STATUS_SUCCESS;
+};
+
+struct transform_limits {
+  session_limits session{};
+  std::size_t maximum_rewritten_payload = 256 * 1024;
+  std::size_t maximum_expansion_ratio = 16;
+};
+
+/**
+ * @brief Per-session policy that shares one callback model across reliable
+ * streams, unreliable datagrams, and CONNECT capsules.
+ */
+class transform_session {
+public:
+  explicit transform_session(transform_limits limits = {})
+      : limits_(limits), guard_(limits.session) {
+    if (limits_.maximum_rewritten_payload == 0 ||
+        limits_.maximum_expansion_ratio == 0)
+      throw std::invalid_argument("WebTransport transform limits are invalid");
+  }
+
+  template <class Function>
+  transform_session &transform(Function &&function) {
+    using callback_type = std::decay_t<Function>;
+    rules_.push_back(
+        [callback = callback_type(std::forward<Function>(function))](
+            payload &value) {
+          return static_cast<transform_result>(callback(value));
+        });
+    return *this;
+  }
+
+  template <class Function>
+  transform_session &inspect(Function &&function) {
+    using callback_type = std::decay_t<Function>;
+    return transform([callback = callback_type(
+                          std::forward<Function>(function))](payload &value) {
+      switch (static_cast<ntl::net::inspection::verdict>(
+          callback(static_cast<const payload &>(value)))) {
+      case ntl::net::inspection::verdict::permit:
+        return transform_result::unchanged();
+      case ntl::net::inspection::verdict::block:
+        return transform_result::block_session();
+      case ntl::net::inspection::verdict::drop_flow:
+        return transform_result::drop();
+      }
+      return transform_result::block_session();
+    });
+  }
+
+  ntl::status open_stream(stream_direction direction) noexcept {
+    return guard_.open_stream(direction);
+  }
+
+  transform_outcome apply(payload &value) noexcept {
+    if (!valid_session_id(value.session_id))
+      return fail(STATUS_DATA_ERROR);
+    if (value.bytes.size() > limits_.maximum_rewritten_payload)
+      return fail(STATUS_BUFFER_OVERFLOW);
+    ntl::status accounted = ntl::status::ok();
+    if (value.kind == payload_kind::stream)
+      accounted = guard_.consume_stream_data(value.bytes.size());
+    else if (value.kind == payload_kind::datagram)
+      accounted = guard_.consume_datagram(value.bytes.size());
+    else {
+      auto wire = ntl::net::http::encode_capsule(
+          value.capsule_type, value.bytes,
+          {.maximum_payload_size = limits_.maximum_rewritten_payload});
+      if (!wire)
+        return fail(wire.status());
+      auto capsule = ntl::net::http::capsule_view::parse(
+          ntl::net::scatter_view::from_contiguous(
+              std::span<const std::byte>(*wire)),
+          {.maximum_payload_size = limits_.maximum_rewritten_payload});
+      if (!capsule)
+        return fail(capsule.status());
+      const auto inspected = inspect_capsule(*capsule);
+      if (!inspected)
+        return fail(inspected.status());
+    }
+    if (!accounted.is_ok())
+      return fail(accounted);
+
+    const std::size_t original_size = value.bytes.size();
+    try {
+      bool modified = false;
+      for (const auto &rule : rules_) {
+        auto result = rule(value);
+        if (result.action() != transform_action::forward)
+          return {result.action(), modified, STATUS_SUCCESS};
+        if (result.modified()) {
+          // Flow-control capsules are authority-bearing and cannot be
+          // rewritten through a content-policy callback.
+          if (value.kind == payload_kind::capsule)
+            return fail(STATUS_ACCESS_DENIED);
+          value.bytes = result.release_bytes();
+          modified = true;
+          if (value.bytes.size() > limits_.maximum_rewritten_payload ||
+              value.bytes.size() /
+                      (std::max<std::size_t>)(1, original_size) >
+                  limits_.maximum_expansion_ratio)
+            return fail(STATUS_BUFFER_OVERFLOW);
+        }
+      }
+      return {transform_action::forward, modified, STATUS_SUCCESS};
+    } catch (const std::bad_alloc &) {
+      return fail(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return fail(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+  const session_guard &accounting() const noexcept { return guard_; }
+
+private:
+  static transform_outcome fail(ntl::status status) noexcept {
+    return {transform_action::block_session, false,
+            static_cast<NTSTATUS>(status)};
+  }
+
+  transform_limits limits_{};
+  session_guard guard_;
+  std::vector<std::function<transform_result(payload &)>> rules_;
+};
+
+} // namespace ntl::net::http3::webtransport

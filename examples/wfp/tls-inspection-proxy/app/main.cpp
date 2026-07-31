@@ -55,20 +55,37 @@ using namespace crtsys::wfp_sample;
 constexpr std::wstring_view inspected_server_name =
     L"service.example.test";
 
-socket_owner connect_loopback(std::uint16_t port) {
+socket_owner connect_loopback(
+    int family, std::uint16_t port) {
   socket_owner socket(::WSASocketW(
-      AF_INET, SOCK_STREAM, IPPROTO_TCP, nullptr, 0,
+      family, SOCK_STREAM, IPPROTO_TCP, nullptr, 0,
       WSA_FLAG_OVERLAPPED));
   if (socket.get() == INVALID_SOCKET)
     throw_socket("WSASocketW(client)");
-  sockaddr_in address{};
-  address.sin_family = AF_INET;
-  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-  address.sin_port = htons(port);
-  if (::connect(socket.get(),
-                reinterpret_cast<const sockaddr *>(&address),
-                sizeof(address)) == SOCKET_ERROR)
-    throw_socket("connect(loopback)");
+  if (family == AF_INET) {
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = htons(port);
+    if (::connect(
+            socket.get(),
+            reinterpret_cast<const sockaddr *>(&address),
+            sizeof(address)) == SOCKET_ERROR)
+      throw_socket("connect(IPv4 loopback)");
+  } else if (family == AF_INET6) {
+    sockaddr_in6 address{};
+    address.sin6_family = AF_INET6;
+    address.sin6_addr = in6addr_loopback;
+    address.sin6_port = htons(port);
+    if (::connect(
+            socket.get(),
+            reinterpret_cast<const sockaddr *>(&address),
+            sizeof(address)) == SOCKET_ERROR)
+      throw_socket("connect(IPv6 loopback)");
+  } else {
+    throw std::invalid_argument(
+        "loopback connection requires AF_INET or AF_INET6");
+  }
   return socket;
 }
 
@@ -401,6 +418,7 @@ struct exchange_result {
 };
 
 exchange_result run_proxied_exchange(
+    int family,
     const listener &origin_listener,
     const listener &proxy_listener,
     ntl::net::tls_credentials &client_credentials,
@@ -408,17 +426,29 @@ exchange_result run_proxied_exchange(
     ntl::net::tls_server_identity_provider &identities,
     ntl::net::tls_peer_certificate_policy &authority,
     std::string_view content) {
-  auto client_native = connect_loopback(origin_listener.port);
+  auto client_native =
+      connect_loopback(family, origin_listener.port);
   auto proxy_inbound_native = accept_one(proxy_listener);
   auto handoff =
       ntl::wfp::redirected_connection::capture(
           proxy_inbound_native.get());
-  const auto *destination =
-      reinterpret_cast<const sockaddr_in *>(
-          &handoff.original_destination());
-  if (destination->sin_family != AF_INET)
+  const auto &destination = handoff.original_destination();
+  if (destination.ss_family != family)
     throw std::runtime_error(
-        "TLS inspection sample expected an IPv4 destination");
+        "TLS inspection did not preserve the address family");
+  std::uint16_t original_port = 0;
+  if (family == AF_INET) {
+    original_port = ntohs(
+        reinterpret_cast<const sockaddr_in *>(&destination)
+            ->sin_port);
+  } else if (family == AF_INET6) {
+    original_port = ntohs(
+        reinterpret_cast<const sockaddr_in6 *>(&destination)
+            ->sin6_port);
+  } else {
+    throw std::invalid_argument(
+        "proxied exchange requires AF_INET or AF_INET6");
+  }
   auto proxy_outbound_native =
       socket_owner(handoff.connect_original());
   auto origin_native = accept_one(origin_listener);
@@ -442,7 +472,7 @@ exchange_result run_proxied_exchange(
   auto origin_task = run_origin(origin_tls);
   auto proxy_task = run_proxy(
       proxy_inbound, identities, proxy_outbound_tls, authority,
-      ntohs(destination->sin_port));
+      original_port);
   auto client_task = run_client(
       client_tls, authority, inspected_server_name, content);
 
@@ -460,12 +490,14 @@ struct direct_result {
 };
 
 direct_result run_direct_exchange(
+    int family,
     const listener &origin_listener,
     ntl::net::tls_credentials &client_credentials,
     ntl::net::tls_server_identity &origin_identity,
     ntl::net::tls_peer_certificate_policy &authority,
     std::string_view content) {
-  auto client_native = connect_loopback(origin_listener.port);
+  auto client_native =
+      connect_loopback(family, origin_listener.port);
   auto origin_native = accept_one(origin_listener);
   ntl::net::io_completion_context context;
   ntl::net::async_socket client_socket(
@@ -487,9 +519,11 @@ direct_result run_direct_exchange(
   return result;
 }
 
-void install_policy(ntl::wfp::dynamic_session &session,
-                    std::uint16_t original_port,
-                    std::uint16_t proxy_port) {
+void install_policy(ntl::wfp::policy_session &session,
+                    std::uint16_t original_port_v4,
+                    std::uint16_t proxy_port_v4,
+                    std::uint16_t original_port_v6,
+                    std::uint16_t proxy_port_v6) {
   session.install([&](ntl::wfp::policy_transaction &transaction) {
     const auto provider = transaction.add_provider(
         {wfp_tls_inspection_proxy::provider_key,
@@ -501,31 +535,55 @@ void install_policy(ntl::wfp::dynamic_session &session,
          L"crtsys NTL WFP TLS inspection sublayer",
          L"Redirect selected TLS connects to the local proxy",
          0x7500});
-    const auto callout =
+    const auto callout_v4 =
         transaction.add_callout<
-            wfp_tls_inspection_proxy::layer>(
+            wfp_tls_inspection_proxy::layer_v4>(
             provider,
-            {wfp_tls_inspection_proxy::callout_key,
-             L"Redirect selected TLS connects",
+            {wfp_tls_inspection_proxy::callout_key_v4,
+             L"Redirect selected IPv4 TLS connects",
              L"Typed ALE_CONNECT_REDIRECT_V4 callout"});
+    const auto callout_v6 =
+        transaction.add_callout<
+            wfp_tls_inspection_proxy::layer_v6>(
+            provider,
+            {wfp_tls_inspection_proxy::callout_key_v6,
+             L"Redirect selected IPv6 TLS connects",
+             L"Typed ALE_CONNECT_REDIRECT_V6 callout"});
 
     ntl::wfp::connect_redirect_filter_builder<
-        wfp_tls_inspection_proxy::layer>
-        filter(
-            wfp_tls_inspection_proxy::filter_key,
-            L"Redirect the selected TLS destination port",
-            {::GetCurrentProcessId(), proxy_port});
-    filter.description(
-              L"Proxy PID and port are encoded by the typed builder")
+        wfp_tls_inspection_proxy::layer_v4>
+        filter_v4(
+            wfp_tls_inspection_proxy::filter_key_v4,
+            L"Redirect the selected IPv4 TLS destination port",
+            {::GetCurrentProcessId(), proxy_port_v4},
+            ntl::wfp::callout_unavailable::permit);
+    filter_v4
+        .description(
+            L"IPv4 proxy PID and port are encoded by the typed builder")
         .protocol_equal(IPPROTO_TCP)
-        .remote_port_equal(original_port);
+        .remote_port_equal(original_port_v4);
     transaction.add_connect_redirect_filter(
-        sublayer, callout, filter);
+        sublayer, callout_v4, filter_v4);
+
+    ntl::wfp::connect_redirect_filter_builder<
+        wfp_tls_inspection_proxy::layer_v6>
+        filter_v6(
+            wfp_tls_inspection_proxy::filter_key_v6,
+            L"Redirect the selected IPv6 TLS destination port",
+            {::GetCurrentProcessId(), proxy_port_v6},
+            ntl::wfp::callout_unavailable::permit);
+    filter_v6
+        .description(
+            L"IPv6 proxy PID and port are encoded by the typed builder")
+        .protocol_equal(IPPROTO_TCP)
+        .remote_port_equal(original_port_v6);
+    transaction.add_connect_redirect_filter(
+        sublayer, callout_v6, filter_v6);
   });
 }
 
 void install_live_policy(
-    ntl::wfp::dynamic_session &session,
+    ntl::wfp::policy_session &session,
     const ntl::wfp::application_id &application,
     const sockaddr_in &destination,
     std::uint16_t proxy_port) {
@@ -542,24 +600,26 @@ void install_live_policy(
          0x7500});
     const auto callout =
         transaction.add_callout<
-            wfp_tls_inspection_proxy::layer>(
+            wfp_tls_inspection_proxy::layer_v4>(
             provider,
-            {wfp_tls_inspection_proxy::callout_key,
+            {wfp_tls_inspection_proxy::callout_key_v4,
              L"Redirect one controlled HTTPS connection",
              L"Typed ALE_CONNECT_REDIRECT_V4 callout"});
 
     ntl::wfp::connect_redirect_filter_builder<
-        wfp_tls_inspection_proxy::layer>
+        wfp_tls_inspection_proxy::layer_v4>
         filter(
-            wfp_tls_inspection_proxy::filter_key,
+            wfp_tls_inspection_proxy::filter_key_v4,
             L"Redirect one executable and HTTPS destination",
-            {::GetCurrentProcessId(), proxy_port});
+            {::GetCurrentProcessId(), proxy_port},
+            ntl::wfp::callout_unavailable::permit);
     filter.description(
               L"Application ID, remote IPv4, TCP, and 443 are exact")
         .application_equal(application)
         .protocol_equal(IPPROTO_TCP)
-        .remote_address_v4_equal(
-            ntohl(destination.sin_addr.s_addr))
+        .remote_address_equal(
+            ntl::wfp::ipv4_address::from_host_order(
+                ntohl(destination.sin_addr.s_addr)))
         .remote_port_equal(ntohs(destination.sin_port));
     transaction.add_connect_redirect_filter(
         sublayer, callout, filter);
@@ -692,7 +752,7 @@ live_exchange_result run_live_exchange(
     ntl::net::tls_server_identity_provider &identities,
     ntl::net::tls_peer_certificate_policy &authority) {
   auto proxy_listener = make_listener();
-  ntl::wfp::dynamic_session policy(
+  auto policy = ntl::wfp::policy_session::ephemeral(
       L"crtsys ntl::wfp controlled live HTTPS inspection");
   install_live_policy(
       policy, application, destination, proxy_listener.port);
@@ -850,6 +910,48 @@ int run_live_host_sample(
   return 0;
 }
 
+void require_permitted_exchange(
+    const exchange_result &result,
+    std::uint16_t original_port,
+    std::string_view content) {
+  if (result.proxy.original_port != original_port ||
+      result.proxy.server_name != inspected_server_name ||
+      result.proxy.verdict !=
+          ntl::net::inspection::verdict::permit ||
+      !result.origin.received ||
+      result.origin.content != content ||
+      !result.client.received_reply ||
+      result.client.reply !=
+          "echo:" + std::string(content))
+    throw std::runtime_error(
+        "permitted TLS plaintext proof did not match");
+}
+
+void require_blocked_exchange(
+    const exchange_result &result,
+    std::uint16_t original_port) {
+  if (result.proxy.original_port != original_port ||
+      result.proxy.server_name != inspected_server_name ||
+      result.proxy.verdict !=
+          ntl::net::inspection::verdict::drop_flow ||
+      result.origin.received ||
+      result.client.received_reply)
+    throw std::runtime_error(
+        "blocked TLS plaintext proof did not match");
+}
+
+void require_direct_exchange(
+    const direct_result &result,
+    std::string_view content) {
+  if (!result.origin.received ||
+      result.origin.content != content ||
+      !result.client.received_reply ||
+      result.client.reply !=
+          "echo:" + std::string(content))
+    throw std::runtime_error(
+        "direct TLS exchange after policy removal failed");
+}
+
 } // namespace
 
 int wmain(int argc, wchar_t **argv) {
@@ -901,87 +1003,100 @@ int wmain(int argc, wchar_t **argv) {
             {.manual_peer_validation = true});
     ntl::net::certificate_authority_policy authority(
         certificate.get());
-    auto origin = make_listener();
-    auto proxy = make_listener();
+    auto origin_v4 = make_listener();
+    auto proxy_v4 = make_listener();
+    auto origin_v6 = make_ipv6_listener();
+    auto proxy_v6 = make_ipv6_listener();
 
     std::wcout
-        << L"[1/6] TLS origin=" << origin.port
-        << L", inspection proxy=" << proxy.port << L".\n";
+        << L"[1/8] IPv4 TLS origin=" << origin_v4.port
+        << L", proxy=" << proxy_v4.port
+        << L"; IPv6 TLS origin=" << origin_v6.port
+        << L", proxy=" << proxy_v6.port << L".\n";
 
-    exchange_result allowed;
-    exchange_result blocked;
+    exchange_result allowed_v4;
+    exchange_result allowed_v6;
+    exchange_result blocked_v4;
+    exchange_result blocked_v6;
     {
-      ntl::wfp::dynamic_session policy(
+      auto policy = ntl::wfp::policy_session::ephemeral(
           L"crtsys ntl::wfp TLS inspection proxy sample");
-      install_policy(policy, origin.port, proxy.port);
+      install_policy(
+          policy, origin_v4.port, proxy_v4.port,
+          origin_v6.port, proxy_v6.port);
       std::wcout
-          << L"[2/6] Selected connects now terminate TLS in the "
+          << L"[2/8] Selected IPv4 and IPv6 connects now terminate TLS in the "
              L"user-mode proxy.\n";
 
       constexpr std::string_view allowed_content =
           "ALLOW:ntl-tls-plaintext";
-      allowed = run_proxied_exchange(
-          origin, proxy, client_credentials, *origin_identity,
-          interception_identities, authority, allowed_content);
-      if (allowed.proxy.original_port != origin.port ||
-          allowed.proxy.server_name != inspected_server_name ||
-          allowed.proxy.verdict !=
-              ntl::net::inspection::verdict::permit ||
-          !allowed.origin.received ||
-          allowed.origin.content != allowed_content ||
-          !allowed.client.received_reply ||
-          allowed.client.reply !=
-              "echo:" + std::string(allowed_content))
-        throw std::runtime_error(
-            "permitted TLS plaintext proof did not match");
+      allowed_v4 = run_proxied_exchange(
+          AF_INET, origin_v4, proxy_v4, client_credentials,
+          *origin_identity, interception_identities, authority,
+          allowed_content);
+      require_permitted_exchange(
+          allowed_v4, origin_v4.port, allowed_content);
       std::wcout
-          << L"[3/6] Decrypted ALLOW content reached the TLS "
+          << L"[3/8] IPv4 decrypted ALLOW content reached the TLS "
+             L"origin and its reply returned.\n";
+
+      allowed_v6 = run_proxied_exchange(
+          AF_INET6, origin_v6, proxy_v6, client_credentials,
+          *origin_identity,
+          interception_identities, authority, allowed_content);
+      require_permitted_exchange(
+          allowed_v6, origin_v6.port, allowed_content);
+      std::wcout
+          << L"[4/8] IPv6 decrypted ALLOW content reached the TLS "
              L"origin and its reply returned.\n";
 
       constexpr std::string_view blocked_content =
           "BLOCKME:ntl-tls-plaintext";
-      blocked = run_proxied_exchange(
-          origin, proxy, client_credentials, *origin_identity,
+      blocked_v4 = run_proxied_exchange(
+          AF_INET, origin_v4, proxy_v4, client_credentials,
+          *origin_identity, interception_identities, authority,
+          blocked_content);
+      require_blocked_exchange(blocked_v4, origin_v4.port);
+      blocked_v6 = run_proxied_exchange(
+          AF_INET6, origin_v6, proxy_v6, client_credentials,
+          *origin_identity,
           interception_identities, authority, blocked_content);
-      if (blocked.proxy.original_port != origin.port ||
-          blocked.proxy.server_name != inspected_server_name ||
-          blocked.proxy.verdict !=
-              ntl::net::inspection::verdict::drop_flow ||
-          blocked.origin.received ||
-          blocked.client.received_reply)
-        throw std::runtime_error(
-            "blocked TLS plaintext proof did not match");
+      require_blocked_exchange(blocked_v6, origin_v6.port);
       std::wcout
-          << L"[4/6] Decrypted BLOCKME content was closed before "
-             L"the origin received an application frame.\n";
+          << L"[5/8] IPv4 and IPv6 decrypted BLOCKME content was "
+             L"closed before either origin received a frame.\n";
     }
 
     constexpr std::string_view restored_content =
         "BLOCKME:policy-removed";
-    const auto restored = run_direct_exchange(
-        origin, client_credentials, *origin_identity, authority,
-        restored_content);
-    if (!restored.origin.received ||
-        restored.origin.content != restored_content ||
-        !restored.client.received_reply ||
-        restored.client.reply !=
-            "echo:" + std::string(restored_content))
-      throw std::runtime_error(
-          "direct TLS exchange after policy removal failed");
+    const auto restored_v4 = run_direct_exchange(
+        AF_INET, origin_v4, client_credentials, *origin_identity,
+        authority, restored_content);
+    require_direct_exchange(restored_v4, restored_content);
     std::wcout
-        << L"[5/6] Dynamic policy removed; the same BLOCKME "
-           L"plaintext reached the origin directly.\n";
+        << L"[6/8] Ephemeral policy removed; IPv4 reached the "
+           L"origin directly.\n";
+    const auto restored_v6 = run_direct_exchange(
+        AF_INET6, origin_v6, client_credentials, *origin_identity,
+        authority,
+        restored_content);
+    require_direct_exchange(restored_v6, restored_content);
+    std::wcout
+        << L"[7/8] Ephemeral policy removed; IPv6 reached the "
+           L"origin directly.\n";
 
-    if (has_pending_connection(proxy))
+    if (has_pending_connection(proxy_v4) ||
+        has_pending_connection(proxy_v6))
       throw std::runtime_error(
           "TLS proxy received a connection after policy removal");
     if (interception_identities.size() != 1)
       throw std::runtime_error(
           "SNI certificate cache did not reuse one host identity");
     std::wcout
-        << L"[6/6] No connection reached the proxy after removal.\n";
+        << L"[8/8] Neither proxy received a connection after removal.\n";
     std::wcout
-        << L"NTL WFP TLS inspection-proxy ok: permit=1, block=1, "
+        << L"NTL WFP TLS inspection-proxy ok: permit=2, block=2, "
+           L"ipv4=verified, ipv6=verified, "
            L"http1=bounded, sni=dynamic, certificate=per-host, "
            L"cache=bounded, trust-store=unchanged, restored=direct\n";
     return 0;

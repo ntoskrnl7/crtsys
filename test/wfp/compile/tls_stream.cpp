@@ -5,6 +5,7 @@
 #include <ntl/net/tls/framed_stream>
 #include <ntl/net/tls/stream>
 #include <ntl/net/tls/inspection_frontend>
+#include <ntl/net/tls/product_backend>
 
 #include <algorithm>
 #include <array>
@@ -592,6 +593,33 @@ void test_http1_framing() {
     throw std::runtime_error(
         "ambiguous close-delimited HTTP response was accepted");
 
+  ntl::net::http::http1_message_framer head_response(
+      ntl::net::http::http1_message_kind::response,
+      {.maximum_header_size = 1024,
+       .maximum_body_size = 1024,
+       .maximum_chunk_line_size = 128,
+       .maximum_trailer_size = 128,
+       .response_body_forbidden = true});
+  constexpr std::string_view head_metadata =
+      "HTTP/1.1 200 OK\r\nContent-Length: 554\r\n"
+      "Content-Encoding: gzip\r\n\r\n";
+  const auto head_probe = probe(head_response, head_metadata);
+  if (head_probe.state() !=
+          ntl::net::framing::probe_state::complete ||
+      head_probe.frame_size() != head_metadata.size())
+    throw std::runtime_error(
+        "HEAD response representation metadata was treated as a body");
+
+  constexpr std::string_view not_modified =
+      "HTTP/1.1 304 Not Modified\r\n"
+      "Content-Length: 554\r\n\r\n";
+  const auto not_modified_probe = probe(response, not_modified);
+  if (not_modified_probe.state() !=
+          ntl::net::framing::probe_state::complete ||
+      not_modified_probe.frame_size() != not_modified.size())
+    throw std::runtime_error(
+        "304 response representation metadata was treated as a body");
+
   constexpr std::string_view content_length_with_ows =
       "HTTP/1.1 200 OK\r\nContent-Length:554 \r\n"
       "Server: ePrism\r\nConnection: close\r\n\r\n"
@@ -630,6 +658,22 @@ void test_http1_framing() {
         "close-delimited HTTP response did not finalize at EOF");
 }
 
+class test_ech_channel final
+    : public ntl::net::inspection::ech_plaintext_channel {
+public:
+  ntl::result<std::size_t>
+  read(std::span<std::byte>) noexcept override {
+    return ntl::ok(std::size_t{0});
+  }
+  ntl::result<std::size_t>
+  write(std::span<const std::byte> source) noexcept override {
+    return ntl::ok(source.size());
+  }
+  ntl::status shutdown() noexcept override {
+    return ntl::status::ok();
+  }
+};
+
 bool test_tls_frontend_boundaries() {
   ntl::net::inspection::tls_inspection_observation observation;
   observation.server_name = L"outer.example";
@@ -651,7 +695,8 @@ bool test_tls_frontend_boundaries() {
 
   const ntl::net::inspection::ech_frontend_result decrypted{
       ntl::net::inspection::ech_offer_state::decrypted,
-      L"inner.example", {"h2"}};
+      L"inner.example", {"h2"},
+      std::make_shared<test_ech_channel>()};
   if (!ntl::net::inspection::apply_ech_result(
            observation, decrypted)
            .is_ok() ||
@@ -662,6 +707,27 @@ bool test_tls_frontend_boundaries() {
              ntl::net::inspection::tls_inspection_action::inspect &&
          inspect.issue ==
              ntl::net::inspection::tls_inspection_issue::none;
+}
+
+bool test_product_tls_backend_audit() {
+  using namespace ntl::net::inspection;
+  bounded_tls_audit_sink audit(2);
+  unavailable_origin_client_identity unavailable;
+  audited_origin_client_identity_provider provider(unavailable, audit);
+  const auto selected = provider.select({L"mtls.example", {}});
+  if (!selected || static_cast<bool>(*selected))
+    return false;
+  audit.record({tls_audit_kind::blocked_confirmed_ech,
+                std::chrono::system_clock::now(), L"ech.example",
+                STATUS_ACCESS_DENIED});
+  audit.record({tls_audit_kind::downstream_identity_selected,
+                std::chrono::system_clock::now(), L"site.example",
+                STATUS_SUCCESS});
+  const auto snapshot = audit.snapshot();
+  return snapshot.size() == 2 && audit.discarded() == 1 &&
+         snapshot.front().kind == tls_audit_kind::blocked_confirmed_ech &&
+         snapshot.back().kind ==
+             tls_audit_kind::downstream_identity_selected;
 }
 
 std::array<BYTE, 32>
@@ -687,6 +753,8 @@ int main() {
     if (!test_tls_frontend_boundaries())
       throw std::runtime_error(
           "TLS frontend policy boundaries failed");
+    if (!test_product_tls_backend_audit())
+      throw std::runtime_error("product TLS backend audit failed");
     test_http1_framing();
     winsock_session winsock;
     bool rejected_unscoped_revocation_exception = false;

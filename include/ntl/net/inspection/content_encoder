@@ -1,0 +1,326 @@
+/**
+ * @file content_encoder
+ * @brief User-mode adapter point for bounded HTTP Content-Encoding output.
+ *
+ * Encoders are deliberately separate from content_decoder. A proxy can
+ * inspect compressed input without acquiring the authority or dependencies
+ * required to manufacture compressed output.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/inspection/content_encoder is a user-mode header"
+#endif
+
+#include <ntl/result>
+#include <ntl/status>
+
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <new>
+#include <span>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+namespace ntl::net::inspection {
+
+struct encode_limits {
+  std::size_t maximum_input_size = 4 * 1024 * 1024;
+  std::size_t maximum_encoded_size = 4 * 1024 * 1024;
+  std::size_t maximum_coding_layers = 4;
+};
+
+enum class encode_state : std::uint8_t {
+  complete = 1,
+  need_more_input = 2,
+  malformed = 3,
+};
+
+class encode_result {
+public:
+  static constexpr encode_result complete() noexcept {
+    return encode_result(encode_state::complete, STATUS_SUCCESS);
+  }
+  static constexpr encode_result need_more_input() noexcept {
+    return encode_result(encode_state::need_more_input, STATUS_SUCCESS);
+  }
+  static constexpr encode_result
+  malformed(NTSTATUS status = STATUS_DATA_ERROR) noexcept {
+    return encode_result(encode_state::malformed, status);
+  }
+
+  constexpr encode_state state() const noexcept { return state_; }
+  constexpr NTSTATUS error() const noexcept { return error_; }
+
+private:
+  constexpr encode_result(encode_state state, NTSTATUS error) noexcept
+      : state_(state), error_(error) {}
+
+  encode_state state_ = encode_state::malformed;
+  NTSTATUS error_ = STATUS_DATA_ERROR;
+};
+
+/**
+ * @brief Per-push bounded destination for incremental content encoders.
+ */
+class encoded_output {
+public:
+  explicit encoded_output(std::size_t maximum_size) noexcept
+      : maximum_size_(maximum_size) {}
+
+  ntl::status append(std::span<const std::byte> bytes) noexcept {
+    if (bytes.size() > maximum_size_ - size())
+      return STATUS_BUFFER_OVERFLOW;
+    try {
+      bytes_.insert(bytes_.end(), bytes.begin(), bytes.end());
+      return ntl::status::ok();
+    } catch (const std::bad_alloc &) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    } catch (...) {
+      return STATUS_UNHANDLED_EXCEPTION;
+    }
+  }
+
+  std::size_t size() const noexcept { return bytes_.size(); }
+  std::size_t maximum_size() const noexcept { return maximum_size_; }
+  std::span<const std::byte> bytes() const noexcept { return bytes_; }
+  std::vector<std::byte> release() noexcept { return std::move(bytes_); }
+
+private:
+  std::vector<std::byte> bytes_;
+  std::size_t maximum_size_ = 0;
+};
+
+class content_encoder {
+public:
+  virtual ~content_encoder() = default;
+  virtual void reset() noexcept = 0;
+  virtual encode_result encode(std::span<const std::byte> input, bool final,
+                               encoded_output &output) noexcept = 0;
+};
+
+template <class Encoder>
+class content_encoder_adapter final : public content_encoder {
+public:
+  template <class... Args>
+  explicit content_encoder_adapter(Args &&...args)
+      : encoder_(std::forward<Args>(args)...) {}
+
+  void reset() noexcept override {
+    static_assert(noexcept(encoder_.reset()),
+                  "encoder::reset must be noexcept");
+    encoder_.reset();
+  }
+
+  encode_result encode(std::span<const std::byte> input, bool final,
+                       encoded_output &output) noexcept override {
+    static_assert(noexcept(encoder_.encode(input, final, output)),
+        "encoder::encode must be noexcept");
+    return encoder_.encode(input, final, output);
+  }
+
+  Encoder &underlying() noexcept { return encoder_; }
+
+private:
+  Encoder encoder_;
+};
+
+/**
+ * @brief Maps normalized HTTP Content-Encoding tokens to encoder factories.
+ *
+ * Registry mutation must finish before concurrent create() calls begin.
+ */
+class content_encoder_registry {
+public:
+  using factory =
+      std::function<std::unique_ptr<content_encoder>()>;
+
+  void add(std::string encoding, factory create) {
+    normalize(encoding);
+    if (encoding.empty() || !create)
+      throw std::invalid_argument(
+          "content encoder registration requires a name and factory");
+    for (auto &entry : entries_) {
+      if (entry.encoding == encoding) {
+        entry.create = std::move(create);
+        return;
+      }
+    }
+    entries_.push_back(
+        entry{std::move(encoding), std::move(create)});
+  }
+
+  std::unique_ptr<content_encoder>
+  create(std::string_view encoding) const {
+    std::string normalized(encoding);
+    normalize(normalized);
+    for (const auto &entry : entries_) {
+      if (entry.encoding == normalized)
+        return entry.create();
+    }
+    return {};
+  }
+
+  bool contains(std::string_view encoding) const {
+    std::string normalized(encoding);
+    normalize(normalized);
+    for (const auto &entry : entries_) {
+      if (entry.encoding == normalized)
+        return true;
+    }
+    return false;
+  }
+
+private:
+  struct entry {
+    std::string encoding;
+    factory create;
+  };
+
+  static void normalize(std::string &value) {
+    std::size_t first = 0;
+    while (first != value.size() &&
+           (value[first] == ' ' || value[first] == '\t'))
+      ++first;
+    std::size_t last = value.size();
+    while (last != first &&
+           (value[last - 1] == ' ' ||
+            value[last - 1] == '\t'))
+      --last;
+    if (first != 0 || last != value.size())
+      value = value.substr(first, last - first);
+    for (char &character : value) {
+      if (character >= 'A' && character <= 'Z')
+        character = static_cast<char>(
+            character + ('a' - 'A'));
+    }
+  }
+
+  std::vector<entry> entries_;
+};
+
+namespace content_encoder_detail {
+
+inline ntl::result<std::vector<std::string>>
+parse_content_codings(std::string_view value,
+                      std::size_t maximum_layers) noexcept {
+  if (maximum_layers == 0)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  try {
+    std::vector<std::string> result;
+    std::size_t position = 0;
+    while (position <= value.size()) {
+      const std::size_t comma = value.find(',', position);
+      const std::size_t end =
+          comma == std::string_view::npos ? value.size() : comma;
+      std::string coding(value.substr(position, end - position));
+      std::size_t first = 0;
+      while (first != coding.size() &&
+             (coding[first] == ' ' || coding[first] == '\t'))
+        ++first;
+      std::size_t last = coding.size();
+      while (last != first &&
+             (coding[last - 1] == ' ' ||
+              coding[last - 1] == '\t'))
+        --last;
+      coding = coding.substr(first, last - first);
+      for (char &character : coding) {
+        if (character >= 'A' && character <= 'Z')
+          character = static_cast<char>(
+              character + ('a' - 'A'));
+      }
+      if (!coding.empty() && coding != "identity")
+        result.push_back(std::move(coding));
+      if (result.size() > maximum_layers)
+        return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+      if (comma == std::string_view::npos)
+        break;
+      position = comma + 1;
+    }
+    return ntl::ok(std::move(result));
+  } catch (const std::bad_alloc &) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+}
+
+} // namespace content_encoder_detail
+
+/** @brief Encodes one complete message through an incremental encoder. */
+inline ntl::result<std::vector<std::byte>>
+encode_complete(content_encoder &encoder,
+                std::span<const std::byte> input,
+                std::size_t maximum_encoded_size) noexcept {
+  if (maximum_encoded_size == 0)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  encoder.reset();
+  encoded_output output(maximum_encoded_size);
+  const encode_result result = encoder.encode(input, true, output);
+  if (result.state() != encode_state::complete) {
+    const NTSTATUS status =
+        result.state() == encode_state::need_more_input
+            ? STATUS_END_OF_FILE
+            : result.error() == STATUS_SUCCESS ? STATUS_DATA_ERROR
+                                               : result.error();
+    return ntl::unexpected(status);
+  }
+  return ntl::ok(output.release());
+}
+
+/**
+ * @brief Applies an HTTP Content-Encoding list in sender order.
+ *
+ * `gzip, br` means gzip is applied first and Brotli second.
+ */
+inline ntl::result<std::vector<std::byte>>
+encode_content_encoding(
+    const content_encoder_registry &registry,
+    std::span<const std::byte> decoded,
+    std::string_view content_encoding,
+    encode_limits limits = {}) noexcept {
+  if (limits.maximum_input_size == 0 ||
+      limits.maximum_encoded_size == 0 ||
+      limits.maximum_coding_layers == 0 ||
+      decoded.size() > limits.maximum_input_size)
+    return ntl::unexpected(
+        decoded.size() > limits.maximum_input_size
+            ? STATUS_BUFFER_OVERFLOW
+            : STATUS_INVALID_PARAMETER);
+
+  auto codings = content_encoder_detail::parse_content_codings(
+      content_encoding, limits.maximum_coding_layers);
+  if (!codings)
+    return ntl::unexpected(codings.status());
+
+  try {
+    std::vector<std::byte> current(decoded.begin(), decoded.end());
+    if (current.size() > limits.maximum_encoded_size)
+      return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+    for (const auto &coding : *codings) {
+      auto encoder = registry.create(coding);
+      if (!encoder)
+        return ntl::unexpected(STATUS_NOT_SUPPORTED);
+      auto encoded = encode_complete(
+          *encoder, std::span<const std::byte>(current),
+          limits.maximum_encoded_size);
+      if (!encoded)
+        return encoded;
+      current = std::move(*encoded);
+    }
+    return ntl::ok(std::move(current));
+  } catch (const std::bad_alloc &) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+}
+
+} // namespace ntl::net::inspection

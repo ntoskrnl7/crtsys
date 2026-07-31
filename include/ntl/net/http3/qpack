@@ -325,6 +325,163 @@ private:
   }
 };
 
+namespace qpack_encode_detail {
+
+inline ntl::status append_prefixed_integer(
+    std::vector<std::byte> &output, std::uint64_t value,
+    std::uint8_t prefix_bits, std::uint8_t prefix_value) noexcept {
+  if (prefix_bits == 0 || prefix_bits > 8)
+    return STATUS_INVALID_PARAMETER;
+  try {
+    const std::uint64_t prefix_maximum =
+        (std::uint64_t{1} << prefix_bits) - 1;
+    if (value < prefix_maximum) {
+      output.push_back(static_cast<std::byte>(
+          prefix_value | static_cast<std::uint8_t>(value)));
+      return ntl::status::ok();
+    }
+    output.push_back(static_cast<std::byte>(
+        prefix_value | static_cast<std::uint8_t>(prefix_maximum)));
+    value -= prefix_maximum;
+    while (value >= 128) {
+      output.push_back(static_cast<std::byte>(
+          static_cast<std::uint8_t>(value % 128) | 0x80u));
+      value /= 128;
+    }
+    output.push_back(static_cast<std::byte>(
+        static_cast<std::uint8_t>(value)));
+    return ntl::status::ok();
+  } catch (const std::bad_alloc &) {
+    return STATUS_INSUFFICIENT_RESOURCES;
+  } catch (...) {
+    return STATUS_UNHANDLED_EXCEPTION;
+  }
+}
+
+inline bool valid_field(std::string_view name,
+                        std::string_view value) noexcept {
+  if (name.empty())
+    return false;
+  for (const unsigned char character : name) {
+    if (character == 0 || character == '\r' || character == '\n' ||
+        (character >= 'A' && character <= 'Z'))
+      return false;
+  }
+  for (const unsigned char character : value) {
+    if (character == 0 || character == '\r' || character == '\n')
+      return false;
+  }
+  return true;
+}
+
+inline ntl::status append_literal(std::vector<std::byte> &output,
+                                  std::string_view value) noexcept {
+  auto status = append_prefixed_integer(
+      output, value.size(), 7, 0x00);
+  if (!status.is_ok())
+    return status;
+  try {
+    output.insert(output.end(),
+                  reinterpret_cast<const std::byte *>(value.data()),
+                  reinterpret_cast<const std::byte *>(
+                      value.data() + value.size()));
+    return ntl::status::ok();
+  } catch (const std::bad_alloc &) {
+    return STATUS_INSUFFICIENT_RESOURCES;
+  } catch (...) {
+    return STATUS_UNHANDLED_EXCEPTION;
+  }
+}
+
+} // namespace qpack_encode_detail
+
+/**
+ * @brief Bounded RFC 9204 encoder that never uses dynamic state or Huffman.
+ *
+ * This deliberately conservative profile is sufficient for control traffic,
+ * Extended CONNECT, and deterministic intermediaries.  It remains
+ * interoperable when both QPACK settings are zero and avoids encoder-stream
+ * blocking altogether.
+ */
+class bounded_static_qpack_encoder {
+public:
+  ntl::result<std::vector<std::byte>>
+  encode(std::span<const header_field> fields,
+         std::size_t maximum_encoded_size = 256 * 1024) const noexcept {
+    if (maximum_encoded_size < 2)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    try {
+      std::vector<std::byte> output;
+      output.reserve((std::min)(maximum_encoded_size, std::size_t{4096}));
+      output.push_back(std::byte{0}); // Required Insert Count.
+      output.push_back(std::byte{0}); // Delta Base, sign=0.
+      bool regular_seen = false;
+      std::unordered_set<std::string_view> pseudo_fields;
+      for (const auto &field : fields) {
+        if (!qpack_encode_detail::valid_field(field.name, field.value))
+          return ntl::unexpected(STATUS_DATA_ERROR);
+        const bool pseudo = field.name.front() == ':';
+        if (pseudo) {
+          if (regular_seen || !pseudo_fields.insert(field.name).second)
+            return ntl::unexpected(STATUS_DATA_ERROR);
+        } else {
+          regular_seen = true;
+        }
+
+        std::size_t exact = qpack_detail::static_table.size();
+        std::size_t named = qpack_detail::static_table.size();
+        for (std::size_t index = 0;
+             index != qpack_detail::static_table.size(); ++index) {
+          const auto &entry = qpack_detail::static_table[index];
+          if (entry.name != field.name)
+            continue;
+          if (named == qpack_detail::static_table.size())
+            named = index;
+          if (entry.value == field.value) {
+            exact = index;
+            break;
+          }
+        }
+
+        ntl::status status = ntl::status::ok();
+        if (exact != qpack_detail::static_table.size()) {
+          // Indexed Field Line: 1, T=1, 6-bit static table index.
+          status = qpack_encode_detail::append_prefixed_integer(
+              output, exact, 6, 0xc0);
+        } else if (named != qpack_detail::static_table.size()) {
+          // Literal With Name Reference: 01, N, T=1, 4-bit name index.
+          status = qpack_encode_detail::append_prefixed_integer(
+              output, named, 4,
+              static_cast<std::uint8_t>(field.never_index ? 0x70 : 0x50));
+          if (status.is_ok())
+            status = qpack_encode_detail::append_literal(output, field.value);
+        } else {
+          // Literal With Literal Name: 001, N, H=0, 3-bit name length.
+          status = qpack_encode_detail::append_prefixed_integer(
+              output, field.name.size(), 3,
+              static_cast<std::uint8_t>(field.never_index ? 0x30 : 0x20));
+          if (status.is_ok()) {
+            output.insert(output.end(),
+                          reinterpret_cast<const std::byte *>(field.name.data()),
+                          reinterpret_cast<const std::byte *>(
+                              field.name.data() + field.name.size()));
+            status = qpack_encode_detail::append_literal(output, field.value);
+          }
+        }
+        if (!status.is_ok())
+          return ntl::unexpected(static_cast<NTSTATUS>(status));
+        if (output.size() > maximum_encoded_size)
+          return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+      }
+      return ntl::ok(std::move(output));
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+};
+
 struct dynamic_qpack_limits {
   std::size_t maximum_table_capacity = 64 * 1024;
   std::size_t maximum_blocked_streams = 32;

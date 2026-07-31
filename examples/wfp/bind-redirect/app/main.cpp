@@ -158,7 +158,7 @@ void verify_target_ports_available() {
   }
 }
 
-void install_policy(ntl::wfp::dynamic_session &session) {
+void install_policy(ntl::wfp::policy_session &session) {
   const auto application =
       ntl::wfp::application_id::current_process();
   session.install(
@@ -185,7 +185,8 @@ void install_policy(ntl::wfp::dynamic_session &session) {
             filter_v4(
                 wfp_bind_redirect::filter_key_v4,
                 L"Redirect current process IPv4 UDP binds",
-                wfp_bind_redirect::selector_v4);
+                wfp_bind_redirect::selector_v4,
+                ntl::wfp::callout_unavailable::permit);
         filter_v4.application_equal(application)
             .protocol_equal(IPPROTO_UDP);
         transaction.add_bind_redirect_filter(
@@ -203,7 +204,8 @@ void install_policy(ntl::wfp::dynamic_session &session) {
             filter_v6(
                 wfp_bind_redirect::filter_key_v6,
                 L"Redirect current process IPv6 UDP binds",
-                wfp_bind_redirect::selector_v6);
+                wfp_bind_redirect::selector_v6,
+                ntl::wfp::callout_unavailable::permit);
         filter_v6.application_equal(application)
             .protocol_equal(IPPROTO_UDP);
         transaction.add_bind_redirect_filter(
@@ -223,7 +225,7 @@ int wmain() {
     std::uint16_t redirected_port_v4 = 0;
     std::uint16_t redirected_port_v6 = 0;
     {
-      ntl::wfp::dynamic_session policy(
+      auto policy = ntl::wfp::policy_session::ephemeral(
           L"crtsys ntl::wfp bind-redirect sample");
       install_policy(policy);
 
@@ -250,7 +252,7 @@ int wmain() {
     if (direct_port_v4 == redirected_port_v4 ||
         direct_port_v6 == redirected_port_v6)
       throw std::runtime_error(
-          "bind remained redirected after dynamic policy removal");
+          "bind remained redirected after ephemeral policy removal");
 
     std::wcout
         << L"NTL WFP bind-redirect ok: IPv4="

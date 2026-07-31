@@ -22,6 +22,8 @@ enum class application_protocol : std::uint8_t {
   http2 = 2,
   http3 = 3,
   websocket = 4,
+  grpc = 5,
+  webtransport = 6,
 };
 
 enum class tls_inspection_issue : std::uint8_t {

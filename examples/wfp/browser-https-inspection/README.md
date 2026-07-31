@@ -7,7 +7,7 @@ HTTP/2, HTTP/3, WebSocket, and content-decoding components. It is a portable
 example: no machine path, public host, certificate, or browser profile is
 compiled into the driver or application.
 
-While the dynamic policy is active, the driver scopes interception to one
+While the ephemeral policy is active, the driver scopes interception to one
 browser executable:
 
 - IPv4 and IPv6 TCP port 443 is redirected to the local Schannel proxy.
@@ -23,6 +23,12 @@ For TCP, the application recovers the original destination, reads a bounded
 ClientHello, issues a short-lived SNI-specific leaf, terminates browser TLS,
 and creates a normally validated origin TLS connection. It inspects bounded
 HTTP/1.1, multiplexed HTTP/2, and HTTP/1.1 WebSocket traffic.
+
+HTTP/1.1, HTTP/2, and the msh3 HTTP/3 service use the same semantic
+`ntl::net::http::transform_pipeline`. Policy receives complete decoded
+messages and can inspect, change headers or bodies, block, drop, or return a
+synthetic response. Protocol adapters own chunking, HPACK/QPACK, compression
+re-encoding, content length, multiplexing, and flow control.
 
 The companion managed-client path is deliberately separate from the WFP
 browser policy. The NTL client connects to an explicit loopback inspection
@@ -66,7 +72,8 @@ cookies are not logged.
 - `http1_inspection.*`: bounded HTTP/1.1 and WebSocket relay
 - `http1_inspection_support.*`: testable request rewriting, content decoding,
   and WebSocket extension negotiation
-- `http2_inspection.*`: HTTP/2 frames, HPACK, and stream policy
+- `http2_inspection.*`: HTTP/2 message transformation, serialized TLS output,
+  and connection/stream flow control
 - `http3_inspection.*`: bounded HTTP/3 response inspection policy
 - `http3_controlled.cpp`: deterministic H3 origin and H3 upstream acceptance
 - `http3_live_proxy.*`: msh3 server and WinHTTP origin adapters around the
@@ -77,10 +84,13 @@ cookies are not logged.
   peer cancellation, and drain
 - `browser_log.*`: event and HTML output
 
-The generic parts are under `include/ntl`: `http3_backend`,
+The generic parts are under `include/ntl`: `http_transform`,
+`http1_transform`, `http2_transform`, `content_encoder`,
+`standard_content_encoders`, `http3_backend`,
 `http3_msh3_backend`, `http3_msh3_client`, `http3_inspection_proxy`,
 `http3_standard_inspection_proxy`, `http3_qpack`, `http_datagram`,
-`http_extended_connect`, `webtransport_http3`, and `tls_inspection_frontend`.
+`http_extended_connect`, `webtransport_http3`, `webtransport_session`,
+`content_stream`, `tls_inspection_frontend`, and `tls_product_backend`.
 The HTTP/3 inspection proxy validates requests, binds SNI to `:authority`,
 enforces bounded decoding, invokes typed request/response policy, and gives
 the origin adapter only validated requests.
@@ -161,11 +171,26 @@ the normal WFP path and is not evidence of transparent interception.
 The TCP path covers TLS 1.2/1.3 as negotiated by Schannel, HTTP/1.1 HTML,
 RFC 6455 WebSocket with validated `permessage-deflate`, and multiplexed
 HTTP/2 HTML. HTTP/2 keeps independent bounded HPACK state in each direction
-and relays flow-control frames unchanged.
+and re-encodes transformed headers without dynamic-table coupling. It
+replenishes only retained inbound DATA and waits asynchronously for peer
+connection and stream send windows.
 
-HTTP/1.1 and HTTP/2 share bounded gzip, zlib `deflate`, and Brotli content
-decoders. Coding depth, input/output size, expansion ratio, checksum,
-truncation, and connection limits fail closed.
+HTTP/1.1, HTTP/2, and HTTP/3 share bounded gzip, zlib `deflate`, and Brotli
+content decoders and encoders. Changed bodies may preserve the original
+coding chain or explicitly become identity-coded. Coding depth, input/output
+size, expansion ratio, checksum, truncation, and connection limits fail
+closed. The reusable streaming API retains one incremental codec chain per
+message, so arbitrary HTTP chunk/DATA splits do not reset gzip, deflate, or
+Brotli state and do not require one complete body allocation.
+
+The sample deliberately uses the complete-message transform for HTML logging
+and policies that must decide before forwarding any rewritten body byte. The
+library also supplies live adapters in
+`ntl/net/http/http1_stream_transform`, `ntl/net/http2/stream_transform`, and
+`ntl/net/http3/stream_transform`. Those adapters forward transformed chunks as
+soon as framing and codec state permit; a later rejection resets or closes the
+stream and cannot retract bytes already emitted. Choose the atomic or live
+adapter from the policy's decision boundary rather than from the HTTP version.
 
 The NTL HTTP/3 layer contains:
 
@@ -174,14 +199,19 @@ The NTL HTTP/3 layer contains:
   stream resume, acknowledgements, and cancellation;
 - RFC 9297 HTTP Datagrams and Capsule Protocol framing;
 - HTTP/2 and HTTP/3 extended CONNECT validation; and
-- a bounded WebTransport-over-HTTP/3 draft-16 session and stream parser.
+- a bounded WebTransport-over-HTTP/3 draft-16 session, stream, datagram, and
+  transform layer.
 
-The pinned msh3 server backend exposes decoded ordinary request/response
-callbacks, but not raw bidirectional/unidirectional streams or QUIC Datagram
-callbacks. Its capabilities therefore report extended CONNECT, HTTP
-Datagrams, and WebTransport as unavailable. Those NTL protocol components
-become live only with a QUIC backend that exposes the required stream and
-datagram primitives; the example never claims otherwise.
+The high-level pinned msh3 server backend exposes decoded ordinary
+request/response callbacks but not the raw primitives WebTransport needs. The
+separate raw MsQuic backend does expose request, bidirectional,
+unidirectional, Datagram, and reliable-reset-at events. Its live loopback
+contract performs TLS 1.3/h3 negotiation, exchanges SETTINGS, completes a
+QPACK Extended CONNECT, and transfers a WebTransport bidirectional stream,
+unidirectional stream, and HTTP Datagram. It also opens a multi-write stream,
+maps a 32-bit application error into the draft HTTP/3 range, and proves the
+peer receives a reliable-prefix reset. WebTransport capability remains false
+when the required preview reliable-reset-at API is unavailable.
 
 ## Security boundaries
 
@@ -218,8 +248,16 @@ ordinary private CA and WFP redirect do not provide. The separate NTL managed
 client demonstrates that integration: it owns the endpoint mapping and the
 private-CA trust decision inside the application.
 
+The product TLS contracts also provide managed identity selection, an owned
+plaintext handoff from an actual ECH frontend, explicit origin mTLS selection,
+and bounded audit. They do not supply private ECH configurations or authority
+to bypass endpoint pinning.
+
 The sample accepts visible SNI, port 443, ordinary HTTP methods, and configured
-bounds. Arbitrary ECH, pinning bypass, unmanaged client-certificate choice,
+bounds. Arbitrary public ECH without a configured frontend, pinning bypass,
+unmanaged client-certificate choice,
 non-443 origins, transparent HTTP/3 MITM of an unmodified stock browser, and
-live WebTransport on the pinned msh3 backend are outside the demonstrated
-runtime.
+browser-originated WebTransport through that transparent private-CA path are
+outside the demonstrated runtime. The raw MsQuic WebTransport loopback is an
+actual transport test, but it is not evidence that an unmodified Chromium
+browser accepts an enterprise/private CA for QUIC.

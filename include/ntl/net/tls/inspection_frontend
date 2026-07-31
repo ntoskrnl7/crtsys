@@ -23,6 +23,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cwctype>
+#include <memory>
 #include <mutex>
 #include <new>
 #include <span>
@@ -53,10 +54,28 @@ enum class ech_offer_state : std::uint8_t {
   decrypted = 3,
 };
 
+/**
+ * @brief Frontend-owned plaintext channel after successful ECH termination.
+ *
+ * The ECH implementation retains the outer TLS or QUIC state.  This channel
+ * is the only valid continuation point after inner ClientHello decryption;
+ * callers must not try to resume Schannel from the inner hello.
+ */
+class ech_plaintext_channel {
+public:
+  virtual ~ech_plaintext_channel() = default;
+  virtual ntl::result<std::size_t>
+  read(std::span<std::byte> destination) noexcept = 0;
+  virtual ntl::result<std::size_t>
+  write(std::span<const std::byte> source) noexcept = 0;
+  virtual ntl::status shutdown() noexcept = 0;
+};
+
 struct ech_frontend_result {
   ech_offer_state state = ech_offer_state::absent;
   std::wstring inner_server_name;
   std::vector<std::string> inner_application_protocols;
+  std::shared_ptr<ech_plaintext_channel> channel;
 };
 
 /**
@@ -97,20 +116,20 @@ inline ntl::status apply_ech_result(
   case ech_offer_state::absent:
   case ech_offer_state::unconfirmed_or_grease:
     if (!result.inner_server_name.empty() ||
-        !result.inner_application_protocols.empty())
+        !result.inner_application_protocols.empty() || result.channel)
       return STATUS_INVALID_PARAMETER;
     observation.encrypted_client_hello_confirmed = false;
     observation.encrypted_client_hello_decrypted = false;
     return ntl::status::ok();
   case ech_offer_state::confirmed:
     if (!result.inner_server_name.empty() ||
-        !result.inner_application_protocols.empty())
+        !result.inner_application_protocols.empty() || result.channel)
       return STATUS_INVALID_PARAMETER;
     observation.encrypted_client_hello_confirmed = true;
     observation.encrypted_client_hello_decrypted = false;
     return ntl::status::ok();
   case ech_offer_state::decrypted:
-    if (result.inner_server_name.empty())
+    if (result.inner_server_name.empty() || !result.channel)
       return STATUS_INVALID_PARAMETER;
     observation.encrypted_client_hello_confirmed = true;
     observation.encrypted_client_hello_decrypted = true;

@@ -342,6 +342,43 @@ private:
 };
 
 /**
+ * @brief Copyable capability that can only resume deferred stream data.
+ *
+ * This capability is layer-erased so one bounded verdict queue can safely
+ * merge IPv4 and IPv6 work. It does not expose stream reinjection.
+ */
+class stream_continuation {
+public:
+  stream_continuation(const stream_continuation &) = default;
+  stream_continuation &operator=(const stream_continuation &) = default;
+
+  explicit operator bool() const noexcept {
+    return flow_id_ != 0 && callout_id_ != 0 && layer_id_ != 0;
+  }
+
+  ntl::status resume() const noexcept {
+    if (!*this)
+      return STATUS_INVALID_DEVICE_STATE;
+    return FwpsStreamContinue0(flow_id_, callout_id_, layer_id_,
+                               stream_flags_);
+  }
+
+private:
+  template <class, class> friend class stream_event;
+
+  stream_continuation() = default;
+  stream_continuation(UINT64 flow_id, UINT32 callout_id, UINT16 layer_id,
+                      UINT32 stream_flags) noexcept
+      : flow_id_(flow_id), callout_id_(callout_id), layer_id_(layer_id),
+        stream_flags_(stream_flags) {}
+
+  UINT64 flow_id_ = 0;
+  UINT32 callout_id_ = 0;
+  UINT16 layer_id_ = 0;
+  UINT32 stream_flags_ = 0;
+};
+
+/**
  * @brief Copyable identity needed to continue or reinject one stream flow.
  *
  * It can only be obtained from a stream_event, so layer and callout IDs cannot
@@ -490,6 +527,16 @@ public:
       return stream_injection_site<Layer>();
     return stream_injection_site<Layer>(
         metadata_->flowHandle, filter_->action.calloutId,
+        io_packet_->streamData->flags);
+  }
+
+  stream_continuation continuation() const noexcept {
+    if (!metadata_ || !filter_ || !io_packet_ || !io_packet_->streamData ||
+        (metadata_->currentMetadataValues &
+         FWPS_METADATA_FIELD_FLOW_HANDLE) == 0)
+      return {};
+    return stream_continuation(
+        metadata_->flowHandle, filter_->action.calloutId, Layer::runtime_id,
         io_packet_->streamData->flags);
   }
 

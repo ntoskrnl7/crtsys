@@ -165,7 +165,10 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: crtsys-nuget-libs-${{ matrix.toolset }}-${{ matrix.arch }}-${{ matrix.config }}
-          path: artifacts/nuget-staging/lib/native/${{ matrix.toolset }}/${{ matrix.arch }}/${{ matrix.config }}
+          path: |
+            artifacts/nuget-staging/lib/native/${{ matrix.toolset }}/${{ matrix.arch }}/${{ matrix.config }}
+            artifacts/nuget-staging/codecs/lib/${{ matrix.toolset }}/${{ matrix.arch }}/${{ matrix.config }}
+            artifacts/nuget-staging/codecs/include
           if-no-files-found: error
 
   pack:
@@ -207,9 +210,26 @@ jobs:
             $toolset = $Matches[1]
             $arch = $Matches[2]
             $config = $Matches[3]
+            $librarySource = Join-Path $artifact.FullName "lib/native/$toolset/$arch/$config"
+            if (-not (Test-Path $librarySource)) {
+              $librarySource = $artifact.FullName
+            }
             $destination = Join-Path 'artifacts/nuget-staging/lib/native' "$toolset/$arch/$config"
             New-Item -ItemType Directory -Force -Path $destination | Out-Null
-            Copy-Item -Path (Join-Path $artifact.FullName '*') -Destination $destination -Recurse -Force
+            Copy-Item -Path (Join-Path $librarySource '*') -Destination $destination -Recurse -Force
+
+            $codecSource = Join-Path $artifact.FullName "codecs/lib/$toolset/$arch/$config"
+            if (-not (Test-Path $codecSource)) {
+              throw "Content codec libraries were not found in artifact $($artifact.Name)."
+            }
+            $codecDestination = Join-Path 'artifacts/nuget-staging/codecs/lib' "$toolset/$arch/$config"
+            New-Item -ItemType Directory -Force -Path $codecDestination | Out-Null
+            Copy-Item -Path (Join-Path $codecSource '*') -Destination $codecDestination -Recurse -Force
+
+            $codecIncludeSource = Join-Path $artifact.FullName 'codecs/include'
+            $codecIncludeDestination = 'artifacts/nuget-staging/codecs/include'
+            New-Item -ItemType Directory -Force -Path $codecIncludeDestination | Out-Null
+            Copy-Item -Path (Join-Path $codecIncludeSource '*') -Destination $codecIncludeDestination -Recurse -Force
           }
 
       - name: Pack
@@ -411,6 +431,18 @@ jobs:
           -Toolset '${{ matrix.toolset }}'
           -Architecture '${{ matrix.arch }}'
           -Configuration '${{ matrix.config }}'
+          -WindowsSdkVersion '${{ matrix.windows_sdk }}'
+          -VisualStudioMajorVersion '${{ matrix.vs_major }}'
+
+      - name: Build and run NuGet content codec consumer
+        shell: pwsh
+        run: >
+          ./scripts/nuget/Test-CrtSysNuGetContentCodecs.ps1
+          -PackageDirectory artifacts/nuget
+          -Version '${{ needs.pack.outputs.package_version }}'
+          -Configuration '${{ matrix.config }}'
+          -Toolset '${{ matrix.toolset }}'
+          -Architecture '${{ matrix.arch }}'
           -WindowsSdkVersion '${{ matrix.windows_sdk }}'
           -VisualStudioMajorVersion '${{ matrix.vs_major }}'
 

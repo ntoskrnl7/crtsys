@@ -1,0 +1,296 @@
+/**
+ * @file content_stream
+ * @brief Bounded incremental HTTP Content-Encoding decode/re-encode chains.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/inspection/content_stream is a user-mode header"
+#endif
+
+#include <ntl/net/inspection/content_decoder>
+#include <ntl/net/inspection/content_encoder>
+#include <ntl/result>
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <memory>
+#include <new>
+#include <span>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+namespace ntl::net::inspection {
+
+struct content_stream_limits {
+  std::size_t maximum_input_chunk_size = 64 * 1024;
+  std::size_t maximum_stage_output_chunk_size = 2 * 1024 * 1024;
+  std::uint64_t maximum_encoded_stream_size = 4ull * 1024 * 1024 * 1024;
+  std::uint64_t maximum_decoded_stream_size = 4ull * 1024 * 1024 * 1024;
+  std::uint64_t maximum_transformed_stream_size = 4ull * 1024 * 1024 * 1024;
+  std::uint64_t maximum_output_stream_size = 4ull * 1024 * 1024 * 1024;
+  std::size_t maximum_expansion_ratio = 64;
+  std::size_t expansion_slack_size = 64 * 1024;
+  std::size_t maximum_coding_layers = 4;
+};
+
+struct content_stream_chunk {
+  std::vector<std::byte> bytes;
+  bool final = false;
+};
+
+namespace content_stream_detail {
+
+inline bool add_would_overflow(std::uint64_t value, std::size_t addition,
+                               std::uint64_t maximum) noexcept {
+  return value > maximum ||
+         addition > static_cast<std::uint64_t>(maximum - value);
+}
+
+inline bool expansion_exceeded(std::uint64_t output, std::uint64_t input,
+                               std::size_t ratio,
+                               std::size_t slack) noexcept {
+  const std::uint64_t maximum =
+      (std::numeric_limits<std::uint64_t>::max)();
+  if (input > (maximum - static_cast<std::uint64_t>(slack)) / ratio)
+    return false;
+  return output > input * ratio + static_cast<std::uint64_t>(slack);
+}
+
+struct decoder_stage {
+  std::unique_ptr<content_decoder> codec;
+  bool complete = false;
+};
+
+struct encoder_stage {
+  std::unique_ptr<content_encoder> codec;
+  bool complete = false;
+};
+
+} // namespace content_stream_detail
+
+/**
+ * @brief One message's stateful Content-Encoding chain.
+ *
+ * Decoders run in reverse sender order and encoders run in sender order.
+ * A fresh object is required per HTTP message/stream; no compression state is
+ * shared between concurrent streams.
+ */
+class content_encoding_stream {
+public:
+  content_encoding_stream(const content_encoding_stream &) = delete;
+  content_encoding_stream &operator=(const content_encoding_stream &) = delete;
+  content_encoding_stream(content_encoding_stream &&) noexcept = default;
+  content_encoding_stream &operator=(content_encoding_stream &&) noexcept =
+      default;
+
+  static ntl::result<content_encoding_stream> create(
+      const content_decoder_registry &decoders,
+      const content_encoder_registry &encoders,
+      std::string_view content_encoding,
+      content_stream_limits limits = {}) noexcept {
+    if (!valid(limits))
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    auto codings = content_encoder_detail::parse_content_codings(
+        content_encoding, limits.maximum_coding_layers);
+    if (!codings)
+      return ntl::unexpected(codings.status());
+    try {
+      content_encoding_stream result(limits);
+      result.coding_ = std::string(content_encoding);
+      result.decoders_.reserve(codings->size());
+      result.encoders_.reserve(codings->size());
+      for (auto iterator = codings->rbegin(); iterator != codings->rend();
+           ++iterator) {
+        auto decoder = decoders.create(*iterator);
+        if (!decoder)
+          return ntl::unexpected(STATUS_NOT_SUPPORTED);
+        decoder->reset();
+        result.decoders_.push_back({std::move(decoder), false});
+      }
+      for (const auto &coding : *codings) {
+        auto encoder = encoders.create(coding);
+        if (!encoder)
+          return ntl::unexpected(STATUS_NOT_SUPPORTED);
+        encoder->reset();
+        result.encoders_.push_back({std::move(encoder), false});
+      }
+      return ntl::ok(std::move(result));
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+  ntl::result<content_stream_chunk>
+  decode(std::span<const std::byte> input, bool final) noexcept {
+    if (decode_final_) {
+      if (!input.empty())
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      return ntl::ok(content_stream_chunk{{}, final});
+    }
+    if (input.size() > limits_.maximum_input_chunk_size ||
+        content_stream_detail::add_would_overflow(
+            encoded_input_size_, input.size(),
+            limits_.maximum_encoded_stream_size))
+      return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+    encoded_input_size_ += input.size();
+
+    try {
+      std::vector<std::byte> current(input.begin(), input.end());
+      bool stage_final = final;
+      for (auto &stage : decoders_) {
+        if (stage.complete) {
+          if (!current.empty())
+            return ntl::unexpected(STATUS_DATA_ERROR);
+          stage_final = true;
+          continue;
+        }
+        decoded_output output(limits_.maximum_stage_output_chunk_size);
+        const auto view = ntl::net::scatter_view::from_contiguous(
+            std::span<const std::byte>(current));
+        const decode_result result = stage.codec->decode(view, stage_final,
+                                                          output);
+        if (result.state() == decode_state::malformed)
+          return ntl::unexpected(result.error() == STATUS_SUCCESS
+                                     ? STATUS_DATA_ERROR
+                                     : result.error());
+        if (stage_final && result.state() != decode_state::complete)
+          return ntl::unexpected(STATUS_END_OF_FILE);
+        stage.complete = result.state() == decode_state::complete;
+        current = output.release();
+        stage_final = stage.complete;
+      }
+      if (decoders_.empty())
+        stage_final = final;
+      if (final && !stage_final)
+        return ntl::unexpected(STATUS_END_OF_FILE);
+      if (content_stream_detail::add_would_overflow(
+              decoded_output_size_, current.size(),
+              limits_.maximum_decoded_stream_size))
+        return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+      decoded_output_size_ += current.size();
+      if (content_stream_detail::expansion_exceeded(
+              decoded_output_size_, encoded_input_size_,
+              limits_.maximum_expansion_ratio,
+              limits_.expansion_slack_size))
+        return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+      decode_final_ = stage_final;
+      return ntl::ok(content_stream_chunk{
+          std::move(current), final && stage_final});
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+  ntl::result<content_stream_chunk>
+  encode(std::span<const std::byte> input, bool final) noexcept {
+    if (encode_final_) {
+      if (!input.empty())
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      return ntl::ok(content_stream_chunk{{}, final});
+    }
+    if (input.size() > limits_.maximum_stage_output_chunk_size ||
+        content_stream_detail::add_would_overflow(
+            transformed_input_size_, input.size(),
+            limits_.maximum_transformed_stream_size))
+      return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+    transformed_input_size_ += input.size();
+
+    try {
+      std::vector<std::byte> current(input.begin(), input.end());
+      bool stage_final = final;
+      for (auto &stage : encoders_) {
+        if (stage.complete) {
+          if (!current.empty())
+            return ntl::unexpected(STATUS_DATA_ERROR);
+          stage_final = true;
+          continue;
+        }
+        encoded_output output(limits_.maximum_stage_output_chunk_size);
+        const encode_result result = stage.codec->encode(
+            current, stage_final, output);
+        if (result.state() == encode_state::malformed)
+          return ntl::unexpected(result.error() == STATUS_SUCCESS
+                                     ? STATUS_DATA_ERROR
+                                     : result.error());
+        if (stage_final && result.state() != encode_state::complete)
+          return ntl::unexpected(STATUS_END_OF_FILE);
+        stage.complete = result.state() == encode_state::complete;
+        current = output.release();
+        stage_final = stage.complete;
+      }
+      if (encoders_.empty())
+        stage_final = final;
+      if (final && !stage_final)
+        return ntl::unexpected(STATUS_END_OF_FILE);
+      if (content_stream_detail::add_would_overflow(
+              encoded_output_size_, current.size(),
+              limits_.maximum_output_stream_size))
+        return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+      encoded_output_size_ += current.size();
+      if (content_stream_detail::expansion_exceeded(
+              encoded_output_size_, transformed_input_size_,
+              limits_.maximum_expansion_ratio,
+              limits_.expansion_slack_size))
+        return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+      encode_final_ = stage_final;
+      return ntl::ok(content_stream_chunk{std::move(current), stage_final});
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+  std::string_view content_encoding() const noexcept { return coding_; }
+  std::uint64_t encoded_input_size() const noexcept {
+    return encoded_input_size_;
+  }
+  std::uint64_t decoded_output_size() const noexcept {
+    return decoded_output_size_;
+  }
+  std::uint64_t transformed_input_size() const noexcept {
+    return transformed_input_size_;
+  }
+  std::uint64_t encoded_output_size() const noexcept {
+    return encoded_output_size_;
+  }
+  bool decode_finished() const noexcept { return decode_final_; }
+  bool encode_finished() const noexcept { return encode_final_; }
+
+private:
+  explicit content_encoding_stream(content_stream_limits limits) noexcept
+      : limits_(limits) {}
+
+  static bool valid(const content_stream_limits &limits) noexcept {
+    return limits.maximum_input_chunk_size != 0 &&
+           limits.maximum_stage_output_chunk_size != 0 &&
+           limits.maximum_encoded_stream_size != 0 &&
+           limits.maximum_decoded_stream_size != 0 &&
+           limits.maximum_transformed_stream_size != 0 &&
+           limits.maximum_output_stream_size != 0 &&
+           limits.maximum_expansion_ratio != 0 &&
+           limits.maximum_coding_layers != 0;
+  }
+
+  content_stream_limits limits_{};
+  std::string coding_;
+  std::vector<content_stream_detail::decoder_stage> decoders_;
+  std::vector<content_stream_detail::encoder_stage> encoders_;
+  std::uint64_t encoded_input_size_ = 0;
+  std::uint64_t decoded_output_size_ = 0;
+  std::uint64_t transformed_input_size_ = 0;
+  std::uint64_t encoded_output_size_ = 0;
+  bool decode_final_ = false;
+  bool encode_final_ = false;
+};
+
+} // namespace ntl::net::inspection

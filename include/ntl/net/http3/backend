@@ -32,6 +32,7 @@ struct quic_backend_capabilities {
   bool bidirectional_streams = false;
   bool unidirectional_streams = false;
   bool quic_datagrams = false;
+  bool reliable_reset_at = false;
   bool extended_connect = false;
   bool webtransport = false;
   bool origin_client = false;
@@ -73,6 +74,16 @@ public:
       ntl::net::scatter_view) noexcept {
     return STATUS_NOT_SUPPORTED;
   }
+  virtual ntl::status on_peer_send_aborted(
+      std::uint64_t, std::uint64_t) noexcept {
+    return ntl::status::ok();
+  }
+  virtual ntl::status on_peer_receive_aborted(
+      std::uint64_t, std::uint64_t) noexcept {
+    return ntl::status::ok();
+  }
+  virtual void on_datagram_send_state(bool, std::size_t) noexcept {}
+  virtual void on_reliable_reset_negotiated(bool) noexcept {}
   virtual void on_closed(NTSTATUS status) noexcept = 0;
 };
 
@@ -100,12 +111,30 @@ public:
       std::uint64_t &) noexcept {
     return STATUS_NOT_SUPPORTED;
   }
+  virtual ntl::status open_request_stream(
+      std::uint64_t &stream_id) noexcept {
+    return open_bidirectional_stream(stream_id);
+  }
   virtual ntl::status open_unidirectional_stream(
       std::uint64_t &) noexcept {
     return STATUS_NOT_SUPPORTED;
   }
   virtual ntl::status send_datagram(
       ntl::net::scatter_view) noexcept {
+    return STATUS_NOT_SUPPORTED;
+  }
+  /** Aborts both directions of one ordinary QUIC stream. */
+  virtual ntl::status reset_stream(
+      std::uint64_t, std::uint64_t) noexcept {
+    return STATUS_NOT_SUPPORTED;
+  }
+  /**
+   * Aborts the send side after keeping a negotiated prefix reliable.
+   * This is a WebTransport extension and is not a substitute for reset_stream.
+   */
+  virtual ntl::status reset_stream_at(
+      std::uint64_t, std::uint64_t,
+      std::uint64_t) noexcept {
     return STATUS_NOT_SUPPORTED;
   }
   virtual void stop() noexcept = 0;

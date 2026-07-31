@@ -5,8 +5,8 @@
 This observation-only driver/controller pair covers the core WDK `msnmntr`
 flow-lifetime mechanism without its protocol-specific application parsing.
 
-- `ALE_FLOW_ESTABLISHED_V4` creates typed per-flow state.
-- `STREAM_V4` counts indications, indicated bytes, and missed bytes.
+- `ALE_FLOW_ESTABLISHED_V4/V6` creates typed per-flow state.
+- `STREAM_V4/V6` counts indications, indicated bytes, and missed bytes.
 - Flow deletion destroys the typed context and increments the closed count.
 - A secure, administrator/system-only control device exposes a read-only
   typed stats IOCTL.

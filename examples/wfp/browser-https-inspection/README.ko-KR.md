@@ -84,7 +84,8 @@ identity와 gzip/deflate/Brotli HTML, 잘못된 CA와 호스트, upstream body �
 범용 구현은 `include/ntl`의 `http3_backend`, `http3_msh3_backend`,
 `http3_msh3_client`, `http3_inspection_proxy`,
 `http3_standard_inspection_proxy`, `http3_qpack`, `http_datagram`,
-`http_extended_connect`, `webtransport_http3`, `tls_inspection_frontend`에
+`http_extended_connect`, `webtransport_http3`, `webtransport_session`,
+`content_stream`, `tls_inspection_frontend`, `tls_product_backend`에
 있습니다. HTTP/3 검사 프록시는 요청을 검증하고 SNI와 `:authority`를
 결속하며 제한된 디코딩과 typed 요청/응답 정책을 적용합니다. origin
 adapter에는 검증을 마친 요청만 전달합니다.
@@ -163,19 +164,25 @@ VM packaging과 전후 상태 검사는
 
 TCP 경로는 Schannel이 협상하는 TLS 1.2/1.3, HTTP/1.1 HTML, 검증된
 `permessage-deflate`가 있는 RFC 6455 WebSocket, multiplexed HTTP/2 HTML을
-지원합니다. HTTP/1.1과 HTTP/2는 제한된 gzip, zlib `deflate`, Brotli
-decoder를 공유합니다. coding 깊이, 입력·출력 크기, 확장 비율, checksum,
-잘린 입력, 연결 수 제한을 넘으면 fail closed합니다.
+지원합니다. HTTP/1.1, HTTP/2, HTTP/3는 제한된 gzip, zlib `deflate`, Brotli
+decoder와 encoder를 공유합니다. 증분 스트리밍 API는 메시지마다 codec chain
+상태를 따로 유지하므로 임의의 HTTP chunk/DATA 분할에서도 압축 상태를
+초기화하지 않으며 전체 body를 한 번에 보관할 필요가 없습니다. coding 깊이,
+입력·출력 크기, 확장 비율, checksum, 잘린 입력, 연결 수 제한을 넘으면 fail
+closed합니다.
 
 NTL HTTP/3 계층에는 분할 frame 재조립, 제한된 동적 RFC 9204 QPACK,
 RFC 9297 HTTP Datagram과 Capsule framing, HTTP/2·HTTP/3 extended CONNECT
 검증, 제한된 WebTransport-over-HTTP/3 parser가 있습니다.
 
-현재 고정된 msh3 server backend는 일반 요청·응답 callback은 제공하지만
-raw 양방향·단방향 stream과 QUIC Datagram callback은 제공하지 않습니다.
-따라서 live extended CONNECT, HTTP Datagram, WebTransport는 backend
-capability에서 지원하지 않는다고 보고합니다. NTL parser 구현이 있다는 것과
-현재 예제 transport에서 실제로 전달할 수 있다는 것은 구분합니다.
+고수준 msh3 server backend는 일반 요청·응답 callback만 제공하지만, 별도의
+raw MsQuic backend는 request, 양방향·단방향 stream, QUIC Datagram,
+reliable-reset-at event를 제공합니다. 실제 loopback contract는 TLS 1.3/h3를
+협상하고 SETTINGS와 QPACK Extended CONNECT를 교환한 뒤 WebTransport 양방향
+stream, 단방향 stream, HTTP Datagram을 전송합니다. 또한 여러 번 쓸 수 있는
+stream을 열고 32비트 application error를 draft HTTP/3 범위로 매핑한 뒤,
+상대가 session prefix가 보장된 reset을 받는지 검증합니다. preview
+reliable-reset-at API를 사용할 수 없으면 WebTransport capability는 false입니다.
 
 ## 보안 경계
 
@@ -209,6 +216,14 @@ anchor를 Chromium QUIC의 `known root`로 바꾸지는 않습니다. 따라서 
 얻을 수 없는 신뢰 결정을 소유할 수 있습니다. 이 예제의 NTL 관리형
 클라이언트가 바로 그 구조를 보여 줍니다.
 
-임의 ECH, pinning 우회, 관리되지 않는 client-certificate 자동 선택, 443 이외
-origin, 수정되지 않은 일반 브라우저의 투명 HTTP/3 MITM, 현재 msh3 backend의
-live WebTransport는 이 runtime이 지원한다고 주장하지 않습니다.
+제품 TLS contract는 관리형 identity 선택, 실제 ECH frontend가 소유한 plaintext
+channel 인계, 명시적인 origin mTLS 선택, 제한된 audit를 제공합니다. 하지만
+private ECH configuration을 만들거나 endpoint pinning을 우회할 권한을 제공하지
+않습니다.
+
+구성된 frontend가 없는 임의 공개 ECH, pinning 우회, 관리되지 않는
+client-certificate 자동 선택, 443 이외 origin, 수정되지 않은 일반 브라우저의
+투명 HTTP/3 MITM, 그 private-CA 경로를 통한 브라우저 WebTransport는 이
+runtime이 지원한다고 주장하지 않습니다. raw MsQuic WebTransport loopback은
+실제 transport 시험이지만 Chromium이 enterprise/private CA를 QUIC에
+허용한다는 증거는 아닙니다.

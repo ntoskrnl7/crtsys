@@ -10,7 +10,9 @@
 #include <string>
 
 #include <ntl/net/io/async_socket>
+#include <ntl/net/http/transform>
 #include <ntl/net/inspection/content_decoder>
+#include <ntl/net/inspection/content_encoder>
 #include <ntl/net/tls/acceptor>
 #include <ntl/net/tls/inspection_frontend>
 #include <ntl/net/tls/stream>
@@ -34,6 +36,8 @@ coroutine_task<browser_proxy_result> run_browser_proxy(
     ntl::net::inspection::origin_client_identity_provider
         &origin_identities,
     const ntl::net::inspection::content_decoder_registry &decoders,
+    const ntl::net::inspection::content_encoder_registry &encoders,
+    const ntl::net::http::transform_pipeline &transforms,
     browser_html_logger &logger);
 
 } // namespace crtsys::wfp_sample::browser_https

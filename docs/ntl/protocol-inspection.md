@@ -3,20 +3,22 @@
 [Back to NTL documentation](./README.md)
 
 NTL separates complete reusable protocol contracts from product-selected
-backends. This prevents an application from treating “some plaintext bytes”
-as a complete HTTP message or silently permitting traffic merely because a
-decoder is unavailable.
+backends. This prevents an application from treating arbitrary plaintext
+bytes as a complete HTTP message or silently permitting traffic merely because
+a decoder is unavailable.
 
 ## Support layers
 
 | Layer | NTL supplies | Application or product supplies |
 | --- | --- | --- |
 | HTTP/1.1 | Bounded request/response framing, validated length and chunked boundaries | Semantic policy and decoded-body handling |
-| WebSocket | Bounded RFC 6455 frame parsing, mask-direction checks, control-frame rules, fragmented-message assembly, and negotiated `permessage-deflate` decoding | Message policy and nonstandard negotiated extensions |
+| WebSocket | Bounded RFC 6455 framing, fragmented-message assembly, semantic rewrite, negotiated `permessage-deflate` decode/re-encode, masking, and output fragmentation | Subprotocol schema and nonstandard negotiated extensions |
 | HTTP/2 | Bounded frame validation, HEADERS/CONTINUATION assembly, complete bounded HPACK decoding, decoded-header/DATA inspection routing | Semantic policy and one decoder/inspector instance per connection direction |
 | HTTP/3 | QUIC-varint HTTP/3 frame validation, split-stream assembly, decoded-header/DATA routing, and a bounded zero-dynamic-table QPACK decoder | QUIC transport, stream lifecycle, and a stateful QPACK provider when a dynamic table is negotiated |
-| Content coding | Bounded decoder sink, registry, reverse decoding of coding chains, and gzip/RFC 1950 deflate/Brotli adapters | Zstandard, dictionary, or proprietary decoder adapters |
-| TLS | Schannel coroutine stream, ClientHello observation, ALPN, explicit client certificate and mTLS authorization | Authorized issuer/trust deployment, identity selection, ECH frontend when required |
+| gRPC | Incremental five-byte message framing, negotiated message compression, semantic rewrite, and re-encoding over HTTP/2 or HTTP/3 DATA | Protobuf or other application schema |
+| WebTransport | Draft-16 SETTINGS, QPACK Extended CONNECT, real bidirectional/unidirectional streams and HTTP Datagrams over the raw MsQuic backend, plus bounded semantic policy | Application payload schema and deployment trust model |
+| Content coding | Bounded decoder/encoder registries, reverse decoding and sender-order encoding of chains, and gzip/RFC 1950 deflate/Brotli adapters | Zstandard, dictionary, or proprietary adapters |
+| TLS | Schannel coroutine stream, ClientHello observation, ALPN, managed downstream identity selection, frontend-owned ECH plaintext handoff, explicit mTLS authorization, and bounded audit | Authorized issuer/trust deployment, actual ECH key/configuration provider, and product identity inventory |
 
 `<ntl/net/http2/hpack>` supplies the complete RFC 7541 static table, dynamic table,
 integer representation, literal forms, and Huffman decoder. Dynamic-table and
@@ -81,6 +83,54 @@ frontend has authenticated and decrypted the inner ClientHello and supplied
 the resulting server name. Certificate pinning cannot be transparently
 defeated by this API. Mutual TLS cannot guess which client identity represents
 the user.
+
+`<ntl/net/tls/product_policy>` combines these observations with actual
+deployed capabilities. It returns only actions a product can execute:
+intercept, tunnel unchanged ciphertext, record metadata, terminate, or block
+QUIC for a normal TCP retry. `when_possible` may tunnel a pinned or ECH
+connection unchanged; `required` terminates it. Neither mode disables browser
+certificate validation or pretends to decrypt opaque traffic.
+
+`<ntl/net/tls/product_backend>` is the corresponding execution boundary. It
+returns either a cached Schannel server identity or the owned plaintext channel
+created by a successful ECH frontend, after application/host trust
+classification. It also wraps origin mTLS selection with bounded audit events.
+The API never treats a bare ECH extension, a candidate key, or a pinned client
+as successful interception.
+
+## Semantic transforms
+
+`<ntl/net/http/transform>` is shared by HTTP/1.1, HTTP/2, and HTTP/3 complete
+messages. `<ntl/net/http/async_transform>` adds a fixed worker pool, bounded
+queue, cooperative cancellation, deadlines, overload policy, and statistics.
+`<ntl/net/http/stream_transform>` handles bounded plaintext body chunks when a
+complete-body allocation is undesirable. Its per-message
+`content_encoding_stream` incrementally decodes and re-encodes registered
+`Content-Encoding` chains across arbitrary H1 chunk, H2 DATA, or H3 DATA
+splits. The corresponding live wire/event adapters are
+`<ntl/net/http/http1_stream_transform>`,
+`<ntl/net/http2/stream_transform>`, and
+`<ntl/net/http3/stream_transform>`. Stateful callbacks are constructed once per
+message, so multiplexed streams never share partial application records.
+Separate semantic adapters cover
+WebSocket (`<ntl/net/websocket/transform>`), gRPC
+(`<ntl/net/grpc/transform>`), and WebTransport
+(`<ntl/net/http3/webtransport_transform>`).
+
+The adapters preserve each protocol's authority boundary: HTTP/2 and HTTP/3
+flow-control credit stays with the connection backend, WebSocket client output
+is re-masked, gRPC compressed messages are decoded and re-encoded with the
+negotiated coding, and WebTransport flow-control capsules are not mutable
+content.
+
+`<ntl/net/http3/webtransport_session>` binds the WebTransport semantic layer
+to a real QUIC backend: it exchanges draft-16 SETTINGS, emits/accepts static
+QPACK Extended CONNECT HEADERS, writes session stream prefixes, and sends HTTP
+Datagrams. A move-only stream authority supports multiple writes and either FIN
+or a mapped 32-bit application reset; the reset keeps the session prefix
+reliable with MsQuic's preview reliable-offset API. The raw MsQuic backend
+advertises WebTransport only when reliable-reset-at and QUIC Datagrams are
+available and negotiated.
 
 ## Managed HTTP/3 client
 

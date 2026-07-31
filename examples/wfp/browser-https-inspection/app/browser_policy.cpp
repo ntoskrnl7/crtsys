@@ -15,7 +15,7 @@
 namespace crtsys::wfp_sample::browser_https {
 
 void install_browser_policy(
-    ntl::wfp::dynamic_session &session,
+    ntl::wfp::policy_session &session,
     const ntl::wfp::application_id &browser,
     std::uint16_t proxy_port_v4,
     std::uint16_t proxy_port_v6,
@@ -56,7 +56,8 @@ void install_browser_policy(
         filter_v4(
             wfp_browser_https_inspection::filter_key_v4,
             L"Redirect one browser executable's IPv4 HTTPS",
-            {::GetCurrentProcessId(), proxy_port_v4});
+            {::GetCurrentProcessId(), proxy_port_v4},
+            ntl::wfp::callout_unavailable::permit);
     filter_v4.description(
                  L"Application ID, TCP, and remote port 443 are exact")
         .application_equal(browser)
@@ -70,7 +71,8 @@ void install_browser_policy(
         filter_v6(
             wfp_browser_https_inspection::filter_key_v6,
             L"Redirect one browser executable's IPv6 HTTPS",
-            {::GetCurrentProcessId(), proxy_port_v6});
+            {::GetCurrentProcessId(), proxy_port_v6},
+            ntl::wfp::callout_unavailable::permit);
     filter_v6.description(
                  L"Application ID, TCP, and remote port 443 are exact")
         .application_equal(browser)
@@ -87,7 +89,8 @@ void install_browser_policy(
                   quic_redirect_filter_key_v4,
               L"Redirect one browser executable's IPv4 HTTP/3",
               {::GetCurrentProcessId(),
-               *quic_proxy_port_v4});
+               *quic_proxy_port_v4},
+              ntl::wfp::callout_unavailable::permit);
       quic_redirect_v4
           .description(
               L"Application ID, UDP, and remote port 443 are exact")
@@ -104,7 +107,8 @@ void install_browser_policy(
                   quic_redirect_filter_key_v6,
               L"Redirect one browser executable's IPv6 HTTP/3",
               {::GetCurrentProcessId(),
-               *quic_proxy_port_v6});
+               *quic_proxy_port_v6},
+              ntl::wfp::callout_unavailable::permit);
       quic_redirect_v6
           .description(
               L"Application ID, UDP, and remote port 443 are exact")
@@ -135,7 +139,8 @@ void install_browser_policy(
         wfp_browser_https_inspection::quic_layer_v4>
         quic_filter_v4(
             wfp_browser_https_inspection::quic_filter_key_v4,
-            L"Block one browser executable's IPv4 QUIC fallback");
+            L"Block one browser executable's IPv4 QUIC fallback",
+            ntl::wfp::callout_unavailable::block);
     quic_filter_v4.description(
                        L"Prevent UDP 443 from bypassing TLS inspection")
         .application_equal(browser)
@@ -148,7 +153,8 @@ void install_browser_policy(
         wfp_browser_https_inspection::quic_layer_v6>
         quic_filter_v6(
             wfp_browser_https_inspection::quic_filter_key_v6,
-            L"Block one browser executable's IPv6 QUIC fallback");
+            L"Block one browser executable's IPv6 QUIC fallback",
+            ntl::wfp::callout_unavailable::block);
     quic_filter_v6.description(
                        L"Prevent UDP 443 from bypassing TLS inspection")
         .application_equal(browser)
@@ -160,7 +166,7 @@ void install_browser_policy(
 }
 
 void install_managed_http3_redirect_policy(
-    ntl::wfp::dynamic_session &session,
+    ntl::wfp::policy_session &session,
     const ntl::wfp::application_id &client,
     std::uint16_t quic_proxy_port) {
   if (quic_proxy_port == 0)
@@ -200,7 +206,8 @@ void install_managed_http3_redirect_policy(
                     quic_redirect_filter_key_v4,
                 L"Redirect managed client IPv4 UDP 443",
                 {::GetCurrentProcessId(), quic_proxy_port,
-                 ntl::wfp::original_destination_context::omit});
+                 ntl::wfp::original_destination_context::omit},
+                ntl::wfp::callout_unavailable::permit);
         filter_v4
             .description(
                 L"Exact application, UDP, and remote port 443")
@@ -217,7 +224,8 @@ void install_managed_http3_redirect_policy(
                     quic_redirect_filter_key_v6,
                 L"Redirect managed client IPv6 UDP 443",
                 {::GetCurrentProcessId(), quic_proxy_port,
-                 ntl::wfp::original_destination_context::omit});
+                 ntl::wfp::original_destination_context::omit},
+                ntl::wfp::callout_unavailable::permit);
         filter_v6
             .description(
                 L"Exact application, UDP, and remote port 443")

@@ -25,6 +25,7 @@ struct http1_framing_limits {
   std::size_t maximum_chunk_line_size = 4 * 1024;
   std::size_t maximum_trailer_size = 16 * 1024;
   bool allow_close_delimited_response = false;
+  bool response_body_forbidden = false;
 };
 
 namespace detail {
@@ -505,8 +506,8 @@ inline ntl::net::framing::frame_probe probe_chunked(
  *
  * Requests without Content-Length or Transfer-Encoding have no body.
  * Responses require an explicit body boundary except 1xx, 204, and 304
- * unless the caller explicitly enables authenticated/transport EOF
- * finalization for a close-delimited response.
+ * unless the caller explicitly marks a HEAD response or enables
+ * authenticated/transport EOF finalization for a close-delimited response.
  * Transfer-Encoding is accepted only when its final coding is chunked.
  * The returned content is the complete wire message; chunk decoding and
  * content decoding are deliberately separate policy stages.
@@ -599,6 +600,18 @@ private:
         (headers.has_transfer_encoding &&
          !headers.final_transfer_is_chunked))
       return ntl::net::framing::frame_probe::malformed();
+
+    const bool body_forbidden =
+        kind_ == http1_message_kind::response &&
+        (limits_.response_body_forbidden ||
+         (response_status >= 100 && response_status < 200) ||
+         response_status == 204 || response_status == 304);
+    if (body_forbidden) {
+      if (headers.has_transfer_encoding)
+        return ntl::net::framing::frame_probe::malformed();
+      return ntl::net::framing::frame_probe::complete(
+          header_end, 0, header_end);
+    }
 
     if (headers.has_transfer_encoding)
       return detail::probe_chunked(bytes, header_end, limits_);

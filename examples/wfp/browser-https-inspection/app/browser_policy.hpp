@@ -8,7 +8,7 @@
 namespace crtsys::wfp_sample::browser_https {
 
 void install_browser_policy(
-    ntl::wfp::dynamic_session &session,
+    ntl::wfp::policy_session &session,
     const ntl::wfp::application_id &browser,
     std::uint16_t proxy_port_v4,
     std::uint16_t proxy_port_v6,
@@ -24,7 +24,7 @@ void install_browser_policy(
  * fail-closed TCP fallback unless those requirements are met.
  */
 void install_managed_http3_redirect_policy(
-    ntl::wfp::dynamic_session &session,
+    ntl::wfp::policy_session &session,
     const ntl::wfp::application_id &client,
     std::uint16_t quic_proxy_port);
 

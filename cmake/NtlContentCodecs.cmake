@@ -44,11 +44,20 @@ endif()
 
 if(NOT TARGET crtsys_ntl_content_codecs)
   add_library(crtsys_ntl_content_codecs INTERFACE)
+  if(MSVC)
+    target_compile_options(
+      crtsys_ntl_content_codecs
+      INTERFACE
+        "$<$<AND:$<COMPILE_LANGUAGE:C,CXX>,$<CONFIG:Debug>>:/MTd>"
+        "$<$<AND:$<COMPILE_LANGUAGE:C,CXX>,$<NOT:$<CONFIG:Debug>>>:/MT>"
+    )
+  endif()
   target_link_libraries(
     crtsys_ntl_content_codecs
     INTERFACE
       ZLIB::ZLIBSTATIC
       brotlidec
+      brotlienc
       brotlicommon
   )
 endif()

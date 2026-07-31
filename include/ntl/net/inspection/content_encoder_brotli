@@ -1,0 +1,110 @@
+/**
+ * @file content_encoder_brotli
+ * @brief Bounded Brotli adapter for content_encoder.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/inspection/content_encoder_brotli is a user-mode header"
+#endif
+
+#include <ntl/net/inspection/content_encoder>
+
+#include <algorithm>
+#include <memory>
+#include <array>
+#include <cstdint>
+#include <span>
+
+#include <brotli/encode.h>
+
+namespace ntl::net::inspection {
+
+class brotli_content_encoder {
+public:
+  brotli_content_encoder() noexcept = default;
+  brotli_content_encoder(const brotli_content_encoder &) = delete;
+  brotli_content_encoder &operator=(const brotli_content_encoder &) = delete;
+
+  ~brotli_content_encoder() { release(); }
+
+  void reset() noexcept {
+    release();
+    ended_ = false;
+  }
+
+  encode_result encode(std::span<const std::byte> input, bool final,
+                       encoded_output &output) noexcept {
+    if (ended_)
+      return encode_result::malformed(STATUS_INVALID_DEVICE_STATE);
+    if (!initialize())
+      return encode_result::malformed(STATUS_INSUFFICIENT_RESOURCES);
+
+    const std::uint8_t *next_in =
+        reinterpret_cast<const std::uint8_t *>(input.data());
+    std::size_t available_in = input.size();
+    const BrotliEncoderOperation operation =
+        final ? BROTLI_OPERATION_FINISH : BROTLI_OPERATION_PROCESS;
+    for (;;) {
+      std::array<std::byte, 16 * 1024> buffer{};
+      const std::size_t remaining = output.maximum_size() - output.size();
+      std::size_t available_out =
+          remaining == 0 ? 1 : (std::min)(remaining, buffer.size());
+      std::uint8_t *next_out =
+          reinterpret_cast<std::uint8_t *>(buffer.data());
+      const std::size_t capacity = available_out;
+      const BROTLI_BOOL encoded = ::BrotliEncoderCompressStream(
+          state_, operation, &available_in, &next_in, &available_out,
+          &next_out, nullptr);
+      if (!encoded)
+        return encode_result::malformed(STATUS_DATA_ERROR);
+      const std::size_t produced = capacity - available_out;
+      if (produced > remaining)
+        return encode_result::malformed(STATUS_BUFFER_OVERFLOW);
+      if (produced != 0) {
+        const ntl::status appended = output.append(
+            std::span<const std::byte>(buffer.data(), produced));
+        if (!appended.is_ok())
+          return encode_result::malformed(static_cast<NTSTATUS>(appended));
+      }
+      if (::BrotliEncoderIsFinished(state_)) {
+        if (available_in != 0)
+          return encode_result::malformed(STATUS_DATA_ERROR);
+        ended_ = true;
+        return encode_result::complete();
+      }
+      if (available_in == 0 &&
+          !::BrotliEncoderHasMoreOutput(state_) && !final)
+        return encode_result::need_more_input();
+      if (available_in == 0 && produced == 0 && final)
+        return encode_result::malformed(STATUS_DATA_ERROR);
+    }
+  }
+
+private:
+  bool initialize() noexcept {
+    if (state_)
+      return true;
+    state_ = ::BrotliEncoderCreateInstance(nullptr, nullptr, nullptr);
+    return state_ != nullptr;
+  }
+
+  void release() noexcept {
+    if (state_)
+      ::BrotliEncoderDestroyInstance(state_);
+    state_ = nullptr;
+  }
+
+  BrotliEncoderState *state_ = nullptr;
+  bool ended_ = false;
+};
+
+inline void register_brotli_content_encoder(
+    content_encoder_registry &registry) {
+  registry.add("br", [] {
+    return std::make_unique<
+        content_encoder_adapter<brotli_content_encoder>>();
+  });
+}
+
+} // namespace ntl::net::inspection

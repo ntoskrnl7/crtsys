@@ -26,6 +26,14 @@ inline NTSTATUS NTAPI accept_filter_notification(
     FWPS_CALLOUT_NOTIFY_TYPE, const GUID *, FWPS_FILTER2 *) noexcept {
   return STATUS_SUCCESS;
 }
+
+template <auto Callback>
+struct bfe_state_adapter {
+  static void CALLBACK invoke(
+      void *, FWPM_SERVICE_STATE state) noexcept {
+    Callback(state);
+  }
+};
 } // namespace detail
 
 /**
@@ -52,6 +60,35 @@ public:
   ~callout_driver() {
     const ntl::status result = reset();
     NT_ASSERT(result.is_ok());
+  }
+
+  /**
+   * @brief Subscribes once to BFE state changes for service reconciliation.
+   *
+   * The callback runs at PASSIVE_LEVEL and must only signal bounded,
+   * nonblocking driver state. A user-mode policy service can then call
+   * policy_session::recover() after observing BFE_RUNNING.
+   */
+  template <auto Callback>
+  ntl::status watch_bfe() noexcept {
+    static_assert(
+        std::is_nothrow_invocable_r_v<
+            void, decltype(Callback), FWPM_SERVICE_STATE>,
+        "a BFE state callback must be noexcept and accept FWPM_SERVICE_STATE");
+    if (!device_ || !device_->native_handle())
+      return STATUS_INVALID_DEVICE_STATE;
+    if (bfe_subscription_)
+      return STATUS_ALREADY_REGISTERED;
+    const NTSTATUS result =
+        FwpmBfeStateSubscribeChanges0(
+            device_->native_handle(),
+            &detail::bfe_state_adapter<Callback>::invoke,
+            nullptr, &bfe_subscription_);
+    return result;
+  }
+
+  FWPM_SERVICE_STATE bfe_state() const noexcept {
+    return FwpmBfeStateGet0();
   }
 
   /**
@@ -199,6 +236,14 @@ public:
    * the same cleanup path.
    */
   [[nodiscard]] ntl::status reset() noexcept {
+    if (bfe_subscription_) {
+      const NTSTATUS unsubscribed =
+          FwpmBfeStateUnsubscribeChanges0(
+              bfe_subscription_);
+      if (!NT_SUCCESS(unsubscribed))
+        return unsubscribed;
+      bfe_subscription_ = nullptr;
+    }
     while (count_ != 0) {
       registration &entry = registrations_[count_ - 1];
       if (entry.flow) {
@@ -230,6 +275,7 @@ private:
   std::shared_ptr<ntl::device<void>> device_;
   std::array<registration, Capacity> registrations_{};
   std::size_t count_ = 0;
+  HANDLE bfe_subscription_ = nullptr;
 };
 
 } // namespace ntl::wfp

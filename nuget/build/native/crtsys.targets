@@ -5,8 +5,14 @@
     <CrtSysIsDriverProject Condition="'$(CrtSysIsDriverProject)' == ''">false</CrtSysIsDriverProject>
     <CrtSysUseDriverSupport Condition="'$(CrtSysUseDriverSupport)' == '' and '$(CrtSysIsDriverProject)' == 'true'">true</CrtSysUseDriverSupport>
     <CrtSysUseDriverSupport Condition="'$(CrtSysUseDriverSupport)' == ''">false</CrtSysUseDriverSupport>
+    <CrtSysUseNtlContentCodecs Condition="'$(CrtSysUseNtlContentCodecs)' == '' and '$(CrtSysIsDriverProject)' != 'true'">true</CrtSysUseNtlContentCodecs>
+    <CrtSysUseNtlContentCodecs Condition="'$(CrtSysUseNtlContentCodecs)' == ''">false</CrtSysUseNtlContentCodecs>
     <CrtSysLibPlatform Condition="'$(CrtSysLibPlatform)' == '' and '$(Platform)' == 'Win32'">x86</CrtSysLibPlatform>
     <CrtSysLibPlatform Condition="'$(CrtSysLibPlatform)' == ''">$(Platform)</CrtSysLibPlatform>
+    <CrtSysTargetArchitectureDefinition Condition="'$(CrtSysTargetArchitectureDefinition)' == '' and '$(CrtSysLibPlatform)' == 'x86'">_X86_</CrtSysTargetArchitectureDefinition>
+    <CrtSysTargetArchitectureDefinition Condition="'$(CrtSysTargetArchitectureDefinition)' == '' and '$(CrtSysLibPlatform)' == 'x64'">_AMD64_</CrtSysTargetArchitectureDefinition>
+    <CrtSysTargetArchitectureDefinition Condition="'$(CrtSysTargetArchitectureDefinition)' == '' and '$(CrtSysLibPlatform)' == 'ARM'">_ARM_</CrtSysTargetArchitectureDefinition>
+    <CrtSysTargetArchitectureDefinition Condition="'$(CrtSysTargetArchitectureDefinition)' == '' and '$(CrtSysLibPlatform)' == 'ARM64'">_ARM64_</CrtSysTargetArchitectureDefinition>
     <CrtSysEntryPointSuffix Condition="'$(CrtSysEntryPointSuffix)' == '' and '$(CrtSysLibPlatform)' == 'x86'">@8</CrtSysEntryPointSuffix>
     <CrtSysEntryPointSuffix Condition="'$(CrtSysEntryPointSuffix)' == ''"></CrtSysEntryPointSuffix>
     <CrtSysLibraryConfiguration Condition="'$(CrtSysLibraryConfiguration)' == '' and ('$(Configuration)' == 'Debug' or '$(Configuration)' == 'Release')">$(Configuration)</CrtSysLibraryConfiguration>
@@ -24,6 +30,8 @@
     <CrtSysAllowToolsetFallback Condition="'$(CrtSysAllowToolsetFallback)' == ''">false</CrtSysAllowToolsetFallback>
     <CrtSysNativeLibRoot Condition="'$(CrtSysNativeLibRoot)' == '' and Exists('$(MSBuildThisFileDirectory)lib\native')">$(MSBuildThisFileDirectory)lib\native\</CrtSysNativeLibRoot>
     <CrtSysNativeLibRoot Condition="'$(CrtSysNativeLibRoot)' == ''">$(CrtSysRoot)lib\native\</CrtSysNativeLibRoot>
+    <CrtSysContentCodecRoot Condition="'$(CrtSysContentCodecRoot)' == ''">$(CrtSysRoot)build\native\codecs\</CrtSysContentCodecRoot>
+    <CrtSysContentCodecLibDir Condition="'$(CrtSysContentCodecLibDir)' == ''">$(CrtSysContentCodecRoot)lib\$(CrtSysLibToolset)\$(CrtSysLibPlatform)\$(CrtSysLibraryConfiguration)\</CrtSysContentCodecLibDir>
     <CrtSysHasToolsetLibLayout Condition="Exists('$(CrtSysNativeLibRoot)v142') or Exists('$(CrtSysNativeLibRoot)v143') or Exists('$(CrtSysNativeLibRoot)v145')">true</CrtSysHasToolsetLibLayout>
     <CrtSysExactLibDir>$(CrtSysNativeLibRoot)$(CrtSysLibToolset)\$(CrtSysLibPlatform)\$(CrtSysLibraryConfiguration)\</CrtSysExactLibDir>
     <CrtSysFallbackLibDir>$(CrtSysNativeLibRoot)v143\$(CrtSysLibPlatform)\$(CrtSysLibraryConfiguration)\</CrtSysFallbackLibDir>
@@ -155,6 +163,12 @@
     <Error
       Condition="'$(CrtSysUseDriverSupport)' == 'true' and !Exists('$(CrtSysLibDir)Ldk.lib')"
       Text="Ldk.lib was not found under '$(CrtSysLibDir)' for MSVC toolset '$(CrtSysLibToolset)'." />
+    <Error
+      Condition="'$(CrtSysUseNtlContentCodecs)' == 'true' and !Exists('$(CrtSysContentCodecRoot)include\zlib.h')"
+      Text="NTL content codec headers were not found under '$(CrtSysContentCodecRoot)include'. Reinstall a complete crtsys package or disable CrtSysUseNtlContentCodecs." />
+    <Error
+      Condition="'$(CrtSysUseNtlContentCodecs)' == 'true' and !Exists('$(CrtSysContentCodecLibDir)zlibstatic.lib')"
+      Text="NTL content codec libraries were not found under '$(CrtSysContentCodecLibDir)' for MSVC toolset '$(CrtSysLibToolset)', platform '$(CrtSysLibPlatform)', and configuration '$(CrtSysLibraryConfiguration)'." />
     <Message
       Importance="high"
       Condition="'$(CrtSysUseDriverSupport)' == 'true'"
@@ -169,12 +183,16 @@
     <ClCompile>
       <AdditionalIncludeDirectories Condition="'$(CrtSysUseDriverSupport)' == 'true'">$(CrtSysRoot)include;$(CrtSysRoot)include\.internal\msvc\$(VCToolsVersion);$(CrtSysRoot)include\.internal\msvc\$(PlatformToolsetVersion);$(CrtSysRoot)include\.internal\msvc\$(VCToolsVersion)\stl;$(CrtSysRoot)include\.internal\msvc\$(PlatformToolsetVersion)\stl;$(CrtSysRoot)include\.internal\msvc\143;$(CrtSysRoot)include\.internal\msvc\143\stl;$(CrtSysRoot)include\.internal\msvc\142;$(CrtSysRoot)include\.internal\msvc\142\stl;$(CrtSysRoot)include\.internal\msvc\141;$(CrtSysRoot)include\.internal\msvc\141\stl;$(VC_IncludePath);$(WindowsSDK_IncludePath);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalIncludeDirectories Condition="'$(CrtSysUseDriverSupport)' != 'true'">$(CrtSysRoot)include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories Condition="'$(CrtSysUseNtlContentCodecs)' == 'true'">$(CrtSysContentCodecRoot)include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <ForcedIncludeFiles Condition="'$(CrtSysUseDriverSupport)' == 'true'">$(CrtSysRoot)include\.internal\adjust_link_order;%(ForcedIncludeFiles)</ForcedIncludeFiles>
       <PreprocessorDefinitions Condition="'$(CrtSysUseDriverSupport)' == 'true'">$(CrtSysDriverPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions Condition="'$(CrtSysUseDriverSupport)' != 'true'">$(CrtSysTargetArchitectureDefinition);%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalOptions Condition="'$(CrtSysUseDriverSupport)' == 'true'">/Zc:__cplusplus %(AdditionalOptions)</AdditionalOptions>
       <AdditionalOptions Condition="'$(CrtSysUseDriverSupport)' != 'true'">/Zc:__cplusplus %(AdditionalOptions)</AdditionalOptions>
       <TreatWChar_tAsBuiltInType>true</TreatWChar_tAsBuiltInType>
       <RuntimeLibrary Condition="'$(CrtSysUseDriverSupport)' == 'true'">MultiThreaded</RuntimeLibrary>
+      <RuntimeLibrary Condition="'$(CrtSysUseNtlContentCodecs)' == 'true' and '$(Configuration)' == 'Debug'">MultiThreadedDebug</RuntimeLibrary>
+      <RuntimeLibrary Condition="'$(CrtSysUseNtlContentCodecs)' == 'true' and '$(Configuration)' != 'Debug'">MultiThreaded</RuntimeLibrary>
       <ExceptionHandling Condition="'$(CrtSysUseDriverSupport)' == 'true'">Sync</ExceptionHandling>
     </ClCompile>
     <Link Condition="'$(CrtSysUseDriverSupport)' == 'true'">
@@ -189,6 +207,10 @@
       <ImageHasSafeExceptionHandlers Condition="'$(CrtSysLibPlatform)' == 'x86'">false</ImageHasSafeExceptionHandlers>
       <AdditionalOptions>/FORCE:MULTIPLE %(AdditionalOptions)</AdditionalOptions>
       <TreatLinkerWarningAsErrors>false</TreatLinkerWarningAsErrors>
+    </Link>
+    <Link Condition="'$(CrtSysUseNtlContentCodecs)' == 'true'">
+      <AdditionalLibraryDirectories>$(CrtSysContentCodecLibDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>zlibstatic.lib;brotlidec.lib;brotlienc.lib;brotlicommon.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
 </Project>

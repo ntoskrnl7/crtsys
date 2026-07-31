@@ -1,0 +1,136 @@
+/**
+ * @file content_encoder_zlib
+ * @brief Bounded zlib and gzip adapters for content_encoder.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/inspection/content_encoder_zlib is a user-mode header"
+#endif
+
+#include <ntl/net/inspection/content_decoder_zlib>
+#include <ntl/net/inspection/content_encoder>
+
+#include <limits>
+#include <memory>
+#include <span>
+#include <array>
+
+#include <zlib.h>
+
+namespace ntl::net::inspection {
+
+class zlib_content_encoder {
+public:
+  explicit zlib_content_encoder(
+      zlib_stream_format format) noexcept
+      : window_bits_(static_cast<int>(format)) {}
+
+  zlib_content_encoder(const zlib_content_encoder &) = delete;
+  zlib_content_encoder &operator=(const zlib_content_encoder &) = delete;
+
+  ~zlib_content_encoder() { release(); }
+
+  void reset() noexcept {
+    release();
+    ended_ = false;
+  }
+
+  encode_result encode(std::span<const std::byte> input, bool final,
+                       encoded_output &output) noexcept {
+    if (ended_)
+      return encode_result::malformed(STATUS_INVALID_DEVICE_STATE);
+    if (!initialize())
+      return encode_result::malformed(STATUS_INSUFFICIENT_RESOURCES);
+
+    std::size_t offset = 0;
+    for (;;) {
+      const std::size_t available = (std::min)(
+          input.size() - offset,
+          static_cast<std::size_t>((std::numeric_limits<uInt>::max)()));
+      stream_.next_in = reinterpret_cast<Bytef *>(
+          const_cast<std::byte *>(input.data() + offset));
+      stream_.avail_in = static_cast<uInt>(available);
+      const bool finishing = final && offset + available == input.size();
+
+      do {
+        std::array<std::byte, 16 * 1024> buffer{};
+        const std::size_t remaining = output.maximum_size() - output.size();
+        const std::size_t capacity =
+            remaining == 0 ? 1 : (std::min)(remaining, buffer.size());
+        stream_.next_out = reinterpret_cast<Bytef *>(buffer.data());
+        stream_.avail_out = static_cast<uInt>(capacity);
+        const int status =
+            ::deflate(&stream_, finishing ? Z_FINISH : Z_NO_FLUSH);
+        const std::size_t produced = capacity - stream_.avail_out;
+        if (produced > remaining)
+          return encode_result::malformed(STATUS_BUFFER_OVERFLOW);
+        if (produced != 0) {
+          const ntl::status appended = output.append(
+              std::span<const std::byte>(buffer.data(), produced));
+          if (!appended.is_ok())
+            return encode_result::malformed(static_cast<NTSTATUS>(appended));
+        }
+        if (status == Z_STREAM_END) {
+          if (stream_.avail_in != 0 || offset + available != input.size())
+            return encode_result::malformed(STATUS_DATA_ERROR);
+          ended_ = true;
+          return encode_result::complete();
+        }
+        if (status == Z_MEM_ERROR)
+          return encode_result::malformed(STATUS_INSUFFICIENT_RESOURCES);
+        if (status != Z_OK && status != Z_BUF_ERROR)
+          return encode_result::malformed(STATUS_DATA_ERROR);
+        if (stream_.avail_in == 0 &&
+            (!finishing || (produced == 0 && status == Z_BUF_ERROR)))
+          break;
+      } while (stream_.avail_in != 0 || finishing);
+
+      offset += available;
+      if (offset == input.size())
+        break;
+    }
+    return final ? encode_result::malformed(STATUS_END_OF_FILE)
+                 : encode_result::need_more_input();
+  }
+
+private:
+  bool initialize() noexcept {
+    if (initialized_)
+      return true;
+    stream_ = {};
+    const int status = ::deflateInit2(
+        &stream_, Z_DEFAULT_COMPRESSION, Z_DEFLATED, window_bits_, 8,
+        Z_DEFAULT_STRATEGY);
+    initialized_ = status == Z_OK;
+    return initialized_;
+  }
+
+  void release() noexcept {
+    if (initialized_)
+      (void)::deflateEnd(&stream_);
+    stream_ = {};
+    initialized_ = false;
+  }
+
+  z_stream stream_{};
+  int window_bits_ = MAX_WBITS;
+  bool initialized_ = false;
+  bool ended_ = false;
+};
+
+inline void register_zlib_content_encoders(
+    content_encoder_registry &registry) {
+  registry.add("gzip", [] {
+    return std::make_unique<
+        content_encoder_adapter<zlib_content_encoder>>(
+        zlib_stream_format::gzip);
+  });
+  registry.add("deflate", [] {
+    return std::make_unique<
+        content_encoder_adapter<zlib_content_encoder>>(
+        zlib_stream_format::zlib);
+  });
+}
+
+} // namespace ntl::net::inspection

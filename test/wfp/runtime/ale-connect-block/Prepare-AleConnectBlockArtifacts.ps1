@@ -8,6 +8,8 @@ param(
 
   [string] $WindowsSdkVersion = '10.0.28000.0',
 
+  [string] $BuildRoot = '',
+
   [string] $OutputRoot = '',
 
   [switch] $SkipBuild
@@ -23,6 +25,12 @@ if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
   $OutputRoot =
       Join-Path $repoRoot 'artifacts\wfp-ale-connect-block-staging'
 }
+if ([string]::IsNullOrWhiteSpace($BuildRoot)) {
+  $sdkDirectory = $WindowsSdkVersion -replace '[^A-Za-z0-9]+', '_'
+  $BuildRoot = Join-Path $repoRoot (
+      "artifacts\b\wfp-ale-connect-block-runtime\" +
+      "$PlatformToolset\$sdkDirectory")
+}
 
 function Assert-SafeOutputRoot([string] $Path) {
   $artifactsRoot =
@@ -35,27 +43,30 @@ function Assert-SafeOutputRoot([string] $Path) {
   }
 }
 
+Assert-SafeOutputRoot $BuildRoot
+Assert-SafeOutputRoot $OutputRoot
+$resolvedBuildRoot = [IO.Path]::GetFullPath($BuildRoot)
+
 if (-not $SkipBuild) {
   & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $buildScript `
       -Project wfp-ale-connect-block -Architecture x64 `
       -Configuration $Configuration `
       -WindowsSdkVersion $WindowsSdkVersion `
       -WdkVersion $WindowsSdkVersion `
-      -PlatformToolset $PlatformToolset
+      -PlatformToolset $PlatformToolset `
+      -BuildDirectory $resolvedBuildRoot
   if ($LASTEXITCODE -ne 0) {
     throw 'The WFP ALE connect-block build failed.'
   }
 }
 
-Assert-SafeOutputRoot $OutputRoot
 $resolvedOutputRoot = [IO.Path]::GetFullPath($OutputRoot)
 if (Test-Path -LiteralPath $resolvedOutputRoot) {
   Remove-Item -LiteralPath $resolvedOutputRoot -Recurse -Force
 }
 $packageRoot = New-Item -ItemType Directory -Force -Path $resolvedOutputRoot
 
-$buildRoot = Join-Path $repoRoot (
-    "examples\wfp\ale-connect-block\build_x64_$PlatformToolset\$Configuration")
+$buildRoot = Join-Path $resolvedBuildRoot $Configuration
 $driverSource = Join-Path $buildRoot 'crtsys_wfp_ale_connect_block.sys'
 $appSource =
     Join-Path $buildRoot 'crtsys_wfp_ale_connect_block_app.exe'

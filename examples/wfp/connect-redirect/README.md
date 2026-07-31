@@ -31,7 +31,7 @@ process, installs a dynamic rule for only the origin port, and verifies:
 2. the proxy observes the correct original destination;
 3. coroutine relays preserve the complete request and response;
 4. the outbound proxy leg reaches the origin without a redirect loop; and
-5. removing the dynamic policy restores a direct connection.
+5. removing the ephemeral policy restores a direct connection.
 
 This is a transparent TCP byte-stream proxy foundation. For Schannel
 termination and plaintext policy on the accepted socket, see

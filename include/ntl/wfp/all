@@ -10,6 +10,7 @@
 #include "callout"
 #include "classify"
 #include "connect_redirect"
+#include "diagnostics"
 #include "flow"
 #include "injection"
 #include "packet"
@@ -18,4 +19,5 @@
 #else
 #include "connect_redirect"
 #include "management"
+#include "telemetry"
 #endif

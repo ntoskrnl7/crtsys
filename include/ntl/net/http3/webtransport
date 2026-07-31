@@ -64,6 +64,36 @@ inline constexpr std::uint64_t
     wt_buffered_stream_rejected = 0x3994bd84;
 inline constexpr std::uint64_t wt_session_gone = 0x170d7b68;
 inline constexpr std::uint64_t wt_flow_control_error = 0x045d4487;
+inline constexpr std::uint64_t wt_alpn_error = 0x0817b3dd;
+inline constexpr std::uint64_t wt_requirements_not_met = 0x212c0d48;
+inline constexpr std::uint64_t wt_application_error_first =
+    0x52e4a40fa8db;
+inline constexpr std::uint64_t wt_application_error_last =
+    0x52e5ac983162;
+
+inline constexpr std::uint64_t application_error_to_http3(
+    std::uint32_t application_error) noexcept {
+  return wt_application_error_first + application_error +
+         application_error / 0x1e;
+}
+
+inline ntl::result<std::uint32_t> application_error_from_http3(
+    std::uint64_t http3_error) noexcept {
+  if (http3_error < wt_application_error_first ||
+      http3_error > wt_application_error_last ||
+      (http3_error - 0x21) % 0x1f == 0)
+    return ntl::unexpected(STATUS_DATA_ERROR);
+  const std::uint64_t shifted =
+      http3_error - wt_application_error_first;
+  const std::uint64_t application_error =
+      shifted - shifted / 0x1f;
+  if (application_error >
+          (std::numeric_limits<std::uint32_t>::max)() ||
+      application_error_to_http3(
+          static_cast<std::uint32_t>(application_error)) != http3_error)
+    return ntl::unexpected(STATUS_DATA_ERROR);
+  return ntl::ok(static_cast<std::uint32_t>(application_error));
+}
 
 struct prerequisites {
   bool peer_enabled_extended_connect = false;

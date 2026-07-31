@@ -1,0 +1,1251 @@
+/**
+ * @file http2_transform
+ * @brief Bounded HTTP/2 semantic transformation and stateless HPACK output.
+ *
+ * Each connection direction keeps its own stateful HPACK decoder. Output is
+ * deliberately encoded without dynamic-table insertions, so transformed
+ * fields cannot desynchronize the peer's HPACK state.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/http2/transform is a user-mode header"
+#endif
+
+#include <ntl/net/http/transform>
+#include <ntl/net/http2/framing>
+#include <ntl/net/http2/hpack>
+#include <ntl/result>
+#include <ntl/status>
+
+#include <algorithm>
+#include <array>
+#include <charconv>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <new>
+#include <mutex>
+#include <optional>
+#include <span>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <unordered_map>
+#include <vector>
+
+namespace ntl::net::http2 {
+
+struct outbound_frame {
+  std::vector<std::byte> wire;
+  std::uint32_t stream_id = 0;
+  std::size_t flow_controlled_bytes = 0;
+};
+
+struct transformed_request {
+  ntl::net::http::request_message message;
+  ntl::net::http::pipeline_outcome outcome;
+  std::vector<outbound_frame> frames;
+};
+
+struct transformed_response {
+  ntl::net::http::response_message message;
+  ntl::net::http::pipeline_outcome outcome;
+  std::vector<outbound_frame> frames;
+};
+
+inline ntl::result<outbound_frame>
+encode_window_update(
+    std::uint32_t stream_id,
+    std::uint32_t increment) noexcept;
+
+inline ntl::result<outbound_frame>
+encode_reset_stream(
+    std::uint32_t stream_id,
+    std::uint32_t error_code) noexcept;
+
+namespace transform_detail {
+
+inline void append_integer(
+    std::vector<std::byte> &output, std::size_t value,
+    unsigned prefix_bits, std::uint8_t prefix) {
+  const std::size_t maximum =
+      (std::size_t{1} << prefix_bits) - 1;
+  if (value < maximum) {
+    output.push_back(static_cast<std::byte>(
+        prefix | static_cast<std::uint8_t>(value)));
+    return;
+  }
+  output.push_back(static_cast<std::byte>(
+      prefix | static_cast<std::uint8_t>(maximum)));
+  value -= maximum;
+  while (value >= 128) {
+    output.push_back(static_cast<std::byte>(
+        static_cast<std::uint8_t>(value % 128) | 0x80u));
+    value /= 128;
+  }
+  output.push_back(static_cast<std::byte>(
+      static_cast<std::uint8_t>(value)));
+}
+
+inline void append_string(
+    std::vector<std::byte> &output, std::string_view value) {
+  append_integer(output, value.size(), 7, 0);
+  output.insert(
+      output.end(),
+      reinterpret_cast<const std::byte *>(value.data()),
+      reinterpret_cast<const std::byte *>(
+          value.data() + value.size()));
+}
+
+inline std::size_t static_name_index(
+    std::string_view name) noexcept {
+  for (std::size_t index = 0;
+       index != hpack_detail::static_table.size(); ++index) {
+    if (hpack_detail::static_table[index].name == name)
+      return index + 1;
+  }
+  return 0;
+}
+
+inline std::size_t static_exact_index(
+    std::string_view name, std::string_view value) noexcept {
+  for (std::size_t index = 0;
+       index != hpack_detail::static_table.size(); ++index) {
+    const auto &entry = hpack_detail::static_table[index];
+    if (entry.name == name && entry.value == value)
+      return index + 1;
+  }
+  return 0;
+}
+
+inline ntl::result<std::vector<std::byte>>
+encode_hpack(
+    std::span<const header_field> fields,
+    std::size_t maximum_encoded_size) noexcept {
+  if (maximum_encoded_size == 0)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  try {
+    std::vector<std::byte> output;
+    for (const auto &field : fields) {
+      if (field.name.empty() ||
+          field.value.find_first_of("\r\n") !=
+              std::string::npos)
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      const std::size_t exact =
+          field.never_index
+              ? 0
+              : static_exact_index(field.name, field.value);
+      if (exact != 0) {
+        append_integer(output, exact, 7, 0x80u);
+      } else {
+        const std::size_t name =
+            static_name_index(field.name);
+        append_integer(
+            output, name, 4,
+            field.never_index ? 0x10u : 0x00u);
+        if (name == 0)
+          append_string(output, field.name);
+        append_string(output, field.value);
+      }
+      if (output.size() > maximum_encoded_size)
+        return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+    }
+    return ntl::ok(std::move(output));
+  } catch (const std::bad_alloc &) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+}
+
+inline ntl::result<outbound_frame> make_frame(
+    frame_type type, std::uint8_t flags,
+    std::uint32_t stream_id,
+    std::span<const std::byte> payload) noexcept {
+  if (payload.size() > absolute_maximum_frame_size ||
+      (stream_id & 0x80000000u) != 0)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  try {
+    outbound_frame result;
+    result.stream_id = stream_id;
+    result.flow_controlled_bytes =
+        type == frame_type::data ? payload.size() : 0;
+    result.wire.resize(frame_header_size + payload.size());
+    result.wire[0] = static_cast<std::byte>(
+        (payload.size() >> 16) & 0xffu);
+    result.wire[1] = static_cast<std::byte>(
+        (payload.size() >> 8) & 0xffu);
+    result.wire[2] =
+        static_cast<std::byte>(payload.size() & 0xffu);
+    result.wire[3] =
+        static_cast<std::byte>(static_cast<std::uint8_t>(type));
+    result.wire[4] = static_cast<std::byte>(flags);
+    result.wire[5] =
+        static_cast<std::byte>((stream_id >> 24) & 0x7fu);
+    result.wire[6] =
+        static_cast<std::byte>((stream_id >> 16) & 0xffu);
+    result.wire[7] =
+        static_cast<std::byte>((stream_id >> 8) & 0xffu);
+    result.wire[8] =
+        static_cast<std::byte>(stream_id & 0xffu);
+    std::copy(
+        payload.begin(), payload.end(),
+        result.wire.begin() + frame_header_size);
+    return ntl::ok(std::move(result));
+  } catch (const std::bad_alloc &) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+}
+
+inline ntl::status append_header_frames(
+    std::vector<outbound_frame> &output,
+    std::uint32_t stream_id,
+    std::span<const header_field> fields,
+    bool end_stream, std::size_t maximum_frame_size,
+    std::size_t maximum_header_block_size) noexcept {
+  auto encoded =
+      encode_hpack(fields, maximum_header_block_size);
+  if (!encoded)
+    return encoded.status();
+  try {
+    std::size_t offset = 0;
+    bool first = true;
+    do {
+      const std::size_t count = (std::min)(
+          maximum_frame_size, encoded->size() - offset);
+      const bool last = offset + count == encoded->size();
+      std::uint8_t flags = last ? 0x04u : 0;
+      if (first && end_stream)
+        flags |= 0x01u;
+      auto frame = make_frame(
+          first ? frame_type::headers
+                : frame_type::continuation,
+          flags, stream_id,
+          std::span<const std::byte>(*encoded)
+              .subspan(offset, count));
+      if (!frame)
+        return frame.status();
+      output.push_back(std::move(*frame));
+      offset += count;
+      first = false;
+    } while (offset != encoded->size());
+    return ntl::status::ok();
+  } catch (...) {
+    return STATUS_INSUFFICIENT_RESOURCES;
+  }
+}
+
+inline ntl::status append_data_frames(
+    std::vector<outbound_frame> &output,
+    std::uint32_t stream_id,
+    std::span<const std::byte> body,
+    bool end_stream,
+    std::size_t maximum_frame_size) noexcept {
+  try {
+    if (body.empty()) {
+      if (!end_stream)
+        return ntl::status::ok();
+      auto empty = make_frame(
+          frame_type::data, 0x01u, stream_id, {});
+      if (!empty)
+        return empty.status();
+      output.push_back(std::move(*empty));
+      return ntl::status::ok();
+    }
+    std::size_t offset = 0;
+    while (offset != body.size()) {
+      const std::size_t count = (std::min)(
+          maximum_frame_size, body.size() - offset);
+      const bool last = offset + count == body.size();
+      auto frame = make_frame(
+          frame_type::data,
+          last && end_stream ? 0x01u : 0,
+          stream_id, body.subspan(offset, count));
+      if (!frame)
+        return frame.status();
+      output.push_back(std::move(*frame));
+      offset += count;
+    }
+    return ntl::status::ok();
+  } catch (...) {
+    return STATUS_INSUFFICIENT_RESOURCES;
+  }
+}
+
+inline std::vector<header_field> ordinary_fields(
+    const ntl::net::http::header_collection &headers) {
+  std::vector<header_field> result;
+  result.reserve(headers.size());
+  for (const auto &field : headers.fields())
+    result.push_back(
+        {field.name, field.value, field.sensitive});
+  return result;
+}
+
+inline std::vector<header_field> trailer_fields(
+    std::span<const ntl::net::http::header_field> trailers) {
+  std::vector<header_field> result;
+  result.reserve(trailers.size());
+  for (const auto &field : trailers)
+    result.push_back(
+        {field.name, field.value, field.sensitive});
+  return result;
+}
+
+inline ntl::status validate_encoded_length(
+    const ntl::net::http::header_collection &headers,
+    std::size_t encoded_size) noexcept {
+  const auto length = headers.first("content-length");
+  if (!length)
+    return ntl::status::ok();
+  std::size_t parsed = 0;
+  const auto converted = std::from_chars(
+      length->data(), length->data() + length->size(),
+      parsed);
+  if (converted.ec != std::errc{} ||
+      converted.ptr != length->data() + length->size() ||
+      parsed != encoded_size)
+    return STATUS_DATA_ERROR;
+  return ntl::status::ok();
+}
+
+} // namespace transform_detail
+
+inline ntl::result<outbound_frame>
+encode_window_update(
+    std::uint32_t stream_id,
+    std::uint32_t increment) noexcept {
+  if (increment == 0 || increment > 0x7fffffffu)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  const std::array<std::byte, 4> payload{
+      static_cast<std::byte>((increment >> 24) & 0x7fu),
+      static_cast<std::byte>((increment >> 16) & 0xffu),
+      static_cast<std::byte>((increment >> 8) & 0xffu),
+      static_cast<std::byte>(increment & 0xffu)};
+  return transform_detail::make_frame(
+      frame_type::window_update, 0, stream_id, payload);
+}
+
+inline ntl::result<outbound_frame>
+encode_reset_stream(
+    std::uint32_t stream_id,
+    std::uint32_t error_code) noexcept {
+  if (stream_id == 0)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  const std::array<std::byte, 4> payload{
+      static_cast<std::byte>((error_code >> 24) & 0xffu),
+      static_cast<std::byte>((error_code >> 16) & 0xffu),
+      static_cast<std::byte>((error_code >> 8) & 0xffu),
+      static_cast<std::byte>(error_code & 0xffu)};
+  return transform_detail::make_frame(
+      frame_type::reset_stream, 0, stream_id, payload);
+}
+
+inline ntl::result<std::vector<outbound_frame>>
+encode_request_frames(
+    std::uint32_t stream_id,
+    const ntl::net::http::request_message &message,
+    std::span<const std::byte> encoded_body,
+    std::size_t maximum_frame_size = default_maximum_frame_size,
+    std::size_t maximum_header_block_size = 256 * 1024) noexcept {
+  if (stream_id == 0 || maximum_frame_size == 0 ||
+      maximum_frame_size > absolute_maximum_frame_size)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  try {
+    ntl::net::http::transform_limits header_limits;
+    header_limits.maximum_header_bytes =
+        maximum_header_block_size;
+    const ntl::status valid_headers =
+        message.headers.validate(
+            ntl::net::http::protocol::http2,
+            header_limits);
+    const ntl::status valid_trailers =
+        ntl::net::http::validate_trailers(
+            message.trailers,
+            ntl::net::http::protocol::http2,
+            header_limits);
+    const ntl::status valid_length =
+        transform_detail::validate_encoded_length(
+            message.headers, encoded_body.size());
+    const bool connect = message.method == "CONNECT";
+    const bool extended =
+        connect && message.extended_protocol.has_value();
+    if (!valid_headers.is_ok() || !valid_trailers.is_ok() ||
+        !valid_length.is_ok() ||
+        !ntl::net::http::transform_detail::is_token(
+            message.method) ||
+        !ntl::net::http::transform_detail::valid_uri_component(
+            message.authority) ||
+        (!connect &&
+         (!ntl::net::http::transform_detail::is_scheme(
+              message.scheme) ||
+          !ntl::net::http::transform_detail::valid_uri_component(
+              message.path))) ||
+        (connect && !extended &&
+         (!message.scheme.empty() || !message.path.empty())) ||
+        (extended &&
+         (!ntl::net::http::transform_detail::is_scheme(
+              message.scheme) ||
+          !ntl::net::http::transform_detail::valid_uri_component(
+              message.path) ||
+          !ntl::net::http::transform_detail::is_token(
+              *message.extended_protocol))))
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    std::vector<header_field> fields;
+    fields.push_back({":method", message.method, false});
+    if (message.method != "CONNECT" ||
+        message.extended_protocol) {
+      fields.push_back({":scheme", message.scheme, false});
+      fields.push_back({":path", message.path, false});
+    }
+    fields.push_back({":authority", message.authority, false});
+    if (message.extended_protocol)
+      fields.push_back(
+          {":protocol", *message.extended_protocol, false});
+    auto regular =
+        transform_detail::ordinary_fields(message.headers);
+    fields.insert(
+        fields.end(),
+        std::make_move_iterator(regular.begin()),
+        std::make_move_iterator(regular.end()));
+
+    std::vector<outbound_frame> output;
+    const bool has_trailers = !message.trailers.empty();
+    ntl::status status =
+        transform_detail::append_header_frames(
+            output, stream_id, fields,
+            encoded_body.empty() && !has_trailers,
+            maximum_frame_size, maximum_header_block_size);
+    if (!status.is_ok())
+      return ntl::unexpected(status);
+    if (!encoded_body.empty()) {
+      status = transform_detail::append_data_frames(
+          output, stream_id, encoded_body,
+          !has_trailers, maximum_frame_size);
+      if (!status.is_ok())
+        return ntl::unexpected(status);
+    }
+    if (has_trailers) {
+      auto trailers =
+          transform_detail::trailer_fields(message.trailers);
+      status = transform_detail::append_header_frames(
+          output, stream_id, trailers, true,
+          maximum_frame_size, maximum_header_block_size);
+      if (!status.is_ok())
+        return ntl::unexpected(status);
+    }
+    return ntl::ok(std::move(output));
+  } catch (const std::bad_alloc &) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+}
+
+inline ntl::result<std::vector<outbound_frame>>
+encode_response_frames(
+    std::uint32_t stream_id,
+    const ntl::net::http::response_message &message,
+    std::span<const std::byte> encoded_body,
+    std::size_t maximum_frame_size = default_maximum_frame_size,
+    std::size_t maximum_header_block_size = 256 * 1024,
+    bool body_forbidden = false) noexcept {
+  if (stream_id == 0 || maximum_frame_size == 0 ||
+      maximum_frame_size > absolute_maximum_frame_size)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  try {
+    ntl::net::http::transform_limits header_limits;
+    header_limits.maximum_header_bytes =
+        maximum_header_block_size;
+    const ntl::status valid_headers =
+        message.headers.validate(
+            ntl::net::http::protocol::http2,
+            header_limits);
+    const ntl::status valid_trailers =
+        ntl::net::http::validate_trailers(
+            message.trailers,
+            ntl::net::http::protocol::http2,
+            header_limits);
+    body_forbidden =
+        body_forbidden ||
+        (message.status >= 100 && message.status < 200) ||
+        message.status == 204 || message.status == 304;
+    const ntl::status valid_length =
+        body_forbidden
+            ? ntl::status::ok()
+            : transform_detail::validate_encoded_length(
+                  message.headers, encoded_body.size());
+    if (!valid_headers.is_ok() || !valid_trailers.is_ok() ||
+        !valid_length.is_ok() ||
+        message.status < 100 || message.status > 999 ||
+        (body_forbidden &&
+         (!encoded_body.empty() || !message.trailers.empty())))
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    std::vector<header_field> fields;
+    fields.push_back(
+        {":status", std::to_string(message.status), false});
+    auto regular =
+        transform_detail::ordinary_fields(message.headers);
+    fields.insert(
+        fields.end(),
+        std::make_move_iterator(regular.begin()),
+        std::make_move_iterator(regular.end()));
+
+    std::vector<outbound_frame> output;
+    const bool has_trailers = !message.trailers.empty();
+    ntl::status status =
+        transform_detail::append_header_frames(
+            output, stream_id, fields,
+            encoded_body.empty() && !has_trailers,
+            maximum_frame_size, maximum_header_block_size);
+    if (!status.is_ok())
+      return ntl::unexpected(status);
+    if (!encoded_body.empty()) {
+      status = transform_detail::append_data_frames(
+          output, stream_id, encoded_body,
+          !has_trailers, maximum_frame_size);
+      if (!status.is_ok())
+        return ntl::unexpected(status);
+    }
+    if (has_trailers) {
+      auto trailers =
+          transform_detail::trailer_fields(message.trailers);
+      status = transform_detail::append_header_frames(
+          output, stream_id, trailers, true,
+          maximum_frame_size, maximum_header_block_size);
+      if (!status.is_ok())
+        return ntl::unexpected(status);
+    }
+    return ntl::ok(std::move(output));
+  } catch (const std::bad_alloc &) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+}
+
+inline ntl::result<ntl::net::http::request_message>
+parse_request(
+    std::span<const header_field> fields,
+    std::span<const std::byte> encoded_body,
+    std::span<const header_field> trailers,
+    const ntl::net::inspection::content_decoder_registry &decoders,
+    const ntl::net::http::transform_limits &limits = {}) noexcept {
+  try {
+    ntl::net::http::request_message message;
+    message.wire_protocol = ntl::net::http::protocol::http2;
+    message.scheme.clear();
+    message.path.clear();
+    bool regular_seen = false;
+    for (const auto &field : fields) {
+      if (field.name.empty())
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      const bool pseudo = field.name.front() == ':';
+      if (pseudo && regular_seen)
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      regular_seen = regular_seen || !pseudo;
+      if (pseudo) {
+        std::string *target = nullptr;
+        if (field.name == ":method")
+          target = &message.method;
+        else if (field.name == ":scheme")
+          target = &message.scheme;
+        else if (field.name == ":authority")
+          target = &message.authority;
+        else if (field.name == ":path")
+          target = &message.path;
+        else if (field.name == ":protocol") {
+          if (message.extended_protocol)
+            return ntl::unexpected(STATUS_DATA_ERROR);
+          message.extended_protocol = field.value;
+          continue;
+        } else {
+          return ntl::unexpected(STATUS_DATA_ERROR);
+        }
+        if (!target->empty())
+          return ntl::unexpected(STATUS_DATA_ERROR);
+        *target = field.value;
+      } else {
+        message.headers.append(
+            field.name, field.value, field.never_index);
+      }
+    }
+    for (const auto &field : trailers) {
+      if (field.name.empty() || field.name.front() == ':')
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      message.trailers.push_back(
+          {field.name, field.value, field.never_index});
+    }
+    const ntl::status valid_trailers =
+        ntl::net::http::validate_trailers(
+            message.trailers,
+            ntl::net::http::protocol::http2, limits);
+    if (!valid_trailers.is_ok())
+      return ntl::unexpected(valid_trailers);
+    const ntl::status length =
+        transform_detail::validate_encoded_length(
+            message.headers, encoded_body.size());
+    if (!length.is_ok())
+      return ntl::unexpected(length);
+    auto decoded = ntl::net::http::decode_body(
+        message.headers, encoded_body, decoders, limits);
+    if (!decoded)
+      return ntl::unexpected(decoded.status());
+    message.body = std::move(decoded->bytes);
+    return ntl::ok(std::move(message));
+  } catch (const std::invalid_argument &) {
+    return ntl::unexpected(STATUS_DATA_ERROR);
+  } catch (const std::bad_alloc &) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+}
+
+inline ntl::result<ntl::net::http::response_message>
+parse_response(
+    std::span<const header_field> fields,
+    std::span<const std::byte> encoded_body,
+    std::span<const header_field> trailers,
+    const ntl::net::inspection::content_decoder_registry &decoders,
+    const ntl::net::http::transform_limits &limits = {},
+    bool response_to_head = false,
+    bool response_to_connect = false) noexcept {
+  try {
+    ntl::net::http::response_message message;
+    message.wire_protocol = ntl::net::http::protocol::http2;
+    bool regular_seen = false;
+    bool status_seen = false;
+    for (const auto &field : fields) {
+      if (field.name.empty())
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      const bool pseudo = field.name.front() == ':';
+      if (pseudo && regular_seen)
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      regular_seen = regular_seen || !pseudo;
+      if (pseudo) {
+        if (field.name != ":status" || status_seen)
+          return ntl::unexpected(STATUS_DATA_ERROR);
+        const auto converted = std::from_chars(
+            field.value.data(),
+            field.value.data() + field.value.size(),
+            message.status);
+        if (converted.ec != std::errc{} ||
+            converted.ptr !=
+                field.value.data() + field.value.size())
+          return ntl::unexpected(STATUS_DATA_ERROR);
+        status_seen = true;
+      } else {
+        message.headers.append(
+            field.name, field.value, field.never_index);
+      }
+    }
+    if (!status_seen)
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    for (const auto &field : trailers) {
+      if (field.name.empty() || field.name.front() == ':')
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      message.trailers.push_back(
+          {field.name, field.value, field.never_index});
+    }
+    const ntl::status valid_trailers =
+        ntl::net::http::validate_trailers(
+            message.trailers,
+            ntl::net::http::protocol::http2, limits);
+    if (!valid_trailers.is_ok())
+      return ntl::unexpected(valid_trailers);
+    const bool body_forbidden =
+        response_to_head ||
+        (message.status >= 100 && message.status < 200) ||
+        message.status == 204 || message.status == 304 ||
+        (response_to_connect && message.status >= 200 &&
+         message.status < 300);
+    if (body_forbidden) {
+      if (!encoded_body.empty() || !message.trailers.empty())
+        return ntl::unexpected(STATUS_DATA_ERROR);
+    } else {
+      const ntl::status length =
+          transform_detail::validate_encoded_length(
+              message.headers, encoded_body.size());
+      if (!length.is_ok())
+        return ntl::unexpected(length);
+    }
+    if (!body_forbidden) {
+      auto decoded = ntl::net::http::decode_body(
+          message.headers, encoded_body, decoders, limits);
+      if (!decoded)
+        return ntl::unexpected(decoded.status());
+      message.body = std::move(decoded->bytes);
+    }
+    return ntl::ok(std::move(message));
+  } catch (const std::invalid_argument &) {
+    return ntl::unexpected(STATUS_DATA_ERROR);
+  } catch (const std::bad_alloc &) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+}
+
+inline ntl::result<transformed_request>
+transform_request(
+    std::uint32_t stream_id,
+    std::span<const header_field> fields,
+    std::span<const std::byte> encoded_body,
+    std::span<const header_field> trailers,
+    const ntl::net::http::transform_pipeline &pipeline,
+    const ntl::net::inspection::content_decoder_registry &decoders,
+    const ntl::net::inspection::content_encoder_registry &encoders,
+    std::size_t maximum_frame_size =
+        default_maximum_frame_size) noexcept {
+  auto parsed = parse_request(
+      fields, encoded_body, trailers, decoders,
+      pipeline.limits());
+  if (!parsed)
+    return ntl::unexpected(parsed.status());
+  try {
+    transformed_request result;
+    result.message = std::move(*parsed);
+    const std::string original_coding =
+        result.message.headers.joined("content-encoding");
+    result.outcome = pipeline.apply(result.message);
+    if (result.outcome.action !=
+        ntl::net::http::rewrite_action::forward)
+      return ntl::ok(std::move(result));
+    std::vector<std::byte> body(
+        encoded_body.begin(), encoded_body.end());
+    if (result.outcome.body_modified) {
+      auto encoded = ntl::net::http::encode_body(
+          result.message.headers, result.message.body,
+          original_coding, result.outcome.body_coding,
+          encoders, pipeline.limits());
+      if (!encoded)
+        return ntl::unexpected(encoded.status());
+      body = std::move(*encoded);
+    }
+    auto frames = encode_request_frames(
+        stream_id, result.message, body,
+        maximum_frame_size);
+    if (!frames)
+      return ntl::unexpected(frames.status());
+    result.frames = std::move(*frames);
+    return ntl::ok(std::move(result));
+  } catch (const std::bad_alloc &) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+}
+
+inline ntl::result<transformed_response>
+transform_response(
+    std::uint32_t stream_id,
+    const ntl::net::http::request_message &request,
+    std::span<const header_field> fields,
+    std::span<const std::byte> encoded_body,
+    std::span<const header_field> trailers,
+    const ntl::net::http::transform_pipeline &pipeline,
+    const ntl::net::inspection::content_decoder_registry &decoders,
+    const ntl::net::inspection::content_encoder_registry &encoders,
+    std::size_t maximum_frame_size =
+        default_maximum_frame_size) noexcept {
+  auto parsed = parse_response(
+      fields, encoded_body, trailers, decoders,
+      pipeline.limits(), request.method == "HEAD",
+      request.method == "CONNECT");
+  if (!parsed)
+    return ntl::unexpected(parsed.status());
+  try {
+    transformed_response result;
+    result.message = std::move(*parsed);
+    const std::string original_coding =
+        result.message.headers.joined("content-encoding");
+    result.outcome =
+        pipeline.apply(request, result.message);
+    if (result.outcome.action !=
+        ntl::net::http::rewrite_action::forward)
+      return ntl::ok(std::move(result));
+    std::vector<std::byte> body(
+        encoded_body.begin(), encoded_body.end());
+    if (result.outcome.body_modified) {
+      auto encoded = ntl::net::http::encode_body(
+          result.message.headers, result.message.body,
+          original_coding, result.outcome.body_coding,
+          encoders, pipeline.limits());
+      if (!encoded)
+        return ntl::unexpected(encoded.status());
+      body = std::move(*encoded);
+    }
+    auto frames = encode_response_frames(
+        stream_id, result.message, body,
+        maximum_frame_size, 256 * 1024,
+        ntl::net::http::response_body_forbidden(
+            request, result.message));
+    if (!frames)
+      return ntl::unexpected(frames.status());
+    result.frames = std::move(*frames);
+    return ntl::ok(std::move(result));
+  } catch (const std::bad_alloc &) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+}
+
+enum class connection_direction : std::uint8_t {
+  requests = 1,
+  responses = 2,
+};
+
+/**
+ * @brief Request metadata shared by the two HTTP/2 connection directions.
+ *
+ * A response stream cannot run policy until the matching transformed request
+ * is known. The store is connection-local and safe for the two concurrent
+ * relay coroutines.
+ */
+class exchange_store {
+public:
+  ntl::status remember(
+      std::uint32_t stream_id,
+      ntl::net::http::request_message request) noexcept {
+    try {
+      std::lock_guard lock(lock_);
+      if (requests_.size() >= maximum_streams_ &&
+          requests_.find(stream_id) == requests_.end())
+        return STATUS_QUOTA_EXCEEDED;
+      requests_.insert_or_assign(
+          stream_id, std::move(request));
+      return ntl::status::ok();
+    } catch (...) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+  }
+
+  ntl::result<ntl::net::http::request_message>
+  request(std::uint32_t stream_id) const noexcept {
+    try {
+      std::lock_guard lock(lock_);
+      const auto found = requests_.find(stream_id);
+      if (found == requests_.end())
+        return ntl::unexpected(STATUS_NOT_FOUND);
+      return ntl::ok(found->second);
+    } catch (...) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+  }
+
+  void erase(std::uint32_t stream_id) noexcept {
+    std::lock_guard lock(lock_);
+    requests_.erase(stream_id);
+  }
+
+  void clear() noexcept {
+    std::lock_guard lock(lock_);
+    requests_.clear();
+  }
+
+private:
+  static constexpr std::size_t maximum_streams_ = 256;
+  mutable std::mutex lock_;
+  std::unordered_map<
+      std::uint32_t, ntl::net::http::request_message>
+      requests_;
+};
+
+struct connection_transform_result {
+  bool consumed = false;
+  bool message_complete = false;
+  std::uint32_t stream_id = 0;
+  unsigned terminal_status = 0;
+  std::size_t received_flow_controlled_bytes = 0;
+  std::vector<outbound_frame> forward;
+  std::vector<outbound_frame> reverse;
+  std::optional<ntl::net::http::request_message> request;
+  std::optional<ntl::net::http::response_message> response;
+};
+
+/**
+ * @brief Buffers complete bounded messages and applies the common HTTP policy.
+ *
+ * Non-HEADERS/DATA control frames are not consumed and remain the caller's
+ * responsibility. Received DATA byte counts are returned so the connection
+ * adapter can replenish the source connection and stream windows.
+ */
+class connection_transformer {
+public:
+  connection_transformer(
+      connection_direction direction,
+      exchange_store &exchanges,
+      const ntl::net::http::transform_pipeline &pipeline,
+      const ntl::net::inspection::content_decoder_registry &decoders,
+      const ntl::net::inspection::content_encoder_registry &encoders,
+      std::size_t maximum_frame_size =
+          default_maximum_frame_size)
+      : direction_(direction),
+        exchanges_(&exchanges),
+        pipeline_(&pipeline),
+        decoders_(&decoders),
+        encoders_(&encoders),
+        decoder_(hpack_limits{
+            pipeline.limits().maximum_header_bytes}),
+        assembler_(
+            pipeline.limits().maximum_header_bytes),
+        maximum_frame_size_(maximum_frame_size),
+        maximum_buffered_body_bytes_(
+            pipeline.limits().maximum_encoded_body_bytes >
+                    (std::numeric_limits<std::size_t>::max)() / 4
+                ? (std::numeric_limits<std::size_t>::max)()
+                : pipeline.limits().maximum_encoded_body_bytes *
+                      4) {
+    if (maximum_frame_size_ == 0 ||
+        maximum_frame_size_ > absolute_maximum_frame_size)
+      throw std::invalid_argument(
+          "invalid HTTP/2 transform frame size");
+  }
+
+  connection_transformer(
+      const connection_transformer &) = delete;
+  connection_transformer &
+  operator=(const connection_transformer &) = delete;
+
+  ntl::result<connection_transform_result>
+  consume(const frame_view &frame) noexcept {
+    try {
+      const auto &header = frame.header();
+      connection_transform_result result;
+      result.stream_id = header.stream_id;
+      if (assembler_.in_progress() ||
+          header.type == frame_type::headers ||
+          header.type == frame_type::continuation ||
+          header.type == frame_type::push_promise) {
+        if (header.type == frame_type::push_promise)
+          return ntl::unexpected(STATUS_NOT_SUPPORTED);
+        result.consumed = true;
+        auto block = assembler_.consume(frame);
+        if (!block)
+          return ntl::unexpected(block.status());
+        if (!*block)
+          return ntl::ok(std::move(result));
+        auto decoded = decode_headers(
+            decoder_, **block,
+            pipeline_->limits().maximum_header_bytes);
+        if (!decoded)
+          return ntl::unexpected(decoded.status());
+        result.stream_id = (**block).stream_id;
+        auto completed = consume_headers(
+            result.stream_id, std::move(decoded->fields),
+            (**block).end_stream);
+        if (!completed)
+          return ntl::unexpected(completed.status());
+        return ntl::ok(std::move(*completed));
+      }
+
+      if (header.type == frame_type::data) {
+        result.consumed = true;
+        result.received_flow_controlled_bytes =
+            header.payload_size;
+        auto data = frame.data_payload();
+        if (!data)
+          return ntl::unexpected(data.status());
+        auto found = streams_.find(header.stream_id);
+        if (found == streams_.end() ||
+            !found->second.initial_headers)
+          return ntl::unexpected(STATUS_DATA_ERROR);
+        if (data->size() >
+            pipeline_->limits().maximum_encoded_body_bytes -
+                found->second.body.size())
+          return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+        if (data->size() >
+            maximum_buffered_body_bytes_ -
+                buffered_body_bytes_)
+          return ntl::unexpected(STATUS_QUOTA_EXCEEDED);
+        const std::size_t offset = found->second.body.size();
+        found->second.body.resize(offset + data->size());
+        const ntl::status copied = data->copy_to(
+            std::span<std::byte>(found->second.body)
+                .subspan(offset));
+        if (!copied.is_ok())
+          return ntl::unexpected(copied);
+        buffered_body_bytes_ += data->size();
+        if (!header.end_stream())
+          return ntl::ok(std::move(result));
+        auto completed = complete(header.stream_id);
+        if (!completed)
+          return ntl::unexpected(completed.status());
+        completed->received_flow_controlled_bytes =
+            header.payload_size;
+        return ntl::ok(std::move(*completed));
+      }
+
+      if (header.type == frame_type::reset_stream) {
+        const auto found = streams_.find(header.stream_id);
+        if (found != streams_.end()) {
+          buffered_body_bytes_ -= found->second.body.size();
+          streams_.erase(found);
+        }
+        exchanges_->erase(header.stream_id);
+      }
+      return ntl::ok(std::move(result));
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+private:
+  struct stream_state {
+    std::vector<header_field> headers;
+    std::vector<header_field> trailers;
+    std::vector<std::byte> body;
+    bool initial_headers = false;
+  };
+
+  ntl::result<connection_transform_result>
+  consume_headers(
+      std::uint32_t stream_id,
+      std::vector<header_field> fields,
+      bool end_stream) noexcept {
+    try {
+      connection_transform_result result;
+      result.consumed = true;
+      result.stream_id = stream_id;
+      auto found = streams_.find(stream_id);
+      if (found == streams_.end()) {
+        if (direction_ == connection_direction::responses) {
+          unsigned status = 0;
+          bool status_seen = false;
+          for (const auto &field : fields) {
+            if (field.name != ":status")
+              continue;
+            if (status_seen)
+              return ntl::unexpected(STATUS_DATA_ERROR);
+            const auto parsed = std::from_chars(
+                field.value.data(),
+                field.value.data() + field.value.size(),
+                status);
+            if (parsed.ec != std::errc{} ||
+                parsed.ptr !=
+                    field.value.data() + field.value.size())
+              return ntl::unexpected(STATUS_DATA_ERROR);
+            status_seen = true;
+          }
+          if (status_seen && status >= 100 && status < 200) {
+            if (end_stream)
+              return ntl::unexpected(STATUS_DATA_ERROR);
+            const ntl::status encoded =
+                transform_detail::append_header_frames(
+                    result.forward, stream_id, fields, false,
+                    maximum_frame_size_,
+                    pipeline_->limits().maximum_header_bytes);
+            if (!encoded.is_ok())
+              return ntl::unexpected(encoded);
+            return ntl::ok(std::move(result));
+          }
+        }
+        if (streams_.size() >= 256)
+          return ntl::unexpected(STATUS_QUOTA_EXCEEDED);
+        auto inserted =
+            streams_.try_emplace(stream_id).first;
+        inserted->second.headers = std::move(fields);
+        inserted->second.initial_headers = true;
+      } else {
+        if (!end_stream || !found->second.trailers.empty())
+          return ntl::unexpected(STATUS_DATA_ERROR);
+        for (const auto &field : fields) {
+          if (field.name.empty() ||
+              field.name.front() == ':')
+            return ntl::unexpected(STATUS_DATA_ERROR);
+        }
+        found->second.trailers = std::move(fields);
+      }
+      if (!end_stream)
+        return ntl::ok(std::move(result));
+      return complete(stream_id);
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+  static ntl::net::http::response_message
+  forbidden_response() {
+    ntl::net::http::response_message response;
+    response.wire_protocol =
+        ntl::net::http::protocol::http2;
+    response.status = 403;
+    response.headers.append(
+        "content-type", "text/plain; charset=utf-8");
+    constexpr std::string_view text =
+        "Request blocked by policy.\n";
+    response.body.assign(
+        reinterpret_cast<const std::byte *>(text.data()),
+        reinterpret_cast<const std::byte *>(
+            text.data() + text.size()));
+    return response;
+  }
+
+  ntl::result<std::vector<outbound_frame>>
+  terminal_frames(
+      std::uint32_t stream_id,
+      std::optional<ntl::net::http::response_message>
+          supplied,
+      const ntl::net::http::request_message
+          &request) const noexcept {
+    try {
+      auto response =
+          supplied ? std::move(*supplied)
+                   : forbidden_response();
+      response.wire_protocol =
+          ntl::net::http::protocol::http2;
+      const ntl::status valid = response.headers.validate(
+          response.wire_protocol, pipeline_->limits());
+      if (!valid.is_ok() || response.status < 100 ||
+          response.status > 999)
+        return ntl::unexpected(
+            valid.is_ok() ? ntl::status(STATUS_DATA_ERROR)
+                          : valid);
+      const std::string coding =
+          response.headers.joined("content-encoding");
+      auto encoded = ntl::net::http::encode_body(
+          response.headers, response.body, coding,
+          ntl::net::http::transformed_body_coding::preserve,
+          *encoders_, pipeline_->limits());
+      if (!encoded)
+        return ntl::unexpected(encoded.status());
+      const std::span<const std::byte> wire_body =
+          ntl::net::http::response_body_forbidden(
+              request, response)
+              ? std::span<const std::byte>{}
+              : std::span<const std::byte>(*encoded);
+      return encode_response_frames(
+          stream_id, response, wire_body,
+          maximum_frame_size_, 256 * 1024,
+          ntl::net::http::response_body_forbidden(
+              request, response));
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+  ntl::result<connection_transform_result>
+  complete(std::uint32_t stream_id) noexcept {
+    try {
+      const auto found = streams_.find(stream_id);
+      if (found == streams_.end())
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      stream_state stream = std::move(found->second);
+      streams_.erase(found);
+      buffered_body_bytes_ -= stream.body.size();
+
+      connection_transform_result result;
+      result.consumed = true;
+      result.message_complete = true;
+      result.stream_id = stream_id;
+      if (direction_ == connection_direction::requests) {
+        auto transformed = transform_request(
+            stream_id, stream.headers, stream.body,
+            stream.trailers, *pipeline_,
+            *decoders_, *encoders_, maximum_frame_size_);
+        if (!transformed)
+          return ntl::unexpected(transformed.status());
+        result.request = transformed->message;
+        switch (transformed->outcome.action) {
+        case ntl::net::http::rewrite_action::forward: {
+          const ntl::status remembered =
+              exchanges_->remember(
+                  stream_id, transformed->message);
+          if (!remembered.is_ok())
+            return ntl::unexpected(remembered);
+          result.forward = std::move(transformed->frames);
+          break;
+        }
+        case ntl::net::http::rewrite_action::block:
+        case ntl::net::http::rewrite_action::respond: {
+          result.terminal_status =
+              transformed->outcome.response
+                  ? transformed->outcome.response->status
+                  : 403;
+          auto terminal = terminal_frames(
+              stream_id,
+              std::move(transformed->outcome.response),
+              transformed->message);
+          if (!terminal)
+            return ntl::unexpected(terminal.status());
+          result.reverse = std::move(*terminal);
+          break;
+        }
+        case ntl::net::http::rewrite_action::drop:
+          if (auto reset = encode_reset_stream(
+                  stream_id, 0x8u))
+            result.reverse.push_back(std::move(*reset));
+          break;
+        }
+        return ntl::ok(std::move(result));
+      }
+
+      auto request = exchanges_->request(stream_id);
+      if (!request)
+        return ntl::unexpected(request.status());
+      auto transformed = transform_response(
+          stream_id, *request, stream.headers, stream.body,
+          stream.trailers, *pipeline_,
+          *decoders_, *encoders_, maximum_frame_size_);
+      exchanges_->erase(stream_id);
+      if (!transformed)
+        return ntl::unexpected(transformed.status());
+      result.response = transformed->message;
+      switch (transformed->outcome.action) {
+      case ntl::net::http::rewrite_action::forward:
+        result.forward = std::move(transformed->frames);
+        break;
+      case ntl::net::http::rewrite_action::block:
+      case ntl::net::http::rewrite_action::respond: {
+        result.terminal_status =
+            transformed->outcome.response
+                ? transformed->outcome.response->status
+                : 403;
+        auto terminal = terminal_frames(
+            stream_id,
+            std::move(transformed->outcome.response),
+            *request);
+        if (!terminal)
+          return ntl::unexpected(terminal.status());
+        result.forward = std::move(*terminal);
+        break;
+      }
+      case ntl::net::http::rewrite_action::drop:
+        if (auto reset = encode_reset_stream(
+                stream_id, 0x8u))
+          result.forward.push_back(std::move(*reset));
+        break;
+      }
+      return ntl::ok(std::move(result));
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+  connection_direction direction_;
+  exchange_store *exchanges_;
+  const ntl::net::http::transform_pipeline *pipeline_;
+  const ntl::net::inspection::content_decoder_registry *decoders_;
+  const ntl::net::inspection::content_encoder_registry *encoders_;
+  hpack_decoder_adapter<bounded_hpack_decoder> decoder_;
+  header_block_assembler assembler_;
+  std::size_t maximum_frame_size_;
+  std::size_t maximum_buffered_body_bytes_;
+  std::size_t buffered_body_bytes_ = 0;
+  std::unordered_map<std::uint32_t, stream_state> streams_;
+};
+
+} // namespace ntl::net::http2

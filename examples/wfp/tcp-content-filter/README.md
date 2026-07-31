@@ -19,10 +19,10 @@ to this sample application protocol. Replace
 
 ## Enforcement path
 
-1. an ALE flow-established callout associates typed state with the selected
-   inbound TCP flow;
-2. a stream callout requests more bytes until one bounded application message
-   is complete;
+1. IPv4 and IPv6 ALE flow-established callouts associate typed state with the
+   selected inbound TCP flows;
+2. `STREAM_V4/V6` callouts request more bytes until one bounded application
+   message is complete;
 3. inbound stream data is deferred and copied into owned storage;
 4. a reliable typed NTL RPC notification reaches the user-mode coroutine;
 5. `permit` continues the deferred stream and enforces exactly that frame;
@@ -30,8 +30,9 @@ to this sample application protocol. Replace
    allocation failure drops the whole flow.
 
 The app sends an allowed message with its four-byte prefix split across two
-socket writes. It then sends `BLOCKME` and proves that the flow is closed.
-Removing the dynamic WFP policy restores ordinary TCP delivery.
+socket writes over IPv4 and IPv6. It then sends `BLOCKME` on both and proves
+that each flow is closed. Removing the session-scoped WFP policy restores
+ordinary TCP delivery for both.
 
 Run `crtsys_wfp_tcp_content_filter_app.exe --failure-self-test` to verify
 malformed-verdict rejection, timeout flow drop, late-permit rejection, and

@@ -330,6 +330,143 @@ private:
   bool initialized_ = false;
 };
 
+/**
+ * @brief Directional RFC 7692 encoder with context-takeover semantics.
+ *
+ * The four-octet Z_SYNC_FLUSH marker is removed from every encoded message as
+ * required by RFC 7692. One encoder belongs to one connection direction.
+ */
+class permessage_deflate_encoder {
+public:
+  permessage_deflate_encoder(
+      std::uint8_t window_bits, bool no_context_takeover,
+      std::size_t maximum_input_size,
+      std::size_t maximum_output_size) noexcept
+      : window_bits_(window_bits),
+        no_context_takeover_(no_context_takeover),
+        maximum_input_size_(maximum_input_size),
+        maximum_output_size_(maximum_output_size) {}
+
+  permessage_deflate_encoder(const permessage_deflate_encoder &) = delete;
+  permessage_deflate_encoder &
+  operator=(const permessage_deflate_encoder &) = delete;
+
+  ~permessage_deflate_encoder() { release(); }
+
+  void reset() noexcept { release(); }
+
+  ntl::result<std::vector<std::byte>>
+  encode(std::span<const std::byte> payload,
+         bool compress = true) noexcept {
+    if (window_bits_ < 8 || window_bits_ > 15 ||
+        maximum_input_size_ == 0 || maximum_output_size_ == 0)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    if (payload.size() > maximum_input_size_)
+      return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+    if (!compress) {
+      try {
+        return ntl::ok(std::vector<std::byte>(
+            payload.begin(), payload.end()));
+      } catch (...) {
+        return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+      }
+    }
+    if (!initialize())
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+
+    std::vector<std::byte> output;
+    try {
+      output.reserve((std::min)(
+          maximum_output_size_, payload.size() + 64));
+    } catch (...) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+
+    std::size_t input_offset = 0;
+    int status = Z_OK;
+    do {
+      const std::size_t available = (std::min)(
+          payload.size() - input_offset,
+          static_cast<std::size_t>((std::numeric_limits<uInt>::max)()));
+      stream_.next_in = reinterpret_cast<Bytef *>(
+          const_cast<std::byte *>(payload.data() + input_offset));
+      stream_.avail_in = static_cast<uInt>(available);
+      const bool last_input = input_offset + available == payload.size();
+      do {
+        if (output.size() == maximum_output_size_) {
+          release();
+          return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+        }
+        std::array<std::byte, 16 * 1024> buffer{};
+        const std::size_t capacity = (std::min)(
+            buffer.size(), maximum_output_size_ - output.size());
+        stream_.next_out = reinterpret_cast<Bytef *>(buffer.data());
+        stream_.avail_out = static_cast<uInt>(capacity);
+        status = ::deflate(
+            &stream_, last_input ? Z_SYNC_FLUSH : Z_NO_FLUSH);
+        if (status != Z_OK) {
+          release();
+          return ntl::unexpected(
+              status == Z_MEM_ERROR ? STATUS_INSUFFICIENT_RESOURCES
+                                    : STATUS_DATA_ERROR);
+        }
+        const std::size_t produced = capacity - stream_.avail_out;
+        try {
+          output.insert(output.end(), buffer.begin(),
+                        buffer.begin() +
+                            static_cast<std::ptrdiff_t>(produced));
+        } catch (...) {
+          release();
+          return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+        }
+      } while (stream_.avail_in != 0 ||
+               (last_input && stream_.avail_out == 0));
+      input_offset += available;
+    } while (input_offset != payload.size());
+
+    constexpr std::array<std::byte, 4> flush_marker{
+        std::byte{0x00}, std::byte{0x00},
+        std::byte{0xff}, std::byte{0xff}};
+    if (output.size() < flush_marker.size() ||
+        !std::equal(flush_marker.begin(), flush_marker.end(),
+                    output.end() -
+                        static_cast<std::ptrdiff_t>(flush_marker.size()))) {
+      release();
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    }
+    output.resize(output.size() - flush_marker.size());
+    if (no_context_takeover_)
+      release();
+    return ntl::ok(std::move(output));
+  }
+
+private:
+  bool initialize() noexcept {
+    if (initialized_)
+      return true;
+    stream_ = {};
+    initialized_ = ::deflateInit2(
+        &stream_, Z_DEFAULT_COMPRESSION, Z_DEFLATED,
+        -static_cast<int>(window_bits_), 8,
+        Z_DEFAULT_STRATEGY) == Z_OK;
+    return initialized_;
+  }
+
+  void release() noexcept {
+    if (initialized_)
+      (void)::deflateEnd(&stream_);
+    stream_ = {};
+    initialized_ = false;
+  }
+
+  z_stream stream_{};
+  std::uint8_t window_bits_ = 15;
+  bool no_context_takeover_ = false;
+  std::size_t maximum_input_size_ = 0;
+  std::size_t maximum_output_size_ = 0;
+  bool initialized_ = false;
+};
+
 inline permessage_deflate_decoder
 make_permessage_deflate_decoder(
     const permessage_deflate_parameters &parameters,
@@ -342,6 +479,20 @@ make_permessage_deflate_decoder(
       client ? parameters.client_no_context_takeover
              : parameters.server_no_context_takeover,
       maximum_message_size);
+}
+
+inline permessage_deflate_encoder
+make_permessage_deflate_encoder(
+    const permessage_deflate_parameters &parameters,
+    sender_role sender, std::size_t maximum_input_size,
+    std::size_t maximum_output_size) noexcept {
+  const bool client = sender == sender_role::client;
+  return permessage_deflate_encoder(
+      client ? parameters.client_max_window_bits
+             : parameters.server_max_window_bits,
+      client ? parameters.client_no_context_takeover
+             : parameters.server_no_context_takeover,
+      maximum_input_size, maximum_output_size);
 }
 
 } // namespace ntl::net::websocket

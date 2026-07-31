@@ -145,7 +145,6 @@ std::wstring make_upstream_request_headers(
         is_hop_by_hop_header(name) ||
         ascii_equal_ci(name, "host") ||
         ascii_equal_ci(name, "content-length") ||
-        ascii_equal_ci(name, "accept-encoding") ||
         ascii_equal_ci(name, "te"))
       continue;
     if (!std::all_of(
@@ -161,7 +160,6 @@ std::wstring make_upstream_request_headers(
     result += widen_ascii(value);
     result += L"\r\n";
   }
-  result += L"Accept-Encoding: identity\r\n";
   if (result.size() > maximum_request_header_bytes)
     throw std::length_error(
         "forwarded HTTP request headers exceed the bounded limit");

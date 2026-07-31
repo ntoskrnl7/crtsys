@@ -334,7 +334,7 @@ void validate_coroutine_eof() {
   throw std::runtime_error("incomplete read_exactly ignored clean EOF");
 }
 
-void install_policy(ntl::wfp::dynamic_session &session,
+void install_policy(ntl::wfp::policy_session &session,
                     std::uint16_t port) {
   session.install([&](ntl::wfp::policy_transaction &transaction) {
     const auto provider = transaction.add_provider(
@@ -373,7 +373,8 @@ void install_policy(ntl::wfp::dynamic_session &session,
     ntl::wfp::stream_control_filter_builder<
         wfp_stream_edit::stream_layer>
         stream_filter(wfp_stream_edit::stream_filter_key,
-                      L"Replace BLOCKME with REDACT!");
+                      L"Replace BLOCKME with REDACT!",
+                      ntl::wfp::callout_unavailable::permit);
     stream_filter.remote_port_equal(port);
     transaction.add_stream_control_filter(
         sublayer, stream_callout, stream_filter);
@@ -417,7 +418,7 @@ int wmain(int argc, wchar_t **argv) {
                << L".\n";
     {
       std::wcout << L"[2/8] Installing flow and stream-control rules.\n";
-      ntl::wfp::dynamic_session policy(
+      auto policy = ntl::wfp::policy_session::ephemeral(
           L"crtsys ntl::wfp stream-edit sample");
       install_policy(policy, server.port);
 

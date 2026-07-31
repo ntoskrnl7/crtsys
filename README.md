@@ -262,10 +262,10 @@ may compile or work.
 | [NTL KMDF USB template](./examples/kmdf/usb) | Buildable PnP USB device/interface/pipe and continuous-reader template with a user-mode inspection app |
 | [NTL KMDF WMI sample](./examples/kmdf/wmi) | MOF-backed typed WMI query/set/method providers, event delivery, and a `ROOT\\WMI` user-mode verifier |
 | [NTL minifilter samples](./examples/minifilter) | Independent typed callback/context, control-device, communication, MiniSpy-style operation-log, swapped-buffer, and MetadataManager-style driver/app examples with WDK sample-coverage mapping |
-| [NTL WFP ALE connect-block](./examples/wfp/ale-connect-block) | A purpose-named, step-by-step driver/controller sample that blocks one selected outbound IPv4 TCP connection and proves recovery after dynamic policy removal |
+| [NTL WFP ALE connect-block](./examples/wfp/ale-connect-block) | A purpose-named driver/controller sample that blocks one selected outbound IPv4 TCP connection, proves session-scoped recovery, and exercises persistent graph reconcile, health, and uninstall |
 | [NTL WFP connect-redirect](./examples/wfp/connect-redirect) | A local TCP proxy foundation that safely hands the original destination and opaque WFP redirect records to user mode, relays both directions with coroutines, and prevents redirect loops |
 | [NTL WFP TLS inspection-proxy](./examples/wfp/tls-inspection-proxy) | An authorized connect-redirect and two-leg Schannel proxy with bounded ClientHello/SNI identity selection, per-host certificate issuance/cache, HTTP/1.1 plaintext framing, and typed content policy outside the kernel |
-| [NTL WFP browser HTTPS inspection](./examples/wfp/browser-https-inspection) | An independent browser-scoped driver/app example that keeps a dynamic redirect policy active, terminates two Schannel legs, and records bounded uncompressed HTML response bodies |
+| [NTL WFP browser HTTPS inspection](./examples/wfp/browser-https-inspection) | An independent browser-scoped driver/app example with dynamic redirect policy, two-leg Schannel termination, HTTP/1.1 and HTTP/2 transforms, WebSocket/gRPC adapters, and bounded gzip/deflate/Brotli HTML decoding |
 | [NTL WFP UDP content-filter](./examples/wfp/udp-content-filter) | A fail-closed driver/policy-coroutine sample for complete outbound UDP datagrams; permit reinjects the retained clone and block discards only that datagram |
 | [NTL WFP TCP content-filter](./examples/wfp/tcp-content-filter) | A fail-closed driver/policy-coroutine sample for explicitly framed inbound TCP application messages; permit resumes exactly one frame and block drops the whole flow |
 | [CI Driver Load Tests](./docs/ci-driver-load-tests.md) | Optional self-hosted driver load/run workflow |
@@ -372,6 +372,14 @@ driver libraries for `x86`, `x64`, `ARM`, and `ARM64` `Debug`/`Release` on
 v142/v143, and `x86`, `x64`, and `ARM64` on v145. The package workflow builds
 WDK consumer projects for every packaged architecture that the selected toolset
 supports. The checked-in smoke projects live under [`test/nuget`](./test/nuget).
+
+User-mode NuGet consumers also receive and automatically link the pinned
+zlib/Brotli backends used by NTL's bounded gzip, RFC 1950 `deflate`, and
+Brotli HTTP, WebSocket, and gRPC transforms, including incremental chained
+`Content-Encoding` decode/re-encode. Package CI compiles and links this codec
+consumer across every packaged toolset, architecture, and configuration;
+x86/x64 jobs also execute one-byte-split round trips. Driver projects do not
+link these user-mode codecs.
 
 The NuGet distribution is `crtsys.<version>.nupkg` for Visual Studio/MSBuild
 projects.

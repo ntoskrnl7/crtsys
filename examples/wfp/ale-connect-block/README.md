@@ -3,8 +3,8 @@
 [한국어 설명](./README.ko-KR.md)
 
 This sample temporarily blocks one outbound IPv4 TCP connection to a selected
-loopback port. When its dynamic WFP policy session closes, the same connection
-succeeds.
+loopback port. When its ephemeral WFP policy session closes, the same
+connection succeeds.
 
 ## Who does what
 
@@ -20,13 +20,13 @@ callout GUID connects the user-mode and kernel-mode registrations.
 ## Observable sequence
 
 1. The app starts a TCP listener on `127.0.0.1:<port>`.
-2. The app opens a dynamic WFP session.
+2. The app opens an ephemeral WFP policy session.
 3. In one transaction it adds provider → sublayer → callout → filter.
 4. The filter matches outbound IPv4 TCP connections to `<port>`.
 5. WFP calls the driver's typed `classify_event<ALE_AUTH_CONNECT_V4>`
    callback.
 6. The driver returns `block`, so `connect()` fails with `WSAEACCES` (`10013`).
-7. The dynamic session closes and removes all four policy objects.
+7. The ephemeral session closes and removes all four policy objects.
 8. The app repeats `connect()` and it succeeds.
 
 The executable prints every stage as it runs. Its final success marker is:
@@ -41,7 +41,19 @@ NTL WFP ale-connect-block ok: blocked_error=10013, restored_connect=success
   same typed layer and callout key;
 - `ntl::wfp` applies action-write and clear-action-right rules;
 - the selected connection is actually denied by the kernel callout; and
-- dynamic policy leaves no persistent firewall objects after session close.
+- ephemeral policy leaves no persistent firewall objects after session close.
+
+The runtime suite also invokes:
+
+```powershell
+.\crtsys_wfp_ale_connect_block_app.exe `
+  --persistent-lifecycle-self-test 49152
+```
+
+That path atomically reconciles a manifest-backed persistent graph, closes
+the installing controller, verifies policy health and enforcement from a new
+engine connection, explicitly uninstalls the manifest, and proves that all
+four objects and the block are gone.
 
 Continue with [`datagram-proxy`](../datagram-proxy) for UDP packet redirection,
 [`async-inspection`](../async-inspection) for pended ALE decisions,

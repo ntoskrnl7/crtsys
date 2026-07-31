@@ -16,7 +16,8 @@ param(
                'wfp-tls-inspection-proxy',
                'wfp-browser-https-inspection',
                'wfp-udp-content-filter',
-               'wfp-tcp-content-filter')]
+               'wfp-tcp-content-filter',
+               'wfp-specialized-observation')]
   [string] $Project,
 
   [Parameter(Mandatory = $true)]

@@ -77,8 +77,7 @@ rewritten_browser_request rewrite_browser_request(
     const bool remove =
         ascii_equal_ci(name, "proxy-connection") ||
         (!is_websocket_upgrade &&
-         (ascii_equal_ci(name, "accept-encoding") ||
-          ascii_equal_ci(name, "connection")));
+         ascii_equal_ci(name, "connection"));
     if (!remove)
       headers.append(text.substr(line, line_end - line + 2));
     line = line_end + 2;
@@ -86,8 +85,7 @@ rewritten_browser_request rewrite_browser_request(
   if (is_websocket_upgrade)
     headers.append("\r\n");
   else
-    headers.append(
-        "Accept-Encoding: identity\r\nConnection: close\r\n\r\n");
+    headers.append("Connection: close\r\n\r\n");
 
   const auto body = wire.subspan(header_end + 4);
   std::vector<std::byte> result(headers.size() + body.size());

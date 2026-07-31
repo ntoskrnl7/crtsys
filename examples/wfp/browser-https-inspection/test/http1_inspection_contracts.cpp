@@ -113,13 +113,13 @@ void test_regular_request_rewrite() {
           "ordinary request retained WebSocket extensions");
   require(text.find("Proxy-Connection:") == std::string::npos,
           "proxy-only connection header reached the origin");
-  require(text.find("Accept-Encoding: gzip") == std::string::npos,
-          "browser compression offer was not normalized");
+  require(text.find("Accept-Encoding: gzip, br\r\n") != std::string::npos,
+          "browser compression offer was not preserved");
   require(text.find("Connection: keep-alive") == std::string::npos,
           "persistent HTTP/1 connection was not bounded");
   require(
       text.find(
-          "Accept-Encoding: identity\r\nConnection: close\r\n\r\n"
+          "Connection: close\r\n\r\n"
           "payload") != std::string::npos,
       "request body or bounded replacement fields were lost");
 }

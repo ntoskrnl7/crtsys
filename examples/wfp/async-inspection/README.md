@@ -5,7 +5,7 @@
 This driver/controller pair demonstrates an out-of-band ALE authorization
 decision:
 
-1. Initial `ALE_AUTH_CONNECT_V4` classification is pended.
+1. Initial `ALE_AUTH_CONNECT_V4/V6` classification is pended.
 2. The classify result is block-and-absorb while ownership is outstanding.
 3. A PASSIVE_LEVEL worker waits 100 ms and completes the operation.
 4. WFP reauthorizes the connection.
@@ -16,4 +16,5 @@ queue prevents driver unload until all posted decisions finish.
 
 The decision source is deterministic filter context so the fixture isolates
 the pend/complete/reauthorize lifetime. A product can connect that lifetime to
-its own bounded policy broker and define separate IPv6 and IPsec policy.
+its own bounded policy broker. The fixture installs and verifies both IPv4 and
+IPv6 policy; IPsec policy remains a separate layer-specific integration.

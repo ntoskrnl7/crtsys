@@ -17,7 +17,9 @@
 #endif
 
 #include <ntl/net/inspection/content_decoder>
+#include <ntl/net/inspection/content_encoder>
 #include <ntl/net/inspection/core>
+#include <ntl/net/http/transform>
 #include <ntl/result>
 #include <ntl/net/buffer/scatter_view>
 #include <ntl/status>
@@ -27,6 +29,7 @@
 #include <cstdint>
 #include <limits>
 #include <new>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -386,6 +389,34 @@ public:
         decoders_(&decoders),
         limits_(limits) {}
 
+  inspection_proxy(
+      origin_transport &origin,
+      inspection_policy &policy,
+      const ntl::net::inspection::content_decoder_registry &decoders,
+      const ntl::net::inspection::content_encoder_registry &encoders,
+      const ntl::net::http::transform_pipeline &transforms,
+      proxy_limits limits = {}) noexcept
+      : origin_(&origin),
+        policy_(&policy),
+        decoders_(&decoders),
+        encoders_(&encoders),
+        transforms_(&transforms),
+        limits_(limits) {}
+
+  inspection_proxy(
+      origin_transport &origin,
+      inspection_policy &policy,
+      const ntl::net::inspection::content_decoder_registry &decoders,
+      const ntl::net::inspection::content_encoder_registry *encoders,
+      const ntl::net::http::transform_pipeline *transforms,
+      proxy_limits limits = {}) noexcept
+      : origin_(&origin),
+        policy_(&policy),
+        decoders_(&decoders),
+        encoders_(encoders),
+        transforms_(transforms),
+        limits_(limits) {}
+
   inspection_proxy(const inspection_proxy &) = delete;
   inspection_proxy &
   operator=(const inspection_proxy &) = delete;
@@ -426,13 +457,38 @@ public:
         return fail(
             static_cast<NTSTATUS>(request_verdict));
 
+      ntl::net::http::request_message semantic_request;
+      if (transforms_) {
+        auto converted =
+            make_semantic_request(request, *decoded_request);
+        if (!converted)
+          return fail(static_cast<NTSTATUS>(
+              converted.status()));
+        semantic_request = std::move(*converted);
+        auto transformed =
+            transforms_->apply(semantic_request);
+        if (transformed.action ==
+            ntl::net::http::rewrite_action::drop)
+          return fail(STATUS_CONNECTION_ABORTED);
+        if (transformed.action !=
+            ntl::net::http::rewrite_action::forward)
+          return make_terminal_response(
+              std::move(transformed.response),
+              semantic_request);
+        const ntl::status applied = apply_request_transform(
+            request, semantic_request, transformed,
+            request_metadata->content_encoding);
+        if (!applied.is_ok())
+          return fail(static_cast<NTSTATUS>(applied));
+      }
+
       auto received = origin_->send(request);
       if (!received)
         return fail(
             static_cast<NTSTATUS>(received.status()));
       origin_response response = std::move(*received);
       const ntl::status response_valid =
-          validate_response(response);
+          validate_response(response, &request);
       if (!response_valid.is_ok())
         return fail(
             static_cast<NTSTATUS>(response_valid));
@@ -444,24 +500,62 @@ public:
         return fail(static_cast<NTSTATUS>(
             response_metadata.status()));
       std::vector<std::byte> decoded_response_storage;
-      auto decoded_response = decode_body(
-          response.body,
-          response_metadata->content_encoding,
-          limits_.maximum_response_body_bytes,
-          decoded_response_storage);
-      if (!decoded_response)
-        return fail(static_cast<NTSTATUS>(
-            decoded_response.status()));
+      std::span<const std::byte> decoded_response =
+          response.body;
+      const bool response_body_forbidden =
+          (response.status >= 100 && response.status < 200) ||
+          response.status == 204 || response.status == 304 ||
+          inspection_proxy_detail::ascii_equal_ci(
+              request.method, "HEAD") ||
+          (inspection_proxy_detail::ascii_equal_ci(
+               request.method, "CONNECT") &&
+           response.status >= 200 && response.status < 300);
+      if (!response_body_forbidden) {
+        auto decoded = decode_body(
+            response.body,
+            response_metadata->content_encoding,
+            limits_.maximum_response_body_bytes,
+            decoded_response_storage);
+        if (!decoded)
+          return fail(static_cast<NTSTATUS>(
+              decoded.status()));
+        decoded_response = *decoded;
+      }
       const ntl::status response_verdict =
           inspection_proxy_detail::verdict_status(
               policy_->inspect_response(
                   {request, response,
                    response_metadata->content_type,
                    response_metadata->content_encoding,
-                   *decoded_response}));
+                   decoded_response}));
       if (!response_verdict.is_ok())
         return fail(
             static_cast<NTSTATUS>(response_verdict));
+
+      if (transforms_) {
+        auto converted =
+            make_semantic_response(response, decoded_response);
+        if (!converted)
+          return fail(static_cast<NTSTATUS>(
+              converted.status()));
+        auto semantic_response = std::move(*converted);
+        auto transformed = transforms_->apply(
+            semantic_request, semantic_response);
+        if (transformed.action ==
+            ntl::net::http::rewrite_action::drop)
+          return fail(STATUS_CONNECTION_ABORTED);
+        if (transformed.action !=
+            ntl::net::http::rewrite_action::forward)
+          return make_terminal_response(
+              std::move(transformed.response),
+              semantic_request);
+        const ntl::status applied = apply_response_transform(
+            response, semantic_response, transformed,
+            response_metadata->content_encoding,
+            semantic_request);
+        if (!applied.is_ok())
+          return fail(static_cast<NTSTATUS>(applied));
+      }
       return ntl::ok(std::move(response));
     } catch (const std::bad_alloc &) {
       return fail(STATUS_INSUFFICIENT_RESOURCES);
@@ -473,6 +567,7 @@ public:
 private:
   bool valid_limits() const noexcept {
     return origin_ && policy_ && decoders_ &&
+           (!transforms_ || encoders_) &&
            limits_.maximum_request_headers != 0 &&
            limits_.maximum_request_header_bytes != 0 &&
            limits_.maximum_request_body_bytes != 0 &&
@@ -589,7 +684,8 @@ private:
   }
 
   ntl::status validate_response(
-      const origin_response &response) const noexcept {
+      const origin_response &response,
+      const origin_request *request = nullptr) const noexcept {
     using namespace inspection_proxy_detail;
     if (response.status < 100 || response.status > 999 ||
         response.headers.size() >
@@ -603,6 +699,17 @@ private:
 
     std::size_t header_bytes = 0;
     bool content_length_seen = false;
+    const bool body_forbidden =
+        (response.status >= 100 && response.status < 200) ||
+        response.status == 204 || response.status == 304 ||
+        (request &&
+         (inspection_proxy_detail::ascii_equal_ci(
+              request->method, "HEAD") ||
+          (inspection_proxy_detail::ascii_equal_ci(
+               request->method, "CONNECT") &&
+           response.status >= 200 && response.status < 300)));
+    if (body_forbidden && !response.body.empty())
+      return STATUS_DATA_ERROR;
     for (const auto &field : response.headers) {
       if (field.name.size() >
               limits_.maximum_response_header_bytes -
@@ -623,7 +730,9 @@ private:
         if (content_length_seen)
           return STATUS_DATA_ERROR;
         auto length = parse_content_length(field.value);
-        if (!length || *length != response.body.size())
+        if (!length ||
+            (!body_forbidden &&
+             *length != response.body.size()))
           return STATUS_DATA_ERROR;
         content_length_seen = true;
       }
@@ -664,6 +773,209 @@ private:
         std::span<const std::byte>(storage));
   }
 
+  ntl::result<ntl::net::http::request_message>
+  make_semantic_request(
+      const origin_request &request,
+      std::span<const std::byte> decoded_body) const noexcept {
+    try {
+      ntl::net::http::request_message result;
+      result.wire_protocol =
+          ntl::net::http::protocol::http3;
+      result.method = request.method;
+      result.scheme = request.scheme;
+      result.authority = request.authority;
+      result.path = request.path;
+      for (const auto &field : request.headers)
+        result.headers.append(field.name, field.value);
+      result.body.assign(
+          decoded_body.begin(), decoded_body.end());
+      return ntl::ok(std::move(result));
+    } catch (const std::invalid_argument &) {
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+  ntl::result<ntl::net::http::response_message>
+  make_semantic_response(
+      const origin_response &response,
+      std::span<const std::byte> decoded_body) const noexcept {
+    try {
+      ntl::net::http::response_message result;
+      result.wire_protocol =
+          ntl::net::http::protocol::http3;
+      result.status = response.status;
+      for (const auto &field : response.headers)
+        result.headers.append(field.name, field.value);
+      result.body.assign(
+          decoded_body.begin(), decoded_body.end());
+      return ntl::ok(std::move(result));
+    } catch (const std::invalid_argument &) {
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+  static ntl::status assign_headers(
+      std::vector<proxy_header> &destination,
+      const ntl::net::http::header_collection &source) noexcept {
+    try {
+      destination.clear();
+      destination.reserve(source.size());
+      for (const auto &field : source.fields())
+        destination.push_back({field.name, field.value});
+      return ntl::status::ok();
+    } catch (...) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+  }
+
+  ntl::status apply_request_transform(
+      origin_request &wire,
+      ntl::net::http::request_message &semantic,
+      const ntl::net::http::pipeline_outcome &outcome,
+      std::string_view original_coding) const noexcept {
+    try {
+      wire.method = semantic.method;
+      wire.scheme = semantic.scheme;
+      wire.authority = semantic.authority;
+      wire.path = semantic.path;
+      if (outcome.body_modified) {
+        auto encoded = ntl::net::http::encode_body(
+            semantic.headers, semantic.body,
+            original_coding, outcome.body_coding,
+            *encoders_, transforms_->limits());
+        if (!encoded)
+          return encoded.status();
+        wire.body = std::move(*encoded);
+      }
+      if (outcome.modified()) {
+        const ntl::status assigned =
+            assign_headers(wire.headers, semantic.headers);
+        if (!assigned.is_ok())
+          return assigned;
+      }
+      return validate_request_after_transform(wire);
+    } catch (...) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+  }
+
+  ntl::status apply_response_transform(
+      origin_response &wire,
+      ntl::net::http::response_message &semantic,
+      const ntl::net::http::pipeline_outcome &outcome,
+      std::string_view original_coding,
+      const ntl::net::http::request_message
+          &request) const noexcept {
+    try {
+      wire.status = semantic.status;
+      if (outcome.body_modified) {
+        auto encoded = ntl::net::http::encode_body(
+            semantic.headers, semantic.body,
+            original_coding, outcome.body_coding,
+            *encoders_, transforms_->limits());
+        if (!encoded)
+          return encoded.status();
+        wire.body = std::move(*encoded);
+      }
+      if (outcome.modified()) {
+        const ntl::status assigned =
+            assign_headers(wire.headers, semantic.headers);
+        if (!assigned.is_ok())
+          return assigned;
+      }
+      origin_request validation_request;
+      validation_request.method = request.method;
+      return validate_response(wire, &validation_request);
+    } catch (...) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+  }
+
+  ntl::status validate_request_after_transform(
+      const origin_request &request) const noexcept {
+    incoming_request incoming;
+    try {
+      incoming.server_name = request.server_name;
+      incoming.headers.reserve(request.headers.size() + 4);
+      incoming.headers.push_back({":method", request.method});
+      incoming.headers.push_back({":scheme", request.scheme});
+      incoming.headers.push_back(
+          {":authority", request.authority});
+      incoming.headers.push_back({":path", request.path});
+      incoming.headers.insert(
+          incoming.headers.end(),
+          request.headers.begin(), request.headers.end());
+      incoming.body = request.body;
+    } catch (...) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    auto validated = validate_request(std::move(incoming));
+    return validated ? ntl::status::ok()
+                     : validated.status();
+  }
+
+  ntl::result<origin_response> make_terminal_response(
+      std::optional<ntl::net::http::response_message>
+          supplied,
+      const ntl::net::http::request_message
+          &request) const noexcept {
+    try {
+      ntl::net::http::response_message semantic;
+      if (supplied) {
+        semantic = std::move(*supplied);
+      } else {
+        semantic.status = 403;
+        semantic.headers.append(
+            "content-type", "text/plain; charset=utf-8");
+        constexpr std::string_view text =
+            "Request blocked by policy.\n";
+        semantic.body.assign(
+            reinterpret_cast<const std::byte *>(text.data()),
+            reinterpret_cast<const std::byte *>(
+                text.data() + text.size()));
+      }
+      semantic.wire_protocol =
+          ntl::net::http::protocol::http3;
+      const std::string original_coding =
+          semantic.headers.joined("content-encoding");
+      auto encoded = ntl::net::http::encode_body(
+          semantic.headers, semantic.body, original_coding,
+          ntl::net::http::transformed_body_coding::preserve,
+          *encoders_, transforms_->limits());
+      if (!encoded)
+        return fail(static_cast<NTSTATUS>(encoded.status()));
+      origin_response result;
+      result.status = semantic.status;
+      const ntl::status assigned =
+          assign_headers(result.headers, semantic.headers);
+      if (!assigned.is_ok())
+        return fail(static_cast<NTSTATUS>(assigned));
+      if (!ntl::net::http::response_body_forbidden(
+              request, semantic))
+        result.body = std::move(*encoded);
+      result.negotiated_protocol = "h3";
+      origin_request validation_request;
+      validation_request.method = request.method;
+      const ntl::status valid =
+          validate_response(result, &validation_request);
+      if (!valid.is_ok())
+        return fail(static_cast<NTSTATUS>(valid));
+      return ntl::ok(std::move(result));
+    } catch (const std::bad_alloc &) {
+      return fail(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return fail(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
   ntl::result<origin_response>
   fail(NTSTATUS status) const noexcept {
     if (policy_)
@@ -675,6 +987,10 @@ private:
   inspection_policy *policy_ = nullptr;
   const ntl::net::inspection::content_decoder_registry
       *decoders_ = nullptr;
+  const ntl::net::inspection::content_encoder_registry
+      *encoders_ = nullptr;
+  const ntl::net::http::transform_pipeline
+      *transforms_ = nullptr;
   proxy_limits limits_{};
 };
 

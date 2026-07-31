@@ -307,11 +307,13 @@ cancellation, and completion-context lifetime rules.
 
 ## Transactional user-mode policy
 
-`dynamic_session` always opens a dynamic WFP session. Policy is installed only
-inside `install()`:
+`policy_session` makes lifetime an explicit construction choice. An
+`ephemeral()` session installs process-scoped objects that BFE removes if the
+controller exits or loses its engine connection:
 
 ```cpp
-ntl::wfp::dynamic_session session;
+auto session = ntl::wfp::policy_session::ephemeral(
+    L"my product policy");
 session.install([](ntl::wfp::policy_transaction& tx) {
   const auto provider = tx.add_provider(/* provider_spec */);
   const auto sublayer = tx.add_sublayer(provider, /* sublayer_spec */);
@@ -320,7 +322,10 @@ session.install([](ntl::wfp::policy_transaction& tx) {
 
   ntl::wfp::filter_builder<layer> filter(
       /* filter_key<layer> */, L"Block selected TCP port");
-  filter.protocol_equal(IPPROTO_TCP).remote_port_equal(443);
+  filter.protocol_equal(IPPROTO_TCP)
+      .remote_address_equal(
+          ntl::wfp::ipv4_address::from_octets(127, 0, 0, 1))
+      .remote_port_equal(443);
   tx.add_filter(sublayer, callout, filter);
 });
 ```
@@ -330,7 +335,41 @@ references are transaction-scoped capabilities with a generation identity;
 mixing references from two transactions or providers throws before a native
 filter call.
 
-The four policy builders fix their native action:
+For product policy that must survive controller or BFE restarts, construct a
+`persistent()` session and declare the graph keys once:
+
+```cpp
+ntl::wfp::policy_manifest manifest;
+manifest.include(provider_key)
+    .include(sublayer_key)
+    .include(callout_key)
+    .include(filter_key);
+
+auto policy = ntl::wfp::policy_session::persistent(
+    L"my persistent product policy");
+policy.reconcile(manifest, [](ntl::wfp::policy_transaction& tx) {
+  // Add the complete replacement graph.
+});
+
+const auto health = policy.health(manifest);
+if (!health.healthy())
+  policy.reconcile(manifest, write_complete_policy);
+
+policy.uninstall(manifest); // explicit product uninstall
+```
+
+`reconcile()` removes the manifest's previous filters, callouts, sublayers,
+and providers in dependency order and installs the complete replacement in
+the same native transaction. Before commit, NTL verifies that the writer
+created exactly the keys declared by the manifest; an omitted or undeclared
+object aborts the transaction. `install()` is ephemeral-only, while
+`reconcile()` and `uninstall()` are persistent-only, so lifetime cannot be
+selected accidentally after construction. `health()` reports missing object
+keys without changing policy. `reconnect()` reopens the BFE engine;
+persistent callers then run `health()` or `reconcile()`. Persistent providers
+may specify the owning service name in `provider_spec::service_name`.
+
+The policy builders fix their native action:
 
 | Builder | Layer/use | Native action |
 | --- | --- | --- |
@@ -341,6 +380,53 @@ The four policy builders fix their native action:
 
 There is no public engine handle, commit/abort method, action-type field, or
 native condition array.
+
+## Typed conditions
+
+Condition methods exist only when the selected WFP layer supports the native
+field. For example, ALE layers expose application, user, package, protocol,
+address, and port conditions; stream layers do not expose protocol; MAC
+layers expose MAC, EtherType, VLAN, and interface fields. An invalid
+layer/condition pair therefore fails during compilation.
+
+Addresses and identities have explicit owning types:
+
+- `ipv4_address::from_octets()` and `ipv4_network`;
+- `ipv6_address` and `ipv6_network`;
+- `mac_address`;
+- `user_identity` and `package_identity`.
+
+Prefix lengths, direction values, empty flag masks, VLAN identifiers, SID
+validity, and duplicate native fields are validated before BFE is called.
+`icmp_equal(type, code)` adds protocol, ICMP type, and ICMP code atomically so
+the caller cannot accidentally create a cross-protocol rule.
+
+## Diagnostics and event telemetry
+
+`policy_session::inspect_filter()` and `enumerate_filters<Layer>()` return
+bounded, pointer-free policy snapshots. Application blobs are represented by
+size and hash rather than retained executable paths.
+
+`network_event_monitor` subscribes to WFP classify-drop and IPsec-drop events
+and copies them into a preallocated bounded ring:
+
+```cpp
+ntl::wfp::network_event_monitor events({
+    .maximum_queued_events = 2048,
+    .manage_collection_state = false,
+});
+
+ntl::wfp::network_event_snapshot event;
+if (events.wait_pop(event, std::chrono::seconds(1))) {
+  // Correlate event.filter_id and event.layer_id with policy diagnostics.
+}
+```
+
+The callback path performs no queue allocation. Ring overflow drops new
+records and increments `dropped_by_limit`. Collection enablement is a
+machine-wide BFE option, so the monitor leaves it unchanged by default. Set
+`manage_collection_state` only when this component owns that global setting;
+the previous value is restored by `stop()`.
 
 ## Lifetime and IRQL
 
@@ -367,27 +453,34 @@ the first runtime sample. Its
 [Korean walkthrough](../../examples/wfp/ale-connect-block/README.ko-KR.md)
 explains the driver, controller, WFP engine, and nine-step execution sequence.
 It registers an `ALE_AUTH_CONNECT_V4` callout, installs all policy objects in
-one dynamic transaction, proves a selected loopback TCP connection is denied,
-closes the session, and proves connectivity is restored.
+one ephemeral transaction, proves a selected loopback TCP connection is
+denied, closes the session, and proves connectivity is restored. Its runtime
+suite also reconciles a persistent manifest, closes the installing controller,
+checks health and continued enforcement from a new connection, and explicitly
+uninstalls the graph.
 
 [`test/wfp/compile`](../../test/wfp/compile) compiles all typed layer families,
 flow-context transfer, stream state machines, ALE pending ownership, and the
-three asynchronous injector types with `/W4 /WX`. Its user-mode semantic
-contract executes fragmented cursor, edit, subview, copy, early-stop, and
-cross-fragment pattern cases on x64 and x86.
+three asynchronous injector types with `/W4 /WX`. Eight CTest semantic
+contracts execute in Debug/Release, including every IPv4/IPv6 prefix length,
+deterministic fragmented framing/search inputs, parser fuzz contracts, and
+the browser HTTP/3 contract.
 
-The advanced VM gate loads `datagram-proxy`, `async-inspection`,
-`flow-monitor`, `stream-edit`, `connect-redirect`,
-`tls-inspection-proxy`, `udp-content-filter`, and `tcp-content-filter`
-together under Driver Verifier and executes 20 controller iterations per
-sample. The two content-filter samples prove independently
+The advanced VM gate builds and packages only its selected samples. The
+dual-stack policy gate loads `datagram-proxy`, `async-inspection`,
+`flow-monitor`, `udp-content-filter`, and `tcp-content-filter` together under
+Driver Verifier and executes 20 controller iterations per sample. A full
+regression also runs all ten advanced samples together. IPv4 and IPv6
+redirect, delayed decisions, observation, content verdicts, endpoint closure,
+and post-policy restoration run in the gate. The two content-filter samples
+prove independently
 that a user-mode coroutine can decide a complete UDP datagram or a complete
 message of an explicitly selected TCP application protocol without receiving
 native WFP action authority. A TCP block drops the flow.
 The connect-redirect sample proves the separate proxy path: the driver
 redirects a selected TCP connect, the app captures the original endpoint and
 opaque WFP records, and two IOCP coroutines relay the byte stream before
-dynamic policy removal restores a direct connection.
+ephemeral policy removal restores a direct connection.
 The TLS inspection-proxy composes the same safe redirect handoff with two
 user-mode Schannel sessions. It observes a fragmented ClientHello, selects
 and caches a CA-signed per-SNI leaf, frames a bounded HTTP/1.1 plaintext
@@ -402,7 +495,11 @@ The gate also runs the
 fragmented UDP
 NBL/MDL and bounded coroutine-reader contracts at driver load, checks
 load/unload accounting plus crash events and dumps, and restores the exact
-caller-supplied Verifier targets after its second automatic guest restart.
+caller-supplied Verifier targets. Its default manual restart mode allows an
+operator to select the required driver-signing startup option. A full run
+uses separate normal-Verifier and Systematic Low Resources boots before the
+restore boot. Randomized Low Resources remains an explicit compatibility
+mode; volatile settings are not treated as additive.
 
 The mapping to Microsoft's network/trans samples and the exact runtime status
 is maintained in

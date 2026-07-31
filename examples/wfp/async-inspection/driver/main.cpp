@@ -12,8 +12,6 @@
 
 namespace {
 
-using layer = wfp_async_inspection::layer;
-
 class inspection_queue {
 public:
   inspection_queue() noexcept : executor_(DelayedWorkQueue, "Wfai") {
@@ -77,39 +75,38 @@ private:
 
 inspection_queue *g_queue = nullptr;
 
-constexpr auto inspect_connect =
-    +[](const ntl::wfp::classify_event<layer> &event) noexcept {
-      const auto flags = event.value(layer::field::flags).uint32();
-      const auto policy = event.filter().context();
-      if (!flags ||
-          (policy != wfp_async_inspection::permit_context &&
-           policy != wfp_async_inspection::block_context))
-        return ntl::wfp::decision::block;
+template <class Layer>
+ntl::wfp::decision
+inspect_connect(const ntl::wfp::classify_event<Layer> &event) noexcept {
+  const auto flags = event.value(Layer::field::flags).uint32();
+  const auto policy = event.filter().context();
+  if (!flags || (policy != wfp_async_inspection::permit_context &&
+                 policy != wfp_async_inspection::block_context))
+    return ntl::wfp::decision::block;
 
-      if ((*flags & FWP_CONDITION_FLAG_IS_REAUTHORIZE) != 0) {
-        inspection_queue *const queue = g_queue;
-        if (!queue || !queue->may_reauthorize())
-          return ntl::wfp::decision::block;
-        return policy == wfp_async_inspection::permit_context
-                   ? ntl::wfp::decision::permit
-                   : ntl::wfp::decision::block;
-      }
+  if ((*flags & FWP_CONDITION_FLAG_IS_REAUTHORIZE) != 0) {
+    inspection_queue *const queue = g_queue;
+    if (!queue || !queue->may_reauthorize())
+      return ntl::wfp::decision::block;
+    return policy == wfp_async_inspection::permit_context
+               ? ntl::wfp::decision::permit
+               : ntl::wfp::decision::block;
+  }
 
-      inspection_queue *const queue = g_queue;
-      if (!queue || !queue->accepting())
-        return ntl::wfp::decision::block;
+  inspection_queue *const queue = g_queue;
+  if (!queue || !queue->accepting())
+    return ntl::wfp::decision::block;
 
-      auto operation =
-          ntl::wfp::pended_operation::try_create(event.metadata());
-      if (!operation)
-        return ntl::wfp::decision::block;
+  auto operation = ntl::wfp::pended_operation::try_create(event.metadata());
+  if (!operation)
+    return ntl::wfp::decision::block;
 
-      const ntl::status queued = queue->post(std::move(*operation));
-      if (!queued.is_ok())
-        return ntl::wfp::decision::block_and_absorb;
+  const ntl::status queued = queue->post(std::move(*operation));
+  if (!queued.is_ok())
+    return ntl::wfp::decision::block_and_absorb;
 
-      return ntl::wfp::decision::block_and_absorb;
-    };
+  return ntl::wfp::decision::block_and_absorb;
+}
 
 } // namespace
 
@@ -118,12 +115,21 @@ ntl::status ntl::main(ntl::driver &driver, const std::wstring &) {
   auto callouts = std::make_shared<ntl::wfp::callout_driver<>>(driver);
   g_queue = queue.get();
 
-  const ntl::status registered =
-      callouts->add<inspect_connect>(
-          wfp_async_inspection::callout_key);
-  if (!registered.is_ok()) {
+  const ntl::status registered_v4 =
+      callouts->add<inspect_connect<wfp_async_inspection::layer_v4>>(
+          wfp_async_inspection::callout_key_v4);
+  if (!registered_v4.is_ok()) {
     g_queue = nullptr;
-    return registered;
+    return registered_v4;
+  }
+
+  const ntl::status registered_v6 =
+      callouts->add<inspect_connect<wfp_async_inspection::layer_v6>>(
+          wfp_async_inspection::callout_key_v6);
+  if (!registered_v6.is_ok()) {
+    (void)callouts->reset();
+    g_queue = nullptr;
+    return registered_v6;
   }
 
   driver.on_unload([queue, callouts] {

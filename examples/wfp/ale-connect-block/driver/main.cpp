@@ -11,8 +11,17 @@ namespace {
 
 using connect_v4 = ntl::wfp::layers::ale_auth_connect_v4;
 
+ntl::wfp::operational_telemetry *g_telemetry = nullptr;
+
+void observe_bfe_state(FWPM_SERVICE_STATE state) noexcept {
+  if (g_telemetry)
+    g_telemetry->record_bfe_state(state);
+}
+
 constexpr auto block_selected_connection =
     +[](const ntl::wfp::classify_event<connect_v4> &event) noexcept {
+      if (g_telemetry)
+        g_telemetry->record_classify(connect_v4::runtime_id);
       // The management filter already limits invocation to TCP and the
       // selected port. Reading the typed values here also demonstrates that a
       // callback cannot accidentally use an index from another WFP layer.
@@ -20,9 +29,14 @@ constexpr auto block_selected_connection =
           event.value(connect_v4::field::protocol).uint8();
       const auto port =
           event.value(connect_v4::field::remote_port).uint16();
-      if (!protocol || !port)
+      if (!protocol || !port) {
+        if (g_telemetry)
+          g_telemetry->record_permit(connect_v4::runtime_id);
         return ntl::wfp::decision::continue_classification;
+      }
 
+      if (g_telemetry)
+        g_telemetry->record_block(connect_v4::runtime_id);
       return ntl::wfp::decision::block;
     };
 
@@ -142,15 +156,33 @@ ntl::status ntl::main(ntl::driver &driver, const std::wstring &) {
 
   auto owned_callouts =
       std::make_shared<ntl::wfp::callout_driver<>>(driver);
-  const ntl::status result =
+  auto telemetry =
+      std::make_shared<ntl::wfp::operational_telemetry>();
+  g_telemetry = telemetry.get();
+  ntl::status result =
+      owned_callouts->watch_bfe<&observe_bfe_state>();
+  if (!result.is_ok()) {
+    g_telemetry = nullptr;
+    return result;
+  }
+  if (owned_callouts->bfe_state() != FWPM_SERVICE_RUNNING) {
+    g_telemetry = nullptr;
+    return STATUS_DEVICE_NOT_READY;
+  }
+  result =
       owned_callouts->add<block_selected_connection>(
           wfp_ale_connect_block::callout_key);
-  if (!result.is_ok())
+  if (!result.is_ok()) {
+    g_telemetry = nullptr;
     return result;
+  }
 
-  driver.on_unload([owned_callouts] {
+  driver.on_unload([owned_callouts, telemetry] {
     const ntl::status result = owned_callouts->reset();
     NT_ASSERT(result.is_ok());
+    g_telemetry = nullptr;
+    const auto final = telemetry->snapshot();
+    NT_ASSERT(final.classify == final.blocked + final.permitted);
   });
   return ntl::status::ok();
 }

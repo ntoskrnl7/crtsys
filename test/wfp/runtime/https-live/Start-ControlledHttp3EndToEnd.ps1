@@ -55,6 +55,11 @@ function Get-RootCertificateSnapshot {
 }
 
 function Get-ControlledKeySnapshot {
+  param(
+    [ValidateRange(0, [int]::MaxValue)]
+    [int] $OwnerProcessId = 0
+  )
+
   $entries = @(
     foreach ($scope in @('user', 'machine')) {
       $arguments =
@@ -71,7 +76,10 @@ function Get-ControlledKeySnapshot {
           } |
           ForEach-Object {
             $line = "$_".Trim()
-            "$scope|$line"
+            if ($OwnerProcessId -eq 0 -or
+                $line.Contains("-$OwnerProcessId-")) {
+              "$scope|$line"
+            }
           }
     }
   )
@@ -180,24 +188,41 @@ function Complete-ManagedClient {
   }
 }
 
-$rootsBefore = Get-RootCertificateSnapshot
-$keysBefore = Get-ControlledKeySnapshot
-$servicesBefore = Get-WfpServiceSnapshot
-$proxyPort = Get-FreeUdpPort
-do {
-  $originPort = Get-FreeUdpPort
-} while ($originPort -eq $proxyPort)
-
-$serverStdout = Join-Path $runDirectory 'server.stdout.log'
-$serverStderr = Join-Path $runDirectory 'server.stderr.log'
-$inspectionAuthority =
-    Join-Path $runDirectory 'ntl-browser-inspection-ca.cer'
-$originAuthority =
-    Join-Path $runDirectory 'ntl-controlled-origin-ca.cer'
-$stopPath = Join-Path $runDirectory 'stop.request'
+$testMutex = [Threading.Mutex]::new(
+    $false, 'Local\CrtSys-ControlledHttp3-EndToEnd')
+$mutexAcquired = $false
 $server = $null
+$stopPath = $null
 
 try {
+  try {
+    $mutexAcquired = $testMutex.WaitOne([TimeSpan]::FromMinutes(5))
+  } catch [Threading.AbandonedMutexException] {
+    $mutexAcquired = $true
+  }
+  if (-not $mutexAcquired) {
+    throw 'Timed out waiting for another controlled HTTP/3 run.'
+  }
+
+  # The certificate stores and persisted Schannel key containers inspected
+  # below are process-external resources.  Serialize the complete snapshot /
+  # exercise / cleanup transaction so independent CTest configurations cannot
+  # mistake another run's temporary key for a leak.
+  $rootsBefore = Get-RootCertificateSnapshot
+  $servicesBefore = Get-WfpServiceSnapshot
+  $proxyPort = Get-FreeUdpPort
+  do {
+    $originPort = Get-FreeUdpPort
+  } while ($originPort -eq $proxyPort)
+
+  $serverStdout = Join-Path $runDirectory 'server.stdout.log'
+  $serverStderr = Join-Path $runDirectory 'server.stderr.log'
+  $inspectionAuthority =
+      Join-Path $runDirectory 'ntl-browser-inspection-ca.cer'
+  $originAuthority =
+      Join-Path $runDirectory 'ntl-controlled-origin-ca.cer'
+  $stopPath = Join-Path $runDirectory 'stop.request'
+
   $server = Start-Process -FilePath $serverApplication `
       -ArgumentList @(
         '--controlled-http3-e2e', "$proxyPort", "$originPort",
@@ -205,6 +230,7 @@ try {
       ) -WorkingDirectory $root -WindowStyle Hidden -PassThru `
       -RedirectStandardOutput $serverStdout `
       -RedirectStandardError $serverStderr
+  $serverProcessId = $server.Id
 
   $readyDeadline = (Get-Date).AddSeconds(30)
   $ready = $false
@@ -357,12 +383,17 @@ try {
   }
 
   $rootsAfter = Get-RootCertificateSnapshot
-  $keysAfter = Get-ControlledKeySnapshot
+  # Other configurations may concurrently create their own short-lived
+  # test keys.  Every key created by this topology contains its server PID,
+  # so scope the leak check to this process instead of comparing the global
+  # key-container inventory.
+  $keysAfter = Get-ControlledKeySnapshot `
+      -OwnerProcessId $serverProcessId
   $servicesAfter = Get-WfpServiceSnapshot
   if ($rootsAfter -cne $rootsBefore) {
     throw 'A Windows root certificate store changed during the run.'
   }
-  if ($keysAfter -cne $keysBefore) {
+  if (-not [string]::IsNullOrEmpty($keysAfter)) {
     throw 'A controlled HTTP/3 private key remained after shutdown.'
   }
   if ($servicesAfter -cne $servicesBefore) {
@@ -400,13 +431,19 @@ try {
       'WFP-driver=not-used, reboot=no')
 } finally {
   if ($server -and -not $server.HasExited) {
-    New-Item -ItemType File -Path $stopPath -Force `
-        -ErrorAction SilentlyContinue | Out-Null
+    if ($stopPath) {
+      New-Item -ItemType File -Path $stopPath -Force `
+          -ErrorAction SilentlyContinue | Out-Null
+    }
     if (-not $server.WaitForExit(10000)) {
       Stop-Process -Id $server.Id -Force `
           -ErrorAction SilentlyContinue
     }
   }
+  if ($mutexAcquired) {
+    $testMutex.ReleaseMutex()
+  }
+  $testMutex.Dispose()
 }
 
 Write-Host "Controlled HTTP/3 evidence: $runDirectory"

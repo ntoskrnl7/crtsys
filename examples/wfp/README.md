@@ -5,7 +5,7 @@
 Start with [`ale-connect-block`](./ale-connect-block) or its
 [Korean walkthrough](./ale-connect-block/README.ko-KR.md). Its name describes
 the observable behavior: a kernel callout blocks one selected outbound IPv4
-TCP connection, then dynamic policy removal restores the connection.
+TCP connection, then ephemeral policy removal restores the connection.
 
 Use [`connect-redirect`](./connect-redirect) when a selected TCP connection
 must traverse a local user-mode proxy. It preserves WFP redirect records,

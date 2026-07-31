@@ -300,7 +300,7 @@ std::string exchange(
   return receive_to_eof(client.get());
 }
 
-void install_policy(ntl::wfp::dynamic_session &session,
+void install_policy(ntl::wfp::policy_session &session,
                     std::uint16_t original_port_v4,
                     std::uint16_t proxy_port_v4,
                     std::uint16_t original_port_v6,
@@ -327,7 +327,8 @@ void install_policy(ntl::wfp::dynamic_session &session,
         filter(
             wfp_connect_redirect::filter_key,
             L"Redirect the selected destination port",
-            {::GetCurrentProcessId(), proxy_port_v4});
+            {::GetCurrentProcessId(), proxy_port_v4},
+            ntl::wfp::callout_unavailable::permit);
     filter.description(
               L"PID and proxy port are encoded by the typed builder")
         .protocol_equal(IPPROTO_TCP)
@@ -347,7 +348,8 @@ void install_policy(ntl::wfp::dynamic_session &session,
         filter_v6(
             wfp_connect_redirect::filter_key_v6,
             L"Redirect the selected IPv6 destination port",
-            {::GetCurrentProcessId(), proxy_port_v6});
+            {::GetCurrentProcessId(), proxy_port_v6},
+            ntl::wfp::callout_unavailable::permit);
     filter_v6.description(
                  L"IPv6 PID and proxy port use the typed builder")
         .protocol_equal(IPPROTO_TCP)
@@ -485,7 +487,7 @@ int wmain() {
     redirected_proof proof_v4;
     redirected_proof proof_v6;
     {
-      ntl::wfp::dynamic_session policy(
+      auto policy = ntl::wfp::policy_session::ephemeral(
           L"crtsys ntl::wfp connect-redirect sample");
       install_policy(
           policy, origin_v4.port, proxy_v4.port,
@@ -510,7 +512,7 @@ int wmain() {
     prove_direct_exchange(origin_v4);
     prove_direct_exchange(origin_v6);
     std::wcout
-        << L"[4/5] Dynamic policy removed; both families are "
+        << L"[4/5] Ephemeral policy removed; both families are "
            L"direct.\n";
 
     if (listener_has_pending_connection(proxy_v4) ||

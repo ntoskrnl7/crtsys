@@ -15,6 +15,9 @@ class origin_client_identity_provider;
 namespace ntl::net::http3 {
 class origin_transport;
 }
+namespace ntl::net::http {
+class transform_pipeline;
+}
 
 namespace crtsys::wfp_sample::browser_https {
 
@@ -40,7 +43,9 @@ public:
       http3_origin_policy origin_policy =
           http3_origin_policy::require_http3,
       ntl::net::http3::origin_transport
-          *origin_transport = nullptr);
+          *origin_transport = nullptr,
+      const ntl::net::http::transform_pipeline
+          *transforms = nullptr);
   ~browser_http3_service();
 
   browser_http3_service(

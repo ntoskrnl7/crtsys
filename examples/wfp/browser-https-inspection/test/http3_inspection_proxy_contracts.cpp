@@ -1,5 +1,6 @@
 #include <zlib.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <iostream>
 #include <limits>
@@ -11,6 +12,7 @@
 
 #include <ntl/net/http3/inspection_proxy>
 #include <ntl/net/http3/standard_inspection_proxy>
+#include <ntl/net/http/transform>
 #include <ntl/net/inspection/standard_content_decoders>
 
 namespace {
@@ -72,6 +74,7 @@ public:
   send(const ntl::net::http3::origin_request &request)
       noexcept override {
     ++calls;
+    last_request = request;
     last_server_name = request.server_name;
     last_authority = request.authority;
     return ntl::ok(response);
@@ -79,6 +82,7 @@ public:
 
   ntl::net::http3::origin_response response;
   std::size_t calls = 0;
+  ntl::net::http3::origin_request last_request;
   std::string last_server_name;
   std::string last_authority;
 };
@@ -292,6 +296,152 @@ bool test_functional_convenience_api() {
          origin_calls == 1 && response_calls == 1;
 }
 
+bool test_common_transform_pipeline() {
+  const auto plain =
+      bytes_of("<html><body>http3</body></html>");
+  const auto gzip = gzip_encode(plain);
+  if (gzip.empty())
+    return false;
+
+  fake_origin origin;
+  origin.response.status = 200;
+  origin.response.headers = {
+      {"content-type", "text/html"},
+      {"content-encoding", "gzip"},
+      {"content-length", std::to_string(gzip.size())},
+      {"etag", "\"old\""}};
+  origin.response.body = gzip;
+  origin.response.negotiated_protocol = "h3";
+  recording_policy legacy_policy;
+
+  ntl::net::http::transform_pipeline transforms;
+  transforms.requests().transform(
+      [](ntl::net::http::request_message &request) {
+        request.headers.set("x-ntl-inspected", "h3");
+        return ntl::net::http::rewrite_result::
+            headers_changed();
+      });
+  transforms.responses().html().transform(
+      [](const ntl::net::http::request_message &,
+         ntl::net::http::response_message &response) {
+        std::string rewritten(
+            reinterpret_cast<const char *>(
+                response.body.data()),
+            response.body.size());
+        rewritten.append("<!-- rewritten-h3 -->");
+        return ntl::net::http::rewrite_result::replace_text(
+            std::move(rewritten));
+      });
+
+  ntl::net::http3::standard_inspection_proxy proxy(
+      origin, legacy_policy, transforms);
+  auto transformed = proxy.forward(make_request());
+  if (!transformed || origin.calls != 1 ||
+      transformed->body == gzip ||
+      transformed->headers.end() !=
+          std::find_if(
+              transformed->headers.begin(),
+              transformed->headers.end(),
+              [](const ntl::net::http3::proxy_header &field) {
+                return field.name == "etag";
+              }))
+    return false;
+  const auto request_marker = std::find_if(
+      origin.last_request.headers.begin(),
+      origin.last_request.headers.end(),
+      [](const ntl::net::http3::proxy_header &field) {
+        return field.name == "x-ntl-inspected" &&
+               field.value == "h3";
+      });
+  if (request_marker == origin.last_request.headers.end())
+    return false;
+
+  ntl::net::inspection::content_decoder_registry decoders;
+  ntl::net::inspection::register_standard_content_decoders(
+      decoders);
+  auto decoded =
+      ntl::net::inspection::decode_content_encoding(
+          decoders,
+          ntl::net::scatter_view::from_contiguous(
+              transformed->body),
+          "gzip",
+          {.maximum_encoded_size = 1024 * 1024,
+           .maximum_decoded_size = 1024 * 1024,
+           .maximum_expansion_ratio = 64,
+           .maximum_coding_layers = 4});
+  if (!decoded)
+    return false;
+  const std::string decoded_text(
+      reinterpret_cast<const char *>(decoded->data()),
+      decoded->size());
+  return decoded_text.ends_with("<!-- rewritten-h3 -->");
+}
+
+bool test_common_transform_synthetic_response() {
+  fake_origin origin;
+  recording_policy legacy_policy;
+  ntl::net::http::transform_pipeline transforms;
+  transforms.requests().decide(
+      [](const ntl::net::http::request_message &) {
+        return ntl::net::inspection::verdict::block;
+      });
+  ntl::net::http3::standard_inspection_proxy proxy(
+      origin, legacy_policy, transforms);
+  auto response = proxy.forward(make_request());
+  if (!response || response->status != 403 ||
+      response->negotiated_protocol != "h3" ||
+      origin.calls != 0)
+    return false;
+  const auto length = std::find_if(
+      response->headers.begin(), response->headers.end(),
+      [](const ntl::net::http3::proxy_header &field) {
+        return field.name == "content-length";
+      });
+  return length != response->headers.end() &&
+         length->value ==
+             std::to_string(response->body.size());
+}
+
+bool test_head_response_metadata_without_body() {
+  fake_origin origin;
+  origin.response.status = 200;
+  origin.response.headers = {
+      {"content-encoding", "gzip"},
+      {"content-length", "123"}};
+  origin.response.negotiated_protocol = "h3";
+  recording_policy legacy_policy;
+  ntl::net::http::transform_pipeline transforms;
+  transforms.responses().transform(
+      [](const ntl::net::http::request_message &,
+         ntl::net::http::response_message &response) {
+        response.headers.set("x-ntl-bodyless", "true");
+        return ntl::net::http::rewrite_result::
+            headers_changed();
+      });
+  ntl::net::http3::standard_inspection_proxy proxy(
+      origin, legacy_policy, transforms);
+  auto request = make_request();
+  request.headers[0].value = "HEAD";
+  auto response = proxy.forward(std::move(request));
+  if (!response || !response->body.empty() ||
+      !legacy_policy.response_body.empty())
+    return false;
+  const auto length = std::find_if(
+      response->headers.begin(), response->headers.end(),
+      [](const ntl::net::http3::proxy_header &field) {
+        return field.name == "content-length";
+      });
+  const auto marker = std::find_if(
+      response->headers.begin(), response->headers.end(),
+      [](const ntl::net::http3::proxy_header &field) {
+        return field.name == "x-ntl-bodyless" &&
+               field.value == "true";
+      });
+  return length != response->headers.end() &&
+         length->value == "123" &&
+         marker != response->headers.end();
+}
+
 } // namespace
 
 int main() {
@@ -300,7 +450,10 @@ int main() {
       !test_origin_protocol_and_bounds() ||
       !test_policy_is_enforced() ||
       !test_request_content_is_decoded_before_policy() ||
-      !test_functional_convenience_api()) {
+      !test_functional_convenience_api() ||
+      !test_common_transform_pipeline() ||
+      !test_common_transform_synthetic_response() ||
+      !test_head_response_metadata_without_body()) {
     std::cerr
         << "NTL HTTP/3 inspection proxy contracts failed\n";
     return 1;

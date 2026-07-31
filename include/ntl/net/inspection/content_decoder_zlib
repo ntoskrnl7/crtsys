@@ -154,16 +154,16 @@ private:
     std::array<std::byte, 16 * 1024> buffer{};
     const std::size_t remaining =
         output.maximum_size() - output.size();
-    if (remaining == 0)
-      return decode_result::malformed(STATUS_BUFFER_OVERFLOW);
     const std::size_t capacity =
-        (std::min)(remaining, buffer.size());
+        remaining == 0 ? 1 : (std::min)(remaining, buffer.size());
     stream_.next_out =
         reinterpret_cast<Bytef *>(buffer.data());
     stream_.avail_out = static_cast<uInt>(capacity);
     const int status = ::inflate(&stream_, Z_NO_FLUSH);
     const std::size_t produced =
         capacity - stream_.avail_out;
+    if (produced > remaining)
+      return decode_result::malformed(STATUS_BUFFER_OVERFLOW);
     if (produced != 0) {
       const ntl::status appended =
           output.append(std::span<const std::byte>(

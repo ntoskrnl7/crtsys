@@ -8,7 +8,8 @@ param(
                'bind-redirect',
                'tls-inspection-proxy',
                'udp-content-filter',
-               'tcp-content-filter')]
+               'tcp-content-filter',
+               'specialized-observation')]
   [Alias('Sample')]
   [string] $SelectedSample = 'all',
 
@@ -75,6 +76,12 @@ $samples = @(
     Service = 'CrtSysWfpTcpContentFilterAcceptance'
     Marker = 'NTL WFP TCP content-filter ok:'
     FailureMarker = 'NTL WFP TCP content-filter fail-closed self-test ok:'
+  },
+  [pscustomobject]@{
+    Name = 'specialized-observation'
+    BaseName = 'crtsys_wfp_specialized_observation'
+    Service = 'CrtSysWfpSpecializedObservationAcceptance'
+    Marker = 'NTL WFP specialized-observation ok:'
   }
 )
 if ($SelectedSample -ne 'all') {
@@ -150,6 +157,22 @@ function Invoke-SampleApplication {
   }
 }
 
+function Wait-FileMarker(
+  [string] $Path, [string] $Marker, [int] $TimeoutSeconds = 30
+) {
+  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  do {
+    if (Test-Path -LiteralPath $Path -PathType Leaf) {
+      $text = Get-Content -LiteralPath $Path -Raw -ErrorAction SilentlyContinue
+      if ($text -and $text.Contains($Marker)) {
+        return
+      }
+    }
+    Start-Sleep -Milliseconds 100
+  } while ((Get-Date) -lt $deadline)
+  throw "Timed out waiting for '$Marker' in $Path"
+}
+
 Assert-Administrator
 $PackageRoot = (Resolve-Path -LiteralPath $PackageRoot).Path
 
@@ -205,6 +228,62 @@ try {
         throw "Starting the $($sample.Name) service failed."
       }
 
+      if ($sample.Name -eq 'async-inspection') {
+        Write-Host '=== async-inspection: unload/reload race self-test ==='
+        $raceId = [Guid]::NewGuid().ToString('N')
+        $raceOutput =
+            Join-Path ([IO.Path]::GetTempPath()) "ntl-wfp-race-$raceId.log"
+        $raceError =
+            Join-Path ([IO.Path]::GetTempPath()) "ntl-wfp-race-$raceId.err"
+        $raceProcess = $null
+        try {
+          $raceProcess = Start-Process -FilePath $application `
+              -ArgumentList @('--unload-race', '128') `
+              -RedirectStandardOutput $raceOutput `
+              -RedirectStandardError $raceError `
+              -WindowStyle Hidden -PassThru
+          Wait-FileMarker $raceOutput (
+              'NTL WFP async-inspection unload-race ready:') 60
+          & sc.exe stop $sample.Service |
+              ForEach-Object { Write-Host $_ }
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Stopping async-inspection during pending work failed.'
+          }
+          if (-not $raceProcess.WaitForExit(120000)) {
+            throw 'The async-inspection unload-race app did not drain.'
+          }
+          # Complete Process exit bookkeeping before reading ExitCode. Windows
+          # PowerShell can leave the property unavailable after only the
+          # timeout overload, even though that overload returned true.
+          $raceProcess.WaitForExit()
+          $raceText =
+              (Get-Content $raceOutput -Raw -ErrorAction SilentlyContinue) +
+              (Get-Content $raceError -Raw -ErrorAction SilentlyContinue)
+          Write-Host $raceText
+          if (-not $raceText.Contains(
+                  'NTL WFP async-inspection unload-race ok:')) {
+            throw 'The async-inspection unload/reload race failed.'
+          }
+          $raceProcess.Dispose()
+          $raceProcess = $null
+          & sc.exe start $sample.Service |
+              ForEach-Object { Write-Host $_ }
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Reloading async-inspection after the race failed.'
+          }
+        } finally {
+          if ($raceProcess -and -not $raceProcess.HasExited) {
+            Stop-Process -Id $raceProcess.Id -Force `
+                -ErrorAction SilentlyContinue
+          }
+          if ($raceProcess) { $raceProcess.Dispose() }
+          Remove-Item -LiteralPath $raceOutput -Force `
+              -ErrorAction SilentlyContinue
+          Remove-Item -LiteralPath $raceError -Force `
+              -ErrorAction SilentlyContinue
+        }
+      }
+
       if ($sample.Name -eq 'stream-edit') {
         Write-Host '=== stream-edit: coroutine socket self-test ==='
         $selfTest =
@@ -214,6 +293,19 @@ try {
             -not $selfTest.Text.Contains(
                 'NTL WFP stream-edit coroutine self-test ok:')) {
           throw 'The stream-edit coroutine socket self-test failed.'
+        }
+      }
+      if ($sample.Name -eq 'flow-monitor') {
+        Write-Host '=== flow-monitor: 20,000-flow load/latency self-test ==='
+        $loadTest = Invoke-SampleApplication `
+            -Path $application `
+            -Arguments @('--load-self-test', '10000', '64') `
+            -TimeoutSeconds 600
+        $loadTest.Output | ForEach-Object { Write-Host $_ }
+        if ($loadTest.ExitCode -ne 0 -or
+            -not $loadTest.Text.Contains(
+                'NTL WFP flow-monitor load ok: flows=20000')) {
+          throw 'The flow-monitor load/latency self-test failed.'
         }
       }
       if ($null -ne $sample.PSObject.Properties['FailureMarker']) {

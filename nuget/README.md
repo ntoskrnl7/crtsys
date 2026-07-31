@@ -35,6 +35,12 @@ Install-Package crtsys
 ```
 
 - App projects get compatibility headers/includes.
+- User-mode app projects automatically receive the packaged gzip, RFC 1950
+  `deflate`, and Brotli headers and static libraries used by NTL HTTP,
+  WebSocket, and gRPC transforms, including the stateful incremental
+  `Content-Encoding` stream API. Set
+  `<CrtSysUseNtlContentCodecs>false</CrtSysUseNtlContentCodecs>` only when the
+  app does not use those standard codecs or supplies its own registries.
 - Driver projects (WDK) get automatic WDK linkage for
   `crtsys.lib` / `Ldk.lib` (x86/x64/ARM/ARM64 depending on the selected
   MSVC toolset).
@@ -245,6 +251,12 @@ project into a driver project.
   VS2022 uses `build/native/lib/native/v143/x64/Release`, and VS2026 uses
   `build/native/lib/native/v145/x64/Release`. ARM is provided for v142/v143;
   v145 carries x86/x64/ARM64.
+
+Package CI compiles and links a real codec consumer for every packaged
+toolset, architecture, and Debug/Release combination. x86 and x64 consumers
+also execute gzip, deflate, Brotli, and chained gzip+Brotli one-byte-split
+incremental round trips; ARM and ARM64 are cross-link validation on the hosted
+Windows runners.
 
 The NTL minifilter entry supports Windows 7+ consumers even though the
 prebuilt library itself is compiled with the Windows 8 Filter Manager

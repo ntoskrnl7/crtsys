@@ -1,0 +1,229 @@
+/**
+ * @file diagnostics
+ * @brief Allocation-free kernel WFP operational counters and trace sink.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/wfp/diagnostics is a kernel-mode header"
+#endif
+
+#include <ntddk.h>
+
+#include <array>
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+
+namespace ntl::wfp {
+
+/**
+ * @brief Stable event identifiers for WPP/ETW or private driver trace sinks.
+ *
+ * NTL deliberately does not declare a global WPP control GUID. A product
+ * supplies its generated WPP/ETW callback through operational_trace_sink, so
+ * two drivers cannot accidentally share or double-register a provider.
+ */
+enum class operational_event : std::uint8_t {
+  classify,
+  permit,
+  block,
+  absorb,
+  queue_saturated,
+  verdict_timeout,
+  user_verdict,
+  clone_failure,
+  injection_failure,
+  cancellation,
+  unload_race,
+  bfe_state_change,
+  count,
+};
+
+struct operational_trace_record {
+  operational_event event = operational_event::classify;
+  std::uint16_t layer_id = 0;
+  NTSTATUS status = STATUS_SUCCESS;
+  std::uint64_t value = 0;
+  std::uint64_t sequence = 0;
+};
+
+using operational_trace_callback =
+    void (*)(void *, const operational_trace_record &) noexcept;
+
+struct operational_trace_sink {
+  operational_trace_callback callback = nullptr;
+  void *context = nullptr;
+
+  constexpr explicit operator bool() const noexcept {
+    return callback != nullptr;
+  }
+};
+
+struct operational_snapshot {
+  std::uint64_t classify = 0;
+  std::uint64_t permitted = 0;
+  std::uint64_t blocked = 0;
+  std::uint64_t absorbed = 0;
+  std::uint64_t queue_saturated = 0;
+  std::uint64_t verdict_timeouts = 0;
+  std::uint64_t user_verdicts = 0;
+  std::uint64_t user_verdict_latency_100ns = 0;
+  std::uint64_t maximum_user_verdict_latency_100ns = 0;
+  std::uint64_t clone_failures = 0;
+  std::uint64_t injection_failures = 0;
+  std::uint64_t cancellations = 0;
+  std::uint64_t unload_races = 0;
+  std::uint64_t bfe_state_changes = 0;
+};
+
+/**
+ * @brief Lock-free counters safe on WFP classify and completion paths.
+ *
+ * The optional sink is immutable after construction. It must be nonblocking,
+ * allocation-free, callable at the current IRQL, and remain alive longer than
+ * this object. Generated WPP callbacks and kernel TraceLogging adapters fit
+ * that contract without making NTL own a process-wide trace provider.
+ */
+class operational_telemetry {
+public:
+  constexpr explicit operational_telemetry(
+      operational_trace_sink sink = {}) noexcept
+      : sink_(sink) {}
+
+  operational_telemetry(const operational_telemetry &) = delete;
+  operational_telemetry &
+  operator=(const operational_telemetry &) = delete;
+
+  void record_classify(std::uint16_t layer_id) noexcept {
+    increment(operational_event::classify, classify_, layer_id);
+  }
+
+  void record_permit(std::uint16_t layer_id) noexcept {
+    increment(operational_event::permit, permitted_, layer_id);
+  }
+
+  void record_block(std::uint16_t layer_id) noexcept {
+    increment(operational_event::block, blocked_, layer_id);
+  }
+
+  void record_absorb(std::uint16_t layer_id) noexcept {
+    increment(operational_event::absorb, absorbed_, layer_id);
+  }
+
+  void record_queue_saturated(std::uint16_t layer_id) noexcept {
+    increment(
+        operational_event::queue_saturated, queue_saturated_, layer_id);
+  }
+
+  void record_verdict_timeout(std::uint16_t layer_id) noexcept {
+    increment(
+        operational_event::verdict_timeout, verdict_timeouts_, layer_id);
+  }
+
+  void record_user_verdict(
+      std::uint16_t layer_id, std::uint64_t latency_100ns) noexcept {
+    user_verdicts_.fetch_add(1, std::memory_order_relaxed);
+    user_verdict_latency_100ns_.fetch_add(
+        latency_100ns, std::memory_order_relaxed);
+    update_maximum(maximum_user_verdict_latency_100ns_, latency_100ns);
+    emit(operational_event::user_verdict, layer_id, STATUS_SUCCESS,
+         latency_100ns);
+  }
+
+  void record_clone_failure(
+      std::uint16_t layer_id, NTSTATUS status) noexcept {
+    increment(
+        operational_event::clone_failure, clone_failures_, layer_id, status);
+  }
+
+  void record_injection_failure(
+      std::uint16_t layer_id, NTSTATUS status) noexcept {
+    increment(operational_event::injection_failure, injection_failures_,
+              layer_id, status);
+  }
+
+  void record_cancellation(std::uint16_t layer_id) noexcept {
+    increment(
+        operational_event::cancellation, cancellations_, layer_id);
+  }
+
+  void record_unload_race(std::uint16_t layer_id) noexcept {
+    increment(operational_event::unload_race, unload_races_, layer_id);
+  }
+
+  void record_bfe_state(FWPM_SERVICE_STATE state) noexcept {
+    bfe_state_changes_.fetch_add(1, std::memory_order_relaxed);
+    emit(operational_event::bfe_state_change, 0, STATUS_SUCCESS,
+         static_cast<std::uint64_t>(state));
+  }
+
+  operational_snapshot snapshot() const noexcept {
+    return {
+        classify_.load(std::memory_order_relaxed),
+        permitted_.load(std::memory_order_relaxed),
+        blocked_.load(std::memory_order_relaxed),
+        absorbed_.load(std::memory_order_relaxed),
+        queue_saturated_.load(std::memory_order_relaxed),
+        verdict_timeouts_.load(std::memory_order_relaxed),
+        user_verdicts_.load(std::memory_order_relaxed),
+        user_verdict_latency_100ns_.load(std::memory_order_relaxed),
+        maximum_user_verdict_latency_100ns_.load(
+            std::memory_order_relaxed),
+        clone_failures_.load(std::memory_order_relaxed),
+        injection_failures_.load(std::memory_order_relaxed),
+        cancellations_.load(std::memory_order_relaxed),
+        unload_races_.load(std::memory_order_relaxed),
+        bfe_state_changes_.load(std::memory_order_relaxed),
+    };
+  }
+
+private:
+  static void update_maximum(
+      std::atomic<std::uint64_t> &target, std::uint64_t value) noexcept {
+    auto observed = target.load(std::memory_order_relaxed);
+    while (observed < value &&
+           !target.compare_exchange_weak(
+               observed, value, std::memory_order_relaxed,
+               std::memory_order_relaxed)) {
+    }
+  }
+
+  void increment(operational_event event,
+                 std::atomic<std::uint64_t> &counter,
+                 std::uint16_t layer_id,
+                 NTSTATUS status = STATUS_SUCCESS) noexcept {
+    counter.fetch_add(1, std::memory_order_relaxed);
+    emit(event, layer_id, status, 0);
+  }
+
+  void emit(operational_event event, std::uint16_t layer_id,
+            NTSTATUS status, std::uint64_t value) noexcept {
+    if (!sink_)
+      return;
+    const auto sequence =
+        trace_sequence_.fetch_add(1, std::memory_order_relaxed) + 1;
+    operational_trace_record record{
+        event, layer_id, status, value, sequence};
+    sink_.callback(sink_.context, record);
+  }
+
+  const operational_trace_sink sink_;
+  std::atomic<std::uint64_t> trace_sequence_{0};
+  std::atomic<std::uint64_t> classify_{0};
+  std::atomic<std::uint64_t> permitted_{0};
+  std::atomic<std::uint64_t> blocked_{0};
+  std::atomic<std::uint64_t> absorbed_{0};
+  std::atomic<std::uint64_t> queue_saturated_{0};
+  std::atomic<std::uint64_t> verdict_timeouts_{0};
+  std::atomic<std::uint64_t> user_verdicts_{0};
+  std::atomic<std::uint64_t> user_verdict_latency_100ns_{0};
+  std::atomic<std::uint64_t> maximum_user_verdict_latency_100ns_{0};
+  std::atomic<std::uint64_t> clone_failures_{0};
+  std::atomic<std::uint64_t> injection_failures_{0};
+  std::atomic<std::uint64_t> cancellations_{0};
+  std::atomic<std::uint64_t> unload_races_{0};
+  std::atomic<std::uint64_t> bfe_state_changes_{0};
+};
+
+} // namespace ntl::wfp

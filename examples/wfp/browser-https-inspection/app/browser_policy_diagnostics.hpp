@@ -22,7 +22,7 @@ struct browser_policy_diagnostic_summary {
  */
 browser_policy_diagnostic_summary
 verify_browser_quic_block_policy(
-    const ntl::wfp::dynamic_session &session,
+    const ntl::wfp::policy_session &session,
     const ntl::wfp::application_id &browser,
     const std::filesystem::path &log_directory);
 

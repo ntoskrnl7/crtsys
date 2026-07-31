@@ -6,11 +6,23 @@ param(
   [ValidateSet('v143', 'v145')]
   [string] $PlatformToolset = 'v145',
 
+  [ValidateSet('x64', 'ARM64')]
+  [string] $Architecture = 'x64',
+
   [string] $WindowsSdkVersion = '10.0.22621.0',
 
   [string] $BuildRoot = '',
 
+  [string] $PrebuiltRoot = '',
+
   [string] $OutputRoot = '',
+
+  [ValidateSet('all', 'datagram-proxy', 'async-inspection',
+               'flow-monitor', 'stream-edit', 'connect-redirect',
+               'bind-redirect', 'tls-inspection-proxy',
+               'udp-content-filter', 'tcp-content-filter',
+               'specialized-observation')]
+  [string[]] $SelectedWfpSample = @('all'),
 
   [switch] $SkipBuild
 )
@@ -27,7 +39,7 @@ if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
 if ([string]::IsNullOrWhiteSpace($BuildRoot)) {
   $sdkDirectory = $WindowsSdkVersion -replace '[^A-Za-z0-9]+', '_'
   $BuildRoot = Join-Path $repoRoot (
-      "artifacts\b\wfp-advanced-runtime\$PlatformToolset\$sdkDirectory")
+      "artifacts\b\wfp-advanced-runtime\$PlatformToolset\$Architecture\$sdkDirectory")
 }
 
 $samples = @(
@@ -75,8 +87,28 @@ $samples = @(
     Project = 'wfp-tcp-content-filter'
     Directory = 'tcp-content-filter'
     BaseName = 'crtsys_wfp_tcp_content_filter'
+  },
+  [pscustomobject]@{
+    Project = 'wfp-specialized-observation'
+    Directory = 'specialized-observation'
+    BaseName = 'crtsys_wfp_specialized_observation'
   }
 )
+if ($SelectedWfpSample -notcontains 'all') {
+  $samples = @(
+    $samples |
+        Where-Object { $SelectedWfpSample -contains $_.Directory }
+  )
+}
+if (-not [string]::IsNullOrWhiteSpace($PrebuiltRoot)) {
+  if (-not $SkipBuild) {
+    throw 'PrebuiltRoot requires SkipBuild.'
+  }
+  $PrebuiltRoot = (Resolve-Path -LiteralPath $PrebuiltRoot).Path
+}
+if ($samples.Count -eq 0) {
+  throw 'No WFP sample was selected for packaging.'
+}
 
 function Assert-SafeOutputRoot([string] $Path) {
   $artifactsRoot =
@@ -98,7 +130,7 @@ if (-not $SkipBuild) {
     $sampleBuildRoot =
         Join-Path $resolvedBuildRoot $sample.Directory
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $buildScript `
-        -Project $sample.Project -Architecture x64 `
+        -Project $sample.Project -Architecture $Architecture `
         -Configuration $Configuration `
         -WindowsSdkVersion $WindowsSdkVersion `
         -WdkVersion $WindowsSdkVersion `
@@ -117,8 +149,13 @@ if (Test-Path -LiteralPath $resolvedOutputRoot) {
 $packageRoot = New-Item -ItemType Directory -Force -Path $resolvedOutputRoot
 
 foreach ($sample in $samples) {
-  $buildRoot = Join-Path (
-      Join-Path $resolvedBuildRoot $sample.Directory) $Configuration
+  $buildRoot = if ([string]::IsNullOrWhiteSpace($PrebuiltRoot)) {
+    Join-Path (
+        Join-Path $resolvedBuildRoot $sample.Directory) $Configuration
+  } else {
+    Join-Path (
+        Join-Path $PrebuiltRoot $sample.Project) $Configuration
+  }
   $driverSource = Join-Path $buildRoot "$($sample.BaseName).sys"
   $appSource = Join-Path $buildRoot "$($sample.BaseName)_app.exe"
   $infSource = Join-Path $repoRoot (

@@ -1,0 +1,514 @@
+/**
+ * @file stream_transform
+ * @brief Protocol-neutral bounded streaming HTTP body transformation.
+ *
+ * HTTP wire adapters retain framing and flow-control ownership.  This layer
+ * receives decoded identity body chunks and returns owned replacement chunks;
+ * it never retains a caller span across a callback.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/http/stream_transform is a user-mode header"
+#endif
+
+#include <ntl/net/http/transform>
+#include <ntl/net/inspection/content_stream>
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <limits>
+#include <new>
+#include <span>
+#include <stdexcept>
+#include <utility>
+#include <vector>
+
+namespace ntl::net::http {
+
+struct stream_transform_limits {
+  std::size_t maximum_input_chunk_bytes = 64 * 1024;
+  std::size_t maximum_output_chunk_bytes = 2 * 1024 * 1024;
+  std::size_t maximum_codec_chunk_bytes = 2 * 1024 * 1024;
+  std::uint64_t maximum_input_stream_bytes = 4ull * 1024 * 1024 * 1024;
+  std::uint64_t maximum_decoded_stream_bytes = 4ull * 1024 * 1024 * 1024;
+  std::uint64_t maximum_output_stream_bytes = 4ull * 1024 * 1024 * 1024;
+  std::size_t maximum_expansion_ratio = 16;
+  std::size_t maximum_content_expansion_ratio = 64;
+  std::size_t expansion_slack_bytes = 64 * 1024;
+  std::size_t maximum_coding_layers = 4;
+  transform_failure_policy on_failure = transform_failure_policy::block;
+};
+
+enum class stream_rewrite_action : std::uint8_t {
+  forward = 1,
+  block = 2,
+  drop = 3,
+};
+
+class stream_rewrite_result {
+public:
+  static stream_rewrite_result unchanged() noexcept {
+    return stream_rewrite_result(stream_rewrite_action::forward, false);
+  }
+
+  static stream_rewrite_result replace(std::vector<std::byte> bytes) {
+    stream_rewrite_result result(stream_rewrite_action::forward, true);
+    result.bytes_ = std::move(bytes);
+    return result;
+  }
+
+  static stream_rewrite_result block() noexcept {
+    return stream_rewrite_result(stream_rewrite_action::block, false);
+  }
+
+  static stream_rewrite_result drop() noexcept {
+    return stream_rewrite_result(stream_rewrite_action::drop, false);
+  }
+
+  stream_rewrite_action action() const noexcept { return action_; }
+  bool replaced() const noexcept { return replaced_; }
+  std::vector<std::byte> release_bytes() noexcept {
+    return std::move(bytes_);
+  }
+
+private:
+  stream_rewrite_result(stream_rewrite_action action, bool replaced) noexcept
+      : action_(action), replaced_(replaced) {}
+
+  stream_rewrite_action action_ = stream_rewrite_action::block;
+  bool replaced_ = false;
+  std::vector<std::byte> bytes_;
+};
+
+struct stream_chunk {
+  std::span<const std::byte> bytes;
+  std::uint64_t input_offset = 0;
+  bool final = false;
+};
+
+struct stream_chunk_outcome {
+  stream_rewrite_action action = stream_rewrite_action::forward;
+  std::vector<std::byte> bytes;
+  bool modified = false;
+  bool final = false;
+  NTSTATUS failure = STATUS_SUCCESS;
+};
+
+struct stream_message_context {
+  const request_message *request = nullptr;
+  const response_message *response = nullptr;
+
+  bool response_body() const noexcept { return response != nullptr; }
+  protocol wire_protocol() const noexcept {
+    return response ? response->wire_protocol
+                    : request ? request->wire_protocol : protocol::http1;
+  }
+};
+
+class stream_transform_pipeline;
+
+class stream_rule_selector {
+public:
+  using predicate = std::function<bool(const stream_message_context &)>;
+
+  stream_rule_selector when(predicate condition) const;
+
+  template <class Function>
+  stream_rule_selector &transform(Function &&function);
+
+  template <class Function>
+  stream_rule_selector &inspect(Function &&function);
+
+  /**
+   * @brief Creates one stateful transformer for every opened HTTP message.
+   *
+   * The factory runs once after the selector predicate matches.  Its returned
+   * callback then owns only that message's parser/compressor state, so split
+   * gRPC, multipart, or application records are never shared by concurrent
+   * HTTP/2 or HTTP/3 streams.
+   */
+  template <class Factory>
+  stream_rule_selector &transform_session(Factory &&factory);
+
+  template <class Factory>
+  stream_rule_selector &inspect_session(Factory &&factory);
+
+private:
+  friend class stream_transform_pipeline;
+  stream_rule_selector(stream_transform_pipeline &pipeline,
+                       predicate condition)
+      : pipeline_(&pipeline), condition_(std::move(condition)) {}
+
+  stream_transform_pipeline *pipeline_ = nullptr;
+  predicate condition_;
+};
+
+/**
+ * @brief Immutable-after-configuration body-chunk policy.
+ *
+ * Call prepare_headers() before emitting the message head.  It removes a
+ * stale Content-Length and validators and selects HTTP/1.1 chunked framing;
+ * HTTP/2 and HTTP/3 adapters continue to use DATA and end-of-stream flags.
+ */
+class stream_transform_pipeline {
+public:
+  using session_callback =
+      std::function<stream_rewrite_result(
+          const stream_message_context &, const stream_chunk &)>;
+
+  explicit stream_transform_pipeline(stream_transform_limits limits = {})
+      : limits_(limits) {
+    if (limits_.maximum_input_chunk_bytes == 0 ||
+        limits_.maximum_output_chunk_bytes == 0 ||
+        limits_.maximum_codec_chunk_bytes == 0 ||
+        limits_.maximum_input_stream_bytes == 0 ||
+        limits_.maximum_decoded_stream_bytes == 0 ||
+        limits_.maximum_output_stream_bytes == 0 ||
+        limits_.maximum_expansion_ratio == 0 ||
+        limits_.maximum_content_expansion_ratio == 0 ||
+        limits_.maximum_coding_layers == 0 ||
+        limits_.on_failure == transform_failure_policy::forward_original)
+      throw std::invalid_argument("HTTP stream transform limits are invalid");
+  }
+
+  stream_rule_selector chunks() {
+    return stream_rule_selector(*this, [](const stream_message_context &) {
+      return true;
+    });
+  }
+
+  stream_transform_limits limits() const noexcept { return limits_; }
+
+  ntl::status prepare_headers(request_message &message) const noexcept {
+    return prepare(message.headers, message.wire_protocol);
+  }
+
+  ntl::status prepare_headers(const request_message &request,
+                              response_message &message) const noexcept {
+    if (response_body_forbidden(request, message))
+      return STATUS_INVALID_DEVICE_STATE;
+    return prepare(message.headers, message.wire_protocol);
+  }
+
+  class session {
+  public:
+    session(const stream_transform_pipeline &pipeline,
+            stream_message_context context,
+            ntl::net::inspection::content_encoding_stream coding,
+            std::vector<session_callback> rules) noexcept
+        : pipeline_(&pipeline), context_(context),
+          coding_(std::move(coding)), rules_(std::move(rules)) {}
+
+    session(const session &) = delete;
+    session &operator=(const session &) = delete;
+    session(session &&) noexcept = default;
+    session &operator=(session &&) noexcept = default;
+
+    stream_chunk_outcome consume(std::span<const std::byte> bytes,
+                                 bool final = false) noexcept {
+      if (finished_)
+        return fail(STATUS_INVALID_DEVICE_STATE);
+      if (bytes.size() > pipeline_->limits_.maximum_input_chunk_bytes ||
+          bytes.size() >
+              pipeline_->limits_.maximum_input_stream_bytes - input_bytes_)
+        return fail(STATUS_BUFFER_OVERFLOW);
+
+      stream_chunk_outcome outcome;
+      outcome.final = final;
+      try {
+        auto decoded = coding_.decode(bytes, final);
+        if (!decoded)
+          return fail(decoded.status());
+        std::vector<std::byte> current = std::move(decoded->bytes);
+        const std::uint64_t offset = decoded_bytes_;
+        input_bytes_ += bytes.size();
+        decoded_bytes_ += current.size();
+        for (const auto &rule : rules_) {
+          const stream_chunk view{current, offset, decoded->final};
+          auto result = rule(context_, view);
+          outcome.action = result.action();
+          if (outcome.action != stream_rewrite_action::forward) {
+            finished_ = true;
+            outcome.bytes.clear();
+            return outcome;
+          }
+          if (result.replaced()) {
+            current = result.release_bytes();
+            outcome.modified = true;
+          }
+          if (current.size() >
+              pipeline_->limits_.maximum_output_chunk_bytes)
+            return fail(STATUS_BUFFER_OVERFLOW);
+        }
+
+        if (current.size() >
+            pipeline_->limits_.maximum_output_stream_bytes -
+                transformed_bytes_)
+          return fail(STATUS_BUFFER_OVERFLOW);
+        const std::uint64_t prospective =
+            transformed_bytes_ + current.size();
+        const std::uint64_t ratio_base =
+            (std::max<std::uint64_t>)(1, decoded_bytes_);
+        const auto slack = static_cast<std::uint64_t>(
+            pipeline_->limits_.expansion_slack_bytes);
+        if (ratio_base <=
+                ((std::numeric_limits<std::uint64_t>::max)() - slack) /
+                    pipeline_->limits_.maximum_expansion_ratio &&
+            prospective >
+                ratio_base * pipeline_->limits_.maximum_expansion_ratio +
+                    slack)
+          return fail(STATUS_BUFFER_OVERFLOW);
+        transformed_bytes_ = prospective;
+        auto encoded = coding_.encode(current, decoded->final);
+        if (!encoded)
+          return fail(encoded.status());
+        if (encoded->bytes.size() >
+            pipeline_->limits_.maximum_output_stream_bytes - output_bytes_)
+          return fail(STATUS_BUFFER_OVERFLOW);
+        output_bytes_ += encoded->bytes.size();
+        outcome.bytes = std::move(encoded->bytes);
+        outcome.final = final && encoded->final;
+        finished_ = outcome.final;
+        return outcome;
+      } catch (const std::bad_alloc &) {
+        return fail(STATUS_INSUFFICIENT_RESOURCES);
+      } catch (...) {
+        return fail(STATUS_UNHANDLED_EXCEPTION);
+      }
+    }
+
+    bool finished() const noexcept { return finished_; }
+    std::uint64_t input_bytes() const noexcept { return input_bytes_; }
+    std::uint64_t decoded_bytes() const noexcept { return decoded_bytes_; }
+    std::uint64_t transformed_bytes() const noexcept {
+      return transformed_bytes_;
+    }
+    std::uint64_t output_bytes() const noexcept { return output_bytes_; }
+
+  private:
+    stream_chunk_outcome fail(NTSTATUS status) noexcept {
+      finished_ = true;
+      return {pipeline_->limits_.on_failure ==
+                      transform_failure_policy::forward_original
+                  ? stream_rewrite_action::forward
+                  : stream_rewrite_action::block,
+              {}, false, true, status};
+    }
+
+    const stream_transform_pipeline *pipeline_ = nullptr;
+    stream_message_context context_{};
+    ntl::net::inspection::content_encoding_stream coding_;
+    std::vector<session_callback> rules_;
+    std::uint64_t input_bytes_ = 0;
+    std::uint64_t decoded_bytes_ = 0;
+    std::uint64_t transformed_bytes_ = 0;
+    std::uint64_t output_bytes_ = 0;
+    bool finished_ = false;
+  };
+
+  ntl::result<session> open(
+      const request_message &request,
+      const ntl::net::inspection::content_decoder_registry &decoders,
+      const ntl::net::inspection::content_encoder_registry &encoders) const
+      noexcept {
+    return open_session({&request, nullptr}, request.headers, decoders,
+                        encoders);
+  }
+
+  ntl::result<session> open(
+      const request_message &request, const response_message &response,
+      const ntl::net::inspection::content_decoder_registry &decoders,
+      const ntl::net::inspection::content_encoder_registry &encoders) const
+      noexcept {
+    return open_session({&request, &response}, response.headers, decoders,
+                        encoders);
+  }
+
+  ntl::result<session> open(const request_message &request) const noexcept {
+    static const ntl::net::inspection::content_decoder_registry decoders;
+    static const ntl::net::inspection::content_encoder_registry encoders;
+    return open(request, decoders, encoders);
+  }
+
+  ntl::result<session> open(const request_message &request,
+                            const response_message &response) const noexcept {
+    static const ntl::net::inspection::content_decoder_registry decoders;
+    static const ntl::net::inspection::content_encoder_registry encoders;
+    return open(request, response, decoders, encoders);
+  }
+
+private:
+  friend class stream_rule_selector;
+  struct rule {
+    stream_rule_selector::predicate condition;
+    std::function<session_callback(const stream_message_context &)> create;
+  };
+
+  static ntl::status prepare(header_collection &headers,
+                             protocol wire_protocol) noexcept {
+    try {
+      headers.erase("content-length");
+      headers.erase("content-md5");
+      headers.erase("digest");
+      headers.erase("etag");
+      if (wire_protocol == protocol::http1)
+        headers.set("transfer-encoding", "chunked");
+      else
+        headers.erase("transfer-encoding");
+      return ntl::status::ok();
+    } catch (const std::bad_alloc &) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    } catch (...) {
+      return STATUS_DATA_ERROR;
+    }
+  }
+
+  ntl::result<session> open_session(
+      stream_message_context context, const header_collection &headers,
+      const ntl::net::inspection::content_decoder_registry &decoders,
+      const ntl::net::inspection::content_encoder_registry &encoders) const
+      noexcept {
+    ntl::net::inspection::content_stream_limits codec_limits;
+    codec_limits.maximum_input_chunk_size = limits_.maximum_input_chunk_bytes;
+    codec_limits.maximum_stage_output_chunk_size =
+        limits_.maximum_codec_chunk_bytes;
+    codec_limits.maximum_encoded_stream_size =
+        limits_.maximum_input_stream_bytes;
+    codec_limits.maximum_decoded_stream_size =
+        limits_.maximum_decoded_stream_bytes;
+    codec_limits.maximum_transformed_stream_size =
+        limits_.maximum_output_stream_bytes;
+    codec_limits.maximum_output_stream_size =
+        limits_.maximum_output_stream_bytes;
+    codec_limits.maximum_expansion_ratio =
+        limits_.maximum_content_expansion_ratio;
+    codec_limits.expansion_slack_size = limits_.expansion_slack_bytes;
+    codec_limits.maximum_coding_layers = limits_.maximum_coding_layers;
+    auto coding = ntl::net::inspection::content_encoding_stream::create(
+        decoders, encoders, headers.joined("content-encoding"), codec_limits);
+    if (!coding)
+      return ntl::unexpected(coding.status());
+    try {
+      std::vector<session_callback> active;
+      active.reserve(rules_.size());
+      for (const auto &rule : rules_) {
+        if (!rule.condition(context))
+          continue;
+        auto callback = rule.create(context);
+        if (!callback)
+          return ntl::unexpected(STATUS_INVALID_PARAMETER);
+        active.push_back(std::move(callback));
+      }
+      return ntl::ok(session(
+          *this, context, std::move(*coding), std::move(active)));
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+  stream_transform_limits limits_{};
+  std::vector<rule> rules_;
+};
+
+inline stream_rule_selector
+stream_rule_selector::when(predicate condition) const {
+  if (!condition)
+    throw std::invalid_argument("HTTP stream predicate is empty");
+  const predicate previous = condition_;
+  return stream_rule_selector(
+      *pipeline_,
+      [previous, condition = std::move(condition)](
+          const stream_message_context &context) {
+        return previous(context) && condition(context);
+      });
+}
+
+template <class Function>
+stream_rule_selector &stream_rule_selector::transform(Function &&function) {
+  using callback_type = std::decay_t<Function>;
+  callback_type callback(std::forward<Function>(function));
+  pipeline_->rules_.push_back(
+      {condition_,
+       [callback = std::move(callback)](
+           const stream_message_context &) {
+         return stream_transform_pipeline::session_callback(
+             [callback](const stream_message_context &context,
+                        const stream_chunk &chunk) mutable {
+               return static_cast<stream_rewrite_result>(
+                   callback(context, chunk));
+             });
+       }});
+  return *this;
+}
+
+template <class Function>
+stream_rule_selector &stream_rule_selector::inspect(Function &&function) {
+  using callback_type = std::decay_t<Function>;
+  return transform(
+      [callback = callback_type(std::forward<Function>(function))](
+          const stream_message_context &context,
+          const stream_chunk &chunk) {
+        switch (static_cast<ntl::net::inspection::verdict>(
+            callback(context, chunk))) {
+        case ntl::net::inspection::verdict::permit:
+          return stream_rewrite_result::unchanged();
+        case ntl::net::inspection::verdict::block:
+          return stream_rewrite_result::block();
+        case ntl::net::inspection::verdict::drop_flow:
+          return stream_rewrite_result::drop();
+        }
+        return stream_rewrite_result::block();
+      });
+}
+
+template <class Factory>
+stream_rule_selector &
+stream_rule_selector::transform_session(Factory &&factory) {
+  using factory_type = std::decay_t<Factory>;
+  pipeline_->rules_.push_back(
+      {condition_,
+       [factory = factory_type(std::forward<Factory>(factory))](
+           const stream_message_context &context) mutable {
+         auto callback = factory(context);
+         return stream_transform_pipeline::session_callback(
+             [callback = std::move(callback)](
+                 const stream_message_context &active_context,
+                 const stream_chunk &chunk) mutable {
+               return static_cast<stream_rewrite_result>(
+                   callback(active_context, chunk));
+             });
+       }});
+  return *this;
+}
+
+template <class Factory>
+stream_rule_selector &
+stream_rule_selector::inspect_session(Factory &&factory) {
+  using factory_type = std::decay_t<Factory>;
+  return transform_session(
+      [factory = factory_type(std::forward<Factory>(factory))](
+          const stream_message_context &context) mutable {
+        auto callback = factory(context);
+        return [callback = std::move(callback)](
+                   const stream_message_context &active_context,
+                   const stream_chunk &chunk) mutable {
+          switch (static_cast<ntl::net::inspection::verdict>(
+              callback(active_context, chunk))) {
+          case ntl::net::inspection::verdict::permit:
+            return stream_rewrite_result::unchanged();
+          case ntl::net::inspection::verdict::block:
+            return stream_rewrite_result::block();
+          case ntl::net::inspection::verdict::drop_flow:
+            return stream_rewrite_result::drop();
+          }
+          return stream_rewrite_result::block();
+        };
+      });
+}
+
+} // namespace ntl::net::http

@@ -3,7 +3,13 @@
   <!-- CMake-generated projects already receive crtsys from their CMake
        targets. Importing the Visual Studio development package as well can
        mix two different header/library revisions in one build. -->
-  <PropertyGroup Condition="'$(VCProjectUpgraderObjectName)' != 'NoUpgrade'">
+  <PropertyGroup>
+    <CrtSysIsCMakeProbe Condition="'$(MSBuildProjectName)' == 'VCTargetsPath'">true</CrtSysIsCMakeProbe>
+    <CrtSysIsCMakeProbe Condition="$([System.String]::Copy('$(MSBuildProjectName)').StartsWith('CompilerId'))">true</CrtSysIsCMakeProbe>
+    <CrtSysIsCMakeProbe Condition="'$(CrtSysIsCMakeProbe)' == ''">false</CrtSysIsCMakeProbe>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(VCProjectUpgraderObjectName)' != 'NoUpgrade' and '$(CrtSysIsCMakeProbe)' != 'true'">
     <CrtSysRepositoryRoot Condition="'$(CrtSysRepositoryRoot)' == ''">$([MSBuild]::NormalizeDirectory('$(MSBuildThisFileDirectory)', '..'))</CrtSysRepositoryRoot>
     <CrtSysDevelopmentPackageRoot Condition="'$(CrtSysDevelopmentPackageRoot)' == ''">$(CrtSysRepositoryRoot)artifacts\development-package\</CrtSysDevelopmentPackageRoot>
     <CrtSysUseRepositoryDevelopmentFiles Condition="'$(CrtSysPackageRoot)' == '' and Exists('$(CrtSysDevelopmentPackageRoot)build\native\crtsys.props')">true</CrtSysUseRepositoryDevelopmentFiles>
@@ -16,5 +22,5 @@
   </PropertyGroup>
 
   <Import Project="$(CrtSysPackageRoot)build\native\crtsys.props"
-          Condition="'$(VCProjectUpgraderObjectName)' != 'NoUpgrade' and Exists('$(CrtSysPackageRoot)build\native\crtsys.props')" />
+          Condition="'$(VCProjectUpgraderObjectName)' != 'NoUpgrade' and '$(CrtSysIsCMakeProbe)' != 'true' and Exists('$(CrtSysPackageRoot)build\native\crtsys.props')" />
 </Project>

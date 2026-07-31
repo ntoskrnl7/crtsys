@@ -231,7 +231,6 @@ if(BUILD_TESTING)
   target_link_libraries(
     crtsys_ntl_http1_inspection_contracts
     PRIVATE
-      brotlienc
       crtsys_ntl_content_codecs
   )
   target_link_libraries(
@@ -272,6 +271,9 @@ if(BUILD_TESTING)
       crypt32
       msquic
   )
+  target_compile_definitions(
+    crtsys_ntl_raw_msquic_loopback_contracts
+    PRIVATE QUIC_API_ENABLE_PREVIEW_FEATURES)
   target_compile_options(
     crtsys_ntl_bidirectional_relay_contracts
     PRIVATE
@@ -399,7 +401,6 @@ target_link_libraries(
     advapi32 bcrypt crypt32 fwpuclnt ncrypt secur32 ws2_32
     winhttp
     crtsys_ntl_content_codecs
-    brotlienc
     msh3
 )
 target_link_libraries(

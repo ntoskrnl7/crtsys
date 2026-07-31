@@ -71,8 +71,15 @@ inline constexpr quic_backend_capabilities capabilities{
     .bidirectional_streams = true,
     .unidirectional_streams = true,
     .quic_datagrams = true,
+#ifdef QUIC_API_ENABLE_PREVIEW_FEATURES
+    .reliable_reset_at = true,
     .extended_connect = true,
     .webtransport = true,
+#else
+    .reliable_reset_at = false,
+    .extended_connect = true,
+    .webtransport = false,
+#endif
     .origin_client = true,
     .encrypted_client_hello = false,
     .arbitrary_browser_server_identity = false};
@@ -288,12 +295,19 @@ public:
 
   ntl::status open_bidirectional_stream(
       std::uint64_t &stream_id) noexcept override {
-    return open_stream(false, stream_id);
+    return open_stream(false, stream_id,
+                       stream_kind::extension_bidirectional);
+  }
+
+  ntl::status open_request_stream(
+      std::uint64_t &stream_id) noexcept override {
+    return open_stream(false, stream_id, stream_kind::request);
   }
 
   ntl::status open_unidirectional_stream(
       std::uint64_t &stream_id) noexcept override {
-    return open_stream(true, stream_id);
+    return open_stream(true, stream_id,
+                       stream_kind::extension_unidirectional);
   }
 
   ntl::status send_datagram(
@@ -326,6 +340,48 @@ public:
       return STATUS_UNSUCCESSFUL;
     }
     return ntl::status::ok();
+  }
+
+  ntl::status reset_stream_at(
+      std::uint64_t stream_id, std::uint64_t error_code,
+      std::uint64_t reliable_size) noexcept override {
+#ifdef QUIC_API_ENABLE_PREVIEW_FEATURES
+    if (error_code > maximum_quic_varint ||
+        reliable_size > maximum_quic_varint)
+      return STATUS_INVALID_PARAMETER;
+    if (!reliable_reset_negotiated_.load(
+            std::memory_order_acquire))
+      return STATUS_NOT_SUPPORTED;
+    auto stream = find_stream(stream_id);
+    if (!stream)
+      return STATUS_NOT_FOUND;
+    const QUIC_STATUS configured = api_->SetParam(
+        stream->handle, QUIC_PARAM_STREAM_RELIABLE_OFFSET,
+        sizeof(reliable_size), &reliable_size);
+    if (QUIC_FAILED(configured))
+      return STATUS_INVALID_DEVICE_STATE;
+    return detail::from_quic_status(api_->StreamShutdown(
+        stream->handle, QUIC_STREAM_SHUTDOWN_FLAG_ABORT_SEND,
+        error_code));
+#else
+    (void)stream_id;
+    (void)error_code;
+    (void)reliable_size;
+    return STATUS_NOT_SUPPORTED;
+#endif
+  }
+
+  ntl::status reset_stream(
+      std::uint64_t stream_id,
+      std::uint64_t error_code) noexcept override {
+    if (error_code > maximum_quic_varint)
+      return STATUS_INVALID_PARAMETER;
+    auto stream = find_stream(stream_id);
+    if (!stream)
+      return STATUS_NOT_FOUND;
+    return detail::from_quic_status(api_->StreamShutdown(
+        stream->handle, QUIC_STREAM_SHUTDOWN_FLAG_ABORT,
+        error_code));
   }
 
   void stop() noexcept override {
@@ -430,6 +486,13 @@ private:
           event.PEER_STREAM_STARTED.Stream,
           (event.PEER_STREAM_STARTED.Flags &
            QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL) != 0);
+    case QUIC_CONNECTION_EVENT_DATAGRAM_STATE_CHANGED:
+      invoke_sink_void([&] {
+        sink_->on_datagram_send_state(
+            event.DATAGRAM_STATE_CHANGED.SendEnabled != FALSE,
+            event.DATAGRAM_STATE_CHANGED.MaxSendLength);
+      });
+      return QUIC_STATUS_SUCCESS;
     case QUIC_CONNECTION_EVENT_DATAGRAM_RECEIVED: {
       const QUIC_BUFFER *buffer =
           event.DATAGRAM_RECEIVED.Buffer;
@@ -461,6 +524,17 @@ private:
         event.DATAGRAM_SEND_STATE_CHANGED.ClientContext = nullptr;
       }
       return QUIC_STATUS_SUCCESS;
+#ifdef QUIC_API_ENABLE_PREVIEW_FEATURES
+    case QUIC_CONNECTION_EVENT_RELIABLE_RESET_NEGOTIATED:
+      reliable_reset_negotiated_.store(
+          event.RELIABLE_RESET_NEGOTIATED.IsNegotiated != FALSE,
+          std::memory_order_release);
+      invoke_sink_void([&] {
+        sink_->on_reliable_reset_negotiated(
+            event.RELIABLE_RESET_NEGOTIATED.IsNegotiated != FALSE);
+      });
+      return QUIC_STATUS_SUCCESS;
+#endif
     case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT:
       set_terminal(STATUS_CONNECTION_ABORTED);
       return QUIC_STATUS_SUCCESS;
@@ -570,12 +644,22 @@ private:
           return abort_stream(state, consumed);
       }
       return QUIC_STATUS_SUCCESS;
-    case QUIC_STREAM_EVENT_PEER_SEND_ABORTED:
-    case QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED:
-      api_->StreamShutdown(
-          state.handle, QUIC_STREAM_SHUTDOWN_FLAG_ABORT,
-          h3_internal_error);
-      return QUIC_STATUS_SUCCESS;
+    case QUIC_STREAM_EVENT_PEER_SEND_ABORTED: {
+      const ntl::status reported = invoke_sink([&] {
+        return sink_->on_peer_send_aborted(
+            state.id, event.PEER_SEND_ABORTED.ErrorCode);
+      });
+      return reported.is_ok() ? QUIC_STATUS_SUCCESS
+                              : abort_stream(state, reported);
+    }
+    case QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED: {
+      const ntl::status reported = invoke_sink([&] {
+        return sink_->on_peer_receive_aborted(
+            state.id, event.PEER_RECEIVE_ABORTED.ErrorCode);
+      });
+      return reported.is_ok() ? QUIC_STATUS_SUCCESS
+                              : abort_stream(state, reported);
+    }
     case QUIC_STREAM_EVENT_SEND_COMPLETE:
       delete static_cast<detail::send_context *>(
           event.SEND_COMPLETE.ClientContext);
@@ -709,7 +793,8 @@ private:
 
   ntl::status open_stream(
       bool unidirectional,
-      std::uint64_t &stream_id) noexcept {
+      std::uint64_t &stream_id,
+      stream_kind local_kind) noexcept {
     stream_id = invalid_stream_id;
     if (!handle_ ||
         stopping_.load(std::memory_order_acquire))
@@ -722,10 +807,7 @@ private:
       return STATUS_INSUFFICIENT_RESOURCES;
     }
     state->owner = this;
-    state->kind =
-        unidirectional
-            ? stream_kind::extension_unidirectional
-            : stream_kind::extension_bidirectional;
+    state->kind = local_kind;
     HQUIC stream = nullptr;
     const QUIC_STATUS opened = api_->StreamOpen(
         handle_,
@@ -860,6 +942,7 @@ private:
   std::atomic<bool> started_{false};
   std::atomic<bool> connected_{false};
   std::atomic<bool> stopping_{false};
+  std::atomic<bool> reliable_reset_negotiated_{false};
   std::mutex sink_lock_;
   std::mutex qpack_stream_lock_;
   std::mutex state_lock_;

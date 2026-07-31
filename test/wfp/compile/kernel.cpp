@@ -96,6 +96,47 @@ constexpr auto proxy_datagram =
       return ntl::wfp::decision::block_and_absorb;
     };
 
+void compile_trace_sink(
+    void *context,
+    const ntl::wfp::operational_trace_record &record) noexcept {
+  if (context)
+    *static_cast<ntl::wfp::operational_trace_record *>(context) = record;
+}
+
+[[maybe_unused]] bool compile_operational_telemetry() noexcept {
+  ntl::wfp::operational_trace_record last{};
+  ntl::wfp::operational_telemetry telemetry(
+      {&compile_trace_sink, &last});
+  telemetry.record_classify(connect_layer::runtime_id);
+  telemetry.record_permit(connect_layer::runtime_id);
+  telemetry.record_block(connect_layer::runtime_id);
+  telemetry.record_absorb(connect_layer::runtime_id);
+  telemetry.record_queue_saturated(datagram_layer::runtime_id);
+  telemetry.record_verdict_timeout(stream_layer::runtime_id);
+  telemetry.record_user_verdict(stream_layer::runtime_id, 25);
+  telemetry.record_clone_failure(
+      datagram_layer::runtime_id, STATUS_INSUFFICIENT_RESOURCES);
+  telemetry.record_injection_failure(
+      datagram_layer::runtime_id, STATUS_CANCELLED);
+  telemetry.record_cancellation(stream_layer::runtime_id);
+  telemetry.record_unload_race(stream_layer::runtime_id);
+  telemetry.record_bfe_state(FWPM_SERVICE_RUNNING);
+  const auto snapshot = telemetry.snapshot();
+  return snapshot.classify == 1 && snapshot.permitted == 1 &&
+         snapshot.blocked == 1 && snapshot.absorbed == 1 &&
+         snapshot.queue_saturated == 1 &&
+         snapshot.verdict_timeouts == 1 &&
+         snapshot.user_verdicts == 1 &&
+         snapshot.user_verdict_latency_100ns == 25 &&
+         snapshot.maximum_user_verdict_latency_100ns == 25 &&
+         snapshot.clone_failures == 1 &&
+         snapshot.injection_failures == 1 &&
+         snapshot.cancellations == 1 &&
+         snapshot.unload_races == 1 &&
+         snapshot.bfe_state_changes == 1 &&
+         last.event == ntl::wfp::operational_event::bfe_state_change;
+}
+
 static_assert(!std::is_convertible_v<
               ntl::wfp::callout_key<connect_layer>, GUID>);
 static_assert(!std::is_constructible_v<
@@ -133,7 +174,9 @@ static_assert(ntl::wfp::detail::decision_layer<
               ntl::wfp::layers::ale_endpoint_closure_v6>);
 static_assert(ntl::wfp::detail::decision_layer<
               ntl::wfp::layers::name_resolution_cache_v4>);
-static_assert(ntl::wfp::detail::decision_layer<
+static_assert(ntl::wfp::detail::management_only_layer<
+              ntl::wfp::layers::ipsec_v6>);
+static_assert(!ntl::wfp::detail::callout_layer<
               ntl::wfp::layers::ipsec_v6>);
 static_assert(!std::is_copy_constructible_v<
               ntl::wfp::connect_redirector>);
@@ -270,14 +313,6 @@ ntl::status compile_specialized_registration(
        {0x88, 0xe7, 0x2c, 0xd8, 0xcf, 0xb0, 0xa6, 0x01}},
       {0xca664ea7, 0x1f3d, 0x44bd,
        {0x88, 0xe7, 0x2c, 0xd8, 0xcf, 0xb0, 0xa6, 0x01}},
-      {0xca664ea8, 0x1f3d, 0x44bd,
-       {0x88, 0xe7, 0x2c, 0xd8, 0xcf, 0xb0, 0xa6, 0x01}},
-      {0xca664ea9, 0x1f3d, 0x44bd,
-       {0x88, 0xe7, 0x2c, 0xd8, 0xcf, 0xb0, 0xa6, 0x01}},
-      {0xca664eaa, 0x1f3d, 0x44bd,
-       {0x88, 0xe7, 0x2c, 0xd8, 0xcf, 0xb0, 0xa6, 0x01}},
-      {0xca664eab, 0x1f3d, 0x44bd,
-       {0x88, 0xe7, 0x2c, 0xd8, 0xcf, 0xb0, 0xa6, 0x01}},
   };
   ntl::status result =
       compile_specialized_registration<
@@ -318,14 +353,7 @@ ntl::status compile_specialized_registration(
   result = compile_specialized_registration<
       ntl::wfp::layers::egress_vswitch_ethernet>(
       callouts, keys[7]);
-  if (!result.is_ok())
-    return result;
-  result = compile_specialized_registration<
-      ntl::wfp::layers::ipsec_v4>(callouts, keys[8]);
-  if (!result.is_ok())
-    return result;
-  return compile_specialized_registration<
-      ntl::wfp::layers::ipsec_v6>(callouts, keys[9]);
+  return result;
 }
 
 #if NTL_HAS_COROUTINE_SUPPORT

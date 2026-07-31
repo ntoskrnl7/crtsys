@@ -195,7 +195,8 @@ inline parsed_http_response parse_http_response(
 inline ntl::net::http::http1_message_framer
 make_http_framer(
     ntl::net::http::http1_message_kind kind,
-    bool allow_close_delimited_response = false) {
+    bool allow_close_delimited_response = false,
+    bool response_body_forbidden = false) {
   return ntl::net::http::http1_message_framer(
       kind,
       {.maximum_header_size = maximum_http_header_size,
@@ -203,7 +204,9 @@ make_http_framer(
        .maximum_chunk_line_size = 4 * 1024,
        .maximum_trailer_size = 16 * 1024,
        .allow_close_delimited_response =
-           allow_close_delimited_response});
+           allow_close_delimited_response,
+       .response_body_forbidden =
+           response_body_forbidden});
 }
 
 } // namespace crtsys::wfp_sample

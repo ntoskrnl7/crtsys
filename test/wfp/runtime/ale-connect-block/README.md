@@ -31,4 +31,6 @@ $guestPassword = Read-Host 'Guest password' -AsSecureString
 empty array only when the disposable guest intentionally had no Verifier
 targets. Build staging and logs default to sample-named directories under
 `artifacts` in the current repository checkout; callers may override both
-paths.
+paths. The build cache is isolated by toolset and SDK version under
+`artifacts/b/wfp-ale-connect-block-runtime`; `BuildRoot` may override that
+location without sharing a CMake cache across SDKs.

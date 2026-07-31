@@ -1,0 +1,1353 @@
+/**
+ * @file conditions
+ * @brief Layer-capability-checked WFP policy filter conditions.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/wfp/conditions is a user-mode header"
+#endif
+
+#include "layers"
+
+#include <sddl.h>
+
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <cstring>
+#include <limits>
+#include <memory>
+#include <span>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+namespace ntl::wfp {
+
+class policy_transaction;
+class application_id;
+namespace detail {
+template <class Derived, class Layer> class typed_condition_builder;
+}
+
+/** @brief Host-order IPv4 address used by typed policy conditions. */
+struct ipv4_address {
+public:
+  static constexpr ipv4_address from_octets(std::uint8_t first,
+                                            std::uint8_t second,
+                                            std::uint8_t third,
+                                            std::uint8_t fourth) noexcept {
+    return ipv4_address((static_cast<std::uint32_t>(first) << 24) |
+                        (static_cast<std::uint32_t>(second) << 16) |
+                        (static_cast<std::uint32_t>(third) << 8) |
+                        static_cast<std::uint32_t>(fourth));
+  }
+
+  static constexpr ipv4_address from_host_order(std::uint32_t value) noexcept {
+    return ipv4_address(value);
+  }
+
+  constexpr std::uint32_t host_order() const noexcept { return value_; }
+
+private:
+  friend class ipv4_network;
+  template <class, class> friend class detail::typed_condition_builder;
+  constexpr explicit ipv4_address(std::uint32_t value) noexcept
+      : value_(value) {}
+  std::uint32_t value_ = 0;
+};
+
+/** @brief IPv4 network prefix used by typed policy conditions. */
+class ipv4_network {
+public:
+  constexpr ipv4_network(ipv4_address address, std::uint8_t prefix_length)
+      : address_(address.host_order()), prefix_length_(prefix_length) {
+    if (prefix_length > 32)
+      throw std::invalid_argument("WFP IPv4 prefix length exceeds 32");
+  }
+
+  constexpr std::uint32_t address() const noexcept { return address_; }
+  constexpr std::uint8_t prefix_length() const noexcept {
+    return prefix_length_;
+  }
+
+private:
+  std::uint32_t address_ = 0;
+  std::uint8_t prefix_length_ = 0;
+};
+
+/** @brief Network-order IPv6 address bytes used by typed policy conditions. */
+struct ipv6_address {
+  std::array<std::uint8_t, 16> bytes{};
+
+  constexpr explicit ipv6_address(
+      std::array<std::uint8_t, 16> network_order) noexcept
+      : bytes(network_order) {}
+};
+
+/** @brief IPv6 network prefix used by typed policy conditions. */
+class ipv6_network {
+public:
+  constexpr ipv6_network(ipv6_address address, std::uint8_t prefix_length)
+      : address_(address), prefix_length_(prefix_length) {
+    if (prefix_length > 128)
+      throw std::invalid_argument("WFP IPv6 prefix length exceeds 128");
+  }
+
+  constexpr const ipv6_address &address() const noexcept { return address_; }
+  constexpr std::uint8_t prefix_length() const noexcept {
+    return prefix_length_;
+  }
+
+private:
+  ipv6_address address_;
+  std::uint8_t prefix_length_ = 0;
+};
+
+/** @brief Six-byte MAC address used only by MAC-frame policy layers. */
+struct mac_address {
+  std::array<std::uint8_t, 6> bytes{};
+
+  constexpr explicit mac_address(
+      std::array<std::uint8_t, 6> network_order) noexcept
+      : bytes(network_order) {}
+};
+
+/** @brief Network Location Awareness category used by profile conditions. */
+enum class network_profile : std::uint32_t {
+  unknown = 0,
+  public_network = 1,
+  private_network = 2,
+  domain_authenticated = 3,
+};
+
+enum class virtual_switch_network : std::uint8_t {
+  unknown = FWP_VSWITCH_NETWORK_TYPE_UNKNOWN,
+  private_network = FWP_VSWITCH_NETWORK_TYPE_PRIVATE,
+  internal = FWP_VSWITCH_NETWORK_TYPE_INTERNAL,
+  external = FWP_VSWITCH_NETWORK_TYPE_EXTERNAL,
+};
+
+enum class virtual_switch_interface_type : std::uint8_t {
+  external = 0,
+  synthetic = 1,
+  emulated = 2,
+  internal = 3,
+};
+
+namespace detail {
+
+template <class Tag>
+class guid_blob_identifier {
+public:
+  explicit guid_blob_identifier(const GUID &value) noexcept {
+    std::memcpy(bytes_.data(), &value, sizeof(value));
+  }
+
+private:
+  template <class, class>
+  friend class typed_condition_builder;
+  std::span<const std::uint8_t> bytes() const noexcept {
+    return bytes_;
+  }
+  std::array<std::uint8_t, sizeof(GUID)> bytes_{};
+};
+
+struct virtual_switch_tag;
+struct virtual_switch_interface_tag;
+struct virtual_machine_tag;
+
+} // namespace detail
+
+using virtual_switch_id =
+    detail::guid_blob_identifier<detail::virtual_switch_tag>;
+using virtual_switch_interface_id =
+    detail::guid_blob_identifier<
+        detail::virtual_switch_interface_tag>;
+using virtual_machine_id =
+    detail::guid_blob_identifier<detail::virtual_machine_tag>;
+
+namespace detail {
+
+class sid_value {
+public:
+  static sid_value from_string(std::wstring_view value) {
+    if (value.empty())
+      throw std::invalid_argument("WFP SID string cannot be empty");
+    const std::wstring owned(value);
+    PSID native = nullptr;
+    if (!::ConvertStringSidToSidW(owned.c_str(), &native))
+      throw std::system_error(static_cast<int>(::GetLastError()),
+                              std::system_category(), "ConvertStringSidToSidW");
+    struct local_release {
+      PSID value = nullptr;
+      ~local_release() {
+        if (value)
+          ::LocalFree(value);
+      }
+    } release{native};
+    return from_native(native);
+  }
+
+  static sid_value from_native(PSID value) {
+    if (!value || !::IsValidSid(value))
+      throw std::invalid_argument("WFP SID is invalid");
+    const DWORD size = ::GetLengthSid(value);
+    if (size == 0)
+      throw std::invalid_argument("WFP SID is empty");
+    std::vector<std::uint8_t> bytes(size);
+    if (!::CopySid(size, bytes.data(), value))
+      throw std::system_error(static_cast<int>(::GetLastError()),
+                              std::system_category(), "CopySid");
+    return sid_value(std::move(bytes));
+  }
+
+  std::span<const std::uint8_t> bytes() const noexcept { return bytes_; }
+
+private:
+  explicit sid_value(std::vector<std::uint8_t> bytes)
+      : bytes_(std::move(bytes)) {}
+
+  std::vector<std::uint8_t> bytes_;
+};
+
+class security_descriptor_value {
+public:
+  static security_descriptor_value for_identity(
+      std::span<const std::uint8_t> sid_bytes) {
+    if (sid_bytes.empty() ||
+        !::IsValidSid(
+            reinterpret_cast<PSID>(
+                const_cast<std::uint8_t *>(sid_bytes.data()))))
+      throw std::invalid_argument("WFP identity SID is invalid");
+
+    const auto sid = reinterpret_cast<PSID>(
+        const_cast<std::uint8_t *>(sid_bytes.data()));
+    const DWORD acl_size =
+        sizeof(ACL) + sizeof(ACCESS_ALLOWED_ACE) -
+        sizeof(DWORD) + ::GetLengthSid(sid);
+    std::vector<std::uint8_t> acl_bytes(acl_size);
+    auto *const acl =
+        reinterpret_cast<PACL>(acl_bytes.data());
+    if (!::InitializeAcl(acl, acl_size, ACL_REVISION) ||
+        !::AddAccessAllowedAce(
+            acl, ACL_REVISION, FWP_ACTRL_MATCH_FILTER, sid))
+      throw std::system_error(
+          static_cast<int>(::GetLastError()),
+          std::system_category(),
+          "create WFP identity ACL");
+
+    SECURITY_DESCRIPTOR absolute{};
+    if (!::InitializeSecurityDescriptor(
+            &absolute, SECURITY_DESCRIPTOR_REVISION) ||
+        !::SetSecurityDescriptorDacl(
+            &absolute, TRUE, acl, FALSE))
+      throw std::system_error(
+          static_cast<int>(::GetLastError()),
+          std::system_category(),
+          "create WFP identity security descriptor");
+
+    DWORD required = 0;
+    (void)::MakeSelfRelativeSD(
+        &absolute, nullptr, &required);
+    if (::GetLastError() != ERROR_INSUFFICIENT_BUFFER ||
+        required == 0)
+      throw std::system_error(
+          static_cast<int>(::GetLastError()),
+          std::system_category(),
+          "size WFP identity security descriptor");
+    std::vector<std::uint8_t> descriptor(required);
+    if (!::MakeSelfRelativeSD(
+            &absolute,
+            reinterpret_cast<PSECURITY_DESCRIPTOR>(
+                descriptor.data()),
+            &required))
+      throw std::system_error(
+          static_cast<int>(::GetLastError()),
+          std::system_category(),
+          "serialize WFP identity security descriptor");
+    descriptor.resize(required);
+    return security_descriptor_value(
+        std::move(descriptor));
+  }
+
+  std::span<const std::uint8_t> bytes() const noexcept {
+    return bytes_;
+  }
+
+private:
+  explicit security_descriptor_value(
+      std::vector<std::uint8_t> bytes)
+      : bytes_(std::move(bytes)) {}
+
+  std::vector<std::uint8_t> bytes_;
+};
+
+} // namespace detail
+
+/** @brief Validated user or service SID for ALE user conditions. */
+class user_identity {
+public:
+  static user_identity from_string(std::wstring_view value) {
+    const auto sid = detail::sid_value::from_string(value);
+    return user_identity(
+        detail::security_descriptor_value::for_identity(
+            sid.bytes()));
+  }
+  static user_identity from_native(PSID value) {
+    const auto sid = detail::sid_value::from_native(value);
+    return user_identity(
+        detail::security_descriptor_value::for_identity(
+            sid.bytes()));
+  }
+
+private:
+  template <class, class> friend class detail::typed_condition_builder;
+  explicit user_identity(
+      detail::security_descriptor_value value)
+      : value_(std::move(value)) {}
+  std::span<const std::uint8_t> bytes() const noexcept {
+    return value_.bytes();
+  }
+  detail::security_descriptor_value value_;
+};
+
+/** @brief Validated package/AppContainer SID for ALE package conditions. */
+class package_identity {
+public:
+  static package_identity from_string(std::wstring_view value) {
+    return package_identity(detail::sid_value::from_string(value));
+  }
+  static package_identity from_native(PSID value) {
+    return package_identity(detail::sid_value::from_native(value));
+  }
+
+private:
+  template <class, class> friend class detail::typed_condition_builder;
+  explicit package_identity(detail::sid_value value)
+      : value_(std::move(value)) {}
+  std::span<const std::uint8_t> bytes() const noexcept {
+    return value_.bytes();
+  }
+  detail::sid_value value_;
+};
+
+namespace detail {
+
+template <class Layer>
+inline constexpr bool ipv4_policy_layer =
+    std::is_same_v<Layer, layers::ale_connect_redirect_v4> ||
+    std::is_same_v<Layer, layers::ale_bind_redirect_v4> ||
+    std::is_same_v<Layer, layers::ale_auth_connect_v4> ||
+    std::is_same_v<Layer, layers::ale_auth_recv_accept_v4> ||
+    std::is_same_v<Layer, layers::ale_flow_established_v4> ||
+    std::is_same_v<Layer, layers::stream_v4> ||
+    std::is_same_v<Layer, layers::datagram_data_v4> ||
+    std::is_same_v<Layer, layers::inbound_transport_v4> ||
+    std::is_same_v<Layer, layers::outbound_transport_v4> ||
+    std::is_same_v<Layer, layers::ale_endpoint_closure_v4> ||
+    std::is_same_v<Layer, layers::name_resolution_cache_v4> ||
+    std::is_same_v<Layer, layers::ipsec_v4>;
+
+template <class Layer>
+inline constexpr bool ipv6_policy_layer =
+    std::is_same_v<Layer, layers::ale_connect_redirect_v6> ||
+    std::is_same_v<Layer, layers::ale_bind_redirect_v6> ||
+    std::is_same_v<Layer, layers::ale_auth_connect_v6> ||
+    std::is_same_v<Layer, layers::ale_auth_recv_accept_v6> ||
+    std::is_same_v<Layer, layers::ale_flow_established_v6> ||
+    std::is_same_v<Layer, layers::stream_v6> ||
+    std::is_same_v<Layer, layers::datagram_data_v6> ||
+    std::is_same_v<Layer, layers::inbound_transport_v6> ||
+    std::is_same_v<Layer, layers::outbound_transport_v6> ||
+    std::is_same_v<Layer, layers::ale_endpoint_closure_v6> ||
+    std::is_same_v<Layer, layers::name_resolution_cache_v6> ||
+    std::is_same_v<Layer, layers::ipsec_v6>;
+
+template <class Layer>
+inline constexpr bool ale_identity_condition_layer =
+    connect_redirect_layer<Layer> || bind_redirect_layer<Layer> ||
+    ale_authorization_layer<Layer> ||
+    std::is_same_v<Layer, layers::ale_flow_established_v4> ||
+    std::is_same_v<Layer, layers::ale_flow_established_v6> ||
+    std::is_same_v<Layer, layers::ale_endpoint_closure_v4> ||
+    std::is_same_v<Layer, layers::ale_endpoint_closure_v6> ||
+    std::is_same_v<Layer, layers::name_resolution_cache_v4> ||
+    std::is_same_v<Layer, layers::name_resolution_cache_v6>;
+
+template <class Layer>
+inline constexpr bool package_identity_condition_layer =
+    ale_identity_condition_layer<Layer> &&
+    !std::is_same_v<Layer, layers::name_resolution_cache_v4> &&
+    !std::is_same_v<Layer, layers::name_resolution_cache_v6>;
+
+template <class Layer>
+inline constexpr bool protocol_condition_layer =
+    package_identity_condition_layer<Layer> ||
+    std::is_same_v<Layer, layers::datagram_data_v4> ||
+    std::is_same_v<Layer, layers::datagram_data_v6> ||
+    std::is_same_v<Layer, layers::inbound_transport_v4> ||
+    std::is_same_v<Layer, layers::inbound_transport_v6> ||
+    std::is_same_v<Layer, layers::outbound_transport_v4> ||
+    std::is_same_v<Layer, layers::outbound_transport_v6> ||
+    std::is_same_v<Layer, layers::ipsec_v4> ||
+    std::is_same_v<Layer, layers::ipsec_v6>;
+
+template <class Layer>
+inline constexpr bool local_port_condition_layer =
+    protocol_condition_layer<Layer> || stream_layer<Layer>;
+
+template <class Layer>
+inline constexpr bool remote_port_condition_layer =
+    local_port_condition_layer<Layer> && !bind_redirect_layer<Layer>;
+
+template <class Layer>
+inline constexpr bool local_address_condition_layer =
+    (ipv4_policy_layer<Layer> || ipv6_policy_layer<Layer>) &&
+    !std::is_same_v<Layer, layers::name_resolution_cache_v4> &&
+    !std::is_same_v<Layer, layers::name_resolution_cache_v6>;
+
+template <class Layer>
+inline constexpr bool remote_address_condition_layer =
+    (ipv4_policy_layer<Layer> || ipv6_policy_layer<Layer>) &&
+    !bind_redirect_layer<Layer>;
+
+template <class Layer>
+inline constexpr bool direction_condition_layer =
+    std::is_same_v<Layer, layers::ale_flow_established_v4> ||
+    std::is_same_v<Layer, layers::ale_flow_established_v6> ||
+    std::is_same_v<Layer, layers::stream_v4> ||
+    std::is_same_v<Layer, layers::stream_v6> ||
+    std::is_same_v<Layer, layers::datagram_data_v4> ||
+    std::is_same_v<Layer, layers::datagram_data_v6>;
+
+template <class Layer>
+inline constexpr bool interface_condition_layer =
+    ale_authorization_layer<Layer> ||
+    std::is_same_v<Layer, layers::datagram_data_v4> ||
+    std::is_same_v<Layer, layers::datagram_data_v6> ||
+    std::is_same_v<Layer, layers::inbound_transport_v4> ||
+    std::is_same_v<Layer, layers::inbound_transport_v6> ||
+    std::is_same_v<Layer, layers::outbound_transport_v4> ||
+    std::is_same_v<Layer, layers::outbound_transport_v6> ||
+    std::is_same_v<Layer, layers::inbound_mac_frame_ethernet> ||
+    std::is_same_v<Layer, layers::outbound_mac_frame_ethernet>;
+
+template <class Layer>
+inline constexpr bool subinterface_condition_layer =
+    ale_authorization_layer<Layer> ||
+    std::is_same_v<Layer, layers::datagram_data_v4> ||
+    std::is_same_v<Layer, layers::datagram_data_v6> ||
+    std::is_same_v<Layer, layers::inbound_transport_v4> ||
+    std::is_same_v<Layer, layers::inbound_transport_v6> ||
+    std::is_same_v<Layer, layers::outbound_transport_v4> ||
+    std::is_same_v<Layer, layers::outbound_transport_v6>;
+
+template <class Layer>
+inline constexpr bool interface_type_condition_layer =
+    ale_authorization_layer<Layer> ||
+    std::is_same_v<Layer, layers::ale_flow_established_v4> ||
+    std::is_same_v<Layer, layers::ale_flow_established_v6> ||
+    std::is_same_v<Layer, layers::datagram_data_v4> ||
+    std::is_same_v<Layer, layers::datagram_data_v6> ||
+    std::is_same_v<Layer, layers::inbound_transport_v4> ||
+    std::is_same_v<Layer, layers::inbound_transport_v6> ||
+    std::is_same_v<Layer, layers::outbound_transport_v4> ||
+    std::is_same_v<Layer, layers::outbound_transport_v6>;
+
+template <class Layer>
+inline constexpr bool ip_flags_condition_layer =
+    (ipv4_policy_layer<Layer> || ipv6_policy_layer<Layer>) &&
+    !std::is_same_v<Layer, layers::name_resolution_cache_v4> &&
+    !std::is_same_v<Layer, layers::name_resolution_cache_v6> &&
+    !std::is_same_v<Layer, layers::ipsec_v4> &&
+    !std::is_same_v<Layer, layers::ipsec_v6>;
+
+template <class Layer>
+inline constexpr bool mac_frame_condition_layer =
+    std::is_same_v<Layer, layers::inbound_mac_frame_ethernet> ||
+    std::is_same_v<Layer, layers::outbound_mac_frame_ethernet>;
+
+template <class Layer>
+inline constexpr bool vswitch_condition_layer =
+    std::is_same_v<Layer, layers::ingress_vswitch_ethernet> ||
+    std::is_same_v<Layer, layers::egress_vswitch_ethernet>;
+
+template <class Layer>
+inline constexpr bool compartment_condition_layer =
+    (((ipv4_policy_layer<Layer> || ipv6_policy_layer<Layer>) &&
+      !std::is_same_v<Layer, layers::name_resolution_cache_v4> &&
+      !std::is_same_v<Layer, layers::name_resolution_cache_v6> &&
+      !std::is_same_v<Layer, layers::ipsec_v4> &&
+      !std::is_same_v<Layer, layers::ipsec_v6>) ||
+     mac_frame_condition_layer<Layer> ||
+     vswitch_condition_layer<Layer>);
+
+template <class Layer>
+inline constexpr bool current_profile_condition_layer =
+    ale_authorization_layer<Layer> ||
+    std::is_same_v<Layer, layers::inbound_transport_v4> ||
+    std::is_same_v<Layer, layers::inbound_transport_v6> ||
+    std::is_same_v<Layer, layers::outbound_transport_v4> ||
+    std::is_same_v<Layer, layers::outbound_transport_v6> ||
+    std::is_same_v<Layer, layers::ipsec_v4> ||
+    std::is_same_v<Layer, layers::ipsec_v6>;
+
+template <class Layer>
+inline constexpr bool original_profile_condition_layer =
+    ale_authorization_layer<Layer>;
+
+template <class Layer>
+inline constexpr bool loopback_flag_layer =
+    std::is_same_v<Layer, layers::ale_auth_recv_accept_v4> ||
+    std::is_same_v<Layer, layers::ale_auth_recv_accept_v6> ||
+    std::is_same_v<Layer, layers::ale_flow_established_v4> ||
+    std::is_same_v<Layer, layers::ale_flow_established_v6> ||
+    std::is_same_v<Layer, layers::datagram_data_v4> ||
+    std::is_same_v<Layer, layers::datagram_data_v6> ||
+    std::is_same_v<Layer, layers::inbound_transport_v4> ||
+    std::is_same_v<Layer, layers::inbound_transport_v6> ||
+    std::is_same_v<Layer, layers::outbound_transport_v4> ||
+    std::is_same_v<Layer, layers::outbound_transport_v6>;
+
+template <class Layer>
+inline constexpr bool reauthorization_flag_layer =
+    ale_authorization_layer<Layer> || bind_redirect_layer<Layer>;
+
+class condition_list {
+public:
+  condition_list() = default;
+  condition_list(const condition_list &) = delete;
+  condition_list &operator=(const condition_list &) = delete;
+  condition_list(condition_list &&) noexcept = default;
+  condition_list &operator=(condition_list &&) noexcept = default;
+
+  std::size_t size() const noexcept { return values_.size(); }
+  FWPM_FILTER_CONDITION0 *data() noexcept {
+    return values_.empty() ? nullptr : values_.data();
+  }
+  const FWPM_FILTER_CONDITION0 *data() const noexcept {
+    return values_.empty() ? nullptr : values_.data();
+  }
+
+  void add_u8(const GUID &field, std::uint8_t value,
+              FWP_MATCH_TYPE match = FWP_MATCH_EQUAL) {
+    FWPM_FILTER_CONDITION0 condition{};
+    condition.fieldKey = field;
+    condition.matchType = match;
+    condition.conditionValue.type = FWP_UINT8;
+    condition.conditionValue.uint8 = value;
+    append(condition);
+  }
+
+  void add_u16(const GUID &field, std::uint16_t value,
+               FWP_MATCH_TYPE match = FWP_MATCH_EQUAL) {
+    FWPM_FILTER_CONDITION0 condition{};
+    condition.fieldKey = field;
+    condition.matchType = match;
+    condition.conditionValue.type = FWP_UINT16;
+    condition.conditionValue.uint16 = value;
+    append(condition);
+  }
+
+  void add_u32(const GUID &field, std::uint32_t value,
+               FWP_MATCH_TYPE match = FWP_MATCH_EQUAL) {
+    FWPM_FILTER_CONDITION0 condition{};
+    condition.fieldKey = field;
+    condition.matchType = match;
+    condition.conditionValue.type = FWP_UINT32;
+    condition.conditionValue.uint32 = value;
+    append(condition);
+  }
+
+  void add_blob(const GUID &field, std::span<const std::uint8_t> bytes,
+                FWP_MATCH_TYPE match = FWP_MATCH_EQUAL) {
+    prepare_append(field);
+    auto storage = std::make_unique<owned_blob>(bytes);
+    FWPM_FILTER_CONDITION0 condition{};
+    condition.fieldKey = field;
+    condition.matchType = match;
+    condition.conditionValue.type = FWP_BYTE_BLOB_TYPE;
+    condition.conditionValue.byteBlob = &storage->native;
+    blobs_.push_back(std::move(storage));
+    append_prepared(condition);
+  }
+
+  void add_sid(const GUID &field, std::span<const std::uint8_t> bytes,
+               FWP_MATCH_TYPE match = FWP_MATCH_EQUAL) {
+    prepare_append(field);
+    auto storage = std::make_unique<owned_sid>(bytes);
+    FWPM_FILTER_CONDITION0 condition{};
+    condition.fieldKey = field;
+    condition.matchType = match;
+    condition.conditionValue.type = FWP_SID;
+    condition.conditionValue.sid =
+        reinterpret_cast<SID *>(storage->bytes.data());
+    sids_.push_back(std::move(storage));
+    append_prepared(condition);
+  }
+
+  void add_security_descriptor(
+      const GUID &field,
+      std::span<const std::uint8_t> bytes,
+      FWP_MATCH_TYPE match = FWP_MATCH_EQUAL) {
+    prepare_append(field);
+    auto storage = std::make_unique<owned_blob>(bytes);
+    if (!::IsValidSecurityDescriptor(
+            reinterpret_cast<PSECURITY_DESCRIPTOR>(
+                storage->bytes.data())) ||
+        !::GetSecurityDescriptorControl(
+            reinterpret_cast<PSECURITY_DESCRIPTOR>(
+                storage->bytes.data()),
+            &storage->control, &storage->revision) ||
+        (storage->control & SE_SELF_RELATIVE) == 0)
+      throw std::invalid_argument(
+          "WFP identity security descriptor is invalid");
+    FWPM_FILTER_CONDITION0 condition{};
+    condition.fieldKey = field;
+    condition.matchType = match;
+    condition.conditionValue.type =
+        FWP_SECURITY_DESCRIPTOR_TYPE;
+    condition.conditionValue.sd = &storage->native;
+    blobs_.push_back(std::move(storage));
+    append_prepared(condition);
+  }
+
+  void add_u16_range(
+      const GUID &field,
+      std::uint16_t low,
+      std::uint16_t high) {
+    if (low > high)
+      throw std::invalid_argument(
+          "WFP UINT16 range low exceeds high");
+    prepare_append(field);
+    auto storage = std::make_unique<FWP_RANGE0>();
+    storage->valueLow.type = FWP_UINT16;
+    storage->valueLow.uint16 = low;
+    storage->valueHigh.type = FWP_UINT16;
+    storage->valueHigh.uint16 = high;
+    FWPM_FILTER_CONDITION0 condition{};
+    condition.fieldKey = field;
+    condition.matchType = FWP_MATCH_RANGE;
+    condition.conditionValue.type = FWP_RANGE_TYPE;
+    condition.conditionValue.rangeValue = storage.get();
+    ranges_.push_back(std::move(storage));
+    append_prepared(condition);
+  }
+
+  void add_u32_range(
+      const GUID &field,
+      std::uint32_t low,
+      std::uint32_t high) {
+    if (low > high)
+      throw std::invalid_argument(
+          "WFP UINT32 range low exceeds high");
+    prepare_append(field);
+    auto storage = std::make_unique<FWP_RANGE0>();
+    storage->valueLow.type = FWP_UINT32;
+    storage->valueLow.uint32 = low;
+    storage->valueHigh.type = FWP_UINT32;
+    storage->valueHigh.uint32 = high;
+    FWPM_FILTER_CONDITION0 condition{};
+    condition.fieldKey = field;
+    condition.matchType = FWP_MATCH_RANGE;
+    condition.conditionValue.type = FWP_RANGE_TYPE;
+    condition.conditionValue.rangeValue = storage.get();
+    ranges_.push_back(std::move(storage));
+    append_prepared(condition);
+  }
+
+  void add_v4_network(const GUID &field, ipv4_network network) {
+    prepare_append(field);
+    auto storage = std::make_unique<FWP_V4_ADDR_AND_MASK>();
+    const auto prefix = network.prefix_length();
+    const std::uint32_t mask = prefix == 0 ? 0u : 0xffffffffu << (32u - prefix);
+    storage->addr = network.address() & mask;
+    storage->mask = mask;
+    FWPM_FILTER_CONDITION0 condition{};
+    condition.fieldKey = field;
+    condition.matchType = FWP_MATCH_EQUAL;
+    condition.conditionValue.type = FWP_V4_ADDR_MASK;
+    condition.conditionValue.v4AddrMask = storage.get();
+    v4_networks_.push_back(std::move(storage));
+    append_prepared(condition);
+  }
+
+  void add_v6_address(
+      const GUID &field,
+      ipv6_address address,
+      FWP_MATCH_TYPE match = FWP_MATCH_EQUAL) {
+    prepare_append(field);
+    auto storage = std::make_unique<FWP_BYTE_ARRAY16>();
+    std::copy(address.bytes.begin(), address.bytes.end(), storage->byteArray16);
+    FWPM_FILTER_CONDITION0 condition{};
+    condition.fieldKey = field;
+    condition.matchType = match;
+    condition.conditionValue.type = FWP_BYTE_ARRAY16_TYPE;
+    condition.conditionValue.byteArray16 = storage.get();
+    v6_addresses_.push_back(std::move(storage));
+    append_prepared(condition);
+  }
+
+  void add_v6_network(const GUID &field, ipv6_network network) {
+    prepare_append(field);
+    auto storage = std::make_unique<FWP_V6_ADDR_AND_MASK>();
+    const auto &bytes = network.address().bytes;
+    std::copy(bytes.begin(), bytes.end(), storage->addr);
+    storage->prefixLength = network.prefix_length();
+    const auto whole = static_cast<std::size_t>(storage->prefixLength / 8);
+    const auto partial = static_cast<unsigned>(storage->prefixLength % 8);
+    if (whole < bytes.size()) {
+      if (partial != 0)
+        storage->addr[whole] &=
+            static_cast<std::uint8_t>(0xffu << (8u - partial));
+      const auto first_zero = whole + (partial == 0 ? 0u : 1u);
+      std::fill(storage->addr + first_zero, storage->addr + bytes.size(),
+                static_cast<std::uint8_t>(0));
+    }
+    FWPM_FILTER_CONDITION0 condition{};
+    condition.fieldKey = field;
+    condition.matchType = FWP_MATCH_EQUAL;
+    condition.conditionValue.type = FWP_V6_ADDR_MASK;
+    condition.conditionValue.v6AddrMask = storage.get();
+    v6_networks_.push_back(std::move(storage));
+    append_prepared(condition);
+  }
+
+  void add_mac(const GUID &field, mac_address address) {
+    prepare_append(field);
+    auto storage = std::make_unique<FWP_BYTE_ARRAY6>();
+    std::copy(address.bytes.begin(), address.bytes.end(), storage->byteArray6);
+    FWPM_FILTER_CONDITION0 condition{};
+    condition.fieldKey = field;
+    condition.matchType = FWP_MATCH_EQUAL;
+    condition.conditionValue.type = FWP_BYTE_ARRAY6_TYPE;
+    condition.conditionValue.byteArray6 = storage.get();
+    mac_addresses_.push_back(std::move(storage));
+    append_prepared(condition);
+  }
+
+private:
+  void prepare_append(const GUID &field) {
+    const auto duplicate =
+        std::find_if(values_.begin(), values_.end(),
+                     [&](const FWPM_FILTER_CONDITION0 &existing) {
+                       return ::IsEqualGUID(existing.fieldKey, field);
+                     });
+    if (duplicate != values_.end())
+      throw std::logic_error(
+          "WFP filter contains the same condition field twice");
+    values_.reserve(values_.size() + 1);
+  }
+
+  void append_prepared(const FWPM_FILTER_CONDITION0 &condition) {
+    values_.push_back(condition);
+  }
+
+  void append(const FWPM_FILTER_CONDITION0 &condition) {
+    prepare_append(condition.fieldKey);
+    append_prepared(condition);
+  }
+
+  struct owned_blob {
+    explicit owned_blob(std::span<const std::uint8_t> source)
+        : bytes(source.begin(), source.end()) {
+      if (bytes.empty() || bytes.size() > (std::numeric_limits<UINT32>::max)())
+        throw std::invalid_argument(
+            "WFP byte-blob condition has an invalid size");
+      native.size = static_cast<UINT32>(bytes.size());
+      native.data = bytes.data();
+    }
+    std::vector<std::uint8_t> bytes;
+    FWP_BYTE_BLOB native{};
+    SECURITY_DESCRIPTOR_CONTROL control = 0;
+    DWORD revision = 0;
+  };
+
+  struct owned_sid {
+    explicit owned_sid(std::span<const std::uint8_t> source)
+        : bytes(source.begin(), source.end()) {
+      if (bytes.empty() || !::IsValidSid(reinterpret_cast<PSID>(bytes.data())))
+        throw std::invalid_argument("WFP SID condition is invalid");
+    }
+    std::vector<std::uint8_t> bytes;
+  };
+
+  std::vector<FWPM_FILTER_CONDITION0> values_;
+  std::vector<std::unique_ptr<owned_blob>> blobs_;
+  std::vector<std::unique_ptr<owned_sid>> sids_;
+  std::vector<std::unique_ptr<FWP_V4_ADDR_AND_MASK>> v4_networks_;
+  std::vector<std::unique_ptr<FWP_BYTE_ARRAY16>> v6_addresses_;
+  std::vector<std::unique_ptr<FWP_V6_ADDR_AND_MASK>> v6_networks_;
+  std::vector<std::unique_ptr<FWP_BYTE_ARRAY6>> mac_addresses_;
+  std::vector<std::unique_ptr<FWP_RANGE0>> ranges_;
+};
+
+/**
+ * @brief CRTP mixin exposing only conditions supported by one layer family.
+ */
+template <class Derived, class Layer> class typed_condition_builder {
+public:
+  std::size_t condition_count() const noexcept { return conditions_.size(); }
+
+  template <class L = Layer,
+            std::enable_if_t<protocol_condition_layer<L>, int> = 0>
+  Derived &protocol_equal(std::uint8_t protocol) {
+    conditions_.add_u8(FWPM_CONDITION_IP_PROTOCOL, protocol);
+    return derived();
+  }
+
+  template <class L = Layer,
+            std::enable_if_t<protocol_condition_layer<L>, int> = 0>
+  Derived &protocol_not_equal(std::uint8_t protocol) {
+    conditions_.add_u8(
+        FWPM_CONDITION_IP_PROTOCOL, protocol,
+        FWP_MATCH_NOT_EQUAL);
+    return derived();
+  }
+
+  template <class L = Layer,
+            std::enable_if_t<local_port_condition_layer<L>, int> = 0>
+  Derived &local_port_equal(std::uint16_t port) {
+    conditions_.add_u16(FWPM_CONDITION_IP_LOCAL_PORT, port);
+    return derived();
+  }
+
+  template <class L = Layer,
+            std::enable_if_t<local_port_condition_layer<L>, int> = 0>
+  Derived &local_port_not_equal(std::uint16_t port) {
+    conditions_.add_u16(
+        FWPM_CONDITION_IP_LOCAL_PORT, port,
+        FWP_MATCH_NOT_EQUAL);
+    return derived();
+  }
+
+  template <class L = Layer,
+            std::enable_if_t<local_port_condition_layer<L>, int> = 0>
+  Derived &local_port_range(
+      std::uint16_t first, std::uint16_t last) {
+    conditions_.add_u16_range(
+        FWPM_CONDITION_IP_LOCAL_PORT, first, last);
+    return derived();
+  }
+
+  template <class L = Layer,
+            std::enable_if_t<remote_port_condition_layer<L>, int> = 0>
+  Derived &remote_port_equal(std::uint16_t port) {
+    conditions_.add_u16(FWPM_CONDITION_IP_REMOTE_PORT, port);
+    return derived();
+  }
+
+  template <class L = Layer,
+            std::enable_if_t<remote_port_condition_layer<L>, int> = 0>
+  Derived &remote_port_not_equal(std::uint16_t port) {
+    conditions_.add_u16(
+        FWPM_CONDITION_IP_REMOTE_PORT, port,
+        FWP_MATCH_NOT_EQUAL);
+    return derived();
+  }
+
+  template <class L = Layer,
+            std::enable_if_t<remote_port_condition_layer<L>, int> = 0>
+  Derived &remote_port_range(
+      std::uint16_t first, std::uint16_t last) {
+    conditions_.add_u16_range(
+        FWPM_CONDITION_IP_REMOTE_PORT, first, last);
+    return derived();
+  }
+
+  template <class L = Layer,
+            std::enable_if_t<direction_condition_layer<L>, int> = 0>
+  Derived &direction_equal(std::uint32_t direction) {
+    if (direction != FWP_DIRECTION_INBOUND &&
+        direction != FWP_DIRECTION_OUTBOUND)
+      throw std::invalid_argument("WFP direction is invalid");
+    conditions_.add_u32(FWPM_CONDITION_DIRECTION, direction);
+    return derived();
+  }
+
+  template <class L = Layer,
+            std::enable_if_t<direction_condition_layer<L>, int> = 0>
+  Derived &direction_not_equal(std::uint32_t direction) {
+    if (direction != FWP_DIRECTION_INBOUND &&
+        direction != FWP_DIRECTION_OUTBOUND)
+      throw std::invalid_argument("WFP direction is invalid");
+    conditions_.add_u32(
+        FWPM_CONDITION_DIRECTION, direction,
+        FWP_MATCH_NOT_EQUAL);
+    return derived();
+  }
+
+  template <class L = Layer,
+            std::enable_if_t<ale_identity_condition_layer<L>, int> = 0>
+  Derived &application_equal(const application_id &application);
+
+  template <class L = Layer,
+            std::enable_if_t<ale_identity_condition_layer<L>, int> = 0>
+  Derived &user_equal(const user_identity &user) {
+    conditions_.add_security_descriptor(
+        FWPM_CONDITION_ALE_USER_ID, user.bytes());
+    return derived();
+  }
+
+  template <class L = Layer,
+            std::enable_if_t<package_identity_condition_layer<L>, int> = 0>
+  Derived &package_equal(const package_identity &package) {
+    conditions_.add_sid(FWPM_CONDITION_ALE_PACKAGE_ID, package.bytes());
+    return derived();
+  }
+
+  template <
+      class L = Layer,
+      std::enable_if_t<ipv4_policy_layer<L> && local_address_condition_layer<L>,
+                       int> = 0>
+  Derived &local_address_equal(ipv4_address address) {
+    conditions_.add_u32(FWPM_CONDITION_IP_LOCAL_ADDRESS, address.host_order());
+    return derived();
+  }
+
+  template <
+      class L = Layer,
+      std::enable_if_t<ipv4_policy_layer<L> && local_address_condition_layer<L>,
+                       int> = 0>
+  Derived &local_address_not_equal(ipv4_address address) {
+    conditions_.add_u32(
+        FWPM_CONDITION_IP_LOCAL_ADDRESS,
+        address.host_order(), FWP_MATCH_NOT_EQUAL);
+    return derived();
+  }
+
+  template <
+      class L = Layer,
+      std::enable_if_t<
+          ipv4_policy_layer<L> && remote_address_condition_layer<L>, int> = 0>
+  Derived &remote_address_equal(ipv4_address address) {
+    conditions_.add_u32(FWPM_CONDITION_IP_REMOTE_ADDRESS, address.host_order());
+    return derived();
+  }
+
+  template <
+      class L = Layer,
+      std::enable_if_t<
+          ipv4_policy_layer<L> && remote_address_condition_layer<L>, int> = 0>
+  Derived &remote_address_not_equal(ipv4_address address) {
+    conditions_.add_u32(
+        FWPM_CONDITION_IP_REMOTE_ADDRESS,
+        address.host_order(), FWP_MATCH_NOT_EQUAL);
+    return derived();
+  }
+
+  template <
+      class L = Layer,
+      std::enable_if_t<ipv4_policy_layer<L> && local_address_condition_layer<L>,
+                       int> = 0>
+  Derived &local_address_prefix(ipv4_network network) {
+    conditions_.add_v4_network(FWPM_CONDITION_IP_LOCAL_ADDRESS, network);
+    return derived();
+  }
+
+  template <
+      class L = Layer,
+      std::enable_if_t<
+          ipv4_policy_layer<L> && remote_address_condition_layer<L>, int> = 0>
+  Derived &remote_address_prefix(ipv4_network network) {
+    conditions_.add_v4_network(FWPM_CONDITION_IP_REMOTE_ADDRESS, network);
+    return derived();
+  }
+
+  template <
+      class L = Layer,
+      std::enable_if_t<ipv6_policy_layer<L> && local_address_condition_layer<L>,
+                       int> = 0>
+  Derived &local_address_equal(ipv6_address address) {
+    conditions_.add_v6_address(FWPM_CONDITION_IP_LOCAL_ADDRESS, address);
+    return derived();
+  }
+
+  template <
+      class L = Layer,
+      std::enable_if_t<ipv6_policy_layer<L> && local_address_condition_layer<L>,
+                       int> = 0>
+  Derived &local_address_not_equal(ipv6_address address) {
+    conditions_.add_v6_address(
+        FWPM_CONDITION_IP_LOCAL_ADDRESS,
+        address, FWP_MATCH_NOT_EQUAL);
+    return derived();
+  }
+
+  template <
+      class L = Layer,
+      std::enable_if_t<
+          ipv6_policy_layer<L> && remote_address_condition_layer<L>, int> = 0>
+  Derived &remote_address_equal(ipv6_address address) {
+    conditions_.add_v6_address(FWPM_CONDITION_IP_REMOTE_ADDRESS, address);
+    return derived();
+  }
+
+  template <
+      class L = Layer,
+      std::enable_if_t<
+          ipv6_policy_layer<L> && remote_address_condition_layer<L>, int> = 0>
+  Derived &remote_address_not_equal(ipv6_address address) {
+    conditions_.add_v6_address(
+        FWPM_CONDITION_IP_REMOTE_ADDRESS,
+        address, FWP_MATCH_NOT_EQUAL);
+    return derived();
+  }
+
+  template <
+      class L = Layer,
+      std::enable_if_t<ipv6_policy_layer<L> && local_address_condition_layer<L>,
+                       int> = 0>
+  Derived &local_address_prefix(ipv6_network network) {
+    conditions_.add_v6_network(FWPM_CONDITION_IP_LOCAL_ADDRESS, network);
+    return derived();
+  }
+
+  template <
+      class L = Layer,
+      std::enable_if_t<
+          ipv6_policy_layer<L> && remote_address_condition_layer<L>, int> = 0>
+  Derived &remote_address_prefix(ipv6_network network) {
+    conditions_.add_v6_network(FWPM_CONDITION_IP_REMOTE_ADDRESS, network);
+    return derived();
+  }
+
+  template <class L = Layer,
+            std::enable_if_t<interface_condition_layer<L>, int> = 0>
+  Derived &interface_index_equal(std::uint32_t index) {
+    if (index == 0)
+      throw std::invalid_argument("WFP interface index cannot be zero");
+    conditions_.add_u32(FWPM_CONDITION_INTERFACE_INDEX, index);
+    return derived();
+  }
+
+  template <class L = Layer,
+            std::enable_if_t<interface_condition_layer<L>, int> = 0>
+  Derived &interface_index_not_equal(std::uint32_t index) {
+    if (index == 0)
+      throw std::invalid_argument(
+          "WFP interface index cannot be zero");
+    conditions_.add_u32(
+        FWPM_CONDITION_INTERFACE_INDEX, index,
+        FWP_MATCH_NOT_EQUAL);
+    return derived();
+  }
+
+  template <class L = Layer,
+            std::enable_if_t<interface_condition_layer<L>, int> = 0>
+  Derived &interface_index_range(
+      std::uint32_t first, std::uint32_t last) {
+    if (first == 0)
+      throw std::invalid_argument(
+          "WFP interface index range cannot begin at zero");
+    conditions_.add_u32_range(
+        FWPM_CONDITION_INTERFACE_INDEX, first, last);
+    return derived();
+  }
+
+  template <class L = Layer,
+            std::enable_if_t<subinterface_condition_layer<L>, int> = 0>
+  Derived &subinterface_index_equal(std::uint32_t index) {
+    conditions_.add_u32(FWPM_CONDITION_SUB_INTERFACE_INDEX, index);
+    return derived();
+  }
+
+  template <class L = Layer,
+            std::enable_if_t<interface_type_condition_layer<L>, int> = 0>
+  Derived &interface_type_equal(std::uint32_t type) {
+    conditions_.add_u32(FWPM_CONDITION_INTERFACE_TYPE, type);
+    return derived();
+  }
+
+  template <class L = Layer,
+            std::enable_if_t<interface_type_condition_layer<L>, int> = 0>
+  Derived &interface_type_not_equal(std::uint32_t type) {
+    conditions_.add_u32(
+        FWPM_CONDITION_INTERFACE_TYPE, type,
+        FWP_MATCH_NOT_EQUAL);
+    return derived();
+  }
+
+  template <class L = Layer,
+            std::enable_if_t<compartment_condition_layer<L>, int> = 0>
+  Derived &compartment_equal(std::uint32_t compartment) {
+    if (compartment == 0)
+      throw std::invalid_argument(
+          "WFP compartment identifier cannot be zero");
+    conditions_.add_u32(
+        FWPM_CONDITION_COMPARTMENT_ID, compartment);
+    return derived();
+  }
+
+  template <class L = Layer,
+            std::enable_if_t<compartment_condition_layer<L>, int> = 0>
+  Derived &compartment_not_equal(std::uint32_t compartment) {
+    if (compartment == 0)
+      throw std::invalid_argument(
+          "WFP compartment identifier cannot be zero");
+    conditions_.add_u32(
+        FWPM_CONDITION_COMPARTMENT_ID, compartment,
+        FWP_MATCH_NOT_EQUAL);
+    return derived();
+  }
+
+  template <class L = Layer,
+            std::enable_if_t<compartment_condition_layer<L>, int> = 0>
+  Derived &compartment_range(
+      std::uint32_t first, std::uint32_t last) {
+    if (first == 0)
+      throw std::invalid_argument(
+          "WFP compartment range cannot begin at zero");
+    conditions_.add_u32_range(
+        FWPM_CONDITION_COMPARTMENT_ID, first, last);
+    return derived();
+  }
+
+  template <
+      class L = Layer,
+      std::enable_if_t<current_profile_condition_layer<L>, int> = 0>
+  Derived &current_profile_equal(network_profile profile) {
+    conditions_.add_u32(
+        FWPM_CONDITION_CURRENT_PROFILE_ID,
+        static_cast<std::uint32_t>(profile));
+    return derived();
+  }
+
+  template <
+      class L = Layer,
+      std::enable_if_t<current_profile_condition_layer<L>, int> = 0>
+  Derived &current_profile_not_equal(network_profile profile) {
+    conditions_.add_u32(
+        FWPM_CONDITION_CURRENT_PROFILE_ID,
+        static_cast<std::uint32_t>(profile),
+        FWP_MATCH_NOT_EQUAL);
+    return derived();
+  }
+
+  template <
+      class L = Layer,
+      std::enable_if_t<original_profile_condition_layer<L>, int> = 0>
+  Derived &original_profile_equal(network_profile profile) {
+    conditions_.add_u32(
+        FWPM_CONDITION_ORIGINAL_PROFILE_ID,
+        static_cast<std::uint32_t>(profile));
+    return derived();
+  }
+
+  template <
+      class L = Layer,
+      std::enable_if_t<original_profile_condition_layer<L>, int> = 0>
+  Derived &original_profile_not_equal(network_profile profile) {
+    conditions_.add_u32(
+        FWPM_CONDITION_ORIGINAL_PROFILE_ID,
+        static_cast<std::uint32_t>(profile),
+        FWP_MATCH_NOT_EQUAL);
+    return derived();
+  }
+
+  template <class L = Layer,
+            std::enable_if_t<loopback_flag_layer<L>, int> = 0>
+  Derived &loopback(bool required = true) {
+    conditions_.add_u32(
+        FWPM_CONDITION_FLAGS,
+        FWP_CONDITION_FLAG_IS_LOOPBACK,
+        required ? FWP_MATCH_FLAGS_ALL_SET
+                 : FWP_MATCH_FLAGS_NONE_SET);
+    return derived();
+  }
+
+  template <
+      class L = Layer,
+      std::enable_if_t<reauthorization_flag_layer<L>, int> = 0>
+  Derived &reauthorization(bool required = true) {
+    conditions_.add_u32(
+        FWPM_CONDITION_FLAGS,
+        FWP_CONDITION_FLAG_IS_REAUTHORIZE,
+        required ? FWP_MATCH_FLAGS_ALL_SET
+                 : FWP_MATCH_FLAGS_NONE_SET);
+    return derived();
+  }
+
+  template <class L = Layer,
+            std::enable_if_t<protocol_condition_layer<L> &&
+                                 local_port_condition_layer<L> &&
+                                 remote_port_condition_layer<L> &&
+                                 (ipv4_policy_layer<L> || ipv6_policy_layer<L>),
+                             int> = 0>
+  Derived &icmp_equal(std::uint8_t type, std::uint8_t code) {
+    conditions_.add_u8(FWPM_CONDITION_IP_PROTOCOL,
+                       ipv4_policy_layer<L> ? static_cast<std::uint8_t>(1)
+                                            : static_cast<std::uint8_t>(58));
+    conditions_.add_u16(FWPM_CONDITION_ICMP_TYPE, type);
+    conditions_.add_u16(FWPM_CONDITION_ICMP_CODE, code);
+    return derived();
+  }
+
+  template <class L = Layer,
+            std::enable_if_t<mac_frame_condition_layer<L>, int> = 0>
+  Derived &local_mac_equal(mac_address address) {
+    conditions_.add_mac(FWPM_CONDITION_MAC_LOCAL_ADDRESS, address);
+    return derived();
+  }
+
+  template <class L = Layer,
+            std::enable_if_t<mac_frame_condition_layer<L>, int> = 0>
+  Derived &remote_mac_equal(mac_address address) {
+    conditions_.add_mac(FWPM_CONDITION_MAC_REMOTE_ADDRESS, address);
+    return derived();
+  }
+
+  template <class L = Layer,
+            std::enable_if_t<
+                mac_frame_condition_layer<L> ||
+                    vswitch_condition_layer<L>,
+                int> = 0>
+  Derived &ether_type_equal(std::uint16_t ether_type) {
+    conditions_.add_u16(FWPM_CONDITION_ETHER_TYPE, ether_type);
+    return derived();
+  }
+
+  template <class L = Layer,
+            std::enable_if_t<
+                mac_frame_condition_layer<L> ||
+                    vswitch_condition_layer<L>,
+                int> = 0>
+  Derived &vlan_id_equal(std::uint16_t vlan) {
+    if (vlan > 4095)
+      throw std::invalid_argument("WFP VLAN identifier exceeds 4095");
+    if (tenant_network_selected_)
+      throw std::logic_error(
+          "WFP vSwitch VLAN and tenant-network conditions are mutually exclusive");
+    conditions_.add_u16(FWPM_CONDITION_VLAN_ID, vlan);
+    vlan_selected_ = true;
+    return derived();
+  }
+
+  template <class L = Layer,
+            std::enable_if_t<vswitch_condition_layer<L>, int> = 0>
+  Derived &source_mac_equal(mac_address address) {
+    conditions_.add_mac(
+        FWPM_CONDITION_MAC_SOURCE_ADDRESS, address);
+    return derived();
+  }
+
+  template <class L = Layer,
+            std::enable_if_t<vswitch_condition_layer<L>, int> = 0>
+  Derived &destination_mac_equal(mac_address address) {
+    conditions_.add_mac(
+        FWPM_CONDITION_MAC_DESTINATION_ADDRESS, address);
+    return derived();
+  }
+
+  template <class L = Layer,
+            std::enable_if_t<vswitch_condition_layer<L>, int> = 0>
+  Derived &switch_equal(const virtual_switch_id &value) {
+    conditions_.add_blob(
+        FWPM_CONDITION_VSWITCH_ID, value.bytes());
+    return derived();
+  }
+
+  template <class L = Layer,
+            std::enable_if_t<vswitch_condition_layer<L>, int> = 0>
+  Derived &network_type_equal(virtual_switch_network value) {
+    conditions_.add_u8(
+        FWPM_CONDITION_VSWITCH_NETWORK_TYPE,
+        static_cast<std::uint8_t>(value));
+    return derived();
+  }
+
+  template <class L = Layer,
+            std::enable_if_t<vswitch_condition_layer<L>, int> = 0>
+  Derived &source_interface_equal(
+      const virtual_switch_interface_id &value) {
+    conditions_.add_blob(
+        FWPM_CONDITION_VSWITCH_SOURCE_INTERFACE_ID,
+        value.bytes());
+    return derived();
+  }
+
+  template <class L = Layer,
+            std::enable_if_t<vswitch_condition_layer<L>, int> = 0>
+  Derived &destination_interface_equal(
+      const virtual_switch_interface_id &value) {
+    conditions_.add_blob(
+        FWPM_CONDITION_VSWITCH_DESTINATION_INTERFACE_ID,
+        value.bytes());
+    return derived();
+  }
+
+  template <class L = Layer,
+            std::enable_if_t<vswitch_condition_layer<L>, int> = 0>
+  Derived &source_interface_type_equal(
+      virtual_switch_interface_type value) {
+    conditions_.add_u8(
+        FWPM_CONDITION_VSWITCH_SOURCE_INTERFACE_TYPE,
+        static_cast<std::uint8_t>(value));
+    return derived();
+  }
+
+  template <class L = Layer,
+            std::enable_if_t<vswitch_condition_layer<L>, int> = 0>
+  Derived &destination_interface_type_equal(
+      virtual_switch_interface_type value) {
+    conditions_.add_u8(
+        FWPM_CONDITION_VSWITCH_DESTINATION_INTERFACE_TYPE,
+        static_cast<std::uint8_t>(value));
+    return derived();
+  }
+
+  template <class L = Layer,
+            std::enable_if_t<vswitch_condition_layer<L>, int> = 0>
+  Derived &source_vm_equal(const virtual_machine_id &value) {
+    conditions_.add_blob(
+        FWPM_CONDITION_VSWITCH_SOURCE_VM_ID,
+        value.bytes());
+    return derived();
+  }
+
+  template <class L = Layer,
+            std::enable_if_t<vswitch_condition_layer<L>, int> = 0>
+  Derived &destination_vm_equal(const virtual_machine_id &value) {
+    conditions_.add_blob(
+        FWPM_CONDITION_VSWITCH_DESTINATION_VM_ID,
+        value.bytes());
+    return derived();
+  }
+
+  template <class L = Layer,
+            std::enable_if_t<vswitch_condition_layer<L>, int> = 0>
+  Derived &tenant_network_equal(std::uint16_t value) {
+    if (vlan_selected_)
+      throw std::logic_error(
+          "WFP vSwitch tenant-network and VLAN conditions are mutually exclusive");
+    conditions_.add_u16(
+        FWPM_CONDITION_VSWITCH_TENANT_NETWORK_ID,
+        value);
+    tenant_network_selected_ = true;
+    return derived();
+  }
+
+private:
+  friend class ::ntl::wfp::policy_transaction;
+
+  Derived &derived() noexcept { return static_cast<Derived &>(*this); }
+
+  condition_list &native_conditions() noexcept { return conditions_; }
+
+  const condition_list &native_conditions() const noexcept {
+    return conditions_;
+  }
+
+  condition_list conditions_;
+  bool vlan_selected_ = false;
+  bool tenant_network_selected_ = false;
+};
+
+} // namespace detail
+} // namespace ntl::wfp
