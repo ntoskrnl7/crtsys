@@ -65,9 +65,24 @@ if(CRTSYS_WFP_ENABLE_LIBFUZZER)
   target_compile_definitions(crtsys_wfp_protocol_libfuzzer
     PRIVATE CRTSYS_WFP_LIBFUZZER=1)
   target_compile_options(crtsys_wfp_protocol_libfuzzer
-    PRIVATE -fsanitize=fuzzer,address -O1 -gline-tables-only /MT)
-  target_link_options(crtsys_wfp_protocol_libfuzzer
-    PRIVATE -fsanitize=fuzzer,address /INCREMENTAL:NO)
+    PRIVATE -O1 -gline-tables-only /MT)
+  if(CMAKE_GENERATOR MATCHES "^Visual Studio")
+    # Visual Studio generators invoke lld-link directly.  Passing the Clang
+    # driver option through target_link_options() therefore drops the
+    # compiler-rt runtimes.  Use the ClangCL MSBuild properties so both
+    # instrumentation and runtime linkage are configured by the toolset.
+    set_property(TARGET crtsys_wfp_protocol_libfuzzer PROPERTY
+      VS_GLOBAL_EnableASAN "true")
+    set_property(TARGET crtsys_wfp_protocol_libfuzzer PROPERTY
+      VS_GLOBAL_EnableFuzzer "true")
+    target_link_options(crtsys_wfp_protocol_libfuzzer
+      PRIVATE /INCREMENTAL:NO)
+  else()
+    target_compile_options(crtsys_wfp_protocol_libfuzzer
+      PRIVATE -fsanitize=fuzzer,address)
+    target_link_options(crtsys_wfp_protocol_libfuzzer
+      PRIVATE -fsanitize=fuzzer,address)
+  endif()
   set_property(TARGET crtsys_wfp_protocol_libfuzzer PROPERTY
     MSVC_RUNTIME_LIBRARY "MultiThreaded")
 endif()
