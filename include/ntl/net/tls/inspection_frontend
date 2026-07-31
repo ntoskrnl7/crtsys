@@ -1,0 +1,376 @@
+/**
+ * @file tls_inspection_frontend
+ * @brief Provider boundaries for ECH, downstream pinning, and origin mTLS.
+ *
+ * These contracts keep protocol capabilities separate from policy. They do
+ * not imply that Schannel can decrypt ECH or that certificate pinning can be
+ * bypassed.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/tls/inspection_frontend is a user-mode header"
+#endif
+
+#include <ntl/result>
+#include <ntl/status>
+#include <ntl/net/tls/client_hello>
+#include <ntl/net/tls/inspection_policy>
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <cwctype>
+#include <memory>
+#include <mutex>
+#include <new>
+#include <span>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
+namespace ntl::net::inspection {
+
+inline std::wstring normalize_dns_name(std::wstring value) {
+  std::transform(
+      value.begin(), value.end(), value.begin(),
+      [](wchar_t ch) noexcept {
+        return static_cast<wchar_t>(std::towlower(ch));
+      });
+  while (!value.empty() && value.back() == L'.')
+    value.pop_back();
+  return value;
+}
+
+enum class ech_offer_state : std::uint8_t {
+  absent = 0,
+  unconfirmed_or_grease = 1,
+  confirmed = 2,
+  decrypted = 3,
+};
+
+/**
+ * @brief Frontend-owned plaintext channel after successful ECH termination.
+ *
+ * The ECH implementation retains the outer TLS or QUIC state.  This channel
+ * is the only valid continuation point after inner ClientHello decryption;
+ * callers must not try to resume Schannel from the inner hello.
+ */
+class ech_plaintext_channel {
+public:
+  virtual ~ech_plaintext_channel() = default;
+  virtual ntl::result<std::size_t>
+  read(std::span<std::byte> destination) noexcept = 0;
+  virtual ntl::result<std::size_t>
+  write(std::span<const std::byte> source) noexcept = 0;
+  virtual ntl::status shutdown() noexcept = 0;
+};
+
+struct ech_frontend_result {
+  ech_offer_state state = ech_offer_state::absent;
+  std::wstring inner_server_name;
+  std::vector<std::string> inner_application_protocols;
+  std::shared_ptr<ech_plaintext_channel> channel;
+};
+
+/**
+ * @brief ECH-aware TLS frontend adapter.
+ *
+ * A real implementation owns ECH configuration selection, HPKE decryption,
+ * inner/outer ClientHello validation, and TLS termination. An extension type
+ * observed by tls_client_hello alone is never enough to return `confirmed`.
+ */
+class ech_frontend_provider {
+public:
+  virtual ~ech_frontend_provider() = default;
+  virtual ntl::result<ech_frontend_result>
+  inspect(const ntl::net::tls_client_hello &outer) noexcept = 0;
+};
+
+/**
+ * @brief Safe fallback when no ECH-capable TLS frontend is installed.
+ */
+class unavailable_ech_frontend final
+    : public ech_frontend_provider {
+public:
+  ntl::result<ech_frontend_result>
+  inspect(const ntl::net::tls_client_hello &outer)
+      noexcept override {
+    return ntl::ok(ech_frontend_result{
+        outer.encrypted_client_hello_extension_present()
+            ? ech_offer_state::unconfirmed_or_grease
+            : ech_offer_state::absent,
+        {}, {}});
+  }
+};
+
+inline ntl::status apply_ech_result(
+    tls_inspection_observation &observation,
+    const ech_frontend_result &result) noexcept {
+  switch (result.state) {
+  case ech_offer_state::absent:
+  case ech_offer_state::unconfirmed_or_grease:
+    if (!result.inner_server_name.empty() ||
+        !result.inner_application_protocols.empty() || result.channel)
+      return STATUS_INVALID_PARAMETER;
+    observation.encrypted_client_hello_confirmed = false;
+    observation.encrypted_client_hello_decrypted = false;
+    return ntl::status::ok();
+  case ech_offer_state::confirmed:
+    if (!result.inner_server_name.empty() ||
+        !result.inner_application_protocols.empty() || result.channel)
+      return STATUS_INVALID_PARAMETER;
+    observation.encrypted_client_hello_confirmed = true;
+    observation.encrypted_client_hello_decrypted = false;
+    return ntl::status::ok();
+  case ech_offer_state::decrypted:
+    if (result.inner_server_name.empty() || !result.channel)
+      return STATUS_INVALID_PARAMETER;
+    observation.encrypted_client_hello_confirmed = true;
+    observation.encrypted_client_hello_decrypted = true;
+    observation.server_name = result.inner_server_name;
+    return ntl::status::ok();
+  }
+  return STATUS_INVALID_PARAMETER;
+}
+
+enum class downstream_trust_state : std::uint8_t {
+  inspectable = 1,
+  pinned = 2,
+  unknown = 3,
+};
+
+struct downstream_trust_query {
+  std::span<const std::byte> application_id;
+  std::wstring_view server_name;
+};
+
+/**
+ * @brief Application/host knowledge used before issuing a substitute leaf.
+ *
+ * Pinning is an endpoint property. A provider can classify known pinned
+ * applications or hosts so policy can bypass or block before interception;
+ * it cannot make a pinned application accept a different certificate.
+ */
+class downstream_trust_provider {
+public:
+  virtual ~downstream_trust_provider() = default;
+  virtual downstream_trust_state
+  classify(const downstream_trust_query &query) noexcept = 0;
+};
+
+class inspectable_downstream_trust final
+    : public downstream_trust_provider {
+public:
+  downstream_trust_state classify(
+      const downstream_trust_query &) noexcept override {
+    return downstream_trust_state::inspectable;
+  }
+};
+
+/**
+ * @brief Exact application/host trust knowledge supplied by product policy.
+ *
+ * This registry predicts known pinning; it never attempts to defeat it.
+ * Unknown pairs remain `unknown` and therefore require an explicit policy
+ * outcome before a substitute certificate is issued.
+ */
+class configured_downstream_trust final
+    : public downstream_trust_provider {
+public:
+  void add(
+      std::span<const std::byte> application_id,
+      std::wstring server_name,
+      downstream_trust_state state) {
+    if (application_id.empty() || server_name.empty() ||
+        state == downstream_trust_state::unknown)
+      throw std::invalid_argument(
+          "downstream trust rules require an application, host, and "
+          "decisive state");
+    std::lock_guard guard(lock_);
+    rules_.push_back(
+        {std::vector<std::byte>(
+             application_id.begin(), application_id.end()),
+         normalize_dns_name(std::move(server_name)), state});
+  }
+
+  downstream_trust_state classify(
+      const downstream_trust_query &query) noexcept override {
+    try {
+      const auto server_name =
+          normalize_dns_name(std::wstring(query.server_name));
+      std::lock_guard guard(lock_);
+      for (const auto &rule : rules_) {
+        if (rule.server_name == server_name &&
+            rule.application_id.size() ==
+                query.application_id.size() &&
+            std::equal(
+                rule.application_id.begin(),
+                rule.application_id.end(),
+                query.application_id.begin()))
+          return rule.state;
+      }
+    } catch (...) {
+    }
+    return downstream_trust_state::unknown;
+  }
+
+private:
+  struct rule {
+    std::vector<std::byte> application_id;
+    std::wstring server_name;
+    downstream_trust_state state =
+        downstream_trust_state::unknown;
+  };
+
+  std::mutex lock_;
+  std::vector<rule> rules_;
+};
+
+struct origin_client_identity_request {
+  std::wstring_view server_name;
+  std::span<const std::byte> acceptable_issuers;
+};
+
+class selected_client_identity {
+public:
+  selected_client_identity() noexcept = default;
+  explicit selected_client_identity(
+      PCCERT_CONTEXT certificate) noexcept
+      : certificate_(
+            certificate
+                ? ::CertDuplicateCertificateContext(certificate)
+                : nullptr) {}
+
+  selected_client_identity(
+      const selected_client_identity &other) noexcept
+      : selected_client_identity(other.certificate_) {}
+
+  selected_client_identity &
+  operator=(const selected_client_identity &other) noexcept {
+    if (this != &other) {
+      selected_client_identity copy(other);
+      swap(copy);
+    }
+    return *this;
+  }
+
+  selected_client_identity(
+      selected_client_identity &&other) noexcept
+      : certificate_(
+            std::exchange(other.certificate_, nullptr)) {}
+
+  selected_client_identity &
+  operator=(selected_client_identity &&other) noexcept {
+    if (this != &other) {
+      reset();
+      certificate_ =
+          std::exchange(other.certificate_, nullptr);
+    }
+    return *this;
+  }
+
+  ~selected_client_identity() { reset(); }
+
+  explicit operator bool() const noexcept {
+    return certificate_ != nullptr;
+  }
+  PCCERT_CONTEXT get() const noexcept { return certificate_; }
+
+  void swap(selected_client_identity &other) noexcept {
+    std::swap(certificate_, other.certificate_);
+  }
+
+private:
+  void reset() noexcept {
+    if (certificate_)
+      (void)::CertFreeCertificateContext(certificate_);
+    certificate_ = nullptr;
+  }
+
+  PCCERT_CONTEXT certificate_ = nullptr;
+};
+
+/**
+ * @brief Explicit origin-side mTLS identity selection.
+ *
+ * Providers may use a Windows certificate store, smart card, HSM, or
+ * application-owned map. Returning an empty identity means fail closed unless
+ * policy explicitly permits an unchanged bypass.
+ */
+class origin_client_identity_provider {
+public:
+  virtual ~origin_client_identity_provider() = default;
+  virtual ntl::result<selected_client_identity>
+  select(const origin_client_identity_request &request) noexcept = 0;
+};
+
+class unavailable_origin_client_identity final
+    : public origin_client_identity_provider {
+public:
+  ntl::result<selected_client_identity>
+  select(const origin_client_identity_request &)
+      noexcept override {
+    return ntl::ok(selected_client_identity{});
+  }
+};
+
+/**
+ * @brief Exact SNI-to-client-certificate map for origin mutual TLS.
+ *
+ * The certificate must include an accessible private key. Issuer-list
+ * filtering can be added by a product provider; this bounded default selects
+ * only an administrator-configured exact host.
+ */
+class mapped_origin_client_identity final
+    : public origin_client_identity_provider {
+public:
+  void add(
+      std::wstring server_name,
+      PCCERT_CONTEXT certificate) {
+    if (server_name.empty() || !certificate)
+      throw std::invalid_argument(
+          "origin mTLS mappings require a host and certificate");
+    selected_client_identity retained(certificate);
+    if (!retained)
+      throw std::bad_alloc();
+    std::lock_guard guard(lock_);
+    identities_.insert_or_assign(
+        normalize_dns_name(std::move(server_name)),
+        std::move(retained));
+  }
+
+  ntl::result<selected_client_identity>
+  select(const origin_client_identity_request &request)
+      noexcept override {
+    try {
+      std::lock_guard guard(lock_);
+      const auto found = identities_.find(
+          normalize_dns_name(
+              std::wstring(request.server_name)));
+      if (found == identities_.end())
+        return ntl::ok(selected_client_identity{});
+      return ntl::ok(
+          selected_client_identity(found->second));
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(
+          STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(
+          STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+private:
+  std::mutex lock_;
+  std::unordered_map<
+      std::wstring, selected_client_identity>
+      identities_;
+};
+
+} // namespace ntl::net::inspection

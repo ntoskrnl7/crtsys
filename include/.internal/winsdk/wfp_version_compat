@@ -1,0 +1,20 @@
+#pragma once
+
+//
+// WDK 10.0.26100 WFP headers can be selected together with an older Windows
+// SDK by the Visual Studio generator.  In that mixed layout sdkddkver.h comes
+// from the older SDK and does not define the Windows 11 version constants used
+// by fwpmk.h and fwpsk.h.  An undefined constant evaluates to zero in #if,
+// which incorrectly exposes declarations whose supporting types were hidden
+// by the requested NTDDI version.
+//
+// ndis.h is included before this compatibility header, so sdkddkver.h has
+// already supplied any constants known to the selected SDK.
+//
+#ifndef NTDDI_WIN11_ZN
+#define NTDDI_WIN11_ZN 0x0A00000E
+#endif
+
+#ifndef NTDDI_WIN11_GA
+#define NTDDI_WIN11_GA 0x0A00000F
+#endif

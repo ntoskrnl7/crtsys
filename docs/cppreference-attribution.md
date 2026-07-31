@@ -369,7 +369,8 @@ array, and linked-list portions, including the hosted file I/O custom deleter,
 the locale-imbued output, and the cppreference linked-list stress size.
 
 The locale harness ports the linked cppreference locale, facet, money, and time
-examples. The messages example does not claim hosted message-catalog support.
+examples. The messages example covers the repository's in-memory catalog
+contract; hosted message catalogs require a separate integration.
 
 The `std::any` example keeps the `any_cast`, bad-cast, reset, pointer-access,
 and `any::type().name()` behavior.

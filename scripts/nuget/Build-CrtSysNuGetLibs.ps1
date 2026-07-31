@@ -134,7 +134,48 @@ foreach ($toolsetName in $Toolset) {
       Copy-Item -Path $pdb.FullName -Destination (Join-Path $libOutputDir $pdb.Name) -Force
     }
 
-    Write-Host "Staged crtsys libraries in $libOutputDir"
+    $codecBuildDir = Join-Path $repoRoot (
+      "artifacts\build\content_codecs_${toolsetName}_${arch}_$config")
+    $codecInstallDir = Join-Path $codecBuildDir 'install'
+    $codecSourceDir = Join-Path $repoRoot 'test\nuget\content-codecs'
+    $codecConfigureArgs = @(
+      '-S', $codecSourceDir,
+      '-B', $codecBuildDir,
+      '-G', $generatorByToolset[$toolsetName],
+      '-A', $generatorPlatform,
+      '-T', $(if ($toolsetName -eq 'v142') { 'v142,host=x64' } else { 'host=x64' }),
+      "-DCRTSYS_ROOT:PATH=$($repoRoot.Replace('\', '/'))",
+      "-DCMAKE_SYSTEM_VERSION:STRING=$WindowsSdkVersion",
+      "-DCMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION:STRING=$WindowsSdkVersion"
+    )
+
+    Write-Host "Configuring NTL content codecs $toolsetName $arch $config"
+    & cmake @codecConfigureArgs
+    if ($LASTEXITCODE -ne 0) {
+      throw "Content codec configure failed with exit code $LASTEXITCODE."
+    }
+    & cmake --build $codecBuildDir --config $config --target `
+        crtsys_nuget_content_codecs --parallel
+    if ($LASTEXITCODE -ne 0) {
+      throw "Content codec build failed with exit code $LASTEXITCODE."
+    }
+    & cmake --install $codecBuildDir --config $config --prefix $codecInstallDir `
+        --component CrtSysContentCodecs
+    if ($LASTEXITCODE -ne 0) {
+      throw "Content codec install failed with exit code $LASTEXITCODE."
+    }
+
+    $codecLibOutputDir = Join-Path $OutputDirectory (
+      "codecs\lib\$toolsetName\$arch\$config")
+    $codecIncludeOutputDir = Join-Path $OutputDirectory 'codecs\include'
+    New-Item -ItemType Directory -Force -Path $codecLibOutputDir | Out-Null
+    New-Item -ItemType Directory -Force -Path $codecIncludeOutputDir | Out-Null
+    Copy-Item -Path (Join-Path $codecInstallDir 'lib\*.lib') `
+      -Destination $codecLibOutputDir -Force
+    Copy-Item -Path (Join-Path $codecInstallDir 'include\*') `
+      -Destination $codecIncludeOutputDir -Recurse -Force
+
+    Write-Host "Staged crtsys libraries in $libOutputDir and codecs in $codecLibOutputDir"
     }
   }
 }

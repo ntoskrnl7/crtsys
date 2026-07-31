@@ -96,12 +96,33 @@ foreach ($toolsetName in $Toolset) {
           throw "Required prebuilt library is missing: $fullPath. Run scripts\nuget\Build-CrtSysNuGetLibs.ps1 first."
         }
       }
+      foreach ($codecLibrary in @(
+          'zlibstatic.lib', 'brotlicommon.lib',
+          'brotlidec.lib', 'brotlienc.lib')) {
+        $requiredCodecPath =
+          "codecs\lib\$toolsetName\$arch\$config\$codecLibrary"
+        $fullCodecPath = Join-Path $stagingDirectory $requiredCodecPath
+        if (-not (Test-Path $fullCodecPath)) {
+          throw "Required content codec library is missing: $fullCodecPath. Run scripts\nuget\Build-CrtSysNuGetLibs.ps1 first."
+        }
+      }
     }
+  }
+}
+
+foreach ($codecHeader in @(
+    'zlib.h', 'zconf.h', 'brotli\decode.h', 'brotli\encode.h')) {
+  $fullCodecHeader = Join-Path $stagingDirectory "codecs\include\$codecHeader"
+  if (-not (Test-Path $fullCodecHeader)) {
+    throw "Required content codec header is missing: $fullCodecHeader. Run scripts\nuget\Build-CrtSysNuGetLibs.ps1 first."
   }
 }
 
 Remove-UnselectedStagedLibraries `
   -NativeDirectory (Join-Path $stagingDirectory 'lib\native') `
+  -SelectedToolsets @($Toolset)
+Remove-UnselectedStagedLibraries `
+  -NativeDirectory (Join-Path $stagingDirectory 'codecs\lib') `
   -SelectedToolsets @($Toolset)
 
 Write-Host "Packing crtsys $Version to $OutputDirectory"

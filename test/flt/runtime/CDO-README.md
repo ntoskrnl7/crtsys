@@ -22,13 +22,13 @@ The VM app verifies:
 - the runner's final unload removes the link and device and unloads the
   minifilter.
 
-The observable Windows 11 25H2 VM result is:
+The application success contract is:
 
 ```text
 cdo_integration=PASS concurrent_open_error=548
 unload_veto=0x801F0010 creates=2 ioctls=3
 ```
 
-This scenario passes with Standard Driver Verifier flags `0x1209BB` and an
-x86 app against the x64 driver. The complete runner log is written under
-`artifacts/flt-cdo-win11-25h2/wow64-verifier-final.log`.
+Validate this scenario with Standard Driver Verifier flags `0x1209BB` and with
+both x64 and WOW64 applications against the x64 driver. Preserve the resulting
+logs in the test environment's configured artifact destination.

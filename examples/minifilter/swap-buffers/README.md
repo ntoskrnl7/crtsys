@@ -1,5 +1,7 @@
 # NTL minifilter swap-buffers sample
 
+[한국어 설명](./README.ko-KR.md)
+
 This sample demonstrates transparent input and output replacement with
 `ntl::flt::try_swap_io_buffers`:
 

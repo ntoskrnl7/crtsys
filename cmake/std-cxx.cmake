@@ -4,13 +4,18 @@ endif()
 
 macro(set_std_cxx_latest target)
     if(MSVC)
-        check_std_cxx(latest _cxx_latest_flag_supported)
-        if(_cxx_latest_flag_supported)
-            set(_version latest)
-        else()
-            set(_version 17)
-        endif()
-
+        # NTL exposes C++20 library types such as std::span and coroutines.
+        # A configure-time try_run can inherit WDK flags and incorrectly
+        # conclude that /std:c++latest is unavailable, silently selecting
+        # C++17 for a driver target. Express the actual minimum requirement
+        # as target properties so old CMake + VS2022 WDK generators emit
+        # /std:c++20 deterministically.
+        set_target_properties(${target}
+            PROPERTIES
+                CXX_STANDARD 20
+                CXX_STANDARD_REQUIRED YES
+                CXX_EXTENSIONS NO)
+        target_compile_options(${target} PRIVATE "/Zc:__cplusplus")
     else()
         check_std_cxx(2a _cxx_2a_flag_supported)
         if(_cxx_2a_flag_supported)
@@ -20,14 +25,10 @@ macro(set_std_cxx_latest target)
         endif()
     endif()
 
-    if(MSVC)
-        set(_std_cxx_option "/std:c++${_version}")
-        target_compile_options(${target} PRIVATE "/Zc:__cplusplus")
-    else()
+    if(NOT MSVC)
         set(_std_cxx_option "-std=c++${_version}")
+        target_compile_options(${target} PRIVATE ${_std_cxx_option})
     endif()
-
-    target_compile_options(${target} PRIVATE ${_std_cxx_option})
 endmacro()
 
 macro(set_std_cxx) #optional argumanet version

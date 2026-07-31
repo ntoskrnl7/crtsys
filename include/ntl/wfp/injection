@@ -1,0 +1,496 @@
+/**
+ * @file injection
+ * @brief Unload-safe asynchronous WFP packet injection.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/wfp/injection is a kernel-mode header"
+#endif
+
+#include "../result"
+#include "../status"
+#include "packet"
+#include "stream"
+
+#include <memory>
+#include <new>
+#include <utility>
+
+namespace ntl::wfp {
+
+namespace detail {
+
+struct injection_state {
+  explicit injection_state(HANDLE value) noexcept : handle(value) {
+    ExInitializeRundownProtection(&rundown);
+  }
+
+  HANDLE handle = nullptr;
+  EX_RUNDOWN_REF rundown{};
+};
+
+template <class Packet> struct async_packet_context {
+  async_packet_context(injection_state &owner, Packet &&value) noexcept
+      : state(&owner), packet(std::move(value)) {}
+
+  ~async_packet_context() {
+    // The owned NBL must be released while the injection owner's rundown
+    // protection is still held.  In particular, injected_stream_data may
+    // depend on an NBL pool that reset() frees immediately after rundown.
+    packet.reset();
+    ExReleaseRundownProtection(&state->rundown);
+  }
+
+  injection_state *state;
+  Packet packet;
+};
+
+template <class Packet>
+inline void NTAPI injection_complete(void *context, NET_BUFFER_LIST *,
+                                     BOOLEAN) noexcept {
+  delete static_cast<async_packet_context<Packet> *>(context);
+}
+
+struct async_stream_clone_context {
+  async_stream_clone_context(
+      injection_state &owner, LONG count) noexcept
+      : state(&owner), remaining(count) {}
+
+  ~async_stream_clone_context() {
+    ExReleaseRundownProtection(&state->rundown);
+  }
+
+  injection_state *state;
+  volatile LONG remaining;
+};
+
+inline void NTAPI stream_clone_injection_complete(
+    void *context, NET_BUFFER_LIST *packet, BOOLEAN) noexcept {
+  auto *completion =
+      static_cast<async_stream_clone_context *>(context);
+  FwpsFreeCloneNetBufferList0(packet, 0);
+  if (InterlockedDecrement(&completion->remaining) == 0)
+    delete completion;
+}
+
+class injection_owner {
+public:
+  injection_owner() = default;
+  injection_owner(const injection_owner &) = delete;
+  injection_owner &operator=(const injection_owner &) = delete;
+  injection_owner(injection_owner &&other) noexcept
+      : state_(std::move(other.state_)) {}
+  injection_owner &operator=(injection_owner &&other) noexcept {
+    if (this != &other) {
+      reset();
+      state_ = std::move(other.state_);
+    }
+    return *this;
+  }
+
+  ~injection_owner() { reset(); }
+
+  static ntl::result<injection_owner>
+  try_create(ADDRESS_FAMILY family, UINT32 type) noexcept {
+    HANDLE handle = nullptr;
+    const NTSTATUS result =
+        FwpsInjectionHandleCreate0(family, type, &handle);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+
+    std::unique_ptr<injection_state> state(
+        new (std::nothrow) injection_state(handle));
+    if (!state) {
+      (void)FwpsInjectionHandleDestroy0(handle);
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+    return ntl::ok(injection_owner(std::move(state)));
+  }
+
+  void reset() noexcept {
+    if (!state_)
+      return;
+    NT_ASSERT(KeGetCurrentIrql() == PASSIVE_LEVEL);
+    ExWaitForRundownProtectionRelease(&state_->rundown);
+    (void)FwpsInjectionHandleDestroy0(state_->handle);
+    state_.reset();
+  }
+
+  FWPS_PACKET_INJECTION_STATE
+  query(borrowed_packet packet) const noexcept {
+    if (!state_ || !packet)
+      return FWPS_PACKET_NOT_INJECTED;
+    return FwpsQueryPacketInjectionState0(
+        state_->handle, packet.native_handle(), nullptr);
+  }
+
+  template <class Packet>
+  ntl::result<async_packet_context<Packet> *>
+  prepare(Packet &&packet) noexcept {
+    if (!state_ || !packet)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    if (!ExAcquireRundownProtection(&state_->rundown))
+      return ntl::unexpected(STATUS_DELETE_PENDING);
+
+    auto *context = new (std::nothrow)
+        async_packet_context<Packet>(*state_, std::move(packet));
+    if (!context) {
+      ExReleaseRundownProtection(&state_->rundown);
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+    return ntl::ok(context);
+  }
+
+  ntl::result<async_stream_clone_context *>
+  prepare_stream_clone(LONG count) noexcept {
+    if (!state_ || count <= 0)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    if (!ExAcquireRundownProtection(&state_->rundown))
+      return ntl::unexpected(STATUS_DELETE_PENDING);
+
+    auto *context = new (std::nothrow)
+        async_stream_clone_context(*state_, count);
+    if (!context) {
+      ExReleaseRundownProtection(&state_->rundown);
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+    return ntl::ok(context);
+  }
+
+  HANDLE native_handle() const noexcept {
+    return state_ ? state_->handle : nullptr;
+  }
+
+private:
+  explicit injection_owner(
+      std::unique_ptr<injection_state> &&state) noexcept
+      : state_(std::move(state)) {}
+
+  std::unique_ptr<injection_state> state_;
+};
+
+template <class Context>
+inline ntl::status finish_injection(NTSTATUS result,
+                                    Context *context) noexcept {
+  if (!NT_SUCCESS(result))
+    delete context;
+  return result;
+}
+
+} // namespace detail
+
+/**
+ * @brief Network-layer injector whose handle waits for all completions.
+ */
+class network_injector {
+public:
+  network_injector(const network_injector &) = delete;
+  network_injector &operator=(const network_injector &) = delete;
+  network_injector(network_injector &&) noexcept = default;
+  network_injector &operator=(network_injector &&) noexcept = default;
+
+  static ntl::result<network_injector>
+  try_create(ADDRESS_FAMILY family = AF_UNSPEC) noexcept {
+    auto owner = detail::injection_owner::try_create(
+        family, FWPS_INJECTION_TYPE_NETWORK);
+    if (!owner)
+      return ntl::unexpected(owner.status());
+    return ntl::ok(network_injector(std::move(*owner)));
+  }
+
+  FWPS_PACKET_INJECTION_STATE
+  query(borrowed_packet packet) const noexcept {
+    return owner_.query(packet);
+  }
+
+  ntl::status inject_send(cloned_packet &&packet,
+                          COMPARTMENT_ID compartment_id,
+                          UINT32 flags = 0) noexcept {
+    auto prepared = owner_.prepare(std::move(packet));
+    if (!prepared)
+      return prepared.status();
+    auto *context = *prepared;
+    return detail::finish_injection(
+        FwpsInjectNetworkSendAsync0(
+            owner_.native_handle(), nullptr, flags, compartment_id,
+            context->packet.native_handle(),
+            &detail::injection_complete<cloned_packet>,
+            context),
+        context);
+  }
+
+  ntl::status inject_receive(cloned_packet &&packet,
+                             COMPARTMENT_ID compartment_id,
+                             IF_INDEX interface_index,
+                             IF_INDEX subinterface_index,
+                             UINT32 flags = 0) noexcept {
+    auto prepared = owner_.prepare(std::move(packet));
+    if (!prepared)
+      return prepared.status();
+    auto *context = *prepared;
+    return detail::finish_injection(
+        FwpsInjectNetworkReceiveAsync0(
+            owner_.native_handle(), nullptr, flags, compartment_id,
+            interface_index, subinterface_index,
+            context->packet.native_handle(),
+            &detail::injection_complete<cloned_packet>,
+            context),
+        context);
+  }
+
+  void reset() noexcept { owner_.reset(); }
+
+private:
+  explicit network_injector(detail::injection_owner &&owner) noexcept
+      : owner_(std::move(owner)) {}
+  detail::injection_owner owner_;
+};
+
+/**
+ * @brief Transport-layer injector whose handle waits for all completions.
+ */
+class transport_injector {
+public:
+  transport_injector(const transport_injector &) = delete;
+  transport_injector &operator=(const transport_injector &) = delete;
+  transport_injector(transport_injector &&) noexcept = default;
+  transport_injector &operator=(transport_injector &&) noexcept = default;
+
+  static ntl::result<transport_injector>
+  try_create(ADDRESS_FAMILY family = AF_UNSPEC) noexcept {
+    auto owner = detail::injection_owner::try_create(
+        family, FWPS_INJECTION_TYPE_TRANSPORT);
+    if (!owner)
+      return ntl::unexpected(owner.status());
+    return ntl::ok(transport_injector(std::move(*owner)));
+  }
+
+  FWPS_PACKET_INJECTION_STATE
+  query(borrowed_packet packet) const noexcept {
+    return owner_.query(packet);
+  }
+
+  ntl::status inject_send(cloned_packet &&packet, UINT64 endpoint_handle,
+                          ADDRESS_FAMILY family,
+                          COMPARTMENT_ID compartment_id,
+                          FWPS_TRANSPORT_SEND_PARAMS0 *parameters = nullptr,
+                          UINT32 flags = 0) noexcept {
+    auto prepared = owner_.prepare(std::move(packet));
+    if (!prepared)
+      return prepared.status();
+    auto *context = *prepared;
+    return detail::finish_injection(
+        FwpsInjectTransportSendAsync0(
+            owner_.native_handle(), nullptr, endpoint_handle, flags,
+            parameters, family, compartment_id,
+            context->packet.native_handle(),
+            &detail::injection_complete<cloned_packet>,
+            context),
+        context);
+  }
+
+  ntl::status inject_receive(cloned_packet &&packet,
+                             ADDRESS_FAMILY family,
+                             COMPARTMENT_ID compartment_id,
+                             IF_INDEX interface_index,
+                             IF_INDEX subinterface_index,
+                             UINT32 flags = 0) noexcept {
+    auto prepared = owner_.prepare(std::move(packet));
+    if (!prepared)
+      return prepared.status();
+    auto *context = *prepared;
+    return detail::finish_injection(
+        FwpsInjectTransportReceiveAsync0(
+            owner_.native_handle(), nullptr, nullptr, flags, family,
+            compartment_id, interface_index, subinterface_index,
+            context->packet.native_handle(),
+            &detail::injection_complete<cloned_packet>,
+            context),
+        context);
+  }
+
+  void reset() noexcept { owner_.reset(); }
+
+private:
+  explicit transport_injector(detail::injection_owner &&owner) noexcept
+      : owner_(std::move(owner)) {}
+  detail::injection_owner owner_;
+};
+
+/**
+ * @brief Stream injector paired with cloned_stream_data ownership.
+ */
+class stream_injector {
+public:
+  stream_injector(const stream_injector &) = delete;
+  stream_injector &operator=(const stream_injector &) = delete;
+  stream_injector(stream_injector &&other) noexcept
+      : owner_(std::move(other.owner_)),
+        generic_object_(std::exchange(other.generic_object_, nullptr)),
+        nbl_pool_(std::exchange(other.nbl_pool_, nullptr)) {}
+
+  stream_injector &operator=(stream_injector &&other) noexcept {
+    if (this != &other) {
+      reset();
+      owner_ = std::move(other.owner_);
+      generic_object_ =
+          std::exchange(other.generic_object_, nullptr);
+      nbl_pool_ = std::exchange(other.nbl_pool_, nullptr);
+    }
+    return *this;
+  }
+
+  ~stream_injector() { reset(); }
+
+  static ntl::result<stream_injector>
+  try_create(ADDRESS_FAMILY family = AF_UNSPEC) noexcept {
+    auto owner = detail::injection_owner::try_create(
+        family, FWPS_INJECTION_TYPE_STREAM);
+    if (!owner)
+      return ntl::unexpected(owner.status());
+    return ntl::ok(stream_injector(std::move(*owner)));
+  }
+
+  /**
+   * @brief Creates a stream injector that can also allocate replacement data.
+   */
+  static ntl::result<stream_injector>
+  try_create(PDRIVER_OBJECT driver,
+             ADDRESS_FAMILY family = AF_UNSPEC) noexcept {
+    if (!driver)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+
+    auto owner = detail::injection_owner::try_create(
+        family, FWPS_INJECTION_TYPE_STREAM);
+    if (!owner)
+      return ntl::unexpected(owner.status());
+
+    PNDIS_GENERIC_OBJECT generic =
+        NdisAllocateGenericObject(driver, 'gSwN', 0);
+    if (!generic)
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+
+    NET_BUFFER_LIST_POOL_PARAMETERS parameters{};
+    parameters.Header.Type = NDIS_OBJECT_TYPE_DEFAULT;
+    parameters.Header.Revision =
+        NET_BUFFER_LIST_POOL_PARAMETERS_REVISION_1;
+    parameters.Header.Size =
+        NDIS_SIZEOF_NET_BUFFER_LIST_POOL_PARAMETERS_REVISION_1;
+    parameters.fAllocateNetBuffer = TRUE;
+    parameters.PoolTag = 'pSwN';
+
+    NDIS_HANDLE pool =
+        NdisAllocateNetBufferListPool(generic, &parameters);
+    if (!pool) {
+      NdisFreeGenericObject(generic);
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+
+    return ntl::ok(
+        stream_injector(std::move(*owner), generic, pool));
+  }
+
+  ntl::result<injected_stream_data>
+  try_make_data(const void *data, std::size_t length,
+                std::uint32_t stream_flags) const noexcept {
+    return injected_stream_data::try_create(
+        nbl_pool_, data, length, stream_flags);
+  }
+
+  template <class Layer>
+  ntl::status inject(stream_injection_site<Layer> site,
+                     cloned_stream_data &&data,
+                     UINT32 flags = 0) noexcept {
+    static_assert(detail::stream_layer<Layer>,
+                  "stream injection requires a stream layer");
+    if (!site || !data)
+      return STATUS_INVALID_PARAMETER;
+
+    LONG list_count = 0;
+    for (NET_BUFFER_LIST *packet = data.chain_; packet;
+         packet = NET_BUFFER_LIST_NEXT_NBL(packet)) {
+      if (list_count == MAXLONG)
+        return STATUS_INTEGER_OVERFLOW;
+      ++list_count;
+    }
+
+    auto prepared = owner_.prepare_stream_clone(list_count);
+    if (!prepared)
+      return prepared.status();
+    auto *context = *prepared;
+
+    NET_BUFFER_LIST *const chain =
+        std::exchange(data.chain_, nullptr);
+    const std::size_t length =
+        std::exchange(data.length_, 0);
+    const std::uint32_t stream_flags =
+        std::exchange(data.stream_flags_, 0);
+    const ULONG clone_flags =
+        std::exchange(data.clone_flags_, 0);
+    const NTSTATUS result = FwpsStreamInjectAsync0(
+        owner_.native_handle(), nullptr, flags, site.flow_id_,
+        site.callout_id_, Layer::runtime_id, stream_flags,
+        chain, length, &detail::stream_clone_injection_complete,
+        context);
+    if (!NT_SUCCESS(result)) {
+      const BOOLEAN dispatch_level =
+          KeGetCurrentIrql() == DISPATCH_LEVEL ? TRUE : FALSE;
+      FwpsDiscardClonedStreamData0(
+          chain, clone_flags, dispatch_level);
+      delete context;
+    }
+    return result;
+  }
+
+  template <class Layer>
+  ntl::status inject(stream_injection_site<Layer> site,
+                     injected_stream_data &&data,
+                     UINT32 flags = 0) noexcept {
+    static_assert(detail::stream_layer<Layer>,
+                  "stream injection requires a stream layer");
+    if (!site)
+      return STATUS_INVALID_PARAMETER;
+
+    auto prepared = owner_.prepare(std::move(data));
+    if (!prepared)
+      return prepared.status();
+    auto *context = *prepared;
+    return detail::finish_injection(
+        FwpsStreamInjectAsync0(
+            owner_.native_handle(), nullptr, flags, site.flow_id_,
+            site.callout_id_, Layer::runtime_id,
+            context->packet.stream_flags_, context->packet.chain_,
+            context->packet.length_,
+            &detail::injection_complete<injected_stream_data>, context),
+        context);
+  }
+
+  void reset() noexcept {
+    owner_.reset();
+    if (nbl_pool_) {
+      NdisFreeNetBufferListPool(nbl_pool_);
+      nbl_pool_ = nullptr;
+    }
+    if (generic_object_) {
+      NdisFreeGenericObject(generic_object_);
+      generic_object_ = nullptr;
+    }
+  }
+
+private:
+  explicit stream_injector(detail::injection_owner &&owner) noexcept
+      : owner_(std::move(owner)) {}
+
+  stream_injector(detail::injection_owner &&owner,
+                  PNDIS_GENERIC_OBJECT generic,
+                  NDIS_HANDLE pool) noexcept
+      : owner_(std::move(owner)), generic_object_(generic),
+        nbl_pool_(pool) {}
+
+  detail::injection_owner owner_;
+  PNDIS_GENERIC_OBJECT generic_object_ = nullptr;
+  NDIS_HANDLE nbl_pool_ = nullptr;
+};
+
+} // namespace ntl::wfp

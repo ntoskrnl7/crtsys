@@ -1,0 +1,94 @@
+/**
+ * @file stream_reader
+ * @brief WFP adapter for the bounded coroutine byte stream.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/wfp/stream_reader is a kernel-mode header"
+#endif
+
+#include <ntl/net/io/async_byte_stream>
+#include "stream"
+
+#include <cstddef>
+#include <utility>
+
+namespace ntl::wfp {
+
+#if NTL_HAS_COROUTINE_SUPPORT
+
+/**
+ * @brief Copies callback-scoped WFP stream bytes into an observation reader.
+ *
+ * ingest() deliberately returns NTSTATUS rather than a stream_result. The
+ * callout must explicitly select its fail-open/fail-closed policy and return a
+ * result legal for the native filter action.
+ *
+ * This adapter does not defer, clone, absorb, or reinject WFP stream data.
+ * Consequently, a coroutine consuming bytes from it may observe traffic but
+ * cannot retroactively enforce a verdict on bytes the callback permitted.
+ * Asynchronous enforcement must use stream_result::defer together with
+ * cloned_stream_data, stream_injection_site, and stream_injector.
+ */
+class stream_reader {
+public:
+  stream_reader() noexcept = default;
+  stream_reader(const stream_reader &) = delete;
+  stream_reader &operator=(const stream_reader &) = delete;
+  stream_reader(stream_reader &&) noexcept = default;
+  stream_reader &operator=(stream_reader &&) noexcept = default;
+
+  static ntl::result<stream_reader>
+  try_create(std::size_t maximum_buffered_bytes,
+             WORK_QUEUE_TYPE queue_type = DelayedWorkQueue) noexcept {
+    auto reader = ntl::net::async_byte_stream::try_create(
+        maximum_buffered_bytes, queue_type);
+    if (!reader)
+      return ntl::unexpected(reader.status());
+    return ntl::ok(stream_reader(std::move(*reader)));
+  }
+
+  template <class Layer, class Context>
+  ntl::status
+  ingest(const ntl::wfp::stream_event<Layer, Context> &event) noexcept {
+    const auto data = event.data();
+    const ntl::status result =
+        data.empty() ? ntl::status::ok()
+                     : reader_.append_received_data(data.bytes());
+
+    const std::uint32_t flags = data.flags();
+    if (event.no_more_data() ||
+        (flags & (FWPS_STREAM_FLAG_RECEIVE_DISCONNECT |
+                  FWPS_STREAM_FLAG_RECEIVE_ABORT |
+                  FWPS_STREAM_FLAG_SEND_DISCONNECT |
+                  FWPS_STREAM_FLAG_SEND_ABORT)) != 0) {
+      reader_.close();
+    }
+    return result;
+  }
+
+  ntl::net::async_byte_stream &bytes() noexcept { return reader_; }
+  const ntl::net::async_byte_stream &bytes() const noexcept {
+    return reader_;
+  }
+
+  void close(ntl::status status = STATUS_END_OF_FILE) noexcept {
+    reader_.close(status);
+  }
+  void cancel() noexcept { reader_.cancel(); }
+  ntl::status cancel_and_wait() noexcept {
+    return reader_.cancel_and_wait();
+  }
+
+private:
+  explicit stream_reader(
+      ntl::net::async_byte_stream &&reader) noexcept
+      : reader_(std::move(reader)) {}
+
+  ntl::net::async_byte_stream reader_;
+};
+
+#endif // NTL_HAS_COROUTINE_SUPPORT
+
+} // namespace ntl::wfp

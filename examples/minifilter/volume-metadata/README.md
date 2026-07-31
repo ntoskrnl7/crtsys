@@ -1,5 +1,7 @@
 # NTL minifilter volume-metadata sample
 
+[한국어 설명](./README.ko-KR.md)
+
 This sample expresses the reusable lifecycle from the WDK
 `MetadataManager` sample with typed NTL callbacks and ownership.
 

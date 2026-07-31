@@ -1,0 +1,1580 @@
+/**
+ * @file tls_stream
+ * @brief Schannel-backed user-mode coroutine TLS stream.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/tls/stream is a user-mode header"
+#endif
+
+#include <ntl/net/io/async_socket>
+
+#ifndef SECURITY_WIN32
+#define SECURITY_WIN32
+#endif
+#ifndef SCHANNEL_USE_BLACKLISTS
+#define SCHANNEL_USE_BLACKLISTS
+#endif
+#include <winternl.h>
+#include <security.h>
+#include <schannel.h>
+#include <wincrypt.h>
+
+#include <algorithm>
+#include <atomic>
+#include <coroutine>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <exception>
+#include <limits>
+#include <memory>
+#include <optional>
+#include <span>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <utility>
+#include <vector>
+
+namespace ntl::net {
+
+namespace detail {
+
+[[noreturn]] inline void
+throw_security_status(SECURITY_STATUS status, const char *operation) {
+  throw std::system_error(
+      static_cast<int>(status), std::system_category(), operation);
+}
+
+template <class T> class tls_task {
+public:
+  struct promise_type;
+  using handle_type = std::coroutine_handle<promise_type>;
+
+  tls_task(const tls_task &) = delete;
+  tls_task &operator=(const tls_task &) = delete;
+
+  tls_task(tls_task &&other) noexcept
+      : handle_(std::exchange(other.handle_, {})) {}
+
+  tls_task &operator=(tls_task &&other) noexcept {
+    if (this != &other) {
+      if (handle_)
+        handle_.destroy();
+      handle_ = std::exchange(other.handle_, {});
+    }
+    return *this;
+  }
+
+  ~tls_task() {
+    if (handle_)
+      handle_.destroy();
+  }
+
+  class awaiter {
+  public:
+    explicit awaiter(handle_type handle) noexcept : handle_(handle) {}
+    awaiter(const awaiter &) = delete;
+    awaiter &operator=(const awaiter &) = delete;
+    awaiter(awaiter &&other) noexcept
+        : handle_(std::exchange(other.handle_, {})) {}
+    ~awaiter() {
+      if (handle_)
+        handle_.destroy();
+    }
+
+    bool await_ready() const noexcept {
+      return !handle_ || handle_.done();
+    }
+
+    std::coroutine_handle<>
+    await_suspend(std::coroutine_handle<> next) noexcept {
+      handle_.promise().continuation = next;
+      return handle_;
+    }
+
+    T await_resume() {
+      auto &promise = handle_.promise();
+      if (promise.exception)
+        std::rethrow_exception(promise.exception);
+      if (!promise.value)
+        throw std::logic_error("TLS coroutine produced no result");
+      return std::move(*promise.value);
+    }
+
+  private:
+    handle_type handle_{};
+  };
+
+  awaiter operator co_await() && noexcept {
+    return awaiter(std::exchange(handle_, {}));
+  }
+
+  struct promise_type {
+    tls_task get_return_object() noexcept {
+      return tls_task(handle_type::from_promise(*this));
+    }
+    std::suspend_always initial_suspend() const noexcept { return {}; }
+
+    struct final_awaiter {
+      bool await_ready() const noexcept { return false; }
+      std::coroutine_handle<>
+      await_suspend(handle_type handle) const noexcept {
+        const auto next = handle.promise().continuation;
+        return next ? next : std::noop_coroutine();
+      }
+      void await_resume() const noexcept {}
+    };
+
+    final_awaiter final_suspend() const noexcept { return {}; }
+
+    template <class U> void return_value(U &&result) {
+      value.emplace(std::forward<U>(result));
+    }
+
+    void unhandled_exception() noexcept {
+      exception = std::current_exception();
+    }
+
+    std::coroutine_handle<> continuation{};
+    std::optional<T> value;
+    std::exception_ptr exception;
+  };
+
+private:
+  explicit tls_task(handle_type handle) noexcept : handle_(handle) {}
+
+  handle_type handle_{};
+};
+
+template <> class tls_task<void> {
+public:
+  struct promise_type;
+  using handle_type = std::coroutine_handle<promise_type>;
+
+  tls_task(const tls_task &) = delete;
+  tls_task &operator=(const tls_task &) = delete;
+
+  tls_task(tls_task &&other) noexcept
+      : handle_(std::exchange(other.handle_, {})) {}
+
+  tls_task &operator=(tls_task &&other) noexcept {
+    if (this != &other) {
+      if (handle_)
+        handle_.destroy();
+      handle_ = std::exchange(other.handle_, {});
+    }
+    return *this;
+  }
+
+  ~tls_task() {
+    if (handle_)
+      handle_.destroy();
+  }
+
+  class awaiter {
+  public:
+    explicit awaiter(handle_type handle) noexcept : handle_(handle) {}
+    awaiter(const awaiter &) = delete;
+    awaiter &operator=(const awaiter &) = delete;
+    awaiter(awaiter &&other) noexcept
+        : handle_(std::exchange(other.handle_, {})) {}
+    ~awaiter() {
+      if (handle_)
+        handle_.destroy();
+    }
+
+    bool await_ready() const noexcept {
+      return !handle_ || handle_.done();
+    }
+
+    std::coroutine_handle<>
+    await_suspend(std::coroutine_handle<> next) noexcept {
+      handle_.promise().continuation = next;
+      return handle_;
+    }
+
+    void await_resume() {
+      if (handle_.promise().exception)
+        std::rethrow_exception(handle_.promise().exception);
+    }
+
+  private:
+    handle_type handle_{};
+  };
+
+  awaiter operator co_await() && noexcept {
+    return awaiter(std::exchange(handle_, {}));
+  }
+
+  struct promise_type {
+    tls_task get_return_object() noexcept {
+      return tls_task(handle_type::from_promise(*this));
+    }
+    std::suspend_always initial_suspend() const noexcept { return {}; }
+
+    struct final_awaiter {
+      bool await_ready() const noexcept { return false; }
+      std::coroutine_handle<>
+      await_suspend(handle_type handle) const noexcept {
+        const auto next = handle.promise().continuation;
+        return next ? next : std::noop_coroutine();
+      }
+      void await_resume() const noexcept {}
+    };
+
+    final_awaiter final_suspend() const noexcept { return {}; }
+    void return_void() const noexcept {}
+    void unhandled_exception() noexcept {
+      exception = std::current_exception();
+    }
+
+    std::coroutine_handle<> continuation{};
+    std::exception_ptr exception;
+  };
+
+private:
+  explicit tls_task(handle_type handle) noexcept : handle_(handle) {}
+
+  handle_type handle_{};
+};
+
+class context_buffer {
+public:
+  context_buffer() noexcept = default;
+  context_buffer(const context_buffer &) = delete;
+  context_buffer &operator=(const context_buffer &) = delete;
+
+  context_buffer(context_buffer &&other) noexcept
+      : data_(std::exchange(other.data_, nullptr)),
+        size_(std::exchange(other.size_, 0)) {}
+
+  context_buffer &operator=(context_buffer &&other) noexcept {
+    if (this != &other) {
+      reset();
+      data_ = std::exchange(other.data_, nullptr);
+      size_ = std::exchange(other.size_, 0);
+    }
+    return *this;
+  }
+
+  ~context_buffer() { reset(); }
+
+  void assign(void *data, ULONG size) noexcept {
+    reset();
+    data_ = data;
+    size_ = size;
+  }
+
+  std::span<const std::byte> bytes() const noexcept {
+    return {static_cast<const std::byte *>(data_),
+            static_cast<std::size_t>(size_)};
+  }
+
+private:
+  void reset() noexcept {
+    if (data_)
+      (void)::FreeContextBuffer(data_);
+    data_ = nullptr;
+    size_ = 0;
+  }
+
+  void *data_ = nullptr;
+  ULONG size_ = 0;
+};
+
+} // namespace detail
+
+/**
+ * @brief Selects a server certificate without imposing a certificate store.
+ *
+ * The returned context is borrowed for the duration of credential creation
+ * and must have an accessible private key. Policy implementations may use a
+ * store, a hardware provider, or an application-owned certificate cache.
+ */
+class tls_server_certificate_policy {
+public:
+  virtual ~tls_server_certificate_policy() = default;
+  virtual PCCERT_CONTEXT
+  select_certificate(std::wstring_view server_name) noexcept = 0;
+};
+
+/**
+ * @brief Optional peer-certificate check after the Schannel handshake.
+ *
+ * System validation remains enabled unless the client credential was created
+ * with manual_peer_validation. Returning false fails the handshake closed.
+ */
+class tls_peer_certificate_policy {
+public:
+  virtual ~tls_peer_certificate_policy() = default;
+  virtual bool verify(PCCERT_CONTEXT certificate,
+                      std::wstring_view server_name) noexcept = 0;
+};
+
+/**
+ * @brief Validates the client certificate presented to a TLS server.
+ *
+ * Schannel performs the handshake and supplies the remote certificate. The
+ * application owns identity mapping and authorization.
+ */
+class tls_client_certificate_policy {
+public:
+  virtual ~tls_client_certificate_policy() = default;
+  virtual bool verify(PCCERT_CONTEXT certificate) noexcept = 0;
+};
+
+/**
+ * @brief Pins one exact DER-encoded certificate.
+ */
+class exact_certificate_policy final
+    : public tls_peer_certificate_policy {
+public:
+  explicit exact_certificate_policy(PCCERT_CONTEXT certificate)
+      : certificate_(certificate
+                         ? ::CertDuplicateCertificateContext(certificate)
+                         : nullptr) {
+    if (!certificate_)
+      throw std::invalid_argument(
+          "exact_certificate_policy requires a certificate");
+  }
+
+  exact_certificate_policy(const exact_certificate_policy &) = delete;
+  exact_certificate_policy &
+  operator=(const exact_certificate_policy &) = delete;
+
+  exact_certificate_policy(exact_certificate_policy &&other) noexcept
+      : certificate_(
+            std::exchange(other.certificate_, nullptr)) {}
+
+  ~exact_certificate_policy() override {
+    if (certificate_)
+      (void)::CertFreeCertificateContext(certificate_);
+  }
+
+  bool verify(PCCERT_CONTEXT certificate,
+              std::wstring_view) noexcept override {
+    return certificate && certificate_ &&
+           certificate->cbCertEncoded ==
+               certificate_->cbCertEncoded &&
+           std::memcmp(certificate->pbCertEncoded,
+                       certificate_->pbCertEncoded,
+                       certificate->cbCertEncoded) == 0;
+  }
+
+private:
+  PCCERT_CONTEXT certificate_ = nullptr;
+};
+
+/**
+ * @brief Authorizes one exact DER-encoded client certificate.
+ */
+class exact_client_certificate_policy final
+    : public tls_client_certificate_policy {
+public:
+  explicit exact_client_certificate_policy(PCCERT_CONTEXT certificate)
+      : certificate_(certificate
+                         ? ::CertDuplicateCertificateContext(certificate)
+                         : nullptr) {
+    if (!certificate_)
+      throw std::invalid_argument(
+          "exact_client_certificate_policy requires a certificate");
+  }
+
+  exact_client_certificate_policy(
+      const exact_client_certificate_policy &) = delete;
+  exact_client_certificate_policy &
+  operator=(const exact_client_certificate_policy &) = delete;
+
+  exact_client_certificate_policy(
+      exact_client_certificate_policy &&other) noexcept
+      : certificate_(
+            std::exchange(other.certificate_, nullptr)) {}
+
+  ~exact_client_certificate_policy() override {
+    if (certificate_)
+      (void)::CertFreeCertificateContext(certificate_);
+  }
+
+  bool verify(PCCERT_CONTEXT certificate) noexcept override {
+    return certificate && certificate_ &&
+           certificate->cbCertEncoded ==
+               certificate_->cbCertEncoded &&
+           std::memcmp(certificate->pbCertEncoded,
+                       certificate_->pbCertEncoded,
+                       certificate->cbCertEncoded) == 0;
+  }
+
+private:
+  PCCERT_CONTEXT certificate_ = nullptr;
+};
+
+enum class tls_credential_role : std::uint8_t {
+  client = 1,
+  server = 2,
+};
+
+enum class tls_certificate_revocation_check : std::uint8_t {
+  system_default = 0,
+  end_certificate,
+  chain,
+  chain_excluding_root,
+};
+
+struct tls_client_credential_options {
+  bool manual_peer_validation = false;
+  bool use_default_client_certificate = false;
+  PCCERT_CONTEXT certificate = nullptr;
+  tls_certificate_revocation_check revocation_check =
+      tls_certificate_revocation_check::system_default;
+  bool ignore_missing_revocation_information = false;
+  bool ignore_offline_revocation = false;
+};
+
+/**
+ * @brief Reusable Schannel credential handle.
+ *
+ * A credential may be shared by multiple tls_stream instances. It must outlive
+ * every stream using it.
+ */
+class tls_credentials {
+public:
+  tls_credentials(const tls_credentials &) = delete;
+  tls_credentials &operator=(const tls_credentials &) = delete;
+
+  tls_credentials(tls_credentials &&other) noexcept
+      : handle_(other.handle_),
+        role_(other.role_),
+        manual_peer_validation_(other.manual_peer_validation_),
+        valid_(std::exchange(other.valid_, false)) {
+    SecInvalidateHandle(&other.handle_);
+  }
+
+  tls_credentials &operator=(tls_credentials &&other) noexcept {
+    if (this != &other) {
+      reset();
+      handle_ = other.handle_;
+      role_ = other.role_;
+      manual_peer_validation_ = other.manual_peer_validation_;
+      valid_ = std::exchange(other.valid_, false);
+      SecInvalidateHandle(&other.handle_);
+    }
+    return *this;
+  }
+
+  ~tls_credentials() { reset(); }
+
+  static tls_credentials
+  client(tls_client_credential_options options = {}) {
+    if (options.use_default_client_certificate &&
+        options.certificate)
+      throw std::invalid_argument(
+          "TLS client credentials cannot combine default and explicit "
+          "certificates");
+    if (options.revocation_check ==
+            tls_certificate_revocation_check::system_default &&
+        (options.ignore_missing_revocation_information ||
+         options.ignore_offline_revocation))
+      throw std::invalid_argument(
+          "TLS revocation availability exceptions require an explicit "
+          "revocation check");
+    if (options.manual_peer_validation &&
+        options.revocation_check !=
+            tls_certificate_revocation_check::system_default)
+      throw std::invalid_argument(
+          "manual TLS validation owns its revocation policy");
+
+    PCCERT_CONTEXT certificates[] = {options.certificate};
+    SCH_CREDENTIALS native{};
+    native.dwVersion = SCH_CREDENTIALS_VERSION;
+    if (options.certificate) {
+      native.cCreds = 1;
+      native.paCred = certificates;
+    }
+    native.dwFlags = SCH_USE_STRONG_CRYPTO;
+    native.dwFlags |= options.use_default_client_certificate
+                          ? SCH_CRED_USE_DEFAULT_CREDS
+                          : SCH_CRED_NO_DEFAULT_CREDS;
+    if (options.manual_peer_validation)
+      native.dwFlags |= SCH_CRED_MANUAL_CRED_VALIDATION;
+    switch (options.revocation_check) {
+    case tls_certificate_revocation_check::system_default:
+      break;
+    case tls_certificate_revocation_check::end_certificate:
+      native.dwFlags |= SCH_CRED_REVOCATION_CHECK_END_CERT;
+      break;
+    case tls_certificate_revocation_check::chain:
+      native.dwFlags |= SCH_CRED_REVOCATION_CHECK_CHAIN;
+      break;
+    case tls_certificate_revocation_check::chain_excluding_root:
+      native.dwFlags |=
+          SCH_CRED_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT;
+      break;
+    }
+    if (options.ignore_missing_revocation_information)
+      native.dwFlags |= SCH_CRED_IGNORE_NO_REVOCATION_CHECK;
+    if (options.ignore_offline_revocation)
+      native.dwFlags |= SCH_CRED_IGNORE_REVOCATION_OFFLINE;
+
+    tls_credentials result(
+        tls_credential_role::client,
+        options.manual_peer_validation);
+    result.acquire(SECPKG_CRED_OUTBOUND, native);
+    return result;
+  }
+
+  static tls_credentials server(PCCERT_CONTEXT certificate) {
+    if (!certificate)
+      throw std::invalid_argument(
+          "TLS server credentials require a certificate");
+
+    PCCERT_CONTEXT certificates[] = {certificate};
+    SCH_CREDENTIALS native{};
+    native.dwVersion = SCH_CREDENTIALS_VERSION;
+    native.cCreds = 1;
+    native.paCred = certificates;
+    native.dwFlags =
+        SCH_USE_STRONG_CRYPTO | SCH_CRED_NO_SYSTEM_MAPPER;
+
+    tls_credentials result(tls_credential_role::server, false);
+    result.acquire(SECPKG_CRED_INBOUND, native);
+    return result;
+  }
+
+  static tls_credentials
+  server(tls_server_certificate_policy &policy,
+         std::wstring_view server_name) {
+    return server(policy.select_certificate(server_name));
+  }
+
+  tls_credential_role role() const noexcept { return role_; }
+  bool manual_peer_validation() const noexcept {
+    return manual_peer_validation_;
+  }
+
+private:
+  friend class tls_stream;
+
+  tls_credentials(tls_credential_role role,
+                  bool manual_peer_validation) noexcept
+      : role_(role),
+        manual_peer_validation_(manual_peer_validation) {
+    SecInvalidateHandle(&handle_);
+  }
+
+  void acquire(ULONG use, SCH_CREDENTIALS &native) {
+    TimeStamp expiry{};
+    const SECURITY_STATUS status = ::AcquireCredentialsHandleW(
+        nullptr, const_cast<wchar_t *>(UNISP_NAME_W), use, nullptr,
+        &native, nullptr, nullptr, &handle_, &expiry);
+    if (status != SEC_E_OK)
+      detail::throw_security_status(
+          status, "AcquireCredentialsHandleW(Schannel)");
+    valid_ = true;
+  }
+
+  void reset() noexcept {
+    if (valid_)
+      (void)::FreeCredentialsHandle(&handle_);
+    valid_ = false;
+    SecInvalidateHandle(&handle_);
+  }
+
+  CredHandle handle_{};
+  tls_credential_role role_ = tls_credential_role::client;
+  bool manual_peer_validation_ = false;
+  bool valid_ = false;
+};
+
+struct tls_stream_limits {
+  std::size_t maximum_buffered_ciphertext = 1024 * 1024;
+  std::size_t receive_chunk_size = 16 * 1024;
+};
+
+struct tls_client_handshake_options {
+  std::wstring server_name;
+  tls_peer_certificate_policy *certificate_policy = nullptr;
+  std::vector<std::string> application_protocols;
+  bool require_application_protocol = false;
+};
+
+struct tls_server_handshake_options {
+  std::vector<std::string> application_protocols;
+  bool require_application_protocol = false;
+  bool require_client_certificate = false;
+  tls_client_certificate_policy *client_certificate_policy = nullptr;
+};
+
+struct tls_connection_info {
+  DWORD protocol = 0;
+  ALG_ID cipher_algorithm = 0;
+  DWORD cipher_strength = 0;
+  ALG_ID hash_algorithm = 0;
+  DWORD hash_strength = 0;
+  ALG_ID key_exchange_algorithm = 0;
+  DWORD key_exchange_strength = 0;
+};
+
+/**
+ * @brief One Schannel TLS session over an async_socket.
+ *
+ * The stream retains partial TLS records and over-read ciphertext. One reader
+ * and one writer may be active concurrently; multiple readers, multiple
+ * writers, and handshake/shutdown races are rejected. Application buffers and
+ * the awaiting coroutine must remain alive through completion. A custom peer
+ * certificate policy must outlive the stream because TLS 1.3 post-handshake
+ * authentication can require validation again.
+ */
+class tls_stream {
+public:
+  tls_stream(async_socket &socket, tls_credentials &credentials,
+             tls_stream_limits limits = {})
+      : socket_(&socket), credentials_(&credentials), limits_(limits) {
+    if (!socket || !credentials.valid_ ||
+        limits_.maximum_buffered_ciphertext == 0 ||
+        limits_.receive_chunk_size == 0 ||
+        limits_.receive_chunk_size >
+            limits_.maximum_buffered_ciphertext)
+      throw std::invalid_argument(
+          "tls_stream requires a socket, credentials, and positive limits");
+    SecInvalidateHandle(&context_);
+  }
+
+  tls_stream(const tls_stream &) = delete;
+  tls_stream &operator=(const tls_stream &) = delete;
+  tls_stream(tls_stream &&) = delete;
+  tls_stream &operator=(tls_stream &&) = delete;
+
+  ~tls_stream() {
+    if (context_valid_)
+      (void)::DeleteSecurityContext(&context_);
+  }
+
+  bool is_handshaken() const noexcept { return handshaken_; }
+  bool received_close_notify() const noexcept {
+    return received_close_notify_;
+  }
+
+  std::size_t maximum_plaintext_record() const noexcept {
+    return static_cast<std::size_t>(stream_sizes_.cbMaximumMessage);
+  }
+
+  std::string_view
+  negotiated_application_protocol() const noexcept {
+    return negotiated_application_protocol_;
+  }
+
+  tls_connection_info connection_info() const {
+    require_handshake();
+    SecPkgContext_ConnectionInfo native{};
+    const SECURITY_STATUS status = ::QueryContextAttributesW(
+        const_cast<CtxtHandle *>(&context_),
+        SECPKG_ATTR_CONNECTION_INFO, &native);
+    if (status != SEC_E_OK)
+      detail::throw_security_status(
+          status,
+          "QueryContextAttributesW(SECPKG_ATTR_CONNECTION_INFO)");
+    return {
+        native.dwProtocol,
+        native.aiCipher,
+        native.dwCipherStrength,
+        native.aiHash,
+        native.dwHashStrength,
+        native.aiExch,
+        native.dwExchStrength,
+    };
+  }
+
+  detail::tls_task<void>
+  handshake_client(tls_client_handshake_options options) {
+    if (credentials_->role_ != tls_credential_role::client)
+      throw std::logic_error(
+          "client handshake requires client credentials");
+    if (options.server_name.empty())
+      throw std::invalid_argument(
+          "TLS client handshake requires a server name");
+    if (credentials_->manual_peer_validation_ &&
+        !options.certificate_policy)
+      throw std::invalid_argument(
+          "manual TLS validation requires a certificate policy");
+    auto application_protocol_input =
+        make_application_protocol_input(
+            options.application_protocols);
+    if (options.require_application_protocol &&
+        application_protocol_input.empty())
+      throw std::invalid_argument(
+          "required TLS application protocol needs a nonempty offer");
+    begin_handshake();
+    role_ = tls_credential_role::client;
+    server_name_ = std::move(options.server_name);
+    application_protocol_input_ =
+        std::move(application_protocol_input);
+    require_application_protocol_ =
+        options.require_application_protocol;
+
+    bool first = true;
+    for (;;) {
+      handshake_step step =
+          client_handshake_step(first, !first);
+      first = false;
+      co_await send_token(std::move(step.token));
+
+      if (step.status == SEC_E_OK)
+        break;
+      if (step.status == SEC_E_INCOMPLETE_MESSAGE) {
+        if (!(co_await receive_ciphertext()))
+          throw std::runtime_error(
+              "TLS peer closed during client handshake");
+        continue;
+      }
+      if (step.status == SEC_I_CONTINUE_NEEDED) {
+        if (encrypted_input_.empty()) {
+          if (!(co_await receive_ciphertext()))
+            throw std::runtime_error(
+                "TLS peer closed during client handshake");
+        }
+        continue;
+      }
+      detail::throw_security_status(
+          step.status, "InitializeSecurityContextW(Schannel)");
+    }
+
+    finish_handshake();
+    enforce_application_protocol();
+    peer_policy_ = options.certificate_policy;
+    validate_peer(options.certificate_policy);
+    handshake_in_progress_ = false;
+    co_return;
+  }
+
+  detail::tls_task<void> handshake_server() {
+    co_await handshake_server(
+        std::span<const std::byte>{},
+        tls_server_handshake_options{});
+  }
+
+  detail::tls_task<void>
+  handshake_server(tls_server_handshake_options options) {
+    co_await handshake_server(
+        std::span<const std::byte>{}, std::move(options));
+  }
+
+  /**
+   * @brief Starts a server handshake with bytes already read from the socket.
+   *
+   * A transparent proxy may inspect a bounded ClientHello before selecting
+   * its server credential. The complete bytes consumed by that inspection
+   * must be supplied here so Schannel receives the original TLS stream
+   * without reconstruction or loss.
+   */
+  detail::tls_task<void>
+  handshake_server(std::span<const std::byte> initial_ciphertext) {
+    co_await handshake_server(
+        initial_ciphertext, tls_server_handshake_options{});
+  }
+
+  detail::tls_task<void>
+  handshake_server(
+      std::span<const std::byte> initial_ciphertext,
+      tls_server_handshake_options options) {
+    if (credentials_->role_ != tls_credential_role::server)
+      throw std::logic_error(
+          "server handshake requires server credentials");
+    if (initial_ciphertext.size() >
+        limits_.maximum_buffered_ciphertext)
+      throw std::system_error(
+          ERROR_BUFFER_OVERFLOW, std::system_category(),
+          "initial TLS ciphertext exceeds stream limit");
+    auto application_protocol_input =
+        make_application_protocol_input(
+            options.application_protocols);
+    if (options.require_application_protocol &&
+        application_protocol_input.empty())
+      throw std::invalid_argument(
+          "required TLS application protocol needs a nonempty offer");
+    if (options.require_client_certificate &&
+        !options.client_certificate_policy)
+      throw std::invalid_argument(
+          "required TLS client certificates need an authorization policy");
+    begin_handshake();
+    role_ = tls_credential_role::server;
+    application_protocol_input_ =
+        std::move(application_protocol_input);
+    require_application_protocol_ =
+        options.require_application_protocol;
+    require_client_certificate_ =
+        options.require_client_certificate;
+    client_certificate_policy_ =
+        options.client_certificate_policy;
+    encrypted_input_.assign(
+        initial_ciphertext.begin(), initial_ciphertext.end());
+
+    if (encrypted_input_.empty() &&
+        !(co_await receive_ciphertext()))
+      throw std::runtime_error(
+          "TLS peer closed before server handshake");
+
+    for (;;) {
+      handshake_step step = server_handshake_step();
+      co_await send_token(std::move(step.token));
+
+      if (step.status == SEC_E_OK)
+        break;
+      if (step.status == SEC_E_INCOMPLETE_MESSAGE) {
+        if (!(co_await receive_ciphertext()))
+          throw std::runtime_error(
+              "TLS peer closed during server handshake");
+        continue;
+      }
+      if (step.status == SEC_I_CONTINUE_NEEDED) {
+        if (encrypted_input_.empty()) {
+          if (!(co_await receive_ciphertext()))
+            throw std::runtime_error(
+                "TLS peer closed during server handshake");
+        }
+        continue;
+      }
+      detail::throw_security_status(
+          step.status, "AcceptSecurityContext(Schannel)");
+    }
+
+    finish_handshake();
+    enforce_application_protocol();
+    validate_client_certificate();
+    handshake_in_progress_ = false;
+    co_return;
+  }
+
+  detail::tls_task<std::size_t>
+  read_some(std::span<std::byte> destination) {
+    require_handshake();
+    if (destination.empty())
+      co_return 0;
+    if (closing_.load(std::memory_order_acquire))
+      throw std::system_error(
+          ERROR_BUSY, std::system_category(),
+          "TLS shutdown is in progress");
+    operation_flag reader(reading_, "concurrent TLS read");
+    if (received_close_notify_)
+      co_return 0;
+
+    for (;;) {
+      const std::size_t pending = copy_plaintext(destination);
+      if (pending != 0)
+        co_return pending;
+
+      if (!encrypted_input_.empty()) {
+        SecBuffer buffers[4]{};
+        buffers[0].BufferType = SECBUFFER_DATA;
+        buffers[0].pvBuffer = encrypted_input_.data();
+        buffers[0].cbBuffer =
+            checked_ulong(encrypted_input_.size());
+        for (std::size_t index = 1; index != 4; ++index)
+          buffers[index].BufferType = SECBUFFER_EMPTY;
+        SecBufferDesc message{
+            SECBUFFER_VERSION, 4, buffers};
+
+        const SECURITY_STATUS status =
+            ::DecryptMessage(&context_, &message, 0, nullptr);
+        if (status == SEC_E_OK) {
+          const SecBuffer *data = find_buffer(
+              buffers, SECBUFFER_DATA);
+          const SecBuffer *extra = find_buffer(
+              buffers, SECBUFFER_EXTRA);
+          std::vector<std::byte> plaintext;
+          if (data && data->cbBuffer != 0)
+            plaintext = copy_schannel_buffer(*data);
+          preserve_extra(extra);
+          plaintext_ = std::move(plaintext);
+          plaintext_offset_ = 0;
+          continue;
+        }
+        if (status == SEC_E_INCOMPLETE_MESSAGE) {
+          // The partial record remains in encrypted_input_.
+        } else if (status == SEC_I_CONTEXT_EXPIRED) {
+          encrypted_input_.clear();
+          received_close_notify_ = true;
+          co_return 0;
+        } else if (status == SEC_I_RENEGOTIATE) {
+          const SecBuffer *data = find_buffer(
+              buffers, SECBUFFER_DATA);
+          const SecBuffer *extra = find_buffer(
+              buffers, SECBUFFER_EXTRA);
+          std::vector<std::byte> plaintext;
+          if (data && data->cbBuffer != 0)
+            plaintext = copy_schannel_buffer(*data);
+          preserve_extra(extra);
+          plaintext_ = std::move(plaintext);
+          plaintext_offset_ = 0;
+          co_await continue_handshake();
+          continue;
+        } else {
+          detail::throw_security_status(status, "DecryptMessage");
+        }
+      }
+
+      if (!(co_await receive_ciphertext()))
+        throw std::system_error(
+            ERROR_HANDLE_EOF, std::system_category(),
+            "TLS transport closed without close_notify");
+    }
+  }
+
+  detail::tls_task<std::size_t>
+  write_all(std::span<const std::byte> source) {
+    require_handshake();
+    if (source.empty())
+      co_return 0;
+    if (write_closed_ ||
+        closing_.load(std::memory_order_acquire))
+      throw std::system_error(
+          ERROR_PIPE_NOT_CONNECTED, std::system_category(),
+          "TLS write side is closed");
+    operation_flag writer(writing_, "concurrent TLS write");
+
+    std::size_t written = 0;
+    const std::size_t maximum =
+        static_cast<std::size_t>(
+            stream_sizes_.cbMaximumMessage);
+    if (maximum == 0)
+      detail::throw_security_status(
+          SEC_E_INTERNAL_ERROR,
+          "Schannel reported a zero maximum TLS message");
+
+    while (written != source.size()) {
+      const std::size_t chunk =
+          (std::min)(maximum, source.size() - written);
+      const std::size_t header =
+          static_cast<std::size_t>(stream_sizes_.cbHeader);
+      const std::size_t trailer =
+          static_cast<std::size_t>(stream_sizes_.cbTrailer);
+      if (header > (std::numeric_limits<std::size_t>::max)() -
+                       chunk ||
+          header + chunk >
+              (std::numeric_limits<std::size_t>::max)() - trailer)
+        throw std::overflow_error("TLS record size overflow");
+
+      std::vector<std::byte> record(header + chunk + trailer);
+      std::memcpy(record.data() + header,
+                  source.data() + written, chunk);
+
+      SecBuffer buffers[4]{};
+      buffers[0] = {
+          checked_ulong(header), SECBUFFER_STREAM_HEADER,
+          record.data()};
+      buffers[1] = {
+          checked_ulong(chunk), SECBUFFER_DATA,
+          record.data() + header};
+      buffers[2] = {
+          checked_ulong(trailer), SECBUFFER_STREAM_TRAILER,
+          record.data() + header + chunk};
+      buffers[3].BufferType = SECBUFFER_EMPTY;
+      SecBufferDesc message{
+          SECBUFFER_VERSION, 4, buffers};
+
+      const SECURITY_STATUS status =
+          ::EncryptMessage(&context_, 0, &message, 0);
+      if (status != SEC_E_OK)
+        detail::throw_security_status(status, "EncryptMessage");
+
+      const std::size_t ciphertext =
+          static_cast<std::size_t>(buffers[0].cbBuffer) +
+          static_cast<std::size_t>(buffers[1].cbBuffer) +
+          static_cast<std::size_t>(buffers[2].cbBuffer);
+      if (ciphertext > record.size())
+        detail::throw_security_status(
+            SEC_E_INTERNAL_ERROR,
+            "EncryptMessage returned invalid buffer sizes");
+
+      const std::size_t sent = co_await socket_->write_all(
+          std::span<const std::byte>(
+              record.data(), ciphertext));
+      if (sent != ciphertext)
+        throw std::system_error(
+            ERROR_WRITE_FAULT, std::system_category(),
+            "TLS ciphertext write completed short");
+      written += chunk;
+    }
+
+    co_return written;
+  }
+
+  /**
+   * @brief Sends close_notify without closing the underlying socket.
+   *
+   * No read or write may be active while shutdown starts. Reads remain
+   * available afterward so the caller can consume the peer close_notify.
+   */
+  detail::tls_task<void> shutdown() {
+    require_handshake();
+    if (write_closed_)
+      co_return;
+    bool expected = false;
+    if (!closing_.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel))
+      throw std::system_error(
+          ERROR_BUSY, std::system_category(),
+          "TLS shutdown is already in progress");
+
+    struct closing_release {
+      std::atomic<bool> &flag;
+      ~closing_release() {
+        flag.store(false, std::memory_order_release);
+      }
+    } release{closing_};
+
+    if (reading_.load(std::memory_order_acquire) ||
+        writing_.load(std::memory_order_acquire))
+      throw std::system_error(
+          ERROR_BUSY, std::system_category(),
+          "TLS shutdown requires idle read and write sides");
+
+    DWORD shutdown_token = SCHANNEL_SHUTDOWN;
+    SecBuffer control{
+        sizeof(shutdown_token), SECBUFFER_TOKEN,
+        &shutdown_token};
+    SecBufferDesc control_desc{
+        SECBUFFER_VERSION, 1, &control};
+    SECURITY_STATUS status =
+        ::ApplyControlToken(&context_, &control_desc);
+    if (status != SEC_E_OK)
+      detail::throw_security_status(
+          status, "ApplyControlToken(SCHANNEL_SHUTDOWN)");
+
+    handshake_step step =
+        role_ == tls_credential_role::client
+            ? client_handshake_step(false, false)
+            : server_handshake_step(false);
+    co_await send_token(std::move(step.token));
+    if (step.status != SEC_E_OK &&
+        step.status != SEC_I_CONTEXT_EXPIRED)
+      detail::throw_security_status(
+          step.status, "Schannel close_notify");
+    write_closed_ = true;
+    co_return;
+  }
+
+private:
+  class operation_flag {
+  public:
+    operation_flag(std::atomic<bool> &flag, const char *message)
+        : flag_(&flag) {
+      if (flag_->exchange(true, std::memory_order_acq_rel))
+        throw std::system_error(
+            ERROR_BUSY, std::system_category(), message);
+    }
+    operation_flag(const operation_flag &) = delete;
+    operation_flag &operator=(const operation_flag &) = delete;
+    ~operation_flag() {
+      if (flag_)
+        flag_->store(false, std::memory_order_release);
+    }
+
+  private:
+    std::atomic<bool> *flag_ = nullptr;
+  };
+
+  struct handshake_step {
+    SECURITY_STATUS status = SEC_E_INTERNAL_ERROR;
+    detail::context_buffer token;
+  };
+
+  static ULONG checked_ulong(std::size_t size) {
+    if (size > (std::numeric_limits<ULONG>::max)())
+      throw std::overflow_error("Schannel buffer exceeds ULONG");
+    return static_cast<ULONG>(size);
+  }
+
+  template <std::size_t N>
+  static const SecBuffer *
+  find_buffer(const SecBuffer (&buffers)[N], ULONG type) noexcept {
+    for (const auto &buffer : buffers) {
+      if (buffer.BufferType == type)
+        return &buffer;
+    }
+    return nullptr;
+  }
+
+  static std::vector<std::byte>
+  copy_schannel_buffer(const SecBuffer &buffer) {
+    if (buffer.cbBuffer == 0)
+      return {};
+    if (!buffer.pvBuffer)
+      detail::throw_security_status(
+          SEC_E_INVALID_TOKEN,
+          "Schannel returned a null buffer");
+    const auto *begin =
+        static_cast<const std::byte *>(buffer.pvBuffer);
+    return std::vector<std::byte>(
+        begin, begin + buffer.cbBuffer);
+  }
+
+  static std::vector<std::byte>
+  make_application_protocol_input(
+      const std::vector<std::string> &protocols) {
+    if (protocols.empty())
+      return {};
+
+    std::size_t list_size = 0;
+    for (const auto &protocol : protocols) {
+      if (protocol.empty() ||
+          protocol.size() > MAX_PROTOCOL_ID_SIZE)
+        throw std::invalid_argument(
+            "TLS application protocol IDs must contain 1..255 bytes");
+      if (protocol.size() >
+          (std::numeric_limits<USHORT>::max)() -
+              list_size - 1)
+        throw std::invalid_argument(
+            "TLS application protocol list is too large");
+      list_size += protocol.size() + 1;
+    }
+
+    constexpr std::size_t prefix_size =
+        sizeof(ULONG) + sizeof(ULONG) + sizeof(USHORT);
+    std::vector<std::byte> result(prefix_size + list_size);
+    const ULONG protocol_lists_size = static_cast<ULONG>(
+        sizeof(ULONG) + sizeof(USHORT) + list_size);
+    const ULONG extension =
+        SecApplicationProtocolNegotiationExt_ALPN;
+    const USHORT encoded_list_size =
+        static_cast<USHORT>(list_size);
+    std::memcpy(
+        result.data(), &protocol_lists_size,
+        sizeof(protocol_lists_size));
+    std::memcpy(
+        result.data() + sizeof(ULONG), &extension,
+        sizeof(extension));
+    std::memcpy(
+        result.data() + sizeof(ULONG) + sizeof(ULONG),
+        &encoded_list_size, sizeof(encoded_list_size));
+    std::size_t position = prefix_size;
+    for (const auto &protocol : protocols) {
+      result[position++] =
+          static_cast<std::byte>(protocol.size());
+      std::memcpy(
+          result.data() + position, protocol.data(),
+          protocol.size());
+      position += protocol.size();
+    }
+    return result;
+  }
+
+  void begin_handshake() {
+    if (handshaken_ || handshake_in_progress_ || context_valid_)
+      throw std::logic_error("TLS stream handshake already started");
+    if (reading_.load(std::memory_order_acquire) ||
+        writing_.load(std::memory_order_acquire))
+      throw std::logic_error(
+          "TLS handshake cannot race stream operations");
+    handshake_in_progress_ = true;
+  }
+
+  void require_handshake() const {
+    if (!handshaken_ || !context_valid_)
+      throw std::logic_error(
+          "TLS stream operation requires a completed handshake");
+  }
+
+  static SECURITY_STATUS
+  complete_auth_if_needed(SECURITY_STATUS status,
+                          CtxtHandle &context,
+                          SecBufferDesc &output) {
+    if (status != SEC_I_COMPLETE_NEEDED &&
+        status != SEC_I_COMPLETE_AND_CONTINUE)
+      return status;
+    const SECURITY_STATUS completed =
+        ::CompleteAuthToken(&context, &output);
+    if (completed != SEC_E_OK)
+      return completed;
+    return status == SEC_I_COMPLETE_NEEDED
+               ? SEC_E_OK
+               : SEC_I_CONTINUE_NEEDED;
+  }
+
+  void mark_context_if_created(SECURITY_STATUS status) noexcept {
+    if (status == SEC_E_OK ||
+        status == SEC_I_CONTINUE_NEEDED ||
+        status == SEC_I_COMPLETE_NEEDED ||
+        status == SEC_I_COMPLETE_AND_CONTINUE ||
+        status == SEC_E_INCOMPLETE_MESSAGE)
+      context_valid_ =
+          context_valid_ || SecIsValidHandle(&context_);
+  }
+
+  handshake_step client_handshake_step(bool first,
+                                       bool use_input) {
+    SecBuffer input_buffers[3]{};
+    SecBufferDesc input_desc{
+        SECBUFFER_VERSION, 3, input_buffers};
+    SecBufferDesc *input = nullptr;
+    if (first && !application_protocol_input_.empty()) {
+      input_buffers[0].BufferType =
+          SECBUFFER_APPLICATION_PROTOCOLS;
+      input_buffers[0].pvBuffer =
+          application_protocol_input_.data();
+      input_buffers[0].cbBuffer = checked_ulong(
+          application_protocol_input_.size());
+      input_desc.cBuffers = 1;
+      input = &input_desc;
+    } else if (use_input) {
+      input_buffers[0].BufferType = SECBUFFER_TOKEN;
+      input_buffers[0].pvBuffer = encrypted_input_.data();
+      input_buffers[0].cbBuffer =
+          checked_ulong(encrypted_input_.size());
+      input_buffers[1].BufferType = SECBUFFER_EMPTY;
+      input_desc.cBuffers = 2;
+      input = &input_desc;
+    }
+
+    SecBuffer output_buffer{};
+    output_buffer.BufferType = SECBUFFER_TOKEN;
+    SecBufferDesc output{
+        SECBUFFER_VERSION, 1, &output_buffer};
+    ULONG attributes = 0;
+    TimeStamp expiry{};
+    ULONG request = ISC_REQ_SEQUENCE_DETECT |
+                    ISC_REQ_REPLAY_DETECT |
+                    ISC_REQ_CONFIDENTIALITY |
+                    ISC_REQ_EXTENDED_ERROR |
+                    ISC_REQ_ALLOCATE_MEMORY |
+                    ISC_REQ_STREAM;
+    if (credentials_->manual_peer_validation_)
+      request |= ISC_REQ_MANUAL_CRED_VALIDATION;
+
+    SECURITY_STATUS status = ::InitializeSecurityContextW(
+        &credentials_->handle_,
+        first ? nullptr : &context_,
+        const_cast<wchar_t *>(server_name_.c_str()), request, 0, 0,
+        input, 0, &context_, &output, &attributes, &expiry);
+    mark_context_if_created(status);
+    status = complete_auth_if_needed(status, context_, output);
+
+    handshake_step result;
+    result.status = status;
+    result.token.assign(
+        output_buffer.pvBuffer, output_buffer.cbBuffer);
+    if (use_input && status != SEC_E_INCOMPLETE_MESSAGE)
+      preserve_extra(
+          find_buffer(input_buffers, SECBUFFER_EXTRA));
+    return result;
+  }
+
+  handshake_step server_handshake_step(bool use_input = true) {
+    SecBuffer input_buffers[3]{};
+    SecBufferDesc input_desc{
+        SECBUFFER_VERSION, 3, input_buffers};
+    SecBufferDesc *input = nullptr;
+    if (use_input) {
+      input_buffers[0].BufferType = SECBUFFER_TOKEN;
+      input_buffers[0].pvBuffer = encrypted_input_.data();
+      input_buffers[0].cbBuffer =
+          checked_ulong(encrypted_input_.size());
+    }
+    const bool first = !context_valid_;
+    if (first && !application_protocol_input_.empty()) {
+      input_buffers[1].BufferType =
+          SECBUFFER_APPLICATION_PROTOCOLS;
+      input_buffers[1].pvBuffer =
+          application_protocol_input_.data();
+      input_buffers[1].cbBuffer = checked_ulong(
+          application_protocol_input_.size());
+    } else {
+      input_buffers[1].BufferType = SECBUFFER_EMPTY;
+    }
+    input_desc.cBuffers = 2;
+    if (use_input)
+      input = &input_desc;
+
+    SecBuffer output_buffer{};
+    output_buffer.BufferType = SECBUFFER_TOKEN;
+    SecBufferDesc output{
+        SECBUFFER_VERSION, 1, &output_buffer};
+    ULONG attributes = 0;
+    TimeStamp expiry{};
+    ULONG request =
+        ASC_REQ_SEQUENCE_DETECT |
+        ASC_REQ_REPLAY_DETECT |
+        ASC_REQ_CONFIDENTIALITY |
+        ASC_REQ_EXTENDED_ERROR |
+        ASC_REQ_ALLOCATE_MEMORY |
+        ASC_REQ_STREAM;
+    if (require_client_certificate_)
+      request |= ASC_REQ_MUTUAL_AUTH;
+
+    SECURITY_STATUS status = ::AcceptSecurityContext(
+        &credentials_->handle_,
+        context_valid_ ? &context_ : nullptr,
+        input, request, 0, &context_, &output,
+        &attributes, &expiry);
+    mark_context_if_created(status);
+    status = complete_auth_if_needed(status, context_, output);
+
+    handshake_step result;
+    result.status = status;
+    result.token.assign(
+        output_buffer.pvBuffer, output_buffer.cbBuffer);
+    if (use_input && status != SEC_E_INCOMPLETE_MESSAGE)
+      preserve_extra(
+          find_buffer(input_buffers, SECBUFFER_EXTRA));
+    return result;
+  }
+
+  detail::tls_task<void>
+  send_token(detail::context_buffer token) {
+    const auto bytes = token.bytes();
+    if (!bytes.empty()) {
+      const std::size_t sent =
+          co_await socket_->write_all(bytes);
+      if (sent != bytes.size())
+        throw std::system_error(
+            ERROR_WRITE_FAULT, std::system_category(),
+            "TLS handshake token write completed short");
+    }
+    co_return;
+  }
+
+  detail::tls_task<bool> receive_ciphertext() {
+    if (encrypted_input_.size() >=
+        limits_.maximum_buffered_ciphertext)
+      throw std::system_error(
+          ERROR_BUFFER_OVERFLOW, std::system_category(),
+          "TLS ciphertext buffer limit reached");
+    const std::size_t old_size = encrypted_input_.size();
+    const std::size_t room =
+        limits_.maximum_buffered_ciphertext - old_size;
+    const std::size_t growth =
+        (std::min)(limits_.receive_chunk_size, room);
+    encrypted_input_.resize(old_size + growth);
+    const std::size_t received = co_await socket_->read_some(
+        std::span<std::byte>(
+            encrypted_input_.data() + old_size, growth));
+    encrypted_input_.resize(old_size + received);
+    co_return received != 0;
+  }
+
+  detail::tls_task<void> continue_handshake() {
+    for (;;) {
+      if (encrypted_input_.empty() &&
+          !(co_await receive_ciphertext()))
+        throw std::runtime_error(
+            "TLS peer closed during post-handshake authentication");
+
+      handshake_step step =
+          role_ == tls_credential_role::client
+              ? client_handshake_step(false, true)
+              : server_handshake_step(true);
+      co_await send_token(std::move(step.token));
+
+      if (step.status == SEC_E_OK)
+        break;
+      if (step.status == SEC_E_INCOMPLETE_MESSAGE) {
+        if (!(co_await receive_ciphertext()))
+          throw std::runtime_error(
+              "TLS peer closed during post-handshake authentication");
+        continue;
+      }
+      if (step.status == SEC_I_CONTINUE_NEEDED)
+        continue;
+      detail::throw_security_status(
+          step.status, "Schannel post-handshake authentication");
+    }
+
+    finish_handshake();
+    enforce_application_protocol();
+    if (role_ == tls_credential_role::client)
+      validate_peer(peer_policy_);
+    else
+      validate_client_certificate();
+    co_return;
+  }
+
+  void preserve_extra(const SecBuffer *extra) {
+    if (!extra || extra->cbBuffer == 0) {
+      encrypted_input_.clear();
+      return;
+    }
+    const auto extra_size =
+        static_cast<std::size_t>(extra->cbBuffer);
+    const std::byte *begin = nullptr;
+    if (extra->pvBuffer) {
+      begin = static_cast<const std::byte *>(extra->pvBuffer);
+    } else {
+      // InitializeSecurityContext and AcceptSecurityContext may report only
+      // the size of SECBUFFER_EXTRA. In that form the extra bytes are the
+      // suffix of the original input token.
+      if (extra_size > encrypted_input_.size())
+        detail::throw_security_status(
+            SEC_E_INVALID_TOKEN,
+            "Schannel returned an invalid extra-buffer size");
+      begin = encrypted_input_.data() +
+              (encrypted_input_.size() - extra_size);
+    }
+    std::vector<std::byte> saved(
+        begin, begin + extra_size);
+    if (saved.size() >
+        limits_.maximum_buffered_ciphertext)
+      throw std::system_error(
+          ERROR_BUFFER_OVERFLOW, std::system_category(),
+          "Schannel extra buffer exceeds TLS limit");
+    encrypted_input_ = std::move(saved);
+  }
+
+  void finish_handshake() {
+    if (!context_valid_)
+      detail::throw_security_status(
+          SEC_E_INVALID_HANDLE,
+          "Schannel completed without a security context");
+    const SECURITY_STATUS status = ::QueryContextAttributesW(
+        &context_, SECPKG_ATTR_STREAM_SIZES, &stream_sizes_);
+    if (status != SEC_E_OK)
+      detail::throw_security_status(
+          status,
+          "QueryContextAttributesW(SECPKG_ATTR_STREAM_SIZES)");
+    if (stream_sizes_.cbMaximumMessage == 0)
+      detail::throw_security_status(
+          SEC_E_INTERNAL_ERROR,
+          "Schannel reported invalid stream sizes");
+    negotiated_application_protocol_.clear();
+    SecPkgContext_ApplicationProtocol application{};
+    const SECURITY_STATUS application_status =
+        ::QueryContextAttributesW(
+            &context_, SECPKG_ATTR_APPLICATION_PROTOCOL,
+            &application);
+    if (application_status == SEC_E_OK) {
+      if (application.ProtoNegoStatus ==
+              SecApplicationProtocolNegotiationStatus_Success ||
+          application.ProtoNegoStatus ==
+              SecApplicationProtocolNegotiationStatus_SelectedClientOnly) {
+        if (application.ProtocolIdSize == 0)
+          detail::throw_security_status(
+              SEC_E_INVALID_TOKEN,
+              "Schannel reported an empty ALPN protocol");
+        negotiated_application_protocol_.assign(
+            reinterpret_cast<const char *>(
+                application.ProtocolId),
+            application.ProtocolIdSize);
+      }
+    } else if (!application_protocol_input_.empty()) {
+      detail::throw_security_status(
+          application_status,
+          "QueryContextAttributesW("
+          "SECPKG_ATTR_APPLICATION_PROTOCOL)");
+    }
+    handshaken_ = true;
+  }
+
+  void enforce_application_protocol() const {
+    if (require_application_protocol_ &&
+        negotiated_application_protocol_.empty())
+      detail::throw_security_status(
+          SEC_E_APPLICATION_PROTOCOL_MISMATCH,
+          role_ == tls_credential_role::client
+              ? "TLS client application protocol was not negotiated"
+              : "TLS server application protocol was not negotiated");
+  }
+
+  void validate_peer(tls_peer_certificate_policy *policy) {
+    if (!policy)
+      return;
+    PCCERT_CONTEXT certificate = nullptr;
+    const SECURITY_STATUS status = ::QueryContextAttributesW(
+        &context_, SECPKG_ATTR_REMOTE_CERT_CONTEXT, &certificate);
+    if (status != SEC_E_OK)
+      detail::throw_security_status(
+          status,
+          "QueryContextAttributesW(SECPKG_ATTR_REMOTE_CERT_CONTEXT)");
+    struct certificate_release {
+      PCCERT_CONTEXT value;
+      ~certificate_release() {
+        if (value)
+          (void)::CertFreeCertificateContext(value);
+      }
+    } release{certificate};
+    if (!policy->verify(certificate, server_name_))
+      detail::throw_security_status(
+          SEC_E_CERT_UNKNOWN,
+          "TLS peer certificate policy rejected the certificate");
+  }
+
+  void validate_client_certificate() {
+    if (!require_client_certificate_ &&
+        !client_certificate_policy_)
+      return;
+
+    PCCERT_CONTEXT certificate = nullptr;
+    const SECURITY_STATUS status = ::QueryContextAttributesW(
+        &context_, SECPKG_ATTR_REMOTE_CERT_CONTEXT,
+        &certificate);
+    if (status != SEC_E_OK || !certificate) {
+      if (!require_client_certificate_)
+        return;
+      detail::throw_security_status(
+          status == SEC_E_OK ? SEC_E_NO_CREDENTIALS : status,
+          "TLS client certificate is required");
+    }
+    struct certificate_release {
+      PCCERT_CONTEXT value;
+      ~certificate_release() {
+        if (value)
+          (void)::CertFreeCertificateContext(value);
+      }
+    } release{certificate};
+    if (client_certificate_policy_ &&
+        !client_certificate_policy_->verify(certificate))
+      detail::throw_security_status(
+          SEC_E_CERT_UNKNOWN,
+          "TLS client certificate policy rejected the certificate");
+  }
+
+  std::size_t copy_plaintext(
+      std::span<std::byte> destination) {
+    if (plaintext_offset_ >= plaintext_.size()) {
+      plaintext_.clear();
+      plaintext_offset_ = 0;
+      return 0;
+    }
+    const std::size_t count =
+        (std::min)(destination.size(),
+                   plaintext_.size() - plaintext_offset_);
+    std::memcpy(destination.data(),
+                plaintext_.data() + plaintext_offset_, count);
+    plaintext_offset_ += count;
+    if (plaintext_offset_ == plaintext_.size()) {
+      plaintext_.clear();
+      plaintext_offset_ = 0;
+    }
+    return count;
+  }
+
+  async_socket *socket_ = nullptr;
+  tls_credentials *credentials_ = nullptr;
+  tls_peer_certificate_policy *peer_policy_ = nullptr;
+  tls_client_certificate_policy *client_certificate_policy_ = nullptr;
+  tls_stream_limits limits_{};
+  CtxtHandle context_{};
+  SecPkgContext_StreamSizes stream_sizes_{};
+  tls_credential_role role_ = tls_credential_role::client;
+  std::wstring server_name_;
+  std::vector<std::byte> application_protocol_input_;
+  std::string negotiated_application_protocol_;
+  std::vector<std::byte> encrypted_input_;
+  std::vector<std::byte> plaintext_;
+  std::size_t plaintext_offset_ = 0;
+  std::atomic<bool> reading_{false};
+  std::atomic<bool> writing_{false};
+  std::atomic<bool> closing_{false};
+  bool context_valid_ = false;
+  bool handshake_in_progress_ = false;
+  bool handshaken_ = false;
+  bool require_application_protocol_ = false;
+  bool require_client_certificate_ = false;
+  bool received_close_notify_ = false;
+  bool write_closed_ = false;
+};
+
+} // namespace ntl::net

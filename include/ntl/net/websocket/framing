@@ -1,0 +1,372 @@
+/**
+ * @file websocket_framing
+ * @brief Bounded WebSocket frame and message assembly.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/websocket/framing is a user-mode header"
+#endif
+
+#include <ntl/net/framing>
+#include <ntl/result>
+#include <ntl/net/buffer/scatter_view>
+#include <ntl/status>
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <optional>
+#include <span>
+#include <utility>
+#include <vector>
+
+namespace ntl::net::websocket {
+
+enum class sender_role : std::uint8_t {
+  either = 0,
+  client = 1,
+  server = 2,
+};
+
+enum class opcode : std::uint8_t {
+  continuation = 0x0,
+  text = 0x1,
+  binary = 0x2,
+  close = 0x8,
+  ping = 0x9,
+  pong = 0xa,
+};
+
+struct frame_limits {
+  std::uint64_t maximum_payload_size = 1024 * 1024;
+  std::uint8_t allowed_reserved_bits = 0;
+};
+
+struct frame_header {
+  bool final = false;
+  std::uint8_t reserved_bits = 0;
+  opcode operation = opcode::continuation;
+  bool masked = false;
+  std::uint64_t payload_size = 0;
+  std::size_t header_size = 0;
+  std::array<std::byte, 4> masking_key{};
+
+  bool control() const noexcept {
+    return (static_cast<std::uint8_t>(operation) & 0x08u) != 0;
+  }
+};
+
+namespace detail {
+
+inline bool byte_at(ntl::net::scatter_view bytes, std::size_t offset,
+                    std::uint8_t &value) noexcept {
+  const auto read = bytes.read<std::uint8_t>(offset);
+  if (!read)
+    return false;
+  value = *read;
+  return true;
+}
+
+inline bool known_opcode(std::uint8_t value) noexcept {
+  switch (static_cast<opcode>(value)) {
+  case opcode::continuation:
+  case opcode::text:
+  case opcode::binary:
+  case opcode::close:
+  case opcode::ping:
+  case opcode::pong:
+    return true;
+  }
+  return false;
+}
+
+inline ntl::result<frame_header>
+parse_header(ntl::net::scatter_view bytes, sender_role sender,
+             frame_limits limits) noexcept {
+  if (!bytes || limits.maximum_payload_size == 0)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  if (bytes.size() < 2)
+    return ntl::unexpected(STATUS_BUFFER_TOO_SMALL);
+
+  std::uint8_t first = 0;
+  std::uint8_t second = 0;
+  if (!byte_at(bytes, 0, first) || !byte_at(bytes, 1, second))
+    return ntl::unexpected(STATUS_DATA_ERROR);
+
+  frame_header result;
+  result.final = (first & 0x80u) != 0;
+  result.reserved_bits =
+      static_cast<std::uint8_t>((first >> 4) & 0x07u);
+  const std::uint8_t raw_opcode =
+      static_cast<std::uint8_t>(first & 0x0fu);
+  if (!known_opcode(raw_opcode) ||
+      (result.reserved_bits &
+       static_cast<std::uint8_t>(~limits.allowed_reserved_bits)) != 0)
+    return ntl::unexpected(STATUS_DATA_ERROR);
+  result.operation = static_cast<opcode>(raw_opcode);
+  result.masked = (second & 0x80u) != 0;
+  if ((sender == sender_role::client && !result.masked) ||
+      (sender == sender_role::server && result.masked))
+    return ntl::unexpected(STATUS_DATA_ERROR);
+
+  const std::uint8_t length_code =
+      static_cast<std::uint8_t>(second & 0x7fu);
+  std::size_t position = 2;
+  if (length_code <= 125) {
+    result.payload_size = length_code;
+  } else if (length_code == 126) {
+    if (bytes.size() < position + 2)
+      return ntl::unexpected(STATUS_BUFFER_TOO_SMALL);
+    std::uint8_t high = 0;
+    std::uint8_t low = 0;
+    if (!byte_at(bytes, position, high) ||
+        !byte_at(bytes, position + 1, low))
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    result.payload_size =
+        (static_cast<std::uint64_t>(high) << 8) | low;
+    if (result.payload_size < 126)
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    position += 2;
+  } else {
+    if (bytes.size() < position + 8)
+      return ntl::unexpected(STATUS_BUFFER_TOO_SMALL);
+    std::uint64_t length = 0;
+    for (std::size_t index = 0; index != 8; ++index) {
+      std::uint8_t value = 0;
+      if (!byte_at(bytes, position + index, value))
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      if (index == 0 && (value & 0x80u) != 0)
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      length = (length << 8) | value;
+    }
+    if (length <= 0xffffu)
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    result.payload_size = length;
+    position += 8;
+  }
+
+  if (result.payload_size > limits.maximum_payload_size)
+    return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+  if (result.control() &&
+      (!result.final || result.payload_size > 125 ||
+       (result.operation == opcode::close &&
+        result.payload_size == 1)))
+    return ntl::unexpected(STATUS_DATA_ERROR);
+
+  if (result.masked) {
+    if (bytes.size() < position + result.masking_key.size())
+      return ntl::unexpected(STATUS_BUFFER_TOO_SMALL);
+    for (std::size_t index = 0;
+         index != result.masking_key.size(); ++index) {
+      std::uint8_t value = 0;
+      if (!byte_at(bytes, position + index, value))
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      result.masking_key[index] = static_cast<std::byte>(value);
+    }
+    position += result.masking_key.size();
+  }
+  result.header_size = position;
+  return ntl::ok(result);
+}
+
+} // namespace detail
+
+/**
+ * @brief Finds one complete RFC 6455 wire frame.
+ *
+ * The returned content is the payload bytes as carried on the wire. Use
+ * decode_payload() to copy and unmask it before inspection.
+ */
+class frame_framer {
+public:
+  explicit constexpr frame_framer(
+      sender_role sender, frame_limits limits = {}) noexcept
+      : sender_(sender), limits_(limits) {}
+
+  ntl::net::framing::frame_probe
+  probe(ntl::net::scatter_view bytes) const noexcept {
+    if (!bytes)
+      return ntl::net::framing::frame_probe::malformed(
+          STATUS_INVALID_PARAMETER);
+    const auto parsed =
+        detail::parse_header(bytes, sender_, limits_);
+    if (!parsed) {
+      const NTSTATUS status =
+          static_cast<NTSTATUS>(parsed.status());
+      if (status == STATUS_BUFFER_TOO_SMALL) {
+        if (bytes.size() >= 14)
+          return ntl::net::framing::frame_probe::malformed();
+        return ntl::net::framing::frame_probe::need_more(
+            bytes.size() + 1);
+      }
+      return ntl::net::framing::frame_probe::malformed(status);
+    }
+
+    if (parsed->payload_size >
+        (std::numeric_limits<std::size_t>::max)() -
+            parsed->header_size)
+      return ntl::net::framing::frame_probe::malformed(
+          STATUS_BUFFER_OVERFLOW);
+    const std::size_t total =
+        parsed->header_size +
+        static_cast<std::size_t>(parsed->payload_size);
+    if (bytes.size() < total)
+      return ntl::net::framing::frame_probe::need_more(total);
+    return ntl::net::framing::frame_probe::complete(
+        total, parsed->header_size,
+        static_cast<std::size_t>(parsed->payload_size));
+  }
+
+  sender_role sender() const noexcept { return sender_; }
+  frame_limits limits() const noexcept { return limits_; }
+
+private:
+  sender_role sender_ = sender_role::either;
+  frame_limits limits_{};
+};
+
+inline ntl::result<frame_header>
+inspect_header(ntl::net::scatter_view frame, sender_role sender,
+               frame_limits limits = {}) noexcept {
+  const auto parsed = detail::parse_header(frame, sender, limits);
+  if (!parsed)
+    return parsed;
+  if (parsed->payload_size >
+          (std::numeric_limits<std::size_t>::max)() -
+              parsed->header_size ||
+      frame.size() <
+          parsed->header_size +
+              static_cast<std::size_t>(parsed->payload_size))
+    return ntl::unexpected(STATUS_BUFFER_TOO_SMALL);
+  return parsed;
+}
+
+inline ntl::result<std::vector<std::byte>>
+decode_payload(ntl::net::scatter_view frame, const frame_header &header,
+               std::size_t maximum_size) noexcept {
+  if (!frame || header.payload_size > maximum_size ||
+      header.payload_size >
+          (std::numeric_limits<std::size_t>::max)() ||
+      header.header_size > frame.size() ||
+      static_cast<std::size_t>(header.payload_size) >
+          frame.size() - header.header_size)
+    return ntl::unexpected(
+        header.payload_size > maximum_size
+            ? STATUS_BUFFER_OVERFLOW
+            : STATUS_INVALID_PARAMETER);
+
+  try {
+    std::vector<std::byte> result(
+        static_cast<std::size_t>(header.payload_size));
+    for (std::size_t index = 0; index != result.size(); ++index) {
+      const auto value =
+          frame.read<std::byte>(header.header_size + index);
+      if (!value)
+        return ntl::unexpected(value.status());
+      result[index] =
+          header.masked
+              ? *value ^
+                    header.masking_key[
+                        index % header.masking_key.size()]
+              : *value;
+    }
+    return ntl::ok(std::move(result));
+  } catch (...) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  }
+}
+
+struct message {
+  opcode operation = opcode::continuation;
+  bool control = false;
+  std::uint8_t reserved_bits = 0;
+  std::vector<std::byte> payload;
+
+  bool compressed() const noexcept {
+    return !control && (reserved_bits & 0x04u) != 0;
+  }
+};
+
+/**
+ * @brief Reassembles fragmented data messages while preserving control frames.
+ */
+class message_assembler {
+public:
+  explicit message_assembler(
+      std::size_t maximum_message_size = 1024 * 1024) noexcept
+      : maximum_message_size_(maximum_message_size) {}
+
+  void reset() noexcept {
+    fragmented_.reset();
+    fragmented_reserved_bits_ = 0;
+    payload_.clear();
+  }
+
+  ntl::result<std::optional<message>>
+  consume(const frame_header &header,
+          std::span<const std::byte> decoded_payload) noexcept {
+    if (maximum_message_size_ == 0 ||
+        decoded_payload.size() != header.payload_size)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+
+    if (header.control()) {
+      if (header.reserved_bits != 0)
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      try {
+        return ntl::ok(std::optional<message>(message{
+            header.operation, true, 0,
+            std::vector<std::byte>(
+                decoded_payload.begin(), decoded_payload.end())}));
+      } catch (...) {
+        return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+      }
+    }
+
+    if (header.operation == opcode::continuation) {
+      if (!fragmented_ || header.reserved_bits != 0)
+        return ntl::unexpected(STATUS_DATA_ERROR);
+    } else {
+      if (fragmented_ ||
+          (header.operation != opcode::text &&
+           header.operation != opcode::binary))
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      fragmented_ = header.operation;
+      fragmented_reserved_bits_ = header.reserved_bits;
+    }
+
+    if (decoded_payload.size() >
+        maximum_message_size_ - payload_.size())
+      return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+    try {
+      payload_.insert(
+          payload_.end(), decoded_payload.begin(),
+          decoded_payload.end());
+    } catch (...) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+
+    if (!header.final)
+      return ntl::ok(std::optional<message>{});
+
+    message completed{
+        *fragmented_, false, fragmented_reserved_bits_,
+        std::move(payload_)};
+    fragmented_.reset();
+    fragmented_reserved_bits_ = 0;
+    payload_.clear();
+    return ntl::ok(
+        std::optional<message>(std::move(completed)));
+  }
+
+private:
+  std::size_t maximum_message_size_ = 0;
+  std::optional<opcode> fragmented_;
+  std::uint8_t fragmented_reserved_bits_ = 0;
+  std::vector<std::byte> payload_;
+};
+
+} // namespace ntl::net::websocket

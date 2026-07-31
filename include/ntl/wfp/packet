@@ -1,0 +1,380 @@
+/**
+ * @file packet
+ * @brief WFP network-buffer-list observation and ownership types.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/wfp/packet is a kernel-mode header"
+#endif
+
+#include <ntl/net/buffer/owned_bytes>
+#include "../result"
+#include <ntl/net/buffer/scatter_view>
+#include "../status"
+#include "layers"
+
+#include <algorithm>
+#include <cstdint>
+#include <limits>
+#include <span>
+#include <utility>
+
+namespace ntl::wfp {
+
+namespace detail {
+
+inline std::size_t nbl_byte_count(NET_BUFFER_LIST *chain) noexcept {
+  std::size_t total = 0;
+  for (NET_BUFFER_LIST *list = chain; list;
+       list = NET_BUFFER_LIST_NEXT_NBL(list)) {
+    for (NET_BUFFER *buffer = NET_BUFFER_LIST_FIRST_NB(list); buffer;
+         buffer = NET_BUFFER_NEXT_NB(buffer)) {
+      const std::size_t length = NET_BUFFER_DATA_LENGTH(buffer);
+      if (length > (std::numeric_limits<std::size_t>::max)() - total)
+        return 0;
+      total += length;
+    }
+  }
+  return total;
+}
+
+template <class Byte, class Visit>
+inline ntl::status enumerate_nbl_impl(
+    NET_BUFFER_LIST *chain, std::size_t offset, std::size_t length,
+    Visit visit, void *context) noexcept {
+  if (!chain || !visit)
+    return STATUS_INVALID_PARAMETER;
+  if (length == 0)
+    return ntl::status::ok();
+
+  std::size_t skip = offset;
+  std::size_t remaining = length;
+  for (NET_BUFFER_LIST *list = chain; list && remaining != 0;
+       list = NET_BUFFER_LIST_NEXT_NBL(list)) {
+    for (NET_BUFFER *buffer = NET_BUFFER_LIST_FIRST_NB(list);
+         buffer && remaining != 0;
+         buffer = NET_BUFFER_NEXT_NB(buffer)) {
+      const std::size_t buffer_length = NET_BUFFER_DATA_LENGTH(buffer);
+      if (skip >= buffer_length) {
+        skip -= buffer_length;
+        continue;
+      }
+
+      std::size_t buffer_skip = skip;
+      skip = 0;
+      std::size_t buffer_remaining = buffer_length;
+      MDL *mdl = NET_BUFFER_CURRENT_MDL(buffer);
+      std::size_t mdl_offset = NET_BUFFER_CURRENT_MDL_OFFSET(buffer);
+
+      while (mdl && buffer_remaining != 0 && remaining != 0) {
+        const std::size_t mdl_length = MmGetMdlByteCount(mdl);
+        if (mdl_offset > mdl_length)
+          return STATUS_DATA_ERROR;
+
+        const std::size_t segment_length =
+            (std::min)(mdl_length - mdl_offset, buffer_remaining);
+        if (buffer_skip >= segment_length) {
+          buffer_skip -= segment_length;
+          buffer_remaining -= segment_length;
+          mdl = mdl->Next;
+          mdl_offset = 0;
+          continue;
+        }
+
+        const std::size_t available = segment_length - buffer_skip;
+        const std::size_t take = (std::min)(available, remaining);
+        auto *mapped = static_cast<Byte *>(MmGetSystemAddressForMdlSafe(
+            mdl, static_cast<MM_PAGE_PRIORITY>(
+                     NormalPagePriority | MdlMappingNoExecute)));
+        if (!mapped)
+          return STATUS_INSUFFICIENT_RESOURCES;
+
+        if (!visit(context,
+                   std::span<Byte>(mapped + mdl_offset + buffer_skip,
+                                   take)))
+          return ntl::status::ok();
+
+        remaining -= take;
+        buffer_remaining -= segment_length;
+        buffer_skip = 0;
+        mdl = mdl->Next;
+        mdl_offset = 0;
+      }
+
+      if (buffer_remaining != 0 && remaining != 0)
+        return STATUS_DATA_ERROR;
+    }
+  }
+  return remaining == 0 ? ntl::status::ok()
+                        : ntl::status{STATUS_BUFFER_TOO_SMALL};
+}
+
+inline ntl::status enumerate_nbl_bytes(
+    const void *source, std::size_t base_offset, std::size_t offset,
+    std::size_t length, ntl::net::detail::scatter_visit visit,
+    void *context) noexcept {
+  if (offset >
+      (std::numeric_limits<std::size_t>::max)() - base_offset)
+    return STATUS_INTEGER_OVERFLOW;
+  return enumerate_nbl_impl<const std::byte>(
+      const_cast<NET_BUFFER_LIST *>(
+          static_cast<const NET_BUFFER_LIST *>(source)),
+      base_offset + offset, length, visit, context);
+}
+
+inline ntl::status enumerate_mutable_nbl_bytes(
+    void *source, std::size_t base_offset, std::size_t offset,
+    std::size_t length, ntl::net::detail::mutable_scatter_visit visit,
+    void *context) noexcept {
+  if (offset >
+      (std::numeric_limits<std::size_t>::max)() - base_offset)
+    return STATUS_INTEGER_OVERFLOW;
+  return enumerate_nbl_impl<std::byte>(
+      static_cast<NET_BUFFER_LIST *>(source), base_offset + offset,
+      length, visit, context);
+}
+
+inline ntl::net::scatter_view
+nbl_bytes(NET_BUFFER_LIST *chain, std::size_t base_offset = 0,
+          std::size_t length =
+              (std::numeric_limits<std::size_t>::max)()) noexcept {
+  const std::size_t total = nbl_byte_count(chain);
+  if (!chain || base_offset > total)
+    return {};
+  if (length == (std::numeric_limits<std::size_t>::max)())
+    length = total - base_offset;
+  if (!ntl::net::detail::valid_subrange(total, base_offset, length))
+    return {};
+  return ntl::net::scatter_view::from_source(
+      chain, base_offset, length, &enumerate_nbl_bytes);
+}
+
+inline ntl::net::mutable_scatter_view
+mutable_nbl_bytes(NET_BUFFER_LIST *chain,
+                  std::size_t base_offset = 0,
+                  std::size_t length =
+                      (std::numeric_limits<std::size_t>::max)()) noexcept {
+  const std::size_t total = nbl_byte_count(chain);
+  if (!chain || base_offset > total)
+    return {};
+  if (length == (std::numeric_limits<std::size_t>::max)())
+    length = total - base_offset;
+  if (!ntl::net::detail::valid_subrange(total, base_offset, length))
+    return {};
+  return ntl::net::mutable_scatter_view::from_source(
+      chain, base_offset, length, &enumerate_mutable_nbl_bytes);
+}
+
+} // namespace detail
+
+/**
+ * @brief Callback-scoped, non-owning packet observation.
+ */
+class borrowed_packet {
+public:
+  explicit operator bool() const noexcept { return packet_ != nullptr; }
+
+  /**
+   * @brief Returns an allocation-free view across every NB/MDL fragment.
+   */
+  ntl::net::scatter_view bytes() const noexcept {
+    return detail::nbl_bytes(packet_);
+  }
+
+  /**
+   * @brief Deep-copies bytes for work that outlives the classify callback.
+   */
+  ntl::result<ntl::net::owned_bytes>
+  try_copy(ntl::net::buffer_limits limits,
+           ULONG tag = ntl::pool_tag("pWlN")) const noexcept {
+    return ntl::net::owned_bytes::try_copy(bytes(), limits, tag);
+  }
+
+  /**
+   * @brief Observes the NBL without changing its WFP ownership.
+   *
+   * The pointer must not be retained beyond the classify callback. Use
+   * referenced_packet or cloned_packet when work will be deferred.
+   */
+  NET_BUFFER_LIST *native_handle() const noexcept { return packet_; }
+
+private:
+  template <class> friend class classify_event;
+  friend class referenced_packet;
+  friend class cloned_packet;
+  explicit borrowed_packet(void *packet) noexcept
+      : packet_(static_cast<NET_BUFFER_LIST *>(packet)) {}
+
+  NET_BUFFER_LIST *packet_ = nullptr;
+};
+
+/**
+ * @brief Move-only reference that keeps a WFP-provided NBL alive.
+ */
+class referenced_packet {
+public:
+  referenced_packet(const referenced_packet &) = delete;
+  referenced_packet &operator=(const referenced_packet &) = delete;
+
+  referenced_packet(referenced_packet &&other) noexcept
+      : packet_(std::exchange(other.packet_, nullptr)) {}
+
+  referenced_packet &operator=(referenced_packet &&other) noexcept {
+    if (this != &other) {
+      reset();
+      packet_ = std::exchange(other.packet_, nullptr);
+    }
+    return *this;
+  }
+
+  ~referenced_packet() { reset(); }
+
+  static ntl::result<referenced_packet>
+  try_acquire(borrowed_packet packet, bool intend_to_modify = false) noexcept {
+    if (!packet.packet_)
+      return ntl::unexpected(STATUS_NOT_FOUND);
+    FwpsReferenceNetBufferList0(packet.packet_,
+                                intend_to_modify ? TRUE : FALSE);
+    return ntl::ok(referenced_packet(packet.packet_));
+  }
+
+  NET_BUFFER_LIST *native_handle() const noexcept { return packet_; }
+  explicit operator bool() const noexcept { return packet_ != nullptr; }
+  ntl::net::scatter_view bytes() const noexcept {
+    return detail::nbl_bytes(packet_);
+  }
+
+  void reset() noexcept {
+    NET_BUFFER_LIST *packet = std::exchange(packet_, nullptr);
+    if (packet) {
+      const BOOLEAN dispatch_level =
+          KeGetCurrentIrql() == DISPATCH_LEVEL ? TRUE : FALSE;
+      FwpsDereferenceNetBufferList0(packet, dispatch_level);
+    }
+  }
+
+private:
+  explicit referenced_packet(NET_BUFFER_LIST *packet) noexcept
+      : packet_(packet) {}
+  NET_BUFFER_LIST *packet_ = nullptr;
+};
+
+/**
+ * @brief Move-only owner of an NBL clone allocated by WFP.
+ */
+class cloned_packet {
+public:
+  cloned_packet(const cloned_packet &) = delete;
+  cloned_packet &operator=(const cloned_packet &) = delete;
+
+  cloned_packet(cloned_packet &&other) noexcept
+      : packet_(std::exchange(other.packet_, nullptr)) {}
+
+  cloned_packet &operator=(cloned_packet &&other) noexcept {
+    if (this != &other) {
+      reset();
+      packet_ = std::exchange(other.packet_, nullptr);
+    }
+    return *this;
+  }
+
+  ~cloned_packet() { reset(); }
+
+  static ntl::result<cloned_packet>
+  try_create(borrowed_packet packet, ULONG flags = 0) noexcept {
+    if (!packet.packet_)
+      return ntl::unexpected(STATUS_NOT_FOUND);
+
+    NET_BUFFER_LIST *clone = nullptr;
+    const NTSTATUS result = FwpsAllocateCloneNetBufferList0(
+        packet.packet_, nullptr, nullptr, flags, &clone);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return ntl::ok(cloned_packet(clone));
+  }
+
+  NET_BUFFER_LIST *native_handle() const noexcept { return packet_; }
+  explicit operator bool() const noexcept { return packet_ != nullptr; }
+  ntl::net::scatter_view bytes() const noexcept {
+    return detail::nbl_bytes(packet_);
+  }
+  ntl::net::mutable_scatter_view edit_bytes() noexcept {
+    return detail::mutable_nbl_bytes(packet_);
+  }
+
+  /**
+   * @brief Rewrites every UDP destination port in an outbound transport NBL.
+   *
+   * The caller supplies a host-order port. The helper performs byte-order
+   * conversion and clears the IPv4 UDP checksum after modification. Header
+   * fields may cross MDL boundaries. It fails closed when a complete
+   * transport header is absent.
+   */
+  ntl::status
+  rewrite_udp_destination_port(std::uint16_t host_order_port) noexcept {
+    return rewrite_udp_port(host_order_port, false);
+  }
+
+  /**
+   * @brief Rewrites every UDP source port in a transport NBL.
+   */
+  ntl::status
+  rewrite_udp_source_port(std::uint16_t host_order_port) noexcept {
+    return rewrite_udp_port(host_order_port, true);
+  }
+
+  void reset() noexcept {
+    NET_BUFFER_LIST *packet = std::exchange(packet_, nullptr);
+    if (packet)
+      FwpsFreeCloneNetBufferList0(packet, 0);
+  }
+
+private:
+  ntl::status rewrite_udp_port(std::uint16_t host_order_port,
+                               bool source) noexcept {
+    if (!packet_ || host_order_port == 0)
+      return STATUS_INVALID_PARAMETER;
+
+    constexpr std::size_t udp_header_length = 8;
+    constexpr std::size_t source_offset = 0;
+    constexpr std::size_t destination_offset = 2;
+    constexpr std::size_t checksum_offset = 6;
+    std::size_t base_offset = 0;
+    for (NET_BUFFER_LIST *list = packet_; list;
+         list = NET_BUFFER_LIST_NEXT_NBL(list)) {
+      for (NET_BUFFER *buffer = NET_BUFFER_LIST_FIRST_NB(list); buffer;
+           buffer = NET_BUFFER_NEXT_NB(buffer)) {
+        const std::size_t buffer_length =
+            NET_BUFFER_DATA_LENGTH(buffer);
+        if (buffer_length < udp_header_length)
+          return STATUS_BUFFER_TOO_SMALL;
+
+        auto bytes = detail::mutable_nbl_bytes(
+            packet_, base_offset, buffer_length);
+        if (!bytes)
+          return STATUS_DATA_ERROR;
+        const ntl::status port_status = bytes.write_be16(
+            source ? source_offset : destination_offset,
+            host_order_port);
+        if (!port_status.is_ok())
+          return port_status;
+        const ntl::status checksum_status =
+            bytes.write_be16(checksum_offset, 0);
+        if (!checksum_status.is_ok())
+          return checksum_status;
+
+        if (buffer_length >
+            (std::numeric_limits<std::size_t>::max)() - base_offset)
+          return STATUS_INTEGER_OVERFLOW;
+        base_offset += buffer_length;
+      }
+    }
+    return ntl::status::ok();
+  }
+
+  explicit cloned_packet(NET_BUFFER_LIST *packet) noexcept : packet_(packet) {}
+  NET_BUFFER_LIST *packet_ = nullptr;
+};
+
+} // namespace ntl::wfp

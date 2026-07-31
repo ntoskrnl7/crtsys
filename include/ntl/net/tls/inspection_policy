@@ -1,0 +1,182 @@
+/**
+ * @file tls_inspection_policy
+ * @brief Explicit policy results for inspectable and opaque TLS connections.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include <cstdint>
+#include <string_view>
+
+namespace ntl::net::inspection {
+
+enum class encrypted_transport : std::uint8_t {
+  tcp_tls = 1,
+  quic = 2,
+};
+
+enum class application_protocol : std::uint8_t {
+  unknown = 0,
+  http1 = 1,
+  http2 = 2,
+  http3 = 3,
+  websocket = 4,
+  grpc = 5,
+  webtransport = 6,
+};
+
+enum class tls_inspection_issue : std::uint8_t {
+  none = 0,
+  no_usable_server_name = 1,
+  encrypted_client_hello = 2,
+  certificate_pinning_rejected = 3,
+  downstream_trust_unknown = 4,
+  client_identity_unavailable = 5,
+  unsupported_application_protocol = 6,
+  unsupported_content_encoding = 7,
+  quic_backend_unavailable = 8,
+};
+
+enum class tls_inspection_action : std::uint8_t {
+  inspect = 1,
+  bypass = 2,
+  block = 3,
+  metadata_only = 4,
+};
+
+struct tls_inspection_observation {
+  encrypted_transport transport = encrypted_transport::tcp_tls;
+  application_protocol protocol = application_protocol::unknown;
+  std::wstring_view server_name;
+  std::string_view negotiated_alpn;
+  std::string_view content_encoding;
+  // Set only after an ECH-aware frontend has confirmed that this is a real
+  // ECH offer. Merely observing extension type 0xfe0d is insufficient
+  // because GREASE ECH is intentionally indistinguishable on the wire.
+  bool encrypted_client_hello_confirmed = false;
+  // True only after a TLS frontend has authenticated and decrypted the
+  // inner ClientHello. Merely possessing a candidate ECH key is insufficient.
+  bool encrypted_client_hello_decrypted = false;
+  bool downstream_trust_known = true;
+  bool downstream_rejected_issued_certificate = false;
+  bool origin_requests_client_identity = false;
+  bool client_identity_available = false;
+  bool protocol_adapter_available = false;
+  bool content_decoder_available = true;
+  bool quic_backend_available = false;
+};
+
+struct tls_inspection_decision {
+  tls_inspection_action action =
+      tls_inspection_action::block;
+  tls_inspection_issue issue =
+      tls_inspection_issue::none;
+};
+
+struct tls_application_protocol_selection {
+  application_protocol protocol = application_protocol::unknown;
+  bool negotiated = false;
+  bool valid_for_transport = false;
+};
+
+/**
+ * @brief Maps ALPN to exactly one parser family without guessing.
+ *
+ * An empty ALPN may use HTTP/1.1 fallback only on TCP when the caller
+ * explicitly permits it. HTTP/3 is valid only over QUIC; WebSocket starts as
+ * HTTP/1.1 and is selected later by a validated Upgrade exchange.
+ */
+inline constexpr tls_application_protocol_selection
+select_tls_application_protocol(
+    encrypted_transport transport, std::string_view alpn,
+    bool permit_http1_without_alpn = false) noexcept {
+  if (transport == encrypted_transport::tcp_tls) {
+    if (alpn == "h2")
+      return {application_protocol::http2, true, true};
+    if (alpn == "http/1.1")
+      return {application_protocol::http1, true, true};
+    if (alpn.empty() && permit_http1_without_alpn)
+      return {application_protocol::http1, false, true};
+    return {};
+  }
+
+  if (alpn == "h3" ||
+      (alpn.size() > 3 && alpn.substr(0, 3) == "h3-"))
+    return {application_protocol::http3, true, true};
+  return {};
+}
+
+struct tls_inspection_policy_options {
+  tls_inspection_action no_server_name =
+      tls_inspection_action::block;
+  tls_inspection_action encrypted_client_hello =
+      tls_inspection_action::block;
+  tls_inspection_action certificate_pinning =
+      tls_inspection_action::block;
+  tls_inspection_action unknown_downstream_trust =
+      tls_inspection_action::block;
+  tls_inspection_action missing_client_identity =
+      tls_inspection_action::block;
+  tls_inspection_action unsupported_protocol =
+      tls_inspection_action::block;
+  tls_inspection_action unsupported_content_encoding =
+      tls_inspection_action::block;
+  tls_inspection_action unavailable_quic_backend =
+      tls_inspection_action::block;
+};
+
+/**
+ * @brief A deterministic policy that never equates "not inspectable" with
+ * permit.
+ *
+ * Every exceptional TLS condition has its own configured outcome. The caller
+ * remains responsible for implementing bypass as an unchanged ciphertext
+ * tunnel and block as a connection-level termination.
+ */
+class explicit_tls_inspection_policy {
+public:
+  explicit constexpr explicit_tls_inspection_policy(
+      tls_inspection_policy_options options = {}) noexcept
+      : options_(options) {}
+
+  constexpr tls_inspection_decision
+  decide(const tls_inspection_observation &value) const noexcept {
+    if (value.transport == encrypted_transport::quic &&
+        !value.quic_backend_available)
+      return {options_.unavailable_quic_backend,
+              tls_inspection_issue::quic_backend_unavailable};
+    if (value.encrypted_client_hello_confirmed &&
+        !value.encrypted_client_hello_decrypted)
+      return {options_.encrypted_client_hello,
+              tls_inspection_issue::encrypted_client_hello};
+    if (value.server_name.empty())
+      return {options_.no_server_name,
+              tls_inspection_issue::no_usable_server_name};
+    if (!value.downstream_trust_known)
+      return {options_.unknown_downstream_trust,
+              tls_inspection_issue::downstream_trust_unknown};
+    if (value.downstream_rejected_issued_certificate)
+      return {options_.certificate_pinning,
+              tls_inspection_issue::certificate_pinning_rejected};
+    if (value.origin_requests_client_identity &&
+        !value.client_identity_available)
+      return {options_.missing_client_identity,
+              tls_inspection_issue::client_identity_unavailable};
+    if (!value.protocol_adapter_available)
+      return {options_.unsupported_protocol,
+              tls_inspection_issue::
+                  unsupported_application_protocol};
+    if (!value.content_decoder_available)
+      return {options_.unsupported_content_encoding,
+              tls_inspection_issue::
+                  unsupported_content_encoding};
+    return {tls_inspection_action::inspect,
+            tls_inspection_issue::none};
+  }
+
+private:
+  tls_inspection_policy_options options_{};
+};
+
+} // namespace ntl::net::inspection

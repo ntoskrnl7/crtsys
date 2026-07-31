@@ -41,10 +41,10 @@ The app proves all of the following in a loaded minifilter:
 5. The same x64 driver passes with x64 and x86 apps, unloads, and leaves no
    mapped test tree behind.
 
-The fixture deliberately does not claim general namespace virtualization.
-Directory enumeration, notification, name-provider callbacks, query
-information, and FSCTL result rewriting belong to the broader NameChanger
-surface.
+The fixture covers this bounded SimRep namespace transformation. General
+namespace virtualization uses the broader NameChanger surface for directory
+enumeration, notification, name-provider callbacks, query information, and
+FSCTL result rewriting.
 
 ## Build
 
@@ -59,9 +59,16 @@ cmake --build test\flt\runtime\build_x86_v145 --config Debug `
   --target crtsys_flt_simrep_runtime_test_app
 ```
 
-Run only through the disposable-VM command in
-`D:\projects\crtsys-vm-test\COMMANDS.md`; never load the test driver on the
-host. A passing app reports counters similar to:
+Stage the driver package and application using the
+[disposable VM workflow](README.md#disposable-vm-execution). Run the application
+against an explicit disposable volume root:
+
+```powershell
+$testVolumeRoot = Read-Host 'Disposable test volume root'
+.\crtsys_flt_simrep_runtime_test_app.exe $testVolumeRoot
+```
+
+A passing app reports counters similar to:
 
 ```text
 reparses=5 network_disallowed=1 destination_queries=2

@@ -1,0 +1,245 @@
+/**
+ * @file tls_product_backend
+ * @brief Managed TLS interception identities, ECH handoff, mTLS, and audit.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/tls/product_backend is a user-mode header"
+#endif
+
+#include <ntl/net/tls/certificate>
+#include <ntl/net/tls/inspection_frontend>
+#include <ntl/result>
+
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <deque>
+#include <memory>
+#include <mutex>
+#include <new>
+#include <span>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+namespace ntl::net::inspection {
+
+enum class tls_audit_kind : std::uint8_t {
+  downstream_identity_selected = 1,
+  ech_channel_selected = 2,
+  blocked_confirmed_ech = 3,
+  blocked_pinned_downstream = 4,
+  blocked_unknown_downstream = 5,
+  origin_client_identity_selected = 6,
+  origin_client_identity_missing = 7,
+  provider_failure = 8,
+};
+
+struct tls_audit_event {
+  tls_audit_kind kind = tls_audit_kind::provider_failure;
+  std::chrono::system_clock::time_point timestamp{};
+  std::wstring server_name;
+  NTSTATUS status = STATUS_SUCCESS;
+};
+
+class tls_audit_sink {
+public:
+  virtual ~tls_audit_sink() = default;
+  virtual void record(tls_audit_event event) noexcept = 0;
+};
+
+class null_tls_audit_sink final : public tls_audit_sink {
+public:
+  void record(tls_audit_event) noexcept override {}
+};
+
+/** Thread-safe bounded audit collector; oldest events are discarded first. */
+class bounded_tls_audit_sink final : public tls_audit_sink {
+public:
+  explicit bounded_tls_audit_sink(std::size_t capacity)
+      : capacity_(capacity) {
+    if (capacity_ == 0)
+      throw std::invalid_argument("TLS audit capacity must be positive");
+  }
+
+  void record(tls_audit_event event) noexcept override {
+    try {
+      std::lock_guard guard(lock_);
+      if (events_.size() == capacity_) {
+        events_.pop_front();
+        ++discarded_;
+      }
+      events_.push_back(std::move(event));
+    } catch (...) {
+      std::lock_guard guard(lock_);
+      ++discarded_;
+    }
+  }
+
+  std::vector<tls_audit_event> snapshot() const {
+    std::lock_guard guard(lock_);
+    return {events_.begin(), events_.end()};
+  }
+
+  std::uint64_t discarded() const noexcept {
+    std::lock_guard guard(lock_);
+    return discarded_;
+  }
+
+private:
+  std::size_t capacity_ = 0;
+  mutable std::mutex lock_;
+  std::deque<tls_audit_event> events_;
+  std::uint64_t discarded_ = 0;
+};
+
+enum class frontend_transport_kind : std::uint8_t {
+  schannel = 1,
+  ech_frontend_channel = 2,
+};
+
+struct managed_frontend_selection {
+  frontend_transport_kind transport = frontend_transport_kind::schannel;
+  std::wstring server_name;
+  std::vector<std::string> application_protocols;
+  std::shared_ptr<ntl::net::tls_server_identity> identity;
+  std::shared_ptr<ech_plaintext_channel> ech_channel;
+};
+
+/**
+ * @brief Product entry point for substitute identity or ECH-owned channel.
+ *
+ * A known pinned application/host is always rejected. Unknown trust is also
+ * rejected: callers that want an unchanged tunnel make that policy decision
+ * before invoking this interception backend.
+ */
+class managed_tls_frontend {
+public:
+  managed_tls_frontend(
+      ntl::net::cached_tls_server_identity_provider &identities,
+      ech_frontend_provider &ech,
+      downstream_trust_provider &trust,
+      tls_audit_sink &audit) noexcept
+      : identities_(&identities), ech_(&ech), trust_(&trust), audit_(&audit) {}
+
+  ntl::result<managed_frontend_selection>
+  select(const ntl::net::tls_client_hello &outer,
+         std::span<const std::byte> application_id) noexcept {
+    tls_inspection_observation observation;
+    observation.transport = encrypted_transport::tcp_tls;
+    observation.server_name = outer.server_name();
+    try {
+      const auto inspected = ech_->inspect(outer);
+      if (!inspected) {
+        audit(tls_audit_kind::provider_failure, observation.server_name,
+              static_cast<NTSTATUS>(inspected.status()));
+        return ntl::unexpected(inspected.status());
+      }
+      const auto applied = apply_ech_result(observation, *inspected);
+      if (!applied.is_ok()) {
+        audit(tls_audit_kind::provider_failure, observation.server_name,
+              static_cast<NTSTATUS>(applied));
+        return ntl::unexpected(static_cast<NTSTATUS>(applied));
+      }
+      if (inspected->state == ech_offer_state::confirmed) {
+        audit(tls_audit_kind::blocked_confirmed_ech,
+              observation.server_name, STATUS_ACCESS_DENIED);
+        return ntl::unexpected(STATUS_ACCESS_DENIED);
+      }
+      if (observation.server_name.empty())
+        return ntl::unexpected(STATUS_NOT_FOUND);
+
+      const auto trust = trust_->classify(
+          {application_id, observation.server_name});
+      if (trust != downstream_trust_state::inspectable) {
+        const auto kind = trust == downstream_trust_state::pinned
+                              ? tls_audit_kind::blocked_pinned_downstream
+                              : tls_audit_kind::blocked_unknown_downstream;
+        audit(kind, observation.server_name, STATUS_ACCESS_DENIED);
+        return ntl::unexpected(STATUS_ACCESS_DENIED);
+      }
+
+      managed_frontend_selection result;
+      result.server_name = observation.server_name;
+      if (inspected->state == ech_offer_state::decrypted) {
+        result.transport = frontend_transport_kind::ech_frontend_channel;
+        result.application_protocols =
+            inspected->inner_application_protocols;
+        result.ech_channel = inspected->channel;
+        audit(tls_audit_kind::ech_channel_selected, result.server_name,
+              STATUS_SUCCESS);
+      } else {
+        result.transport = frontend_transport_kind::schannel;
+        result.application_protocols = outer.application_protocols();
+        result.identity = identities_->select(result.server_name);
+        if (!result.identity) {
+          audit(tls_audit_kind::provider_failure, result.server_name,
+                STATUS_NOT_FOUND);
+          return ntl::unexpected(STATUS_NOT_FOUND);
+        }
+        audit(tls_audit_kind::downstream_identity_selected,
+              result.server_name, STATUS_SUCCESS);
+      }
+      return ntl::ok(std::move(result));
+    } catch (const std::bad_alloc &) {
+      audit(tls_audit_kind::provider_failure, observation.server_name,
+            STATUS_INSUFFICIENT_RESOURCES);
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      audit(tls_audit_kind::provider_failure, observation.server_name,
+            STATUS_UNHANDLED_EXCEPTION);
+      return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+private:
+  void audit(tls_audit_kind kind, std::wstring_view server_name,
+             NTSTATUS status) noexcept {
+    try {
+      audit_->record({kind, std::chrono::system_clock::now(),
+                      std::wstring(server_name), status});
+    } catch (...) {
+    }
+  }
+
+  ntl::net::cached_tls_server_identity_provider *identities_ = nullptr;
+  ech_frontend_provider *ech_ = nullptr;
+  downstream_trust_provider *trust_ = nullptr;
+  tls_audit_sink *audit_ = nullptr;
+};
+
+/** Adds deterministic audit behavior to any origin mTLS identity provider. */
+class audited_origin_client_identity_provider final
+    : public origin_client_identity_provider {
+public:
+  audited_origin_client_identity_provider(
+      origin_client_identity_provider &inner,
+      tls_audit_sink &audit) noexcept
+      : inner_(&inner), audit_(&audit) {}
+
+  ntl::result<selected_client_identity>
+  select(const origin_client_identity_request &request) noexcept override {
+    auto result = inner_->select(request);
+    const NTSTATUS status = result ? STATUS_SUCCESS
+                                   : static_cast<NTSTATUS>(result.status());
+    const auto kind = result && static_cast<bool>(*result)
+                          ? tls_audit_kind::origin_client_identity_selected
+                          : result ? tls_audit_kind::origin_client_identity_missing
+                                   : tls_audit_kind::provider_failure;
+    try {
+      audit_->record({kind, std::chrono::system_clock::now(),
+                      std::wstring(request.server_name), status});
+    } catch (...) {
+    }
+    return result;
+  }
+
+private:
+  origin_client_identity_provider *inner_ = nullptr;
+  tls_audit_sink *audit_ = nullptr;
+};
+
+} // namespace ntl::net::inspection

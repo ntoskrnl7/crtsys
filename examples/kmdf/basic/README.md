@@ -1,5 +1,7 @@
 # NTL KMDF Driver Sample
 
+[한국어 설명](./README.ko-KR.md)
+
 This sample demonstrates an NTL-style KMDF driver using the MSVC STL through
 `crtsys`. KMDF continues to own the WDF driver, device, queue, request, PnP,
 power, and object-lifetime model. `crtsys` supplies the kernel-compatible CRT

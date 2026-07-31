@@ -1,0 +1,859 @@
+/**
+ * @file async_transform
+ * @brief Bounded coroutine HTTP policy execution with cancellation and timeout.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/http/async_transform is a user-mode header"
+#endif
+
+#include <ntl/net/http/transform>
+
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <coroutine>
+#include <cstddef>
+#include <cstdint>
+#include <deque>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <stop_token>
+#include <thread>
+#include <type_traits>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+
+namespace ntl::net::http {
+
+struct async_transform_options {
+  std::size_t maximum_concurrency = 4;
+  std::size_t maximum_queue_depth = 256;
+  std::chrono::milliseconds timeout{5'000};
+  transform_failure_policy on_cancel = transform_failure_policy::block;
+  transform_failure_policy on_timeout = transform_failure_policy::block;
+  transform_failure_policy on_overload = transform_failure_policy::block;
+};
+
+class async_policy_context {
+public:
+  async_policy_context(
+      std::stop_token cancellation,
+      std::chrono::steady_clock::time_point deadline) noexcept
+      : cancellation_(cancellation), deadline_(deadline) {}
+
+  std::stop_token cancellation() const noexcept { return cancellation_; }
+  bool cancellation_requested() const noexcept {
+    return cancellation_.stop_requested();
+  }
+  std::chrono::steady_clock::time_point deadline() const noexcept {
+    return deadline_;
+  }
+  std::chrono::milliseconds remaining() const noexcept {
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= deadline_)
+      return std::chrono::milliseconds::zero();
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        deadline_ - now);
+  }
+
+private:
+  std::stop_token cancellation_;
+  std::chrono::steady_clock::time_point deadline_{};
+};
+
+struct async_transform_statistics {
+  std::uint64_t submitted = 0;
+  std::uint64_t completed = 0;
+  std::uint64_t cancelled = 0;
+  std::uint64_t timed_out = 0;
+  std::uint64_t overloaded = 0;
+  std::size_t queued = 0;
+  std::size_t running = 0;
+};
+
+namespace async_transform_detail {
+
+enum class completion_reason : std::uint8_t {
+  normal,
+  cancelled,
+  timed_out,
+  overloaded,
+  stopping,
+};
+
+class operation_base : public std::enable_shared_from_this<operation_base> {
+public:
+  enum class phase : std::uint8_t { submitting, suspended, completed };
+
+  explicit operation_base(
+      std::chrono::steady_clock::time_point deadline) noexcept
+      : deadline_(deadline) {}
+  virtual ~operation_base() = default;
+
+  operation_base(const operation_base &) = delete;
+  operation_base &operator=(const operation_base &) = delete;
+
+  virtual void execute(async_policy_context context) noexcept = 0;
+  virtual void fail(completion_reason reason, NTSTATUS status) noexcept = 0;
+
+  bool completed() const noexcept {
+    return phase_.load(std::memory_order_acquire) == phase::completed;
+  }
+  std::chrono::steady_clock::time_point deadline() const noexcept {
+    return deadline_;
+  }
+  std::stop_token token() const noexcept { return cancellation_.get_token(); }
+  void request_stop() noexcept { (void)cancellation_.request_stop(); }
+
+  void set_continuation(std::coroutine_handle<> continuation) noexcept {
+    continuation_ = continuation;
+  }
+
+  bool mark_suspended() noexcept {
+    phase expected = phase::submitting;
+    return phase_.compare_exchange_strong(
+        expected, phase::suspended,
+        std::memory_order_acq_rel, std::memory_order_acquire);
+  }
+
+protected:
+  bool complete_once(std::coroutine_handle<> &continuation) noexcept {
+    const phase previous =
+        phase_.exchange(phase::completed, std::memory_order_acq_rel);
+    if (previous == phase::completed)
+      return false;
+    if (previous == phase::suspended)
+      continuation = continuation_;
+    return true;
+  }
+
+private:
+  std::chrono::steady_clock::time_point deadline_{};
+  std::stop_source cancellation_;
+  std::atomic<phase> phase_{phase::submitting};
+  std::coroutine_handle<> continuation_{};
+};
+
+class executor {
+public:
+  explicit executor(async_transform_options options)
+      : options_(options) {
+    if (options_.maximum_concurrency == 0 ||
+        options_.maximum_queue_depth == 0 ||
+        options_.timeout <= std::chrono::milliseconds::zero())
+      throw std::invalid_argument("async HTTP transform options are invalid");
+    workers_.reserve(options_.maximum_concurrency);
+    for (std::size_t index = 0; index != options_.maximum_concurrency; ++index)
+      workers_.emplace_back([this](std::stop_token stop) { worker(stop); });
+    timer_ = std::jthread([this](std::stop_token stop) { monitor(stop); });
+  }
+
+  executor(const executor &) = delete;
+  executor &operator=(const executor &) = delete;
+
+  ~executor() {
+    std::vector<std::shared_ptr<operation_base>> pending;
+    {
+      std::lock_guard guard(lock_);
+      stopping_ = true;
+      pending.assign(operations_.begin(), operations_.end());
+      queue_.clear();
+    }
+    for (const auto &operation : pending) {
+      operation->fail(completion_reason::stopping, STATUS_CANCELLED);
+      operation->request_stop();
+    }
+    for (auto &worker : workers_)
+      worker.request_stop();
+    timer_.request_stop();
+    ready_.notify_all();
+    timer_wakeup_.notify_all();
+  }
+
+  bool submit(const std::shared_ptr<operation_base> &operation) noexcept {
+    {
+      std::lock_guard guard(lock_);
+      if (stopping_ || queue_.size() >= options_.maximum_queue_depth) {
+        ++overloaded_;
+        return false;
+      }
+      ++submitted_;
+      operations_.insert(operation);
+      queue_.push_back(operation);
+    }
+    ready_.notify_one();
+    timer_wakeup_.notify_one();
+    return true;
+  }
+
+  void retired(operation_base *operation,
+               completion_reason reason) noexcept {
+    std::lock_guard guard(lock_);
+    for (auto iterator = operations_.begin();
+         iterator != operations_.end(); ++iterator) {
+      if (iterator->get() == operation) {
+        operations_.erase(iterator);
+        break;
+      }
+    }
+    const auto queued = std::find_if(
+        queue_.begin(), queue_.end(), [operation](const auto &candidate) {
+          return candidate.get() == operation;
+        });
+    if (queued != queue_.end())
+      queue_.erase(queued);
+    if (running_operations_.erase(operation) != 0 && running_ != 0)
+      --running_;
+    ++completed_;
+    if (reason == completion_reason::cancelled)
+      ++cancelled_;
+    else if (reason == completion_reason::timed_out)
+      ++timed_out_;
+  }
+
+  async_transform_statistics statistics() const noexcept {
+    std::lock_guard guard(lock_);
+    return {submitted_, completed_, cancelled_, timed_out_, overloaded_,
+            queue_.size(), running_};
+  }
+
+private:
+  void worker(std::stop_token stop) noexcept {
+    while (!stop.stop_requested()) {
+      std::shared_ptr<operation_base> operation;
+      bool execute = false;
+      {
+        std::unique_lock guard(lock_);
+        ready_.wait(guard, [&] {
+          return stopping_ || stop.stop_requested() || !queue_.empty();
+        });
+        if (stopping_ || stop.stop_requested())
+          return;
+        operation = std::move(queue_.front());
+        queue_.pop_front();
+        if (!operation->completed()) {
+          running_operations_.insert(operation.get());
+          ++running_;
+          execute = true;
+        }
+      }
+
+      if (execute) {
+        if (std::chrono::steady_clock::now() >= operation->deadline()) {
+          operation->fail(completion_reason::timed_out, STATUS_IO_TIMEOUT);
+          operation->request_stop();
+        } else {
+          operation->execute(
+              async_policy_context(operation->token(), operation->deadline()));
+        }
+      }
+    }
+  }
+
+  void monitor(std::stop_token stop) noexcept {
+    while (!stop.stop_requested()) {
+      std::vector<std::shared_ptr<operation_base>> expired;
+      auto wake = std::chrono::steady_clock::now() +
+                  std::chrono::milliseconds(100);
+      {
+        std::unique_lock guard(lock_);
+        if (operations_.empty()) {
+          timer_wakeup_.wait_for(guard, std::chrono::milliseconds(100));
+        } else {
+          for (const auto &operation : operations_)
+            wake = (std::min)(wake, operation->deadline());
+          timer_wakeup_.wait_until(guard, wake);
+        }
+        if (stopping_ || stop.stop_requested())
+          return;
+        const auto now = std::chrono::steady_clock::now();
+        for (const auto &operation : operations_) {
+          if (!operation->completed() && now >= operation->deadline())
+            expired.push_back(operation);
+        }
+      }
+      for (const auto &operation : expired) {
+        operation->fail(completion_reason::timed_out, STATUS_IO_TIMEOUT);
+        operation->request_stop();
+      }
+    }
+  }
+
+  async_transform_options options_{};
+  mutable std::mutex lock_;
+  std::condition_variable ready_;
+  std::condition_variable timer_wakeup_;
+  std::deque<std::shared_ptr<operation_base>> queue_;
+  std::unordered_set<std::shared_ptr<operation_base>> operations_;
+  std::unordered_set<operation_base *> running_operations_;
+  std::vector<std::jthread> workers_;
+  std::jthread timer_;
+  std::uint64_t submitted_ = 0;
+  std::uint64_t completed_ = 0;
+  std::uint64_t cancelled_ = 0;
+  std::uint64_t timed_out_ = 0;
+  std::uint64_t overloaded_ = 0;
+  std::size_t running_ = 0;
+  bool stopping_ = false;
+};
+
+inline pipeline_outcome failure_outcome(
+    transform_failure_policy policy, NTSTATUS status) noexcept {
+  return {policy == transform_failure_policy::forward_original
+              ? rewrite_action::forward
+              : rewrite_action::block,
+          false, false, transformed_body_coding::preserve,
+          std::nullopt, status};
+}
+
+} // namespace async_transform_detail
+
+class async_transform_pipeline;
+
+class async_request_rule_selector {
+public:
+  using predicate = std::function<bool(const request_message &)>;
+  async_request_rule_selector when(predicate condition) const;
+
+  template <class Function>
+  async_request_rule_selector &transform(Function &&function);
+  template <class Function>
+  async_request_rule_selector &decide(Function &&function);
+
+private:
+  friend class async_transform_pipeline;
+  async_request_rule_selector(async_transform_pipeline &pipeline,
+                              predicate condition)
+      : pipeline_(&pipeline), condition_(std::move(condition)) {}
+  async_transform_pipeline *pipeline_ = nullptr;
+  predicate condition_;
+};
+
+class async_response_rule_selector {
+public:
+  using predicate = std::function<bool(const request_message &,
+                                       const response_message &)>;
+  async_response_rule_selector when(predicate condition) const;
+  async_response_rule_selector html() const;
+
+  template <class Function>
+  async_response_rule_selector &transform(Function &&function);
+  template <class Function>
+  async_response_rule_selector &decide(Function &&function);
+
+private:
+  friend class async_transform_pipeline;
+  async_response_rule_selector(async_transform_pipeline &pipeline,
+                               predicate condition)
+      : pipeline_(&pipeline), condition_(std::move(condition)) {}
+  async_transform_pipeline *pipeline_ = nullptr;
+  predicate condition_;
+};
+
+class async_transform_pipeline {
+public:
+  explicit async_transform_pipeline(
+      transform_limits limits = {}, async_transform_options options = {})
+      : limits_(limits), options_(options), executor_(options) {
+    transform_pipeline validation(limits_);
+    (void)validation;
+  }
+
+  async_transform_pipeline(const async_transform_pipeline &) = delete;
+  async_transform_pipeline &operator=(const async_transform_pipeline &) = delete;
+
+  async_request_rule_selector requests() {
+    ensure_configurable();
+    return async_request_rule_selector(*this, [](const request_message &) {
+      return true;
+    });
+  }
+  async_response_rule_selector responses() {
+    ensure_configurable();
+    return async_response_rule_selector(
+        *this, [](const request_message &, const response_message &) {
+          return true;
+        });
+  }
+
+  async_transform_statistics statistics() const noexcept {
+    return executor_.statistics();
+  }
+
+private:
+  friend class async_request_rule_selector;
+  friend class async_response_rule_selector;
+
+  struct request_rule {
+    async_request_rule_selector::predicate condition;
+    std::function<rewrite_result(request_message &,
+                                 const async_policy_context &)> apply;
+  };
+  struct response_rule {
+    async_response_rule_selector::predicate condition;
+    std::function<rewrite_result(const request_message &, response_message &,
+                                 const async_policy_context &)> apply;
+  };
+
+  template <class Message> class operation;
+
+public:
+  class request_awaitable;
+  class response_awaitable;
+
+  request_awaitable apply(request_message &message,
+                          std::stop_token cancellation = {});
+  response_awaitable apply(const request_message &request,
+                           response_message &message,
+                           std::stop_token cancellation = {});
+
+private:
+  void ensure_configurable() const {
+    if (started_.load(std::memory_order_acquire))
+      throw std::logic_error(
+          "async HTTP transform rules cannot change after apply");
+  }
+
+  pipeline_outcome run(request_message &message,
+                       const async_policy_context &context) const noexcept {
+    try {
+      transform_pipeline pipeline(limits_);
+      for (const auto &rule : request_rules_) {
+        pipeline.requests().when(rule.condition).transform(
+            [&rule, &context](request_message &value) {
+              return rule.apply(value, context);
+            });
+      }
+      return pipeline.apply(message);
+    } catch (const std::bad_alloc &) {
+      return async_transform_detail::failure_outcome(
+          limits_.on_failure, STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return async_transform_detail::failure_outcome(
+          limits_.on_failure, STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+  pipeline_outcome run(const request_message &request,
+                       response_message &message,
+                       const async_policy_context &context) const noexcept {
+    try {
+      transform_pipeline pipeline(limits_);
+      for (const auto &rule : response_rules_) {
+        pipeline.responses().when(rule.condition).transform(
+            [&rule, &context](const request_message &value_request,
+                              response_message &value) {
+              return rule.apply(value_request, value, context);
+            });
+      }
+      return pipeline.apply(request, message);
+    } catch (const std::bad_alloc &) {
+      return async_transform_detail::failure_outcome(
+          limits_.on_failure, STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return async_transform_detail::failure_outcome(
+          limits_.on_failure, STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+  transform_limits limits_{};
+  async_transform_options options_{};
+  std::vector<request_rule> request_rules_;
+  std::vector<response_rule> response_rules_;
+  std::atomic_bool started_{false};
+  // Destroy the executor first so every callback has stopped before the
+  // immutable rules and limits it reads are released.
+  async_transform_detail::executor executor_;
+};
+
+template <> class async_transform_pipeline::operation<request_message> final
+    : public async_transform_detail::operation_base {
+public:
+  operation(async_transform_pipeline &owner, request_message value,
+            request_message &destination, std::stop_token external)
+      : operation_base(std::chrono::steady_clock::now() +
+                       owner.options_.timeout),
+        owner_(&owner), value_(std::move(value)), destination_(&destination),
+        external_(external) {}
+
+  void arm_external_cancellation() {
+    if (external_.stop_possible()) {
+      std::weak_ptr<operation> weak =
+          std::static_pointer_cast<operation>(shared_from_this());
+      external_callback_.emplace(
+          external_, std::function<void()>([weak] {
+            if (const auto current = weak.lock()) {
+              current->fail(async_transform_detail::completion_reason::cancelled,
+                            STATUS_CANCELLED);
+              current->request_stop();
+            }
+          }));
+    }
+  }
+
+  bool submit() noexcept { return owner_->executor_.submit(shared_from_this()); }
+
+  void execute(async_policy_context context) noexcept override {
+    {
+      std::lock_guard guard(completion_lock_);
+      if (completed())
+        return;
+      running_callback_ = true;
+    }
+    auto outcome = owner_->run(value_, context);
+    auto reason = async_transform_detail::completion_reason::normal;
+    {
+      std::lock_guard guard(completion_lock_);
+      running_callback_ = false;
+      if (completed())
+        return;
+      if (pending_failure_) {
+        reason = pending_failure_->first;
+        outcome = failure(pending_failure_->first,
+                          pending_failure_->second);
+      }
+    }
+    complete(std::move(outcome), reason);
+  }
+  void fail(async_transform_detail::completion_reason reason,
+            NTSTATUS status) noexcept override {
+    {
+      std::lock_guard guard(completion_lock_);
+      if (completed())
+        return;
+      if (running_callback_) {
+        pending_failure_ = std::pair{reason, status};
+        return;
+      }
+    }
+    complete(failure(reason, status), reason);
+  }
+  pipeline_outcome take() {
+    std::lock_guard guard(completion_lock_);
+    if (outcome_.failure == STATUS_SUCCESS || outcome_.modified())
+      *destination_ = std::move(value_);
+    return std::move(outcome_);
+  }
+
+private:
+  pipeline_outcome failure(
+      async_transform_detail::completion_reason reason,
+      NTSTATUS status) const noexcept {
+    transform_failure_policy policy = owner_->limits_.on_failure;
+    if (reason == async_transform_detail::completion_reason::cancelled ||
+        reason == async_transform_detail::completion_reason::stopping)
+      policy = owner_->options_.on_cancel;
+    else if (reason == async_transform_detail::completion_reason::timed_out)
+      policy = owner_->options_.on_timeout;
+    else if (reason == async_transform_detail::completion_reason::overloaded)
+      policy = owner_->options_.on_overload;
+    return async_transform_detail::failure_outcome(policy, status);
+  }
+
+  void complete(pipeline_outcome outcome,
+                async_transform_detail::completion_reason reason) noexcept {
+    std::coroutine_handle<> continuation;
+    {
+      std::lock_guard guard(completion_lock_);
+      if (completed())
+        return;
+      outcome_ = std::move(outcome);
+      if (!complete_once(continuation))
+        return;
+    }
+    owner_->executor_.retired(this, reason);
+    if (continuation)
+      continuation.resume();
+  }
+  async_transform_pipeline *owner_ = nullptr;
+  request_message value_;
+  request_message *destination_ = nullptr;
+  std::stop_token external_;
+  std::optional<std::stop_callback<std::function<void()>>> external_callback_;
+  std::mutex completion_lock_;
+  std::optional<std::pair<async_transform_detail::completion_reason,
+                          NTSTATUS>> pending_failure_;
+  bool running_callback_ = false;
+  pipeline_outcome outcome_{};
+};
+
+template <> class async_transform_pipeline::operation<response_message> final
+    : public async_transform_detail::operation_base {
+public:
+  operation(async_transform_pipeline &owner, request_message request,
+            response_message value, response_message &destination,
+            std::stop_token external)
+      : operation_base(std::chrono::steady_clock::now() +
+                       owner.options_.timeout),
+        owner_(&owner), request_(std::move(request)), value_(std::move(value)),
+        destination_(&destination), external_(external) {}
+
+  void arm_external_cancellation() {
+    if (external_.stop_possible()) {
+      std::weak_ptr<operation> weak =
+          std::static_pointer_cast<operation>(shared_from_this());
+      external_callback_.emplace(
+          external_, std::function<void()>([weak] {
+            if (const auto current = weak.lock()) {
+              current->fail(async_transform_detail::completion_reason::cancelled,
+                            STATUS_CANCELLED);
+              current->request_stop();
+            }
+          }));
+    }
+  }
+
+  bool submit() noexcept { return owner_->executor_.submit(shared_from_this()); }
+
+  void execute(async_policy_context context) noexcept override {
+    {
+      std::lock_guard guard(completion_lock_);
+      if (completed())
+        return;
+      running_callback_ = true;
+    }
+    auto outcome = owner_->run(request_, value_, context);
+    auto reason = async_transform_detail::completion_reason::normal;
+    {
+      std::lock_guard guard(completion_lock_);
+      running_callback_ = false;
+      if (completed())
+        return;
+      if (pending_failure_) {
+        reason = pending_failure_->first;
+        outcome = failure(pending_failure_->first,
+                          pending_failure_->second);
+      }
+    }
+    complete(std::move(outcome), reason);
+  }
+  void fail(async_transform_detail::completion_reason reason,
+            NTSTATUS status) noexcept override {
+    {
+      std::lock_guard guard(completion_lock_);
+      if (completed())
+        return;
+      if (running_callback_) {
+        pending_failure_ = std::pair{reason, status};
+        return;
+      }
+    }
+    complete(failure(reason, status), reason);
+  }
+  pipeline_outcome take() {
+    std::lock_guard guard(completion_lock_);
+    if (outcome_.failure == STATUS_SUCCESS || outcome_.modified())
+      *destination_ = std::move(value_);
+    return std::move(outcome_);
+  }
+
+private:
+  pipeline_outcome failure(
+      async_transform_detail::completion_reason reason,
+      NTSTATUS status) const noexcept {
+    transform_failure_policy policy = owner_->limits_.on_failure;
+    if (reason == async_transform_detail::completion_reason::cancelled ||
+        reason == async_transform_detail::completion_reason::stopping)
+      policy = owner_->options_.on_cancel;
+    else if (reason == async_transform_detail::completion_reason::timed_out)
+      policy = owner_->options_.on_timeout;
+    else if (reason == async_transform_detail::completion_reason::overloaded)
+      policy = owner_->options_.on_overload;
+    return async_transform_detail::failure_outcome(policy, status);
+  }
+
+  void complete(pipeline_outcome outcome,
+                async_transform_detail::completion_reason reason) noexcept {
+    std::coroutine_handle<> continuation;
+    {
+      std::lock_guard guard(completion_lock_);
+      if (completed())
+        return;
+      outcome_ = std::move(outcome);
+      if (!complete_once(continuation))
+        return;
+    }
+    owner_->executor_.retired(this, reason);
+    if (continuation)
+      continuation.resume();
+  }
+  async_transform_pipeline *owner_ = nullptr;
+  request_message request_;
+  response_message value_;
+  response_message *destination_ = nullptr;
+  std::stop_token external_;
+  std::optional<std::stop_callback<std::function<void()>>> external_callback_;
+  std::mutex completion_lock_;
+  std::optional<std::pair<async_transform_detail::completion_reason,
+                          NTSTATUS>> pending_failure_;
+  bool running_callback_ = false;
+  pipeline_outcome outcome_{};
+};
+
+class async_transform_pipeline::request_awaitable {
+public:
+  explicit request_awaitable(
+      std::shared_ptr<operation<request_message>> operation) noexcept
+      : operation_(std::move(operation)) {}
+  bool await_ready() const noexcept { return false; }
+  bool await_suspend(std::coroutine_handle<> continuation) noexcept {
+    operation_->set_continuation(continuation);
+    if (!operation_->submit())
+      operation_->fail(async_transform_detail::completion_reason::overloaded,
+                       STATUS_DEVICE_BUSY);
+    operation_->arm_external_cancellation();
+    return operation_->mark_suspended();
+  }
+  pipeline_outcome await_resume() { return operation_->take(); }
+
+private:
+  std::shared_ptr<operation<request_message>> operation_;
+};
+
+class async_transform_pipeline::response_awaitable {
+public:
+  explicit response_awaitable(
+      std::shared_ptr<operation<response_message>> operation) noexcept
+      : operation_(std::move(operation)) {}
+  bool await_ready() const noexcept { return false; }
+  bool await_suspend(std::coroutine_handle<> continuation) noexcept {
+    operation_->set_continuation(continuation);
+    if (!operation_->submit())
+      operation_->fail(async_transform_detail::completion_reason::overloaded,
+                       STATUS_DEVICE_BUSY);
+    operation_->arm_external_cancellation();
+    return operation_->mark_suspended();
+  }
+  pipeline_outcome await_resume() { return operation_->take(); }
+
+private:
+  std::shared_ptr<operation<response_message>> operation_;
+};
+
+inline async_transform_pipeline::request_awaitable
+async_transform_pipeline::apply(request_message &message,
+                                std::stop_token cancellation) {
+  started_.store(true, std::memory_order_release);
+  return request_awaitable(std::make_shared<operation<request_message>>(
+      *this, message, message, cancellation));
+}
+
+inline async_transform_pipeline::response_awaitable
+async_transform_pipeline::apply(const request_message &request,
+                                response_message &message,
+                                std::stop_token cancellation) {
+  started_.store(true, std::memory_order_release);
+  return response_awaitable(std::make_shared<operation<response_message>>(
+      *this, request, message, message, cancellation));
+}
+
+inline async_request_rule_selector
+async_request_rule_selector::when(predicate condition) const {
+  if (!condition)
+    throw std::invalid_argument("async HTTP request predicate is empty");
+  const predicate previous = condition_;
+  return async_request_rule_selector(
+      *pipeline_, [previous, condition = std::move(condition)](
+                      const request_message &message) {
+        return previous(message) && condition(message);
+      });
+}
+
+template <class Function>
+async_request_rule_selector &
+async_request_rule_selector::transform(Function &&function) {
+  pipeline_->ensure_configurable();
+  using callback_type = std::decay_t<Function>;
+  pipeline_->request_rules_.push_back(
+      {condition_,
+       [callback = callback_type(std::forward<Function>(function))](
+           request_message &message, const async_policy_context &context) {
+         return static_cast<rewrite_result>(callback(message, context));
+       }});
+  return *this;
+}
+
+template <class Function>
+async_request_rule_selector &
+async_request_rule_selector::decide(Function &&function) {
+  using callback_type = std::decay_t<Function>;
+  return transform(
+      [callback = callback_type(std::forward<Function>(function))](
+          request_message &message, const async_policy_context &context) {
+        switch (static_cast<ntl::net::inspection::verdict>(
+            callback(static_cast<const request_message &>(message), context))) {
+        case ntl::net::inspection::verdict::permit:
+          return rewrite_result::unchanged();
+        case ntl::net::inspection::verdict::block:
+          return rewrite_result::block();
+        case ntl::net::inspection::verdict::drop_flow:
+          return rewrite_result::drop();
+        }
+        return rewrite_result::block();
+      });
+}
+
+inline async_response_rule_selector
+async_response_rule_selector::when(predicate condition) const {
+  if (!condition)
+    throw std::invalid_argument("async HTTP response predicate is empty");
+  const predicate previous = condition_;
+  return async_response_rule_selector(
+      *pipeline_, [previous, condition = std::move(condition)](
+                      const request_message &request,
+                      const response_message &response) {
+        return previous(request, response) && condition(request, response);
+      });
+}
+
+inline async_response_rule_selector async_response_rule_selector::html() const {
+  return when([](const request_message &, const response_message &response) {
+    const auto content_type = response.headers.first("content-type");
+    return content_type &&
+           transform_detail::html_content_type(*content_type);
+  });
+}
+
+template <class Function>
+async_response_rule_selector &
+async_response_rule_selector::transform(Function &&function) {
+  pipeline_->ensure_configurable();
+  using callback_type = std::decay_t<Function>;
+  pipeline_->response_rules_.push_back(
+      {condition_,
+       [callback = callback_type(std::forward<Function>(function))](
+           const request_message &request, response_message &message,
+           const async_policy_context &context) {
+         return static_cast<rewrite_result>(callback(request, message, context));
+       }});
+  return *this;
+}
+
+template <class Function>
+async_response_rule_selector &
+async_response_rule_selector::decide(Function &&function) {
+  using callback_type = std::decay_t<Function>;
+  return transform(
+      [callback = callback_type(std::forward<Function>(function))](
+          const request_message &request, response_message &message,
+          const async_policy_context &context) {
+        switch (static_cast<ntl::net::inspection::verdict>(callback(
+            request, static_cast<const response_message &>(message), context))) {
+        case ntl::net::inspection::verdict::permit:
+          return rewrite_result::unchanged();
+        case ntl::net::inspection::verdict::block:
+          return rewrite_result::block();
+        case ntl::net::inspection::verdict::drop_flow:
+          return rewrite_result::drop();
+        }
+        return rewrite_result::block();
+      });
+}
+
+} // namespace ntl::net::http

@@ -1,0 +1,59 @@
+name: WFP parser fuzz
+
+on:
+  pull_request:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/wfp-fuzz.yml'
+      - 'cmake/**'
+      - 'include/ntl/net/**'
+      - 'test/wfp/compile/**'
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/wfp-fuzz.yml'
+      - 'cmake/**'
+      - 'include/ntl/net/**'
+      - 'test/wfp/compile/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  libfuzzer:
+    name: ClangCL ASan libFuzzer
+    runs-on: windows-2022
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Ensure WDK
+        shell: pwsh
+        run: >-
+          ./scripts/nuget/Ensure-CrtSysWdk.ps1
+          -WindowsSdkVersion 10.0.22621.0
+
+      - name: Verify ClangCL
+        shell: pwsh
+        run: |
+          $clang = Get-Command clang-cl.exe -ErrorAction Stop
+          & $clang.Source --version
+
+      - name: Run coverage-guided parser fuzzing
+        shell: pwsh
+        run: >-
+          ./test/wfp/compile/Run-WfpLibFuzzer.ps1
+          -Seconds 600
+          -BuildDirectory '${{ runner.temp }}\crtsys-wfp-libfuzzer'
+
+      - name: Upload fuzz corpus and artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wfp-libfuzzer-evidence
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}\crtsys-wfp-libfuzzer\corpus
+            ${{ runner.temp }}\crtsys-wfp-libfuzzer\artifacts

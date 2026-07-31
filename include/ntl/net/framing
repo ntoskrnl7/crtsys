@@ -1,0 +1,282 @@
+/**
+ * @file framing
+ * @brief Bounded incremental framing contracts for byte streams.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include <ntl/net/buffer/scatter_view>
+#include <ntl/status>
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <type_traits>
+
+namespace ntl::net::framing {
+
+enum class probe_state : std::uint8_t {
+  need_more = 1,
+  complete = 2,
+  malformed = 3,
+};
+
+/**
+ * @brief Validated result of probing the currently buffered stream bytes.
+ */
+class frame_probe {
+public:
+  static constexpr frame_probe
+  need_more(std::size_t required_total) noexcept {
+    return frame_probe(probe_state::need_more, required_total, 0, 0,
+                       STATUS_SUCCESS);
+  }
+
+  static constexpr frame_probe
+  complete(std::size_t frame_size, std::size_t content_offset,
+           std::size_t content_size) noexcept {
+    return frame_probe(probe_state::complete, 0, frame_size,
+                       content_offset, STATUS_SUCCESS, content_size);
+  }
+
+  static constexpr frame_probe
+  malformed(NTSTATUS status = STATUS_DATA_ERROR) noexcept {
+    return frame_probe(probe_state::malformed, 0, 0, 0, status);
+  }
+
+  constexpr probe_state state() const noexcept { return state_; }
+  constexpr std::size_t required_total() const noexcept {
+    return required_total_;
+  }
+  constexpr std::size_t frame_size() const noexcept { return frame_size_; }
+  constexpr std::size_t content_offset() const noexcept {
+    return content_offset_;
+  }
+  constexpr std::size_t content_size() const noexcept {
+    return content_size_;
+  }
+  constexpr NTSTATUS error() const noexcept { return error_; }
+
+private:
+  constexpr frame_probe(probe_state state, std::size_t required_total,
+                        std::size_t frame_size,
+                        std::size_t content_offset, NTSTATUS error,
+                        std::size_t content_size = 0) noexcept
+      : state_(state), required_total_(required_total),
+        frame_size_(frame_size), content_offset_(content_offset),
+        content_size_(content_size), error_(error) {}
+
+  probe_state state_ = probe_state::malformed;
+  std::size_t required_total_ = 0;
+  std::size_t frame_size_ = 0;
+  std::size_t content_offset_ = 0;
+  std::size_t content_size_ = 0;
+  NTSTATUS error_ = STATUS_DATA_ERROR;
+};
+
+struct frame_limits {
+  std::size_t maximum_frame_size = 64 * 1024;
+};
+
+/**
+ * @brief Rejects invalid or non-progressing results from custom framers.
+ */
+inline frame_probe validate(frame_probe probe, std::size_t available,
+                            frame_limits limits) noexcept {
+  if (limits.maximum_frame_size == 0)
+    return frame_probe::malformed(STATUS_INVALID_PARAMETER);
+
+  switch (probe.state()) {
+  case probe_state::need_more:
+    if (probe.required_total() <= available ||
+        probe.required_total() > limits.maximum_frame_size)
+      return frame_probe::malformed(
+          probe.required_total() > limits.maximum_frame_size
+              ? STATUS_BUFFER_OVERFLOW
+              : STATUS_DATA_ERROR);
+    return probe;
+
+  case probe_state::complete:
+    if (probe.frame_size() == 0 ||
+        probe.frame_size() > available ||
+        probe.frame_size() > limits.maximum_frame_size ||
+        probe.content_offset() > probe.frame_size() ||
+        probe.content_size() >
+            probe.frame_size() - probe.content_offset())
+      return frame_probe::malformed(STATUS_DATA_ERROR);
+    return probe;
+
+  case probe_state::malformed:
+    return probe.error() == STATUS_SUCCESS
+               ? frame_probe::malformed(STATUS_DATA_ERROR)
+               : probe;
+  }
+
+  return frame_probe::malformed(STATUS_DATA_ERROR);
+}
+
+class fixed_size_framer {
+public:
+  explicit constexpr fixed_size_framer(std::size_t size) noexcept
+      : size_(size) {}
+
+  frame_probe probe(ntl::net::scatter_view bytes) const noexcept {
+    if (!bytes || size_ == 0)
+      return frame_probe::malformed(STATUS_INVALID_PARAMETER);
+    if (bytes.size() < size_)
+      return frame_probe::need_more(size_);
+    return frame_probe::complete(size_, 0, size_);
+  }
+
+private:
+  std::size_t size_ = 0;
+};
+
+/**
+ * @brief Frames [big-endian uint16 payload length][payload].
+ */
+class u16_be_length_prefix {
+public:
+  explicit constexpr
+  u16_be_length_prefix(std::size_t maximum_payload_size) noexcept
+      : maximum_payload_size_(maximum_payload_size) {}
+
+  frame_probe probe(ntl::net::scatter_view bytes) const noexcept {
+    constexpr std::size_t prefix_size = 2;
+    if (!bytes || maximum_payload_size_ == 0)
+      return frame_probe::malformed(STATUS_INVALID_PARAMETER);
+    if (bytes.size() < prefix_size)
+      return frame_probe::need_more(prefix_size);
+
+    ntl::net::byte_cursor cursor(bytes);
+    const auto payload = cursor.read_be16();
+    if (!payload)
+      return frame_probe::malformed(
+          static_cast<NTSTATUS>(payload.status()));
+    if (*payload > maximum_payload_size_)
+      return frame_probe::malformed(STATUS_BUFFER_OVERFLOW);
+    const std::size_t total = prefix_size + *payload;
+    if (bytes.size() < total)
+      return frame_probe::need_more(total);
+    return frame_probe::complete(total, prefix_size, *payload);
+  }
+
+private:
+  std::size_t maximum_payload_size_ = 0;
+};
+
+/**
+ * @brief Frames [big-endian uint32 payload length][payload].
+ */
+class u32_be_length_prefix {
+public:
+  explicit constexpr
+  u32_be_length_prefix(std::size_t maximum_payload_size) noexcept
+      : maximum_payload_size_(maximum_payload_size) {}
+
+  frame_probe probe(ntl::net::scatter_view bytes) const noexcept {
+    constexpr std::size_t prefix_size = 4;
+    if (!bytes || maximum_payload_size_ == 0)
+      return frame_probe::malformed(STATUS_INVALID_PARAMETER);
+    if (bytes.size() < prefix_size)
+      return frame_probe::need_more(prefix_size);
+
+    ntl::net::byte_cursor cursor(bytes);
+    const auto payload = cursor.read_be32();
+    if (!payload)
+      return frame_probe::malformed(
+          static_cast<NTSTATUS>(payload.status()));
+    if (*payload > maximum_payload_size_ ||
+        *payload >
+            (std::numeric_limits<std::size_t>::max)() - prefix_size)
+      return frame_probe::malformed(STATUS_BUFFER_OVERFLOW);
+    const std::size_t total =
+        prefix_size + static_cast<std::size_t>(*payload);
+    if (bytes.size() < total)
+      return frame_probe::need_more(total);
+    return frame_probe::complete(total, prefix_size, *payload);
+  }
+
+private:
+  std::size_t maximum_payload_size_ = 0;
+};
+
+/**
+ * @brief Frames through one fixed delimiter and excludes it from content.
+ */
+template <std::size_t N> class delimiter_framer {
+public:
+  constexpr delimiter_framer(std::array<std::byte, N> delimiter,
+                             std::size_t maximum_frame_size) noexcept
+      : delimiter_(delimiter), maximum_frame_size_(maximum_frame_size) {
+    static_assert(N != 0, "delimiter_framer requires a delimiter");
+  }
+
+  frame_probe probe(ntl::net::scatter_view bytes) const noexcept {
+    if (!bytes || maximum_frame_size_ < N)
+      return frame_probe::malformed(STATUS_INVALID_PARAMETER);
+    const auto match = ntl::net::scan_bytes(bytes, delimiter_);
+    if (!match)
+      return frame_probe::malformed(
+          static_cast<NTSTATUS>(match.status()));
+    if (match->found) {
+      const std::size_t total = match->offset + N;
+      return total <= maximum_frame_size_
+                 ? frame_probe::complete(total, 0, match->offset)
+                 : frame_probe::malformed(STATUS_BUFFER_OVERFLOW);
+    }
+    if (bytes.size() >= maximum_frame_size_)
+      return frame_probe::malformed(STATUS_BUFFER_OVERFLOW);
+    return frame_probe::need_more(bytes.size() + 1);
+  }
+
+private:
+  std::array<std::byte, N> delimiter_{};
+  std::size_t maximum_frame_size_ = 0;
+};
+
+/**
+ * @brief Invokes any stateful no-throw framer and validates its result.
+ */
+template <class Framer>
+frame_probe probe(Framer &framer, ntl::net::scatter_view bytes,
+                  frame_limits limits) noexcept {
+  static_assert(noexcept(framer.probe(bytes)),
+                "framer::probe must be noexcept");
+  return validate(framer.probe(bytes), bytes.size(), limits);
+}
+
+/**
+ * @brief Finalizes a framer after the underlying stream reaches EOF.
+ *
+ * Framers that support EOF-delimited messages provide
+ * finish(scatter_view) noexcept. Every other framer converts an incomplete
+ * probe to STATUS_END_OF_FILE. A finalizer is not allowed to request more
+ * bytes after EOF.
+ */
+template <class Framer>
+frame_probe finish(Framer &framer, ntl::net::scatter_view bytes,
+                   frame_limits limits) noexcept {
+  frame_probe result = frame_probe::malformed(STATUS_END_OF_FILE);
+  if constexpr (requires(Framer &value, ntl::net::scatter_view available) {
+                  value.finish(available);
+                }) {
+    static_assert(
+        std::is_same_v<
+            decltype(framer.finish(bytes)), frame_probe>,
+        "framer::finish must return frame_probe");
+    static_assert(noexcept(framer.finish(bytes)),
+                  "framer::finish must be noexcept");
+    result = validate(
+        framer.finish(bytes), bytes.size(), limits);
+  } else {
+    result = probe(framer, bytes, limits);
+  }
+  return result.state() == probe_state::need_more
+             ? frame_probe::malformed(STATUS_END_OF_FILE)
+             : result;
+}
+
+} // namespace ntl::net::framing

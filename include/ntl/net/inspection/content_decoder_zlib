@@ -1,0 +1,208 @@
+/**
+ * @file content_decoder_zlib
+ * @brief Bounded zlib and gzip adapters for ntl/net/inspection/content_decoder.
+ *
+ * Link the consuming target with zlib. This header is intentionally separate
+ * from ntl/net/inspection/content_decoder so the generic inspection contract has no codec
+ * dependency.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/inspection/content_decoder_zlib is a user-mode header"
+#endif
+
+#include <ntl/net/inspection/content_decoder>
+
+#include <array>
+#include <cstddef>
+#include <limits>
+#include <memory>
+#include <span>
+
+#include <zlib.h>
+
+namespace ntl::net::inspection {
+
+enum class zlib_stream_format : int {
+  zlib = MAX_WBITS,
+  gzip = MAX_WBITS + 16,
+};
+
+/**
+ * @brief Incremental, output-bounded adapter for RFC 1950 and RFC 1952.
+ *
+ * HTTP `deflate` uses the RFC 1950 zlib wrapper. The adapter deliberately
+ * rejects the historical non-standard raw-DEFLATE variant instead of guessing
+ * a format after a parse failure.
+ */
+class zlib_content_decoder {
+public:
+  explicit zlib_content_decoder(
+      zlib_stream_format format) noexcept
+      : window_bits_(static_cast<int>(format)) {}
+
+  zlib_content_decoder(const zlib_content_decoder &) = delete;
+  zlib_content_decoder &
+  operator=(const zlib_content_decoder &) = delete;
+
+  ~zlib_content_decoder() { release(); }
+
+  void reset() noexcept {
+    release();
+    ended_ = false;
+  }
+
+  decode_result decode(
+      ntl::net::scatter_view input, bool final,
+      decoded_output &output) noexcept {
+    if (!input || ended_)
+      return decode_result::malformed(STATUS_INVALID_PARAMETER);
+    if (!initialize())
+      return decode_result::malformed(
+          STATUS_INSUFFICIENT_RESOURCES);
+
+    decode_result result = decode_result::need_more_input();
+    const ntl::status visited = input.for_each_chunk(
+        [this, &output, &result](
+            std::span<const std::byte> chunk) noexcept {
+          std::size_t offset = 0;
+          while (offset != chunk.size()) {
+            const std::size_t available =
+                (std::min)(
+                    chunk.size() - offset,
+                    static_cast<std::size_t>(
+                        (std::numeric_limits<uInt>::max)()));
+            stream_.next_in = reinterpret_cast<Bytef *>(
+                const_cast<std::byte *>(chunk.data() + offset));
+            stream_.avail_in = static_cast<uInt>(available);
+            while (stream_.avail_in != 0) {
+              const decode_result step =
+                  inflate_once(output);
+              if (step.state() == decode_state::malformed) {
+                result = step;
+                return false;
+              }
+              if (step.state() == decode_state::complete) {
+                ended_ = true;
+                if (stream_.avail_in != 0 ||
+                    offset + available != chunk.size()) {
+                  result =
+                      decode_result::malformed(STATUS_DATA_ERROR);
+                  return false;
+                }
+                result = step;
+                break;
+              }
+              if (stream_.avail_in != 0 &&
+                  stream_.avail_out != 0) {
+                result =
+                    decode_result::malformed(STATUS_DATA_ERROR);
+                return false;
+              }
+            }
+            offset += available;
+            if (ended_)
+              break;
+          }
+          return true;
+        });
+    if (!visited.is_ok())
+      return result.state() == decode_state::malformed
+                 ? result
+                 : decode_result::malformed(
+                       static_cast<NTSTATUS>(visited));
+    if (ended_)
+      return result;
+    if (!final)
+      return decode_result::need_more_input();
+
+    stream_.next_in = nullptr;
+    stream_.avail_in = 0;
+    const decode_result tail = inflate_once(output);
+    if (tail.state() == decode_state::complete) {
+      ended_ = true;
+      return tail;
+    }
+    return tail.state() == decode_state::malformed
+               ? tail
+               : decode_result::malformed(STATUS_END_OF_FILE);
+  }
+
+private:
+  bool initialize() noexcept {
+    if (initialized_)
+      return true;
+    stream_ = {};
+    const int status =
+        ::inflateInit2(&stream_, window_bits_);
+    initialized_ = status == Z_OK;
+    return initialized_;
+  }
+
+  void release() noexcept {
+    if (initialized_)
+      (void)::inflateEnd(&stream_);
+    stream_ = {};
+    initialized_ = false;
+  }
+
+  decode_result
+  inflate_once(decoded_output &output) noexcept {
+    std::array<std::byte, 16 * 1024> buffer{};
+    const std::size_t remaining =
+        output.maximum_size() - output.size();
+    const std::size_t capacity =
+        remaining == 0 ? 1 : (std::min)(remaining, buffer.size());
+    stream_.next_out =
+        reinterpret_cast<Bytef *>(buffer.data());
+    stream_.avail_out = static_cast<uInt>(capacity);
+    const int status = ::inflate(&stream_, Z_NO_FLUSH);
+    const std::size_t produced =
+        capacity - stream_.avail_out;
+    if (produced > remaining)
+      return decode_result::malformed(STATUS_BUFFER_OVERFLOW);
+    if (produced != 0) {
+      const ntl::status appended =
+          output.append(std::span<const std::byte>(
+              buffer.data(), produced));
+      if (!appended.is_ok())
+        return decode_result::malformed(
+            static_cast<NTSTATUS>(appended));
+    }
+    if (status == Z_STREAM_END)
+      return decode_result::complete();
+    if (status == Z_OK)
+      return decode_result::need_more_input();
+    if (status == Z_BUF_ERROR && produced == 0 &&
+        stream_.avail_in == 0)
+      return decode_result::need_more_input();
+    if (status == Z_MEM_ERROR)
+      return decode_result::malformed(
+          STATUS_INSUFFICIENT_RESOURCES);
+    return decode_result::malformed(STATUS_DATA_ERROR);
+  }
+
+  z_stream stream_{};
+  int window_bits_ = MAX_WBITS;
+  bool initialized_ = false;
+  bool ended_ = false;
+};
+
+inline void register_zlib_content_decoders(
+    content_decoder_registry &registry) {
+  registry.add("gzip", [] {
+    return std::make_unique<
+        content_decoder_adapter<zlib_content_decoder>>(
+        zlib_stream_format::gzip);
+  });
+  registry.add("deflate", [] {
+    return std::make_unique<
+        content_decoder_adapter<zlib_content_decoder>>(
+        zlib_stream_format::zlib);
+  });
+}
+
+} // namespace ntl::net::inspection

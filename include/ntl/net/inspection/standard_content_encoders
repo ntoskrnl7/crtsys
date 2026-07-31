@@ -1,0 +1,18 @@
+/**
+ * @file standard_content_encoders
+ * @brief Registration helper for common HTTP Content-Encoding output.
+ */
+#pragma once
+
+#include <ntl/net/inspection/content_encoder_brotli>
+#include <ntl/net/inspection/content_encoder_zlib>
+
+namespace ntl::net::inspection {
+
+inline void register_standard_content_encoders(
+    content_encoder_registry &registry) {
+  register_zlib_content_encoders(registry);
+  register_brotli_content_encoder(registry);
+}
+
+} // namespace ntl::net::inspection

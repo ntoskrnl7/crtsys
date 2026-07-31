@@ -1,0 +1,281 @@
+/**
+ * @file callout
+ * @brief Move-only ownership of kernel WFP callout registrations.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/wfp/callout is a kernel-mode header"
+#endif
+
+#include "../driver"
+#include "../result"
+#include "../status"
+#include "classify"
+#include "flow"
+#include "stream"
+
+#include <array>
+#include <cstddef>
+#include <memory>
+
+namespace ntl::wfp {
+
+namespace detail {
+inline NTSTATUS NTAPI accept_filter_notification(
+    FWPS_CALLOUT_NOTIFY_TYPE, const GUID *, FWPS_FILTER2 *) noexcept {
+  return STATUS_SUCCESS;
+}
+
+template <auto Callback>
+struct bfe_state_adapter {
+  static void CALLBACK invoke(
+      void *, FWPM_SERVICE_STATE state) noexcept {
+    Callback(state);
+  }
+};
+} // namespace detail
+
+/**
+ * @brief Owns the device object and run-time registrations for one callout
+ * driver.
+ *
+ * reset() first drains tracked flow contexts, then unregisters in reverse
+ * order before releasing the device. Keep this object alive until the
+ * driver's unload callback and call reset() there.
+ */
+template <std::size_t Capacity = 16> class callout_driver {
+public:
+  explicit callout_driver(ntl::driver &driver) {
+    auto options =
+        ntl::device_options().type(FILE_DEVICE_NETWORK).exclusive(false);
+    device_ = driver.create_device<void>(options);
+  }
+
+  callout_driver(const callout_driver &) = delete;
+  callout_driver &operator=(const callout_driver &) = delete;
+  callout_driver(callout_driver &&) = delete;
+  callout_driver &operator=(callout_driver &&) = delete;
+
+  ~callout_driver() {
+    const ntl::status result = reset();
+    NT_ASSERT(result.is_ok());
+  }
+
+  /**
+   * @brief Subscribes once to BFE state changes for service reconciliation.
+   *
+   * The callback runs at PASSIVE_LEVEL and must only signal bounded,
+   * nonblocking driver state. A user-mode policy service can then call
+   * policy_session::recover() after observing BFE_RUNNING.
+   */
+  template <auto Callback>
+  ntl::status watch_bfe() noexcept {
+    static_assert(
+        std::is_nothrow_invocable_r_v<
+            void, decltype(Callback), FWPM_SERVICE_STATE>,
+        "a BFE state callback must be noexcept and accept FWPM_SERVICE_STATE");
+    if (!device_ || !device_->native_handle())
+      return STATUS_INVALID_DEVICE_STATE;
+    if (bfe_subscription_)
+      return STATUS_ALREADY_REGISTERED;
+    const NTSTATUS result =
+        FwpmBfeStateSubscribeChanges0(
+            device_->native_handle(),
+            &detail::bfe_state_adapter<Callback>::invoke,
+            nullptr, &bfe_subscription_);
+    return result;
+  }
+
+  FWPM_SERVICE_STATE bfe_state() const noexcept {
+    return FwpmBfeStateGet0();
+  }
+
+  /**
+   * @brief Registers a synchronous, decision-returning callback for Layer.
+   */
+  template <auto Callback, class Layer>
+  ntl::status add(callout_key<Layer> key, UINT32 flags = 0) noexcept {
+    static_assert(detail::decision_layer<Layer>,
+                  "add() requires an ntl::wfp decision layer");
+    static_assert(
+        std::is_nothrow_invocable_r_v<decision, decltype(Callback),
+                                      const classify_event<Layer> &>,
+        "a WFP classify callback must be noexcept and return decision");
+
+    if (!device_ || !device_->native_handle())
+      return STATUS_INVALID_DEVICE_STATE;
+    if (count_ == registrations_.size())
+      return STATUS_INSUFFICIENT_RESOURCES;
+
+    FWPS_CALLOUT2 callout{};
+    callout.calloutKey = key.native();
+    callout.flags = flags;
+    callout.classifyFn = &detail_classify_adapter<Layer, Callback>::invoke;
+    callout.notifyFn = &detail::accept_filter_notification;
+
+    UINT32 id = 0;
+    const NTSTATUS result =
+        FwpsCalloutRegister2(device_->native_handle(), &callout, &id);
+    if (!NT_SUCCESS(result))
+      return result;
+
+    registrations_[count_++] = registration{id, {}};
+    return ntl::status::ok();
+  }
+
+  /**
+   * @brief Registers a stream callback and returns the only capability that
+   * can associate Context objects with that registration.
+   */
+  template <class Context, auto Callback, class Layer>
+  ntl::result<flow_target<Layer, Context>>
+  add_stream(callout_key<Layer> key, UINT32 flags = 0) noexcept {
+    static_assert(detail::stream_layer<Layer>,
+                  "add_stream() requires an ntl::wfp stream layer");
+    static_assert(
+        std::is_nothrow_invocable_r_v<
+            stream_result, decltype(Callback),
+            const stream_event<Layer, Context> &>,
+        "a WFP stream callback must be noexcept and return stream_result");
+    static_assert(std::is_nothrow_destructible_v<Context>,
+                  "a WFP flow context destructor must be noexcept");
+
+    if (!device_ || !device_->native_handle())
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+    if (count_ == registrations_.size())
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+
+    std::shared_ptr<detail::flow_registration_state<Layer, Context>> state;
+    try {
+      state =
+          std::make_shared<detail::flow_registration_state<Layer, Context>>();
+    } catch (...) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+
+    FWPS_CALLOUT2 callout{};
+    callout.calloutKey = key.native();
+    callout.flags = flags;
+    callout.classifyFn =
+        &detail_stream_adapter<Layer, Context, Callback>::invoke;
+    callout.notifyFn = &detail::accept_filter_notification;
+    callout.flowDeleteFn =
+        &detail::flow_delete_adapter<Layer, Context>::invoke;
+
+    UINT32 id = 0;
+    const NTSTATUS result =
+        FwpsCalloutRegister2(device_->native_handle(), &callout, &id);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+
+    state->activate(id);
+    registrations_[count_++] = registration{id, state};
+    return ntl::ok(flow_target<Layer, Context>(std::move(state)));
+  }
+
+  /**
+   * @brief Registers a packet decision callback with a typed flow context.
+   *
+   * This is the datagram counterpart to add_stream(), used by proxy callouts
+   * that attach state at ALE_FLOW_ESTABLISHED and consume it at DATAGRAM_DATA.
+   */
+  template <class Context, auto Callback, class Layer>
+  ntl::result<flow_target<Layer, Context>>
+  add_flow_context(callout_key<Layer> key, UINT32 flags = 0) noexcept {
+    static_assert(detail::flow_context_layer<Layer> &&
+                      detail::decision_layer<Layer>,
+                  "add_flow_context() requires a contextual decision layer");
+    static_assert(
+        std::is_nothrow_invocable_r_v<
+            decision, decltype(Callback), const classify_event<Layer> &,
+            Context *>,
+        "a contextual WFP callback must be noexcept and return decision");
+    static_assert(std::is_nothrow_destructible_v<Context>,
+                  "a WFP flow context destructor must be noexcept");
+
+    if (!device_ || !device_->native_handle())
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+    if (count_ == registrations_.size())
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+
+    std::shared_ptr<detail::flow_registration_state<Layer, Context>> state;
+    try {
+      state =
+          std::make_shared<detail::flow_registration_state<Layer, Context>>();
+    } catch (...) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+
+    FWPS_CALLOUT2 callout{};
+    callout.calloutKey = key.native();
+    callout.flags = flags;
+    callout.classifyFn =
+        &detail::detail_flow_classify_adapter<Layer, Context,
+                                              Callback>::invoke;
+    callout.notifyFn = &detail::accept_filter_notification;
+    callout.flowDeleteFn =
+        &detail::flow_delete_adapter<Layer, Context>::invoke;
+
+    UINT32 id = 0;
+    const NTSTATUS result =
+        FwpsCalloutRegister2(device_->native_handle(), &callout, &id);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+
+    state->activate(id);
+    registrations_[count_++] = registration{id, state};
+    return ntl::ok(flow_target<Layer, Context>(std::move(state)));
+  }
+
+  /**
+   * @brief Drains flow contexts, then unregisters every callout before
+   * deleting the backing device.
+   *
+   * The operation is idempotent, making entry failure and normal unload share
+   * the same cleanup path.
+   */
+  [[nodiscard]] ntl::status reset() noexcept {
+    if (bfe_subscription_) {
+      const NTSTATUS unsubscribed =
+          FwpmBfeStateUnsubscribeChanges0(
+              bfe_subscription_);
+      if (!NT_SUCCESS(unsubscribed))
+        return unsubscribed;
+      bfe_subscription_ = nullptr;
+    }
+    while (count_ != 0) {
+      registration &entry = registrations_[count_ - 1];
+      if (entry.flow) {
+        const ntl::status drained = entry.flow->drain();
+        if (!drained.is_ok())
+          return drained;
+      }
+
+      const NTSTATUS result = FwpsCalloutUnregisterById0(entry.id);
+      if (!NT_SUCCESS(result) &&
+          result != STATUS_FWP_CALLOUT_NOT_FOUND)
+        return result;
+
+      entry = {};
+      --count_;
+    }
+    device_.reset();
+    return ntl::status::ok();
+  }
+
+  std::size_t size() const noexcept { return count_; }
+
+private:
+  struct registration {
+    UINT32 id = 0;
+    std::shared_ptr<detail::flow_registration_base> flow;
+  };
+
+  std::shared_ptr<ntl::device<void>> device_;
+  std::array<registration, Capacity> registrations_{};
+  std::size_t count_ = 0;
+  HANDLE bfe_subscription_ = nullptr;
+};
+
+} // namespace ntl::wfp

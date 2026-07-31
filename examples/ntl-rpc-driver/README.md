@@ -1,5 +1,7 @@
 # NTL RPC Sample Driver
 
+[한국어 설명](./README.ko-KR.md)
+
 This sample shows the NTL RPC helper layer. It is intentionally separate from
 the typed IOCTL sample in `examples/ntl-driver`: the IOCTL sample shows manual
 device-control contracts, while this sample generates both sides from one

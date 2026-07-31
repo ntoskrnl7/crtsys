@@ -13,7 +13,7 @@ param(
   [ValidateSet('v142', 'v143', 'v145')]
   [string] $Toolset = 'v143',
 
-  [ValidateSet('NTL', 'WDM', 'KMDF', 'NTL_KMDF', 'NTL_FLT')]
+  [ValidateSet('NTL', 'WDM', 'KMDF', 'NTL_KMDF', 'NTL_FLT', 'NTL_WFP')]
   [string] $DriverModel = 'NTL',
 
   [string] $WindowsSdkVersion = '10.0.22621.0',
@@ -142,6 +142,9 @@ $requiredWdkLibraries = @('ntoskrnl.lib', 'hal.lib', 'wmilib.lib', 'libcntpr.lib
 if ($DriverModel -eq 'NTL_FLT') {
   $requiredWdkLibraries += 'fltmgr.lib'
 }
+if ($DriverModel -eq 'NTL_WFP') {
+  $requiredWdkLibraries += 'fwpkclnt.lib'
+}
 foreach ($requiredLib in $requiredWdkLibraries) {
   if (-not (Test-Path (Join-Path $wdkKernelLibDirectory $requiredLib))) {
     throw "WDK kernel library directory is missing $requiredLib`: $wdkKernelLibDirectory"
@@ -238,6 +241,47 @@ foreach ($requiredPath in @(
   'build\native\crtsys-kmdf.xml',
   'docs\third-party-notices.md',
   'include\ntl\driver',
+  'include\ntl\net\inspection\content_decoder',
+  'include\ntl\net\inspection\content_decoder_brotli',
+  'include\ntl\net\inspection\content_decoder_zlib',
+  'include\ntl\net\inspection\content_encoder',
+  'include\ntl\net\inspection\content_encoder_brotli',
+  'include\ntl\net\inspection\content_encoder_zlib',
+  'include\ntl\net\inspection\content_stream',
+  'include\ntl\net\inspection\standard_content_encoders',
+  'include\ntl\net\http\http1_transform',
+  'include\ntl\net\http\http1_stream_transform',
+  'include\ntl\net\http\async_transform',
+  'include\ntl\net\http\stream_transform',
+  'include\ntl\net\http\transform',
+  'include\ntl\net\grpc\framing',
+  'include\ntl\net\grpc\transform',
+  'include\ntl\net\http2\framing',
+  'include\ntl\net\http2\hpack',
+  'include\ntl\net\http2\transform',
+  'include\ntl\net\http2\stream_transform',
+  'include\ntl\net\http3\backend',
+  'include\ntl\net\http3\framing',
+  'include\ntl\net\http3\inspection_proxy',
+  'include\ntl\net\http3\qpack',
+  'include\ntl\net\http3\standard_inspection_proxy',
+  'include\ntl\net\http3\stream_transform',
+  'include\ntl\net\http3\webtransport_transform',
+  'include\ntl\net\http3\webtransport_session',
+  'include\ntl\net\tls\product_backend',
+  'include\ntl\net\inspection\standard_content_decoders',
+  'include\ntl\net\tls\inspection_frontend',
+  'include\ntl\net\tls\inspection_policy',
+  'include\ntl\net\tls\product_policy',
+  'include\ntl\net\websocket\framing',
+  'include\ntl\net\websocket\permessage_deflate',
+  'include\ntl\net\websocket\transform',
+  'build\native\codecs\include\zlib.h',
+  'build\native\codecs\include\brotli\decode.h',
+  "build\native\codecs\lib\$Toolset\$Architecture\$Configuration\zlibstatic.lib",
+  "build\native\codecs\lib\$Toolset\$Architecture\$Configuration\brotlicommon.lib",
+  "build\native\codecs\lib\$Toolset\$Architecture\$Configuration\brotlidec.lib",
+  "build\native\codecs\lib\$Toolset\$Architecture\$Configuration\brotlienc.lib",
   'include\ntl\deps\zpp\LICENSE',
   'include\ntl\deps\zpp\README.md',
   'include\ntl\deps\zpp\serializer.h',
@@ -252,6 +296,20 @@ foreach ($requiredPath in @(
   'include\ntl\kmdf\pdo',
   'include\ntl\kmdf\query_interface',
   'include\ntl\kmdf\resource_requirements',
+  'include\ntl\wfp\all',
+  'include\ntl\wfp\callout',
+  'include\ntl\wfp\classify',
+  'include\ntl\wfp\conditions',
+  'include\ntl\wfp\connect_redirect',
+  'include\ntl\wfp\flow',
+  'include\ntl\wfp\injection',
+  'include\ntl\wfp\layers',
+  'include\ntl\wfp\management',
+  'include\ntl\wfp\packet',
+  'include\ntl\wfp\stream',
+  'include\ntl\wfp\stream_reader',
+  'include\ntl\wfp\telemetry',
+  'include\.internal\winsdk\wfp_version_compat',
   "build\native\lib\native\$Toolset\$Architecture\$Configuration\crtsys.lib",
   "build\native\lib\native\$Toolset\$Architecture\$Configuration\Ldk.lib"
 )) {
@@ -301,10 +359,23 @@ $escapedArchitectureDefines = ConvertTo-XmlEscapedText $architectureDefines
 $crtsysProps = ConvertTo-XmlEscapedText (Join-Path $packageRoot 'build\native\crtsys.props')
 $crtsysTargets = ConvertTo-XmlEscapedText (Join-Path $packageRoot 'build\native\crtsys.targets')
 $driverType = if ($isKmdf) { 'KMDF' } else { 'WDM' }
-$useNtlMain = if ($DriverModel -eq 'NTL') { 'true' } else { 'false' }
+$useNtlMain = if ($DriverModel -eq 'NTL') {
+  'true'
+} elseif ($DriverModel -eq 'NTL_WFP') {
+  ''
+} else {
+  'false'
+}
 $useNtlKmdfMain = if ($DriverModel -eq 'NTL_KMDF') { 'true' } else { 'false' }
 $isMinifilter = if ($DriverModel -eq 'NTL_FLT') { 'true' } else { 'false' }
 $useNtlFltMain = $isMinifilter
+$isWfp = if ($DriverModel -eq 'NTL_WFP') { '' } else { 'false' }
+$wdmEntryPointProperty = if ($DriverModel -eq 'NTL_WFP') {
+  '    <CrtSysWdmEntryPoint>NtlWfp</CrtSysWdmEntryPoint>'
+} else {
+  ''
+}
+$targetWinver = if ($DriverModel -eq 'NTL_WFP') { '0x0602' } else { '0x0601' }
 $kmdfVersionProperty = if ($isKmdf) { "    <KmdfVersion>$kmdfVersion</KmdfVersion>" } else { '' }
 $additionalDriverIncludes = if ($isKmdf) {
   (ConvertTo-XmlEscapedText $wdfIncludeDirectory) + ';'
@@ -352,6 +423,8 @@ $kmdfVersionProperty
     <CrtSysUseNtlKmdfMain>$useNtlKmdfMain</CrtSysUseNtlKmdfMain>
     <CrtSysIsMinifilter>$isMinifilter</CrtSysIsMinifilter>
     <CrtSysUseNtlFltMain>$useNtlFltMain</CrtSysUseNtlFltMain>
+    <CrtSysIsWfp>$isWfp</CrtSysIsWfp>
+$wdmEntryPointProperty
     <CrtSysExpectedLibToolset>$escapedToolset</CrtSysExpectedLibToolset>
   </PropertyGroup>
   <Import Project="$crtsysProps" Condition="Exists('$crtsysProps')" />
@@ -372,7 +445,7 @@ $kmdfVersionProperty
   <ItemDefinitionGroup>
     <ClCompile>
       <AdditionalIncludeDirectories>$sharedInclude;$kmInclude;$kmCrtInclude;$additionalDriverIncludes%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>$escapedArchitectureDefines;WINNT=1;_WIN32_WINNT=0x0601;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>$escapedArchitectureDefines;WINNT=1;_WIN32_WINNT=$targetWinver;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalOptions>%(AdditionalOptions) /Zc:__cplusplus $additionalCompileOptions</AdditionalOptions>
 $callingConventionProperty
       <ExceptionHandling>Sync</ExceptionHandling>
@@ -505,6 +578,39 @@ ntl::status ntl::flt::main(ntl::flt::driver &driver,
         return ntl::flt::pre_result::success_no_callback;
       });
   return driver.start(std::move(callbacks));
+}
+'@ }
+  'NTL_WFP' { @'
+#include <memory>
+
+#include <ntl/driver>
+#include <ntl/wfp/all>
+
+namespace {
+using layer = ntl::wfp::layers::ale_auth_connect_v4;
+
+constexpr GUID callout_guid = {
+    0x2fde27d7, 0x7bc8, 0x4f0e,
+    {0x82, 0x0d, 0x97, 0xac, 0x36, 0xe0, 0x1f, 0xb3}};
+constexpr ntl::wfp::callout_key<layer> callout_key(callout_guid);
+
+constexpr auto classify =
+    +[](const ntl::wfp::classify_event<layer>&) noexcept {
+      return ntl::wfp::decision::continue_classification;
+    };
+}
+
+ntl::status ntl::main(ntl::driver& driver, const std::wstring&) {
+  auto callouts = std::make_shared<ntl::wfp::callout_driver<>>(driver);
+  const ntl::status status = callouts->add<classify>(callout_key);
+  if (!status.is_ok())
+    return status;
+
+  driver.on_unload([callouts] {
+    const ntl::status result = callouts->reset();
+    NT_ASSERT(result.is_ok());
+  });
+  return ntl::status::ok();
 }
 '@ }
   'KMDF' { @'

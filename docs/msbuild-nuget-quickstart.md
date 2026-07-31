@@ -41,8 +41,10 @@ The package UI and Package Manager Console both add the same native NuGet
 package reference to the project.
 
 For an ordinary WDM project, **crtsys WDM entry point** offers **No NTL entry
-point**, **NTL WDM**, and **NTL Minifilter**. `NTL WDM` selects `ntl::main`;
-`NTL Minifilter` selects the Filter Manager entry point.
+point**, **NTL WDM**, **NTL Minifilter**, and **NTL WFP**. `NTL WDM` selects
+`ntl::main`; `NTL Minifilter` selects the Filter Manager entry point; and
+`NTL WFP` selects `ntl::main` plus the Windows Filtering Platform callout
+build contract.
 
 For an NTL-style WDM driver, select **NTL WDM**, add `main.cpp`, and implement
 `ntl::main`:
@@ -69,9 +71,18 @@ Then add `main.cpp` and implement `ntl::flt::main`:
 
 ![Visual Studio selecting the crtsys NTL Minifilter entry point and implementing ntl::flt::main](./assets/visual-studio-ntl-minifilter-entrypoint.gif)
 
+For a WFP callout driver, keep the WDK project type as WDM and set
+**crtsys WDM entry point** to **NTL WFP**. The package then defines
+`CRTSYS_USE_WFP`, the architecture-appropriate NDIS version, and a Windows 8
+NTDDI contract; it links `fwpkclnt.lib` and selects the `ntl::main` entry
+wrapper. Packet-processing projects that directly call NDIS routines must
+still add `ndis.lib` for those routines.
+
+![Visual Studio selecting the crtsys NTL WFP entry point and implementing ntl::main](./assets/visual-studio-ntl-wfp-entrypoint.gif)
+
 For an **Export driver**, no crtsys entry-point property is shown. Export drivers
 use the WDK export-driver entry model and must not select an NTL WDM, KMDF, or
-minifilter entry point.
+minifilter/WFP entry point.
 
 ## Build Tools Only
 
@@ -120,6 +131,8 @@ libraries, and the startup object for the selected driver model.
 | WDM with a standard entry | `<CrtSysUseNtlMain>false</CrtSysUseNtlMain>` | `DriverEntry` |
 | Standard KMDF | existing `<DriverType>KMDF</DriverType>`; default | standard `DriverEntry` and `WdfDriverCreate` |
 | NTL KMDF | `<DriverType>KMDF</DriverType>` + `<CrtSysKmdfEntryPoint>NtlKmdf</CrtSysKmdfEntryPoint>` | `ntl::kmdf::main` |
+| NTL minifilter | `<CrtSysWdmEntryPoint>NtlMinifilter</CrtSysWdmEntryPoint>` | `ntl::flt::main` |
+| NTL WFP callout | `<CrtSysWdmEntryPoint>NtlWfp</CrtSysWdmEntryPoint>` | `ntl::main` |
 | Export driver | WDK `ExportDriver` + no crtsys entry selection | WDK export-driver entry model |
 
 The NTL KMDF entry is optional. In both KMDF modes WDF retains its normal PnP,

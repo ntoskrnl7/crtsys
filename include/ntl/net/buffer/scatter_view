@@ -1,0 +1,682 @@
+/**
+ * @file scatter_view
+ * @brief Allocation-free views and cursors over fragmented byte ranges.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include <ntl/result>
+#include <ntl/status>
+
+#include <algorithm>
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <limits>
+#include <span>
+#include <type_traits>
+#include <utility>
+
+namespace ntl::net {
+
+class scatter_view;
+class mutable_scatter_view;
+
+namespace detail {
+
+using scatter_visit =
+    bool (*)(void *, std::span<const std::byte>) noexcept;
+using mutable_scatter_visit =
+    bool (*)(void *, std::span<std::byte>) noexcept;
+
+using scatter_enumerator =
+    ntl::status (*)(const void *, std::size_t, std::size_t, std::size_t,
+                    scatter_visit, void *) noexcept;
+using mutable_scatter_enumerator =
+    ntl::status (*)(void *, std::size_t, std::size_t, std::size_t,
+                    mutable_scatter_visit, void *) noexcept;
+
+inline bool valid_subrange(std::size_t total, std::size_t offset,
+                           std::size_t length) noexcept {
+  return offset <= total && length <= total - offset;
+}
+
+inline ntl::status enumerate_contiguous(
+    const void *source, std::size_t source_size, std::size_t offset,
+    std::size_t length, scatter_visit visit, void *context) noexcept {
+  if (!source || !visit ||
+      !valid_subrange(source_size, offset, length))
+    return STATUS_INVALID_PARAMETER;
+  if (length == 0)
+    return ntl::status::ok();
+
+  const auto *bytes = static_cast<const std::byte *>(source);
+  (void)visit(context, std::span<const std::byte>(bytes + offset, length));
+  return ntl::status::ok();
+}
+
+inline ntl::status enumerate_mutable_contiguous(
+    void *source, std::size_t source_size, std::size_t offset,
+    std::size_t length, mutable_scatter_visit visit,
+    void *context) noexcept {
+  if (!source || !visit ||
+      !valid_subrange(source_size, offset, length))
+    return STATUS_INVALID_PARAMETER;
+  if (length == 0)
+    return ntl::status::ok();
+
+  auto *bytes = static_cast<std::byte *>(source);
+  (void)visit(context, std::span<std::byte>(bytes + offset, length));
+  return ntl::status::ok();
+}
+
+inline ntl::status enumerate_segments(
+    const void *source, std::size_t count, std::size_t offset,
+    std::size_t length, scatter_visit visit, void *context) noexcept {
+  if ((!source && count != 0) || !visit)
+    return STATUS_INVALID_PARAMETER;
+
+  const auto *segments =
+      static_cast<const std::span<const std::byte> *>(source);
+  std::size_t remaining = length;
+  std::size_t skip = offset;
+  for (std::size_t index = 0; index != count && remaining != 0; ++index) {
+    const auto segment = segments[index];
+    if (skip >= segment.size()) {
+      skip -= segment.size();
+      continue;
+    }
+
+    const std::size_t available = segment.size() - skip;
+    const std::size_t take = (std::min)(available, remaining);
+    if (!visit(context, segment.subspan(skip, take)))
+      return ntl::status::ok();
+    remaining -= take;
+    skip = 0;
+  }
+  return remaining == 0 ? ntl::status::ok()
+                        : ntl::status{STATUS_BUFFER_TOO_SMALL};
+}
+
+inline ntl::status enumerate_mutable_segments(
+    void *source, std::size_t count, std::size_t offset,
+    std::size_t length, mutable_scatter_visit visit,
+    void *context) noexcept {
+  if ((!source && count != 0) || !visit)
+    return STATUS_INVALID_PARAMETER;
+
+  auto *segments = static_cast<std::span<std::byte> *>(source);
+  std::size_t remaining = length;
+  std::size_t skip = offset;
+  for (std::size_t index = 0; index != count && remaining != 0; ++index) {
+    const auto segment = segments[index];
+    if (skip >= segment.size()) {
+      skip -= segment.size();
+      continue;
+    }
+
+    const std::size_t available = segment.size() - skip;
+    const std::size_t take = (std::min)(available, remaining);
+    if (!visit(context, segment.subspan(skip, take)))
+      return ntl::status::ok();
+    remaining -= take;
+    skip = 0;
+  }
+  return remaining == 0 ? ntl::status::ok()
+                        : ntl::status{STATUS_BUFFER_TOO_SMALL};
+}
+
+template <class Function> struct const_visit_state {
+  Function *function;
+  std::size_t visited = 0;
+  bool stopped = false;
+
+  static bool invoke(void *context,
+                     std::span<const std::byte> chunk) noexcept {
+    auto &self = *static_cast<const_visit_state *>(context);
+    self.visited += chunk.size();
+    if constexpr (std::is_same_v<
+                      std::invoke_result_t<Function &,
+                                           std::span<const std::byte>>,
+                      bool>) {
+      if (!(*self.function)(chunk)) {
+        self.stopped = true;
+        return false;
+      }
+    } else {
+      (*self.function)(chunk);
+    }
+    return true;
+  }
+};
+
+template <class Function> struct mutable_visit_state {
+  Function *function;
+  std::size_t visited = 0;
+  bool stopped = false;
+
+  static bool invoke(void *context, std::span<std::byte> chunk) noexcept {
+    auto &self = *static_cast<mutable_visit_state *>(context);
+    self.visited += chunk.size();
+    if constexpr (std::is_same_v<
+                      std::invoke_result_t<Function &,
+                                           std::span<std::byte>>,
+                      bool>) {
+      if (!(*self.function)(chunk)) {
+        self.stopped = true;
+        return false;
+      }
+    } else {
+      (*self.function)(chunk);
+    }
+    return true;
+  }
+};
+
+} // namespace detail
+
+/**
+ * @brief Callback-lifetime read-only view over one or more byte fragments.
+ *
+ * The view never allocates or extends the lifetime of its backing storage.
+ * Native adapters provide an enumerator and keep their normal ownership rules.
+ */
+class scatter_view {
+public:
+  scatter_view() noexcept = default;
+
+  static scatter_view
+  from_contiguous(std::span<const std::byte> bytes) noexcept {
+    if (bytes.empty())
+      return scatter_view(nullptr, 0, 0, 0,
+                          &detail::enumerate_contiguous);
+    return scatter_view(bytes.data(), bytes.size(), 0, bytes.size(),
+                        &detail::enumerate_contiguous);
+  }
+
+  static scatter_view
+  from_segments(
+      std::span<const std::span<const std::byte>> segments) noexcept {
+    std::size_t total = 0;
+    for (const auto segment : segments) {
+      if (segment.size() >
+          (std::numeric_limits<std::size_t>::max)() - total)
+        return {};
+      total += segment.size();
+    }
+    return scatter_view(segments.data(), segments.size(), 0, total,
+                        &detail::enumerate_segments);
+  }
+
+  /**
+   * @brief Extensibility point for native scatter/gather adapters.
+   *
+   * source and any storage reachable from it must outlive this view.
+   */
+  static scatter_view
+  from_source(const void *source, std::size_t source_argument,
+              std::size_t length,
+              detail::scatter_enumerator enumerate) noexcept {
+    if ((!source && length != 0) || !enumerate)
+      return {};
+    return scatter_view(source, source_argument, 0, length, enumerate);
+  }
+
+  std::size_t size() const noexcept { return length_; }
+  bool empty() const noexcept { return length_ == 0; }
+  explicit operator bool() const noexcept {
+    return enumerate_ != nullptr && (source_ != nullptr || length_ == 0);
+  }
+
+  ntl::result<scatter_view>
+  subview(std::size_t offset, std::size_t length) const noexcept {
+    if (!*this || !detail::valid_subrange(length_, offset, length))
+      return ntl::unexpected(STATUS_BUFFER_TOO_SMALL);
+    return ntl::ok(scatter_view(source_, source_argument_,
+                                offset_ + offset, length, enumerate_));
+  }
+
+  ntl::result<scatter_view>
+  subview(std::size_t offset) const noexcept {
+    if (offset > length_)
+      return ntl::unexpected(STATUS_BUFFER_TOO_SMALL);
+    return subview(offset, length_ - offset);
+  }
+
+  template <class Function>
+  ntl::status for_each_chunk(Function &&function) const noexcept {
+    using function_type = std::remove_reference_t<Function>;
+    static_assert(
+        std::is_nothrow_invocable_v<
+            function_type &, std::span<const std::byte>>,
+        "scatter_view callbacks must be noexcept");
+    static_assert(
+        std::is_void_v<std::invoke_result_t<
+            function_type &, std::span<const std::byte>>> ||
+            std::is_same_v<std::invoke_result_t<
+                               function_type &,
+                               std::span<const std::byte>>,
+                           bool>,
+        "scatter_view callbacks must return void or bool");
+
+    if (!*this)
+      return STATUS_INVALID_DEVICE_STATE;
+    if (length_ == 0)
+      return ntl::status::ok();
+
+    function_type &callable = function;
+    detail::const_visit_state<function_type> state{&callable};
+    const ntl::status status = enumerate_(
+        source_, source_argument_, offset_, length_,
+        &detail::const_visit_state<function_type>::invoke, &state);
+    if (!status.is_ok())
+      return status;
+    if (!state.stopped && state.visited != length_)
+      return STATUS_DATA_ERROR;
+    return ntl::status::ok();
+  }
+
+  ntl::status copy_to(std::span<std::byte> destination,
+                      std::size_t source_offset = 0) const noexcept {
+    if (!detail::valid_subrange(length_, source_offset,
+                                destination.size()))
+      return STATUS_BUFFER_TOO_SMALL;
+    if (destination.empty())
+      return ntl::status::ok();
+
+    std::size_t copied = 0;
+    auto range = subview(source_offset, destination.size());
+    if (!range)
+      return range.status();
+    const ntl::status status = range->for_each_chunk(
+        [&](std::span<const std::byte> chunk) noexcept {
+          std::memcpy(destination.data() + copied, chunk.data(),
+                      chunk.size());
+          copied += chunk.size();
+        });
+    if (!status.is_ok())
+      return status;
+    return copied == destination.size() ? ntl::status::ok()
+                                        : ntl::status{STATUS_DATA_ERROR};
+  }
+
+  template <class T>
+  ntl::result<T> read(std::size_t offset = 0) const noexcept {
+    static_assert(std::is_trivially_copyable_v<T>,
+                  "scatter_view::read requires a trivially copyable type");
+    T value{};
+    const ntl::status status = copy_to(
+        std::as_writable_bytes(std::span<T>(&value, 1)), offset);
+    if (!status.is_ok())
+      return ntl::unexpected(status);
+    return ntl::ok(value);
+  }
+
+  ntl::result<std::span<const std::byte>>
+  contiguous() const noexcept {
+    if (!*this)
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+    if (length_ == 0)
+      return ntl::ok(std::span<const std::byte>{});
+
+    std::span<const std::byte> result;
+    std::size_t chunks = 0;
+    const ntl::status status = for_each_chunk(
+        [&](std::span<const std::byte> chunk) noexcept {
+          ++chunks;
+          result = chunk;
+          return chunks == 1;
+        });
+    if (!status.is_ok())
+      return ntl::unexpected(status);
+    if (chunks != 1 || result.size() != length_)
+      return ntl::unexpected(STATUS_NOT_FOUND);
+    return ntl::ok(result);
+  }
+
+private:
+  scatter_view(const void *source, std::size_t source_argument,
+               std::size_t offset, std::size_t length,
+               detail::scatter_enumerator enumerate) noexcept
+      : source_(source), source_argument_(source_argument), offset_(offset),
+        length_(length), enumerate_(enumerate) {}
+
+  const void *source_ = nullptr;
+  std::size_t source_argument_ = 0;
+  std::size_t offset_ = 0;
+  std::size_t length_ = 0;
+  detail::scatter_enumerator enumerate_ = nullptr;
+};
+
+/**
+ * @brief Mutable fragmented bytes available only from an owning/native editor.
+ */
+class mutable_scatter_view {
+public:
+  mutable_scatter_view() noexcept = default;
+
+  static mutable_scatter_view
+  from_contiguous(std::span<std::byte> bytes) noexcept {
+    if (bytes.empty())
+      return mutable_scatter_view(
+          nullptr, 0, 0, 0, &detail::enumerate_mutable_contiguous);
+    return mutable_scatter_view(
+        bytes.data(), bytes.size(), 0, bytes.size(),
+        &detail::enumerate_mutable_contiguous);
+  }
+
+  static mutable_scatter_view
+  from_segments(std::span<std::span<std::byte>> segments) noexcept {
+    std::size_t total = 0;
+    for (const auto segment : segments) {
+      if (segment.size() >
+          (std::numeric_limits<std::size_t>::max)() - total)
+        return {};
+      total += segment.size();
+    }
+    return mutable_scatter_view(
+        segments.data(), segments.size(), 0, total,
+        &detail::enumerate_mutable_segments);
+  }
+
+  static mutable_scatter_view
+  from_source(void *source, std::size_t source_argument,
+              std::size_t length,
+              detail::mutable_scatter_enumerator enumerate) noexcept {
+    if ((!source && length != 0) || !enumerate)
+      return {};
+    return mutable_scatter_view(source, source_argument, 0, length,
+                                enumerate);
+  }
+
+  std::size_t size() const noexcept { return length_; }
+  bool empty() const noexcept { return length_ == 0; }
+  explicit operator bool() const noexcept {
+    return enumerate_ != nullptr && (source_ != nullptr || length_ == 0);
+  }
+
+  ntl::result<mutable_scatter_view>
+  subview(std::size_t offset, std::size_t length) const noexcept {
+    if (!*this || !detail::valid_subrange(length_, offset, length))
+      return ntl::unexpected(STATUS_BUFFER_TOO_SMALL);
+    return ntl::ok(mutable_scatter_view(
+        source_, source_argument_, offset_ + offset, length, enumerate_));
+  }
+
+  template <class Function>
+  ntl::status for_each_chunk(Function &&function) const noexcept {
+    using function_type = std::remove_reference_t<Function>;
+    static_assert(
+        std::is_nothrow_invocable_v<function_type &,
+                                    std::span<std::byte>>,
+        "mutable_scatter_view callbacks must be noexcept");
+    static_assert(
+        std::is_void_v<std::invoke_result_t<
+            function_type &, std::span<std::byte>>> ||
+            std::is_same_v<std::invoke_result_t<
+                               function_type &, std::span<std::byte>>,
+                           bool>,
+        "mutable_scatter_view callbacks must return void or bool");
+
+    if (!*this)
+      return STATUS_INVALID_DEVICE_STATE;
+    if (length_ == 0)
+      return ntl::status::ok();
+
+    function_type &callable = function;
+    detail::mutable_visit_state<function_type> state{&callable};
+    const ntl::status status = enumerate_(
+        source_, source_argument_, offset_, length_,
+        &detail::mutable_visit_state<function_type>::invoke, &state);
+    if (!status.is_ok())
+      return status;
+    if (!state.stopped && state.visited != length_)
+      return STATUS_DATA_ERROR;
+    return ntl::status::ok();
+  }
+
+  ntl::status write(std::size_t destination_offset,
+                    std::span<const std::byte> source) const noexcept {
+    if (!detail::valid_subrange(length_, destination_offset,
+                                source.size()))
+      return STATUS_BUFFER_TOO_SMALL;
+    if (source.empty())
+      return ntl::status::ok();
+
+    auto range = subview(destination_offset, source.size());
+    if (!range)
+      return range.status();
+    std::size_t copied = 0;
+    const ntl::status status = range->for_each_chunk(
+        [&](std::span<std::byte> chunk) noexcept {
+          std::memcpy(chunk.data(), source.data() + copied, chunk.size());
+          copied += chunk.size();
+        });
+    if (!status.is_ok())
+      return status;
+    return copied == source.size() ? ntl::status::ok()
+                                   : ntl::status{STATUS_DATA_ERROR};
+  }
+
+  ntl::status write_u8(std::size_t offset,
+                       std::uint8_t value) const noexcept {
+    const auto byte = static_cast<std::byte>(value);
+    return write(offset, std::span<const std::byte>(&byte, 1));
+  }
+
+  ntl::status write_be16(std::size_t offset,
+                         std::uint16_t value) const noexcept {
+    const std::byte bytes[] = {
+        static_cast<std::byte>((value >> 8) & 0xff),
+        static_cast<std::byte>(value & 0xff)};
+    return write(offset, bytes);
+  }
+
+  ntl::status write_be32(std::size_t offset,
+                         std::uint32_t value) const noexcept {
+    const std::byte bytes[] = {
+        static_cast<std::byte>((value >> 24) & 0xff),
+        static_cast<std::byte>((value >> 16) & 0xff),
+        static_cast<std::byte>((value >> 8) & 0xff),
+        static_cast<std::byte>(value & 0xff)};
+    return write(offset, bytes);
+  }
+
+  template <class T>
+  ntl::result<T> read(std::size_t offset = 0) const noexcept {
+    static_assert(std::is_trivially_copyable_v<T>,
+                  "mutable_scatter_view::read requires a trivial type");
+    if (!detail::valid_subrange(length_, offset, sizeof(T)))
+      return ntl::unexpected(STATUS_BUFFER_TOO_SMALL);
+
+    T value{};
+    auto destination =
+        std::as_writable_bytes(std::span<T>(&value, 1));
+    std::size_t copied = 0;
+    auto range = subview(offset, sizeof(T));
+    if (!range)
+      return ntl::unexpected(range.status());
+    const ntl::status status = range->for_each_chunk(
+        [&](std::span<std::byte> chunk) noexcept {
+          std::memcpy(destination.data() + copied, chunk.data(),
+                      chunk.size());
+          copied += chunk.size();
+        });
+    if (!status.is_ok())
+      return ntl::unexpected(status);
+    return ntl::ok(value);
+  }
+
+private:
+  mutable_scatter_view(void *source, std::size_t source_argument,
+                       std::size_t offset, std::size_t length,
+                       detail::mutable_scatter_enumerator enumerate) noexcept
+      : source_(source), source_argument_(source_argument), offset_(offset),
+        length_(length), enumerate_(enumerate) {}
+
+  void *source_ = nullptr;
+  std::size_t source_argument_ = 0;
+  std::size_t offset_ = 0;
+  std::size_t length_ = 0;
+  detail::mutable_scatter_enumerator enumerate_ = nullptr;
+};
+
+/**
+ * @brief Bounds-checked sequential reader over a scatter_view.
+ */
+class byte_cursor {
+public:
+  explicit byte_cursor(scatter_view bytes) noexcept : bytes_(bytes) {}
+
+  std::size_t position() const noexcept { return position_; }
+  std::size_t remaining() const noexcept {
+    return position_ <= bytes_.size() ? bytes_.size() - position_ : 0;
+  }
+  bool empty() const noexcept { return remaining() == 0; }
+
+  ntl::status skip(std::size_t count) noexcept {
+    if (count > remaining())
+      return STATUS_BUFFER_TOO_SMALL;
+    position_ += count;
+    return ntl::status::ok();
+  }
+
+  ntl::status read_into(std::span<std::byte> destination) noexcept {
+    const ntl::status status = bytes_.copy_to(destination, position_);
+    if (status.is_ok())
+      position_ += destination.size();
+    return status;
+  }
+
+  template <class T> ntl::result<T> read() noexcept {
+    auto value = bytes_.read<T>(position_);
+    if (value)
+      position_ += sizeof(T);
+    return value;
+  }
+
+  ntl::result<std::uint8_t> read_u8() noexcept {
+    auto value = bytes_.read<std::uint8_t>(position_);
+    if (value)
+      ++position_;
+    return value;
+  }
+
+  ntl::result<std::uint16_t> read_be16() noexcept {
+    std::byte bytes[2]{};
+    const ntl::status status = read_into(bytes);
+    if (!status.is_ok())
+      return ntl::unexpected(status);
+    return ntl::ok(static_cast<std::uint16_t>(
+        (static_cast<std::uint16_t>(std::to_integer<unsigned char>(
+             bytes[0]))
+         << 8) |
+        std::to_integer<unsigned char>(bytes[1])));
+  }
+
+  ntl::result<std::uint32_t> read_be32() noexcept {
+    std::byte bytes[4]{};
+    const ntl::status status = read_into(bytes);
+    if (!status.is_ok())
+      return ntl::unexpected(status);
+    return ntl::ok(
+        (static_cast<std::uint32_t>(
+             std::to_integer<unsigned char>(bytes[0]))
+         << 24) |
+        (static_cast<std::uint32_t>(
+             std::to_integer<unsigned char>(bytes[1]))
+         << 16) |
+        (static_cast<std::uint32_t>(
+             std::to_integer<unsigned char>(bytes[2]))
+         << 8) |
+        static_cast<std::uint32_t>(
+            std::to_integer<unsigned char>(bytes[3])));
+  }
+
+  ntl::result<scatter_view> take(std::size_t count) noexcept {
+    auto result = bytes_.subview(position_, count);
+    if (result)
+      position_ += count;
+    return result;
+  }
+
+private:
+  scatter_view bytes_;
+  std::size_t position_ = 0;
+};
+
+struct byte_pattern_match {
+  bool found = false;
+  std::size_t offset = 0;
+  std::size_t trailing_prefix = 0;
+};
+
+/**
+ * @brief Converts a null-terminated narrow literal to compile-time bytes.
+ */
+template <std::size_t N>
+constexpr std::array<std::byte, N - 1>
+byte_literal(const char (&text)[N]) noexcept {
+  static_assert(N > 1, "byte_literal requires a non-empty literal");
+  std::array<std::byte, N - 1> result{};
+  for (std::size_t index = 0; index != N - 1; ++index)
+    result[index] = static_cast<std::byte>(
+        static_cast<unsigned char>(text[index]));
+  return result;
+}
+
+/**
+ * @brief Finds a fixed-size pattern across fragment boundaries.
+ *
+ * When no match exists, trailing_prefix is the longest suffix of the input
+ * that is also a prefix of pattern. No allocation or flattening is performed.
+ */
+template <std::size_t N>
+ntl::result<byte_pattern_match>
+scan_bytes(scatter_view source,
+           const std::array<std::byte, N> &pattern) noexcept {
+  static_assert(N != 0, "scan_bytes requires a non-empty pattern");
+  if (!source)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+
+  std::array<std::size_t, N> fallback{};
+  for (std::size_t index = 1, prefix = 0; index != N;) {
+    if (pattern[index] == pattern[prefix]) {
+      fallback[index++] = ++prefix;
+    } else if (prefix != 0) {
+      prefix = fallback[prefix - 1];
+    } else {
+      fallback[index++] = 0;
+    }
+  }
+
+  byte_pattern_match result{};
+  std::size_t matched = 0;
+  std::size_t consumed = 0;
+  const ntl::status status = source.for_each_chunk(
+      [&](std::span<const std::byte> chunk) noexcept {
+        for (const std::byte value : chunk) {
+          while (matched != 0 && value != pattern[matched])
+            matched = fallback[matched - 1];
+          if (value == pattern[matched])
+            ++matched;
+          ++consumed;
+          if (matched == N) {
+            result.found = true;
+            result.offset = consumed - N;
+            result.trailing_prefix = 0;
+            return false;
+          }
+        }
+        return true;
+      });
+  if (!status.is_ok())
+    return ntl::unexpected(status);
+  if (!result.found)
+    result.trailing_prefix = matched;
+  return ntl::ok(result);
+}
+
+} // namespace ntl::net

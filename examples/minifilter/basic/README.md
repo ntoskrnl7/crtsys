@@ -1,5 +1,7 @@
 # NTL basic minifilter sample
 
+[한국어 설명](./README.ko-KR.md)
+
 This is the smallest complete NTL minifilter in the sample set. It demonstrates:
 
 - typed pre-create and post-create callbacks;

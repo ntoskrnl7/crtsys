@@ -1,0 +1,203 @@
+/**
+ * @file inspection
+ * @brief Transport-neutral content views and typed inspection verdicts.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include <ntl/result>
+#include <ntl/net/buffer/scatter_view>
+#include <ntl/status>
+
+#include <cstddef>
+#include <cstdint>
+#include <span>
+#include <string_view>
+#include <utility>
+
+namespace ntl::net::inspection {
+
+/**
+ * @brief Final policy result. Native WFP actions remain adapter-owned.
+ */
+enum class verdict : std::uint8_t {
+  permit = 1,
+  block = 2,
+  drop_flow = 3,
+};
+
+/**
+ * @brief Policy used when an external inspector cannot return a verdict.
+ */
+enum class failure_policy : std::uint8_t {
+  fail_closed = 1,
+  fail_open = 2,
+};
+
+enum class direction : std::uint8_t {
+  unknown = 0,
+  inbound = 1,
+  outbound = 2,
+};
+
+enum class content_kind : std::uint8_t {
+  opaque = 0,
+  udp_payload = 1,
+  tcp_message = 2,
+  tls_plaintext = 3,
+};
+
+/**
+ * @brief Immutable callback-lifetime content, contiguous or fragmented.
+ *
+ * Native pointers and ownership never cross this boundary. Asynchronous
+ * callers must keep the request that owns the backing bytes alive.
+ */
+class content_view {
+public:
+  content_view() noexcept = default;
+  explicit content_view(ntl::net::scatter_view bytes) noexcept : bytes_(bytes) {}
+  explicit content_view(std::span<const std::byte> bytes) noexcept
+      : bytes_(ntl::net::scatter_view::from_contiguous(bytes)) {}
+
+  explicit operator bool() const noexcept { return static_cast<bool>(bytes_); }
+  bool empty() const noexcept { return bytes_.empty(); }
+  std::size_t size() const noexcept { return bytes_.size(); }
+  ntl::net::scatter_view bytes() const noexcept { return bytes_; }
+
+  ntl::result<content_view>
+  subview(std::size_t offset, std::size_t length) const noexcept {
+    auto selected = bytes_.subview(offset, length);
+    if (!selected)
+      return ntl::unexpected(selected.status());
+    return ntl::ok(content_view(*selected));
+  }
+
+  /**
+   * @brief Tests a binary prefix without assuming text encoding.
+   */
+  ntl::result<bool>
+  starts_with(std::span<const std::byte> pattern) const noexcept {
+    if (!bytes_)
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+    if (pattern.size() > bytes_.size())
+      return ntl::ok(false);
+    for (std::size_t index = 0; index != pattern.size(); ++index) {
+      auto value = bytes_.read<std::byte>(index);
+      if (!value)
+        return ntl::unexpected(value.status());
+      if (*value != pattern[index])
+        return ntl::ok(false);
+    }
+    return ntl::ok(true);
+  }
+
+  ntl::result<bool> starts_with(std::string_view text) const noexcept {
+    return starts_with(std::as_bytes(
+        std::span<const char>(text.data(), text.size())));
+  }
+
+  /**
+   * @brief Finds an arbitrary binary pattern across fragment boundaries.
+   *
+   * This allocation-free generic overload favors bounded inspection inputs.
+   * Fixed compile-time patterns may use ntl::net::scan_bytes for linear KMP
+   * scanning.
+   */
+  ntl::result<bool>
+  contains(std::span<const std::byte> pattern) const noexcept {
+    if (!bytes_)
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+    if (pattern.empty())
+      return ntl::ok(true);
+    if (pattern.size() > bytes_.size())
+      return ntl::ok(false);
+
+    const std::size_t last = bytes_.size() - pattern.size();
+    for (std::size_t offset = 0; offset <= last; ++offset) {
+      bool equal = true;
+      for (std::size_t index = 0; index != pattern.size(); ++index) {
+        auto value = bytes_.read<std::byte>(offset + index);
+        if (!value)
+          return ntl::unexpected(value.status());
+        if (*value != pattern[index]) {
+          equal = false;
+          break;
+        }
+      }
+      if (equal)
+        return ntl::ok(true);
+    }
+    return ntl::ok(false);
+  }
+
+  ntl::result<bool> contains(std::string_view text) const noexcept {
+    return contains(std::as_bytes(
+        std::span<const char>(text.data(), text.size())));
+  }
+
+private:
+  ntl::net::scatter_view bytes_;
+};
+
+/**
+ * @brief Metadata shared by packet, message, and proxy inspection adapters.
+ */
+struct context {
+  content_kind kind = content_kind::opaque;
+  direction flow_direction = direction::unknown;
+  std::uint64_t flow_id = 0;
+  std::uint16_t source_port = 0;
+  std::uint16_t destination_port = 0;
+};
+
+/**
+ * @brief One complete validated UDP datagram payload.
+ */
+class udp_datagram_view {
+public:
+  udp_datagram_view(context metadata, content_view payload) noexcept
+      : metadata_(metadata), payload_(payload) {
+    metadata_.kind = content_kind::udp_payload;
+  }
+
+  const context &metadata() const noexcept { return metadata_; }
+  content_view payload() const noexcept { return payload_; }
+
+private:
+  context metadata_{};
+  content_view payload_;
+};
+
+/**
+ * @brief One complete message defined by a caller-selected TCP framer.
+ */
+class tcp_message_view {
+public:
+  tcp_message_view(context metadata, content_view frame,
+                   content_view content) noexcept
+      : metadata_(metadata), frame_(frame), content_(content) {
+    metadata_.kind = content_kind::tcp_message;
+  }
+
+  const context &metadata() const noexcept { return metadata_; }
+  content_view frame() const noexcept { return frame_; }
+  content_view content() const noexcept { return content_; }
+
+private:
+  context metadata_{};
+  content_view frame_;
+  content_view content_;
+};
+
+/**
+ * @brief Evaluates a policy without exposing native WFP action fields.
+ */
+template <class Policy, class View>
+verdict evaluate(Policy &&policy, const View &view) {
+  return static_cast<verdict>(
+      std::forward<Policy>(policy)(view));
+}
+
+} // namespace ntl::net::inspection

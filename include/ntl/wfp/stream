@@ -1,0 +1,667 @@
+/**
+ * @file stream
+ * @brief Rule-safe WFP stream inspection and editing callbacks.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/wfp/stream is a kernel-mode header"
+#endif
+
+#include "flow"
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <span>
+#include <type_traits>
+
+namespace ntl::wfp {
+
+class stream_injector;
+
+namespace detail {
+
+inline ntl::status enumerate_stream_bytes(
+    const void *source, std::size_t, std::size_t offset,
+    std::size_t length, ntl::net::detail::scatter_visit visit,
+    void *context) noexcept {
+  const auto *data = static_cast<const FWPS_STREAM_DATA0 *>(source);
+  if (!data || !visit ||
+      !ntl::net::detail::valid_subrange(data->dataLength, offset, length))
+    return STATUS_INVALID_PARAMETER;
+  if (length == 0)
+    return ntl::status::ok();
+
+  NET_BUFFER_LIST *list = data->dataOffset.netBufferList;
+  NET_BUFFER *buffer = data->dataOffset.netBuffer;
+  MDL *first_mdl = data->dataOffset.mdl;
+  std::size_t first_mdl_offset = data->dataOffset.mdlOffset;
+  std::size_t first_buffer_offset =
+      data->dataOffset.netBufferOffset;
+  std::size_t stream_remaining = data->dataLength;
+  std::size_t skip = offset;
+  std::size_t remaining = length;
+  bool first_buffer = true;
+
+  if (!list || !buffer || !first_mdl)
+    return STATUS_DATA_ERROR;
+
+  while (list && buffer && stream_remaining != 0 &&
+         remaining != 0) {
+    const std::size_t native_buffer_length =
+        NET_BUFFER_DATA_LENGTH(buffer);
+    const std::size_t buffer_offset =
+        first_buffer ? first_buffer_offset : 0;
+    if (buffer_offset > native_buffer_length)
+      return STATUS_DATA_ERROR;
+
+    const std::size_t buffer_length = (std::min)(
+        native_buffer_length - buffer_offset, stream_remaining);
+    MDL *mdl =
+        first_buffer ? first_mdl : NET_BUFFER_CURRENT_MDL(buffer);
+    std::size_t mdl_offset =
+        first_buffer ? first_mdl_offset
+                     : NET_BUFFER_CURRENT_MDL_OFFSET(buffer);
+    std::size_t buffer_remaining = buffer_length;
+
+    while (mdl && buffer_remaining != 0 && remaining != 0) {
+      const std::size_t mdl_length = MmGetMdlByteCount(mdl);
+      if (mdl_offset > mdl_length)
+        return STATUS_DATA_ERROR;
+      const std::size_t segment_length =
+          (std::min)(mdl_length - mdl_offset, buffer_remaining);
+
+      if (skip >= segment_length) {
+        skip -= segment_length;
+      } else {
+        const std::size_t take = (std::min)(
+            segment_length - skip, remaining);
+        auto *mapped =
+            static_cast<const std::byte *>(
+                MmGetSystemAddressForMdlSafe(
+                    mdl, static_cast<MM_PAGE_PRIORITY>(
+                             NormalPagePriority |
+                             MdlMappingNoExecute)));
+        if (!mapped)
+          return STATUS_INSUFFICIENT_RESOURCES;
+        if (!visit(context,
+                   std::span<const std::byte>(
+                       mapped + mdl_offset + skip, take)))
+          return ntl::status::ok();
+        remaining -= take;
+        skip = 0;
+      }
+
+      buffer_remaining -= segment_length;
+      mdl = mdl->Next;
+      mdl_offset = 0;
+    }
+    if (buffer_remaining != 0 && remaining != 0)
+      return STATUS_DATA_ERROR;
+
+    stream_remaining -= buffer_length;
+    first_buffer = false;
+    if (NET_BUFFER_NEXT_NB(buffer)) {
+      buffer = NET_BUFFER_NEXT_NB(buffer);
+    } else {
+      list = NET_BUFFER_LIST_NEXT_NBL(list);
+      buffer = list ? NET_BUFFER_LIST_FIRST_NB(list) : nullptr;
+    }
+  }
+
+  return remaining == 0 ? ntl::status::ok()
+                        : ntl::status{STATUS_BUFFER_TOO_SMALL};
+}
+
+} // namespace detail
+
+/**
+ * @brief Callback-scoped read-only access to the indicated stream bytes.
+ */
+class stream_data_view {
+public:
+  std::size_t size() const noexcept {
+    return data_ ? data_->dataLength : 0;
+  }
+  bool empty() const noexcept { return size() == 0; }
+
+  std::uint32_t flags() const noexcept { return data_ ? data_->flags : 0; }
+
+  /**
+   * @brief Views the indicated bytes without flattening the NBL/MDL chain.
+   *
+   * The returned view is valid only for the classify callback.
+   */
+  ntl::net::scatter_view bytes() const noexcept {
+    if (!data_)
+      return {};
+    return ntl::net::scatter_view::from_source(
+        data_, 0, data_->dataLength, &detail::enumerate_stream_bytes);
+  }
+
+  std::size_t copy_to(void *buffer, std::size_t capacity) const noexcept {
+    if (!data_ || !buffer || capacity == 0)
+      return 0;
+    const std::size_t requested = (std::min)(capacity, size());
+    const ntl::status status = bytes().copy_to(
+        std::span<std::byte>(static_cast<std::byte *>(buffer), requested));
+    return status.is_ok() ? requested : 0;
+  }
+
+  explicit operator bool() const noexcept { return data_ != nullptr; }
+
+private:
+  template <class, class> friend class stream_event;
+  friend class cloned_stream_data;
+  explicit stream_data_view(FWPS_STREAM_DATA0 *data) noexcept : data_(data) {}
+
+  FWPS_STREAM_DATA0 *data_ = nullptr;
+};
+
+/**
+ * @brief Move-only clone produced by FwpsCloneStreamData0.
+ *
+ * This is deliberately distinct from cloned_packet because WFP requires
+ * stream clones to be released with FwpsDiscardClonedStreamData0.
+ */
+class cloned_stream_data {
+public:
+  cloned_stream_data(const cloned_stream_data &) = delete;
+  cloned_stream_data &operator=(const cloned_stream_data &) = delete;
+
+  cloned_stream_data(cloned_stream_data &&other) noexcept
+      : chain_(std::exchange(other.chain_, nullptr)),
+        length_(std::exchange(other.length_, 0)),
+        stream_flags_(std::exchange(other.stream_flags_, 0)),
+        clone_flags_(std::exchange(other.clone_flags_, 0)) {}
+
+  cloned_stream_data &operator=(cloned_stream_data &&other) noexcept {
+    if (this != &other) {
+      reset();
+      chain_ = std::exchange(other.chain_, nullptr);
+      length_ = std::exchange(other.length_, 0);
+      stream_flags_ = std::exchange(other.stream_flags_, 0);
+      clone_flags_ = std::exchange(other.clone_flags_, 0);
+    }
+    return *this;
+  }
+
+  ~cloned_stream_data() { reset(); }
+
+  static ntl::result<cloned_stream_data>
+  try_create(stream_data_view source, ULONG clone_flags = 0) noexcept {
+    if (!source.data_)
+      return ntl::unexpected(STATUS_NOT_FOUND);
+
+    NET_BUFFER_LIST *chain = nullptr;
+    const NTSTATUS result = FwpsCloneStreamData0(
+        source.data_, nullptr, nullptr, clone_flags, &chain);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return ntl::ok(cloned_stream_data(
+        chain, source.data_->dataLength, source.data_->flags, clone_flags));
+  }
+
+  explicit operator bool() const noexcept { return chain_ != nullptr; }
+  std::size_t size() const noexcept { return length_; }
+  std::uint32_t stream_flags() const noexcept { return stream_flags_; }
+
+  void reset() noexcept {
+    NET_BUFFER_LIST *chain = std::exchange(chain_, nullptr);
+    if (chain) {
+      const BOOLEAN dispatch_level =
+          KeGetCurrentIrql() == DISPATCH_LEVEL ? TRUE : FALSE;
+      FwpsDiscardClonedStreamData0(chain, clone_flags_, dispatch_level);
+    }
+    length_ = 0;
+    stream_flags_ = 0;
+    clone_flags_ = 0;
+  }
+
+private:
+  friend class stream_injector;
+
+  cloned_stream_data(NET_BUFFER_LIST *chain, std::size_t length,
+                     std::uint32_t stream_flags,
+                     ULONG clone_flags) noexcept
+      : chain_(chain), length_(length), stream_flags_(stream_flags),
+        clone_flags_(clone_flags) {}
+
+  NET_BUFFER_LIST *chain_ = nullptr;
+  std::size_t length_ = 0;
+  std::uint32_t stream_flags_ = 0;
+  ULONG clone_flags_ = 0;
+};
+
+/**
+ * @brief Move-only stream bytes built for replacement injection.
+ *
+ * Instances can only be created by stream_injector, which owns the matching
+ * NBL pool and waits for every asynchronous injection before releasing it.
+ */
+class injected_stream_data {
+public:
+  injected_stream_data(const injected_stream_data &) = delete;
+  injected_stream_data &operator=(const injected_stream_data &) = delete;
+
+  injected_stream_data(injected_stream_data &&other) noexcept
+      : buffer_(std::exchange(other.buffer_, nullptr)),
+        mdl_(std::exchange(other.mdl_, nullptr)),
+        chain_(std::exchange(other.chain_, nullptr)),
+        length_(std::exchange(other.length_, 0)),
+        stream_flags_(std::exchange(other.stream_flags_, 0)) {}
+
+  injected_stream_data &
+  operator=(injected_stream_data &&other) noexcept {
+    if (this != &other) {
+      reset();
+      buffer_ = std::exchange(other.buffer_, nullptr);
+      mdl_ = std::exchange(other.mdl_, nullptr);
+      chain_ = std::exchange(other.chain_, nullptr);
+      length_ = std::exchange(other.length_, 0);
+      stream_flags_ = std::exchange(other.stream_flags_, 0);
+    }
+    return *this;
+  }
+
+  ~injected_stream_data() { reset(); }
+
+  explicit operator bool() const noexcept { return chain_ != nullptr; }
+  std::size_t size() const noexcept { return length_; }
+  std::uint32_t stream_flags() const noexcept { return stream_flags_; }
+
+  void reset() noexcept {
+    NET_BUFFER_LIST *chain = std::exchange(chain_, nullptr);
+    if (chain)
+      FwpsFreeNetBufferList0(chain);
+    MDL *mdl = std::exchange(mdl_, nullptr);
+    if (mdl)
+      IoFreeMdl(mdl);
+    void *buffer = std::exchange(buffer_, nullptr);
+    if (buffer)
+      ExFreePool(buffer);
+    length_ = 0;
+    stream_flags_ = 0;
+  }
+
+private:
+  friend class stream_injector;
+
+  static ntl::result<injected_stream_data>
+  try_create(NDIS_HANDLE pool, const void *data, std::size_t length,
+             std::uint32_t stream_flags) noexcept {
+    if (!pool || !data || length == 0 || length > MAXULONG)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4996)
+#endif
+    void *buffer =
+        ExAllocatePoolWithTag(NonPagedPoolNx, length, 'dSwN');
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+    if (!buffer)
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    RtlCopyMemory(buffer, data, length);
+
+    MDL *mdl = IoAllocateMdl(buffer, static_cast<ULONG>(length), FALSE,
+                             FALSE, nullptr);
+    if (!mdl) {
+      ExFreePool(buffer);
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+    MmBuildMdlForNonPagedPool(mdl);
+
+    NET_BUFFER_LIST *chain = nullptr;
+    const NTSTATUS result = FwpsAllocateNetBufferAndNetBufferList0(
+        pool, 0, 0, mdl, 0, length, &chain);
+    if (!NT_SUCCESS(result)) {
+      IoFreeMdl(mdl);
+      ExFreePool(buffer);
+      return ntl::unexpected(result);
+    }
+
+    return ntl::ok(injected_stream_data(
+        buffer, mdl, chain, length, stream_flags));
+  }
+
+  injected_stream_data(void *buffer, MDL *mdl, NET_BUFFER_LIST *chain,
+                       std::size_t length,
+                       std::uint32_t stream_flags) noexcept
+      : buffer_(buffer), mdl_(mdl), chain_(chain), length_(length),
+        stream_flags_(stream_flags) {}
+
+  void *buffer_ = nullptr;
+  MDL *mdl_ = nullptr;
+  NET_BUFFER_LIST *chain_ = nullptr;
+  std::size_t length_ = 0;
+  std::uint32_t stream_flags_ = 0;
+};
+
+/**
+ * @brief Copyable capability that can only resume deferred stream data.
+ *
+ * This capability is layer-erased so one bounded verdict queue can safely
+ * merge IPv4 and IPv6 work. It does not expose stream reinjection.
+ */
+class stream_continuation {
+public:
+  stream_continuation(const stream_continuation &) = default;
+  stream_continuation &operator=(const stream_continuation &) = default;
+
+  explicit operator bool() const noexcept {
+    return flow_id_ != 0 && callout_id_ != 0 && layer_id_ != 0;
+  }
+
+  ntl::status resume() const noexcept {
+    if (!*this)
+      return STATUS_INVALID_DEVICE_STATE;
+    return FwpsStreamContinue0(flow_id_, callout_id_, layer_id_,
+                               stream_flags_);
+  }
+
+private:
+  template <class, class> friend class stream_event;
+
+  stream_continuation() = default;
+  stream_continuation(UINT64 flow_id, UINT32 callout_id, UINT16 layer_id,
+                      UINT32 stream_flags) noexcept
+      : flow_id_(flow_id), callout_id_(callout_id), layer_id_(layer_id),
+        stream_flags_(stream_flags) {}
+
+  UINT64 flow_id_ = 0;
+  UINT32 callout_id_ = 0;
+  UINT16 layer_id_ = 0;
+  UINT32 stream_flags_ = 0;
+};
+
+/**
+ * @brief Copyable identity needed to continue or reinject one stream flow.
+ *
+ * It can only be obtained from a stream_event, so layer and callout IDs cannot
+ * be assembled or mixed manually.
+ */
+template <class Layer> class stream_injection_site {
+public:
+  static_assert(detail::stream_layer<Layer>,
+                "stream_injection_site requires a stream layer");
+
+  stream_injection_site(const stream_injection_site &) = default;
+  stream_injection_site &operator=(const stream_injection_site &) = default;
+
+  explicit operator bool() const noexcept {
+    return flow_id_ != 0 && callout_id_ != 0;
+  }
+
+  ntl::status continue_deferred() const noexcept {
+    if (!*this)
+      return STATUS_INVALID_DEVICE_STATE;
+    return FwpsStreamContinue0(flow_id_, callout_id_, Layer::runtime_id,
+                               stream_flags_);
+  }
+
+private:
+  template <class, class> friend class stream_event;
+  friend class stream_injector;
+
+  stream_injection_site() = default;
+  stream_injection_site(UINT64 flow_id, UINT32 callout_id,
+                        UINT32 stream_flags) noexcept
+      : flow_id_(flow_id), callout_id_(callout_id),
+        stream_flags_(stream_flags) {}
+
+  UINT64 flow_id_ = 0;
+  UINT32 callout_id_ = 0;
+  UINT32 stream_flags_ = 0;
+};
+
+/**
+ * @brief The only legal output states for an ntl::wfp stream callback.
+ *
+ * The factories bind classify action, stream action, byte counts, and
+ * ACTION_WRITE handling together so callers cannot construct invalid native
+ * combinations.
+ */
+class stream_result {
+public:
+  static stream_result permit(std::size_t bytes) noexcept {
+    return stream_result(kind::permit, bytes);
+  }
+
+  static stream_result block(std::size_t bytes) noexcept {
+    return stream_result(kind::block, bytes);
+  }
+
+  static stream_result need_more(std::uint32_t minimum_bytes) noexcept {
+    return stream_result(kind::need_more, minimum_bytes);
+  }
+
+  static stream_result defer() noexcept {
+    return stream_result(kind::defer, 0);
+  }
+
+  static stream_result drop_connection() noexcept {
+    return stream_result(kind::drop_connection, 0);
+  }
+
+  static stream_result allow_connection() noexcept {
+    return stream_result(kind::allow_connection, 0);
+  }
+
+private:
+  enum class kind {
+    permit,
+    block,
+    need_more,
+    defer,
+    drop_connection,
+    allow_connection,
+  };
+
+  template <class, class, auto> friend struct detail_stream_adapter;
+  friend void detail_apply_stream_result(
+      stream_result, const FWPS_FILTER2 *, FWPS_STREAM_CALLOUT_IO_PACKET0 *,
+      FWPS_CLASSIFY_OUT0 &) noexcept;
+
+  stream_result(kind operation, std::size_t count) noexcept
+      : operation_(operation), count_(count) {}
+
+  kind operation_;
+  std::size_t count_;
+};
+
+/**
+ * @brief Callback data for a stream layer and its typed flow context.
+ */
+template <class Layer, class Context> class stream_event {
+public:
+  static_assert(detail::stream_layer<Layer>,
+                "stream_event requires an ntl::wfp stream layer");
+
+  stream_event(const stream_event &) = delete;
+  stream_event &operator=(const stream_event &) = delete;
+  stream_event(stream_event &&) = delete;
+  stream_event &operator=(stream_event &&) = delete;
+
+  incoming_value_view value(typename Layer::field field) const noexcept {
+    const auto index = static_cast<std::uint16_t>(field);
+    if (!values_ || values_->layerId != Layer::runtime_id ||
+        index >= values_->valueCount || !values_->incomingValue)
+      return incoming_value_view(nullptr);
+    return incoming_value_view(&values_->incomingValue[index].value);
+  }
+
+  metadata_view metadata() const noexcept { return metadata_view(metadata_); }
+  filter_view filter() const noexcept { return filter_view(filter_); }
+
+  Context *context() const noexcept {
+    return context_;
+  }
+
+  stream_data_view data() const noexcept {
+    return stream_data_view(io_packet_ ? io_packet_->streamData : nullptr);
+  }
+
+  std::size_t missed_bytes() const noexcept {
+    return io_packet_ ? io_packet_->missedBytes : 0;
+  }
+
+  bool no_more_data() const noexcept {
+    return output_ &&
+           (output_->flags & FWPS_CLASSIFY_OUT_FLAG_NO_MORE_DATA) != 0;
+  }
+
+  bool buffer_limit_reached() const noexcept {
+    return output_ &&
+           (output_->flags &
+            FWPS_CLASSIFY_OUT_FLAG_BUFFER_LIMIT_REACHED) != 0;
+  }
+
+  stream_injection_site<Layer> injection_site() const noexcept {
+    if (!metadata_ || !filter_ || !io_packet_ || !io_packet_->streamData ||
+        (metadata_->currentMetadataValues &
+         FWPS_METADATA_FIELD_FLOW_HANDLE) == 0)
+      return stream_injection_site<Layer>();
+    return stream_injection_site<Layer>(
+        metadata_->flowHandle, filter_->action.calloutId,
+        io_packet_->streamData->flags);
+  }
+
+  stream_continuation continuation() const noexcept {
+    if (!metadata_ || !filter_ || !io_packet_ || !io_packet_->streamData ||
+        (metadata_->currentMetadataValues &
+         FWPS_METADATA_FIELD_FLOW_HANDLE) == 0)
+      return {};
+    return stream_continuation(
+        metadata_->flowHandle, filter_->action.calloutId, Layer::runtime_id,
+        io_packet_->streamData->flags);
+  }
+
+private:
+  template <class, class, auto> friend struct detail_stream_adapter;
+
+  stream_event(const FWPS_INCOMING_VALUES0 *values,
+               const FWPS_INCOMING_METADATA_VALUES0 *metadata,
+               FWPS_STREAM_CALLOUT_IO_PACKET0 *io_packet,
+               const FWPS_FILTER2 *filter, Context *context,
+               const FWPS_CLASSIFY_OUT0 *output) noexcept
+      : values_(values), metadata_(metadata), io_packet_(io_packet),
+        filter_(filter), context_(context), output_(output) {}
+
+  const FWPS_INCOMING_VALUES0 *values_ = nullptr;
+  const FWPS_INCOMING_METADATA_VALUES0 *metadata_ = nullptr;
+  FWPS_STREAM_CALLOUT_IO_PACKET0 *io_packet_ = nullptr;
+  const FWPS_FILTER2 *filter_ = nullptr;
+  Context *context_ = nullptr;
+  const FWPS_CLASSIFY_OUT0 *output_ = nullptr;
+};
+
+inline void detail_apply_stream_result(
+    stream_result result, const FWPS_FILTER2 *filter,
+    FWPS_STREAM_CALLOUT_IO_PACKET0 *io_packet,
+    FWPS_CLASSIFY_OUT0 &output) noexcept {
+  if (!io_packet || !io_packet->streamData ||
+      (output.rights & FWPS_RIGHT_ACTION_WRITE) == 0)
+    return;
+
+  io_packet->countBytesRequired = 0;
+  io_packet->countBytesEnforced = 0;
+  io_packet->streamAction = FWPS_STREAM_ACTION_NONE;
+
+  if (filter &&
+      filter->action.type == FWP_ACTION_CALLOUT_INSPECTION) {
+    detail::apply_decision(decision::continue_classification, filter, output);
+    return;
+  }
+
+  const auto enforce_all = [&](decision action) noexcept {
+    io_packet->countBytesEnforced = io_packet->streamData->dataLength;
+    detail::apply_decision(action, filter, output);
+  };
+
+  switch (result.operation_) {
+  case stream_result::kind::permit:
+  case stream_result::kind::block: {
+    io_packet->countBytesEnforced =
+        (std::min)(result.count_, static_cast<std::size_t>(
+                                      io_packet->streamData->dataLength));
+    // Stream editing is byte-range enforcement, not a final layer veto.
+    // Retaining ACTION_WRITE lets WFP re-indicate bytes after the enforced
+    // prefix (n / pattern / m in the documented inline-edit sequence).
+    // Clearing it here would incorrectly consume the remainder after a
+    // partial block even though countBytesEnforced is smaller than dataLength.
+    output.actionType =
+        result.operation_ == stream_result::kind::permit
+            ? FWP_ACTION_PERMIT
+            : FWP_ACTION_BLOCK;
+    return;
+  }
+  case stream_result::kind::need_more:
+    if ((output.flags & (FWPS_CLASSIFY_OUT_FLAG_BUFFER_LIMIT_REACHED |
+                         FWPS_CLASSIFY_OUT_FLAG_NO_MORE_DATA)) != 0) {
+      enforce_all(decision::block);
+      return;
+    }
+    io_packet->streamAction = FWPS_STREAM_ACTION_NEED_MORE_DATA;
+    io_packet->countBytesRequired = static_cast<UINT32>(
+        (std::max)(result.count_, static_cast<std::size_t>(1)));
+    output.actionType = FWP_ACTION_NONE;
+    return;
+  case stream_result::kind::defer:
+    if ((io_packet->streamData->flags & FWPS_STREAM_FLAG_RECEIVE) == 0) {
+      enforce_all(decision::block);
+      return;
+    }
+    io_packet->streamAction = FWPS_STREAM_ACTION_DEFER;
+    output.actionType = FWP_ACTION_NONE;
+    return;
+  case stream_result::kind::drop_connection:
+    if (filter &&
+        filter->action.type != FWP_ACTION_CALLOUT_UNKNOWN) {
+      enforce_all(decision::block);
+      return;
+    }
+    io_packet->streamAction = FWPS_STREAM_ACTION_DROP_CONNECTION;
+    output.actionType = FWP_ACTION_NONE;
+    return;
+  case stream_result::kind::allow_connection:
+    io_packet->streamAction = FWPS_STREAM_ACTION_ALLOW_CONNECTION;
+    output.actionType = FWP_ACTION_NONE;
+    return;
+  }
+}
+
+template <class Layer, class Context, auto Callback>
+struct detail_stream_adapter {
+  static_assert(
+      detail::stream_layer<Layer>,
+      "a stream callback can only be registered at a stream layer");
+  static_assert(
+      std::is_nothrow_invocable_r_v<stream_result, decltype(Callback),
+                                    const stream_event<Layer, Context> &>,
+      "a WFP stream callback must be noexcept and return stream_result");
+
+  static void NTAPI invoke(
+      const FWPS_INCOMING_VALUES0 *values,
+      const FWPS_INCOMING_METADATA_VALUES0 *metadata, void *layer_data,
+      const void *, const FWPS_FILTER2 *filter, UINT64 flow_context,
+      FWPS_CLASSIFY_OUT0 *output) noexcept {
+    if (!layer_data || !output)
+      return;
+
+    auto *io_packet =
+        static_cast<FWPS_STREAM_CALLOUT_IO_PACKET0 *>(layer_data);
+    auto *holder =
+        reinterpret_cast<detail::flow_context_holder<Layer, Context> *>(
+            flow_context);
+    Context *context = holder ? holder->context.get() : nullptr;
+    stream_event<Layer, Context> event(values, metadata, io_packet, filter,
+                                       context, output);
+    detail_apply_stream_result(Callback(event), filter, io_packet, *output);
+  }
+};
+
+} // namespace ntl::wfp

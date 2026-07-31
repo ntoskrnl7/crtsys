@@ -36,6 +36,13 @@ Minifilter에서는 **NTL Minifilter**를 선택하고 `main.cpp`에
 
 ![Visual Studio에서 crtsys NTL Minifilter 진입점을 선택하고 ntl::flt::main을 구현하는 화면](./assets/visual-studio-ntl-minifilter-entrypoint-ko-kr.gif)
 
+WFP callout driver에서는 WDK project type을 WDM으로 유지하고
+**crtsys WDM entry point**를 **NTL WFP**로 선택한 뒤 `ntl::main`을
+구현합니다. Package가 WFP와 architecture별 NDIS 전처리기 정의를 적용하고
+`fwpkclnt.lib`를 자동으로 링크합니다.
+
+![Visual Studio에서 crtsys NTL WFP 진입점을 선택하고 ntl::main을 구현하는 화면](./assets/visual-studio-ntl-wfp-entrypoint-ko-kr.gif)
+
 Visual Studio에서는 NuGet package UI를 사용하는 것이 가장 쉽습니다.
 
 ![Visual Studio NuGet package UI에서 crtsys를 설치하는 화면](./assets/visual-studio-nuget-package-ui-ko-kr.gif)
@@ -102,12 +109,15 @@ library, 선택한 driver model에 맞는 startup object가 포함됩니다.
 | 일반 진입점을 쓰는 WDM | `<CrtSysUseNtlMain>false</CrtSysUseNtlMain>` | `DriverEntry` |
 | 일반 KMDF | 기존 `<DriverType>KMDF</DriverType>` 설정의 기본값 | 일반 `DriverEntry`와 `WdfDriverCreate` |
 | NTL KMDF | `<DriverType>KMDF</DriverType>` + `<CrtSysKmdfEntryPoint>NtlKmdf</CrtSysKmdfEntryPoint>` | `ntl::kmdf::main` |
+| NTL minifilter | `<CrtSysWdmEntryPoint>NtlMinifilter</CrtSysWdmEntryPoint>` | `ntl::flt::main` |
+| NTL WFP callout | `<CrtSysWdmEntryPoint>NtlWfp</CrtSysWdmEntryPoint>` | `ntl::main` |
 | Export driver | WDK `ExportDriver` + crtsys 진입점 선택 없음 | WDK export-driver 진입 모델 |
 
 NTL KMDF 진입점은 선택 사항입니다. 두 KMDF 방식 모두 PnP, power, queue,
 request, object lifetime, dispatch 처리는 기존과 같이 WDF가 소유합니다.
 `ExportDriver`는 일반 WDM 진입점이 아니라 WDK export-driver 모델이므로,
-export driver에서는 NTL WDM, NTL KMDF, NTL Minifilter를 선택하면 안 됩니다.
+export driver에서는 NTL WDM, NTL KMDF, NTL Minifilter, NTL WFP를 선택하면
+안 됩니다.
 
 driver는 여전히 일반 WDK driver입니다. Verifier, signing, target OS policy,
 IRQL, paging, unload safety는 driver project가 책임집니다.

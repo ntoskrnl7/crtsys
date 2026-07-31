@@ -1,0 +1,652 @@
+/**
+ * @file http2_hpack
+ * @brief Bounded RFC 7541 HPACK decoder for HTTP/2 inspection.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include <ntl/net/http2/framing>
+
+#include <algorithm>
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <optional>
+#include <span>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+namespace ntl::net::http2 {
+
+struct hpack_limits {
+  std::size_t maximum_dynamic_table_size = 4096;
+};
+
+namespace hpack_detail {
+
+struct static_entry {
+  std::string_view name;
+  std::string_view value;
+};
+
+inline constexpr std::array<static_entry, 61> static_table{{
+    {":authority", ""},
+    {":method", "GET"},
+    {":method", "POST"},
+    {":path", "/"},
+    {":path", "/index.html"},
+    {":scheme", "http"},
+    {":scheme", "https"},
+    {":status", "200"},
+    {":status", "204"},
+    {":status", "206"},
+    {":status", "304"},
+    {":status", "400"},
+    {":status", "404"},
+    {":status", "500"},
+    {"accept-charset", ""},
+    {"accept-encoding", "gzip, deflate"},
+    {"accept-language", ""},
+    {"accept-ranges", ""},
+    {"accept", ""},
+    {"access-control-allow-origin", ""},
+    {"age", ""},
+    {"allow", ""},
+    {"authorization", ""},
+    {"cache-control", ""},
+    {"content-disposition", ""},
+    {"content-encoding", ""},
+    {"content-language", ""},
+    {"content-length", ""},
+    {"content-location", ""},
+    {"content-range", ""},
+    {"content-type", ""},
+    {"cookie", ""},
+    {"date", ""},
+    {"etag", ""},
+    {"expect", ""},
+    {"expires", ""},
+    {"from", ""},
+    {"host", ""},
+    {"if-match", ""},
+    {"if-modified-since", ""},
+    {"if-none-match", ""},
+    {"if-range", ""},
+    {"if-unmodified-since", ""},
+    {"last-modified", ""},
+    {"link", ""},
+    {"location", ""},
+    {"max-forwards", ""},
+    {"proxy-authenticate", ""},
+    {"proxy-authorization", ""},
+    {"range", ""},
+    {"referer", ""},
+    {"refresh", ""},
+    {"retry-after", ""},
+    {"server", ""},
+    {"set-cookie", ""},
+    {"strict-transport-security", ""},
+    {"transfer-encoding", ""},
+    {"user-agent", ""},
+    {"vary", ""},
+    {"via", ""},
+    {"www-authenticate", ""},
+}};
+
+/*
+ * The following two tables are RFC 7541 Appendix B Code Components.
+ *
+ * Copyright (c) 2015 IETF Trust and the persons identified as the
+ * document authors. All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES ARE DISCLAIMED.
+ */
+inline constexpr std::array<std::uint32_t, 257> huffman_codes{{
+    0x1ff8u, 0x7fffd8u, 0xfffffe2u, 0xfffffe3u,
+    0xfffffe4u, 0xfffffe5u, 0xfffffe6u, 0xfffffe7u,
+    0xfffffe8u, 0xffffeau, 0x3ffffffcu, 0xfffffe9u,
+    0xfffffeau, 0x3ffffffdu, 0xfffffebu, 0xfffffecu,
+    0xfffffedu, 0xfffffeeu, 0xfffffefu, 0xffffff0u,
+    0xffffff1u, 0xffffff2u, 0x3ffffffeu, 0xffffff3u,
+    0xffffff4u, 0xffffff5u, 0xffffff6u, 0xffffff7u,
+    0xffffff8u, 0xffffff9u, 0xffffffau, 0xffffffbu,
+    0x14u, 0x3f8u, 0x3f9u, 0xffau,
+    0x1ff9u, 0x15u, 0xf8u, 0x7fau,
+    0x3fau, 0x3fbu, 0xf9u, 0x7fbu,
+    0xfau, 0x16u, 0x17u, 0x18u,
+    0x0u, 0x1u, 0x2u, 0x19u,
+    0x1au, 0x1bu, 0x1cu, 0x1du,
+    0x1eu, 0x1fu, 0x5cu, 0xfbu,
+    0x7ffcu, 0x20u, 0xffbu, 0x3fcu,
+    0x1ffau, 0x21u, 0x5du, 0x5eu,
+    0x5fu, 0x60u, 0x61u, 0x62u,
+    0x63u, 0x64u, 0x65u, 0x66u,
+    0x67u, 0x68u, 0x69u, 0x6au,
+    0x6bu, 0x6cu, 0x6du, 0x6eu,
+    0x6fu, 0x70u, 0x71u, 0x72u,
+    0xfcu, 0x73u, 0xfdu, 0x1ffbu,
+    0x7fff0u, 0x1ffcu, 0x3ffcu, 0x22u,
+    0x7ffdu, 0x3u, 0x23u, 0x4u,
+    0x24u, 0x5u, 0x25u, 0x26u,
+    0x27u, 0x6u, 0x74u, 0x75u,
+    0x28u, 0x29u, 0x2au, 0x7u,
+    0x2bu, 0x76u, 0x2cu, 0x8u,
+    0x9u, 0x2du, 0x77u, 0x78u,
+    0x79u, 0x7au, 0x7bu, 0x7ffeu,
+    0x7fcu, 0x3ffdu, 0x1ffdu, 0xffffffcu,
+    0xfffe6u, 0x3fffd2u, 0xfffe7u, 0xfffe8u,
+    0x3fffd3u, 0x3fffd4u, 0x3fffd5u, 0x7fffd9u,
+    0x3fffd6u, 0x7fffdau, 0x7fffdbu, 0x7fffdcu,
+    0x7fffddu, 0x7fffdeu, 0xffffebu, 0x7fffdfu,
+    0xffffecu, 0xffffedu, 0x3fffd7u, 0x7fffe0u,
+    0xffffeeu, 0x7fffe1u, 0x7fffe2u, 0x7fffe3u,
+    0x7fffe4u, 0x1fffdcu, 0x3fffd8u, 0x7fffe5u,
+    0x3fffd9u, 0x7fffe6u, 0x7fffe7u, 0xffffefu,
+    0x3fffdau, 0x1fffddu, 0xfffe9u, 0x3fffdbu,
+    0x3fffdcu, 0x7fffe8u, 0x7fffe9u, 0x1fffdeu,
+    0x7fffeau, 0x3fffddu, 0x3fffdeu, 0xfffff0u,
+    0x1fffdfu, 0x3fffdfu, 0x7fffebu, 0x7fffecu,
+    0x1fffe0u, 0x1fffe1u, 0x3fffe0u, 0x1fffe2u,
+    0x7fffedu, 0x3fffe1u, 0x7fffeeu, 0x7fffefu,
+    0xfffeau, 0x3fffe2u, 0x3fffe3u, 0x3fffe4u,
+    0x7ffff0u, 0x3fffe5u, 0x3fffe6u, 0x7ffff1u,
+    0x3ffffe0u, 0x3ffffe1u, 0xfffebu, 0x7fff1u,
+    0x3fffe7u, 0x7ffff2u, 0x3fffe8u, 0x1ffffecu,
+    0x3ffffe2u, 0x3ffffe3u, 0x3ffffe4u, 0x7ffffdeu,
+    0x7ffffdfu, 0x3ffffe5u, 0xfffff1u, 0x1ffffedu,
+    0x7fff2u, 0x1fffe3u, 0x3ffffe6u, 0x7ffffe0u,
+    0x7ffffe1u, 0x3ffffe7u, 0x7ffffe2u, 0xfffff2u,
+    0x1fffe4u, 0x1fffe5u, 0x3ffffe8u, 0x3ffffe9u,
+    0xffffffdu, 0x7ffffe3u, 0x7ffffe4u, 0x7ffffe5u,
+    0xfffecu, 0xfffff3u, 0xfffedu, 0x1fffe6u,
+    0x3fffe9u, 0x1fffe7u, 0x1fffe8u, 0x7ffff3u,
+    0x3fffeau, 0x3fffebu, 0x1ffffeeu, 0x1ffffefu,
+    0xfffff4u, 0xfffff5u, 0x3ffffeau, 0x7ffff4u,
+    0x3ffffebu, 0x7ffffe6u, 0x3ffffecu, 0x3ffffedu,
+    0x7ffffe7u, 0x7ffffe8u, 0x7ffffe9u, 0x7ffffeau,
+    0x7ffffebu, 0xffffffeu, 0x7ffffecu, 0x7ffffedu,
+    0x7ffffeeu, 0x7ffffefu, 0x7fffff0u, 0x3ffffeeu,
+    0x3fffffffu,
+}};
+
+inline constexpr std::array<std::uint8_t, 257> huffman_lengths{{
+    13, 23, 28, 28, 28, 28, 28, 28,
+    28, 24, 30, 28, 28, 30, 28, 28,
+    28, 28, 28, 28, 28, 28, 30, 28,
+    28, 28, 28, 28, 28, 28, 28, 28,
+    6, 10, 10, 12, 13, 6, 8, 11,
+    10, 10, 8, 11, 8, 6, 6, 6,
+    5, 5, 5, 6, 6, 6, 6, 6,
+    6, 6, 7, 8, 15, 6, 12, 10,
+    13, 6, 7, 7, 7, 7, 7, 7,
+    7, 7, 7, 7, 7, 7, 7, 7,
+    7, 7, 7, 7, 7, 7, 7, 7,
+    8, 7, 8, 13, 19, 13, 14, 6,
+    15, 5, 6, 5, 6, 5, 6, 6,
+    6, 5, 7, 7, 6, 6, 6, 5,
+    6, 7, 6, 5, 5, 6, 7, 7,
+    7, 7, 7, 15, 11, 14, 13, 28,
+    20, 22, 20, 20, 22, 22, 22, 23,
+    22, 23, 23, 23, 23, 23, 24, 23,
+    24, 24, 22, 23, 24, 23, 23, 23,
+    23, 21, 22, 23, 22, 23, 23, 24,
+    22, 21, 20, 22, 22, 23, 23, 21,
+    23, 22, 22, 24, 21, 22, 23, 23,
+    21, 21, 22, 21, 23, 22, 23, 23,
+    20, 22, 22, 22, 23, 22, 22, 23,
+    26, 26, 20, 19, 22, 23, 22, 25,
+    26, 26, 26, 27, 27, 26, 24, 25,
+    19, 21, 26, 27, 27, 26, 27, 24,
+    21, 21, 26, 26, 28, 27, 27, 27,
+    20, 24, 20, 21, 22, 21, 21, 23,
+    22, 22, 25, 25, 24, 24, 26, 23,
+    26, 27, 26, 26, 27, 27, 27, 27,
+    27, 28, 27, 27, 27, 27, 27, 26,
+    30,
+}};
+
+struct huffman_node {
+  std::array<std::int16_t, 2> child{{-1, -1}};
+  std::int16_t symbol = -1;
+};
+
+struct huffman_tree_storage {
+  std::array<huffman_node, 1024> nodes{};
+  std::size_t used = 1;
+};
+
+consteval huffman_tree_storage make_huffman_tree() {
+  huffman_tree_storage result;
+  for (std::size_t symbol = 0;
+       symbol != huffman_codes.size(); ++symbol) {
+    std::int16_t node = 0;
+    const auto length = huffman_lengths[symbol];
+    const auto code = huffman_codes[symbol];
+    for (std::uint8_t consumed = 0; consumed != length;
+         ++consumed) {
+      const auto shift =
+          static_cast<std::uint8_t>(length - consumed - 1);
+      const std::size_t bit = (code >> shift) & 1u;
+      auto &child = result.nodes[
+          static_cast<std::size_t>(node)].child[bit];
+      if (child < 0) {
+        child = static_cast<std::int16_t>(result.used);
+        ++result.used;
+      }
+      node = child;
+    }
+    result.nodes[static_cast<std::size_t>(node)].symbol =
+        static_cast<std::int16_t>(symbol);
+  }
+  return result;
+}
+
+inline constexpr auto huffman_tree = make_huffman_tree();
+static_assert(huffman_tree.used <= huffman_tree.nodes.size());
+
+class cursor {
+public:
+  explicit cursor(ntl::net::scatter_view bytes) noexcept
+      : bytes_(bytes) {}
+
+  std::size_t remaining() const noexcept {
+    return bytes_.size() - offset_;
+  }
+
+  std::size_t position() const noexcept { return offset_; }
+
+  bool at(std::size_t relative,
+          std::uint8_t &value) const noexcept {
+    if (relative >= remaining())
+      return false;
+    const auto read =
+        bytes_.read<std::uint8_t>(offset_ + relative);
+    if (!read)
+      return false;
+    value = *read;
+    return true;
+  }
+
+  bool read(std::uint8_t &value) noexcept {
+    if (!at(0, value))
+      return false;
+    ++offset_;
+    return true;
+  }
+
+  bool advance(std::size_t count) noexcept {
+    if (count > remaining())
+      return false;
+    offset_ += count;
+    return true;
+  }
+
+private:
+  ntl::net::scatter_view bytes_;
+  std::size_t offset_ = 0;
+};
+
+inline ntl::result<std::size_t>
+read_integer(cursor &input, std::uint8_t prefix_bits) noexcept {
+  if (prefix_bits == 0 || prefix_bits > 8)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  std::uint8_t first = 0;
+  if (!input.read(first))
+    return ntl::unexpected(STATUS_DATA_ERROR);
+
+  const std::size_t prefix_max =
+      (std::size_t{1} << prefix_bits) - 1;
+  std::size_t value = first & prefix_max;
+  if (value != prefix_max)
+    return ntl::ok(value);
+
+  unsigned shift = 0;
+  for (;;) {
+    std::uint8_t octet = 0;
+    if (!input.read(octet))
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    const std::size_t part = octet & 0x7fu;
+    if (shift >=
+            std::numeric_limits<std::size_t>::digits ||
+        part > ((std::numeric_limits<std::size_t>::max)() -
+                value) >> shift)
+      return ntl::unexpected(STATUS_INTEGER_OVERFLOW);
+    value += part << shift;
+    if ((octet & 0x80u) == 0)
+      return ntl::ok(value);
+    shift += 7;
+  }
+}
+
+inline ntl::result<std::string>
+read_huffman_string(cursor &input, std::size_t encoded_size,
+                    std::size_t maximum_decoded_size) {
+  if (encoded_size > input.remaining())
+    return ntl::unexpected(STATUS_DATA_ERROR);
+
+  std::string decoded;
+  decoded.reserve((std::min)(
+      encoded_size, maximum_decoded_size));
+  std::int16_t node = 0;
+  unsigned trailing_count = 0;
+  unsigned trailing_value = 0;
+
+  for (std::size_t offset = 0; offset != encoded_size;
+       ++offset) {
+    std::uint8_t octet = 0;
+    if (!input.at(offset, octet))
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    for (unsigned index = 0; index != 8; ++index) {
+      const unsigned bit = (octet >> (7 - index)) & 1u;
+      trailing_value =
+          ((trailing_value << 1) | bit) & 0xffu;
+      ++trailing_count;
+      const auto child = huffman_tree.nodes[
+          static_cast<std::size_t>(node)].child[bit];
+      if (child < 0)
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      node = child;
+      const auto symbol = huffman_tree.nodes[
+          static_cast<std::size_t>(node)].symbol;
+      if (symbol < 0)
+        continue;
+      if (symbol == 256)
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      if (decoded.size() >= maximum_decoded_size)
+        return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+      decoded.push_back(static_cast<char>(symbol));
+      node = 0;
+      trailing_count = 0;
+      trailing_value = 0;
+    }
+  }
+  if (!input.advance(encoded_size))
+    return ntl::unexpected(STATUS_DATA_ERROR);
+  if (node != 0 &&
+      (trailing_count > 7 ||
+       trailing_value !=
+           ((1u << trailing_count) - 1u)))
+    return ntl::unexpected(STATUS_DATA_ERROR);
+  return ntl::ok(std::move(decoded));
+}
+
+inline ntl::result<std::string>
+read_string(cursor &input,
+            std::size_t maximum_decoded_size) {
+  std::uint8_t first = 0;
+  if (!input.at(0, first))
+    return ntl::unexpected(STATUS_DATA_ERROR);
+  const bool huffman = (first & 0x80u) != 0;
+  auto length = read_integer(input, 7);
+  if (!length)
+    return ntl::unexpected(length.status());
+  if (*length > input.remaining())
+    return ntl::unexpected(STATUS_DATA_ERROR);
+  if (huffman)
+    return read_huffman_string(
+        input, *length, maximum_decoded_size);
+  if (*length > maximum_decoded_size)
+    return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+
+  std::string decoded;
+  decoded.reserve(*length);
+  for (std::size_t index = 0; index != *length; ++index) {
+    std::uint8_t octet = 0;
+    if (!input.read(octet))
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    decoded.push_back(static_cast<char>(octet));
+  }
+  return ntl::ok(std::move(decoded));
+}
+
+} // namespace hpack_detail
+
+/**
+ * @brief Complete bounded HPACK decoding context for one direction.
+ *
+ * Keep one instance per HTTP/2 connection direction. The configured dynamic
+ * table limit is both an allocation bound and the greatest table-size update
+ * accepted from the peer. Header-list output is separately bounded by the
+ * maximum passed to decode().
+ */
+class bounded_hpack_decoder {
+public:
+  explicit bounded_hpack_decoder(
+      hpack_limits limits = {}) noexcept
+      : maximum_dynamic_table_size_(
+            limits.maximum_dynamic_table_size),
+        dynamic_table_limit_(
+            limits.maximum_dynamic_table_size) {}
+
+  void reset() noexcept {
+    dynamic_table_.clear();
+    dynamic_table_size_ = 0;
+    dynamic_table_limit_ = maximum_dynamic_table_size_;
+  }
+
+  std::size_t dynamic_table_size() const noexcept {
+    return dynamic_table_size_;
+  }
+
+  std::size_t dynamic_table_entries() const noexcept {
+    return dynamic_table_.size();
+  }
+
+  ntl::result<decoded_headers>
+  decode(ntl::net::scatter_view encoded,
+         std::size_t maximum_decoded_size) noexcept {
+    if (!encoded || maximum_decoded_size == 0)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    try {
+      return decode_impl(encoded, maximum_decoded_size);
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+private:
+  struct dynamic_entry {
+    std::string name;
+    std::string value;
+    std::size_t size = 0;
+  };
+
+  struct indexed_value {
+    std::string_view name;
+    std::string_view value;
+  };
+
+  std::optional<indexed_value>
+  lookup(std::size_t index) const noexcept {
+    if (index == 0)
+      return std::nullopt;
+    if (index <= hpack_detail::static_table.size()) {
+      const auto &entry =
+          hpack_detail::static_table[index - 1];
+      return indexed_value{entry.name, entry.value};
+    }
+    const std::size_t dynamic_index =
+        index - hpack_detail::static_table.size() - 1;
+    if (dynamic_index >= dynamic_table_.size())
+      return std::nullopt;
+    const auto &entry = dynamic_table_[dynamic_index];
+    return indexed_value{entry.name, entry.value};
+  }
+
+  void evict_to_limit() noexcept {
+    while (dynamic_table_size_ > dynamic_table_limit_ &&
+           !dynamic_table_.empty()) {
+      dynamic_table_size_ -= dynamic_table_.back().size;
+      dynamic_table_.pop_back();
+    }
+  }
+
+  void insert(std::string name, std::string value) {
+    if (name.size() >
+        (std::numeric_limits<std::size_t>::max)() -
+            value.size() - 32) {
+      dynamic_table_.clear();
+      dynamic_table_size_ = 0;
+      return;
+    }
+    const std::size_t size =
+        name.size() + value.size() + 32;
+    if (size > dynamic_table_limit_) {
+      dynamic_table_.clear();
+      dynamic_table_size_ = 0;
+      return;
+    }
+    while (!dynamic_table_.empty() &&
+           dynamic_table_size_ >
+               dynamic_table_limit_ - size) {
+      dynamic_table_size_ -= dynamic_table_.back().size;
+      dynamic_table_.pop_back();
+    }
+    dynamic_table_.insert(
+        dynamic_table_.begin(),
+        dynamic_entry{
+            std::move(name), std::move(value), size});
+    dynamic_table_size_ += size;
+  }
+
+  static ntl::status append_header(
+      decoded_headers &output, std::string name,
+      std::string value, bool never_index,
+      std::size_t maximum_decoded_size) {
+    if (name.size() > maximum_decoded_size -
+                          output.decoded_bytes ||
+        value.size() >
+            maximum_decoded_size -
+                output.decoded_bytes - name.size())
+      return ntl::status(STATUS_BUFFER_OVERFLOW);
+    output.decoded_bytes += name.size() + value.size();
+    output.fields.push_back(
+        {std::move(name), std::move(value), never_index});
+    return ntl::status::ok();
+  }
+
+  ntl::result<decoded_headers>
+  decode_impl(ntl::net::scatter_view encoded,
+              std::size_t maximum_decoded_size) {
+    hpack_detail::cursor input(encoded);
+    decoded_headers output;
+    bool header_field_seen = false;
+
+    while (input.remaining() != 0) {
+      std::uint8_t first = 0;
+      if (!input.at(0, first))
+        return ntl::unexpected(STATUS_DATA_ERROR);
+
+      if ((first & 0x80u) != 0) {
+        auto index = hpack_detail::read_integer(input, 7);
+        if (!index)
+          return ntl::unexpected(index.status());
+        const auto found = lookup(*index);
+        if (!found)
+          return ntl::unexpected(STATUS_DATA_ERROR);
+        const auto appended = append_header(
+            output, std::string(found->name),
+            std::string(found->value), false,
+            maximum_decoded_size);
+        if (!appended.is_ok())
+          return ntl::unexpected(
+              static_cast<NTSTATUS>(appended));
+        header_field_seen = true;
+        continue;
+      }
+
+      if ((first & 0xe0u) == 0x20u) {
+        if (header_field_seen)
+          return ntl::unexpected(STATUS_DATA_ERROR);
+        auto size = hpack_detail::read_integer(input, 5);
+        if (!size)
+          return ntl::unexpected(size.status());
+        if (*size > maximum_dynamic_table_size_)
+          return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+        dynamic_table_limit_ = *size;
+        evict_to_limit();
+        continue;
+      }
+
+      const bool incremental = (first & 0xc0u) == 0x40u;
+      const bool never_index =
+          !incremental && (first & 0xf0u) == 0x10u;
+      const std::uint8_t prefix_bits =
+          incremental ? 6 : 4;
+      auto name_index =
+          hpack_detail::read_integer(input, prefix_bits);
+      if (!name_index)
+        return ntl::unexpected(name_index.status());
+
+      std::string name;
+      if (*name_index == 0) {
+        auto literal_name = hpack_detail::read_string(
+            input, maximum_decoded_size -
+                       output.decoded_bytes);
+        if (!literal_name)
+          return ntl::unexpected(literal_name.status());
+        name = std::move(*literal_name);
+      } else {
+        const auto found = lookup(*name_index);
+        if (!found)
+          return ntl::unexpected(STATUS_DATA_ERROR);
+        name.assign(found->name);
+      }
+      if (name.size() >
+          maximum_decoded_size - output.decoded_bytes)
+        return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+
+      auto value = hpack_detail::read_string(
+          input, maximum_decoded_size -
+                     output.decoded_bytes - name.size());
+      if (!value)
+        return ntl::unexpected(value.status());
+      std::string dynamic_name;
+      std::string dynamic_value;
+      if (incremental) {
+        dynamic_name = name;
+        dynamic_value = *value;
+      }
+      const auto appended = append_header(
+          output, std::move(name), std::move(*value),
+          never_index, maximum_decoded_size);
+      if (!appended.is_ok())
+        return ntl::unexpected(
+            static_cast<NTSTATUS>(appended));
+      if (incremental)
+        insert(std::move(dynamic_name),
+               std::move(dynamic_value));
+      header_field_seen = true;
+    }
+    return ntl::ok(std::move(output));
+  }
+
+  std::size_t maximum_dynamic_table_size_ = 0;
+  std::size_t dynamic_table_limit_ = 0;
+  std::size_t dynamic_table_size_ = 0;
+  std::vector<dynamic_entry> dynamic_table_;
+};
+
+static_assert(noexcept(std::declval<bounded_hpack_decoder &>().reset()));
+static_assert(noexcept(
+    std::declval<bounded_hpack_decoder &>().decode(
+        std::declval<ntl::net::scatter_view>(), 1)));
+
+} // namespace ntl::net::http2

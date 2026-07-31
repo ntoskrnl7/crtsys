@@ -1232,14 +1232,17 @@ void run() {
   constexpr auto delim{"^_^"sv};
 
   for (const auto word : std::views::split(words, delim)) {
+#if defined(__cpp_lib_string_view) && __cpp_lib_string_view >= 202110L
     // with string_view's C++23 range constructor:
     std::cout << std::quoted(std::string_view(word)) << ' ';
+#else
+    std::cout << std::quoted(
+        std::string_view(word.begin(), word.end())) << ' ';
+#endif
   }
   std::cout << '\n';
 #else
-  // The cppreference example relies on string_view's C++23 range constructor.
-  // VS 2019's STL does not expose that constructor, so keep the source exact
-  // and run it only on toolsets that provide the required library surface.
+  // VS 2019's STL does not expose the required ranges surface.
   std::cout << "std::views::split cppreference example is not available\n";
 #endif
 }

@@ -60,9 +60,16 @@ cmake --build test\flt\runtime\build_x86_v145 --config Debug `
   --target crtsys_flt_delete_runtime_test_app
 ```
 
-Run only through the disposable-VM commands in
-`D:\projects\crtsys-vm-test\COMMANDS.md`; never load the test driver on the
-host. A passing app reports counters similar to:
+Stage the driver package and application using the
+[disposable VM workflow](README.md#disposable-vm-execution). Run the application
+against an explicit disposable volume root:
+
+```powershell
+$testVolumeRoot = Read-Host 'Disposable test volume root'
+.\crtsys_flt_delete_runtime_test_app.exe $testVolumeRoot
+```
+
+A passing app reports counters similar to:
 
 ```text
 create_delete_on_close=2 legacy=8 extended=2 delete=7 clear=3

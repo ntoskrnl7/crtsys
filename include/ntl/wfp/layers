@@ -1,0 +1,880 @@
+/**
+ * @file layers
+ * @brief WFP layer tags shared by kernel callouts and policy management.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#define NTL_WFP_KERNEL_MODE
+#include <ndis.h>
+#include <.internal/winsdk/wfp_version_compat>
+#include <fwpmk.h>
+#include <fwpsk.h>
+#else
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <fwpmu.h>
+#endif
+
+#include <cstdint>
+#include <cstddef>
+#include <type_traits>
+
+#if !defined(NTL_WFP_KERNEL_MODE) || \
+    (NTDDI_VERSION >= NTDDI_WINBLUE)
+#define NTL_WFP_HAS_FAST_LAYERS
+#endif
+
+namespace ntl::wfp {
+
+class policy_transaction;
+class policy_session;
+class policy_manifest;
+template <std::size_t> class callout_driver;
+class connect_redirector;
+class bind_redirector;
+
+class provider_key {
+public:
+  constexpr explicit provider_key(const GUID &value) noexcept : value_(value) {}
+  bool matches(const GUID &value) const noexcept {
+    return ::IsEqualGUID(value_, value);
+  }
+
+private:
+  friend class policy_transaction;
+  friend class policy_session;
+  friend class policy_manifest;
+  friend class connect_redirector;
+  constexpr const GUID &native() const noexcept { return value_; }
+  GUID value_{};
+};
+
+class sublayer_key {
+public:
+  constexpr explicit sublayer_key(const GUID &value) noexcept : value_(value) {}
+  bool matches(const GUID &value) const noexcept {
+    return ::IsEqualGUID(value_, value);
+  }
+
+private:
+  friend class policy_transaction;
+  friend class policy_session;
+  friend class policy_manifest;
+  constexpr const GUID &native() const noexcept { return value_; }
+  GUID value_{};
+};
+
+template <class Layer> class callout_key {
+public:
+  constexpr explicit callout_key(const GUID &value) noexcept : value_(value) {}
+  bool matches(const GUID &value) const noexcept {
+    return ::IsEqualGUID(value_, value);
+  }
+
+private:
+  friend class policy_transaction;
+  friend class policy_session;
+  friend class policy_manifest;
+  template <std::size_t> friend class callout_driver;
+  constexpr const GUID &native() const noexcept { return value_; }
+  GUID value_{};
+};
+
+template <class Layer> class filter_key {
+public:
+  constexpr explicit filter_key(const GUID &value) noexcept : value_(value) {}
+  bool matches(const GUID &value) const noexcept {
+    return ::IsEqualGUID(value_, value);
+  }
+
+private:
+  friend class policy_transaction;
+  friend class policy_session;
+  friend class policy_manifest;
+  constexpr const GUID &native() const noexcept { return value_; }
+  GUID value_{};
+};
+
+namespace layers {
+
+/**
+ * @brief Outbound IPv4 ALE connect redirection.
+ */
+struct ale_connect_redirect_v4 {
+#ifdef NTL_WFP_KERNEL_MODE
+  enum class field : std::uint16_t {
+    app_id = FWPS_FIELD_ALE_CONNECT_REDIRECT_V4_ALE_APP_ID,
+    user_id = FWPS_FIELD_ALE_CONNECT_REDIRECT_V4_ALE_USER_ID,
+    local_address = FWPS_FIELD_ALE_CONNECT_REDIRECT_V4_IP_LOCAL_ADDRESS,
+    local_address_type =
+        FWPS_FIELD_ALE_CONNECT_REDIRECT_V4_IP_LOCAL_ADDRESS_TYPE,
+    local_port = FWPS_FIELD_ALE_CONNECT_REDIRECT_V4_IP_LOCAL_PORT,
+    protocol = FWPS_FIELD_ALE_CONNECT_REDIRECT_V4_IP_PROTOCOL,
+    remote_address = FWPS_FIELD_ALE_CONNECT_REDIRECT_V4_IP_REMOTE_ADDRESS,
+    destination_address_type =
+        FWPS_FIELD_ALE_CONNECT_REDIRECT_V4_IP_DESTINATION_ADDRESS_TYPE,
+    remote_port = FWPS_FIELD_ALE_CONNECT_REDIRECT_V4_IP_REMOTE_PORT,
+    flags = FWPS_FIELD_ALE_CONNECT_REDIRECT_V4_FLAGS,
+  };
+
+  static constexpr UINT16 runtime_id = FWPS_LAYER_ALE_CONNECT_REDIRECT_V4;
+#endif
+  static const GUID &policy_key() noexcept {
+    return FWPM_LAYER_ALE_CONNECT_REDIRECT_V4;
+  }
+};
+
+/**
+ * @brief Outbound IPv6 ALE connect redirection.
+ */
+struct ale_connect_redirect_v6 {
+#ifdef NTL_WFP_KERNEL_MODE
+  enum class field : std::uint16_t {
+    app_id = FWPS_FIELD_ALE_CONNECT_REDIRECT_V6_ALE_APP_ID,
+    user_id = FWPS_FIELD_ALE_CONNECT_REDIRECT_V6_ALE_USER_ID,
+    local_address = FWPS_FIELD_ALE_CONNECT_REDIRECT_V6_IP_LOCAL_ADDRESS,
+    local_address_type =
+        FWPS_FIELD_ALE_CONNECT_REDIRECT_V6_IP_LOCAL_ADDRESS_TYPE,
+    local_port = FWPS_FIELD_ALE_CONNECT_REDIRECT_V6_IP_LOCAL_PORT,
+    protocol = FWPS_FIELD_ALE_CONNECT_REDIRECT_V6_IP_PROTOCOL,
+    remote_address = FWPS_FIELD_ALE_CONNECT_REDIRECT_V6_IP_REMOTE_ADDRESS,
+    destination_address_type =
+        FWPS_FIELD_ALE_CONNECT_REDIRECT_V6_IP_DESTINATION_ADDRESS_TYPE,
+    remote_port = FWPS_FIELD_ALE_CONNECT_REDIRECT_V6_IP_REMOTE_PORT,
+    flags = FWPS_FIELD_ALE_CONNECT_REDIRECT_V6_FLAGS,
+  };
+
+  static constexpr UINT16 runtime_id = FWPS_LAYER_ALE_CONNECT_REDIRECT_V6;
+#endif
+  static const GUID &policy_key() noexcept {
+    return FWPM_LAYER_ALE_CONNECT_REDIRECT_V6;
+  }
+};
+
+/**
+ * @brief IPv4 local-address and port redirection at bind time.
+ */
+struct ale_bind_redirect_v4 {
+#ifdef NTL_WFP_KERNEL_MODE
+  enum class field : std::uint16_t {
+    app_id = FWPS_FIELD_ALE_BIND_REDIRECT_V4_ALE_APP_ID,
+    user_id = FWPS_FIELD_ALE_BIND_REDIRECT_V4_ALE_USER_ID,
+    local_address = FWPS_FIELD_ALE_BIND_REDIRECT_V4_IP_LOCAL_ADDRESS,
+    local_address_type =
+        FWPS_FIELD_ALE_BIND_REDIRECT_V4_IP_LOCAL_ADDRESS_TYPE,
+    local_port = FWPS_FIELD_ALE_BIND_REDIRECT_V4_IP_LOCAL_PORT,
+    protocol = FWPS_FIELD_ALE_BIND_REDIRECT_V4_IP_PROTOCOL,
+    flags = FWPS_FIELD_ALE_BIND_REDIRECT_V4_FLAGS,
+  };
+
+  static constexpr UINT16 runtime_id = FWPS_LAYER_ALE_BIND_REDIRECT_V4;
+#endif
+  static const GUID &policy_key() noexcept {
+    return FWPM_LAYER_ALE_BIND_REDIRECT_V4;
+  }
+};
+
+/**
+ * @brief IPv6 local-address and port redirection at bind time.
+ */
+struct ale_bind_redirect_v6 {
+#ifdef NTL_WFP_KERNEL_MODE
+  enum class field : std::uint16_t {
+    app_id = FWPS_FIELD_ALE_BIND_REDIRECT_V6_ALE_APP_ID,
+    user_id = FWPS_FIELD_ALE_BIND_REDIRECT_V6_ALE_USER_ID,
+    local_address = FWPS_FIELD_ALE_BIND_REDIRECT_V6_IP_LOCAL_ADDRESS,
+    local_address_type =
+        FWPS_FIELD_ALE_BIND_REDIRECT_V6_IP_LOCAL_ADDRESS_TYPE,
+    local_port = FWPS_FIELD_ALE_BIND_REDIRECT_V6_IP_LOCAL_PORT,
+    protocol = FWPS_FIELD_ALE_BIND_REDIRECT_V6_IP_PROTOCOL,
+    flags = FWPS_FIELD_ALE_BIND_REDIRECT_V6_FLAGS,
+  };
+
+  static constexpr UINT16 runtime_id = FWPS_LAYER_ALE_BIND_REDIRECT_V6;
+#endif
+  static const GUID &policy_key() noexcept {
+    return FWPM_LAYER_ALE_BIND_REDIRECT_V6;
+  }
+};
+
+/**
+ * @brief Outbound IPv4 ALE authorization.
+ */
+struct ale_auth_connect_v4 {
+#ifdef NTL_WFP_KERNEL_MODE
+  enum class field : std::uint16_t {
+    app_id = FWPS_FIELD_ALE_AUTH_CONNECT_V4_ALE_APP_ID,
+    user_id = FWPS_FIELD_ALE_AUTH_CONNECT_V4_ALE_USER_ID,
+    local_address = FWPS_FIELD_ALE_AUTH_CONNECT_V4_IP_LOCAL_ADDRESS,
+    local_port = FWPS_FIELD_ALE_AUTH_CONNECT_V4_IP_LOCAL_PORT,
+    protocol = FWPS_FIELD_ALE_AUTH_CONNECT_V4_IP_PROTOCOL,
+    remote_address = FWPS_FIELD_ALE_AUTH_CONNECT_V4_IP_REMOTE_ADDRESS,
+    remote_port = FWPS_FIELD_ALE_AUTH_CONNECT_V4_IP_REMOTE_PORT,
+    flags = FWPS_FIELD_ALE_AUTH_CONNECT_V4_FLAGS,
+  };
+
+  static constexpr UINT16 runtime_id = FWPS_LAYER_ALE_AUTH_CONNECT_V4;
+#endif
+  static const GUID &policy_key() noexcept {
+    return FWPM_LAYER_ALE_AUTH_CONNECT_V4;
+  }
+};
+
+/**
+ * @brief Outbound IPv6 ALE authorization.
+ */
+struct ale_auth_connect_v6 {
+#ifdef NTL_WFP_KERNEL_MODE
+  enum class field : std::uint16_t {
+    app_id = FWPS_FIELD_ALE_AUTH_CONNECT_V6_ALE_APP_ID,
+    user_id = FWPS_FIELD_ALE_AUTH_CONNECT_V6_ALE_USER_ID,
+    local_address = FWPS_FIELD_ALE_AUTH_CONNECT_V6_IP_LOCAL_ADDRESS,
+    local_port = FWPS_FIELD_ALE_AUTH_CONNECT_V6_IP_LOCAL_PORT,
+    protocol = FWPS_FIELD_ALE_AUTH_CONNECT_V6_IP_PROTOCOL,
+    remote_address = FWPS_FIELD_ALE_AUTH_CONNECT_V6_IP_REMOTE_ADDRESS,
+    remote_port = FWPS_FIELD_ALE_AUTH_CONNECT_V6_IP_REMOTE_PORT,
+    flags = FWPS_FIELD_ALE_AUTH_CONNECT_V6_FLAGS,
+  };
+
+  static constexpr UINT16 runtime_id = FWPS_LAYER_ALE_AUTH_CONNECT_V6;
+#endif
+  static const GUID &policy_key() noexcept {
+    return FWPM_LAYER_ALE_AUTH_CONNECT_V6;
+  }
+};
+
+/**
+ * @brief Inbound IPv4 ALE receive/accept authorization.
+ */
+struct ale_auth_recv_accept_v4 {
+#ifdef NTL_WFP_KERNEL_MODE
+  enum class field : std::uint16_t {
+    app_id = FWPS_FIELD_ALE_AUTH_RECV_ACCEPT_V4_ALE_APP_ID,
+    user_id = FWPS_FIELD_ALE_AUTH_RECV_ACCEPT_V4_ALE_USER_ID,
+    local_address = FWPS_FIELD_ALE_AUTH_RECV_ACCEPT_V4_IP_LOCAL_ADDRESS,
+    local_port = FWPS_FIELD_ALE_AUTH_RECV_ACCEPT_V4_IP_LOCAL_PORT,
+    protocol = FWPS_FIELD_ALE_AUTH_RECV_ACCEPT_V4_IP_PROTOCOL,
+    remote_address = FWPS_FIELD_ALE_AUTH_RECV_ACCEPT_V4_IP_REMOTE_ADDRESS,
+    remote_port = FWPS_FIELD_ALE_AUTH_RECV_ACCEPT_V4_IP_REMOTE_PORT,
+    flags = FWPS_FIELD_ALE_AUTH_RECV_ACCEPT_V4_FLAGS,
+  };
+
+  static constexpr UINT16 runtime_id = FWPS_LAYER_ALE_AUTH_RECV_ACCEPT_V4;
+#endif
+  static const GUID &policy_key() noexcept {
+    return FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4;
+  }
+};
+
+/**
+ * @brief Inbound IPv6 ALE receive/accept authorization.
+ */
+struct ale_auth_recv_accept_v6 {
+#ifdef NTL_WFP_KERNEL_MODE
+  enum class field : std::uint16_t {
+    app_id = FWPS_FIELD_ALE_AUTH_RECV_ACCEPT_V6_ALE_APP_ID,
+    user_id = FWPS_FIELD_ALE_AUTH_RECV_ACCEPT_V6_ALE_USER_ID,
+    local_address = FWPS_FIELD_ALE_AUTH_RECV_ACCEPT_V6_IP_LOCAL_ADDRESS,
+    local_port = FWPS_FIELD_ALE_AUTH_RECV_ACCEPT_V6_IP_LOCAL_PORT,
+    protocol = FWPS_FIELD_ALE_AUTH_RECV_ACCEPT_V6_IP_PROTOCOL,
+    remote_address = FWPS_FIELD_ALE_AUTH_RECV_ACCEPT_V6_IP_REMOTE_ADDRESS,
+    remote_port = FWPS_FIELD_ALE_AUTH_RECV_ACCEPT_V6_IP_REMOTE_PORT,
+    flags = FWPS_FIELD_ALE_AUTH_RECV_ACCEPT_V6_FLAGS,
+  };
+
+  static constexpr UINT16 runtime_id = FWPS_LAYER_ALE_AUTH_RECV_ACCEPT_V6;
+#endif
+  static const GUID &policy_key() noexcept {
+    return FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6;
+  }
+};
+
+/**
+ * @brief IPv4 flow-established notification used to attach later-layer
+ * contexts.
+ */
+struct ale_flow_established_v4 {
+#ifdef NTL_WFP_KERNEL_MODE
+  enum class field : std::uint16_t {
+    app_id = FWPS_FIELD_ALE_FLOW_ESTABLISHED_V4_ALE_APP_ID,
+    user_id = FWPS_FIELD_ALE_FLOW_ESTABLISHED_V4_ALE_USER_ID,
+    local_address = FWPS_FIELD_ALE_FLOW_ESTABLISHED_V4_IP_LOCAL_ADDRESS,
+    local_port = FWPS_FIELD_ALE_FLOW_ESTABLISHED_V4_IP_LOCAL_PORT,
+    protocol = FWPS_FIELD_ALE_FLOW_ESTABLISHED_V4_IP_PROTOCOL,
+    remote_address = FWPS_FIELD_ALE_FLOW_ESTABLISHED_V4_IP_REMOTE_ADDRESS,
+    remote_port = FWPS_FIELD_ALE_FLOW_ESTABLISHED_V4_IP_REMOTE_PORT,
+    direction = FWPS_FIELD_ALE_FLOW_ESTABLISHED_V4_DIRECTION,
+    flags = FWPS_FIELD_ALE_FLOW_ESTABLISHED_V4_FLAGS,
+  };
+
+  static constexpr UINT16 runtime_id = FWPS_LAYER_ALE_FLOW_ESTABLISHED_V4;
+#endif
+  static const GUID &policy_key() noexcept {
+    return FWPM_LAYER_ALE_FLOW_ESTABLISHED_V4;
+  }
+};
+
+/**
+ * @brief IPv6 flow-established notification used to attach later-layer
+ * contexts.
+ */
+struct ale_flow_established_v6 {
+#ifdef NTL_WFP_KERNEL_MODE
+  enum class field : std::uint16_t {
+    app_id = FWPS_FIELD_ALE_FLOW_ESTABLISHED_V6_ALE_APP_ID,
+    user_id = FWPS_FIELD_ALE_FLOW_ESTABLISHED_V6_ALE_USER_ID,
+    local_address = FWPS_FIELD_ALE_FLOW_ESTABLISHED_V6_IP_LOCAL_ADDRESS,
+    local_port = FWPS_FIELD_ALE_FLOW_ESTABLISHED_V6_IP_LOCAL_PORT,
+    protocol = FWPS_FIELD_ALE_FLOW_ESTABLISHED_V6_IP_PROTOCOL,
+    remote_address = FWPS_FIELD_ALE_FLOW_ESTABLISHED_V6_IP_REMOTE_ADDRESS,
+    remote_port = FWPS_FIELD_ALE_FLOW_ESTABLISHED_V6_IP_REMOTE_PORT,
+    direction = FWPS_FIELD_ALE_FLOW_ESTABLISHED_V6_DIRECTION,
+    flags = FWPS_FIELD_ALE_FLOW_ESTABLISHED_V6_FLAGS,
+  };
+
+  static constexpr UINT16 runtime_id = FWPS_LAYER_ALE_FLOW_ESTABLISHED_V6;
+#endif
+  static const GUID &policy_key() noexcept {
+    return FWPM_LAYER_ALE_FLOW_ESTABLISHED_V6;
+  }
+};
+
+/**
+ * @brief IPv4 TCP byte-stream inspection or editing.
+ */
+struct stream_v4 {
+#ifdef NTL_WFP_KERNEL_MODE
+  enum class field : std::uint16_t {
+    local_address = FWPS_FIELD_STREAM_V4_IP_LOCAL_ADDRESS,
+    remote_address = FWPS_FIELD_STREAM_V4_IP_REMOTE_ADDRESS,
+    local_port = FWPS_FIELD_STREAM_V4_IP_LOCAL_PORT,
+    remote_port = FWPS_FIELD_STREAM_V4_IP_REMOTE_PORT,
+    direction = FWPS_FIELD_STREAM_V4_DIRECTION,
+    flags = FWPS_FIELD_STREAM_V4_FLAGS,
+  };
+
+  static constexpr UINT16 runtime_id = FWPS_LAYER_STREAM_V4;
+#endif
+  static const GUID &policy_key() noexcept { return FWPM_LAYER_STREAM_V4; }
+};
+
+/**
+ * @brief IPv6 TCP byte-stream inspection or editing.
+ */
+struct stream_v6 {
+#ifdef NTL_WFP_KERNEL_MODE
+  enum class field : std::uint16_t {
+    local_address = FWPS_FIELD_STREAM_V6_IP_LOCAL_ADDRESS,
+    remote_address = FWPS_FIELD_STREAM_V6_IP_REMOTE_ADDRESS,
+    local_port = FWPS_FIELD_STREAM_V6_IP_LOCAL_PORT,
+    remote_port = FWPS_FIELD_STREAM_V6_IP_REMOTE_PORT,
+    direction = FWPS_FIELD_STREAM_V6_DIRECTION,
+    flags = FWPS_FIELD_STREAM_V6_FLAGS,
+  };
+
+  static constexpr UINT16 runtime_id = FWPS_LAYER_STREAM_V6;
+#endif
+  static const GUID &policy_key() noexcept { return FWPM_LAYER_STREAM_V6; }
+};
+
+#ifdef NTL_WFP_KERNEL_MODE
+#define NTL_WFP_PACKET_FIELDS(prefix)                                           \
+  enum class field : std::uint16_t {                                            \
+    protocol = prefix##_IP_PROTOCOL,                                             \
+    local_address = prefix##_IP_LOCAL_ADDRESS,                                   \
+    remote_address = prefix##_IP_REMOTE_ADDRESS,                                 \
+    local_port = prefix##_IP_LOCAL_PORT,                                         \
+    remote_port = prefix##_IP_REMOTE_PORT,                                       \
+    interface_index = prefix##_INTERFACE_INDEX,                                  \
+    subinterface_index = prefix##_SUB_INTERFACE_INDEX,                           \
+    flags = prefix##_FLAGS,                                                      \
+  }
+#define NTL_WFP_PACKET_RUNTIME(value) static constexpr UINT16 runtime_id = value
+#else
+#define NTL_WFP_PACKET_FIELDS(prefix)
+#define NTL_WFP_PACKET_RUNTIME(value)
+#endif
+
+/**
+ * @brief IPv4 datagram traffic used by UDP proxy and inspection callouts.
+ */
+struct datagram_data_v4 {
+#ifdef NTL_WFP_KERNEL_MODE
+  enum class field : std::uint16_t {
+    protocol = FWPS_FIELD_DATAGRAM_DATA_V4_IP_PROTOCOL,
+    local_address = FWPS_FIELD_DATAGRAM_DATA_V4_IP_LOCAL_ADDRESS,
+    remote_address = FWPS_FIELD_DATAGRAM_DATA_V4_IP_REMOTE_ADDRESS,
+    local_port = FWPS_FIELD_DATAGRAM_DATA_V4_IP_LOCAL_PORT,
+    remote_port = FWPS_FIELD_DATAGRAM_DATA_V4_IP_REMOTE_PORT,
+    direction = FWPS_FIELD_DATAGRAM_DATA_V4_DIRECTION,
+    interface_index = FWPS_FIELD_DATAGRAM_DATA_V4_INTERFACE_INDEX,
+    subinterface_index = FWPS_FIELD_DATAGRAM_DATA_V4_SUB_INTERFACE_INDEX,
+    flags = FWPS_FIELD_DATAGRAM_DATA_V4_FLAGS,
+  };
+#endif
+  NTL_WFP_PACKET_RUNTIME(FWPS_LAYER_DATAGRAM_DATA_V4);
+  static const GUID &policy_key() noexcept {
+    return FWPM_LAYER_DATAGRAM_DATA_V4;
+  }
+};
+
+/**
+ * @brief IPv6 datagram traffic used by UDP proxy and inspection callouts.
+ */
+struct datagram_data_v6 {
+#ifdef NTL_WFP_KERNEL_MODE
+  enum class field : std::uint16_t {
+    protocol = FWPS_FIELD_DATAGRAM_DATA_V6_IP_PROTOCOL,
+    local_address = FWPS_FIELD_DATAGRAM_DATA_V6_IP_LOCAL_ADDRESS,
+    remote_address = FWPS_FIELD_DATAGRAM_DATA_V6_IP_REMOTE_ADDRESS,
+    local_port = FWPS_FIELD_DATAGRAM_DATA_V6_IP_LOCAL_PORT,
+    remote_port = FWPS_FIELD_DATAGRAM_DATA_V6_IP_REMOTE_PORT,
+    direction = FWPS_FIELD_DATAGRAM_DATA_V6_DIRECTION,
+    interface_index = FWPS_FIELD_DATAGRAM_DATA_V6_INTERFACE_INDEX,
+    subinterface_index = FWPS_FIELD_DATAGRAM_DATA_V6_SUB_INTERFACE_INDEX,
+    flags = FWPS_FIELD_DATAGRAM_DATA_V6_FLAGS,
+  };
+#endif
+  NTL_WFP_PACKET_RUNTIME(FWPS_LAYER_DATAGRAM_DATA_V6);
+  static const GUID &policy_key() noexcept {
+    return FWPM_LAYER_DATAGRAM_DATA_V6;
+  }
+};
+
+/**
+ * @brief Inbound IPv4 transport packet inspection.
+ */
+struct inbound_transport_v4 {
+  NTL_WFP_PACKET_FIELDS(FWPS_FIELD_INBOUND_TRANSPORT_V4);
+  NTL_WFP_PACKET_RUNTIME(FWPS_LAYER_INBOUND_TRANSPORT_V4);
+  static const GUID &policy_key() noexcept {
+    return FWPM_LAYER_INBOUND_TRANSPORT_V4;
+  }
+};
+
+/**
+ * @brief Inbound IPv6 transport packet inspection.
+ */
+struct inbound_transport_v6 {
+  NTL_WFP_PACKET_FIELDS(FWPS_FIELD_INBOUND_TRANSPORT_V6);
+  NTL_WFP_PACKET_RUNTIME(FWPS_LAYER_INBOUND_TRANSPORT_V6);
+  static const GUID &policy_key() noexcept {
+    return FWPM_LAYER_INBOUND_TRANSPORT_V6;
+  }
+};
+
+/**
+ * @brief Outbound IPv4 transport packet inspection.
+ */
+struct outbound_transport_v4 {
+  NTL_WFP_PACKET_FIELDS(FWPS_FIELD_OUTBOUND_TRANSPORT_V4);
+  NTL_WFP_PACKET_RUNTIME(FWPS_LAYER_OUTBOUND_TRANSPORT_V4);
+  static const GUID &policy_key() noexcept {
+    return FWPM_LAYER_OUTBOUND_TRANSPORT_V4;
+  }
+};
+
+/**
+ * @brief Outbound IPv6 transport packet inspection.
+ */
+struct outbound_transport_v6 {
+  NTL_WFP_PACKET_FIELDS(FWPS_FIELD_OUTBOUND_TRANSPORT_V6);
+  NTL_WFP_PACKET_RUNTIME(FWPS_LAYER_OUTBOUND_TRANSPORT_V6);
+  static const GUID &policy_key() noexcept {
+    return FWPM_LAYER_OUTBOUND_TRANSPORT_V6;
+  }
+};
+
+/**
+ * @brief IPv4 endpoint-lifetime notification after socket closure.
+ */
+struct ale_endpoint_closure_v4 {
+#ifdef NTL_WFP_KERNEL_MODE
+  enum class field : std::uint16_t {
+    app_id = FWPS_FIELD_ALE_ENDPOINT_CLOSURE_V4_ALE_APP_ID,
+    user_id = FWPS_FIELD_ALE_ENDPOINT_CLOSURE_V4_ALE_USER_ID,
+    local_address = FWPS_FIELD_ALE_ENDPOINT_CLOSURE_V4_IP_LOCAL_ADDRESS,
+    local_port = FWPS_FIELD_ALE_ENDPOINT_CLOSURE_V4_IP_LOCAL_PORT,
+    protocol = FWPS_FIELD_ALE_ENDPOINT_CLOSURE_V4_IP_PROTOCOL,
+    remote_address = FWPS_FIELD_ALE_ENDPOINT_CLOSURE_V4_IP_REMOTE_ADDRESS,
+    remote_port = FWPS_FIELD_ALE_ENDPOINT_CLOSURE_V4_IP_REMOTE_PORT,
+    flags = FWPS_FIELD_ALE_ENDPOINT_CLOSURE_V4_FLAGS,
+  };
+  static constexpr UINT16 runtime_id = FWPS_LAYER_ALE_ENDPOINT_CLOSURE_V4;
+#endif
+  static const GUID &policy_key() noexcept {
+    return FWPM_LAYER_ALE_ENDPOINT_CLOSURE_V4;
+  }
+};
+
+/**
+ * @brief IPv6 endpoint-lifetime notification after socket closure.
+ */
+struct ale_endpoint_closure_v6 {
+#ifdef NTL_WFP_KERNEL_MODE
+  enum class field : std::uint16_t {
+    app_id = FWPS_FIELD_ALE_ENDPOINT_CLOSURE_V6_ALE_APP_ID,
+    user_id = FWPS_FIELD_ALE_ENDPOINT_CLOSURE_V6_ALE_USER_ID,
+    local_address = FWPS_FIELD_ALE_ENDPOINT_CLOSURE_V6_IP_LOCAL_ADDRESS,
+    local_port = FWPS_FIELD_ALE_ENDPOINT_CLOSURE_V6_IP_LOCAL_PORT,
+    protocol = FWPS_FIELD_ALE_ENDPOINT_CLOSURE_V6_IP_PROTOCOL,
+    remote_address = FWPS_FIELD_ALE_ENDPOINT_CLOSURE_V6_IP_REMOTE_ADDRESS,
+    remote_port = FWPS_FIELD_ALE_ENDPOINT_CLOSURE_V6_IP_REMOTE_PORT,
+    flags = FWPS_FIELD_ALE_ENDPOINT_CLOSURE_V6_FLAGS,
+  };
+  static constexpr UINT16 runtime_id = FWPS_LAYER_ALE_ENDPOINT_CLOSURE_V6;
+#endif
+  static const GUID &policy_key() noexcept {
+    return FWPM_LAYER_ALE_ENDPOINT_CLOSURE_V6;
+  }
+};
+
+/**
+ * @brief IPv4 DNS/name-cache observation.
+ */
+struct name_resolution_cache_v4 {
+#ifdef NTL_WFP_KERNEL_MODE
+  enum class field : std::uint16_t {
+    user_id = FWPS_FIELD_NAME_RESOLUTION_CACHE_V4_ALE_USER_ID,
+    app_id = FWPS_FIELD_NAME_RESOLUTION_CACHE_V4_ALE_APP_ID,
+    remote_address = FWPS_FIELD_NAME_RESOLUTION_CACHE_V4_IP_REMOTE_ADDRESS,
+    peer_name = FWPS_FIELD_NAME_RESOLUTION_CACHE_V4_PEER_NAME,
+  };
+  static constexpr UINT16 runtime_id = FWPS_LAYER_NAME_RESOLUTION_CACHE_V4;
+#endif
+  static const GUID &policy_key() noexcept {
+    return FWPM_LAYER_NAME_RESOLUTION_CACHE_V4;
+  }
+};
+
+/**
+ * @brief IPv6 DNS/name-cache observation.
+ */
+struct name_resolution_cache_v6 {
+#ifdef NTL_WFP_KERNEL_MODE
+  enum class field : std::uint16_t {
+    user_id = FWPS_FIELD_NAME_RESOLUTION_CACHE_V6_ALE_USER_ID,
+    app_id = FWPS_FIELD_NAME_RESOLUTION_CACHE_V6_ALE_APP_ID,
+    remote_address = FWPS_FIELD_NAME_RESOLUTION_CACHE_V6_IP_REMOTE_ADDRESS,
+    peer_name = FWPS_FIELD_NAME_RESOLUTION_CACHE_V6_PEER_NAME,
+  };
+  static constexpr UINT16 runtime_id = FWPS_LAYER_NAME_RESOLUTION_CACHE_V6;
+#endif
+  static const GUID &policy_key() noexcept {
+    return FWPM_LAYER_NAME_RESOLUTION_CACHE_V6;
+  }
+};
+
+#ifdef NTL_WFP_KERNEL_MODE
+#define NTL_WFP_MAC_FIELDS(prefix)                                              \
+  enum class field : std::uint16_t {                                            \
+    interface_mac_address = prefix##_INTERFACE_MAC_ADDRESS,                     \
+    local_address = prefix##_MAC_LOCAL_ADDRESS,                                 \
+    remote_address = prefix##_MAC_REMOTE_ADDRESS,                               \
+    ether_type = prefix##_ETHER_TYPE,                                           \
+    vlan_id = prefix##_VLAN_ID,                                                 \
+    interface_index = prefix##_INTERFACE_INDEX,                                 \
+    ndis_port = prefix##_NDIS_PORT,                                             \
+    flags = prefix##_L2_FLAGS,                                                  \
+  }
+#define NTL_WFP_VSWITCH_FIELDS(prefix)                                          \
+  enum class field : std::uint16_t {                                            \
+    source_address = prefix##_MAC_SOURCE_ADDRESS,                               \
+    destination_address = prefix##_MAC_DESTINATION_ADDRESS,                    \
+    ether_type = prefix##_ETHER_TYPE,                                           \
+    vlan_id = prefix##_VLAN_ID,                                                 \
+    tenant_network_id = prefix##_VSWITCH_TENANT_NETWORK_ID,                     \
+    switch_id = prefix##_VSWITCH_ID,                                            \
+    source_interface_id = prefix##_VSWITCH_SOURCE_INTERFACE_ID,                 \
+    source_vm_id = prefix##_VSWITCH_SOURCE_VM_ID,                               \
+    flags = prefix##_L2_FLAGS,                                                  \
+  }
+#else
+#define NTL_WFP_MAC_FIELDS(prefix)
+#define NTL_WFP_VSWITCH_FIELDS(prefix)
+#endif
+
+/**
+ * @brief Ethernet frame entering an NDIS interface.
+ */
+struct inbound_mac_frame_ethernet {
+  NTL_WFP_MAC_FIELDS(FWPS_FIELD_INBOUND_MAC_FRAME_ETHERNET);
+#ifdef NTL_WFP_KERNEL_MODE
+  static constexpr UINT16 runtime_id =
+      FWPS_LAYER_INBOUND_MAC_FRAME_ETHERNET;
+#endif
+  static const GUID &policy_key() noexcept {
+    return FWPM_LAYER_INBOUND_MAC_FRAME_ETHERNET;
+  }
+};
+
+/**
+ * @brief Ethernet frame leaving an NDIS interface.
+ */
+struct outbound_mac_frame_ethernet {
+  NTL_WFP_MAC_FIELDS(FWPS_FIELD_OUTBOUND_MAC_FRAME_ETHERNET);
+#ifdef NTL_WFP_KERNEL_MODE
+  static constexpr UINT16 runtime_id =
+      FWPS_LAYER_OUTBOUND_MAC_FRAME_ETHERNET;
+#endif
+  static const GUID &policy_key() noexcept {
+    return FWPM_LAYER_OUTBOUND_MAC_FRAME_ETHERNET;
+  }
+};
+
+/**
+ * @brief Ethernet frame entering a Hyper-V virtual switch.
+ */
+struct ingress_vswitch_ethernet {
+  NTL_WFP_VSWITCH_FIELDS(FWPS_FIELD_INGRESS_VSWITCH_ETHERNET);
+#ifdef NTL_WFP_KERNEL_MODE
+  static constexpr UINT16 runtime_id =
+      FWPS_LAYER_INGRESS_VSWITCH_ETHERNET;
+#endif
+  static const GUID &policy_key() noexcept {
+    return FWPM_LAYER_INGRESS_VSWITCH_ETHERNET;
+  }
+};
+
+/**
+ * @brief Ethernet frame leaving a Hyper-V virtual switch.
+ */
+struct egress_vswitch_ethernet {
+  NTL_WFP_VSWITCH_FIELDS(FWPS_FIELD_EGRESS_VSWITCH_ETHERNET);
+#ifdef NTL_WFP_KERNEL_MODE
+  static constexpr UINT16 runtime_id =
+      FWPS_LAYER_EGRESS_VSWITCH_ETHERNET;
+#endif
+  static const GUID &policy_key() noexcept {
+    return FWPM_LAYER_EGRESS_VSWITCH_ETHERNET;
+  }
+};
+
+/**
+ * @brief Microsoft-internal inbound fast-transport layer.
+ *
+ * Windows exposes the schema for diagnostics, but does not support third-party
+ * static filters or callouts on this layer. NTL therefore permits layer
+ * introspection only.
+ */
+#ifdef NTL_WFP_HAS_FAST_LAYERS
+struct inbound_transport_fast {
+#ifdef NTL_WFP_KERNEL_MODE
+  enum class field : std::uint16_t {};
+  static constexpr UINT16 runtime_id = FWPS_LAYER_INBOUND_TRANSPORT_FAST;
+#endif
+  static const GUID &policy_key() noexcept {
+    return FWPM_LAYER_INBOUND_TRANSPORT_FAST;
+  }
+};
+
+/**
+ * @brief Microsoft-internal outbound fast-transport layer.
+ *
+ * Windows exposes the schema for diagnostics, but does not support third-party
+ * static filters or callouts on this layer. NTL therefore permits layer
+ * introspection only.
+ */
+struct outbound_transport_fast {
+#ifdef NTL_WFP_KERNEL_MODE
+  enum class field : std::uint16_t {};
+  static constexpr UINT16 runtime_id = FWPS_LAYER_OUTBOUND_TRANSPORT_FAST;
+#endif
+  static const GUID &policy_key() noexcept {
+    return FWPM_LAYER_OUTBOUND_TRANSPORT_FAST;
+  }
+};
+#endif
+
+#ifdef NTL_WFP_KERNEL_MODE
+#define NTL_WFP_IPSEC_FIELDS(prefix)                                            \
+  enum class field : std::uint16_t {                                            \
+    protocol = prefix##_IP_PROTOCOL,                                            \
+    local_address = prefix##_IP_LOCAL_ADDRESS,                                  \
+    remote_address = prefix##_IP_REMOTE_ADDRESS,                                \
+    local_port = prefix##_IP_LOCAL_PORT,                                        \
+    remote_port = prefix##_IP_REMOTE_PORT,                                      \
+    local_interface = prefix##_IP_LOCAL_INTERFACE,                              \
+    profile_id = prefix##_PROFILE_ID,                                           \
+  }
+#else
+#define NTL_WFP_IPSEC_FIELDS(prefix)
+#endif
+
+/**
+ * @brief IPv4 user-mode IPsec quick-mode policy layer.
+ *
+ * This is a BFE management layer, not a kernel callout layer.
+ */
+struct ipsec_v4 {
+  NTL_WFP_IPSEC_FIELDS(FWPS_FIELD_IPSEC_V4);
+#ifdef NTL_WFP_KERNEL_MODE
+  static constexpr UINT16 runtime_id = FWPS_LAYER_IPSEC_V4;
+#endif
+  static const GUID &policy_key() noexcept { return FWPM_LAYER_IPSEC_V4; }
+};
+
+/**
+ * @brief IPv6 user-mode IPsec quick-mode policy layer.
+ *
+ * This is a BFE management layer, not a kernel callout layer.
+ */
+struct ipsec_v6 {
+  NTL_WFP_IPSEC_FIELDS(FWPS_FIELD_IPSEC_V6);
+#ifdef NTL_WFP_KERNEL_MODE
+  static constexpr UINT16 runtime_id = FWPS_LAYER_IPSEC_V6;
+#endif
+  static const GUID &policy_key() noexcept { return FWPM_LAYER_IPSEC_V6; }
+};
+
+#undef NTL_WFP_IPSEC_FIELDS
+#undef NTL_WFP_VSWITCH_FIELDS
+#undef NTL_WFP_MAC_FIELDS
+
+#undef NTL_WFP_PACKET_RUNTIME
+#undef NTL_WFP_PACKET_FIELDS
+
+} // namespace layers
+
+namespace detail {
+template <class> inline constexpr bool known_layer = false;
+template <>
+inline constexpr bool known_layer<layers::ale_connect_redirect_v4> = true;
+template <>
+inline constexpr bool known_layer<layers::ale_connect_redirect_v6> = true;
+template <>
+inline constexpr bool known_layer<layers::ale_bind_redirect_v4> = true;
+template <>
+inline constexpr bool known_layer<layers::ale_bind_redirect_v6> = true;
+template <>
+inline constexpr bool known_layer<layers::ale_auth_connect_v4> = true;
+template <>
+inline constexpr bool known_layer<layers::ale_auth_connect_v6> = true;
+template <>
+inline constexpr bool known_layer<layers::ale_auth_recv_accept_v4> = true;
+template <>
+inline constexpr bool known_layer<layers::ale_auth_recv_accept_v6> = true;
+template <>
+inline constexpr bool known_layer<layers::ale_flow_established_v4> = true;
+template <>
+inline constexpr bool known_layer<layers::ale_flow_established_v6> = true;
+template <> inline constexpr bool known_layer<layers::stream_v4> = true;
+template <> inline constexpr bool known_layer<layers::stream_v6> = true;
+template <>
+inline constexpr bool known_layer<layers::datagram_data_v4> = true;
+template <>
+inline constexpr bool known_layer<layers::datagram_data_v6> = true;
+template <>
+inline constexpr bool known_layer<layers::inbound_transport_v4> = true;
+template <>
+inline constexpr bool known_layer<layers::inbound_transport_v6> = true;
+template <>
+inline constexpr bool known_layer<layers::outbound_transport_v4> = true;
+template <>
+inline constexpr bool known_layer<layers::outbound_transport_v6> = true;
+template <>
+inline constexpr bool known_layer<layers::ale_endpoint_closure_v4> = true;
+template <>
+inline constexpr bool known_layer<layers::ale_endpoint_closure_v6> = true;
+template <>
+inline constexpr bool known_layer<layers::name_resolution_cache_v4> = true;
+template <>
+inline constexpr bool known_layer<layers::name_resolution_cache_v6> = true;
+template <>
+inline constexpr bool known_layer<layers::inbound_mac_frame_ethernet> = true;
+template <>
+inline constexpr bool known_layer<layers::outbound_mac_frame_ethernet> = true;
+template <>
+inline constexpr bool known_layer<layers::ingress_vswitch_ethernet> = true;
+template <>
+inline constexpr bool known_layer<layers::egress_vswitch_ethernet> = true;
+#ifdef NTL_WFP_HAS_FAST_LAYERS
+template <>
+inline constexpr bool known_layer<layers::inbound_transport_fast> = true;
+template <>
+inline constexpr bool known_layer<layers::outbound_transport_fast> = true;
+#endif
+template <>
+inline constexpr bool known_layer<layers::ipsec_v4> = true;
+template <>
+inline constexpr bool known_layer<layers::ipsec_v6> = true;
+
+template <class Layer>
+inline constexpr bool management_only_layer =
+    std::is_same_v<Layer, layers::ipsec_v4> ||
+    std::is_same_v<Layer, layers::ipsec_v6>;
+
+template <class Layer>
+inline constexpr bool internal_only_layer =
+#ifdef NTL_WFP_HAS_FAST_LAYERS
+    std::is_same_v<Layer, layers::inbound_transport_fast> ||
+    std::is_same_v<Layer, layers::outbound_transport_fast>;
+#else
+    false;
+#endif
+
+template <class Layer>
+inline constexpr bool filterable_layer =
+    known_layer<Layer> && !internal_only_layer<Layer>;
+
+template <class Layer>
+inline constexpr bool callout_layer =
+    filterable_layer<Layer> && !management_only_layer<Layer>;
+
+template <class Layer>
+inline constexpr bool stream_layer =
+    std::is_same_v<Layer, layers::stream_v4> ||
+    std::is_same_v<Layer, layers::stream_v6>;
+
+template <class Layer>
+inline constexpr bool connect_redirect_layer =
+    std::is_same_v<Layer, layers::ale_connect_redirect_v4> ||
+    std::is_same_v<Layer, layers::ale_connect_redirect_v6>;
+
+template <class Layer>
+inline constexpr bool bind_redirect_layer =
+    std::is_same_v<Layer, layers::ale_bind_redirect_v4> ||
+    std::is_same_v<Layer, layers::ale_bind_redirect_v6>;
+
+template <class Layer>
+inline constexpr bool flow_context_layer =
+    stream_layer<Layer> ||
+    std::is_same_v<Layer, layers::datagram_data_v4> ||
+    std::is_same_v<Layer, layers::datagram_data_v6>;
+
+template <class Layer>
+inline constexpr bool decision_layer =
+    callout_layer<Layer> && !stream_layer<Layer>;
+
+template <class Layer>
+inline constexpr bool packet_decision_layer =
+    std::is_same_v<Layer, layers::datagram_data_v4> ||
+    std::is_same_v<Layer, layers::datagram_data_v6> ||
+    std::is_same_v<Layer, layers::inbound_transport_v4> ||
+    std::is_same_v<Layer, layers::inbound_transport_v6> ||
+    std::is_same_v<Layer, layers::outbound_transport_v4> ||
+    std::is_same_v<Layer, layers::outbound_transport_v6> ||
+    std::is_same_v<Layer, layers::inbound_mac_frame_ethernet> ||
+    std::is_same_v<Layer, layers::outbound_mac_frame_ethernet> ||
+    std::is_same_v<Layer, layers::ingress_vswitch_ethernet> ||
+    std::is_same_v<Layer, layers::egress_vswitch_ethernet>;
+
+template <class Layer>
+inline constexpr bool ale_authorization_layer =
+    std::is_same_v<Layer, layers::ale_auth_connect_v4> ||
+    std::is_same_v<Layer, layers::ale_auth_connect_v6> ||
+    std::is_same_v<Layer, layers::ale_auth_recv_accept_v4> ||
+    std::is_same_v<Layer, layers::ale_auth_recv_accept_v6>;
+} // namespace detail
+
+} // namespace ntl::wfp
+
+#ifdef NTL_WFP_KERNEL_MODE
+#undef NTL_WFP_KERNEL_MODE
+#endif
+#ifdef NTL_WFP_HAS_FAST_LAYERS
+#undef NTL_WFP_HAS_FAST_LAYERS
+#endif

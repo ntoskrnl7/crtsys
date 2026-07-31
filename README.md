@@ -52,6 +52,12 @@ For an NTL-style minifilter, select **NTL Minifilter** and implement
 
 ![Visual Studio selecting the crtsys NTL Minifilter entry point and implementing ntl::flt::main](./docs/assets/visual-studio-ntl-minifilter-entrypoint.gif)
 
+For a Windows Filtering Platform callout driver, select **NTL WFP** and
+implement `ntl::main`. The NuGet package applies the WFP target definitions and
+links `fwpkclnt.lib`.
+
+![Visual Studio selecting the crtsys NTL WFP entry point and implementing ntl::main](./docs/assets/visual-studio-ntl-wfp-entrypoint.gif)
+
 | Path | Use when | Start here |
 | --- | --- | --- |
 | NuGet / MSBuild | Visual Studio or Build Tools WDK driver project | `PackageReference` or `Install-Package crtsys` |
@@ -123,7 +129,7 @@ ntl::status ntl::main(ntl::driver& driver,
 }
 ```
 
-### WDM, KMDF, and minifilter driver models
+### WDM, KMDF, minifilter, and WFP driver models
 
 The NuGet package reads the WDK project's existing `DriverType` setting. A
 KMDF project uses its normal `DriverEntry` and `WdfDriverCreate` by default.
@@ -162,6 +168,30 @@ Visual Studio/NuGet projects use `CrtSysIsMinifilter=true` and
 `CrtSysUseNtlFltMain=true`. See the
 [NTL minifilter sample catalog](./examples/minifilter) and
 [API guide](./docs/ntl/minifilter.md).
+
+Windows Filtering Platform callout drivers select the model explicitly. In
+Visual Studio/NuGet projects, select **NTL WFP**, or set
+`<CrtSysWdmEntryPoint>NtlWfp</CrtSysWdmEntryPoint>`. The package applies the
+Windows 8 WFP contract, selects the architecture-appropriate NDIS definitions,
+links `fwpkclnt.lib`, and uses the `ntl::main` entry wrapper.
+
+CMake consumers use the equivalent helper:
+
+```cmake
+crtsys_add_driver(my_wfp_callout WFP NTL src/main.cpp)
+```
+
+See the [WFP ALE connect-block driver/controller](./examples/wfp/ale-connect-block),
+its [Korean walkthrough](./examples/wfp/ale-connect-block/README.ko-KR.md), the
+ [typed API and ownership guide](./docs/ntl/wfp.md), the
+ [connect-redirect coroutine TCP proxy](./examples/wfp/connect-redirect), the
+ [Schannel TLS inspection proxy](./examples/wfp/tls-inspection-proxy), the
+ [separate browser HTTPS inspection example](./examples/wfp/browser-https-inspection), the
+ [UDP content-filter](./examples/wfp/udp-content-filter) and
+[TCP content-filter](./examples/wfp/tcp-content-filter) driver/app samples, the
+[content inspection and framing guide](./docs/ntl/inspection.md), the
+[user-mode TLS stream guide](./docs/ntl/tls-stream.md), and the
+[WDK sample coverage map](./test/wfp/WDK-SAMPLE-COVERAGE.md).
 
 ## Runtime Stack
 
@@ -232,6 +262,12 @@ may compile or work.
 | [NTL KMDF USB template](./examples/kmdf/usb) | Buildable PnP USB device/interface/pipe and continuous-reader template with a user-mode inspection app |
 | [NTL KMDF WMI sample](./examples/kmdf/wmi) | MOF-backed typed WMI query/set/method providers, event delivery, and a `ROOT\\WMI` user-mode verifier |
 | [NTL minifilter samples](./examples/minifilter) | Independent typed callback/context, control-device, communication, MiniSpy-style operation-log, swapped-buffer, and MetadataManager-style driver/app examples with WDK sample-coverage mapping |
+| [NTL WFP ALE connect-block](./examples/wfp/ale-connect-block) | A purpose-named driver/controller sample that blocks one selected outbound IPv4 TCP connection, proves session-scoped recovery, and exercises persistent graph reconcile, health, and uninstall |
+| [NTL WFP connect-redirect](./examples/wfp/connect-redirect) | A local TCP proxy foundation that safely hands the original destination and opaque WFP redirect records to user mode, relays both directions with coroutines, and prevents redirect loops |
+| [NTL WFP TLS inspection-proxy](./examples/wfp/tls-inspection-proxy) | An authorized connect-redirect and two-leg Schannel proxy with bounded ClientHello/SNI identity selection, per-host certificate issuance/cache, HTTP/1.1 plaintext framing, and typed content policy outside the kernel |
+| [NTL WFP browser HTTPS inspection](./examples/wfp/browser-https-inspection) | An independent browser-scoped driver/app example with dynamic redirect policy, two-leg Schannel termination, HTTP/1.1 and HTTP/2 transforms, WebSocket/gRPC adapters, and bounded gzip/deflate/Brotli HTML decoding |
+| [NTL WFP UDP content-filter](./examples/wfp/udp-content-filter) | A fail-closed driver/policy-coroutine sample for complete outbound UDP datagrams; permit reinjects the retained clone and block discards only that datagram |
+| [NTL WFP TCP content-filter](./examples/wfp/tcp-content-filter) | A fail-closed driver/policy-coroutine sample for explicitly framed inbound TCP application messages; permit resumes exactly one frame and block drops the whole flow |
 | [CI Driver Load Tests](./docs/ci-driver-load-tests.md) | Optional self-hosted driver load/run workflow |
 
 ## Operational Boundaries
@@ -336,6 +372,14 @@ driver libraries for `x86`, `x64`, `ARM`, and `ARM64` `Debug`/`Release` on
 v142/v143, and `x86`, `x64`, and `ARM64` on v145. The package workflow builds
 WDK consumer projects for every packaged architecture that the selected toolset
 supports. The checked-in smoke projects live under [`test/nuget`](./test/nuget).
+
+User-mode NuGet consumers also receive and automatically link the pinned
+zlib/Brotli backends used by NTL's bounded gzip, RFC 1950 `deflate`, and
+Brotli HTTP, WebSocket, and gRPC transforms, including incremental chained
+`Content-Encoding` decode/re-encode. Package CI compiles and links this codec
+consumer across every packaged toolset, architecture, and configuration;
+x86/x64 jobs also execute one-byte-split round trips. Driver projects do not
+link these user-mode codecs.
 
 The NuGet distribution is `crtsys.<version>.nupkg` for Visual Studio/MSBuild
 projects.

@@ -1,0 +1,429 @@
+/**
+ * @file tls_client_hello
+ * @brief Bounded user-mode TLS ClientHello observation.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/tls/client_hello is a user-mode header"
+#endif
+
+#include <ntl/net/tls/stream>
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <limits>
+#include <span>
+#include <stdexcept>
+#include <string>
+#include <system_error>
+#include <utility>
+#include <vector>
+
+namespace ntl::net {
+
+struct tls_client_hello_limits {
+  std::size_t maximum_buffered_ciphertext = 256 * 1024;
+  std::size_t maximum_client_hello = 128 * 1024;
+  std::size_t receive_chunk_size = 4 * 1024;
+  std::size_t maximum_alpn_protocols = 32;
+};
+
+/**
+ * @brief Metadata from one complete ClientHello plus every consumed byte.
+ *
+ * The initial ciphertext can include data following ClientHello when a
+ * socket read coalesced records. Callers must either pass the whole buffer to
+ * tls_stream::handshake_server() or forward it unchanged for a bypass tunnel.
+ */
+class tls_client_hello {
+public:
+  const std::wstring &server_name() const noexcept {
+    return server_name_;
+  }
+
+  const std::vector<std::string> &
+  application_protocols() const noexcept {
+    return application_protocols_;
+  }
+
+  /**
+   * @brief True when extension type 0xfe0d is present on the wire.
+   *
+   * This is observation only. GREASE ECH intentionally uses the same wire
+   * shape, so presence does not prove that ClientHelloInner exists or that
+   * the outer SNI is a cover name.
+   */
+  bool encrypted_client_hello_extension_present() const noexcept {
+    return encrypted_client_hello_extension_present_;
+  }
+
+  std::span<const std::byte>
+  initial_ciphertext() const noexcept {
+    return ciphertext_;
+  }
+
+  std::vector<std::byte> take_initial_ciphertext() noexcept {
+    return std::move(ciphertext_);
+  }
+
+private:
+  friend detail::tls_task<tls_client_hello>
+  read_tls_client_hello(async_socket &, tls_client_hello_limits);
+
+  std::wstring server_name_;
+  std::vector<std::string> application_protocols_;
+  std::vector<std::byte> ciphertext_;
+  bool encrypted_client_hello_extension_present_ = false;
+};
+
+namespace detail {
+
+enum class client_hello_parse_state : std::uint8_t {
+  need_more,
+  complete,
+  malformed,
+};
+
+struct client_hello_parse_result {
+  client_hello_parse_state state =
+      client_hello_parse_state::need_more;
+  std::wstring server_name;
+  std::vector<std::string> application_protocols;
+  bool encrypted_client_hello_extension_present = false;
+};
+
+inline std::uint16_t
+tls_read_u16(std::span<const std::byte> bytes,
+             std::size_t offset) noexcept {
+  return static_cast<std::uint16_t>(
+      (static_cast<std::uint16_t>(
+           std::to_integer<std::uint8_t>(bytes[offset]))
+       << 8) |
+      static_cast<std::uint16_t>(
+          std::to_integer<std::uint8_t>(bytes[offset + 1])));
+}
+
+inline std::uint32_t
+tls_read_u24(std::span<const std::byte> bytes,
+             std::size_t offset) noexcept {
+  return (static_cast<std::uint32_t>(
+              std::to_integer<std::uint8_t>(bytes[offset]))
+          << 16) |
+         (static_cast<std::uint32_t>(
+              std::to_integer<std::uint8_t>(bytes[offset + 1]))
+          << 8) |
+         static_cast<std::uint32_t>(
+             std::to_integer<std::uint8_t>(bytes[offset + 2]));
+}
+
+inline bool normalize_sni(
+    std::span<const std::byte> encoded,
+    std::wstring &result) {
+  if (encoded.empty() || encoded.size() > 253)
+    return false;
+
+  result.clear();
+  result.reserve(encoded.size());
+  std::size_t label_size = 0;
+  for (const std::byte value : encoded) {
+    unsigned char character =
+        std::to_integer<unsigned char>(value);
+    if (character >= 'A' && character <= 'Z')
+      character = static_cast<unsigned char>(
+          character - 'A' + 'a');
+    if (character == '.') {
+      if (label_size == 0 || label_size > 63)
+        return false;
+      label_size = 0;
+    } else {
+      const bool accepted =
+          (character >= 'a' && character <= 'z') ||
+          (character >= '0' && character <= '9') ||
+          character == '-' || character == '_';
+      if (!accepted)
+        return false;
+      ++label_size;
+    }
+    result.push_back(static_cast<wchar_t>(character));
+  }
+  return label_size != 0 && label_size <= 63;
+}
+
+inline bool parse_server_name_extension(
+    std::span<const std::byte> extension,
+    std::wstring &server_name) {
+  if (extension.size() < 2)
+    return false;
+  const std::size_t list_size = tls_read_u16(extension, 0);
+  if (list_size != extension.size() - 2)
+    return false;
+
+  std::size_t offset = 2;
+  bool found = false;
+  while (offset != extension.size()) {
+    if (extension.size() - offset < 3)
+      return false;
+    const std::uint8_t type =
+        std::to_integer<std::uint8_t>(extension[offset]);
+    const std::size_t size =
+        tls_read_u16(extension, offset + 1);
+    offset += 3;
+    if (size > extension.size() - offset)
+      return false;
+    if (type == 0) {
+      if (found ||
+          !normalize_sni(extension.subspan(offset, size),
+                         server_name))
+        return false;
+      found = true;
+    }
+    offset += size;
+  }
+  return found;
+}
+
+inline bool parse_alpn_extension(
+    std::span<const std::byte> extension,
+    std::size_t maximum_protocols,
+    std::vector<std::string> &protocols) {
+  if (extension.size() < 2)
+    return false;
+  const std::size_t list_size = tls_read_u16(extension, 0);
+  if (list_size != extension.size() - 2)
+    return false;
+
+  std::size_t offset = 2;
+  while (offset != extension.size()) {
+    const std::size_t size =
+        std::to_integer<std::uint8_t>(extension[offset++]);
+    if (size == 0 || size > extension.size() - offset ||
+        protocols.size() == maximum_protocols)
+      return false;
+    const char *begin = reinterpret_cast<const char *>(
+        extension.data() + offset);
+    protocols.emplace_back(begin, begin + size);
+    offset += size;
+  }
+  return !protocols.empty();
+}
+
+inline client_hello_parse_result parse_client_hello_body(
+    std::span<const std::byte> body,
+    const tls_client_hello_limits &limits) {
+  client_hello_parse_result result;
+  result.state = client_hello_parse_state::malformed;
+  if (body.size() < 2 + 32 + 1)
+    return result;
+
+  std::size_t offset = 2 + 32;
+  const std::size_t session_id_size =
+      std::to_integer<std::uint8_t>(body[offset++]);
+  if (session_id_size > 32 ||
+      session_id_size > body.size() - offset)
+    return result;
+  offset += session_id_size;
+
+  if (body.size() - offset < 2)
+    return result;
+  const std::size_t cipher_size = tls_read_u16(body, offset);
+  offset += 2;
+  if (cipher_size < 2 || (cipher_size & 1) != 0 ||
+      cipher_size > body.size() - offset)
+    return result;
+  offset += cipher_size;
+
+  if (offset == body.size())
+    return result;
+  const std::size_t compression_size =
+      std::to_integer<std::uint8_t>(body[offset++]);
+  if (compression_size == 0 ||
+      compression_size > body.size() - offset)
+    return result;
+  offset += compression_size;
+
+  if (offset == body.size()) {
+    result.state = client_hello_parse_state::complete;
+    return result;
+  }
+  if (body.size() - offset < 2)
+    return result;
+  const std::size_t extension_size = tls_read_u16(body, offset);
+  offset += 2;
+  if (extension_size != body.size() - offset)
+    return result;
+
+  bool saw_server_name = false;
+  bool saw_alpn = false;
+  const std::size_t end = offset + extension_size;
+  while (offset != end) {
+    if (end - offset < 4)
+      return result;
+    const std::uint16_t type = tls_read_u16(body, offset);
+    const std::size_t size = tls_read_u16(body, offset + 2);
+    offset += 4;
+    if (size > end - offset)
+      return result;
+    const auto extension = body.subspan(offset, size);
+
+    if (type == 0) {
+      if (saw_server_name ||
+          !parse_server_name_extension(
+              extension, result.server_name))
+        return result;
+      saw_server_name = true;
+    } else if (type == 16) {
+      if (saw_alpn ||
+          !parse_alpn_extension(
+              extension, limits.maximum_alpn_protocols,
+              result.application_protocols))
+        return result;
+      saw_alpn = true;
+    } else if (type == 0xfe0d) {
+      result.encrypted_client_hello_extension_present = true;
+    }
+    offset += size;
+  }
+
+  result.state = client_hello_parse_state::complete;
+  return result;
+}
+
+inline client_hello_parse_result parse_client_hello(
+    std::span<const std::byte> wire,
+    const tls_client_hello_limits &limits) {
+  client_hello_parse_result result;
+  std::vector<std::byte> handshake;
+  handshake.reserve(
+      (std::min)(wire.size(), limits.maximum_client_hello + 4));
+
+  std::size_t offset = 0;
+  std::size_t required_handshake = 0;
+  for (;;) {
+    if (wire.size() - offset < 5)
+      return result;
+    const std::uint8_t content_type =
+        std::to_integer<std::uint8_t>(wire[offset]);
+    const std::size_t record_size =
+        tls_read_u16(wire, offset + 3);
+    if (content_type != 22 || record_size == 0 ||
+        record_size > 18 * 1024) {
+      result.state = client_hello_parse_state::malformed;
+      return result;
+    }
+    if (record_size > wire.size() - offset - 5)
+      return result;
+
+    const auto record =
+        wire.subspan(offset + 5, record_size);
+    const std::size_t maximum_handshake =
+        limits.maximum_client_hello + 4;
+    if (record.size() > maximum_handshake ||
+        handshake.size() >
+            maximum_handshake - record.size()) {
+      result.state = client_hello_parse_state::malformed;
+      return result;
+    }
+    handshake.insert(
+        handshake.end(), record.begin(), record.end());
+    offset += 5 + record_size;
+
+    if (handshake.size() >= 4 && required_handshake == 0) {
+      if (std::to_integer<std::uint8_t>(handshake[0]) != 1) {
+        result.state = client_hello_parse_state::malformed;
+        return result;
+      }
+      const std::size_t body_size =
+          tls_read_u24(handshake, 1);
+      if (body_size == 0 ||
+          body_size > limits.maximum_client_hello) {
+        result.state = client_hello_parse_state::malformed;
+        return result;
+      }
+      required_handshake = 4 + body_size;
+    }
+    if (required_handshake != 0 &&
+        handshake.size() >= required_handshake) {
+      return parse_client_hello_body(
+          std::span<const std::byte>(handshake).subspan(
+              4, required_handshake - 4),
+          limits);
+    }
+  }
+}
+
+} // namespace detail
+
+/**
+ * @brief Reads one complete, bounded ClientHello from an async socket.
+ *
+ * This is observation, not TLS termination. No bytes are discarded; the
+ * returned initial_ciphertext must be passed to Schannel or a bypass tunnel.
+ */
+inline detail::tls_task<tls_client_hello>
+read_tls_client_hello(
+    async_socket &socket, tls_client_hello_limits limits = {}) {
+  if (!socket ||
+      limits.maximum_buffered_ciphertext == 0 ||
+      limits.maximum_client_hello == 0 ||
+      limits.receive_chunk_size == 0 ||
+      limits.maximum_alpn_protocols == 0 ||
+      limits.maximum_client_hello >
+          (std::numeric_limits<std::size_t>::max)() - 4 ||
+      limits.maximum_client_hello >
+          limits.maximum_buffered_ciphertext ||
+      limits.receive_chunk_size >
+          limits.maximum_buffered_ciphertext)
+    throw std::invalid_argument(
+        "invalid TLS ClientHello limits or socket");
+
+  std::vector<std::byte> ciphertext;
+  for (;;) {
+    auto parsed = detail::parse_client_hello(
+        ciphertext, limits);
+    if (parsed.state ==
+        detail::client_hello_parse_state::complete) {
+      tls_client_hello result;
+      result.server_name_ = std::move(parsed.server_name);
+      result.application_protocols_ =
+          std::move(parsed.application_protocols);
+      result.encrypted_client_hello_extension_present_ =
+          parsed.encrypted_client_hello_extension_present;
+      result.ciphertext_ = std::move(ciphertext);
+      co_return result;
+    }
+    if (parsed.state ==
+        detail::client_hello_parse_state::malformed)
+      throw std::system_error(
+          ERROR_INVALID_DATA, std::system_category(),
+          "malformed TLS ClientHello");
+    if (ciphertext.size() >=
+        limits.maximum_buffered_ciphertext)
+      throw std::system_error(
+          ERROR_BUFFER_OVERFLOW, std::system_category(),
+          "TLS ClientHello ciphertext limit reached");
+
+    const std::size_t room =
+        limits.maximum_buffered_ciphertext -
+        ciphertext.size();
+    const std::size_t growth =
+        (std::min)(limits.receive_chunk_size, room);
+    const std::size_t old_size = ciphertext.size();
+    ciphertext.resize(old_size + growth);
+    const std::size_t received =
+        co_await socket.read_some(
+            std::span<std::byte>(
+                ciphertext.data() + old_size, growth));
+    ciphertext.resize(old_size + received);
+    if (received == 0)
+      throw std::system_error(
+          ERROR_HANDLE_EOF, std::system_category(),
+          "TLS peer closed before ClientHello completed");
+  }
+}
+
+} // namespace ntl::net

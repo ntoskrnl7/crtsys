@@ -13,7 +13,7 @@ param(
   [ValidateSet('v142', 'v143', 'v145')]
   [string] $Toolset = 'v143',
 
-  [ValidateSet('NTL', 'WDM', 'KMDF', 'NTL_KMDF', 'NTL_FLT')]
+  [ValidateSet('NTL', 'WDM', 'KMDF', 'NTL_KMDF', 'NTL_FLT', 'NTL_WFP')]
   [string] $DriverModel = 'NTL',
 
   [string] $WindowsSdkVersion = '10.0.22621.0',
@@ -94,7 +94,40 @@ foreach ($requiredPath in @(
   'share\crtsys\cmake\crtsys-config.cmake',
   'share\crtsys\cmake\crtsys-config-version.cmake',
   'share\crtsys\cmake\CrtSys.cmake',
+  'share\crtsys\cmake\NtlContentCodecs.cmake',
+  'include\ntl\net\io\async_framed_stream',
+  'include\ntl\net\io\async_socket',
+  'include\ntl\net\inspection\content_decoder',
+  'include\ntl\net\inspection\content_decoder_brotli',
+  'include\ntl\net\inspection\content_decoder_zlib',
+  'include\ntl\net\inspection\content_encoder',
+  'include\ntl\net\inspection\content_encoder_brotli',
+  'include\ntl\net\inspection\content_encoder_zlib',
+  'include\ntl\net\inspection\content_stream',
+  'include\ntl\net\inspection\standard_content_encoders',
   'include\ntl\driver',
+  'include\ntl\net\framing',
+  'include\ntl\net\http\http1_framing',
+  'include\ntl\net\http\http1_transform',
+  'include\ntl\net\http\http1_stream_transform',
+  'include\ntl\net\http\async_transform',
+  'include\ntl\net\http\stream_transform',
+  'include\ntl\net\http\transform',
+  'include\ntl\net\grpc\framing',
+  'include\ntl\net\grpc\transform',
+  'include\ntl\net\http2\framing',
+  'include\ntl\net\http2\hpack',
+  'include\ntl\net\http2\transform',
+  'include\ntl\net\http2\stream_transform',
+  'include\ntl\net\http3\backend',
+  'include\ntl\net\http3\framing',
+  'include\ntl\net\http3\inspection_proxy',
+  'include\ntl\net\http3\qpack',
+  'include\ntl\net\http3\standard_inspection_proxy',
+  'include\ntl\net\http3\stream_transform',
+  'include\ntl\net\http3\webtransport_transform',
+  'include\ntl\net\http3\webtransport_session',
+  'include\ntl\net\tls\product_backend',
   'include\ntl\flt\driver',
   'include\ntl\flt\communication',
   'include\ntl\flt\communication_client',
@@ -112,6 +145,33 @@ foreach ($requiredPath in @(
   'include\ntl\kmdf\property',
   'include\ntl\kmdf\object',
   'include\ntl\kmdf\wmi',
+  'include\ntl\net\inspection\core',
+  'include\ntl\net\inspection\standard_content_decoders',
+  'include\ntl\net\tls\acceptor',
+  'include\ntl\net\tls\certificate',
+  'include\ntl\net\tls\client_hello',
+  'include\ntl\net\tls\framed_stream',
+  'include\ntl\net\tls\inspection_frontend',
+  'include\ntl\net\tls\inspection_policy',
+  'include\ntl\net\tls\product_policy',
+  'include\ntl\net\tls\stream',
+  'include\ntl\net\websocket\framing',
+  'include\ntl\net\websocket\permessage_deflate',
+  'include\ntl\net\websocket\transform',
+  'include\ntl\wfp\all',
+  'include\ntl\wfp\callout',
+  'include\ntl\wfp\classify',
+  'include\ntl\wfp\conditions',
+  'include\ntl\wfp\connect_redirect',
+  'include\ntl\wfp\flow',
+  'include\ntl\wfp\injection',
+  'include\ntl\wfp\layers',
+  'include\ntl\wfp\management',
+  'include\ntl\wfp\packet',
+  'include\ntl\wfp\stream',
+  'include\ntl\wfp\stream_reader',
+  'include\ntl\wfp\telemetry',
+  'include\.internal\winsdk\wfp_version_compat',
   'include\.internal\adjust_link_order'
 )) {
   $fullPath = Join-Path $bundleRoot $requiredPath
@@ -149,6 +209,10 @@ crtsys_add_driver(crtsys_release_asset_smoke KMDF 1.15 NTL main.cpp)
   'NTL_FLT' { @'
 set(CRTSYS_NTL_MAIN OFF)
 crtsys_add_driver(crtsys_release_asset_smoke MINIFILTER NTL main.cpp)
+'@ }
+  'NTL_WFP' { @'
+set(CRTSYS_NTL_MAIN OFF)
+crtsys_add_driver(crtsys_release_asset_smoke WFP NTL main.cpp)
 '@ }
 }
 
@@ -232,6 +296,38 @@ ntl::status ntl::flt::main(ntl::flt::driver &driver,
         return ntl::flt::pre_result::success_no_callback;
       });
   return driver.start(std::move(callbacks));
+}
+'@ }
+  'NTL_WFP' { @'
+#include <memory>
+
+#include <ntl/driver>
+#include <ntl/wfp/all>
+
+namespace {
+using layer = ntl::wfp::layers::ale_auth_connect_v4;
+
+constexpr GUID callout_guid = {
+    0xd33c2b8e, 0x3782, 0x4454,
+    {0xaf, 0x7c, 0x9c, 0x72, 0x34, 0xab, 0x91, 0x20}};
+constexpr ntl::wfp::callout_key<layer> callout_key(callout_guid);
+
+constexpr auto classify =
+    +[](const ntl::wfp::classify_event<layer>&) noexcept {
+      return ntl::wfp::decision::continue_classification;
+    };
+}
+
+ntl::status ntl::main(ntl::driver& driver, const std::wstring&) {
+  auto callouts = std::make_shared<ntl::wfp::callout_driver<>>(driver);
+  const ntl::status status = callouts->add<classify>(callout_key);
+  if (!status.is_ok())
+    return status;
+  driver.on_unload([callouts] {
+    const ntl::status result = callouts->reset();
+    NT_ASSERT(result.is_ok());
+  });
+  return ntl::status::ok();
 }
 '@ }
   'KMDF' { @'

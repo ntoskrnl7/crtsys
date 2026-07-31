@@ -1,0 +1,393 @@
+/**
+ * @file classify
+ * @brief Read-only WFP classification views and policy decisions.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/wfp/classify is a kernel-mode header"
+#endif
+
+#include "layers"
+#include "packet"
+#include "../result"
+
+#include <cstdint>
+#include <optional>
+#include <type_traits>
+#include <utility>
+
+namespace ntl::wfp {
+
+class connect_redirector;
+template <class Layer, class Context> class stream_event;
+namespace detail {
+template <class Layer, class Context, auto Callback>
+struct detail_flow_classify_adapter;
+}
+
+/**
+ * @brief The complete decision surface available to a synchronous callout.
+ *
+ * Returning a value instead of exposing FWPS_CLASSIFY_OUT prevents callbacks
+ * from accidentally violating ACTION_WRITE and CLEAR_ACTION_RIGHT rules.
+ */
+enum class decision {
+  continue_classification,
+  permit,
+  block,
+  block_and_absorb,
+};
+
+/**
+ * @brief A checked, read-only view of one fixed incoming value.
+ */
+class incoming_value_view {
+public:
+  std::optional<std::uint8_t> uint8() const noexcept {
+    if (!value_ || value_->type != FWP_UINT8)
+      return std::nullopt;
+    return value_->uint8;
+  }
+
+  std::optional<std::uint16_t> uint16() const noexcept {
+    if (!value_ || value_->type != FWP_UINT16)
+      return std::nullopt;
+    return value_->uint16;
+  }
+
+  std::optional<std::uint32_t> uint32() const noexcept {
+    if (!value_ || value_->type != FWP_UINT32)
+      return std::nullopt;
+    return value_->uint32;
+  }
+
+  std::optional<std::uint64_t> uint64() const noexcept {
+    if (!value_ || value_->type != FWP_UINT64 || !value_->uint64)
+      return std::nullopt;
+    return *value_->uint64;
+  }
+
+  const FWP_BYTE_BLOB *byte_blob() const noexcept {
+    if (!value_ || value_->type != FWP_BYTE_BLOB_TYPE)
+      return nullptr;
+    return value_->byteBlob;
+  }
+
+  const FWP_BYTE_ARRAY16 *byte_array16() const noexcept {
+    if (!value_ || value_->type != FWP_BYTE_ARRAY16_TYPE)
+      return nullptr;
+    return value_->byteArray16;
+  }
+
+  explicit operator bool() const noexcept { return value_ != nullptr; }
+
+private:
+  template <class> friend class classify_event;
+  template <class, class> friend class stream_event;
+  explicit incoming_value_view(const FWP_VALUE0 *value) noexcept
+      : value_(value) {}
+
+  const FWP_VALUE0 *value_ = nullptr;
+};
+
+/**
+ * @brief Presence-checked metadata supplied by the filtering engine.
+ */
+class metadata_view {
+public:
+  std::optional<std::uint64_t> process_id() const noexcept {
+    if (!present(FWPS_METADATA_FIELD_PROCESS_ID))
+      return std::nullopt;
+    return values_->processId;
+  }
+
+  std::optional<std::uint64_t> flow_handle() const noexcept {
+    if (!present(FWPS_METADATA_FIELD_FLOW_HANDLE))
+      return std::nullopt;
+    return values_->flowHandle;
+  }
+
+  std::optional<HANDLE> completion_handle() const noexcept {
+    if (!present(FWPS_METADATA_FIELD_COMPLETION_HANDLE))
+      return std::nullopt;
+    return values_->completionHandle;
+  }
+
+  std::optional<std::uint64_t> transport_endpoint_handle() const noexcept {
+    if (!present(FWPS_METADATA_FIELD_TRANSPORT_ENDPOINT_HANDLE))
+      return std::nullopt;
+    return values_->transportEndpointHandle;
+  }
+
+  std::optional<std::uint32_t> compartment_id() const noexcept {
+    if (!present(FWPS_METADATA_FIELD_COMPARTMENT_ID))
+      return std::nullopt;
+    return values_->compartmentId;
+  }
+
+  std::optional<std::uint32_t> packet_direction() const noexcept {
+    if (!present(FWPS_METADATA_FIELD_PACKET_DIRECTION))
+      return std::nullopt;
+    return values_->packetDirection;
+  }
+
+  std::optional<std::uint32_t> ip_header_size() const noexcept {
+    if (!present(FWPS_METADATA_FIELD_IP_HEADER_SIZE))
+      return std::nullopt;
+    return values_->ipHeaderSize;
+  }
+
+  std::optional<std::uint32_t> transport_header_size() const noexcept {
+    if (!present(FWPS_METADATA_FIELD_TRANSPORT_HEADER_SIZE))
+      return std::nullopt;
+    return values_->transportHeaderSize;
+  }
+
+  bool present(std::uint32_t field) const noexcept {
+    return values_ &&
+           (values_->currentMetadataValues & field) == field;
+  }
+
+private:
+  template <class> friend class classify_event;
+  template <class, class> friend class stream_event;
+  explicit metadata_view(
+      const FWPS_INCOMING_METADATA_VALUES0 *values) noexcept
+      : values_(values) {}
+
+  const FWPS_INCOMING_METADATA_VALUES0 *values_ = nullptr;
+};
+
+/**
+ * @brief Exactly-once owner for an ALE operation pended by WFP.
+ *
+ * Destruction completes an outstanding operation with no replacement packet,
+ * so an exception-free early return cannot leave a connection permanently
+ * pended. Moving transfers that completion obligation.
+ */
+class pended_operation {
+public:
+  pended_operation(const pended_operation &) = delete;
+  pended_operation &operator=(const pended_operation &) = delete;
+
+  pended_operation(pended_operation &&other) noexcept
+      : context_(std::exchange(other.context_, nullptr)) {}
+
+  pended_operation &operator=(pended_operation &&other) noexcept {
+    if (this != &other) {
+      complete();
+      context_ = std::exchange(other.context_, nullptr);
+    }
+    return *this;
+  }
+
+  ~pended_operation() { complete(); }
+
+  static ntl::result<pended_operation>
+  try_create(metadata_view metadata) noexcept {
+    const auto handle = metadata.completion_handle();
+    if (!handle || !*handle)
+      return ntl::unexpected(STATUS_NOT_FOUND);
+
+    HANDLE context = nullptr;
+    const NTSTATUS result = FwpsPendOperation0(*handle, &context);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+    return ntl::ok(pended_operation(context));
+  }
+
+  void complete() noexcept {
+    HANDLE context = std::exchange(context_, nullptr);
+    if (context)
+      FwpsCompleteOperation0(context, nullptr);
+  }
+
+  explicit operator bool() const noexcept { return context_ != nullptr; }
+
+private:
+  explicit pended_operation(HANDLE context) noexcept : context_(context) {}
+  HANDLE context_ = nullptr;
+};
+
+/**
+ * @brief Stable, read-only filter properties useful to a classify callback.
+ */
+class filter_view {
+public:
+  std::uint64_t id() const noexcept {
+    return filter_ ? filter_->filterId : 0;
+  }
+
+  std::uint64_t context() const noexcept {
+    return filter_ ? filter_->context : 0;
+  }
+
+  std::uint16_t flags() const noexcept {
+    return filter_ ? filter_->flags : 0;
+  }
+
+private:
+  template <class> friend class classify_event;
+  template <class, class> friend class stream_event;
+  explicit filter_view(const FWPS_FILTER2 *filter) noexcept : filter_(filter) {}
+
+  const FWPS_FILTER2 *filter_ = nullptr;
+};
+
+/**
+ * @brief Callback-scoped classification data bound to one compile-time layer.
+ *
+ * The view cannot be copied or moved. WFP owns every referenced native value,
+ * so the view and pointers returned by it must not escape the callback.
+ */
+template <class Layer> class classify_event {
+public:
+  classify_event(const classify_event &) = delete;
+  classify_event &operator=(const classify_event &) = delete;
+  classify_event(classify_event &&) = delete;
+  classify_event &operator=(classify_event &&) = delete;
+
+  incoming_value_view value(typename Layer::field field) const noexcept {
+    const auto index = static_cast<std::uint16_t>(field);
+    if (!values_ || values_->layerId != Layer::runtime_id ||
+        index >= values_->valueCount || !values_->incomingValue)
+      return incoming_value_view(nullptr);
+    return incoming_value_view(&values_->incomingValue[index].value);
+  }
+
+  metadata_view metadata() const noexcept {
+    return metadata_view(metadata_);
+  }
+
+  filter_view filter() const noexcept { return filter_view(filter_); }
+
+  /**
+   * @brief Reports whether this callout may write the current action.
+   *
+   * This is diagnostic state only. Callbacks still return decision and cannot
+   * mutate FWPS_CLASSIFY_OUT directly.
+   */
+  bool action_write_available() const noexcept {
+    return output_ &&
+           (output_->rights & FWPS_RIGHT_ACTION_WRITE) != 0;
+  }
+
+  /**
+   * @brief Returns the action selected before this callout executes.
+   */
+  FWP_ACTION_TYPE current_action() const noexcept {
+    return output_ ? output_->actionType : FWP_ACTION_NONE;
+  }
+
+  /**
+   * @brief Observes callback-scoped packet data, when the layer supplies it.
+   */
+  borrowed_packet packet() const noexcept {
+    return borrowed_packet(layer_data_);
+  }
+
+private:
+  friend class connect_redirector;
+  friend class bind_redirector;
+  template <class, auto> friend struct detail_classify_adapter;
+  template <class, class, auto>
+  friend struct detail::detail_flow_classify_adapter;
+
+  classify_event(const FWPS_INCOMING_VALUES0 *values,
+                 const FWPS_INCOMING_METADATA_VALUES0 *metadata,
+                 void *layer_data, const void *classify_context,
+                 const FWPS_FILTER2 *filter,
+                 std::uint64_t, FWPS_CLASSIFY_OUT0 *output) noexcept
+      : values_(values), metadata_(metadata), layer_data_(layer_data),
+        classify_context_(classify_context), filter_(filter),
+        output_(output) {}
+
+  const FWPS_INCOMING_VALUES0 *values_ = nullptr;
+  const FWPS_INCOMING_METADATA_VALUES0 *metadata_ = nullptr;
+  void *layer_data_ = nullptr;
+  const void *classify_context_ = nullptr;
+  const FWPS_FILTER2 *filter_ = nullptr;
+  FWPS_CLASSIFY_OUT0 *output_ = nullptr;
+};
+
+namespace detail {
+
+inline decision normalize_decision(decision value,
+                                   const FWPS_FILTER2 *filter) noexcept {
+  if (!filter)
+    return value;
+
+  switch (filter->action.type) {
+  case FWP_ACTION_CALLOUT_INSPECTION:
+    return decision::continue_classification;
+  case FWP_ACTION_CALLOUT_TERMINATING:
+    // WFP treats every non-permit/non-block terminating result as block.
+    return value == decision::continue_classification ? decision::block
+                                                       : value;
+  case FWP_ACTION_CALLOUT_UNKNOWN:
+    return value;
+  default:
+    // A native policy not built by ntl::wfp supplied an incompatible action.
+    return decision::block;
+  }
+}
+
+inline void apply_decision(decision value, const FWPS_FILTER2 *filter,
+                           FWPS_CLASSIFY_OUT0 &output) noexcept {
+  value = normalize_decision(value, filter);
+  const bool may_write =
+      (output.rights & FWPS_RIGHT_ACTION_WRITE) != 0;
+
+  switch (value) {
+  case decision::continue_classification:
+    if (may_write)
+      output.actionType = FWP_ACTION_CONTINUE;
+    return;
+
+  case decision::permit:
+    if (!may_write)
+      return;
+    output.actionType = FWP_ACTION_PERMIT;
+    if (filter &&
+        (filter->flags & FWPS_FILTER_FLAG_CLEAR_ACTION_RIGHT) != 0)
+      output.rights &= ~FWPS_RIGHT_ACTION_WRITE;
+    return;
+
+  case decision::block:
+  case decision::block_and_absorb:
+    // Without ACTION_WRITE a callout may still veto a preceding permit.
+    if (!may_write && output.actionType != FWP_ACTION_PERMIT)
+      return;
+    output.actionType = FWP_ACTION_BLOCK;
+    output.rights &= ~FWPS_RIGHT_ACTION_WRITE;
+    if (value == decision::block_and_absorb)
+      output.flags |= FWPS_CLASSIFY_OUT_FLAG_ABSORB;
+    return;
+  }
+}
+
+} // namespace detail
+
+template <class Layer, auto Callback> struct detail_classify_adapter {
+  static_assert(
+      std::is_nothrow_invocable_r_v<decision, decltype(Callback),
+                                    const classify_event<Layer> &>,
+      "a WFP classify callback must be noexcept and return ntl::wfp::decision");
+
+  static void NTAPI invoke(
+      const FWPS_INCOMING_VALUES0 *values,
+      const FWPS_INCOMING_METADATA_VALUES0 *metadata, void *layer_data,
+      const void *classify_context, const FWPS_FILTER2 *filter,
+      UINT64 flow_context, FWPS_CLASSIFY_OUT0 *output) noexcept {
+    if (!output)
+      return;
+
+    classify_event<Layer> event(values, metadata, layer_data,
+                                classify_context, filter, flow_context,
+                                output);
+    detail::apply_decision(Callback(event), filter, *output);
+  }
+};
+
+} // namespace ntl::wfp

@@ -11,7 +11,6 @@
 #include "status"
 
 #include <exception>
-#include <ntstatus.h>
 #include <string>
 #include <tuple>
 #include <utility>

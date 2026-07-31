@@ -1,5 +1,7 @@
 # NTL KMDF samples
 
+[한국어 설명](./README.ko-KR.md)
+
 Each directory is an independent, buildable KMDF project. The grouping keeps
 software-only examples separate from hardware-specific templates:
 

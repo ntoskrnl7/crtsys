@@ -1,5 +1,7 @@
 # NTL KMDF reference driver
 
+[한국어 설명](./README.ko-KR.md)
+
 This project is the recommended starting point for a production-oriented
 software KMDF device. It combines the common rules that are deliberately
 separated across the smaller teaching samples:

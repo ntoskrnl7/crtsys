@@ -1,0 +1,103 @@
+/**
+ * @file grpc_framing
+ * @brief Bounded gRPC length-prefixed message framing.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/grpc/framing is a user-mode header"
+#endif
+
+#include <ntl/net/buffer/scatter_view>
+#include <ntl/net/framing>
+#include <ntl/result>
+#include <ntl/status>
+
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <span>
+#include <vector>
+
+namespace ntl::net::grpc {
+
+struct message_header {
+  bool compressed = false;
+  std::uint32_t payload_size = 0;
+};
+
+class message_framer {
+public:
+  explicit constexpr message_framer(
+      std::size_t maximum_message_size = 4 * 1024 * 1024) noexcept
+      : maximum_message_size_(maximum_message_size) {}
+
+  ntl::net::framing::frame_probe
+  probe(ntl::net::scatter_view bytes) const noexcept {
+    if (!bytes || maximum_message_size_ == 0)
+      return ntl::net::framing::frame_probe::malformed(
+          STATUS_INVALID_PARAMETER);
+    if (bytes.size() < 5)
+      return ntl::net::framing::frame_probe::need_more(5);
+    const auto compressed = bytes.read<std::uint8_t>(0);
+    if (!compressed || (*compressed != 0 && *compressed != 1))
+      return ntl::net::framing::frame_probe::malformed(STATUS_DATA_ERROR);
+    std::uint32_t size = 0;
+    for (std::size_t index = 1; index != 5; ++index) {
+      const auto value = bytes.read<std::uint8_t>(index);
+      if (!value)
+        return ntl::net::framing::frame_probe::malformed(value.status());
+      size = (size << 8) | *value;
+    }
+    if (size > maximum_message_size_)
+      return ntl::net::framing::frame_probe::malformed(
+          STATUS_BUFFER_OVERFLOW);
+    const std::size_t total = 5 + static_cast<std::size_t>(size);
+    if (bytes.size() < total)
+      return ntl::net::framing::frame_probe::need_more(total);
+    return ntl::net::framing::frame_probe::complete(total, 5, size);
+  }
+
+private:
+  std::size_t maximum_message_size_ = 0;
+};
+
+inline ntl::result<message_header>
+inspect_header(ntl::net::scatter_view wire,
+               std::size_t maximum_message_size =
+                   4 * 1024 * 1024) noexcept {
+  const auto probe = message_framer(maximum_message_size).probe(wire);
+  if (probe.state() != ntl::net::framing::probe_state::complete)
+    return ntl::unexpected(
+        probe.state() == ntl::net::framing::probe_state::need_more
+            ? STATUS_BUFFER_TOO_SMALL
+            : probe.error());
+  const auto compressed = wire.read<std::uint8_t>(0);
+  return ntl::ok(message_header{*compressed == 1,
+                                static_cast<std::uint32_t>(probe.content_size())});
+}
+
+inline ntl::result<std::vector<std::byte>>
+encode_message(std::span<const std::byte> payload, bool compressed,
+               std::size_t maximum_message_size =
+                   4 * 1024 * 1024) noexcept {
+  if (payload.size() > maximum_message_size ||
+      payload.size() > (std::numeric_limits<std::uint32_t>::max)())
+    return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+  try {
+    std::vector<std::byte> wire;
+    wire.reserve(5 + payload.size());
+    wire.push_back(compressed ? std::byte{1} : std::byte{0});
+    const auto size = static_cast<std::uint32_t>(payload.size());
+    wire.push_back(static_cast<std::byte>((size >> 24) & 0xffu));
+    wire.push_back(static_cast<std::byte>((size >> 16) & 0xffu));
+    wire.push_back(static_cast<std::byte>((size >> 8) & 0xffu));
+    wire.push_back(static_cast<std::byte>(size & 0xffu));
+    wire.insert(wire.end(), payload.begin(), payload.end());
+    return ntl::ok(std::move(wire));
+  } catch (...) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  }
+}
+
+} // namespace ntl::net::grpc

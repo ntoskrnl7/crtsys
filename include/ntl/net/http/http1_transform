@@ -1,0 +1,880 @@
+/**
+ * @file http1_transform
+ * @brief Bounded HTTP/1.1 semantic parsing, transformation, and serialization.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/http/http1_transform is a user-mode header"
+#endif
+
+#include <ntl/net/http/transform>
+#include <ntl/result>
+#include <ntl/status>
+
+#include <charconv>
+#include <cstddef>
+#include <span>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+namespace ntl::net::http {
+
+template <class Message>
+struct http1_parsed_message {
+  Message message;
+  std::vector<std::byte> encoded_body;
+  std::string original_content_encoding;
+  bool chunked = false;
+  bool websocket_upgrade = false;
+  std::string websocket_extensions;
+};
+
+using http1_parsed_request =
+    http1_parsed_message<request_message>;
+using http1_parsed_response =
+    http1_parsed_message<response_message>;
+
+struct http1_transformed_request {
+  request_message message;
+  pipeline_outcome outcome;
+  std::vector<std::byte> wire;
+  bool websocket_upgrade = false;
+  std::string websocket_extensions;
+};
+
+struct http1_transformed_response {
+  response_message message;
+  pipeline_outcome outcome;
+  std::vector<std::byte> wire;
+  bool websocket_upgrade = false;
+  std::string websocket_extensions;
+};
+
+namespace http1_transform_detail {
+
+inline std::string_view trim_ows(
+    std::string_view value) noexcept {
+  while (!value.empty() &&
+         (value.front() == ' ' || value.front() == '\t'))
+    value.remove_prefix(1);
+  while (!value.empty() &&
+         (value.back() == ' ' || value.back() == '\t'))
+    value.remove_suffix(1);
+  return value;
+}
+
+inline bool contains_token_ci(
+    std::string_view value, std::string_view token) noexcept {
+  std::size_t position = 0;
+  while (position <= value.size()) {
+    const std::size_t comma = value.find(',', position);
+    const std::size_t end =
+        comma == std::string_view::npos ? value.size() : comma;
+    if (transform_detail::ascii_equal_ci(
+            trim_ows(value.substr(position, end - position)),
+            token))
+      return true;
+    if (comma == std::string_view::npos)
+      break;
+    position = comma + 1;
+  }
+  return false;
+}
+
+struct wire_parts {
+  std::string_view start_line;
+  std::vector<header_field> headers;
+  std::span<const std::byte> body_wire;
+  std::vector<header_field> trailers;
+  bool chunked = false;
+  bool has_content_length = false;
+  std::size_t content_length = 0;
+};
+
+/** Parses one complete HTTP/1 head without requiring its body bytes. */
+inline ntl::result<wire_parts>
+parse_head(std::span<const std::byte> wire,
+           const transform_limits &limits) noexcept {
+  try {
+    if (wire.empty() || wire.size() > limits.maximum_header_bytes)
+      return ntl::unexpected(
+          wire.empty() ? STATUS_INVALID_PARAMETER : STATUS_BUFFER_OVERFLOW);
+    const std::string_view text(
+        reinterpret_cast<const char *>(wire.data()), wire.size());
+    const std::size_t first_line_end = text.find("\r\n");
+    const std::size_t header_end = text.find("\r\n\r\n");
+    if (first_line_end == std::string_view::npos ||
+        header_end == std::string_view::npos ||
+        first_line_end >= header_end || header_end + 4 != wire.size())
+      return ntl::unexpected(STATUS_DATA_ERROR);
+
+    wire_parts result;
+    result.start_line = text.substr(0, first_line_end);
+    std::size_t position = first_line_end + 2;
+    std::size_t header_bytes = 0;
+    while (position < header_end) {
+      const std::size_t line_end = text.find("\r\n", position);
+      const std::size_t colon = text.find(':', position);
+      if (line_end == std::string_view::npos || line_end > header_end ||
+          colon == std::string_view::npos || colon >= line_end)
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      std::string name(text.substr(position, colon - position));
+      std::string value(trim_ows(
+          text.substr(colon + 1, line_end - colon - 1)));
+      name = transform_detail::normalized_name(std::move(name));
+      if (!transform_detail::is_token(name) ||
+          !transform_detail::valid_field_value(value) ||
+          name.size() > limits.maximum_header_bytes - header_bytes ||
+          value.size() > limits.maximum_header_bytes - header_bytes -
+                             name.size())
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      header_bytes += name.size() + value.size();
+      if (name == "transfer-encoding")
+        result.chunked = contains_token_ci(value, "chunked");
+      if (name == "content-length") {
+        std::size_t parsed_length = 0;
+        const auto parsed = std::from_chars(
+            value.data(), value.data() + value.size(), parsed_length);
+        if (result.has_content_length || value.empty() ||
+            parsed.ec != std::errc{} ||
+            parsed.ptr != value.data() + value.size())
+          return ntl::unexpected(STATUS_DATA_ERROR);
+        result.has_content_length = true;
+        result.content_length = parsed_length;
+      }
+      result.headers.push_back(
+          {std::move(name), std::move(value), false});
+      if (result.headers.size() > limits.maximum_header_count)
+        return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+      position = line_end + 2;
+    }
+    if (result.chunked && result.has_content_length)
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    return ntl::ok(std::move(result));
+  } catch (const std::bad_alloc &) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+}
+
+inline ntl::result<std::vector<std::byte>>
+decode_chunked(
+    std::span<const std::byte> encoded,
+    std::vector<header_field> &trailers,
+    const transform_limits &limits) noexcept {
+  try {
+    const std::string_view text(
+        reinterpret_cast<const char *>(encoded.data()),
+        encoded.size());
+    std::vector<std::byte> decoded;
+    std::size_t position = 0;
+    for (;;) {
+      const std::size_t line_end = text.find("\r\n", position);
+      if (line_end == std::string_view::npos)
+        return ntl::unexpected(STATUS_END_OF_FILE);
+      std::string_view size_text =
+          text.substr(position, line_end - position);
+      const std::size_t extension = size_text.find(';');
+      if (extension != std::string_view::npos)
+        size_text = size_text.substr(0, extension);
+      size_text = trim_ows(size_text);
+      std::size_t size = 0;
+      const auto parsed = std::from_chars(
+          size_text.data(), size_text.data() + size_text.size(),
+          size, 16);
+      if (size_text.empty() || parsed.ec != std::errc{} ||
+          parsed.ptr != size_text.data() + size_text.size())
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      position = line_end + 2;
+      if (size == 0)
+        break;
+      if (position > encoded.size() ||
+          size > encoded.size() - position ||
+          size > limits.maximum_encoded_body_bytes -
+                     decoded.size() ||
+          encoded.size() - position - size < 2 ||
+          encoded[position + size] != std::byte{'\r'} ||
+          encoded[position + size + 1] != std::byte{'\n'})
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      decoded.insert(
+          decoded.end(), encoded.begin() +
+                             static_cast<std::ptrdiff_t>(position),
+          encoded.begin() +
+              static_cast<std::ptrdiff_t>(position + size));
+      position += size + 2;
+    }
+
+    for (;;) {
+      const std::size_t line_end = text.find("\r\n", position);
+      if (line_end == std::string_view::npos)
+        return ntl::unexpected(STATUS_END_OF_FILE);
+      if (line_end == position) {
+        position += 2;
+        break;
+      }
+      const std::size_t colon = text.find(':', position);
+      if (colon == std::string_view::npos || colon >= line_end)
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      std::string name(
+          text.substr(position, colon - position));
+      std::string value(trim_ows(
+          text.substr(colon + 1, line_end - colon - 1)));
+      name = transform_detail::normalized_name(std::move(name));
+      if (!transform_detail::is_token(name) ||
+          !transform_detail::valid_field_value(value))
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      trailers.push_back(
+          {std::move(name), std::move(value), false});
+      if (trailers.size() > limits.maximum_header_count)
+        return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+      position = line_end + 2;
+    }
+    if (position != encoded.size())
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    const ntl::status valid = ntl::net::http::validate_trailers(
+        trailers, protocol::http1, limits);
+    if (!valid.is_ok())
+      return ntl::unexpected(valid);
+    return ntl::ok(std::move(decoded));
+  } catch (const std::bad_alloc &) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+}
+
+inline ntl::result<wire_parts>
+parse_wire(std::span<const std::byte> wire,
+           const transform_limits &limits,
+           bool body_forbidden = false) noexcept {
+  try {
+    if (wire.empty() ||
+        wire.size() >
+            limits.maximum_header_bytes +
+                limits.maximum_encoded_body_bytes +
+                256 * 1024)
+      return ntl::unexpected(
+          wire.empty() ? STATUS_INVALID_PARAMETER
+                       : STATUS_BUFFER_OVERFLOW);
+    const std::string_view text(
+        reinterpret_cast<const char *>(wire.data()), wire.size());
+    const std::size_t first_line_end = text.find("\r\n");
+    const std::size_t header_end = text.find("\r\n\r\n");
+    if (first_line_end == std::string_view::npos ||
+        header_end == std::string_view::npos ||
+        first_line_end >= header_end ||
+        header_end + 4 > limits.maximum_header_bytes)
+      return ntl::unexpected(STATUS_DATA_ERROR);
+
+    wire_parts result;
+    result.start_line = text.substr(0, first_line_end);
+    std::size_t position = first_line_end + 2;
+    std::size_t header_bytes = 0;
+    bool content_length_seen = false;
+    std::size_t content_length = 0;
+    while (position < header_end) {
+      const std::size_t line_end = text.find("\r\n", position);
+      const std::size_t colon = text.find(':', position);
+      if (line_end == std::string_view::npos ||
+          line_end > header_end ||
+          colon == std::string_view::npos || colon >= line_end)
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      std::string name(
+          text.substr(position, colon - position));
+      std::string value(trim_ows(
+          text.substr(colon + 1, line_end - colon - 1)));
+      name = transform_detail::normalized_name(std::move(name));
+      if (!transform_detail::is_token(name) ||
+          !transform_detail::valid_field_value(value) ||
+          name.size() >
+              limits.maximum_header_bytes - header_bytes ||
+          value.size() >
+              limits.maximum_header_bytes - header_bytes -
+                  name.size())
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      header_bytes += name.size() + value.size();
+      if (name == "transfer-encoding")
+        result.chunked =
+            contains_token_ci(value, "chunked");
+      if (name == "content-length") {
+        std::size_t parsed_length = 0;
+        const auto parsed = std::from_chars(
+            value.data(), value.data() + value.size(),
+            parsed_length);
+        if (content_length_seen || value.empty() ||
+            parsed.ec != std::errc{} ||
+            parsed.ptr != value.data() + value.size())
+          return ntl::unexpected(STATUS_DATA_ERROR);
+        content_length_seen = true;
+        content_length = parsed_length;
+      }
+      result.headers.push_back(
+          {std::move(name), std::move(value), false});
+      if (result.headers.size() >
+          limits.maximum_header_count)
+        return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+      position = line_end + 2;
+    }
+    if (result.chunked && content_length_seen)
+      return ntl::unexpected(STATUS_DATA_ERROR);
+
+    const auto body_wire = wire.subspan(header_end + 4);
+    if (body_forbidden &&
+        (result.chunked || !body_wire.empty()))
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    if (!body_forbidden && !result.chunked &&
+        content_length_seen &&
+        content_length != body_wire.size())
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    result.body_wire = body_wire;
+    return ntl::ok(std::move(result));
+  } catch (const std::bad_alloc &) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+}
+
+inline ntl::result<std::vector<std::byte>>
+transfer_decode_body(
+    wire_parts &parts,
+    const transform_limits &limits) noexcept {
+  if (!parts.chunked) {
+    try {
+      return ntl::ok(std::vector<std::byte>(
+          parts.body_wire.begin(), parts.body_wire.end()));
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+  return decode_chunked(
+      parts.body_wire, parts.trailers, limits);
+}
+
+inline std::string reason_phrase(unsigned status) {
+  switch (status) {
+  case 100:
+    return "Continue";
+  case 101:
+    return "Switching Protocols";
+  case 200:
+    return "OK";
+  case 201:
+    return "Created";
+  case 204:
+    return "No Content";
+  case 301:
+    return "Moved Permanently";
+  case 302:
+    return "Found";
+  case 304:
+    return "Not Modified";
+  case 400:
+    return "Bad Request";
+  case 403:
+    return "Forbidden";
+  case 404:
+    return "Not Found";
+  case 421:
+    return "Misdirected Request";
+  case 500:
+    return "Internal Server Error";
+  case 502:
+    return "Bad Gateway";
+  default:
+    return "Status";
+  }
+}
+
+inline bool bodyless_response_status(
+    std::span<const std::byte> wire) noexcept {
+  const std::string_view text(
+      reinterpret_cast<const char *>(wire.data()), wire.size());
+  if (text.size() < 12 || !text.starts_with("HTTP/1.") ||
+      text[8] != ' ')
+    return false;
+  unsigned status = 0;
+  const auto parsed = std::from_chars(
+      text.data() + 9, text.data() + 12, status);
+  return parsed.ec == std::errc{} &&
+         parsed.ptr == text.data() + 12 &&
+         ((status >= 100 && status < 200) ||
+          status == 204 || status == 304);
+}
+
+inline ntl::status validate_trailers(
+    std::span<const header_field> trailers,
+    const transform_limits &limits) noexcept {
+  return ntl::net::http::validate_trailers(
+      trailers, protocol::http1, limits);
+}
+
+inline ntl::result<std::vector<std::byte>>
+serialize(
+    std::string start_line,
+    header_collection headers,
+    std::span<const std::byte> body,
+    std::span<const header_field> trailers,
+    const transform_limits &limits,
+    bool body_forbidden = false,
+    bool preserve_content_length = false) noexcept {
+  try {
+    const ntl::status valid =
+        headers.validate(protocol::http1, limits);
+    const ntl::status valid_trailers =
+        validate_trailers(trailers, limits);
+    if (!valid.is_ok())
+      return ntl::unexpected(valid);
+    if (!valid_trailers.is_ok())
+      return ntl::unexpected(valid_trailers);
+    if (body.size() > limits.maximum_encoded_body_bytes)
+      return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+    if (body_forbidden &&
+        (!body.empty() || !trailers.empty()))
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    if (start_line.empty() ||
+        limits.maximum_header_bytes < 2 ||
+        start_line.size() >
+            limits.maximum_header_bytes - 2)
+      return ntl::unexpected(
+          start_line.empty() ? STATUS_DATA_ERROR
+                             : STATUS_BUFFER_OVERFLOW);
+    for (const unsigned char character : start_line) {
+      if (character == 0x7f || character < 0x20)
+        return ntl::unexpected(STATUS_DATA_ERROR);
+    }
+
+    const bool chunked = !body_forbidden && !trailers.empty();
+    headers.erase("transfer-encoding");
+    if (!body_forbidden || !preserve_content_length)
+      headers.erase("content-length");
+    if (body_forbidden) {
+      // HEAD and 304 may retain representation metadata, but no body bytes.
+    } else if (chunked) {
+      headers.append("transfer-encoding", "chunked");
+    } else {
+      headers.append(
+          "content-length", std::to_string(body.size()));
+    }
+
+    std::string head = std::move(start_line);
+    head.append("\r\n");
+    for (const auto &field : headers.fields()) {
+      head.append(field.name);
+      head.append(": ");
+      head.append(field.value);
+      head.append("\r\n");
+    }
+    head.append("\r\n");
+
+    std::vector<std::byte> output;
+    output.reserve(
+        head.size() + body.size() +
+        (chunked ? limits.maximum_header_bytes : 0));
+    output.insert(
+        output.end(),
+        reinterpret_cast<const std::byte *>(head.data()),
+        reinterpret_cast<const std::byte *>(
+            head.data() + head.size()));
+    if (!chunked) {
+      output.insert(output.end(), body.begin(), body.end());
+      return ntl::ok(std::move(output));
+    }
+
+    if (!body.empty()) {
+      char size_text[
+          sizeof(std::size_t) * 2 + 1]{};
+      const auto converted = std::to_chars(
+          size_text, size_text + sizeof(size_text) - 1,
+          body.size(), 16);
+      output.insert(
+          output.end(),
+          reinterpret_cast<const std::byte *>(size_text),
+          reinterpret_cast<const std::byte *>(converted.ptr));
+      output.push_back(std::byte{'\r'});
+      output.push_back(std::byte{'\n'});
+      output.insert(output.end(), body.begin(), body.end());
+      output.push_back(std::byte{'\r'});
+      output.push_back(std::byte{'\n'});
+    }
+    output.push_back(std::byte{'0'});
+    output.push_back(std::byte{'\r'});
+    output.push_back(std::byte{'\n'});
+    for (const auto &field : trailers) {
+      output.insert(
+          output.end(),
+          reinterpret_cast<const std::byte *>(field.name.data()),
+          reinterpret_cast<const std::byte *>(
+              field.name.data() + field.name.size()));
+      output.push_back(std::byte{':'});
+      output.push_back(std::byte{' '});
+      output.insert(
+          output.end(),
+          reinterpret_cast<const std::byte *>(field.value.data()),
+          reinterpret_cast<const std::byte *>(
+              field.value.data() + field.value.size()));
+      output.push_back(std::byte{'\r'});
+      output.push_back(std::byte{'\n'});
+    }
+    output.push_back(std::byte{'\r'});
+    output.push_back(std::byte{'\n'});
+    return ntl::ok(std::move(output));
+  } catch (const std::bad_alloc &) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+}
+
+inline bool websocket_upgrade(
+    unsigned status, const header_collection &headers) noexcept {
+  const auto connection = headers.first("connection");
+  const auto upgrade = headers.first("upgrade");
+  return status == 101 && connection && upgrade &&
+         contains_token_ci(*connection, "upgrade") &&
+         transform_detail::ascii_equal_ci(*upgrade, "websocket");
+}
+
+} // namespace http1_transform_detail
+
+inline ntl::result<http1_parsed_request>
+parse_http1_request(
+    std::span<const std::byte> wire,
+    const ntl::net::inspection::content_decoder_registry
+        &decoders,
+    const transform_limits &limits = {}) noexcept {
+  auto parts =
+      http1_transform_detail::parse_wire(wire, limits);
+  if (!parts)
+    return ntl::unexpected(parts.status());
+  try {
+    const std::size_t first_space =
+        parts->start_line.find(' ');
+    const std::size_t last_space =
+        parts->start_line.rfind(' ');
+    if (first_space == std::string_view::npos ||
+        last_space == first_space ||
+        parts->start_line.substr(last_space + 1) !=
+            "HTTP/1.1")
+      return ntl::unexpected(STATUS_DATA_ERROR);
+
+    request_message message;
+    message.wire_protocol = protocol::http1;
+    message.method.assign(
+        parts->start_line.substr(0, first_space));
+    message.path.assign(parts->start_line.substr(
+        first_space + 1,
+        last_space - first_space - 1));
+    message.headers =
+        header_collection(std::move(parts->headers));
+    const auto host = message.headers.first("host");
+    if (!host)
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    message.authority.assign(*host);
+    if (message.method == "CONNECT") {
+      if (!transform_detail::ascii_equal_ci(
+              message.authority, message.path))
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      message.authority = std::move(message.path);
+      message.scheme.clear();
+      message.path.clear();
+    }
+
+    auto transfer_body =
+        http1_transform_detail::transfer_decode_body(
+            *parts, limits);
+    if (!transfer_body)
+      return ntl::unexpected(transfer_body.status());
+    auto decoded = decode_body(
+        message.headers, *transfer_body, decoders, limits);
+    if (!decoded)
+      return ntl::unexpected(decoded.status());
+    message.body = decoded->bytes;
+    message.trailers = std::move(parts->trailers);
+
+    http1_parsed_request result;
+    result.message = std::move(message);
+    result.encoded_body = std::move(*transfer_body);
+    result.original_content_encoding =
+        std::move(decoded->original_content_encoding);
+    result.chunked = parts->chunked;
+    const auto connection =
+        result.message.headers.first("connection");
+    const auto upgrade =
+        result.message.headers.first("upgrade");
+    result.websocket_upgrade =
+        connection && upgrade &&
+        http1_transform_detail::contains_token_ci(
+            *connection, "upgrade") &&
+        transform_detail::ascii_equal_ci(
+            *upgrade, "websocket");
+    if (const auto extensions = result.message.headers.first(
+            "sec-websocket-extensions"))
+      result.websocket_extensions.assign(*extensions);
+    return ntl::ok(std::move(result));
+  } catch (const std::bad_alloc &) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+}
+
+inline ntl::result<http1_parsed_response>
+parse_http1_response(
+    std::span<const std::byte> wire,
+    const ntl::net::inspection::content_decoder_registry
+        &decoders,
+    const transform_limits &limits = {},
+    bool response_to_head = false) noexcept {
+  const bool body_forbidden =
+      response_to_head ||
+      http1_transform_detail::bodyless_response_status(wire);
+  auto parts =
+      http1_transform_detail::parse_wire(
+          wire, limits, body_forbidden);
+  if (!parts)
+    return ntl::unexpected(parts.status());
+  try {
+    if (!parts->start_line.starts_with("HTTP/1.") ||
+        parts->start_line.size() < 12 ||
+        parts->start_line[8] != ' ')
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    const std::size_t status_end =
+        parts->start_line.find(' ', 9);
+    const std::string_view status_text =
+        parts->start_line.substr(
+            9, status_end == std::string_view::npos
+                   ? std::string_view::npos
+                   : status_end - 9);
+    unsigned status = 0;
+    const auto parsed = std::from_chars(
+        status_text.data(),
+        status_text.data() + status_text.size(), status);
+    if (status_text.size() != 3 || parsed.ec != std::errc{} ||
+        parsed.ptr != status_text.data() + status_text.size() ||
+        status < 100 || status > 999)
+      return ntl::unexpected(STATUS_DATA_ERROR);
+
+    response_message message;
+    message.wire_protocol = protocol::http1;
+    message.status = status;
+    if (status_end != std::string_view::npos)
+      message.reason.assign(
+          parts->start_line.substr(status_end + 1));
+    message.headers =
+        header_collection(std::move(parts->headers));
+    auto transfer_body =
+        http1_transform_detail::transfer_decode_body(
+            *parts, limits);
+    if (!transfer_body)
+      return ntl::unexpected(transfer_body.status());
+    decoded_body decoded;
+    if (body_forbidden) {
+      decoded.original_content_encoding =
+          message.headers.joined("content-encoding");
+    } else {
+      auto result = decode_body(
+          message.headers, *transfer_body, decoders, limits);
+      if (!result)
+        return ntl::unexpected(result.status());
+      decoded = std::move(*result);
+    }
+    message.body = decoded.bytes;
+    message.trailers = std::move(parts->trailers);
+
+    http1_parsed_response result;
+    result.message = std::move(message);
+    result.encoded_body = std::move(*transfer_body);
+    result.original_content_encoding =
+        std::move(decoded.original_content_encoding);
+    result.chunked = parts->chunked;
+    result.websocket_upgrade =
+        http1_transform_detail::websocket_upgrade(
+            result.message.status, result.message.headers);
+    if (const auto extensions = result.message.headers.first(
+            "sec-websocket-extensions"))
+      result.websocket_extensions.assign(*extensions);
+    return ntl::ok(std::move(result));
+  } catch (const std::bad_alloc &) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+}
+
+inline ntl::result<std::vector<std::byte>>
+serialize_http1_request(
+    const request_message &message,
+    std::span<const std::byte> encoded_body,
+    const transform_limits &limits = {}) noexcept {
+  try {
+    const bool connect = message.method == "CONNECT";
+    if (!transform_detail::is_token(message.method) ||
+        !transform_detail::valid_uri_component(
+            message.authority) ||
+        (!connect &&
+         !transform_detail::valid_uri_component(message.path)) ||
+        (connect &&
+         (!message.scheme.empty() || !message.path.empty())) ||
+        message.extended_protocol)
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    header_collection headers = message.headers;
+    headers.set("host", message.authority);
+    const std::string &target =
+        connect ? message.authority : message.path;
+    return http1_transform_detail::serialize(
+        message.method + " " + target + " HTTP/1.1",
+        std::move(headers), encoded_body,
+        message.trailers, limits);
+  } catch (const std::bad_alloc &) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+}
+
+inline ntl::result<std::vector<std::byte>>
+serialize_http1_response(
+    const response_message &message,
+    std::span<const std::byte> encoded_body,
+    const transform_limits &limits = {},
+    bool response_to_head = false) noexcept {
+  try {
+    if (message.status < 100 || message.status > 999 ||
+        !transform_detail::valid_field_value(message.reason))
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    const std::string reason = message.reason.empty()
+                                   ? http1_transform_detail::reason_phrase(
+                                         message.status)
+                                   : message.reason;
+    const bool body_forbidden =
+        response_to_head ||
+        (message.status >= 100 && message.status < 200) ||
+        message.status == 204 || message.status == 304;
+    const bool preserve_content_length =
+        response_to_head || message.status == 304;
+    return http1_transform_detail::serialize(
+        "HTTP/1.1 " + std::to_string(message.status) +
+            " " + reason,
+        message.headers, encoded_body,
+        message.trailers, limits, body_forbidden,
+        preserve_content_length);
+  } catch (const std::bad_alloc &) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+}
+
+inline ntl::result<http1_transformed_request>
+transform_http1_request(
+    std::span<const std::byte> original_wire,
+    const transform_pipeline &pipeline,
+    const ntl::net::inspection::content_decoder_registry
+        &decoders,
+    const ntl::net::inspection::content_encoder_registry
+        &encoders) noexcept {
+  auto parsed = parse_http1_request(
+      original_wire, decoders, pipeline.limits());
+  if (!parsed)
+    return ntl::unexpected(parsed.status());
+  http1_transformed_request result;
+  result.message = std::move(parsed->message);
+  result.websocket_upgrade = parsed->websocket_upgrade;
+  result.websocket_extensions =
+      std::move(parsed->websocket_extensions);
+  result.outcome = pipeline.apply(result.message);
+  if (result.outcome.action != rewrite_action::forward)
+    return ntl::ok(std::move(result));
+  if (!result.outcome.modified()) {
+    try {
+      result.wire.assign(
+          original_wire.begin(), original_wire.end());
+      return ntl::ok(std::move(result));
+    } catch (...) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+  }
+
+  std::vector<std::byte> encoded_body;
+  if (result.outcome.body_modified) {
+    auto encoded = encode_body(
+        result.message.headers, result.message.body,
+        parsed->original_content_encoding,
+        result.outcome.body_coding, encoders,
+        pipeline.limits());
+    if (!encoded)
+      return ntl::unexpected(encoded.status());
+    encoded_body = std::move(*encoded);
+  } else {
+    encoded_body = std::move(parsed->encoded_body);
+  }
+  auto wire = serialize_http1_request(
+      result.message, encoded_body, pipeline.limits());
+  if (!wire)
+    return ntl::unexpected(wire.status());
+  result.wire = std::move(*wire);
+  return ntl::ok(std::move(result));
+}
+
+inline ntl::result<http1_transformed_response>
+transform_http1_response(
+    std::span<const std::byte> original_wire,
+    const request_message &request,
+    const transform_pipeline &pipeline,
+    const ntl::net::inspection::content_decoder_registry
+        &decoders,
+    const ntl::net::inspection::content_encoder_registry
+        &encoders) noexcept {
+  auto parsed = parse_http1_response(
+      original_wire, decoders, pipeline.limits(),
+      request.method == "HEAD");
+  if (!parsed)
+    return ntl::unexpected(parsed.status());
+  http1_transformed_response result;
+  result.message = std::move(parsed->message);
+  result.websocket_upgrade = parsed->websocket_upgrade;
+  result.websocket_extensions =
+      std::move(parsed->websocket_extensions);
+  result.outcome = pipeline.apply(request, result.message);
+  if (result.outcome.action != rewrite_action::forward)
+    return ntl::ok(std::move(result));
+  if (!result.outcome.modified()) {
+    try {
+      result.wire.assign(
+          original_wire.begin(), original_wire.end());
+      return ntl::ok(std::move(result));
+    } catch (...) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+  }
+
+  std::vector<std::byte> encoded_body;
+  if (result.outcome.body_modified) {
+    auto encoded = encode_body(
+        result.message.headers, result.message.body,
+        parsed->original_content_encoding,
+        result.outcome.body_coding, encoders,
+        pipeline.limits());
+    if (!encoded)
+      return ntl::unexpected(encoded.status());
+    encoded_body = std::move(*encoded);
+  } else {
+    encoded_body = std::move(parsed->encoded_body);
+  }
+  auto wire = serialize_http1_response(
+      result.message, encoded_body, pipeline.limits(),
+      request.method == "HEAD");
+  if (!wire)
+    return ntl::unexpected(wire.status());
+  result.wire = std::move(*wire);
+  return ntl::ok(std::move(result));
+}
+
+} // namespace ntl::net::http

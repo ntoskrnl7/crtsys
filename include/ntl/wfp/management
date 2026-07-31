@@ -1,0 +1,1839 @@
+/**
+ * @file management
+ * @brief Transactional session-scoped and persistent WFP policy management.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/wfp/management is a user-mode header"
+#endif
+
+#include "conditions"
+#include "connect_redirect"
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <cstring>
+#include <functional>
+#include <limits>
+#include <memory>
+#include <optional>
+#include <span>
+#include <stdexcept>
+#include <string>
+#include <system_error>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+namespace ntl::wfp {
+
+class management_error : public std::system_error {
+public:
+  management_error(DWORD code, const char *operation)
+      : std::system_error(static_cast<int>(code), std::system_category(),
+                          operation) {}
+};
+
+/**
+ * @brief Pointer-free snapshot of one native WFP filter condition.
+ *
+ * Scalar values are copied into scalar_value. Byte blobs are represented by
+ * their size and FNV-1a hash so diagnostics can compare application
+ * identities without retaining or logging executable paths.
+ */
+struct policy_condition_diagnostic {
+  GUID field_key{};
+  FWP_MATCH_TYPE match_type = FWP_MATCH_EQUAL;
+  FWP_DATA_TYPE value_type = FWP_EMPTY;
+  std::uint64_t scalar_value = 0;
+  std::uint32_t blob_size = 0;
+  std::uint64_t blob_hash = 0;
+};
+
+/**
+ * @brief Pointer-free snapshot of a WFP filter and its effective placement.
+ */
+struct policy_filter_diagnostic {
+  GUID filter_key{};
+  GUID provider_key{};
+  bool has_provider = false;
+  GUID layer_key{};
+  GUID sublayer_key{};
+  GUID action_callout_key{};
+  std::uint64_t filter_id = 0;
+  std::uint64_t raw_context = 0;
+  FWP_ACTION_TYPE action_type = FWP_ACTION_NONE;
+  std::uint32_t flags = 0;
+  FWP_DATA_TYPE weight_type = FWP_EMPTY;
+  std::uint64_t weight_value = 0;
+  FWP_DATA_TYPE effective_weight_type = FWP_EMPTY;
+  std::uint64_t effective_weight_value = 0;
+  std::uint16_t sublayer_weight = 0;
+  std::vector<policy_condition_diagnostic> conditions;
+  bool conditions_truncated = false;
+
+  const policy_condition_diagnostic *
+  find_condition(const GUID &field) const noexcept {
+    for (const auto &condition : conditions)
+      if (::IsEqualGUID(condition.field_key, field))
+        return &condition;
+    return nullptr;
+  }
+};
+
+/**
+ * @brief Bounded filter inventory for one WFP layer.
+ */
+struct policy_filter_inventory {
+  std::vector<policy_filter_diagnostic> filters;
+  bool truncated = false;
+};
+
+struct policy_layer_diagnostic {
+  GUID layer_key{};
+  GUID default_sublayer_key{};
+  std::uint32_t flags = 0;
+  std::uint32_t field_count = 0;
+  std::uint16_t layer_id = 0;
+};
+
+/**
+ * @brief Owning WFP application identifier derived from an executable path.
+ */
+class application_id {
+public:
+  static application_id from_path(std::wstring_view path) {
+    if (path.empty())
+      throw std::invalid_argument(
+          "WFP application path cannot be empty");
+    const std::wstring owned(path);
+    FWP_BYTE_BLOB *native = nullptr;
+    const DWORD status =
+        ::FwpmGetAppIdFromFileName0(owned.c_str(), &native);
+    if (status != ERROR_SUCCESS)
+      throw management_error(
+          status, "FwpmGetAppIdFromFileName0");
+    struct native_release {
+      FWP_BYTE_BLOB *value;
+      ~native_release() {
+        if (value)
+          ::FwpmFreeMemory0(
+              reinterpret_cast<void **>(&value));
+      }
+    } release{native};
+    if (!native || native->size == 0 || !native->data)
+      throw std::runtime_error(
+          "WFP returned an empty application identifier");
+    return application_id(std::vector<std::uint8_t>(
+        native->data, native->data + native->size));
+  }
+
+  static application_id current_process() {
+    std::vector<wchar_t> path(32768);
+    const DWORD length = ::GetModuleFileNameW(
+        nullptr, path.data(), static_cast<DWORD>(path.size()));
+    if (length == 0)
+      throw management_error(
+          ::GetLastError(), "GetModuleFileNameW");
+    if (length >= path.size())
+      throw std::system_error(
+          ERROR_BUFFER_OVERFLOW, std::system_category(),
+          "current executable path exceeds the Windows limit");
+    return from_path(
+        std::wstring_view(path.data(), length));
+  }
+
+  std::span<const std::uint8_t> bytes() const noexcept {
+    return bytes_;
+  }
+
+private:
+  explicit application_id(std::vector<std::uint8_t> bytes)
+      : bytes_(std::move(bytes)) {}
+
+  std::vector<std::uint8_t> bytes_;
+};
+
+template <class Derived, class Layer>
+template <class L, std::enable_if_t<
+                       detail::ale_identity_condition_layer<L>, int>>
+Derived &detail::typed_condition_builder<Derived, Layer>::
+    application_equal(const application_id &application) {
+  conditions_.add_blob(
+      FWPM_CONDITION_ALE_APP_ID, application.bytes());
+  return derived();
+}
+
+struct provider_spec {
+  provider_key key;
+  std::wstring name;
+  std::wstring description;
+  std::wstring service_name;
+};
+
+struct sublayer_spec {
+  sublayer_key key;
+  std::wstring name;
+  std::wstring description;
+  std::uint16_t weight = 0x100;
+};
+
+template <class Layer> struct callout_spec {
+  callout_key<Layer> key;
+  std::wstring name;
+  std::wstring description;
+};
+
+/** @brief Controls whether installed WFP objects follow the process lifetime. */
+enum class policy_scope {
+  /**
+   * Objects are attached to a dynamic engine session and disappear if the
+   * controller exits or loses its BFE connection.
+   */
+  ephemeral,
+
+  /**
+   * Objects survive controller and BFE restarts until an explicit manifest
+   * uninstall or reconcile removes them.
+   */
+  persistent,
+};
+
+/**
+ * @brief Explicit behavior while a terminating callout is not registered.
+ */
+enum class callout_unavailable {
+  /** Treat the matching callout filter as block (WFP default). */
+  block,
+  /** Treat the matching callout filter as permit. */
+  permit,
+};
+
+enum class enforcement_action {
+  permit,
+  block,
+};
+
+/**
+ * @brief Typed inventory of one policy graph, used for atomic replacement.
+ *
+ * The manifest stores only object keys. `policy_session::reconcile()` removes
+ * the old graph in dependency order and installs its replacement in the same
+ * WFP transaction.
+ */
+class policy_manifest {
+public:
+  policy_manifest &include(provider_key key) {
+    append_unique(providers_, key.native());
+    return *this;
+  }
+
+  policy_manifest &include(sublayer_key key) {
+    append_unique(sublayers_, key.native());
+    return *this;
+  }
+
+  template <class Layer>
+  policy_manifest &include(callout_key<Layer> key) {
+    append_unique(callouts_, key.native());
+    return *this;
+  }
+
+  template <class Layer>
+  policy_manifest &include(filter_key<Layer> key) {
+    append_unique(filters_, key.native());
+    return *this;
+  }
+
+  bool empty() const noexcept {
+    return providers_.empty() && sublayers_.empty() &&
+           callouts_.empty() && filters_.empty();
+  }
+
+private:
+  friend class policy_session;
+  friend class policy_transaction;
+
+  static void append_unique(std::vector<GUID> &values,
+                            const GUID &value) {
+    const auto duplicate = std::find_if(
+        values.begin(), values.end(), [&](const GUID &existing) {
+          return ::IsEqualGUID(existing, value);
+        });
+    if (duplicate == values.end())
+      values.push_back(value);
+  }
+
+  std::vector<GUID> providers_;
+  std::vector<GUID> sublayers_;
+  std::vector<GUID> callouts_;
+  std::vector<GUID> filters_;
+};
+
+/**
+ * @brief Versioned persistent policy graph used for migration and rollback.
+ */
+class policy_revision {
+public:
+  policy_revision(
+      std::uint64_t version, policy_manifest manifest)
+      : version_(version), manifest_(std::move(manifest)) {
+    if (version_ == 0)
+      throw std::invalid_argument(
+          "WFP policy revision must be nonzero");
+    if (manifest_.empty())
+      throw std::invalid_argument(
+          "WFP policy revision manifest cannot be empty");
+  }
+
+  std::uint64_t version() const noexcept {
+    return version_;
+  }
+
+  const policy_manifest &manifest() const noexcept {
+    return manifest_;
+  }
+
+private:
+  friend class policy_session;
+  std::uint64_t version_ = 0;
+  policy_manifest manifest_;
+};
+
+enum class policy_object_kind {
+  provider,
+  sublayer,
+  callout,
+  filter,
+};
+
+struct missing_policy_object {
+  policy_object_kind kind = policy_object_kind::provider;
+  GUID key{};
+};
+
+/** @brief Pointer-free health snapshot for one expected policy graph. */
+struct policy_health_report {
+  policy_scope scope = policy_scope::ephemeral;
+  std::size_t expected_objects = 0;
+  std::uint64_t expected_revision = 0;
+  std::vector<missing_policy_object> missing;
+  std::vector<GUID> revision_mismatches;
+
+  bool healthy() const noexcept {
+    return expected_objects != 0 && missing.empty() &&
+           revision_mismatches.empty();
+  }
+};
+
+namespace detail {
+
+inline constexpr std::array<std::uint8_t, 8>
+    policy_revision_magic{
+        'N', 'T', 'L', 'W', 'F', 'P', 'R', 1};
+
+inline std::array<std::uint8_t, 16>
+encode_policy_revision(std::uint64_t revision) noexcept {
+  std::array<std::uint8_t, 16> result{};
+  std::copy(
+      policy_revision_magic.begin(),
+      policy_revision_magic.end(), result.begin());
+  for (std::size_t index = 0; index != 8; ++index)
+    result[8 + index] = static_cast<std::uint8_t>(
+        revision >> (index * 8));
+  return result;
+}
+
+inline std::optional<std::uint64_t>
+decode_policy_revision(const FWP_BYTE_BLOB &blob) noexcept {
+  if (blob.size != 16 || !blob.data ||
+      !std::equal(
+          policy_revision_magic.begin(),
+          policy_revision_magic.end(), blob.data))
+    return std::nullopt;
+  std::uint64_t result = 0;
+  for (std::size_t index = 0; index != 8; ++index)
+    result |= static_cast<std::uint64_t>(
+                  blob.data[8 + index])
+              << (index * 8);
+  return result == 0
+             ? std::nullopt
+             : std::optional<std::uint64_t>(result);
+}
+
+} // namespace detail
+
+/**
+ * @brief A terminating local-proxy filter for ALE connect redirection.
+ *
+ * The proxy PID and host-order port are mandatory constructor data. The
+ * native action, raw context encoding, and CLEAR_ACTION_RIGHT flag cannot be
+ * changed by application code.
+ */
+template <class Layer>
+class connect_redirect_filter_builder
+    : public detail::typed_condition_builder<
+          connect_redirect_filter_builder<Layer>, Layer> {
+public:
+  connect_redirect_filter_builder(filter_key<Layer> key,
+                                  std::wstring name,
+                                  local_proxy_target target,
+                                  callout_unavailable unavailable)
+      : key_(key), name_(std::move(name)),
+        context_(target.filter_context()),
+        unavailable_(unavailable) {
+    static_assert(detail::connect_redirect_layer<Layer>,
+                  "connect_redirect_filter_builder requires an "
+                  "ALE_CONNECT_REDIRECT layer");
+    if (!target.valid())
+      throw std::invalid_argument(
+          "a connect redirect target needs a nonzero PID and port");
+  }
+
+  connect_redirect_filter_builder &
+  description(std::wstring value) {
+    description_ = std::move(value);
+    return *this;
+  }
+
+  connect_redirect_filter_builder &
+  weight(std::uint8_t value) noexcept {
+    weight_ = value;
+    return *this;
+  }
+
+private:
+  friend class policy_transaction;
+
+  filter_key<Layer> key_;
+  std::wstring name_;
+  std::wstring description_;
+  std::uint8_t weight_ = 8;
+  std::uint64_t context_ = 0;
+  callout_unavailable unavailable_;
+};
+
+/**
+ * @brief A terminating ALE bind-redirect filter.
+ *
+ * The callback owns the typed address/port target. Policy code may only
+ * select a valid bind-redirect layer and supported ALE conditions.
+ */
+template <class Layer>
+class bind_redirect_filter_builder
+    : public detail::typed_condition_builder<
+          bind_redirect_filter_builder<Layer>, Layer> {
+public:
+  bind_redirect_filter_builder(
+      filter_key<Layer> key, std::wstring name,
+      bind_redirect_selector selector,
+      callout_unavailable unavailable)
+      : key_(key), name_(std::move(name)),
+        context_(selector.filter_context()),
+        unavailable_(unavailable) {
+    static_assert(detail::bind_redirect_layer<Layer>,
+                  "bind_redirect_filter_builder requires an "
+                  "ALE_BIND_REDIRECT layer");
+    if (!selector.valid())
+      throw std::invalid_argument(
+          "a bind redirect filter needs a nonzero policy selector");
+  }
+
+  bind_redirect_filter_builder &
+  description(std::wstring value) {
+    description_ = std::move(value);
+    return *this;
+  }
+
+  bind_redirect_filter_builder &
+  weight(std::uint8_t value) noexcept {
+    weight_ = value;
+    return *this;
+  }
+
+private:
+  friend class policy_transaction;
+
+  filter_key<Layer> key_;
+  std::wstring name_;
+  std::wstring description_;
+  std::uint8_t weight_ = 8;
+  std::uint64_t context_ = 0;
+  callout_unavailable unavailable_;
+};
+
+/**
+ * @brief A typed terminating-callout filter for one compile-time WFP layer.
+ *
+ * Only conditions valid for the ALE authorization layer family are exposed.
+ * Native condition arrays and action types are deliberately not public.
+ */
+template <class Layer>
+class filter_builder
+    : public detail::typed_condition_builder<
+          filter_builder<Layer>, Layer> {
+public:
+  filter_builder(filter_key<Layer> key, std::wstring name,
+                 callout_unavailable unavailable)
+      : key_(key), name_(std::move(name)),
+        unavailable_(unavailable) {
+    static_assert(detail::ale_authorization_layer<Layer>,
+                  "filter_builder is limited to ALE authorization layers");
+  }
+
+  filter_builder &description(std::wstring value) {
+    description_ = std::move(value);
+    return *this;
+  }
+
+  filter_builder &weight(std::uint8_t value) noexcept {
+    weight_ = value;
+    return *this;
+  }
+
+  filter_builder &context(std::uint64_t value) noexcept {
+    context_ = value;
+    return *this;
+  }
+
+private:
+  friend class policy_transaction;
+
+  filter_key<Layer> key_;
+  std::wstring name_;
+  std::wstring description_;
+  std::uint8_t weight_ = 8;
+  std::uint64_t context_ = 0;
+  callout_unavailable unavailable_;
+};
+
+/**
+ * @brief A non-terminating inspection filter.
+ *
+ * This builder is used for flow establishment, datagram, transport, and
+ * monitor-only stream callouts. Its action type is fixed to
+ * FWP_ACTION_CALLOUT_INSPECTION by add_inspection_filter().
+ */
+template <class Layer>
+class inspection_filter_builder
+    : public detail::typed_condition_builder<
+          inspection_filter_builder<Layer>, Layer> {
+public:
+  inspection_filter_builder(filter_key<Layer> key, std::wstring name)
+      : key_(key), name_(std::move(name)) {
+    static_assert(
+        detail::callout_layer<Layer>,
+        "inspection_filter_builder requires a third-party callout layer");
+  }
+
+  inspection_filter_builder &description(std::wstring value) {
+    description_ = std::move(value);
+    return *this;
+  }
+
+  inspection_filter_builder &weight(std::uint8_t value) noexcept {
+    weight_ = value;
+    return *this;
+  }
+
+  inspection_filter_builder &context(std::uint64_t value) noexcept {
+    context_ = value;
+    return *this;
+  }
+
+private:
+  friend class policy_transaction;
+
+  filter_key<Layer> key_;
+  std::wstring name_;
+  std::wstring description_;
+  std::uint8_t weight_ = 8;
+  std::uint64_t context_ = 0;
+};
+
+/**
+ * @brief A terminating packet filter for datagram and transport layers.
+ *
+ * The action is fixed by add_packet_filter(). Applications can only select
+ * typed scalar conditions; they cannot construct an incompatible native
+ * action or forget CLEAR_ACTION_RIGHT.
+ */
+template <class Layer>
+class packet_filter_builder
+    : public detail::typed_condition_builder<
+          packet_filter_builder<Layer>, Layer> {
+public:
+  packet_filter_builder(filter_key<Layer> key, std::wstring name,
+                        callout_unavailable unavailable)
+      : key_(key), name_(std::move(name)),
+        unavailable_(unavailable) {
+    static_assert(detail::packet_decision_layer<Layer>,
+                  "packet_filter_builder requires a packet decision layer");
+  }
+
+  packet_filter_builder &description(std::wstring value) {
+    description_ = std::move(value);
+    return *this;
+  }
+
+  packet_filter_builder &weight(std::uint8_t value) noexcept {
+    weight_ = value;
+    return *this;
+  }
+
+  packet_filter_builder &context(std::uint64_t value) noexcept {
+    context_ = value;
+    return *this;
+  }
+
+private:
+  friend class policy_transaction;
+
+  filter_key<Layer> key_;
+  std::wstring name_;
+  std::wstring description_;
+  std::uint8_t weight_ = 8;
+  std::uint64_t context_ = 0;
+  callout_unavailable unavailable_;
+};
+
+/**
+ * @brief A terminating stream-edit filter.
+ *
+ * Only stream layers are accepted. The terminating action and clear-right
+ * flag are selected by add_stream_filter(), never by application code.
+ */
+template <class Layer>
+class stream_filter_builder
+    : public detail::typed_condition_builder<
+          stream_filter_builder<Layer>, Layer> {
+public:
+  stream_filter_builder(filter_key<Layer> key, std::wstring name,
+                        callout_unavailable unavailable)
+      : key_(key), name_(std::move(name)),
+        unavailable_(unavailable) {
+    static_assert(detail::stream_layer<Layer>,
+                  "stream_filter_builder requires a stream layer");
+  }
+
+  stream_filter_builder &description(std::wstring value) {
+    description_ = std::move(value);
+    return *this;
+  }
+
+  stream_filter_builder &weight(std::uint8_t value) noexcept {
+    weight_ = value;
+    return *this;
+  }
+
+  stream_filter_builder &context(std::uint64_t value) noexcept {
+    context_ = value;
+    return *this;
+  }
+
+private:
+  friend class policy_transaction;
+
+  filter_key<Layer> key_;
+  std::wstring name_;
+  std::wstring description_;
+  std::uint8_t weight_ = 8;
+  std::uint64_t context_ = 0;
+  callout_unavailable unavailable_;
+};
+
+/**
+ * @brief An unknown-action stream filter for connection-level stream actions.
+ *
+ * Use this only when the callback may return drop_connection() or needs WFP
+ * to arbitrate permit/block/continue. The native action remains fixed and is
+ * not writable by application code.
+ */
+template <class Layer>
+class stream_control_filter_builder
+    : public detail::typed_condition_builder<
+          stream_control_filter_builder<Layer>, Layer> {
+public:
+  stream_control_filter_builder(
+      filter_key<Layer> key, std::wstring name,
+      callout_unavailable unavailable)
+      : key_(key), name_(std::move(name)),
+        unavailable_(unavailable) {
+    static_assert(detail::stream_layer<Layer>,
+                  "stream_control_filter_builder requires a stream layer");
+  }
+
+  stream_control_filter_builder &description(std::wstring value) {
+    description_ = std::move(value);
+    return *this;
+  }
+
+  stream_control_filter_builder &weight(std::uint8_t value) noexcept {
+    weight_ = value;
+    return *this;
+  }
+
+  stream_control_filter_builder &context(std::uint64_t value) noexcept {
+    context_ = value;
+    return *this;
+  }
+
+private:
+  friend class policy_transaction;
+
+  filter_key<Layer> key_;
+  std::wstring name_;
+  std::wstring description_;
+  std::uint8_t weight_ = 8;
+  std::uint64_t context_ = 0;
+  callout_unavailable unavailable_;
+};
+
+/**
+ * @brief A typed, callout-free permit or block rule.
+ *
+ * Only the two native enforcement actions are representable. The builder
+ * cannot create callout actions, provider contexts, raw action masks, or
+ * incompatible layer conditions.
+ */
+template <class Layer>
+class enforcement_filter_builder
+    : public detail::typed_condition_builder<
+          enforcement_filter_builder<Layer>, Layer> {
+public:
+  enforcement_filter_builder(
+      filter_key<Layer> key, std::wstring name,
+      enforcement_action action)
+      : key_(key), name_(std::move(name)), action_(action) {
+    static_assert(
+        detail::filterable_layer<Layer>,
+        "enforcement_filter_builder requires a filterable WFP layer");
+  }
+
+  enforcement_filter_builder &
+  description(std::wstring value) {
+    description_ = std::move(value);
+    return *this;
+  }
+
+  enforcement_filter_builder &
+  weight(std::uint8_t value) noexcept {
+    weight_ = value;
+    return *this;
+  }
+
+private:
+  friend class policy_transaction;
+  filter_key<Layer> key_;
+  std::wstring name_;
+  std::wstring description_;
+  std::uint8_t weight_ = 8;
+  enforcement_action action_;
+};
+
+/**
+ * @brief Hard block enforced from TCP/IP startup until BFE activates the
+ * matching persistent policy.
+ *
+ * The action and BOOTTIME lifetime are fixed. Fail-open products omit this
+ * object; fail-closed products pair it with a persistent runtime filter under
+ * the same provider so Windows performs an atomic boot-to-BFE transition.
+ */
+template <class Layer>
+class boot_time_block_filter_builder
+    : public detail::typed_condition_builder<
+          boot_time_block_filter_builder<Layer>, Layer> {
+public:
+  boot_time_block_filter_builder(
+      filter_key<Layer> key, std::wstring name)
+      : key_(key), name_(std::move(name)) {
+    static_assert(
+        detail::callout_layer<Layer>,
+        "boot_time_block_filter_builder requires a known kernel WFP layer");
+  }
+
+  boot_time_block_filter_builder &
+  description(std::wstring value) {
+    description_ = std::move(value);
+    return *this;
+  }
+
+  boot_time_block_filter_builder &
+  weight(std::uint8_t value) noexcept {
+    weight_ = value;
+    return *this;
+  }
+
+private:
+  friend class policy_transaction;
+  filter_key<Layer> key_;
+  std::wstring name_;
+  std::wstring description_;
+  std::uint8_t weight_ = 8;
+};
+
+class provider_ref {
+public:
+  provider_ref(const provider_ref &) = default;
+  provider_ref &operator=(const provider_ref &) = default;
+
+private:
+  friend class policy_transaction;
+  provider_ref(provider_key key, std::uint64_t transaction) noexcept
+      : key_(key), transaction_(transaction) {}
+
+  provider_key key_;
+  std::uint64_t transaction_ = 0;
+};
+
+class sublayer_ref {
+public:
+  sublayer_ref(const sublayer_ref &) = default;
+  sublayer_ref &operator=(const sublayer_ref &) = default;
+
+private:
+  friend class policy_transaction;
+  sublayer_ref(sublayer_key key, provider_key provider,
+               std::uint64_t transaction) noexcept
+      : key_(key), provider_(provider), transaction_(transaction) {}
+
+  sublayer_key key_;
+  provider_key provider_;
+  std::uint64_t transaction_ = 0;
+};
+
+template <class Layer> class callout_ref {
+public:
+  callout_ref(const callout_ref &) = default;
+  callout_ref &operator=(const callout_ref &) = default;
+
+private:
+  friend class policy_transaction;
+  callout_ref(callout_key<Layer> key, provider_key provider,
+              std::uint64_t transaction) noexcept
+      : key_(key), provider_(provider), transaction_(transaction) {}
+
+  callout_key<Layer> key_;
+  provider_key provider_;
+  std::uint64_t transaction_ = 0;
+};
+
+/**
+ * @brief Transaction-scoped policy writer.
+ *
+ * Instances can only be created by policy_session and cannot be
+ * copied, moved, committed, or aborted by application code.
+ */
+class policy_transaction {
+public:
+  policy_transaction(const policy_transaction &) = delete;
+  policy_transaction &operator=(const policy_transaction &) = delete;
+  policy_transaction(policy_transaction &&) = delete;
+  policy_transaction &operator=(policy_transaction &&) = delete;
+
+  provider_ref add_provider(const provider_spec &spec) {
+    FWPM_PROVIDER0 provider{};
+    provider.providerKey = spec.key.native();
+    provider.displayData.name =
+        const_cast<wchar_t *>(spec.name.c_str());
+    provider.displayData.description =
+        const_cast<wchar_t *>(spec.description.c_str());
+    provider.serviceName = spec.service_name.empty()
+                               ? nullptr
+                               : const_cast<wchar_t *>(
+                                     spec.service_name.c_str());
+    std::array<std::uint8_t, 16> revision_data{};
+    if (scope_ == policy_scope::persistent) {
+      provider.flags |= FWPM_PROVIDER_FLAG_PERSISTENT;
+      if (!revision_)
+        throw std::logic_error(
+            "persistent WFP provider requires a policy revision");
+      revision_data =
+          detail::encode_policy_revision(*revision_);
+      provider.providerData.size =
+          static_cast<UINT32>(revision_data.size());
+      provider.providerData.data =
+          revision_data.data();
+    }
+    check(FwpmProviderAdd0(engine_, &provider, nullptr),
+          "FwpmProviderAdd0");
+    providers_.push_back(spec.key.native());
+    return provider_ref(spec.key, transaction_);
+  }
+
+  sublayer_ref add_sublayer(const provider_ref &owner,
+                            const sublayer_spec &spec) {
+    require_current(owner.transaction_);
+    GUID provider_key = owner.key_.native();
+    FWPM_SUBLAYER0 sublayer{};
+    sublayer.subLayerKey = spec.key.native();
+    sublayer.providerKey = &provider_key;
+    sublayer.displayData.name =
+        const_cast<wchar_t *>(spec.name.c_str());
+    sublayer.displayData.description =
+        const_cast<wchar_t *>(spec.description.c_str());
+    sublayer.weight = spec.weight;
+    if (scope_ == policy_scope::persistent)
+      sublayer.flags |= FWPM_SUBLAYER_FLAG_PERSISTENT;
+    check(FwpmSubLayerAdd0(engine_, &sublayer, nullptr),
+          "FwpmSubLayerAdd0");
+    sublayers_.push_back(spec.key.native());
+    return sublayer_ref(spec.key, owner.key_, transaction_);
+  }
+
+  template <class Layer>
+  callout_ref<Layer> add_callout(const provider_ref &owner,
+                                 const callout_spec<Layer> &spec) {
+    static_assert(
+        detail::callout_layer<Layer>,
+        "add_callout() requires a third-party kernel callout layer");
+    require_current(owner.transaction_);
+    GUID provider_key = owner.key_.native();
+    FWPM_CALLOUT0 callout{};
+    callout.calloutKey = spec.key.native();
+    callout.providerKey = &provider_key;
+    callout.displayData.name =
+        const_cast<wchar_t *>(spec.name.c_str());
+    callout.displayData.description =
+        const_cast<wchar_t *>(spec.description.c_str());
+    callout.applicableLayer = Layer::policy_key();
+    if (scope_ == policy_scope::persistent)
+      callout.flags |= FWPM_CALLOUT_FLAG_PERSISTENT;
+    check(FwpmCalloutAdd0(engine_, &callout, nullptr, nullptr),
+          "FwpmCalloutAdd0");
+    callouts_.push_back(spec.key.native());
+    return callout_ref<Layer>(spec.key, owner.key_, transaction_);
+  }
+
+  template <class Layer>
+  void add_filter(const sublayer_ref &sublayer,
+                  const callout_ref<Layer> &callout,
+                  filter_builder<Layer> &builder) {
+    static_assert(detail::ale_authorization_layer<Layer>,
+                  "add_filter() is limited to ALE authorization layers");
+    add_callout_filter(sublayer, callout, builder,
+                       FWP_ACTION_CALLOUT_TERMINATING,
+                       FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT,
+                       builder.unavailable_);
+  }
+
+  template <class Layer>
+  void add_connect_redirect_filter(
+      const sublayer_ref &sublayer,
+      const callout_ref<Layer> &callout,
+      connect_redirect_filter_builder<Layer> &builder) {
+    static_assert(detail::connect_redirect_layer<Layer>,
+                  "add_connect_redirect_filter() requires an "
+                  "ALE_CONNECT_REDIRECT layer");
+    add_callout_filter(sublayer, callout, builder,
+                       FWP_ACTION_CALLOUT_TERMINATING,
+                       FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT,
+                       builder.unavailable_);
+  }
+
+  template <class Layer>
+  void add_bind_redirect_filter(
+      const sublayer_ref &sublayer,
+      const callout_ref<Layer> &callout,
+      bind_redirect_filter_builder<Layer> &builder) {
+    static_assert(detail::bind_redirect_layer<Layer>,
+                  "add_bind_redirect_filter() requires an "
+                  "ALE_BIND_REDIRECT layer");
+    add_callout_filter(sublayer, callout, builder,
+                       FWP_ACTION_CALLOUT_TERMINATING,
+                       FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT,
+                       builder.unavailable_);
+  }
+
+  template <class Layer>
+  void add_inspection_filter(
+      const sublayer_ref &sublayer, const callout_ref<Layer> &callout,
+      inspection_filter_builder<Layer> &builder) {
+    static_assert(
+        detail::callout_layer<Layer>,
+        "add_inspection_filter() requires a third-party callout layer");
+    add_callout_filter(sublayer, callout, builder,
+                       FWP_ACTION_CALLOUT_INSPECTION, 0,
+                       std::nullopt);
+  }
+
+  template <class Layer>
+  void add_packet_filter(const sublayer_ref &sublayer,
+                         const callout_ref<Layer> &callout,
+                         packet_filter_builder<Layer> &builder) {
+    static_assert(detail::packet_decision_layer<Layer>,
+                  "add_packet_filter() requires a packet decision layer");
+    add_callout_filter(sublayer, callout, builder,
+                       FWP_ACTION_CALLOUT_TERMINATING,
+                       FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT,
+                       builder.unavailable_);
+  }
+
+  template <class Layer>
+  void add_stream_filter(const sublayer_ref &sublayer,
+                         const callout_ref<Layer> &callout,
+                         stream_filter_builder<Layer> &builder) {
+    static_assert(detail::stream_layer<Layer>,
+                  "add_stream_filter() requires a stream layer");
+    add_callout_filter(sublayer, callout, builder,
+                       FWP_ACTION_CALLOUT_TERMINATING,
+                       FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT,
+                       builder.unavailable_);
+  }
+
+  template <class Layer>
+  void add_stream_control_filter(
+      const sublayer_ref &sublayer, const callout_ref<Layer> &callout,
+      stream_control_filter_builder<Layer> &builder) {
+    static_assert(detail::stream_layer<Layer>,
+                  "add_stream_control_filter() requires a stream layer");
+    add_callout_filter(sublayer, callout, builder,
+                       FWP_ACTION_CALLOUT_UNKNOWN, 0,
+                       builder.unavailable_);
+  }
+
+  template <class Layer>
+  void add_enforcement_filter(
+      const sublayer_ref &sublayer,
+      enforcement_filter_builder<Layer> &builder) {
+    static_assert(
+        detail::filterable_layer<Layer>,
+        "add_enforcement_filter() requires a filterable WFP layer");
+    require_current(sublayer.transaction_);
+
+    GUID provider_key = sublayer.provider_.native();
+    FWP_VALUE0 weight{};
+    weight.type = FWP_UINT8;
+    weight.uint8 = builder.weight_;
+
+    FWPM_FILTER0 filter{};
+    filter.filterKey = builder.key_.native();
+    filter.providerKey = &provider_key;
+    filter.displayData.name =
+        const_cast<wchar_t *>(builder.name_.c_str());
+    filter.displayData.description =
+        const_cast<wchar_t *>(builder.description_.c_str());
+    filter.layerKey = Layer::policy_key();
+    filter.subLayerKey = sublayer.key_.native();
+    filter.weight = weight;
+    auto &conditions = builder.native_conditions();
+    filter.numFilterConditions =
+        static_cast<UINT32>(conditions.size());
+    filter.filterCondition = conditions.data();
+    filter.action.type =
+        builder.action_ == enforcement_action::permit
+            ? FWP_ACTION_PERMIT
+            : FWP_ACTION_BLOCK;
+    if (scope_ == policy_scope::persistent)
+      filter.flags |= FWPM_FILTER_FLAG_PERSISTENT;
+    check(FwpmFilterAdd0(
+              engine_, &filter, nullptr, nullptr),
+          "FwpmFilterAdd0(enforcement)");
+    filters_.push_back(builder.key_.native());
+  }
+
+  template <class Layer>
+  void add_boot_time_block_filter(
+      const sublayer_ref &sublayer,
+      boot_time_block_filter_builder<Layer> &builder) {
+    static_assert(
+        detail::callout_layer<Layer>,
+        "add_boot_time_block_filter() requires a kernel WFP layer");
+    if (scope_ != policy_scope::persistent)
+      throw std::logic_error(
+          "boot-time WFP filters require a persistent policy session");
+    require_current(sublayer.transaction_);
+
+    GUID provider_key = sublayer.provider_.native();
+    FWP_VALUE0 weight{};
+    weight.type = FWP_UINT8;
+    weight.uint8 = builder.weight_;
+
+    FWPM_FILTER0 filter{};
+    filter.filterKey = builder.key_.native();
+    filter.providerKey = &provider_key;
+    filter.displayData.name =
+        const_cast<wchar_t *>(builder.name_.c_str());
+    filter.displayData.description =
+        const_cast<wchar_t *>(
+            builder.description_.c_str());
+    filter.layerKey = Layer::policy_key();
+    filter.subLayerKey = sublayer.key_.native();
+    filter.weight = weight;
+    auto &conditions = builder.native_conditions();
+    filter.numFilterConditions =
+        static_cast<UINT32>(conditions.size());
+    filter.filterCondition = conditions.data();
+    filter.action.type = FWP_ACTION_BLOCK;
+    filter.flags = FWPM_FILTER_FLAG_BOOTTIME;
+    check(FwpmFilterAdd0(
+              engine_, &filter, nullptr, nullptr),
+          "FwpmFilterAdd0(boot-time block)");
+    filters_.push_back(builder.key_.native());
+  }
+
+private:
+  template <class Layer, class Builder>
+  void add_callout_filter(const sublayer_ref &sublayer,
+                          const callout_ref<Layer> &callout,
+                          Builder &builder, FWP_ACTION_TYPE action,
+                          UINT32 flags,
+                          std::optional<callout_unavailable>
+                              unavailable) {
+    require_current(sublayer.transaction_);
+    require_current(callout.transaction_);
+    if (!IsEqualGUID(sublayer.provider_.native(),
+                     callout.provider_.native()))
+      throw std::logic_error(
+          "WFP sublayer and callout belong to different providers");
+
+    GUID provider_key = sublayer.provider_.native();
+    FWP_VALUE0 weight{};
+    weight.type = FWP_UINT8;
+    weight.uint8 = builder.weight_;
+
+    FWPM_FILTER0 filter{};
+    filter.filterKey = builder.key_.native();
+    filter.providerKey = &provider_key;
+    filter.displayData.name =
+        const_cast<wchar_t *>(builder.name_.c_str());
+    filter.displayData.description =
+        const_cast<wchar_t *>(builder.description_.c_str());
+    filter.layerKey = Layer::policy_key();
+    filter.subLayerKey = sublayer.key_.native();
+    filter.weight = weight;
+    auto &conditions = builder.native_conditions();
+    filter.numFilterConditions =
+        static_cast<UINT32>(conditions.size());
+    filter.filterCondition = conditions.data();
+    filter.action.type = action;
+    filter.action.calloutKey = callout.key_.native();
+    filter.rawContext = builder.context_;
+    filter.flags = flags;
+    if (unavailable == callout_unavailable::permit)
+      filter.flags |=
+          FWPM_FILTER_FLAG_PERMIT_IF_CALLOUT_UNREGISTERED;
+    if (scope_ == policy_scope::persistent)
+      filter.flags |= FWPM_FILTER_FLAG_PERSISTENT;
+    check(FwpmFilterAdd0(engine_, &filter, nullptr, nullptr),
+          "FwpmFilterAdd0");
+    filters_.push_back(builder.key_.native());
+  }
+
+  friend class policy_session;
+  policy_transaction(HANDLE engine, std::uint64_t transaction,
+                     policy_scope scope,
+                     std::optional<std::uint64_t> revision) noexcept
+      : engine_(engine), transaction_(transaction),
+        scope_(scope), revision_(revision) {}
+
+  static void check(DWORD result, const char *operation) {
+    if (result != ERROR_SUCCESS)
+      throw management_error(result, operation);
+  }
+
+  void require_current(std::uint64_t transaction) const {
+    if (transaction != transaction_)
+      throw std::logic_error(
+          "WFP policy reference belongs to another transaction");
+  }
+
+  static bool same_keys(const std::vector<GUID> &left,
+                        const std::vector<GUID> &right) noexcept {
+    if (left.size() != right.size())
+      return false;
+    return std::all_of(left.begin(), left.end(), [&](const GUID &key) {
+      return std::any_of(right.begin(), right.end(), [&](const GUID &value) {
+        return ::IsEqualGUID(key, value);
+      });
+    });
+  }
+
+  bool matches(const policy_manifest &manifest) const noexcept {
+    return same_keys(providers_, manifest.providers_) &&
+           same_keys(sublayers_, manifest.sublayers_) &&
+           same_keys(callouts_, manifest.callouts_) &&
+           same_keys(filters_, manifest.filters_);
+  }
+
+  HANDLE engine_ = nullptr;
+  std::uint64_t transaction_ = 0;
+  policy_scope scope_ = policy_scope::ephemeral;
+  std::optional<std::uint64_t> revision_;
+  std::vector<GUID> providers_;
+  std::vector<GUID> sublayers_;
+  std::vector<GUID> callouts_;
+  std::vector<GUID> filters_;
+};
+
+/**
+ * @brief Move-only WFP engine session with explicit policy lifetime.
+ *
+ * Session-scoped objects disappear with the controller. Persistent objects
+ * are replaced or removed through a typed `policy_manifest`; there is no raw
+ * delete-by-GUID escape hatch in application code.
+ */
+class policy_session {
+public:
+  static policy_session ephemeral(
+      std::wstring name = L"ntl::wfp session policy") {
+    return policy_session(std::move(name), policy_scope::ephemeral);
+  }
+
+  static policy_session persistent(
+      std::wstring name = L"ntl::wfp persistent policy") {
+    return policy_session(std::move(name), policy_scope::persistent);
+  }
+
+  policy_session(const policy_session &) = delete;
+  policy_session &operator=(const policy_session &) = delete;
+
+  policy_session(policy_session &&other) noexcept
+      : engine_(std::exchange(other.engine_, nullptr)),
+        name_(std::move(other.name_)), scope_(other.scope_) {}
+
+  policy_session &operator=(policy_session &&other) noexcept {
+    if (this != &other) {
+      close();
+      engine_ = std::exchange(other.engine_, nullptr);
+      name_ = std::move(other.name_);
+      scope_ = other.scope_;
+    }
+    return *this;
+  }
+
+  ~policy_session() { close(); }
+
+  policy_scope scope() const noexcept { return scope_; }
+
+  /**
+   * @brief Reopens the BFE engine after a service restart.
+   *
+   * Persistent callers should follow this with reconcile(). Session-scoped
+   * callers should reinstall because BFE discarded the ephemeral graph.
+   */
+  void reconnect() {
+    HANDLE replacement = open(name_, scope_);
+    close();
+    engine_ = replacement;
+  }
+
+  template <class Function> void install(Function &&function) {
+    if (scope_ != policy_scope::ephemeral)
+      throw std::logic_error(
+          "persistent WFP policy requires reconcile(revision, writer)");
+    transact(
+        nullptr, nullptr, std::nullopt,
+        std::forward<Function>(function));
+  }
+
+  /**
+   * @brief Atomically removes a known graph and installs its replacement.
+   */
+  template <class Function>
+  void reconcile(
+      const policy_revision &revision, Function &&function) {
+    if (scope_ != policy_scope::persistent)
+      throw std::logic_error(
+          "WFP reconcile is available only for persistent policy");
+    transact(
+        &revision.manifest_, nullptr, revision.version_,
+        std::forward<Function>(function));
+  }
+
+  /**
+   * @brief Atomically migrates a healthy persistent graph to a newer revision.
+   */
+  template <class Function>
+  void migrate(
+      const policy_revision &current,
+      const policy_revision &next,
+      Function &&function) {
+    if (scope_ != policy_scope::persistent)
+      throw std::logic_error(
+          "WFP migration is available only for persistent policy");
+    if (next.version_ <= current.version_)
+      throw std::invalid_argument(
+          "WFP migration revision must increase");
+    if (!health(current).healthy())
+      throw std::logic_error(
+          "WFP migration source revision is not healthy");
+    transact(
+        &current.manifest_, &next.manifest_,
+        next.version_, std::forward<Function>(function));
+  }
+
+  /**
+   * @brief Atomically restores an older, explicitly supplied policy writer.
+   */
+  template <class Function>
+  void rollback(
+      const policy_revision &current,
+      const policy_revision &previous,
+      Function &&function) {
+    if (scope_ != policy_scope::persistent)
+      throw std::logic_error(
+          "WFP rollback is available only for persistent policy");
+    if (previous.version_ >= current.version_)
+      throw std::invalid_argument(
+          "WFP rollback revision must decrease");
+    if (!health(current).healthy())
+      throw std::logic_error(
+          "WFP rollback source revision is not healthy");
+    transact(
+        &current.manifest_, &previous.manifest_,
+        previous.version_,
+        std::forward<Function>(function));
+  }
+
+  /**
+   * @brief Reopens BFE and restores the expected graph only when unhealthy.
+   *
+   * Call this after BFE/service restart notification. Returns true when a
+   * transaction was needed.
+   */
+  template <class Function>
+  bool recover(
+      const policy_revision &expected, Function &&function) {
+    if (scope_ != policy_scope::persistent)
+      throw std::logic_error(
+          "WFP recovery is available only for persistent policy");
+    reconnect();
+    if (health(expected).healthy())
+      return false;
+    reconcile(expected, std::forward<Function>(function));
+    return true;
+  }
+
+  /** @brief Atomically removes every object named by the manifest. */
+  void uninstall(const policy_revision &revision) {
+    if (scope_ != policy_scope::persistent)
+      throw std::logic_error(
+          "WFP manifest uninstall is available only for persistent policy");
+    const auto &manifest = revision.manifest_;
+    if (manifest.empty())
+      return;
+    check(FwpmTransactionBegin0(engine_, 0), "FwpmTransactionBegin0");
+    try {
+      remove_manifest(manifest);
+      check(FwpmTransactionCommit0(engine_), "FwpmTransactionCommit0");
+    } catch (...) {
+      (void)FwpmTransactionAbort0(engine_);
+      throw;
+    }
+  }
+
+  /** @brief Checks that every object in a manifest is visible through BFE. */
+  policy_health_report health(
+      const policy_revision &revision) const {
+    if (scope_ != policy_scope::persistent)
+      throw std::logic_error(
+          "WFP manifest health is available only for persistent policy");
+    policy_health_report report;
+    report.scope = scope_;
+    report.expected_revision = revision.version_;
+    const auto &manifest = revision.manifest_;
+    report.expected_objects =
+        manifest.providers_.size() + manifest.sublayers_.size() +
+        manifest.callouts_.size() + manifest.filters_.size();
+
+    for (const auto &key : manifest.providers_) {
+      if (!provider_present(key)) {
+        report.missing.push_back(
+            {policy_object_kind::provider, key});
+        continue;
+      }
+      const auto observed = provider_revision(key);
+      if (!observed || *observed != revision.version_)
+        report.revision_mismatches.push_back(key);
+    }
+    for (const auto &key : manifest.sublayers_)
+      if (!sublayer_present(key))
+        report.missing.push_back(
+            {policy_object_kind::sublayer, key});
+    for (const auto &key : manifest.callouts_)
+      if (!callout_present(key))
+        report.missing.push_back(
+            {policy_object_kind::callout, key});
+    for (const auto &key : manifest.filters_)
+      if (!filter_present(key))
+        report.missing.push_back(
+            {policy_object_kind::filter, key});
+    return report;
+  }
+
+private:
+  policy_session(std::wstring name, policy_scope scope)
+      : name_(std::move(name)), scope_(scope) {
+    engine_ = open(name_, scope_);
+  }
+
+  static HANDLE open(const std::wstring &name, policy_scope scope) {
+    FWPM_SESSION0 session{};
+    session.displayData.name = const_cast<wchar_t *>(name.c_str());
+    if (scope == policy_scope::ephemeral)
+      session.flags = FWPM_SESSION_FLAG_DYNAMIC;
+    HANDLE engine = nullptr;
+    const DWORD result =
+        FwpmEngineOpen0(nullptr, RPC_C_AUTHN_WINNT, nullptr, &session,
+                        &engine);
+    if (result != ERROR_SUCCESS)
+      throw management_error(result, "FwpmEngineOpen0");
+    return engine;
+  }
+
+  template <class Function>
+  void transact(
+      const policy_manifest *first_replacement,
+      const policy_manifest *second_replacement,
+      std::optional<std::uint64_t> revision,
+      Function &&function) {
+    static_assert(
+        std::is_invocable_v<Function, policy_transaction &>,
+        "policy callback must accept ntl::wfp::policy_transaction&");
+    check(FwpmTransactionBegin0(engine_, 0), "FwpmTransactionBegin0");
+
+    policy_transaction transaction(
+        engine_, next_transaction(), scope_, revision);
+    try {
+      if (first_replacement)
+        remove_manifest(*first_replacement);
+      if (second_replacement)
+        remove_manifest(*second_replacement);
+      std::invoke(std::forward<Function>(function), transaction);
+      const auto *const expected =
+          second_replacement
+              ? second_replacement
+              : first_replacement;
+      if (expected && !transaction.matches(*expected))
+        throw std::logic_error(
+            "persistent WFP writer output does not match its manifest");
+      check(FwpmTransactionCommit0(engine_), "FwpmTransactionCommit0");
+    } catch (...) {
+      (void)FwpmTransactionAbort0(engine_);
+      throw;
+    }
+  }
+
+public:
+  /**
+   * @brief Returns the installed schema for a compile-time WFP layer.
+   *
+   * An empty result is a real capability result: the selected Windows build
+   * does not expose that layer. It must not be reported as runtime coverage.
+   */
+  template <class Layer>
+  std::optional<policy_layer_diagnostic> inspect_layer() const {
+    static_assert(detail::known_layer<Layer>,
+                  "inspect_layer() requires a known WFP layer");
+    FWPM_LAYER0 *native = nullptr;
+    const GUID key = Layer::policy_key();
+    const DWORD result =
+        FwpmLayerGetByKey0(engine_, &key, &native);
+    native_owner<FWPM_LAYER0> owned(native);
+    if (result == static_cast<DWORD>(FWP_E_LAYER_NOT_FOUND))
+      return std::nullopt;
+    check(result, "FwpmLayerGetByKey0");
+    if (!native)
+      return std::nullopt;
+    return policy_layer_diagnostic{
+        native->layerKey, native->defaultSubLayerKey,
+        native->flags, native->numFields, native->layerId};
+  }
+
+  template <class Layer>
+  bool layer_present() const {
+    return inspect_layer<Layer>().has_value();
+  }
+
+  /**
+   * @brief Tests whether this engine can resolve a provider by key.
+   */
+  bool provider_present(provider_key key) const {
+    FWPM_PROVIDER0 *native = nullptr;
+    const DWORD result =
+        FwpmProviderGetByKey0(engine_, &key.native(), &native);
+    native_owner<FWPM_PROVIDER0> owned(native);
+    if (result == static_cast<DWORD>(FWP_E_PROVIDER_NOT_FOUND))
+      return false;
+    check(result, "FwpmProviderGetByKey0");
+    return native != nullptr;
+  }
+
+  /**
+   * @brief Tests whether this engine can resolve a sublayer by key.
+   */
+  bool sublayer_present(sublayer_key key) const {
+    FWPM_SUBLAYER0 *native = nullptr;
+    const DWORD result =
+        FwpmSubLayerGetByKey0(engine_, &key.native(), &native);
+    native_owner<FWPM_SUBLAYER0> owned(native);
+    if (result == static_cast<DWORD>(FWP_E_SUBLAYER_NOT_FOUND))
+      return false;
+    check(result, "FwpmSubLayerGetByKey0");
+    return native != nullptr;
+  }
+
+  /**
+   * @brief Tests whether a typed callout exists on its declared layer.
+   */
+  template <class Layer>
+  bool callout_present(callout_key<Layer> key) const {
+    FWPM_CALLOUT0 *native = nullptr;
+    const DWORD result =
+        FwpmCalloutGetByKey0(engine_, &key.native(), &native);
+    native_owner<FWPM_CALLOUT0> owned(native);
+    if (result == static_cast<DWORD>(FWP_E_CALLOUT_NOT_FOUND))
+      return false;
+    check(result, "FwpmCalloutGetByKey0");
+    return native &&
+           ::IsEqualGUID(native->applicableLayer,
+                         Layer::policy_key());
+  }
+
+  /**
+   * @brief Returns a pointer-free snapshot of one typed filter.
+   */
+  template <class Layer>
+  std::optional<policy_filter_diagnostic>
+  inspect_filter(filter_key<Layer> key) const {
+    FWPM_FILTER0 *native = nullptr;
+    const DWORD result =
+        FwpmFilterGetByKey0(engine_, &key.native(), &native);
+    native_owner<FWPM_FILTER0> owned(native);
+    if (result == static_cast<DWORD>(FWP_E_FILTER_NOT_FOUND))
+      return std::nullopt;
+    check(result, "FwpmFilterGetByKey0");
+    if (!native ||
+        !::IsEqualGUID(native->layerKey, Layer::policy_key()))
+      return std::nullopt;
+    return snapshot_filter(*native);
+  }
+
+  /**
+   * @brief Enumerates a bounded, pointer-free inventory for one WFP layer.
+   *
+   * At most maximum_filters snapshots are returned. The method probes for
+   * one additional result and sets truncated when the layer contains more.
+   */
+  template <class Layer>
+  policy_filter_inventory
+  enumerate_filters(std::size_t maximum_filters = 256) const {
+    if (maximum_filters == 0 ||
+        maximum_filters >
+            (std::numeric_limits<UINT32>::max)())
+      throw std::invalid_argument(
+          "WFP filter inventory bound is invalid");
+
+    FWPM_FILTER_ENUM_TEMPLATE0 query{};
+    query.layerKey = Layer::policy_key();
+    query.enumType = FWP_FILTER_ENUM_FULLY_CONTAINED;
+    query.actionMask = 0xFFFFFFFFu;
+
+    HANDLE enum_handle = nullptr;
+    check(FwpmFilterCreateEnumHandle0(
+              engine_, &query, &enum_handle),
+          "FwpmFilterCreateEnumHandle0");
+    struct enum_handle_guard {
+      HANDLE engine;
+      HANDLE value;
+      ~enum_handle_guard() {
+        if (value)
+          (void)FwpmFilterDestroyEnumHandle0(engine, value);
+      }
+    } enum_guard{engine_, enum_handle};
+
+    policy_filter_inventory inventory;
+    inventory.filters.reserve(maximum_filters);
+    while (inventory.filters.size() < maximum_filters) {
+      const auto remaining =
+          maximum_filters - inventory.filters.size();
+      const UINT32 requested = static_cast<UINT32>(
+          (std::min<std::size_t>)(remaining, 64));
+      FWPM_FILTER0 **entries = nullptr;
+      UINT32 returned = 0;
+      check(FwpmFilterEnum0(
+                engine_, enum_handle, requested, &entries, &returned),
+            "FwpmFilterEnum0");
+      native_owner<FWPM_FILTER0 *> owned(entries);
+      if (returned == 0)
+        return inventory;
+      for (UINT32 index = 0; index != returned; ++index) {
+        if (entries[index])
+          inventory.filters.push_back(
+              snapshot_filter(*entries[index]));
+      }
+    }
+
+    FWPM_FILTER0 **probe = nullptr;
+    UINT32 probe_count = 0;
+    check(FwpmFilterEnum0(
+              engine_, enum_handle, 1, &probe, &probe_count),
+          "FwpmFilterEnum0");
+    native_owner<FWPM_FILTER0 *> owned_probe(probe);
+    inventory.truncated = probe_count != 0;
+    return inventory;
+  }
+
+private:
+  struct native_memory_deleter {
+    template <class Value>
+    void operator()(Value *value) const noexcept {
+      if (!value)
+        return;
+      void *memory = value;
+      ::FwpmFreeMemory0(&memory);
+    }
+  };
+
+  template <class Value>
+  using native_owner =
+      std::unique_ptr<Value, native_memory_deleter>;
+
+  static std::uint64_t hash_bytes(
+      const std::uint8_t *data, std::size_t size) noexcept {
+    std::uint64_t value = 14695981039346656037ull;
+    for (std::size_t index = 0; index != size; ++index) {
+      value ^= data[index];
+      value *= 1099511628211ull;
+    }
+    return value;
+  }
+
+  static std::uint64_t scalar_value(
+      const FWP_VALUE0 &value) noexcept {
+    switch (value.type) {
+    case FWP_UINT8:
+      return value.uint8;
+    case FWP_UINT16:
+      return value.uint16;
+    case FWP_UINT32:
+      return value.uint32;
+    case FWP_UINT64:
+      return value.uint64 ? *value.uint64 : 0;
+    case FWP_INT8:
+      return static_cast<std::uint64_t>(value.int8);
+    case FWP_INT16:
+      return static_cast<std::uint64_t>(value.int16);
+    case FWP_INT32:
+      return static_cast<std::uint64_t>(value.int32);
+    case FWP_INT64:
+      return value.int64
+                 ? static_cast<std::uint64_t>(*value.int64)
+                 : 0;
+    default:
+      return 0;
+    }
+  }
+
+  static std::uint64_t scalar_value(
+      const FWP_CONDITION_VALUE0 &value) noexcept {
+    switch (value.type) {
+    case FWP_UINT8:
+      return value.uint8;
+    case FWP_UINT16:
+      return value.uint16;
+    case FWP_UINT32:
+      return value.uint32;
+    case FWP_UINT64:
+      return value.uint64 ? *value.uint64 : 0;
+    case FWP_INT8:
+      return static_cast<std::uint64_t>(value.int8);
+    case FWP_INT16:
+      return static_cast<std::uint64_t>(value.int16);
+    case FWP_INT32:
+      return static_cast<std::uint64_t>(value.int32);
+    case FWP_INT64:
+      return value.int64
+                 ? static_cast<std::uint64_t>(*value.int64)
+                 : 0;
+    default:
+      return 0;
+    }
+  }
+
+  static policy_condition_diagnostic snapshot_condition(
+      const FWPM_FILTER_CONDITION0 &native) noexcept {
+    policy_condition_diagnostic result{};
+    result.field_key = native.fieldKey;
+    result.match_type = native.matchType;
+    result.value_type = native.conditionValue.type;
+    result.scalar_value = scalar_value(native.conditionValue);
+    if (native.conditionValue.type == FWP_BYTE_BLOB_TYPE &&
+        native.conditionValue.byteBlob) {
+      const auto &blob = *native.conditionValue.byteBlob;
+      result.blob_size = blob.size;
+      if (blob.data)
+        result.blob_hash = hash_bytes(blob.data, blob.size);
+    }
+    return result;
+  }
+
+  policy_filter_diagnostic snapshot_filter(
+      const FWPM_FILTER0 &native) const {
+    policy_filter_diagnostic result{};
+    result.filter_key = native.filterKey;
+    if (native.providerKey) {
+      result.provider_key = *native.providerKey;
+      result.has_provider = true;
+    }
+    result.layer_key = native.layerKey;
+    result.sublayer_key = native.subLayerKey;
+    result.filter_id = native.filterId;
+    result.flags = native.flags;
+    result.action_type = native.action.type;
+    if ((native.action.type & FWP_ACTION_FLAG_CALLOUT) != 0)
+      result.action_callout_key = native.action.calloutKey;
+    if ((native.flags & FWPM_FILTER_FLAG_HAS_PROVIDER_CONTEXT) == 0)
+      result.raw_context = native.rawContext;
+    result.weight_type = native.weight.type;
+    result.weight_value = scalar_value(native.weight);
+    result.effective_weight_type = native.effectiveWeight.type;
+    result.effective_weight_value =
+        scalar_value(native.effectiveWeight);
+
+    FWPM_SUBLAYER0 *sublayer = nullptr;
+    const DWORD sublayer_result = FwpmSubLayerGetByKey0(
+        engine_, &native.subLayerKey, &sublayer);
+    native_owner<FWPM_SUBLAYER0> owned_sublayer(sublayer);
+    if (sublayer_result == ERROR_SUCCESS && sublayer)
+      result.sublayer_weight = sublayer->weight;
+    else if (sublayer_result !=
+             static_cast<DWORD>(FWP_E_SUBLAYER_NOT_FOUND))
+      check(sublayer_result, "FwpmSubLayerGetByKey0");
+
+    constexpr std::size_t maximum_conditions = 64;
+    const std::size_t condition_count =
+        (std::min<std::size_t>)(
+            native.numFilterConditions, maximum_conditions);
+    result.conditions.reserve(condition_count);
+    for (std::size_t index = 0;
+         index != condition_count; ++index)
+      result.conditions.push_back(
+          snapshot_condition(native.filterCondition[index]));
+    result.conditions_truncated =
+        native.numFilterConditions > maximum_conditions;
+    return result;
+  }
+
+  bool provider_present(const GUID &key) const {
+    FWPM_PROVIDER0 *native = nullptr;
+    const DWORD result =
+        FwpmProviderGetByKey0(engine_, &key, &native);
+    native_owner<FWPM_PROVIDER0> owned(native);
+    if (result == static_cast<DWORD>(FWP_E_PROVIDER_NOT_FOUND))
+      return false;
+    check(result, "FwpmProviderGetByKey0");
+    return native != nullptr;
+  }
+
+  std::optional<std::uint64_t>
+  provider_revision(const GUID &key) const {
+    FWPM_PROVIDER0 *native = nullptr;
+    const DWORD result =
+        FwpmProviderGetByKey0(engine_, &key, &native);
+    native_owner<FWPM_PROVIDER0> owned(native);
+    if (result ==
+        static_cast<DWORD>(FWP_E_PROVIDER_NOT_FOUND))
+      return std::nullopt;
+    check(result, "FwpmProviderGetByKey0");
+    if (!native)
+      return std::nullopt;
+    return detail::decode_policy_revision(
+        native->providerData);
+  }
+
+  bool sublayer_present(const GUID &key) const {
+    FWPM_SUBLAYER0 *native = nullptr;
+    const DWORD result =
+        FwpmSubLayerGetByKey0(engine_, &key, &native);
+    native_owner<FWPM_SUBLAYER0> owned(native);
+    if (result == static_cast<DWORD>(FWP_E_SUBLAYER_NOT_FOUND))
+      return false;
+    check(result, "FwpmSubLayerGetByKey0");
+    return native != nullptr;
+  }
+
+  bool callout_present(const GUID &key) const {
+    FWPM_CALLOUT0 *native = nullptr;
+    const DWORD result =
+        FwpmCalloutGetByKey0(engine_, &key, &native);
+    native_owner<FWPM_CALLOUT0> owned(native);
+    if (result == static_cast<DWORD>(FWP_E_CALLOUT_NOT_FOUND))
+      return false;
+    check(result, "FwpmCalloutGetByKey0");
+    return native != nullptr;
+  }
+
+  bool filter_present(const GUID &key) const {
+    FWPM_FILTER0 *native = nullptr;
+    const DWORD result =
+        FwpmFilterGetByKey0(engine_, &key, &native);
+    native_owner<FWPM_FILTER0> owned(native);
+    if (result == static_cast<DWORD>(FWP_E_FILTER_NOT_FOUND))
+      return false;
+    check(result, "FwpmFilterGetByKey0");
+    return native != nullptr;
+  }
+
+  void remove_manifest(const policy_manifest &manifest) {
+    for (auto iterator = manifest.filters_.rbegin();
+         iterator != manifest.filters_.rend(); ++iterator)
+      ignore_missing(
+          FwpmFilterDeleteByKey0(engine_, &*iterator),
+          static_cast<DWORD>(FWP_E_FILTER_NOT_FOUND),
+          "FwpmFilterDeleteByKey0");
+
+    for (auto iterator = manifest.callouts_.rbegin();
+         iterator != manifest.callouts_.rend(); ++iterator)
+      ignore_missing(
+          FwpmCalloutDeleteByKey0(engine_, &*iterator),
+          static_cast<DWORD>(FWP_E_CALLOUT_NOT_FOUND),
+          "FwpmCalloutDeleteByKey0");
+
+    for (auto iterator = manifest.sublayers_.rbegin();
+         iterator != manifest.sublayers_.rend(); ++iterator)
+      ignore_missing(
+          FwpmSubLayerDeleteByKey0(engine_, &*iterator),
+          static_cast<DWORD>(FWP_E_SUBLAYER_NOT_FOUND),
+          "FwpmSubLayerDeleteByKey0");
+
+    for (auto iterator = manifest.providers_.rbegin();
+         iterator != manifest.providers_.rend(); ++iterator)
+      ignore_missing(
+          FwpmProviderDeleteByKey0(engine_, &*iterator),
+          static_cast<DWORD>(FWP_E_PROVIDER_NOT_FOUND),
+          "FwpmProviderDeleteByKey0");
+  }
+
+  static void ignore_missing(DWORD result, DWORD missing,
+                             const char *operation) {
+    if (result != ERROR_SUCCESS && result != missing)
+      throw management_error(result, operation);
+  }
+
+  static void check(DWORD result, const char *operation) {
+    if (result != ERROR_SUCCESS)
+      throw management_error(result, operation);
+  }
+
+  void close() noexcept {
+    if (engine_) {
+      (void)FwpmEngineClose0(engine_);
+      engine_ = nullptr;
+    }
+  }
+
+  static std::uint64_t next_transaction() noexcept {
+    static std::atomic<std::uint64_t> value{1};
+    return value.fetch_add(1, std::memory_order_relaxed);
+  }
+
+  HANDLE engine_ = nullptr;
+  std::wstring name_;
+  policy_scope scope_ = policy_scope::ephemeral;
+};
+
+} // namespace ntl::wfp

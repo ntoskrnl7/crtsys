@@ -49,6 +49,7 @@ target_compile_options(crtsys_ntl_rpc_sample_app
   PRIVATE
     "$<$<COMPILE_LANGUAGE:CXX>:/W4>"
     "$<$<COMPILE_LANGUAGE:CXX>:/WX>"
+    "$<$<COMPILE_LANGUAGE:CXX>:/EHsc>"
     "$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Debug>>:/MTd>"
     "$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:/MT>"
 )

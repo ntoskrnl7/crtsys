@@ -8,6 +8,11 @@ allocation helpers, and simple user-mode to kernel-mode RPC without hiding the
 underlying WDK objects.
 
 Headers live under [`include/ntl`](../include/ntl).
+Transport-neutral networking, framing, TLS, HTTP, and inspection headers are
+grouped under [`include/ntl/net`](../include/ntl/net) and use the `ntl::net`
+namespace (with protocol subnamespaces such as `ntl::net::http` and
+`ntl::net::http3`). Windows-specific integration layers remain in their own
+top-level directories and namespaces, such as `ntl::wfp`.
 
 The detailed API reference is split by topic:
 
@@ -23,6 +28,9 @@ The detailed API reference is split by topic:
 | [KMDF helpers](./ntl/kmdf.md) | `ntl::kmdf::main`, C++ WDF contexts, typed manual-queue ownership and cancellation, hardware resources and power policy, DMA/USB/WMI, common WDF objects, I/O/interrupt/timer/work-item/child-list/PDO facades, typed driver-defined query interfaces, and registry/property helpers |
 | [KMDF engineering checklist](./ntl/kmdf-driver-checklist.md) | Reviewable ownership, callback, cancellation, PnP/power, ABI, and verification rules for production drivers |
 | [Minifilter helpers](./ntl/minifilter.md) | `ntl::flt::main`, typed Filter Manager operation callbacks, RAII name information, and typed file/stream/stream-handle contexts |
+| [WFP helpers](./ntl/wfp.md) | Layer-typed callouts, safe connect redirection and proxy handoff, fragmented byte views, bounded coroutine observation, rule-safe results, flow-context and injection ownership, and transactional user-mode policy |
+| [Content inspection and framing](./ntl/inspection.md) | UDP datagram and TCP message boundaries, typed policy verdicts, custom framers, decoder adapters, bounded HTTP/3 inspection composition, and TLS limits |
+| [User-mode Schannel TLS streams](./ntl/tls-stream.md) | Schannel coroutine I/O, ClientHello/SNI handoff, injectable per-host issuance and identity cache, private-CA validation, TLS plaintext framing, bounded HTTP/1 boundaries, and `close_notify` |
 | [Typed IOCTL helper](./ntl/ioctl.md) | `ntl::ioctl`, `is_ioctl`, typed input/output buffer helpers |
 | [Device interface](./ntl/device-interface.md) | `ntl::device_interface_link`, `try_register_device_interface` |
 | [RPC](./ntl/rpc.md) | RPC schema macros, server lifetime, user-mode client calls |
@@ -35,6 +43,7 @@ The detailed API reference is split by topic:
 | [Work item](./ntl/work-item.md) | Deferring resident work to a `PASSIVE_LEVEL` system worker thread |
 | [Passive executor](./ntl/passive-executor.md) | `ntl::passive_executor`, inline PASSIVE execution, detached nonpaged work posting |
 | [Kernel coroutine context](./ntl/coroutine.md) | C++20 `ntl::resume_on_passive`, queue-failure status, continuation lifetime |
+| [User-mode coroutine sockets](./ntl/async-socket.md) | C++20 IOCP socket awaiters, partial-transfer loops, cancellation, and context/task lifetime |
 | [Pool allocator](./ntl/pool-allocator.md) | Kernel pool-backed ownership helpers, STL allocators, PMR resources, pool tags, IRQL rules |
 | [Lookaside list](./ntl/lookaside-list.md) | Fixed-size kernel object cache wrapper over `LOOKASIDE_LIST_EX` |
 | [MDL helper](./ntl/mdl.md) | `ntl::mdl` ownership and mapping helpers |

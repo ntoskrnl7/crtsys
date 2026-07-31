@@ -158,6 +158,11 @@ public:
    */
   const std::wstring &name() const { return name_; }
 
+  /**
+   * @brief Observes the native DRIVER_OBJECT for subsystem resource setup.
+   */
+  PDRIVER_OBJECT native_handle() const noexcept { return object_; }
+
 protected:
   detail::device::dispatchers_t *dispatchers(PDEVICE_OBJECT ptr) noexcept {
     try {

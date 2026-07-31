@@ -1,0 +1,78 @@
+/**
+ * @file http3_standard_inspection_proxy
+ * @brief HTTP/3 inspection proxy with gzip, deflate, and Brotli adapters.
+ *
+ * Targets using this convenience wrapper link crtsys_ntl_content_codecs.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include <ntl/net/http3/inspection_proxy>
+#include <ntl/net/inspection/standard_content_decoders>
+#include <ntl/net/inspection/standard_content_encoders>
+
+#include <utility>
+
+namespace ntl::net::http3 {
+
+/**
+ * @brief Owns the standard decoder registry used by inspection_proxy.
+ */
+class standard_inspection_proxy {
+public:
+  standard_inspection_proxy(
+      origin_transport &origin,
+      inspection_policy &policy,
+      proxy_limits limits = {})
+      : proxy_(origin, policy, decoders_, limits) {
+    ntl::net::inspection::register_standard_content_decoders(
+        decoders_);
+  }
+
+  standard_inspection_proxy(
+      origin_transport &origin,
+      inspection_policy &policy,
+      const ntl::net::http::transform_pipeline &transforms,
+      proxy_limits limits = {})
+      : proxy_(
+            origin, policy, decoders_, encoders_,
+            transforms, limits) {
+    ntl::net::inspection::register_standard_content_decoders(
+        decoders_);
+    ntl::net::inspection::register_standard_content_encoders(
+        encoders_);
+  }
+
+  standard_inspection_proxy(
+      origin_transport &origin,
+      inspection_policy &policy,
+      const ntl::net::http::transform_pipeline *transforms,
+      proxy_limits limits = {})
+      : proxy_(
+            origin, policy, decoders_,
+            transforms ? &encoders_ : nullptr,
+            transforms, limits) {
+    ntl::net::inspection::register_standard_content_decoders(
+        decoders_);
+    ntl::net::inspection::register_standard_content_encoders(
+        encoders_);
+  }
+
+  standard_inspection_proxy(
+      const standard_inspection_proxy &) = delete;
+  standard_inspection_proxy &
+  operator=(const standard_inspection_proxy &) = delete;
+
+  ntl::result<origin_response>
+  forward(incoming_request request) const noexcept {
+    return proxy_.forward(std::move(request));
+  }
+
+private:
+  ntl::net::inspection::content_decoder_registry decoders_;
+  ntl::net::inspection::content_encoder_registry encoders_;
+  inspection_proxy proxy_;
+};
+
+} // namespace ntl::net::http3

@@ -448,18 +448,27 @@ function(crtsys_link_prebuilt_driver_libraries _target)
 endfunction()
 
 function(crtsys_add_driver _target)
-    cmake_parse_arguments(WDK "NTL;MINIFILTER" "WINVER;KMDF" "" ${ARGN})
+    cmake_parse_arguments(WDK "NTL;MINIFILTER;WFP" "WINVER;KMDF" "" ${ARGN})
 
-    if(WDK_MINIFILTER AND WDK_KMDF)
-        message(FATAL_ERROR "MINIFILTER and KMDF select different driver models and cannot be combined.")
+    if((WDK_MINIFILTER AND WDK_KMDF) OR
+       (WDK_MINIFILTER AND WDK_WFP) OR
+       (WDK_KMDF AND WDK_WFP))
+        message(FATAL_ERROR "MINIFILTER, KMDF, and WFP select different driver models and cannot be combined.")
     endif()
-    if(WDK_NTL AND NOT WDK_KMDF AND NOT WDK_MINIFILTER)
-        message(FATAL_ERROR "The NTL argument is valid with KMDF or MINIFILTER. Use CRTSYS_NTL_MAIN for WDM NTL drivers.")
+    if(WDK_NTL AND NOT WDK_KMDF AND NOT WDK_MINIFILTER AND NOT WDK_WFP)
+        message(FATAL_ERROR "The NTL argument is valid with KMDF, MINIFILTER, or WFP. Use CRTSYS_NTL_MAIN for WDM NTL drivers.")
     endif()
 
     set(_crtsys_wdk_arguments ${WDK_UNPARSED_ARGUMENTS})
-    if(WDK_WINVER)
+    # FindWDK also defines a cache variable named WDK_WINVER. Determine
+    # whether this function actually received the WINVER keyword instead of
+    # mistaking that global default for a per-target argument.
+    list(FIND ARGN "WINVER" _crtsys_winver_argument_index)
+    if(NOT _crtsys_winver_argument_index EQUAL -1)
         list(APPEND _crtsys_wdk_arguments WINVER "${WDK_WINVER}")
+    elseif(WDK_WFP)
+        # ntl::wfp uses the version-2 callout contract introduced in Windows 8.
+        list(APPEND _crtsys_wdk_arguments WINVER "0x0602")
     endif()
 
     if(WDK_MINIFILTER AND WDK_NTL)
@@ -479,6 +488,16 @@ function(crtsys_add_driver _target)
         set(_crtsys_use_ntl_flt_main FALSE)
     elseif(WDK_KMDF)
         set(_crtsys_entry_point CrtSysKmdfDriverEntry)
+        set(_crtsys_use_ntl_main FALSE)
+        set(_crtsys_use_ntl_kmdf_main FALSE)
+        set(_crtsys_use_ntl_flt_main FALSE)
+    elseif(WDK_WFP AND WDK_NTL)
+        set(_crtsys_entry_point CrtSysDriverEntry)
+        set(_crtsys_use_ntl_main TRUE)
+        set(_crtsys_use_ntl_kmdf_main FALSE)
+        set(_crtsys_use_ntl_flt_main FALSE)
+    elseif(WDK_WFP)
+        set(_crtsys_entry_point CrtSysWdmDriverEntry)
         set(_crtsys_use_ntl_main FALSE)
         set(_crtsys_use_ntl_kmdf_main FALSE)
         set(_crtsys_use_ntl_flt_main FALSE)
@@ -534,6 +553,27 @@ function(crtsys_add_driver _target)
         target_compile_definitions(${_target} PUBLIC CRTSYS_USE_MINIFILTER)
     endif()
 
+    if(WDK_WFP)
+        if(NOT TARGET WDK::FWPKCLNT)
+            message(FATAL_ERROR "WDK::FWPKCLNT is required for WFP callout drivers.")
+        endif()
+        target_link_libraries(${_target} WDK::FWPKCLNT)
+        if(WDK_PLATFORM MATCHES "^ARM")
+            # Windows on ARM requires NDIS 6.30 or newer.
+            set(_crtsys_wfp_ndis_version NDIS630)
+        else()
+            set(_crtsys_wfp_ndis_version NDIS60)
+        endif()
+        target_compile_definitions(
+            ${_target}
+            PUBLIC
+                CRTSYS_USE_WFP
+                ${_crtsys_wfp_ndis_version}
+                NDIS_SUPPORT_NDIS6
+                NTDDI_VERSION=NTDDI_WIN8
+        )
+    endif()
+
     set(CMAKE_GENERATOR_PLATFORM "${_CRTSYS_ORIGINAL_GENERATOR_PLATFORM}")
     crtsys_scope_compile_options_to_c_cxx(${_target})
 
@@ -546,7 +586,20 @@ function(crtsys_add_driver _target)
     )
 
     if(_crtsys_use_ntl_main OR _crtsys_use_ntl_kmdf_main OR _crtsys_use_ntl_flt_main)
-        target_compile_features(${_target} PRIVATE cxx_std_17)
+        target_compile_features(${_target} PRIVATE cxx_std_20)
+        set_target_properties(
+            ${_target}
+            PROPERTIES
+                CXX_STANDARD 20
+                CXX_STANDARD_REQUIRED YES
+                CXX_EXTENSIONS NO
+        )
+        if(MSVC)
+            target_compile_options(
+                ${_target}
+                PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>"
+            )
+        endif()
     endif()
 
     if(CRTSYS_USE_PREBUILT)
@@ -557,6 +610,12 @@ function(crtsys_add_driver _target)
         endif()
 
         target_link_libraries(${_target} crtsys)
+        # A source-tree consumer needs the same libcntpr duplicate-symbol
+        # policy as a prebuilt-package consumer. Link options placed on the
+        # static crtsys archive are not applied by every WDK generator path.
+        if(CRTSYS_USE_LIBCNTPR)
+            target_link_options(${_target} PRIVATE "/FORCE:MULTIPLE")
+        endif()
         if(NOT TARGET WDK::WDMSEC)
             message(FATAL_ERROR "WDK::WDMSEC is required for secure NTL control devices.")
         endif()

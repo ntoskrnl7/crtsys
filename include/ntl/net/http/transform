@@ -1,0 +1,1120 @@
+/**
+ * @file transform
+ * @brief Protocol-neutral, bounded HTTP request/response transformation.
+ *
+ * Wire adapters terminate HTTP/1.1, HTTP/2, or HTTP/3 and present one
+ * semantic message model to this pipeline. The pipeline never exposes TLS
+ * records, HPACK/QPACK state, frame lengths, or transport flow-control
+ * authority to application policy.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/http/transform is a user-mode header"
+#endif
+
+#include <ntl/net/inspection/content_decoder>
+#include <ntl/net/inspection/content_encoder>
+#include <ntl/net/inspection/core>
+#include <ntl/result>
+#include <ntl/status>
+
+#include <algorithm>
+#include <charconv>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <limits>
+#include <new>
+#include <optional>
+#include <span>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+namespace ntl::net::http {
+
+enum class protocol : std::uint8_t {
+  http1 = 1,
+  http2 = 2,
+  http3 = 3,
+};
+
+enum class transform_failure_policy : std::uint8_t {
+  block = 1,
+  forward_original = 2,
+};
+
+enum class transformed_body_coding : std::uint8_t {
+  identity = 1,
+  preserve = 2,
+};
+
+struct transform_limits {
+  std::size_t maximum_header_count = 256;
+  std::size_t maximum_header_bytes = 64 * 1024;
+  std::size_t maximum_encoded_body_bytes = 4 * 1024 * 1024;
+  std::size_t maximum_decoded_body_bytes = 16 * 1024 * 1024;
+  std::size_t maximum_expansion_ratio = 64;
+  std::size_t maximum_coding_layers = 4;
+  transform_failure_policy on_failure =
+      transform_failure_policy::block;
+};
+
+struct header_field {
+  std::string name;
+  std::string value;
+  bool sensitive = false;
+};
+
+namespace transform_detail {
+
+inline unsigned char ascii_lower(unsigned char value) noexcept {
+  return value >= 'A' && value <= 'Z'
+             ? static_cast<unsigned char>(value + ('a' - 'A'))
+             : value;
+}
+
+inline bool ascii_equal_ci(
+    std::string_view left, std::string_view right) noexcept {
+  if (left.size() != right.size())
+    return false;
+  for (std::size_t index = 0; index != left.size(); ++index) {
+    if (ascii_lower(static_cast<unsigned char>(left[index])) !=
+        ascii_lower(static_cast<unsigned char>(right[index])))
+      return false;
+  }
+  return true;
+}
+
+inline bool is_token(std::string_view value) noexcept {
+  if (value.empty())
+    return false;
+  for (const unsigned char character : value) {
+    const bool valid =
+        (character >= 'A' && character <= 'Z') ||
+        (character >= 'a' && character <= 'z') ||
+        (character >= '0' && character <= '9') ||
+        std::string_view("!#$%&'*+-.^_`|~").find(
+            static_cast<char>(character)) != std::string_view::npos;
+    if (!valid)
+      return false;
+  }
+  return true;
+}
+
+inline bool is_scheme(std::string_view value) noexcept {
+  if (value.empty() ||
+      !((value.front() >= 'A' && value.front() <= 'Z') ||
+        (value.front() >= 'a' && value.front() <= 'z')))
+    return false;
+  for (const unsigned char character : value) {
+    if (!((character >= 'A' && character <= 'Z') ||
+          (character >= 'a' && character <= 'z') ||
+          (character >= '0' && character <= '9') ||
+          character == '+' || character == '-' ||
+          character == '.'))
+      return false;
+  }
+  return true;
+}
+
+inline bool valid_field_value(
+    std::string_view value) noexcept {
+  for (const unsigned char character : value) {
+    if (character == '\r' || character == '\n' ||
+        character == 0x7f ||
+        (character < 0x20 && character != '\t'))
+      return false;
+  }
+  return true;
+}
+
+inline bool valid_uri_component(
+    std::string_view value) noexcept {
+  if (value.empty())
+    return false;
+  for (const unsigned char character : value) {
+    if (character <= 0x20 || character == 0x7f)
+      return false;
+  }
+  return true;
+}
+
+inline bool forbidden_h2_h3_header(
+    std::string_view name, std::string_view value) noexcept;
+
+inline bool forbidden_trailer(
+    std::string_view name, protocol wire_protocol) noexcept {
+  if (name == "content-length" ||
+      name == "transfer-encoding" || name == "trailer" ||
+      name == "host" || name == "connection" ||
+      name == "proxy-connection" || name == "keep-alive" ||
+      name == "upgrade")
+    return true;
+  return wire_protocol != protocol::http1 &&
+         forbidden_h2_h3_header(name, {});
+}
+
+inline bool forbidden_h2_h3_header(
+    std::string_view name, std::string_view value) noexcept {
+  if (name == "connection" || name == "proxy-connection" ||
+      name == "keep-alive" || name == "transfer-encoding" ||
+      name == "upgrade")
+    return true;
+  return name == "te" && !ascii_equal_ci(value, "trailers");
+}
+
+inline std::string normalized_name(std::string value) {
+  for (char &character : value) {
+    if (character >= 'A' && character <= 'Z')
+      character = static_cast<char>(character + ('a' - 'A'));
+  }
+  return value;
+}
+
+inline bool html_content_type(std::string_view value) noexcept {
+  const std::size_t separator = value.find(';');
+  value = value.substr(0, separator);
+  while (!value.empty() &&
+         (value.front() == ' ' || value.front() == '\t'))
+    value.remove_prefix(1);
+  while (!value.empty() &&
+         (value.back() == ' ' || value.back() == '\t'))
+    value.remove_suffix(1);
+  return ascii_equal_ci(value, "text/html") ||
+         ascii_equal_ci(value, "application/xhtml+xml");
+}
+
+} // namespace transform_detail
+
+/**
+ * @brief Owning, normalized ordinary HTTP header fields.
+ *
+ * HTTP/2 and HTTP/3 pseudo-fields remain typed members of request_message and
+ * response_message and cannot be inserted through this collection.
+ */
+class header_collection {
+public:
+  header_collection() = default;
+  explicit header_collection(std::vector<header_field> fields)
+      : fields_(std::move(fields)) {
+    for (auto &field : fields_)
+      field.name =
+          transform_detail::normalized_name(std::move(field.name));
+  }
+
+  std::span<const header_field> fields() const noexcept {
+    return fields_;
+  }
+
+  std::size_t size() const noexcept { return fields_.size(); }
+  bool empty() const noexcept { return fields_.empty(); }
+
+  std::optional<std::string_view>
+  first(std::string_view name) const noexcept {
+    for (const auto &field : fields_) {
+      if (transform_detail::ascii_equal_ci(field.name, name))
+        return field.value;
+    }
+    return std::nullopt;
+  }
+
+  std::string joined(std::string_view name) const {
+    std::string result;
+    for (const auto &field : fields_) {
+      if (!transform_detail::ascii_equal_ci(field.name, name))
+        continue;
+      if (!result.empty())
+        result.append(", ");
+      result.append(field.value);
+    }
+    return result;
+  }
+
+  bool contains(std::string_view name) const noexcept {
+    return first(name).has_value();
+  }
+
+  void append(std::string name, std::string value,
+              bool sensitive = false) {
+    name = transform_detail::normalized_name(std::move(name));
+    if (!transform_detail::is_token(name) ||
+        !transform_detail::valid_field_value(value))
+      throw std::invalid_argument("invalid HTTP header field");
+    fields_.push_back(
+        {std::move(name), std::move(value), sensitive});
+  }
+
+  void set(std::string name, std::string value,
+           bool sensitive = false) {
+    name = transform_detail::normalized_name(std::move(name));
+    if (!transform_detail::is_token(name) ||
+        !transform_detail::valid_field_value(value))
+      throw std::invalid_argument("invalid HTTP header field");
+    erase(name);
+    fields_.push_back(
+        {std::move(name), std::move(value), sensitive});
+  }
+
+  std::size_t erase(std::string_view name) noexcept {
+    const auto original = fields_.size();
+    fields_.erase(
+        std::remove_if(
+            fields_.begin(), fields_.end(),
+            [&](const header_field &field) noexcept {
+              return transform_detail::ascii_equal_ci(
+                  field.name, name);
+            }),
+        fields_.end());
+    return original - fields_.size();
+  }
+
+  ntl::status validate(protocol wire_protocol,
+                       const transform_limits &limits) const noexcept {
+    if (limits.maximum_header_count == 0 ||
+        limits.maximum_header_bytes == 0 ||
+        fields_.size() > limits.maximum_header_count)
+      return fields_.size() > limits.maximum_header_count
+                 ? ntl::status(STATUS_BUFFER_OVERFLOW)
+                 : ntl::status(STATUS_INVALID_PARAMETER);
+
+    std::size_t bytes = 0;
+    bool content_length_seen = false;
+    for (const auto &field : fields_) {
+      if (!transform_detail::is_token(field.name) ||
+          field.name.front() == ':' ||
+          !transform_detail::valid_field_value(field.value) ||
+          field.name.size() >
+              limits.maximum_header_bytes - bytes ||
+          field.value.size() >
+              limits.maximum_header_bytes - bytes -
+                  field.name.size())
+        return STATUS_DATA_ERROR;
+      bytes += field.name.size() + field.value.size();
+
+      if (wire_protocol != protocol::http1) {
+        for (const unsigned char character : field.name) {
+          if (character >= 'A' && character <= 'Z')
+            return STATUS_DATA_ERROR;
+        }
+        if (transform_detail::forbidden_h2_h3_header(
+                field.name, field.value))
+          return STATUS_DATA_ERROR;
+      }
+
+      if (field.name == "content-length") {
+        if (content_length_seen)
+          return STATUS_DATA_ERROR;
+        content_length_seen = true;
+        std::size_t ignored = 0;
+        const auto parsed = std::from_chars(
+            field.value.data(),
+            field.value.data() + field.value.size(), ignored);
+        if (field.value.empty() || parsed.ec != std::errc{} ||
+            parsed.ptr != field.value.data() + field.value.size())
+          return STATUS_DATA_ERROR;
+      }
+    }
+    return ntl::status::ok();
+  }
+
+private:
+  std::vector<header_field> fields_;
+};
+
+inline ntl::status validate_trailers(
+    std::span<const header_field> trailers,
+    protocol wire_protocol,
+    const transform_limits &limits) noexcept {
+  if (trailers.size() > limits.maximum_header_count)
+    return STATUS_BUFFER_OVERFLOW;
+  std::size_t bytes = 0;
+  for (const auto &field : trailers) {
+    if (!transform_detail::is_token(field.name) ||
+        field.name.front() == ':' ||
+        !transform_detail::valid_field_value(field.value) ||
+        transform_detail::forbidden_trailer(
+            field.name, wire_protocol) ||
+        field.name.size() >
+            limits.maximum_header_bytes - bytes ||
+        field.value.size() >
+            limits.maximum_header_bytes - bytes -
+                field.name.size())
+      return STATUS_DATA_ERROR;
+    if (wire_protocol != protocol::http1) {
+      for (const unsigned char character : field.name) {
+        if (character >= 'A' && character <= 'Z')
+          return STATUS_DATA_ERROR;
+      }
+    }
+    bytes += field.name.size() + field.value.size();
+  }
+  return ntl::status::ok();
+}
+
+struct request_message {
+  protocol wire_protocol = protocol::http1;
+  std::string method;
+  std::string scheme = "https";
+  std::string authority;
+  std::string path = "/";
+  std::optional<std::string> extended_protocol;
+  header_collection headers;
+  std::vector<std::byte> body;
+  std::vector<header_field> trailers;
+};
+
+struct response_message {
+  protocol wire_protocol = protocol::http1;
+  unsigned status = 200;
+  std::string reason;
+  header_collection headers;
+  std::vector<std::byte> body;
+  std::vector<header_field> trailers;
+};
+
+inline bool response_body_forbidden(
+    const request_message &request,
+    const response_message &response) noexcept {
+  return transform_detail::ascii_equal_ci(
+             request.method, "HEAD") ||
+         (response.status >= 100 && response.status < 200) ||
+         response.status == 204 || response.status == 304 ||
+         (transform_detail::ascii_equal_ci(
+              request.method, "CONNECT") &&
+          response.status >= 200 && response.status < 300);
+}
+
+enum class rewrite_action : std::uint8_t {
+  forward = 1,
+  block = 2,
+  drop = 3,
+  respond = 4,
+};
+
+enum class rewrite_change : std::uint8_t {
+  none = 0,
+  headers = 1,
+  body = 2,
+};
+
+class rewrite_result {
+public:
+  static rewrite_result unchanged() noexcept {
+    return rewrite_result(
+        rewrite_action::forward, rewrite_change::none);
+  }
+
+  static rewrite_result headers_changed() noexcept {
+    return rewrite_result(
+        rewrite_action::forward, rewrite_change::headers);
+  }
+
+  static rewrite_result replace_body(
+      std::vector<std::byte> body,
+      transformed_body_coding coding =
+          transformed_body_coding::preserve) {
+    rewrite_result result(
+        rewrite_action::forward, rewrite_change::body);
+    result.body_ = std::move(body);
+    result.coding_ = coding;
+    return result;
+  }
+
+  static rewrite_result replace_text(
+      std::string text,
+      transformed_body_coding coding =
+          transformed_body_coding::preserve) {
+    std::vector<std::byte> body(text.size());
+    std::transform(
+        text.begin(), text.end(), body.begin(),
+        [](char value) noexcept {
+          return static_cast<std::byte>(
+              static_cast<unsigned char>(value));
+        });
+    return replace_body(std::move(body), coding);
+  }
+
+  static rewrite_result block() noexcept {
+    return rewrite_result(
+        rewrite_action::block, rewrite_change::none);
+  }
+
+  static rewrite_result drop() noexcept {
+    return rewrite_result(
+        rewrite_action::drop, rewrite_change::none);
+  }
+
+  static rewrite_result respond(response_message response) {
+    rewrite_result result(
+        rewrite_action::respond, rewrite_change::none);
+    result.response_ = std::move(response);
+    return result;
+  }
+
+  rewrite_action action() const noexcept { return action_; }
+  rewrite_change change() const noexcept { return change_; }
+  transformed_body_coding coding() const noexcept {
+    return coding_;
+  }
+  std::vector<std::byte> release_body() noexcept {
+    return std::move(body_);
+  }
+  std::optional<response_message>
+  release_response() noexcept {
+    return std::move(response_);
+  }
+
+private:
+  rewrite_result(rewrite_action action,
+                 rewrite_change change) noexcept
+      : action_(action), change_(change) {}
+
+  rewrite_action action_ = rewrite_action::block;
+  rewrite_change change_ = rewrite_change::none;
+  transformed_body_coding coding_ =
+      transformed_body_coding::preserve;
+  std::vector<std::byte> body_;
+  std::optional<response_message> response_;
+};
+
+struct pipeline_outcome {
+  rewrite_action action = rewrite_action::forward;
+  bool headers_modified = false;
+  bool body_modified = false;
+  transformed_body_coding body_coding =
+      transformed_body_coding::preserve;
+  std::optional<response_message> response;
+  NTSTATUS failure = STATUS_SUCCESS;
+
+  bool modified() const noexcept {
+    return headers_modified || body_modified;
+  }
+};
+
+class transform_pipeline;
+
+class request_rule_selector {
+public:
+  using predicate =
+      std::function<bool(const request_message &)>;
+
+  request_rule_selector when(predicate condition) const;
+
+  template <class Function>
+  request_rule_selector &inspect(Function &&function);
+
+  template <class Function>
+  request_rule_selector &transform(Function &&function);
+
+  template <class Function>
+  request_rule_selector &decide(Function &&function) {
+    return inspect(std::forward<Function>(function));
+  }
+
+private:
+  friend class transform_pipeline;
+  request_rule_selector(transform_pipeline &pipeline,
+                        predicate condition)
+      : pipeline_(&pipeline),
+        condition_(std::move(condition)) {}
+
+  transform_pipeline *pipeline_ = nullptr;
+  predicate condition_;
+};
+
+class response_rule_selector {
+public:
+  using predicate = std::function<bool(
+      const request_message &, const response_message &)>;
+
+  response_rule_selector when(predicate condition) const;
+  response_rule_selector html() const;
+
+  template <class Function>
+  response_rule_selector &inspect(Function &&function);
+
+  template <class Function>
+  response_rule_selector &transform(Function &&function);
+
+  template <class Function>
+  response_rule_selector &decide(Function &&function) {
+    return inspect(std::forward<Function>(function));
+  }
+
+private:
+  friend class transform_pipeline;
+  response_rule_selector(transform_pipeline &pipeline,
+                         predicate condition)
+      : pipeline_(&pipeline),
+        condition_(std::move(condition)) {}
+
+  transform_pipeline *pipeline_ = nullptr;
+  predicate condition_;
+};
+
+/**
+ * @brief Ordered, fail-closed semantic HTTP policy.
+ *
+ * Rules are configured before concurrent use. Each apply call owns its message
+ * and therefore may run concurrently with other calls after configuration.
+ */
+class transform_pipeline {
+public:
+  explicit transform_pipeline(
+      transform_limits limits = {}) : limits_(limits) {
+    if (!valid_limits())
+      throw std::invalid_argument(
+          "HTTP transform pipeline limits are invalid");
+  }
+
+  request_rule_selector requests() {
+    return request_rule_selector(
+        *this, [](const request_message &) { return true; });
+  }
+
+  response_rule_selector responses() {
+    return response_rule_selector(
+        *this,
+        [](const request_message &,
+           const response_message &) { return true; });
+  }
+
+  const transform_limits &limits() const noexcept {
+    return limits_;
+  }
+
+  pipeline_outcome
+  apply(request_message &message) const noexcept {
+    std::optional<request_message> original;
+    if (limits_.on_failure ==
+        transform_failure_policy::forward_original) {
+      try {
+        original = message;
+      } catch (...) {
+        return failure(STATUS_INSUFFICIENT_RESOURCES);
+      }
+    }
+    pipeline_outcome outcome;
+    try {
+      const ntl::status valid = validate(message);
+      if (!valid.is_ok())
+        return restore_or_fail(
+            message, std::move(original),
+            static_cast<NTSTATUS>(valid));
+      for (const auto &rule : request_rules_) {
+        if (!rule.condition(message))
+          continue;
+        rewrite_result result = rule.apply(message);
+        const ntl::status applied =
+            merge(message, std::move(result), outcome);
+        if (!applied.is_ok())
+          return restore_or_fail(
+              message, std::move(original),
+              static_cast<NTSTATUS>(applied));
+        if (outcome.response &&
+            response_body_forbidden(
+                message, *outcome.response) &&
+            (!outcome.response->body.empty() ||
+             !outcome.response->trailers.empty()))
+          return restore_or_fail(
+              message, std::move(original),
+              STATUS_DATA_ERROR);
+        if (outcome.action != rewrite_action::forward)
+          return outcome;
+      }
+      return outcome;
+    } catch (const std::bad_alloc &) {
+      return restore_or_fail(
+          message, std::move(original),
+          STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return restore_or_fail(
+          message, std::move(original),
+          STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+  pipeline_outcome
+  apply(const request_message &request,
+        response_message &message) const noexcept {
+    std::optional<response_message> original;
+    if (limits_.on_failure ==
+        transform_failure_policy::forward_original) {
+      try {
+        original = message;
+      } catch (...) {
+        return failure(STATUS_INSUFFICIENT_RESOURCES);
+      }
+    }
+    pipeline_outcome outcome;
+    try {
+      const ntl::status valid = validate(message);
+      if (!valid.is_ok() ||
+          response_body_forbidden(request, message) &&
+              (!message.body.empty() ||
+               !message.trailers.empty()))
+        return restore_or_fail(
+            message, std::move(original),
+            valid.is_ok() ? STATUS_DATA_ERROR
+                          : static_cast<NTSTATUS>(valid));
+      for (const auto &rule : response_rules_) {
+        if (!rule.condition(request, message))
+          continue;
+        rewrite_result result =
+            rule.apply(request, message);
+        const ntl::status applied =
+            merge(message, std::move(result), outcome);
+        if (!applied.is_ok())
+          return restore_or_fail(
+              message, std::move(original),
+              static_cast<NTSTATUS>(applied));
+        if ((response_body_forbidden(request, message) &&
+             (!message.body.empty() ||
+              !message.trailers.empty())) ||
+            (outcome.response &&
+             response_body_forbidden(
+                 request, *outcome.response) &&
+             (!outcome.response->body.empty() ||
+              !outcome.response->trailers.empty())))
+          return restore_or_fail(
+              message, std::move(original),
+              STATUS_DATA_ERROR);
+        if (outcome.action != rewrite_action::forward)
+          return outcome;
+      }
+      return outcome;
+    } catch (const std::bad_alloc &) {
+      return restore_or_fail(
+          message, std::move(original),
+          STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return restore_or_fail(
+          message, std::move(original),
+          STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+private:
+  friend class request_rule_selector;
+  friend class response_rule_selector;
+
+  struct request_rule {
+    request_rule_selector::predicate condition;
+    std::function<rewrite_result(request_message &)> apply;
+  };
+
+  struct response_rule {
+    response_rule_selector::predicate condition;
+    std::function<rewrite_result(
+        const request_message &, response_message &)> apply;
+  };
+
+  bool valid_limits() const noexcept {
+    return limits_.maximum_header_count != 0 &&
+           limits_.maximum_header_bytes != 0 &&
+           limits_.maximum_encoded_body_bytes != 0 &&
+           limits_.maximum_decoded_body_bytes != 0 &&
+           limits_.maximum_expansion_ratio != 0 &&
+           limits_.maximum_coding_layers != 0;
+  }
+
+  ntl::status validate(
+      const request_message &message) const noexcept {
+    const bool connect = message.method == "CONNECT";
+    const bool extended_connect =
+        connect && message.extended_protocol.has_value();
+    const bool start_line_bounded =
+        message.method.size() <= limits_.maximum_header_bytes &&
+        message.scheme.size() <=
+            limits_.maximum_header_bytes -
+                message.method.size() &&
+        message.authority.size() <=
+            limits_.maximum_header_bytes -
+                message.method.size() -
+                message.scheme.size() &&
+        message.path.size() <=
+            limits_.maximum_header_bytes -
+                message.method.size() -
+                message.scheme.size() -
+                message.authority.size();
+    if (!transform_detail::is_token(message.method) ||
+        !transform_detail::valid_uri_component(
+            message.authority) ||
+        (!connect &&
+         (!transform_detail::is_scheme(message.scheme) ||
+          !transform_detail::valid_uri_component(
+              message.path))) ||
+        (connect && !extended_connect &&
+         (!message.scheme.empty() || !message.path.empty())) ||
+        (extended_connect &&
+         (!transform_detail::is_scheme(message.scheme) ||
+          !transform_detail::valid_uri_component(message.path) ||
+          !transform_detail::is_token(
+              *message.extended_protocol))) ||
+        (message.wire_protocol == protocol::http1 &&
+         message.extended_protocol.has_value()) ||
+        !start_line_bounded ||
+        message.body.size() >
+            limits_.maximum_decoded_body_bytes)
+      return STATUS_DATA_ERROR;
+    const ntl::status headers = message.headers.validate(
+        message.wire_protocol, limits_);
+    if (!headers.is_ok())
+      return headers;
+    return validate_trailers(
+        message.trailers, message.wire_protocol, limits_);
+  }
+
+  ntl::status validate(
+      const response_message &message) const noexcept {
+    if (message.status < 100 || message.status > 999 ||
+        !transform_detail::valid_field_value(message.reason) ||
+        message.reason.size() >
+            limits_.maximum_header_bytes ||
+        message.body.size() >
+            limits_.maximum_decoded_body_bytes)
+      return STATUS_DATA_ERROR;
+    const ntl::status headers = message.headers.validate(
+        message.wire_protocol, limits_);
+    if (!headers.is_ok())
+      return headers;
+    return validate_trailers(
+        message.trailers, message.wire_protocol, limits_);
+  }
+
+  template <class Message>
+  ntl::status merge(Message &message,
+                    rewrite_result &&result,
+                    pipeline_outcome &outcome) const {
+    outcome.action = result.action();
+    switch (result.change()) {
+    case rewrite_change::none:
+      break;
+    case rewrite_change::headers:
+      outcome.headers_modified = true;
+      break;
+    case rewrite_change::body:
+      message.body = result.release_body();
+      if (message.body.size() >
+          limits_.maximum_decoded_body_bytes)
+        return STATUS_BUFFER_OVERFLOW;
+      outcome.body_modified = true;
+      outcome.headers_modified = true;
+      outcome.body_coding = result.coding();
+      synchronize_body_headers(
+          message.headers, message.body.size(),
+          result.coding());
+      if constexpr (std::is_same_v<Message, response_message>) {
+        remove_invalidated_validators(message.headers);
+        remove_invalidated_validators(message.trailers);
+      }
+      break;
+    }
+    outcome.response = result.release_response();
+    if (outcome.response) {
+      outcome.response->wire_protocol = message.wire_protocol;
+      const ntl::status valid = validate(*outcome.response);
+      if (!valid.is_ok())
+        return valid;
+    }
+    return validate(message);
+  }
+
+  static void synchronize_body_headers(
+      header_collection &headers, std::size_t body_size,
+      transformed_body_coding coding) {
+    headers.erase("transfer-encoding");
+    headers.set("content-length", std::to_string(body_size));
+    if (coding == transformed_body_coding::identity)
+      headers.erase("content-encoding");
+  }
+
+  static void remove_invalidated_validators(
+      header_collection &headers) noexcept {
+    (void)headers.erase("content-md5");
+    (void)headers.erase("digest");
+    (void)headers.erase("etag");
+  }
+
+  static void remove_invalidated_validators(
+      std::vector<header_field> &trailers) noexcept {
+    trailers.erase(
+        std::remove_if(
+            trailers.begin(), trailers.end(),
+            [](const header_field &field) noexcept {
+              return transform_detail::ascii_equal_ci(
+                         field.name, "content-md5") ||
+                     transform_detail::ascii_equal_ci(
+                         field.name, "digest") ||
+                     transform_detail::ascii_equal_ci(
+                         field.name, "etag");
+            }),
+        trailers.end());
+  }
+
+  pipeline_outcome failure(NTSTATUS status) const noexcept {
+    return {
+        limits_.on_failure ==
+                transform_failure_policy::forward_original
+            ? rewrite_action::forward
+            : rewrite_action::block,
+        false, false,
+        transformed_body_coding::preserve,
+        std::nullopt, status};
+  }
+
+  template <class Message>
+  pipeline_outcome restore_or_fail(
+      Message &message, std::optional<Message> original,
+      NTSTATUS status) const noexcept {
+    if (original) {
+      message = std::move(*original);
+      return {
+          rewrite_action::forward, false, false,
+          transformed_body_coding::preserve,
+          std::nullopt, status};
+    }
+    return failure(status);
+  }
+
+  transform_limits limits_;
+  std::vector<request_rule> request_rules_;
+  std::vector<response_rule> response_rules_;
+};
+
+inline request_rule_selector
+request_rule_selector::when(predicate condition) const {
+  if (!condition)
+    throw std::invalid_argument(
+        "HTTP request rule predicate is empty");
+  const predicate previous = condition_;
+  return request_rule_selector(
+      *pipeline_,
+      [previous, condition = std::move(condition)](
+          const request_message &message) {
+        return previous(message) && condition(message);
+      });
+}
+
+template <class Function>
+request_rule_selector &
+request_rule_selector::inspect(Function &&function) {
+  using function_type = std::decay_t<Function>;
+  pipeline_->request_rules_.push_back({
+      condition_,
+      [callback = function_type(
+           std::forward<Function>(function))](
+          request_message &message) {
+        const auto verdict = static_cast<
+            ntl::net::inspection::verdict>(
+                callback(
+                    static_cast<const request_message &>(
+                        message)));
+        switch (verdict) {
+        case ntl::net::inspection::verdict::permit:
+          return rewrite_result::unchanged();
+        case ntl::net::inspection::verdict::block:
+          return rewrite_result::block();
+        case ntl::net::inspection::verdict::drop_flow:
+          return rewrite_result::drop();
+        }
+        return rewrite_result::block();
+      }});
+  return *this;
+}
+
+template <class Function>
+request_rule_selector &
+request_rule_selector::transform(Function &&function) {
+  using function_type = std::decay_t<Function>;
+  pipeline_->request_rules_.push_back({
+      condition_,
+      [callback = function_type(
+           std::forward<Function>(function))](
+          request_message &message) {
+        return static_cast<rewrite_result>(
+            callback(message));
+      }});
+  return *this;
+}
+
+inline response_rule_selector
+response_rule_selector::when(predicate condition) const {
+  if (!condition)
+    throw std::invalid_argument(
+        "HTTP response rule predicate is empty");
+  const predicate previous = condition_;
+  return response_rule_selector(
+      *pipeline_,
+      [previous, condition = std::move(condition)](
+          const request_message &request,
+          const response_message &response) {
+        return previous(request, response) &&
+               condition(request, response);
+      });
+}
+
+inline response_rule_selector
+response_rule_selector::html() const {
+  return when(
+      [](const request_message &,
+         const response_message &response) {
+        const auto content_type =
+            response.headers.first("content-type");
+        return content_type &&
+               transform_detail::html_content_type(
+                   *content_type);
+      });
+}
+
+template <class Function>
+response_rule_selector &
+response_rule_selector::inspect(Function &&function) {
+  using function_type = std::decay_t<Function>;
+  pipeline_->response_rules_.push_back({
+      condition_,
+      [callback = function_type(
+           std::forward<Function>(function))](
+          const request_message &request,
+          response_message &message) {
+        const auto verdict = static_cast<
+            ntl::net::inspection::verdict>(
+                callback(
+                    request,
+                    static_cast<const response_message &>(
+                        message)));
+        switch (verdict) {
+        case ntl::net::inspection::verdict::permit:
+          return rewrite_result::unchanged();
+        case ntl::net::inspection::verdict::block:
+          return rewrite_result::block();
+        case ntl::net::inspection::verdict::drop_flow:
+          return rewrite_result::drop();
+        }
+        return rewrite_result::block();
+      }});
+  return *this;
+}
+
+template <class Function>
+response_rule_selector &
+response_rule_selector::transform(Function &&function) {
+  using function_type = std::decay_t<Function>;
+  pipeline_->response_rules_.push_back({
+      condition_,
+      [callback = function_type(
+           std::forward<Function>(function))](
+          const request_message &request,
+          response_message &message) {
+        return static_cast<rewrite_result>(
+            callback(request, message));
+      }});
+  return *this;
+}
+
+struct decoded_body {
+  std::vector<std::byte> bytes;
+  std::string original_content_encoding;
+};
+
+inline ntl::result<decoded_body>
+decode_body(
+    const header_collection &headers,
+    std::span<const std::byte> encoded,
+    const ntl::net::inspection::content_decoder_registry
+        &decoders,
+    const transform_limits &limits = {}) noexcept {
+  if (encoded.size() > limits.maximum_encoded_body_bytes)
+    return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+  try {
+    decoded_body result;
+    result.original_content_encoding =
+        headers.joined("content-encoding");
+    if (result.original_content_encoding.empty() ||
+        transform_detail::ascii_equal_ci(
+            result.original_content_encoding, "identity")) {
+      result.bytes.assign(encoded.begin(), encoded.end());
+      return ntl::ok(std::move(result));
+    }
+    auto decoded =
+        ntl::net::inspection::decode_content_encoding(
+            decoders,
+            ntl::net::scatter_view::from_contiguous(encoded),
+            result.original_content_encoding,
+            {.maximum_encoded_size =
+                 limits.maximum_encoded_body_bytes,
+             .maximum_decoded_size =
+                 limits.maximum_decoded_body_bytes,
+             .maximum_expansion_ratio =
+                 limits.maximum_expansion_ratio,
+             .maximum_coding_layers =
+                 limits.maximum_coding_layers});
+    if (!decoded)
+      return ntl::unexpected(decoded.status());
+    result.bytes = std::move(*decoded);
+    return ntl::ok(std::move(result));
+  } catch (const std::bad_alloc &) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+}
+
+inline ntl::result<std::vector<std::byte>>
+encode_body(
+    header_collection &headers,
+    std::span<const std::byte> decoded,
+    std::string_view original_content_encoding,
+    transformed_body_coding coding,
+    const ntl::net::inspection::content_encoder_registry
+        &encoders,
+    const transform_limits &limits = {}) noexcept {
+  if (decoded.size() > limits.maximum_decoded_body_bytes)
+    return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+  try {
+    std::vector<std::byte> output;
+    if (coding == transformed_body_coding::preserve &&
+        !original_content_encoding.empty() &&
+        !transform_detail::ascii_equal_ci(
+            original_content_encoding, "identity")) {
+      auto encoded =
+          ntl::net::inspection::encode_content_encoding(
+              encoders, decoded, original_content_encoding,
+              {.maximum_input_size =
+                   limits.maximum_decoded_body_bytes,
+               .maximum_encoded_size =
+                   limits.maximum_encoded_body_bytes,
+               .maximum_coding_layers =
+                   limits.maximum_coding_layers});
+      if (!encoded)
+        return ntl::unexpected(encoded.status());
+      output = std::move(*encoded);
+      headers.set(
+          "content-encoding",
+          std::string(original_content_encoding));
+    } else {
+      if (decoded.size() >
+          limits.maximum_encoded_body_bytes)
+        return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+      output.assign(decoded.begin(), decoded.end());
+      headers.erase("content-encoding");
+    }
+    headers.erase("transfer-encoding");
+    headers.set(
+        "content-length", std::to_string(output.size()));
+    return ntl::ok(std::move(output));
+  } catch (const std::bad_alloc &) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+}
+
+} // namespace ntl::net::http

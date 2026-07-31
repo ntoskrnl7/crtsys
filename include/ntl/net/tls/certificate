@@ -1,0 +1,920 @@
+/**
+ * @file tls_certificate
+ * @brief User-mode TLS certificate issuance and credential caching.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/tls/certificate is a user-mode header"
+#endif
+
+#include <ntl/net/tls/client_hello>
+#include <ntl/net/tls/stream>
+
+#include <bcrypt.h>
+#include <ncrypt.h>
+
+#include <array>
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <list>
+#include <memory>
+#include <mutex>
+#include <span>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <utility>
+#include <vector>
+
+namespace ntl::net {
+
+namespace detail {
+
+[[noreturn]] inline void
+throw_tls_windows(const char *operation) {
+  throw std::system_error(
+      static_cast<int>(::GetLastError()),
+      std::system_category(), operation);
+}
+
+[[noreturn]] inline void
+throw_tls_ncrypt(SECURITY_STATUS status,
+                 const char *operation) {
+  throw std::system_error(
+      static_cast<int>(status),
+      std::system_category(), operation);
+}
+
+inline std::wstring
+normalize_certificate_dns_name(std::wstring_view name) {
+  if (name.empty() || name.size() > 253)
+    throw std::invalid_argument(
+        "TLS certificate DNS name is empty or too long");
+  std::wstring normalized;
+  normalized.reserve(name.size());
+  std::size_t label_size = 0;
+  for (wchar_t character : name) {
+    if (character >= L'A' && character <= L'Z')
+      character = static_cast<wchar_t>(
+          character - L'A' + L'a');
+    if (character == L'.') {
+      if (label_size == 0 || label_size > 63)
+        throw std::invalid_argument(
+            "TLS certificate DNS label is invalid");
+      label_size = 0;
+    } else {
+      const bool accepted =
+          (character >= L'a' && character <= L'z') ||
+          (character >= L'0' && character <= L'9') ||
+          character == L'-' || character == L'_';
+      if (!accepted)
+        throw std::invalid_argument(
+            "TLS certificate DNS name is not an ASCII A-label");
+      ++label_size;
+    }
+    normalized.push_back(character);
+  }
+  if (label_size == 0 || label_size > 63)
+    throw std::invalid_argument(
+        "TLS certificate DNS label is invalid");
+  return normalized;
+}
+
+inline std::vector<BYTE>
+encode_tls_object(LPCSTR type, const void *value) {
+  DWORD size = 0;
+  if (!::CryptEncodeObjectEx(
+          X509_ASN_ENCODING, type, value, 0, nullptr,
+          nullptr, &size))
+    throw_tls_windows("CryptEncodeObjectEx(size)");
+  std::vector<BYTE> encoded(size);
+  if (!::CryptEncodeObjectEx(
+          X509_ASN_ENCODING, type, value, 0, nullptr,
+          encoded.data(), &size))
+    throw_tls_windows("CryptEncodeObjectEx");
+  encoded.resize(size);
+  return encoded;
+}
+
+inline std::vector<BYTE>
+encode_tls_name(std::wstring_view distinguished_name) {
+  const std::wstring owned(distinguished_name);
+  DWORD size = 0;
+  if (!::CertStrToNameW(
+          X509_ASN_ENCODING, owned.c_str(),
+          CERT_X500_NAME_STR, nullptr, nullptr, &size,
+          nullptr))
+    throw_tls_windows("CertStrToNameW(size)");
+  std::vector<BYTE> encoded(size);
+  if (!::CertStrToNameW(
+          X509_ASN_ENCODING, owned.c_str(),
+          CERT_X500_NAME_STR, nullptr, encoded.data(), &size,
+          nullptr))
+    throw_tls_windows("CertStrToNameW");
+  encoded.resize(size);
+  return encoded;
+}
+
+class ncrypt_provider {
+public:
+  ncrypt_provider() {
+    const SECURITY_STATUS status =
+        ::NCryptOpenStorageProvider(
+            &handle_, MS_KEY_STORAGE_PROVIDER, 0);
+    if (status != ERROR_SUCCESS)
+      throw_tls_ncrypt(
+          status, "NCryptOpenStorageProvider");
+  }
+  ncrypt_provider(const ncrypt_provider &) = delete;
+  ncrypt_provider &operator=(const ncrypt_provider &) = delete;
+  ~ncrypt_provider() {
+    if (handle_)
+      (void)::NCryptFreeObject(handle_);
+  }
+  NCRYPT_PROV_HANDLE get() const noexcept { return handle_; }
+
+private:
+  NCRYPT_PROV_HANDLE handle_ = 0;
+};
+
+class acquired_certificate_key {
+public:
+  explicit acquired_certificate_key(PCCERT_CONTEXT certificate) {
+    if (!::CryptAcquireCertificatePrivateKey(
+            certificate,
+            CRYPT_ACQUIRE_PREFER_NCRYPT_KEY_FLAG |
+                CRYPT_ACQUIRE_SILENT_FLAG,
+            nullptr, &handle_, &key_spec_, &caller_frees_))
+      throw_tls_windows(
+          "CryptAcquireCertificatePrivateKey");
+  }
+  acquired_certificate_key(
+      const acquired_certificate_key &) = delete;
+  acquired_certificate_key &
+  operator=(const acquired_certificate_key &) = delete;
+  ~acquired_certificate_key() {
+    if (!caller_frees_ || !handle_)
+      return;
+    if (key_spec_ == CERT_NCRYPT_KEY_SPEC)
+      (void)::NCryptFreeObject(
+          static_cast<NCRYPT_HANDLE>(handle_));
+    else
+      (void)::CryptReleaseContext(
+          static_cast<HCRYPTPROV>(handle_), 0);
+  }
+
+  HCRYPTPROV_OR_NCRYPT_KEY_HANDLE get() const noexcept {
+    return handle_;
+  }
+  DWORD key_spec() const noexcept { return key_spec_; }
+
+private:
+  HCRYPTPROV_OR_NCRYPT_KEY_HANDLE handle_ = 0;
+  DWORD key_spec_ = 0;
+  BOOL caller_frees_ = FALSE;
+};
+
+inline const char *
+certificate_signature_oid(PCCERT_CONTEXT issuer) {
+  if (!issuer || !issuer->pCertInfo ||
+      !issuer->pCertInfo->SubjectPublicKeyInfo.Algorithm.pszObjId)
+    throw std::invalid_argument(
+        "TLS issuer certificate has no public-key algorithm");
+  const char *const oid =
+      issuer->pCertInfo->SubjectPublicKeyInfo.Algorithm.pszObjId;
+  if (std::strcmp(oid, szOID_RSA_RSA) == 0)
+    return szOID_RSA_SHA256RSA;
+#ifdef szOID_ECDSA_SHA256
+  if (std::strcmp(oid, szOID_ECC_PUBLIC_KEY) == 0)
+    return szOID_ECDSA_SHA256;
+#endif
+  throw std::invalid_argument(
+      "TLS issuer must use an RSA or ECDSA key");
+}
+
+inline void require_ca_certificate(PCCERT_CONTEXT issuer) {
+  if (!issuer || !issuer->pCertInfo)
+    throw std::invalid_argument(
+        "TLS certificate issuer requires a certificate");
+  const PCERT_EXTENSION extension = ::CertFindExtension(
+      szOID_BASIC_CONSTRAINTS2,
+      issuer->pCertInfo->cExtension,
+      issuer->pCertInfo->rgExtension);
+  if (!extension)
+    throw std::invalid_argument(
+        "TLS issuer certificate is missing CA constraints");
+
+  CERT_BASIC_CONSTRAINTS2_INFO *constraints = nullptr;
+  DWORD size = 0;
+  if (!::CryptDecodeObjectEx(
+          X509_ASN_ENCODING, X509_BASIC_CONSTRAINTS2,
+          extension->Value.pbData, extension->Value.cbData,
+          CRYPT_DECODE_ALLOC_FLAG, nullptr, &constraints, &size))
+    throw_tls_windows(
+        "CryptDecodeObjectEx(CA constraints)");
+  const bool is_ca = constraints && constraints->fCA != FALSE;
+  if (constraints)
+    (void)::LocalFree(constraints);
+  if (!is_ca)
+    throw std::invalid_argument(
+        "TLS issuer certificate is not a CA");
+
+  BYTE usage = 0;
+  if (::CertGetIntendedKeyUsage(
+          X509_ASN_ENCODING, issuer->pCertInfo,
+          &usage, sizeof(usage)) &&
+      (usage & CERT_KEY_CERT_SIGN_KEY_USAGE) == 0)
+    throw std::invalid_argument(
+        "TLS issuer certificate cannot sign certificates");
+}
+
+} // namespace detail
+
+/**
+ * @brief One issued certificate and its deletable persisted CNG key.
+ */
+class issued_tls_certificate {
+public:
+  issued_tls_certificate() noexcept = default;
+  issued_tls_certificate(const issued_tls_certificate &) = delete;
+  issued_tls_certificate &
+  operator=(const issued_tls_certificate &) = delete;
+
+  issued_tls_certificate(
+      issued_tls_certificate &&other) noexcept
+      : certificate_(
+            std::exchange(other.certificate_, nullptr)),
+        key_(std::exchange(other.key_, 0)),
+        key_lifetime_(std::move(other.key_lifetime_)) {}
+
+  issued_tls_certificate &
+  operator=(issued_tls_certificate &&other) noexcept {
+    if (this != &other) {
+      reset();
+      certificate_ =
+          std::exchange(other.certificate_, nullptr);
+      key_ = std::exchange(other.key_, 0);
+      key_lifetime_ = std::move(other.key_lifetime_);
+    }
+    return *this;
+  }
+
+  ~issued_tls_certificate() { reset(); }
+
+  PCCERT_CONTEXT get() const noexcept { return certificate_; }
+  explicit operator bool() const noexcept {
+    return certificate_ != nullptr &&
+           (key_ != 0 || key_lifetime_ != nullptr);
+  }
+
+private:
+  friend class windows_tls_certificate_issuer;
+
+  issued_tls_certificate(
+      PCCERT_CONTEXT certificate,
+      NCRYPT_KEY_HANDLE key) noexcept
+      : certificate_(certificate), key_(key) {}
+
+  issued_tls_certificate(
+      PCCERT_CONTEXT certificate,
+      std::shared_ptr<void> key_lifetime) noexcept
+      : certificate_(certificate),
+        key_lifetime_(std::move(key_lifetime)) {}
+
+  void reset() noexcept {
+    if (certificate_)
+      (void)::CertFreeCertificateContext(certificate_);
+    certificate_ = nullptr;
+    if (key_) {
+      const SECURITY_STATUS status =
+          ::NCryptDeleteKey(key_, NCRYPT_SILENT_FLAG);
+      if (status != ERROR_SUCCESS)
+        (void)::NCryptFreeObject(key_);
+    }
+    key_ = 0;
+    key_lifetime_.reset();
+  }
+
+  PCCERT_CONTEXT certificate_ = nullptr;
+  NCRYPT_KEY_HANDLE key_ = 0;
+  std::shared_ptr<void> key_lifetime_;
+};
+
+class tls_certificate_issuer {
+public:
+  virtual ~tls_certificate_issuer() = default;
+  virtual issued_tls_certificate
+  issue(std::wstring_view server_name) = 0;
+};
+
+struct windows_tls_certificate_issuer_options {
+  enum class purpose : std::uint8_t {
+    server_authentication = 1,
+    client_authentication = 2,
+  };
+
+  std::wstring key_name_prefix = L"ntl-tls-leaf";
+  DWORD rsa_bits = 2048;
+  DWORD validity_days = 7;
+  bool machine_keys = false;
+  bool reuse_leaf_key = false;
+  purpose certificate_purpose = purpose::server_authentication;
+};
+
+/**
+ * @brief Issues per-host leaf certificates from an application-owned CA.
+ *
+ * The CA certificate must reference an accessible private key and must
+ * contain CA basic constraints. NTL does not install that CA into any trust
+ * store. Every generated leaf key is deleted when its issued certificate is
+ * evicted or destroyed.
+ */
+class windows_tls_certificate_issuer final
+    : public tls_certificate_issuer {
+public:
+  windows_tls_certificate_issuer(
+      PCCERT_CONTEXT issuer,
+      windows_tls_certificate_issuer_options options = {})
+      : issuer_(issuer
+                    ? ::CertDuplicateCertificateContext(issuer)
+                    : nullptr),
+        options_(std::move(options)) {
+    detail::require_ca_certificate(issuer_);
+    if (options_.key_name_prefix.empty() ||
+        options_.rsa_bits < 2048 ||
+        options_.validity_days == 0)
+      throw std::invalid_argument(
+          "invalid Windows TLS certificate issuer options");
+    if (options_.reuse_leaf_key)
+      shared_leaf_key_ = create_shared_leaf_key();
+  }
+
+  windows_tls_certificate_issuer(
+      const windows_tls_certificate_issuer &) = delete;
+  windows_tls_certificate_issuer &
+  operator=(const windows_tls_certificate_issuer &) = delete;
+
+  ~windows_tls_certificate_issuer() override {
+    if (issuer_)
+      (void)::CertFreeCertificateContext(issuer_);
+  }
+
+  issued_tls_certificate
+  issue(std::wstring_view server_name) override {
+    const std::wstring dns_name =
+        detail::normalize_certificate_dns_name(server_name);
+    detail::ncrypt_provider provider;
+
+    NCRYPT_KEY_HANDLE leaf_key =
+        shared_leaf_key_ ? shared_leaf_key_->key : 0;
+    const std::wstring key_name =
+        shared_leaf_key_
+            ? shared_leaf_key_->name
+            : make_key_name();
+    DWORD key_flags = options_.machine_keys
+                          ? NCRYPT_MACHINE_KEY_FLAG
+                          : 0;
+    SECURITY_STATUS status = ERROR_SUCCESS;
+    if (!shared_leaf_key_) {
+      status = ::NCryptCreatePersistedKey(
+          provider.get(), &leaf_key, NCRYPT_RSA_ALGORITHM,
+          key_name.c_str(), 0, key_flags);
+      if (status != ERROR_SUCCESS)
+        detail::throw_tls_ncrypt(
+            status, "NCryptCreatePersistedKey(TLS leaf)");
+    }
+
+    struct leaf_key_cleanup {
+      NCRYPT_KEY_HANDLE *value;
+      bool release = true;
+      ~leaf_key_cleanup() {
+        if (!release || !*value)
+          return;
+        const SECURITY_STATUS status =
+            ::NCryptDeleteKey(*value, NCRYPT_SILENT_FLAG);
+        if (status != ERROR_SUCCESS)
+          (void)::NCryptFreeObject(*value);
+      }
+    } cleanup{&leaf_key, !shared_leaf_key_};
+
+    if (!shared_leaf_key_) {
+      configure_leaf_key(leaf_key);
+    }
+
+    DWORD public_key_size = 0;
+    if (!::CryptExportPublicKeyInfo(
+            leaf_key, 0, X509_ASN_ENCODING,
+            nullptr, &public_key_size))
+      detail::throw_tls_windows(
+          "CryptExportPublicKeyInfo(size)");
+    const std::size_t public_units =
+        (public_key_size + sizeof(std::max_align_t) - 1) /
+        sizeof(std::max_align_t);
+    std::vector<std::max_align_t> public_storage(public_units);
+    auto *const public_key =
+        reinterpret_cast<PCERT_PUBLIC_KEY_INFO>(
+            public_storage.data());
+    if (!::CryptExportPublicKeyInfo(
+            leaf_key, 0, X509_ASN_ENCODING,
+            public_key, &public_key_size))
+      detail::throw_tls_windows(
+          "CryptExportPublicKeyInfo");
+
+    const std::wstring subject = L"CN=" + dns_name;
+    std::vector<BYTE> subject_name =
+        detail::encode_tls_name(subject);
+
+    std::array<BYTE, 16> serial{};
+    if (!BCRYPT_SUCCESS(::BCryptGenRandom(
+            nullptr, serial.data(),
+            static_cast<ULONG>(serial.size()),
+            BCRYPT_USE_SYSTEM_PREFERRED_RNG)))
+      throw std::runtime_error(
+          "BCryptGenRandom(TLS certificate serial) failed");
+    serial.back() &= 0x7f;
+    if (serial.back() == 0)
+      serial.back() = 1;
+
+    CERT_ALT_NAME_ENTRY alternate_name{};
+    alternate_name.dwAltNameChoice =
+        CERT_ALT_NAME_DNS_NAME;
+    alternate_name.pwszDNSName =
+        const_cast<wchar_t *>(dns_name.c_str());
+    CERT_ALT_NAME_INFO alternate_names{
+        1, &alternate_name};
+    auto encoded_alternate_names =
+        detail::encode_tls_object(
+            X509_ALTERNATE_NAME, &alternate_names);
+
+    char *enhanced_usage_ids[] = {
+        const_cast<char *>(
+            options_.certificate_purpose ==
+                    windows_tls_certificate_issuer_options::purpose::
+                        server_authentication
+                ? szOID_PKIX_KP_SERVER_AUTH
+                : szOID_PKIX_KP_CLIENT_AUTH)};
+    CERT_ENHKEY_USAGE enhanced_usage{
+        1, enhanced_usage_ids};
+    auto encoded_enhanced_usage =
+        detail::encode_tls_object(
+            X509_ENHANCED_KEY_USAGE, &enhanced_usage);
+
+    BYTE usage_bits = static_cast<BYTE>(
+        CERT_DIGITAL_SIGNATURE_KEY_USAGE |
+        CERT_KEY_ENCIPHERMENT_KEY_USAGE);
+    CRYPT_BIT_BLOB key_usage{
+        sizeof(usage_bits), &usage_bits, 0};
+    auto encoded_key_usage =
+        detail::encode_tls_object(
+            X509_KEY_USAGE, &key_usage);
+
+    CERT_BASIC_CONSTRAINTS2_INFO constraints{};
+    constraints.fCA = FALSE;
+    auto encoded_constraints =
+        detail::encode_tls_object(
+            X509_BASIC_CONSTRAINTS2, &constraints);
+
+    std::array<CERT_EXTENSION, 4> extensions{};
+    extensions[0] = {
+        const_cast<char *>(szOID_SUBJECT_ALT_NAME2), FALSE,
+        {static_cast<DWORD>(encoded_alternate_names.size()),
+         encoded_alternate_names.data()}};
+    extensions[1] = {
+        const_cast<char *>(szOID_ENHANCED_KEY_USAGE), FALSE,
+        {static_cast<DWORD>(encoded_enhanced_usage.size()),
+         encoded_enhanced_usage.data()}};
+    extensions[2] = {
+        const_cast<char *>(szOID_KEY_USAGE), TRUE,
+        {static_cast<DWORD>(encoded_key_usage.size()),
+         encoded_key_usage.data()}};
+    extensions[3] = {
+        const_cast<char *>(szOID_BASIC_CONSTRAINTS2), TRUE,
+        {static_cast<DWORD>(encoded_constraints.size()),
+         encoded_constraints.data()}};
+
+    FILETIME now{};
+    ::GetSystemTimeAsFileTime(&now);
+    ULARGE_INTEGER start{};
+    start.LowPart = now.dwLowDateTime;
+    start.HighPart = now.dwHighDateTime;
+    constexpr std::uint64_t ticks_per_second = 10000000;
+    start.QuadPart -= 5 * 60 * ticks_per_second;
+    ULARGE_INTEGER end = start;
+    end.QuadPart +=
+        static_cast<std::uint64_t>(options_.validity_days) *
+        24 * 60 * 60 * ticks_per_second;
+    FILETIME not_before{start.LowPart, start.HighPart};
+    FILETIME not_after{end.LowPart, end.HighPart};
+    if (::CompareFileTime(
+            &not_after,
+            &issuer_->pCertInfo->NotAfter) > 0)
+      not_after = issuer_->pCertInfo->NotAfter;
+    if (::CompareFileTime(&not_before, &not_after) >= 0)
+      throw std::invalid_argument(
+          "TLS issuer expires before the leaf certificate");
+
+    const char *const signature_oid =
+        detail::certificate_signature_oid(issuer_);
+    CRYPT_ALGORITHM_IDENTIFIER signature{};
+    signature.pszObjId =
+        const_cast<char *>(signature_oid);
+
+    CERT_INFO certificate_info{};
+    certificate_info.dwVersion = CERT_V3;
+    certificate_info.SerialNumber = {
+        static_cast<DWORD>(serial.size()), serial.data()};
+    certificate_info.SignatureAlgorithm = signature;
+    certificate_info.Issuer = issuer_->pCertInfo->Subject;
+    certificate_info.NotBefore = not_before;
+    certificate_info.NotAfter = not_after;
+    certificate_info.Subject = {
+        static_cast<DWORD>(subject_name.size()),
+        subject_name.data()};
+    certificate_info.SubjectPublicKeyInfo = *public_key;
+    certificate_info.cExtension =
+        static_cast<DWORD>(extensions.size());
+    certificate_info.rgExtension = extensions.data();
+
+    detail::acquired_certificate_key issuer_key(issuer_);
+    DWORD encoded_size = 0;
+    if (!::CryptSignAndEncodeCertificate(
+            issuer_key.get(), issuer_key.key_spec(),
+            X509_ASN_ENCODING, X509_CERT_TO_BE_SIGNED,
+            &certificate_info, &signature, nullptr,
+            nullptr, &encoded_size))
+      detail::throw_tls_windows(
+          "CryptSignAndEncodeCertificate(size)");
+    std::vector<BYTE> encoded(encoded_size);
+    if (!::CryptSignAndEncodeCertificate(
+            issuer_key.get(), issuer_key.key_spec(),
+            X509_ASN_ENCODING, X509_CERT_TO_BE_SIGNED,
+            &certificate_info, &signature, nullptr,
+            encoded.data(), &encoded_size))
+      detail::throw_tls_windows(
+          "CryptSignAndEncodeCertificate");
+    encoded.resize(encoded_size);
+
+    PCCERT_CONTEXT certificate =
+        ::CertCreateCertificateContext(
+            X509_ASN_ENCODING, encoded.data(),
+            static_cast<DWORD>(encoded.size()));
+    if (!certificate)
+      detail::throw_tls_windows(
+          "CertCreateCertificateContext(TLS leaf)");
+
+    CRYPT_KEY_PROV_INFO key_info{};
+    key_info.pwszContainerName =
+        const_cast<wchar_t *>(key_name.c_str());
+    key_info.pwszProvName =
+        const_cast<wchar_t *>(MS_KEY_STORAGE_PROVIDER);
+    key_info.dwProvType = 0;
+    key_info.dwFlags =
+        options_.machine_keys ? NCRYPT_MACHINE_KEY_FLAG : 0;
+    key_info.dwKeySpec = 0;
+    if (!::CertSetCertificateContextProperty(
+            certificate, CERT_KEY_PROV_INFO_PROP_ID, 0,
+            &key_info)) {
+      (void)::CertFreeCertificateContext(certificate);
+      detail::throw_tls_windows(
+          "CertSetCertificateContextProperty(TLS leaf key)");
+    }
+
+    if (shared_leaf_key_)
+      return issued_tls_certificate(
+          certificate,
+          std::static_pointer_cast<void>(
+              shared_leaf_key_));
+    cleanup.release = false;
+    return issued_tls_certificate(certificate, leaf_key);
+  }
+
+private:
+  struct shared_leaf_key {
+    NCRYPT_KEY_HANDLE key = 0;
+    std::wstring name;
+
+    ~shared_leaf_key() {
+      if (!key)
+        return;
+      const SECURITY_STATUS status =
+          ::NCryptDeleteKey(key, NCRYPT_SILENT_FLAG);
+      if (status != ERROR_SUCCESS)
+        (void)::NCryptFreeObject(key);
+    }
+  };
+
+  std::wstring make_key_name() const {
+    return options_.key_name_prefix + L"-" +
+           std::to_wstring(::GetCurrentProcessId()) + L"-" +
+           std::to_wstring(::GetTickCount64()) + L"-" +
+           std::to_wstring(
+               sequence_.fetch_add(
+                   1, std::memory_order_relaxed));
+  }
+
+  void configure_leaf_key(
+      NCRYPT_KEY_HANDLE leaf_key) const {
+    DWORD rsa_bits = options_.rsa_bits;
+    SECURITY_STATUS status = ::NCryptSetProperty(
+        leaf_key, NCRYPT_LENGTH_PROPERTY,
+        reinterpret_cast<PBYTE>(&rsa_bits),
+        sizeof(rsa_bits), 0);
+    if (status != ERROR_SUCCESS)
+      detail::throw_tls_ncrypt(
+          status, "NCryptSetProperty(TLS leaf length)");
+    status = ::NCryptFinalizeKey(leaf_key, 0);
+    if (status != ERROR_SUCCESS)
+      detail::throw_tls_ncrypt(
+          status, "NCryptFinalizeKey(TLS leaf)");
+  }
+
+  std::shared_ptr<shared_leaf_key>
+  create_shared_leaf_key() {
+    detail::ncrypt_provider provider;
+    auto state =
+        std::make_shared<shared_leaf_key>();
+    state->name = make_key_name();
+    const DWORD key_flags =
+        options_.machine_keys
+            ? NCRYPT_MACHINE_KEY_FLAG
+            : 0;
+    const SECURITY_STATUS status =
+        ::NCryptCreatePersistedKey(
+            provider.get(), &state->key,
+            NCRYPT_RSA_ALGORITHM,
+            state->name.c_str(), 0, key_flags);
+    if (status != ERROR_SUCCESS)
+      detail::throw_tls_ncrypt(
+          status,
+          "NCryptCreatePersistedKey(shared TLS leaf)");
+    configure_leaf_key(state->key);
+    return state;
+  }
+
+  PCCERT_CONTEXT issuer_ = nullptr;
+  windows_tls_certificate_issuer_options options_;
+  std::shared_ptr<shared_leaf_key> shared_leaf_key_;
+  inline static std::atomic<std::uint64_t> sequence_{1};
+};
+
+/**
+ * @brief An issued certificate kept beside its Schannel credential.
+ */
+class tls_server_identity {
+public:
+  explicit tls_server_identity(
+      issued_tls_certificate certificate)
+      : certificate_(std::move(certificate)),
+        credentials_(
+            tls_credentials::server(certificate_.get())) {
+    if (!certificate_)
+      throw std::invalid_argument(
+          "TLS server identity requires a certificate");
+  }
+
+  tls_server_identity(const tls_server_identity &) = delete;
+  tls_server_identity &
+  operator=(const tls_server_identity &) = delete;
+
+  PCCERT_CONTEXT certificate() const noexcept {
+    return certificate_.get();
+  }
+  tls_credentials &credentials() noexcept {
+    return credentials_;
+  }
+
+private:
+  issued_tls_certificate certificate_;
+  tls_credentials credentials_;
+};
+
+class tls_server_identity_provider {
+public:
+  virtual ~tls_server_identity_provider() = default;
+  virtual std::shared_ptr<tls_server_identity>
+  select(const tls_client_hello &hello) = 0;
+};
+
+/**
+ * @brief Bounded LRU cache of per-SNI certificates and credentials.
+ */
+class cached_tls_server_identity_provider final
+    : public tls_server_identity_provider {
+public:
+  cached_tls_server_identity_provider(
+      tls_certificate_issuer &issuer,
+      std::size_t maximum_entries)
+      : issuer_(&issuer),
+        maximum_entries_(maximum_entries) {
+    if (maximum_entries_ == 0)
+      throw std::invalid_argument(
+          "TLS identity cache capacity must be positive");
+  }
+
+  cached_tls_server_identity_provider(
+      const cached_tls_server_identity_provider &) = delete;
+  cached_tls_server_identity_provider &
+  operator=(const cached_tls_server_identity_provider &) = delete;
+
+  std::shared_ptr<tls_server_identity>
+  select(const tls_client_hello &hello) override {
+    if (hello.server_name().empty())
+      throw std::system_error(
+          ERROR_NOT_FOUND, std::system_category(),
+          "TLS ClientHello did not contain SNI");
+    return select(hello.server_name());
+  }
+
+  std::shared_ptr<tls_server_identity>
+  select(std::wstring_view server_name) {
+    const std::wstring normalized =
+        detail::normalize_certificate_dns_name(server_name);
+    std::lock_guard guard(lock_);
+    for (auto current = identities_.begin();
+         current != identities_.end(); ++current) {
+      if (current->server_name == normalized) {
+        auto result = current->identity;
+        identities_.splice(
+            identities_.begin(), identities_, current);
+        return result;
+      }
+    }
+
+    auto identity = std::make_shared<tls_server_identity>(
+        issuer_->issue(normalized));
+    identities_.push_front(
+        {normalized, identity});
+    if (identities_.size() > maximum_entries_)
+      identities_.pop_back();
+    return identity;
+  }
+
+  std::size_t size() const {
+    std::lock_guard guard(lock_);
+    return identities_.size();
+  }
+
+  void clear() {
+    std::lock_guard guard(lock_);
+    identities_.clear();
+  }
+
+private:
+  struct cache_entry {
+    std::wstring server_name;
+    std::shared_ptr<tls_server_identity> identity;
+  };
+
+  tls_certificate_issuer *issuer_ = nullptr;
+  std::size_t maximum_entries_ = 0;
+  mutable std::mutex lock_;
+  std::list<cache_entry> identities_;
+};
+
+/**
+ * @brief Manually validates a TLS server against one application-owned CA.
+ *
+ * This policy creates a private certificate-chain engine. It neither reads
+ * trust decisions from nor writes the Windows trusted-root store. It is
+ * useful for controlled clients and tests; ordinary applications that must
+ * trust an interception CA should use an explicit administrator deployment
+ * mechanism and normal Schannel validation instead.
+ */
+class certificate_authority_policy final
+    : public tls_peer_certificate_policy {
+public:
+  explicit certificate_authority_policy(PCCERT_CONTEXT authority)
+      : authority_(
+            authority
+                ? ::CertDuplicateCertificateContext(authority)
+                : nullptr) {
+    try {
+      if (!authority_)
+        throw std::invalid_argument(
+            "certificate_authority_policy requires a CA certificate");
+
+      roots_ = ::CertOpenStore(
+          CERT_STORE_PROV_MEMORY, X509_ASN_ENCODING, 0,
+          CERT_STORE_CREATE_NEW_FLAG, nullptr);
+      if (!roots_)
+        detail::throw_tls_windows(
+            "CertOpenStore(private TLS roots)");
+      if (!::CertAddCertificateContextToStore(
+              roots_, authority_, CERT_STORE_ADD_ALWAYS, nullptr))
+        detail::throw_tls_windows(
+            "CertAddCertificateContextToStore(private TLS root)");
+
+      CERT_CHAIN_ENGINE_CONFIG config{};
+      config.cbSize = sizeof(config);
+      config.hExclusiveRoot = roots_;
+      config.dwFlags = CERT_CHAIN_CACHE_ONLY_URL_RETRIEVAL;
+      if (!::CertCreateCertificateChainEngine(&config, &engine_))
+        detail::throw_tls_windows(
+            "CertCreateCertificateChainEngine(private TLS root)");
+    } catch (...) {
+      reset();
+      throw;
+    }
+  }
+
+  certificate_authority_policy(
+      const certificate_authority_policy &) = delete;
+  certificate_authority_policy &
+  operator=(const certificate_authority_policy &) = delete;
+  certificate_authority_policy(
+      certificate_authority_policy &&) = delete;
+  certificate_authority_policy &
+  operator=(certificate_authority_policy &&) = delete;
+
+  ~certificate_authority_policy() override { reset(); }
+
+  bool verify(PCCERT_CONTEXT certificate,
+              std::wstring_view server_name) noexcept override {
+    if (!certificate || !authority_ || !engine_ ||
+        server_name.empty())
+      return false;
+    try {
+      std::wstring name(server_name);
+      LPSTR usages[] = {
+          const_cast<LPSTR>(szOID_PKIX_KP_SERVER_AUTH)};
+      CERT_CHAIN_PARA chain_parameters{};
+      chain_parameters.cbSize = sizeof(chain_parameters);
+      chain_parameters.RequestedUsage.dwType =
+          USAGE_MATCH_TYPE_AND;
+      chain_parameters.RequestedUsage.Usage.cUsageIdentifier = 1;
+      chain_parameters.RequestedUsage.Usage.rgpszUsageIdentifier =
+          usages;
+
+      PCCERT_CHAIN_CONTEXT chain = nullptr;
+      if (!::CertGetCertificateChain(
+              engine_, certificate, nullptr, nullptr,
+              &chain_parameters,
+              CERT_CHAIN_CACHE_ONLY_URL_RETRIEVAL,
+              nullptr, &chain))
+        return false;
+      struct chain_release {
+        PCCERT_CHAIN_CONTEXT value;
+        ~chain_release() {
+          if (value)
+            (void)::CertFreeCertificateChain(value);
+        }
+      } release{chain};
+
+      if (!chain || chain->cChain != 1 ||
+          !chain->rgpChain || !chain->rgpChain[0] ||
+          chain->rgpChain[0]->cElement < 2)
+        return false;
+      const auto *simple = chain->rgpChain[0];
+      const auto *root_element =
+          simple->rgpElement[simple->cElement - 1];
+      if (!root_element || !root_element->pCertContext ||
+          root_element->pCertContext->cbCertEncoded !=
+              authority_->cbCertEncoded ||
+          std::memcmp(
+              root_element->pCertContext->pbCertEncoded,
+              authority_->pbCertEncoded,
+              authority_->cbCertEncoded) != 0)
+        return false;
+
+      SSL_EXTRA_CERT_CHAIN_POLICY_PARA ssl{};
+      ssl.cbSize = sizeof(ssl);
+      ssl.dwAuthType = AUTHTYPE_SERVER;
+      ssl.pwszServerName = name.data();
+      CERT_CHAIN_POLICY_PARA policy{};
+      policy.cbSize = sizeof(policy);
+      policy.pvExtraPolicyPara = &ssl;
+      CERT_CHAIN_POLICY_STATUS status{};
+      status.cbSize = sizeof(status);
+      return ::CertVerifyCertificateChainPolicy(
+                 CERT_CHAIN_POLICY_SSL, chain, &policy, &status) &&
+             status.dwError == ERROR_SUCCESS;
+    } catch (...) {
+      return false;
+    }
+  }
+
+private:
+  void reset() noexcept {
+    if (engine_)
+      ::CertFreeCertificateChainEngine(engine_);
+    if (roots_)
+      (void)::CertCloseStore(roots_, 0);
+    if (authority_)
+      (void)::CertFreeCertificateContext(authority_);
+    engine_ = nullptr;
+    roots_ = nullptr;
+    authority_ = nullptr;
+  }
+
+  PCCERT_CONTEXT authority_ = nullptr;
+  HCERTSTORE roots_ = nullptr;
+  HCERTCHAINENGINE engine_ = nullptr;
+};
+
+} // namespace ntl::net

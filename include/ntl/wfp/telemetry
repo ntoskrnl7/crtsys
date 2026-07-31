@@ -1,0 +1,359 @@
+/**
+ * @file telemetry
+ * @brief Bounded, pointer-free user-mode WFP network-event diagnostics.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/wfp/telemetry is a user-mode header"
+#endif
+
+#include "management"
+
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <condition_variable>
+#include <cstddef>
+#include <cstdint>
+#include <iterator>
+#include <limits>
+#include <mutex>
+#include <stdexcept>
+#include <utility>
+#include <vector>
+
+namespace ntl::wfp {
+
+enum class network_event_kind {
+  classify_drop,
+  ipsec_kernel_drop,
+  other,
+};
+
+/**
+ * @brief Pointer-free network-event record safe to retain after the callback.
+ */
+struct network_event_snapshot {
+  network_event_kind kind = network_event_kind::other;
+  std::uint64_t timestamp = 0;
+  std::uint32_t header_flags = 0;
+  FWP_IP_VERSION ip_version = FWP_IP_VERSION_NONE;
+  std::uint8_t protocol = 0;
+  std::array<std::uint8_t, 16> local_address{};
+  std::array<std::uint8_t, 16> remote_address{};
+  std::uint8_t address_size = 0;
+  std::uint16_t local_port = 0;
+  std::uint16_t remote_port = 0;
+  std::uint32_t scope_id = 0;
+  std::uint64_t application_id_hash = 0;
+  std::uint64_t user_sid_hash = 0;
+  std::uint64_t filter_id = 0;
+  std::uint16_t layer_id = 0;
+  std::uint32_t direction = 0;
+  std::int32_t failure_status = 0;
+};
+
+struct network_event_monitor_options {
+  /** Maximum retained records. A full queue drops new records and counts it. */
+  std::size_t maximum_queued_events = 1024;
+
+  /**
+   * Explicitly enables BFE network-event collection while this monitor lives.
+   * The prior engine option is restored on stop. Leave false when another
+   * product or administrator owns the global collection policy.
+   */
+  bool manage_collection_state = false;
+};
+
+struct network_event_monitor_stats {
+  std::uint64_t received = 0;
+  std::uint64_t queued = 0;
+  std::uint64_t dropped_by_limit = 0;
+};
+
+namespace detail {
+
+inline std::uint64_t telemetry_hash_bytes(const std::uint8_t *data,
+                                          std::size_t size) noexcept {
+  std::uint64_t value = 14695981039346656037ull;
+  if (!data)
+    return 0;
+  for (std::size_t index = 0; index != size; ++index) {
+    value ^= data[index];
+    value *= 1099511628211ull;
+  }
+  return value;
+}
+
+inline std::uint64_t file_time_value(FILETIME value) noexcept {
+  return (static_cast<std::uint64_t>(value.dwHighDateTime) << 32) |
+         value.dwLowDateTime;
+}
+
+inline network_event_snapshot
+snapshot_network_event(const FWPM_NET_EVENT1 &event) noexcept {
+  network_event_snapshot result;
+  result.timestamp = file_time_value(event.header.timeStamp);
+  result.header_flags = event.header.flags;
+  if ((event.header.flags & FWPM_NET_EVENT_FLAG_IP_VERSION_SET) != 0)
+    result.ip_version = event.header.ipVersion;
+  if ((event.header.flags & FWPM_NET_EVENT_FLAG_IP_PROTOCOL_SET) != 0)
+    result.protocol = event.header.ipProtocol;
+  if ((event.header.flags & FWPM_NET_EVENT_FLAG_LOCAL_PORT_SET) != 0)
+    result.local_port = event.header.localPort;
+  if ((event.header.flags & FWPM_NET_EVENT_FLAG_REMOTE_PORT_SET) != 0)
+    result.remote_port = event.header.remotePort;
+  if ((event.header.flags & FWPM_NET_EVENT_FLAG_SCOPE_ID_SET) != 0)
+    result.scope_id = event.header.scopeId;
+
+  if ((event.header.flags & FWPM_NET_EVENT_FLAG_IP_VERSION_SET) != 0) {
+    if (event.header.ipVersion == FWP_IP_VERSION_V4) {
+      result.address_size = 4;
+      const auto local = event.header.localAddrV4;
+      const auto remote = event.header.remoteAddrV4;
+      for (std::size_t index = 0; index != 4; ++index) {
+        const auto shift = static_cast<unsigned>((3 - index) * 8);
+        if ((event.header.flags & FWPM_NET_EVENT_FLAG_LOCAL_ADDR_SET) != 0)
+          result.local_address[index] =
+              static_cast<std::uint8_t>(local >> shift);
+        if ((event.header.flags & FWPM_NET_EVENT_FLAG_REMOTE_ADDR_SET) != 0)
+          result.remote_address[index] =
+              static_cast<std::uint8_t>(remote >> shift);
+      }
+    } else if (event.header.ipVersion == FWP_IP_VERSION_V6) {
+      result.address_size = 16;
+      if ((event.header.flags & FWPM_NET_EVENT_FLAG_LOCAL_ADDR_SET) != 0)
+        std::copy(std::begin(event.header.localAddrV6.byteArray16),
+                  std::end(event.header.localAddrV6.byteArray16),
+                  result.local_address.begin());
+      if ((event.header.flags & FWPM_NET_EVENT_FLAG_REMOTE_ADDR_SET) != 0)
+        std::copy(std::begin(event.header.remoteAddrV6.byteArray16),
+                  std::end(event.header.remoteAddrV6.byteArray16),
+                  result.remote_address.begin());
+    }
+  }
+
+  if ((event.header.flags & FWPM_NET_EVENT_FLAG_APP_ID_SET) != 0)
+    result.application_id_hash =
+        telemetry_hash_bytes(event.header.appId.data, event.header.appId.size);
+  if ((event.header.flags & FWPM_NET_EVENT_FLAG_USER_ID_SET) != 0 &&
+      event.header.userId && ::IsValidSid(event.header.userId)) {
+    result.user_sid_hash = telemetry_hash_bytes(
+        reinterpret_cast<const std::uint8_t *>(event.header.userId),
+        ::GetLengthSid(event.header.userId));
+  }
+
+  switch (event.type) {
+  case FWPM_NET_EVENT_TYPE_CLASSIFY_DROP:
+    result.kind = network_event_kind::classify_drop;
+    if (event.classifyDrop) {
+      result.filter_id = event.classifyDrop->filterId;
+      result.layer_id = event.classifyDrop->layerId;
+      result.direction = event.classifyDrop->msFwpDirection;
+    }
+    break;
+  case FWPM_NET_EVENT_TYPE_IPSEC_KERNEL_DROP:
+    result.kind = network_event_kind::ipsec_kernel_drop;
+    if (event.ipsecDrop) {
+      result.filter_id = event.ipsecDrop->filterId;
+      result.layer_id = event.ipsecDrop->layerId;
+      result.direction = static_cast<std::uint32_t>(event.ipsecDrop->direction);
+      result.failure_status = event.ipsecDrop->failureStatus;
+    }
+    break;
+  default:
+    result.kind = network_event_kind::other;
+    break;
+  }
+  return result;
+}
+
+} // namespace detail
+
+/**
+ * @brief RAII WFP event subscription with a preallocated bounded event ring.
+ */
+class network_event_monitor {
+public:
+  explicit network_event_monitor(network_event_monitor_options options = {})
+      : maximum_queued_events_(options.maximum_queued_events),
+        manage_collection_state_(options.manage_collection_state) {
+    if (maximum_queued_events_ == 0 ||
+        maximum_queued_events_ > (std::numeric_limits<std::uint32_t>::max)())
+      throw std::invalid_argument("WFP network-event queue bound is invalid");
+    events_.resize(maximum_queued_events_);
+
+    FWPM_SESSION0 session{};
+    session.displayData.name = const_cast<wchar_t *>(L"ntl::wfp event monitor");
+    session.flags = FWPM_SESSION_FLAG_DYNAMIC;
+    check(FwpmEngineOpen0(nullptr, RPC_C_AUTHN_WINNT, nullptr, &session,
+                          &engine_),
+          "FwpmEngineOpen0");
+
+    try {
+      if (manage_collection_state_)
+        enable_collection();
+      FWPM_NET_EVENT_SUBSCRIPTION0 subscription{};
+      check(FwpmNetEventSubscribe0(engine_, &subscription, &receive_native,
+                                   this, &subscription_),
+            "FwpmNetEventSubscribe0");
+    } catch (...) {
+      restore_collection();
+      close_engine();
+      throw;
+    }
+  }
+
+  network_event_monitor(const network_event_monitor &) = delete;
+  network_event_monitor &operator=(const network_event_monitor &) = delete;
+  network_event_monitor(network_event_monitor &&) = delete;
+  network_event_monitor &operator=(network_event_monitor &&) = delete;
+
+  ~network_event_monitor() { stop(); }
+
+  bool try_pop(network_event_snapshot &result) {
+    std::lock_guard lock(mutex_);
+    if (queued_events_ == 0)
+      return false;
+    result = events_[next_event_];
+    next_event_ = (next_event_ + 1) % maximum_queued_events_;
+    --queued_events_;
+    return true;
+  }
+
+  bool wait_pop(network_event_snapshot &result,
+                std::chrono::milliseconds timeout) {
+    if (timeout.count() < 0)
+      throw std::invalid_argument("WFP network-event wait timeout is negative");
+    std::unique_lock lock(mutex_);
+    condition_.wait_for(lock, timeout,
+                        [&] { return stopping_ || queued_events_ != 0; });
+    if (queued_events_ == 0)
+      return false;
+    result = events_[next_event_];
+    next_event_ = (next_event_ + 1) % maximum_queued_events_;
+    --queued_events_;
+    return true;
+  }
+
+  network_event_monitor_stats stats() const noexcept {
+    std::lock_guard lock(mutex_);
+    auto result = stats_;
+    result.queued = queued_events_;
+    return result;
+  }
+
+  void stop() noexcept {
+    HANDLE subscription = nullptr;
+    HANDLE engine = nullptr;
+    {
+      std::lock_guard lock(mutex_);
+      if (stopping_)
+        return;
+      stopping_ = true;
+      subscription = std::exchange(subscription_, nullptr);
+      engine = engine_;
+    }
+    condition_.notify_all();
+    if (subscription && engine)
+      (void)FwpmNetEventUnsubscribe0(engine, subscription);
+    restore_collection();
+    close_engine();
+  }
+
+private:
+  static void CALLBACK receive_native(void *context,
+                                      const FWPM_NET_EVENT1 *event) noexcept {
+    if (!context || !event)
+      return;
+    static_cast<network_event_monitor *>(context)->receive(*event);
+  }
+
+  void receive(const FWPM_NET_EVENT1 &event) noexcept {
+    const auto snapshot = detail::snapshot_network_event(event);
+    {
+      std::lock_guard lock(mutex_);
+      ++stats_.received;
+      if (stopping_)
+        return;
+      if (queued_events_ == maximum_queued_events_) {
+        ++stats_.dropped_by_limit;
+        return;
+      }
+      const auto insertion =
+          (next_event_ + queued_events_) % maximum_queued_events_;
+      events_[insertion] = snapshot;
+      ++queued_events_;
+    }
+    condition_.notify_one();
+  }
+
+  void enable_collection() {
+    FWP_VALUE0 *current = nullptr;
+    check(
+        FwpmEngineGetOption0(engine_, FWPM_ENGINE_COLLECT_NET_EVENTS, &current),
+        "FwpmEngineGetOption0");
+    struct value_release {
+      FWP_VALUE0 *value;
+      ~value_release() {
+        if (!value)
+          return;
+        void *memory = value;
+        ::FwpmFreeMemory0(&memory);
+      }
+    } release{current};
+    if (!current || current->type != FWP_UINT32)
+      throw std::runtime_error(
+          "WFP network-event collection option has an invalid type");
+    collection_was_enabled_ = current->uint32 != 0;
+    if (collection_was_enabled_)
+      return;
+    FWP_VALUE0 enabled{};
+    enabled.type = FWP_UINT32;
+    enabled.uint32 = 1;
+    check(
+        FwpmEngineSetOption0(engine_, FWPM_ENGINE_COLLECT_NET_EVENTS, &enabled),
+        "FwpmEngineSetOption0");
+    changed_collection_state_ = true;
+  }
+
+  void restore_collection() noexcept {
+    if (!changed_collection_state_ || !engine_)
+      return;
+    FWP_VALUE0 disabled{};
+    disabled.type = FWP_UINT32;
+    disabled.uint32 = collection_was_enabled_ ? 1u : 0u;
+    (void)FwpmEngineSetOption0(engine_, FWPM_ENGINE_COLLECT_NET_EVENTS,
+                               &disabled);
+    changed_collection_state_ = false;
+  }
+
+  void close_engine() noexcept {
+    if (engine_) {
+      (void)FwpmEngineClose0(engine_);
+      engine_ = nullptr;
+    }
+  }
+
+  static void check(DWORD result, const char *operation) {
+    if (result != ERROR_SUCCESS)
+      throw management_error(result, operation);
+  }
+
+  mutable std::mutex mutex_;
+  std::condition_variable condition_;
+  std::vector<network_event_snapshot> events_;
+  network_event_monitor_stats stats_{};
+  std::size_t maximum_queued_events_ = 0;
+  std::size_t next_event_ = 0;
+  std::size_t queued_events_ = 0;
+  bool manage_collection_state_ = false;
+  bool collection_was_enabled_ = false;
+  bool changed_collection_state_ = false;
+  bool stopping_ = false;
+  HANDLE engine_ = nullptr;
+  HANDLE subscription_ = nullptr;
+};
+
+} // namespace ntl::wfp

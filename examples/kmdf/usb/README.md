@@ -1,5 +1,7 @@
 # NTL KMDF USB Driver Template
 
+[한국어 설명](./README.ko-KR.md)
+
 This driver/app template demonstrates the NTL KMDF USB path:
 
 1. create a `usb_device` in `EvtDevicePrepareHardware`;

@@ -1,0 +1,1326 @@
+/**
+ * @file http3_qpack
+ * @brief Bounded zero-dynamic-table QPACK decoder for HTTP/3.
+ *
+ * This decoder is an interoperable RFC 9204 profile for endpoints that
+ * advertise SETTINGS_QPACK_MAX_TABLE_CAPACITY=0 and
+ * SETTINGS_QPACK_BLOCKED_STREAMS=0. Applications that negotiate dynamic
+ * QPACK adapt a stateful external decoder through ntl/net/http3/framing.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/http3/qpack is a user-mode header"
+#endif
+
+#include <ntl/net/http2/hpack>
+#include <ntl/net/http3/framing>
+
+#include <array>
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <deque>
+#include <limits>
+#include <optional>
+#include <span>
+#include <string>
+#include <string_view>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+
+namespace ntl::net::http3 {
+
+namespace qpack_detail {
+
+struct static_entry {
+  std::string_view name;
+  std::string_view value;
+};
+
+inline constexpr std::array<static_entry, 99> static_table{{
+    {":authority", ""},
+    {":path", "/"},
+    {"age", "0"},
+    {"content-disposition", ""},
+    {"content-length", "0"},
+    {"cookie", ""},
+    {"date", ""},
+    {"etag", ""},
+    {"if-modified-since", ""},
+    {"if-none-match", ""},
+    {"last-modified", ""},
+    {"link", ""},
+    {"location", ""},
+    {"referer", ""},
+    {"set-cookie", ""},
+    {":method", "CONNECT"},
+    {":method", "DELETE"},
+    {":method", "GET"},
+    {":method", "HEAD"},
+    {":method", "OPTIONS"},
+    {":method", "POST"},
+    {":method", "PUT"},
+    {":scheme", "http"},
+    {":scheme", "https"},
+    {":status", "103"},
+    {":status", "200"},
+    {":status", "304"},
+    {":status", "404"},
+    {":status", "503"},
+    {"accept", "*/*"},
+    {"accept", "application/dns-message"},
+    {"accept-encoding", "gzip, deflate, br"},
+    {"accept-ranges", "bytes"},
+    {"access-control-allow-headers", "cache-control"},
+    {"access-control-allow-headers", "content-type"},
+    {"access-control-allow-origin", "*"},
+    {"cache-control", "max-age=0"},
+    {"cache-control", "max-age=2592000"},
+    {"cache-control", "max-age=604800"},
+    {"cache-control", "no-cache"},
+    {"cache-control", "no-store"},
+    {"cache-control", "public, max-age=31536000"},
+    {"content-encoding", "br"},
+    {"content-encoding", "gzip"},
+    {"content-type", "application/dns-message"},
+    {"content-type", "application/javascript"},
+    {"content-type", "application/json"},
+    {"content-type", "application/x-www-form-urlencoded"},
+    {"content-type", "image/gif"},
+    {"content-type", "image/jpeg"},
+    {"content-type", "image/png"},
+    {"content-type", "text/css"},
+    {"content-type", "text/html; charset=utf-8"},
+    {"content-type", "text/plain"},
+    {"content-type", "text/plain;charset=utf-8"},
+    {"range", "bytes=0-"},
+    {"strict-transport-security", "max-age=31536000"},
+    {"strict-transport-security",
+     "max-age=31536000; includesubdomains"},
+    {"strict-transport-security",
+     "max-age=31536000; includesubdomains; preload"},
+    {"vary", "accept-encoding"},
+    {"vary", "origin"},
+    {"x-content-type-options", "nosniff"},
+    {"x-xss-protection", "1; mode=block"},
+    {":status", "100"},
+    {":status", "204"},
+    {":status", "206"},
+    {":status", "302"},
+    {":status", "400"},
+    {":status", "403"},
+    {":status", "421"},
+    {":status", "425"},
+    {":status", "500"},
+    {"accept-language", ""},
+    {"access-control-allow-credentials", "FALSE"},
+    {"access-control-allow-credentials", "TRUE"},
+    {"access-control-allow-headers", "*"},
+    {"access-control-allow-methods", "get"},
+    {"access-control-allow-methods", "get, post, options"},
+    {"access-control-allow-methods", "options"},
+    {"access-control-expose-headers", "content-length"},
+    {"access-control-request-headers", "content-type"},
+    {"access-control-request-method", "get"},
+    {"access-control-request-method", "post"},
+    {"alt-svc", "clear"},
+    {"authorization", ""},
+    {"content-security-policy",
+     "script-src 'none'; object-src 'none'; base-uri 'none'"},
+    {"early-data", "1"},
+    {"expect-ct", ""},
+    {"forwarded", ""},
+    {"if-range", ""},
+    {"origin", ""},
+    {"purpose", "prefetch"},
+    {"server", ""},
+    {"timing-allow-origin", "*"},
+    {"upgrade-insecure-requests", "1"},
+    {"user-agent", ""},
+    {"x-forwarded-for", ""},
+    {"x-frame-options", "deny"},
+    {"x-frame-options", "sameorigin"},
+}};
+
+inline ntl::result<std::string>
+read_literal(
+    ntl::net::http2::hpack_detail::cursor &input,
+    std::uint8_t prefix_bits, std::uint8_t huffman_mask,
+    std::size_t maximum_decoded_size) {
+  std::uint8_t first = 0;
+  if (!input.at(0, first))
+    return ntl::unexpected(STATUS_DATA_ERROR);
+  const bool huffman = (first & huffman_mask) != 0;
+  const auto length =
+      ntl::net::http2::hpack_detail::read_integer(
+          input, prefix_bits);
+  if (!length)
+    return ntl::unexpected(length.status());
+  if (*length > input.remaining())
+    return ntl::unexpected(STATUS_DATA_ERROR);
+  if (huffman)
+    return ntl::net::http2::hpack_detail::read_huffman_string(
+        input, *length, maximum_decoded_size);
+  if (*length > maximum_decoded_size)
+    return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+
+  std::string result;
+  result.reserve(*length);
+  for (std::size_t index = 0; index != *length; ++index) {
+    std::uint8_t octet = 0;
+    if (!input.read(octet))
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    result.push_back(static_cast<char>(octet));
+  }
+  return ntl::ok(std::move(result));
+}
+
+inline ntl::status append(
+    decoded_headers &output, std::string name,
+    std::string value, bool never_index,
+    std::size_t maximum_decoded_size) {
+  if (name.size() >
+          maximum_decoded_size - output.decoded_bytes ||
+      value.size() >
+          maximum_decoded_size - output.decoded_bytes -
+              name.size())
+    return STATUS_BUFFER_OVERFLOW;
+  output.decoded_bytes += name.size() + value.size();
+  output.fields.push_back(
+      {std::move(name), std::move(value), never_index});
+  return ntl::status::ok();
+}
+
+} // namespace qpack_detail
+
+class bounded_static_qpack_decoder {
+public:
+  void reset() noexcept {}
+
+  ntl::result<decoded_headers>
+  decode(std::uint64_t, ntl::net::scatter_view encoded,
+         std::size_t maximum_decoded_size) noexcept {
+    if (!encoded || maximum_decoded_size == 0)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    try {
+      return decode_impl(encoded, maximum_decoded_size);
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+private:
+  ntl::result<decoded_headers>
+  decode_impl(ntl::net::scatter_view encoded,
+              std::size_t maximum_decoded_size) {
+    ntl::net::http2::hpack_detail::cursor input(encoded);
+    const auto required_insert_count =
+        ntl::net::http2::hpack_detail::read_integer(input, 8);
+    if (!required_insert_count)
+      return ntl::unexpected(required_insert_count.status());
+    const auto delta_base =
+        ntl::net::http2::hpack_detail::read_integer(input, 7);
+    if (!delta_base)
+      return ntl::unexpected(delta_base.status());
+    if (*required_insert_count != 0 || *delta_base != 0)
+      return ntl::unexpected(STATUS_NOT_SUPPORTED);
+
+    decoded_headers output;
+    while (input.remaining() != 0) {
+      std::uint8_t first = 0;
+      if (!input.at(0, first))
+        return ntl::unexpected(STATUS_DATA_ERROR);
+
+      if ((first & 0x80u) != 0) {
+        const bool static_reference = (first & 0x40u) != 0;
+        const auto index =
+            ntl::net::http2::hpack_detail::read_integer(input, 6);
+        if (!index)
+          return ntl::unexpected(index.status());
+        if (!static_reference ||
+            *index >= qpack_detail::static_table.size())
+          return ntl::unexpected(
+              static_reference ? STATUS_DATA_ERROR
+                               : STATUS_NOT_SUPPORTED);
+        const auto &entry = qpack_detail::static_table[*index];
+        const ntl::status appended = qpack_detail::append(
+            output, std::string(entry.name),
+            std::string(entry.value), false,
+            maximum_decoded_size);
+        if (!appended.is_ok())
+          return ntl::unexpected(
+              static_cast<NTSTATUS>(appended));
+        continue;
+      }
+
+      if ((first & 0xc0u) == 0x40u) {
+        const bool never_index = (first & 0x20u) != 0;
+        const bool static_reference = (first & 0x10u) != 0;
+        const auto name_index =
+            ntl::net::http2::hpack_detail::read_integer(input, 4);
+        if (!name_index)
+          return ntl::unexpected(name_index.status());
+        if (!static_reference ||
+            *name_index >= qpack_detail::static_table.size())
+          return ntl::unexpected(
+              static_reference ? STATUS_DATA_ERROR
+                               : STATUS_NOT_SUPPORTED);
+        const auto &entry =
+            qpack_detail::static_table[*name_index];
+        if (entry.name.size() >
+            maximum_decoded_size - output.decoded_bytes)
+          return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+        auto value = qpack_detail::read_literal(
+            input, 7, 0x80,
+            maximum_decoded_size - output.decoded_bytes -
+                entry.name.size());
+        if (!value)
+          return ntl::unexpected(value.status());
+        const ntl::status appended = qpack_detail::append(
+            output, std::string(entry.name),
+            std::move(*value), never_index,
+            maximum_decoded_size);
+        if (!appended.is_ok())
+          return ntl::unexpected(
+              static_cast<NTSTATUS>(appended));
+        continue;
+      }
+
+      if ((first & 0xe0u) == 0x20u) {
+        const bool never_index = (first & 0x10u) != 0;
+        auto name = qpack_detail::read_literal(
+            input, 3, 0x08,
+            maximum_decoded_size - output.decoded_bytes);
+        if (!name)
+          return ntl::unexpected(name.status());
+        if (name->size() >
+            maximum_decoded_size - output.decoded_bytes)
+          return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+        auto value = qpack_detail::read_literal(
+            input, 7, 0x80,
+            maximum_decoded_size - output.decoded_bytes -
+                name->size());
+        if (!value)
+          return ntl::unexpected(value.status());
+        const ntl::status appended = qpack_detail::append(
+            output, std::move(*name), std::move(*value),
+            never_index, maximum_decoded_size);
+        if (!appended.is_ok())
+          return ntl::unexpected(
+              static_cast<NTSTATUS>(appended));
+        continue;
+      }
+
+      // Both post-base encodings and all dynamic references require a
+      // stateful backend negotiated with non-zero QPACK settings.
+      return ntl::unexpected(STATUS_NOT_SUPPORTED);
+    }
+    return ntl::ok(std::move(output));
+  }
+};
+
+namespace qpack_encode_detail {
+
+inline ntl::status append_prefixed_integer(
+    std::vector<std::byte> &output, std::uint64_t value,
+    std::uint8_t prefix_bits, std::uint8_t prefix_value) noexcept {
+  if (prefix_bits == 0 || prefix_bits > 8)
+    return STATUS_INVALID_PARAMETER;
+  try {
+    const std::uint64_t prefix_maximum =
+        (std::uint64_t{1} << prefix_bits) - 1;
+    if (value < prefix_maximum) {
+      output.push_back(static_cast<std::byte>(
+          prefix_value | static_cast<std::uint8_t>(value)));
+      return ntl::status::ok();
+    }
+    output.push_back(static_cast<std::byte>(
+        prefix_value | static_cast<std::uint8_t>(prefix_maximum)));
+    value -= prefix_maximum;
+    while (value >= 128) {
+      output.push_back(static_cast<std::byte>(
+          static_cast<std::uint8_t>(value % 128) | 0x80u));
+      value /= 128;
+    }
+    output.push_back(static_cast<std::byte>(
+        static_cast<std::uint8_t>(value)));
+    return ntl::status::ok();
+  } catch (const std::bad_alloc &) {
+    return STATUS_INSUFFICIENT_RESOURCES;
+  } catch (...) {
+    return STATUS_UNHANDLED_EXCEPTION;
+  }
+}
+
+inline bool valid_field(std::string_view name,
+                        std::string_view value) noexcept {
+  if (name.empty())
+    return false;
+  for (const unsigned char character : name) {
+    if (character == 0 || character == '\r' || character == '\n' ||
+        (character >= 'A' && character <= 'Z'))
+      return false;
+  }
+  for (const unsigned char character : value) {
+    if (character == 0 || character == '\r' || character == '\n')
+      return false;
+  }
+  return true;
+}
+
+inline ntl::status append_literal(std::vector<std::byte> &output,
+                                  std::string_view value) noexcept {
+  auto status = append_prefixed_integer(
+      output, value.size(), 7, 0x00);
+  if (!status.is_ok())
+    return status;
+  try {
+    output.insert(output.end(),
+                  reinterpret_cast<const std::byte *>(value.data()),
+                  reinterpret_cast<const std::byte *>(
+                      value.data() + value.size()));
+    return ntl::status::ok();
+  } catch (const std::bad_alloc &) {
+    return STATUS_INSUFFICIENT_RESOURCES;
+  } catch (...) {
+    return STATUS_UNHANDLED_EXCEPTION;
+  }
+}
+
+} // namespace qpack_encode_detail
+
+/**
+ * @brief Bounded RFC 9204 encoder that never uses dynamic state or Huffman.
+ *
+ * This deliberately conservative profile is sufficient for control traffic,
+ * Extended CONNECT, and deterministic intermediaries.  It remains
+ * interoperable when both QPACK settings are zero and avoids encoder-stream
+ * blocking altogether.
+ */
+class bounded_static_qpack_encoder {
+public:
+  ntl::result<std::vector<std::byte>>
+  encode(std::span<const header_field> fields,
+         std::size_t maximum_encoded_size = 256 * 1024) const noexcept {
+    if (maximum_encoded_size < 2)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    try {
+      std::vector<std::byte> output;
+      output.reserve((std::min)(maximum_encoded_size, std::size_t{4096}));
+      output.push_back(std::byte{0}); // Required Insert Count.
+      output.push_back(std::byte{0}); // Delta Base, sign=0.
+      bool regular_seen = false;
+      std::unordered_set<std::string_view> pseudo_fields;
+      for (const auto &field : fields) {
+        if (!qpack_encode_detail::valid_field(field.name, field.value))
+          return ntl::unexpected(STATUS_DATA_ERROR);
+        const bool pseudo = field.name.front() == ':';
+        if (pseudo) {
+          if (regular_seen || !pseudo_fields.insert(field.name).second)
+            return ntl::unexpected(STATUS_DATA_ERROR);
+        } else {
+          regular_seen = true;
+        }
+
+        std::size_t exact = qpack_detail::static_table.size();
+        std::size_t named = qpack_detail::static_table.size();
+        for (std::size_t index = 0;
+             index != qpack_detail::static_table.size(); ++index) {
+          const auto &entry = qpack_detail::static_table[index];
+          if (entry.name != field.name)
+            continue;
+          if (named == qpack_detail::static_table.size())
+            named = index;
+          if (entry.value == field.value) {
+            exact = index;
+            break;
+          }
+        }
+
+        ntl::status status = ntl::status::ok();
+        if (exact != qpack_detail::static_table.size()) {
+          // Indexed Field Line: 1, T=1, 6-bit static table index.
+          status = qpack_encode_detail::append_prefixed_integer(
+              output, exact, 6, 0xc0);
+        } else if (named != qpack_detail::static_table.size()) {
+          // Literal With Name Reference: 01, N, T=1, 4-bit name index.
+          status = qpack_encode_detail::append_prefixed_integer(
+              output, named, 4,
+              static_cast<std::uint8_t>(field.never_index ? 0x70 : 0x50));
+          if (status.is_ok())
+            status = qpack_encode_detail::append_literal(output, field.value);
+        } else {
+          // Literal With Literal Name: 001, N, H=0, 3-bit name length.
+          status = qpack_encode_detail::append_prefixed_integer(
+              output, field.name.size(), 3,
+              static_cast<std::uint8_t>(field.never_index ? 0x30 : 0x20));
+          if (status.is_ok()) {
+            output.insert(output.end(),
+                          reinterpret_cast<const std::byte *>(field.name.data()),
+                          reinterpret_cast<const std::byte *>(
+                              field.name.data() + field.name.size()));
+            status = qpack_encode_detail::append_literal(output, field.value);
+          }
+        }
+        if (!status.is_ok())
+          return ntl::unexpected(static_cast<NTSTATUS>(status));
+        if (output.size() > maximum_encoded_size)
+          return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+      }
+      return ntl::ok(std::move(output));
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+};
+
+struct dynamic_qpack_limits {
+  std::size_t maximum_table_capacity = 64 * 1024;
+  std::size_t maximum_blocked_streams = 32;
+  std::size_t maximum_encoder_stream_buffer = 256 * 1024;
+  std::size_t maximum_literal_size = 256 * 1024;
+};
+
+/**
+ * @brief Bounded RFC 9204 dynamic-table decoder.
+ *
+ * The decoder accepts arbitrarily fragmented encoder-stream instructions,
+ * returns STATUS_RETRY for blocked field sections, and emits the matching
+ * decoder-stream acknowledgments. One instance belongs to exactly one QUIC
+ * connection and one peer encoder direction.
+ */
+class bounded_dynamic_qpack_decoder {
+public:
+  explicit bounded_dynamic_qpack_decoder(
+      dynamic_qpack_limits limits = {}) noexcept
+      : limits_(limits) {}
+
+  void reset() noexcept {
+    table_.clear();
+    table_size_ = 0;
+    capacity_ = 0;
+    insert_count_ = 0;
+    encoder_buffer_.clear();
+    decoder_stream_.clear();
+    blocked_streams_.clear();
+  }
+
+  ntl::status consume_encoder_stream(
+      ntl::net::scatter_view encoded) noexcept {
+    if (!encoded)
+      return STATUS_INVALID_PARAMETER;
+    if (limits_.maximum_table_capacity == 0 ||
+        limits_.maximum_encoder_stream_buffer == 0 ||
+        limits_.maximum_literal_size == 0)
+      return STATUS_INVALID_PARAMETER;
+    try {
+      if (encoded.size() >
+          limits_.maximum_encoder_stream_buffer -
+              encoder_buffer_.size())
+        return STATUS_BUFFER_OVERFLOW;
+      const ntl::status copied = encoded.for_each_chunk(
+          [this](std::span<const std::byte> chunk) noexcept {
+            try {
+              encoder_buffer_.insert(
+                  encoder_buffer_.end(),
+                  chunk.begin(), chunk.end());
+              return true;
+            } catch (...) {
+              return false;
+            }
+          });
+      if (!copied.is_ok())
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+      std::size_t inserted = 0;
+      for (;;) {
+        const auto instruction = parse_encoder_instruction();
+        if (instruction.state == parse_state::need_more)
+          break;
+        if (instruction.state == parse_state::malformed)
+          return instruction.error;
+        const ntl::status applied =
+            apply_encoder_instruction(instruction);
+        if (!applied.is_ok())
+          return applied;
+        if (instruction.inserts)
+          ++inserted;
+        encoder_buffer_.erase(
+            encoder_buffer_.begin(),
+            encoder_buffer_.begin() +
+                static_cast<std::ptrdiff_t>(
+                    instruction.consumed));
+      }
+      if (inserted != 0)
+        append_prefixed_integer(
+            decoder_stream_, inserted, 6, 0x00);
+      return ntl::status::ok();
+    } catch (const std::bad_alloc &) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    } catch (...) {
+      return STATUS_UNHANDLED_EXCEPTION;
+    }
+  }
+
+  ntl::result<std::vector<std::byte>>
+  take_decoder_stream() noexcept {
+    try {
+      std::vector<std::byte> result;
+      result.swap(decoder_stream_);
+      return ntl::ok(std::move(result));
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+  ntl::status cancel_stream(
+      std::uint64_t stream_id) noexcept {
+    try {
+      blocked_streams_.erase(stream_id);
+      append_prefixed_integer(
+          decoder_stream_, stream_id, 6, 0x40);
+      return ntl::status::ok();
+    } catch (const std::bad_alloc &) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    } catch (...) {
+      return STATUS_UNHANDLED_EXCEPTION;
+    }
+  }
+
+  ntl::result<decoded_headers>
+  decode(std::uint64_t stream_id, ntl::net::scatter_view encoded,
+         std::size_t maximum_decoded_size) noexcept {
+    if (!encoded || maximum_decoded_size == 0 ||
+        limits_.maximum_table_capacity == 0 ||
+        limits_.maximum_literal_size == 0)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    try {
+      return decode_impl(
+          stream_id, encoded, maximum_decoded_size);
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+  std::size_t insert_count() const noexcept {
+    return insert_count_;
+  }
+
+  std::size_t table_size() const noexcept {
+    return table_size_;
+  }
+
+  std::size_t capacity() const noexcept {
+    return capacity_;
+  }
+
+  std::size_t dynamic_table_entries() const noexcept {
+    return table_.size();
+  }
+
+  std::size_t blocked_stream_count() const noexcept {
+    return blocked_streams_.size();
+  }
+
+private:
+  enum class parse_state {
+    complete,
+    need_more,
+    malformed,
+  };
+
+  struct integer_probe {
+    parse_state state = parse_state::need_more;
+    std::size_t value = 0;
+    std::size_t next = 0;
+    NTSTATUS error = STATUS_DATA_ERROR;
+  };
+
+  struct string_probe {
+    parse_state state = parse_state::need_more;
+    std::string value;
+    std::size_t next = 0;
+    NTSTATUS error = STATUS_DATA_ERROR;
+  };
+
+  enum class encoder_instruction_kind {
+    set_capacity,
+    insert_name_reference,
+    insert_literal_name,
+    duplicate,
+  };
+
+  struct encoder_instruction {
+    parse_state state = parse_state::need_more;
+    encoder_instruction_kind kind =
+        encoder_instruction_kind::set_capacity;
+    std::size_t consumed = 0;
+    std::size_t integer = 0;
+    bool static_reference = false;
+    bool inserts = false;
+    std::string name;
+    std::string value;
+    NTSTATUS error = STATUS_DATA_ERROR;
+  };
+
+  struct dynamic_entry {
+    std::size_t absolute_index = 0;
+    std::string name;
+    std::string value;
+    std::size_t size = 0;
+  };
+
+  struct indexed_value {
+    std::string_view name;
+    std::string_view value;
+    std::size_t absolute_index = 0;
+    bool dynamic = false;
+  };
+
+  static integer_probe probe_integer(
+      std::span<const std::byte> bytes,
+      std::size_t offset,
+      std::uint8_t prefix_bits) noexcept {
+    if (prefix_bits == 0 || prefix_bits > 8)
+      return {parse_state::malformed, 0, offset,
+              STATUS_INVALID_PARAMETER};
+    if (offset >= bytes.size())
+      return {};
+    const std::uint8_t first =
+        static_cast<std::uint8_t>(bytes[offset]);
+    const std::size_t prefix_max =
+        (std::size_t{1} << prefix_bits) - 1;
+    std::size_t value = first & prefix_max;
+    ++offset;
+    if (value != prefix_max)
+      return {parse_state::complete, value, offset,
+              STATUS_SUCCESS};
+
+    unsigned shift = 0;
+    for (;;) {
+      if (offset >= bytes.size())
+        return {};
+      const std::uint8_t octet =
+          static_cast<std::uint8_t>(bytes[offset++]);
+      const std::size_t part = octet & 0x7fu;
+      if (shift >=
+              std::numeric_limits<std::size_t>::digits ||
+          part >
+              ((std::numeric_limits<std::size_t>::max)() -
+               value) >>
+                  shift)
+        return {parse_state::malformed, 0, offset,
+                STATUS_INTEGER_OVERFLOW};
+      value += part << shift;
+      if ((octet & 0x80u) == 0)
+        return {parse_state::complete, value, offset,
+                STATUS_SUCCESS};
+      shift += 7;
+    }
+  }
+
+  string_probe probe_string(
+      std::span<const std::byte> bytes,
+      std::size_t offset, std::uint8_t prefix_bits,
+      std::uint8_t huffman_mask) const {
+    if (offset >= bytes.size())
+      return {};
+    const bool huffman =
+        (static_cast<std::uint8_t>(bytes[offset]) &
+         huffman_mask) != 0;
+    const auto length =
+        probe_integer(bytes, offset, prefix_bits);
+    if (length.state != parse_state::complete)
+      return {length.state, {}, length.next,
+              length.error};
+    if (length.value > limits_.maximum_literal_size)
+      return {parse_state::malformed, {}, length.next,
+              STATUS_BUFFER_OVERFLOW};
+    if (length.value > bytes.size() - length.next)
+      return {};
+
+    if (!huffman) {
+      std::string value;
+      value.reserve(length.value);
+      for (std::size_t index = 0;
+           index != length.value; ++index) {
+        value.push_back(static_cast<char>(
+            bytes[length.next + index]));
+      }
+      return {parse_state::complete, std::move(value),
+              length.next + length.value, STATUS_SUCCESS};
+    }
+
+    const auto payload =
+        ntl::net::scatter_view::from_contiguous(
+            bytes.subspan(length.next, length.value));
+    ntl::net::http2::hpack_detail::cursor cursor(payload);
+    auto decoded =
+        ntl::net::http2::hpack_detail::read_huffman_string(
+            cursor, length.value,
+            limits_.maximum_literal_size);
+    if (!decoded)
+      return {parse_state::malformed, {}, length.next,
+              decoded.status()};
+    return {parse_state::complete, std::move(*decoded),
+            length.next + length.value, STATUS_SUCCESS};
+  }
+
+  encoder_instruction parse_encoder_instruction() const {
+    if (encoder_buffer_.empty())
+      return {};
+    const auto bytes =
+        std::span<const std::byte>(encoder_buffer_);
+    const std::uint8_t first =
+        static_cast<std::uint8_t>(bytes.front());
+
+    if ((first & 0x80u) != 0) {
+      const auto name_index = probe_integer(bytes, 0, 6);
+      if (name_index.state != parse_state::complete)
+        return {name_index.state,
+                encoder_instruction_kind::
+                    insert_name_reference,
+                0, 0, false, false, {}, {},
+                name_index.error};
+      const auto value =
+          probe_string(bytes, name_index.next, 7, 0x80);
+      if (value.state != parse_state::complete)
+        return {value.state,
+                encoder_instruction_kind::
+                    insert_name_reference,
+                0, 0, false, false, {}, {},
+                value.error};
+      return {
+          parse_state::complete,
+          encoder_instruction_kind::insert_name_reference,
+          value.next,
+          name_index.value,
+          (first & 0x40u) != 0,
+          true,
+          {},
+          std::move(value.value),
+          STATUS_SUCCESS};
+    }
+
+    if ((first & 0xc0u) == 0x40u) {
+      const auto name = probe_string(bytes, 0, 5, 0x20);
+      if (name.state != parse_state::complete)
+        return {name.state,
+                encoder_instruction_kind::
+                    insert_literal_name,
+                0, 0, false, false, {}, {},
+                name.error};
+      const auto value =
+          probe_string(bytes, name.next, 7, 0x80);
+      if (value.state != parse_state::complete)
+        return {value.state,
+                encoder_instruction_kind::
+                    insert_literal_name,
+                0, 0, false, false, {}, {},
+                value.error};
+      return {
+          parse_state::complete,
+          encoder_instruction_kind::insert_literal_name,
+          value.next,
+          0,
+          false,
+          true,
+          std::move(name.value),
+          std::move(value.value),
+          STATUS_SUCCESS};
+    }
+
+    const auto integer = probe_integer(bytes, 0, 5);
+    if (integer.state != parse_state::complete)
+      return {integer.state,
+              (first & 0x20u) != 0
+                  ? encoder_instruction_kind::set_capacity
+                  : encoder_instruction_kind::duplicate,
+              0, 0, false, false, {}, {},
+              integer.error};
+    return {
+        parse_state::complete,
+        (first & 0x20u) != 0
+            ? encoder_instruction_kind::set_capacity
+            : encoder_instruction_kind::duplicate,
+        integer.next,
+        integer.value,
+        false,
+        (first & 0x20u) == 0,
+        {},
+        {},
+        STATUS_SUCCESS};
+  }
+
+  ntl::status apply_encoder_instruction(
+      const encoder_instruction &instruction) {
+    switch (instruction.kind) {
+    case encoder_instruction_kind::set_capacity:
+      if (instruction.integer >
+          limits_.maximum_table_capacity)
+        return STATUS_BUFFER_OVERFLOW;
+      capacity_ = instruction.integer;
+      evict_to_capacity();
+      return ntl::status::ok();
+
+    case encoder_instruction_kind::insert_name_reference: {
+      std::string name;
+      if (instruction.static_reference) {
+        if (instruction.integer >=
+            qpack_detail::static_table.size())
+          return STATUS_DATA_ERROR;
+        name.assign(
+            qpack_detail::static_table[
+                instruction.integer]
+                .name);
+      } else {
+        const auto found =
+            lookup_encoder_relative(instruction.integer);
+        if (!found)
+          return STATUS_DATA_ERROR;
+        name.assign(found->name);
+      }
+      return insert(
+          std::move(name), instruction.value);
+    }
+
+    case encoder_instruction_kind::insert_literal_name:
+      return insert(instruction.name, instruction.value);
+
+    case encoder_instruction_kind::duplicate: {
+      const auto found =
+          lookup_encoder_relative(instruction.integer);
+      if (!found)
+        return STATUS_DATA_ERROR;
+      return insert(
+          std::string(found->name),
+          std::string(found->value));
+    }
+    }
+    return STATUS_DATA_ERROR;
+  }
+
+  ntl::status insert(
+      std::string name, std::string value) {
+    if (name.size() >
+        (std::numeric_limits<std::size_t>::max)() -
+            value.size() - 32)
+      return STATUS_INTEGER_OVERFLOW;
+    const std::size_t size =
+        name.size() + value.size() + 32;
+    if (size > capacity_)
+      return STATUS_BUFFER_OVERFLOW;
+    while (!table_.empty() &&
+           table_size_ > capacity_ - size) {
+      table_size_ -= table_.back().size;
+      table_.pop_back();
+    }
+    table_.push_front(
+        dynamic_entry{
+            insert_count_, std::move(name),
+            std::move(value), size});
+    table_size_ += size;
+    ++insert_count_;
+    return ntl::status::ok();
+  }
+
+  void evict_to_capacity() noexcept {
+    while (table_size_ > capacity_ &&
+           !table_.empty()) {
+      table_size_ -= table_.back().size;
+      table_.pop_back();
+    }
+  }
+
+  std::optional<indexed_value>
+  lookup_encoder_relative(
+      std::size_t relative) const noexcept {
+    if (relative >= insert_count_)
+      return std::nullopt;
+    return lookup_absolute(
+        insert_count_ - relative - 1);
+  }
+
+  std::optional<indexed_value>
+  lookup_absolute(
+      std::size_t absolute) const noexcept {
+    for (const auto &entry : table_) {
+      if (entry.absolute_index == absolute)
+        return indexed_value{
+            entry.name, entry.value,
+            entry.absolute_index, true};
+    }
+    return std::nullopt;
+  }
+
+  static std::optional<indexed_value>
+  lookup_static(std::size_t index) noexcept {
+    if (index >= qpack_detail::static_table.size())
+      return std::nullopt;
+    const auto &entry = qpack_detail::static_table[index];
+    return indexed_value{
+        entry.name, entry.value, 0, false};
+  }
+
+  ntl::result<std::size_t>
+  decode_required_insert_count(
+      std::size_t encoded) const noexcept {
+    if (encoded == 0)
+      return ntl::ok(std::size_t{0});
+    const std::size_t maximum_entries =
+        limits_.maximum_table_capacity / 32;
+    if (maximum_entries == 0 ||
+        maximum_entries >
+            (std::numeric_limits<std::size_t>::max)() /
+                2)
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    const std::size_t full_range =
+        maximum_entries * 2;
+    if (encoded > full_range ||
+        insert_count_ >
+            (std::numeric_limits<std::size_t>::max)() -
+                maximum_entries)
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    const std::size_t maximum_value =
+        insert_count_ + maximum_entries;
+    const std::size_t maximum_wrapped =
+        (maximum_value / full_range) * full_range;
+    if (maximum_wrapped >
+        (std::numeric_limits<std::size_t>::max)() -
+            encoded + 1)
+      return ntl::unexpected(STATUS_INTEGER_OVERFLOW);
+    std::size_t required =
+        maximum_wrapped + encoded - 1;
+    if (required > maximum_value) {
+      if (required <= full_range)
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      required -= full_range;
+    }
+    if (required == 0)
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    return ntl::ok(required);
+  }
+
+  static void append_prefixed_integer(
+      std::vector<std::byte> &output,
+      std::uint64_t value, std::uint8_t prefix_bits,
+      std::uint8_t prefix) {
+    const std::uint64_t prefix_max =
+        (std::uint64_t{1} << prefix_bits) - 1;
+    if (value < prefix_max) {
+      output.push_back(static_cast<std::byte>(
+          prefix | static_cast<std::uint8_t>(value)));
+      return;
+    }
+    output.push_back(static_cast<std::byte>(
+        prefix | static_cast<std::uint8_t>(prefix_max)));
+    value -= prefix_max;
+    while (value >= 128) {
+      output.push_back(static_cast<std::byte>(
+          static_cast<std::uint8_t>(
+              (value & 0x7fu) | 0x80u)));
+      value >>= 7;
+    }
+    output.push_back(static_cast<std::byte>(
+        static_cast<std::uint8_t>(value)));
+  }
+
+  ntl::result<decoded_headers> decode_impl(
+      std::uint64_t stream_id, ntl::net::scatter_view encoded,
+      std::size_t maximum_decoded_size) {
+    ntl::net::http2::hpack_detail::cursor input(encoded);
+    const auto encoded_required =
+        ntl::net::http2::hpack_detail::read_integer(input, 8);
+    if (!encoded_required)
+      return ntl::unexpected(encoded_required.status());
+    const auto required =
+        decode_required_insert_count(*encoded_required);
+    if (!required)
+      return ntl::unexpected(required.status());
+
+    std::uint8_t delta_first = 0;
+    if (!input.at(0, delta_first))
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    const bool negative = (delta_first & 0x80u) != 0;
+    const auto delta =
+        ntl::net::http2::hpack_detail::read_integer(input, 7);
+    if (!delta)
+      return ntl::unexpected(delta.status());
+    std::size_t base = 0;
+    if (negative) {
+      if (*required <= *delta)
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      base = *required - *delta - 1;
+    } else {
+      if (*required >
+          (std::numeric_limits<std::size_t>::max)() -
+              *delta)
+        return ntl::unexpected(STATUS_INTEGER_OVERFLOW);
+      base = *required + *delta;
+    }
+
+    if (*required > insert_count_) {
+      const auto inserted =
+          blocked_streams_.insert(stream_id);
+      if (inserted.second &&
+          blocked_streams_.size() >
+              limits_.maximum_blocked_streams) {
+        blocked_streams_.erase(inserted.first);
+        return ntl::unexpected(STATUS_QUOTA_EXCEEDED);
+      }
+      return ntl::unexpected(STATUS_RETRY);
+    }
+    blocked_streams_.erase(stream_id);
+
+    decoded_headers output;
+    std::optional<std::size_t> largest_reference;
+    while (input.remaining() != 0) {
+      std::uint8_t first = 0;
+      if (!input.at(0, first))
+        return ntl::unexpected(STATUS_DATA_ERROR);
+
+      if ((first & 0x80u) != 0) {
+        const bool static_reference =
+            (first & 0x40u) != 0;
+        const auto index =
+            ntl::net::http2::hpack_detail::read_integer(
+                input, 6);
+        if (!index)
+          return ntl::unexpected(index.status());
+        std::optional<indexed_value> found;
+        if (static_reference) {
+          found = lookup_static(*index);
+        } else {
+          if (*index >= base)
+            return ntl::unexpected(STATUS_DATA_ERROR);
+          const std::size_t absolute =
+              base - *index - 1;
+          found = lookup_absolute(absolute);
+        }
+        if (!found ||
+            (found->dynamic &&
+             found->absolute_index >= *required))
+          return ntl::unexpected(STATUS_DATA_ERROR);
+        const ntl::status appended =
+            append_decoded(
+                output, *found, false,
+                maximum_decoded_size);
+        if (!appended.is_ok())
+          return ntl::unexpected(
+              static_cast<NTSTATUS>(appended));
+        update_largest_reference(
+            largest_reference, *found);
+        continue;
+      }
+
+      if ((first & 0xc0u) == 0x40u) {
+        const bool never_index = (first & 0x20u) != 0;
+        const bool static_reference =
+            (first & 0x10u) != 0;
+        const auto index =
+            ntl::net::http2::hpack_detail::read_integer(
+                input, 4);
+        if (!index)
+          return ntl::unexpected(index.status());
+        std::optional<indexed_value> found;
+        if (static_reference) {
+          found = lookup_static(*index);
+        } else {
+          if (*index >= base)
+            return ntl::unexpected(STATUS_DATA_ERROR);
+          found = lookup_absolute(
+              base - *index - 1);
+        }
+        if (!found ||
+            (found->dynamic &&
+             found->absolute_index >= *required))
+          return ntl::unexpected(STATUS_DATA_ERROR);
+        if (found->name.size() >
+            maximum_decoded_size -
+                output.decoded_bytes)
+          return ntl::unexpected(
+              STATUS_BUFFER_OVERFLOW);
+        auto value = qpack_detail::read_literal(
+            input, 7, 0x80,
+            maximum_decoded_size -
+                output.decoded_bytes -
+                found->name.size());
+        if (!value)
+          return ntl::unexpected(value.status());
+        const ntl::status appended =
+            qpack_detail::append(
+                output, std::string(found->name),
+                std::move(*value), never_index,
+                maximum_decoded_size);
+        if (!appended.is_ok())
+          return ntl::unexpected(
+              static_cast<NTSTATUS>(appended));
+        update_largest_reference(
+            largest_reference, *found);
+        continue;
+      }
+
+      if ((first & 0xf0u) == 0x10u) {
+        const auto index =
+            ntl::net::http2::hpack_detail::read_integer(
+                input, 4);
+        if (!index)
+          return ntl::unexpected(index.status());
+        if (base >
+            (std::numeric_limits<std::size_t>::max)() -
+                *index)
+          return ntl::unexpected(STATUS_INTEGER_OVERFLOW);
+        const auto found =
+            lookup_absolute(base + *index);
+        if (!found ||
+            found->absolute_index >= *required)
+          return ntl::unexpected(STATUS_DATA_ERROR);
+        const ntl::status appended =
+            append_decoded(
+                output, *found, false,
+                maximum_decoded_size);
+        if (!appended.is_ok())
+          return ntl::unexpected(
+              static_cast<NTSTATUS>(appended));
+        update_largest_reference(
+            largest_reference, *found);
+        continue;
+      }
+
+      if ((first & 0xe0u) == 0x20u) {
+        const bool never_index = (first & 0x10u) != 0;
+        auto name = qpack_detail::read_literal(
+            input, 3, 0x08,
+            maximum_decoded_size -
+                output.decoded_bytes);
+        if (!name)
+          return ntl::unexpected(name.status());
+        if (name->size() >
+            maximum_decoded_size -
+                output.decoded_bytes)
+          return ntl::unexpected(
+              STATUS_BUFFER_OVERFLOW);
+        auto value = qpack_detail::read_literal(
+            input, 7, 0x80,
+            maximum_decoded_size -
+                output.decoded_bytes -
+                name->size());
+        if (!value)
+          return ntl::unexpected(value.status());
+        const ntl::status appended =
+            qpack_detail::append(
+                output, std::move(*name),
+                std::move(*value), never_index,
+                maximum_decoded_size);
+        if (!appended.is_ok())
+          return ntl::unexpected(
+              static_cast<NTSTATUS>(appended));
+        continue;
+      }
+
+      const bool never_index = (first & 0x08u) != 0;
+      const auto index =
+          ntl::net::http2::hpack_detail::read_integer(
+              input, 3);
+      if (!index)
+        return ntl::unexpected(index.status());
+      if (base >
+          (std::numeric_limits<std::size_t>::max)() -
+              *index)
+        return ntl::unexpected(STATUS_INTEGER_OVERFLOW);
+      const auto found =
+          lookup_absolute(base + *index);
+      if (!found ||
+          found->absolute_index >= *required)
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      if (found->name.size() >
+          maximum_decoded_size -
+              output.decoded_bytes)
+        return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+      auto value = qpack_detail::read_literal(
+          input, 7, 0x80,
+          maximum_decoded_size -
+              output.decoded_bytes -
+              found->name.size());
+      if (!value)
+        return ntl::unexpected(value.status());
+      const ntl::status appended =
+          qpack_detail::append(
+              output, std::string(found->name),
+              std::move(*value), never_index,
+              maximum_decoded_size);
+      if (!appended.is_ok())
+        return ntl::unexpected(
+            static_cast<NTSTATUS>(appended));
+      update_largest_reference(
+          largest_reference, *found);
+    }
+
+    const std::size_t expected_required =
+        largest_reference ? *largest_reference + 1 : 0;
+    if (expected_required != *required)
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    if (*required != 0)
+      append_prefixed_integer(
+          decoder_stream_, stream_id, 7, 0x80);
+    return ntl::ok(std::move(output));
+  }
+
+  static ntl::status append_decoded(
+      decoded_headers &output,
+      const indexed_value &value, bool never_index,
+      std::size_t maximum_decoded_size) {
+    return qpack_detail::append(
+        output, std::string(value.name),
+        std::string(value.value), never_index,
+        maximum_decoded_size);
+  }
+
+  static void update_largest_reference(
+      std::optional<std::size_t> &largest,
+      const indexed_value &value) noexcept {
+    if (!value.dynamic)
+      return;
+    if (!largest ||
+        value.absolute_index > *largest)
+      largest = value.absolute_index;
+  }
+
+  dynamic_qpack_limits limits_{};
+  std::deque<dynamic_entry> table_;
+  std::size_t table_size_ = 0;
+  std::size_t capacity_ = 0;
+  std::size_t insert_count_ = 0;
+  std::vector<std::byte> encoder_buffer_;
+  std::vector<std::byte> decoder_stream_;
+  std::unordered_set<std::uint64_t> blocked_streams_;
+};
+
+static_assert(noexcept(
+    std::declval<bounded_static_qpack_decoder &>().reset()));
+static_assert(noexcept(
+    std::declval<bounded_static_qpack_decoder &>().decode(
+        0, std::declval<ntl::net::scatter_view>(), 1)));
+static_assert(noexcept(
+    std::declval<bounded_dynamic_qpack_decoder &>().reset()));
+static_assert(noexcept(
+    std::declval<bounded_dynamic_qpack_decoder &>()
+        .consume_encoder_stream(
+            std::declval<ntl::net::scatter_view>())));
+static_assert(noexcept(
+    std::declval<bounded_dynamic_qpack_decoder &>().decode(
+        0, std::declval<ntl::net::scatter_view>(), 1)));
+
+} // namespace ntl::net::http3

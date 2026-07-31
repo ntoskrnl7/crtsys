@@ -1,0 +1,566 @@
+/**
+ * @file webtransport_session
+ * @brief Draft-16 WebTransport HTTP/3 wire and QUIC-backend session adapter.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/http3/webtransport_session is a user-mode header"
+#endif
+
+#include <ntl/net/http/datagram>
+#include <ntl/net/http3/backend>
+#include <ntl/net/http3/qpack>
+#include <ntl/net/http3/webtransport>
+#include <ntl/result>
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <new>
+#include <span>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+namespace ntl::net::http3::webtransport {
+
+inline constexpr std::uint64_t control_stream_type = 0x00;
+inline constexpr std::uint64_t settings_enable_connect_protocol = 0x08;
+
+struct negotiated_transport {
+  bool quic_datagrams = false;
+  bool reliable_reset_at = false;
+
+  constexpr bool ready() const noexcept {
+    return quic_datagrams && reliable_reset_at;
+  }
+};
+
+struct peer_settings {
+  bool webtransport = false;
+  bool extended_connect = false;
+  bool h3_datagrams = false;
+  std::uint64_t initial_unidirectional_streams = 0;
+  std::uint64_t initial_bidirectional_streams = 0;
+  std::uint64_t initial_data = 0;
+
+  constexpr bool server_ready() const noexcept {
+    return webtransport && extended_connect && h3_datagrams;
+  }
+
+  constexpr bool client_ready() const noexcept {
+    return webtransport && h3_datagrams;
+  }
+};
+
+namespace session_detail {
+
+inline ntl::status append_frame(std::vector<std::byte> &output,
+                                std::uint64_t type,
+                                std::span<const std::byte> payload) noexcept {
+  auto status = append_quic_varint(output, type);
+  if (status.is_ok())
+    status = append_quic_varint(output, payload.size());
+  if (!status.is_ok())
+    return status;
+  try {
+    output.insert(output.end(), payload.begin(), payload.end());
+    return ntl::status::ok();
+  } catch (const std::bad_alloc &) {
+    return STATUS_INSUFFICIENT_RESOURCES;
+  } catch (...) {
+    return STATUS_UNHANDLED_EXCEPTION;
+  }
+}
+
+inline ntl::status append_setting(std::vector<std::byte> &output,
+                                  std::uint64_t identifier,
+                                  std::uint64_t value) noexcept {
+  auto status = append_quic_varint(output, identifier);
+  return status.is_ok() ? append_quic_varint(output, value) : status;
+}
+
+inline ntl::net::scatter_view scatter(
+    const std::vector<std::byte> &bytes) noexcept {
+  return bytes.empty()
+             ? ntl::net::scatter_view{}
+             : ntl::net::scatter_view::from_contiguous(
+                   std::span<const std::byte>(bytes));
+}
+
+inline ntl::result<std::vector<std::byte>>
+headers_frame(std::span<const header_field> fields,
+              std::size_t maximum_size) noexcept {
+  bounded_static_qpack_encoder encoder;
+  auto block = encoder.encode(fields, maximum_size);
+  if (!block)
+    return ntl::unexpected(block.status());
+  try {
+    std::vector<std::byte> frame;
+    frame.reserve(block->size() + 16);
+    const auto status = append_frame(frame,
+                                     static_cast<std::uint64_t>(
+                                         frame_type::headers),
+                                     *block);
+    if (!status.is_ok())
+      return ntl::unexpected(static_cast<NTSTATUS>(status));
+    if (frame.size() > maximum_size)
+      return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+    return ntl::ok(std::move(frame));
+  } catch (const std::bad_alloc &) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+}
+
+} // namespace session_detail
+
+/** Encodes the connection's long-lived HTTP/3 control stream and SETTINGS. */
+inline ntl::result<std::vector<std::byte>>
+encode_control_stream(bool server, session_limits limits = {},
+                      std::size_t maximum_size = 4096) noexcept {
+  if (maximum_size == 0)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  try {
+    std::vector<std::byte> settings;
+    auto status = session_detail::append_setting(
+        settings, ntl::net::http::settings_h3_datagram, 1);
+    if (status.is_ok())
+      status = session_detail::append_setting(
+          settings, settings_wt_enabled, 1);
+    if (server && status.is_ok())
+      status = session_detail::append_setting(
+          settings, settings_enable_connect_protocol, 1);
+    if (status.is_ok())
+      status = session_detail::append_setting(
+          settings, settings_wt_initial_max_streams_unidirectional,
+          limits.maximum_unidirectional_streams);
+    if (status.is_ok())
+      status = session_detail::append_setting(
+          settings, settings_wt_initial_max_streams_bidirectional,
+          limits.maximum_bidirectional_streams);
+    if (status.is_ok())
+      status = session_detail::append_setting(
+          settings, settings_wt_initial_max_data,
+          limits.maximum_stream_data);
+    if (!status.is_ok())
+      return ntl::unexpected(static_cast<NTSTATUS>(status));
+
+    std::vector<std::byte> wire;
+    status = append_quic_varint(wire, control_stream_type);
+    if (status.is_ok())
+      status = session_detail::append_frame(
+          wire, static_cast<std::uint64_t>(frame_type::settings), settings);
+    if (!status.is_ok())
+      return ntl::unexpected(static_cast<NTSTATUS>(status));
+    if (wire.size() > maximum_size)
+      return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+    return ntl::ok(std::move(wire));
+  } catch (const std::bad_alloc &) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+}
+
+/** Parses one complete peer control stream and rejects duplicate settings. */
+inline ntl::result<peer_settings>
+parse_control_stream(ntl::net::scatter_view wire,
+                     std::size_t maximum_size = 4096) noexcept {
+  if (!wire || wire.size() > maximum_size)
+    return ntl::unexpected(wire ? STATUS_BUFFER_OVERFLOW
+                                : STATUS_INVALID_PARAMETER);
+  const auto stream_type = read_quic_varint(wire);
+  if (!stream_type)
+    return ntl::unexpected(stream_type.status());
+  if (stream_type->value != control_stream_type)
+    return ntl::unexpected(STATUS_DATA_ERROR);
+  auto frame_wire = wire.subview(stream_type->encoded_size,
+                                 wire.size() - stream_type->encoded_size);
+  if (!frame_wire)
+    return ntl::unexpected(frame_wire.status());
+  const auto frame = frame_view::parse(*frame_wire, {maximum_size});
+  if (!frame)
+    return ntl::unexpected(frame.status());
+  if (frame->header().type() != frame_type::settings ||
+      frame->header().header_size + frame->header().payload_size !=
+          frame_wire->size())
+    return ntl::unexpected(STATUS_DATA_ERROR);
+
+  peer_settings result;
+  std::vector<std::uint64_t> seen;
+  std::size_t offset = 0;
+  while (offset != frame->payload().size()) {
+    const auto identifier = read_quic_varint(frame->payload(), offset);
+    if (!identifier)
+      return ntl::unexpected(identifier.status());
+    offset += identifier->encoded_size;
+    const auto value = read_quic_varint(frame->payload(), offset);
+    if (!value)
+      return ntl::unexpected(value.status());
+    offset += value->encoded_size;
+    if (std::find(seen.begin(), seen.end(), identifier->value) != seen.end())
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    seen.push_back(identifier->value);
+    switch (identifier->value) {
+    case settings_wt_enabled:
+      if (value->value > 1)
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      result.webtransport = value->value == 1;
+      break;
+    case settings_enable_connect_protocol:
+      if (value->value > 1)
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      result.extended_connect = value->value == 1;
+      break;
+    case ntl::net::http::settings_h3_datagram:
+      if (value->value > 1)
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      result.h3_datagrams = value->value == 1;
+      break;
+    case settings_wt_initial_max_streams_unidirectional:
+      result.initial_unidirectional_streams = value->value;
+      break;
+    case settings_wt_initial_max_streams_bidirectional:
+      result.initial_bidirectional_streams = value->value;
+      break;
+    case settings_wt_initial_max_data:
+      result.initial_data = value->value;
+      break;
+    default:
+      break; // Unknown HTTP/3 settings are ignored.
+    }
+  }
+  return ntl::ok(result);
+}
+
+struct connect_parameters {
+  std::string authority;
+  std::string path = "/";
+  std::string origin;
+  bool browser_client = true;
+  std::vector<header_field> additional_headers;
+};
+
+class backend_session;
+
+/** Move-only authority for one locally opened WebTransport data stream. */
+class outbound_stream {
+public:
+  outbound_stream(const outbound_stream &) = delete;
+  outbound_stream &operator=(const outbound_stream &) = delete;
+
+  outbound_stream(outbound_stream &&other) noexcept
+      : owner_(std::exchange(other.owner_, nullptr)),
+        id_(other.id_), direction_(other.direction_),
+        reliable_prefix_size_(other.reliable_prefix_size_),
+        active_(std::exchange(other.active_, false)) {}
+
+  outbound_stream &operator=(outbound_stream &&) = delete;
+
+  std::uint64_t id() const noexcept { return id_; }
+  stream_direction direction() const noexcept { return direction_; }
+  std::size_t reliable_prefix_size() const noexcept {
+    return reliable_prefix_size_;
+  }
+  bool active() const noexcept { return active_; }
+
+private:
+  friend class backend_session;
+
+  outbound_stream(backend_session &owner, std::uint64_t id,
+                  stream_direction direction,
+                  std::size_t reliable_prefix_size) noexcept
+      : owner_(&owner), id_(id), direction_(direction),
+        reliable_prefix_size_(reliable_prefix_size), active_(true) {}
+
+  backend_session *owner_ = nullptr;
+  std::uint64_t id_ = 0;
+  stream_direction direction_ = stream_direction::bidirectional;
+  std::size_t reliable_prefix_size_ = 0;
+  bool active_ = false;
+};
+
+inline ntl::result<std::vector<std::byte>>
+encode_connect_request(const connect_parameters &parameters,
+                       std::size_t maximum_size = 256 * 1024) noexcept {
+  if (parameters.authority.empty() || parameters.path.empty() ||
+      (parameters.browser_client && parameters.origin.empty()))
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  try {
+    std::vector<header_field> fields{{":method", "CONNECT", false},
+                                     {":protocol", std::string(upgrade_token), false},
+                                     {":scheme", "https", false},
+                                     {":authority", parameters.authority, false},
+                                     {":path", parameters.path, false}};
+    if (!parameters.origin.empty())
+      fields.push_back({"origin", parameters.origin, false});
+    fields.insert(fields.end(), parameters.additional_headers.begin(),
+                  parameters.additional_headers.end());
+    return session_detail::headers_frame(fields, maximum_size);
+  } catch (const std::bad_alloc &) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+}
+
+inline ntl::result<std::vector<std::byte>>
+encode_connect_response(unsigned status = 200,
+                        std::size_t maximum_size = 64 * 1024) noexcept {
+  if (status < 100 || status > 999)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  try {
+    const std::string value = std::to_string(status);
+    const header_field field{":status", value, false};
+    return session_detail::headers_frame(
+        std::span<const header_field>(&field, 1), maximum_size);
+  } catch (const std::bad_alloc &) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+}
+
+/**
+ * @brief One accepted or client-created session bound to a QUIC backend.
+ *
+ * The owner first sends SETTINGS and records negotiated QUIC transport
+ * parameters.  Session creation then writes a real Extended CONNECT HEADERS
+ * frame on the CONNECT request stream; data streams and datagrams carry the
+ * draft-16 session identifier on the wire.
+ */
+class backend_session {
+public:
+  explicit backend_session(quic_transport_backend &backend,
+                           session_limits limits = {}) noexcept
+      : backend_(&backend), guard_(limits), limits_(limits) {}
+
+  backend_session(const backend_session &) = delete;
+  backend_session &operator=(const backend_session &) = delete;
+  backend_session(backend_session &&) = delete;
+  backend_session &operator=(backend_session &&) = delete;
+
+  void set_negotiated_transport(negotiated_transport value) noexcept {
+    transport_ = value;
+  }
+
+  ntl::status send_local_settings(bool server) noexcept {
+    const auto capabilities = backend_->capabilities();
+    if (!capabilities.unidirectional_streams ||
+        !capabilities.quic_datagrams || !capabilities.reliable_reset_at)
+      return STATUS_NOT_SUPPORTED;
+    auto wire = encode_control_stream(server, limits_);
+    if (!wire)
+      return wire.status();
+    std::uint64_t stream = 0;
+    auto status = backend_->open_unidirectional_stream(stream);
+    if (status.is_ok())
+      status = backend_->write_stream(
+          stream, session_detail::scatter(*wire), false);
+    if (status.is_ok())
+      control_stream_id_ = stream;
+    return status;
+  }
+
+  ntl::status open_client(const connect_parameters &parameters) noexcept {
+    if (active_ || !requirements_ready())
+      return active_ ? ntl::status{STATUS_INVALID_DEVICE_STATE}
+                     : ntl::status{STATUS_NOT_SUPPORTED};
+    auto frame = encode_connect_request(parameters);
+    if (!frame)
+      return frame.status();
+    std::uint64_t stream = 0;
+    auto status = backend_->open_request_stream(stream);
+    if (!status.is_ok())
+      return status;
+    if (!valid_session_id(stream))
+      return STATUS_DATA_ERROR;
+    status = backend_->write_stream(stream, session_detail::scatter(*frame),
+                                    false);
+    if (status.is_ok()) {
+      session_id_ = stream;
+      active_ = true;
+    }
+    return status;
+  }
+
+  ntl::status accept_server(std::uint64_t session_id,
+                            unsigned status_code = 200) noexcept {
+    if (active_)
+      return STATUS_INVALID_DEVICE_STATE;
+    if (!requirements_ready())
+      return STATUS_NOT_SUPPORTED;
+    if (!valid_session_id(session_id))
+      return STATUS_DATA_ERROR;
+    auto frame = encode_connect_response(status_code);
+    if (!frame)
+      return frame.status();
+    auto status = backend_->write_stream(
+        session_id, session_detail::scatter(*frame), status_code / 100 != 2);
+    if (status.is_ok() && status_code / 100 == 2) {
+      session_id_ = session_id;
+      active_ = true;
+    }
+    return status;
+  }
+
+  ntl::result<outbound_stream>
+  open_bidirectional_stream() noexcept {
+    return open_data_stream(stream_direction::bidirectional);
+  }
+
+  ntl::result<outbound_stream>
+  open_unidirectional_stream() noexcept {
+    return open_data_stream(stream_direction::unidirectional);
+  }
+
+  ntl::status write(outbound_stream &stream,
+                    std::span<const std::byte> payload,
+                    bool final = false) noexcept {
+    if (!active_ || stream.owner_ != this || !stream.active_)
+      return STATUS_INVALID_DEVICE_STATE;
+    auto status = guard_.consume_stream_data(payload.size());
+    if (!status.is_ok())
+      return status;
+    const auto wire = payload.empty()
+                          ? ntl::net::scatter_view{}
+                          : ntl::net::scatter_view::from_contiguous(payload);
+    status = backend_->write_stream(stream.id_, wire, final);
+    if (status.is_ok() && final)
+      stream.active_ = false;
+    return status;
+  }
+
+  ntl::status reset(outbound_stream &stream,
+                    std::uint32_t application_error) noexcept {
+    if (!active_ || stream.owner_ != this || !stream.active_)
+      return STATUS_INVALID_DEVICE_STATE;
+    const auto status = backend_->reset_stream_at(
+        stream.id_, application_error_to_http3(application_error),
+        stream.reliable_prefix_size_);
+    if (status.is_ok())
+      stream.active_ = false;
+    return status;
+  }
+
+  ntl::status send_bidirectional(std::span<const std::byte> payload,
+                                 bool final = true) noexcept {
+    auto stream = open_bidirectional_stream();
+    return stream ? write(*stream, payload, final)
+                  : ntl::status{stream.status()};
+  }
+
+  ntl::status send_unidirectional(
+      std::span<const std::byte> payload, bool final = true) noexcept {
+    auto stream = open_unidirectional_stream();
+    return stream ? write(*stream, payload, final)
+                  : ntl::status{stream.status()};
+  }
+
+  ntl::status send_datagram(std::span<const std::byte> payload) noexcept {
+    if (!active_)
+      return STATUS_INVALID_DEVICE_STATE;
+    auto status = guard_.consume_datagram(payload.size());
+    if (!status.is_ok())
+      return status;
+    auto wire = ntl::net::http::encode_http3_datagram(
+        session_id_, payload,
+        {limits_.maximum_datagram_payload});
+    return wire ? backend_->send_datagram(session_detail::scatter(*wire))
+                : ntl::status{wire.status()};
+  }
+
+  ntl::status send_capsule(std::uint64_t type,
+                           std::span<const std::byte> payload) noexcept {
+    if (!active_)
+      return STATUS_INVALID_DEVICE_STATE;
+    auto capsule = ntl::net::http::encode_capsule(
+        type, payload, {limits_.maximum_datagram_payload});
+    if (!capsule)
+      return capsule.status();
+    std::vector<std::byte> frame;
+    auto status = session_detail::append_frame(
+        frame, static_cast<std::uint64_t>(frame_type::data), *capsule);
+    return status.is_ok()
+               ? backend_->write_stream(session_id_,
+                                        session_detail::scatter(frame), false)
+               : status;
+  }
+
+  ntl::status finish() noexcept {
+    if (!active_)
+      return STATUS_INVALID_DEVICE_STATE;
+    const auto status = backend_->write_stream(
+        session_id_, ntl::net::scatter_view{}, true);
+    if (status.is_ok())
+      active_ = false;
+    return status;
+  }
+
+  bool active() const noexcept { return active_; }
+  std::uint64_t session_id() const noexcept { return session_id_; }
+  std::uint64_t control_stream_id() const noexcept {
+    return control_stream_id_;
+  }
+
+private:
+  ntl::result<outbound_stream>
+  open_data_stream(stream_direction direction) noexcept {
+    if (!active_)
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+    auto status = guard_.open_stream(direction);
+    if (!status.is_ok())
+      return ntl::unexpected(static_cast<NTSTATUS>(status));
+    try {
+      std::vector<std::byte> prefix;
+      status = append_quic_varint(
+          prefix, direction == stream_direction::bidirectional
+                      ? bidirectional_stream_signal
+                      : unidirectional_stream_type);
+      if (status.is_ok())
+        status = append_quic_varint(prefix, session_id_);
+      if (!status.is_ok())
+        return ntl::unexpected(static_cast<NTSTATUS>(status));
+      std::uint64_t stream_id = 0;
+      status = direction == stream_direction::bidirectional
+                   ? backend_->open_bidirectional_stream(stream_id)
+                   : backend_->open_unidirectional_stream(stream_id);
+      if (status.is_ok())
+        status = backend_->write_stream(
+            stream_id, session_detail::scatter(prefix), false);
+      if (!status.is_ok())
+        return ntl::unexpected(static_cast<NTSTATUS>(status));
+      return ntl::ok(outbound_stream(
+          *this, stream_id, direction, prefix.size()));
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+  bool requirements_ready() const noexcept {
+    const auto capabilities = backend_->capabilities();
+    return transport_.ready() && capabilities.available &&
+           capabilities.tls13_termination &&
+           capabilities.bidirectional_streams &&
+           capabilities.unidirectional_streams &&
+           capabilities.quic_datagrams && capabilities.reliable_reset_at &&
+           capabilities.extended_connect && capabilities.webtransport;
+  }
+
+  quic_transport_backend *backend_ = nullptr;
+  session_guard guard_;
+  session_limits limits_{};
+  negotiated_transport transport_{};
+  std::uint64_t session_id_ = 0;
+  std::uint64_t control_stream_id_ = 0;
+  bool active_ = false;
+};
+
+} // namespace ntl::net::http3::webtransport

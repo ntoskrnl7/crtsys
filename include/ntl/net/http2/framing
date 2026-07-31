@@ -1,0 +1,513 @@
+/**
+ * @file http2_framing
+ * @brief Bounded HTTP/2 wire-frame parsing and header-block assembly.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include <ntl/net/framing>
+#include <ntl/result>
+#include <ntl/net/buffer/scatter_view>
+#include <ntl/status>
+
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <optional>
+#include <span>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace ntl::net::http2 {
+
+inline constexpr std::size_t frame_header_size = 9;
+inline constexpr std::size_t default_maximum_frame_size = 16 * 1024;
+inline constexpr std::size_t absolute_maximum_frame_size = 0x00ffffff;
+
+enum class frame_type : std::uint8_t {
+  data = 0x0,
+  headers = 0x1,
+  priority = 0x2,
+  reset_stream = 0x3,
+  settings = 0x4,
+  push_promise = 0x5,
+  ping = 0x6,
+  goaway = 0x7,
+  window_update = 0x8,
+  continuation = 0x9,
+};
+
+struct frame_limits {
+  std::size_t maximum_payload_size = default_maximum_frame_size;
+  bool reject_unknown_types = false;
+};
+
+struct frame_header {
+  std::size_t payload_size = 0;
+  frame_type type = frame_type::data;
+  std::uint8_t flags = 0;
+  std::uint32_t stream_id = 0;
+
+  bool end_stream() const noexcept {
+    return (flags & 0x01u) != 0 &&
+           (type == frame_type::data ||
+            type == frame_type::headers);
+  }
+  bool end_headers() const noexcept {
+    return (flags & 0x04u) != 0 &&
+           (type == frame_type::headers ||
+            type == frame_type::push_promise ||
+            type == frame_type::continuation);
+  }
+  bool padded() const noexcept {
+    return (flags & 0x08u) != 0 &&
+           (type == frame_type::data ||
+            type == frame_type::headers ||
+            type == frame_type::push_promise);
+  }
+  bool priority_present() const noexcept {
+    return type == frame_type::headers &&
+           (flags & 0x20u) != 0;
+  }
+  bool acknowledgement() const noexcept {
+    return type == frame_type::settings &&
+           (flags & 0x01u) != 0;
+  }
+};
+
+namespace detail {
+
+inline bool byte_at(ntl::net::scatter_view bytes, std::size_t offset,
+                    std::uint8_t &value) noexcept {
+  const auto read = bytes.read<std::uint8_t>(offset);
+  if (!read)
+    return false;
+  value = *read;
+  return true;
+}
+
+inline bool known_type(std::uint8_t type) noexcept {
+  return type <=
+         static_cast<std::uint8_t>(frame_type::continuation);
+}
+
+inline bool valid_shape(const frame_header &header) noexcept {
+  switch (header.type) {
+  case frame_type::data:
+  case frame_type::headers:
+  case frame_type::push_promise:
+  case frame_type::continuation:
+    return header.stream_id != 0;
+  case frame_type::priority:
+    return header.stream_id != 0 && header.payload_size == 5;
+  case frame_type::reset_stream:
+    return header.stream_id != 0 && header.payload_size == 4;
+  case frame_type::settings:
+    return header.stream_id == 0 &&
+           (header.acknowledgement()
+                ? header.payload_size == 0
+                : header.payload_size % 6 == 0);
+  case frame_type::ping:
+    return header.stream_id == 0 && header.payload_size == 8;
+  case frame_type::goaway:
+    return header.stream_id == 0 && header.payload_size >= 8;
+  case frame_type::window_update:
+    return header.payload_size == 4;
+  }
+  return true;
+}
+
+} // namespace detail
+
+inline ntl::result<frame_header>
+inspect_header(ntl::net::scatter_view bytes,
+               frame_limits limits = {}) noexcept {
+  if (!bytes || limits.maximum_payload_size == 0 ||
+      limits.maximum_payload_size > absolute_maximum_frame_size)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  if (bytes.size() < frame_header_size)
+    return ntl::unexpected(STATUS_BUFFER_TOO_SMALL);
+
+  std::uint8_t octets[frame_header_size]{};
+  for (std::size_t index = 0; index != frame_header_size;
+       ++index) {
+    if (!detail::byte_at(bytes, index, octets[index]))
+      return ntl::unexpected(STATUS_DATA_ERROR);
+  }
+  const std::size_t payload_size =
+      (static_cast<std::size_t>(octets[0]) << 16) |
+      (static_cast<std::size_t>(octets[1]) << 8) |
+      octets[2];
+  if (payload_size > limits.maximum_payload_size)
+    return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+  if (limits.reject_unknown_types &&
+      !detail::known_type(octets[3]))
+    return ntl::unexpected(STATUS_NOT_SUPPORTED);
+
+  frame_header result;
+  result.payload_size = payload_size;
+  result.type = static_cast<frame_type>(octets[3]);
+  result.flags = octets[4];
+  result.stream_id =
+      (static_cast<std::uint32_t>(octets[5] & 0x7fu) << 24) |
+      (static_cast<std::uint32_t>(octets[6]) << 16) |
+      (static_cast<std::uint32_t>(octets[7]) << 8) |
+      octets[8];
+  if (detail::known_type(octets[3]) &&
+      !detail::valid_shape(result))
+    return ntl::unexpected(STATUS_DATA_ERROR);
+  return ntl::ok(result);
+}
+
+/**
+ * @brief Frames one HTTP/2 frame after the connection preface.
+ */
+class frame_framer {
+public:
+  explicit constexpr frame_framer(
+      frame_limits limits = {}) noexcept
+      : limits_(limits) {}
+
+  ntl::net::framing::frame_probe
+  probe(ntl::net::scatter_view bytes) const noexcept {
+    if (!bytes)
+      return ntl::net::framing::frame_probe::malformed(
+          STATUS_INVALID_PARAMETER);
+    if (bytes.size() < frame_header_size)
+      return ntl::net::framing::frame_probe::need_more(
+          frame_header_size);
+    const auto header = inspect_header(bytes, limits_);
+    if (!header)
+      return ntl::net::framing::frame_probe::malformed(
+          static_cast<NTSTATUS>(header.status()));
+    const std::size_t total =
+        frame_header_size + header->payload_size;
+    if (bytes.size() < total)
+      return ntl::net::framing::frame_probe::need_more(total);
+    return ntl::net::framing::frame_probe::complete(
+        total, frame_header_size, header->payload_size);
+  }
+
+private:
+  frame_limits limits_{};
+};
+
+class frame_view {
+public:
+  static ntl::result<frame_view>
+  parse(ntl::net::scatter_view wire,
+        frame_limits limits = {}) noexcept {
+    const auto header = inspect_header(wire, limits);
+    if (!header)
+      return ntl::unexpected(header.status());
+    if (wire.size() <
+        frame_header_size + header->payload_size)
+      return ntl::unexpected(STATUS_BUFFER_TOO_SMALL);
+    const auto payload = wire.subview(
+        frame_header_size, header->payload_size);
+    if (!payload)
+      return ntl::unexpected(payload.status());
+    return ntl::ok(frame_view(*header, *payload));
+  }
+
+  const frame_header &header() const noexcept { return header_; }
+  ntl::net::scatter_view payload() const noexcept { return payload_; }
+
+  ntl::result<ntl::net::scatter_view>
+  data_payload() const noexcept {
+    if (header_.type != frame_type::data)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    std::size_t offset = 0;
+    std::size_t size = payload_.size();
+    if (header_.padded()) {
+      const auto padding = payload_.read<std::uint8_t>();
+      if (!padding || size == 0 ||
+          static_cast<std::size_t>(*padding) > size - 1)
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      offset = 1;
+      size -= 1 + *padding;
+    }
+    return payload_.subview(offset, size);
+  }
+
+  ntl::result<ntl::net::scatter_view>
+  header_block_fragment() const noexcept {
+    if (header_.type != frame_type::headers &&
+        header_.type != frame_type::push_promise &&
+        header_.type != frame_type::continuation)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+
+    std::size_t offset = 0;
+    std::size_t size = payload_.size();
+    std::size_t padding = 0;
+    if (header_.padded()) {
+      const auto value = payload_.read<std::uint8_t>();
+      if (!value || size == 0)
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      padding = *value;
+      offset = 1;
+      --size;
+    }
+    if (header_.priority_present()) {
+      if (size < 5)
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      offset += 5;
+      size -= 5;
+    }
+    if (header_.type == frame_type::push_promise) {
+      if (size < 4)
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      offset += 4;
+      size -= 4;
+    }
+    if (padding > size)
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    size -= padding;
+    return payload_.subview(offset, size);
+  }
+
+private:
+  frame_view(frame_header header,
+             ntl::net::scatter_view payload) noexcept
+      : header_(header), payload_(payload) {}
+
+  frame_header header_{};
+  ntl::net::scatter_view payload_;
+};
+
+struct header_block {
+  std::uint32_t stream_id = 0;
+  bool end_stream = false;
+  std::vector<std::byte> encoded;
+};
+
+struct header_field {
+  std::string name;
+  std::string value;
+  bool never_index = false;
+};
+
+struct decoded_headers {
+  std::vector<header_field> fields;
+  std::size_t decoded_bytes = 0;
+};
+
+/**
+ * @brief Stateful HPACK adapter owned per HTTP/2 connection direction.
+ *
+ * Dynamic tables are connection state, so one decoder must not be shared
+ * between unrelated connections or opposite directions.
+ */
+class hpack_decoder {
+public:
+  virtual ~hpack_decoder() = default;
+  virtual void reset() noexcept = 0;
+  virtual ntl::result<decoded_headers>
+  decode(ntl::net::scatter_view encoded,
+         std::size_t maximum_decoded_size) noexcept = 0;
+};
+
+template <class Decoder>
+class hpack_decoder_adapter final : public hpack_decoder {
+public:
+  template <class... Args>
+  explicit hpack_decoder_adapter(Args &&...args)
+      : decoder_(std::forward<Args>(args)...) {}
+
+  void reset() noexcept override {
+    static_assert(noexcept(decoder_.reset()),
+                  "HPACK decoder reset must be noexcept");
+    decoder_.reset();
+  }
+
+  ntl::result<decoded_headers>
+  decode(ntl::net::scatter_view encoded,
+         std::size_t maximum_decoded_size) noexcept override {
+    static_assert(noexcept(decoder_.decode(
+                      encoded, maximum_decoded_size)),
+                  "HPACK decoder decode must be noexcept");
+    auto decoded =
+        decoder_.decode(encoded, maximum_decoded_size);
+    if (decoded &&
+        decoded->decoded_bytes > maximum_decoded_size)
+      return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+    return decoded;
+  }
+
+  Decoder &underlying() noexcept { return decoder_; }
+
+private:
+  Decoder decoder_;
+};
+
+/**
+ * @brief Reassembles one contiguous HEADERS/PUSH_PROMISE + CONTINUATION block.
+ *
+ * HPACK decoding is a separate adapter. HTTP/2 forbids interleaving another
+ * frame while a CONTINUATION sequence is open; this class rejects it.
+ */
+class header_block_assembler {
+public:
+  explicit header_block_assembler(
+      std::size_t maximum_encoded_size = 256 * 1024) noexcept
+      : maximum_encoded_size_(maximum_encoded_size) {}
+
+  void reset() noexcept {
+    stream_id_ = 0;
+    end_stream_ = false;
+    encoded_.clear();
+  }
+
+  bool in_progress() const noexcept { return stream_id_ != 0; }
+
+  ntl::result<std::optional<header_block>>
+  consume(const frame_view &frame) noexcept {
+    const auto &header = frame.header();
+    if (stream_id_ != 0) {
+      if (header.type != frame_type::continuation ||
+          header.stream_id != stream_id_)
+        return ntl::unexpected(STATUS_DATA_ERROR);
+    } else if (header.type != frame_type::headers &&
+               header.type != frame_type::push_promise) {
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    }
+
+    const auto fragment = frame.header_block_fragment();
+    if (!fragment)
+      return ntl::unexpected(fragment.status());
+    if (fragment->size() >
+        maximum_encoded_size_ - encoded_.size())
+      return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+    try {
+      const ntl::status copied = fragment->for_each_chunk(
+          [this](std::span<const std::byte> chunk) noexcept {
+            try {
+              encoded_.insert(
+                  encoded_.end(), chunk.begin(), chunk.end());
+              return true;
+            } catch (...) {
+              return false;
+            }
+          });
+      if (!copied.is_ok())
+        return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+
+    if (stream_id_ == 0) {
+      stream_id_ = header.stream_id;
+      end_stream_ = header.end_stream();
+    }
+    if (!header.end_headers())
+      return ntl::ok(std::optional<header_block>{});
+
+    header_block completed{
+        stream_id_, end_stream_, std::move(encoded_)};
+    stream_id_ = 0;
+    end_stream_ = false;
+    encoded_.clear();
+    return ntl::ok(std::optional<header_block>(
+        std::move(completed)));
+  }
+
+private:
+  std::size_t maximum_encoded_size_ = 0;
+  std::uint32_t stream_id_ = 0;
+  bool end_stream_ = false;
+  std::vector<std::byte> encoded_;
+};
+
+inline ntl::result<decoded_headers>
+decode_headers(hpack_decoder &decoder,
+               const header_block &block,
+               std::size_t maximum_decoded_size) noexcept {
+  if (maximum_decoded_size == 0)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  const auto encoded = ntl::net::scatter_view::from_contiguous(
+      std::span<const std::byte>(block.encoded));
+  auto decoded =
+      decoder.decode(encoded, maximum_decoded_size);
+  if (!decoded)
+    return decoded;
+  if (decoded->decoded_bytes > maximum_decoded_size)
+    return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+  return decoded;
+}
+
+class inspection_sink {
+public:
+  virtual ~inspection_sink() = default;
+  virtual ntl::status
+  on_headers(std::uint32_t stream_id,
+             std::span<const header_field> fields,
+             bool end_stream) noexcept = 0;
+  virtual ntl::status
+  on_data(std::uint32_t stream_id, ntl::net::scatter_view data,
+          bool end_stream) noexcept = 0;
+};
+
+/**
+ * @brief Routes validated HTTP/2 HEADERS and DATA to one bounded sink.
+ *
+ * The object owns the per-direction HPACK and CONTINUATION state. Callers
+ * must create a separate instance for each connection direction.
+ */
+class connection_inspector {
+public:
+  connection_inspector(
+      hpack_decoder &decoder,
+      std::size_t maximum_encoded_header_size = 256 * 1024,
+      std::size_t maximum_decoded_header_size = 256 * 1024) noexcept
+      : decoder_(&decoder),
+        headers_(maximum_encoded_header_size),
+        maximum_decoded_header_size_(
+            maximum_decoded_header_size) {}
+
+  void reset() noexcept {
+    headers_.reset();
+    decoder_->reset();
+  }
+
+  ntl::status consume(
+      const frame_view &frame,
+      inspection_sink &sink) noexcept {
+    const auto &header = frame.header();
+    if (headers_.in_progress() ||
+        header.type == frame_type::headers ||
+        header.type == frame_type::push_promise ||
+        header.type == frame_type::continuation) {
+      auto block = headers_.consume(frame);
+      if (!block)
+        return block.status();
+      if (!*block)
+        return ntl::status::ok();
+      auto decoded = decode_headers(
+          *decoder_, **block,
+          maximum_decoded_header_size_);
+      if (!decoded)
+        return decoded.status();
+      return sink.on_headers(
+          (*block)->stream_id, decoded->fields,
+          (*block)->end_stream);
+    }
+
+    if (header.type == frame_type::data) {
+      auto data = frame.data_payload();
+      if (!data)
+        return data.status();
+      return sink.on_data(
+          header.stream_id, *data, header.end_stream());
+    }
+    return ntl::status::ok();
+  }
+
+private:
+  hpack_decoder *decoder_;
+  header_block_assembler headers_;
+  std::size_t maximum_decoded_header_size_ = 0;
+};
+
+} // namespace ntl::net::http2

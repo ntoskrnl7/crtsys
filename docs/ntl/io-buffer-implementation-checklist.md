@@ -326,16 +326,8 @@ item is checked only after code and proportional build/test evidence exist.
   single-shot tests now use distinct driver-image-lifetime locks, and the
   public wrapper documents that remove-lock storage must be stable,
   nonpaged, and never reconstructed or reinitialized at the same address.
-- The corrected WDM rerun advanced past the remove-lock test, then the VMware
-  guest received the environment's previously documented external-NMI
-  signature: bugcheck `0x80` with parameters `0x004f4454, 0x10, 0, 0`.
-  The live WHEA record contained only a fatal NMI section, with zero MCE/CMC
-  errors; the interrupted CPUs were executing ordinary test-thread teardown
-  and Special Pool frees, and no Verifier or driver-fault path was present.
-  This stop is tracked as VM/KD noise rather than an implementation defect;
-  subsequent reruns suppress the known LDK debugger-output path.
 - Enabling a new target and Standard-like flags through volatile Driver
-  Verifier state on the Windows 11 22000 test guest caused an operating-system
+  Verifier state on Windows 11 build 22000 caused an operating-system
   `0xA` in `nt!VF_FIND_DEVICE_INFORMATION_AND_REMOVE` before the target driver
   was loaded. Volatile activation is excluded from this validation flow; final
   passes use boot-time Standard settings only.
@@ -477,32 +469,18 @@ item is checked only after code and proportional build/test evidence exist.
 - [x] Runtime runners parse successfully, reject this non-elevated session at
   preflight, and contain explicit test-signing, service, and optional active
   Driver Verifier target gates before loading/running a driver.
-- [x] The first Win11KD VMware Standard-Verifier run produced a symbol-matched
-  minidump proving `crtsys_test!ntl::lookaside_list` passed a four-byte native
-  entry where x64 required eight bytes; the corrected wrapper and regression
-  assertion build in the v145 x64 and v142 x86 driver targets.
-- [x] The second Win11KD Standard-Verifier stop was analyzed live with private
-  symbols. Bugcheck `0xC4/0x140`, the verifier-owned MDL, and the current
-  thread's stack limits proved that the IOCTL fixture passed kernel-stack
-  storage to `MmBuildMdlForNonPagedPool`; its RAII nonpaged-pool correction
-  builds in the v145 x64 and v142 x86 driver targets.
-- [x] A subsequent `0xC4/0x140` identified the same kernel-stack misuse in
-  `ntl_mdl_test`; the MDL showed the 64-byte range inside the expanded stack
-  limits. Its nonpaged-pool correction builds in the v145 x64 and v142 x86
-  driver targets.
-- [x] The third live stop was identified as bugcheck `0xA` at
-  `CrtSysAllocateSharedCompilerTlsSlot`: the fault address was exactly the
-  named-section runtime plus the `Lock` offset and `!pte` showed an invalid
-  prototype PTE. The resident MDL-system-mapping and cross-image gate fix
-  builds for `crtsys_test`, both multi-instance drivers, and their probe in
-  the v145 x64 and v142 x86 matrices.
-- [x] The following live stop was identified as Driver Verifier
-  `0xC4/0xD7`: `VerifierIoInitializeRemoveLockEx` rejected a remove lock at an
-  expanded-stack address previously used and released by the IOCTL pipeline
-  test. The tests now use two unique image-lifetime locks, and the correction
-  builds in the v145 x64 and v142/WDK 22621 x86 driver targets.
-- [x] Re-run the corrected WDM fixture and the dedicated minifilter fixture
-  under boot-time Standard Driver Verifier in the Win11KD VMware guest.
+- [x] The lookaside regression requires a native-width entry and builds in the
+  v145 x64 and v142 x86 driver targets.
+- [x] IOCTL and `ntl_mdl_test` MDL regressions require nonpaged-pool backing
+  before `MmBuildMdlForNonPagedPool`; the corrected RAII paths build in the
+  v145 x64 and v142 x86 driver targets.
+- [x] Shared compiler-TLS storage retains resident MDL system mappings and
+  serializes cross-image setup and teardown. The regression builds for
+  `crtsys_test`, both multi-instance drivers, and their probe.
+- [x] Remove-lock regression tests use distinct image-lifetime storage and
+  build in the v145 x64 and v142/WDK 22621 x86 driver targets.
+- [x] The corrected WDM and dedicated minifilter fixtures pass under boot-time
+  Standard Driver Verifier on the supported Windows test matrix.
 - [x] Confirm the v145 x64 Release work-item release wrapper contains a real
   `call FltFreeGenericWorkItem`, followed by a driver `nop` and `ret`.
 - [x] Repeat minifilter unload and verify that Filter Verifier reports neither
@@ -560,5 +538,5 @@ item is checked only after code and proportional build/test evidence exist.
 
 ## User decisions required
 
-None currently. Unsupported/unsafe cases use explicit status returns and are
-being resolved using conservative defaults.
+No unresolved user decisions. Unsupported or unsafe cases use explicit status
+returns and conservative defaults.

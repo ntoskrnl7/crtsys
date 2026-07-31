@@ -63,7 +63,7 @@ bootstrapping, then verifies:
 - balanced data-scan sections, section contexts, pending writes,
   stream-handle contexts, and transaction contexts.
 
-A passing run currently reports the following deterministic policy counts:
+A passing run reports the following deterministic policy counts:
 
 ```text
 policy=19/0 open=10/1 write=4/3/1 cleanup=5/1
@@ -82,19 +82,17 @@ created/mapped/closed, and `pending` is pended/resumed/cancelled.
 cmake --build test\flt\runtime\build_x64_v145 --config Debug `
   --target crtsys_flt_scanner_runtime_test `
            crtsys_flt_scanner_runtime_test_app -- /m:1
-
-powershell -NoProfile -ExecutionPolicy Bypass `
-  -File D:\projects\crtsys-vm-test\Run-CrtSysMinifilterInVm.ps1 `
-  -DriverPath D:\projects\crtsys\test\flt\runtime\build_x64_v145\Debug\crtsys_flt_scanner_runtime_test.sys `
-  -AppPath D:\projects\crtsys\test\flt\runtime\build_x64_v145\Debug\crtsys_flt_scanner_runtime_test_app.exe `
-  -ServiceName CrtSysFltScannerRuntimeTest `
-  -InstanceName 'CrtSys FLT scanner runtime test instance' `
-  -Altitude 370030.233 `
-  -GuestDirectory C:\crtsys-minifilter-scanner-test `
-  -LogPath D:\projects\crtsys\artifacts\flt-scanner-vm.log
 ```
 
-For WOW64 coverage, keep the x64 driver and replace only `-AppPath` with
-`build_x86_v145\Debug\crtsys_flt_scanner_runtime_test_app.exe`. Use a distinct
-guest directory and log such as `flt-scanner-vm-x86-app.log`. Both runs must
-end with `APP_RC=0`, `UNLOAD_RC=0`, and `PASS`.
+Stage the driver package and application using the
+[disposable VM workflow](README.md#disposable-vm-execution), then run in the
+guest:
+
+```powershell
+$testVolumeRoot = Read-Host 'Disposable test volume root'
+.\crtsys_flt_scanner_runtime_test_app.exe $testVolumeRoot
+```
+
+For WOW64 coverage, keep the x64 driver and run the staged x86 application in
+place of the x64 application. Both runs must end with the scanner success
+marker, clean driver unload, and no Verifier or crash event.

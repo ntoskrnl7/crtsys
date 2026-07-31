@@ -1,0 +1,220 @@
+/**
+ * @file tls_product_policy
+ * @brief Product-level enforcement plans for inspectable and opaque TLS.
+ */
+#pragma once
+
+#include <ntl/net/tls/inspection_policy>
+
+#include <cstdint>
+
+namespace ntl::net::inspection {
+
+enum class inspection_requirement : std::uint8_t {
+  required = 1,
+  when_possible = 2,
+  metadata_only = 3,
+};
+
+enum class opaque_connection_policy : std::uint8_t {
+  block = 1,
+  bypass_unchanged = 2,
+  metadata_only = 3,
+};
+
+enum class quic_unavailable_policy : std::uint8_t {
+  block = 1,
+  bypass_unchanged = 2,
+  metadata_only = 3,
+  block_udp_for_tcp_fallback = 4,
+};
+
+enum class inspection_enforcement : std::uint8_t {
+  intercept = 1,
+  tunnel_unchanged = 2,
+  observe_metadata = 3,
+  terminate = 4,
+  block_quic_for_tcp_fallback = 5,
+};
+
+struct inspection_capabilities {
+  bool transparent_tcp_redirect = false;
+  bool transparent_udp_redirect = false;
+  bool tcp_tls_frontend = false;
+  bool http1_adapter = false;
+  bool http2_adapter = false;
+  bool http3_adapter = false;
+  bool managed_downstream_identity = false;
+  bool ech_frontend = false;
+  bool origin_client_identity = false;
+};
+
+struct product_inspection_options {
+  inspection_requirement requirement = inspection_requirement::required;
+  opaque_connection_policy no_server_name = opaque_connection_policy::block;
+  opaque_connection_policy encrypted_client_hello =
+      opaque_connection_policy::block;
+  opaque_connection_policy certificate_pinning =
+      opaque_connection_policy::block;
+  opaque_connection_policy unknown_downstream_trust =
+      opaque_connection_policy::block;
+  opaque_connection_policy missing_client_identity =
+      opaque_connection_policy::block;
+  opaque_connection_policy unsupported_protocol =
+      opaque_connection_policy::block;
+  opaque_connection_policy unsupported_content_encoding =
+      opaque_connection_policy::block;
+  quic_unavailable_policy unavailable_quic =
+      quic_unavailable_policy::block_udp_for_tcp_fallback;
+};
+
+struct inspection_plan {
+  inspection_enforcement enforcement = inspection_enforcement::terminate;
+  tls_inspection_issue issue = tls_inspection_issue::none;
+  bool preserves_ciphertext = false;
+  bool expects_tcp_retry = false;
+};
+
+/**
+ * @brief Converts capability and TLS observations into an executable action.
+ *
+ * This planner never calls certificate pinning or ECH "bypassed".  Bypass is
+ * always an unchanged ciphertext tunnel.  QUIC fallback means blocking the
+ * inspected application's UDP path and waiting for its normal TCP retry; it
+ * never changes browser configuration.
+ */
+class product_inspection_policy {
+public:
+  explicit constexpr product_inspection_policy(
+      product_inspection_options options = {}) noexcept
+      : options_(options) {}
+
+  constexpr inspection_plan plan(
+      const tls_inspection_observation &observation,
+      const inspection_capabilities &capabilities) const noexcept {
+    if (options_.requirement == inspection_requirement::metadata_only)
+      return metadata(tls_inspection_issue::none);
+
+    if (observation.transport == encrypted_transport::quic &&
+        (!capabilities.transparent_udp_redirect ||
+         !capabilities.http3_adapter ||
+         !observation.quic_backend_available))
+      return unavailable_quic(capabilities);
+    if (observation.encrypted_client_hello_confirmed &&
+        !observation.encrypted_client_hello_decrypted)
+      return opaque(options_.encrypted_client_hello,
+                    tls_inspection_issue::encrypted_client_hello);
+    if (observation.encrypted_client_hello_decrypted &&
+        !capabilities.ech_frontend)
+      return opaque(options_.encrypted_client_hello,
+                    tls_inspection_issue::encrypted_client_hello);
+    if (observation.server_name.empty())
+      return opaque(options_.no_server_name,
+                    tls_inspection_issue::no_usable_server_name);
+    if (!observation.downstream_trust_known)
+      return opaque(options_.unknown_downstream_trust,
+                    tls_inspection_issue::downstream_trust_unknown);
+    if (observation.downstream_rejected_issued_certificate)
+      return opaque(options_.certificate_pinning,
+                    tls_inspection_issue::certificate_pinning_rejected);
+    if (observation.origin_requests_client_identity &&
+        (!observation.client_identity_available ||
+         !capabilities.origin_client_identity))
+      return opaque(options_.missing_client_identity,
+                    tls_inspection_issue::client_identity_unavailable);
+    if (!observation.protocol_adapter_available ||
+        !adapter_available(observation, capabilities))
+      return opaque(options_.unsupported_protocol,
+                    tls_inspection_issue::unsupported_application_protocol);
+    if (!observation.content_decoder_available)
+      return opaque(options_.unsupported_content_encoding,
+                    tls_inspection_issue::unsupported_content_encoding);
+    if (!capabilities.managed_downstream_identity)
+      return opaque(options_.unknown_downstream_trust,
+                    tls_inspection_issue::downstream_trust_unknown);
+    if (observation.transport == encrypted_transport::tcp_tls &&
+        (!capabilities.transparent_tcp_redirect ||
+         !capabilities.tcp_tls_frontend))
+      return opaque(options_.unsupported_protocol,
+                    tls_inspection_issue::unsupported_application_protocol);
+    return {inspection_enforcement::intercept,
+            tls_inspection_issue::none, false, false};
+  }
+
+private:
+  static constexpr bool adapter_available(
+      const tls_inspection_observation &observation,
+      const inspection_capabilities &capabilities) noexcept {
+    switch (observation.protocol) {
+    case application_protocol::http1:
+    case application_protocol::websocket:
+      return capabilities.http1_adapter;
+    case application_protocol::http2:
+      return capabilities.http2_adapter;
+    case application_protocol::http3:
+    case application_protocol::webtransport:
+      return capabilities.http3_adapter;
+    case application_protocol::grpc:
+      return observation.transport == encrypted_transport::quic
+                 ? capabilities.http3_adapter
+                 : capabilities.http2_adapter;
+    case application_protocol::unknown:
+      return false;
+    }
+    return false;
+  }
+
+  constexpr inspection_plan unavailable_quic(
+      const inspection_capabilities &capabilities) const noexcept {
+    switch (options_.unavailable_quic) {
+    case quic_unavailable_policy::block_udp_for_tcp_fallback:
+      if (capabilities.transparent_tcp_redirect &&
+          capabilities.tcp_tls_frontend)
+        return {inspection_enforcement::block_quic_for_tcp_fallback,
+                tls_inspection_issue::quic_backend_unavailable,
+                false, true};
+      return terminate(tls_inspection_issue::quic_backend_unavailable);
+    case quic_unavailable_policy::bypass_unchanged:
+      return tunnel(tls_inspection_issue::quic_backend_unavailable);
+    case quic_unavailable_policy::metadata_only:
+      return metadata(tls_inspection_issue::quic_backend_unavailable);
+    case quic_unavailable_policy::block:
+      return terminate(tls_inspection_issue::quic_backend_unavailable);
+    }
+    return terminate(tls_inspection_issue::quic_backend_unavailable);
+  }
+
+  constexpr inspection_plan opaque(
+      opaque_connection_policy policy,
+      tls_inspection_issue issue) const noexcept {
+    if (options_.requirement == inspection_requirement::when_possible &&
+        policy == opaque_connection_policy::block)
+      return tunnel(issue);
+    switch (policy) {
+    case opaque_connection_policy::bypass_unchanged:
+      return tunnel(issue);
+    case opaque_connection_policy::metadata_only:
+      return metadata(issue);
+    case opaque_connection_policy::block:
+      return terminate(issue);
+    }
+    return terminate(issue);
+  }
+
+  static constexpr inspection_plan tunnel(
+      tls_inspection_issue issue) noexcept {
+    return {inspection_enforcement::tunnel_unchanged, issue, true, false};
+  }
+  static constexpr inspection_plan metadata(
+      tls_inspection_issue issue) noexcept {
+    return {inspection_enforcement::observe_metadata, issue, true, false};
+  }
+  static constexpr inspection_plan terminate(
+      tls_inspection_issue issue) noexcept {
+    return {inspection_enforcement::terminate, issue, false, false};
+  }
+
+  product_inspection_options options_{};
+};
+
+} // namespace ntl::net::inspection

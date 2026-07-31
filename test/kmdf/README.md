@@ -24,6 +24,8 @@ repository:
   -Configuration Release
 ```
 
-The VM runner and verifier configuration live in the companion
-`crtsys-vm-test` repository. See the fixture README for the current invocation
-and pass/fail artifacts.
+The in-repository
+[`runtime/Run-KmdfVmAcceptance.ps1`](runtime/Run-KmdfVmAcceptance.ps1)
+performs build, staging, VM execution, Driver Verifier checks, cleanup, and
+restoration. See the [runtime fixture guide](runtime/README.md) for parameters
+and acceptance criteria.

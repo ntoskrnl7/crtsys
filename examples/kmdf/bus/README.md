@@ -1,5 +1,7 @@
 # NTL KMDF bus and PDO sample
 
+[한국어 설명](./README.ko-KR.md)
+
 This sample shows a root-enumerated KMDF bus FDO and a child function driver
 communicating through a typed NTL KMDF query interface. The bus driver:
 

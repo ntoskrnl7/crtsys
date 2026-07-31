@@ -1,0 +1,375 @@
+/**
+ * @file websocket_transform
+ * @brief Bounded semantic WebSocket message inspection and rewriting.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/websocket/transform is a user-mode header"
+#endif
+
+#include <ntl/net/inspection/core>
+#include <ntl/net/websocket/framing>
+#include <ntl/net/websocket/permessage_deflate>
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <new>
+#include <optional>
+#include <span>
+#include <stdexcept>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+namespace ntl::net::websocket {
+
+struct transform_limits {
+  std::size_t maximum_wire_frame_bytes = 1024 * 1024;
+  std::size_t maximum_decoded_message_bytes = 4 * 1024 * 1024;
+  std::size_t maximum_encoded_message_bytes = 4 * 1024 * 1024;
+  std::size_t maximum_output_frame_payload = 64 * 1024;
+  bool validate_text_utf8 = true;
+};
+
+enum class rewrite_action : std::uint8_t {
+  forward = 1,
+  block = 2,
+  drop = 3,
+};
+
+class rewrite_result {
+public:
+  static rewrite_result unchanged() noexcept { return {}; }
+  static rewrite_result replace(std::vector<std::byte> payload) {
+    rewrite_result result;
+    result.replaced_ = true;
+    result.payload_ = std::move(payload);
+    return result;
+  }
+  static rewrite_result block() noexcept {
+    rewrite_result result;
+    result.action_ = rewrite_action::block;
+    return result;
+  }
+  static rewrite_result drop() noexcept {
+    rewrite_result result;
+    result.action_ = rewrite_action::drop;
+    return result;
+  }
+  rewrite_action action() const noexcept { return action_; }
+  bool replaced() const noexcept { return replaced_; }
+  std::vector<std::byte> release_payload() noexcept {
+    return std::move(payload_);
+  }
+
+private:
+  rewrite_action action_ = rewrite_action::forward;
+  bool replaced_ = false;
+  std::vector<std::byte> payload_;
+};
+
+struct transform_outcome {
+  rewrite_action action = rewrite_action::forward;
+  bool complete_message = false;
+  bool modified = false;
+  std::vector<std::byte> wire;
+  NTSTATUS failure = STATUS_SUCCESS;
+};
+
+namespace transform_detail {
+
+inline bool valid_utf8(std::span<const std::byte> value) noexcept {
+  std::size_t position = 0;
+  while (position < value.size()) {
+    const std::uint8_t first = std::to_integer<std::uint8_t>(value[position]);
+    std::size_t count = 0;
+    std::uint32_t codepoint = 0;
+    if (first <= 0x7f) {
+      ++position;
+      continue;
+    } else if ((first & 0xe0u) == 0xc0u) {
+      count = 1;
+      codepoint = first & 0x1fu;
+      if (codepoint < 2)
+        return false;
+    } else if ((first & 0xf0u) == 0xe0u) {
+      count = 2;
+      codepoint = first & 0x0fu;
+    } else if ((first & 0xf8u) == 0xf0u) {
+      count = 3;
+      codepoint = first & 0x07u;
+    } else {
+      return false;
+    }
+    if (position + count >= value.size())
+      return false;
+    for (std::size_t index = 0; index != count; ++index) {
+      const std::uint8_t next =
+          std::to_integer<std::uint8_t>(value[position + 1 + index]);
+      if ((next & 0xc0u) != 0x80u)
+        return false;
+      codepoint = (codepoint << 6) | (next & 0x3fu);
+    }
+    if ((count == 2 && codepoint < 0x800) ||
+        (count == 3 && codepoint < 0x10000) ||
+        codepoint > 0x10ffff ||
+        (codepoint >= 0xd800 && codepoint <= 0xdfff))
+      return false;
+    position += count + 1;
+  }
+  return true;
+}
+
+inline ntl::result<std::vector<std::byte>> encode_frame(
+    opcode operation, bool final, std::uint8_t reserved_bits,
+    std::span<const std::byte> payload, sender_role sender,
+    const std::function<std::array<std::byte, 4>()> &mask_provider) noexcept {
+  if (payload.size() > 0x7fffffffffffffffull ||
+      (sender == sender_role::client && !mask_provider))
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  try {
+    std::vector<std::byte> wire;
+    const std::size_t extended = payload.size() <= 125
+                                     ? 0
+                                     : payload.size() <= 0xffff ? 2 : 8;
+    const bool masked = sender == sender_role::client;
+    wire.reserve(2 + extended + (masked ? 4 : 0) + payload.size());
+    wire.push_back(static_cast<std::byte>(
+        (final ? 0x80u : 0u) |
+        ((reserved_bits & 0x07u) << 4) |
+        static_cast<std::uint8_t>(operation)));
+    const std::uint8_t mask_flag = masked ? 0x80u : 0u;
+    if (payload.size() <= 125) {
+      wire.push_back(static_cast<std::byte>(
+          mask_flag | static_cast<std::uint8_t>(payload.size())));
+    } else if (payload.size() <= 0xffff) {
+      wire.push_back(static_cast<std::byte>(mask_flag | 126u));
+      wire.push_back(static_cast<std::byte>((payload.size() >> 8) & 0xffu));
+      wire.push_back(static_cast<std::byte>(payload.size() & 0xffu));
+    } else {
+      wire.push_back(static_cast<std::byte>(mask_flag | 127u));
+      for (int shift = 56; shift >= 0; shift -= 8)
+        wire.push_back(static_cast<std::byte>((payload.size() >> shift) & 0xffu));
+    }
+    std::array<std::byte, 4> key{};
+    if (masked) {
+      key = mask_provider();
+      wire.insert(wire.end(), key.begin(), key.end());
+    }
+    for (std::size_t index = 0; index != payload.size(); ++index)
+      wire.push_back(masked ? payload[index] ^ key[index % key.size()]
+                            : payload[index]);
+    return ntl::ok(std::move(wire));
+  } catch (...) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  }
+}
+
+} // namespace transform_detail
+
+class message_transform_pipeline {
+public:
+  using predicate = std::function<bool(const message &)>;
+
+  explicit message_transform_pipeline(transform_limits limits = {})
+      : limits_(limits) {
+    if (limits_.maximum_wire_frame_bytes == 0 ||
+        limits_.maximum_decoded_message_bytes == 0 ||
+        limits_.maximum_encoded_message_bytes == 0 ||
+        limits_.maximum_output_frame_payload == 0)
+      throw std::invalid_argument("WebSocket transform limits are invalid");
+  }
+
+  template <class Function>
+  message_transform_pipeline &transform(Function &&function) {
+    using callback_type = std::decay_t<Function>;
+    rules_.push_back(
+        {[](const message &) { return true; },
+         [callback = callback_type(std::forward<Function>(function))](
+             message &value) {
+           return static_cast<rewrite_result>(callback(value));
+         }});
+    return *this;
+  }
+
+  template <class Function>
+  message_transform_pipeline &inspect(Function &&function) {
+    using callback_type = std::decay_t<Function>;
+    return transform([callback = callback_type(
+                          std::forward<Function>(function))](message &value) {
+      switch (static_cast<ntl::net::inspection::verdict>(
+          callback(static_cast<const message &>(value)))) {
+      case ntl::net::inspection::verdict::permit:
+        return rewrite_result::unchanged();
+      case ntl::net::inspection::verdict::block:
+        return rewrite_result::block();
+      case ntl::net::inspection::verdict::drop_flow:
+        return rewrite_result::drop();
+      }
+      return rewrite_result::block();
+    });
+  }
+
+  rewrite_action apply(message &value, bool &modified) const noexcept {
+    modified = false;
+    try {
+      for (const auto &rule : rules_) {
+        if (!rule.condition(value))
+          continue;
+        auto result = rule.apply(value);
+        if (result.action() != rewrite_action::forward)
+          return result.action();
+        if (result.replaced()) {
+          value.payload = result.release_payload();
+          modified = true;
+          if (value.payload.size() > limits_.maximum_decoded_message_bytes)
+            return rewrite_action::block;
+        }
+      }
+      if (limits_.validate_text_utf8 && value.operation == opcode::text &&
+          !transform_detail::valid_utf8(value.payload))
+        return rewrite_action::block;
+      if (value.control && value.payload.size() > 125)
+        return rewrite_action::block;
+      return rewrite_action::forward;
+    } catch (...) {
+      return rewrite_action::block;
+    }
+  }
+
+  transform_limits limits() const noexcept { return limits_; }
+
+private:
+  struct rule {
+    predicate condition;
+    std::function<rewrite_result(message &)> apply;
+  };
+  transform_limits limits_{};
+  std::vector<rule> rules_;
+};
+
+/**
+ * @brief One-direction wire adapter: frame -> message -> policy -> frame.
+ */
+class wire_transformer {
+public:
+  wire_transformer(
+      sender_role sender, const message_transform_pipeline &pipeline,
+      std::optional<permessage_deflate_parameters> compression = std::nullopt,
+      std::function<std::array<std::byte, 4>()> mask_provider = {})
+      : sender_(sender), pipeline_(&pipeline),
+        assembler_(pipeline.limits().maximum_decoded_message_bytes),
+        mask_provider_(std::move(mask_provider)) {
+    if (compression && compression->enabled) {
+      decoder_ = std::make_unique<permessage_deflate_decoder>(
+          sender == sender_role::client
+              ? compression->client_max_window_bits
+              : compression->server_max_window_bits,
+          sender == sender_role::client
+              ? compression->client_no_context_takeover
+              : compression->server_no_context_takeover,
+          pipeline.limits().maximum_decoded_message_bytes);
+      encoder_ = std::make_unique<permessage_deflate_encoder>(
+          sender == sender_role::client
+              ? compression->client_max_window_bits
+              : compression->server_max_window_bits,
+          sender == sender_role::client
+              ? compression->client_no_context_takeover
+              : compression->server_no_context_takeover,
+          pipeline.limits().maximum_decoded_message_bytes,
+          pipeline.limits().maximum_encoded_message_bytes);
+    }
+  }
+
+  transform_outcome consume(ntl::net::scatter_view frame) noexcept {
+    transform_outcome outcome;
+    const auto header = inspect_header(
+        frame, sender_,
+        {.maximum_payload_size = pipeline_->limits().maximum_wire_frame_bytes,
+         .allowed_reserved_bits = decoder_ ? std::uint8_t{0x04} : std::uint8_t{0}});
+    if (!header)
+      return fail(header.status());
+    const auto payload = decode_payload(
+        frame, *header, pipeline_->limits().maximum_wire_frame_bytes);
+    if (!payload)
+      return fail(payload.status());
+    auto assembled = assembler_.consume(*header, *payload);
+    if (!assembled)
+      return fail(assembled.status());
+    if (!*assembled)
+      return outcome;
+
+    message value = std::move(**assembled);
+    const bool originally_compressed = value.compressed();
+    if (originally_compressed) {
+      if (!decoder_)
+        return fail(STATUS_NOT_SUPPORTED);
+      auto decoded = decoder_->decode(value.payload, true);
+      if (!decoded)
+        return fail(decoded.status());
+      value.payload = std::move(*decoded);
+      value.reserved_bits &= static_cast<std::uint8_t>(~0x04u);
+    }
+
+    bool modified = false;
+    outcome.action = pipeline_->apply(value, modified);
+    outcome.complete_message = true;
+    outcome.modified = modified;
+    if (outcome.action != rewrite_action::forward)
+      return outcome;
+
+    if (originally_compressed) {
+      auto encoded = encoder_->encode(value.payload, true);
+      if (!encoded)
+        return fail(encoded.status());
+      value.payload = std::move(*encoded);
+      value.reserved_bits |= 0x04u;
+    }
+    const std::size_t frame_limit =
+        pipeline_->limits().maximum_output_frame_payload;
+    if (value.control && value.payload.size() > frame_limit)
+      return fail(STATUS_BUFFER_OVERFLOW);
+    std::size_t offset = 0;
+    bool first = true;
+    do {
+      const std::size_t remaining = value.payload.size() - offset;
+      const std::size_t count = (std::min)(remaining, frame_limit);
+      const bool final = offset + count == value.payload.size();
+      const auto operation = first ? value.operation : opcode::continuation;
+      const std::uint8_t reserved = first ? value.reserved_bits : 0;
+      auto encoded = transform_detail::encode_frame(
+          operation, final, reserved,
+          std::span<const std::byte>(value.payload).subspan(offset, count),
+          sender_, mask_provider_);
+      if (!encoded)
+        return fail(encoded.status());
+      if (encoded->size() >
+          pipeline_->limits().maximum_encoded_message_bytes -
+              outcome.wire.size())
+        return fail(STATUS_BUFFER_OVERFLOW);
+      outcome.wire.insert(outcome.wire.end(), encoded->begin(), encoded->end());
+      offset += count;
+      first = false;
+    } while (offset != value.payload.size());
+    return outcome;
+  }
+
+private:
+  transform_outcome fail(ntl::status status) noexcept {
+    return {rewrite_action::block, true, false, {},
+            static_cast<NTSTATUS>(status)};
+  }
+
+  sender_role sender_ = sender_role::either;
+  const message_transform_pipeline *pipeline_ = nullptr;
+  message_assembler assembler_;
+  std::function<std::array<std::byte, 4>()> mask_provider_;
+  std::unique_ptr<permessage_deflate_decoder> decoder_;
+  std::unique_ptr<permessage_deflate_encoder> encoder_;
+};
+
+} // namespace ntl::net::websocket

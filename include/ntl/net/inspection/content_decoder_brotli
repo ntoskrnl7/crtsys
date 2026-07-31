@@ -1,0 +1,148 @@
+/**
+ * @file content_decoder_brotli
+ * @brief Bounded Brotli adapter for ntl/net/inspection/content_decoder.
+ *
+ * Link the consuming target with the Brotli decoder and common libraries.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/inspection/content_decoder_brotli is a user-mode header"
+#endif
+
+#include <ntl/net/inspection/content_decoder>
+
+#include <array>
+#include <cstddef>
+#include <memory>
+#include <span>
+
+#include <brotli/decode.h>
+
+namespace ntl::net::inspection {
+
+class brotli_content_decoder {
+public:
+  brotli_content_decoder() noexcept = default;
+  brotli_content_decoder(const brotli_content_decoder &) = delete;
+  brotli_content_decoder &
+  operator=(const brotli_content_decoder &) = delete;
+
+  ~brotli_content_decoder() { release(); }
+
+  void reset() noexcept {
+    release();
+    ended_ = false;
+  }
+
+  decode_result decode(
+      ntl::net::scatter_view input, bool final,
+      decoded_output &output) noexcept {
+    if (!input || ended_)
+      return decode_result::malformed(STATUS_INVALID_PARAMETER);
+    if (!initialize())
+      return decode_result::malformed(
+          STATUS_INSUFFICIENT_RESOURCES);
+
+    decode_result result = decode_result::need_more_input();
+    const ntl::status visited = input.for_each_chunk(
+        [this, &output, &result](
+            std::span<const std::byte> chunk) noexcept {
+          const std::uint8_t *next_in =
+              reinterpret_cast<const std::uint8_t *>(
+                  chunk.data());
+          std::size_t available_in = chunk.size();
+          do {
+            std::array<std::byte, 16 * 1024> buffer{};
+            const std::size_t remaining =
+                output.maximum_size() - output.size();
+            std::size_t available_out =
+                remaining == 0 ? 1 : (std::min)(remaining, buffer.size());
+            std::uint8_t *next_out =
+                reinterpret_cast<std::uint8_t *>(
+                    buffer.data());
+            const std::size_t capacity = available_out;
+            const BrotliDecoderResult status =
+                ::BrotliDecoderDecompressStream(
+                    state_, &available_in, &next_in,
+                    &available_out, &next_out, nullptr);
+            const std::size_t produced =
+                capacity - available_out;
+            if (produced > remaining) {
+              result = decode_result::malformed(STATUS_BUFFER_OVERFLOW);
+              return false;
+            }
+            if (produced != 0) {
+              const ntl::status appended =
+                  output.append(
+                      std::span<const std::byte>(
+                          buffer.data(), produced));
+              if (!appended.is_ok()) {
+                result = decode_result::malformed(
+                    static_cast<NTSTATUS>(appended));
+                return false;
+              }
+            }
+            if (status == BROTLI_DECODER_RESULT_SUCCESS) {
+              if (available_in != 0) {
+                result =
+                    decode_result::malformed(STATUS_DATA_ERROR);
+                return false;
+              }
+              ended_ = true;
+              result = decode_result::complete();
+              break;
+            }
+            if (status == BROTLI_DECODER_RESULT_ERROR) {
+              result =
+                  decode_result::malformed(STATUS_DATA_ERROR);
+              return false;
+            }
+            if (status == BROTLI_DECODER_RESULT_NEEDS_MORE_INPUT)
+              break;
+          } while (available_in != 0 ||
+                   ::BrotliDecoderHasMoreOutput(state_));
+          return true;
+        });
+    if (!visited.is_ok())
+      return result.state() == decode_state::malformed
+                 ? result
+                 : decode_result::malformed(
+                       static_cast<NTSTATUS>(visited));
+    if (ended_)
+      return result;
+    return final
+               ? decode_result::malformed(STATUS_END_OF_FILE)
+               : decode_result::need_more_input();
+  }
+
+private:
+  bool initialize() noexcept {
+    if (state_)
+      return true;
+    state_ = ::BrotliDecoderCreateInstance(
+        nullptr, nullptr, nullptr);
+    return state_ != nullptr;
+  }
+
+  void release() noexcept {
+    if (state_)
+      ::BrotliDecoderDestroyInstance(state_);
+    state_ = nullptr;
+  }
+
+  BrotliDecoderState *state_ = nullptr;
+  bool ended_ = false;
+};
+
+inline void register_brotli_content_decoder(
+    content_decoder_registry &registry) {
+  registry.add("br", [] {
+    return std::make_unique<
+        content_decoder_adapter<brotli_content_decoder>>();
+  });
+}
+
+} // namespace ntl::net::inspection

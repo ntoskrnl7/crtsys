@@ -1,5 +1,7 @@
 # NTL KMDF filter-stack sample
 
+[한국어 설명](./README.ko-KR.md)
+
 This software-only sample installs a root-enumerated KMDF function driver and
 an NTL KMDF upper filter in the same device stack.
 

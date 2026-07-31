@@ -1,0 +1,196 @@
+[CmdletBinding()]
+param(
+  [ValidateSet('Debug', 'Release')]
+  [string] $Configuration = 'Release',
+
+  [ValidateSet('v143', 'v145')]
+  [string] $PlatformToolset = 'v145',
+
+  [ValidateSet('x64', 'ARM64')]
+  [string] $Architecture = 'x64',
+
+  [string] $WindowsSdkVersion = '10.0.22621.0',
+
+  [string] $BuildRoot = '',
+
+  [string] $PrebuiltRoot = '',
+
+  [string] $OutputRoot = '',
+
+  [ValidateSet('all', 'datagram-proxy', 'async-inspection',
+               'flow-monitor', 'stream-edit', 'connect-redirect',
+               'bind-redirect', 'tls-inspection-proxy',
+               'udp-content-filter', 'tcp-content-filter',
+               'specialized-observation')]
+  [string[]] $SelectedWfpSample = @('all'),
+
+  [switch] $SkipBuild
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..\..')).Path
+$buildScript = Join-Path $repoRoot 'scripts\ci\Build-CrtSys.ps1'
+$signScript = Join-Path $repoRoot 'scripts\ci\TestSign-Driver.ps1'
+if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
+  $OutputRoot = Join-Path $repoRoot 'artifacts\wfp-advanced-staging'
+}
+if ([string]::IsNullOrWhiteSpace($BuildRoot)) {
+  $sdkDirectory = $WindowsSdkVersion -replace '[^A-Za-z0-9]+', '_'
+  $BuildRoot = Join-Path $repoRoot (
+      "artifacts\b\wfp-advanced-runtime\$PlatformToolset\$Architecture\$sdkDirectory")
+}
+
+$samples = @(
+  [pscustomobject]@{
+    Project = 'wfp-datagram-proxy'
+    Directory = 'datagram-proxy'
+    BaseName = 'crtsys_wfp_datagram_proxy'
+  },
+  [pscustomobject]@{
+    Project = 'wfp-async-inspection'
+    Directory = 'async-inspection'
+    BaseName = 'crtsys_wfp_async_inspection'
+  },
+  [pscustomobject]@{
+    Project = 'wfp-flow-monitor'
+    Directory = 'flow-monitor'
+    BaseName = 'crtsys_wfp_flow_monitor'
+  },
+  [pscustomobject]@{
+    Project = 'wfp-stream-edit'
+    Directory = 'stream-edit'
+    BaseName = 'crtsys_wfp_stream_edit'
+  },
+  [pscustomobject]@{
+    Project = 'wfp-connect-redirect'
+    Directory = 'connect-redirect'
+    BaseName = 'crtsys_wfp_connect_redirect'
+  },
+  [pscustomobject]@{
+    Project = 'wfp-bind-redirect'
+    Directory = 'bind-redirect'
+    BaseName = 'crtsys_wfp_bind_redirect'
+  },
+  [pscustomobject]@{
+    Project = 'wfp-tls-inspection-proxy'
+    Directory = 'tls-inspection-proxy'
+    BaseName = 'crtsys_wfp_tls_inspection_proxy'
+  },
+  [pscustomobject]@{
+    Project = 'wfp-udp-content-filter'
+    Directory = 'udp-content-filter'
+    BaseName = 'crtsys_wfp_udp_content_filter'
+  },
+  [pscustomobject]@{
+    Project = 'wfp-tcp-content-filter'
+    Directory = 'tcp-content-filter'
+    BaseName = 'crtsys_wfp_tcp_content_filter'
+  },
+  [pscustomobject]@{
+    Project = 'wfp-specialized-observation'
+    Directory = 'specialized-observation'
+    BaseName = 'crtsys_wfp_specialized_observation'
+  }
+)
+if ($SelectedWfpSample -notcontains 'all') {
+  $samples = @(
+    $samples |
+        Where-Object { $SelectedWfpSample -contains $_.Directory }
+  )
+}
+if (-not [string]::IsNullOrWhiteSpace($PrebuiltRoot)) {
+  if (-not $SkipBuild) {
+    throw 'PrebuiltRoot requires SkipBuild.'
+  }
+  $PrebuiltRoot = (Resolve-Path -LiteralPath $PrebuiltRoot).Path
+}
+if ($samples.Count -eq 0) {
+  throw 'No WFP sample was selected for packaging.'
+}
+
+function Assert-SafeOutputRoot([string] $Path) {
+  $artifactsRoot =
+      [IO.Path]::GetFullPath((Join-Path $repoRoot 'artifacts')).
+          TrimEnd('\') + '\'
+  $fullPath = [IO.Path]::GetFullPath($Path).TrimEnd('\') + '\'
+  if (-not $fullPath.StartsWith(
+      $artifactsRoot, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "OutputRoot must stay under $artifactsRoot"
+  }
+}
+
+Assert-SafeOutputRoot $BuildRoot
+Assert-SafeOutputRoot $OutputRoot
+$resolvedBuildRoot = [IO.Path]::GetFullPath($BuildRoot)
+
+if (-not $SkipBuild) {
+  foreach ($sample in $samples) {
+    $sampleBuildRoot =
+        Join-Path $resolvedBuildRoot $sample.Directory
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $buildScript `
+        -Project $sample.Project -Architecture $Architecture `
+        -Configuration $Configuration `
+        -WindowsSdkVersion $WindowsSdkVersion `
+        -WdkVersion $WindowsSdkVersion `
+        -PlatformToolset $PlatformToolset `
+        -BuildDirectory $sampleBuildRoot
+    if ($LASTEXITCODE -ne 0) {
+      throw "The $($sample.Project) build failed."
+    }
+  }
+}
+
+$resolvedOutputRoot = [IO.Path]::GetFullPath($OutputRoot)
+if (Test-Path -LiteralPath $resolvedOutputRoot) {
+  Remove-Item -LiteralPath $resolvedOutputRoot -Recurse -Force
+}
+$packageRoot = New-Item -ItemType Directory -Force -Path $resolvedOutputRoot
+
+foreach ($sample in $samples) {
+  $buildRoot = if ([string]::IsNullOrWhiteSpace($PrebuiltRoot)) {
+    Join-Path (
+        Join-Path $resolvedBuildRoot $sample.Directory) $Configuration
+  } else {
+    Join-Path (
+        Join-Path $PrebuiltRoot $sample.Project) $Configuration
+  }
+  $driverSource = Join-Path $buildRoot "$($sample.BaseName).sys"
+  $appSource = Join-Path $buildRoot "$($sample.BaseName)_app.exe"
+  $infSource = Join-Path $repoRoot (
+      "examples\wfp\$($sample.Directory)\$($sample.BaseName).inf")
+  foreach ($path in @($driverSource, $appSource, $infSource)) {
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+      throw "Required WFP runtime artifact was not found: $path"
+    }
+  }
+
+  $driver = Join-Path $packageRoot.FullName "$($sample.BaseName).sys"
+  Copy-Item -LiteralPath $driverSource -Destination $driver
+  Copy-Item -LiteralPath $appSource -Destination $packageRoot.FullName
+  Copy-Item -LiteralPath $infSource -Destination $packageRoot.FullName
+
+  $signingRoot =
+      Join-Path $resolvedOutputRoot "signing\$($sample.Directory)"
+  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $signScript `
+      -DriverPath $driver -WorkDir $signingRoot
+  if ($LASTEXITCODE -ne 0) {
+    throw "Signing $($sample.BaseName).sys failed."
+  }
+  Copy-Item -LiteralPath (
+      Join-Path $signingRoot 'crtsys-test-signing.cer') `
+      -Destination (
+        Join-Path $packageRoot.FullName "$($sample.BaseName).cer")
+}
+
+Write-Host "Prepared advanced WFP runtime package: $($packageRoot.FullName)"
+[pscustomobject]@{
+  Root = $packageRoot.FullName
+  Drivers = @($samples | ForEach-Object {
+      Join-Path $packageRoot.FullName "$($_.BaseName).sys"
+    })
+  Applications = @($samples | ForEach-Object {
+      Join-Path $packageRoot.FullName "$($_.BaseName)_app.exe"
+    })
+}
