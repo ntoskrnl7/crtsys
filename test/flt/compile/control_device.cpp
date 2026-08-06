@@ -3,8 +3,9 @@
 namespace {
 
 ntl::status configure_compile_only_device(
-    ntl::device<void> &device) noexcept {
-  device.on_create([](ntl::irp &request) { request.succeed(FILE_OPENED); });
+    ntl::device_endpoint<void> &endpoint) noexcept {
+  endpoint.on_create(
+      [](ntl::irp &request) noexcept { request.succeed(FILE_OPENED); });
   return STATUS_SUCCESS;
 }
 

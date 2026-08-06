@@ -1,0 +1,73 @@
+/**
+ * @file kernel_passive_cleanup_item
+ * @brief Lightweight intrusive node for runtime-owned PASSIVE cleanup.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/net/kernel/passive_cleanup_item is a kernel-mode header"
+#endif
+
+#include <ntddk.h>
+
+#include <ntl/status>
+
+namespace ntl::net::kernel {
+
+class passive_cleanup_domain;
+
+/**
+ * @brief Intrusive cleanup node prepared while its owning resource is created.
+ *
+ * Retirement never allocates. The node and its context must remain valid until
+ * the cleanup callback runs. A node can be registered and retired once.
+ */
+class passive_cleanup_item {
+public:
+  using cleanup_fn = void (*)(void *) noexcept;
+
+  passive_cleanup_item(cleanup_fn cleanup, void *context) noexcept
+      : cleanup_(cleanup), context_(context) {
+    InitializeListHead(&entry_);
+  }
+
+  passive_cleanup_item(const passive_cleanup_item &) = delete;
+  passive_cleanup_item &operator=(const passive_cleanup_item &) = delete;
+
+  ~passive_cleanup_item() { NT_ASSERT(owner_ == nullptr); }
+
+private:
+  friend class passive_cleanup_domain;
+
+  LIST_ENTRY entry_{};
+  cleanup_fn cleanup_ = nullptr;
+  void *context_ = nullptr;
+  passive_cleanup_domain *owner_ = nullptr;
+  bool retired_ = false;
+};
+
+namespace detail {
+
+/** Registers one item with the CrtSys runtime-owned cleanup domain. */
+[[nodiscard]] ntl::status
+register_runtime_passive_cleanup(passive_cleanup_item &item) noexcept;
+
+/** Retires one registered item without exposing the runtime domain owner. */
+void retire_runtime_passive_cleanup(passive_cleanup_item &item) noexcept;
+
+/**
+ * Retires one registered item through the joined PASSIVE worker even when the
+ * caller is already at PASSIVE_LEVEL.  Resource facades whose destruction can
+ * wait for callbacks use this path so a callback may release the last facade
+ * without making cleanup wait for itself.
+ */
+void retire_runtime_passive_cleanup_deferred(
+    passive_cleanup_item &item) noexcept;
+
+/** Waits for every runtime retirement queued before this call. */
+[[nodiscard]] ntl::status flush_runtime_passive_cleanup() noexcept;
+
+} // namespace detail
+} // namespace ntl::net::kernel

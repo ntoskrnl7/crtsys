@@ -83,5 +83,7 @@ pass to `IoCreateSymbolicLink`, such as `\\DosDevices\\name` for the link and
 For the common "create a device and expose it through a DOS-device link" case,
 prefer [`ntl::device_endpoint`](./driver-device-irp.md#device-endpoint). It
 keeps `device_options::name()` as the short name and builds the `\\Device\\...`
-target path for the symbolic link, while also keeping the link-before-device
-teardown order in one owner.
+target path for the symbolic link. Its copyable owning handles share one
+idempotent close state and keep the link-before-device teardown order. If the
+last endpoint handle is released above `PASSIVE_LEVEL`, NTL defers final state
+cleanup to its joined runtime worker.

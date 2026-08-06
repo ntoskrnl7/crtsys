@@ -18,11 +18,9 @@ param(
 
   [string] $GuestRoot = 'C:\crtsys-kmdf-acceptance',
 
-  [string] $StagingRoot =
-      'D:\projects\crtsys\artifacts\kmdf-runtime-staging',
+  [string] $StagingRoot,
 
-  [string] $LogRoot =
-      'D:\projects\crtsys\artifacts\kmdf-acceptance',
+  [string] $LogRoot,
 
   [ValidateSet('Debug', 'Release')]
   [string] $DriverConfiguration = 'Debug',
@@ -55,6 +53,12 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
+if ([string]::IsNullOrWhiteSpace($StagingRoot)) {
+  $StagingRoot = Join-Path $repoRoot 'artifacts\kmdf-runtime-staging'
+}
+if ([string]::IsNullOrWhiteSpace($LogRoot)) {
+  $LogRoot = Join-Path $repoRoot 'artifacts\kmdf-acceptance'
+}
 $prepareScript = Join-Path $PSScriptRoot 'Prepare-KmdfRuntimeArtifacts.ps1'
 $runtimeScript = Join-Path $PSScriptRoot 'Run-KmdfRuntimeSuite.ps1'
 $verifierDrivers = @(

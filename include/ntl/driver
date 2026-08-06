@@ -25,6 +25,7 @@
 #include <functional>
 #include <memory>
 #include <unordered_map>
+#include <utility>
 
 namespace ntl::flt {
 class driver;
@@ -151,7 +152,9 @@ public:
   /**
    * @brief Registers a C++ unload callback.
    */
-  void on_unload(unload_routine &&f) { unload_routine_ = f; }
+  void on_unload(unload_routine callback) {
+    unload_routine_ = std::move(callback);
+  }
 
   /**
    * @brief Returns the native driver object name.

@@ -280,9 +280,10 @@ TEST(ntl_device, device_io_control) {
 
   if (hDevice != INVALID_HANDLE_VALUE) {
     DWORD bytes_returned;
+    char input[] = "hello";
     char buffer[sizeof("world")];
 
-    EXPECT_TRUE(DeviceIoControl(hDevice, TEST_DEVICE_CTL, "hello", 5, buffer,
+    EXPECT_TRUE(DeviceIoControl(hDevice, TEST_DEVICE_CTL, input, 5, buffer,
                                 sizeof("world"), &bytes_returned, NULL));
 
     EXPECT_EQ(bytes_returned, sizeof("world"));

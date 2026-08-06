@@ -11,16 +11,23 @@
 #include "device"
 #include "driver"
 #include "except"
+#include "irql"
+#include "ioctl"
 #include "result"
 #include "status"
 #include "symbolic_link"
 
+#include <ntl/net/kernel/passive_cleanup_item>
+
 #include <memory>
-#include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 
 namespace ntl {
+namespace flt {
+class driver;
+}
 namespace detail {
 namespace device_endpoint {
 inline std::wstring make_device_target_name(const std::wstring &device_name) {
@@ -50,13 +57,243 @@ inline std::wstring dos_device_name(const std::wstring &device_name) {
 }
 
 /**
- * @brief Owns a device object and the DOS-device symbolic link that exposes it.
+ * @brief Shared owning handle for a device object and its DOS symbolic link.
  * @tparam Extension Optional device extension payload type.
  *
- * The symbolic link is released before the device object so user-mode opens stop
- * resolving to the device before the device object itself is deleted.
+ * Copies retain one shared endpoint state. close() is idempotent across all
+ * copies and always releases the symbolic link, rejects new IOCTLs, drains
+ * active callbacks, and only then releases the device object.
  */
 template <class Extension> class device_endpoint {
+  struct shared_state {
+    shared_state(std::shared_ptr<ntl::device<Extension>> device,
+                 symbolic_link link)
+        : cleanup(&shared_state::cleanup_at_passive, this),
+          deferred_close(&shared_state::close_at_passive, this),
+          link_name(link.name()), target_name(link.target_name()),
+          device(std::move(device)), link(std::move(link)) {
+      KeInitializeMutex(&lock, 0);
+      KeInitializeEvent(&closed, NotificationEvent, FALSE);
+      ExInitializeRundownProtection(&callback_rundown);
+      router = std::make_shared<ntl::device_control::ioctl_router<>>();
+    }
+
+    shared_state(std::shared_ptr<ntl::device<Extension>> device,
+                 std::wstring link_name, std::wstring target_name)
+        : cleanup(&shared_state::cleanup_at_passive, this),
+          deferred_close(&shared_state::close_at_passive, this),
+          link_name(std::move(link_name)), target_name(std::move(target_name)),
+          device(std::move(device)) {
+      KeInitializeMutex(&lock, 0);
+      KeInitializeEvent(&closed, NotificationEvent, FALSE);
+      ExInitializeRundownProtection(&callback_rundown);
+      router = std::make_shared<ntl::device_control::ioctl_router<>>();
+    }
+
+    ~shared_state() {
+      NT_ASSERT(ntl::current_irql() == ntl::irql::passive);
+      if (InterlockedCompareExchange(&close_started, 0, 0) == 0) {
+        router->stop_accepting();
+        const ntl::status result = close_now();
+        NT_ASSERT(result.is_ok());
+      } else {
+        NT_ASSERT(KeReadStateEvent(&closed) != 0);
+        NT_ASSERT(NT_SUCCESS(static_cast<NTSTATUS>(
+            InterlockedCompareExchange(&close_status, 0, 0))));
+      }
+    }
+
+    static void cleanup_at_passive(void *context) noexcept {
+      delete static_cast<shared_state *>(context);
+    }
+
+    static void close_at_passive(void *context) noexcept {
+      static_cast<shared_state *>(context)->complete_close();
+    }
+
+    ntl::status request_close(
+        std::shared_ptr<shared_state> owner) noexcept {
+      if (ntl::current_irql() > ntl::irql::dispatch)
+        return STATUS_INVALID_DEVICE_STATE;
+      const bool reentrant_close =
+          InterlockedCompareExchangePointer(
+              &closing_thread, nullptr, nullptr) == KeGetCurrentThread();
+      const bool may_wait =
+          ntl::current_irql() == ntl::irql::passive &&
+          !router->current_thread_dispatching() &&
+          !callback_activity.current_thread_active() && !reentrant_close;
+
+      if (InterlockedCompareExchange(&close_started, 1, 0) == 0) {
+        router->stop_accepting();
+        if (may_wait) {
+          complete_close();
+        } else {
+          deferred_owner = std::move(owner);
+          const ntl::status registered =
+              ntl::net::kernel::detail::register_runtime_passive_cleanup(
+                  deferred_close);
+          if (!registered.is_ok()) {
+            deferred_owner.reset();
+            InterlockedExchange(&close_started, 0);
+            return registered;
+          }
+          ntl::net::kernel::detail::
+              retire_runtime_passive_cleanup_deferred(deferred_close);
+        }
+      }
+
+      if (!may_wait)
+        return STATUS_PENDING;
+      const NTSTATUS waited = KeWaitForSingleObject(
+          &closed, Executive, KernelMode, FALSE, nullptr);
+      if (!NT_SUCCESS(waited))
+        return waited;
+      return ntl::status{static_cast<NTSTATUS>(
+          InterlockedCompareExchange(&close_status, 0, 0))};
+    }
+
+    void complete_close() noexcept {
+      InterlockedExchangePointer(&closing_thread, KeGetCurrentThread());
+      const ntl::status result = close_now();
+      InterlockedExchangePointer(&closing_thread, nullptr);
+      InterlockedExchange(&close_status,
+                          static_cast<NTSTATUS>(result));
+      KeSetEvent(&closed, IO_NO_INCREMENT, FALSE);
+      deferred_owner.reset();
+    }
+
+    ntl::status close_now() noexcept {
+      NT_ASSERT(ntl::current_irql() == ntl::irql::passive);
+      std::shared_ptr<ntl::device<Extension>> released_device;
+      lock_state();
+      const ntl::status unpublished = link.close();
+      unlock_state();
+
+      const ntl::status drained = router->drain();
+      if (!drained.is_ok())
+        return drained;
+      ExWaitForRundownProtectionRelease(&callback_rundown);
+
+      lock_state();
+      released_device = std::move(device);
+      unlock_state();
+
+      // Device callback destruction and IoDeleteDevice must not run while the
+      // endpoint state lock is held.
+      released_device.reset();
+      return unpublished;
+    }
+
+    ntl::status publish() noexcept {
+      if (ntl::current_irql() != ntl::irql::passive)
+        return STATUS_INVALID_DEVICE_STATE;
+      lock_state();
+      ntl::status result = ntl::status::ok();
+      if (InterlockedCompareExchange(&close_started, 0, 0) != 0 || !device)
+        result = STATUS_DELETE_PENDING;
+      else if (link.valid())
+        result = STATUS_OBJECT_NAME_COLLISION;
+      else
+        result = link.create(link_name, target_name);
+      unlock_state();
+      return result;
+    }
+
+    template <class Descriptor, class Handler>
+    ntl::status register_ioctl(Handler handler) noexcept {
+      ntl::device_control::dispatch_fn dispatcher;
+      try {
+        dispatcher =
+            [owned_router = router](
+                const ntl::device_control::code &code,
+                const ntl::device_control::in_buffer &input,
+                ntl::device_control::out_buffer &output) noexcept {
+              return owned_router->dispatch(code, input, output);
+            };
+      } catch (...) {
+        return STATUS_INSUFFICIENT_RESOURCES;
+      }
+
+      const ntl::status added =
+          router->template add<Descriptor>(std::move(handler));
+      if (!added.is_ok())
+        return added;
+
+      lock_state();
+      if (InterlockedCompareExchange(&close_started, 0, 0) != 0 ||
+          !device) {
+        unlock_state();
+        return STATUS_DELETE_PENDING;
+      }
+      if (!router_attached) {
+        device->on_borrowed_device_control(std::move(dispatcher));
+        router_attached = true;
+      }
+      unlock_state();
+      return ntl::status::ok();
+    }
+
+    std::shared_ptr<ntl::device<Extension>> retain_device() const noexcept {
+      lock_state();
+      auto retained = device;
+      unlock_state();
+      return retained;
+    }
+
+    bool begin_callback(ntl::detail::callback_activity::token &entered)
+        noexcept {
+      if (InterlockedCompareExchange(&close_started, 0, 0) != 0 ||
+          ExAcquireRundownProtection(&callback_rundown) == FALSE)
+        return false;
+      if (InterlockedCompareExchange(&close_started, 0, 0) != 0) {
+        ExReleaseRundownProtection(&callback_rundown);
+        return false;
+      }
+      entered = callback_activity.enter();
+      return true;
+    }
+
+    void end_callback(ntl::detail::callback_activity::token entered) noexcept {
+      callback_activity.leave(entered);
+      ExReleaseRundownProtection(&callback_rundown);
+    }
+
+    bool valid() const noexcept {
+      lock_state();
+      const bool result = device != nullptr && link.valid();
+      unlock_state();
+      return result;
+    }
+
+    void lock_state() const noexcept {
+      const NTSTATUS result = KeWaitForSingleObject(
+          &lock, Executive, KernelMode, FALSE, nullptr);
+      NT_ASSERT(NT_SUCCESS(result));
+      (void)result;
+    }
+
+    void unlock_state() const noexcept {
+      (void)KeReleaseMutex(&lock, FALSE);
+    }
+
+    ntl::net::kernel::passive_cleanup_item cleanup;
+    ntl::net::kernel::passive_cleanup_item deferred_close;
+    const std::wstring link_name;
+    const std::wstring target_name;
+    mutable KMUTEX lock{};
+    KEVENT closed{};
+    volatile LONG close_started = 0;
+    volatile LONG close_status = STATUS_PENDING;
+    PVOID volatile closing_thread = nullptr;
+    std::shared_ptr<shared_state> deferred_owner;
+    std::shared_ptr<ntl::device_control::ioctl_router<>> router;
+    bool router_attached = false;
+    EX_RUNDOWN_REF callback_rundown{};
+    ntl::detail::callback_activity callback_activity;
+    std::shared_ptr<ntl::device<Extension>> device;
+    symbolic_link link;
+  };
+
 public:
   /**
    * @brief Creates an empty endpoint owner.
@@ -69,48 +306,210 @@ public:
    * @param link Symbolic-link owner that targets the device.
    */
   device_endpoint(std::shared_ptr<ntl::device<Extension>> device,
-                  symbolic_link link) noexcept
-      : device_(std::move(device)), link_(std::move(link)) {}
+                  symbolic_link link)
+      : state_(make_state(std::move(device), std::move(link))) {}
 
-  device_endpoint(const device_endpoint &) = delete;
-  device_endpoint &operator=(const device_endpoint &) = delete;
-
-  /**
-   * @brief Transfers endpoint ownership.
-   */
-  device_endpoint(device_endpoint &&other) noexcept
-      : device_(std::move(other.device_)), link_(std::move(other.link_)) {}
-
-  /**
-   * @brief Transfers endpoint ownership.
-   */
-  device_endpoint &operator=(device_endpoint &&other) noexcept {
-    if (this == &other)
-      return *this;
-
-    reset();
-    device_ = std::move(other.device_);
-    link_ = std::move(other.link_);
-    return *this;
-  }
-
-  /**
-   * @brief Releases the link, then the device.
-   */
-  ~device_endpoint() { reset(); }
+  device_endpoint(const device_endpoint &) noexcept = default;
+  device_endpoint &operator=(const device_endpoint &) noexcept = default;
+  device_endpoint(device_endpoint &&) noexcept = default;
+  device_endpoint &operator=(device_endpoint &&) noexcept = default;
+  ~device_endpoint() = default;
 
   /**
    * @brief Deletes the symbolic link and releases the device owner.
+   *
+   * The operation is idempotent across all copies. Once it returns, device()
+   * returns an empty owner from every handle that shares this endpoint state.
    */
-  void reset() noexcept {
-    link_.reset();
-    device_.reset();
+  ntl::status close() const noexcept {
+    return state_ ? state_->request_close(state_) : ntl::status::ok();
+  }
+
+  /**
+   * @brief Registers one owning typed METHOD_BUFFERED IOCTL handler.
+   *
+   * Descriptor supplies device_type, function, method, access, input_type,
+   * and output_type. The handler signature is derived from its input/output
+   * types and must be noexcept with an ntl::status result.
+   */
+  template <class Descriptor, class Handler>
+  ntl::status on_ioctl(Handler handler) const noexcept {
+    if (!state_)
+      return STATUS_INVALID_DEVICE_STATE;
+    using traits = ntl::ioctl_traits<Descriptor>;
+    using input_type = typename traits::input_type;
+    using output_type = typename traits::output_type;
+    using handler_type = std::decay_t<Handler>;
+    if constexpr (!std::is_void_v<Extension> &&
+                  valid_extension_ioctl_handler<handler_type, input_type,
+                                                output_type>()) {
+      std::weak_ptr<shared_state> weak_state = state_;
+      if constexpr (!std::is_void_v<input_type> &&
+                    !std::is_void_v<output_type>) {
+        return state_->template register_ioctl<Descriptor>(
+            [weak_state, handler = std::move(handler)](
+                const input_type &input,
+                output_type &output) mutable noexcept -> ntl::status {
+              auto state = weak_state.lock();
+              auto device = state ? state->retain_device() : nullptr;
+              if (!device)
+                return STATUS_DELETE_PENDING;
+              return std::invoke(handler, device->extension(), input, output);
+            });
+      } else if constexpr (!std::is_void_v<input_type>) {
+        return state_->template register_ioctl<Descriptor>(
+            [weak_state, handler = std::move(handler)](
+                const input_type &input) mutable noexcept -> ntl::status {
+              auto state = weak_state.lock();
+              auto device = state ? state->retain_device() : nullptr;
+              if (!device)
+                return STATUS_DELETE_PENDING;
+              return std::invoke(handler, device->extension(), input);
+            });
+      } else if constexpr (!std::is_void_v<output_type>) {
+        return state_->template register_ioctl<Descriptor>(
+            [weak_state, handler = std::move(handler)](
+                output_type &output) mutable noexcept -> ntl::status {
+              auto state = weak_state.lock();
+              auto device = state ? state->retain_device() : nullptr;
+              if (!device)
+                return STATUS_DELETE_PENDING;
+              return std::invoke(handler, device->extension(), output);
+            });
+      } else {
+        return state_->template register_ioctl<Descriptor>(
+            [weak_state, handler = std::move(handler)]() mutable noexcept
+                -> ntl::status {
+              auto state = weak_state.lock();
+              auto device = state ? state->retain_device() : nullptr;
+              if (!device)
+                return STATUS_DELETE_PENDING;
+              return std::invoke(handler, device->extension());
+            });
+      }
+    } else {
+      return state_->template register_ioctl<Descriptor>(std::move(handler));
+    }
+  }
+
+  /**
+   * @brief Registers an owning create handler without exposing the device
+   *        owner.
+   *
+   * A non-void endpoint passes (Extension&, irp&); a void endpoint passes
+   * only (irp&). The handler capture is owned by the native device callback.
+   */
+  template <class Handler>
+  ntl::status on_create(Handler handler) const noexcept {
+    return register_irp_handler(
+        std::move(handler),
+        [](ntl::device<Extension> &device, ntl::create::dispatch_fn callback) {
+          device.on_create(std::move(callback));
+        });
+  }
+
+  /** @brief Registers an owning cleanup handler. */
+  template <class Handler>
+  ntl::status on_cleanup(Handler handler) const noexcept {
+    return register_irp_handler(
+        std::move(handler),
+        [](ntl::device<Extension> &device,
+           ntl::cleanup::dispatch_fn callback) {
+          device.on_cleanup(std::move(callback));
+        });
+  }
+
+  /** @brief Registers an owning close handler. */
+  template <class Handler>
+  ntl::status on_close(Handler handler) const noexcept {
+    return register_irp_handler(
+        std::move(handler),
+        [](ntl::device<Extension> &device, ntl::close::dispatch_fn callback) {
+          device.on_close(std::move(callback));
+        });
+  }
+
+  /**
+   * @brief Registers the advanced borrowed-IRP device-control path.
+   *
+   * This path is for operations that deliberately retain and later complete
+   * an IRP. Ordinary METHOD_BUFFERED commands should use on_ioctl(). The
+   * callback receives (Extension&, irp&, code, input, output) for a non-void
+   * endpoint, or the same arguments without Extension& for a void endpoint.
+   */
+  template <class Handler>
+  ntl::status on_borrowed_pending_ioctl(Handler handler) const noexcept {
+    using handler_type = std::decay_t<Handler>;
+    if constexpr (std::is_void_v<Extension>) {
+      static_assert(std::is_nothrow_invocable_r_v<
+                        ntl::device_control::dispatch_result, handler_type &,
+                        ntl::irp &, const ntl::device_control::code &,
+                        const ntl::device_control::in_buffer &,
+                        ntl::device_control::out_buffer &>,
+                    "A borrowed pending-IOCTL handler must be noexcept and "
+                    "return dispatch_result.");
+    } else {
+      static_assert(std::is_nothrow_invocable_r_v<
+                        ntl::device_control::dispatch_result, handler_type &,
+                        Extension &, ntl::irp &,
+                        const ntl::device_control::code &,
+                        const ntl::device_control::in_buffer &,
+                        ntl::device_control::out_buffer &>,
+                    "A borrowed pending-IOCTL handler must be noexcept and "
+                    "return dispatch_result.");
+    }
+
+    if (!state_)
+      return STATUS_INVALID_DEVICE_STATE;
+    try {
+      auto owned_handler =
+          std::make_shared<handler_type>(std::move(handler));
+      auto device = state_->retain_device();
+      if (!device)
+        return STATUS_DELETE_PENDING;
+      std::weak_ptr<shared_state> weak_state = state_;
+      device->on_borrowed_pending_device_control(
+          [weak_state, owned_handler = std::move(owned_handler)](
+              ntl::irp &request, const ntl::device_control::code &code,
+              const ntl::device_control::in_buffer &input,
+              ntl::device_control::out_buffer &output) noexcept {
+            auto retained_state = weak_state.lock();
+            ntl::detail::callback_activity::token entered{};
+            if (!retained_state ||
+                !retained_state->begin_callback(entered)) {
+              output.clear();
+              request.fail(STATUS_DELETE_PENDING);
+              return ntl::device_control::dispatch_result::complete;
+            }
+            auto retained_device = retained_state->retain_device();
+            if (!retained_device) {
+              retained_state->end_callback(entered);
+              output.clear();
+              request.fail(STATUS_DELETE_PENDING);
+              return ntl::device_control::dispatch_result::complete;
+            }
+            ntl::device_control::dispatch_result result{};
+            if constexpr (std::is_void_v<Extension>) {
+              result = std::invoke(*owned_handler, request, code, input,
+                                   output);
+            } else {
+              result = std::invoke(*owned_handler,
+                                   retained_device->extension(), request,
+                                   code, input, output);
+            }
+            retained_state->end_callback(entered);
+            return result;
+          });
+      return ntl::status::ok();
+    } catch (...) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
   }
 
   /**
    * @brief Returns true if both the device and symbolic link are owned.
    */
-  bool valid() const noexcept { return device_ != nullptr && link_.valid(); }
+  bool valid() const noexcept { return state_ && state_->valid(); }
 
   /**
    * @brief Returns true if both the device and symbolic link are owned.
@@ -118,47 +517,162 @@ public:
   explicit operator bool() const noexcept { return valid(); }
 
   /**
-   * @brief Returns the shared device owner.
-   */
-  std::shared_ptr<ntl::device<Extension>> device() const noexcept {
-    return device_;
-  }
-
-  /**
-   * @brief Returns the owned NTL device.
-   * @throw std::runtime_error if this endpoint is empty.
-   */
-  ntl::device<Extension> &device_ref() const {
-    if (!device_)
-      throw std::runtime_error("invalid device endpoint.");
-    return *device_;
-  }
-
-  /**
-   * @brief Returns the symbolic-link owner.
-   */
-  symbolic_link &link() noexcept { return link_; }
-
-  /**
-   * @brief Returns the symbolic-link owner.
-   */
-  const symbolic_link &link() const noexcept { return link_; }
-
-  /**
    * @brief Returns the DOS symbolic-link name.
    */
-  const std::wstring &link_name() const noexcept { return link_.name(); }
+  std::wstring link_name() const {
+    return state_ ? state_->link_name : std::wstring{};
+  }
 
   /**
    * @brief Returns the kernel target path used by the symbolic link.
    */
-  const std::wstring &target_name() const noexcept {
-    return link_.target_name();
+  std::wstring target_name() const {
+    return state_ ? state_->target_name : std::wstring{};
   }
 
 private:
-  std::shared_ptr<ntl::device<Extension>> device_;
-  symbolic_link link_;
+  friend class ntl::flt::driver;
+
+  static device_endpoint
+  make_unpublished(std::shared_ptr<ntl::device<Extension>> device,
+                   std::wstring link_name, std::wstring target_name) {
+    device_endpoint result;
+    result.state_ = make_state(std::move(device), std::move(link_name),
+                               std::move(target_name));
+    return result;
+  }
+
+  ntl::status publish() const noexcept {
+    return state_ ? state_->publish() : ntl::status{STATUS_INVALID_DEVICE_STATE};
+  }
+
+  template <class Handler, class Input, class Output>
+  static consteval bool valid_extension_ioctl_handler() {
+    if constexpr (std::is_void_v<Extension>)
+      return false;
+    else if constexpr (!std::is_void_v<Input> && !std::is_void_v<Output>)
+      return std::is_nothrow_invocable_r_v<ntl::status, Handler &,
+                                            Extension &, const Input &,
+                                            Output &>;
+    else if constexpr (!std::is_void_v<Input>)
+      return std::is_nothrow_invocable_r_v<ntl::status, Handler &,
+                                            Extension &, const Input &>;
+    else if constexpr (!std::is_void_v<Output>)
+      return std::is_nothrow_invocable_r_v<ntl::status, Handler &,
+                                            Extension &, Output &>;
+    else
+      return std::is_nothrow_invocable_r_v<ntl::status, Handler &,
+                                            Extension &>;
+  }
+
+  template <class Handler, class Install>
+  ntl::status register_irp_handler(Handler handler,
+                                   Install install) const noexcept {
+    using handler_type = std::decay_t<Handler>;
+    if constexpr (std::is_void_v<Extension>) {
+      static_assert(std::is_nothrow_invocable_v<handler_type &, ntl::irp &>,
+                    "An endpoint IRP handler must be noexcept.");
+    } else {
+      static_assert(std::is_nothrow_invocable_v<handler_type &, Extension &,
+                                                ntl::irp &>,
+                    "An endpoint IRP handler must be noexcept.");
+    }
+
+    if (!state_)
+      return STATUS_INVALID_DEVICE_STATE;
+    try {
+      auto owned_handler =
+          std::make_shared<handler_type>(std::move(handler));
+      auto device = state_->retain_device();
+      if (!device)
+        return STATUS_DELETE_PENDING;
+      std::weak_ptr<shared_state> weak_state = state_;
+      ntl::create::dispatch_fn callback =
+          [weak_state, owned_handler = std::move(owned_handler)](
+              ntl::irp &request) noexcept {
+            auto retained_state = weak_state.lock();
+            ntl::detail::callback_activity::token entered{};
+            if (!retained_state ||
+                !retained_state->begin_callback(entered)) {
+              request.fail(STATUS_DELETE_PENDING);
+              return;
+            }
+            auto retained_device = retained_state->retain_device();
+            if (!retained_device) {
+              retained_state->end_callback(entered);
+              request.fail(STATUS_DELETE_PENDING);
+              return;
+            }
+            if constexpr (std::is_void_v<Extension>) {
+              std::invoke(*owned_handler, request);
+            } else {
+              std::invoke(*owned_handler, retained_device->extension(),
+                          request);
+            }
+            retained_state->end_callback(entered);
+          };
+      std::invoke(install, *device, std::move(callback));
+      return ntl::status::ok();
+    } catch (...) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+  }
+
+  static std::shared_ptr<shared_state>
+  make_state(std::shared_ptr<ntl::device<Extension>> device,
+             symbolic_link link) {
+    auto *const raw =
+        new shared_state(std::move(device), std::move(link));
+    const ntl::status registered =
+        ntl::net::kernel::detail::register_runtime_passive_cleanup(
+            raw->cleanup);
+    if (!registered.is_ok()) {
+      delete raw;
+      throw ntl::exception(registered,
+                           "device endpoint cleanup registration failed");
+    }
+
+    try {
+      return std::shared_ptr<shared_state>(
+          raw, [](shared_state *value) noexcept {
+            ntl::net::kernel::detail::
+                retire_runtime_passive_cleanup_deferred(value->cleanup);
+          });
+    } catch (...) {
+      ntl::net::kernel::detail::
+          retire_runtime_passive_cleanup_deferred(raw->cleanup);
+      throw;
+    }
+  }
+
+  static std::shared_ptr<shared_state>
+  make_state(std::shared_ptr<ntl::device<Extension>> device,
+             std::wstring link_name, std::wstring target_name) {
+    auto *const raw = new shared_state(
+        std::move(device), std::move(link_name), std::move(target_name));
+    const ntl::status registered =
+        ntl::net::kernel::detail::register_runtime_passive_cleanup(
+            raw->cleanup);
+    if (!registered.is_ok()) {
+      delete raw;
+      throw ntl::exception(registered,
+                           "device endpoint cleanup registration failed");
+    }
+
+    try {
+      return std::shared_ptr<shared_state>(
+          raw, [](shared_state *value) noexcept {
+            ntl::net::kernel::detail::
+                retire_runtime_passive_cleanup_deferred(value->cleanup);
+          });
+    } catch (...) {
+      ntl::net::kernel::detail::
+          retire_runtime_passive_cleanup_deferred(raw->cleanup);
+      throw;
+    }
+  }
+
+  std::shared_ptr<shared_state> state_;
 };
 
 /**
@@ -173,22 +687,31 @@ template <class Extension>
 [[nodiscard]] ntl::result<device_endpoint<Extension>>
 try_create_device_endpoint(driver &driver, device_options &opts,
                            std::wstring link_name) {
-  if (opts.name().empty())
-    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  try {
+    if (opts.name().empty())
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
 
-  auto created_device = driver.try_create_device<Extension>(opts);
-  if (!created_device)
-    return ntl::unexpected(created_device.status());
+    auto created_device = driver.try_create_device<Extension>(opts);
+    if (!created_device)
+      return ntl::unexpected(created_device.status());
 
-  auto device_owner = std::move(created_device).value();
-  auto created_link = ntl::try_create_symbolic_link(
-      std::move(link_name),
-      detail::device_endpoint::make_device_target_name(opts.name()));
-  if (!created_link)
-    return ntl::unexpected(created_link.status());
+    auto device_owner = std::move(created_device).value();
+    auto created_link = ntl::try_create_symbolic_link(
+        std::move(link_name),
+        detail::device_endpoint::make_device_target_name(opts.name()));
+    if (!created_link)
+      return ntl::unexpected(created_link.status());
 
-  return ntl::ok(device_endpoint<Extension>{std::move(device_owner),
-                                            std::move(created_link).value()});
+    return ntl::ok(
+        device_endpoint<Extension>{std::move(device_owner),
+                                   std::move(created_link).value()});
+  } catch (const ntl::exception &error) {
+    return ntl::unexpected(error.get_status());
+  } catch (const std::bad_alloc &) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
 }
 
 /**

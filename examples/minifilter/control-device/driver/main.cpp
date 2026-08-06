@@ -17,50 +17,45 @@ struct control_state {
 
 control_state *active_state = nullptr;
 
-void configure(ntl::device<control_state> &device) {
-  auto *const state = &device.extension();
-  active_state = state;
-
-  device
-      .on_create([state](ntl::irp &request) {
+ntl::status configure(ntl::device_endpoint<control_state> &endpoint) noexcept {
+  ntl::status result = endpoint.on_create(
+      [](control_state &state, ntl::irp &request) noexcept {
+        active_state = &state;
         bool expected = false;
-        if (!state->open.compare_exchange_strong(
+        if (!state.open.compare_exchange_strong(
                 expected, true, std::memory_order_acq_rel,
                 std::memory_order_acquire)) {
           request.fail(STATUS_SHARING_VIOLATION);
           return;
         }
         request.succeed(FILE_OPENED);
-      })
-      .on_cleanup([](ntl::irp &request) { request.succeed(); })
-      .on_close([state](ntl::irp &request) {
-        state->open.store(false, std::memory_order_release);
+      });
+  if (!result.is_ok())
+    return result;
+
+  result = endpoint.on_cleanup(
+      [](control_state &, ntl::irp &request) noexcept { request.succeed(); });
+  if (!result.is_ok())
+    return result;
+
+  result = endpoint.on_close(
+      [](control_state &state, ntl::irp &request) noexcept {
+        state.open.store(false, std::memory_order_release);
         request.succeed();
-      })
-      .on_device_control(
-          [state](const ntl::device_control::code &code,
-                  const ntl::device_control::in_buffer &input,
-                  ntl::device_control::out_buffer &output) {
-            if (!ntl::is_ioctl<ping_ioctl_type>(code))
-              throw ntl::exception(STATUS_INVALID_DEVICE_REQUEST,
-                                   "unknown control-device IOCTL");
+      });
+  if (!result.is_ok())
+    return result;
 
-            const auto *request =
-                ntl::ioctl_input_as<ping_ioctl_type>(input);
-            if (!request)
-              throw ntl::exception(STATUS_BUFFER_TOO_SMALL,
-                                   "ping input is too small");
-
-            ping_reply reply{};
-            reply.value = request->value + 1;
-            reply.sequence =
-                state->sequence.fetch_add(1, std::memory_order_relaxed) + 1;
-            reply.unload_vetoes =
-                state->unload_vetoes.load(std::memory_order_acquire);
-            if (!ntl::ioctl_write_output<ping_ioctl_type>(output, reply))
-              throw ntl::exception(STATUS_BUFFER_TOO_SMALL,
-                                   "ping output is too small");
-          });
+  return endpoint.on_ioctl<ping_ioctl_type>(
+      [](control_state &state, const ping_request &request,
+         ping_reply &reply) noexcept -> ntl::status {
+        reply.value = request.value + 1;
+        reply.sequence =
+            state.sequence.fetch_add(1, std::memory_order_relaxed) + 1;
+        reply.unload_vetoes =
+            state.unload_vetoes.load(std::memory_order_acquire);
+        return ntl::status::ok();
+      });
 }
 
 ntl::status unload(ntl::flt::unload_flags flags) noexcept {

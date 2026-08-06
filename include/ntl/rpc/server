@@ -3287,7 +3287,7 @@ public:
     device_ = driver.create_device<void>(options);
     const auto dispatch = dispatch_;
     device_
-        ->on_pending_device_control(
+        ->on_borrowed_pending_device_control(
             [dispatch](ntl::irp &request, const ntl::device_control::code &code,
                        const ntl::device_control::in_buffer &input,
                        ntl::device_control::out_buffer &output) {

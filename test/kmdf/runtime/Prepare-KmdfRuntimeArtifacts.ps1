@@ -8,8 +8,7 @@ param(
 
   [string] $WindowsSdkVersion = '10.0.28000.0',
 
-  [string] $OutputRoot =
-      'D:\projects\crtsys\artifacts\kmdf-runtime-staging',
+  [string] $OutputRoot,
 
   [switch] $SkipBuild
 )
@@ -18,6 +17,9 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
+if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
+  $OutputRoot = Join-Path $repoRoot 'artifacts\kmdf-runtime-staging'
+}
 $examplesRoot = Join-Path $repoRoot 'examples\kmdf'
 $buildScript = Join-Path $repoRoot 'scripts\ci\Build-CrtSys.ps1'
 $signScript = Join-Path $repoRoot 'scripts\ci\TestSign-Driver.ps1'
