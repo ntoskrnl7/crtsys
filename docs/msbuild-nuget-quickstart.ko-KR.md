@@ -1,6 +1,6 @@
 # MSBuild/NuGet 빠른 시작
 
-[README로 돌아가기](./ko-kr.md)
+[README로 돌아가기](./README.ko-KR.md)
 
 이 경로는 `crtsys`를 native NuGet package로 소비하는 Visual Studio 또는
 Build Tools WDK driver project용입니다. CMake/CPM GitHub 소비 경로와는
@@ -72,7 +72,7 @@ KMDF driver는 **Project Properties > Driver Settings > Driver Model**에서
 **crtsys KMDF entry point** 속성에 `No NTL entry point`와 `NTL KMDF`가
 표시되며, `NTL KMDF`를 선택하면 됩니다.
 
-## Build Tools only
+## Build Tools만 사용하는 환경
 
 driver project에 `PackageReference`를 추가합니다.
 
@@ -101,7 +101,13 @@ msbuild .\my_driver.vcxproj /restore /p:Configuration=Debug /p:Platform=Win32
 msbuild .\my_driver.vcxproj /restore /p:Configuration=Release /p:Platform=ARM64
 ```
 
-## Package가 가져오는 것
+v142/v143의 32비트 `ARM`은 다음과 같이 빌드합니다.
+
+```powershell
+msbuild .\my_driver.vcxproj /restore /p:Configuration=Release /p:Platform=ARM
+```
+
+## 패키지가 제공하는 항목
 
 native package는 WDK consumer project에 필요한 MSBuild props/targets를
 제공합니다. 여기에는 include path, forced include, runtime library, LDK
@@ -131,7 +137,7 @@ export driver에서는 NTL WDM, NTL KMDF, NTL Minifilter, NTL WFP를 선택하�
 driver는 여전히 일반 WDK driver입니다. Verifier, signing, target OS policy,
 IRQL, paging, unload safety는 driver project가 책임집니다.
 
-## CI smoke test 구조
+## CI 기본 동작 테스트 구조
 
 이 저장소는 NuGet 소비가 문서로만 존재하지 않도록
 [`test/nuget`](../test/nuget)에 consumer project를 둡니다.
@@ -148,4 +154,4 @@ msbuild .\test\nuget\crtsys_nuget_test.vcxproj /restore /p:Configuration=Release
 ```
 
 runtime driver load는 package consumption과 별도 문제입니다. 이 경로는
-[CI driver load tests](./ci-driver-load-tests.md)에 정리되어 있습니다.
+[CI driver load tests](./ci-driver-load-tests.ko-KR.md)에 정리되어 있습니다.

@@ -30,7 +30,7 @@ kernel-mode substrate 위에 매핑됩니다.
 Coverage matrix에는 driver test로 검증한 기능만 표시합니다. 목록에 없는 API도
 동작할 수 있지만 아직 검증된 범위에는 포함되지 않습니다.
 
-## Quick Start
+## 빠른 시작
 
 Visual Studio WDK driver project에서는 NuGet package UI로 `crtsys`를 설치하는
 경로가 가장 일반적입니다.
@@ -64,7 +64,7 @@ NTL 방식의 WFP callout driver에서는 **NTL WFP**를 선택하고
 | CMake prebuilt | offline 또는 pinned CI dependency | `find_package(crtsys CONFIG REQUIRED)` |
 | CMake / CPM | GitHub에서 `crtsys`를 소비하려는 CMake 기반 driver project | `CPMAddPackage("gh:ntoskrnl7/crtsys@<version>")` |
 
-Minimal MSBuild/NuGet consumer:
+최소 MSBuild/NuGet 소비자 구성:
 
 Visual Studio에서는 driver project를 우클릭하고 **Manage NuGet Packages...**를
 선택합니다. 사용하는 package source에서 **crtsys**를 검색해서 WDK driver
@@ -89,7 +89,7 @@ Install-Package crtsys
 modern `PackageReference` project에서는 MSBuild restore가 가능하면
 `nuget.exe`가 필수는 아닙니다. Build Tools-only 환경도 같은
 `msbuild /restore` 경로를 사용할 수 있습니다. 자세한 내용은
-[MSBuild/NuGet 빠른 시작](./ko-kr-msbuild-nuget-quickstart.md)을 보세요.
+[MSBuild/NuGet 빠른 시작](./msbuild-nuget-quickstart.ko-KR.md)을 보세요.
 
 별도 driver project에서 사용하는 Minimal CMake/CPM consumer:
 
@@ -134,7 +134,7 @@ ntl::status ntl::main(ntl::driver& driver,
 `CRTSYS_NTL_MAIN`을 끄면 일반 WDK 드라이버처럼 `DriverEntry`를 직접
 작성하고 초기화를 수동으로 처리하면 됩니다.
 
-### WDM, KMDF, minifilter, WFP driver model
+### WDM, KMDF, minifilter, WFP 드라이버 모델
 
 NuGet package는 WDK project의 기존 `DriverType` 설정을 읽습니다. KMDF
 project는 기본적으로 일반 `DriverEntry`와 `WdfDriverCreate` 경로를 사용합니다.
@@ -171,7 +171,7 @@ crtsys_add_driver(my_ntl_kmdf_driver KMDF 1.15 NTL src/main.cpp)
 ```
 
 전체 동작은 [NTL KMDF driver/app 예제](../examples/kmdf/basic)에서 확인할
-수 있으며, API 계약은 [NTL KMDF 가이드](./ntl/kmdf.md)에 정리되어 있습니다.
+수 있으며, API 계약은 [NTL KMDF 가이드](./ntl/kmdf.ko-KR.md)에 정리되어 있습니다.
 
 파일 시스템 minifilter는 Filter Manager driver model을 그대로 유지합니다.
 다음처럼 명시적으로 선택하면 crtsys가 `fltmgr.lib`를 링크하고 runtime 경계를
@@ -185,7 +185,7 @@ crtsys_add_driver(my_minifilter MINIFILTER NTL src/main.cpp)
 Visual Studio/NuGet project는 `CrtSysIsMinifilter=true`와
 `CrtSysUseNtlFltMain=true`를 사용합니다. 전체 코드는
 [NTL minifilter 예제 모음](../examples/minifilter), API 계약은
-[minifilter 가이드](./ntl/minifilter.md)에 정리되어 있습니다.
+[minifilter 가이드](./ntl/minifilter.ko-KR.md)에 정리되어 있습니다.
 
 Windows Filtering Platform callout driver는 Visual Studio/NuGet에서
 **NTL WFP**를 선택하거나 다음 property를 지정합니다.
@@ -208,13 +208,13 @@ target과 `netio.lib`가 함께 선택됩니다.
 
 WFP를 처음 사용하는 드라이버 개발자는
 [NTL WFP 입문 가이드](./ntl/wfp-guide.ko-KR.md)부터 볼 수 있습니다. API와
-소유권 규칙은 [WFP API 가이드](./ntl/wfp.md), 실행 가능한 구성은
+소유권 규칙은 [WFP API 가이드](./ntl/wfp.ko-KR.md), 실행 가능한 구성은
 [WFP 예제 모음](../examples/wfp)에 정리되어 있습니다.
 사용자 모드와 커널에서 같은 프로토콜·정책 API를 사용하는 방법은
 [네트워크 dual-runtime 가이드](./ntl/network-dual-runtime.ko-KR.md)와
 [커널 네트워크 계약 테스트](../test/net/kernel-contracts/README.ko-KR.md)를 보십시오.
 
-## Runtime Stack
+## 런타임 스택
 
 ```mermaid
 flowchart TD
@@ -227,50 +227,50 @@ flowchart TD
     Driver --> Runtime --> CrtSys --> LDK --> Kernel
 ```
 
-## Capability Map
+## 기능 구성도
 
-| 표면 | Driver-facing 결과 |
+| 영역 | 드라이버에서 제공되는 결과 |
 | --- | --- |
-| C++ runtime | static init, EH/SEH, RTTI, ABI |
-| CRT/UCRT | STL dependency, math, char conversion |
+| C++ runtime | 정적 초기화, EH/SEH, RTTI, ABI |
+| CRT/UCRT | STL 의존 기능, 수학, 문자 변환 |
 | STL | container, range, filesystem, format/print, regex, locale, chrono, threading, atomic, PMR, stream, random |
-| Substrate | crtsys adapter + LDK Windows/NTDLL/ICU |
-| Evidence | driver-run matrix + cppreference + IRQL contract |
-| Packaging | NuGet/MSBuild + prebuilt bundle + CPM.cmake |
+| 기반 계층 | crtsys adapter + LDK Windows/NTDLL/ICU |
+| 검증 근거 | 드라이버 실행 matrix + cppreference + IRQL 계약 |
+| 패키징 | NuGet/MSBuild + 사전 빌드 bundle + CPM.cmake |
 
-## Feature Highlights
+## 주요 기능
 
-| Feature | Status | Notes |
+| 기능 | 상태 | 비고 |
 | --- | --- | --- |
-| C++ exceptions | Driver-tested | `throw`, `try`/`catch`, function-try-block, `std::exception_ptr` |
-| SEH handling | Driver-tested | `__try` / `__except` boundary 처리를 위한 C++ helper path |
-| Static initialization | Driver-tested | non-local, dynamic, MSVC function-local static initialization |
-| Multi-driver compiler TLS | Driver-tested | 여러 crtsys-linked driver가 각자 고유 MSVC `_tls_index`를 받아 runtime TLS slot 충돌을 피함 |
-| RTTI | Driver-tested | `typeid`, `dynamic_cast` |
-| STL containers / algorithms | Driver-tested | container, algorithm, range, smart pointer, PMR, utility |
-| `std::format` / `std::print` | Driver-tested | formatted string/output path |
-| `std::regex` | Driver-tested | regular expression path |
-| `std::filesystem` | Driver-tested | path, directory, copy, metadata, time, link-oriented path를 matrix에서 coverage |
-| Concurrency | Driver-tested | thread, synchronization, async/future, atomic wait/notify |
-| Locale / chrono / charconv | Driver-tested | locale facet, timezone/chrono path, integer/floating char conversion |
-| NTL driver helpers | Driver-tested | `ntl::main`, driver/device helper, symbolic link/event/work item RAII, RPC, IRQL helper, pool allocator, stack expansion |
-| NTL WFP helpers | Driver-tested | typed callout, layer-safe policy, packet/stream ownership, injection, redirect와 user-mode inspection |
+| C++ 예외 | 드라이버 검증 완료 | `throw`, `try`/`catch`, function-try-block, `std::exception_ptr` |
+| SEH 처리 | 드라이버 검증 완료 | `__try` / `__except` 경계 처리를 위한 C++ 도우미 경로 |
+| 정적 초기화 | 드라이버 검증 완료 | non-local, dynamic 및 MSVC 함수 지역 정적 초기화 |
+| 다중 드라이버 compiler TLS | 드라이버 검증 완료 | 여러 crtsys 연결 드라이버가 각자 고유 MSVC `_tls_index`를 받아 runtime TLS slot 충돌을 피함 |
+| RTTI | 드라이버 검증 완료 | `typeid`, `dynamic_cast` |
+| STL container/algorithm | 드라이버 검증 완료 | container, algorithm, range, smart pointer, PMR, utility |
+| `std::format` / `std::print` | 드라이버 검증 완료 | 형식화된 문자열 및 출력 경로 |
+| `std::regex` | 드라이버 검증 완료 | 정규식 경로 |
+| `std::filesystem` | 드라이버 검증 완료 | path, directory, copy, metadata, time 및 link 관련 경로를 matrix로 검증 |
+| 동시성 | 드라이버 검증 완료 | thread, synchronization, async/future, atomic wait/notify |
+| locale / chrono / charconv | 드라이버 검증 완료 | locale facet, timezone/chrono 경로, 정수/부동소수점 문자 변환 |
+| NTL 드라이버 도우미 | 드라이버 검증 완료 | `ntl::main`, driver/device 도우미, symbolic link/event/work item RAII, RPC, IRQL 도우미, pool allocator, stack expansion |
+| NTL WFP 도우미 | 드라이버 검증 완료 | 형식화된 callout, layer-safe 정책, packet/stream 소유권, injection, redirect 및 사용자 모드 inspection |
 | `thread_local` | 사용자 변수 용도 미지원 | kernel GS는 user-mode TEB가 아니라 processor-local KPCR이므로 사용자 `thread_local`은 thread별 storage가 아님 |
 
 상세 matrix는 의도적으로 test-linked 형태입니다. Kernel driver test suite에서
 실행한 기능을 기록하며, compile되거나 동작할 수 있는 모든 header/code path의
 전체 목록을 의미하지 않습니다.
 
-## Documentation
+## 문서
 
 | 문서 | 볼 내용 |
 | --- | --- |
-| [아키텍처](./ko-kr-architecture.md) | Runtime stack, 계층별 책임, 소비 경로 |
-| [MSBuild/NuGet 빠른 시작](./ko-kr-msbuild-nuget-quickstart.md) | Visual Studio, Build Tools-only, CI package 소비 |
-| [설계 근거](./ko-kr-design-rationale.md) | IRQL, pool, stack, unload, 운영 경계 |
-| [기능 지원 현황](./ko-kr-feature-coverage.md) | Driver-tested C++/CRT/STL matrix와 known gap |
-| [NTL API](./ko-kr-ntl-api.md) | Driver helper API, entry wrapper, synchronization, pool allocator, SEH helper |
-| [사용 예제](./ko-kr-usage-examples.md) | Driver-side NTL 예제 |
+| [아키텍처](./architecture.ko-KR.md) | Runtime stack, 계층별 책임, 소비 경로 |
+| [MSBuild/NuGet 빠른 시작](./msbuild-nuget-quickstart.ko-KR.md) | Visual Studio, Build Tools-only, CI package 소비 |
+| [설계 근거](./design-rationale.ko-KR.md) | IRQL, pool, stack, unload, 운영 경계 |
+| [기능 지원 현황](./feature-coverage.ko-KR.md) | Driver-tested C++/CRT/STL matrix와 known gap |
+| [NTL API](./ntl-api.ko-KR.md) | 드라이버 도우미 API, 진입점 wrapper, 동기화, pool allocator, SEH 도우미 |
+| [사용 예제](./usage-examples.ko-KR.md) | Driver-side NTL 예제 |
 | [NTL sample driver](../examples/ntl-driver) | `ntl::main`, device endpoint, typed IOCTL, remove lock, registry config, passive executor, pool-backed PMR를 사용하는 Visual Studio/NuGet 및 CMake driver/app 예제 |
 | [NTL RPC sample driver](../examples/ntl-rpc-driver) | shared NTL RPC schema를 사용하는 Visual Studio/NuGet 및 CMake driver/app 예제 |
 | [NTL KMDF 예제 모음](../examples/kmdf) | basic, PnP, bus, DMA, USB, WMI를 독립 프로젝트로 분류한 예제 모음 |
@@ -282,12 +282,12 @@ flowchart TD
 | [NTL KMDF 버스 예제](../examples/kmdf/bus) | dynamic PDO plug/remove/eject 수명 주기와 버스/자식 function driver 사이 typed `QUERY_INTERFACE` 검증 예제 |
 | [NTL minifilter 예제 모음](../examples/minifilter) | 기본 callback/context, Filter Manager 통신, swapped-buffer를 독립 프로젝트로 분리한 driver/app 예제 |
 | [NTL WFP 입문 가이드](./ntl/wfp-guide.ko-KR.md) | WFP 개념, user/kernel 실행 모델, callout 판정, packet/stream/message 경계, TLS/QUIC 검사, 예제 선택과 검증 순서 |
-| [NTL WFP API 가이드](./ntl/wfp.md) | typed callout, flow/packet/stream ownership, injection, redirect와 동적 정책 계약 |
+| [NTL WFP API 가이드](./ntl/wfp.ko-KR.md) | typed callout, flow/packet/stream ownership, injection, redirect와 동적 정책 계약 |
 | [NTL WFP 예제 모음](../examples/wfp) | ALE, datagram, flow, stream, redirect, TLS/HTTPS와 TCP/UDP content-filter 예제 |
 | [NTL 커널 네트워크 계약](../test/net/kernel-contracts/README.ko-KR.md) | 합성 IOCTL로 HTTP/1/2/3, gRPC, QPACK, WebSocket, WebTransport, TLS ClientHello, direct/offload 정책과 drainable 실행을 검증하는 드라이버/앱 계약 테스트; 실제 트래픽 예제는 `examples/wfp`에 유지 |
-| [CI driver load tests](./ci-driver-load-tests.md) | optional self-hosted driver load/run workflow |
+| [CI 드라이버 로드 테스트](./ci-driver-load-tests.ko-KR.md) | 선택적 자체 호스팅 드라이버 로드/실행 workflow |
 
-## Operational Boundaries
+## 운영 경계
 
 | 경계 | 정책 |
 | --- | --- |
@@ -410,7 +410,7 @@ prebuilt bundle은 source에서 `crtsys`를 fetch/build하지 않고, CMake
 `prebuilt.zip`은 GitHub Release 전용 번들이며 NuGet 패키지가 아닙니다.
 전체 packaging 및 publishing 명령은 `nuget/README.md`를 참고하세요.
 
-## CMake install
+## CMake 설치
 
 CMake 소비자는 로컬 CMake 패키지를 설치해서 사용할 수 있습니다.
 
@@ -494,7 +494,7 @@ test\cmake\app\build_x64\Debug\crtsys_test_app.exe
 실제 로드와 실행은 Windows 드라이버 테스트 환경에서 수행해야 합니다.
 
 CI 빌드 workflow와 선택적 self-hosted 드라이버 로드 테스트 경로는
-[CI driver load tests](./ci-driver-load-tests.md)에 정리되어 있습니다.
+[CI driver load tests](./ci-driver-load-tests.ko-KR.md)에 정리되어 있습니다.
 
 ```bat
 sc create CrtSysTest binpath= "C:\path\to\crtsys_test.sys" displayname= "crtsys test" start= demand type= kernel

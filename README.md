@@ -10,7 +10,7 @@ A modern C++ development platform for Windows kernel drivers (`.sys`).
 ![CMake 3.14+](https://img.shields.io/badge/CMake-3.14%2B-064f8c?logo=cmake&logoColor=white)
 ![C++14+](https://img.shields.io/badge/C%2B%2B-14%2B-00599c?logo=cplusplus&logoColor=white)
 
-[Korean documentation](./docs/ko-kr.md)
+[Korean documentation](./README.ko-KR.md)
 
 `crtsys` brings the Microsoft C++ runtime ecosystem (CRT, STL, VCRT, and UCRT)
 into Windows kernel drivers without maintaining a separate STL fork. It uses
