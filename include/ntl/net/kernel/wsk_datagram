@@ -1,0 +1,418 @@
+/**
+ * @file kernel_wsk_datagram
+ * @brief Owning, bounded WSK datagram socket with automatic callback drain.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/net/kernel/wsk_datagram is a kernel-mode header"
+#endif
+
+#include <ntl/net/buffer/owned_bytes>
+#include <ntl/net/kernel/wsk_transport>
+#include <ntl/pool_allocator>
+#include <ntl/result>
+#include <ntl/status>
+
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <new>
+#include <utility>
+
+namespace ntl::net::kernel {
+
+struct wsk_datagram_limits {
+  std::size_t maximum_datagram_bytes = 65'535;
+  std::size_t maximum_datagrams_per_indication = 64;
+
+  constexpr bool valid() const noexcept {
+    return maximum_datagram_bytes != 0 &&
+           maximum_datagram_bytes <= 65'535 &&
+           maximum_datagrams_per_indication != 0 &&
+           maximum_datagrams_per_indication <= 1024;
+  }
+};
+
+struct wsk_datagram_statistics {
+  std::uint64_t received = 0;
+  std::uint64_t sent = 0;
+  std::uint64_t receive_drops = 0;
+  std::uint64_t send_failures = 0;
+};
+
+/**
+ * An owning socket retains this sink until native WSK callbacks have stopped.
+ * on_datagram may run at DISPATCH_LEVEL and must not block.
+ */
+class wsk_datagram_sink {
+public:
+  virtual ~wsk_datagram_sink() = default;
+  virtual ntl::status on_datagram(ip_endpoint remote,
+                                  owned_bytes &&bytes) noexcept = 0;
+};
+
+/**
+ * @brief Bound connectionless WSK socket with order-independent ownership.
+ *
+ * The socket owns its callback sink and its captured provider state. close()
+ * is nonblocking and idempotent at IRQL <= DISPATCH_LEVEL. Native socket
+ * destruction and callback drain are performed automatically at PASSIVE_LEVEL.
+ */
+class wsk_datagram_socket final {
+public:
+  using pointer = std::shared_ptr<wsk_datagram_socket>;
+
+  wsk_datagram_socket(const wsk_datagram_socket &) = delete;
+  wsk_datagram_socket &operator=(const wsk_datagram_socket &) = delete;
+
+  ~wsk_datagram_socket() {
+    request_close();
+    NT_ASSERT(KeGetCurrentIrql() == PASSIVE_LEVEL);
+    if (KeGetCurrentIrql() == PASSIVE_LEVEL)
+      (void)KeWaitForSingleObject(&closed_, Executive, KernelMode, FALSE,
+                                  nullptr);
+    if (close_irp_)
+      IoFreeIrp(close_irp_);
+  }
+
+  static ntl::result<pointer>
+  try_bind(wsk_provider &provider, const ip_endpoint &local,
+           std::shared_ptr<wsk_datagram_sink> sink,
+           wsk_datagram_limits limits = {}) noexcept {
+    auto provider_state = provider.retain_state();
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL || !provider_state || !local ||
+        !sink || !limits.valid())
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+
+    PIRP operation_irp = IoAllocateIrp(1, FALSE);
+    PIRP close_irp = IoAllocateIrp(1, FALSE);
+    void *const storage = ntl::detail::allocate_pool_bytes(
+        sizeof(wsk_datagram_socket), alignof(wsk_datagram_socket),
+        ntl::pool_kind::nonpaged, ntl::pool_option::none,
+        ntl::pool_tag("dWtN"));
+    if (!operation_irp || !close_irp || !storage) {
+      if (operation_irp)
+        IoFreeIrp(operation_irp);
+      if (close_irp)
+        IoFreeIrp(close_irp);
+      if (storage)
+        ntl::detail::free_pool_bytes(storage, ntl::pool_kind::nonpaged,
+                                     ntl::pool_tag("dWtN"));
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+
+    auto *const result = new (storage) wsk_datagram_socket(
+        std::move(provider_state), close_irp, std::move(sink), limits);
+    const auto fail = [&](ntl::status failure) noexcept
+        -> ntl::result<pointer> {
+      if (result->socket_) {
+        (void)detail::close_wsk_socket(result->socket_, result->close_irp_);
+        result->socket_ = nullptr;
+      }
+      result->closing_.store(true, std::memory_order_release);
+      KeSetEvent(&result->closed_, IO_NO_INCREMENT, FALSE);
+      IoFreeIrp(operation_irp);
+      ntl::pool_deleter<wsk_datagram_socket>{
+          ntl::pool_tag("dWtN"), ntl::pool_kind::nonpaged}(result);
+      return ntl::unexpected(failure);
+    };
+
+    const WSK_PROVIDER_NPI *const native =
+        result->provider_->borrowed_native_npi();
+    detail::wsk_sync_wait wait{};
+    KeInitializeEvent(&wait.event, NotificationEvent, FALSE);
+    IoSetCompletionRoutine(operation_irp, &detail::wsk_sync_completion,
+                           &wait, TRUE, TRUE, TRUE);
+    const NTSTATUS submitted = native->Dispatch->WskSocket(
+        native->Client, local.family(), SOCK_DGRAM, IPPROTO_UDP,
+        WSK_FLAG_DATAGRAM_SOCKET, result, &datagram_dispatch_, nullptr,
+        nullptr, nullptr, operation_irp);
+    ntl::status status = detail::finish_wsk_irp(operation_irp, wait, submitted);
+    result->socket_ = static_cast<PWSK_SOCKET>(
+        reinterpret_cast<void *>(operation_irp->IoStatus.Information));
+    if (!status.is_ok() || !result->socket_)
+      return fail(status.is_ok() ? ntl::status{STATUS_INVALID_DEVICE_STATE}
+                                 : status);
+
+    const auto *dispatch = static_cast<const WSK_PROVIDER_DATAGRAM_DISPATCH *>(
+        result->socket_->Dispatch);
+    KeClearEvent(&wait.event);
+    IoReuseIrp(operation_irp, STATUS_UNSUCCESSFUL);
+    IoSetCompletionRoutine(operation_irp, &detail::wsk_sync_completion,
+                           &wait, TRUE, TRUE, TRUE);
+    status = detail::finish_wsk_irp(
+        operation_irp, wait,
+        dispatch->WskBind(
+            result->socket_,
+            const_cast<SOCKADDR *>(local.borrowed_native_address()), 0,
+            operation_irp));
+    if (!status.is_ok())
+      return fail(status);
+
+    SOCKADDR_STORAGE bound{};
+    KeClearEvent(&wait.event);
+    IoReuseIrp(operation_irp, STATUS_UNSUCCESSFUL);
+    IoSetCompletionRoutine(operation_irp, &detail::wsk_sync_completion,
+                           &wait, TRUE, TRUE, TRUE);
+    status = detail::finish_wsk_irp(
+        operation_irp, wait,
+        dispatch->WskGetLocalAddress(
+            result->socket_, reinterpret_cast<SOCKADDR *>(&bound),
+            operation_irp));
+    if (!status.is_ok())
+      return fail(status);
+    result->local_ = ip_endpoint::from_native(
+        reinterpret_cast<const SOCKADDR *>(&bound),
+        bound.ss_family == AF_INET ? sizeof(SOCKADDR_IN)
+                                   : sizeof(SOCKADDR_IN6));
+    if (!result->local_)
+      return fail(STATUS_DATA_ERROR);
+    IoFreeIrp(operation_irp);
+    return own(result);
+  }
+
+  ip_endpoint local_endpoint() const noexcept { return local_; }
+
+  /** Synchronous PASSIVE_LEVEL send; input remains borrowed only for this call. */
+  ntl::status send_to(std::span<const std::byte> bytes,
+                      const ip_endpoint &remote) noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL || !remote || bytes.empty() ||
+        bytes.size() > limits_.maximum_datagram_bytes ||
+        bytes.size() > MAXULONG)
+      return STATUS_INVALID_PARAMETER;
+    if (!ExAcquireRundownProtection(&operations_))
+      return STATUS_DELETE_PENDING;
+    if (closing_.load(std::memory_order_acquire) || !socket_) {
+      ExReleaseRundownProtection(&operations_);
+      return STATUS_DELETE_PENDING;
+    }
+
+    PIRP irp = IoAllocateIrp(1, FALSE);
+    PMDL mdl = IoAllocateMdl(const_cast<std::byte *>(bytes.data()),
+                             static_cast<ULONG>(bytes.size()), FALSE, FALSE,
+                             nullptr);
+    if (!irp || !mdl) {
+      if (irp)
+        IoFreeIrp(irp);
+      if (mdl)
+        IoFreeMdl(mdl);
+      ExReleaseRundownProtection(&operations_);
+      send_failures_.fetch_add(1, std::memory_order_relaxed);
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    MmBuildMdlForNonPagedPool(mdl);
+    WSK_BUF buffer{mdl, 0, bytes.size()};
+    detail::wsk_sync_wait wait{};
+    KeInitializeEvent(&wait.event, NotificationEvent, FALSE);
+    IoSetCompletionRoutine(irp, &detail::wsk_sync_completion, &wait, TRUE,
+                           TRUE, TRUE);
+    const auto *dispatch = static_cast<const WSK_PROVIDER_DATAGRAM_DISPATCH *>(
+        socket_->Dispatch);
+    const ntl::status sent = detail::finish_wsk_irp(
+        irp, wait,
+        dispatch->WskSendTo(
+            socket_, &buffer, 0,
+            const_cast<SOCKADDR *>(remote.borrowed_native_address()), 0,
+            nullptr, irp));
+    IoFreeMdl(mdl);
+    IoFreeIrp(irp);
+    ExReleaseRundownProtection(&operations_);
+    if (sent.is_ok())
+      sent_.fetch_add(1, std::memory_order_relaxed);
+    else
+      send_failures_.fetch_add(1, std::memory_order_relaxed);
+    return sent;
+  }
+
+  void close() noexcept { request_close(); }
+
+  explicit operator bool() const noexcept {
+    return !closing_.load(std::memory_order_acquire) && socket_ != nullptr;
+  }
+
+  wsk_datagram_statistics statistics() const noexcept {
+    return {received_.load(std::memory_order_relaxed),
+            sent_.load(std::memory_order_relaxed),
+            receive_drops_.load(std::memory_order_relaxed),
+            send_failures_.load(std::memory_order_relaxed)};
+  }
+
+private:
+  wsk_datagram_socket(
+      std::shared_ptr<detail::wsk_provider_state> provider, PIRP close_irp,
+      std::shared_ptr<wsk_datagram_sink> sink,
+      wsk_datagram_limits limits) noexcept
+      : cleanup_(&wsk_datagram_socket::cleanup_at_passive, this),
+        cleanup_domain_(borrowed_runtime_passive_cleanup_domain()),
+        provider_(std::move(provider)), close_irp_(close_irp),
+        sink_(std::move(sink)), limits_(limits) {
+    ExInitializeRundownProtection(&operations_);
+    KeInitializeEvent(&closed_, NotificationEvent, FALSE);
+    detail::initialize_work_item(shutdown_work_,
+                                 &wsk_datagram_socket::shutdown, this);
+  }
+
+  static ntl::result<pointer> own(wsk_datagram_socket *value) noexcept {
+    if (!value || !value->cleanup_domain_) {
+      if (value)
+        ntl::pool_deleter<wsk_datagram_socket>{
+            ntl::pool_tag("dWtN"), ntl::pool_kind::nonpaged}(value);
+      return ntl::unexpected(STATUS_DEVICE_NOT_READY);
+    }
+    const ntl::status registered =
+        value->cleanup_domain_->register_item(value->cleanup_);
+    if (!registered.is_ok()) {
+      value->request_close();
+      (void)KeWaitForSingleObject(&value->closed_, Executive, KernelMode,
+                                  FALSE, nullptr);
+      ntl::pool_deleter<wsk_datagram_socket>{
+          ntl::pool_tag("dWtN"), ntl::pool_kind::nonpaged}(value);
+      return ntl::unexpected(registered);
+    }
+    try {
+      return ntl::ok(pointer(value, [](wsk_datagram_socket *socket) noexcept {
+        socket->request_close();
+        socket->cleanup_domain_->retire_deferred(socket->cleanup_);
+      }));
+    } catch (...) {
+      value->request_close();
+      value->cleanup_domain_->retire_deferred(value->cleanup_);
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+  }
+
+  static void cleanup_at_passive(void *context) noexcept {
+    ntl::pool_deleter<wsk_datagram_socket>{
+        ntl::pool_tag("dWtN"), ntl::pool_kind::nonpaged}(
+        static_cast<wsk_datagram_socket *>(context));
+  }
+
+  void request_close() noexcept {
+    if (KeGetCurrentIrql() > DISPATCH_LEVEL) {
+      NT_ASSERT(false);
+      return;
+    }
+    if (closing_.exchange(true, std::memory_order_acq_rel))
+      return;
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4996)
+#endif
+    ExQueueWorkItem(&shutdown_work_, DelayedWorkQueue);
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+  }
+
+  static void shutdown(void *context) noexcept {
+    auto *const self = static_cast<wsk_datagram_socket *>(context);
+    ExWaitForRundownProtectionRelease(&self->operations_);
+    if (self->socket_) {
+      (void)detail::close_wsk_socket(self->socket_, self->close_irp_);
+      self->socket_ = nullptr;
+    }
+    self->sink_.reset();
+    KeSetEvent(&self->closed_, IO_NO_INCREMENT, FALSE);
+  }
+
+  static bool copy_buffer(const WSK_BUF &source,
+                          std::span<std::byte> destination) noexcept {
+    if (source.Length != destination.size())
+      return false;
+    PMDL mdl = source.Mdl;
+    std::size_t skip = source.Offset;
+    std::size_t copied = 0;
+    while (mdl && copied != destination.size()) {
+      const std::size_t mdl_size = MmGetMdlByteCount(mdl);
+      if (skip >= mdl_size) {
+        skip -= mdl_size;
+        mdl = mdl->Next;
+        continue;
+      }
+      auto *const mapped = static_cast<const std::byte *>(
+          MmGetSystemAddressForMdlSafe(mdl, NormalPagePriority |
+                                               MdlMappingNoExecute));
+      if (!mapped)
+        return false;
+      const std::size_t available = mdl_size - skip;
+      const std::size_t remaining = destination.size() - copied;
+      const std::size_t take = available < remaining ? available : remaining;
+      std::memcpy(destination.data() + copied, mapped + skip, take);
+      copied += take;
+      skip = 0;
+      mdl = mdl->Next;
+    }
+    return copied == destination.size();
+  }
+
+  static NTSTATUS WSKAPI receive_from_event(
+      void *context, ULONG, PWSK_DATAGRAM_INDICATION indications) noexcept {
+    auto *const self = static_cast<wsk_datagram_socket *>(context);
+    if (!self)
+      return STATUS_DATA_NOT_ACCEPTED;
+    if (!indications) {
+      self->request_close();
+      return STATUS_SUCCESS;
+    }
+    if (!ExAcquireRundownProtection(&self->operations_))
+      return STATUS_SUCCESS;
+
+    std::size_t count = 0;
+    for (auto *item = indications; item; item = item->Next) {
+      if (++count > self->limits_.maximum_datagrams_per_indication ||
+          item->Buffer.Length == 0 ||
+          item->Buffer.Length > self->limits_.maximum_datagram_bytes) {
+        self->receive_drops_.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
+      auto bytes = owned_bytes::try_allocate(
+          item->Buffer.Length,
+          buffer_limits{self->limits_.maximum_datagram_bytes},
+          ntl::pool_tag("rWdN"));
+      if (!bytes || !copy_buffer(item->Buffer, bytes->span())) {
+        self->receive_drops_.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
+      const ULONG remote_length =
+          item->RemoteAddress && item->RemoteAddress->sa_family == AF_INET
+              ? sizeof(SOCKADDR_IN)
+              : sizeof(SOCKADDR_IN6);
+      const ip_endpoint remote =
+          ip_endpoint::from_native(item->RemoteAddress, remote_length);
+      if (!remote || !self->sink_ ||
+          !self->sink_->on_datagram(remote, std::move(*bytes)).is_ok()) {
+        self->receive_drops_.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
+      self->received_.fetch_add(1, std::memory_order_relaxed);
+    }
+    ExReleaseRundownProtection(&self->operations_);
+    return STATUS_SUCCESS;
+  }
+
+  inline static const WSK_CLIENT_DATAGRAM_DISPATCH datagram_dispatch_{
+      &wsk_datagram_socket::receive_from_event};
+
+  passive_cleanup_item cleanup_;
+  passive_cleanup_domain *cleanup_domain_ = nullptr;
+  std::shared_ptr<detail::wsk_provider_state> provider_;
+  PWSK_SOCKET socket_ = nullptr;
+  PIRP close_irp_ = nullptr;
+  std::shared_ptr<wsk_datagram_sink> sink_;
+  ip_endpoint local_{};
+  wsk_datagram_limits limits_{};
+  EX_RUNDOWN_REF operations_{};
+  WORK_QUEUE_ITEM shutdown_work_{};
+  KEVENT closed_{};
+  std::atomic<bool> closing_{false};
+  std::atomic<std::uint64_t> received_{0};
+  std::atomic<std::uint64_t> sent_{0};
+  std::atomic<std::uint64_t> receive_drops_{0};
+  std::atomic<std::uint64_t> send_failures_{0};
+};
+
+} // namespace ntl::net::kernel

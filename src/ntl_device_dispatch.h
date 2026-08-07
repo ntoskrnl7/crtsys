@@ -89,14 +89,16 @@ public:
             case METHOD_OUT_DIRECT:
               input = irp->AssociatedIrp.SystemBuffer;
               if (output_length != 0) {
-                if (!irp->MdlAddress)
-                  throw ntl::exception(STATUS_INVALID_USER_BUFFER,
-                                       "direct IOCTL has no output MDL");
+                if (!irp->MdlAddress) {
+                  irp->IoStatus.Status = STATUS_INVALID_USER_BUFFER;
+                  return;
+                }
                 output = MmGetSystemAddressForMdlSafe(
                     irp->MdlAddress, NormalPagePriority);
-                if (!output)
-                  throw ntl::exception(STATUS_INSUFFICIENT_RESOURCES,
-                                       "unable to map direct IOCTL output");
+                if (!output) {
+                  irp->IoStatus.Status = STATUS_INSUFFICIENT_RESOURCES;
+                  return;
+                }
               }
               break;
             case METHOD_NEITHER:
@@ -111,8 +113,8 @@ public:
               output = irp->UserBuffer;
               break;
             default:
-              throw ntl::exception(STATUS_INVALID_DEVICE_REQUEST,
-                                   "invalid IOCTL transfer method");
+              irp->IoStatus.Status = STATUS_INVALID_DEVICE_REQUEST;
+              return;
             }
 
             device_control::code code(
@@ -132,10 +134,16 @@ public:
                 return;
               }
             } else {
-              dispatchers->on_device_control(code, in_buffer, out_buffer);
+              irp->IoStatus.Status = static_cast<NTSTATUS>(
+                  dispatchers->on_device_control(
+                      code, in_buffer, out_buffer));
             }
-            irp->IoStatus.Information =
-                static_cast<ULONG_PTR>(out_buffer.size);
+            if (NT_SUCCESS(irp->IoStatus.Status)) {
+              irp->IoStatus.Information =
+                  static_cast<ULONG_PTR>(out_buffer.size);
+            } else {
+              irp->IoStatus.Information = 0;
+            }
           });
         }
         break;

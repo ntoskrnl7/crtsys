@@ -32,6 +32,50 @@ CMake consumers use:
 crtsys_add_driver(my_callout WFP NTL src/main.cpp)
 ```
 
+The examples are split by execution boundary instead of mixing both designs
+inside one directory:
+
+- [`examples/wfp/user`](../../examples/wfp/user/) keeps protocol parsing,
+  certificate policy, and content decisions in a controller or proxy;
+- [`examples/wfp/kernel`](../../examples/wfp/kernel/) contains direct kernel
+  implementations and the native WFP primitive samples.
+
+TCP/UDP content filtering, connect redirect, TLS inspection, controlled
+browser HTTPS capture, and HTTP/3 have paired user/kernel examples. The
+kernel versions are separate projects; they do not silently turn a user-mode
+example into a different design. Primitive callout examples such as flow
+monitoring and stream editing remain kernel-only because an empty user copy
+would teach no additional contract.
+
+NuGet `NTL WFP` projects automatically link the package's audited kernel
+zlib/Brotli archives. Source-based CMake projects opt in only when needed:
+
+```cmake
+crtsys_add_driver(
+  my_callout WFP NTL KERNEL_CONTENT_CODECS src/main.cpp)
+```
+
+Kernel drivers opt in to the pinned MsQuic ABI, Windows 10 version-2004 target,
+and NMR client import as one driver option:
+
+```cmake
+crtsys_add_driver(
+  my_h3_callout
+  WFP NTL KERNEL_MSQUIC KERNEL_CONTENT_CODECS
+  src/main.cpp)
+```
+
+`KERNEL_MSQUIC` supplies headers and `netio.lib`, not a provider. A user-mode
+CMake target that only needs the pinned ABI can still call
+`crtsys_add_ntl_msquic_headers()` and link `crtsys_ntl_msquic_headers`.
+NuGet and the offline prebuilt bundle carry the same SHA-256-verified header
+and add its include directory automatically. User applications deploy a
+compatible `msquic.dll`; kernel NuGet consumers opt in with
+`<CrtSysUseNtlKernelMsQuic>true</CrtSysUseNtlKernelMsQuic>`, which selects the
+Windows 10 version-2004-or-newer contract and `netio.lib`, and bind to a
+compatible, explicitly installed MsQuic NMR provider.
+Building never installs or starts either one.
+
 ## Rules enforced by the API
 
 ### Layers and keys never become raw GUIDs
@@ -43,17 +87,18 @@ filter keys also contain their layer type:
 using layer = ntl::wfp::layers::ale_auth_connect_v4;
 
 constexpr GUID native_callout = /* project-owned stable GUID */;
-constexpr ntl::wfp::callout_key<layer> callout(native_callout);
+constexpr ntl::wfp::arbitrating_callout_key<layer> callout(native_callout);
 ```
 
 A key for `stream_v4` cannot be passed to an `ale_auth_connect_v4`
 registration or filter. Native GUID access is private and is available only to
 the registration and policy writers.
 
-### A classify callback returns a decision
+### A classify callback returns the decision allowed by its filter
 
 Ordinary classify callbacks receive a non-copyable, callback-scoped,
-read-only `classify_event<Layer>` and return `decision`:
+read-only `classify_event<Layer>`. The callout key and callback result encode
+the same native WFP action contract:
 
 ```cpp
 constexpr auto authorize =
@@ -61,17 +106,28 @@ constexpr auto authorize =
       const auto port =
           event.value(layer::field::remote_port).uint16();
       return port && *port == 443
-                 ? ntl::wfp::decision::block
-                 : ntl::wfp::decision::continue_classification;
+                 ? ntl::wfp::arbitration_decision::block
+                 : ntl::wfp::arbitration_decision::continue_classification;
     };
 ```
 
 The callback cannot access `FWPS_CLASSIFY_OUT0`. The trampoline applies
 `FWPS_RIGHT_ACTION_WRITE`, clear-action-right, veto, and absorb semantics.
-It also normalizes the result to the native filter action: inspection always
-continues, terminating accepts only permit/block, and unknown accepts the
-full decision set. This remains enforced when policy was installed outside
-`ntl::wfp`. Callbacks must be `noexcept` and return exactly `decision`.
+The controller and driver must use the same typed key:
+
+- `inspection_callout_key` / `add_inspection()`: a `void` observer callback;
+  WFP classification continues automatically;
+- `terminating_callout_key` / `terminating_decision`: permit or block; and
+- `arbitrating_callout_key` / `arbitration_decision`: continue, permit, or
+  block (`FWP_ACTION_CALLOUT_UNKNOWN`).
+
+`stream_callout_key` is paired with `stream_result` and the fixed stream
+UNKNOWN action. An observation-only stream callback instead uses
+`inspection_callout_key` and `add_stream_inspection()`; it returns `void`.
+Callbacks are `noexcept`. Enforcement callbacks must return exactly the
+decision type selected by the key, while inspection callbacks return exactly
+`void`. A mismatched controller filter, driver registration, or callback
+return type does not compile.
 
 The supported decision layers are:
 
@@ -80,7 +136,8 @@ The supported decision layers are:
 - `ale_auth_recv_accept_v4` and `ale_auth_recv_accept_v6`;
 - `ale_flow_established_v4` and `ale_flow_established_v6`;
 - `datagram_data_v4` and `datagram_data_v6`; and
-- inbound/outbound transport v4 and v6.
+- inbound/outbound transport v4 and v6; and
+- `outbound_ip_packet_v4` and `outbound_ip_packet_v6`.
 
 ### Connect redirection has one legal mutation path
 
@@ -158,8 +215,8 @@ native NBL/MDL fragments. `copy_to()` remains the convenience flattening path.
 
 ### Flow contexts transfer ownership once
 
-`callout_driver::add_stream<Context, Callback>()` and
-`add_flow_context<Context, Callback>()` return a
+`callout_driver::add_stream<Context>()` and
+`add_flow_context<Context>()` return a
 `flow_target<Layer, Context>`. A target accepts only the same layer and context
 type:
 
@@ -195,11 +252,40 @@ The raw integer flow context is not cast by application code.
 - `pended_operation` completes an ALE operation from its destructor unless it
   has already been completed.
 
-`network_injector`, `transport_injector`, and `stream_injector` own their
-injection handles. Successful asynchronous injection transfers the clone to a
-completion context. Injector teardown acquires rundown, waits at
-`PASSIVE_LEVEL` for every completion, and only then destroys the native
-handle.
+`network_injector`, `transport_injector`, and `stream_injector` own shared
+injection state. Successful asynchronous injection transfers the packet owner
+to a completion context. `injection_limits::maximum_in_flight` is enforced
+before submission; exhaustion returns `STATUS_QUOTA_EXCEEDED` without
+consuming the caller's packet. `close()`/destruction rejects new work, while
+the native handle remains alive until every accepted completion drains. A last
+release at APC or DISPATCH is retired to the runtime PASSIVE cleanup domain,
+so callers do not schedule cleanup work or remember a destruction IRQL.
+
+Outbound transport injection also uses a move-only
+`transport_send_request`. It deep-copies or adopts the remote address and
+ancillary control data together with the endpoint, address family, scope, and
+compartment. `transport_injector::inject_send()` moves both the clone and that
+request into the same completion context. This is required because WFP keeps
+the buffers referenced by `FWPS_TRANSPORT_SEND_PARAMS0` until asynchronous
+completion; stack-backed native parameter blocks are therefore not exposed by
+the NTL API.
+
+```cpp
+auto request = ntl::wfp::transport_send_request::try_copy(
+    endpoint, AF_INET6, compartment, remote_address, remote_scope,
+    control_data, ntl::net::buffer_limits{4096});
+if (!request)
+  return ntl::wfp::terminating_decision::block_and_absorb;
+
+const auto injected = injector.inject_send(
+    std::move(clone), std::move(*request));
+```
+
+Synchronous submission failure destroys the completion context immediately.
+Successful submission destroys it from the WFP completion callback. Injector
+reset stops new submissions; rundown and PASSIVE cleanup keep accepted packet
+owners and native state alive through their callbacks. None of those paths
+needs caller-managed buffer lifetime or a second cleanup branch.
 
 A `stream_event` can issue a typed `stream_injection_site<Layer>`. It captures
 the WFP-provided flow, callout, layer, and stream flags without exposing
@@ -214,7 +300,7 @@ contains no WFP or NDIS callback type:
 - `scatter_view` borrows read-only fragments and never extends their lifetime;
 - `mutable_scatter_view` is returned only by an owning or explicitly mutable
   adapter;
-- `byte_cursor` performs bounded sequential and big-endian reads;
+- `borrowed_byte_cursor` performs bounded sequential and big-endian reads;
 - `scan_bytes()` finds a fixed token across fragment boundaries without
   flattening; and
 - `owned_bytes` is a move-only nonpaged deep copy with a mandatory
@@ -224,11 +310,11 @@ Packet wrappers expose the distinction directly:
 
 ```cpp
 const auto borrowed = event.packet();
-ntl::net::byte_cursor header(borrowed.bytes()); // callback lifetime only
+ntl::net::borrowed_byte_cursor header(borrowed.bytes()); // callback lifetime only
 
 auto saved = borrowed.try_copy(ntl::net::buffer_limits{64 * 1024});
 if (!saved)
-  return ntl::wfp::decision::block_and_absorb;
+  return ntl::wfp::terminating_decision::block_and_absorb;
 ```
 
 `borrowed_packet::bytes()` and `stream_data_view::bytes()` enumerate every
@@ -265,7 +351,7 @@ if (!body)
   co_return;
 
 const ntl::status read =
-    co_await stream.read_exactly(body->span());
+    co_await stream.read_exactly_borrowed(body->span());
 ```
 
 Producers call `append_received_data(scatter_view)`. The call copies fragments
@@ -276,11 +362,12 @@ overflow, and a competing reader are reported as `NTSTATUS`; two work slots
 prevent a second completed read from reusing a work item that is still
 resuming the first.
 
-The initial surface intentionally does not define a general `task<T>`:
-coroutine-frame ownership belongs to the driver's task/flow lifetime. The
-destination span and frame must survive suspension. At teardown, call
-`cancel_and_wait()` at `PASSIVE_LEVEL`, then wait for and destroy the owning
-task. Destroying a task while its continuation is queued is invalid.
+Coroutine-frame ownership belongs to the driver's task or flow lifetime. The
+destination span and frame must survive suspension. At teardown, the owner
+`co_await`s `cancel_and_drain()` and only then releases the stream and task.
+The drain continuation always resumes through a separate `PASSIVE_LEVEL` work
+item, so it is safe when requested by the read continuation currently being
+resumed. Destroying a task while its continuation is queued is invalid.
 
 `ntl::wfp::stream_reader` automatically copies a `stream_event` into this
 bounded reader and closes it on disconnect, abort, or no-more-data. It is an
@@ -293,7 +380,8 @@ failure policy must explicitly choose fail-open or fail-closed.
 
 The controller side has a separate user-mode primitive:
 `<ntl/net/io/async_socket>`. It uses overlapped Winsock plus IOCP and offers
-`co_await read_some()`, `read_exactly()`, and `write_all()`. It does not share
+`co_await read_some_borrowed()`, `read_exactly_borrowed()`, and `write_all()`.
+The borrowed names make the destination-span lifetime explicit. It does not share
 kernel pool, IRQL, or callback-lifetime machinery with `async_byte_stream`.
 `<ntl/net/io/async_framed_stream>` adds a bounded caller-selected message framer,
 retains partial and over-read TCP bytes, and yields only complete owning
@@ -374,12 +462,30 @@ The policy builders fix their native action:
 | Builder | Layer/use | Native action |
 | --- | --- | --- |
 | `filter_builder<Layer>` | ALE authorization | terminating + clear action right |
-| `inspection_filter_builder<Layer>` | flow/packet/monitor-only stream | inspection |
-| `stream_filter_builder<Layer>` | stream editing | terminating + clear action right |
-| `stream_control_filter_builder<Layer>` | connection-level stream control | unknown |
+| `inspection_filter_builder<Layer>` | observation only | inspection; callback can only continue |
+| `arbitration_filter_builder<Layer>` | flow/packet fail-close or conditional decisions | unknown; callback may continue/permit/block |
+| `packet_filter_builder<Layer>` | datagram/transport packet decision | terminating + clear action right |
+| `local_udp_proxy_reply_filter_builder<Layer>` | loopback `OUTBOUND_IPPACKET` proxy reply restoration | terminating; unrelated traffic remains available while the callout is absent |
+| `stream_filter_builder<Layer>` | stream inspection, editing, and connection control | unknown |
 
 There is no public engine handle, commit/abort method, action-type field, or
 native condition array.
+
+`local_udp_proxy_reply_filter_builder` is deliberately narrower than the
+generic packet builder. `OUTBOUND_IPPACKET` has no protocol or port policy
+condition, so this builder fixes the layer to IPv4/IPv6 outbound IP, installs
+the family loopback address, requires a nonzero proxy port as callout context,
+and hides the unavailable-callout choice. The matching callout parses the UDP
+header and port before it absorbs anything; unrelated loopback traffic is not
+blocked when the callout is absent.
+
+Ordinary applications do not assemble the six flow/datagram/reverse objects
+themselves. `transparent_udp_proxy_policy::install()` owns a complete policy,
+while `add_to()` adds the same indivisible graph to an existing provider and
+sublayer. `transparent_udp_proxy_service` owns the matching dual-stack
+callouts, tuple table, injection, callback rundown, and idempotent close.
+The unrestricted outbound-IP packet builder is available only under
+`ntl::wfp::advanced`; the default API cannot create a broad reverse hook.
 
 ## Typed conditions
 
@@ -436,21 +542,29 @@ the previous value is restored by `stop()`.
   injection submission follow their WFP layer contract and may run at
   `DISPATCH_LEVEL`. Keep those paths resident, allocation-aware, nonblocking,
   and exception-free.
-- Injector destruction waits for rundown and is `PASSIVE_LEVEL`.
-- `callout_driver::reset()` closes flow association, requests removal of every
-  tracked context, waits for synchronous or asynchronous flow-delete
-  callbacks, and only then unregisters in reverse registration order and
-  deletes its unnamed network device. It returns the native failure if WFP
-  cannot drain or unregister. Invoke and check it from the driver's unload
-  path after user-mode policy has been removed.
-- A `flow_target` is a registration-scoped capability. Do not retain or use it
-  after its owning `callout_driver` begins reset.
+- Injector facade destruction is IRQL-independent. Accepted completions own
+  shared rundown state, and native-handle destruction is transferred to the
+  joined runtime PASSIVE cleanup domain.
+- `callout_driver::add()` owns the callback object and every explicitly bound
+  `shared_ptr` state. `close()` rejects new callback entries, drains callbacks
+  and flow contexts, unregisters callouts in reverse order, and then deletes
+  its unnamed network device. The operation is idempotent across copied
+  facades and reports a native drain or unregister failure. An ordinary
+  `PASSIVE_LEVEL` caller receives the completed result. A call from one of the
+  driver's own callbacks, or from `APC_LEVEL`/`DISPATCH_LEVEL`, returns the
+  successful `STATUS_PENDING` close request; the runtime retains the owner and
+  completes the same drain on its joined `PASSIVE_LEVEL` worker.
+- A `flow_target` is a registration-scoped capability. Association returns
+  `STATUS_DELETE_PENDING` after its owning `callout_driver` begins closing.
+- Releasing the last facade above `PASSIVE_LEVEL` transfers native cleanup to
+  the runtime PASSIVE cleanup domain. Drivers do not queue detached cleanup
+  work items or manage callback rundown themselves.
 
 ## Verification
 
-[`examples/wfp/ale-connect-block`](../../examples/wfp/ale-connect-block) is
+[`examples/wfp/kernel/ale-connect-block`](../../examples/wfp/kernel/ale-connect-block) is
 the first runtime sample. Its
-[Korean walkthrough](../../examples/wfp/ale-connect-block/README.ko-KR.md)
+[Korean walkthrough](../../examples/wfp/kernel/ale-connect-block/README.ko-KR.md)
 explains the driver, controller, WFP engine, and nine-step execution sequence.
 It registers an `ALE_AUTH_CONNECT_V4` callout, installs all policy objects in
 one ephemeral transaction, proves a selected loopback TCP connection is
@@ -461,7 +575,7 @@ uninstalls the graph.
 
 [`test/wfp/compile`](../../test/wfp/compile) compiles all typed layer families,
 flow-context transfer, stream state machines, ALE pending ownership, and the
-three asynchronous injector types with `/W4 /WX`. Eight CTest semantic
+three asynchronous injector types with `/W4 /WX`. Sixteen CTest semantic
 contracts execute in Debug/Release, including every IPv4/IPv6 prefix length,
 deterministic fragmented framing/search inputs, parser fuzz contracts, and
 the browser HTTP/3 contract.
@@ -470,7 +584,7 @@ The advanced VM gate builds and packages only its selected samples. The
 dual-stack policy gate loads `datagram-proxy`, `async-inspection`,
 `flow-monitor`, `udp-content-filter`, and `tcp-content-filter` together under
 Driver Verifier and executes 20 controller iterations per sample. A full
-regression also runs all ten advanced samples together. IPv4 and IPv6
+regression can run every selected advanced sample together. IPv4 and IPv6
 redirect, delayed decisions, observation, content verdicts, endpoint closure,
 and post-policy restoration run in the gate. The two content-filter samples
 prove independently
@@ -486,20 +600,26 @@ user-mode Schannel sessions. It observes a fragmented ClientHello, selects
 and caches a CA-signed per-SNI leaf, frames a bounded HTTP/1.1 plaintext
 request, proves both permit and block outcomes, leaves the trust store
 unchanged, and restores a direct TLS connection after policy removal.
-The Internet-dependent `browser-https-inspection` project uses independent WFP
-keys and service names. Its runtime wrapper owns isolated Edge launch,
-temporary test-CA trust, and HTML-log cleanup. The deterministic advanced
-Verifier gate exercises the generic TLS proxy, while the HTTPS live runner
-exercises the browser workflow.
-The gate also runs the
-fragmented UDP
-NBL/MDL and bounded coroutine-reader contracts at driver load, checks
-load/unload accounting plus crash events and dumps, and restores the exact
-caller-supplied Verifier targets. Its default manual restart mode allows an
-operator to select the required driver-signing startup option. A full run
-uses separate normal-Verifier and Systematic Low Resources boots before the
-restore boot. Randomized Low Resources remains an explicit compatibility
-mode; volatile settings are not treated as additive.
+The `browser-https-inspection` project uses independent WFP keys and service
+names. Its user service terminates Schannel HTTP/1.1 and HTTP/2 plus MsQuic
+HTTP/3, then applies one owning inspection/rewrite policy to the decoded
+messages. The kernel counterpart runs the same semantic policy with WSK,
+kernel Schannel, and the MsQuic NMR backend. Their runtime wrappers observe an
+already-running exact browser executable without creating a profile, launching
+or terminating the browser, or adding flags, and own HTML-log cleanup. Local
+controlled-origin tests are deterministic; the external-origin HTTP/3 probe is
+separate because the surrounding network can block QUIC.
+The gate also runs the fragmented UDP NBL/MDL contract, checks load/unload
+accounting plus crash events and dumps, and requires the exact caller-supplied
+Verifier settings to remain byte-for-byte unchanged. Bounded coroutine-reader
+contracts live in the dedicated kernel-contract driver instead of a sample.
+The runner never starts, resets, reverts, or reboots the VM and never changes
+Driver Verifier; the operator selects the required driver-signing startup
+option before the run. Low Resources Simulation requires a separately
+prepared, operator-controlled boot and separate evidence. It is not implied
+by the normal Verifier gate. That separate gate has passed for the kernel
+browser inspection path with an observed intentional allocation failure,
+fail-closed cleanup, no new crash or dump, and unchanged Verifier settings.
 
 The mapping to Microsoft's network/trans samples and the exact runtime status
 is maintained in

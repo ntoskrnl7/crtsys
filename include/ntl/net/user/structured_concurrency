@@ -1,0 +1,574 @@
+/**
+ * @file structured_concurrency
+ * @brief Lifetime-safe concurrent composition for user-mode network tasks.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/user/structured_concurrency is a user-mode header"
+#endif
+
+#include <coroutine>
+#include <condition_variable>
+#include <exception>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <stdexcept>
+#include <tuple>
+#include <type_traits>
+#include <utility>
+#include <variant>
+
+#include <ntl/net/user/task>
+
+namespace ntl::net::user {
+
+namespace structured_concurrency_detail {
+
+struct detached_observer {
+  struct promise_type {
+    detached_observer get_return_object() const noexcept { return {}; }
+    std::suspend_never initial_suspend() const noexcept { return {}; }
+    std::suspend_never final_suspend() const noexcept { return {}; }
+    void return_void() const noexcept {}
+    [[noreturn]] void unhandled_exception() const noexcept {
+      std::terminate();
+    }
+  };
+};
+
+template <class T> class background_state final {
+public:
+  explicit background_state(std::function<void()> stop)
+      : stop_(std::move(stop)) {}
+
+  template <class U> void complete(U &&value) noexcept {
+    {
+      std::lock_guard lock(lock_);
+      try {
+        value_.emplace(std::forward<U>(value));
+      } catch (...) {
+        exception_ = std::current_exception();
+      }
+      completed_ = true;
+      stop_ = {};
+    }
+    completed_event_.notify_all();
+  }
+
+  void fail(std::exception_ptr exception) noexcept {
+    {
+      std::lock_guard lock(lock_);
+      exception_ = std::move(exception);
+      completed_ = true;
+      stop_ = {};
+    }
+    completed_event_.notify_all();
+  }
+
+  void close() noexcept {
+    std::function<void()> stop;
+    {
+      std::lock_guard lock(lock_);
+      if (completed_ || stop_requested_)
+        return;
+      stop_requested_ = true;
+      stop = std::move(stop_);
+    }
+    if (stop)
+      stop();
+  }
+
+  bool ready() const noexcept {
+    std::lock_guard lock(lock_);
+    return completed_;
+  }
+
+  T get() {
+    std::unique_lock lock(lock_);
+    completed_event_.wait(lock, [this] { return completed_; });
+    if (exception_)
+      std::rethrow_exception(exception_);
+    if (!value_)
+      throw std::logic_error("background task produced no result");
+    if (consumed_)
+      throw std::logic_error("background task result was already consumed");
+    consumed_ = true;
+    return std::move(*value_);
+  }
+
+private:
+  mutable std::mutex lock_;
+  std::condition_variable completed_event_;
+  std::function<void()> stop_;
+  std::optional<T> value_;
+  std::exception_ptr exception_;
+  bool completed_ = false;
+  bool stop_requested_ = false;
+  bool consumed_ = false;
+};
+
+template <> class background_state<void> final {
+public:
+  explicit background_state(std::function<void()> stop)
+      : stop_(std::move(stop)) {}
+
+  void complete() noexcept {
+    {
+      std::lock_guard lock(lock_);
+      completed_ = true;
+      stop_ = {};
+    }
+    completed_event_.notify_all();
+  }
+
+  void fail(std::exception_ptr exception) noexcept {
+    {
+      std::lock_guard lock(lock_);
+      exception_ = std::move(exception);
+      completed_ = true;
+      stop_ = {};
+    }
+    completed_event_.notify_all();
+  }
+
+  void close() noexcept {
+    std::function<void()> stop;
+    {
+      std::lock_guard lock(lock_);
+      if (completed_ || stop_requested_)
+        return;
+      stop_requested_ = true;
+      stop = std::move(stop_);
+    }
+    if (stop)
+      stop();
+  }
+
+  bool ready() const noexcept {
+    std::lock_guard lock(lock_);
+    return completed_;
+  }
+
+  void get() {
+    std::unique_lock lock(lock_);
+    completed_event_.wait(lock, [this] { return completed_; });
+    if (exception_)
+      std::rethrow_exception(exception_);
+  }
+
+private:
+  mutable std::mutex lock_;
+  std::condition_variable completed_event_;
+  std::function<void()> stop_;
+  std::exception_ptr exception_;
+  bool completed_ = false;
+  bool stop_requested_ = false;
+};
+
+template <class T>
+detached_observer observe_background(
+    std::shared_ptr<background_state<T>> state,
+    task<T> operation) noexcept {
+  try {
+    if constexpr (std::is_void_v<T>) {
+      co_await std::move(operation);
+      state->complete();
+    } else {
+      state->complete(co_await std::move(operation));
+    }
+  } catch (...) {
+    state->fail(std::current_exception());
+  }
+}
+
+template <class T> struct completion_slot {
+  template <class U> void store(U &&value) {
+    result.emplace(std::forward<U>(value));
+  }
+
+  T take() {
+    if (!result)
+      throw std::logic_error("concurrent task produced no result");
+    return std::move(*result);
+  }
+
+  std::optional<T> result;
+};
+
+template <> struct completion_slot<void> {
+  void store() noexcept { completed = true; }
+
+  std::monostate take() const {
+    if (!completed)
+      throw std::logic_error("concurrent task did not complete");
+    return {};
+  }
+
+  bool completed = false;
+};
+
+template <class T>
+using completion_value_t =
+    std::conditional_t<std::is_void_v<T>, std::monostate, T>;
+
+#if defined(_MSC_VER) && defined(_M_ARM64)
+#pragma warning(push)
+// The private coordination state contains over-aligned ARM64 synchronization
+// storage; its intentional padding is not observable by callers.
+#pragma warning(disable : 4324)
+#endif
+template <class First, class Second, class Stop>
+class concurrent_pair_state final {
+public:
+  concurrent_pair_state(Stop stop, bool stop_on_first) noexcept(
+      std::is_nothrow_move_constructible_v<Stop>)
+      : stop_(std::move(stop)), stop_on_first_(stop_on_first) {}
+
+  concurrent_pair_state(const concurrent_pair_state &) = delete;
+  concurrent_pair_state &operator=(const concurrent_pair_state &) = delete;
+
+  template <class Value>
+    requires(!std::is_void_v<First>)
+  void first_succeeded(Value &&value) noexcept {
+    complete_with_value(first_, std::forward<Value>(value));
+  }
+
+  void first_succeeded() noexcept
+    requires std::is_void_v<First>
+  {
+    complete_without_value(first_);
+  }
+
+  template <class Value>
+    requires(!std::is_void_v<Second>)
+  void second_succeeded(Value &&value) noexcept {
+    complete_with_value(second_, std::forward<Value>(value));
+  }
+
+  void second_succeeded() noexcept
+    requires std::is_void_v<Second>
+  {
+    complete_without_value(second_);
+  }
+
+  void failed(std::exception_ptr exception) noexcept {
+    completion_action action;
+    {
+      std::lock_guard lock(lock_);
+      action = record_completion_locked(std::move(exception));
+    }
+    finish_action(action);
+  }
+
+  bool ready() const noexcept {
+    std::lock_guard lock(lock_);
+    return completed_ == 2;
+  }
+
+  bool suspend(std::coroutine_handle<> continuation) noexcept {
+    std::lock_guard lock(lock_);
+    if (completed_ == 2)
+      return false;
+    continuation_ = continuation;
+    return true;
+  }
+
+  void abandon() noexcept {
+    bool stop = false;
+    {
+      std::lock_guard lock(lock_);
+      abandoned_ = true;
+      continuation_ = {};
+      if (completed_ != 2 && !stop_requested_) {
+        stop_requested_ = true;
+        stop = true;
+      }
+    }
+    if (stop)
+      stop_();
+  }
+
+  std::tuple<completion_value_t<First>, completion_value_t<Second>>
+  take_results() {
+    std::lock_guard lock(lock_);
+    if (completed_ != 2)
+      throw std::logic_error("concurrent tasks have not completed");
+    if (primary_failure_)
+      std::rethrow_exception(primary_failure_);
+    return {first_.take(), second_.take()};
+  }
+
+  void finish_without_results() {
+    std::lock_guard lock(lock_);
+    if (completed_ != 2)
+      throw std::logic_error("concurrent tasks have not completed");
+    if (primary_failure_)
+      std::rethrow_exception(primary_failure_);
+  }
+
+private:
+  struct completion_action {
+    bool stop = false;
+    std::coroutine_handle<> continuation{};
+  };
+
+  template <class Slot, class Value>
+  void complete_with_value(Slot &slot, Value &&value) noexcept {
+    completion_action action;
+    try {
+      std::lock_guard lock(lock_);
+      slot.store(std::forward<Value>(value));
+      action = record_completion_locked({});
+    } catch (...) {
+      failed(std::current_exception());
+      return;
+    }
+    finish_action(action);
+  }
+
+  template <class Slot> void complete_without_value(Slot &slot) noexcept {
+    completion_action action;
+    {
+      std::lock_guard lock(lock_);
+      slot.store();
+      action = record_completion_locked({});
+    }
+    finish_action(action);
+  }
+
+  completion_action
+  record_completion_locked(std::exception_ptr exception) noexcept {
+    completion_action action;
+    const bool first_completion = completed_ == 0;
+    if (exception && (!stop_on_first_ || first_completion) &&
+        !primary_failure_)
+      primary_failure_ = std::move(exception);
+
+    const bool should_stop =
+        stop_on_first_ ? first_completion
+                       : static_cast<bool>(primary_failure_);
+    if (should_stop && !stop_requested_) {
+      stop_requested_ = true;
+      action.stop = true;
+    }
+
+    ++completed_;
+    if (completed_ == 2 && !abandoned_)
+      action.continuation = std::exchange(continuation_, {});
+    return action;
+  }
+
+  void finish_action(const completion_action &action) noexcept {
+    // Stop can synchronously complete the peer operation. Invoke it before
+    // resuming the parent so the parent always observes a fully drained pair.
+    if (action.stop)
+      stop_();
+    if (action.continuation)
+      action.continuation.resume();
+  }
+
+  mutable std::mutex lock_;
+  completion_slot<First> first_;
+  completion_slot<Second> second_;
+  Stop stop_;
+  std::exception_ptr primary_failure_;
+  std::coroutine_handle<> continuation_{};
+  unsigned completed_ = 0;
+  bool stop_on_first_ = false;
+  bool stop_requested_ = false;
+  bool abandoned_ = false;
+};
+#if defined(_MSC_VER) && defined(_M_ARM64)
+#pragma warning(pop)
+#endif
+
+template <class First, class Second, class Stop>
+detached_observer observe_first(
+    std::shared_ptr<concurrent_pair_state<First, Second, Stop>> state,
+    task<First> operation) noexcept {
+  try {
+    if constexpr (std::is_void_v<First>) {
+      co_await std::move(operation);
+      state->first_succeeded();
+    } else {
+      state->first_succeeded(co_await std::move(operation));
+    }
+  } catch (...) {
+    state->failed(std::current_exception());
+  }
+}
+
+template <class First, class Second, class Stop>
+detached_observer observe_second(
+    std::shared_ptr<concurrent_pair_state<First, Second, Stop>> state,
+    task<Second> operation) noexcept {
+  try {
+    if constexpr (std::is_void_v<Second>) {
+      co_await std::move(operation);
+      state->second_succeeded();
+    } else {
+      state->second_succeeded(co_await std::move(operation));
+    }
+  } catch (...) {
+    state->failed(std::current_exception());
+  }
+}
+
+template <class First, class Second, class Stop, bool ReturnResults>
+class concurrent_pair_awaiter {
+public:
+  using state_type = concurrent_pair_state<First, Second, Stop>;
+
+  concurrent_pair_awaiter(task<First> first, task<Second> second, Stop stop,
+                          bool stop_on_first)
+      : state_(std::make_shared<state_type>(std::move(stop),
+                                            stop_on_first)) {
+    observe_first(state_, std::move(first));
+    observe_second(state_, std::move(second));
+  }
+
+  concurrent_pair_awaiter(const concurrent_pair_awaiter &) = delete;
+  concurrent_pair_awaiter &operator=(const concurrent_pair_awaiter &) = delete;
+  concurrent_pair_awaiter(concurrent_pair_awaiter &&) = delete;
+  concurrent_pair_awaiter &operator=(concurrent_pair_awaiter &&) = delete;
+
+  ~concurrent_pair_awaiter() {
+    if (state_)
+      state_->abandon();
+  }
+
+  bool await_ready() const noexcept { return state_->ready(); }
+
+  bool await_suspend(std::coroutine_handle<> continuation) noexcept {
+    return state_->suspend(continuation);
+  }
+
+  auto await_resume() {
+    auto state = std::exchange(state_, {});
+    if constexpr (ReturnResults)
+      return state->take_results();
+    else
+      state->finish_without_results();
+  }
+
+private:
+  std::shared_ptr<state_type> state_;
+};
+
+} // namespace structured_concurrency_detail
+
+/**
+ * @brief Move-only owning handle for a started task.
+ *
+ * close() and destruction invoke the supplied stop operation at most once.
+ * They never block an IOCP callback: the coroutine frame and its awaited
+ * native operations retain shared state until completion. get() is the
+ * explicit top-level drain point when a caller needs the result.
+ */
+template <class T> class background_operation {
+public:
+  background_operation() noexcept = default;
+  background_operation(const background_operation &) = delete;
+  background_operation &operator=(const background_operation &) = delete;
+  background_operation(background_operation &&) noexcept = default;
+  background_operation &operator=(background_operation &&other) noexcept {
+    if (this != &other) {
+      close();
+      state_ = std::move(other.state_);
+    }
+    return *this;
+  }
+  ~background_operation() { close(); }
+
+  void close() noexcept {
+    auto state = state_;
+    if (state)
+      state->close();
+  }
+
+  bool ready() const noexcept {
+    auto state = state_;
+    return state && state->ready();
+  }
+
+  explicit operator bool() const noexcept { return static_cast<bool>(state_); }
+
+  T get() {
+    if (!state_)
+      throw std::logic_error("background operation has no state");
+    return state_->get();
+  }
+
+private:
+  template <class U, class Stop>
+  friend background_operation<U> start_background(task<U>, Stop);
+
+  explicit background_operation(
+      std::shared_ptr<structured_concurrency_detail::background_state<T>>
+          state) noexcept
+      : state_(std::move(state)) {}
+
+  std::shared_ptr<structured_concurrency_detail::background_state<T>> state_;
+};
+
+template <> inline void background_operation<void>::get() {
+  if (!state_)
+    throw std::logic_error("background operation has no state");
+  state_->get();
+}
+
+/** Starts a lazy task under an owning, idempotently closeable handle. */
+template <class T, class Stop>
+background_operation<T> start_background(task<T> operation, Stop stop) {
+  static_assert(std::is_nothrow_invocable_v<Stop &>,
+                "the background stop callback must be noexcept");
+  auto state = std::make_shared<
+      structured_concurrency_detail::background_state<T>>(
+      [stop = std::move(stop)]() mutable noexcept { stop(); });
+  structured_concurrency_detail::observe_background(
+      state, std::move(operation));
+  return background_operation<T>(std::move(state));
+}
+
+/**
+ * @brief Runs two tasks concurrently and cancels/drains both on an error.
+ *
+ * The stop callback is invoked at most once and must be noexcept. Destroying
+ * the awaiting parent also invokes it and detaches the parent's continuation;
+ * the two observer frames retain their shared state until both operations
+ * finish. Successful completion returns both results as a tuple.
+ */
+template <class First, class Second, class Stop>
+auto when_all_cancel_on_error(task<First> first, task<Second> second,
+                              Stop stop) {
+  static_assert(std::is_nothrow_invocable_v<Stop &>,
+                "the structured stop callback must be noexcept");
+  return structured_concurrency_detail::concurrent_pair_awaiter<
+      First, Second, std::decay_t<Stop>, true>(
+      std::move(first), std::move(second), std::move(stop), false);
+}
+
+/**
+ * @brief Runs two tasks concurrently, stops the peer on first completion, and
+ * drains both before resuming the parent.
+ *
+ * This is the natural policy for tunnels: EOF, a close frame, or an error in
+ * either direction closes the transport pair. A follower cancellation error
+ * is ignored; an error from the leading completion is rethrown.
+ */
+template <class First, class Second, class Stop>
+auto when_all_stop_on_first(task<First> first, task<Second> second,
+                            Stop stop) {
+  static_assert(std::is_nothrow_invocable_v<Stop &>,
+                "the structured stop callback must be noexcept");
+  return structured_concurrency_detail::concurrent_pair_awaiter<
+      First, Second, std::decay_t<Stop>, false>(
+      std::move(first), std::move(second), std::move(stop), true);
+}
+
+} // namespace ntl::net::user

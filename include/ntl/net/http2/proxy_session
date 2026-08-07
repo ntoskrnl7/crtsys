@@ -1,0 +1,846 @@
+/**
+ * @file http2_proxy_session
+ * @brief Structured bidirectional HTTP/2 proxy I/O over async byte streams.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/http2/proxy_session is a user-mode header"
+#endif
+
+#include <ntl/net/framing>
+#include <ntl/net/http2/proxy_connection>
+#include <ntl/net/user/structured_concurrency>
+#include <ntl/net/user/task>
+
+#include <algorithm>
+#include <array>
+#include <coroutine>
+#include <cstddef>
+#include <cstdint>
+#include <deque>
+#include <exception>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <span>
+#include <stdexcept>
+#include <string>
+#include <system_error>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+namespace ntl::net::http2 {
+
+enum class proxy_session_termination : std::uint8_t {
+  downstream_eof = 1,
+  upstream_eof = 2,
+  policy_drop = 3,
+};
+
+struct proxy_session_result {
+  proxy_session_termination termination =
+      proxy_session_termination::downstream_eof;
+  std::size_t downstream_to_upstream_bytes = 0;
+  std::size_t upstream_to_downstream_bytes = 0;
+  std::size_t completed_requests = 0;
+  std::size_t completed_responses = 0;
+  unsigned last_response_status = 0;
+  unsigned last_terminal_status = 0;
+};
+
+/** Default CONNECT behavior: reject before origin-facing HEADERS. */
+struct reject_tunnel_handler {
+  ntl::result<connect_disposition> admit(
+      std::uint32_t,
+      const ntl::net::http::request_message &) noexcept {
+    return ntl::ok(connect_disposition::reject);
+  }
+
+  ntl::result<std::optional<std::vector<outbound_frame>>> transform(
+      connection_direction, const frame_view &) noexcept {
+    return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+  }
+
+  void reset(std::uint32_t) noexcept {}
+};
+
+/** Explicit opt-in to carrying CONNECT DATA without inspection. */
+struct passthrough_tunnel_handler {
+  ntl::result<connect_disposition> admit(
+      std::uint32_t,
+      const ntl::net::http::request_message &) noexcept {
+    return ntl::ok(connect_disposition::passthrough);
+  }
+
+  ntl::result<std::optional<std::vector<outbound_frame>>> transform(
+      connection_direction, const frame_view &) noexcept {
+    return ntl::ok(
+        std::optional<std::vector<outbound_frame>>{});
+  }
+
+  void reset(std::uint32_t) noexcept {}
+};
+
+namespace proxy_session_detail {
+
+class async_mutex {
+public:
+  class guard {
+  public:
+    guard() noexcept = default;
+    explicit guard(async_mutex &owner) noexcept : owner_(&owner) {}
+    guard(const guard &) = delete;
+    guard &operator=(const guard &) = delete;
+    guard(guard &&other) noexcept
+        : owner_(std::exchange(other.owner_, nullptr)) {}
+    guard &operator=(guard &&other) noexcept {
+      if (this != &other) {
+        if (owner_)
+          owner_->unlock();
+        owner_ = std::exchange(other.owner_, nullptr);
+      }
+      return *this;
+    }
+    ~guard() {
+      if (owner_)
+        owner_->unlock();
+    }
+
+  private:
+    async_mutex *owner_ = nullptr;
+  };
+
+  class lock_operation {
+  public:
+    explicit lock_operation(async_mutex &owner) noexcept : owner_(&owner) {}
+    lock_operation(const lock_operation &) = delete;
+    lock_operation &operator=(const lock_operation &) = delete;
+    lock_operation(lock_operation &&) = delete;
+    lock_operation &operator=(lock_operation &&) = delete;
+    ~lock_operation() { unregister(); }
+
+    bool await_ready() noexcept {
+      std::lock_guard lock(owner_->lock_);
+      if (owner_->cancelled_) {
+        cancelled_ = true;
+        return true;
+      }
+      if (!owner_->owned_) {
+        owner_->owned_ = true;
+        acquired_ = true;
+        return true;
+      }
+      return false;
+    }
+
+    bool await_suspend(std::coroutine_handle<> continuation) {
+      std::lock_guard lock(owner_->lock_);
+      if (owner_->cancelled_) {
+        cancelled_ = true;
+        return false;
+      }
+      if (!owner_->owned_) {
+        owner_->owned_ = true;
+        acquired_ = true;
+        return false;
+      }
+      continuation_ = continuation;
+      owner_->waiters_.push_back(this);
+      queued_ = true;
+      return true;
+    }
+
+    guard await_resume() {
+      if (cancelled_ || !acquired_)
+        throw std::system_error(
+            995, std::system_category(),
+            "serialized HTTP/2 writer cancelled");
+      return guard(*owner_);
+    }
+
+  private:
+    friend class async_mutex;
+
+    void unregister() noexcept {
+      if (!owner_ || !queued_)
+        return;
+      std::lock_guard lock(owner_->lock_);
+      if (!queued_)
+        return;
+      const auto found = std::find(
+          owner_->waiters_.begin(), owner_->waiters_.end(), this);
+      if (found != owner_->waiters_.end())
+        owner_->waiters_.erase(found);
+      queued_ = false;
+    }
+
+    async_mutex *owner_ = nullptr;
+    std::coroutine_handle<> continuation_{};
+    bool acquired_ = false;
+    bool cancelled_ = false;
+    bool queued_ = false;
+  };
+
+  lock_operation acquire() noexcept { return lock_operation(*this); }
+
+  void cancel() noexcept {
+    std::deque<lock_operation *> waiters;
+    {
+      std::lock_guard lock(lock_);
+      if (cancelled_)
+        return;
+      cancelled_ = true;
+      waiters.swap(waiters_);
+      for (auto *waiter : waiters) {
+        waiter->cancelled_ = true;
+        waiter->queued_ = false;
+      }
+    }
+    for (auto *waiter : waiters)
+      waiter->continuation_.resume();
+  }
+
+private:
+  void unlock() noexcept {
+    lock_operation *next = nullptr;
+    {
+      std::lock_guard lock(lock_);
+      if (!waiters_.empty() && !cancelled_) {
+        next = waiters_.front();
+        waiters_.pop_front();
+        next->acquired_ = true;
+        next->queued_ = false;
+      } else {
+        owned_ = false;
+      }
+    }
+    if (next)
+      next->continuation_.resume();
+  }
+
+  std::mutex lock_;
+  bool owned_ = false;
+  bool cancelled_ = false;
+  std::deque<lock_operation *> waiters_;
+};
+
+template <class Stream> class serialized_writer {
+public:
+  explicit serialized_writer(Stream &stream) noexcept : stream_(&stream) {}
+
+  serialized_writer(const serialized_writer &) = delete;
+  serialized_writer &operator=(const serialized_writer &) = delete;
+
+  ntl::net::user::task<std::size_t>
+  write(std::span<const std::byte> bytes) {
+    auto ownership = co_await mutex_.acquire();
+    const std::size_t written = co_await stream_->write_all(bytes);
+    if (written != bytes.size())
+      throw std::runtime_error("HTTP/2 stream write completed short");
+    co_return written;
+  }
+
+  ntl::net::user::task<std::size_t>
+  write_batch(std::span<const outbound_frame> frames) {
+    auto ownership = co_await mutex_.acquire();
+    std::size_t total = 0;
+    for (const auto &frame : frames) {
+      const std::size_t written = co_await stream_->write_all(frame.wire);
+      if (written != frame.wire.size())
+        throw std::runtime_error(
+            "HTTP/2 frame batch write completed short");
+      total += written;
+    }
+    co_return total;
+  }
+
+  void cancel() noexcept { mutex_.cancel(); }
+
+private:
+  Stream *stream_ = nullptr;
+  async_mutex mutex_;
+};
+
+class async_barrier {
+public:
+  class wait_operation {
+  public:
+    explicit wait_operation(async_barrier &owner) noexcept : owner_(&owner) {}
+    wait_operation(const wait_operation &) = delete;
+    wait_operation &operator=(const wait_operation &) = delete;
+    wait_operation(wait_operation &&) = delete;
+    wait_operation &operator=(wait_operation &&) = delete;
+    ~wait_operation() { unregister(); }
+    bool await_ready() const noexcept {
+      std::lock_guard lock(owner_->lock_);
+      return owner_->ready_;
+    }
+    bool await_suspend(std::coroutine_handle<> continuation) {
+      std::lock_guard lock(owner_->lock_);
+      if (owner_->ready_)
+        return false;
+      if (owner_->waiter_) {
+        duplicate_ = true;
+        return false;
+      }
+      continuation_ = continuation;
+      queued_ = true;
+      owner_->waiter_ = this;
+      return true;
+    }
+    void await_resume() const {
+      if (duplicate_)
+        throw std::logic_error("HTTP/2 barrier already has a waiter");
+      std::lock_guard lock(owner_->lock_);
+      if (owner_->failure_)
+        std::rethrow_exception(owner_->failure_);
+    }
+
+  private:
+    friend class async_barrier;
+
+    void unregister() noexcept {
+      if (!owner_ || !queued_)
+        return;
+      std::lock_guard lock(owner_->lock_);
+      if (queued_ && owner_->waiter_ == this)
+        owner_->waiter_ = nullptr;
+      queued_ = false;
+    }
+
+    async_barrier *owner_ = nullptr;
+    std::coroutine_handle<> continuation_{};
+    bool queued_ = false;
+    bool duplicate_ = false;
+  };
+
+  wait_operation wait() noexcept { return wait_operation(*this); }
+  void signal() noexcept { complete({}); }
+  void cancel() noexcept {
+    complete(std::make_exception_ptr(std::system_error(
+        995, std::system_category(), "HTTP/2 session cancelled")));
+  }
+
+private:
+  void complete(std::exception_ptr failure) noexcept {
+    std::coroutine_handle<> continuation;
+    {
+      std::lock_guard lock(lock_);
+      if (ready_)
+        return;
+      ready_ = true;
+      failure_ = std::move(failure);
+      auto *waiter = std::exchange(waiter_, nullptr);
+      if (waiter) {
+        waiter->queued_ = false;
+        continuation = waiter->continuation_;
+      }
+    }
+    if (continuation)
+      continuation.resume();
+  }
+
+  mutable std::mutex lock_;
+  bool ready_ = false;
+  std::exception_ptr failure_;
+  wait_operation *waiter_ = nullptr;
+};
+
+template <class Stream> class frame_reader {
+public:
+  frame_reader(Stream &stream, std::size_t maximum_payload,
+               std::size_t receive_chunk = 16 * 1024)
+      : stream_(&stream), maximum_payload_(maximum_payload),
+        receive_chunk_(receive_chunk),
+        framer_(frame_limits{maximum_payload, false}) {
+    if (maximum_payload_ == 0 || receive_chunk_ == 0)
+      throw std::invalid_argument("invalid HTTP/2 frame reader limits");
+  }
+
+  ntl::net::user::task<std::optional<std::vector<std::byte>>>
+  read_or_eof() {
+    const std::size_t maximum_wire =
+        maximum_payload_ + frame_header_size;
+    for (;;) {
+      const auto view = scatter_view::from_contiguous(
+          std::span<const std::byte>(buffer_));
+      const auto probe = ntl::net::framing::probe(
+          framer_, view, {.maximum_frame_size = maximum_wire});
+      if (probe.state() == ntl::net::framing::probe_state::complete) {
+        std::vector<std::byte> result(
+            buffer_.begin(),
+            buffer_.begin() +
+                static_cast<std::ptrdiff_t>(probe.frame_size()));
+        buffer_.erase(
+            buffer_.begin(),
+            buffer_.begin() +
+                static_cast<std::ptrdiff_t>(probe.frame_size()));
+        co_return result;
+      }
+      if (probe.state() == ntl::net::framing::probe_state::malformed)
+        throw std::runtime_error("malformed HTTP/2 frame");
+      if (buffer_.size() >= maximum_wire)
+        throw std::runtime_error("HTTP/2 frame exceeded its wire limit");
+      const std::size_t current = buffer_.size();
+      const std::size_t target = (std::min)(
+          maximum_wire, (std::max)(probe.required_total(),
+                                   current + receive_chunk_));
+      if (target <= current)
+        throw std::runtime_error("invalid HTTP/2 framing progress");
+      buffer_.resize(target);
+      const std::size_t received = co_await stream_->read_some_borrowed(
+          std::span<std::byte>(buffer_).subspan(current));
+      if (received > target - current)
+        throw std::runtime_error("HTTP/2 stream returned an invalid size");
+      buffer_.resize(current + received);
+      if (received != 0)
+        continue;
+      if (current == 0)
+        co_return std::nullopt;
+      throw std::runtime_error("HTTP/2 stream ended inside a frame");
+    }
+  }
+
+private:
+  Stream *stream_ = nullptr;
+  std::size_t maximum_payload_ = 0;
+  std::size_t receive_chunk_ = 0;
+  frame_framer framer_;
+  std::vector<std::byte> buffer_;
+};
+
+struct shared_result {
+  void add_bytes(connection_direction direction, std::size_t count) noexcept {
+    std::lock_guard guard(lock);
+    if (direction == connection_direction::requests)
+      value.downstream_to_upstream_bytes += count;
+    else
+      value.upstream_to_downstream_bytes += count;
+  }
+
+  void observe(connection_direction direction,
+               const proxy_connection_step &step) noexcept {
+    std::lock_guard guard(lock);
+    if (step.message_complete && !step.informational) {
+      if (direction == connection_direction::requests)
+        ++value.completed_requests;
+      else
+        ++value.completed_responses;
+      if (step.response)
+        value.last_response_status = step.response->status;
+    }
+    if (step.terminal_status != 0)
+      value.last_terminal_status = step.terminal_status;
+    if (step.drop_flow)
+      value.termination = proxy_session_termination::policy_drop;
+  }
+
+  void eof(connection_direction direction) noexcept {
+    std::lock_guard guard(lock);
+    if (value.termination == proxy_session_termination::policy_drop)
+      return;
+    value.termination = direction == connection_direction::requests
+                            ? proxy_session_termination::downstream_eof
+                            : proxy_session_termination::upstream_eof;
+  }
+
+  proxy_session_result snapshot() const noexcept {
+    std::lock_guard guard(lock);
+    return value;
+  }
+
+  mutable std::mutex lock;
+  proxy_session_result value;
+};
+
+template <class Writer>
+ntl::net::user::task<std::size_t> write_frames(
+    Writer &writer, send_window &window,
+    std::vector<outbound_frame> frames) {
+  for (const auto &frame : frames) {
+    if (frame.flow_controlled_bytes != 0)
+      co_await window.reserve(frame.stream_id,
+                              frame.flow_controlled_bytes);
+  }
+  const std::size_t transferred = co_await writer.write_batch(frames);
+  for (const auto &frame : frames) {
+    const auto parsed = frame_view::parse(
+        scatter_view::from_contiguous(frame.wire),
+        {absolute_maximum_frame_size, false});
+    if (parsed && parsed->header().end_stream())
+      window.close(frame.stream_id);
+  }
+  co_return transferred;
+}
+
+template <class Stream>
+ntl::net::user::task<void> read_exact(
+    Stream &stream, std::span<std::byte> destination) {
+  std::size_t offset = 0;
+  while (offset != destination.size()) {
+    const std::size_t received =
+        co_await stream.read_some_borrowed(destination.subspan(offset));
+    if (received == 0)
+      throw std::runtime_error(
+          "HTTP/2 peer closed before its connection preface");
+    if (received > destination.size() - offset)
+      throw std::runtime_error("HTTP/2 stream returned an invalid size");
+    offset += received;
+  }
+}
+
+template <class Source, class DestinationWriter, class SourceWriter,
+          class TunnelHandler>
+ntl::net::user::task<void> relay_direction(
+    Source &source, DestinationWriter &destination_writer,
+    SourceWriter &source_writer, proxy_connection &connection,
+    connection_direction direction, async_barrier &server_settings,
+    TunnelHandler &tunnels, shared_result &result,
+    std::size_t maximum_frame_payload) {
+  const bool requests = direction == connection_direction::requests;
+  if (requests) {
+    std::array<std::byte, client_connection_preface.size()> preface{};
+    co_await read_exact(source, preface);
+    const ntl::status accepted = connection.accept_client_preface(preface);
+    if (!accepted.is_ok())
+      throw std::runtime_error("invalid HTTP/2 client connection preface");
+    result.add_bytes(
+        direction,
+        co_await destination_writer.write(preface));
+  }
+
+  frame_reader<Source> reader(source, maximum_frame_payload);
+  bool first_frame = true;
+  for (;;) {
+    auto wire = co_await reader.read_or_eof();
+    if (!wire) {
+      result.eof(direction);
+      co_return;
+    }
+    auto parsed = frame_view::parse(
+        scatter_view::from_contiguous(*wire),
+        {maximum_frame_payload, false});
+    if (!parsed)
+      throw std::runtime_error("HTTP/2 framed input failed validation");
+    const frame_header header = parsed->header();
+    auto step = connection.consume(direction, *parsed);
+    if (!step)
+      throw std::system_error(
+          static_cast<int>(step.status()), std::system_category(),
+          "HTTP/2 proxy connection rejected a frame");
+    if (step->request && step->request->method == "CONNECT" &&
+        step->transform_action ==
+            ntl::net::http::rewrite_action::forward) {
+      auto admission = tunnels.admit(step->stream_id, *step->request);
+      if (!admission)
+        throw std::system_error(
+            static_cast<int>(admission.status()), std::system_category(),
+            "HTTP/2 CONNECT admission failed");
+      const ntl::status admitted =
+          connection.admit_connect(*step, *admission);
+      if (!admitted.is_ok())
+        throw std::system_error(
+            static_cast<int>(admitted), std::system_category(),
+            "HTTP/2 CONNECT admission was invalid");
+    }
+    result.observe(direction, *step);
+    if (step->drop_flow)
+      co_return;
+    if (step->response) {
+      if constexpr (requires(TunnelHandler &handler) {
+                      handler.observe_response(
+                          step->stream_id, *step->response);
+                    })
+        tunnels.observe_response(step->stream_id, *step->response);
+    }
+
+    auto &destination_window = connection.destination_window_ref(direction);
+    const auto reverse_direction =
+        direction == connection_direction::requests
+            ? connection_direction::responses
+            : connection_direction::requests;
+    auto &source_window =
+        connection.destination_window_ref(reverse_direction);
+
+    if (step->forward_original) {
+      if (header.type == frame_type::reset_stream)
+        tunnels.reset(header.stream_id);
+      bool original = true;
+      std::vector<outbound_frame> replacement;
+      if (header.type == frame_type::data &&
+          (connection.is_admitted_connect(header.stream_id) ||
+           connection.is_established_tunnel(header.stream_id)) &&
+          connection.connect_mode(header.stream_id) ==
+              connect_disposition::inspect) {
+        auto transformed = tunnels.transform(direction, *parsed);
+        if (!transformed)
+          throw std::system_error(
+              static_cast<int>(transformed.status()),
+              std::system_category(),
+              "HTTP/2 tunnel transform failed");
+        if (*transformed) {
+          replacement = std::move(**transformed);
+          original = false;
+        }
+      }
+
+      std::size_t transferred = 0;
+      if (original) {
+        outbound_frame frame;
+        frame.stream_id = header.stream_id;
+        frame.flow_controlled_bytes =
+            header.type == frame_type::data
+                ? header.payload_size
+                : 0;
+        frame.wire = std::move(*wire);
+        std::vector<outbound_frame> frames;
+        frames.push_back(std::move(frame));
+        transferred = co_await write_frames(
+            destination_writer, destination_window, std::move(frames));
+      } else {
+        transferred = co_await write_frames(
+            destination_writer, destination_window,
+            std::move(replacement));
+      }
+      result.add_bytes(direction, transferred);
+
+      if (header.type == frame_type::data) {
+        auto credits = connection.acknowledge_forwarded_data(
+            header.stream_id, header.payload_size,
+            header.end_stream());
+        if (!credits)
+          throw std::runtime_error("HTTP/2 source credit encoding failed");
+        result.add_bytes(
+            reverse_direction,
+            co_await write_frames(source_writer, source_window,
+                                  std::move(*credits)));
+        connection.finish_forwarded_tunnel_data(
+            direction, header.stream_id, header.end_stream());
+        if (direction == connection_direction::responses &&
+            header.end_stream())
+          tunnels.reset(header.stream_id);
+      }
+    } else {
+      result.add_bytes(
+          direction,
+          co_await write_frames(destination_writer, destination_window,
+                                std::move(step->forward)));
+      result.add_bytes(
+          reverse_direction,
+          co_await write_frames(source_writer, source_window,
+                                std::move(step->reverse)));
+    }
+
+    if (first_frame) {
+      first_frame = false;
+      if (requests)
+        co_await server_settings.wait();
+      else
+        server_settings.signal();
+    }
+  }
+}
+
+} // namespace proxy_session_detail
+
+/**
+ * @brief Runs both HTTP/2 directions and drains them before returning.
+ *
+ * Stream reads and writes are coroutine operations. `stop_transport` must
+ * wake both outstanding reads (for sockets this is normally shutdown on both
+ * native handles). The first EOF, policy drop, or failure invokes it exactly
+ * once; both already-started children are then awaited. No thread or child
+ * coroutine is detached from this scope.
+ */
+template <class DownstreamStream, class UpstreamStream,
+          class StopTransport, class TunnelHandler>
+ntl::net::user::task<proxy_session_result> run_proxy_session_borrowed(
+    DownstreamStream &downstream, UpstreamStream &upstream,
+    proxy_connection &connection, StopTransport stop_transport,
+    TunnelHandler &tunnels,
+    std::size_t maximum_frame_payload = 1024 * 1024) {
+  if (maximum_frame_payload == 0 ||
+      maximum_frame_payload > absolute_maximum_frame_size)
+    throw std::invalid_argument("invalid HTTP/2 proxy session frame limit");
+
+  proxy_session_detail::serialized_writer<DownstreamStream>
+      downstream_writer(downstream);
+  proxy_session_detail::serialized_writer<UpstreamStream>
+      upstream_writer(upstream);
+  proxy_session_detail::async_barrier server_settings;
+  proxy_session_detail::shared_result result;
+
+  auto stop = [&]() noexcept {
+    connection.close();
+    downstream_writer.cancel();
+    upstream_writer.cancel();
+    server_settings.cancel();
+    try {
+      stop_transport();
+    } catch (...) {
+    }
+  };
+
+  co_await ntl::net::user::when_all_stop_on_first(
+      proxy_session_detail::relay_direction(
+          downstream, upstream_writer, downstream_writer, connection,
+          connection_direction::requests, server_settings, tunnels, result,
+          maximum_frame_payload),
+      proxy_session_detail::relay_direction(
+          upstream, downstream_writer, upstream_writer, connection,
+          connection_direction::responses, server_settings, tunnels, result,
+          maximum_frame_payload),
+      stop);
+  co_return result.snapshot();
+}
+
+template <class DownstreamStream, class UpstreamStream,
+          class StopTransport>
+ntl::net::user::task<proxy_session_result> run_proxy_session_borrowed(
+    DownstreamStream &downstream, UpstreamStream &upstream,
+    proxy_connection &connection, StopTransport stop_transport,
+    std::size_t maximum_frame_payload = 1024 * 1024) {
+  reject_tunnel_handler tunnels;
+  co_return co_await run_proxy_session_borrowed(
+      downstream, upstream, connection, std::move(stop_transport), tunnels,
+      maximum_frame_payload);
+}
+
+namespace proxy_session_detail {
+
+template <class DownstreamStream, class UpstreamStream,
+          class StopTransport, class TunnelHandler>
+ntl::net::user::task<proxy_session_result> run_proxy_session_owned(
+    std::shared_ptr<DownstreamStream> downstream,
+    std::shared_ptr<UpstreamStream> upstream,
+    std::shared_ptr<proxy_connection> connection,
+    StopTransport stop_transport,
+    std::shared_ptr<TunnelHandler> tunnels,
+    std::size_t maximum_frame_payload) {
+  co_return co_await run_proxy_session_borrowed(
+      *downstream, *upstream, *connection, std::move(stop_transport),
+      *tunnels, maximum_frame_payload);
+}
+
+} // namespace proxy_session_detail
+
+/**
+ * @brief Owning HTTP/2 session composition.
+ *
+ * All streams, semantic connection state, and tunnel callbacks are retained
+ * by the lazy task at call time. Their declaration order and the lifetime of
+ * the facade that created them are therefore not part of the contract.
+ */
+template <class DownstreamStream, class UpstreamStream,
+          class StopTransport, class TunnelHandler>
+ntl::net::user::task<proxy_session_result> run_proxy_session_with_stop(
+    std::shared_ptr<DownstreamStream> downstream,
+    std::shared_ptr<UpstreamStream> upstream,
+    std::shared_ptr<proxy_connection> connection,
+    StopTransport stop_transport,
+    std::shared_ptr<TunnelHandler> tunnels,
+    std::size_t maximum_frame_payload = 1024 * 1024) {
+  if (!downstream || !upstream || !connection || !tunnels)
+    throw std::invalid_argument(
+        "HTTP/2 owning proxy session requires all dependencies");
+  return proxy_session_detail::run_proxy_session_owned(
+      std::move(downstream), std::move(upstream), std::move(connection),
+      std::move(stop_transport), std::move(tunnels), maximum_frame_payload);
+}
+
+template <class DownstreamStream, class UpstreamStream,
+          class StopTransport>
+ntl::net::user::task<proxy_session_result> run_proxy_session_with_stop(
+    std::shared_ptr<DownstreamStream> downstream,
+    std::shared_ptr<UpstreamStream> upstream,
+    std::shared_ptr<proxy_connection> connection,
+    StopTransport stop_transport,
+    std::size_t maximum_frame_payload = 1024 * 1024) {
+  return run_proxy_session_with_stop(
+      std::move(downstream), std::move(upstream), std::move(connection),
+      std::move(stop_transport), std::make_shared<reject_tunnel_handler>(),
+      maximum_frame_payload);
+}
+
+namespace proxy_session_detail {
+
+template <class Stream>
+void close_owned_stream(Stream &stream) noexcept {
+  try {
+    if constexpr (requires { stream.cancel(); }) {
+      (void)stream.cancel();
+    } else if constexpr (requires { stream.close(); }) {
+      stream.close();
+    }
+  } catch (...) {
+  }
+}
+
+template <class Stream>
+ntl::net::user::task<void> shutdown_owned_stream(Stream &stream) {
+  if constexpr (requires { stream.shutdown(); })
+    co_await stream.shutdown();
+  co_return;
+}
+
+template <class DownstreamStream, class UpstreamStream,
+          class TunnelHandler>
+ntl::net::user::task<proxy_session_result> run_proxy_session_auto_owned(
+    std::shared_ptr<DownstreamStream> downstream,
+    std::shared_ptr<UpstreamStream> upstream,
+    std::shared_ptr<proxy_connection> connection,
+    std::shared_ptr<TunnelHandler> tunnels,
+    std::size_t maximum_frame_payload) {
+  auto stop = [downstream, upstream]() noexcept {
+    close_owned_stream(*downstream);
+    close_owned_stream(*upstream);
+  };
+  auto result = co_await run_proxy_session_borrowed(
+      *downstream, *upstream, *connection, std::move(stop), *tunnels,
+      maximum_frame_payload);
+  co_await shutdown_owned_stream(*downstream);
+  co_await shutdown_owned_stream(*upstream);
+  co_return result;
+}
+
+} // namespace proxy_session_detail
+
+/**
+ * @brief Owning HTTP/2 session with automatic peer cancellation and join.
+ *
+ * The session retains both streams, protocol state, and tunnel policy. The
+ * first terminal direction closes both stream facades, cancels the peer, and
+ * joins both child coroutines before returning. Callers do not supply a drain
+ * callback or preserve declaration order.
+ */
+template <class DownstreamStream, class UpstreamStream, class TunnelHandler>
+ntl::net::user::task<proxy_session_result> run_proxy_session(
+    std::shared_ptr<DownstreamStream> downstream,
+    std::shared_ptr<UpstreamStream> upstream,
+    std::shared_ptr<proxy_connection> connection,
+    std::shared_ptr<TunnelHandler> tunnels,
+    std::size_t maximum_frame_payload = 1024 * 1024) {
+  if (!downstream || !upstream)
+    throw std::invalid_argument(
+        "HTTP/2 owning proxy session requires both streams");
+  return proxy_session_detail::run_proxy_session_auto_owned(
+      std::move(downstream), std::move(upstream), std::move(connection),
+      std::move(tunnels), maximum_frame_payload);
+}
+
+template <class DownstreamStream, class UpstreamStream>
+ntl::net::user::task<proxy_session_result> run_proxy_session(
+    std::shared_ptr<DownstreamStream> downstream,
+    std::shared_ptr<UpstreamStream> upstream,
+    std::shared_ptr<proxy_connection> connection,
+    std::size_t maximum_frame_payload = 1024 * 1024) {
+  return run_proxy_session(
+      std::move(downstream), std::move(upstream), std::move(connection),
+      std::make_shared<reject_tunnel_handler>(), maximum_frame_payload);
+}
+
+} // namespace ntl::net::http2

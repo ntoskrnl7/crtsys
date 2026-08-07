@@ -3,7 +3,8 @@ param(
   [Parameter(Mandatory)]
   [string] $PackageRoot,
 
-  [uri] $Url = 'https://www.google.com/',
+  [Parameter(Mandatory)]
+  [uri] $Url,
 
   [string] $LogDirectory =
       (Join-Path $PackageRoot 'managed-http3-log')
@@ -18,9 +19,13 @@ if ($Url.Scheme -ne 'https' -or $Url.Port -ne 443) {
 
 $root = (Resolve-Path -LiteralPath $PackageRoot).Path
 $proxyApplication =
-    Join-Path $root 'crtsys_wfp_browser_https_inspection_app.exe'
+    Join-Path $root (
+        'crtsys_wfp_browser_https_inspection_' +
+        'http3_proxy_service.exe')
 $clientApplication =
-    Join-Path $root 'crtsys_ntl_managed_http3_client.exe'
+    Join-Path $root (
+        'crtsys_wfp_browser_https_inspection_' +
+        'managed_client_acceptance.exe')
 $unrelatedAuthority =
     Join-Path $root 'crtsys_wfp_browser_https_inspection.cer'
 foreach ($required in @(

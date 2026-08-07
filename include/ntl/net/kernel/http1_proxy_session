@@ -1,0 +1,950 @@
+/**
+ * @file kernel_http1_proxy_session
+ * @brief Bounded persistent HTTP/1 inspection proxy for kernel streams.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/net/kernel/http1_proxy_session is a kernel-mode header"
+#endif
+
+#include <ntl/net/framing>
+#include <ntl/net/borrowed_memory_resource>
+#include <ntl/net/http/authority>
+#include <ntl/net/http/http1_proxy_types>
+#include <ntl/net/http/http1_transform>
+#include <ntl/net/http/inspection_policy>
+#include <ntl/net/inspection/content_decoder>
+#include <ntl/net/inspection/content_encoder>
+#include <ntl/net/kernel/task>
+#include <ntl/pool_allocator>
+
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cstddef>
+#include <cstring>
+#include <functional>
+#include <optional>
+#include <span>
+#include <stdexcept>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+namespace ntl::net::http {
+
+struct kernel_http1_proxy_buffer_views {
+  std::span<std::byte> requests;
+  std::span<std::byte> responses;
+
+  bool valid(std::size_t maximum_wire_message_size) const noexcept {
+    if (maximum_wire_message_size == 0 ||
+        requests.size() < maximum_wire_message_size ||
+        responses.size() < maximum_wire_message_size)
+      return false;
+    const auto request_begin =
+        reinterpret_cast<std::uintptr_t>(requests.data());
+    const auto request_end = request_begin + requests.size();
+    const auto response_begin =
+        reinterpret_cast<std::uintptr_t>(responses.data());
+    const auto response_end = response_begin + responses.size();
+    return request_end <= response_begin || response_end <= request_begin;
+  }
+};
+
+struct kernel_http1_proxy_memory_refs {
+  message_memory_ref requests;
+  message_memory_ref responses;
+
+  bool valid() const noexcept {
+    return requests.valid() && responses.valid() &&
+           requests.resource != responses.resource;
+  }
+};
+
+struct kernel_http1_proxy_workspace {
+  explicit kernel_http1_proxy_workspace(
+      std::size_t maximum_wire_message_size,
+      std::size_t maximum_message_storage_size = 40 * 1024 * 1024,
+      std::size_t maximum_single_allocation = 16 * 1024 * 1024)
+      : request_memory_(
+            *ntl::pmr::nonpaged_pool_resource(),
+            {.maximum_allocated_bytes = maximum_message_storage_size,
+             .maximum_single_allocation = maximum_single_allocation}),
+        response_memory_(
+            *ntl::pmr::nonpaged_pool_resource(),
+            {.maximum_allocated_bytes = maximum_message_storage_size,
+             .maximum_single_allocation = maximum_single_allocation}),
+        requests(maximum_wire_message_size),
+        responses(maximum_wire_message_size) {
+    if (maximum_wire_message_size == 0 ||
+        maximum_message_storage_size == 0 ||
+        maximum_single_allocation == 0 ||
+        maximum_single_allocation > maximum_message_storage_size)
+      throw std::invalid_argument("invalid kernel HTTP/1 workspace limits");
+  }
+
+  kernel_http1_proxy_workspace(const kernel_http1_proxy_workspace &) = delete;
+  kernel_http1_proxy_workspace &
+  operator=(const kernel_http1_proxy_workspace &) = delete;
+
+  std::vector<std::byte> requests;
+  std::vector<std::byte> responses;
+
+  kernel_http1_proxy_buffer_views borrowed_buffers() noexcept {
+    return {requests, responses};
+  }
+
+  kernel_http1_proxy_memory_refs borrowed_memory() noexcept {
+    return {{&request_memory_}, {&response_memory_}};
+  }
+
+  std::size_t peak_request_storage() const noexcept {
+    return request_memory_.peak_allocated_bytes();
+  }
+
+  std::size_t peak_response_storage() const noexcept {
+    return response_memory_.peak_allocated_bytes();
+  }
+
+private:
+  ntl::net::borrowed_bounded_memory_resource request_memory_;
+  ntl::net::borrowed_bounded_memory_resource response_memory_;
+};
+
+/** First-request result that keeps its bounded workspace alive. */
+template <class WorkspaceLease> class kernel_http1_proxy_preflight {
+public:
+  kernel_http1_proxy_preflight(const kernel_http1_proxy_preflight &) = delete;
+  kernel_http1_proxy_preflight &
+  operator=(const kernel_http1_proxy_preflight &) = delete;
+  kernel_http1_proxy_preflight(kernel_http1_proxy_preflight &&) noexcept =
+      default;
+  kernel_http1_proxy_preflight &
+  operator=(kernel_http1_proxy_preflight &&) noexcept = default;
+
+  bool requires_upstream() const noexcept { return request_.has_value(); }
+  const http1_proxy_result &summary() const noexcept { return summary_; }
+
+private:
+  template <class DownstreamStream, class Lease, http1_observer Observer>
+  friend ntl::net::kernel::task<
+      ntl::result<kernel_http1_proxy_preflight<Lease>>>
+  prepare_kernel_http1_proxy_session(
+      std::shared_ptr<DownstreamStream>,
+      std::shared_ptr<const inspection_policy>,
+      http1_request_target_context, Lease, std::shared_ptr<Observer>,
+      http1_proxy_limits, inspection_session_metadata);
+
+  template <class DownstreamStream, class UpstreamStream, class Lease,
+            http1_observer Observer, class TunnelHandler>
+  friend ntl::net::kernel::task<ntl::result<http1_proxy_result>>
+  continue_kernel_http1_proxy_session(
+      std::shared_ptr<DownstreamStream>, std::shared_ptr<UpstreamStream>,
+      std::shared_ptr<const inspection_policy>,
+      http1_request_target_context, kernel_http1_proxy_preflight<Lease>,
+      std::shared_ptr<Observer>, std::shared_ptr<TunnelHandler>,
+      http1_proxy_limits, inspection_session_metadata);
+
+  explicit kernel_http1_proxy_preflight(WorkspaceLease workspace) noexcept
+      : workspace_(std::move(workspace)) {}
+
+  WorkspaceLease workspace_;
+  std::optional<http1_transformed_request> request_;
+  ntl::net::inspection::verdict verdict_ =
+      ntl::net::inspection::verdict::permit;
+  std::size_t original_wire_size_ = 0;
+  std::size_t buffered_bytes_ = 0;
+  http1_proxy_result summary_{};
+};
+
+namespace kernel_http1_proxy_detail {
+
+template <http1_observer Observer>
+void notify_context(Observer &observer,
+                    const inspection_context_view &context) noexcept {
+  try {
+    observer.on_inspection(context);
+  } catch (...) {
+  }
+}
+
+template <http1_observer Observer>
+void notify_request(Observer &observer,
+                    const http1_request_event_view &event) noexcept {
+  try {
+    observer.on_request(event);
+  } catch (...) {
+  }
+}
+
+template <http1_observer Observer>
+void notify_response(Observer &observer,
+                     const http1_response_event_view &event) noexcept {
+  try {
+    observer.on_response(event);
+  } catch (...) {
+  }
+}
+
+template <http1_observer Observer>
+ntl::net::inspection::verdict inspect_message(
+    const decision_policy &policy, Observer &observer,
+    const inspection_session_metadata &session, std::uint64_t exchange_id,
+    const request_message &request,
+    const response_message *response) noexcept {
+  const auto body = response ? std::span<const std::byte>(response->body)
+                             : std::span<const std::byte>(request.body);
+  constexpr std::array stages{inspection_stage::headers,
+                              inspection_stage::body_chunk,
+                              inspection_stage::message_complete};
+  for (const auto stage : stages) {
+    if (stage == inspection_stage::body_chunk && body.empty())
+      continue;
+    const auto chunk = stage == inspection_stage::body_chunk
+                           ? body
+                           : std::span<const std::byte>{};
+    const auto context = response
+                             ? inspection_context_view::for_response(
+                                   protocol::http1, 0, exchange_id, stage,
+                                   session, request, *response, chunk)
+                             : inspection_context_view::for_request(
+                                   protocol::http1, 0, exchange_id, stage,
+                                   session, request, chunk);
+    notify_context(observer, context);
+    const auto verdict = policy.evaluate(context);
+    if (verdict != ntl::net::inspection::verdict::permit)
+      return verdict;
+  }
+  return ntl::net::inspection::verdict::permit;
+}
+
+template <class Stream>
+ntl::net::kernel::task<ntl::result<std::size_t>>
+read_some(Stream &stream, std::span<std::byte> destination) {
+  if constexpr (requires {
+                  stream.read_some_borrowed(
+                      destination,
+                      ntl::net::read_options{
+                          .timeout = (std::chrono::milliseconds::max)()});
+                }) {
+    co_return co_await stream.read_some_borrowed(
+        destination,
+        {.timeout = (std::chrono::milliseconds::max)()});
+  } else {
+    co_return co_await stream.read_some_borrowed(destination);
+  }
+}
+
+template <class Stream>
+ntl::net::kernel::task<ntl::status>
+write_all(Stream &stream, std::span<const std::byte> bytes) {
+  auto written = co_await stream.write_all(bytes);
+  if (!written)
+    co_return written.status();
+  co_return *written == bytes.size() ? ntl::status::ok()
+                                     : ntl::status{STATUS_DATA_ERROR};
+}
+
+template <class Stream> class framed_reader {
+public:
+  framed_reader(Stream &stream, http1_message_kind kind,
+                http1_framing_limits framing_limits,
+                std::span<std::byte> workspace,
+                std::size_t maximum_wire_message_size,
+                std::size_t receive_chunk_size,
+                http1_expect_continue_policy expect_continue =
+                    http1_expect_continue_policy::reject,
+                std::size_t initial_bytes = 0) noexcept
+      : stream_(&stream), kind_(kind), framer_(kind, framing_limits),
+        workspace_(workspace.first(maximum_wire_message_size)),
+        used_((std::min)(initial_bytes, maximum_wire_message_size)),
+        receive_chunk_size_(receive_chunk_size),
+        expect_continue_(expect_continue) {}
+
+  ntl::net::kernel::task<
+      ntl::result<std::optional<std::span<const std::byte>>>>
+  read_or_eof() {
+    for (;;) {
+      const auto bytes = std::span<const std::byte>(workspace_)
+                             .subspan(offset_, used_ - offset_);
+      const auto view = scatter_view::from_contiguous(bytes);
+      const auto probe = framing::probe(
+          framer_, view,
+          {.maximum_frame_size = workspace_.size()});
+      if (probe.state() == framing::probe_state::complete) {
+        const auto result = bytes.first(probe.frame_size());
+        offset_ += probe.frame_size();
+        // This reader is reused for a persistent connection.  A local
+        // provisional response belongs to one request only; the next request
+        // must be allowed to perform its own Expect: 100-continue handshake.
+        continue_sent_ = false;
+        co_return ntl::ok(
+            std::optional<std::span<const std::byte>>(result));
+      }
+      if (probe.state() == framing::probe_state::malformed)
+        co_return ntl::unexpected(probe.error());
+      if (kind_ == http1_message_kind::request) {
+        const auto expectation = inspect_http1_request_expectation(view);
+        if (expectation == http1_request_expectation::continue_100 &&
+            !continue_sent_) {
+          if (expect_continue_ !=
+              http1_expect_continue_policy::local_continue)
+            co_return ntl::unexpected(STATUS_NOT_SUPPORTED);
+          constexpr std::string_view provisional =
+              "HTTP/1.1 100 Continue\r\n\r\n";
+          const ntl::status continued = co_await write_all(
+              *stream_, std::as_bytes(std::span<const char>(
+                            provisional.data(), provisional.size())));
+          if (!continued.is_ok())
+            co_return ntl::unexpected(continued);
+          continue_sent_ = true;
+        }
+        if (expectation == http1_request_expectation::unsupported)
+          co_return ntl::unexpected(STATUS_NOT_SUPPORTED);
+        if (expectation == http1_request_expectation::malformed)
+          co_return ntl::unexpected(STATUS_DATA_ERROR);
+      }
+      if (eof_) {
+        const auto final = framing::finish(
+            framer_, view,
+            {.maximum_frame_size = workspace_.size()});
+        if (final.state() != framing::probe_state::complete)
+          co_return ntl::unexpected(final.error());
+        const auto result = bytes.first(final.frame_size());
+        offset_ += final.frame_size();
+        continue_sent_ = false;
+        co_return ntl::ok(
+            std::optional<std::span<const std::byte>>(result));
+      }
+      compact();
+      if (used_ == workspace_.size())
+        co_return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+      const std::size_t room = workspace_.size() - used_;
+      const std::size_t count = (std::min)(room, receive_chunk_size_);
+      auto received =
+          co_await read_some(*stream_, workspace_.subspan(used_, count));
+      if (!received)
+        co_return ntl::unexpected(received.status());
+      if (*received > count)
+        co_return ntl::unexpected(STATUS_DATA_ERROR);
+      if (*received == 0) {
+        eof_ = true;
+        if (used_ == offset_)
+          co_return ntl::ok(
+              std::optional<std::span<const std::byte>>{});
+        continue;
+      }
+      used_ += *received;
+    }
+  }
+
+  std::span<const std::byte> buffered() const noexcept {
+    return std::span<const std::byte>(workspace_)
+        .subspan(offset_, used_ - offset_);
+  }
+  bool eof() const noexcept { return eof_; }
+
+  std::size_t compact_buffered() noexcept {
+    compact();
+    return used_;
+  }
+
+  void framing_limits(http1_framing_limits limits) noexcept {
+    framer_ = http1_message_framer(kind_, limits);
+  }
+
+private:
+  void compact() noexcept {
+    if (offset_ == 0)
+      return;
+    const std::size_t remaining = used_ - offset_;
+    if (remaining)
+      std::memmove(workspace_.data(), workspace_.data() + offset_, remaining);
+    used_ = remaining;
+    offset_ = 0;
+  }
+
+  Stream *stream_ = nullptr;
+  http1_message_kind kind_ = http1_message_kind::request;
+  http1_message_framer framer_;
+  std::span<std::byte> workspace_;
+  std::size_t receive_chunk_size_ = 0;
+  std::size_t offset_ = 0;
+  std::size_t used_ = 0;
+  bool eof_ = false;
+  http1_expect_continue_policy expect_continue_ =
+      http1_expect_continue_policy::reject;
+  bool continue_sent_ = false;
+};
+
+inline response_message forbidden_response(message_memory_ref memory = {}) {
+  response_message response(memory);
+  response.wire_protocol = protocol::http1;
+  response.status = 403;
+  response.headers.append("content-type", "text/plain; charset=utf-8");
+  constexpr std::string_view text = "Request blocked by policy.\n";
+  response.body.assign(
+      reinterpret_cast<const std::byte *>(text.data()),
+      reinterpret_cast<const std::byte *>(text.data() + text.size()));
+  return response;
+}
+
+template <class Stream>
+ntl::net::kernel::task<ntl::result<unsigned>> send_terminal_response(
+    Stream &downstream, std::optional<response_message> supplied,
+    const ntl::net::inspection::content_encoder_registry &encoders,
+    const transform_limits &limits, const request_message &request,
+    response_message &sent, message_memory_ref memory = {}) {
+  try {
+    sent = supplied ? std::move(*supplied) : forbidden_response(memory);
+    const std::string coding = sent.headers.joined("content-encoding");
+    auto encoded = encode_body(
+        sent.headers, sent.body, coding, transformed_body_coding::preserve,
+        encoders, limits);
+    if (!encoded)
+      co_return ntl::unexpected(encoded.status());
+    const bool head = transform_detail::ascii_equal_ci(request.method, "HEAD");
+    const bool connect =
+        transform_detail::ascii_equal_ci(request.method, "CONNECT");
+    auto wire = serialize_http1_response(
+        sent, head ? std::span<const std::byte>{}
+                   : std::span<const std::byte>(*encoded),
+        limits, head, connect, memory);
+    if (!wire)
+      co_return ntl::unexpected(wire.status());
+    const ntl::status written = co_await write_all(downstream, *wire);
+    if (!written.is_ok())
+      co_return ntl::unexpected(written);
+    co_return ntl::ok(sent.status);
+  } catch (const std::bad_alloc &) {
+    co_return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    co_return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+}
+
+inline bool header_has_token(const header_collection &headers,
+                             std::string_view name,
+                             std::string_view token) noexcept {
+  for (const auto &field : headers.fields()) {
+    if (transform_detail::ascii_equal_ci(field.name, name) &&
+        http1_transform_detail::contains_token_ci(field.value, token))
+      return true;
+  }
+  return false;
+}
+
+inline std::optional<http1_tunnel_offer_view> tunnel_offer(
+    const request_message &request, bool websocket_upgrade,
+    std::string_view websocket_extensions) noexcept {
+  if (websocket_upgrade)
+    return http1_tunnel_offer_view{
+        request, websocket_extensions, http1_tunnel_kind::websocket};
+  if (transform_detail::ascii_equal_ci(request.method, "CONNECT"))
+    return http1_tunnel_offer_view{
+        request, websocket_extensions, http1_tunnel_kind::connect};
+  if (header_has_token(request.headers, "connection", "upgrade") &&
+      request.headers.first("upgrade"))
+    return http1_tunnel_offer_view{
+        request, websocket_extensions,
+        http1_tunnel_kind::switch_protocol};
+  return std::nullopt;
+}
+
+inline bool valid_tunnel_disposition(
+    http1_tunnel_disposition disposition) noexcept {
+  return disposition == http1_tunnel_disposition::reject ||
+         disposition == http1_tunnel_disposition::inspect ||
+         disposition == http1_tunnel_disposition::passthrough;
+}
+
+template <class Handler>
+ntl::result<http1_tunnel_disposition> admit_tunnel(
+    Handler &handler, const http1_tunnel_offer_view &offer) noexcept {
+  if constexpr (requires { handler.admit(offer); }) {
+    try {
+      auto result = handler.admit(offer);
+      if (!result)
+        return ntl::unexpected(result.status());
+      if (!valid_tunnel_disposition(*result))
+        return ntl::unexpected(STATUS_INVALID_PARAMETER);
+      return ntl::ok(*result);
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  } else {
+    return ntl::ok(http1_tunnel_disposition::reject);
+  }
+}
+
+} // namespace kernel_http1_proxy_detail
+
+/**
+ * @brief Runs one persistent kernel HTTP/1 connection with common policy.
+ *
+ * All read buffering comes from caller-owned fixed workspace.  Allocation or
+ * workspace exhaustion returns an error and therefore fails the flow closed.
+ * A blocked request receives a bounded 403; drop_flow closes without a reply.
+ */
+template <class DownstreamStream, class UpstreamStream,
+          http1_observer Observer,
+          class TunnelHandler>
+ntl::net::kernel::task<ntl::result<http1_proxy_result>>
+run_kernel_http1_proxy_session_borrowed(
+    DownstreamStream &downstream, UpstreamStream &upstream,
+    const inspection_policy &policy,
+    const ntl::net::inspection::content_decoder_registry &decoders,
+    const ntl::net::inspection::content_encoder_registry &encoders,
+    http1_request_target_context target_context,
+    kernel_http1_proxy_buffer_views buffers, kernel_http1_proxy_memory_refs memory,
+    Observer &observer,
+    TunnelHandler &tunnel_handler, http1_proxy_limits limits = {},
+    inspection_session_metadata session = {},
+    std::optional<http1_transformed_request> prepared_request = {},
+    ntl::net::inspection::verdict prepared_verdict =
+        ntl::net::inspection::verdict::permit,
+    std::size_t prepared_wire_size = 0,
+    std::size_t initial_request_bytes = 0) {
+  if (!limits.valid() || !target_context.valid() ||
+      !buffers.valid(limits.maximum_wire_message_size) || !memory.valid())
+    co_return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  try {
+    kernel_http1_proxy_detail::framed_reader<DownstreamStream> requests(
+        downstream, http1_message_kind::request, limits.framing,
+        buffers.requests, limits.maximum_wire_message_size,
+        limits.request_receive_chunk_size, limits.expect_continue,
+        initial_request_bytes);
+    kernel_http1_proxy_detail::framed_reader<UpstreamStream> responses(
+        upstream, http1_message_kind::response, limits.framing,
+        buffers.responses, limits.maximum_wire_message_size,
+        limits.response_receive_chunk_size);
+    http1_proxy_result result;
+    for (;;) {
+      std::optional<http1_transformed_request> request;
+      auto request_verdict = ntl::net::inspection::verdict::permit;
+      std::size_t request_wire_size = 0;
+      if (prepared_request) {
+        request = std::move(prepared_request);
+        prepared_request.reset();
+        request_verdict = prepared_verdict;
+        request_wire_size = prepared_wire_size;
+      } else {
+        auto request_wire = co_await requests.read_or_eof();
+        if (!request_wire)
+          co_return ntl::unexpected(request_wire.status());
+        if (!*request_wire) {
+          result.termination = http1_proxy_termination::downstream_eof;
+          break;
+        }
+        auto transformed = transform_http1_request(
+            **request_wire, policy.transforms_ref(), decoders, encoders,
+            target_context, memory.requests);
+        if (!transformed)
+          co_return ntl::unexpected(transformed.status());
+        request_wire_size = (**request_wire).size();
+        request = std::move(*transformed);
+        if (request->outcome.action == rewrite_action::forward)
+          request_verdict = kernel_http1_proxy_detail::inspect_message(
+              policy.decisions_ref(), observer, session,
+              result.completed_exchanges + 1, request->message, nullptr);
+        kernel_http1_proxy_detail::notify_request(
+            observer, {request->message, request_wire_size,
+                       request->websocket_upgrade});
+      }
+      const bool request_closes =
+          kernel_http1_proxy_detail::header_has_token(
+              request->message.headers, "connection", "close");
+      if (request->outcome.action == rewrite_action::drop ||
+          request_verdict == ntl::net::inspection::verdict::drop_flow) {
+        result.termination = http1_proxy_termination::request_drop;
+        break;
+      }
+      if (request->outcome.action != rewrite_action::forward ||
+          request_verdict == ntl::net::inspection::verdict::block) {
+        response_message sent(memory.responses);
+        auto terminal = co_await kernel_http1_proxy_detail::send_terminal_response(
+            downstream, std::move(request->outcome.response), encoders,
+            policy.transforms_ref().limits_ref(), request->message, sent,
+            memory.responses);
+        if (!terminal)
+          co_return ntl::unexpected(terminal.status());
+        result.last_status = *terminal;
+        kernel_http1_proxy_detail::notify_response(
+            observer, {request->message, sent, 0, false, true, false});
+        ++result.blocked_exchanges;
+        ++result.completed_exchanges;
+        const bool synthetic_closes =
+            kernel_http1_proxy_detail::header_has_token(
+                sent.headers, "connection", "close");
+        if (request_closes || synthetic_closes) {
+          result.termination = http1_proxy_termination::connection_close;
+          break;
+        }
+        continue;
+      }
+      if (limits.require_server_name_authority_binding &&
+          transform_detail::ascii_equal_ci(
+              target_context.origin_scheme, "https") &&
+          !authority_matches_tls_session(
+              request->message.authority, session)) {
+        response_message sent(memory.responses);
+        auto terminal =
+            co_await kernel_http1_proxy_detail::send_terminal_response(
+                downstream, std::nullopt, encoders,
+                policy.transforms_ref().limits_ref(), request->message, sent,
+                memory.responses);
+        if (!terminal)
+          co_return ntl::unexpected(terminal.status());
+        result.last_status = *terminal;
+        kernel_http1_proxy_detail::notify_response(
+            observer, {request->message, sent, 0, false, true, false});
+        ++result.blocked_exchanges;
+        result.termination = http1_proxy_termination::terminal_response;
+        break;
+      }
+
+      const auto offer = kernel_http1_proxy_detail::tunnel_offer(
+          request->message, request->websocket_upgrade,
+          request->websocket_extensions);
+      std::optional<http1_tunnel_disposition> tunnel_disposition;
+      if (offer) {
+        auto admitted =
+            kernel_http1_proxy_detail::admit_tunnel(tunnel_handler, *offer);
+        if (!admitted)
+          co_return ntl::unexpected(admitted.status());
+        tunnel_disposition = *admitted;
+        if (*tunnel_disposition == http1_tunnel_disposition::reject) {
+          response_message sent(memory.responses);
+          auto terminal =
+              co_await kernel_http1_proxy_detail::send_terminal_response(
+                  downstream, std::nullopt, encoders,
+                  policy.transforms_ref().limits_ref(), request->message, sent,
+                  memory.responses);
+          if (!terminal)
+            co_return ntl::unexpected(terminal.status());
+          result.last_status = *terminal;
+          kernel_http1_proxy_detail::notify_response(
+              observer, {request->message, sent, 0, false, true, false});
+          ++result.blocked_exchanges;
+          result.termination = http1_proxy_termination::terminal_response;
+          break;
+        }
+      }
+      ntl::status status = co_await kernel_http1_proxy_detail::write_all(
+          upstream, request->wire);
+      if (!status.is_ok())
+        co_return ntl::unexpected(status);
+
+      auto response_limits = limits.framing;
+      response_limits.allow_close_delimited_response = true;
+      response_limits.response_body_forbidden =
+          transform_detail::ascii_equal_ci(request->message.method, "HEAD");
+      response_limits.response_to_connect =
+          transform_detail::ascii_equal_ci(request->message.method, "CONNECT");
+      responses.framing_limits(response_limits);
+
+      bool response_closes = false;
+      for (;;) {
+        auto response_wire = co_await responses.read_or_eof();
+        if (!response_wire)
+          co_return ntl::unexpected(response_wire.status());
+        if (!*response_wire)
+          co_return ntl::unexpected(STATUS_END_OF_FILE);
+        auto response = transform_http1_response(
+            **response_wire, request->message, policy.transforms_ref(),
+            decoders, encoders, memory.responses);
+        if (!response)
+          co_return ntl::unexpected(response.status());
+        const bool informational = response->message.status >= 100 &&
+                                   response->message.status < 200 &&
+                                   response->message.status != 101;
+        auto response_verdict = ntl::net::inspection::verdict::permit;
+        if (response->outcome.action == rewrite_action::forward)
+          response_verdict = kernel_http1_proxy_detail::inspect_message(
+              policy.decisions_ref(), observer, session,
+              result.completed_exchanges + 1, request->message,
+              &response->message);
+        if (response->outcome.action == rewrite_action::drop ||
+            response_verdict == ntl::net::inspection::verdict::drop_flow) {
+          result.termination = http1_proxy_termination::response_drop;
+          break;
+        }
+        if (response->outcome.action != rewrite_action::forward ||
+            response_verdict == ntl::net::inspection::verdict::block) {
+          const bool origin_response_closes =
+              responses.eof() ||
+              kernel_http1_proxy_detail::header_has_token(
+                  response->message.headers, "connection", "close") ||
+              (response->message.headers.first("content-length") ==
+                   std::nullopt &&
+               response->message.headers.first("transfer-encoding") ==
+                   std::nullopt &&
+               !response_body_forbidden(request->message,
+                                        response->message));
+          response_message sent(memory.responses);
+          auto terminal =
+              co_await kernel_http1_proxy_detail::send_terminal_response(
+                  downstream, std::move(response->outcome.response), encoders,
+                  policy.transforms_ref().limits_ref(), request->message, sent,
+                  memory.responses);
+          if (!terminal)
+            co_return ntl::unexpected(terminal.status());
+          result.last_status = *terminal;
+          kernel_http1_proxy_detail::notify_response(
+              observer, {request->message, sent, 0, false, true, false});
+          ++result.blocked_exchanges;
+          if (informational) {
+            result.termination =
+                http1_proxy_termination::terminal_response;
+          } else {
+            ++result.completed_exchanges;
+            response_closes = origin_response_closes ||
+                kernel_http1_proxy_detail::header_has_token(
+                    sent.headers, "connection", "close");
+          }
+          break;
+        }
+        status = co_await kernel_http1_proxy_detail::write_all(
+            downstream, response->wire);
+        if (!status.is_ok())
+          co_return ntl::unexpected(status);
+        kernel_http1_proxy_detail::notify_response(
+            observer, {request->message, response->message,
+                       (**response_wire).size(), informational, false,
+                       response->websocket_upgrade});
+        if (informational)
+          continue;
+
+        result.last_status = response->message.status;
+        ++result.completed_exchanges;
+        const bool connect_tunnel =
+            transform_detail::ascii_equal_ci(
+                request->message.method, "CONNECT") &&
+            response->message.status >= 200 && response->message.status < 300;
+        const bool switched = response->message.status == 101;
+        if (response->websocket_upgrade || connect_tunnel || switched) {
+          const auto kind = response->websocket_upgrade
+                                ? http1_tunnel_kind::websocket
+                                : connect_tunnel
+                                      ? http1_tunnel_kind::connect
+                                      : http1_tunnel_kind::switch_protocol;
+          if (!offer || !tunnel_disposition || offer->kind != kind)
+            co_return ntl::unexpected(STATUS_INVALID_NETWORK_RESPONSE);
+          http1_upgrade_context_view<DownstreamStream, UpstreamStream> context{
+              downstream, upstream, request->message, response->message,
+              requests.buffered(), responses.buffered(),
+              request->websocket_extensions,
+              response->websocket_extensions, kind,
+              *tunnel_disposition};
+          status = co_await std::invoke(tunnel_handler, context);
+          if (!status.is_ok())
+            co_return ntl::unexpected(status);
+          result.termination = http1_proxy_termination::upgraded;
+          break;
+        }
+        response_closes = responses.eof() ||
+            kernel_http1_proxy_detail::header_has_token(
+                response->message.headers, "connection", "close") ||
+            (response->message.headers.first("content-length") == std::nullopt &&
+             response->message.headers.first("transfer-encoding") == std::nullopt &&
+             !response_body_forbidden(request->message, response->message));
+        break;
+      }
+      if (result.termination == http1_proxy_termination::request_drop ||
+          result.termination == http1_proxy_termination::response_drop ||
+          result.termination == http1_proxy_termination::terminal_response ||
+          result.termination == http1_proxy_termination::upgraded)
+        break;
+      if (request_closes || response_closes) {
+        result.termination = http1_proxy_termination::connection_close;
+        break;
+      }
+    }
+
+    if (result.termination == http1_proxy_termination::upgraded ||
+        result.termination == http1_proxy_termination::request_drop ||
+        result.termination == http1_proxy_termination::response_drop)
+      co_return ntl::ok(result);
+
+    const ntl::status downstream_closed = co_await downstream.shutdown();
+    const ntl::status upstream_closed = co_await upstream.shutdown();
+    if (!downstream_closed.is_ok())
+      co_return ntl::unexpected(downstream_closed);
+    if (!upstream_closed.is_ok())
+      co_return ntl::unexpected(upstream_closed);
+    co_return ntl::ok(result);
+  } catch (const std::bad_alloc &) {
+    co_return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    co_return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+}
+
+/**
+ * Inspect and transform the first request before any origin connection is
+ * opened. A terminal policy result is sent locally; a permitted result owns
+ * the workspace and buffered pipelined bytes for one continuation.
+ */
+template <class DownstreamStream, class WorkspaceLease,
+          http1_observer Observer>
+ntl::net::kernel::task<
+    ntl::result<kernel_http1_proxy_preflight<WorkspaceLease>>>
+prepare_kernel_http1_proxy_session(
+    std::shared_ptr<DownstreamStream> downstream,
+    std::shared_ptr<const inspection_policy> policy,
+    http1_request_target_context target_context,
+    WorkspaceLease workspace, std::shared_ptr<Observer> observer,
+    http1_proxy_limits limits = {},
+    inspection_session_metadata session = {}) {
+  auto decoders = policy ? policy->content_decoders() : nullptr;
+  auto encoders = policy ? policy->content_encoders() : nullptr;
+  if (!downstream || !policy || !decoders || !encoders || !workspace ||
+      !observer || !limits.valid() || !target_context.valid())
+    co_return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  try {
+    kernel_http1_proxy_preflight<WorkspaceLease> preflight(
+        std::move(workspace));
+    auto buffers = preflight.workspace_->borrowed_buffers();
+    auto memory = preflight.workspace_->borrowed_memory();
+    if (!buffers.valid(limits.maximum_wire_message_size) || !memory.valid())
+      co_return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    kernel_http1_proxy_detail::framed_reader<DownstreamStream> requests(
+        *downstream, http1_message_kind::request, limits.framing,
+        buffers.requests, limits.maximum_wire_message_size,
+        limits.request_receive_chunk_size, limits.expect_continue);
+    auto request_wire = co_await requests.read_or_eof();
+    if (!request_wire)
+      co_return ntl::unexpected(request_wire.status());
+    if (!*request_wire)
+      co_return ntl::unexpected(STATUS_END_OF_FILE);
+    auto request = transform_http1_request(
+        **request_wire, policy->transforms_ref(), *decoders, *encoders,
+        target_context, memory.requests);
+    if (!request)
+      co_return ntl::unexpected(request.status());
+    auto verdict = ntl::net::inspection::verdict::permit;
+    if (request->outcome.action == rewrite_action::forward)
+      verdict = kernel_http1_proxy_detail::inspect_message(
+          policy->decisions_ref(), *observer, session, 1,
+          request->message, nullptr);
+    kernel_http1_proxy_detail::notify_request(
+        *observer, {request->message, (**request_wire).size(),
+                    request->websocket_upgrade});
+
+    const bool authority_blocked =
+        limits.require_server_name_authority_binding &&
+        transform_detail::ascii_equal_ci(target_context.origin_scheme,
+                                         "https") &&
+        !authority_matches_tls_session(request->message.authority, session);
+    if (request->outcome.action == rewrite_action::drop ||
+        verdict == ntl::net::inspection::verdict::drop_flow) {
+      preflight.summary_.termination = http1_proxy_termination::request_drop;
+      co_return ntl::ok(std::move(preflight));
+    }
+    if (request->outcome.action != rewrite_action::forward ||
+        verdict == ntl::net::inspection::verdict::block ||
+        authority_blocked) {
+      response_message sent(memory.responses);
+      auto terminal =
+          co_await kernel_http1_proxy_detail::send_terminal_response(
+              *downstream,
+              authority_blocked
+                  ? std::optional<response_message>{}
+                  : std::move(request->outcome.response),
+              *encoders, policy->transforms_ref().limits_ref(),
+              request->message, sent, memory.responses);
+      if (!terminal)
+        co_return ntl::unexpected(terminal.status());
+      preflight.summary_.last_status = *terminal;
+      preflight.summary_.blocked_exchanges = 1;
+      preflight.summary_.completed_exchanges = 1;
+      preflight.summary_.termination =
+          http1_proxy_termination::terminal_response;
+      kernel_http1_proxy_detail::notify_response(
+          *observer, {request->message, sent, 0, false, true, false});
+      const ntl::status closed = co_await downstream->shutdown();
+      if (!closed.is_ok())
+        co_return ntl::unexpected(closed);
+      co_return ntl::ok(std::move(preflight));
+    }
+
+    preflight.original_wire_size_ = (**request_wire).size();
+    preflight.buffered_bytes_ = requests.compact_buffered();
+    preflight.verdict_ = verdict;
+    preflight.request_ = std::move(*request);
+    co_return ntl::ok(std::move(preflight));
+  } catch (const std::bad_alloc &) {
+    co_return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    co_return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+}
+
+/** Consume one permitted preflight with an owning upstream stream. */
+template <class DownstreamStream, class UpstreamStream,
+          class WorkspaceLease, http1_observer Observer,
+          class TunnelHandler>
+ntl::net::kernel::task<ntl::result<http1_proxy_result>>
+continue_kernel_http1_proxy_session(
+    std::shared_ptr<DownstreamStream> downstream,
+    std::shared_ptr<UpstreamStream> upstream,
+    std::shared_ptr<const inspection_policy> policy,
+    http1_request_target_context target_context,
+    kernel_http1_proxy_preflight<WorkspaceLease> preflight,
+    std::shared_ptr<Observer> observer,
+    std::shared_ptr<TunnelHandler> tunnel_handler,
+    http1_proxy_limits limits = {},
+    inspection_session_metadata session = {}) {
+  auto decoders = policy ? policy->content_decoders() : nullptr;
+  auto encoders = policy ? policy->content_encoders() : nullptr;
+  if (!downstream || !upstream || !policy || !decoders || !encoders ||
+      !preflight.requires_upstream() || !observer || !tunnel_handler)
+    co_return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  auto buffers = preflight.workspace_->borrowed_buffers();
+  auto memory = preflight.workspace_->borrowed_memory();
+  co_return co_await run_kernel_http1_proxy_session_borrowed(
+      *downstream, *upstream, *policy, *decoders, *encoders,
+      std::move(target_context), buffers, memory, *observer, *tunnel_handler,
+      limits, std::move(session), std::move(preflight.request_),
+      preflight.verdict_, preflight.original_wire_size_,
+      preflight.buffered_bytes_);
+}
+
+/**
+ * @brief Owning kernel HTTP/1 session composition.
+ *
+ * Streams, policy, codec registries, observer, tunnel handler, and the
+ * workspace lease are retained by the coroutine frame. Destroying any facade
+ * that produced those objects cannot invalidate this operation.
+ */
+template <class DownstreamStream, class UpstreamStream,
+          class WorkspaceLease, http1_observer Observer,
+          class TunnelHandler>
+ntl::net::kernel::task<ntl::result<http1_proxy_result>>
+run_kernel_http1_proxy_session(
+    std::shared_ptr<DownstreamStream> downstream,
+    std::shared_ptr<UpstreamStream> upstream,
+    std::shared_ptr<const inspection_policy> policy,
+    http1_request_target_context target_context,
+    WorkspaceLease workspace,
+    std::shared_ptr<Observer> observer,
+    std::shared_ptr<TunnelHandler> tunnel_handler,
+    http1_proxy_limits limits = {},
+    inspection_session_metadata session = {}) {
+  auto decoders = policy ? policy->content_decoders() : nullptr;
+  auto encoders = policy ? policy->content_encoders() : nullptr;
+  if (!downstream || !upstream || !policy || !decoders || !encoders ||
+      !workspace || !observer || !tunnel_handler)
+    co_return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  co_return co_await run_kernel_http1_proxy_session_borrowed(
+      *downstream, *upstream, *policy, *decoders, *encoders,
+      std::move(target_context), workspace->borrowed_buffers(),
+      workspace->borrowed_memory(),
+      *observer, *tunnel_handler, limits, std::move(session));
+}
+
+} // namespace ntl::net::http

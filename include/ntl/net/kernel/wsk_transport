@@ -1,0 +1,1780 @@
+/**
+ * @file kernel_wsk_transport
+ * @brief Bounded, cancellation-aware WSK TCP byte transport.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/net/kernel/wsk_transport is a kernel-mode header"
+#endif
+
+#include <ntl/net/buffer/owned_bytes>
+#include <ntl/net/io/transport>
+#include <ntl/net/kernel/passive_cleanup_domain>
+#include <ntl/pool_allocator>
+#include <ntl/result>
+#include <ntl/status>
+
+#include <wsk.h>
+
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <limits>
+#include <memory>
+#include <new>
+#include <span>
+#include <utility>
+
+namespace ntl::net::kernel {
+
+struct wsk_provider_options {
+  ULONG capture_timeout_milliseconds = 15'000;
+};
+
+struct wsk_transport_limits {
+  std::size_t maximum_write_bytes = 1024 * 1024;
+  std::size_t receive_buffer_bytes = 64 * 1024;
+  std::chrono::milliseconds connect_timeout{15'000};
+};
+
+/**
+ * A synchronous borrowed control view applied after WskSocket and before
+ * connect. The input span only needs to remain valid for the factory call.
+ */
+struct wsk_socket_control_view {
+  WSK_CONTROL_SOCKET_TYPE request_type = WskIoctl;
+  ULONG control_code = 0;
+  ULONG level = 0;
+  std::span<const std::byte> input{};
+};
+
+/** A value-owned native IP endpoint with host-order port input. */
+class ip_endpoint {
+public:
+  ip_endpoint() noexcept = default;
+
+  static ip_endpoint ipv4(std::array<std::uint8_t, 4> address,
+                          std::uint16_t port) noexcept {
+    ip_endpoint result;
+    SOCKADDR_IN native{};
+    native.sin_family = AF_INET;
+    native.sin_port = RtlUshortByteSwap(port);
+    std::memcpy(&native.sin_addr, address.data(), address.size());
+    std::memcpy(&result.storage_, &native, sizeof(native));
+    result.length_ = sizeof(native);
+    return result;
+  }
+
+  static ip_endpoint any_ipv4(std::uint16_t port = 0) noexcept {
+    return ipv4({0, 0, 0, 0}, port);
+  }
+
+  static ip_endpoint ipv6(std::array<std::uint8_t, 16> address,
+                          std::uint16_t port,
+                          std::uint32_t scope_id = 0) noexcept {
+    ip_endpoint result;
+    SOCKADDR_IN6 native{};
+    native.sin6_family = AF_INET6;
+    native.sin6_port = RtlUshortByteSwap(port);
+    native.sin6_scope_id = scope_id;
+    std::memcpy(&native.sin6_addr, address.data(), address.size());
+    std::memcpy(&result.storage_, &native, sizeof(native));
+    result.length_ = sizeof(native);
+    return result;
+  }
+
+  static ip_endpoint any_ipv6(std::uint16_t port = 0) noexcept {
+    return ipv6({}, port);
+  }
+
+  static ip_endpoint from_native(const SOCKADDR *address,
+                                 ULONG length) noexcept {
+    ip_endpoint result;
+    if (!address ||
+        (address->sa_family == AF_INET && length < sizeof(SOCKADDR_IN)) ||
+        (address->sa_family == AF_INET6 && length < sizeof(SOCKADDR_IN6)) ||
+        (address->sa_family != AF_INET && address->sa_family != AF_INET6))
+      return result;
+    result.length_ = address->sa_family == AF_INET
+                         ? sizeof(SOCKADDR_IN)
+                         : sizeof(SOCKADDR_IN6);
+    std::memcpy(&result.storage_, address, result.length_);
+    return result;
+  }
+
+  explicit operator bool() const noexcept {
+    return length_ != 0 &&
+           (family() == AF_INET || family() == AF_INET6);
+  }
+  ADDRESS_FAMILY family() const noexcept {
+    return length_ == 0 ? AF_UNSPEC : storage_.ss_family;
+  }
+  std::uint16_t port() const noexcept {
+    if (family() == AF_INET) {
+      const auto *address = reinterpret_cast<const SOCKADDR_IN *>(&storage_);
+      return RtlUshortByteSwap(address->sin_port);
+    }
+    if (family() == AF_INET6) {
+      const auto *address = reinterpret_cast<const SOCKADDR_IN6 *>(&storage_);
+      return RtlUshortByteSwap(address->sin6_port);
+    }
+    return 0;
+  }
+  SOCKADDR *borrowed_native_address() noexcept {
+    return reinterpret_cast<SOCKADDR *>(&storage_);
+  }
+  const SOCKADDR *borrowed_native_address() const noexcept {
+    return reinterpret_cast<const SOCKADDR *>(&storage_);
+  }
+  ULONG length() const noexcept { return length_; }
+
+  friend bool operator==(const ip_endpoint &left,
+                         const ip_endpoint &right) noexcept {
+    return left.length_ == right.length_ &&
+           (left.length_ == 0 ||
+            std::memcmp(&left.storage_, &right.storage_, left.length_) == 0);
+  }
+
+  friend bool operator!=(const ip_endpoint &left,
+                         const ip_endpoint &right) noexcept {
+    return !(left == right);
+  }
+
+private:
+  SOCKADDR_STORAGE storage_{};
+  ULONG length_ = 0;
+};
+
+namespace detail {
+
+struct wsk_sync_wait {
+  KEVENT event{};
+};
+
+inline NTSTATUS wsk_sync_completion(PDEVICE_OBJECT, PIRP,
+                                    void *context) noexcept {
+  auto *const wait = static_cast<wsk_sync_wait *>(context);
+  KeSetEvent(&wait->event, IO_NO_INCREMENT, FALSE);
+  return STATUS_MORE_PROCESSING_REQUIRED;
+}
+
+inline ntl::status wait_for_wsk_irp(
+    PIRP irp, wsk_sync_wait &wait,
+    std::chrono::milliseconds timeout =
+        (std::chrono::milliseconds::max)()) noexcept {
+  LARGE_INTEGER due_time{};
+  LARGE_INTEGER *due_time_pointer = nullptr;
+  if (timeout != (std::chrono::milliseconds::max)()) {
+    if (timeout <= std::chrono::milliseconds::zero()) {
+      (void)IoCancelIrp(irp);
+      (void)KeWaitForSingleObject(&wait.event, Executive, KernelMode,
+                                  FALSE, nullptr);
+      return STATUS_IO_TIMEOUT;
+    }
+    constexpr auto maximum_milliseconds =
+        (std::numeric_limits<LONGLONG>::max)() / 10'000;
+    const auto count = timeout.count();
+    const LONGLONG milliseconds =
+        count > maximum_milliseconds
+            ? maximum_milliseconds
+            : static_cast<LONGLONG>(count);
+    due_time.QuadPart = -milliseconds * 10'000;
+    due_time_pointer = &due_time;
+  }
+
+  const NTSTATUS waited = KeWaitForSingleObject(
+      &wait.event, Executive, KernelMode, FALSE, due_time_pointer);
+  if (waited == STATUS_TIMEOUT) {
+    (void)IoCancelIrp(irp);
+    (void)KeWaitForSingleObject(&wait.event, Executive, KernelMode,
+                                FALSE, nullptr);
+    return STATUS_IO_TIMEOUT;
+  }
+  if (!NT_SUCCESS(waited))
+    return waited;
+  return irp->IoStatus.Status;
+}
+
+/**
+ * Consumes the immediate WSK submission result before waiting. WSK completes
+ * the supplied IRP before returning a status other than STATUS_PENDING, so a
+ * synchronous success must not depend on a later event notification.
+ */
+inline ntl::status finish_wsk_irp(
+    PIRP irp, wsk_sync_wait &wait, NTSTATUS submitted,
+    std::chrono::milliseconds timeout =
+        (std::chrono::milliseconds::max)()) noexcept {
+  if (submitted == STATUS_PENDING)
+    return wait_for_wsk_irp(irp, wait, timeout);
+  if (!NT_SUCCESS(submitted))
+    return submitted;
+  return irp->IoStatus.Status;
+}
+
+inline ntl::status close_wsk_socket(PWSK_SOCKET socket,
+                                    PIRP irp) noexcept {
+  if (!socket || !irp || KeGetCurrentIrql() != PASSIVE_LEVEL)
+    return STATUS_INVALID_DEVICE_STATE;
+  wsk_sync_wait wait{};
+  KeInitializeEvent(&wait.event, NotificationEvent, FALSE);
+  IoReuseIrp(irp, STATUS_UNSUCCESSFUL);
+  IoSetCompletionRoutine(irp, &wsk_sync_completion, &wait, TRUE, TRUE,
+                         TRUE);
+  const auto *dispatch =
+      static_cast<const WSK_PROVIDER_BASIC_DISPATCH *>(socket->Dispatch);
+  const NTSTATUS submitted = dispatch->WskCloseSocket(socket, irp);
+  return finish_wsk_irp(irp, wait, submitted);
+}
+
+inline ntl::status control_wsk_socket(
+    PWSK_SOCKET socket, WSK_CONTROL_SOCKET_TYPE request_type,
+    ULONG control_code, ULONG level, std::span<const std::byte> input,
+    std::span<std::byte> output, SIZE_T *output_size, PIRP irp,
+    std::chrono::milliseconds timeout) noexcept {
+  if (!socket || !irp || KeGetCurrentIrql() != PASSIVE_LEVEL ||
+      (input.size() != 0 && !input.data()) ||
+      (output.size() != 0 && !output.data()))
+    return STATUS_INVALID_PARAMETER;
+
+  if (output_size)
+    *output_size = 0;
+  wsk_sync_wait wait{};
+  KeInitializeEvent(&wait.event, NotificationEvent, FALSE);
+  IoReuseIrp(irp, STATUS_UNSUCCESSFUL);
+  IoSetCompletionRoutine(irp, &wsk_sync_completion, &wait, TRUE, TRUE,
+                         TRUE);
+  const auto *dispatch =
+      static_cast<const WSK_PROVIDER_BASIC_DISPATCH *>(socket->Dispatch);
+  const NTSTATUS submitted = dispatch->WskControlSocket(
+      socket, request_type, control_code, level, input.size(),
+      input.empty() ? nullptr : const_cast<std::byte *>(input.data()),
+      output.size(), output.empty() ? nullptr : output.data(), nullptr,
+      irp);
+  const ntl::status status = finish_wsk_irp(irp, wait, submitted, timeout);
+  if (output_size)
+    *output_size = static_cast<SIZE_T>(irp->IoStatus.Information);
+  return status;
+}
+
+inline void initialize_work_item(WORK_QUEUE_ITEM &work,
+                                 PWORKER_THREAD_ROUTINE routine,
+                                 void *context) noexcept {
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4996)
+#endif
+  ExInitializeWorkItem(&work, routine, context);
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+}
+
+} // namespace detail
+
+namespace detail {
+
+/** Shared native WSK registration retained by every listener and socket. */
+class wsk_provider_state {
+public:
+  explicit wsk_provider_state(passive_cleanup_domain *domain) noexcept
+      : cleanup_(&wsk_provider_state::cleanup_at_passive, this),
+        domain_(domain) {}
+
+  wsk_provider_state(const wsk_provider_state &) = delete;
+  wsk_provider_state &operator=(const wsk_provider_state &) = delete;
+
+  ~wsk_provider_state() {
+    NT_ASSERT(KeGetCurrentIrql() == PASSIVE_LEVEL);
+    close_native();
+  }
+
+  ntl::status open(wsk_provider_options options) noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return STATUS_INVALID_DEVICE_STATE;
+    WSK_CLIENT_NPI client{};
+    client.ClientContext = this;
+    client.Dispatch = &client_dispatch_;
+    const NTSTATUS registered = WskRegister(&client, &registration_);
+    if (!NT_SUCCESS(registered))
+      return registered;
+    registered_ = true;
+    const NTSTATUS captured = WskCaptureProviderNPI(
+        &registration_, options.capture_timeout_milliseconds, &provider_);
+    if (!NT_SUCCESS(captured)) {
+      close_native();
+      return captured;
+    }
+    captured_ = true;
+    WSK_EVENT_CALLBACK_CONTROL callbacks{};
+    callbacks.NpiId = const_cast<PNPIID>(&NPI_WSK_INTERFACE_ID);
+    callbacks.EventMask = WSK_EVENT_ACCEPT | WSK_EVENT_RECEIVE_FROM;
+    const NTSTATUS configured = provider_.Dispatch->WskControlClient(
+        provider_.Client, WSK_SET_STATIC_EVENT_CALLBACKS,
+        sizeof(callbacks), &callbacks, 0, nullptr, nullptr, nullptr);
+    if (!NT_SUCCESS(configured)) {
+      close_native();
+      return configured;
+    }
+    accepting_.store(true, std::memory_order_release);
+    return ntl::status::ok();
+  }
+
+  void begin_close() noexcept {
+    accepting_.store(false, std::memory_order_release);
+  }
+
+  bool accepting() const noexcept {
+    return accepting_.load(std::memory_order_acquire) && captured_ &&
+           provider_.Client && provider_.Dispatch;
+  }
+
+  const WSK_PROVIDER_NPI *borrowed_native_npi() const noexcept {
+    return captured_ ? &provider_ : nullptr;
+  }
+
+  passive_cleanup_item &cleanup_item() noexcept { return cleanup_; }
+  passive_cleanup_domain *domain() const noexcept { return domain_; }
+
+private:
+  static void cleanup_at_passive(void *context) noexcept {
+    delete static_cast<wsk_provider_state *>(context);
+  }
+
+  void close_native() noexcept {
+    if (captured_) {
+      WskReleaseProviderNPI(&registration_);
+      captured_ = false;
+      provider_ = {};
+    }
+    if (registered_) {
+      WskDeregister(&registration_);
+      registered_ = false;
+    }
+  }
+
+  inline static const WSK_CLIENT_DISPATCH client_dispatch_{
+      MAKE_WSK_VERSION(1, 0), 0, nullptr};
+
+  passive_cleanup_item cleanup_;
+  passive_cleanup_domain *domain_ = nullptr;
+  WSK_REGISTRATION registration_{};
+  WSK_PROVIDER_NPI provider_{};
+  std::atomic<bool> accepting_{false};
+  bool registered_ = false;
+  bool captured_ = false;
+};
+
+} // namespace detail
+
+/**
+ * @brief Owning facade for a captured WSK provider.
+ *
+ * Listeners and connected transports retain the native registration. Calling
+ * close(), destroying this facade, or moving over it immediately rejects new
+ * children, while existing children remain valid until their own callbacks
+ * drain. Native WSK release is always deferred to the driver runtime's joined
+ * PASSIVE cleanup domain, so member declaration order is irrelevant.
+ */
+class wsk_provider {
+public:
+  wsk_provider() noexcept { KeInitializeSpinLock(&state_lock_); }
+  wsk_provider(const wsk_provider &) = delete;
+  wsk_provider &operator=(const wsk_provider &) = delete;
+  wsk_provider(wsk_provider &&other) noexcept
+      : wsk_provider() {
+    state_ = other.take_state_for_move();
+  }
+  wsk_provider &operator=(wsk_provider &&other) noexcept {
+    if (this != &other) {
+      close();
+      auto next = other.take_state_for_move();
+      KIRQL old_irql = PASSIVE_LEVEL;
+      KeAcquireSpinLock(&state_lock_, &old_irql);
+      state_ = std::move(next);
+      KeReleaseSpinLock(&state_lock_, old_irql);
+    }
+    return *this;
+  }
+  ~wsk_provider() { close(); }
+
+  ntl::status open(wsk_provider_options options = {}) noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return STATUS_INVALID_DEVICE_STATE;
+
+    std::uint64_t open_epoch = 0;
+    KIRQL old_irql = PASSIVE_LEVEL;
+    KeAcquireSpinLock(&state_lock_, &old_irql);
+    if (state_ || opening_) {
+      KeReleaseSpinLock(&state_lock_, old_irql);
+      return STATUS_ALREADY_REGISTERED;
+    }
+    opening_ = true;
+    open_epoch = close_epoch_;
+    KeReleaseSpinLock(&state_lock_, old_irql);
+
+    const auto finish_open = [this](std::uint64_t epoch) noexcept {
+      KIRQL finish_irql = PASSIVE_LEVEL;
+      KeAcquireSpinLock(&state_lock_, &finish_irql);
+      if (close_epoch_ == epoch)
+        opening_ = false;
+      KeReleaseSpinLock(&state_lock_, finish_irql);
+    };
+
+    auto *domain = borrowed_runtime_passive_cleanup_domain();
+    if (!domain) {
+      finish_open(open_epoch);
+      return STATUS_DEVICE_NOT_READY;
+    }
+    auto *raw = new (std::nothrow) detail::wsk_provider_state(domain);
+    if (!raw) {
+      finish_open(open_epoch);
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    const ntl::status registered = domain->register_item(raw->cleanup_item());
+    if (!registered.is_ok()) {
+      delete raw;
+      finish_open(open_epoch);
+      return registered;
+    }
+    const ntl::status opened = raw->open(options);
+    if (!opened.is_ok()) {
+      domain->retire(raw->cleanup_item());
+      finish_open(open_epoch);
+      return opened;
+    }
+    std::shared_ptr<detail::wsk_provider_state> next;
+    try {
+      next = std::shared_ptr<detail::wsk_provider_state>(
+          raw, [](detail::wsk_provider_state *value) noexcept {
+            value->begin_close();
+            value->domain()->retire_deferred(value->cleanup_item());
+          });
+    } catch (...) {
+      raw->begin_close();
+      domain->retire(raw->cleanup_item());
+      finish_open(open_epoch);
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    bool publish = false;
+    KeAcquireSpinLock(&state_lock_, &old_irql);
+    if (opening_ && close_epoch_ == open_epoch && !state_) {
+      state_ = std::move(next);
+      publish = true;
+    }
+    if (close_epoch_ == open_epoch)
+      opening_ = false;
+    KeReleaseSpinLock(&state_lock_, old_irql);
+    if (!publish) {
+      next->begin_close();
+      next.reset();
+      return STATUS_CANCELLED;
+    }
+    return ntl::status::ok();
+  }
+
+  void close() noexcept {
+    std::shared_ptr<detail::wsk_provider_state> retiring;
+    KIRQL old_irql = PASSIVE_LEVEL;
+    KeAcquireSpinLock(&state_lock_, &old_irql);
+    ++close_epoch_;
+    opening_ = false;
+    retiring = std::move(state_);
+    KeReleaseSpinLock(&state_lock_, old_irql);
+    if (retiring)
+      retiring->begin_close();
+    retiring.reset();
+  }
+
+  explicit operator bool() const noexcept {
+    return static_cast<bool>(retain_state());
+  }
+
+  /**
+   * Callback-scoped/native integration view. The returned NPI is borrowed;
+   * general callers should create an owning listener or transport instead.
+   */
+  const WSK_PROVIDER_NPI *borrowed_native_npi() const noexcept {
+    auto state = retain_state();
+    return state ? state->borrowed_native_npi() : nullptr;
+  }
+
+private:
+  friend class wsk_tcp_transport;
+  friend class wsk_tcp_listener;
+  friend class wsk_datagram_socket;
+
+  std::shared_ptr<detail::wsk_provider_state> retain_state() const noexcept {
+    std::shared_ptr<detail::wsk_provider_state> retained;
+    KIRQL old_irql = PASSIVE_LEVEL;
+    KeAcquireSpinLock(&state_lock_, &old_irql);
+    retained = state_;
+    KeReleaseSpinLock(&state_lock_, old_irql);
+    if (retained && retained->accepting())
+      return retained;
+    return nullptr;
+  }
+
+  std::shared_ptr<detail::wsk_provider_state>
+  take_state_for_move() noexcept {
+    std::shared_ptr<detail::wsk_provider_state> retained;
+    KIRQL old_irql = PASSIVE_LEVEL;
+    KeAcquireSpinLock(&state_lock_, &old_irql);
+    ++close_epoch_;
+    opening_ = false;
+    retained = std::move(state_);
+    KeReleaseSpinLock(&state_lock_, old_irql);
+    return retained;
+  }
+
+  mutable KSPIN_LOCK state_lock_{};
+  std::shared_ptr<detail::wsk_provider_state> state_;
+  std::uint64_t close_epoch_ = 0;
+  bool opening_ = false;
+};
+
+/**
+ * @brief Connected WSK TCP transport with one receive and bounded writes.
+ *
+ * Completion callbacks are delivered on a system worker at PASSIVE_LEVEL.
+ * stop() rejects new writes and closes the socket. drain() returns only after
+ * WskCloseSocket has completed and every accepted sink callback has returned.
+ */
+class wsk_tcp_transport final : public ntl::net::io::transport_backend {
+public:
+  using pointer = std::shared_ptr<wsk_tcp_transport>;
+
+  wsk_tcp_transport(const wsk_tcp_transport &) = delete;
+  wsk_tcp_transport &operator=(const wsk_tcp_transport &) = delete;
+
+  ~wsk_tcp_transport() override {
+    if (socket_ || activities_.load(std::memory_order_acquire) != 0) {
+      NT_ASSERT(KeGetCurrentIrql() == PASSIVE_LEVEL);
+      stop();
+      (void)drain();
+    }
+    if (receive_.mdl)
+      IoFreeMdl(receive_.mdl);
+    if (receive_.irp)
+      IoFreeIrp(receive_.irp);
+    if (close_irp_)
+      IoFreeIrp(close_irp_);
+  }
+
+  static ntl::result<pointer>
+  try_connect(wsk_provider &provider, const ip_endpoint &local,
+              const ip_endpoint &remote,
+              wsk_transport_limits limits = {}) noexcept {
+    auto provider_state = provider.retain_state();
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+    if (!provider_state || !local || !remote ||
+        local.family() != remote.family() ||
+        limits.maximum_write_bytes == 0 ||
+        limits.receive_buffer_bytes == 0 ||
+        limits.maximum_write_bytes > MAXULONG ||
+        limits.receive_buffer_bytes > MAXULONG)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+
+    PIRP connect_irp = IoAllocateIrp(1, FALSE);
+    PIRP close_irp = IoAllocateIrp(1, FALSE);
+    if (!connect_irp || !close_irp) {
+      if (connect_irp)
+        IoFreeIrp(connect_irp);
+      if (close_irp)
+        IoFreeIrp(close_irp);
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+
+    detail::wsk_sync_wait wait{};
+    KeInitializeEvent(&wait.event, NotificationEvent, FALSE);
+    IoSetCompletionRoutine(connect_irp, &detail::wsk_sync_completion,
+                           &wait, TRUE, TRUE, TRUE);
+    const WSK_PROVIDER_NPI *const native =
+        provider_state->borrowed_native_npi();
+    const NTSTATUS submitted = native->Dispatch->WskSocketConnect(
+        native->Client, SOCK_STREAM, IPPROTO_TCP,
+        const_cast<SOCKADDR *>(local.borrowed_native_address()),
+        const_cast<SOCKADDR *>(remote.borrowed_native_address()), 0, nullptr, nullptr,
+        nullptr, nullptr, nullptr, connect_irp);
+    const ntl::status connected = detail::finish_wsk_irp(
+        connect_irp, wait, submitted, limits.connect_timeout);
+    PWSK_SOCKET socket = static_cast<PWSK_SOCKET>(
+        reinterpret_cast<void *>(connect_irp->IoStatus.Information));
+    IoFreeIrp(connect_irp);
+    if (!connected.is_ok()) {
+      if (socket)
+        (void)detail::close_wsk_socket(socket, close_irp);
+      IoFreeIrp(close_irp);
+      return ntl::unexpected(connected);
+    }
+    if (!socket) {
+      IoFreeIrp(close_irp);
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+    }
+
+    auto receive_storage = owned_bytes::try_allocate(
+        limits.receive_buffer_bytes,
+        buffer_limits{limits.receive_buffer_bytes},
+        ntl::pool_tag("rWtN"));
+    if (!receive_storage) {
+      (void)detail::close_wsk_socket(socket, close_irp);
+      IoFreeIrp(close_irp);
+      return ntl::unexpected(receive_storage.status());
+    }
+
+    PIRP receive_irp = IoAllocateIrp(1, FALSE);
+    PMDL receive_mdl = IoAllocateMdl(
+        receive_storage->data(),
+        static_cast<ULONG>(receive_storage->size()), FALSE, FALSE, nullptr);
+    if (!receive_irp || !receive_mdl) {
+      if (receive_irp)
+        IoFreeIrp(receive_irp);
+      if (receive_mdl)
+        IoFreeMdl(receive_mdl);
+      (void)detail::close_wsk_socket(socket, close_irp);
+      IoFreeIrp(close_irp);
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+    MmBuildMdlForNonPagedPool(receive_mdl);
+
+    void *const storage = ntl::detail::allocate_pool_bytes(
+        sizeof(wsk_tcp_transport), alignof(wsk_tcp_transport),
+        ntl::pool_kind::nonpaged, ntl::pool_option::none,
+        ntl::pool_tag("tWtN"));
+    if (!storage) {
+      IoFreeMdl(receive_mdl);
+      IoFreeIrp(receive_irp);
+      (void)detail::close_wsk_socket(socket, close_irp);
+      IoFreeIrp(close_irp);
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+
+    auto *const result = new (storage) wsk_tcp_transport(
+        std::move(provider_state), socket, close_irp,
+        std::move(*receive_storage), receive_mdl, receive_irp, limits);
+    return own(result);
+  }
+
+  /**
+   * @brief Creates, configures, binds, and connects a WSK TCP socket.
+   *
+   * Controls are applied synchronously before WskConnect. This is required by
+   * handoff protocols such as WFP connection redirect records, which must be
+   * attached to the outbound socket before the original destination is
+   * connected. The input spans only need to remain valid for this call.
+   */
+  static ntl::result<pointer> try_connect_configured(
+      wsk_provider &provider, const ip_endpoint &local,
+      const ip_endpoint &remote,
+      std::span<const wsk_socket_control_view> controls,
+      wsk_transport_limits limits = {}) noexcept {
+    auto provider_state = provider.retain_state();
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+    if (!provider_state || !local || !remote ||
+        local.family() != remote.family() ||
+        limits.maximum_write_bytes == 0 ||
+        limits.receive_buffer_bytes == 0 ||
+        limits.maximum_write_bytes > MAXULONG ||
+        limits.receive_buffer_bytes > MAXULONG)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    for (const auto &control : controls) {
+      if (control.control_code == 0)
+        return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    }
+
+    PIRP operation_irp = IoAllocateIrp(1, FALSE);
+    PIRP close_irp = IoAllocateIrp(1, FALSE);
+    if (!operation_irp || !close_irp) {
+      if (operation_irp)
+        IoFreeIrp(operation_irp);
+      if (close_irp)
+        IoFreeIrp(close_irp);
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+
+    const WSK_PROVIDER_NPI *const native =
+        provider_state->borrowed_native_npi();
+    detail::wsk_sync_wait wait{};
+    KeInitializeEvent(&wait.event, NotificationEvent, FALSE);
+    IoSetCompletionRoutine(operation_irp, &detail::wsk_sync_completion,
+                           &wait, TRUE, TRUE, TRUE);
+    NTSTATUS submitted = native->Dispatch->WskSocket(
+        native->Client, local.family(), SOCK_STREAM, IPPROTO_TCP,
+        WSK_FLAG_CONNECTION_SOCKET, nullptr, nullptr, nullptr, nullptr,
+        nullptr, operation_irp);
+    ntl::status status = detail::finish_wsk_irp(
+        operation_irp, wait, submitted, limits.connect_timeout);
+    PWSK_SOCKET socket = static_cast<PWSK_SOCKET>(
+        reinterpret_cast<void *>(operation_irp->IoStatus.Information));
+
+    auto fail = [&](ntl::status failure) noexcept -> ntl::result<pointer> {
+      if (socket)
+        (void)detail::close_wsk_socket(socket, close_irp);
+      IoFreeIrp(operation_irp);
+      IoFreeIrp(close_irp);
+      return ntl::unexpected(failure);
+    };
+    if (!status.is_ok() || !socket)
+      return fail(status.is_ok()
+                      ? ntl::status{STATUS_INVALID_DEVICE_STATE}
+                      : status);
+
+    for (const auto &control : controls) {
+      SIZE_T returned = 0;
+      status = detail::control_wsk_socket(
+          socket, control.request_type, control.control_code, control.level,
+          control.input, {}, &returned, operation_irp,
+          limits.connect_timeout);
+      if (!status.is_ok())
+        return fail(status);
+    }
+
+    auto *const dispatch = static_cast<
+        const WSK_PROVIDER_CONNECTION_DISPATCH *>(socket->Dispatch);
+    KeClearEvent(&wait.event);
+    IoReuseIrp(operation_irp, STATUS_UNSUCCESSFUL);
+    IoSetCompletionRoutine(operation_irp, &detail::wsk_sync_completion,
+                           &wait, TRUE, TRUE, TRUE);
+    submitted = dispatch->WskBind(
+        socket, const_cast<SOCKADDR *>(local.borrowed_native_address()), 0, operation_irp);
+    status = detail::finish_wsk_irp(operation_irp, wait, submitted,
+                                    limits.connect_timeout);
+    if (!status.is_ok())
+      return fail(status);
+
+    KeClearEvent(&wait.event);
+    IoReuseIrp(operation_irp, STATUS_UNSUCCESSFUL);
+    IoSetCompletionRoutine(operation_irp, &detail::wsk_sync_completion,
+                           &wait, TRUE, TRUE, TRUE);
+    submitted = dispatch->WskConnect(
+        socket, const_cast<SOCKADDR *>(remote.borrowed_native_address()), 0, operation_irp);
+    status = detail::finish_wsk_irp(operation_irp, wait, submitted,
+                                    limits.connect_timeout);
+    IoFreeIrp(operation_irp);
+    if (!status.is_ok()) {
+      (void)detail::close_wsk_socket(socket, close_irp);
+      IoFreeIrp(close_irp);
+      return ntl::unexpected(status);
+    }
+
+    return try_adopt_with_state(std::move(provider_state), socket, close_irp,
+                                limits);
+  }
+
+  /**
+   * @brief Turns a WSK accepted connection socket into the common transport.
+   *
+   * The caller transfers both socket and close_irp ownership. On every failure
+   * this function closes the socket synchronously and frees close_irp.
+   */
+  static ntl::result<pointer>
+  try_adopt(wsk_provider &provider, PWSK_SOCKET socket, PIRP close_irp,
+            wsk_transport_limits limits = {}) noexcept {
+    auto provider_state = provider.retain_state();
+    if (!provider_state) {
+      if (socket && close_irp && KeGetCurrentIrql() == PASSIVE_LEVEL)
+        (void)detail::close_wsk_socket(socket, close_irp);
+      if (close_irp)
+        IoFreeIrp(close_irp);
+      return ntl::unexpected(STATUS_DELETE_PENDING);
+    }
+    return try_adopt_with_state(std::move(provider_state), socket, close_irp,
+                                limits);
+  }
+
+private:
+  friend class wsk_tcp_listener;
+
+  static ntl::result<pointer> try_adopt_with_state(
+      std::shared_ptr<detail::wsk_provider_state> provider_state,
+      PWSK_SOCKET socket, PIRP close_irp,
+      wsk_transport_limits limits = {}) noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL || !socket || !close_irp ||
+        !provider_state ||
+        limits.maximum_write_bytes == 0 ||
+        limits.receive_buffer_bytes == 0 ||
+        limits.maximum_write_bytes > MAXULONG ||
+        limits.receive_buffer_bytes > MAXULONG) {
+      if (socket && close_irp && KeGetCurrentIrql() == PASSIVE_LEVEL)
+        (void)detail::close_wsk_socket(socket, close_irp);
+      if (close_irp)
+        IoFreeIrp(close_irp);
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    }
+
+    auto fail = [&](NTSTATUS status) noexcept -> ntl::result<pointer> {
+      (void)detail::close_wsk_socket(socket, close_irp);
+      IoFreeIrp(close_irp);
+      return ntl::unexpected(status);
+    };
+    auto receive_storage = owned_bytes::try_allocate(
+        limits.receive_buffer_bytes,
+        buffer_limits{limits.receive_buffer_bytes},
+        ntl::pool_tag("aWtN"));
+    if (!receive_storage)
+      return fail(static_cast<NTSTATUS>(receive_storage.status()));
+
+    PIRP receive_irp = IoAllocateIrp(1, FALSE);
+    PMDL receive_mdl = IoAllocateMdl(
+        receive_storage->data(),
+        static_cast<ULONG>(receive_storage->size()), FALSE, FALSE, nullptr);
+    if (!receive_irp || !receive_mdl) {
+      if (receive_irp)
+        IoFreeIrp(receive_irp);
+      if (receive_mdl)
+        IoFreeMdl(receive_mdl);
+      return fail(STATUS_INSUFFICIENT_RESOURCES);
+    }
+    MmBuildMdlForNonPagedPool(receive_mdl);
+
+    void *const storage = ntl::detail::allocate_pool_bytes(
+        sizeof(wsk_tcp_transport), alignof(wsk_tcp_transport),
+        ntl::pool_kind::nonpaged, ntl::pool_option::none,
+        ntl::pool_tag("tWtN"));
+    if (!storage) {
+      IoFreeMdl(receive_mdl);
+      IoFreeIrp(receive_irp);
+      return fail(STATUS_INSUFFICIENT_RESOURCES);
+    }
+    auto *const result = new (storage) wsk_tcp_transport(
+        std::move(provider_state), socket, close_irp,
+        std::move(*receive_storage), receive_mdl, receive_irp, limits);
+    return own(result);
+  }
+
+  static ntl::result<pointer> own(wsk_tcp_transport *value) noexcept {
+    if (!value || !value->cleanup_domain_) {
+      if (value)
+        ntl::pool_deleter<wsk_tcp_transport>{
+            ntl::pool_tag("tWtN"), ntl::pool_kind::nonpaged}(value);
+      return ntl::unexpected(STATUS_DEVICE_NOT_READY);
+    }
+    const ntl::status registered =
+        value->cleanup_domain_->register_item(value->cleanup_);
+    if (!registered.is_ok()) {
+      ntl::pool_deleter<wsk_tcp_transport>{
+          ntl::pool_tag("tWtN"), ntl::pool_kind::nonpaged}(value);
+      return ntl::unexpected(registered);
+    }
+    try {
+      return ntl::ok(pointer(
+          value, [](wsk_tcp_transport *transport) noexcept {
+            transport->stop();
+            transport->cleanup_domain_->retire_deferred(transport->cleanup_);
+          }));
+    } catch (...) {
+      value->cleanup_domain_->retire(value->cleanup_);
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+  }
+
+public:
+  runtime_descriptor runtime() const noexcept override {
+    runtime_descriptor result{
+        .domain = execution_domain::kernel,
+        .path = execution_path::direct,
+        .features = feature_set(network_feature::byte_transport),
+    };
+    result.limits.maximum_input_bytes = limits_.maximum_write_bytes;
+    result.limits.maximum_output_bytes = limits_.receive_buffer_bytes;
+    return result;
+  }
+
+  io::transport_capabilities capabilities() const noexcept override {
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    const bool available = socket_ != nullptr && !stopping_;
+    KeReleaseSpinLock(&lock_, old_irql);
+    return {
+        .available = available,
+        .full_duplex = true,
+        .half_close = true,
+        .cancellation = true,
+        .message_boundaries = false,
+        .plaintext = true,
+    };
+  }
+
+  /**
+   * @brief Executes a bounded synchronous WskControlSocket request.
+   *
+   * This is intentionally available only before start(). It lets a proxy
+   * capture opaque handoff metadata from a freshly accepted connection
+   * without exposing the native socket or racing stop()/destruction.
+   */
+  ntl::status control_socket(
+      WSK_CONTROL_SOCKET_TYPE request_type, ULONG control_code, ULONG level,
+      std::span<const std::byte> input, std::span<std::byte> output,
+      std::size_t *output_size = nullptr,
+      std::chrono::milliseconds timeout =
+          std::chrono::milliseconds{15'000}) noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL || control_code == 0 ||
+        timeout <= std::chrono::milliseconds::zero())
+      return STATUS_INVALID_PARAMETER;
+    if (!ExAcquireRundownProtection(&control_rundown_))
+      return STATUS_DELETE_PENDING;
+
+    PWSK_SOCKET socket = nullptr;
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    if (!started_ && !stopping_)
+      socket = socket_;
+    KeReleaseSpinLock(&lock_, old_irql);
+    if (!socket) {
+      ExReleaseRundownProtection(&control_rundown_);
+      return STATUS_INVALID_DEVICE_STATE;
+    }
+
+    PIRP irp = IoAllocateIrp(1, FALSE);
+    if (!irp) {
+      ExReleaseRundownProtection(&control_rundown_);
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    SIZE_T returned = 0;
+    const ntl::status status = detail::control_wsk_socket(
+        socket, request_type, control_code, level, input, output, &returned,
+        irp, timeout);
+    IoFreeIrp(irp);
+    ExReleaseRundownProtection(&control_rundown_);
+    if (output_size)
+      *output_size = returned;
+    return status;
+  }
+
+  ntl::status start_borrowed(io::transport_sink &sink) noexcept override {
+    if (KeGetCurrentIrql() > DISPATCH_LEVEL)
+      return STATUS_INVALID_DEVICE_STATE;
+
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    if (started_ || stopping_ || !socket_) {
+      KeReleaseSpinLock(&lock_, old_irql);
+      return STATUS_INVALID_DEVICE_STATE;
+    }
+    sink_ = &sink;
+    started_ = true;
+    begin_activity_locked();
+    receive_active_ = true;
+    KeReleaseSpinLock(&lock_, old_irql);
+
+    if (!submit_receive()) {
+      KeAcquireSpinLock(&lock_, &old_irql);
+      receive_active_ = false;
+      KeReleaseSpinLock(&lock_, old_irql);
+      finish_activity();
+      return STATUS_DELETE_PENDING;
+    }
+    return ntl::status::ok();
+  }
+
+  ntl::status write(std::uint64_t operation_id, scatter_view bytes,
+                    bool final) noexcept override {
+    if (KeGetCurrentIrql() > DISPATCH_LEVEL)
+      return STATUS_INVALID_DEVICE_STATE;
+    if (operation_id == 0 || !bytes ||
+        (!final && bytes.empty()) ||
+        bytes.size() > limits_.maximum_write_bytes ||
+        bytes.size() > MAXULONG)
+      return STATUS_INVALID_PARAMETER;
+
+    auto copied = owned_bytes::try_copy(
+        bytes, buffer_limits{limits_.maximum_write_bytes},
+        ntl::pool_tag("bWtN"));
+    if (!copied)
+      return copied.status();
+
+    auto operation = ntl::try_make_pool<send_operation>(
+        ntl::pool_kind::nonpaged, ntl::pool_option::none,
+        ntl::pool_tag("oWtN"), this, operation_id,
+        std::move(*copied), final);
+    if (!operation)
+      return operation.status();
+    send_operation *const raw = operation->get();
+    if (!raw->initialize())
+      return STATUS_INSUFFICIENT_RESOURCES;
+
+    bool queue_final_only = false;
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    if (!started_ || stopping_ || write_closed_) {
+      const NTSTATUS unavailable =
+          !started_ ? STATUS_DELETE_PENDING
+                    : stopping_ ? close_status_
+                                : STATUS_CONNECTION_DISCONNECTED;
+      KeReleaseSpinLock(&lock_, old_irql);
+      return unavailable;
+    }
+    for (PLIST_ENTRY entry = writes_.Flink; entry != &writes_;
+         entry = entry->Flink) {
+      const auto *existing = CONTAINING_RECORD(
+          entry, send_operation, link);
+      if (existing->operation_id == operation_id) {
+        KeReleaseSpinLock(&lock_, old_irql);
+        return STATUS_DUPLICATE_OBJECTID;
+      }
+    }
+    InsertTailList(&writes_, &raw->link);
+    begin_activity_locked();
+    if (final)
+      write_closed_ = true;
+    queue_final_only = raw->bytes.empty();
+    if (!queue_final_only)
+      raw->irp_active.store(true, std::memory_order_release);
+    (void)operation->release();
+    if (!queue_final_only) {
+      auto *const dispatch = static_cast<
+          const WSK_PROVIDER_CONNECTION_DISPATCH *>(socket_->Dispatch);
+      (void)dispatch->WskSend(socket_, &raw->buffer, WSK_FLAG_NODELAY,
+                              raw->irp);
+    }
+    KeReleaseSpinLock(&lock_, old_irql);
+
+    if (queue_final_only)
+      queue_work(raw->work);
+    return ntl::status::ok();
+  }
+
+  ntl::status cancel(std::uint64_t operation_id) noexcept override {
+    if (operation_id == 0)
+      return STATUS_INVALID_PARAMETER;
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    for (PLIST_ENTRY entry = writes_.Flink; entry != &writes_;
+         entry = entry->Flink) {
+      auto *const operation = CONTAINING_RECORD(
+          entry, send_operation, link);
+      if (operation->operation_id != operation_id)
+        continue;
+      operation->cancelled.store(true, std::memory_order_release);
+      if (operation->irp_active.load(std::memory_order_acquire))
+        (void)IoCancelIrp(operation->irp);
+      KeReleaseSpinLock(&lock_, old_irql);
+      return ntl::status::ok();
+    }
+    KeReleaseSpinLock(&lock_, old_irql);
+    return STATUS_NOT_FOUND;
+  }
+
+  void stop() noexcept override { request_stop(STATUS_CANCELLED); }
+
+  ntl::status drain() noexcept override {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return STATUS_INVALID_DEVICE_STATE;
+    stop();
+    return KeWaitForSingleObject(&drained_, Executive, KernelMode, FALSE,
+                                 nullptr);
+  }
+
+  std::size_t pending_operations() const noexcept {
+    return activities_.load(std::memory_order_acquire);
+  }
+
+private:
+  struct receive_operation {
+    wsk_tcp_transport *owner = nullptr;
+    owned_bytes bytes{};
+    PMDL mdl = nullptr;
+    PIRP irp = nullptr;
+    WSK_BUF buffer{};
+    WORK_QUEUE_ITEM work{};
+    NTSTATUS status = STATUS_PENDING;
+    std::size_t transferred = 0;
+  };
+
+  struct send_operation {
+    send_operation(wsk_tcp_transport *owner_value,
+                   std::uint64_t id, owned_bytes &&storage,
+                   bool final_value) noexcept
+        : owner(owner_value), operation_id(id), bytes(std::move(storage)),
+          final(final_value) {
+      InitializeListHead(&link);
+      detail::initialize_work_item(
+          work, &wsk_tcp_transport::process_send, this);
+    }
+
+    ~send_operation() {
+      if (mdl)
+        IoFreeMdl(mdl);
+      if (irp)
+        IoFreeIrp(irp);
+    }
+
+    bool initialize() noexcept {
+      irp = IoAllocateIrp(1, FALSE);
+      if (!irp)
+        return false;
+      if (!bytes.empty()) {
+        mdl = IoAllocateMdl(bytes.data(), static_cast<ULONG>(bytes.size()),
+                            FALSE, FALSE, nullptr);
+        if (!mdl)
+          return false;
+        MmBuildMdlForNonPagedPool(mdl);
+        buffer.Mdl = mdl;
+        buffer.Offset = 0;
+        buffer.Length = bytes.size();
+      }
+      IoSetCompletionRoutine(irp, &wsk_tcp_transport::send_complete,
+                             this, TRUE, TRUE, TRUE);
+      return true;
+    }
+
+    wsk_tcp_transport *owner = nullptr;
+    std::uint64_t operation_id = 0;
+    owned_bytes bytes{};
+    bool final = false;
+    PMDL mdl = nullptr;
+    PIRP irp = nullptr;
+    WSK_BUF buffer{};
+    LIST_ENTRY link{};
+    WORK_QUEUE_ITEM work{};
+    std::atomic<bool> irp_active{false};
+    std::atomic<bool> cancelled{false};
+    NTSTATUS status = STATUS_SUCCESS;
+    std::size_t transferred = 0;
+  };
+
+  wsk_tcp_transport(
+                    std::shared_ptr<detail::wsk_provider_state> provider,
+                    PWSK_SOCKET socket, PIRP close_irp,
+                    owned_bytes &&receive_bytes, PMDL receive_mdl,
+                    PIRP receive_irp, wsk_transport_limits limits) noexcept
+      : cleanup_(&wsk_tcp_transport::cleanup_at_passive, this),
+        cleanup_domain_(borrowed_runtime_passive_cleanup_domain()),
+        provider_(std::move(provider)), socket_(socket),
+        close_irp_(close_irp), limits_(limits) {
+    KeInitializeSpinLock(&lock_);
+    ExInitializeRundownProtection(&control_rundown_);
+    KeInitializeEvent(&drained_, NotificationEvent, TRUE);
+    InitializeListHead(&writes_);
+    detail::initialize_work_item(
+        shutdown_work_, &wsk_tcp_transport::shutdown, this);
+    receive_.owner = this;
+    receive_.bytes = std::move(receive_bytes);
+    receive_.mdl = receive_mdl;
+    receive_.irp = receive_irp;
+    receive_.buffer.Mdl = receive_mdl;
+    receive_.buffer.Offset = 0;
+    receive_.buffer.Length = receive_.bytes.size();
+    detail::initialize_work_item(
+        receive_.work, &wsk_tcp_transport::process_receive, &receive_);
+  }
+
+  static void cleanup_at_passive(void *context) noexcept {
+    ntl::pool_deleter<wsk_tcp_transport>{
+        ntl::pool_tag("tWtN"), ntl::pool_kind::nonpaged}(
+        static_cast<wsk_tcp_transport *>(context));
+  }
+
+  static void queue_work(WORK_QUEUE_ITEM &work) noexcept {
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4996)
+#endif
+    ExQueueWorkItem(&work, DelayedWorkQueue);
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+  }
+
+  void begin_activity_locked() noexcept {
+    if (activities_.fetch_add(1, std::memory_order_acq_rel) == 0)
+      KeClearEvent(&drained_);
+  }
+
+  void finish_activity() noexcept {
+    io::transport_sink *notify = nullptr;
+    NTSTATUS status = STATUS_SUCCESS;
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    const std::size_t previous =
+        activities_.fetch_sub(1, std::memory_order_acq_rel);
+    NT_ASSERT(previous != 0);
+    if (previous == 1) {
+      if (stopping_ && socket_closed_ && !closed_notified_) {
+        closed_notified_ = true;
+        notify = sink_;
+        status = close_status_;
+      }
+      if (!notify)
+        KeSetEvent(&drained_, IO_NO_INCREMENT, FALSE);
+    }
+    KeReleaseSpinLock(&lock_, old_irql);
+
+    if (notify) {
+      notify->on_closed(status);
+      KeSetEvent(&drained_, IO_NO_INCREMENT, FALSE);
+    }
+  }
+
+  void request_stop(NTSTATUS status) noexcept {
+    bool queue = false;
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    if (!stopping_) {
+      stopping_ = true;
+      close_status_ = status;
+      begin_activity_locked();
+      queue = true;
+    } else if (close_status_ == STATUS_CANCELLED &&
+               status != STATUS_CANCELLED) {
+      close_status_ = status;
+    }
+    KeReleaseSpinLock(&lock_, old_irql);
+    if (queue)
+      queue_work(shutdown_work_);
+  }
+
+  bool submit_receive() noexcept {
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    if (stopping_ || !socket_) {
+      KeReleaseSpinLock(&lock_, old_irql);
+      return false;
+    }
+    IoReuseIrp(receive_.irp, STATUS_UNSUCCESSFUL);
+    IoSetCompletionRoutine(receive_.irp,
+                           &wsk_tcp_transport::receive_complete,
+                           &receive_, TRUE, TRUE, TRUE);
+    auto *const dispatch = static_cast<
+        const WSK_PROVIDER_CONNECTION_DISPATCH *>(socket_->Dispatch);
+    (void)dispatch->WskReceive(socket_, &receive_.buffer, 0,
+                               receive_.irp);
+    KeReleaseSpinLock(&lock_, old_irql);
+    return true;
+  }
+
+  static NTSTATUS receive_complete(PDEVICE_OBJECT, PIRP irp,
+                                   void *context) noexcept {
+    auto *const operation = static_cast<receive_operation *>(context);
+    operation->status = irp->IoStatus.Status;
+    operation->transferred = static_cast<std::size_t>(
+        irp->IoStatus.Information);
+    queue_work(operation->work);
+    return STATUS_MORE_PROCESSING_REQUIRED;
+  }
+
+  static void process_receive(void *context) noexcept {
+    auto *const operation = static_cast<receive_operation *>(context);
+    wsk_tcp_transport *const owner = operation->owner;
+
+    bool stopping = false;
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&owner->lock_, &old_irql);
+    stopping = owner->stopping_;
+    KeReleaseSpinLock(&owner->lock_, old_irql);
+
+    if (!stopping && NT_SUCCESS(operation->status) &&
+        operation->transferred > operation->bytes.size()) {
+      owner->request_stop(STATUS_DATA_ERROR);
+    } else if (!stopping && NT_SUCCESS(operation->status) &&
+               operation->transferred != 0) {
+      const auto bytes = operation->bytes.span().first(
+          operation->transferred);
+      const ntl::status delivered = owner->sink_->on_receive(
+          scatter_view::from_contiguous(bytes), false);
+      if (delivered.is_ok() && owner->submit_receive()) {
+        return;
+      }
+      if (!delivered.is_ok())
+        owner->request_stop(static_cast<NTSTATUS>(delivered));
+    } else if (!stopping && NT_SUCCESS(operation->status)) {
+      // A zero-byte TCP receive is the peer's FIN: it closes only the read
+      // direction. Keep the socket writable so protocols such as TLS can send
+      // their own close_notify before performing the local half-close.
+      const ntl::status delivered = owner->sink_->on_receive(
+          scatter_view::from_contiguous({}), true);
+      if (!delivered.is_ok())
+        owner->request_stop(static_cast<NTSTATUS>(delivered));
+    } else if (!stopping) {
+      owner->request_stop(operation->status);
+    }
+
+    KeAcquireSpinLock(&owner->lock_, &old_irql);
+    owner->receive_active_ = false;
+    KeReleaseSpinLock(&owner->lock_, old_irql);
+    owner->finish_activity();
+  }
+
+  static NTSTATUS send_complete(PDEVICE_OBJECT, PIRP irp,
+                                void *context) noexcept {
+    auto *const operation = static_cast<send_operation *>(context);
+    operation->status = irp->IoStatus.Status;
+    operation->transferred = static_cast<std::size_t>(
+        irp->IoStatus.Information);
+    operation->irp_active.store(false, std::memory_order_release);
+    queue_work(operation->work);
+    return STATUS_MORE_PROCESSING_REQUIRED;
+  }
+
+  static void process_send(void *context) noexcept {
+    auto *const operation = static_cast<send_operation *>(context);
+    wsk_tcp_transport *const owner = operation->owner;
+    if (operation->cancelled.load(std::memory_order_acquire)) {
+      operation->status = STATUS_CANCELLED;
+    } else if (operation->final && NT_SUCCESS(operation->status)) {
+      bool disconnect_submitted = false;
+      NTSTATUS submitted = STATUS_UNSUCCESSFUL;
+      detail::wsk_sync_wait wait{};
+      KeInitializeEvent(&wait.event, NotificationEvent, FALSE);
+      KIRQL old_irql = 0;
+      KeAcquireSpinLock(&owner->lock_, &old_irql);
+      if (!owner->stopping_ && owner->socket_) {
+        IoReuseIrp(operation->irp, STATUS_UNSUCCESSFUL);
+        IoSetCompletionRoutine(operation->irp,
+                               &detail::wsk_sync_completion, &wait,
+                               TRUE, TRUE, TRUE);
+        auto *const dispatch = static_cast<
+            const WSK_PROVIDER_CONNECTION_DISPATCH *>(
+            owner->socket_->Dispatch);
+        submitted = dispatch->WskDisconnect(owner->socket_, nullptr, 0,
+                                             operation->irp);
+        disconnect_submitted = true;
+      }
+      KeReleaseSpinLock(&owner->lock_, old_irql);
+      if (disconnect_submitted) {
+        const NTSTATUS disconnect_status = static_cast<NTSTATUS>(
+            detail::finish_wsk_irp(operation->irp, wait, submitted));
+        // A payload+final operation has already completed WskSend. Preserve
+        // that send result: a redundant WskDisconnect after peer FIN does not
+        // invalidate the transmitted bytes. A standalone shutdown_write()
+        // still reports the disconnect result because it has no payload.
+        if (operation->bytes.empty())
+          operation->status = disconnect_status;
+      }
+    }
+
+    io::transport_sink *sink = nullptr;
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&owner->lock_, &old_irql);
+    RemoveEntryList(&operation->link);
+    InitializeListHead(&operation->link);
+    sink = owner->sink_;
+    KeReleaseSpinLock(&owner->lock_, old_irql);
+
+    if (sink) {
+      sink->on_write_complete(operation->operation_id, operation->status,
+                              operation->transferred);
+    }
+    ntl::pool_deleter<send_operation>{
+        ntl::pool_tag("oWtN"), ntl::pool_kind::nonpaged}(operation);
+    owner->finish_activity();
+  }
+
+  static void shutdown(void *context) noexcept {
+    auto *const owner = static_cast<wsk_tcp_transport *>(context);
+    ExWaitForRundownProtectionRelease(&owner->control_rundown_);
+    PWSK_SOCKET socket = nullptr;
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&owner->lock_, &old_irql);
+    socket = owner->socket_;
+    KeReleaseSpinLock(&owner->lock_, old_irql);
+
+    NTSTATUS close_status = STATUS_SUCCESS;
+    if (socket) {
+      close_status = static_cast<NTSTATUS>(
+          detail::close_wsk_socket(socket, owner->close_irp_));
+    }
+
+    KeAcquireSpinLock(&owner->lock_, &old_irql);
+    owner->socket_ = nullptr;
+    owner->socket_closed_ = true;
+    if (!NT_SUCCESS(close_status) &&
+        owner->close_status_ == STATUS_CANCELLED)
+      owner->close_status_ = close_status;
+    KeReleaseSpinLock(&owner->lock_, old_irql);
+    owner->finish_activity();
+  }
+
+  passive_cleanup_item cleanup_;
+  passive_cleanup_domain *cleanup_domain_ = nullptr;
+  std::shared_ptr<detail::wsk_provider_state> provider_;
+  PWSK_SOCKET socket_ = nullptr;
+  PIRP close_irp_ = nullptr;
+  wsk_transport_limits limits_{};
+  io::transport_sink *sink_ = nullptr;
+
+  mutable KSPIN_LOCK lock_{};
+  EX_RUNDOWN_REF control_rundown_{};
+  LIST_ENTRY writes_{};
+  KEVENT drained_{};
+  WORK_QUEUE_ITEM shutdown_work_{};
+  receive_operation receive_{};
+  std::atomic<std::size_t> activities_{0};
+
+  bool started_ = false;
+  bool stopping_ = false;
+  bool write_closed_ = false;
+  bool receive_active_ = false;
+  bool socket_closed_ = false;
+  bool closed_notified_ = false;
+  NTSTATUS close_status_ = STATUS_CANCELLED;
+};
+
+struct wsk_listener_limits {
+  wsk_transport_limits connection{};
+  std::chrono::milliseconds accept_timeout{
+      (std::chrono::milliseconds::max)()};
+};
+
+/**
+ * @brief Bounded passive-level WSK TCP listener.
+ *
+ * A statically enabled WskAcceptEvent callback owns the bind-to-accept gap:
+ * one connection may wait in the listener without borrowing caller storage.
+ * Only one accept() may be active at a time. stop() rejects new callbacks,
+ * wakes a waiter, closes a queued connection, drains the listener socket, and
+ * then waits for the public accept boundary to return.
+ */
+class wsk_tcp_listener
+    : public std::enable_shared_from_this<wsk_tcp_listener> {
+public:
+  using pointer = std::shared_ptr<wsk_tcp_listener>;
+
+  wsk_tcp_listener(const wsk_tcp_listener &) = delete;
+  wsk_tcp_listener &operator=(const wsk_tcp_listener &) = delete;
+
+  ~wsk_tcp_listener() {
+    if (socket_ || queued_socket_) {
+      NT_ASSERT(KeGetCurrentIrql() == PASSIVE_LEVEL);
+      stop();
+    }
+    if (close_irp_)
+      IoFreeIrp(close_irp_);
+    if (queued_close_irp_)
+      IoFreeIrp(queued_close_irp_);
+  }
+
+  static ntl::result<pointer>
+  try_listen(wsk_provider &provider, const ip_endpoint &local,
+             wsk_listener_limits limits = {}) noexcept {
+    auto provider_state = provider.retain_state();
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL || !provider_state || !local ||
+        (local.family() != AF_INET && local.family() != AF_INET6) ||
+        limits.accept_timeout <= std::chrono::milliseconds::zero())
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+
+    PIRP operation_irp = IoAllocateIrp(1, FALSE);
+    PIRP close_irp = IoAllocateIrp(1, FALSE);
+    PIRP queued_close_irp = IoAllocateIrp(1, FALSE);
+    void *const storage = ntl::detail::allocate_pool_bytes(
+        sizeof(wsk_tcp_listener), alignof(wsk_tcp_listener),
+        ntl::pool_kind::nonpaged, ntl::pool_option::none,
+        ntl::pool_tag("lWtN"));
+    if (!operation_irp || !close_irp || !queued_close_irp || !storage) {
+      if (operation_irp)
+        IoFreeIrp(operation_irp);
+      if (close_irp)
+        IoFreeIrp(close_irp);
+      if (queued_close_irp)
+        IoFreeIrp(queued_close_irp);
+      if (storage)
+        ntl::detail::free_pool_bytes(
+            storage, ntl::pool_kind::nonpaged, ntl::pool_tag("lWtN"));
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+
+    auto *const result = new (storage) wsk_tcp_listener(
+        std::move(provider_state), close_irp, queued_close_irp, local, limits);
+    auto fail = [&](ntl::status failure) noexcept -> ntl::result<pointer> {
+      IoFreeIrp(operation_irp);
+      ntl::pool_deleter<wsk_tcp_listener>{
+          ntl::pool_tag("lWtN"), ntl::pool_kind::nonpaged}(result);
+      return ntl::unexpected(failure);
+    };
+
+    const WSK_PROVIDER_NPI *const native =
+        result->provider_->borrowed_native_npi();
+    detail::wsk_sync_wait wait{};
+    KeInitializeEvent(&wait.event, NotificationEvent, FALSE);
+    IoSetCompletionRoutine(operation_irp, &detail::wsk_sync_completion,
+                           &wait, TRUE, TRUE, TRUE);
+    NTSTATUS submitted = native->Dispatch->WskSocket(
+        native->Client, local.family(), SOCK_STREAM, IPPROTO_TCP,
+        WSK_FLAG_LISTEN_SOCKET, result, &listen_dispatch_, nullptr, nullptr,
+        nullptr, operation_irp);
+    ntl::status status = detail::finish_wsk_irp(
+        operation_irp, wait, submitted);
+    result->socket_ = static_cast<PWSK_SOCKET>(
+        reinterpret_cast<void *>(operation_irp->IoStatus.Information));
+    if (!status.is_ok() || !result->socket_)
+      return fail(status.is_ok()
+                      ? ntl::status{STATUS_INVALID_DEVICE_STATE}
+                      : status);
+
+    auto *const dispatch = static_cast<const WSK_PROVIDER_LISTEN_DISPATCH *>(
+        result->socket_->Dispatch);
+    KeClearEvent(&wait.event);
+    IoReuseIrp(operation_irp, STATUS_UNSUCCESSFUL);
+    IoSetCompletionRoutine(operation_irp, &detail::wsk_sync_completion,
+                           &wait, TRUE, TRUE, TRUE);
+    submitted = dispatch->WskBind(
+        result->socket_,
+        const_cast<SOCKADDR *>(local.borrowed_native_address()), 0,
+        operation_irp);
+    status = detail::finish_wsk_irp(operation_irp, wait, submitted);
+    if (!status.is_ok())
+      return fail(status);
+
+    SOCKADDR_STORAGE bound_storage{};
+    KeClearEvent(&wait.event);
+    IoReuseIrp(operation_irp, STATUS_UNSUCCESSFUL);
+    IoSetCompletionRoutine(operation_irp, &detail::wsk_sync_completion,
+                           &wait, TRUE, TRUE, TRUE);
+    submitted = dispatch->WskGetLocalAddress(
+        result->socket_, reinterpret_cast<SOCKADDR *>(&bound_storage),
+        operation_irp);
+    status = detail::finish_wsk_irp(operation_irp, wait, submitted);
+    if (!status.is_ok())
+      return fail(status);
+
+    const ULONG bound_length = bound_storage.ss_family == AF_INET
+                                   ? sizeof(SOCKADDR_IN)
+                                   : sizeof(SOCKADDR_IN6);
+    result->local_ = ip_endpoint::from_native(
+        reinterpret_cast<const SOCKADDR *>(&bound_storage), bound_length);
+    if (!result->local_)
+      return fail(STATUS_DATA_ERROR);
+
+    IoFreeIrp(operation_irp);
+    operation_irp = nullptr;
+    return own(result);
+  }
+
+  ip_endpoint local_endpoint() const noexcept { return local_; }
+
+  ntl::result<wsk_tcp_transport::pointer>
+  accept(ip_endpoint *local = nullptr,
+         ip_endpoint *remote = nullptr) noexcept {
+    auto lifetime = weak_from_this().lock();
+    if (!lifetime || KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+    bool expected = false;
+    if (!accept_active_.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel,
+            std::memory_order_acquire))
+      return ntl::unexpected(STATUS_DEVICE_BUSY);
+    if (!ExAcquireRundownProtection(&accept_rundown_)) {
+      accept_active_.store(false, std::memory_order_release);
+      return ntl::unexpected(STATUS_DELETE_PENDING);
+    }
+    auto finish = [&]() noexcept {
+      ExReleaseRundownProtection(&accept_rundown_);
+      accept_active_.store(false, std::memory_order_release);
+    };
+
+    PIRP accepted_close_irp = IoAllocateIrp(1, FALSE);
+    if (!accepted_close_irp) {
+      finish();
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+    const NTSTATUS waited = wait_for_accept();
+    if (!NT_SUCCESS(waited)) {
+      IoFreeIrp(accepted_close_irp);
+      finish();
+      return ntl::unexpected(waited);
+    }
+
+    PWSK_SOCKET accepted_socket = nullptr;
+    ip_endpoint accepted_local{};
+    ip_endpoint accepted_remote{};
+    NTSTATUS failure = STATUS_SUCCESS;
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&queue_lock_, &old_irql);
+    accepted_socket = queued_socket_;
+    accepted_local = queued_local_;
+    accepted_remote = queued_remote_;
+    failure = callback_failure_;
+    queued_socket_ = nullptr;
+    queued_local_ = {};
+    queued_remote_ = {};
+    callback_failure_ = STATUS_SUCCESS;
+    KeClearEvent(&accepted_event_);
+    KeReleaseSpinLock(&queue_lock_, old_irql);
+
+    if (!accepted_socket) {
+      IoFreeIrp(accepted_close_irp);
+      finish();
+      return ntl::unexpected(NT_SUCCESS(failure)
+                                 ? ntl::status{STATUS_DELETE_PENDING}
+                                 : ntl::status{failure});
+    }
+    if (local)
+      *local = accepted_local;
+    if (remote)
+      *remote = accepted_remote;
+    auto transport = wsk_tcp_transport::try_adopt_with_state(
+        provider_, accepted_socket, accepted_close_irp, limits_.connection);
+    finish();
+    return transport;
+  }
+
+  void stop() noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL) {
+      NT_ASSERT(false);
+      return;
+    }
+    if (stopping_.exchange(true, std::memory_order_acq_rel))
+      return;
+
+    PWSK_SOCKET queued = nullptr;
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&queue_lock_, &old_irql);
+    queue_stopping_ = true;
+    queued = queued_socket_;
+    queued_socket_ = nullptr;
+    queued_local_ = {};
+    queued_remote_ = {};
+    KeSetEvent(&accepted_event_, IO_NO_INCREMENT, FALSE);
+    KeReleaseSpinLock(&queue_lock_, old_irql);
+
+    if (queued)
+      (void)detail::close_wsk_socket(queued, queued_close_irp_);
+    if (socket_) {
+      (void)detail::close_wsk_socket(socket_, close_irp_);
+      socket_ = nullptr;
+    }
+    ExWaitForRundownProtectionRelease(&accept_rundown_);
+  }
+
+private:
+  static ntl::result<pointer> own(wsk_tcp_listener *value) noexcept {
+    if (!value || !value->cleanup_domain_) {
+      if (value)
+        ntl::pool_deleter<wsk_tcp_listener>{
+            ntl::pool_tag("lWtN"), ntl::pool_kind::nonpaged}(value);
+      return ntl::unexpected(STATUS_DEVICE_NOT_READY);
+    }
+    const ntl::status registered =
+        value->cleanup_domain_->register_item(value->cleanup_);
+    if (!registered.is_ok()) {
+      ntl::pool_deleter<wsk_tcp_listener>{
+          ntl::pool_tag("lWtN"), ntl::pool_kind::nonpaged}(value);
+      return ntl::unexpected(registered);
+    }
+    try {
+      return ntl::ok(pointer(
+          value, [](wsk_tcp_listener *listener) noexcept {
+            listener->cleanup_domain_->retire_deferred(listener->cleanup_);
+          }));
+    } catch (...) {
+      value->cleanup_domain_->retire(value->cleanup_);
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+  }
+
+  wsk_tcp_listener(std::shared_ptr<detail::wsk_provider_state> provider,
+                   PIRP close_irp, PIRP queued_close_irp,
+                   ip_endpoint local, wsk_listener_limits limits) noexcept
+      : cleanup_(&wsk_tcp_listener::cleanup_at_passive, this),
+        cleanup_domain_(borrowed_runtime_passive_cleanup_domain()),
+        provider_(std::move(provider)), close_irp_(close_irp),
+        queued_close_irp_(queued_close_irp), local_(local), limits_(limits) {
+    ExInitializeRundownProtection(&accept_rundown_);
+    KeInitializeSpinLock(&queue_lock_);
+    KeInitializeEvent(&accepted_event_, NotificationEvent, FALSE);
+  }
+
+  NTSTATUS wait_for_accept() noexcept {
+    LARGE_INTEGER due_time{};
+    LARGE_INTEGER *due_time_pointer = nullptr;
+    if (limits_.accept_timeout != (std::chrono::milliseconds::max)()) {
+      constexpr auto maximum_milliseconds =
+          (std::numeric_limits<LONGLONG>::max)() / 10'000;
+      const auto count = limits_.accept_timeout.count();
+      const LONGLONG milliseconds =
+          count > maximum_milliseconds
+              ? maximum_milliseconds
+              : static_cast<LONGLONG>(count);
+      due_time.QuadPart = -milliseconds * 10'000;
+      due_time_pointer = &due_time;
+    }
+    const NTSTATUS waited = KeWaitForSingleObject(
+        &accepted_event_, Executive, KernelMode, FALSE, due_time_pointer);
+    return waited == STATUS_TIMEOUT ? STATUS_IO_TIMEOUT : waited;
+  }
+
+  static NTSTATUS WSKAPI accept_event(
+      void *context, ULONG, PSOCKADDR local, PSOCKADDR remote,
+      PWSK_SOCKET accepted_socket, void **accepted_context,
+      const WSK_CLIENT_CONNECTION_DISPATCH **accepted_dispatch) noexcept {
+    if (accepted_context)
+      *accepted_context = nullptr;
+    if (accepted_dispatch)
+      *accepted_dispatch = nullptr;
+    auto *const listener = static_cast<wsk_tcp_listener *>(context);
+    if (!listener)
+      return STATUS_REQUEST_NOT_ACCEPTED;
+
+    if (!accepted_socket) {
+      KIRQL old_irql = 0;
+      KeAcquireSpinLock(&listener->queue_lock_, &old_irql);
+      listener->callback_failure_ = STATUS_FILE_FORCED_CLOSED;
+      KeSetEvent(&listener->accepted_event_, IO_NO_INCREMENT, FALSE);
+      KeReleaseSpinLock(&listener->queue_lock_, old_irql);
+      return STATUS_REQUEST_NOT_ACCEPTED;
+    }
+
+    const ULONG local_length =
+        local && local->sa_family == AF_INET ? sizeof(SOCKADDR_IN)
+                                             : sizeof(SOCKADDR_IN6);
+    const ULONG remote_length =
+        remote && remote->sa_family == AF_INET ? sizeof(SOCKADDR_IN)
+                                               : sizeof(SOCKADDR_IN6);
+    const ip_endpoint owned_local =
+        ip_endpoint::from_native(local, local_length);
+    const ip_endpoint owned_remote =
+        ip_endpoint::from_native(remote, remote_length);
+
+    NTSTATUS result = STATUS_SUCCESS;
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&listener->queue_lock_, &old_irql);
+    if (listener->queue_stopping_ || listener->queued_socket_) {
+      result = STATUS_REQUEST_NOT_ACCEPTED;
+    } else {
+      listener->queued_socket_ = accepted_socket;
+      listener->queued_local_ = owned_local;
+      listener->queued_remote_ = owned_remote;
+      KeSetEvent(&listener->accepted_event_, IO_NO_INCREMENT, FALSE);
+    }
+    KeReleaseSpinLock(&listener->queue_lock_, old_irql);
+    return result;
+  }
+
+  static void cleanup_at_passive(void *context) noexcept {
+    ntl::pool_deleter<wsk_tcp_listener>{
+        ntl::pool_tag("lWtN"), ntl::pool_kind::nonpaged}(
+        static_cast<wsk_tcp_listener *>(context));
+  }
+
+  passive_cleanup_item cleanup_;
+  passive_cleanup_domain *cleanup_domain_ = nullptr;
+  std::shared_ptr<detail::wsk_provider_state> provider_;
+  PWSK_SOCKET socket_ = nullptr;
+  PIRP close_irp_ = nullptr;
+  PIRP queued_close_irp_ = nullptr;
+  ip_endpoint local_{};
+  wsk_listener_limits limits_{};
+  EX_RUNDOWN_REF accept_rundown_{};
+  KSPIN_LOCK queue_lock_{};
+  KEVENT accepted_event_{};
+  PWSK_SOCKET queued_socket_ = nullptr;
+  ip_endpoint queued_local_{};
+  ip_endpoint queued_remote_{};
+  NTSTATUS callback_failure_ = STATUS_SUCCESS;
+  bool queue_stopping_ = false;
+  std::atomic<bool> accept_active_{false};
+  std::atomic<bool> stopping_{false};
+
+  inline static const WSK_CLIENT_LISTEN_DISPATCH listen_dispatch_{
+      &wsk_tcp_listener::accept_event, nullptr, nullptr};
+};
+
+} // namespace ntl::net::kernel

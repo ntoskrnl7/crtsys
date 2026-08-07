@@ -41,8 +41,6 @@ inline constexpr ntl::rpc::method<0xA64, std::uint32_t(std::uint32_t)>
 std::uint64_t
 publish_progress_callback(const ntl::flt::communication_context &context,
                           std::uint32_t percent, bool reliable);
-std::uint32_t call_app_callback(const ntl::flt::communication_context &context,
-                                std::uint32_t value);
 #endif
 
 } // namespace crtsys_minifilter_communication_sample

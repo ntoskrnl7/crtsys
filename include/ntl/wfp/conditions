@@ -350,6 +350,7 @@ inline constexpr bool ipv4_policy_layer =
     std::is_same_v<Layer, layers::datagram_data_v4> ||
     std::is_same_v<Layer, layers::inbound_transport_v4> ||
     std::is_same_v<Layer, layers::outbound_transport_v4> ||
+    std::is_same_v<Layer, layers::outbound_ip_packet_v4> ||
     std::is_same_v<Layer, layers::ale_endpoint_closure_v4> ||
     std::is_same_v<Layer, layers::name_resolution_cache_v4> ||
     std::is_same_v<Layer, layers::ipsec_v4>;
@@ -365,159 +366,220 @@ inline constexpr bool ipv6_policy_layer =
     std::is_same_v<Layer, layers::datagram_data_v6> ||
     std::is_same_v<Layer, layers::inbound_transport_v6> ||
     std::is_same_v<Layer, layers::outbound_transport_v6> ||
+    std::is_same_v<Layer, layers::outbound_ip_packet_v6> ||
     std::is_same_v<Layer, layers::ale_endpoint_closure_v6> ||
     std::is_same_v<Layer, layers::name_resolution_cache_v6> ||
     std::is_same_v<Layer, layers::ipsec_v6>;
 
+// Policy-condition availability is an exact per-layer schema.  Do not infer
+// it from broad layer families: WFP layers that look similar do not
+// necessarily expose the same FWPM_CONDITION_* keys.
+struct application_condition;
+struct user_condition;
+struct package_condition;
+struct protocol_condition;
+struct local_port_condition;
+struct remote_port_condition;
+struct local_address_condition;
+struct remote_address_condition;
+struct direction_condition;
+struct interface_condition;
+struct subinterface_condition;
+struct interface_type_condition;
+struct ip_flags_condition;
+struct compartment_condition;
+struct current_profile_condition;
+struct original_profile_condition;
+struct loopback_condition;
+struct reauthorization_condition;
+struct mac_frame_condition;
+struct vswitch_condition;
+
+template <class... Conditions> struct condition_schema {
+  template <class Condition>
+  static constexpr bool contains =
+      (std::is_same_v<Condition, Conditions> || ...);
+};
+
+template <class Layer> struct layer_schema;
+
+#define NTL_WFP_LAYER_SCHEMA(layer, ...)                                      \
+  template <> struct layer_schema<layers::layer>                              \
+      : condition_schema<__VA_ARGS__> {}
+
+#define NTL_WFP_ALE_COMMON                                                    \
+  application_condition, user_condition, package_condition,                  \
+      protocol_condition, local_port_condition
+#define NTL_WFP_IP_COMMON                                                     \
+  local_address_condition, remote_address_condition
+#define NTL_WFP_PACKET_COMMON                                                 \
+  protocol_condition, local_port_condition, remote_port_condition,            \
+      local_address_condition, remote_address_condition, interface_condition, \
+      subinterface_condition, interface_type_condition, ip_flags_condition,   \
+      compartment_condition, current_profile_condition, loopback_condition
+
+NTL_WFP_LAYER_SCHEMA(ale_connect_redirect_v4, NTL_WFP_ALE_COMMON,
+                     remote_port_condition, NTL_WFP_IP_COMMON,
+                     ip_flags_condition, compartment_condition);
+NTL_WFP_LAYER_SCHEMA(ale_connect_redirect_v6, NTL_WFP_ALE_COMMON,
+                     remote_port_condition, NTL_WFP_IP_COMMON,
+                     ip_flags_condition, compartment_condition);
+NTL_WFP_LAYER_SCHEMA(ale_bind_redirect_v4, NTL_WFP_ALE_COMMON,
+                     local_address_condition, ip_flags_condition,
+                     compartment_condition, reauthorization_condition);
+NTL_WFP_LAYER_SCHEMA(ale_bind_redirect_v6, NTL_WFP_ALE_COMMON,
+                     local_address_condition, ip_flags_condition,
+                     compartment_condition, reauthorization_condition);
+
+#define NTL_WFP_AUTH_COMMON                                                   \
+  NTL_WFP_ALE_COMMON, remote_port_condition, NTL_WFP_IP_COMMON,               \
+      interface_condition, subinterface_condition, interface_type_condition,  \
+      ip_flags_condition, compartment_condition, current_profile_condition,   \
+      original_profile_condition, reauthorization_condition
+NTL_WFP_LAYER_SCHEMA(ale_auth_connect_v4, NTL_WFP_AUTH_COMMON);
+NTL_WFP_LAYER_SCHEMA(ale_auth_connect_v6, NTL_WFP_AUTH_COMMON);
+NTL_WFP_LAYER_SCHEMA(ale_auth_recv_accept_v4, NTL_WFP_AUTH_COMMON,
+                     loopback_condition);
+NTL_WFP_LAYER_SCHEMA(ale_auth_recv_accept_v6, NTL_WFP_AUTH_COMMON,
+                     loopback_condition);
+
+#define NTL_WFP_FLOW_SCHEMA(layer)                                            \
+  NTL_WFP_LAYER_SCHEMA(                                                       \
+      layer, NTL_WFP_ALE_COMMON, remote_port_condition, NTL_WFP_IP_COMMON,    \
+      direction_condition, interface_type_condition, ip_flags_condition,      \
+      compartment_condition, loopback_condition)
+NTL_WFP_FLOW_SCHEMA(ale_flow_established_v4);
+NTL_WFP_FLOW_SCHEMA(ale_flow_established_v6);
+
+#define NTL_WFP_STREAM_SCHEMA(layer)                                          \
+  NTL_WFP_LAYER_SCHEMA(layer, local_port_condition, remote_port_condition,    \
+                       NTL_WFP_IP_COMMON, direction_condition,                \
+                       ip_flags_condition, compartment_condition)
+NTL_WFP_STREAM_SCHEMA(stream_v4);
+NTL_WFP_STREAM_SCHEMA(stream_v6);
+
+#define NTL_WFP_DATAGRAM_SCHEMA(layer)                                        \
+  NTL_WFP_LAYER_SCHEMA(layer, NTL_WFP_PACKET_COMMON, direction_condition)
+NTL_WFP_DATAGRAM_SCHEMA(datagram_data_v4);
+NTL_WFP_DATAGRAM_SCHEMA(datagram_data_v6);
+NTL_WFP_LAYER_SCHEMA(inbound_transport_v4, NTL_WFP_PACKET_COMMON);
+NTL_WFP_LAYER_SCHEMA(inbound_transport_v6, NTL_WFP_PACKET_COMMON);
+NTL_WFP_LAYER_SCHEMA(outbound_transport_v4, NTL_WFP_PACKET_COMMON);
+NTL_WFP_LAYER_SCHEMA(outbound_transport_v6, NTL_WFP_PACKET_COMMON);
+
+#define NTL_WFP_IP_PACKET_SCHEMA(layer)                                       \
+  NTL_WFP_LAYER_SCHEMA(layer, local_address_condition,                       \
+                       remote_address_condition, interface_condition,        \
+                       subinterface_condition, ip_flags_condition,           \
+                       compartment_condition)
+NTL_WFP_IP_PACKET_SCHEMA(outbound_ip_packet_v4);
+NTL_WFP_IP_PACKET_SCHEMA(outbound_ip_packet_v6);
+
+#define NTL_WFP_ENDPOINT_SCHEMA(layer)                                        \
+  NTL_WFP_LAYER_SCHEMA(layer, NTL_WFP_ALE_COMMON, remote_port_condition,      \
+                       NTL_WFP_IP_COMMON, ip_flags_condition,                 \
+                       compartment_condition)
+NTL_WFP_ENDPOINT_SCHEMA(ale_endpoint_closure_v4);
+NTL_WFP_ENDPOINT_SCHEMA(ale_endpoint_closure_v6);
+NTL_WFP_LAYER_SCHEMA(name_resolution_cache_v4, application_condition,
+                     user_condition, remote_address_condition);
+NTL_WFP_LAYER_SCHEMA(name_resolution_cache_v6, application_condition,
+                     user_condition, remote_address_condition);
+
+#define NTL_WFP_IPSEC_SCHEMA(layer)                                           \
+  NTL_WFP_LAYER_SCHEMA(layer, protocol_condition, local_port_condition,      \
+                       remote_port_condition, NTL_WFP_IP_COMMON,             \
+                       current_profile_condition)
+NTL_WFP_IPSEC_SCHEMA(ipsec_v4);
+NTL_WFP_IPSEC_SCHEMA(ipsec_v6);
+
+#define NTL_WFP_MAC_SCHEMA(layer)                                             \
+  NTL_WFP_LAYER_SCHEMA(layer, interface_condition, mac_frame_condition,      \
+                       compartment_condition)
+NTL_WFP_MAC_SCHEMA(inbound_mac_frame_ethernet);
+NTL_WFP_MAC_SCHEMA(outbound_mac_frame_ethernet);
+NTL_WFP_LAYER_SCHEMA(ingress_vswitch_ethernet, vswitch_condition,
+                     compartment_condition);
+NTL_WFP_LAYER_SCHEMA(egress_vswitch_ethernet, vswitch_condition,
+                     compartment_condition);
+NTL_WFP_LAYER_SCHEMA(inbound_transport_fast);
+NTL_WFP_LAYER_SCHEMA(outbound_transport_fast);
+
+#undef NTL_WFP_MAC_SCHEMA
+#undef NTL_WFP_IPSEC_SCHEMA
+#undef NTL_WFP_ENDPOINT_SCHEMA
+#undef NTL_WFP_IP_PACKET_SCHEMA
+#undef NTL_WFP_DATAGRAM_SCHEMA
+#undef NTL_WFP_STREAM_SCHEMA
+#undef NTL_WFP_FLOW_SCHEMA
+#undef NTL_WFP_AUTH_COMMON
+#undef NTL_WFP_PACKET_COMMON
+#undef NTL_WFP_IP_COMMON
+#undef NTL_WFP_ALE_COMMON
+#undef NTL_WFP_LAYER_SCHEMA
+
+template <class Layer, class Condition>
+inline constexpr bool layer_supports_condition =
+    layer_schema<Layer>::template contains<Condition>;
+
 template <class Layer>
 inline constexpr bool ale_identity_condition_layer =
-    connect_redirect_layer<Layer> || bind_redirect_layer<Layer> ||
-    ale_authorization_layer<Layer> ||
-    std::is_same_v<Layer, layers::ale_flow_established_v4> ||
-    std::is_same_v<Layer, layers::ale_flow_established_v6> ||
-    std::is_same_v<Layer, layers::ale_endpoint_closure_v4> ||
-    std::is_same_v<Layer, layers::ale_endpoint_closure_v6> ||
-    std::is_same_v<Layer, layers::name_resolution_cache_v4> ||
-    std::is_same_v<Layer, layers::name_resolution_cache_v6>;
-
+    layer_supports_condition<Layer, application_condition> &&
+    layer_supports_condition<Layer, user_condition>;
 template <class Layer>
 inline constexpr bool package_identity_condition_layer =
-    ale_identity_condition_layer<Layer> &&
-    !std::is_same_v<Layer, layers::name_resolution_cache_v4> &&
-    !std::is_same_v<Layer, layers::name_resolution_cache_v6>;
-
+    layer_supports_condition<Layer, package_condition>;
 template <class Layer>
 inline constexpr bool protocol_condition_layer =
-    package_identity_condition_layer<Layer> ||
-    std::is_same_v<Layer, layers::datagram_data_v4> ||
-    std::is_same_v<Layer, layers::datagram_data_v6> ||
-    std::is_same_v<Layer, layers::inbound_transport_v4> ||
-    std::is_same_v<Layer, layers::inbound_transport_v6> ||
-    std::is_same_v<Layer, layers::outbound_transport_v4> ||
-    std::is_same_v<Layer, layers::outbound_transport_v6> ||
-    std::is_same_v<Layer, layers::ipsec_v4> ||
-    std::is_same_v<Layer, layers::ipsec_v6>;
-
+    layer_supports_condition<Layer, protocol_condition>;
 template <class Layer>
 inline constexpr bool local_port_condition_layer =
-    protocol_condition_layer<Layer> || stream_layer<Layer>;
-
+    layer_supports_condition<Layer, local_port_condition>;
 template <class Layer>
 inline constexpr bool remote_port_condition_layer =
-    local_port_condition_layer<Layer> && !bind_redirect_layer<Layer>;
-
+    layer_supports_condition<Layer, remote_port_condition>;
 template <class Layer>
 inline constexpr bool local_address_condition_layer =
-    (ipv4_policy_layer<Layer> || ipv6_policy_layer<Layer>) &&
-    !std::is_same_v<Layer, layers::name_resolution_cache_v4> &&
-    !std::is_same_v<Layer, layers::name_resolution_cache_v6>;
-
+    layer_supports_condition<Layer, local_address_condition>;
 template <class Layer>
 inline constexpr bool remote_address_condition_layer =
-    (ipv4_policy_layer<Layer> || ipv6_policy_layer<Layer>) &&
-    !bind_redirect_layer<Layer>;
-
+    layer_supports_condition<Layer, remote_address_condition>;
 template <class Layer>
 inline constexpr bool direction_condition_layer =
-    std::is_same_v<Layer, layers::ale_flow_established_v4> ||
-    std::is_same_v<Layer, layers::ale_flow_established_v6> ||
-    std::is_same_v<Layer, layers::stream_v4> ||
-    std::is_same_v<Layer, layers::stream_v6> ||
-    std::is_same_v<Layer, layers::datagram_data_v4> ||
-    std::is_same_v<Layer, layers::datagram_data_v6>;
-
+    layer_supports_condition<Layer, direction_condition>;
 template <class Layer>
 inline constexpr bool interface_condition_layer =
-    ale_authorization_layer<Layer> ||
-    std::is_same_v<Layer, layers::datagram_data_v4> ||
-    std::is_same_v<Layer, layers::datagram_data_v6> ||
-    std::is_same_v<Layer, layers::inbound_transport_v4> ||
-    std::is_same_v<Layer, layers::inbound_transport_v6> ||
-    std::is_same_v<Layer, layers::outbound_transport_v4> ||
-    std::is_same_v<Layer, layers::outbound_transport_v6> ||
-    std::is_same_v<Layer, layers::inbound_mac_frame_ethernet> ||
-    std::is_same_v<Layer, layers::outbound_mac_frame_ethernet>;
-
+    layer_supports_condition<Layer, interface_condition>;
 template <class Layer>
 inline constexpr bool subinterface_condition_layer =
-    ale_authorization_layer<Layer> ||
-    std::is_same_v<Layer, layers::datagram_data_v4> ||
-    std::is_same_v<Layer, layers::datagram_data_v6> ||
-    std::is_same_v<Layer, layers::inbound_transport_v4> ||
-    std::is_same_v<Layer, layers::inbound_transport_v6> ||
-    std::is_same_v<Layer, layers::outbound_transport_v4> ||
-    std::is_same_v<Layer, layers::outbound_transport_v6>;
-
+    layer_supports_condition<Layer, subinterface_condition>;
 template <class Layer>
 inline constexpr bool interface_type_condition_layer =
-    ale_authorization_layer<Layer> ||
-    std::is_same_v<Layer, layers::ale_flow_established_v4> ||
-    std::is_same_v<Layer, layers::ale_flow_established_v6> ||
-    std::is_same_v<Layer, layers::datagram_data_v4> ||
-    std::is_same_v<Layer, layers::datagram_data_v6> ||
-    std::is_same_v<Layer, layers::inbound_transport_v4> ||
-    std::is_same_v<Layer, layers::inbound_transport_v6> ||
-    std::is_same_v<Layer, layers::outbound_transport_v4> ||
-    std::is_same_v<Layer, layers::outbound_transport_v6>;
-
+    layer_supports_condition<Layer, interface_type_condition>;
 template <class Layer>
 inline constexpr bool ip_flags_condition_layer =
-    (ipv4_policy_layer<Layer> || ipv6_policy_layer<Layer>) &&
-    !std::is_same_v<Layer, layers::name_resolution_cache_v4> &&
-    !std::is_same_v<Layer, layers::name_resolution_cache_v6> &&
-    !std::is_same_v<Layer, layers::ipsec_v4> &&
-    !std::is_same_v<Layer, layers::ipsec_v6>;
-
+    layer_supports_condition<Layer, ip_flags_condition>;
 template <class Layer>
 inline constexpr bool mac_frame_condition_layer =
-    std::is_same_v<Layer, layers::inbound_mac_frame_ethernet> ||
-    std::is_same_v<Layer, layers::outbound_mac_frame_ethernet>;
-
+    layer_supports_condition<Layer, mac_frame_condition>;
 template <class Layer>
 inline constexpr bool vswitch_condition_layer =
-    std::is_same_v<Layer, layers::ingress_vswitch_ethernet> ||
-    std::is_same_v<Layer, layers::egress_vswitch_ethernet>;
-
+    layer_supports_condition<Layer, vswitch_condition>;
 template <class Layer>
 inline constexpr bool compartment_condition_layer =
-    (((ipv4_policy_layer<Layer> || ipv6_policy_layer<Layer>) &&
-      !std::is_same_v<Layer, layers::name_resolution_cache_v4> &&
-      !std::is_same_v<Layer, layers::name_resolution_cache_v6> &&
-      !std::is_same_v<Layer, layers::ipsec_v4> &&
-      !std::is_same_v<Layer, layers::ipsec_v6>) ||
-     mac_frame_condition_layer<Layer> ||
-     vswitch_condition_layer<Layer>);
-
+    layer_supports_condition<Layer, compartment_condition>;
 template <class Layer>
 inline constexpr bool current_profile_condition_layer =
-    ale_authorization_layer<Layer> ||
-    std::is_same_v<Layer, layers::inbound_transport_v4> ||
-    std::is_same_v<Layer, layers::inbound_transport_v6> ||
-    std::is_same_v<Layer, layers::outbound_transport_v4> ||
-    std::is_same_v<Layer, layers::outbound_transport_v6> ||
-    std::is_same_v<Layer, layers::ipsec_v4> ||
-    std::is_same_v<Layer, layers::ipsec_v6>;
-
+    layer_supports_condition<Layer, current_profile_condition>;
 template <class Layer>
 inline constexpr bool original_profile_condition_layer =
-    ale_authorization_layer<Layer>;
-
+    layer_supports_condition<Layer, original_profile_condition>;
 template <class Layer>
 inline constexpr bool loopback_flag_layer =
-    std::is_same_v<Layer, layers::ale_auth_recv_accept_v4> ||
-    std::is_same_v<Layer, layers::ale_auth_recv_accept_v6> ||
-    std::is_same_v<Layer, layers::ale_flow_established_v4> ||
-    std::is_same_v<Layer, layers::ale_flow_established_v6> ||
-    std::is_same_v<Layer, layers::datagram_data_v4> ||
-    std::is_same_v<Layer, layers::datagram_data_v6> ||
-    std::is_same_v<Layer, layers::inbound_transport_v4> ||
-    std::is_same_v<Layer, layers::inbound_transport_v6> ||
-    std::is_same_v<Layer, layers::outbound_transport_v4> ||
-    std::is_same_v<Layer, layers::outbound_transport_v6>;
-
+    layer_supports_condition<Layer, loopback_condition>;
 template <class Layer>
 inline constexpr bool reauthorization_flag_layer =
-    ale_authorization_layer<Layer> || bind_redirect_layer<Layer>;
+    layer_supports_condition<Layer, reauthorization_condition>;
 
 class condition_list {
 public:

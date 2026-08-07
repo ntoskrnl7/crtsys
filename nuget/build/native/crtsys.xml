@@ -31,4 +31,16 @@
                DisplayName="NTL WFP"
                Description="Use ntl::main for a Windows Filtering Platform callout driver and automatically apply the WFP build contract." />
   </EnumProperty>
+  <BoolProperty Name="CrtSysUseNtlKernelMsQuic"
+                DisplayName="NTL kernel MsQuic backend"
+                Description="Expose the pinned MsQuic kernel ABI, select the Windows 10 version 2004 contract, and link the NMR client import. The runtime provider remains an explicit deployment dependency."
+                Category="DriverModel"
+                Default="false">
+    <BoolProperty.DataSource>
+      <DataSource Persistence="ProjectFile"
+                  Label="Configuration"
+                  HasConfigurationCondition="true"
+                  SourceOfDefaultValue="AfterContext" />
+    </BoolProperty.DataSource>
+  </BoolProperty>
 </Rule>

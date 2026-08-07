@@ -14,3 +14,6 @@ VOID
 CrtSysUninitializeRuntime(
     _In_ PDRIVER_OBJECT DriverObject
     );
+
+NTSTATUS CrtSysInitializeNetworkPassiveCleanup(VOID);
+VOID CrtSysUninitializeNetworkPassiveCleanup(VOID);

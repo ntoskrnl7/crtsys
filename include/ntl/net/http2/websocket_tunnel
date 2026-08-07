@@ -1,0 +1,395 @@
+/**
+ * @file http2_websocket_tunnel
+ * @brief RFC 8441 Extended CONNECT WebSocket inspection sessions.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include <ntl/net/http2/transform>
+#include <ntl/net/websocket/permessage_deflate>
+#include <ntl/net/websocket/stream_transform>
+
+#include <array>
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <span>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <type_traits>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
+namespace ntl::net::http2 {
+
+enum class unsupported_tunnel_action : std::uint8_t {
+  passthrough = 1,
+  block = 2,
+};
+
+class websocket_tunnel_policy_ref {
+public:
+  websocket_tunnel_policy_ref() noexcept = default;
+  websocket_tunnel_policy_ref(const websocket_tunnel_policy_ref &) noexcept =
+      default;
+  websocket_tunnel_policy_ref &operator=(
+      const websocket_tunnel_policy_ref &) noexcept = default;
+
+  template <class Policy>
+    requires(!std::is_same_v<std::remove_cvref_t<Policy>,
+                             websocket_tunnel_policy_ref>)
+  explicit websocket_tunnel_policy_ref(Policy &policy) noexcept
+      : context_(&policy), apply_([](
+            void *value, std::uint32_t stream_id,
+            connection_direction direction,
+            ntl::net::websocket::message &message) noexcept {
+          try {
+            if constexpr (requires(Policy &candidate) {
+                            candidate.transform(
+                                stream_id, direction, message);
+                          })
+              return static_cast<ntl::net::websocket::rewrite_result>(
+                  static_cast<Policy *>(value)->transform(
+                      stream_id, direction, message));
+            else
+              return static_cast<ntl::net::websocket::rewrite_result>(
+                  (*static_cast<Policy *>(value))(
+                      stream_id, direction, message));
+          } catch (...) {
+            return ntl::net::websocket::rewrite_result::block();
+          }
+        }) {}
+
+  ntl::net::websocket::rewrite_result apply(
+      std::uint32_t stream_id, connection_direction direction,
+      ntl::net::websocket::message &message) const noexcept {
+    return apply_ ? apply_(context_, stream_id, direction, message)
+                  : ntl::net::websocket::rewrite_result::unchanged();
+  }
+
+private:
+  using apply_function = ntl::net::websocket::rewrite_result (*)(
+      void *, std::uint32_t, connection_direction,
+      ntl::net::websocket::message &) noexcept;
+  void *context_ = nullptr;
+  apply_function apply_ = nullptr;
+};
+
+struct websocket_tunnel_options {
+  std::size_t maximum_sessions = 256;
+  std::size_t maximum_http2_frame_payload = default_maximum_frame_size;
+  unsupported_tunnel_action unsupported = unsupported_tunnel_action::block;
+  ntl::net::websocket::transform_limits message_limits{};
+  ntl::net::websocket::stream_transform_options stream_limits{
+      .maximum_pending_wire_bytes = 2 * 1024 * 1024 + 14,
+      .maximum_output_bytes_per_push = 8 * 1024 * 1024};
+  std::function<std::array<std::byte, 4>()> client_mask_provider;
+
+  bool valid() const noexcept {
+    return maximum_sessions != 0 && maximum_http2_frame_payload != 0 &&
+           maximum_http2_frame_payload <= absolute_maximum_frame_size &&
+           stream_limits.maximum_pending_wire_bytes >= 14 &&
+           stream_limits.maximum_output_bytes_per_push != 0;
+  }
+};
+
+namespace websocket_tunnel_detail {
+
+inline char ascii_lower(char value) noexcept {
+  return value >= 'A' && value <= 'Z'
+             ? static_cast<char>(value + ('a' - 'A'))
+             : value;
+}
+
+inline bool contains_ascii_ci(
+    std::string_view value, std::string_view token) noexcept {
+  if (token.empty())
+    return true;
+  if (token.size() > value.size())
+    return false;
+  for (std::size_t offset = 0; offset <= value.size() - token.size();
+       ++offset) {
+    bool equal = true;
+    for (std::size_t index = 0; index != token.size(); ++index) {
+      if (ascii_lower(value[offset + index]) !=
+          ascii_lower(token[index])) {
+        equal = false;
+        break;
+      }
+    }
+    if (equal)
+      return true;
+  }
+  return false;
+}
+
+} // namespace websocket_tunnel_detail
+
+/**
+ * @brief Connection-local WebSocket handler consumed by proxy_session.
+ *
+ * HTTP/2 DATA boundaries are ignored. Each direction preserves partial
+ * WebSocket wire bytes, reassembles complete messages, applies the supplied
+ * policy, and reframes the transformed message. permessage-deflate is enabled
+ * only when it was offered by the client and selected by the server.
+ */
+class websocket_tunnel_handler {
+public:
+  template <class Policy>
+  explicit websocket_tunnel_handler(
+      std::shared_ptr<Policy> policy,
+      websocket_tunnel_options options = {})
+      : retained_policy_(std::move(policy)),
+        policy_([this]() -> Policy & {
+          if (!retained_policy_)
+            throw std::invalid_argument(
+                "HTTP/2 WebSocket policy is null");
+          return *static_cast<Policy *>(retained_policy_.get());
+        }()),
+        options_(std::move(options)) {
+    if (!options_.valid())
+      throw std::invalid_argument("invalid HTTP/2 WebSocket tunnel limits");
+  }
+
+  /** Explicit non-owning adapter; the referenced policy must outlive this. */
+  explicit websocket_tunnel_handler(
+      websocket_tunnel_policy_ref policy = {},
+      websocket_tunnel_options options = {})
+      : policy_(policy), options_(std::move(options)) {
+    if (!options_.valid())
+      throw std::invalid_argument("invalid HTTP/2 WebSocket tunnel limits");
+  }
+
+  websocket_tunnel_handler(const websocket_tunnel_handler &) = delete;
+  websocket_tunnel_handler &operator=(const websocket_tunnel_handler &) =
+      delete;
+  websocket_tunnel_handler(websocket_tunnel_handler &&) = delete;
+  websocket_tunnel_handler &operator=(websocket_tunnel_handler &&) = delete;
+
+  ntl::result<connect_disposition> admit(
+      std::uint32_t stream_id,
+      const ntl::net::http::request_message &request) noexcept {
+    try {
+      if (request.method != "CONNECT")
+        return ntl::unexpected(STATUS_INVALID_PARAMETER);
+      if (!request.extended_protocol)
+        return ntl::ok(connect_disposition::reject);
+      if (*request.extended_protocol != "websocket")
+        return ntl::ok(
+            options_.unsupported == unsupported_tunnel_action::passthrough
+                ? connect_disposition::passthrough
+                : connect_disposition::reject);
+      auto value = std::make_shared<session>(
+          policy_, options_.message_limits, stream_id);
+      value->protocol = *request.extended_protocol;
+      value->offered_extensions = std::string(
+          request.headers.first("sec-websocket-extensions")
+              .value_or(std::string_view{}));
+      std::lock_guard lock(lock_);
+      if (sessions_.size() >= options_.maximum_sessions &&
+          !sessions_.contains(stream_id))
+        return ntl::unexpected(STATUS_QUOTA_EXCEEDED);
+      sessions_[stream_id] = std::move(value);
+      return ntl::ok(connect_disposition::inspect);
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+  void observe_response(
+      std::uint32_t stream_id,
+      const ntl::net::http::response_message &response) {
+    std::shared_ptr<session> value;
+    {
+      std::lock_guard lock(lock_);
+      const auto found = sessions_.find(stream_id);
+      if (found == sessions_.end())
+        return;
+      if (response.status >= 100 && response.status < 200)
+        return;
+      if (response.status < 200 || response.status >= 300) {
+        sessions_.erase(found);
+        return;
+      }
+      value = found->second;
+    }
+
+    if (value->protocol == "websocket") {
+      const std::string_view selected =
+          response.headers.first("sec-websocket-extensions")
+              .value_or(std::string_view{});
+      const auto compression =
+          ntl::net::websocket::parse_permessage_deflate_response(selected);
+      if (!compression)
+        throw std::system_error(
+            static_cast<int>(compression.status()), std::system_category(),
+            "HTTP/2 peer selected an invalid WebSocket extension");
+      if (compression->enabled &&
+          !websocket_tunnel_detail::contains_ascii_ci(
+              value->offered_extensions, "permessage-deflate"))
+        throw std::runtime_error(
+            "HTTP/2 peer selected permessage-deflate without an offer");
+      if (!options_.client_mask_provider)
+        throw std::invalid_argument(
+            "a WebSocket client mask provider is required");
+      const auto selected_compression =
+          compression->enabled
+              ? std::optional<
+                    ntl::net::websocket::permessage_deflate_parameters>(
+                    *compression)
+              : std::nullopt;
+      std::scoped_lock direction_locks(
+          value->client_lock, value->server_lock);
+      value->client =
+          std::make_unique<ntl::net::websocket::stream_transformer>(
+              ntl::net::websocket::sender_role::client,
+              value->client_policy, selected_compression,
+              options_.client_mask_provider, options_.stream_limits);
+      value->server =
+          std::make_unique<ntl::net::websocket::stream_transformer>(
+              ntl::net::websocket::sender_role::server,
+              value->server_policy, selected_compression,
+              std::function<std::array<std::byte, 4>()>{},
+              options_.stream_limits);
+    }
+    value->established.store(true, std::memory_order_release);
+  }
+
+  ntl::result<std::optional<std::vector<outbound_frame>>> transform(
+      connection_direction direction,
+      const frame_view &frame) noexcept {
+    try {
+      const std::uint32_t stream_id = frame.header().stream_id;
+      std::shared_ptr<session> value;
+      {
+        std::lock_guard lock(lock_);
+        const auto found = sessions_.find(stream_id);
+        if (found == sessions_.end())
+          return ntl::ok(
+              std::optional<std::vector<outbound_frame>>{});
+        value = found->second;
+      }
+      if (!value->established.load(std::memory_order_acquire))
+        return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+      if (value->protocol != "websocket") {
+        if (options_.unsupported == unsupported_tunnel_action::passthrough)
+          return ntl::ok(
+              std::optional<std::vector<outbound_frame>>{});
+        return ntl::unexpected(STATUS_NOT_SUPPORTED);
+      }
+      const auto payload = frame.data_payload();
+      if (!payload)
+        return ntl::unexpected(payload.status());
+
+      ntl::result<ntl::net::websocket::stream_transform_result> transformed =
+          ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+      if (direction == connection_direction::requests) {
+        std::lock_guard direction_lock(value->client_lock);
+        if (!value->client)
+          return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+        transformed = value->client->consume(
+            *payload, frame.header().end_stream());
+      } else {
+        std::lock_guard direction_lock(value->server_lock);
+        if (!value->server)
+          return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+        transformed = value->server->consume(
+            *payload, frame.header().end_stream());
+      }
+      if (!transformed)
+        return ntl::unexpected(transformed.status());
+      if (transformed->action !=
+          ntl::net::websocket::rewrite_action::forward)
+        return ntl::unexpected(
+            transformed->failure == STATUS_SUCCESS
+                ? STATUS_ACCESS_DENIED
+                : transformed->failure);
+
+      std::vector<outbound_frame> frames;
+      const ntl::status encoded = transform_detail::append_data_frames(
+          frames, stream_id, transformed->wire,
+          frame.header().end_stream(),
+          options_.maximum_http2_frame_payload);
+      if (!encoded.is_ok())
+        return ntl::unexpected(encoded);
+      if (frame.header().end_stream())
+        mark_ended(stream_id, direction);
+      return ntl::ok(
+          std::optional<std::vector<outbound_frame>>(
+              std::move(frames)));
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+  void reset(std::uint32_t stream_id) noexcept {
+    std::lock_guard lock(lock_);
+    sessions_.erase(stream_id);
+  }
+
+private:
+  struct session {
+    session(websocket_tunnel_policy_ref policy,
+            ntl::net::websocket::transform_limits limits,
+            std::uint32_t stream_id)
+        : client_policy(limits), server_policy(limits) {
+      client_policy.transform(
+          [policy, stream_id](ntl::net::websocket::message &message) {
+            return policy.apply(
+                stream_id, connection_direction::requests, message);
+          });
+      server_policy.transform(
+          [policy, stream_id](ntl::net::websocket::message &message) {
+            return policy.apply(
+                stream_id, connection_direction::responses, message);
+          });
+    }
+
+    std::string protocol;
+    std::string offered_extensions;
+    ntl::net::websocket::message_transform_pipeline client_policy;
+    ntl::net::websocket::message_transform_pipeline server_policy;
+    std::unique_ptr<ntl::net::websocket::stream_transformer> client;
+    std::unique_ptr<ntl::net::websocket::stream_transformer> server;
+    std::mutex client_lock;
+    std::mutex server_lock;
+    std::atomic<bool> established{false};
+    bool client_ended = false;
+    bool server_ended = false;
+  };
+
+  void mark_ended(
+      std::uint32_t stream_id,
+      connection_direction direction) noexcept {
+    std::lock_guard lock(lock_);
+    const auto found = sessions_.find(stream_id);
+    if (found == sessions_.end())
+      return;
+    if (direction == connection_direction::requests)
+      found->second->client_ended = true;
+    else
+      found->second->server_ended = true;
+    if (found->second->client_ended && found->second->server_ended)
+      sessions_.erase(found);
+  }
+
+  std::shared_ptr<void> retained_policy_;
+  websocket_tunnel_policy_ref policy_;
+  websocket_tunnel_options options_;
+  std::mutex lock_;
+  std::unordered_map<std::uint32_t, std::shared_ptr<session>> sessions_;
+};
+
+} // namespace ntl::net::http2

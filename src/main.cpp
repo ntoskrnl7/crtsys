@@ -5,6 +5,7 @@
 #include <corecrt_startup.h>
 #include <vcruntime_internal.h>
 #include <Ldk/ldk.h>
+#include "../include/ntl/net/kernel/passive_cleanup_domain"
 #include "runtime_internal.h"
 
 namespace ntl {
@@ -77,6 +78,76 @@ HANDLE CrtSyspCompilerTlsGateHandle = NULL;
 PMDL CrtSyspCompilerTlsRuntimeViewMdl = NULL;
 ULONG CrtSyspCompilerTlsIndex = CRTSYS_COMPILER_TLS_INDEX_INVALID;
 BOOLEAN CrtSyspTypeInfoInitialized = FALSE;
+BOOLEAN CrtSyspExitHandlersAvailable = FALSE;
+
+namespace {
+alignas(ntl::net::kernel::passive_cleanup_domain)
+unsigned char CrtSyspNetworkPassiveCleanupStorage[
+    sizeof(ntl::net::kernel::passive_cleanup_domain)];
+ntl::net::kernel::passive_cleanup_domain *
+    CrtSyspNetworkPassiveCleanup = nullptr;
+}
+
+namespace ntl::net::kernel {
+passive_cleanup_domain *borrowed_runtime_passive_cleanup_domain() noexcept {
+  return CrtSyspNetworkPassiveCleanup;
+}
+
+namespace detail {
+ntl::status
+register_runtime_passive_cleanup(passive_cleanup_item &item) noexcept {
+  auto *const domain = borrowed_runtime_passive_cleanup_domain();
+  return domain ? domain->register_item(item)
+                : ntl::status{STATUS_DEVICE_NOT_READY};
+}
+
+void retire_runtime_passive_cleanup(passive_cleanup_item &item) noexcept {
+  auto *const domain = borrowed_runtime_passive_cleanup_domain();
+  NT_ASSERT(domain != nullptr);
+  if (domain)
+    domain->retire(item);
+}
+
+void retire_runtime_passive_cleanup_deferred(
+    passive_cleanup_item &item) noexcept {
+  auto *const domain = borrowed_runtime_passive_cleanup_domain();
+  NT_ASSERT(domain != nullptr);
+  if (domain)
+    domain->retire_deferred(item);
+}
+
+ntl::status flush_runtime_passive_cleanup() noexcept {
+  auto *const domain = borrowed_runtime_passive_cleanup_domain();
+  return domain ? domain->flush_retired()
+                : ntl::status{STATUS_DEVICE_NOT_READY};
+}
+} // namespace detail
+} // namespace ntl::net::kernel
+
+NTSTATUS CrtSysInitializeNetworkPassiveCleanup(VOID) {
+  PAGED_CODE();
+  if (CrtSyspNetworkPassiveCleanup)
+    return STATUS_SUCCESS;
+  auto *domain = ::new (CrtSyspNetworkPassiveCleanupStorage)
+      ntl::net::kernel::passive_cleanup_domain();
+  const NTSTATUS status = static_cast<NTSTATUS>(domain->start_status());
+  if (!NT_SUCCESS(status)) {
+    domain->~passive_cleanup_domain();
+    return status;
+  }
+  CrtSyspNetworkPassiveCleanup = domain;
+  return STATUS_SUCCESS;
+}
+
+VOID CrtSysUninitializeNetworkPassiveCleanup(VOID) {
+  PAGED_CODE();
+  auto *domain = CrtSyspNetworkPassiveCleanup;
+  if (!domain)
+    return;
+  (void)domain->stop_and_drain();
+  CrtSyspNetworkPassiveCleanup = nullptr;
+  domain->~passive_cleanup_domain();
+}
 
 NTSTATUS
 CrtSysOpenSharedCompilerTlsGate (
@@ -761,7 +832,18 @@ CrtSysInitializeRuntime(_In_ PDRIVER_OBJECT DriverObject,
     return STATUS_FAILED_DRIVER_ENTRY;
   }
 
+  // _cexit() runs UCRT pre-terminators such as _fcloseall().  Those routines
+  // are not safe until the C initializer table has completed successfully.
+  // In particular, a low-resource failure while preparing argv/environment
+  // reaches the common rollback path before stdio has initialized _piob.
+  CrtSyspExitHandlersAvailable = TRUE;
   _initterm(__xc_a, __xc_z);
+
+  status = CrtSysInitializeNetworkPassiveCleanup();
+  if (!NT_SUCCESS(status)) {
+    CrtSysUninitializeRuntime(DriverObject);
+    return status;
+  }
 
   __scrt_current_native_startup_state =
       __scrt_native_startup_state::initialized;
@@ -778,9 +860,18 @@ CrtSysUninitializeRuntime (
     PAGED_CODE();
     UNREFERENCED_PARAMETER(DriverObject);
 
+    // Network resources can retire from APC/DISPATCH callbacks. Drain their
+    // joined PASSIVE worker while driver code and the CRT are still resident.
+    CrtSysUninitializeNetworkPassiveCleanup();
+
     // LDK-created workers may still execute CRT code, so drain them first.
     LdkPrepareForTermination();
-    _cexit();
+    if (CrtSyspExitHandlersAvailable) {
+      // Clear the phase first so recursive or repeated cleanup cannot run the
+      // UCRT exit tables twice.
+      CrtSyspExitHandlersAvailable = FALSE;
+      _cexit();
+    }
     if (CrtSyspTypeInfoInitialized) {
       __scrt_uninitialize_type_info();
       CrtSyspTypeInfoInitialized = FALSE;

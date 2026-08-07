@@ -1,0 +1,1617 @@
+/**
+ * @file kernel_http2_proxy_session
+ * @brief Structured bounded HTTP/2 proxy I/O for kernel byte streams.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/net/kernel/http2_proxy_session is a kernel-mode header"
+#endif
+
+#include <ntl/net/borrowed_memory_resource>
+#include <ntl/net/http2/proxy_connection>
+#include <ntl/net/kernel/continuation>
+#include <ntl/net/kernel/started_task>
+#include <ntl/net/kernel/task>
+#include <ntl/pool_allocator>
+
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <coroutine>
+#include <cstddef>
+#include <cstdint>
+#include <deque>
+#include <exception>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <span>
+#include <stdexcept>
+#include <utility>
+#include <vector>
+
+namespace ntl::net::http2 {
+
+enum class kernel_proxy_session_termination : std::uint8_t {
+  downstream_eof = 1,
+  upstream_eof = 2,
+  policy_drop = 3,
+  graceful_goaway = 4,
+};
+
+/** How the owner must interrupt the sibling relay after the first terminal. */
+enum class kernel_proxy_session_stop_mode : std::uint8_t {
+  /** Wake pending reads but preserve the transports for TLS close-notify. */
+  graceful,
+  /** Abort both transports for policy drop or protocol/I/O failure. */
+  abortive,
+};
+
+enum class kernel_proxy_session_failure_point : std::uint8_t {
+  none = 0,
+  source_read = 1,
+  destination_write = 2,
+  source_write = 3,
+  protocol = 4,
+};
+
+struct kernel_proxy_session_stop_context {
+  kernel_proxy_session_stop_mode mode =
+      kernel_proxy_session_stop_mode::abortive;
+  connection_direction direction = connection_direction::requests;
+  ntl::status status{STATUS_UNHANDLED_EXCEPTION};
+  kernel_proxy_session_failure_point failure_point =
+      kernel_proxy_session_failure_point::none;
+};
+
+struct kernel_proxy_session_result {
+  kernel_proxy_session_termination termination =
+      kernel_proxy_session_termination::downstream_eof;
+  std::size_t downstream_to_upstream_bytes = 0;
+  std::size_t upstream_to_downstream_bytes = 0;
+  std::size_t completed_requests = 0;
+  std::size_t completed_responses = 0;
+  unsigned last_response_status = 0;
+  unsigned last_terminal_status = 0;
+  kernel_proxy_session_failure_point failure_point =
+      kernel_proxy_session_failure_point::none;
+};
+
+struct kernel_proxy_preflight_options {
+  std::size_t maximum_frame_payload = 1024 * 1024;
+  std::size_t maximum_buffered_origin_bytes = 4 * 1024 * 1024;
+  /** Advertise RFC 8441 support while the origin connection is deferred. */
+  bool advertise_extended_connect = false;
+
+  constexpr bool valid() const noexcept {
+    return maximum_frame_payload != 0 &&
+           maximum_frame_payload <= absolute_maximum_frame_size &&
+           maximum_buffered_origin_bytes != 0;
+  }
+};
+
+namespace kernel_proxy_session_detail {
+struct preflight_access;
+}
+
+/**
+ * Move-only result of inspecting the first downstream HTTP/2 request.
+ *
+ * The buffered origin-facing frames are intentionally private.  They can only
+ * be consumed by the continuation overload of run_kernel_proxy_session, which
+ * prevents callers from forwarding a request that was blocked or from
+ * replaying the preflight output twice.
+ */
+template <class WorkspaceLease> class kernel_proxy_session_preflight {
+public:
+  kernel_proxy_session_preflight(
+      const kernel_proxy_session_preflight &) = delete;
+  kernel_proxy_session_preflight &operator=(
+      const kernel_proxy_session_preflight &) = delete;
+  kernel_proxy_session_preflight(
+      kernel_proxy_session_preflight &&) noexcept = default;
+  kernel_proxy_session_preflight &operator=(
+      kernel_proxy_session_preflight &&) noexcept = default;
+
+  bool requires_upstream() const noexcept { return requires_upstream_; }
+  const kernel_proxy_session_result &summary() const noexcept {
+    return summary_;
+  }
+
+private:
+  explicit kernel_proxy_session_preflight(WorkspaceLease workspace) noexcept
+      : workspace_(std::move(workspace)) {}
+
+  bool requires_upstream_ = false;
+  std::size_t buffered_bytes_ = 0;
+  kernel_proxy_session_result summary_{};
+  std::vector<outbound_frame> upstream_frames_;
+  WorkspaceLease workspace_;
+
+  friend struct kernel_proxy_session_detail::preflight_access;
+};
+
+/** Default CONNECT behavior: reject before origin-facing HEADERS. */
+struct reject_tunnel_handler {
+  ntl::result<connect_disposition> admit(
+      std::uint32_t,
+      const ntl::net::http::request_message &) noexcept {
+    return ntl::ok(connect_disposition::reject);
+  }
+
+  ntl::result<std::optional<std::vector<outbound_frame>>> transform(
+      connection_direction, const frame_view &) noexcept {
+    return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+  }
+
+  void reset(std::uint32_t) noexcept {}
+};
+
+/** Caller-owned fixed buffers, normally leased from kernel::workspace_pool. */
+struct kernel_proxy_session_buffer_views {
+  std::span<std::byte> requests;
+  std::span<std::byte> responses;
+
+  bool valid(std::size_t maximum_frame_payload) const noexcept {
+    if (maximum_frame_payload == 0 ||
+        maximum_frame_payload > absolute_maximum_frame_size)
+      return false;
+    const std::size_t required =
+        maximum_frame_payload + frame_header_size;
+    if (requests.size() < required || responses.size() < required)
+      return false;
+    const auto request_begin =
+        reinterpret_cast<std::uintptr_t>(requests.data());
+    const auto request_end = request_begin + requests.size();
+    const auto response_begin =
+        reinterpret_cast<std::uintptr_t>(responses.data());
+    const auto response_end = response_begin + responses.size();
+    return request_end <= response_begin || response_end <= request_begin;
+  }
+};
+
+struct kernel_proxy_session_workspace {
+  explicit kernel_proxy_session_workspace(
+      std::size_t maximum_frame_payload,
+      std::size_t maximum_message_storage_size = 96 * 1024 * 1024,
+      std::size_t maximum_single_allocation = 16 * 1024 * 1024)
+      : message_memory_(
+            *ntl::pmr::nonpaged_pool_resource(),
+            {.maximum_allocated_bytes = maximum_message_storage_size,
+             .maximum_single_allocation = maximum_single_allocation}),
+        requests(maximum_frame_payload + frame_header_size),
+        responses(maximum_frame_payload + frame_header_size) {
+    if (maximum_frame_payload == 0 ||
+        maximum_frame_payload > absolute_maximum_frame_size ||
+        maximum_message_storage_size == 0 ||
+        maximum_single_allocation == 0 ||
+        maximum_single_allocation > maximum_message_storage_size)
+      throw std::invalid_argument("invalid kernel HTTP/2 workspace limits");
+  }
+
+  kernel_proxy_session_workspace(const kernel_proxy_session_workspace &) =
+      delete;
+  kernel_proxy_session_workspace &
+  operator=(const kernel_proxy_session_workspace &) = delete;
+
+  std::vector<std::byte> requests;
+  std::vector<std::byte> responses;
+
+  kernel_proxy_session_buffer_views borrowed_buffers() noexcept {
+    return {requests, responses};
+  }
+
+  ntl::net::http::message_memory_ref borrowed_memory() noexcept {
+    return {&message_memory_};
+  }
+
+  std::size_t peak_message_storage() const noexcept {
+    return message_memory_.peak_allocated_bytes();
+  }
+
+private:
+  ntl::net::borrowed_bounded_memory_resource message_memory_;
+};
+
+namespace kernel_proxy_session_detail {
+
+struct preflight_access {
+  template <class WorkspaceLease>
+  static kernel_proxy_session_preflight<WorkspaceLease>
+  make(WorkspaceLease workspace) {
+    return kernel_proxy_session_preflight<WorkspaceLease>(
+        std::move(workspace));
+  }
+
+  template <class WorkspaceLease>
+  static void require_upstream(
+      kernel_proxy_session_preflight<WorkspaceLease> &value) noexcept {
+    value.requires_upstream_ = true;
+  }
+
+  template <class WorkspaceLease>
+  static kernel_proxy_session_result &summary(
+      kernel_proxy_session_preflight<WorkspaceLease> &value) noexcept {
+    return value.summary_;
+  }
+
+  template <class WorkspaceLease>
+  static std::vector<outbound_frame> &frames(
+      kernel_proxy_session_preflight<WorkspaceLease> &value) noexcept {
+    return value.upstream_frames_;
+  }
+
+  template <class WorkspaceLease>
+  static std::size_t &buffered_bytes(
+      kernel_proxy_session_preflight<WorkspaceLease> &value) noexcept {
+    return value.buffered_bytes_;
+  }
+
+  template <class WorkspaceLease>
+  static WorkspaceLease &workspace(
+      kernel_proxy_session_preflight<WorkspaceLease> &value) noexcept {
+    return value.workspace_;
+  }
+};
+
+class async_mutex {
+public:
+  class guard {
+  public:
+    guard() noexcept = default;
+    explicit guard(async_mutex &owner) noexcept : owner_(&owner) {}
+    guard(const guard &) = delete;
+    guard &operator=(const guard &) = delete;
+    guard(guard &&other) noexcept
+        : owner_(std::exchange(other.owner_, nullptr)) {}
+    ~guard() {
+      if (owner_)
+        owner_->unlock();
+    }
+
+  private:
+    async_mutex *owner_ = nullptr;
+  };
+
+  class lock_operation {
+  public:
+    explicit lock_operation(async_mutex &owner) noexcept : owner_(&owner) {}
+    lock_operation(const lock_operation &) = delete;
+    lock_operation &operator=(const lock_operation &) = delete;
+    lock_operation(lock_operation &&) = delete;
+    lock_operation &operator=(lock_operation &&) = delete;
+    ~lock_operation() { unregister(); }
+    bool await_ready() noexcept {
+      std::lock_guard lock(owner_->lock_);
+      if (owner_->cancelled_) {
+        cancelled_ = true;
+        return true;
+      }
+      if (!owner_->owned_) {
+        owner_->owned_ = true;
+        acquired_ = true;
+        return true;
+      }
+      return false;
+    }
+    bool await_suspend(std::coroutine_handle<> continuation) noexcept {
+      std::lock_guard lock(owner_->lock_);
+      if (owner_->cancelled_) {
+        cancelled_ = true;
+        return false;
+      }
+      if (!owner_->owned_) {
+        owner_->owned_ = true;
+        acquired_ = true;
+        return false;
+      }
+      continuation_ = continuation;
+      try {
+        owner_->waiters_.push_back(this);
+        queued_ = true;
+      } catch (...) {
+        failed_ = true;
+        return false;
+      }
+      return true;
+    }
+    guard await_resume() {
+      if (cancelled_ || !acquired_)
+        throw ntl::exception(
+            failed_ ? STATUS_INSUFFICIENT_RESOURCES : STATUS_CANCELLED,
+            "kernel HTTP/2 writer acquisition failed");
+      return guard(*owner_);
+    }
+
+  private:
+    friend class async_mutex;
+
+    void unregister() noexcept {
+      if (!owner_ || !queued_)
+        return;
+      std::lock_guard lock(owner_->lock_);
+      if (!queued_)
+        return;
+      const auto found = std::find(
+          owner_->waiters_.begin(), owner_->waiters_.end(), this);
+      if (found != owner_->waiters_.end())
+        owner_->waiters_.erase(found);
+      queued_ = false;
+    }
+
+    async_mutex *owner_ = nullptr;
+    std::coroutine_handle<> continuation_{};
+    bool acquired_ = false;
+    bool cancelled_ = false;
+    bool failed_ = false;
+    bool queued_ = false;
+  };
+
+  lock_operation acquire() noexcept { return lock_operation(*this); }
+
+  void cancel() noexcept {
+    std::vector<lock_operation *> waiters;
+    {
+      std::lock_guard lock(lock_);
+      if (cancelled_)
+        return;
+      cancelled_ = true;
+      waiters.swap(waiters_);
+      for (auto *waiter : waiters) {
+        waiter->cancelled_ = true;
+        waiter->queued_ = false;
+      }
+    }
+    for (auto *waiter : waiters)
+      ntl::net::kernel::resume_deferred(waiter->continuation_);
+  }
+
+private:
+  void unlock() noexcept {
+    lock_operation *next = nullptr;
+    {
+      std::lock_guard lock(lock_);
+      if (!waiters_.empty() && !cancelled_) {
+        next = waiters_.front();
+        waiters_.erase(waiters_.begin());
+        next->acquired_ = true;
+        next->queued_ = false;
+      } else {
+        owned_ = false;
+      }
+    }
+    if (next)
+      ntl::net::kernel::resume_deferred(next->continuation_);
+  }
+
+  std::mutex lock_;
+  bool owned_ = false;
+  bool cancelled_ = false;
+  std::vector<lock_operation *> waiters_;
+};
+
+template <class Stream> class serialized_writer {
+public:
+  explicit serialized_writer(Stream &stream) noexcept : stream_(&stream) {}
+
+  ntl::net::kernel::task<ntl::result<std::size_t>>
+  write(std::span<const std::byte> bytes) {
+    try {
+      auto ownership = co_await mutex_.acquire();
+      auto written = co_await stream_->write_all(bytes);
+      if (!written)
+        co_return ntl::unexpected(written.status());
+      if (*written != bytes.size())
+        co_return ntl::unexpected(STATUS_DATA_ERROR);
+      co_return ntl::ok(*written);
+    } catch (const ntl::exception &error) {
+      co_return ntl::unexpected(error.get_status());
+    } catch (const std::bad_alloc &) {
+      co_return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      co_return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+  void cancel() noexcept { mutex_.cancel(); }
+
+private:
+  Stream *stream_ = nullptr;
+  async_mutex mutex_;
+};
+
+class async_barrier {
+public:
+  class wait_operation {
+  public:
+    explicit wait_operation(async_barrier &owner) noexcept : owner_(&owner) {}
+    wait_operation(const wait_operation &) = delete;
+    wait_operation &operator=(const wait_operation &) = delete;
+    wait_operation(wait_operation &&) = delete;
+    wait_operation &operator=(wait_operation &&) = delete;
+    ~wait_operation() { unregister(); }
+    bool await_ready() const noexcept {
+      std::lock_guard lock(owner_->lock_);
+      return owner_->ready_;
+    }
+    bool await_suspend(std::coroutine_handle<> continuation) noexcept {
+      std::lock_guard lock(owner_->lock_);
+      if (owner_->ready_)
+        return false;
+      if (owner_->waiter_) {
+        duplicate_ = true;
+        return false;
+      }
+      continuation_ = continuation;
+      queued_ = true;
+      owner_->waiter_ = this;
+      return true;
+    }
+    ntl::status await_resume() const noexcept {
+      if (duplicate_)
+        return STATUS_INVALID_DEVICE_STATE;
+      std::lock_guard lock(owner_->lock_);
+      return owner_->status_;
+    }
+
+  private:
+    friend class async_barrier;
+
+    void unregister() noexcept {
+      if (!owner_ || !queued_)
+        return;
+      std::lock_guard lock(owner_->lock_);
+      if (queued_ && owner_->waiter_ == this)
+        owner_->waiter_ = nullptr;
+      queued_ = false;
+    }
+
+    async_barrier *owner_ = nullptr;
+    std::coroutine_handle<> continuation_{};
+    bool queued_ = false;
+    bool duplicate_ = false;
+  };
+
+  wait_operation wait() noexcept { return wait_operation(*this); }
+  void signal() noexcept { complete(STATUS_SUCCESS); }
+  void cancel() noexcept { complete(STATUS_CANCELLED); }
+
+private:
+  void complete(NTSTATUS status) noexcept {
+    std::coroutine_handle<> continuation;
+    {
+      std::lock_guard lock(lock_);
+      if (ready_)
+        return;
+      ready_ = true;
+      status_ = status;
+      auto *waiter = std::exchange(waiter_, nullptr);
+      if (waiter) {
+        waiter->queued_ = false;
+        continuation = waiter->continuation_;
+      }
+    }
+    if (continuation)
+      ntl::net::kernel::resume_deferred(continuation);
+  }
+
+  mutable std::mutex lock_;
+  bool ready_ = false;
+  ntl::status status_{STATUS_PENDING};
+  wait_operation *waiter_ = nullptr;
+};
+
+template <class Stream>
+ntl::net::kernel::task<ntl::result<std::size_t>>
+read_some(Stream &stream, std::span<std::byte> destination) {
+  if constexpr (requires {
+                  stream.read_some_borrowed(
+                      destination,
+                      ntl::net::read_options{
+                          .timeout = (std::chrono::milliseconds::max)()});
+                }) {
+    co_return co_await stream.read_some_borrowed(
+        destination,
+        {.timeout = (std::chrono::milliseconds::max)()});
+  } else {
+    co_return co_await stream.read_some_borrowed(destination);
+  }
+}
+
+template <class Stream>
+ntl::net::kernel::task<ntl::result<bool>>
+read_exact(Stream &stream, std::span<std::byte> destination,
+           bool allow_initial_eof) {
+  std::size_t used = 0;
+  while (used != destination.size()) {
+    auto received = co_await read_some(stream, destination.subspan(used));
+    if (!received)
+      co_return ntl::unexpected(received.status());
+    if (*received == 0) {
+      if (used == 0 && allow_initial_eof)
+        co_return ntl::ok(false);
+      co_return ntl::unexpected(STATUS_END_OF_FILE);
+    }
+    if (*received > destination.size() - used)
+      co_return ntl::unexpected(STATUS_DATA_ERROR);
+    used += *received;
+  }
+  co_return ntl::ok(true);
+}
+
+template <class Stream>
+ntl::net::kernel::task<ntl::result<std::optional<std::span<const std::byte>>>>
+read_frame(Stream &stream, std::span<std::byte> workspace,
+           std::size_t maximum_frame_payload) {
+  auto header_read = co_await read_exact(
+      stream, workspace.first(frame_header_size), true);
+  if (!header_read)
+    co_return ntl::unexpected(header_read.status());
+  if (!*header_read)
+    co_return ntl::ok(
+        std::optional<std::span<const std::byte>>{});
+  auto header = inspect_header(scatter_view::from_contiguous(
+      std::span<const std::byte>(workspace.first(frame_header_size))));
+  if (!header)
+    co_return ntl::unexpected(header.status());
+  if (header->payload_size > maximum_frame_payload)
+    co_return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+  const std::size_t wire_size = frame_header_size + header->payload_size;
+  if (wire_size > workspace.size())
+    co_return ntl::unexpected(STATUS_BUFFER_TOO_SMALL);
+  if (header->payload_size != 0) {
+    auto payload_read = co_await read_exact(
+        stream, workspace.subspan(frame_header_size, header->payload_size),
+        false);
+    if (!payload_read)
+      co_return ntl::unexpected(payload_read.status());
+  }
+  co_return ntl::ok(std::optional<std::span<const std::byte>>(
+      std::span<const std::byte>(workspace.first(wire_size))));
+}
+
+struct shared_result {
+  shared_result() = default;
+  explicit shared_result(kernel_proxy_session_result initial) noexcept
+      : value(std::move(initial)) {}
+
+  void add_bytes(connection_direction direction, std::size_t count) noexcept {
+    std::lock_guard lock(mutex);
+    if (direction == connection_direction::requests)
+      value.downstream_to_upstream_bytes += count;
+    else
+      value.upstream_to_downstream_bytes += count;
+  }
+  void observe(connection_direction direction,
+               const proxy_connection_step &step) noexcept {
+    std::lock_guard lock(mutex);
+    if (step.message_complete && !step.informational) {
+      if (direction == connection_direction::requests)
+        ++value.completed_requests;
+      else
+        ++value.completed_responses;
+      if (step.response)
+        value.last_response_status = step.response->status;
+    }
+    if (step.terminal_status)
+      value.last_terminal_status = step.terminal_status;
+    if (step.drop_flow)
+      value.termination = kernel_proxy_session_termination::policy_drop;
+  }
+  void eof(connection_direction direction) noexcept {
+    std::lock_guard lock(mutex);
+    if (value.termination == kernel_proxy_session_termination::policy_drop)
+      return;
+    value.termination = direction == connection_direction::requests
+                            ? kernel_proxy_session_termination::downstream_eof
+                            : kernel_proxy_session_termination::upstream_eof;
+  }
+  void goaway(connection_direction direction) noexcept {
+    std::lock_guard lock(mutex);
+    if (direction == connection_direction::requests)
+      downstream_goaway = true;
+    else
+      upstream_goaway = true;
+  }
+  void graceful_goaway() noexcept {
+    std::lock_guard lock(mutex);
+    if (value.termination != kernel_proxy_session_termination::policy_drop)
+      value.termination = kernel_proxy_session_termination::graceful_goaway;
+  }
+  bool saw_goaway(connection_direction direction) const noexcept {
+    std::lock_guard lock(mutex);
+    return direction == connection_direction::requests
+               ? downstream_goaway
+               : upstream_goaway;
+  }
+  void failure(kernel_proxy_session_failure_point point) noexcept {
+    std::lock_guard lock(mutex);
+    if (value.failure_point == kernel_proxy_session_failure_point::none)
+      value.failure_point = point;
+  }
+  kernel_proxy_session_result snapshot() const noexcept {
+    std::lock_guard lock(mutex);
+    return value;
+  }
+
+  mutable std::mutex mutex;
+  kernel_proxy_session_result value;
+  bool downstream_goaway = false;
+  bool upstream_goaway = false;
+};
+
+inline bool is_post_goaway_close_status(ntl::status status) noexcept {
+  // SEC_E_CONTEXT_EXPIRED is returned by Schannel writes after the peer's
+  // authenticated close_notify has expired the shared security context.
+  constexpr NTSTATUS security_context_expired =
+      static_cast<NTSTATUS>(0x80090317u);
+  const NTSTATUS value = static_cast<NTSTATUS>(status);
+  return value == security_context_expired ||
+         value == STATUS_END_OF_FILE || value == STATUS_CONNECTION_RESET ||
+         value == STATUS_CONNECTION_DISCONNECTED ||
+         value == STATUS_PIPE_DISCONNECTED;
+}
+
+inline constexpr bool is_discardable_control_after_authenticated_tls_close(
+    const frame_header &header, NTSTATUS status) noexcept {
+  constexpr NTSTATUS security_context_expired =
+      static_cast<NTSTATUS>(0x80090317u);
+  if (status != security_context_expired)
+    return false;
+  switch (header.type) {
+  case frame_type::settings:
+  case frame_type::priority:
+  case frame_type::reset_stream:
+  case frame_type::ping:
+  case frame_type::window_update:
+    return true;
+  default:
+    return false;
+  }
+}
+
+static_assert(is_discardable_control_after_authenticated_tls_close(
+    {.type = frame_type::window_update},
+    static_cast<NTSTATUS>(0x80090317u)));
+static_assert(!is_discardable_control_after_authenticated_tls_close(
+    {.type = frame_type::data},
+    static_cast<NTSTATUS>(0x80090317u)));
+
+template <class Stop> class session_scope {
+public:
+  explicit session_scope(Stop stop) : stop_(std::move(stop)) {}
+
+  void finish(connection_direction direction, ntl::status status) noexcept {
+    bool first = false;
+    {
+      std::lock_guard lock(mutex_);
+      if (!finished_) {
+        finished_ = true;
+        primary_ = status;
+        first = true;
+      }
+    }
+    if (first) {
+      try {
+        stop_(direction, status);
+      } catch (...) {
+        std::lock_guard lock(mutex_);
+        if (primary_.is_ok())
+          primary_ = STATUS_UNHANDLED_EXCEPTION;
+      }
+    }
+  }
+
+  ntl::status primary() const noexcept {
+    std::lock_guard lock(mutex_);
+    return primary_;
+  }
+
+private:
+  Stop stop_;
+  mutable std::mutex mutex_;
+  bool finished_ = false;
+  ntl::status primary_{STATUS_PENDING};
+};
+
+template <class Writer>
+ntl::net::kernel::task<ntl::result<std::size_t>>
+write_frames(Writer &writer, send_window &window,
+             std::vector<outbound_frame> frames) {
+  try {
+    std::size_t transferred = 0;
+    for (auto &frame : frames) {
+      if (frame.flow_controlled_bytes)
+        co_await window.reserve(frame.stream_id,
+                                frame.flow_controlled_bytes);
+      auto written = co_await writer.write(frame.wire);
+      if (!written)
+        co_return ntl::unexpected(written.status());
+      transferred += *written;
+      const auto parsed = frame_view::parse(
+          scatter_view::from_contiguous(frame.wire),
+          {absolute_maximum_frame_size, false});
+      if (parsed && parsed->header().end_stream())
+        window.close(frame.stream_id);
+    }
+    co_return ntl::ok(transferred);
+  } catch (const std::bad_alloc &) {
+    co_return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    co_return ntl::unexpected(STATUS_CANCELLED);
+  }
+}
+
+template <class WorkspaceLease>
+ntl::status append_preflight_frames(
+    kernel_proxy_session_preflight<WorkspaceLease> &preflight,
+    std::vector<outbound_frame> frames,
+    std::size_t maximum_buffered_bytes) noexcept {
+  try {
+    auto &used = preflight_access::buffered_bytes(preflight);
+    auto &destination = preflight_access::frames(preflight);
+    for (const auto &frame : frames) {
+      if (frame.wire.size() > maximum_buffered_bytes -
+                                  (std::min)(maximum_buffered_bytes, used))
+        return STATUS_BUFFER_OVERFLOW;
+      used += frame.wire.size();
+    }
+    destination.reserve(destination.size() + frames.size());
+    for (auto &frame : frames)
+      destination.push_back(std::move(frame));
+    return ntl::status::ok();
+  } catch (const std::bad_alloc &) {
+    return STATUS_INSUFFICIENT_RESOURCES;
+  } catch (...) {
+    return STATUS_UNHANDLED_EXCEPTION;
+  }
+}
+
+inline ntl::result<outbound_frame>
+make_preflight_downstream_settings(bool advertise_extended_connect) noexcept {
+  try {
+    const std::array<std::byte, 6> enable_connect{
+        std::byte{0x00}, std::byte{0x08}, std::byte{0x00},
+        std::byte{0x00}, std::byte{0x00}, std::byte{0x01}};
+    const std::span<const std::byte> payload =
+        advertise_extended_connect
+            ? std::span<const std::byte>(enable_connect)
+            : std::span<const std::byte>{};
+    return transform_detail::make_frame(frame_type::settings, 0, 0,
+                                        payload);
+  } catch (const std::bad_alloc &) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+}
+
+/**
+ * Bounded, ordered reverse-output queue.
+ *
+ * Reverse DATA credit is advertised by frames read by the same relay. Awaiting
+ * send_window::reserve() inline would therefore prevent the relay from reading
+ * the WINDOW_UPDATE that releases it. This queue writes every currently
+ * creditable frame and lets the relay continue reading while DATA remains
+ * blocked.
+ */
+class pending_reverse_frames {
+public:
+  explicit pending_reverse_frames(std::size_t maximum_bytes) noexcept
+      : maximum_bytes_(maximum_bytes) {}
+
+  ntl::status enqueue(std::vector<outbound_frame> frames) noexcept {
+    try {
+      std::size_t added = 0;
+      for (const auto &frame : frames) {
+        if (frame.wire.size() > maximum_bytes_ -
+                                    (std::min)(maximum_bytes_, bytes_ + added))
+          return STATUS_BUFFER_OVERFLOW;
+        added += frame.wire.size();
+      }
+      for (auto &frame : frames)
+        frames_.push_back(std::move(frame));
+      bytes_ += added;
+      return ntl::status::ok();
+    } catch (const std::bad_alloc &) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    } catch (...) {
+      return STATUS_UNHANDLED_EXCEPTION;
+    }
+  }
+
+  template <class Writer>
+  ntl::net::kernel::task<ntl::result<std::size_t>>
+  flush_available(Writer &writer, send_window &window) {
+    std::size_t transferred = 0;
+    while (!frames_.empty()) {
+      auto &frame = frames_.front();
+      if (frame.flow_controlled_bytes &&
+          !window.try_reserve(frame.stream_id,
+                              frame.flow_controlled_bytes))
+        break;
+      auto written = co_await writer.write(frame.wire);
+      if (!written)
+        co_return ntl::unexpected(written.status());
+      transferred += *written;
+      const auto parsed = frame_view::parse(
+          scatter_view::from_contiguous(frame.wire),
+          {absolute_maximum_frame_size, false});
+      if (parsed && parsed->header().end_stream())
+        window.close(frame.stream_id);
+      bytes_ -= frame.wire.size();
+      frames_.pop_front();
+    }
+    co_return ntl::ok(transferred);
+  }
+
+  bool empty() const noexcept { return frames_.empty(); }
+
+private:
+  std::size_t maximum_bytes_ = 0;
+  std::size_t bytes_ = 0;
+  std::deque<outbound_frame> frames_;
+};
+
+template <class Source, class DestinationWriter, class SourceWriter,
+          class TunnelHandler>
+ntl::net::kernel::task<ntl::status> relay_direction(
+    Source &source, DestinationWriter &destination_writer,
+    SourceWriter &source_writer, proxy_connection &connection,
+    connection_direction direction, async_barrier &server_settings,
+    TunnelHandler &tunnels, shared_result &result,
+    std::span<std::byte> workspace,
+    std::size_t maximum_frame_payload,
+    bool receive_client_preface = true,
+    bool synchronize_first_frame = true) {
+  try {
+    const bool requests = direction == connection_direction::requests;
+    if (requests && receive_client_preface) {
+      std::array<std::byte, client_connection_preface.size()> preface{};
+      auto read = co_await read_exact(source, preface, false);
+      if (!read) {
+        result.failure(kernel_proxy_session_failure_point::source_read);
+        co_return read.status();
+      }
+      const ntl::status accepted = connection.accept_client_preface(preface);
+      if (!accepted.is_ok())
+        co_return accepted;
+      auto written = co_await destination_writer.write(preface);
+      if (!written) {
+        result.failure(kernel_proxy_session_failure_point::destination_write);
+        co_return written.status();
+      }
+      result.add_bytes(direction, *written);
+    }
+
+    bool first_frame = synchronize_first_frame;
+    pending_reverse_frames pending_reverse(16 * 1024 * 1024);
+    for (;;) {
+      auto wire = co_await read_frame(
+          source, workspace, maximum_frame_payload);
+      if (!wire) {
+        result.failure(kernel_proxy_session_failure_point::source_read);
+        co_return wire.status();
+      }
+      if (!*wire) {
+        auto flushed = co_await pending_reverse.flush_available(
+            source_writer,
+            connection.destination_window_ref(
+                requests ? connection_direction::responses
+                         : connection_direction::requests));
+        if (!flushed) {
+          result.failure(kernel_proxy_session_failure_point::source_write);
+          co_return flushed.status();
+        }
+        result.add_bytes(requests ? connection_direction::responses
+                                  : connection_direction::requests,
+                         *flushed);
+        if (!pending_reverse.empty()) {
+          result.failure(kernel_proxy_session_failure_point::source_write);
+          co_return ntl::status{STATUS_PROTOCOL_UNREACHABLE};
+        }
+        result.eof(direction);
+        co_return ntl::status::ok();
+      }
+      auto frame = frame_view::parse(
+          scatter_view::from_contiguous(**wire),
+          {maximum_frame_payload, false});
+      if (!frame)
+        co_return frame.status();
+      const frame_header header = frame->header();
+      if (header.type == frame_type::goaway)
+        result.goaway(direction);
+      auto step = connection.consume(direction, *frame);
+      if (!step)
+        co_return step.status();
+      if (step->request && step->request->method == "CONNECT" &&
+          step->transform_action ==
+              ntl::net::http::rewrite_action::forward) {
+        auto admission = tunnels.admit(step->stream_id, *step->request);
+        if (!admission)
+          co_return admission.status();
+        const ntl::status admitted =
+            connection.admit_connect(*step, *admission);
+        if (!admitted.is_ok())
+          co_return admitted;
+      }
+      result.observe(direction, *step);
+      if constexpr (requires(TunnelHandler &handler) {
+                      handler.on_step(direction, *step);
+                    }) {
+        const ntl::status observed = tunnels.on_step(direction, *step);
+        if (!observed.is_ok())
+          co_return observed;
+      }
+      if (step->drop_flow)
+        co_return ntl::status::ok();
+      if (step->response) {
+        if constexpr (requires(TunnelHandler &handler) {
+                        handler.observe_response(
+                            step->stream_id, *step->response);
+                      })
+          tunnels.observe_response(step->stream_id, *step->response);
+      }
+
+      auto &destination_window = connection.destination_window_ref(direction);
+      const auto reverse_direction =
+          requests ? connection_direction::responses
+                   : connection_direction::requests;
+      auto &source_window =
+          connection.destination_window_ref(reverse_direction);
+
+      auto pending = co_await pending_reverse.flush_available(
+          source_writer, source_window);
+      if (!pending) {
+        result.failure(kernel_proxy_session_failure_point::source_write);
+        co_return pending.status();
+      }
+      result.add_bytes(reverse_direction, *pending);
+
+      if (step->forward_original) {
+        if (header.type == frame_type::reset_stream)
+          tunnels.reset(header.stream_id);
+        bool original = true;
+        std::vector<outbound_frame> replacement;
+        if (header.type == frame_type::data &&
+            (connection.is_admitted_connect(header.stream_id) ||
+             connection.is_established_tunnel(header.stream_id)) &&
+            connection.connect_mode(header.stream_id) ==
+                connect_disposition::inspect) {
+          auto transformed = tunnels.transform(direction, *frame);
+          if (!transformed)
+            co_return transformed.status();
+          if (*transformed) {
+            replacement = std::move(**transformed);
+            original = false;
+          }
+        }
+
+        if (original) {
+          if (header.type == frame_type::data)
+            co_await destination_window.reserve(
+                header.stream_id, header.payload_size);
+          auto written = co_await destination_writer.write(**wire);
+          if (!written) {
+            if ((result.saw_goaway(reverse_direction) &&
+                 is_post_goaway_close_status(written.status())) ||
+                is_discardable_control_after_authenticated_tls_close(
+                    header,
+                    static_cast<NTSTATUS>(written.status()))) {
+              result.eof(direction);
+              co_return ntl::status::ok();
+            }
+            result.failure(
+                kernel_proxy_session_failure_point::destination_write);
+            co_return written.status();
+          }
+          result.add_bytes(direction, *written);
+          if (header.end_stream())
+            destination_window.close(header.stream_id);
+        } else {
+          auto written = co_await write_frames(
+              destination_writer, destination_window,
+              std::move(replacement));
+          if (!written) {
+            if (result.saw_goaway(reverse_direction) &&
+                is_post_goaway_close_status(written.status())) {
+              result.eof(direction);
+              co_return ntl::status::ok();
+            }
+            result.failure(
+                kernel_proxy_session_failure_point::destination_write);
+            co_return written.status();
+          }
+          result.add_bytes(direction, *written);
+        }
+        if (header.type == frame_type::data) {
+          auto credits = connection.acknowledge_forwarded_data(
+              header.stream_id, header.payload_size,
+              header.end_stream());
+          if (!credits)
+            co_return credits.status();
+          const ntl::status queued =
+              pending_reverse.enqueue(std::move(*credits));
+          if (!queued.is_ok()) {
+            result.failure(kernel_proxy_session_failure_point::source_write);
+            co_return queued;
+          }
+          auto credited = co_await pending_reverse.flush_available(
+              source_writer, source_window);
+          if (!credited) {
+            result.failure(kernel_proxy_session_failure_point::source_write);
+            co_return credited.status();
+          }
+          result.add_bytes(reverse_direction, *credited);
+          connection.finish_forwarded_tunnel_data(
+              direction, header.stream_id, header.end_stream());
+          if (direction == connection_direction::responses &&
+              header.end_stream())
+            tunnels.reset(header.stream_id);
+        }
+      } else {
+        auto forwarded = co_await write_frames(
+            destination_writer, destination_window,
+            std::move(step->forward));
+        if (!forwarded) {
+          if (result.saw_goaway(reverse_direction) &&
+              is_post_goaway_close_status(forwarded.status())) {
+            result.eof(direction);
+            co_return ntl::status::ok();
+          }
+          result.failure(
+              kernel_proxy_session_failure_point::destination_write);
+          co_return forwarded.status();
+        }
+        result.add_bytes(direction, *forwarded);
+        const ntl::status queued =
+            pending_reverse.enqueue(std::move(step->reverse));
+        if (!queued.is_ok()) {
+          result.failure(kernel_proxy_session_failure_point::source_write);
+          co_return queued;
+        }
+        auto reversed = co_await pending_reverse.flush_available(
+            source_writer, source_window);
+        if (!reversed) {
+          result.failure(kernel_proxy_session_failure_point::source_write);
+          co_return reversed.status();
+        }
+        result.add_bytes(reverse_direction, *reversed);
+      }
+
+      if (header.type == frame_type::goaway &&
+          connection.ready_for_graceful_shutdown(direction)) {
+        result.graceful_goaway();
+        co_return ntl::status::ok();
+      }
+
+      if (first_frame) {
+        first_frame = false;
+        if (requests) {
+          const ntl::status ready = co_await server_settings.wait();
+          if (!ready.is_ok())
+            co_return ready;
+        } else {
+          server_settings.signal();
+        }
+      }
+    }
+  } catch (const ntl::exception &error) {
+    co_return error.get_status();
+  } catch (const std::bad_alloc &) {
+    co_return ntl::status{STATUS_INSUFFICIENT_RESOURCES};
+  } catch (...) {
+    co_return ntl::status{STATUS_UNHANDLED_EXCEPTION};
+  }
+}
+
+template <class Operation, class Scope>
+ntl::net::kernel::started_task observe_child(
+    Operation operation, std::shared_ptr<Scope> scope,
+    connection_direction direction) {
+  ntl::status status{STATUS_UNHANDLED_EXCEPTION};
+  try {
+    status = co_await std::move(operation);
+  } catch (const ntl::exception &error) {
+    status = error.get_status();
+  } catch (const std::bad_alloc &) {
+    status = STATUS_INSUFFICIENT_RESOURCES;
+  } catch (...) {
+    status = STATUS_UNHANDLED_EXCEPTION;
+  }
+  scope->finish(direction, status);
+}
+
+} // namespace kernel_proxy_session_detail
+
+/**
+ * Inspect and transform the first downstream request before opening an
+ * origin connection.
+ *
+ * A block response is flushed to the downstream peer and the returned object
+ * reports requires_upstream()==false.  A permitted request retains both its
+ * bounded origin-facing frames and the workspace lease; passing that object
+ * to the continuation overload is the only way to consume them.
+ */
+template <class DownstreamStream, class TunnelHandler, class WorkspaceLease>
+ntl::net::kernel::task<
+    ntl::result<kernel_proxy_session_preflight<WorkspaceLease>>>
+prepare_kernel_proxy_session(
+    std::shared_ptr<DownstreamStream> downstream,
+    std::shared_ptr<proxy_connection> connection,
+    std::shared_ptr<TunnelHandler> tunnels, WorkspaceLease workspace,
+    kernel_proxy_preflight_options options = {}) {
+  if (!downstream || !connection || !tunnels || !workspace ||
+      !options.valid())
+    co_return ntl::unexpected(STATUS_INVALID_PARAMETER);
+
+  auto preflight = kernel_proxy_session_detail::preflight_access::make(
+      std::move(workspace));
+  auto &owned_workspace =
+      kernel_proxy_session_detail::preflight_access::workspace(preflight);
+  const auto buffers = owned_workspace->borrowed_buffers();
+  if (!buffers.valid(options.maximum_frame_payload))
+    co_return ntl::unexpected(STATUS_INVALID_PARAMETER);
+
+  try {
+    kernel_proxy_session_detail::serialized_writer<DownstreamStream>
+        downstream_writer(*downstream);
+    kernel_proxy_session_detail::shared_result result;
+    std::array<std::byte, client_connection_preface.size()> preface{};
+    auto preface_read = co_await kernel_proxy_session_detail::read_exact(
+        *downstream, preface, false);
+    if (!preface_read) {
+      result.failure(kernel_proxy_session_failure_point::source_read);
+      co_return ntl::unexpected(preface_read.status());
+    }
+    const ntl::status accepted = connection->accept_client_preface(preface);
+    if (!accepted.is_ok())
+      co_return ntl::unexpected(accepted);
+
+    bool downstream_settings_sent = false;
+    for (;;) {
+      auto wire = co_await kernel_proxy_session_detail::read_frame(
+          *downstream, buffers.requests, options.maximum_frame_payload);
+      if (!wire) {
+        result.failure(kernel_proxy_session_failure_point::source_read);
+        co_return ntl::unexpected(wire.status());
+      }
+      if (!*wire) {
+        result.eof(connection_direction::requests);
+        kernel_proxy_session_detail::preflight_access::summary(preflight) =
+            result.snapshot();
+        co_return ntl::ok(std::move(preflight));
+      }
+
+      auto frame = frame_view::parse(
+          scatter_view::from_contiguous(**wire),
+          {options.maximum_frame_payload, false});
+      if (!frame)
+        co_return ntl::unexpected(frame.status());
+      const frame_header header = frame->header();
+      if (header.type == frame_type::goaway)
+        result.goaway(connection_direction::requests);
+      auto step = connection->consume(connection_direction::requests,
+                                      *frame);
+      if (!step)
+        co_return ntl::unexpected(step.status());
+      if (step->request && step->request->method == "CONNECT" &&
+          step->transform_action ==
+              ntl::net::http::rewrite_action::forward) {
+        auto admission = tunnels->admit(step->stream_id, *step->request);
+        if (!admission)
+          co_return ntl::unexpected(admission.status());
+        const ntl::status admitted =
+            connection->admit_connect(*step, *admission);
+        if (!admitted.is_ok())
+          co_return ntl::unexpected(admitted);
+      }
+
+      result.observe(connection_direction::requests, *step);
+      if constexpr (requires(TunnelHandler &handler) {
+                      handler.on_step(connection_direction::requests,
+                                      *step);
+                    }) {
+        const ntl::status observed =
+            tunnels->on_step(connection_direction::requests, *step);
+        if (!observed.is_ok())
+          co_return ntl::unexpected(observed);
+      }
+
+      if (!downstream_settings_sent &&
+          header.type == frame_type::settings &&
+          !header.acknowledgement()) {
+        auto settings =
+            kernel_proxy_session_detail::make_preflight_downstream_settings(
+                options.advertise_extended_connect);
+        if (!settings)
+          co_return ntl::unexpected(settings.status());
+        const ntl::status expected =
+            connection->expect_local_downstream_settings_ack();
+        if (!expected.is_ok())
+          co_return ntl::unexpected(expected);
+        std::vector<outbound_frame> output;
+        output.push_back(std::move(*settings));
+        auto written = co_await kernel_proxy_session_detail::write_frames(
+            downstream_writer,
+            connection->destination_window_ref(
+                connection_direction::responses),
+            std::move(output));
+        if (!written) {
+          result.failure(kernel_proxy_session_failure_point::source_write);
+          co_return ntl::unexpected(written.status());
+        }
+        result.add_bytes(connection_direction::responses, *written);
+        downstream_settings_sent = true;
+      }
+
+      auto reverse = co_await kernel_proxy_session_detail::write_frames(
+          downstream_writer,
+          connection->destination_window_ref(
+              connection_direction::responses),
+          std::move(step->reverse));
+      if (!reverse) {
+        result.failure(kernel_proxy_session_failure_point::source_write);
+        co_return ntl::unexpected(reverse.status());
+      }
+      result.add_bytes(connection_direction::responses, *reverse);
+
+      if (step->drop_flow) {
+        kernel_proxy_session_detail::preflight_access::summary(preflight) =
+            result.snapshot();
+        co_return ntl::ok(std::move(preflight));
+      }
+
+      ntl::status buffered = ntl::status::ok();
+      if (step->forward_original) {
+        if (header.type == frame_type::reset_stream)
+          tunnels->reset(header.stream_id);
+        std::vector<outbound_frame> original;
+        outbound_frame copy;
+        copy.wire.assign((*wire)->begin(), (*wire)->end());
+        copy.stream_id = header.stream_id;
+        copy.flow_controlled_bytes =
+            header.type == frame_type::data ? header.payload_size : 0;
+        original.push_back(std::move(copy));
+        buffered = kernel_proxy_session_detail::append_preflight_frames(
+            preflight, std::move(original),
+            options.maximum_buffered_origin_bytes);
+      } else {
+        buffered = kernel_proxy_session_detail::append_preflight_frames(
+            preflight, std::move(step->forward),
+            options.maximum_buffered_origin_bytes);
+      }
+      if (!buffered.is_ok())
+        co_return ntl::unexpected(buffered);
+
+      if (step->message_complete && !step->informational) {
+        if (step->terminal_status == 0)
+          kernel_proxy_session_detail::preflight_access::require_upstream(
+              preflight);
+        kernel_proxy_session_detail::preflight_access::summary(preflight) =
+            result.snapshot();
+        co_return ntl::ok(std::move(preflight));
+      }
+    }
+  } catch (const ntl::exception &error) {
+    co_return ntl::unexpected(error.get_status());
+  } catch (const std::bad_alloc &) {
+    co_return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    co_return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+}
+
+/**
+ * @brief Runs, cancels, and joins both HTTP/2 directions.
+ *
+ * The session wakes both pending reads before invoking `stop_transport` with
+ * a graceful/abortive mode. In graceful mode the callback must preserve the
+ * transports so the owner can complete protocol close-notify after this
+ * operation returns. In abortive mode it may stop both transports. `buffers`
+ * remain owned by the caller and must outlive this operation. Both eager
+ * children are joined before return.
+ */
+template <class DownstreamStream, class UpstreamStream,
+          class StopTransport, class TunnelHandler>
+ntl::net::kernel::task<ntl::result<kernel_proxy_session_result>>
+run_kernel_proxy_session_borrowed(
+    DownstreamStream &downstream, UpstreamStream &upstream,
+    proxy_connection &connection, StopTransport stop_transport,
+    TunnelHandler &tunnels, kernel_proxy_session_buffer_views buffers,
+    std::size_t maximum_frame_payload = 1024 * 1024) {
+  if (!buffers.valid(maximum_frame_payload))
+    co_return ntl::unexpected(STATUS_INVALID_PARAMETER);
+
+  try {
+    kernel_proxy_session_detail::serialized_writer<DownstreamStream>
+        downstream_writer(downstream);
+    kernel_proxy_session_detail::serialized_writer<UpstreamStream>
+        upstream_writer(upstream);
+    kernel_proxy_session_detail::async_barrier server_settings;
+    kernel_proxy_session_detail::shared_result result;
+
+    auto stop = [&](connection_direction direction,
+                    ntl::status status) noexcept {
+      connection.close();
+      downstream_writer.cancel();
+      upstream_writer.cancel();
+      server_settings.cancel();
+      // The session owns the bidirectional read cancellation contract.  A
+      // caller only observes graceful/abortive shutdown; it never has to
+      // remember which peer read must be woken before the two children join.
+      static_assert(requires { downstream.cancel_pending_read(); },
+                    "kernel HTTP/2 streams must support pending-read cancellation");
+      static_assert(requires { upstream.cancel_pending_read(); },
+                    "kernel HTTP/2 streams must support pending-read cancellation");
+      downstream.cancel_pending_read();
+      upstream.cancel_pending_read();
+      try {
+        const auto snapshot = result.snapshot();
+        const auto mode =
+            status.is_ok() &&
+                    snapshot.termination !=
+                        kernel_proxy_session_termination::policy_drop
+                ? kernel_proxy_session_stop_mode::graceful
+                : kernel_proxy_session_stop_mode::abortive;
+        stop_transport(kernel_proxy_session_stop_context{
+            .mode = mode,
+            .direction = direction,
+            .status = status,
+            .failure_point =
+                snapshot.failure_point ==
+                            kernel_proxy_session_failure_point::none &&
+                        !status.is_ok()
+                    ? kernel_proxy_session_failure_point::protocol
+                    : snapshot.failure_point});
+      } catch (...) {
+      }
+    };
+    using scope_type =
+        kernel_proxy_session_detail::session_scope<decltype(stop)>;
+    auto scope = std::make_shared<scope_type>(stop);
+    auto requests = kernel_proxy_session_detail::observe_child(
+        kernel_proxy_session_detail::relay_direction(
+            downstream, upstream_writer, downstream_writer, connection,
+            connection_direction::requests, server_settings, tunnels,
+            result, buffers.requests, maximum_frame_payload),
+        scope, connection_direction::requests);
+    auto responses = kernel_proxy_session_detail::observe_child(
+        kernel_proxy_session_detail::relay_direction(
+            upstream, downstream_writer, upstream_writer, connection,
+            connection_direction::responses, server_settings, tunnels,
+            result, buffers.responses, maximum_frame_payload),
+        scope, connection_direction::responses);
+    co_await std::move(requests);
+    co_await std::move(responses);
+    const ntl::status primary = scope->primary();
+    if (!primary.is_ok())
+      co_return ntl::unexpected(primary);
+    co_return ntl::ok(result.snapshot());
+  } catch (const std::bad_alloc &) {
+    co_return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    co_return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+}
+
+template <class DownstreamStream, class UpstreamStream,
+          class StopTransport>
+ntl::net::kernel::task<ntl::result<kernel_proxy_session_result>>
+run_kernel_proxy_session_borrowed(
+    DownstreamStream &downstream, UpstreamStream &upstream,
+    proxy_connection &connection, StopTransport stop_transport,
+    kernel_proxy_session_buffer_views buffers,
+    std::size_t maximum_frame_payload = 1024 * 1024) {
+  reject_tunnel_handler tunnels;
+  co_return co_await run_kernel_proxy_session_borrowed(
+      downstream, upstream, connection, std::move(stop_transport), tunnels,
+      buffers, maximum_frame_payload);
+}
+
+/**
+ * @brief Owning kernel HTTP/2 session composition.
+ *
+ * The coroutine retains both streams, semantic connection state, tunnel
+ * handler, and workspace lease until both directions and all callbacks drain.
+ */
+template <class DownstreamStream, class UpstreamStream,
+          class StopTransport, class TunnelHandler, class WorkspaceLease>
+ntl::net::kernel::task<ntl::result<kernel_proxy_session_result>>
+run_kernel_proxy_session(
+    std::shared_ptr<DownstreamStream> downstream,
+    std::shared_ptr<UpstreamStream> upstream,
+    std::shared_ptr<proxy_connection> connection,
+    StopTransport stop_transport,
+    std::shared_ptr<TunnelHandler> tunnels,
+    WorkspaceLease workspace,
+    std::size_t maximum_frame_payload = 1024 * 1024) {
+  if (!downstream || !upstream || !connection || !tunnels || !workspace)
+    co_return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  co_return co_await run_kernel_proxy_session_borrowed(
+      *downstream, *upstream, *connection, std::move(stop_transport),
+      *tunnels, workspace->borrowed_buffers(), maximum_frame_payload);
+}
+
+template <class DownstreamStream, class UpstreamStream,
+          class StopTransport, class WorkspaceLease>
+ntl::net::kernel::task<ntl::result<kernel_proxy_session_result>>
+run_kernel_proxy_session(
+    std::shared_ptr<DownstreamStream> downstream,
+    std::shared_ptr<UpstreamStream> upstream,
+    std::shared_ptr<proxy_connection> connection,
+    StopTransport stop_transport,
+    WorkspaceLease workspace,
+    std::size_t maximum_frame_payload = 1024 * 1024) {
+  co_return co_await run_kernel_proxy_session(
+      std::move(downstream), std::move(upstream), std::move(connection),
+      std::move(stop_transport), std::make_shared<reject_tunnel_handler>(),
+      std::move(workspace), maximum_frame_payload);
+}
+
+/**
+ * Continue a permitted preflight with an owning upstream stream.
+ *
+ * The move-only preflight retains its workspace and can be consumed only
+ * once.  The response relay starts before buffered request DATA is flushed,
+ * allowing peer flow-control updates to make progress without unbounded
+ * buffering.
+ */
+template <class DownstreamStream, class UpstreamStream,
+          class StopTransport, class TunnelHandler, class WorkspaceLease>
+ntl::net::kernel::task<ntl::result<kernel_proxy_session_result>>
+run_kernel_proxy_session(
+    std::shared_ptr<DownstreamStream> downstream,
+    std::shared_ptr<UpstreamStream> upstream,
+    std::shared_ptr<proxy_connection> connection,
+    kernel_proxy_session_preflight<WorkspaceLease> preflight,
+    StopTransport stop_transport,
+    std::shared_ptr<TunnelHandler> tunnels,
+    std::size_t maximum_frame_payload = 1024 * 1024) {
+  if (!downstream || !upstream || !connection || !tunnels)
+    co_return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  if (!preflight.requires_upstream())
+    co_return ntl::ok(preflight.summary());
+
+  auto &workspace =
+      kernel_proxy_session_detail::preflight_access::workspace(preflight);
+  if (!workspace ||
+      !workspace->borrowed_buffers().valid(maximum_frame_payload))
+    co_return ntl::unexpected(STATUS_INVALID_PARAMETER);
+
+  try {
+    kernel_proxy_session_detail::serialized_writer<DownstreamStream>
+        downstream_writer(*downstream);
+    kernel_proxy_session_detail::serialized_writer<UpstreamStream>
+        upstream_writer(*upstream);
+    kernel_proxy_session_detail::async_barrier server_settings;
+    kernel_proxy_session_detail::shared_result result(preflight.summary());
+
+    auto stop = [&](connection_direction direction,
+                    ntl::status status) noexcept {
+      connection->close();
+      downstream_writer.cancel();
+      upstream_writer.cancel();
+      server_settings.cancel();
+      // The preflight continuation has the same structured cancellation
+      // contract as the ordinary session: the session, not its caller, wakes
+      // both reads before joining the already-started children.
+      static_assert(requires { downstream->cancel_pending_read(); },
+                    "kernel HTTP/2 streams must support pending-read cancellation");
+      static_assert(requires { upstream->cancel_pending_read(); },
+                    "kernel HTTP/2 streams must support pending-read cancellation");
+      downstream->cancel_pending_read();
+      upstream->cancel_pending_read();
+      try {
+        const auto snapshot = result.snapshot();
+        const auto mode =
+            status.is_ok() &&
+                    snapshot.termination !=
+                        kernel_proxy_session_termination::policy_drop
+                ? kernel_proxy_session_stop_mode::graceful
+                : kernel_proxy_session_stop_mode::abortive;
+        stop_transport(kernel_proxy_session_stop_context{
+            .mode = mode,
+            .direction = direction,
+            .status = status,
+            .failure_point =
+                snapshot.failure_point ==
+                            kernel_proxy_session_failure_point::none &&
+                        !status.is_ok()
+                    ? kernel_proxy_session_failure_point::protocol
+                    : snapshot.failure_point});
+      } catch (...) {
+      }
+    };
+    using scope_type =
+        kernel_proxy_session_detail::session_scope<decltype(stop)>;
+    auto scope = std::make_shared<scope_type>(stop);
+    auto responses = kernel_proxy_session_detail::observe_child(
+        kernel_proxy_session_detail::relay_direction(
+            *upstream, downstream_writer, upstream_writer, *connection,
+            connection_direction::responses, server_settings, *tunnels,
+            result, workspace->borrowed_buffers().responses,
+            maximum_frame_payload),
+        scope, connection_direction::responses);
+
+    const auto fail_request = [&](ntl::status status,
+                                  kernel_proxy_session_failure_point point) {
+      result.failure(point);
+      scope->finish(connection_direction::requests, status);
+    };
+
+    auto preface_written = co_await upstream_writer.write(
+        std::as_bytes(std::span(client_connection_preface)));
+    if (!preface_written) {
+      fail_request(preface_written.status(),
+                   kernel_proxy_session_failure_point::destination_write);
+      co_await std::move(responses);
+      co_return ntl::unexpected(scope->primary());
+    }
+    result.add_bytes(connection_direction::requests, *preface_written);
+
+    auto frames = std::move(
+        kernel_proxy_session_detail::preflight_access::frames(preflight));
+    if (frames.empty()) {
+      fail_request(STATUS_INVALID_DEVICE_STATE,
+                   kernel_proxy_session_failure_point::protocol);
+      co_await std::move(responses);
+      co_return ntl::unexpected(scope->primary());
+    }
+    auto &destination_window = connection->destination_window_ref(
+        connection_direction::requests);
+    for (std::size_t index = 0; index != frames.size(); ++index) {
+      auto &frame = frames[index];
+      if (frame.flow_controlled_bytes)
+        co_await destination_window.reserve(frame.stream_id,
+                                            frame.flow_controlled_bytes);
+      auto written = co_await upstream_writer.write(frame.wire);
+      if (!written) {
+        fail_request(written.status(),
+                     kernel_proxy_session_failure_point::destination_write);
+        co_await std::move(responses);
+        co_return ntl::unexpected(scope->primary());
+      }
+      result.add_bytes(connection_direction::requests, *written);
+      const auto parsed = frame_view::parse(
+          scatter_view::from_contiguous(frame.wire),
+          {absolute_maximum_frame_size, false});
+      if (parsed && parsed->header().end_stream())
+        destination_window.close(frame.stream_id);
+      if (index == 0) {
+        const ntl::status ready = co_await server_settings.wait();
+        if (!ready.is_ok()) {
+          fail_request(ready,
+                       kernel_proxy_session_failure_point::protocol);
+          co_await std::move(responses);
+          co_return ntl::unexpected(scope->primary());
+        }
+      }
+    }
+
+    auto requests = kernel_proxy_session_detail::observe_child(
+        kernel_proxy_session_detail::relay_direction(
+            *downstream, upstream_writer, downstream_writer, *connection,
+            connection_direction::requests, server_settings, *tunnels,
+            result, workspace->borrowed_buffers().requests,
+            maximum_frame_payload, false, false),
+        scope, connection_direction::requests);
+    co_await std::move(requests);
+    co_await std::move(responses);
+    const ntl::status primary = scope->primary();
+    if (!primary.is_ok())
+      co_return ntl::unexpected(primary);
+    co_return ntl::ok(result.snapshot());
+  } catch (const ntl::exception &error) {
+    co_return ntl::unexpected(error.get_status());
+  } catch (const std::bad_alloc &) {
+    co_return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    co_return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+}
+
+} // namespace ntl::net::http2

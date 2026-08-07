@@ -161,9 +161,9 @@ struct out_buffer {
   size_t size;
 };
 
-using dispatch_fn = std::function<void(const device_control::code &,
-                                       const device_control::in_buffer &,
-                                       device_control::out_buffer &)>;
+using dispatch_fn = std::function<ntl::status(
+    const device_control::code &, const device_control::in_buffer &,
+    device_control::out_buffer &)>;
 
 /**
  * @brief Advanced device-control callback that may retain an IRP.
@@ -393,9 +393,9 @@ public:
   /**
    * @brief Registers an IRP_MJ_DEVICE_CONTROL callback.
    */
-  device &on_device_control(device_control::dispatch_fn &&f) {
+  device &on_borrowed_device_control(device_control::dispatch_fn f) {
     dispatchers().on_pending_device_control = {};
-    dispatchers().on_device_control = f;
+    dispatchers().on_device_control = std::move(f);
     return *this;
   }
 
@@ -404,7 +404,8 @@ public:
    * @note This is a low-level ownership surface. Prefer a higher-level helper
    * such as ntl::rpc::server when possible.
    */
-  device &on_pending_device_control(device_control::pending_dispatch_fn &&f) {
+  device &on_borrowed_pending_device_control(
+      device_control::pending_dispatch_fn &&f) {
     dispatchers().on_device_control = {};
     dispatchers().on_pending_device_control = std::move(f);
     return *this;

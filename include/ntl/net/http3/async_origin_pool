@@ -1,0 +1,492 @@
+/**
+ * @file http3_async_origin_pool
+ * @brief Bounded asynchronous adapter for blocking HTTP/3 origin clients.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/http3/async_origin_pool is a user-mode header"
+#endif
+
+#include <ntl/net/http3/inspection_proxy>
+#include <ntl/net/user/cleanup_domain>
+
+#include <algorithm>
+#include <atomic>
+#include <condition_variable>
+#include <cstddef>
+#include <cstdint>
+#include <deque>
+#include <memory>
+#include <mutex>
+#include <new>
+#include <limits>
+#include <stdexcept>
+#include <thread>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
+namespace ntl::net::http3 {
+
+struct async_origin_pool_limits {
+  std::size_t maximum_concurrency = 4;
+  std::size_t maximum_outstanding_requests = 256;
+  std::size_t maximum_buffered_request_bytes = 64 * 1024 * 1024;
+
+  constexpr bool valid() const noexcept {
+    return maximum_concurrency != 0 &&
+           maximum_outstanding_requests >= maximum_concurrency &&
+           maximum_buffered_request_bytes != 0;
+  }
+};
+
+struct async_origin_pool_statistics {
+  std::uint64_t submitted = 0;
+  std::uint64_t completed = 0;
+  std::uint64_t cancelled = 0;
+  std::uint64_t overloaded = 0;
+  std::size_t queued = 0;
+  std::size_t running = 0;
+  std::size_t buffered_request_bytes = 0;
+  std::size_t peak_buffered_request_bytes = 0;
+  std::uint64_t byte_quota_rejections = 0;
+};
+
+/**
+ * @brief Shares a bounded worker pool between per-connection origin adapters.
+ *
+ * HTTP/3 stream IDs are only unique within one QUIC connection.  Therefore
+ * make_transport() returns a small connection-local async_origin_transport;
+ * the worker pool is shared, while cancellation and duplicate-ID checks stay
+ * correctly namespaced to that connection.
+ *
+ * The wrapped origin_transport::send() is a blocking call and must eventually
+ * return.  Cancellation suppresses a queued or racing completion, but cannot
+ * forcibly interrupt an origin library which is already blocked inside
+ * send().
+ */
+class async_origin_pool {
+private:
+  struct channel_state;
+  struct operation;
+
+  struct shared_state {
+    shared_state(
+        std::shared_ptr<origin_transport> origin_value,
+        async_origin_pool_limits configured,
+        ntl::net::user::cleanup_domain &cleanup)
+        : origin(std::move(origin_value)), limits(configured),
+          cleanup_domain(&cleanup) {
+      if (!origin || !limits.valid())
+        throw std::invalid_argument("invalid HTTP/3 async origin limits");
+      workers.reserve(limits.maximum_concurrency);
+      for (std::size_t index = 0;
+           index != limits.maximum_concurrency; ++index) {
+        workers.emplace_back(
+            [this](std::stop_token stop) noexcept { worker(stop); });
+      }
+    }
+
+    shared_state(const shared_state &) = delete;
+    shared_state &operator=(const shared_state &) = delete;
+
+    ~shared_state() { close(); }
+
+    ntl::status enqueue(
+        const std::shared_ptr<operation> &request) noexcept {
+      {
+        std::lock_guard guard(lock);
+        if (stopping || !accepting)
+          return STATUS_DELETE_PENDING;
+        if (queue.size() + running >=
+            limits.maximum_outstanding_requests) {
+          ++overloaded;
+          return STATUS_QUOTA_EXCEEDED;
+        }
+        if (request->accounted_bytes >
+                limits.maximum_buffered_request_bytes ||
+            buffered_request_bytes >
+                limits.maximum_buffered_request_bytes -
+                    request->accounted_bytes) {
+          ++byte_quota_rejections;
+          return STATUS_QUOTA_EXCEEDED;
+        }
+        queue.push_back(request);
+        buffered_request_bytes += request->accounted_bytes;
+        peak_buffered_request_bytes = (std::max)(
+            peak_buffered_request_bytes, buffered_request_bytes);
+        ++submitted;
+      }
+      ready.notify_one();
+      return ntl::status::ok();
+    }
+
+    void stop_accepting() noexcept {
+      {
+        std::lock_guard guard(lock);
+        accepting = false;
+      }
+      changed.notify_all();
+    }
+
+    ntl::status drain() noexcept {
+      std::unique_lock guard(lock);
+      changed.wait(guard, [this] {
+        return queue.empty() && running == 0;
+      });
+      return ntl::status::ok();
+    }
+
+    async_origin_pool_statistics statistics() const noexcept {
+      std::lock_guard guard(lock);
+      return {.submitted = submitted,
+              .completed = completed,
+              .cancelled = cancelled,
+              .overloaded = overloaded,
+              .queued = queue.size(),
+              .running = running,
+              .buffered_request_bytes = buffered_request_bytes,
+              .peak_buffered_request_bytes = peak_buffered_request_bytes,
+              .byte_quota_rejections = byte_quota_rejections};
+    }
+
+    void close() noexcept {
+      std::deque<std::shared_ptr<operation>> abandoned;
+      {
+        std::lock_guard guard(lock);
+        if (stopping)
+          return;
+        accepting = false;
+        stopping = true;
+        abandoned.swap(queue);
+        for (const auto &request : abandoned) {
+          if (buffered_request_bytes >= request->accounted_bytes)
+            buffered_request_bytes -= request->accounted_bytes;
+          else
+            buffered_request_bytes = 0;
+        }
+        cancelled += abandoned.size();
+      }
+      for (const auto &request : abandoned)
+        cancel_operation(request);
+      for (auto &worker_thread : workers)
+        worker_thread.request_stop();
+      ready.notify_all();
+      changed.notify_all();
+    }
+
+    bool running_on_worker() const noexcept {
+      const auto current = std::this_thread::get_id();
+      return std::any_of(workers.begin(), workers.end(),
+                         [current](const auto &worker_thread) {
+                           return worker_thread.get_id() == current;
+                         });
+    }
+
+    void retire_from_worker() noexcept {
+      if (!cleanup_domain ||
+          !cleanup_domain->retire_deferred(cleanup).is_ok())
+        std::terminate();
+    }
+
+    static void cleanup_deferred(void *context) noexcept {
+      delete static_cast<shared_state *>(context);
+    }
+
+    static void cancel_operation(
+        const std::shared_ptr<operation> &request) noexcept;
+
+    void worker(std::stop_token stop) noexcept;
+
+    std::shared_ptr<origin_transport> origin;
+    async_origin_pool_limits limits{};
+    mutable std::mutex lock;
+    std::condition_variable ready;
+    std::condition_variable changed;
+    std::deque<std::shared_ptr<operation>> queue;
+    std::vector<std::jthread> workers;
+    std::size_t running = 0;
+    std::uint64_t submitted = 0;
+    std::uint64_t completed = 0;
+    std::uint64_t cancelled = 0;
+    std::uint64_t overloaded = 0;
+    std::size_t buffered_request_bytes = 0;
+    std::size_t peak_buffered_request_bytes = 0;
+    std::uint64_t byte_quota_rejections = 0;
+    bool accepting = true;
+    bool stopping = false;
+    ntl::net::user::cleanup_domain *cleanup_domain = nullptr;
+    ntl::net::user::cleanup_item cleanup{
+        &shared_state::cleanup_deferred, this};
+  };
+
+  struct channel_state {
+    std::mutex lock;
+    std::unordered_map<std::uint64_t, std::shared_ptr<operation>> requests;
+    bool stopping = false;
+  };
+
+  struct operation {
+    std::uint64_t exchange_id = 0;
+    origin_request request;
+    origin_completion completion;
+    std::weak_ptr<channel_state> channel;
+    std::atomic<bool> cancelled{false};
+    std::size_t accounted_bytes = 0;
+  };
+
+  class channel final : public async_origin_transport {
+  public:
+    channel(
+        std::shared_ptr<shared_state> pool,
+        std::shared_ptr<channel_state> state) noexcept
+        : pool_(std::move(pool)), state_(std::move(state)) {}
+
+    ~channel() override { cancel_all(); }
+
+    ntl::status submit(
+        std::uint64_t exchange_id, origin_request request,
+        origin_completion completion) noexcept override {
+      if (!completion)
+        return STATUS_INVALID_PARAMETER;
+      const auto accounted = request_size(request);
+      if (!accounted)
+        return accounted.status();
+      std::shared_ptr<operation> pending;
+      try {
+        pending = std::make_shared<operation>();
+        pending->exchange_id = exchange_id;
+        pending->request = std::move(request);
+        pending->completion = std::move(completion);
+        pending->channel = state_;
+        pending->accounted_bytes = *accounted;
+      } catch (const std::bad_alloc &) {
+        return STATUS_INSUFFICIENT_RESOURCES;
+      } catch (...) {
+        return STATUS_UNHANDLED_EXCEPTION;
+      }
+
+      {
+        std::lock_guard guard(state_->lock);
+        if (state_->stopping)
+          return STATUS_DELETE_PENDING;
+        const auto inserted =
+            state_->requests.emplace(exchange_id, pending);
+        if (!inserted.second)
+          return STATUS_OBJECT_NAME_COLLISION;
+      }
+      const ntl::status queued = pool_->enqueue(pending);
+      if (!queued.is_ok()) {
+        std::lock_guard guard(state_->lock);
+        const auto found = state_->requests.find(exchange_id);
+        if (found != state_->requests.end() &&
+            found->second.get() == pending.get())
+          state_->requests.erase(found);
+      }
+      return queued;
+    }
+
+    void cancel(std::uint64_t exchange_id) noexcept override {
+      std::shared_ptr<operation> pending;
+      {
+        std::lock_guard guard(state_->lock);
+        const auto found = state_->requests.find(exchange_id);
+        if (found == state_->requests.end())
+          return;
+        pending = std::move(found->second);
+        state_->requests.erase(found);
+      }
+      pending->cancelled.store(true, std::memory_order_release);
+    }
+
+  private:
+    static ntl::result<std::size_t>
+    request_size(const origin_request &request) noexcept {
+      std::size_t total = request.server_name.size();
+      const auto add = [&total](std::size_t value) noexcept {
+        if (total > (std::numeric_limits<std::size_t>::max)() - value)
+          return false;
+        total += value;
+        return true;
+      };
+      if (!add(request.method.size()) || !add(request.scheme.size()) ||
+          !add(request.authority.size()) || !add(request.path.size()) ||
+          !add(request.body.size()))
+        return ntl::unexpected(STATUS_INTEGER_OVERFLOW);
+      for (const auto &field : request.headers) {
+        if (!add(field.name.size()) || !add(field.value.size()))
+          return ntl::unexpected(STATUS_INTEGER_OVERFLOW);
+      }
+      for (const auto &field : request.trailers) {
+        if (!add(field.name.size()) || !add(field.value.size()))
+          return ntl::unexpected(STATUS_INTEGER_OVERFLOW);
+      }
+      return ntl::ok(total);
+    }
+
+    void cancel_all() noexcept {
+      std::unordered_map<
+          std::uint64_t, std::shared_ptr<operation>> pending;
+      {
+        std::lock_guard guard(state_->lock);
+        state_->stopping = true;
+        pending.swap(state_->requests);
+      }
+      for (auto &[id, request] : pending) {
+        (void)id;
+        request->cancelled.store(true, std::memory_order_release);
+      }
+    }
+
+    std::shared_ptr<shared_state> pool_;
+    std::shared_ptr<channel_state> state_;
+  };
+
+public:
+  explicit async_origin_pool(
+      std::shared_ptr<origin_transport> origin,
+      async_origin_pool_limits limits = {})
+      : state_(make_state(std::move(origin), limits)) {}
+
+  async_origin_pool(const async_origin_pool &) = delete;
+  async_origin_pool &operator=(const async_origin_pool &) = delete;
+
+  ~async_origin_pool() { close(); }
+
+  std::shared_ptr<async_origin_transport> make_transport() {
+    auto state = state_.load(std::memory_order_acquire);
+    if (!state)
+      throw std::logic_error("HTTP/3 origin pool is closed");
+    auto local = std::make_shared<channel_state>();
+    return std::make_shared<channel>(std::move(state), std::move(local));
+  }
+
+  void stop_accepting() noexcept {
+    auto state = state_.load(std::memory_order_acquire);
+    if (state)
+      state->stop_accepting();
+  }
+  ntl::status drain() noexcept {
+    auto state = state_.load(std::memory_order_acquire);
+    return state ? state->drain() : ntl::status::ok();
+  }
+  void close() noexcept {
+    auto state = state_.exchange({}, std::memory_order_acq_rel);
+    if (state)
+      state->close();
+  }
+  async_origin_pool_statistics statistics() const noexcept {
+    auto state = state_.load(std::memory_order_acquire);
+    return state ? state->statistics() : async_origin_pool_statistics{};
+  }
+
+private:
+  static std::shared_ptr<shared_state>
+  make_state(std::shared_ptr<origin_transport> origin,
+             async_origin_pool_limits limits) {
+    auto *cleanup = ntl::net::user::borrowed_runtime_cleanup_domain();
+    if (!cleanup)
+      throw std::bad_alloc();
+    auto *raw = new shared_state(std::move(origin), limits, *cleanup);
+    try {
+      return std::shared_ptr<shared_state>(
+          raw, [](shared_state *state) noexcept {
+            if (state->running_on_worker()) {
+              state->retire_from_worker();
+              return;
+            }
+            delete state;
+          });
+    } catch (...) {
+      delete raw;
+      throw;
+    }
+  }
+
+  std::atomic<std::shared_ptr<shared_state>> state_;
+};
+
+inline void async_origin_pool::shared_state::cancel_operation(
+    const std::shared_ptr<operation> &request) noexcept {
+  request->cancelled.store(true, std::memory_order_release);
+  const auto owner = request->channel.lock();
+  if (!owner)
+    return;
+  std::lock_guard guard(owner->lock);
+  const auto found = owner->requests.find(request->exchange_id);
+  if (found != owner->requests.end() &&
+      found->second.get() == request.get())
+    owner->requests.erase(found);
+}
+
+inline void async_origin_pool::shared_state::worker(
+    std::stop_token stop) noexcept {
+  for (;;) {
+    std::shared_ptr<operation> pending;
+    {
+      std::unique_lock guard(lock);
+      ready.wait(guard, [&] {
+        return stopping || stop.stop_requested() || !queue.empty();
+      });
+      if ((stopping || stop.stop_requested()) && queue.empty())
+        return;
+      if (queue.empty())
+        continue;
+      pending = std::move(queue.front());
+      queue.pop_front();
+      ++running;
+    }
+
+    ntl::result<origin_response> response =
+        ntl::unexpected(STATUS_CANCELLED);
+    if (!pending->cancelled.load(std::memory_order_acquire))
+      response = origin->send(pending->request);
+
+    origin_completion completion;
+    const auto owner = pending->channel.lock();
+    if (owner) {
+      std::lock_guard owner_guard(owner->lock);
+      const auto found = owner->requests.find(pending->exchange_id);
+      if (found != owner->requests.end() &&
+          found->second.get() == pending.get()) {
+        owner->requests.erase(found);
+        if (!pending->cancelled.load(std::memory_order_acquire))
+          completion = std::move(pending->completion);
+      }
+    }
+    // Publish accounting before invoking user completion.  A completion may
+    // synchronously wake a waiter which immediately observes statistics or
+    // closes the pool; exposing the terminal callback first made that state
+    // nondeterministically lag one operation behind.
+    {
+      std::lock_guard guard(lock);
+      if (pending->cancelled.load(std::memory_order_acquire))
+        ++cancelled;
+      else
+        ++completed;
+    }
+
+    if (completion) {
+      try {
+        completion(std::move(response));
+      } catch (...) {
+      }
+    }
+
+    {
+      std::lock_guard guard(lock);
+      if (running != 0)
+        --running;
+      if (buffered_request_bytes >= pending->accounted_bytes)
+        buffered_request_bytes -= pending->accounted_bytes;
+      else
+        buffered_request_bytes = 0;
+    }
+    changed.notify_all();
+  }
+}
+
+} // namespace ntl::net::http3

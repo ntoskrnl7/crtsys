@@ -1,0 +1,164 @@
+/**
+ * @file kernel_waitable_task
+ * @brief Eager top-level coroutine operation with runtime-owned cleanup.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/net/kernel/waitable_task is a kernel-mode header"
+#endif
+
+#include <ntddk.h>
+
+#include <chrono>
+#include <coroutine>
+#include <utility>
+
+#include <ntl/status>
+#include <ntl/net/kernel/passive_cleanup_domain>
+
+namespace ntl::net::kernel {
+
+class waitable_status_task {
+public:
+  struct promise_type;
+  using handle_type = std::coroutine_handle<promise_type>;
+
+  waitable_status_task(const waitable_status_task &) = delete;
+  waitable_status_task &operator=(const waitable_status_task &) = delete;
+  waitable_status_task(waitable_status_task &&other) noexcept
+      : handle_(std::exchange(other.handle_, {})) {}
+  waitable_status_task &operator=(waitable_status_task &&other) noexcept {
+    if (this != &other) {
+      release();
+      handle_ = std::exchange(other.handle_, {});
+    }
+    return *this;
+  }
+  explicit waitable_status_task(handle_type handle) noexcept : handle_(handle) {}
+  ~waitable_status_task() { release(); }
+
+  [[nodiscard]]
+  ntl::status wait(std::chrono::milliseconds timeout) noexcept {
+    if (!handle_)
+      return STATUS_INVALID_HANDLE;
+    LARGE_INTEGER due{};
+    due.QuadPart = -static_cast<LONGLONG>(timeout.count()) * 10'000;
+    const NTSTATUS status = KeWaitForSingleObject(
+        &handle_.promise().completed, Executive, KernelMode, FALSE, &due);
+    return NT_SUCCESS(status) ? handle_.promise().result : ntl::status{status};
+  }
+  [[nodiscard]]
+  ntl::status wait() noexcept {
+    if (!handle_)
+      return STATUS_INVALID_HANDLE;
+    const NTSTATUS status = KeWaitForSingleObject(
+        &handle_.promise().completed, Executive, KernelMode, FALSE, nullptr);
+    return NT_SUCCESS(status) ? handle_.promise().result : ntl::status{status};
+  }
+
+  /** Non-owning event pointer; valid only while this task object is alive. */
+  PKEVENT borrowed_native_event() noexcept {
+    return handle_ ? &handle_.promise().completed : nullptr;
+  }
+  bool completed() const noexcept {
+    return handle_ && KeReadStateEvent(&handle_.promise().completed) != 0;
+  }
+
+  /** Returns the completed status without waiting, or STATUS_PENDING. */
+  ntl::status result() const noexcept {
+    if (!handle_)
+      return STATUS_INVALID_HANDLE;
+    return completed() ? handle_.promise().result
+                       : ntl::status{STATUS_PENDING};
+  }
+
+  struct promise_type {
+    struct completion_awaiter {
+      bool await_ready() const noexcept { return false; }
+      void await_suspend(handle_type handle) const noexcept {
+        // Signal only after the coroutine is suspended at final_suspend.
+        // The runtime cleanup domain destroys the frame only after both the
+        // coroutine and every owning task facade have released it.
+        KeSetEvent(&handle.promise().completed, IO_NO_INCREMENT, FALSE);
+        handle.promise().release_coroutine_reference();
+      }
+      void await_resume() const noexcept {}
+    };
+
+    promise_type() noexcept
+        : cleanup_(&promise_type::destroy_frame, this),
+          cleanup_domain_(borrowed_runtime_passive_cleanup_domain()) {
+      KeInitializeEvent(&completed, NotificationEvent, FALSE);
+      if (!cleanup_domain_) {
+        registration_status_ = STATUS_DEVICE_NOT_READY;
+        return;
+      }
+      registration_status_ =
+          static_cast<NTSTATUS>(cleanup_domain_->register_item(cleanup_));
+    }
+    waitable_status_task get_return_object() noexcept {
+      return waitable_status_task(handle_type::from_promise(*this));
+    }
+    std::suspend_never initial_suspend() const noexcept { return {}; }
+    completion_awaiter final_suspend() const noexcept { return {}; }
+    void return_value(ntl::status value) noexcept {
+      result = value;
+    }
+    void unhandled_exception() noexcept {
+      result = STATUS_UNHANDLED_EXCEPTION;
+    }
+
+    KEVENT completed{};
+    ntl::status result{STATUS_PENDING};
+
+  private:
+    friend class waitable_status_task;
+
+    static void destroy_frame(void *context) noexcept {
+      auto &promise = *static_cast<promise_type *>(context);
+      handle_type::from_promise(promise).destroy();
+    }
+
+    void release_coroutine_reference() noexcept { release_reference(); }
+
+    void release_owner_reference() noexcept { release_reference(); }
+
+    void release_reference() noexcept {
+      if (InterlockedDecrement(&references_) != 0)
+        return;
+
+      if (NT_SUCCESS(registration_status_) && cleanup_domain_) {
+        // Always defer. The final reference is allowed to disappear from the
+        // coroutine itself or from a native callback; inline destruction could
+        // otherwise unwind/join that same execution path.
+        cleanup_domain_->retire_deferred(cleanup_);
+        return;
+      }
+
+      // The driver runtime normally guarantees a cleanup domain. Failure to
+      // initialize it is an early-start error; only a PASSIVE caller can safely
+      // reclaim the frame in that exceptional path.
+      NT_ASSERT(KeGetCurrentIrql() == PASSIVE_LEVEL);
+      if (KeGetCurrentIrql() == PASSIVE_LEVEL)
+        destroy_frame(this);
+    }
+
+    passive_cleanup_item cleanup_;
+    passive_cleanup_domain *cleanup_domain_ = nullptr;
+    NTSTATUS registration_status_ = STATUS_UNSUCCESSFUL;
+    volatile LONG references_ = 2;
+  };
+
+private:
+  void release() noexcept {
+    if (!handle_)
+      return;
+    auto handle = std::exchange(handle_, {});
+    handle.promise().release_owner_reference();
+  }
+
+  handle_type handle_{};
+};
+
+} // namespace ntl::net::kernel

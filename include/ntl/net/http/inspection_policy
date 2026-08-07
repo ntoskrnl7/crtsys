@@ -1,0 +1,95 @@
+/**
+ * @file http_inspection_policy
+ * @brief Unified semantic HTTP transforms and staged decisions.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include <ntl/net/http/decision_policy>
+#include <ntl/net/http/transform>
+
+#include <memory>
+#include <stdexcept>
+#include <vector>
+
+namespace ntl::net::http {
+
+/** One policy containing semantic transforms and full-context decisions. */
+class inspection_policy {
+public:
+  explicit inspection_policy(
+      transform_limits limits = {},
+      ntl::net::inspection::failure_policy failure =
+          ntl::net::inspection::failure_policy::fail_closed)
+      : transforms_(limits), decisions_(failure),
+        decoders_(std::make_shared<
+                  ntl::net::inspection::content_decoder_registry>()),
+        encoders_(std::make_shared<
+                  ntl::net::inspection::content_encoder_registry>()) {}
+
+  transform_pipeline &transforms_ref() noexcept { return transforms_; }
+  const transform_pipeline &transforms_ref() const noexcept {
+    return transforms_;
+  }
+  inspection_direction_selector requests() noexcept {
+    return decisions_.requests();
+  }
+  inspection_direction_selector responses() noexcept {
+    return decisions_.responses();
+  }
+  decision_policy &decisions_ref() noexcept { return decisions_; }
+  const decision_policy &decisions_ref() const noexcept { return decisions_; }
+
+  /**
+   * Replaces the content-coding backends owned by this policy. Configure this
+   * before publishing the policy to a proxy. Every H1/H2/H3 adapter obtains
+   * its registries from the same policy, so callers cannot accidentally pair
+   * rules with different codec lifetimes or capabilities.
+   */
+  inspection_policy &use_content_codecs(
+      std::shared_ptr<const ntl::net::inspection::content_decoder_registry>
+          decoders,
+      std::shared_ptr<const ntl::net::inspection::content_encoder_registry>
+          encoders) {
+    if (!decoders || !encoders)
+      throw std::invalid_argument("inspection policy codecs are null");
+    decoders_ = std::move(decoders);
+    encoders_ = std::move(encoders);
+    return *this;
+  }
+
+  std::shared_ptr<const ntl::net::inspection::content_decoder_registry>
+  content_decoders() const noexcept {
+    return decoders_;
+  }
+
+  std::shared_ptr<const ntl::net::inspection::content_encoder_registry>
+  content_encoders() const noexcept {
+    return encoders_;
+  }
+
+  /**
+   * Retains an auxiliary codec, protocol adapter, observer, or backend for the
+   * complete policy lifetime. Composition helpers use this so callbacks never
+   * depend on declaration order in the calling program.
+   */
+  template <class T>
+  std::shared_ptr<T> own_dependency(std::shared_ptr<T> dependency) {
+    if (!dependency)
+      throw std::invalid_argument("inspection policy dependency is null");
+    dependencies_.emplace_back(dependency);
+    return dependency;
+  }
+
+private:
+  transform_pipeline transforms_;
+  decision_policy decisions_;
+  std::shared_ptr<const ntl::net::inspection::content_decoder_registry>
+      decoders_;
+  std::shared_ptr<const ntl::net::inspection::content_encoder_registry>
+      encoders_;
+  std::vector<std::shared_ptr<const void>> dependencies_;
+};
+
+} // namespace ntl::net::http

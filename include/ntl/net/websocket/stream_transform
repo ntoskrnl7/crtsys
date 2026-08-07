@@ -1,0 +1,185 @@
+/**
+ * @file websocket_stream_transform
+ * @brief Bounded incremental WebSocket framing and message transformation.
+ *
+ * WebSocket frames are independent of the byte chunks supplied by HTTP/2
+ * DATA, HTTP/3 DATA, TLS, or sockets. This adapter preserves partial frame
+ * bytes across pushes and invokes wire_transformer only for complete frames.
+ */
+#pragma once
+
+#include <ntl/net/framing>
+#include <ntl/net/websocket/transform>
+#include <ntl/result>
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <new>
+#include <optional>
+#include <span>
+#include <utility>
+#include <vector>
+
+namespace ntl::net::websocket {
+
+struct stream_transform_options {
+  std::size_t maximum_pending_wire_bytes = 1024 * 1024 + 14;
+  std::size_t maximum_output_bytes_per_push = 4 * 1024 * 1024;
+};
+
+struct stream_transform_result {
+  rewrite_action action = rewrite_action::forward;
+  std::vector<std::byte> wire;
+  std::size_t complete_messages = 0;
+  bool close_seen = false;
+  NTSTATUS failure = STATUS_SUCCESS;
+};
+
+/**
+ * @brief Incremental frame-boundary adapter around wire_transformer.
+ */
+class stream_transformer {
+public:
+  stream_transformer(
+      sender_role sender, const message_transform_pipeline &pipeline,
+      std::optional<permessage_deflate_parameters> compression = std::nullopt,
+      std::function<std::array<std::byte, 4>()> mask_provider = {},
+      stream_transform_options options = {})
+      : framer_(sender,
+                {pipeline.limits().maximum_wire_frame_bytes,
+                 compression && compression->enabled ? std::uint8_t{0x04}
+                                                     : std::uint8_t{0}}),
+        transformer_(sender, pipeline, std::move(compression),
+                     std::move(mask_provider)),
+        options_(options) {
+    if (options_.maximum_pending_wire_bytes < 14 ||
+        options_.maximum_output_bytes_per_push == 0)
+      throw std::invalid_argument(
+          "WebSocket stream transform limits are invalid");
+  }
+
+  stream_transformer(const stream_transformer &) = delete;
+  stream_transformer &operator=(const stream_transformer &) = delete;
+
+  ntl::result<stream_transform_result>
+  consume(ntl::net::scatter_view input, bool final = false) noexcept {
+    if (!input)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    try {
+      stream_transform_result result;
+      std::size_t input_offset = 0;
+      for (;;) {
+        if (pending_.empty() && input_offset < input.size()) {
+          auto available = input.subview(input_offset);
+          if (!available)
+            return ntl::unexpected(available.status());
+          const auto probe = ntl::net::framing::probe(
+              framer_, *available,
+              {options_.maximum_pending_wire_bytes});
+          if (probe.state() ==
+              ntl::net::framing::probe_state::malformed)
+            return ntl::unexpected(probe.error());
+          if (probe.state() ==
+              ntl::net::framing::probe_state::complete) {
+            auto frame = available->subview(0, probe.frame_size());
+            if (!frame)
+              return ntl::unexpected(frame.status());
+            const ntl::status consumed =
+                consume_frame(*frame, result);
+            if (!consumed.is_ok())
+              return ntl::unexpected(consumed);
+            input_offset += probe.frame_size();
+            continue;
+          }
+        }
+
+        const auto pending_view =
+            ntl::net::scatter_view::from_contiguous(pending_);
+        auto probe = ntl::net::framing::probe(
+            framer_, pending_view,
+            {options_.maximum_pending_wire_bytes});
+        if (probe.state() ==
+            ntl::net::framing::probe_state::malformed)
+          return ntl::unexpected(probe.error());
+        if (probe.state() ==
+            ntl::net::framing::probe_state::complete) {
+          auto frame = pending_view.subview(0, probe.frame_size());
+          if (!frame)
+            return ntl::unexpected(frame.status());
+          const ntl::status consumed = consume_frame(*frame, result);
+          if (!consumed.is_ok())
+            return ntl::unexpected(consumed);
+          pending_.erase(pending_.begin(),
+                         pending_.begin() + probe.frame_size());
+          continue;
+        }
+
+        if (input_offset == input.size()) {
+          if (final && !pending_.empty())
+            return ntl::unexpected(STATUS_END_OF_FILE);
+          return ntl::ok(std::move(result));
+        }
+
+        const std::size_t needed =
+            probe.required_total() - pending_.size();
+        const std::size_t count =
+            (std::min)(needed, input.size() - input_offset);
+        if (pending_.size() >
+            options_.maximum_pending_wire_bytes - count)
+          return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+        const std::size_t old_size = pending_.size();
+        pending_.resize(old_size + count);
+        const ntl::status copied = input.copy_to(
+            std::span<std::byte>(pending_).subspan(old_size, count),
+            input_offset);
+        if (!copied.is_ok())
+          return ntl::unexpected(copied);
+        input_offset += count;
+      }
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+  std::size_t pending_bytes() const noexcept { return pending_.size(); }
+
+private:
+  ntl::status consume_frame(
+      ntl::net::scatter_view frame,
+      stream_transform_result &result) noexcept {
+    const auto header = inspect_header(frame, framer_.sender(),
+                                       framer_.limits());
+    if (!header)
+      return header.status();
+    auto transformed = transformer_.consume(frame);
+    if (transformed.failure != STATUS_SUCCESS)
+      return transformed.failure;
+    if (transformed.action == rewrite_action::block)
+      return STATUS_ACCESS_DENIED;
+    if (transformed.complete_message)
+      ++result.complete_messages;
+    if (header->operation == opcode::close)
+      result.close_seen = true;
+    if (transformed.action == rewrite_action::drop) {
+      result.action = rewrite_action::drop;
+      return ntl::status::ok();
+    }
+    if (transformed.wire.size() >
+        options_.maximum_output_bytes_per_push - result.wire.size())
+      return STATUS_BUFFER_OVERFLOW;
+    result.wire.insert(result.wire.end(), transformed.wire.begin(),
+                       transformed.wire.end());
+    return ntl::status::ok();
+  }
+
+  frame_framer framer_;
+  wire_transformer transformer_;
+  stream_transform_options options_{};
+  std::vector<std::byte> pending_;
+};
+
+} // namespace ntl::net::websocket

@@ -212,7 +212,7 @@ public:
     return ntl::ok(frame_view(*header, *payload));
   }
 
-  const frame_header &header() const noexcept { return header_; }
+  frame_header header() const noexcept { return header_; }
   ntl::net::scatter_view payload() const noexcept { return payload_; }
 
   ntl::result<ntl::net::scatter_view>
@@ -336,7 +336,7 @@ public:
     return decoded;
   }
 
-  Decoder &underlying() noexcept { return decoder_; }
+  Decoder &underlying_ref() noexcept { return decoder_; }
 
 private:
   Decoder decoder_;
@@ -455,9 +455,9 @@ public:
  * The object owns the per-direction HPACK and CONTINUATION state. Callers
  * must create a separate instance for each connection direction.
  */
-class connection_inspector {
+class borrowed_connection_inspector {
 public:
-  connection_inspector(
+  borrowed_connection_inspector(
       hpack_decoder &decoder,
       std::size_t maximum_encoded_header_size = 256 * 1024,
       std::size_t maximum_decoded_header_size = 256 * 1024) noexcept

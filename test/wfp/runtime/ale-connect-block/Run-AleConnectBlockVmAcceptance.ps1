@@ -16,6 +16,9 @@ param(
 
   [string] $GuestRoot = 'C:\crtsys-wfp-ale-connect-block',
 
+  [string] $DisposableGuestSentinelPath =
+      'C:\crtsys-disposable-test-guest.sentinel',
+
   [string] $StagingRoot = '',
 
   [string] $LogRoot = '',
@@ -24,11 +27,6 @@ param(
   [string] $PlatformToolset = 'v145',
 
   [string] $WindowsSdkVersion = '10.0.28000.0',
-
-  [string[]] $RestoreDriverFileName = @(),
-
-  [ValidateSet('Oneboot', 'Persistent', 'ResetOnBootFail')]
-  [string] $RestoreBootMode = 'Persistent',
 
   [ValidateRange(1, 1000)]
   [int] $Iterations = 20,
@@ -42,6 +40,10 @@ $ErrorActionPreference = 'Stop'
 $prepareScript =
     Join-Path $PSScriptRoot 'Prepare-AleConnectBlockArtifacts.ps1'
 $runtimeScript = Join-Path $PSScriptRoot 'Run-AleConnectBlockSuite.ps1'
+$guardScript =
+    Join-Path $PSScriptRoot '..\common\DisposableGuestGuard.ps1'
+$crashPostcheckScript =
+    Join-Path $PSScriptRoot '..\..\..\common\Test-VmCrashPostcheck.ps1'
 $targetDriver = 'crtsys_wfp_ale_connect_block.sys'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..\..')).Path
 if ([string]::IsNullOrWhiteSpace($StagingRoot)) {
@@ -72,11 +74,14 @@ if (-not (Test-Path -LiteralPath $VmrunPath -PathType Leaf)) {
 if (-not (Test-Path -LiteralPath $VmxPath -PathType Leaf)) {
   throw "VMX file was not found: $VmxPath"
 }
+foreach ($requiredScript in @($guardScript, $crashPostcheckScript)) {
+  if (-not (Test-Path -LiteralPath $requiredScript -PathType Leaf)) {
+    throw "Required guest script was not found: $requiredScript"
+  }
+}
 
 $vmPasswordText = ConvertTo-PlainText $VmPassword
 $guestPasswordText = ConvertTo-PlainText $GuestPassword
-$verifierChanged = $false
-$restoreCompleted = $false
 
 function Invoke-Vmrun {
   param(
@@ -151,7 +156,6 @@ function Wait-GuestReady {
   for ($attempt = 1; $attempt -le 90; ++$attempt) {
     $result = Invoke-GuestScript -Script 'exit 0' -AllowFailure -Quiet
     if ($result.ExitCode -eq 0) {
-      Write-Host "Guest operations ready after attempt $attempt."
       return
     }
     Start-Sleep -Seconds 2
@@ -159,76 +163,28 @@ function Wait-GuestReady {
   throw 'Guest operations did not become ready within 180 seconds.'
 }
 
-function Restart-Guest {
-  Invoke-Vmrun -Arguments @('reset', $VmxPath, 'soft') | Out-Null
-  Wait-GuestReady
-}
-
-function Set-Verifier(
-  [string[]] $Drivers, [string] $BootMode, [string] $GuestLog
+function Capture-Verifier(
+  [string] $GuestQuery, [string] $HostQuery,
+  [string] $GuestSettings, [string] $HostSettings
 ) {
-  $driverLiterals =
-      $Drivers | ForEach-Object { ConvertTo-PowerShellLiteral $_ }
-  $driversExpression = '@(' + ($driverLiterals -join ',') + ')'
-  $logLiteral = ConvertTo-PowerShellLiteral $GuestLog
-  $script = @"
-`$ErrorActionPreference = 'Stop'
-`$drivers = $driversExpression
-`$lines = [Collections.Generic.List[string]]::new()
-function Run([string] `$name, [string[]] `$arguments) {
-  `$lines.Add("=== `$name ===")
-  `$output = @(& verifier.exe @arguments 2>&1)
-  `$code = `$LASTEXITCODE
-  foreach (`$line in `$output) {
-    `$lines.Add((`$line.ToString() -replace [char]0, ''))
-  }
-  `$lines.Add("`$name`_RC=`$code")
-  if (`$code -notin @(0, 2)) { throw "verifier `$name failed: `$code" }
-}
-Run 'SETTINGS_BEFORE' @('/querysettings')
-Run 'ACTIVE_BEFORE' @('/query')
-if (`$drivers.Count -eq 0) {
-  Run 'RESET' @('/reset')
-} else {
-  Run 'ENABLE' (@('/standard', '/driver') + `$drivers)
-  Run 'BOOT_MODE' @('/bootmode', '$($BootMode.ToLowerInvariant())')
-}
-Run 'SETTINGS_AFTER' @('/querysettings')
-Run 'ACTIVE_AFTER' @('/query')
-`$lines.Add('PASS')
-`$lines | Set-Content -LiteralPath $logLiteral -Encoding UTF8
-"@
-  Invoke-GuestScript -Script $script | Out-Null
-}
-
-function Capture-Verifier([string] $GuestLog, [string] $HostLog) {
-  $literal = ConvertTo-PowerShellLiteral $GuestLog
+  $queryLiteral = ConvertTo-PowerShellLiteral $GuestQuery
+  $settingsLiteral = ConvertTo-PowerShellLiteral $GuestSettings
   Invoke-GuestScript -Script @"
-`$output = @(& verifier.exe /query 2>&1)
-`$code = `$LASTEXITCODE
-`$output | ForEach-Object { `$_.ToString() -replace [char]0, '' } |
-    Set-Content -LiteralPath $literal -Encoding UTF8
-if (`$code -ne 0) { exit `$code }
-"@ | Out-Null
-  Copy-FromGuest $GuestLog $HostLog
+`$ErrorActionPreference = 'Stop'
+`$query = @(& verifier.exe /query 2>&1)
+`$queryCode = `$LASTEXITCODE
+`$query | ForEach-Object { `$_.ToString() -replace [char]0, '' } |
+    Set-Content -LiteralPath $queryLiteral -Encoding UTF8
+`$settings = @(& verifier.exe /querysettings 2>&1)
+`$settingsCode = `$LASTEXITCODE
+`$settings | ForEach-Object { `$_.ToString() -replace [char]0, '' } |
+    Set-Content -LiteralPath $settingsLiteral -Encoding UTF8
+if (`$queryCode -notin @(0, 2) -or `$settingsCode -notin @(0, 2)) {
+  throw "Driver Verifier query failed: query=`$queryCode settings=`$settingsCode"
 }
-
-function Restore-Verifier {
-  $guestStage = Join-Path $GuestRoot 'verifier-restore-stage.txt'
-  Set-Verifier $RestoreDriverFileName $RestoreBootMode $guestStage
-  Copy-FromGuest $guestStage (
-      Join-Path $LogRoot 'verifier-restore-stage.txt')
-  Restart-Guest
-  $guestActive = Join-Path $GuestRoot 'verifier-restored-active.txt'
-  $hostActive = Join-Path $LogRoot 'verifier-restored-active.txt'
-  Capture-Verifier $guestActive $hostActive
-  $text = Get-Content -LiteralPath $hostActive -Raw
-  foreach ($driver in $RestoreDriverFileName) {
-    if (-not $text.Contains($driver)) {
-      throw "Restored verifier target was not active: $driver"
-    }
-  }
-  $script:restoreCompleted = $true
+"@ | Out-Null
+  Copy-FromGuest $GuestQuery $HostQuery
+  Copy-FromGuest $GuestSettings $HostSettings
 }
 
 try {
@@ -247,6 +203,7 @@ try {
     throw 'Preparing WFP runtime artifacts failed.'
   }
 
+  Wait-GuestReady
   $rootLiteral = ConvertTo-PowerShellLiteral $GuestRoot
   Invoke-GuestScript -Script @"
 `$root = $rootLiteral
@@ -256,23 +213,36 @@ if (`$root -ne 'C:\' -and `$root.Length -gt 3 -and
 }
 New-Item -ItemType Directory -Force -Path `$root | Out-Null
 "@ | Out-Null
+  $guestCrashPostcheck =
+      Join-Path $GuestRoot 'Test-VmCrashPostcheck.ps1'
+  Copy-ToGuest $crashPostcheckScript $guestCrashPostcheck
+  $eventBaselineGuest = Join-Path $GuestRoot 'crash-event-baseline.txt'
+  $dumpBaselineGuest = Join-Path $GuestRoot 'crash-dump-baseline.txt'
+  Invoke-Vmrun -Guest -Quiet -Arguments @(
+    'runProgramInGuest', $VmxPath,
+    'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe',
+    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+    $guestCrashPostcheck,
+    '-EventBaselinePath', $eventBaselineGuest,
+    '-DumpBaselinePath', $dumpBaselineGuest,
+    '-CaptureBaseline'
+  ) | Out-Null
+  Copy-FromGuest $eventBaselineGuest (
+      Join-Path $LogRoot 'crash-event-baseline.txt')
+  Copy-FromGuest $dumpBaselineGuest (
+      Join-Path $LogRoot 'crash-dump-baseline.txt')
 
-  $preflightGuest = Join-Path $GuestRoot 'verifier-preflight.txt'
-  Capture-Verifier $preflightGuest (
-      Join-Path $LogRoot 'verifier-preflight.txt')
-
-  $enableGuest = Join-Path $GuestRoot 'verifier-enable.txt'
-  Set-Verifier @($targetDriver) Oneboot $enableGuest
-  $verifierChanged = $true
-  Copy-FromGuest $enableGuest (Join-Path $LogRoot 'verifier-enable.txt')
-  Restart-Guest
-
-  $activeGuest = Join-Path $GuestRoot 'verifier-active.txt'
-  $activeHost = Join-Path $LogRoot 'verifier-active.txt'
-  Capture-Verifier $activeGuest $activeHost
-  if (-not (Get-Content -LiteralPath $activeHost -Raw).
-      Contains($targetDriver)) {
-    throw 'The WFP driver was not active under Driver Verifier.'
+  $beforeQueryGuest = Join-Path $GuestRoot 'verifier-before.txt'
+  $beforeQueryHost = Join-Path $LogRoot 'verifier-before.txt'
+  $beforeSettingsGuest = Join-Path $GuestRoot 'verifier-settings-before.txt'
+  $beforeSettingsHost = Join-Path $LogRoot 'verifier-settings-before.txt'
+  Capture-Verifier $beforeQueryGuest $beforeQueryHost `
+      $beforeSettingsGuest $beforeSettingsHost
+  $beforeText = Get-Content -LiteralPath $beforeQueryHost -Raw
+  if (-not $beforeText.Contains($targetDriver)) {
+    throw (
+      "Driver Verifier is not preconfigured for $targetDriver. " +
+      'Configure Verifier and boot the guest manually before running this gate.')
   }
 
   foreach ($file in Get-ChildItem -LiteralPath $StagingRoot -File) {
@@ -280,13 +250,20 @@ New-Item -ItemType Directory -Force -Path `$root | Out-Null
   }
   Copy-ToGuest $runtimeScript (
       Join-Path $GuestRoot ([IO.Path]::GetFileName($runtimeScript)))
+  Copy-ToGuest $guardScript (
+      Join-Path $GuestRoot 'DisposableGuestGuard.ps1')
 
   $guestLog = Join-Path $GuestRoot 'runtime-suite.log'
   $guestLogLiteral = ConvertTo-PowerShellLiteral $guestLog
+  $sentinelLiteral =
+      ConvertTo-PowerShellLiteral $DisposableGuestSentinelPath
   $runResult = Invoke-GuestScript -AllowFailure -Script @"
 `$ErrorActionPreference = 'Stop'
 try {
-  & (Join-Path $rootLiteral 'Run-AleConnectBlockSuite.ps1') -PackageRoot $rootLiteral -Iterations $Iterations *>&1 |
+  & (Join-Path $rootLiteral 'Run-AleConnectBlockSuite.ps1') `
+      -PackageRoot $rootLiteral -Iterations $Iterations `
+      -AllowDisposableGuestMutation `
+      -DisposableGuestSentinelPath $sentinelLiteral *>&1 |
       Tee-Object -FilePath $guestLogLiteral
   Add-Content -LiteralPath $guestLogLiteral -Value 'PASS'
 } catch {
@@ -301,65 +278,54 @@ try {
     throw "The guest WFP suite failed with $($runResult.ExitCode)."
   }
 
-  $afterGuest = Join-Path $GuestRoot 'verifier-after.txt'
-  $afterHost = Join-Path $LogRoot 'verifier-after.txt'
-  Capture-Verifier $afterGuest $afterHost
-  $afterText = Get-Content -LiteralPath $afterHost -Raw
+  $afterQueryGuest = Join-Path $GuestRoot 'verifier-after.txt'
+  $afterQueryHost = Join-Path $LogRoot 'verifier-after.txt'
+  $afterSettingsGuest = Join-Path $GuestRoot 'verifier-settings-after.txt'
+  $afterSettingsHost = Join-Path $LogRoot 'verifier-settings-after.txt'
+  Capture-Verifier $afterQueryGuest $afterQueryHost `
+      $afterSettingsGuest $afterSettingsHost
+  $afterText = Get-Content -LiteralPath $afterQueryHost -Raw
   $targetLine = @(
     $afterText -split '\r?\n' |
-      Where-Object { $_.Contains($targetDriver) }
+        Where-Object { $_.Contains($targetDriver) }
   ) | Select-Object -First 1
   if (-not $targetLine) {
-    throw 'Verifier no longer listed the WFP target after the runtime suite.'
+    throw 'Verifier no longer listed the preconfigured WFP target.'
   }
-  # The labels are localized, but verifier prints the load/unload counters in
-  # a stable "(label: N/label: N)" shape.
   if ($targetLine -notmatch '\([^0-9]*[1-9][0-9]*\s*/') {
-    throw 'Verifier did not report a WFP driver load after the runtime suite.'
+    throw 'Verifier did not report a WFP driver load during the suite.'
+  }
+  $beforeSettings =
+      (Get-Content -LiteralPath $beforeSettingsHost -Raw) -replace "`r`n", "`n"
+  $afterSettings =
+      (Get-Content -LiteralPath $afterSettingsHost -Raw) -replace "`r`n", "`n"
+  if ($beforeSettings -cne $afterSettings) {
+    throw 'Driver Verifier settings changed during the read-only gate.'
   }
 
   $postGuest = Join-Path $GuestRoot 'postcheck.txt'
   $postHost = Join-Path $LogRoot 'postcheck.txt'
-  $postLiteral = ConvertTo-PowerShellLiteral $postGuest
-  Invoke-GuestScript -Script @"
-`$boot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
-`$lines = [Collections.Generic.List[string]]::new()
-`$events = @(Get-WinEvent -FilterHashtable @{
-  LogName='System'; StartTime=`$boot
-} -ErrorAction SilentlyContinue | Where-Object Id -in @(41,1001,6008))
-`$dumps = @()
-if (Test-Path 'C:\Windows\Minidump') {
-  `$dumps += Get-ChildItem 'C:\Windows\Minidump' -Filter '*.dmp' -File |
-      Where-Object LastWriteTime -ge `$boot
-}
-if (Test-Path 'C:\Windows\MEMORY.DMP') {
-  `$dump = Get-Item 'C:\Windows\MEMORY.DMP'
-  if (`$dump.LastWriteTime -ge `$boot) { `$dumps += `$dump }
-}
-`$lines.Add("EVENT_COUNT=`$(`$events.Count)")
-`$lines.Add("DUMP_COUNT=`$(`$dumps.Count)")
-`$lines.Add('PASS')
-`$lines | Set-Content -LiteralPath $postLiteral -Encoding UTF8
-"@ | Out-Null
+  Invoke-Vmrun -Guest -Quiet -Arguments @(
+    'runProgramInGuest', $VmxPath,
+    'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe',
+    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+    $guestCrashPostcheck,
+    '-EventBaselinePath', $eventBaselineGuest,
+    '-DumpBaselinePath', $dumpBaselineGuest,
+    '-OutputPath', $postGuest
+  ) | Out-Null
   Copy-FromGuest $postGuest $postHost
   $postText = Get-Content -LiteralPath $postHost -Raw
   if ($postText -notmatch 'EVENT_COUNT=0' -or
-      $postText -notmatch 'DUMP_COUNT=0') {
-    throw 'The VM postcheck found a crash event or dump.'
+      $postText -notmatch 'DUMP_COUNT=0' -or
+      $postText -notmatch 'EVENT_LOG_RESET=0') {
+    throw 'The VM postcheck found a new crash event or dump.'
   }
 
-  Restore-Verifier
-  Write-Host 'WFP ALE connect-block VM acceptance gate passed.'
+  Write-Host (
+    'WFP ALE connect-block VM acceptance passed without changing ' +
+    'guest boot or Driver Verifier state.')
 } finally {
-  if ($verifierChanged -and -not $restoreCompleted) {
-    Write-Warning 'Attempting Verifier restoration after an incomplete run.'
-    try {
-      Wait-GuestReady
-      Restore-Verifier
-    } catch {
-      Write-Warning "Verifier restoration failed: $($_.Exception.Message)"
-    }
-  }
   $vmPasswordText = $null
   $guestPasswordText = $null
 }

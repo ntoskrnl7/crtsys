@@ -1,0 +1,1032 @@
+/**
+ * @file kernel_msquic
+ * @brief RAII binding to the official kernel MsQuic NMR provider.
+ *
+ * This optional header requires the public msquic.h from the pinned official
+ * MsQuic source package.  It does not import undocumented msquic.sys symbols:
+ * the provider is discovered and opened through MsQuic's public NMR client
+ * contract.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/net/kernel/msquic is a kernel-mode header"
+#endif
+
+// The official msquic_winkernel.h starts with the socket/DDI declarations
+// and expects the consumer to have established the base kernel types first.
+// Keep this public wrapper self-contained instead of making include order part
+// of the NTL contract.
+#include <ntddk.h>
+
+// FindWDK-based projects commonly define _KERNEL32_ while the official
+// MsQuic header selects its kernel platform definitions with _KERNEL_MODE.
+// Bridge that spelling only while importing the provider ABI.
+#if !defined(_KERNEL_MODE) && defined(_KERNEL32_)
+#define NTL_NET_MSQUIC_RESTORE_KERNEL_MODE
+#define _KERNEL_MODE
+#endif
+#include <msquic.h>
+#if defined(NTL_NET_MSQUIC_RESTORE_KERNEL_MODE)
+#undef _KERNEL_MODE
+#undef NTL_NET_MSQUIC_RESTORE_KERNEL_MODE
+#endif
+
+#include <ntl/result>
+#include <ntl/status>
+#include <ntl/net/http3/msquic_backend>
+#include <ntl/net/kernel/passive_cleanup_domain>
+
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <atomic>
+#include <memory>
+#include <new>
+#include <span>
+#include <string_view>
+#include <utility>
+
+namespace ntl::net::kernel {
+
+struct msquic_provider_options {
+  GUID module_id{};
+  ULONG registration_timeout_milliseconds = 10'000;
+};
+
+namespace detail {
+
+/**
+ * A kernel-safe owning facade slot. Public operations retain a shared state
+ * under a short spin lock; close atomically detaches the facade and performs
+ * cancellation and final release after lowering IRQL. This protects the same
+ * facade from close/use races without imposing a declaration-order contract.
+ */
+template <typename State> class owning_state_slot {
+public:
+  owning_state_slot() noexcept { KeInitializeSpinLock(&lock_); }
+  owning_state_slot(const owning_state_slot &) = delete;
+  owning_state_slot &operator=(const owning_state_slot &) = delete;
+  owning_state_slot(owning_state_slot &&other) noexcept
+      : owning_state_slot() {
+    state_ = other.take();
+  }
+  owning_state_slot &operator=(owning_state_slot &&other) noexcept {
+    if (this != &other) {
+      auto next = other.take();
+      auto previous = take();
+      KIRQL old_irql = PASSIVE_LEVEL;
+      KeAcquireSpinLock(&lock_, &old_irql);
+      state_ = std::move(next);
+      KeReleaseSpinLock(&lock_, old_irql);
+      previous.reset();
+    }
+    return *this;
+  }
+
+  std::shared_ptr<State> retain() const noexcept {
+    std::shared_ptr<State> result;
+    KIRQL old_irql = PASSIVE_LEVEL;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    result = state_;
+    KeReleaseSpinLock(&lock_, old_irql);
+    return result;
+  }
+
+  std::shared_ptr<State> take() noexcept {
+    std::shared_ptr<State> result;
+    KIRQL old_irql = PASSIVE_LEVEL;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    result = std::move(state_);
+    KeReleaseSpinLock(&lock_, old_irql);
+    return result;
+  }
+
+  bool publish(std::shared_ptr<State> state) noexcept {
+    KIRQL old_irql = PASSIVE_LEVEL;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    const bool accepted = !state_;
+    if (accepted)
+      state_ = std::move(state);
+    KeReleaseSpinLock(&lock_, old_irql);
+    return accepted;
+  }
+
+private:
+  mutable KSPIN_LOCK lock_{};
+  std::shared_ptr<State> state_;
+};
+
+class msquic_provider_state {
+public:
+  explicit msquic_provider_state(passive_cleanup_domain *domain) noexcept
+      : cleanup_(&msquic_provider_state::cleanup_at_passive, this),
+        domain_(domain) {}
+
+  ~msquic_provider_state() {
+    NT_ASSERT(KeGetCurrentIrql() == PASSIVE_LEVEL);
+    close_native();
+  }
+
+  ntl::status open(msquic_provider_options options) noexcept {
+    NTSTATUS status = MsQuicNmrClientRegister(
+        &nmr_client_, &options.module_id,
+        options.registration_timeout_milliseconds);
+    if (!NT_SUCCESS(status))
+      return status;
+    dispatch_ = QUIC_GET_DISPATCH(nmr_client_);
+    if (!dispatch_ || !dispatch_->OpenVersion || !dispatch_->Close)
+      return STATUS_NOINTERFACE;
+    const void *api = nullptr;
+    status = dispatch_->OpenVersion(QUIC_API_VERSION_2, &api);
+    if (!NT_SUCCESS(status) || !api)
+      return NT_SUCCESS(status) ? STATUS_NOINTERFACE : status;
+    api_ = static_cast<const QUIC_API_TABLE *>(api);
+    accepting_.store(true, std::memory_order_release);
+    return ntl::status::ok();
+  }
+
+  void begin_close() noexcept {
+    accepting_.store(false, std::memory_order_release);
+  }
+  bool accepting() const noexcept {
+    return accepting_.load(std::memory_order_acquire) && api_;
+  }
+  bool alive() const noexcept { return api_ != nullptr; }
+  const QUIC_API_TABLE *api() const noexcept { return api_; }
+  passive_cleanup_domain *domain() const noexcept { return domain_; }
+  passive_cleanup_item &cleanup_item() noexcept { return cleanup_; }
+
+private:
+  static void cleanup_at_passive(void *context) noexcept {
+    delete static_cast<msquic_provider_state *>(context);
+  }
+  void close_native() noexcept {
+    const QUIC_API_TABLE *api = std::exchange(api_, nullptr);
+    if (api && dispatch_ && dispatch_->Close)
+      dispatch_->Close(api);
+    dispatch_ = nullptr;
+    if (nmr_client_)
+      MsQuicNmrClientDeregister(&nmr_client_);
+  }
+
+  passive_cleanup_item cleanup_;
+  passive_cleanup_domain *domain_ = nullptr;
+  HANDLE nmr_client_ = nullptr;
+  MSQUIC_NMR_DISPATCH *dispatch_ = nullptr;
+  const QUIC_API_TABLE *api_ = nullptr;
+  std::atomic<bool> accepting_{false};
+};
+
+inline ntl::result<std::shared_ptr<msquic_provider_state>>
+open_msquic_provider(msquic_provider_options options) noexcept {
+  auto *domain = borrowed_runtime_passive_cleanup_domain();
+  if (!domain)
+    return ntl::unexpected(STATUS_DEVICE_NOT_READY);
+  auto *raw = new (std::nothrow) msquic_provider_state(domain);
+  if (!raw)
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  const ntl::status registered = domain->register_item(raw->cleanup_item());
+  if (!registered.is_ok()) {
+    delete raw;
+    return ntl::unexpected(static_cast<NTSTATUS>(registered));
+  }
+  const ntl::status opened = raw->open(options);
+  if (!opened.is_ok()) {
+    domain->retire(raw->cleanup_item());
+    return ntl::unexpected(static_cast<NTSTATUS>(opened));
+  }
+  try {
+    return ntl::ok(std::shared_ptr<msquic_provider_state>(
+        raw, [](msquic_provider_state *value) noexcept {
+          value->begin_close();
+          value->domain()->retire_deferred(value->cleanup_item());
+        }));
+  } catch (...) {
+    raw->begin_close();
+    domain->retire_deferred(raw->cleanup_item());
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  }
+}
+
+} // namespace detail
+
+/**
+ * @brief Owns one NMR client binding and one MsQuic v2 API reference.
+ *
+ * Child registrations retain the native provider state, so this facade may be
+ * closed or destroyed first. close() is idempotent, rejects new child
+ * factories, and the driver runtime keeps the provider bound until every
+ * retained child and callback has drained. Native access is intentionally
+ * exposed only through borrowed_native_api().
+ */
+class msquic_provider {
+public:
+  msquic_provider() noexcept = default;
+  msquic_provider(const msquic_provider &) = delete;
+  msquic_provider &operator=(const msquic_provider &) = delete;
+
+  msquic_provider(msquic_provider &&) noexcept = default;
+
+  msquic_provider &operator=(msquic_provider &&other) noexcept {
+    if (this != &other) {
+      close();
+      state_ = std::move(other.state_);
+    }
+    return *this;
+  }
+
+  ~msquic_provider() { close(); }
+
+  static ntl::result<msquic_provider>
+  try_open(msquic_provider_options options) noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL ||
+        options.registration_timeout_milliseconds == 0)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+
+    auto state = detail::open_msquic_provider(options);
+    if (!state)
+      return ntl::unexpected(state.status());
+    msquic_provider result;
+    if (!result.state_.publish(std::move(*state)))
+      return ntl::unexpected(STATUS_INTERNAL_ERROR);
+    return ntl::ok(std::move(result));
+  }
+
+  void close() noexcept {
+    auto state = state_.take();
+    if (state)
+      state->begin_close();
+    state.reset();
+  }
+
+  explicit operator bool() const noexcept {
+    return static_cast<bool>(retain_state());
+  }
+
+  /** Callback-scoped low-level view; prefer owning child factories. */
+  const QUIC_API_TABLE *borrowed_native_api() const noexcept {
+    auto state = retain_state();
+    return state ? state->api() : nullptr;
+  }
+
+private:
+  friend class msquic_registration;
+  std::shared_ptr<detail::msquic_provider_state> retain_state() const noexcept {
+    auto state = state_.retain();
+    return state && state->accepting() ? state : nullptr;
+  }
+  detail::owning_state_slot<detail::msquic_provider_state> state_;
+};
+
+struct msquic_registration_options {
+  const char *application_name = "ntl-kernel";
+  QUIC_EXECUTION_PROFILE execution_profile =
+      QUIC_EXECUTION_PROFILE_LOW_LATENCY;
+};
+
+namespace detail {
+
+class msquic_registration_state {
+public:
+  msquic_registration_state(
+      passive_cleanup_domain *domain,
+      std::shared_ptr<msquic_provider_state> provider) noexcept
+      : cleanup_(&msquic_registration_state::cleanup_at_passive, this),
+        domain_(domain), provider_(std::move(provider)) {}
+
+  ~msquic_registration_state() {
+    NT_ASSERT(KeGetCurrentIrql() == PASSIVE_LEVEL);
+    shutdown_native();
+    if (handle_)
+      provider_->api()->RegistrationClose(std::exchange(handle_, nullptr));
+  }
+
+  ntl::status open(msquic_registration_options options) noexcept {
+    QUIC_REGISTRATION_CONFIG configuration{
+        options.application_name, options.execution_profile};
+    const QUIC_STATUS status = provider_->api()->RegistrationOpen(
+        &configuration, &handle_);
+    if (QUIC_FAILED(status))
+      return static_cast<NTSTATUS>(status);
+    accepting_.store(true, std::memory_order_release);
+    return ntl::status::ok();
+  }
+
+  void begin_close(std::uint64_t error_code = 0,
+                   bool silent = false) noexcept {
+    if (!accepting_.exchange(false, std::memory_order_acq_rel))
+      return;
+    shutdown_error_code_.store(error_code, std::memory_order_relaxed);
+    shutdown_silent_.store(silent, std::memory_order_relaxed);
+    shutdown_requested_.store(true, std::memory_order_release);
+    if (KeGetCurrentIrql() == PASSIVE_LEVEL)
+      shutdown_native();
+  }
+  bool accepting() const noexcept {
+    return accepting_.load(std::memory_order_acquire) && handle_ &&
+           provider_->alive();
+  }
+  const QUIC_API_TABLE *api() const noexcept { return provider_->api(); }
+  HQUIC handle() const noexcept { return handle_; }
+  passive_cleanup_domain *domain() const noexcept { return domain_; }
+  passive_cleanup_item &cleanup_item() noexcept { return cleanup_; }
+
+private:
+  static void cleanup_at_passive(void *context) noexcept {
+    delete static_cast<msquic_registration_state *>(context);
+  }
+  void shutdown_native() noexcept {
+    NT_ASSERT(KeGetCurrentIrql() == PASSIVE_LEVEL);
+    if (!handle_ ||
+        !shutdown_requested_.load(std::memory_order_acquire) ||
+        shutdown_started_.exchange(true, std::memory_order_acq_rel))
+      return;
+    provider_->api()->RegistrationShutdown(
+        handle_, shutdown_silent_.load(std::memory_order_relaxed)
+                     ? QUIC_CONNECTION_SHUTDOWN_FLAG_SILENT
+                     : QUIC_CONNECTION_SHUTDOWN_FLAG_NONE,
+        shutdown_error_code_.load(std::memory_order_relaxed));
+  }
+  passive_cleanup_item cleanup_;
+  passive_cleanup_domain *domain_ = nullptr;
+  std::shared_ptr<msquic_provider_state> provider_;
+  HQUIC handle_ = nullptr;
+  std::atomic<bool> accepting_{false};
+  std::atomic<bool> shutdown_requested_{false};
+  std::atomic<bool> shutdown_started_{false};
+  std::atomic<bool> shutdown_silent_{false};
+  std::atomic<std::uint64_t> shutdown_error_code_{0};
+};
+
+} // namespace detail
+
+class msquic_registration {
+public:
+  msquic_registration() noexcept = default;
+  msquic_registration(const msquic_registration &) = delete;
+  msquic_registration &operator=(const msquic_registration &) = delete;
+  msquic_registration(msquic_registration &&) noexcept = default;
+  msquic_registration &operator=(msquic_registration &&other) noexcept {
+    if (this != &other) {
+      close();
+      state_ = std::move(other.state_);
+    }
+    return *this;
+  }
+  ~msquic_registration() { close(); }
+
+  static ntl::result<msquic_registration>
+  try_open(msquic_provider &provider,
+           msquic_registration_options options = {}) noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL || !options.application_name)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    auto provider_state = provider.retain_state();
+    if (!provider_state)
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+    auto *domain = provider_state->domain();
+    auto *raw = new (std::nothrow)
+        detail::msquic_registration_state(domain, provider_state);
+    if (!raw)
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    const ntl::status registered = domain->register_item(raw->cleanup_item());
+    if (!registered.is_ok()) {
+      delete raw;
+      return ntl::unexpected(static_cast<NTSTATUS>(registered));
+    }
+    const ntl::status opened = raw->open(options);
+    if (!opened.is_ok()) {
+      domain->retire(raw->cleanup_item());
+      return ntl::unexpected(static_cast<NTSTATUS>(opened));
+    }
+    msquic_registration result;
+    try {
+      auto state = std::shared_ptr<detail::msquic_registration_state>(
+          raw, [](detail::msquic_registration_state *value) noexcept {
+            value->begin_close();
+            value->domain()->retire_deferred(value->cleanup_item());
+          });
+      if (!result.state_.publish(std::move(state))) {
+        return ntl::unexpected(STATUS_INTERNAL_ERROR);
+      }
+    } catch (...) {
+      raw->begin_close();
+      domain->retire_deferred(raw->cleanup_item());
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+    return ntl::ok(std::move(result));
+  }
+
+  void shutdown(std::uint64_t error_code = 0,
+                bool silent = false) noexcept {
+    auto state = state_.retain();
+    if (state)
+      state->begin_close(error_code, silent);
+  }
+
+  void close() noexcept {
+    auto state = state_.take();
+    if (state)
+      state->begin_close();
+    state.reset();
+  }
+
+  explicit operator bool() const noexcept {
+    return static_cast<bool>(retain_state());
+  }
+
+private:
+  friend class msquic_configuration;
+  friend class msquic_listener;
+  std::shared_ptr<detail::msquic_registration_state>
+  retain_state() const noexcept {
+    auto state = state_.retain();
+    return state && state->accepting() ? state : nullptr;
+  }
+  detail::owning_state_slot<detail::msquic_registration_state> state_;
+};
+
+struct msquic_configuration_limits {
+  static constexpr std::size_t maximum_alpn_count = 16;
+  static constexpr std::size_t maximum_alpn_size = QUIC_MAX_ALPN_LENGTH;
+};
+
+namespace detail {
+
+class msquic_configuration_state {
+public:
+  msquic_configuration_state(
+      passive_cleanup_domain *domain,
+      std::shared_ptr<msquic_registration_state> registration) noexcept
+      : cleanup_(&msquic_configuration_state::cleanup_at_passive, this),
+        domain_(domain), registration_(std::move(registration)) {}
+
+  ~msquic_configuration_state() {
+    NT_ASSERT(KeGetCurrentIrql() == PASSIVE_LEVEL);
+    if (handle_)
+      api()->ConfigurationClose(std::exchange(handle_, nullptr));
+  }
+
+  ntl::status open(std::span<const QUIC_BUFFER> protocols,
+                   const QUIC_SETTINGS *settings) noexcept {
+    const QUIC_STATUS opened = api()->ConfigurationOpen(
+        registration_->handle(), protocols.data(),
+        static_cast<std::uint32_t>(protocols.size()), settings,
+        settings ? sizeof(*settings) : 0, nullptr, &handle_);
+    if (QUIC_FAILED(opened))
+      return static_cast<NTSTATUS>(opened);
+    accepting_.store(true, std::memory_order_release);
+    return ntl::status::ok();
+  }
+
+  void begin_close() noexcept {
+    accepting_.store(false, std::memory_order_release);
+  }
+  bool accepting() const noexcept {
+    return accepting_.load(std::memory_order_acquire) && handle_ &&
+           registration_->accepting();
+  }
+  const QUIC_API_TABLE *api() const noexcept { return registration_->api(); }
+  HQUIC registration() const noexcept { return registration_->handle(); }
+  HQUIC handle() const noexcept { return handle_; }
+  passive_cleanup_domain *domain() const noexcept { return domain_; }
+  passive_cleanup_item &cleanup_item() noexcept { return cleanup_; }
+
+private:
+  static void cleanup_at_passive(void *context) noexcept {
+    delete static_cast<msquic_configuration_state *>(context);
+  }
+  passive_cleanup_item cleanup_;
+  passive_cleanup_domain *domain_ = nullptr;
+  std::shared_ptr<msquic_registration_state> registration_;
+  HQUIC handle_ = nullptr;
+  std::atomic<bool> accepting_{false};
+};
+
+} // namespace detail
+
+class msquic_configuration {
+public:
+  msquic_configuration() noexcept = default;
+  msquic_configuration(const msquic_configuration &) = delete;
+  msquic_configuration &operator=(const msquic_configuration &) = delete;
+  msquic_configuration(msquic_configuration &&) noexcept = default;
+  msquic_configuration &operator=(msquic_configuration &&other) noexcept {
+    if (this != &other) {
+      close();
+      state_ = std::move(other.state_);
+    }
+    return *this;
+  }
+  ~msquic_configuration() { close(); }
+
+  static ntl::result<msquic_configuration>
+  try_open(msquic_registration &registration,
+           std::span<const std::string_view> protocols,
+           const QUIC_SETTINGS *settings = nullptr) noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL || protocols.empty() ||
+        protocols.size() > msquic_configuration_limits::maximum_alpn_count)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    std::array<QUIC_BUFFER,
+               msquic_configuration_limits::maximum_alpn_count>
+        buffers{};
+    for (std::size_t index = 0; index != protocols.size(); ++index) {
+      if (protocols[index].empty() ||
+          protocols[index].size() >
+              msquic_configuration_limits::maximum_alpn_size)
+        return ntl::unexpected(STATUS_INVALID_PARAMETER);
+      buffers[index].Length =
+          static_cast<std::uint32_t>(protocols[index].size());
+      buffers[index].Buffer = reinterpret_cast<std::uint8_t *>(
+          const_cast<char *>(protocols[index].data()));
+    }
+
+    auto registration_state = registration.retain_state();
+    if (!registration_state)
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+    auto *domain = registration_state->domain();
+    auto *raw = new (std::nothrow)
+        detail::msquic_configuration_state(domain, registration_state);
+    if (!raw)
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    const ntl::status registered = domain->register_item(raw->cleanup_item());
+    if (!registered.is_ok()) {
+      delete raw;
+      return ntl::unexpected(static_cast<NTSTATUS>(registered));
+    }
+    const ntl::status opened = raw->open(
+        std::span<const QUIC_BUFFER>(buffers.data(), protocols.size()),
+        settings);
+    if (!opened.is_ok()) {
+      domain->retire(raw->cleanup_item());
+      return ntl::unexpected(static_cast<NTSTATUS>(opened));
+    }
+    msquic_configuration result;
+    try {
+      auto state = std::shared_ptr<detail::msquic_configuration_state>(
+          raw, [](detail::msquic_configuration_state *value) noexcept {
+            value->begin_close();
+            value->domain()->retire_deferred(value->cleanup_item());
+          });
+      if (!result.state_.publish(std::move(state)))
+        return ntl::unexpected(STATUS_INTERNAL_ERROR);
+    } catch (...) {
+      raw->begin_close();
+      domain->retire_deferred(raw->cleanup_item());
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+    return ntl::ok(std::move(result));
+  }
+
+  ntl::status load_client_credentials(
+      bool validate_peer = true,
+      bool indicate_peer_certificate = false) noexcept {
+    auto state = state_.retain();
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL || !state || !state->accepting())
+      return STATUS_INVALID_DEVICE_STATE;
+    QUIC_CREDENTIAL_CONFIG credentials{};
+    credentials.Type = QUIC_CREDENTIAL_TYPE_NONE;
+    credentials.Flags = QUIC_CREDENTIAL_FLAG_CLIENT;
+    if (!validate_peer)
+      credentials.Flags = static_cast<QUIC_CREDENTIAL_FLAGS>(
+          credentials.Flags | QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION);
+    if (indicate_peer_certificate)
+      credentials.Flags = static_cast<QUIC_CREDENTIAL_FLAGS>(
+          credentials.Flags |
+          QUIC_CREDENTIAL_FLAG_INDICATE_CERTIFICATE_RECEIVED);
+    const QUIC_STATUS loaded =
+        state->api()->ConfigurationLoadCredential(state->handle(), &credentials);
+    return QUIC_SUCCEEDED(loaded)
+               ? ntl::status::ok()
+               : ntl::status{static_cast<NTSTATUS>(loaded)};
+  }
+
+  /**
+   * @brief Loads an explicit machine-store certificate for mutual TLS.
+   *
+   * Peer validation remains enabled by default.  This is the client-side
+   * counterpart of load_server_certificate(); it never silently falls back
+   * to an arbitrary certificate from the machine store.
+   */
+  ntl::status load_client_certificate(
+      std::span<const std::byte> sha1_thumbprint,
+      std::string_view store_name = "MY", bool validate_peer = true,
+      bool indicate_peer_certificate = false) noexcept {
+    auto state = state_.retain();
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL || !state || !state->accepting() ||
+        sha1_thumbprint.size() != sizeof(QUIC_CERTIFICATE_HASH_STORE::ShaHash) ||
+        store_name.empty() || store_name.size() >=
+                                  sizeof(QUIC_CERTIFICATE_HASH_STORE::StoreName))
+      return STATUS_INVALID_PARAMETER;
+    QUIC_CERTIFICATE_HASH_STORE store{};
+    store.Flags = QUIC_CERTIFICATE_HASH_STORE_FLAG_MACHINE_STORE;
+    std::memcpy(store.ShaHash, sha1_thumbprint.data(),
+                sha1_thumbprint.size());
+    std::memcpy(store.StoreName, store_name.data(), store_name.size());
+    QUIC_CREDENTIAL_CONFIG credentials{};
+    credentials.Type = QUIC_CREDENTIAL_TYPE_CERTIFICATE_HASH_STORE;
+    credentials.CertificateHashStore = &store;
+    credentials.Flags = QUIC_CREDENTIAL_FLAG_CLIENT;
+    if (!validate_peer)
+      credentials.Flags = static_cast<QUIC_CREDENTIAL_FLAGS>(
+          credentials.Flags | QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION);
+    if (indicate_peer_certificate)
+      credentials.Flags = static_cast<QUIC_CREDENTIAL_FLAGS>(
+          credentials.Flags |
+          QUIC_CREDENTIAL_FLAG_INDICATE_CERTIFICATE_RECEIVED);
+    const QUIC_STATUS loaded =
+        state->api()->ConfigurationLoadCredential(state->handle(), &credentials);
+    return QUIC_SUCCEEDED(loaded)
+               ? ntl::status::ok()
+               : ntl::status{static_cast<NTSTATUS>(loaded)};
+  }
+
+  ntl::status load_server_certificate(
+      std::span<const std::byte> sha1_thumbprint,
+      std::string_view store_name = "MY",
+      bool require_client_certificate = false) noexcept {
+    auto state = state_.retain();
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL || !state || !state->accepting() ||
+        sha1_thumbprint.size() != sizeof(QUIC_CERTIFICATE_HASH_STORE::ShaHash) ||
+        store_name.empty() || store_name.size() >=
+                                  sizeof(QUIC_CERTIFICATE_HASH_STORE::StoreName))
+      return STATUS_INVALID_PARAMETER;
+    QUIC_CERTIFICATE_HASH_STORE store{};
+    store.Flags = QUIC_CERTIFICATE_HASH_STORE_FLAG_MACHINE_STORE;
+    std::memcpy(store.ShaHash, sha1_thumbprint.data(),
+                sha1_thumbprint.size());
+    std::memcpy(store.StoreName, store_name.data(), store_name.size());
+    QUIC_CREDENTIAL_CONFIG credentials{};
+    credentials.Type = QUIC_CREDENTIAL_TYPE_CERTIFICATE_HASH_STORE;
+    credentials.CertificateHashStore = &store;
+    credentials.Flags = require_client_certificate
+                            ? QUIC_CREDENTIAL_FLAG_REQUIRE_CLIENT_AUTHENTICATION
+                            : QUIC_CREDENTIAL_FLAG_NONE;
+    const QUIC_STATUS loaded =
+        state->api()->ConfigurationLoadCredential(state->handle(), &credentials);
+    return QUIC_SUCCEEDED(loaded)
+               ? ntl::status::ok()
+               : ntl::status{static_cast<NTSTATUS>(loaded)};
+  }
+
+  void close() noexcept {
+    auto state = state_.take();
+    if (state)
+      state->begin_close();
+    state.reset();
+  }
+
+  explicit operator bool() const noexcept {
+    auto state = state_.retain();
+    return state && state->accepting();
+  }
+
+  ntl::net::http3::msquic_backend::connection_context
+  make_connection_context() const noexcept {
+    auto state = state_.retain();
+    if (!state || !state->accepting())
+      return {};
+
+    // Capture every borrowed native value before transferring the owning
+    // reference. Function-argument evaluation order must not be allowed to
+    // move `state` before one of the state accessors is evaluated.
+    const auto *const api = state->api();
+    const HQUIC registration = state->registration();
+    const HQUIC configuration = state->handle();
+    return ntl::net::http3::msquic_backend::connection_context::
+        retain_borrowed_native(api, registration, configuration,
+                               std::move(state));
+  }
+
+private:
+  detail::owning_state_slot<detail::msquic_configuration_state> state_;
+};
+
+class msquic_listener_sink {
+public:
+  virtual ~msquic_listener_sink() = default;
+
+  /**
+   * The pinned public MsQuic ABI annotates NEW_CONNECTION callbacks at
+   * PASSIVE_LEVEL.  It is therefore valid for a sink to create bounded C++
+   * state and install the connection/configuration synchronously.  The only
+   * listener event allowed above PASSIVE_LEVEL is DOS_MODE_CHANGED; the NTL
+   * listener consumes that event without calling the sink.
+   *
+   * The callback receives a move-only, explicitly borrowed indication. Before
+   * returning success it must synchronously move that indication into a
+   * connection factory, which installs the connection callback and
+   * configuration. The metadata view must not be retained after the callback.
+   */
+  virtual ntl::status
+  on_connection(
+      ntl::net::http3::msquic_backend::borrowed_accepted_connection
+          accepted) noexcept = 0;
+};
+
+namespace detail {
+
+class msquic_listener_state {
+public:
+  msquic_listener_state(
+      passive_cleanup_domain *domain,
+      std::shared_ptr<msquic_registration_state> registration,
+      std::shared_ptr<msquic_listener_sink> sink) noexcept
+      : cleanup_(&msquic_listener_state::cleanup_at_passive, this),
+        domain_(domain), registration_(std::move(registration)),
+        sink_(std::move(sink)) {
+    KeInitializeEvent(&drained_, NotificationEvent, FALSE);
+  }
+
+  ~msquic_listener_state() {
+    NT_ASSERT(KeGetCurrentIrql() == PASSIVE_LEVEL);
+    close_exact();
+  }
+
+  ntl::status open() noexcept {
+    const QUIC_STATUS opened = api()->ListenerOpen(
+        registration_->handle(), &listener_callback, this, &handle_);
+    return QUIC_SUCCEEDED(opened)
+               ? ntl::status::ok()
+               : ntl::status{static_cast<NTSTATUS>(opened)};
+  }
+
+  ntl::status start(std::span<const std::string_view> protocols,
+                    const QUIC_ADDR *address) noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL || !handle_ ||
+        InterlockedCompareExchange(&started_, 0, 0) != 0 ||
+        !registration_->accepting() || protocols.empty() ||
+        protocols.size() > msquic_configuration_limits::maximum_alpn_count)
+      return STATUS_INVALID_PARAMETER;
+    if (InterlockedCompareExchange(&starting_, 1, 0) != 0)
+      return STATUS_INVALID_DEVICE_STATE;
+    if (InterlockedCompareExchange(&stopping_, 0, 0) != 0) {
+      InterlockedExchange(&starting_, 0);
+      return STATUS_DELETE_PENDING;
+    }
+    std::array<QUIC_BUFFER,
+               msquic_configuration_limits::maximum_alpn_count> buffers{};
+    for (std::size_t index = 0; index != protocols.size(); ++index) {
+      if (protocols[index].empty() ||
+          protocols[index].size() > QUIC_MAX_ALPN_LENGTH) {
+        InterlockedExchange(&starting_, 0);
+        return STATUS_INVALID_PARAMETER;
+      }
+      buffers[index] = {
+          static_cast<std::uint32_t>(protocols[index].size()),
+          reinterpret_cast<std::uint8_t *>(
+              const_cast<char *>(protocols[index].data()))};
+    }
+    stop_complete_ = 0;
+    KeClearEvent(&drained_);
+    const QUIC_STATUS started = api()->ListenerStart(
+        handle_, buffers.data(),
+        static_cast<std::uint32_t>(protocols.size()), address);
+    if (QUIC_FAILED(started)) {
+      InterlockedExchange(&starting_, 0);
+      if (InterlockedCompareExchange(&stopping_, 0, 0) != 0) {
+        InterlockedExchange(&stop_complete_, 1);
+        signal_if_drained();
+      }
+      return static_cast<NTSTATUS>(started);
+    }
+    InterlockedExchange(&started_, 1);
+    InterlockedExchange(&starting_, 0);
+    if (InterlockedCompareExchange(&stopping_, 0, 0) != 0)
+      request_native_stop();
+    return ntl::status::ok();
+  }
+
+  void begin_close() noexcept {
+    if (InterlockedExchange(&stopping_, 1) != 0)
+      return;
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return;
+    request_close_at_passive();
+  }
+
+  void request_close_at_passive() noexcept {
+    NT_ASSERT(KeGetCurrentIrql() == PASSIVE_LEVEL);
+    if (InterlockedCompareExchange(&starting_, 0, 0) != 0)
+      return;
+    if (handle_ && InterlockedCompareExchange(&started_, 0, 0) != 0) {
+      request_native_stop();
+    } else {
+      InterlockedExchange(&stop_complete_, 1);
+      signal_if_drained();
+    }
+  }
+
+  ntl::status wait_closed(std::chrono::milliseconds timeout) noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL || timeout.count() <= 0)
+      return STATUS_INVALID_DEVICE_STATE;
+    InterlockedExchange(&stopping_, 1);
+    request_close_at_passive();
+    LARGE_INTEGER due{};
+    due.QuadPart = -static_cast<LONGLONG>(timeout.count()) * 10'000;
+    return KeWaitForSingleObject(
+        &drained_, Executive, KernelMode, FALSE, &due);
+  }
+
+  ntl::result<QUIC_ADDR> local_address() const noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL || !handle_ ||
+        InterlockedCompareExchange(&started_, 0, 0) == 0 ||
+        InterlockedCompareExchange(&stopping_, 0, 0) != 0)
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+    QUIC_ADDR address{};
+    std::uint32_t size = sizeof(address);
+    const QUIC_STATUS queried = api()->GetParam(
+        handle_, QUIC_PARAM_LISTENER_LOCAL_ADDRESS, &size, &address);
+    if (QUIC_FAILED(queried) || size != sizeof(address))
+      return ntl::unexpected(QUIC_FAILED(queried)
+                                 ? static_cast<NTSTATUS>(queried)
+                                 : STATUS_INFO_LENGTH_MISMATCH);
+    return ntl::ok(address);
+  }
+
+  passive_cleanup_domain *domain() const noexcept { return domain_; }
+  passive_cleanup_item &cleanup_item() noexcept { return cleanup_; }
+
+private:
+  class callback_guard {
+  public:
+    explicit callback_guard(msquic_listener_state &owner) noexcept
+        : owner_(owner) {
+      if (InterlockedIncrement(&owner_.callbacks_) == 1)
+        KeClearEvent(&owner_.drained_);
+    }
+    ~callback_guard() {
+      InterlockedDecrement(&owner_.callbacks_);
+      owner_.signal_if_drained();
+    }
+  private:
+    msquic_listener_state &owner_;
+  };
+
+  static QUIC_STATUS QUIC_API listener_callback(
+      HQUIC, void *context, QUIC_LISTENER_EVENT *event) noexcept {
+    auto *self = static_cast<msquic_listener_state *>(context);
+    if (!self || !event)
+      return QUIC_STATUS_INVALID_PARAMETER;
+    callback_guard guard(*self);
+    NT_ASSERT(event->Type == QUIC_LISTENER_EVENT_DOS_MODE_CHANGED ||
+              KeGetCurrentIrql() == PASSIVE_LEVEL);
+    if (event->Type == QUIC_LISTENER_EVENT_STOP_COMPLETE) {
+      InterlockedExchange(&self->stop_complete_, 1);
+      self->signal_if_drained();
+      return QUIC_STATUS_SUCCESS;
+    }
+    if (event->Type != QUIC_LISTENER_EVENT_NEW_CONNECTION)
+      return QUIC_STATUS_SUCCESS;
+    if (InterlockedCompareExchange(&self->stopping_, 0, 0) != 0 ||
+        !event->NEW_CONNECTION.Connection ||
+        !event->NEW_CONNECTION.Info || !self->sink_)
+      return QUIC_STATUS_ABORTED;
+    auto accepted = ntl::net::http3::msquic_backend::
+        borrowed_accepted_connection::from_native(
+            event->NEW_CONNECTION.Connection, *event->NEW_CONNECTION.Info);
+    const ntl::status status =
+        self->sink_->on_connection(std::move(accepted));
+    return status.is_ok() ? QUIC_STATUS_SUCCESS
+                          : static_cast<QUIC_STATUS>(status);
+  }
+
+  static void cleanup_at_passive(void *context) noexcept {
+    delete static_cast<msquic_listener_state *>(context);
+  }
+
+  void close_exact() noexcept {
+    if (!handle_)
+      return;
+    InterlockedExchange(&stopping_, 1);
+    request_close_at_passive();
+    signal_if_drained();
+    (void)KeWaitForSingleObject(
+        &drained_, Executive, KernelMode, FALSE, nullptr);
+    api()->ListenerClose(std::exchange(handle_, nullptr));
+    InterlockedExchange(&started_, 0);
+    sink_.reset();
+  }
+  void request_native_stop() noexcept {
+    if (InterlockedExchange(&stop_requested_, 1) == 0)
+      api()->ListenerStop(handle_);
+  }
+  void signal_if_drained() noexcept {
+    if (InterlockedCompareExchange(&stop_complete_, 0, 0) != 0 &&
+        InterlockedCompareExchange(&callbacks_, 0, 0) == 0)
+      KeSetEvent(&drained_, IO_NO_INCREMENT, FALSE);
+  }
+  const QUIC_API_TABLE *api() const noexcept {
+    return registration_->api();
+  }
+
+  passive_cleanup_item cleanup_;
+  passive_cleanup_domain *domain_ = nullptr;
+  std::shared_ptr<msquic_registration_state> registration_;
+  std::shared_ptr<msquic_listener_sink> sink_;
+  HQUIC handle_ = nullptr;
+  KEVENT drained_{};
+  volatile LONG callbacks_ = 0;
+  volatile LONG starting_ = 0;
+  mutable volatile LONG started_ = 0;
+  mutable volatile LONG stopping_ = 0;
+  volatile LONG stop_requested_ = 0;
+  volatile LONG stop_complete_ = 0;
+};
+
+} // namespace detail
+
+/** Owning listener facade with runtime-drained callback and sink lifetime. */
+class msquic_listener {
+public:
+  msquic_listener() noexcept = default;
+  msquic_listener(const msquic_listener &) = delete;
+  msquic_listener &operator=(const msquic_listener &) = delete;
+  msquic_listener(msquic_listener &&) noexcept = default;
+  msquic_listener &operator=(msquic_listener &&other) noexcept {
+    if (this != &other) {
+      close();
+      state_ = std::move(other.state_);
+    }
+    return *this;
+  }
+  ~msquic_listener() { close(); }
+
+  static ntl::result<msquic_listener>
+  try_listen(msquic_registration &registration,
+             std::shared_ptr<msquic_listener_sink> sink,
+             std::span<const std::string_view> protocols,
+             const QUIC_ADDR *address = nullptr) noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL || !sink)
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+    auto registration_state = registration.retain_state();
+    if (!registration_state)
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+    auto *domain = registration_state->domain();
+    auto *raw = new (std::nothrow) detail::msquic_listener_state(
+        domain, registration_state, std::move(sink));
+    if (!raw)
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    const ntl::status registered = domain->register_item(raw->cleanup_item());
+    if (!registered.is_ok()) {
+      delete raw;
+      return ntl::unexpected(static_cast<NTSTATUS>(registered));
+    }
+    const ntl::status opened = raw->open();
+    if (!opened.is_ok()) {
+      domain->retire_deferred(raw->cleanup_item());
+      return ntl::unexpected(static_cast<NTSTATUS>(opened));
+    }
+    const ntl::status started = raw->start(protocols, address);
+    if (!started.is_ok()) {
+      raw->begin_close();
+      domain->retire_deferred(raw->cleanup_item());
+      return ntl::unexpected(static_cast<NTSTATUS>(started));
+    }
+    msquic_listener result;
+    try {
+      auto state = std::shared_ptr<detail::msquic_listener_state>(
+          raw, [](detail::msquic_listener_state *value) noexcept {
+            value->begin_close();
+            value->domain()->retire_deferred(value->cleanup_item());
+          });
+      if (!result.state_.publish(std::move(state)))
+        return ntl::unexpected(STATUS_INTERNAL_ERROR);
+    } catch (...) {
+      raw->begin_close();
+      domain->retire_deferred(raw->cleanup_item());
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+    return ntl::ok(std::move(result));
+  }
+
+  void close() noexcept {
+    auto state = state_.take();
+    if (state)
+      state->begin_close();
+    state.reset();
+  }
+
+  ntl::status wait_closed(
+      std::chrono::milliseconds timeout = std::chrono::seconds(15)) noexcept {
+    auto state = state_.retain();
+    return state ? state->wait_closed(timeout) : ntl::status::ok();
+  }
+
+  ntl::result<QUIC_ADDR> local_address() const noexcept {
+    auto state = state_.retain();
+    return state ? state->local_address()
+                 : ntl::result<QUIC_ADDR>(
+                       ntl::unexpected(STATUS_INVALID_DEVICE_STATE));
+  }
+
+private:
+  detail::owning_state_slot<detail::msquic_listener_state> state_;
+};
+
+} // namespace ntl::net::kernel

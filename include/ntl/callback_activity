@@ -1,0 +1,105 @@
+/**
+ * @file callback_activity
+ * @brief Allocation-free tracking of callback execution by kernel thread.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/callback_activity is a kernel-mode header"
+#endif
+
+#include <ntddk.h>
+
+#include <array>
+#include <cstddef>
+
+namespace ntl::detail {
+
+/**
+ * Tracks whether the current kernel thread is inside an owning callback.
+ *
+ * The fixed table covers ordinary callback concurrency without allocating.
+ * Table overflow is treated conservatively: current_thread_active() returns
+ * true until every overflow entry leaves, which selects deferred cleanup
+ * instead of risking a self-wait.
+ */
+class callback_activity {
+public:
+  struct token {
+    std::size_t slot = slot_count;
+  };
+
+  callback_activity() noexcept { KeInitializeSpinLock(&lock_); }
+  callback_activity(const callback_activity &) = delete;
+  callback_activity &operator=(const callback_activity &) = delete;
+
+  token enter() noexcept {
+    const PKTHREAD thread = KeGetCurrentThread();
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    std::size_t empty = slot_count;
+    for (std::size_t index = 0; index != slot_count; ++index) {
+      if (entries_[index].thread == thread) {
+        ++entries_[index].depth;
+        KeReleaseSpinLock(&lock_, old_irql);
+        return token{index};
+      }
+      if (!entries_[index].thread && empty == slot_count)
+        empty = index;
+    }
+    if (empty != slot_count) {
+      entries_[empty] = entry{thread, 1};
+      KeReleaseSpinLock(&lock_, old_irql);
+      return token{empty};
+    }
+    ++overflow_;
+    KeReleaseSpinLock(&lock_, old_irql);
+    return {};
+  }
+
+  void leave(token entered) noexcept {
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    if (entered.slot == slot_count) {
+      NT_ASSERT(overflow_ != 0);
+      if (overflow_ != 0)
+        --overflow_;
+    } else {
+      entry &value = entries_[entered.slot];
+      NT_ASSERT(value.thread == KeGetCurrentThread() && value.depth != 0);
+      if (value.depth != 0 && --value.depth == 0)
+        value = {};
+    }
+    KeReleaseSpinLock(&lock_, old_irql);
+  }
+
+  bool current_thread_active() const noexcept {
+    const PKTHREAD thread = KeGetCurrentThread();
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    bool active = overflow_ != 0;
+    if (!active) {
+      for (const entry &value : entries_) {
+        if (value.thread == thread) {
+          active = true;
+          break;
+        }
+      }
+    }
+    KeReleaseSpinLock(&lock_, old_irql);
+    return active;
+  }
+
+private:
+  struct entry {
+    PKTHREAD thread = nullptr;
+    ULONG depth = 0;
+  };
+
+  static constexpr std::size_t slot_count = 64;
+  mutable KSPIN_LOCK lock_{};
+  std::array<entry, slot_count> entries_{};
+  ULONG overflow_ = 0;
+};
+
+} // namespace ntl::detail

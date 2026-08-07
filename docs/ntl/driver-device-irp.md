@@ -111,9 +111,11 @@ intended for driver initialization, unload registration, and setup paths.
 
 Header: [`include/ntl/device_endpoint`](../../include/ntl/device_endpoint)
 
-`ntl::device_endpoint<Extension>` owns both an `ntl::device<Extension>` and the
-DOS-device symbolic link that exposes it. It deletes the link before releasing
-the device object, which is the usual unload order for a named control device.
+`ntl::device_endpoint<Extension>` is a copyable owning handle for an
+`ntl::device<Extension>` and the DOS-device symbolic link that exposes it.
+Copies share one endpoint state. Closing any copy closes that state for every
+copy, and the operation is idempotent. The link is always deleted before the
+device object is released.
 
 Use it when a driver wants the common pair:
 
@@ -138,14 +140,15 @@ if (!endpoint_result) {
   return endpoint_result.status();
 }
 
-auto endpoint = std::make_shared<ntl::device_endpoint<device_extension>>(
-    std::move(*endpoint_result));
-endpoint->device_ref().extension().open_count = 0;
+auto endpoint = std::move(*endpoint_result);
+auto device = endpoint.device();
+if (!device)
+  return STATUS_INVALID_DEVICE_STATE;
+device->extension().open_count = 0;
 
-// driver.on_unload stores std::function<void()>, so capture a copyable owner
-// for the move-only endpoint object.
-driver.on_unload([endpoint] {
-  endpoint->reset();
+driver.on_unload([endpoint]() noexcept {
+  const ntl::status result = endpoint.close();
+  NT_ASSERT(result.is_ok());
 });
 ```
 
@@ -168,10 +171,11 @@ API:
 - `device_target_name(short_name)`
 - `device_endpoint<Extension>::device()`
   - returns the shared `ntl::device<Extension>` owner
-- `device_endpoint<Extension>::device_ref()`
-  - returns the referenced device wrapper
-- `device_endpoint<Extension>::link()`
-- `device_endpoint<Extension>::reset()`
+- `device_endpoint<Extension>::unpublish()`
+  - rejects new user-mode opens while retaining the device object for a
+    composed drain path
+- `device_endpoint<Extension>::close()`
+  - idempotently deletes the link and releases the device for all copies
 - `device_endpoint<Extension>::link_name()`
 - `device_endpoint<Extension>::target_name()`
 - `device_endpoint<Extension>::valid()` / `operator bool()`
@@ -180,11 +184,70 @@ API:
 prefix. The endpoint factory builds the native target path from that name. The
 two-argument endpoint factory also builds the usual DOS link name from that
 same short name, so the common case only needs the device name once.
-The endpoint itself is move-only because it owns a symbolic link. If it must
-live inside `driver.on_unload()`, hold it through a copyable owner such as
-`std::shared_ptr`.
+Capturing an endpoint by value retains its shared owning state. Callers do not
+need to wrap it in another `std::shared_ptr`. A subsystem that must reject new
+opens before draining external work calls `unpublish()`, drains that work, and
+then calls `close()`. Put that sequence in the subsystem's owning runtime so
+ordinary callers invoke only one runtime `close()` operation.
 
-IRQL: `PASSIVE_LEVEL`.
+An owning device returned by `device()` may outlive the endpoint facade. After
+`close()`, every endpoint copy reports closed and returns no new device owner,
+while an already-retained device owner remains valid until that owner is
+released. This prevents facade destruction order from invalidating a child
+that is still in use.
+
+Creation, accessors, `unpublish()`, and `close()` require `PASSIVE_LEVEL`.
+Destroying the last endpoint handle is safe through `DISPATCH_LEVEL`: NTL
+defers the endpoint state's final cleanup to its joined `PASSIVE_LEVEL`
+runtime worker when necessary. The caller does not queue or drain a work item.
+
+### Typed IOCTL routing
+
+`on_ioctl<Contract>()` is not a callback with an inferred or hidden request
+layout. `Contract::input_type` and `Contract::output_type` define the exact
+shared app/driver wire structures, and the contract also owns the `CTL_CODE`
+fields. For example:
+
+```cpp
+struct configure_proxy_request {
+  std::uint16_t port = 0;
+};
+
+struct configure_proxy_reply {
+  std::uint32_t generation = 0;
+};
+
+struct configure_proxy_contract {
+  static constexpr ULONG device_type = FILE_DEVICE_UNKNOWN;
+  static constexpr ULONG function = 0x900;
+  static constexpr ULONG method = METHOD_BUFFERED;
+  static constexpr ULONG access = FILE_READ_DATA | FILE_WRITE_DATA;
+  using input_type = configure_proxy_request;
+  using output_type = configure_proxy_reply;
+};
+
+const ntl::status routed =
+    endpoint.on_ioctl<configure_proxy_contract>(
+        [](const configure_proxy_request &request,
+           configure_proxy_reply &reply) noexcept -> ntl::status {
+          if (request.port == 0)
+            return STATUS_INVALID_PARAMETER;
+          reply.generation = static_cast<std::uint32_t>(request.port);
+          return ntl::status::ok();
+        });
+if (!routed.is_ok())
+  return routed;
+```
+
+The router derives the callback signature from those two types. A `void`
+input removes the input parameter, a `void` output removes the output
+parameter, and a non-`void` endpoint extension is passed as the first
+parameter. Payload types must be trivially copyable. The owning typed route is
+restricted to `METHOD_BUFFERED`, validates the exact input size, initializes
+and reports the exact output size, owns the callback capture, rejects duplicate
+codes, and drains callbacks during endpoint close. Direct-I/O,
+`METHOD_NEITHER`, or deliberately pending IRPs use the explicitly low-level
+`on_borrowed_pending_ioctl()` path instead.
 
 ## IRP View
 

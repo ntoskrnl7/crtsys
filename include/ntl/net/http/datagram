@@ -6,10 +6,7 @@
  */
 #pragma once
 
-#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
-#error "ntl/net/http/datagram is a user-mode header"
-#endif
-
+#include <ntl/net/borrowed_bounded_writer>
 #include <ntl/net/framing>
 #include <ntl/net/http3/framing>
 #include <ntl/result>
@@ -19,8 +16,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
-#include <new>
 #include <span>
+#include <new>
 #include <vector>
 
 namespace ntl::net::http {
@@ -81,6 +78,33 @@ private:
   std::uint64_t request_stream_id_ = 0;
   ntl::net::scatter_view payload_;
 };
+
+inline ntl::result<std::size_t>
+encode_http3_datagram_to(
+    std::span<std::byte> output,
+    std::uint64_t request_stream_id,
+    std::span<const std::byte> payload,
+    datagram_limits limits = {}) noexcept {
+  if (limits.maximum_payload_size == 0 ||
+      payload.size() > limits.maximum_payload_size ||
+      (request_stream_id & 0x3u) != 0 ||
+      request_stream_id / 4 > maximum_quarter_stream_id)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  const std::size_t prefix_size =
+      ntl::net::http3::quic_varint_size(request_stream_id / 4);
+  if (prefix_size == 0 || output.size() < prefix_size ||
+      payload.size() > output.size() - prefix_size)
+    return ntl::unexpected(STATUS_BUFFER_TOO_SMALL);
+  auto encoded = ntl::net::http3::write_quic_varint(
+      output, request_stream_id / 4);
+  if (!encoded)
+    return ntl::unexpected(encoded.status());
+  ntl::net::borrowed_bounded_writer writer(output.subspan(*encoded));
+  const ntl::status appended = writer.append(payload);
+  if (!appended.is_ok())
+    return ntl::unexpected(appended);
+  return ntl::ok(*encoded + writer.size());
+}
 
 inline ntl::result<std::vector<std::byte>>
 encode_http3_datagram(
@@ -226,6 +250,41 @@ private:
   capsule_header header_{};
   ntl::net::scatter_view payload_;
 };
+
+inline ntl::result<std::size_t>
+encode_capsule_to(
+    std::span<std::byte> output,
+    std::uint64_t type,
+    std::span<const std::byte> payload,
+    datagram_limits limits = {}) noexcept {
+  if (type > ntl::net::http3::maximum_quic_varint ||
+      limits.maximum_payload_size == 0 ||
+      payload.size() > limits.maximum_payload_size)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  const std::size_t type_size =
+      ntl::net::http3::quic_varint_size(type);
+  const std::size_t length_size =
+      ntl::net::http3::quic_varint_size(payload.size());
+  const std::size_t header_size = type_size + length_size;
+  if (type_size == 0 || length_size == 0 ||
+      output.size() < header_size ||
+      payload.size() > output.size() - header_size)
+    return ntl::unexpected(STATUS_BUFFER_TOO_SMALL);
+  auto encoded_type =
+      ntl::net::http3::write_quic_varint(output, type);
+  if (!encoded_type)
+    return ntl::unexpected(encoded_type.status());
+  auto encoded_length = ntl::net::http3::write_quic_varint(
+      output.subspan(*encoded_type), payload.size());
+  if (!encoded_length)
+    return ntl::unexpected(encoded_length.status());
+  ntl::net::borrowed_bounded_writer writer(
+      output.subspan(*encoded_type + *encoded_length));
+  const ntl::status appended = writer.append(payload);
+  if (!appended.is_ok())
+    return ntl::unexpected(appended);
+  return ntl::ok(*encoded_type + *encoded_length + writer.size());
+}
 
 inline ntl::result<std::vector<std::byte>>
 encode_capsule(

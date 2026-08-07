@@ -169,6 +169,8 @@ jobs:
             artifacts/nuget-staging/lib/native/${{ matrix.toolset }}/${{ matrix.arch }}/${{ matrix.config }}
             artifacts/nuget-staging/codecs/lib/${{ matrix.toolset }}/${{ matrix.arch }}/${{ matrix.config }}
             artifacts/nuget-staging/codecs/include
+            artifacts/nuget-staging/kernel-codecs/lib/${{ matrix.toolset }}/${{ matrix.arch }}/${{ matrix.config }}
+            artifacts/nuget-staging/msquic
           if-no-files-found: error
 
   pack:
@@ -230,6 +232,22 @@ jobs:
             $codecIncludeDestination = 'artifacts/nuget-staging/codecs/include'
             New-Item -ItemType Directory -Force -Path $codecIncludeDestination | Out-Null
             Copy-Item -Path (Join-Path $codecIncludeSource '*') -Destination $codecIncludeDestination -Recurse -Force
+
+            $kernelCodecSource = Join-Path $artifact.FullName "kernel-codecs/lib/$toolset/$arch/$config"
+            if (-not (Test-Path $kernelCodecSource)) {
+              throw "Kernel content codec libraries were not found in artifact $($artifact.Name)."
+            }
+            $kernelCodecDestination = Join-Path 'artifacts/nuget-staging/kernel-codecs/lib' "$toolset/$arch/$config"
+            New-Item -ItemType Directory -Force -Path $kernelCodecDestination | Out-Null
+            Copy-Item -Path (Join-Path $kernelCodecSource '*') -Destination $kernelCodecDestination -Recurse -Force
+
+            $msquicSource = Join-Path $artifact.FullName 'msquic'
+            if (-not (Test-Path (Join-Path $msquicSource 'include/msquic.h'))) {
+              throw "The pinned MsQuic header was not found in artifact $($artifact.Name)."
+            }
+            $msquicDestination = 'artifacts/nuget-staging/msquic'
+            New-Item -ItemType Directory -Force -Path $msquicDestination | Out-Null
+            Copy-Item -Path (Join-Path $msquicSource '*') -Destination $msquicDestination -Recurse -Force
           }
 
       - name: Pack

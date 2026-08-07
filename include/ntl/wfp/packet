@@ -197,7 +197,7 @@ public:
    * The pointer must not be retained beyond the classify callback. Use
    * referenced_packet or cloned_packet when work will be deferred.
    */
-  NET_BUFFER_LIST *native_handle() const noexcept { return packet_; }
+  NET_BUFFER_LIST *borrowed_native_handle() const noexcept { return packet_; }
 
 private:
   template <class> friend class classify_event;
@@ -239,7 +239,7 @@ public:
     return ntl::ok(referenced_packet(packet.packet_));
   }
 
-  NET_BUFFER_LIST *native_handle() const noexcept { return packet_; }
+  NET_BUFFER_LIST *borrowed_native_handle() const noexcept { return packet_; }
   explicit operator bool() const noexcept { return packet_ != nullptr; }
   ntl::net::scatter_view bytes() const noexcept {
     return detail::nbl_bytes(packet_);
@@ -294,7 +294,7 @@ public:
     return ntl::ok(cloned_packet(clone));
   }
 
-  NET_BUFFER_LIST *native_handle() const noexcept { return packet_; }
+  NET_BUFFER_LIST *borrowed_native_handle() const noexcept { return packet_; }
   explicit operator bool() const noexcept { return packet_ != nullptr; }
   ntl::net::scatter_view bytes() const noexcept {
     return detail::nbl_bytes(packet_);
@@ -324,6 +324,19 @@ public:
     return rewrite_udp_port(host_order_port, true);
   }
 
+  /**
+   * @brief Rewrites an inbound UDP source port when the clone begins at IP.
+   *
+   * A transport-receive clone is positioned at its IP header for injection.
+   * This helper locates the UDP header after the caller-validated IP header
+   * and clears the transport checksum after changing the source port.
+   */
+  ntl::status rewrite_inbound_udp_source_port(
+      std::uint16_t host_order_port,
+      std::size_t ip_header_size) noexcept {
+    return rewrite_udp_port(host_order_port, true, ip_header_size);
+  }
+
   void reset() noexcept {
     NET_BUFFER_LIST *packet = std::exchange(packet_, nullptr);
     if (packet)
@@ -332,7 +345,8 @@ public:
 
 private:
   ntl::status rewrite_udp_port(std::uint16_t host_order_port,
-                               bool source) noexcept {
+                               bool source,
+                               std::size_t header_offset = 0) noexcept {
     if (!packet_ || host_order_port == 0)
       return STATUS_INVALID_PARAMETER;
 
@@ -347,11 +361,13 @@ private:
            buffer = NET_BUFFER_NEXT_NB(buffer)) {
         const std::size_t buffer_length =
             NET_BUFFER_DATA_LENGTH(buffer);
-        if (buffer_length < udp_header_length)
+        if (header_offset > buffer_length ||
+            buffer_length - header_offset < udp_header_length)
           return STATUS_BUFFER_TOO_SMALL;
 
         auto bytes = detail::mutable_nbl_bytes(
-            packet_, base_offset, buffer_length);
+            packet_, base_offset + header_offset,
+            buffer_length - header_offset);
         if (!bytes)
           return STATUS_DATA_ERROR;
         const ntl::status port_status = bytes.write_be16(

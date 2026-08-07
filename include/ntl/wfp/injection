@@ -10,46 +10,794 @@
 
 #include "../result"
 #include "../status"
+#include "../net/buffer/owned_bytes"
 #include "packet"
 #include "stream"
 
+#include <ntl/net/kernel/passive_cleanup_domain>
+
+#include <array>
+#include <atomic>
+#include <cstddef>
+#include <cstring>
+#include <limits>
 #include <memory>
 #include <new>
+#include <span>
+#include <type_traits>
 #include <utility>
+#include <variant>
 
 namespace ntl::wfp {
+
+struct injection_limits {
+  std::size_t maximum_in_flight = 1024;
+
+  constexpr bool valid() const noexcept {
+    return maximum_in_flight != 0 && maximum_in_flight <= 64 * 1024;
+  }
+};
+
+/**
+ * @brief Move-only, completion-safe arguments for an outbound transport send.
+ *
+ * WFP requires the buffers referenced by `FWPS_TRANSPORT_SEND_PARAMS0` to
+ * remain valid until the asynchronous injection completion callback.  This
+ * type owns those buffers and keeps the endpoint, address family, compartment,
+ * scope, and ancillary control data together so callers cannot accidentally
+ * pass stack-backed send parameters.
+ */
+class transport_send_request {
+public:
+  transport_send_request(const transport_send_request &) = delete;
+  transport_send_request &operator=(const transport_send_request &) = delete;
+
+  transport_send_request(transport_send_request &&other) noexcept
+      : endpoint_handle_(std::exchange(other.endpoint_handle_, 0)),
+        family_(std::exchange(
+            other.family_, static_cast<ADDRESS_FAMILY>(AF_UNSPEC))),
+        compartment_id_(std::exchange(other.compartment_id_,
+                                      UNSPECIFIED_COMPARTMENT_ID)),
+        remote_address_(other.remote_address_),
+        remote_address_size_(std::exchange(other.remote_address_size_, 0)),
+        remote_scope_(other.remote_scope_),
+        control_data_(std::move(other.control_data_)),
+        has_send_parameters_(
+            std::exchange(other.has_send_parameters_, false)) {
+    rebind_native_parameters();
+    other.native_parameters_ = {};
+  }
+
+  transport_send_request &
+  operator=(transport_send_request &&other) noexcept {
+    if (this != &other) {
+      endpoint_handle_ = std::exchange(other.endpoint_handle_, 0);
+      family_ = std::exchange(
+          other.family_, static_cast<ADDRESS_FAMILY>(AF_UNSPEC));
+      compartment_id_ = std::exchange(other.compartment_id_,
+                                      UNSPECIFIED_COMPARTMENT_ID);
+      remote_address_ = other.remote_address_;
+      remote_address_size_ = std::exchange(other.remote_address_size_, 0);
+      remote_scope_ = other.remote_scope_;
+      control_data_ = std::move(other.control_data_);
+      has_send_parameters_ =
+          std::exchange(other.has_send_parameters_, false);
+      rebind_native_parameters();
+      other.native_parameters_ = {};
+    }
+    return *this;
+  }
+
+  /**
+   * @brief Adopts already-owned ancillary data without another allocation.
+   */
+  static ntl::result<transport_send_request>
+  try_create(UINT64 endpoint_handle, ADDRESS_FAMILY family,
+             COMPARTMENT_ID compartment_id,
+             std::span<const std::byte> remote_address,
+             SCOPE_ID remote_scope,
+             ntl::net::owned_bytes &&control_data) noexcept {
+    const std::size_t expected_address_size = address_size(family);
+    if (endpoint_handle == 0 || expected_address_size == 0 ||
+        remote_address.size() != expected_address_size ||
+        control_data.size() >
+            static_cast<std::size_t>(
+                (std::numeric_limits<ULONG>::max)()))
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+
+    transport_send_request request(endpoint_handle, family, compartment_id);
+    std::memcpy(request.remote_address_.data(), remote_address.data(),
+                remote_address.size());
+    request.remote_address_size_ = remote_address.size();
+    request.remote_scope_ = remote_scope;
+    request.control_data_ = std::move(control_data);
+    request.has_send_parameters_ = true;
+    request.rebind_native_parameters();
+    return ntl::ok(std::move(request));
+  }
+
+  /**
+   * @brief Deep-copies callback-scoped ancillary data into nonpaged storage.
+   */
+  static ntl::result<transport_send_request>
+  try_copy(UINT64 endpoint_handle, ADDRESS_FAMILY family,
+           COMPARTMENT_ID compartment_id,
+           std::span<const std::byte> remote_address,
+           SCOPE_ID remote_scope, std::span<const std::byte> control_data,
+           ntl::net::buffer_limits control_data_limits,
+           ULONG tag = ntl::pool_tag("sIwN")) noexcept {
+    const std::size_t expected_address_size = address_size(family);
+    if (endpoint_handle == 0 || expected_address_size == 0 ||
+        remote_address.size() != expected_address_size ||
+        !control_data_limits.accepts(control_data.size()))
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+
+    auto owned_control_data = ntl::net::owned_bytes::try_copy(
+        control_data, control_data_limits, tag);
+    if (!owned_control_data)
+      return ntl::unexpected(owned_control_data.status());
+    return try_create(endpoint_handle, family, compartment_id, remote_address,
+                      remote_scope, std::move(*owned_control_data));
+  }
+
+  /**
+   * @brief Creates an explicit raw-socket request whose NBL contains the IP
+   * header and therefore needs no transport send parameter block.
+   */
+  static ntl::result<transport_send_request>
+  raw_packet(UINT64 endpoint_handle, ADDRESS_FAMILY family,
+             COMPARTMENT_ID compartment_id) noexcept {
+    if (endpoint_handle == 0 || address_size(family) == 0)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    return ntl::ok(
+        transport_send_request(endpoint_handle, family, compartment_id));
+  }
+
+  explicit operator bool() const noexcept {
+    return endpoint_handle_ != 0 && address_size(family_) != 0 &&
+           (!has_send_parameters_ ||
+            remote_address_size_ == address_size(family_));
+  }
+
+  UINT64 endpoint_handle() const noexcept { return endpoint_handle_; }
+  ADDRESS_FAMILY family() const noexcept { return family_; }
+  COMPARTMENT_ID compartment_id() const noexcept { return compartment_id_; }
+  SCOPE_ID remote_scope() const noexcept { return remote_scope_; }
+  bool has_send_parameters() const noexcept { return has_send_parameters_; }
+  std::span<const std::byte> remote_address() const noexcept {
+    return std::span<const std::byte>(remote_address_).first(
+        remote_address_size_);
+  }
+  std::span<const std::byte> control_data() const noexcept {
+    return control_data_.span();
+  }
+
+private:
+  friend class transport_injector;
+
+  transport_send_request(UINT64 endpoint_handle, ADDRESS_FAMILY family,
+                         COMPARTMENT_ID compartment_id) noexcept
+      : endpoint_handle_(endpoint_handle), family_(family),
+        compartment_id_(compartment_id) {}
+
+  static constexpr std::size_t address_size(ADDRESS_FAMILY family) noexcept {
+    return family == AF_INET ? 4u : family == AF_INET6 ? 16u : 0u;
+  }
+
+  void rebind_native_parameters() noexcept {
+    native_parameters_ = {};
+    if (!has_send_parameters_)
+      return;
+    native_parameters_.remoteAddress =
+        reinterpret_cast<UCHAR *>(remote_address_.data());
+    native_parameters_.remoteScopeId = remote_scope_;
+    if (!control_data_.empty()) {
+      native_parameters_.controlData =
+          reinterpret_cast<WSACMSGHDR *>(control_data_.data());
+      native_parameters_.controlDataLength =
+          static_cast<ULONG>(control_data_.size());
+    }
+  }
+
+  FWPS_TRANSPORT_SEND_PARAMS0 *native_parameters() noexcept {
+    return has_send_parameters_ ? &native_parameters_ : nullptr;
+  }
+
+  UINT64 endpoint_handle_ = 0;
+  ADDRESS_FAMILY family_ = AF_UNSPEC;
+  COMPARTMENT_ID compartment_id_ = UNSPECIFIED_COMPARTMENT_ID;
+  std::array<std::byte, 16> remote_address_{};
+  std::size_t remote_address_size_ = 0;
+  SCOPE_ID remote_scope_{};
+  ntl::net::owned_bytes control_data_;
+  bool has_send_parameters_ = false;
+  FWPS_TRANSPORT_SEND_PARAMS0 native_parameters_{};
+};
+
+/**
+ * @brief Move-only NBL whose storage is independent from the classified NBL.
+ *
+ * Cross-direction injection must not retain send-path NBL metadata such as
+ * checksum-offload and loopback state.  This owner copies only the bounded
+ * packet bytes into nonpaged storage and builds a fresh WFP injection NBL.
+ * The supplying injection runtime owns the NBL pool until every asynchronous
+ * completion has drained.
+ */
+class owned_injection_packet {
+public:
+  owned_injection_packet() noexcept = default;
+  owned_injection_packet(const owned_injection_packet &) = delete;
+  owned_injection_packet &operator=(const owned_injection_packet &) = delete;
+
+  owned_injection_packet(owned_injection_packet &&other) noexcept
+      : packet_(std::exchange(other.packet_, nullptr)),
+        mdl_(std::exchange(other.mdl_, nullptr)),
+        storage_(std::move(other.storage_)) {}
+
+  owned_injection_packet &
+  operator=(owned_injection_packet &&other) noexcept {
+    if (this != &other) {
+      reset();
+      packet_ = std::exchange(other.packet_, nullptr);
+      mdl_ = std::exchange(other.mdl_, nullptr);
+      storage_ = std::move(other.storage_);
+    }
+    return *this;
+  }
+
+  ~owned_injection_packet() { reset(); }
+
+  static ntl::result<owned_injection_packet>
+  try_copy(NDIS_HANDLE nbl_pool, ntl::net::scatter_view source,
+           ntl::net::buffer_limits limits,
+           ULONG tag = ntl::pool_tag("iPwN")) noexcept {
+    if (!nbl_pool || !source || source.empty() ||
+        source.size() > (std::numeric_limits<ULONG>::max)())
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+
+    auto storage = ntl::net::owned_bytes::try_copy(source, limits, tag);
+    if (!storage)
+      return ntl::unexpected(storage.status());
+
+    MDL *mdl = IoAllocateMdl(storage->data(),
+                             static_cast<ULONG>(storage->size()), FALSE,
+                             FALSE, nullptr);
+    if (!mdl)
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    MmBuildMdlForNonPagedPool(mdl);
+
+    NET_BUFFER_LIST *packet = nullptr;
+    const NTSTATUS allocated = FwpsAllocateNetBufferAndNetBufferList0(
+        nbl_pool, 0, 0, mdl, 0, storage->size(), &packet);
+    if (!NT_SUCCESS(allocated)) {
+      IoFreeMdl(mdl);
+      return ntl::unexpected(allocated);
+    }
+    return ntl::ok(owned_injection_packet(
+        packet, mdl, std::move(*storage)));
+  }
+
+  explicit operator bool() const noexcept { return packet_ != nullptr; }
+  NET_BUFFER_LIST *borrowed_native_handle() const noexcept { return packet_; }
+  ntl::net::scatter_view bytes() const noexcept {
+    return detail::nbl_bytes(packet_);
+  }
+  ntl::net::mutable_scatter_view edit_bytes() noexcept {
+    return detail::mutable_nbl_bytes(packet_);
+  }
+
+  ntl::status rewrite_inbound_udp_source_port(
+      std::uint16_t host_order_port,
+      std::size_t ip_header_size) noexcept {
+    if (!packet_ || host_order_port == 0 ||
+        ip_header_size > storage_.size() ||
+        storage_.size() - ip_header_size < 8)
+      return STATUS_INVALID_PARAMETER;
+    auto bytes = edit_bytes();
+    const ntl::status port = bytes.write_be16(ip_header_size,
+                                               host_order_port);
+    if (!port.is_ok())
+      return port;
+    return bytes.write_be16(ip_header_size + 6, 0);
+  }
+
+  void reset() noexcept {
+    NET_BUFFER_LIST *packet = std::exchange(packet_, nullptr);
+    if (packet)
+      FwpsFreeNetBufferList0(packet);
+    MDL *mdl = std::exchange(mdl_, nullptr);
+    if (mdl)
+      IoFreeMdl(mdl);
+    storage_.reset();
+  }
+
+private:
+  owned_injection_packet(NET_BUFFER_LIST *packet, MDL *mdl,
+                         ntl::net::owned_bytes &&storage) noexcept
+      : packet_(packet), mdl_(mdl), storage_(std::move(storage)) {}
+
+  NET_BUFFER_LIST *packet_ = nullptr;
+  MDL *mdl_ = nullptr;
+  ntl::net::owned_bytes storage_;
+};
+
+/**
+ * @brief An inbound transport clone positioned and shaped for reinjection.
+ *
+ * The factory performs the fragile NBL retreat/clone/restore sequence while
+ * the classify callback still owns the original packet. The clone remains at
+ * the IP header, records the validated header sizes, and exposes only the
+ * source-tuple rewrite needed by a transparent UDP proxy.
+ */
+class transport_receive_packet {
+public:
+  transport_receive_packet(const transport_receive_packet &) = delete;
+  transport_receive_packet &
+  operator=(const transport_receive_packet &) = delete;
+  transport_receive_packet(transport_receive_packet &&) noexcept = default;
+  transport_receive_packet &
+  operator=(transport_receive_packet &&) noexcept = default;
+
+  /** Adopts a caller-prepared receive NBL without tuple rewriting. */
+  explicit transport_receive_packet(cloned_packet &&packet) noexcept
+      : packet_(std::move(packet)) {}
+
+  static ntl::result<transport_receive_packet> try_clone(
+      borrowed_packet packet, std::uint32_t ip_header_size,
+      std::uint32_t transport_header_size) noexcept {
+    if (!packet || ip_header_size == 0 || transport_header_size == 0)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    NET_BUFFER_LIST *const native = packet.borrowed_native_handle();
+    NET_BUFFER *const first = NET_BUFFER_LIST_FIRST_NB(native);
+    if (!first || NET_BUFFER_NEXT_NB(first) != nullptr)
+      return ntl::unexpected(STATUS_NOT_SUPPORTED);
+    if (ip_header_size >
+            (std::numeric_limits<ULONG>::max)() - transport_header_size)
+      return ntl::unexpected(STATUS_INTEGER_OVERFLOW);
+    const ULONG retreat = ip_header_size + transport_header_size;
+    const NDIS_STATUS positioned = NdisRetreatNetBufferDataStart(
+        first, retreat, 0, nullptr);
+    if (positioned != NDIS_STATUS_SUCCESS)
+      return ntl::unexpected(STATUS_BUFFER_TOO_SMALL);
+    auto clone = cloned_packet::try_create(packet);
+    NdisAdvanceNetBufferDataStart(first, retreat, FALSE, nullptr);
+    if (!clone)
+      return ntl::unexpected(clone.status());
+    return ntl::ok(transport_receive_packet(
+        std::move(*clone), ip_header_size, transport_header_size));
+  }
+
+  /**
+   * @brief Clones an outbound UDP transport NBL for receive-path injection.
+   *
+   * Outbound datagram data is positioned at the transport header and has no
+   * IP header yet.  rewrite_udp_source() therefore constructs a fresh IP
+   * header with a zero header-include length before the clone is injected into
+   * the receive path.  This is the reverse half used by local transparent UDP
+   * proxies for connected clients whose transport would reject the proxy's
+   * unmodified source tuple before an inbound datagram callout can observe it.
+   */
+  static ntl::result<transport_receive_packet>
+  try_clone_from_outbound(borrowed_packet packet) noexcept {
+    if (!packet)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    auto clone = cloned_packet::try_create(packet);
+    if (!clone)
+      return ntl::unexpected(clone.status());
+    constexpr std::uint32_t udp_header_size = 8;
+    return ntl::ok(transport_receive_packet(
+        std::move(*clone), 0, udp_header_size));
+  }
+
+  /**
+   * @brief Clones an IP-positioned packet for receive-path tuple restoration.
+   */
+  static ntl::result<transport_receive_packet>
+  try_clone_ip_packet(borrowed_packet packet,
+                      std::uint32_t ip_header_size) noexcept {
+    if (!packet || ip_header_size == 0)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    auto clone = cloned_packet::try_create(packet);
+    if (!clone)
+      return ntl::unexpected(clone.status());
+    constexpr std::uint32_t udp_header_size = 8;
+    return ntl::ok(transport_receive_packet(
+        std::move(*clone), ip_header_size, udp_header_size));
+  }
+
+  ntl::status rewrite_udp_source(
+      std::uint16_t source_port, ADDRESS_FAMILY family,
+      std::span<const std::byte> source_address,
+      std::span<const std::byte> destination_address,
+      IF_INDEX interface_index = 0,
+      IF_INDEX subinterface_index = 0) noexcept {
+    const std::size_t expected =
+        family == AF_INET ? 4u : family == AF_INET6 ? 16u : 0u;
+    if (!packet_ || source_port == 0 || expected == 0 ||
+        source_address.size() != expected ||
+        destination_address.size() != expected)
+      return STATUS_INVALID_PARAMETER;
+    const ntl::status port = packet_.rewrite_inbound_udp_source_port(
+        source_port, ip_header_size_);
+    if (!port.is_ok())
+      return port;
+    return FwpsConstructIpHeaderForTransportPacket0(
+        packet_.borrowed_native_handle(), ip_header_size_, family,
+        reinterpret_cast<const UCHAR *>(source_address.data()),
+        reinterpret_cast<const UCHAR *>(destination_address.data()),
+        IPPROTO_UDP, 0, nullptr, 0,
+        0,
+        nullptr, interface_index,
+        subinterface_index);
+  }
+
+  explicit operator bool() const noexcept {
+    return static_cast<bool>(packet_);
+  }
+
+  void reset() noexcept { packet_.reset(); }
+  NET_BUFFER_LIST *borrowed_native_handle() const noexcept {
+    return packet_.borrowed_native_handle();
+  }
+  cloned_packet release() noexcept { return std::move(packet_); }
+  std::uint32_t ip_header_size() const noexcept { return ip_header_size_; }
+  std::uint32_t transport_header_size() const noexcept {
+    return transport_header_size_;
+  }
+
+private:
+  transport_receive_packet(cloned_packet &&packet,
+                           std::uint32_t ip_header_size,
+                           std::uint32_t transport_header_size) noexcept
+      : packet_(std::move(packet)), ip_header_size_(ip_header_size),
+        transport_header_size_(transport_header_size) {}
+
+  cloned_packet packet_;
+  std::uint32_t ip_header_size_ = 0;
+  std::uint32_t transport_header_size_ = 0;
+};
+
+/** Fresh UDP/IP packet built without inheriting classified-NBL metadata. */
+class copied_udp_ip_packet {
+public:
+  copied_udp_ip_packet(const copied_udp_ip_packet &) = delete;
+  copied_udp_ip_packet &operator=(const copied_udp_ip_packet &) = delete;
+  copied_udp_ip_packet(copied_udp_ip_packet &&) noexcept = default;
+  copied_udp_ip_packet &operator=(copied_udp_ip_packet &&) noexcept = default;
+
+  static ntl::result<copied_udp_ip_packet>
+  try_create(owned_injection_packet &&packet,
+             std::uint32_t ip_header_size) noexcept {
+    if (!packet || ip_header_size == 0)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    return ntl::ok(copied_udp_ip_packet(
+        std::move(packet), ip_header_size));
+  }
+
+  ntl::status rewrite_udp_source(
+      std::uint16_t source_port, ADDRESS_FAMILY family,
+      std::span<const std::byte> source_address,
+      std::span<const std::byte> destination_address,
+      IF_INDEX interface_index = 0,
+      IF_INDEX subinterface_index = 0) noexcept {
+    const std::size_t expected =
+        family == AF_INET ? 4u : family == AF_INET6 ? 16u : 0u;
+    if (!packet_ || source_port == 0 || expected == 0 ||
+        source_address.size() != expected ||
+        destination_address.size() != expected)
+      return STATUS_INVALID_PARAMETER;
+    const ntl::status port = packet_.rewrite_inbound_udp_source_port(
+        source_port, ip_header_size_);
+    if (!port.is_ok())
+      return port;
+    return FwpsConstructIpHeaderForTransportPacket0(
+        packet_.borrowed_native_handle(), ip_header_size_, family,
+        reinterpret_cast<const UCHAR *>(source_address.data()),
+        reinterpret_cast<const UCHAR *>(destination_address.data()),
+        IPPROTO_UDP, 0, nullptr, 0, 0, nullptr, interface_index,
+        subinterface_index);
+  }
+
+  explicit operator bool() const noexcept {
+    return static_cast<bool>(packet_);
+  }
+  owned_injection_packet release() noexcept { return std::move(packet_); }
+
+private:
+  copied_udp_ip_packet(owned_injection_packet &&packet,
+                       std::uint32_t ip_header_size) noexcept
+      : packet_(std::move(packet)), ip_header_size_(ip_header_size) {}
+
+  owned_injection_packet packet_;
+  std::uint32_t ip_header_size_ = 0;
+};
+
+namespace detail {
+
+class injection_packet_storage {
+public:
+  explicit injection_packet_storage(cloned_packet &&packet) noexcept
+      : packet_(std::in_place_type<cloned_packet>, std::move(packet)) {}
+  explicit injection_packet_storage(owned_injection_packet &&packet) noexcept
+      : packet_(std::in_place_type<owned_injection_packet>,
+                std::move(packet)) {}
+
+  injection_packet_storage(const injection_packet_storage &) = delete;
+  injection_packet_storage &
+  operator=(const injection_packet_storage &) = delete;
+  injection_packet_storage(injection_packet_storage &&) noexcept = default;
+  injection_packet_storage &
+  operator=(injection_packet_storage &&) noexcept = default;
+
+  explicit operator bool() const noexcept {
+    return std::visit(
+        [](const auto &packet) noexcept -> bool {
+          using packet_type = std::remove_cvref_t<decltype(packet)>;
+          if constexpr (std::is_same_v<packet_type, std::monostate>)
+            return false;
+          else
+            return static_cast<bool>(packet);
+        },
+        packet_);
+  }
+
+  NET_BUFFER_LIST *borrowed_native_handle() const noexcept {
+    return std::visit(
+        [](const auto &packet) noexcept -> NET_BUFFER_LIST * {
+          using packet_type = std::remove_cvref_t<decltype(packet)>;
+          if constexpr (std::is_same_v<packet_type, std::monostate>)
+            return nullptr;
+          else
+            return packet.borrowed_native_handle();
+        },
+        packet_);
+  }
+
+  void reset() noexcept {
+    std::visit(
+        [](auto &packet) noexcept {
+          using packet_type = std::remove_cvref_t<decltype(packet)>;
+          if constexpr (!std::is_same_v<packet_type, std::monostate>)
+            packet.reset();
+        },
+        packet_);
+    packet_.template emplace<std::monostate>();
+  }
+
+private:
+  std::variant<std::monostate, cloned_packet, owned_injection_packet> packet_;
+};
+
+} // namespace detail
+
+/** Move-only packet accepted only by network send injection. */
+class network_send_packet {
+public:
+  explicit network_send_packet(cloned_packet &&packet) noexcept
+      : packet_(std::move(packet)) {}
+  explicit network_send_packet(owned_injection_packet &&packet) noexcept
+      : packet_(std::move(packet)) {}
+  network_send_packet(const network_send_packet &) = delete;
+  network_send_packet &operator=(const network_send_packet &) = delete;
+  network_send_packet(network_send_packet &&) noexcept = default;
+  network_send_packet &operator=(network_send_packet &&) noexcept = default;
+  explicit operator bool() const noexcept { return static_cast<bool>(packet_); }
+  NET_BUFFER_LIST *borrowed_native_handle() const noexcept {
+    return packet_.borrowed_native_handle();
+  }
+  void reset() noexcept { packet_.reset(); }
+
+private:
+  detail::injection_packet_storage packet_;
+};
+
+/** Move-only packet accepted only by network receive injection. */
+class network_receive_packet {
+public:
+  explicit network_receive_packet(cloned_packet &&packet) noexcept
+      : packet_(std::move(packet)) {}
+  explicit network_receive_packet(owned_injection_packet &&packet) noexcept
+      : packet_(std::move(packet)) {}
+  network_receive_packet(const network_receive_packet &) = delete;
+  network_receive_packet &operator=(const network_receive_packet &) = delete;
+  network_receive_packet(network_receive_packet &&) noexcept = default;
+  network_receive_packet &operator=(network_receive_packet &&) noexcept =
+      default;
+  explicit operator bool() const noexcept { return static_cast<bool>(packet_); }
+  NET_BUFFER_LIST *borrowed_native_handle() const noexcept {
+    return packet_.borrowed_native_handle();
+  }
+  void reset() noexcept { packet_.reset(); }
+
+private:
+  detail::injection_packet_storage packet_;
+};
+
+/** Move-only packet and request accepted only by transport send injection. */
+class transport_send_packet {
+public:
+  transport_send_packet(cloned_packet &&packet,
+                        transport_send_request &&request) noexcept
+      : packet_(std::move(packet)), request_(std::move(request)) {}
+  transport_send_packet(owned_injection_packet &&packet,
+                        transport_send_request &&request) noexcept
+      : packet_(std::move(packet)), request_(std::move(request)) {}
+  transport_send_packet(const transport_send_packet &) = delete;
+  transport_send_packet &operator=(const transport_send_packet &) = delete;
+  transport_send_packet(transport_send_packet &&) noexcept = default;
+  transport_send_packet &operator=(transport_send_packet &&) noexcept =
+      default;
+  explicit operator bool() const noexcept {
+    return static_cast<bool>(packet_) && static_cast<bool>(request_);
+  }
+  NET_BUFFER_LIST *borrowed_native_handle() const noexcept {
+    return packet_.borrowed_native_handle();
+  }
+  void reset() noexcept { packet_.reset(); }
+
+private:
+  friend class transport_injector;
+  detail::injection_packet_storage packet_;
+  transport_send_request request_;
+};
 
 namespace detail {
 
 struct injection_state {
-  explicit injection_state(HANDLE value) noexcept : handle(value) {
+  using resource_cleanup =
+      void (*)(PNDIS_GENERIC_OBJECT, NDIS_HANDLE) noexcept;
+
+  injection_state(
+      HANDLE value,
+      ntl::net::kernel::passive_cleanup_domain &cleanup_domain,
+      injection_limits limits_value,
+      PNDIS_GENERIC_OBJECT generic = nullptr,
+      NDIS_HANDLE packet_pool = nullptr,
+      resource_cleanup cleanup_resources_value = nullptr) noexcept
+      : handle(value), cleanup(&injection_state::cleanup_at_passive, this),
+        domain(&cleanup_domain), limits(limits_value), generic_object(generic),
+        nbl_pool(packet_pool), cleanup_resources(cleanup_resources_value) {
     ExInitializeRundownProtection(&rundown);
+  }
+
+  static void cleanup_at_passive(void *context) noexcept {
+    auto *state = static_cast<injection_state *>(context);
+    ExWaitForRundownProtectionRelease(&state->rundown);
+    if (state->handle)
+      (void)FwpsInjectionHandleDestroy0(
+          std::exchange(state->handle, nullptr));
+    if (state->cleanup_resources)
+      state->cleanup_resources(state->generic_object, state->nbl_pool);
+    state->nbl_pool = nullptr;
+    state->generic_object = nullptr;
+    delete state;
   }
 
   HANDLE handle = nullptr;
   EX_RUNDOWN_REF rundown{};
+  std::atomic<bool> accepting{true};
+  std::atomic<std::uint64_t> completion_failures{0};
+  std::atomic<NTSTATUS> last_completion_status{STATUS_SUCCESS};
+  std::atomic<std::size_t> active_injections{0};
+  std::atomic<std::size_t> peak_injections{0};
+  std::atomic<std::uint64_t> quota_rejections{0};
+  ntl::net::kernel::passive_cleanup_item cleanup;
+  ntl::net::kernel::passive_cleanup_domain *domain = nullptr;
+  injection_limits limits{};
+  PNDIS_GENERIC_OBJECT generic_object = nullptr;
+  NDIS_HANDLE nbl_pool = nullptr;
+  resource_cleanup cleanup_resources = nullptr;
+
+  bool try_reserve_injection() noexcept {
+    std::size_t active = active_injections.load(std::memory_order_relaxed);
+    for (;;) {
+      if (active >= limits.maximum_in_flight) {
+        quota_rejections.fetch_add(1, std::memory_order_relaxed);
+        return false;
+      }
+      if (active_injections.compare_exchange_weak(
+              active, active + 1, std::memory_order_acq_rel,
+              std::memory_order_relaxed)) {
+        const std::size_t selected = active + 1;
+        std::size_t peak = peak_injections.load(std::memory_order_relaxed);
+        while (peak < selected &&
+               !peak_injections.compare_exchange_weak(
+                   peak, selected, std::memory_order_relaxed,
+                   std::memory_order_relaxed)) {
+        }
+        return true;
+      }
+    }
+  }
+
+  void release_injection() noexcept {
+    const std::size_t previous =
+        active_injections.fetch_sub(1, std::memory_order_acq_rel);
+    if (previous == 0)
+      active_injections.store(0, std::memory_order_release);
+    NT_ASSERT(previous != 0);
+  }
 };
 
-template <class Packet> struct async_packet_context {
-  async_packet_context(injection_state &owner, Packet &&value) noexcept
-      : state(&owner), packet(std::move(value)) {}
+struct owning_packet_context {
+  template <class Packet>
+  static owning_packet_context *create(injection_state &owner,
+                                       Packet &&value) noexcept {
+    using packet_type = std::remove_cvref_t<Packet>;
+    auto *packet = new (std::nothrow) packet_type(std::move(value));
+    if (!packet)
+      return nullptr;
+    auto *context = new (std::nothrow) owning_packet_context(
+        owner, packet,
+        [](void *stored) noexcept {
+          static_cast<packet_type *>(stored)->reset();
+          delete static_cast<packet_type *>(stored);
+        },
+        [](void *stored) noexcept -> NET_BUFFER_LIST * {
+          if constexpr (requires(packet_type &value) {
+                          value.borrowed_native_handle();
+                        })
+            return static_cast<packet_type *>(stored)
+                ->borrowed_native_handle();
+          else {
+            (void)stored;
+            return nullptr;
+          }
+        });
+    if (!context) {
+      static_cast<packet_type *>(packet)->reset();
+      delete static_cast<packet_type *>(packet);
+    }
+    return context;
+  }
 
-  ~async_packet_context() {
+  ~owning_packet_context() {
     // The owned NBL must be released while the injection owner's rundown
     // protection is still held.  In particular, injected_stream_data may
     // depend on an NBL pool that reset() frees immediately after rundown.
-    packet.reset();
+    destroy(packet);
+    state->release_injection();
     ExReleaseRundownProtection(&state->rundown);
   }
 
+  NET_BUFFER_LIST *borrowed_native_handle() const noexcept {
+    return native(packet);
+  }
+
+  template <class Packet> Packet &as() noexcept {
+    return *static_cast<Packet *>(packet);
+  }
+
+private:
+  owning_packet_context(injection_state &owner, void *value,
+                        void (*destroy_value)(void *) noexcept,
+                        NET_BUFFER_LIST *(*native_value)(void *) noexcept)
+      noexcept
+      : state(&owner), packet(value), destroy(destroy_value),
+        native(native_value) {}
+
+public:
+
   injection_state *state;
-  Packet packet;
+  void *packet;
+  void (*destroy)(void *) noexcept;
+  NET_BUFFER_LIST *(*native)(void *) noexcept;
 };
 
-template <class Packet>
-inline void NTAPI injection_complete(void *context, NET_BUFFER_LIST *,
+inline void NTAPI injection_complete(void *context, NET_BUFFER_LIST *packet,
                                      BOOLEAN) noexcept {
-  delete static_cast<async_packet_context<Packet> *>(context);
+  auto *owned = static_cast<owning_packet_context *>(context);
+  if (packet) {
+    const NTSTATUS status =
+        static_cast<NTSTATUS>(NET_BUFFER_LIST_STATUS(packet));
+    if (!NT_SUCCESS(status)) {
+      owned->state->last_completion_status.store(
+          status, std::memory_order_relaxed);
+      owned->state->completion_failures.fetch_add(
+          1, std::memory_order_relaxed);
+    }
+  }
+  delete owned;
 }
 
 struct async_stream_clone_context {
@@ -58,6 +806,7 @@ struct async_stream_clone_context {
       : state(&owner), remaining(count) {}
 
   ~async_stream_clone_context() {
+    state->release_injection();
     ExReleaseRundownProtection(&state->rundown);
   }
 
@@ -92,51 +841,157 @@ public:
   ~injection_owner() { reset(); }
 
   static ntl::result<injection_owner>
-  try_create(ADDRESS_FAMILY family, UINT32 type) noexcept {
+  try_create(ADDRESS_FAMILY family, UINT32 type,
+             injection_limits limits = {}) noexcept {
+    if (!limits.valid())
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
     HANDLE handle = nullptr;
     const NTSTATUS result =
         FwpsInjectionHandleCreate0(family, type, &handle);
     if (!NT_SUCCESS(result))
       return ntl::unexpected(result);
 
-    std::unique_ptr<injection_state> state(
-        new (std::nothrow) injection_state(handle));
-    if (!state) {
+    return adopt(handle, limits, nullptr, nullptr, nullptr);
+  }
+
+  static ntl::result<injection_owner>
+  try_create(ADDRESS_FAMILY family, UINT32 type,
+             PDRIVER_OBJECT driver,
+             injection_limits limits = {}) noexcept {
+    if (!driver || !limits.valid())
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    HANDLE handle = nullptr;
+    const NTSTATUS result =
+        FwpsInjectionHandleCreate0(family, type, &handle);
+    if (!NT_SUCCESS(result))
+      return ntl::unexpected(result);
+
+    PNDIS_GENERIC_OBJECT generic =
+        NdisAllocateGenericObject(driver, 'gIwN', 0);
+    if (!generic) {
       (void)FwpsInjectionHandleDestroy0(handle);
       return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
     }
-    return ntl::ok(injection_owner(std::move(state)));
+    NET_BUFFER_LIST_POOL_PARAMETERS parameters{};
+    parameters.Header.Type = NDIS_OBJECT_TYPE_DEFAULT;
+    parameters.Header.Revision =
+        NET_BUFFER_LIST_POOL_PARAMETERS_REVISION_1;
+    parameters.Header.Size =
+        NDIS_SIZEOF_NET_BUFFER_LIST_POOL_PARAMETERS_REVISION_1;
+    parameters.fAllocateNetBuffer = TRUE;
+    parameters.PoolTag = 'pIwN';
+    NDIS_HANDLE packet_pool =
+        NdisAllocateNetBufferListPool(generic, &parameters);
+    if (!packet_pool) {
+      NdisFreeGenericObject(generic);
+      (void)FwpsInjectionHandleDestroy0(handle);
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+    return adopt(handle, limits, generic, packet_pool,
+                 &release_ndis_resources);
+  }
+
+private:
+  static void release_ndis_resources(
+      PNDIS_GENERIC_OBJECT generic,
+      NDIS_HANDLE packet_pool) noexcept {
+    if (packet_pool)
+      NdisFreeNetBufferListPool(packet_pool);
+    if (generic)
+      NdisFreeGenericObject(generic);
+  }
+
+  static ntl::result<injection_owner>
+  adopt(HANDLE handle, injection_limits limits,
+        PNDIS_GENERIC_OBJECT generic, NDIS_HANDLE packet_pool,
+        injection_state::resource_cleanup cleanup_resources) noexcept {
+
+    auto *domain =
+        ntl::net::kernel::borrowed_runtime_passive_cleanup_domain();
+    auto *raw = domain
+                    ? new (std::nothrow) injection_state(
+                          handle, *domain, limits, generic, packet_pool,
+                          cleanup_resources)
+                    : nullptr;
+    if (!raw) {
+      if (cleanup_resources)
+        cleanup_resources(generic, packet_pool);
+      (void)FwpsInjectionHandleDestroy0(handle);
+      return ntl::unexpected(domain ? STATUS_INSUFFICIENT_RESOURCES
+                                    : STATUS_DEVICE_NOT_READY);
+    }
+    const ntl::status registered = domain->register_item(raw->cleanup);
+    if (!registered.is_ok()) {
+      (void)FwpsInjectionHandleDestroy0(handle);
+      if (cleanup_resources)
+        cleanup_resources(generic, packet_pool);
+      delete raw;
+      return ntl::unexpected(static_cast<NTSTATUS>(registered));
+    }
+    try {
+      std::shared_ptr<injection_state> state(
+          raw, [](injection_state *value) noexcept {
+            value->accepting.store(false, std::memory_order_release);
+            value->domain->retire_deferred(value->cleanup);
+          });
+      return ntl::ok(injection_owner(std::move(state)));
+    } catch (...) {
+      raw->accepting.store(false, std::memory_order_release);
+      domain->retire_deferred(raw->cleanup);
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+  }
+
+public:
+
+  ntl::result<owned_injection_packet>
+  try_copy_packet(ntl::net::scatter_view source,
+                  ntl::net::buffer_limits limits,
+                  ULONG tag = ntl::pool_tag("iPwN")) const noexcept {
+    auto state = state_;
+    if (!state || !state->accepting.load(std::memory_order_acquire) ||
+        !state->nbl_pool)
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+    return owned_injection_packet::try_copy(state->nbl_pool, source,
+                                             limits, tag);
   }
 
   void reset() noexcept {
-    if (!state_)
-      return;
-    NT_ASSERT(KeGetCurrentIrql() == PASSIVE_LEVEL);
-    ExWaitForRundownProtectionRelease(&state_->rundown);
-    (void)FwpsInjectionHandleDestroy0(state_->handle);
-    state_.reset();
+    auto state = std::move(state_);
+    if (state)
+      state->accepting.store(false, std::memory_order_release);
   }
 
   FWPS_PACKET_INJECTION_STATE
   query(borrowed_packet packet) const noexcept {
-    if (!state_ || !packet)
+    auto state = state_;
+    if (!state || !state->accepting.load(std::memory_order_acquire) || !packet)
       return FWPS_PACKET_NOT_INJECTED;
     return FwpsQueryPacketInjectionState0(
-        state_->handle, packet.native_handle(), nullptr);
+        state->handle, packet.borrowed_native_handle(), nullptr);
   }
 
   template <class Packet>
-  ntl::result<async_packet_context<Packet> *>
+  ntl::result<owning_packet_context *>
   prepare(Packet &&packet) noexcept {
-    if (!state_ || !packet)
+    auto state = state_;
+    if (!state || !state->accepting.load(std::memory_order_acquire) || !packet)
       return ntl::unexpected(STATUS_INVALID_PARAMETER);
-    if (!ExAcquireRundownProtection(&state_->rundown))
+    if (!ExAcquireRundownProtection(&state->rundown))
       return ntl::unexpected(STATUS_DELETE_PENDING);
+    if (!state->accepting.load(std::memory_order_acquire)) {
+      ExReleaseRundownProtection(&state->rundown);
+      return ntl::unexpected(STATUS_DELETE_PENDING);
+    }
+    if (!state->try_reserve_injection()) {
+      ExReleaseRundownProtection(&state->rundown);
+      return ntl::unexpected(STATUS_QUOTA_EXCEEDED);
+    }
 
-    auto *context = new (std::nothrow)
-        async_packet_context<Packet>(*state_, std::move(packet));
+    auto *context = owning_packet_context::create(*state, std::move(packet));
     if (!context) {
-      ExReleaseRundownProtection(&state_->rundown);
+      state->release_injection();
+      ExReleaseRundownProtection(&state->rundown);
       return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
     }
     return ntl::ok(context);
@@ -144,30 +999,70 @@ public:
 
   ntl::result<async_stream_clone_context *>
   prepare_stream_clone(LONG count) noexcept {
-    if (!state_ || count <= 0)
+    auto state = state_;
+    if (!state || !state->accepting.load(std::memory_order_acquire) ||
+        count <= 0)
       return ntl::unexpected(STATUS_INVALID_PARAMETER);
-    if (!ExAcquireRundownProtection(&state_->rundown))
+    if (!ExAcquireRundownProtection(&state->rundown))
       return ntl::unexpected(STATUS_DELETE_PENDING);
+    if (!state->accepting.load(std::memory_order_acquire)) {
+      ExReleaseRundownProtection(&state->rundown);
+      return ntl::unexpected(STATUS_DELETE_PENDING);
+    }
+    if (!state->try_reserve_injection()) {
+      ExReleaseRundownProtection(&state->rundown);
+      return ntl::unexpected(STATUS_QUOTA_EXCEEDED);
+    }
 
     auto *context = new (std::nothrow)
-        async_stream_clone_context(*state_, count);
+        async_stream_clone_context(*state, count);
     if (!context) {
-      ExReleaseRundownProtection(&state_->rundown);
+      state->release_injection();
+      ExReleaseRundownProtection(&state->rundown);
       return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
     }
     return ntl::ok(context);
   }
 
-  HANDLE native_handle() const noexcept {
-    return state_ ? state_->handle : nullptr;
+  struct statistics_type {
+    std::uint64_t completion_failures = 0;
+    NTSTATUS last_completion_status = STATUS_SUCCESS;
+    std::size_t active_injections = 0;
+    std::size_t peak_injections = 0;
+    std::uint64_t quota_rejections = 0;
+  };
+
+  statistics_type statistics() const noexcept {
+    const auto state = state_;
+    return state
+               ? statistics_type{
+                     state->completion_failures.load(
+                         std::memory_order_relaxed),
+                     state->last_completion_status.load(
+                         std::memory_order_relaxed),
+                     state->active_injections.load(
+                         std::memory_order_relaxed),
+                     state->peak_injections.load(
+                         std::memory_order_relaxed),
+                     state->quota_rejections.load(
+                         std::memory_order_relaxed)}
+               : statistics_type{};
+  }
+
+  /** Non-owning native handle; valid only while this owner remains open. */
+  HANDLE borrowed_native_handle() const noexcept {
+    auto state = state_;
+    return state && state->accepting.load(std::memory_order_acquire)
+               ? state->handle
+               : nullptr;
   }
 
 private:
   explicit injection_owner(
-      std::unique_ptr<injection_state> &&state) noexcept
+      std::shared_ptr<injection_state> state) noexcept
       : state_(std::move(state)) {}
 
-  std::unique_ptr<injection_state> state_;
+  std::shared_ptr<injection_state> state_;
 };
 
 template <class Context>
@@ -191,9 +1086,23 @@ public:
   network_injector &operator=(network_injector &&) noexcept = default;
 
   static ntl::result<network_injector>
-  try_create(ADDRESS_FAMILY family = AF_UNSPEC) noexcept {
+  try_create(ADDRESS_FAMILY family = AF_UNSPEC,
+             injection_limits limits = {}) noexcept {
     auto owner = detail::injection_owner::try_create(
-        family, FWPS_INJECTION_TYPE_NETWORK);
+        family, FWPS_INJECTION_TYPE_NETWORK, limits);
+    if (!owner)
+      return ntl::unexpected(owner.status());
+    return ntl::ok(network_injector(std::move(*owner)));
+  }
+
+  static ntl::result<network_injector>
+  try_create(PDRIVER_OBJECT driver,
+             ADDRESS_FAMILY family = AF_UNSPEC,
+             injection_limits limits = {}) noexcept {
+    if (!driver)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    auto owner = detail::injection_owner::try_create(
+        family, FWPS_INJECTION_TYPE_NETWORK, driver, limits);
     if (!owner)
       return ntl::unexpected(owner.status());
     return ntl::ok(network_injector(std::move(*owner)));
@@ -204,7 +1113,18 @@ public:
     return owner_.query(packet);
   }
 
-  ntl::status inject_send(cloned_packet &&packet,
+  detail::injection_owner::statistics_type statistics() const noexcept {
+    return owner_.statistics();
+  }
+
+  ntl::result<owned_injection_packet>
+  try_copy_packet(ntl::net::scatter_view source,
+                  ntl::net::buffer_limits limits,
+                  ULONG tag = ntl::pool_tag("iPwN")) const noexcept {
+    return owner_.try_copy_packet(source, limits, tag);
+  }
+
+  ntl::status inject_send(network_send_packet &&packet,
                           COMPARTMENT_ID compartment_id,
                           UINT32 flags = 0) noexcept {
     auto prepared = owner_.prepare(std::move(packet));
@@ -213,14 +1133,14 @@ public:
     auto *context = *prepared;
     return detail::finish_injection(
         FwpsInjectNetworkSendAsync0(
-            owner_.native_handle(), nullptr, flags, compartment_id,
-            context->packet.native_handle(),
-            &detail::injection_complete<cloned_packet>,
+            owner_.borrowed_native_handle(), nullptr, flags, compartment_id,
+            context->borrowed_native_handle(),
+            &detail::injection_complete,
             context),
         context);
   }
 
-  ntl::status inject_receive(cloned_packet &&packet,
+  ntl::status inject_receive(network_receive_packet &&packet,
                              COMPARTMENT_ID compartment_id,
                              IF_INDEX interface_index,
                              IF_INDEX subinterface_index,
@@ -231,10 +1151,10 @@ public:
     auto *context = *prepared;
     return detail::finish_injection(
         FwpsInjectNetworkReceiveAsync0(
-            owner_.native_handle(), nullptr, flags, compartment_id,
+            owner_.borrowed_native_handle(), nullptr, flags, compartment_id,
             interface_index, subinterface_index,
-            context->packet.native_handle(),
-            &detail::injection_complete<cloned_packet>,
+            context->borrowed_native_handle(),
+            &detail::injection_complete,
             context),
         context);
   }
@@ -258,9 +1178,23 @@ public:
   transport_injector &operator=(transport_injector &&) noexcept = default;
 
   static ntl::result<transport_injector>
-  try_create(ADDRESS_FAMILY family = AF_UNSPEC) noexcept {
+  try_create(ADDRESS_FAMILY family = AF_UNSPEC,
+             injection_limits limits = {}) noexcept {
     auto owner = detail::injection_owner::try_create(
-        family, FWPS_INJECTION_TYPE_TRANSPORT);
+        family, FWPS_INJECTION_TYPE_TRANSPORT, limits);
+    if (!owner)
+      return ntl::unexpected(owner.status());
+    return ntl::ok(transport_injector(std::move(*owner)));
+  }
+
+  static ntl::result<transport_injector>
+  try_create(PDRIVER_OBJECT driver,
+             ADDRESS_FAMILY family = AF_UNSPEC,
+             injection_limits limits = {}) noexcept {
+    if (!driver)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    auto owner = detail::injection_owner::try_create(
+        family, FWPS_INJECTION_TYPE_TRANSPORT, driver, limits);
     if (!owner)
       return ntl::unexpected(owner.status());
     return ntl::ok(transport_injector(std::move(*owner)));
@@ -271,26 +1205,40 @@ public:
     return owner_.query(packet);
   }
 
-  ntl::status inject_send(cloned_packet &&packet, UINT64 endpoint_handle,
-                          ADDRESS_FAMILY family,
-                          COMPARTMENT_ID compartment_id,
-                          FWPS_TRANSPORT_SEND_PARAMS0 *parameters = nullptr,
-                          UINT32 flags = 0) noexcept {
+  detail::injection_owner::statistics_type statistics() const noexcept {
+    return owner_.statistics();
+  }
+
+  ntl::result<owned_injection_packet>
+  try_copy_packet(ntl::net::scatter_view source,
+                  ntl::net::buffer_limits limits,
+                  ULONG tag = ntl::pool_tag("iPwN")) const noexcept {
+    return owner_.try_copy_packet(source, limits, tag);
+  }
+
+  /**
+   * @brief Starts an outbound transport injection while retaining every
+   * request buffer until its completion callback.
+   */
+  ntl::status inject_send(transport_send_packet &&packet) noexcept {
     auto prepared = owner_.prepare(std::move(packet));
     if (!prepared)
       return prepared.status();
     auto *context = *prepared;
+    auto &submission = context->as<transport_send_packet>();
     return detail::finish_injection(
         FwpsInjectTransportSendAsync0(
-            owner_.native_handle(), nullptr, endpoint_handle, flags,
-            parameters, family, compartment_id,
-            context->packet.native_handle(),
-            &detail::injection_complete<cloned_packet>,
+            owner_.borrowed_native_handle(), nullptr,
+            submission.request_.endpoint_handle(), 0,
+            submission.request_.native_parameters(),
+            submission.request_.family(), submission.request_.compartment_id(),
+            submission.borrowed_native_handle(),
+            &detail::injection_complete,
             context),
         context);
   }
 
-  ntl::status inject_receive(cloned_packet &&packet,
+  ntl::status inject_receive(transport_receive_packet &&packet,
                              ADDRESS_FAMILY family,
                              COMPARTMENT_ID compartment_id,
                              IF_INDEX interface_index,
@@ -302,10 +1250,10 @@ public:
     auto *context = *prepared;
     return detail::finish_injection(
         FwpsInjectTransportReceiveAsync0(
-            owner_.native_handle(), nullptr, nullptr, flags, family,
+            owner_.borrowed_native_handle(), nullptr, nullptr, flags, family,
             compartment_id, interface_index, subinterface_index,
-            context->packet.native_handle(),
-            &detail::injection_complete<cloned_packet>,
+            context->borrowed_native_handle(),
+            &detail::injection_complete,
             context),
         context);
   }
@@ -344,9 +1292,10 @@ public:
   ~stream_injector() { reset(); }
 
   static ntl::result<stream_injector>
-  try_create(ADDRESS_FAMILY family = AF_UNSPEC) noexcept {
+  try_create(ADDRESS_FAMILY family = AF_UNSPEC,
+             injection_limits limits = {}) noexcept {
     auto owner = detail::injection_owner::try_create(
-        family, FWPS_INJECTION_TYPE_STREAM);
+        family, FWPS_INJECTION_TYPE_STREAM, limits);
     if (!owner)
       return ntl::unexpected(owner.status());
     return ntl::ok(stream_injector(std::move(*owner)));
@@ -357,12 +1306,13 @@ public:
    */
   static ntl::result<stream_injector>
   try_create(PDRIVER_OBJECT driver,
-             ADDRESS_FAMILY family = AF_UNSPEC) noexcept {
+             ADDRESS_FAMILY family = AF_UNSPEC,
+             injection_limits limits = {}) noexcept {
     if (!driver)
       return ntl::unexpected(STATUS_INVALID_PARAMETER);
 
     auto owner = detail::injection_owner::try_create(
-        family, FWPS_INJECTION_TYPE_STREAM);
+        family, FWPS_INJECTION_TYPE_STREAM, limits);
     if (!owner)
       return ntl::unexpected(owner.status());
 
@@ -429,7 +1379,7 @@ public:
     const ULONG clone_flags =
         std::exchange(data.clone_flags_, 0);
     const NTSTATUS result = FwpsStreamInjectAsync0(
-        owner_.native_handle(), nullptr, flags, site.flow_id_,
+        owner_.borrowed_native_handle(), nullptr, flags, site.flow_id_,
         site.callout_id_, Layer::runtime_id, stream_flags,
         chain, length, &detail::stream_clone_injection_complete,
         context);
@@ -458,11 +1408,12 @@ public:
     auto *context = *prepared;
     return detail::finish_injection(
         FwpsStreamInjectAsync0(
-            owner_.native_handle(), nullptr, flags, site.flow_id_,
+            owner_.borrowed_native_handle(), nullptr, flags, site.flow_id_,
             site.callout_id_, Layer::runtime_id,
-            context->packet.stream_flags_, context->packet.chain_,
-            context->packet.length_,
-            &detail::injection_complete<injected_stream_data>, context),
+            context->as<injected_stream_data>().stream_flags_,
+            context->as<injected_stream_data>().chain_,
+            context->as<injected_stream_data>().length_,
+            &detail::injection_complete, context),
         context);
   }
 

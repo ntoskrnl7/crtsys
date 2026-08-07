@@ -1,0 +1,1394 @@
+#pragma once
+
+#include <ntddk.h>
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <charconv>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <limits>
+#include <memory>
+#include <new>
+#include <optional>
+#include <span>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include <ntl/net/http/http1_framing>
+#include <ntl/net/http/http1_transform>
+#include <ntl/net/http2/flow_control>
+#include <ntl/net/http2/hpack>
+#include <ntl/net/http2/transform>
+#include <ntl/net/io/async_transport_stream>
+#include <ntl/net/kernel/bounded_wait_set>
+#include <ntl/net/kernel/tls_stream>
+#include <ntl/net/kernel/waitable_task>
+#include <ntl/net/kernel/wsk_transport>
+#include <ntl/result>
+#include <ntl/status>
+
+#include <ntl/net/kernel/http3_origin_client>
+
+namespace ntl::net::kernel {
+
+enum class http_origin_fallback_phase : std::uint32_t {
+  none = 0,
+  resolve_origin = 1,
+  connect_origin = 2,
+  create_transport_stream = 3,
+  create_tls_stream = 4,
+  tls_handshake = 5,
+  http1_write_request = 6,
+  http1_read_response = 7,
+  http2_write_opening = 8,
+  http2_read_peer_settings = 9,
+  http2_write_request = 10,
+  http2_read_response = 11,
+  tls_shutdown = 12,
+  complete = 13,
+};
+
+inline ntl::net::kernel::waitable_status_task
+stop_and_drain_origin_transport_at_thread_boundary(
+    ntl::net::io::async_transport_stream &stream) {
+  co_return co_await stream.stop_and_drain();
+}
+
+struct http_origin_fallback_limits {
+  std::size_t maximum_dns_addresses = 8;
+  std::size_t maximum_request_wire = 4 * 1024 * 1024;
+  std::size_t maximum_response_wire = 4 * 1024 * 1024;
+  std::size_t maximum_header_wire = 64 * 1024;
+  std::size_t maximum_h2_frame_payload = 1024 * 1024;
+  std::size_t transport_receive_buffer = 64 * 1024;
+  std::size_t maximum_reserved_bytes = 24 * 1024 * 1024;
+  std::chrono::milliseconds dns_timeout = std::chrono::seconds(5);
+  std::chrono::milliseconds connect_timeout = std::chrono::seconds(5);
+  std::chrono::milliseconds tls_timeout = std::chrono::seconds(10);
+  std::chrono::milliseconds response_timeout = std::chrono::seconds(15);
+  std::chrono::milliseconds exchange_timeout = std::chrono::seconds(30);
+
+  ntl::result<std::size_t> allocation_reservation() const noexcept {
+    constexpr auto maximum_timeout_milliseconds =
+        (std::numeric_limits<LONGLONG>::max)() / 10'000;
+    if (maximum_dns_addresses == 0 || maximum_dns_addresses > 64 ||
+        maximum_request_wire == 0 || maximum_response_wire == 0 ||
+        maximum_header_wire == 0 || maximum_h2_frame_payload == 0 ||
+        maximum_h2_frame_payload <
+            ntl::net::http2::default_maximum_frame_size ||
+        maximum_h2_frame_payload >
+            ntl::net::http2::absolute_maximum_frame_size ||
+        transport_receive_buffer == 0 || maximum_reserved_bytes == 0 ||
+        dns_timeout.count() <= 0 || connect_timeout.count() <= 0 ||
+        tls_timeout.count() <= 0 || response_timeout.count() <= 0 ||
+        exchange_timeout.count() <= 0 ||
+        dns_timeout.count() > maximum_timeout_milliseconds ||
+        connect_timeout.count() > maximum_timeout_milliseconds ||
+        tls_timeout.count() > maximum_timeout_milliseconds ||
+        response_timeout.count() > maximum_timeout_milliseconds ||
+        exchange_timeout.count() > maximum_timeout_milliseconds)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+
+    std::size_t total = 0;
+    const auto add = [&total](std::size_t value,
+                              std::size_t multiplier) noexcept {
+      if (value > (std::numeric_limits<std::size_t>::max)() / multiplier)
+        return false;
+      const std::size_t product = value * multiplier;
+      if (product > (std::numeric_limits<std::size_t>::max)() - total)
+        return false;
+      total += product;
+      return true;
+    };
+    // Request serialization, TLS ciphertext, response framing and decoded
+    // header snapshots can coexist until the exchange has been validated.
+    if (!add(maximum_request_wire, 2) ||
+        !add(maximum_response_wire, 3) ||
+        !add(maximum_header_wire, 4) ||
+        !add(transport_receive_buffer, 2) ||
+        total > maximum_reserved_bytes)
+      return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+    return ntl::ok(total);
+  }
+};
+
+struct http_origin_fallback_options {
+  http_origin_fallback_limits limits{};
+  http3_origin_allocation_budget *borrowed_allocation_budget = nullptr;
+  // Notification events are borrowed until run() returns.
+  PKEVENT borrowed_request_cancellation_event = nullptr;
+  PKEVENT borrowed_service_cancellation_event = nullptr;
+};
+
+namespace http_origin_fallback_detail {
+
+inline LARGE_INTEGER relative_timeout(
+    std::chrono::milliseconds timeout) noexcept {
+  LARGE_INTEGER result{};
+  result.QuadPart = -static_cast<LONGLONG>(timeout.count()) * 10'000;
+  return result;
+}
+
+inline bool event_signaled(PKEVENT event) noexcept {
+  return event && KeReadStateEvent(event) != 0;
+}
+
+inline bool cancellation_requested(
+    PKEVENT local, const http_origin_fallback_options &options) noexcept {
+  return event_signaled(local) ||
+         event_signaled(options.borrowed_request_cancellation_event) ||
+         event_signaled(options.borrowed_service_cancellation_event);
+}
+
+inline NTSTATUS wait_for_target_or_cancel(
+    PKEVENT target, PKEVENT local,
+    const http_origin_fallback_options &options,
+    std::chrono::milliseconds timeout) noexcept {
+  if (!target || !local)
+    return STATUS_INVALID_PARAMETER;
+  if (cancellation_requested(local, options))
+    return STATUS_CANCELLED;
+  ntl::net::kernel::bounded_wait_set<4> objects;
+  if (!objects.try_add_unique(target) ||
+      !objects.try_add_unique(local) ||
+      (options.borrowed_request_cancellation_event &&
+       !objects.try_add_unique(
+           options.borrowed_request_cancellation_event)) ||
+      (options.borrowed_service_cancellation_event &&
+       !objects.try_add_unique(
+           options.borrowed_service_cancellation_event)))
+    return STATUS_INVALID_PARAMETER;
+  LARGE_INTEGER due = relative_timeout(timeout);
+  const NTSTATUS waited = objects.wait_any(
+      Executive, KernelMode, FALSE, &due);
+  if (cancellation_requested(local, options))
+    return STATUS_CANCELLED;
+  if (waited == STATUS_WAIT_0)
+    return STATUS_SUCCESS;
+  if (waited == STATUS_TIMEOUT)
+    return STATUS_IO_TIMEOUT;
+  if (waited >= STATUS_WAIT_1 &&
+      waited < STATUS_WAIT_0 + static_cast<NTSTATUS>(objects.size()))
+    return STATUS_CANCELLED;
+  return waited;
+}
+
+struct irp_wait {
+  KEVENT event{};
+};
+
+inline NTSTATUS irp_completed(PDEVICE_OBJECT, PIRP,
+                              void *context) noexcept {
+  auto *const wait = static_cast<irp_wait *>(context);
+  KeSetEvent(&wait->event, IO_NO_INCREMENT, FALSE);
+  return STATUS_MORE_PROCESSING_REQUIRED;
+}
+
+inline ntl::status wait_for_irp_or_cancel(
+    PIRP irp, irp_wait &wait, PKEVENT local,
+    const http_origin_fallback_options &options,
+    std::chrono::milliseconds timeout) noexcept {
+  const NTSTATUS waited = wait_for_target_or_cancel(
+      &wait.event, local, options, timeout);
+  if (!NT_SUCCESS(waited)) {
+    (void)IoCancelIrp(irp);
+    (void)KeWaitForSingleObject(
+        &wait.event, Executive, KernelMode, FALSE, nullptr);
+    return waited;
+  }
+  return irp->IoStatus.Status;
+}
+
+class address_info_owner {
+public:
+  address_info_owner() noexcept = default;
+  address_info_owner(const WSK_PROVIDER_NPI *provider,
+                     PADDRINFOEXW value) noexcept
+      : provider_(provider), value_(value) {}
+  address_info_owner(const address_info_owner &) = delete;
+  address_info_owner &operator=(const address_info_owner &) = delete;
+  address_info_owner(address_info_owner &&other) noexcept
+      : provider_(std::exchange(other.provider_, nullptr)),
+        value_(std::exchange(other.value_, nullptr)) {}
+  ~address_info_owner() {
+    if (provider_ && provider_->Dispatch && value_)
+      provider_->Dispatch->WskFreeAddressInfo(provider_->Client, value_);
+  }
+  PADDRINFOEXW get() const noexcept { return value_; }
+
+private:
+  const WSK_PROVIDER_NPI *provider_ = nullptr;
+  PADDRINFOEXW value_ = nullptr;
+};
+
+inline ntl::result<std::vector<ntl::net::kernel::ip_endpoint>>
+resolve_origin(ntl::net::kernel::wsk_provider &provider,
+               std::wstring_view server_name, std::uint16_t port,
+               PKEVENT local,
+               const http_origin_fallback_options &options) noexcept {
+  if (KeGetCurrentIrql() != PASSIVE_LEVEL || !provider ||
+      server_name.empty() || port == 0 ||
+      cancellation_requested(local, options))
+    return ntl::unexpected(
+        cancellation_requested(local, options)
+            ? ntl::status{STATUS_CANCELLED}
+            : ntl::status{STATUS_INVALID_PARAMETER});
+  const WSK_PROVIDER_NPI *const native = provider.borrowed_native_npi();
+  if (!native || !native->Dispatch ||
+      !native->Dispatch->WskGetAddressInfo ||
+      !native->Dispatch->WskFreeAddressInfo)
+    return ntl::unexpected(STATUS_NOT_SUPPORTED);
+
+  PIRP irp = IoAllocateIrp(1, FALSE);
+  if (!irp)
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  irp_wait wait{};
+  KeInitializeEvent(&wait.event, NotificationEvent, FALSE);
+  IoSetCompletionRoutine(
+      irp, &irp_completed, &wait, TRUE, TRUE, TRUE);
+
+  std::wstring node;
+  std::array<wchar_t, 6> service{};
+  try {
+    node.assign(server_name);
+  } catch (const std::bad_alloc &) {
+    IoFreeIrp(irp);
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    IoFreeIrp(irp);
+    return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+  unsigned value = port;
+  std::size_t digits = 0;
+  do {
+    service[digits++] = static_cast<wchar_t>(L'0' + value % 10);
+    value /= 10;
+  } while (value != 0);
+  for (std::size_t left = 0, right = digits - 1; left < right;
+       ++left, --right)
+    std::swap(service[left], service[right]);
+
+  UNICODE_STRING node_name{};
+  UNICODE_STRING service_name_value{};
+  RtlInitUnicodeString(&node_name, node.c_str());
+  RtlInitUnicodeString(&service_name_value, service.data());
+  ADDRINFOEXW hints{};
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+  hints.ai_protocol = IPPROTO_TCP;
+  PADDRINFOEXW resolved = nullptr;
+  (void)native->Dispatch->WskGetAddressInfo(
+      native->Client, &node_name, &service_name_value, NS_ALL, nullptr,
+      &hints, &resolved, nullptr, nullptr, irp);
+  const ntl::status queried = wait_for_irp_or_cancel(
+      irp, wait, local, options, options.limits.dns_timeout);
+  IoFreeIrp(irp);
+  address_info_owner addresses(native, resolved);
+  if (!queried.is_ok())
+    return ntl::unexpected(queried);
+
+  try {
+    std::vector<ntl::net::kernel::ip_endpoint> result;
+    result.reserve(options.limits.maximum_dns_addresses);
+    for (PADDRINFOEXW current = addresses.get(); current;
+         current = current->ai_next) {
+      if (result.size() == options.limits.maximum_dns_addresses)
+        break;
+      if (!current->ai_addr ||
+          current->ai_addrlen > MAXULONG)
+        continue;
+      auto endpoint = ntl::net::kernel::ip_endpoint::from_native(
+          current->ai_addr, static_cast<ULONG>(current->ai_addrlen));
+      if (endpoint && endpoint.port() == port)
+        result.push_back(endpoint);
+    }
+    return result.empty()
+               ? ntl::unexpected(STATUS_BAD_NETWORK_PATH)
+               : ntl::ok(std::move(result));
+  } catch (const std::bad_alloc &) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+}
+
+inline ntl::result<ntl::net::kernel::wsk_tcp_transport::pointer>
+connect_origin(ntl::net::kernel::wsk_provider &provider,
+               const ntl::net::kernel::ip_endpoint &remote,
+               PKEVENT local,
+               const http_origin_fallback_options &options) noexcept {
+  if (KeGetCurrentIrql() != PASSIVE_LEVEL || !provider || !remote ||
+      cancellation_requested(local, options))
+    return ntl::unexpected(
+        cancellation_requested(local, options)
+            ? ntl::status{STATUS_CANCELLED}
+            : ntl::status{STATUS_INVALID_PARAMETER});
+  const WSK_PROVIDER_NPI *const native = provider.borrowed_native_npi();
+  if (!native || !native->Dispatch)
+    return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+
+  PIRP connect_irp = IoAllocateIrp(1, FALSE);
+  PIRP close_irp = IoAllocateIrp(1, FALSE);
+  if (!connect_irp || !close_irp) {
+    if (connect_irp)
+      IoFreeIrp(connect_irp);
+    if (close_irp)
+      IoFreeIrp(close_irp);
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  }
+
+  const auto local_endpoint =
+      remote.family() == AF_INET
+          ? ntl::net::kernel::ip_endpoint::any_ipv4()
+          : ntl::net::kernel::ip_endpoint::any_ipv6();
+  irp_wait wait{};
+  KeInitializeEvent(&wait.event, NotificationEvent, FALSE);
+  IoSetCompletionRoutine(
+      connect_irp, &irp_completed, &wait, TRUE, TRUE, TRUE);
+  (void)native->Dispatch->WskSocketConnect(
+      native->Client, SOCK_STREAM, IPPROTO_TCP,
+      const_cast<SOCKADDR *>(local_endpoint.borrowed_native_address()),
+      const_cast<SOCKADDR *>(remote.borrowed_native_address()), 0, nullptr,
+      nullptr,
+      nullptr, nullptr, nullptr, connect_irp);
+  const ntl::status connected = wait_for_irp_or_cancel(
+      connect_irp, wait, local, options, options.limits.connect_timeout);
+  PWSK_SOCKET socket = static_cast<PWSK_SOCKET>(
+      reinterpret_cast<void *>(connect_irp->IoStatus.Information));
+  IoFreeIrp(connect_irp);
+  if (!connected.is_ok() || !socket) {
+    if (socket)
+      (void)ntl::net::kernel::detail::close_wsk_socket(socket, close_irp);
+    IoFreeIrp(close_irp);
+    return ntl::unexpected(
+        connected.is_ok() ? ntl::status{STATUS_INVALID_DEVICE_STATE}
+                          : connected);
+  }
+
+  return ntl::net::kernel::wsk_tcp_transport::try_adopt(
+      provider, socket, close_irp,
+      {.maximum_write_bytes = options.limits.maximum_request_wire,
+       .receive_buffer_bytes = options.limits.transport_receive_buffer,
+       .connect_timeout = options.limits.connect_timeout});
+}
+
+#if NTL_HAS_COROUTINE_SUPPORT
+
+inline ntl::net::kernel::task<ntl::status> write_tls(
+    ntl::net::kernel::tls_stream &stream,
+    std::span<const std::byte> bytes) {
+  auto written = co_await stream.write_all(bytes);
+  if (!written)
+    co_return written.status();
+  co_return *written == bytes.size() ? ntl::status::ok()
+                                     : ntl::status{STATUS_DATA_ERROR};
+}
+
+inline ntl::net::kernel::task<ntl::status> read_tls_exactly(
+    ntl::net::kernel::tls_stream &stream,
+    std::span<std::byte> destination,
+    std::chrono::milliseconds timeout) {
+  std::size_t used = 0;
+  while (used != destination.size()) {
+    auto received = co_await stream.read_some_borrowed(
+        destination.subspan(used), {.timeout = timeout});
+    if (!received)
+      co_return received.status();
+    if (*received == 0)
+      co_return ntl::status{STATUS_END_OF_FILE};
+    used += *received;
+  }
+  co_return ntl::status::ok();
+}
+
+class http1_response_reader {
+public:
+  http1_response_reader(const http1_response_reader &) = delete;
+  http1_response_reader &operator=(const http1_response_reader &) = delete;
+  http1_response_reader() = default;
+
+  ntl::net::kernel::task<ntl::result<std::vector<std::byte>>> read_one(
+      ntl::net::kernel::tls_stream &stream, bool response_to_head,
+      const http_origin_fallback_limits &limits) {
+    try {
+      const ntl::net::http::http1_message_framer framer(
+          ntl::net::http::http1_message_kind::response,
+          {.maximum_header_size = limits.maximum_header_wire,
+           .maximum_body_size = limits.maximum_response_wire,
+           .maximum_chunk_line_size = 4 * 1024,
+           .maximum_trailer_size = limits.maximum_header_wire,
+           .allow_close_delimited_response = true,
+           .response_body_forbidden = response_to_head});
+      for (;;) {
+        const auto bytes =
+            std::span<const std::byte>(storage_).subspan(offset_);
+        if (!bytes.empty()) {
+          const auto view =
+              ntl::net::scatter_view::from_contiguous(bytes);
+          const auto probe = eof_ ? framer.finish(view) : framer.probe(view);
+          if (probe.state() == ntl::net::framing::probe_state::malformed)
+            co_return ntl::unexpected(probe.error());
+          if (probe.state() == ntl::net::framing::probe_state::complete) {
+            std::vector<std::byte> result(
+                bytes.begin(),
+                bytes.begin() +
+                    static_cast<std::ptrdiff_t>(probe.frame_size()));
+            consume(probe.frame_size());
+            co_return ntl::ok(std::move(result));
+          }
+        }
+        if (eof_)
+          co_return ntl::unexpected(STATUS_END_OF_FILE);
+        const std::size_t maximum =
+            limits.maximum_response_wire >
+                    (std::numeric_limits<std::size_t>::max)() -
+                        limits.maximum_header_wire
+                ? (std::numeric_limits<std::size_t>::max)()
+                : limits.maximum_response_wire + limits.maximum_header_wire;
+        if (buffered_size() >= maximum)
+          co_return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+        compact();
+        std::array<std::byte, 16 * 1024> chunk{};
+        auto received = co_await stream.read_some_borrowed(
+            chunk, {.timeout = limits.response_timeout});
+        if (!received)
+          co_return ntl::unexpected(received.status());
+        if (*received == 0) {
+          eof_ = true;
+          continue;
+        }
+        if (*received > maximum - storage_.size())
+          co_return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+        storage_.insert(
+            storage_.end(), chunk.begin(),
+            chunk.begin() + static_cast<std::ptrdiff_t>(*received));
+      }
+    } catch (const std::bad_alloc &) {
+      co_return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      co_return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+private:
+  std::size_t buffered_size() const noexcept {
+    return storage_.size() - offset_;
+  }
+  void consume(std::size_t count) noexcept {
+    NT_ASSERT(count <= buffered_size());
+    offset_ += count;
+    if (offset_ == storage_.size()) {
+      storage_.clear();
+      offset_ = 0;
+    }
+  }
+  void compact() {
+    if (offset_ == 0)
+      return;
+    storage_.erase(
+        storage_.begin(),
+        storage_.begin() + static_cast<std::ptrdiff_t>(offset_));
+    offset_ = 0;
+  }
+
+  std::vector<std::byte> storage_;
+  std::size_t offset_ = 0;
+  bool eof_ = false;
+};
+
+inline ntl::result<ntl::net::http::response_message>
+parse_http1_origin_response(
+    std::span<const std::byte> wire,
+    const ntl::net::http::request_message &request,
+    const http_origin_fallback_limits &limits) noexcept {
+  const bool body_forbidden =
+      request.method == "HEAD" ||
+      ntl::net::http::http1_transform_detail::bodyless_response_status(wire);
+  ntl::net::http::transform_limits transform_limits{};
+  transform_limits.maximum_header_count = 256;
+  transform_limits.maximum_header_bytes = limits.maximum_header_wire;
+  transform_limits.maximum_encoded_body_bytes = limits.maximum_response_wire;
+  transform_limits.maximum_decoded_body_bytes = limits.maximum_response_wire;
+  auto parts = ntl::net::http::http1_transform_detail::parse_wire(
+      wire, transform_limits, body_forbidden);
+  if (!parts)
+    return ntl::unexpected(parts.status());
+  try {
+    const bool http10 = parts->start_line.starts_with("HTTP/1.0 ");
+    const bool http11 = parts->start_line.starts_with("HTTP/1.1 ");
+    if ((!http10 && !http11) || parts->start_line.size() < 12 ||
+        parts->start_line[8] != ' ')
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    const std::size_t status_end = parts->start_line.find(' ', 9);
+    const std::string_view status_text = parts->start_line.substr(
+        9, status_end == std::string_view::npos
+               ? std::string_view::npos
+               : status_end - 9);
+    unsigned status = 0;
+    const auto parsed = std::from_chars(
+        status_text.data(), status_text.data() + status_text.size(), status);
+    if (status_text.size() != 3 || parsed.ec != std::errc{} ||
+        parsed.ptr != status_text.data() + status_text.size() ||
+        status < 100 || status > 599)
+      return ntl::unexpected(STATUS_DATA_ERROR);
+
+    auto body = ntl::net::http::http1_transform_detail::transfer_decode_body(
+        *parts, transform_limits);
+    if (!body)
+      return ntl::unexpected(body.status());
+    ntl::net::http::response_message result;
+    result.wire_protocol = ntl::net::http::protocol::http1;
+    result.status = status;
+    if (status_end != std::string_view::npos)
+      result.reason.assign(parts->start_line.substr(status_end + 1));
+    result.headers =
+        ntl::net::http::header_collection(std::move(parts->headers));
+    result.body = std::move(*body);
+    result.trailers = std::move(parts->trailers);
+    const ntl::status valid = result.headers.validate(
+        ntl::net::http::protocol::http1, transform_limits);
+    const ntl::status trailers = ntl::net::http::validate_trailers(
+        result.trailers, ntl::net::http::protocol::http1,
+        transform_limits);
+    if (!valid.is_ok() || !trailers.is_ok())
+      return ntl::unexpected(valid.is_ok() ? trailers : valid);
+    if (ntl::net::http::response_body_forbidden(request, result) &&
+        !result.body.empty())
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    return ntl::ok(std::move(result));
+  } catch (const std::bad_alloc &) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+}
+
+struct h2_wire_frame {
+  std::vector<std::byte> bytes;
+};
+
+inline ntl::net::kernel::task<ntl::result<h2_wire_frame>> read_h2_frame(
+    ntl::net::kernel::tls_stream &stream,
+    const http_origin_fallback_limits &limits) {
+  try {
+    std::array<std::byte, ntl::net::http2::frame_header_size> header{};
+    ntl::status status = co_await read_tls_exactly(
+        stream, header, limits.response_timeout);
+    if (!status.is_ok())
+      co_return ntl::unexpected(status);
+    auto inspected = ntl::net::http2::inspect_header(
+        ntl::net::scatter_view::from_contiguous(header),
+        {limits.maximum_h2_frame_payload, false});
+    if (!inspected)
+      co_return ntl::unexpected(inspected.status());
+    h2_wire_frame result;
+    result.bytes.resize(
+        ntl::net::http2::frame_header_size + inspected->payload_size);
+    std::memcpy(result.bytes.data(), header.data(), header.size());
+    if (inspected->payload_size != 0) {
+      status = co_await read_tls_exactly(
+          stream, std::span(result.bytes).subspan(header.size()),
+          limits.response_timeout);
+      if (!status.is_ok())
+        co_return ntl::unexpected(status);
+    }
+    co_return ntl::ok(std::move(result));
+  } catch (const std::bad_alloc &) {
+    co_return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    co_return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+}
+
+class h2_response_sink final : public ntl::net::http2::inspection_sink {
+public:
+  h2_response_sink(const ntl::net::http::request_message &request,
+                   const http_origin_fallback_limits &limits) noexcept
+      : request_(&request), limits_(&limits) {}
+
+  ntl::status on_headers(
+      std::uint32_t stream_id,
+      std::span<const ntl::net::http2::header_field> fields,
+      bool end_stream) noexcept override {
+    if (stream_id != request_stream_id || complete_)
+      return STATUS_DATA_ERROR;
+    try {
+      if (!final_headers_seen_) {
+        unsigned status = 0;
+        bool status_seen = false;
+        ntl::net::http::header_collection headers;
+        for (const auto &field : fields) {
+          if (field.name == ":status") {
+            if (status_seen || field.value.size() != 3)
+              return STATUS_DATA_ERROR;
+            const auto parsed = std::from_chars(
+                field.value.data(), field.value.data() + field.value.size(),
+                status);
+            if (parsed.ec != std::errc{} ||
+                parsed.ptr != field.value.data() + field.value.size())
+              return STATUS_DATA_ERROR;
+            status_seen = true;
+          } else {
+            if (field.name.empty() || field.name.front() == ':')
+              return STATUS_DATA_ERROR;
+            headers.append(field.name, field.value, field.never_index);
+          }
+        }
+        if (!status_seen || status < 100 || status > 599)
+          return STATUS_DATA_ERROR;
+        if (status < 200) {
+          if (end_stream || status == 101)
+            return STATUS_DATA_ERROR;
+          return ntl::status::ok();
+        }
+        message_.wire_protocol = ntl::net::http::protocol::http2;
+        message_.status = status;
+        message_.headers = std::move(headers);
+        final_headers_seen_ = true;
+      } else {
+        if (!end_stream || !message_.trailers.empty())
+          return STATUS_DATA_ERROR;
+        for (const auto &field : fields) {
+          if (field.name.empty() || field.name.front() == ':')
+            return STATUS_DATA_ERROR;
+          message_.trailers.push_back(
+              {field.name, field.value, field.never_index});
+        }
+      }
+      complete_ = end_stream;
+      return ntl::status::ok();
+    } catch (const std::invalid_argument &) {
+      return STATUS_DATA_ERROR;
+    } catch (const std::bad_alloc &) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    } catch (...) {
+      return STATUS_UNHANDLED_EXCEPTION;
+    }
+  }
+
+  ntl::status on_data(std::uint32_t stream_id,
+                      ntl::net::scatter_view data,
+                      bool end_stream) noexcept override {
+    const bool too_large =
+        message_.body.size() > limits_->maximum_response_wire ||
+        data.size() >
+            limits_->maximum_response_wire - message_.body.size();
+    if (stream_id != request_stream_id || !final_headers_seen_ || complete_ ||
+        !data || too_large)
+      return too_large ? ntl::status{STATUS_BUFFER_OVERFLOW}
+                       : ntl::status{STATUS_DATA_ERROR};
+    try {
+      const std::size_t offset = message_.body.size();
+      message_.body.resize(offset + data.size());
+      const ntl::status copied = data.copy_to(
+          std::span<std::byte>(message_.body).subspan(offset));
+      if (!copied.is_ok()) {
+        message_.body.resize(offset);
+        return copied;
+      }
+      complete_ = end_stream;
+      return ntl::status::ok();
+    } catch (const std::bad_alloc &) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    } catch (...) {
+      return STATUS_UNHANDLED_EXCEPTION;
+    }
+  }
+
+  bool complete() const noexcept { return complete_; }
+
+  ntl::result<ntl::net::http::response_message> take() noexcept {
+    if (!complete_ || !final_headers_seen_)
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+    ntl::net::http::transform_limits transform_limits{};
+    transform_limits.maximum_header_count = 256;
+    transform_limits.maximum_header_bytes = limits_->maximum_header_wire;
+    transform_limits.maximum_encoded_body_bytes =
+        limits_->maximum_response_wire;
+    transform_limits.maximum_decoded_body_bytes =
+        limits_->maximum_response_wire;
+    const ntl::status headers = message_.headers.validate(
+        ntl::net::http::protocol::http2, transform_limits);
+    const ntl::status trailers = ntl::net::http::validate_trailers(
+        message_.trailers, ntl::net::http::protocol::http2,
+        transform_limits);
+    if (!headers.is_ok() || !trailers.is_ok())
+      return ntl::unexpected(headers.is_ok() ? trailers : headers);
+    if (ntl::net::http::response_body_forbidden(*request_, message_) &&
+        !message_.body.empty())
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    if (const auto length = message_.headers.first("content-length")) {
+      std::size_t expected = 0;
+      const auto parsed = std::from_chars(
+          length->data(), length->data() + length->size(), expected);
+      if (parsed.ec != std::errc{} ||
+          parsed.ptr != length->data() + length->size() ||
+          expected != message_.body.size())
+        return ntl::unexpected(STATUS_DATA_ERROR);
+    }
+    return ntl::ok(std::move(message_));
+  }
+
+  static constexpr std::uint32_t request_stream_id = 1;
+
+private:
+  const ntl::net::http::request_message *request_ = nullptr;
+  const http_origin_fallback_limits *limits_ = nullptr;
+  ntl::net::http::response_message message_{};
+  bool final_headers_seen_ = false;
+  bool complete_ = false;
+};
+
+inline std::uint32_t read_h2_u32(
+    ntl::net::scatter_view bytes, std::size_t offset = 0) noexcept {
+  std::array<std::byte, 4> value{};
+  if (!bytes.copy_to(value, offset).is_ok())
+    return 0;
+  return (static_cast<std::uint32_t>(
+              std::to_integer<std::uint8_t>(value[0]))
+          << 24) |
+         (static_cast<std::uint32_t>(
+              std::to_integer<std::uint8_t>(value[1]))
+          << 16) |
+         (static_cast<std::uint32_t>(
+              std::to_integer<std::uint8_t>(value[2]))
+          << 8) |
+         static_cast<std::uint32_t>(
+             std::to_integer<std::uint8_t>(value[3]));
+}
+
+#endif // NTL_HAS_COROUTINE_SUPPORT
+
+} // namespace http_origin_fallback_detail
+
+#if NTL_HAS_COROUTINE_SUPPORT
+
+/**
+ * Performs the one authorized HTTP/3-to-TLS/TCP origin retry.
+ *
+ * The factory consumes the opaque proof returned by
+ * kernel_http3_origin_exchange::run_classified().  Consequently a caller
+ * cannot turn certificate, mTLS, ALPN, HTTP, QPACK, cancellation, resource or
+ * post-commit failures into a silent protocol downgrade.
+ */
+class kernel_http_origin_fallback_exchange final {
+public:
+  static ntl::result<std::unique_ptr<kernel_http_origin_fallback_exchange>>
+  try_create(
+      std::shared_ptr<ntl::net::kernel::wsk_provider> provider,
+      std::string_view server_name, std::uint16_t port,
+      http3_origin_attempt &&strict_attempt,
+      ntl::net::kernel::schannel_credentials client_credentials,
+      std::shared_ptr<ntl::net::kernel::schannel_peer_certificate_policy>
+          peer_policy,
+      http_origin_fallback_options options = {}) noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL || !provider || !*provider ||
+        server_name.empty() || port == 0 ||
+        client_credentials.role() != ntl::net::kernel::schannel_role::client ||
+        (client_credentials.manual_peer_validation() && !peer_policy) ||
+        strict_attempt.outcome_ ||
+        !strict_attempt.transport_fallback_permitted())
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    const auto reservation = options.limits.allocation_reservation();
+    if (!reservation)
+      return ntl::unexpected(reservation.status());
+    if (server_name.size() > options.limits.maximum_header_wire)
+      return ntl::unexpected(STATUS_INVALID_ADDRESS);
+    for (const unsigned char character : server_name) {
+      if (character == 0 || character > 0x7f)
+        return ntl::unexpected(STATUS_INVALID_ADDRESS);
+    }
+
+    auto retry = strict_attempt.take_retry_request();
+    if (!retry || !safe_method(retry->method))
+      return ntl::unexpected(STATUS_ACCESS_DENIED);
+    const ntl::status request_status =
+        validate_retry_request(*retry, options.limits);
+    if (!request_status.is_ok())
+      return ntl::unexpected(request_status);
+
+    try {
+      std::string owned_name(server_name);
+      std::wstring wide_name;
+      wide_name.reserve(server_name.size());
+      for (const unsigned char character : server_name)
+        wide_name.push_back(static_cast<wchar_t>(character));
+      auto result = std::unique_ptr<kernel_http_origin_fallback_exchange>(
+          new (std::nothrow) kernel_http_origin_fallback_exchange(
+              std::move(provider), std::move(owned_name),
+              std::move(wide_name), port,
+              std::move(*retry), std::move(client_credentials),
+              std::move(peer_policy), options));
+      if (!result)
+        return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+      return ntl::ok(std::move(result));
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+  kernel_http_origin_fallback_exchange(
+      const kernel_http_origin_fallback_exchange &) = delete;
+  kernel_http_origin_fallback_exchange &operator=(
+      const kernel_http_origin_fallback_exchange &) = delete;
+
+  void cancel() noexcept {
+    KeSetEvent(&cancellation_event_, IO_NO_INCREMENT, FALSE);
+  }
+
+  http_origin_fallback_phase current_phase() const noexcept {
+    return phase_.load(std::memory_order_relaxed);
+  }
+
+  ntl::result<http3_origin_result> run() noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL || !provider_ ||
+        run_started_.exchange(true, std::memory_order_acq_rel))
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+    const auto reservation = options_.limits.allocation_reservation();
+    if (!reservation)
+      return ntl::unexpected(reservation.status());
+    http3_origin_detail::allocation_budget_lease lease(
+        options_.borrowed_allocation_budget, *reservation);
+    if (!lease)
+      return ntl::unexpected(STATUS_QUOTA_EXCEEDED);
+    if (cancellation_requested())
+      return ntl::unexpected(STATUS_CANCELLED);
+
+    phase_.store(http_origin_fallback_phase::resolve_origin,
+                 std::memory_order_relaxed);
+    auto addresses = http_origin_fallback_detail::resolve_origin(
+        *provider_, wide_server_name_, port_, &cancellation_event_, options_);
+    if (!addresses)
+      return ntl::unexpected(addresses.status());
+
+    ntl::status last_connect = STATUS_BAD_NETWORK_PATH;
+    phase_.store(http_origin_fallback_phase::connect_origin,
+                 std::memory_order_relaxed);
+    for (const auto &address : *addresses) {
+      if (cancellation_requested())
+        return ntl::unexpected(STATUS_CANCELLED);
+      auto connected = http_origin_fallback_detail::connect_origin(
+          *provider_, address, &cancellation_event_, options_);
+      if (connected) {
+        backend_ = std::move(*connected);
+        break;
+      }
+      last_connect = connected.status();
+      if (last_connect == STATUS_CANCELLED ||
+          last_connect == STATUS_INSUFFICIENT_RESOURCES ||
+          last_connect == STATUS_QUOTA_EXCEEDED)
+        return ntl::unexpected(last_connect);
+    }
+    if (!backend_)
+      return ntl::unexpected(last_connect);
+
+    if (options_.limits.maximum_response_wire >
+        (std::numeric_limits<std::size_t>::max)() -
+            options_.limits.maximum_header_wire) {
+      stop_and_drain();
+      return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+    }
+    phase_.store(http_origin_fallback_phase::create_transport_stream,
+                 std::memory_order_relaxed);
+    auto stream = ntl::net::io::async_transport_stream::try_create(
+        backend_, options_.limits.maximum_response_wire +
+                       options_.limits.maximum_header_wire);
+    if (!stream) {
+      stop_and_drain();
+      return ntl::unexpected(stream.status());
+    }
+    transport_stream_ = std::move(*stream);
+    phase_.store(http_origin_fallback_phase::create_tls_stream,
+                 std::memory_order_relaxed);
+    auto tls = ntl::net::kernel::tls_stream::try_create(
+        transport_stream_,
+        {.maximum_buffered_ciphertext = 256 * 1024,
+         .maximum_plaintext_record = 64 * 1024,
+         .receive_timeout = options_.limits.tls_timeout});
+    if (!tls) {
+      stop_and_drain();
+      return ntl::unexpected(tls.status());
+    }
+    tls_stream_.emplace(std::move(*tls));
+
+    auto operation = run_tls_exchange();
+    const NTSTATUS waited =
+        http_origin_fallback_detail::wait_for_target_or_cancel(
+            operation.borrowed_native_event(), &cancellation_event_, options_,
+            options_.limits.exchange_timeout);
+    if (!NT_SUCCESS(waited)) {
+      KeSetEvent(&cancellation_event_, IO_NO_INCREMENT, FALSE);
+      transport_stream_->close();
+    }
+    const ntl::status completed = operation.wait();
+    stop_and_drain();
+    if (!NT_SUCCESS(waited))
+      return ntl::unexpected(waited);
+    if (!completed.is_ok())
+      return ntl::unexpected(completed);
+    if (!completed_result_)
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+    return ntl::ok(std::move(*completed_result_));
+  }
+
+private:
+  kernel_http_origin_fallback_exchange(
+      std::shared_ptr<ntl::net::kernel::wsk_provider> provider,
+      std::string &&server_name,
+      std::wstring &&wide_server_name, std::uint16_t port,
+      ntl::net::http::request_message &&request,
+      ntl::net::kernel::schannel_credentials client_credentials,
+      std::shared_ptr<ntl::net::kernel::schannel_peer_certificate_policy>
+          peer_policy,
+      http_origin_fallback_options options) noexcept
+      : provider_(std::move(provider)), server_name_(std::move(server_name)),
+        wide_server_name_(std::move(wide_server_name)), port_(port),
+        request_(std::move(request)),
+        client_credentials_(std::move(client_credentials)),
+        peer_policy_(std::move(peer_policy)), options_(options) {
+    KeInitializeEvent(&cancellation_event_, NotificationEvent, FALSE);
+  }
+
+  static bool safe_method(std::string_view method) noexcept {
+    return method == "GET" || method == "HEAD" || method == "OPTIONS" ||
+           method == "TRACE";
+  }
+
+  static ntl::status validate_retry_request(
+      const ntl::net::http::request_message &request,
+      const http_origin_fallback_limits &limits) noexcept {
+    ntl::net::http::transform_limits transform_limits{};
+    transform_limits.maximum_header_count = 256;
+    transform_limits.maximum_header_bytes = limits.maximum_header_wire;
+    transform_limits.maximum_encoded_body_bytes = limits.maximum_request_wire;
+    transform_limits.maximum_decoded_body_bytes = limits.maximum_request_wire;
+    const ntl::status headers = request.headers.validate(
+        ntl::net::http::protocol::http2, transform_limits);
+    const ntl::status trailers = ntl::net::http::validate_trailers(
+        request.trailers, ntl::net::http::protocol::http2,
+        transform_limits);
+    if (!headers.is_ok() || !trailers.is_ok())
+      return headers.is_ok() ? trailers : headers;
+    if (!safe_method(request.method) || request.authority.empty() ||
+        request.scheme != "https" || request.path.empty() ||
+        request.extended_protocol ||
+        request.body.size() > limits.maximum_request_wire)
+      return STATUS_DATA_ERROR;
+    if (const auto length = request.headers.first("content-length")) {
+      std::size_t expected = 0;
+      const auto parsed = std::from_chars(
+          length->data(), length->data() + length->size(), expected);
+      if (parsed.ec != std::errc{} ||
+          parsed.ptr != length->data() + length->size() ||
+          expected != request.body.size())
+        return STATUS_DATA_ERROR;
+    }
+    return ntl::status::ok();
+  }
+
+  bool cancellation_requested() const noexcept {
+    return http_origin_fallback_detail::cancellation_requested(
+        const_cast<PKEVENT>(&cancellation_event_), options_);
+  }
+
+  ntl::net::kernel::waitable_status_task run_tls_exchange() {
+    try {
+      phase_.store(http_origin_fallback_phase::tls_handshake,
+                   std::memory_order_relaxed);
+      const ntl::status handshake = co_await tls_stream_->handshake_client(
+          client_credentials_, wide_server_name_,
+          {.application_protocols = {"h2", "http/1.1"},
+           .require_application_protocol = true,
+           .peer_certificate_policy = peer_policy_});
+      if (!handshake.is_ok())
+        co_return handshake;
+      if (cancellation_requested())
+        co_return ntl::status{STATUS_CANCELLED};
+
+      const std::string protocol =
+          tls_stream_->negotiated_application_protocol();
+      ntl::result<ntl::net::http::response_message> response =
+          ntl::unexpected(STATUS_PROTOCOL_NOT_SUPPORTED);
+      if (protocol == "h2")
+        response = co_await exchange_http2();
+      else if (protocol == "http/1.1")
+        response = co_await exchange_http1();
+      if (!response)
+        co_return response.status();
+      completed_result_.emplace(http3_origin_result{
+          .message = std::move(*response),
+          .negotiated_protocol = std::string(protocol),
+          .peer_validated = true,
+          .peer_settings_received = false,
+          .dynamic_qpack = false,
+          .qpack_decoder_acknowledgement_queued = false});
+      // The response message may be complete before the peer's TLS shutdown
+      // is complete (Content-Length in HTTP/1.1 or END_STREAM in HTTP/2).
+      // Join the owning TLS close operation instead of merely emitting our
+      // alert and immediately tearing down WSK.  That keeps the transport
+      // alive until both authenticated close_notify alerts have crossed and
+      // prevents a successful exchange from ending in a TCP reset.
+      phase_.store(http_origin_fallback_phase::tls_shutdown,
+                   std::memory_order_relaxed);
+      const ntl::status closed = co_await tls_stream_->close();
+      if (!closed.is_ok())
+        co_return closed;
+      phase_.store(http_origin_fallback_phase::complete,
+                   std::memory_order_relaxed);
+      co_return ntl::status::ok();
+    } catch (const std::bad_alloc &) {
+      co_return ntl::status{STATUS_INSUFFICIENT_RESOURCES};
+    } catch (...) {
+      co_return ntl::status{STATUS_UNHANDLED_EXCEPTION};
+    }
+  }
+
+  ntl::net::kernel::task<ntl::result<ntl::net::http::response_message>>
+  exchange_http1() {
+    ntl::net::http::transform_limits transform_limits{};
+    transform_limits.maximum_header_count = 256;
+    transform_limits.maximum_header_bytes = options_.limits.maximum_header_wire;
+    transform_limits.maximum_encoded_body_bytes =
+        options_.limits.maximum_request_wire;
+    transform_limits.maximum_decoded_body_bytes =
+        options_.limits.maximum_request_wire;
+    auto wire = ntl::net::http::serialize_http1_request(
+        request_, request_.body, transform_limits);
+    if (!wire)
+      co_return ntl::unexpected(wire.status());
+    phase_.store(http_origin_fallback_phase::http1_write_request,
+                 std::memory_order_relaxed);
+    const ntl::status sent =
+        co_await http_origin_fallback_detail::write_tls(*tls_stream_, *wire);
+    if (!sent.is_ok())
+      co_return ntl::unexpected(sent);
+
+    http_origin_fallback_detail::http1_response_reader reader;
+    for (unsigned informational = 0; informational != 16; ++informational) {
+      phase_.store(http_origin_fallback_phase::http1_read_response,
+                   std::memory_order_relaxed);
+      auto response_wire = co_await reader.read_one(
+          *tls_stream_, request_.method == "HEAD", options_.limits);
+      if (!response_wire)
+        co_return ntl::unexpected(response_wire.status());
+      auto response =
+          http_origin_fallback_detail::parse_http1_origin_response(
+              *response_wire, request_, options_.limits);
+      if (!response)
+        co_return ntl::unexpected(response.status());
+      if (response->status >= 200)
+        co_return ntl::ok(std::move(*response));
+    }
+    co_return ntl::unexpected(STATUS_QUOTA_EXCEEDED);
+  }
+
+  ntl::net::kernel::task<ntl::result<ntl::net::http::response_message>>
+  exchange_http2() {
+    try {
+      constexpr std::string_view preface =
+          "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+      const std::uint32_t receive_window = static_cast<std::uint32_t>(
+          (std::min)(options_.limits.maximum_response_wire,
+                     static_cast<std::size_t>(
+                         ntl::net::http2::send_window::maximum_window)));
+      const std::uint32_t header_limit = static_cast<std::uint32_t>(
+          (std::min)(options_.limits.maximum_header_wire,
+                     static_cast<std::size_t>(MAXULONG)));
+      const std::uint32_t maximum_frame = static_cast<std::uint32_t>(
+          options_.limits.maximum_h2_frame_payload);
+      const std::array<std::byte, 30> settings_payload{
+          std::byte{0}, std::byte{1}, std::byte{0}, std::byte{0},
+          std::byte{0x10}, std::byte{0},
+          std::byte{0}, std::byte{2}, std::byte{0}, std::byte{0},
+          std::byte{0}, std::byte{0},
+          std::byte{0}, std::byte{4},
+          static_cast<std::byte>((receive_window >> 24) & 0xffu),
+          static_cast<std::byte>((receive_window >> 16) & 0xffu),
+          static_cast<std::byte>((receive_window >> 8) & 0xffu),
+          static_cast<std::byte>(receive_window & 0xffu),
+          std::byte{0}, std::byte{6},
+          static_cast<std::byte>((header_limit >> 24) & 0xffu),
+          static_cast<std::byte>((header_limit >> 16) & 0xffu),
+          static_cast<std::byte>((header_limit >> 8) & 0xffu),
+          static_cast<std::byte>(header_limit & 0xffu),
+          std::byte{0}, std::byte{5},
+          static_cast<std::byte>((maximum_frame >> 24) & 0xffu),
+          static_cast<std::byte>((maximum_frame >> 16) & 0xffu),
+          static_cast<std::byte>((maximum_frame >> 8) & 0xffu),
+          static_cast<std::byte>(maximum_frame & 0xffu)};
+      auto settings = ntl::net::http2::transform_detail::make_frame(
+          ntl::net::http2::frame_type::settings, 0, 0, settings_payload);
+      if (!settings)
+        co_return ntl::unexpected(settings.status());
+      std::vector<std::byte> opening;
+      opening.reserve(preface.size() + settings->wire.size());
+      opening.insert(
+          opening.end(),
+          reinterpret_cast<const std::byte *>(preface.data()),
+          reinterpret_cast<const std::byte *>(
+              preface.data() + preface.size()));
+      opening.insert(opening.end(), settings->wire.begin(),
+                     settings->wire.end());
+      phase_.store(http_origin_fallback_phase::http2_write_opening,
+                   std::memory_order_relaxed);
+      ntl::status status = co_await http_origin_fallback_detail::write_tls(
+          *tls_stream_, opening);
+      if (!status.is_ok())
+        co_return ntl::unexpected(status);
+      if (receive_window > ntl::net::http2::send_window::default_window) {
+        auto update = ntl::net::http2::encode_window_update(
+            0, receive_window -
+                   ntl::net::http2::send_window::default_window);
+        if (!update)
+          co_return ntl::unexpected(update.status());
+        status = co_await http_origin_fallback_detail::write_tls(
+            *tls_stream_, update->wire);
+        if (!status.is_ok())
+          co_return ntl::unexpected(status);
+      }
+
+      ntl::net::http2::send_window peer_window;
+      ntl::net::http2::hpack_decoder_adapter<
+          ntl::net::http2::bounded_hpack_decoder>
+          decoder(ntl::net::http2::hpack_limits{4096});
+      ntl::net::http2::borrowed_connection_inspector inspector(
+          decoder, options_.limits.maximum_header_wire,
+          options_.limits.maximum_header_wire);
+      http_origin_fallback_detail::h2_response_sink sink(
+          request_, options_.limits);
+      bool first_peer_frame = true;
+      std::uint32_t peer_initial_window =
+          ntl::net::http2::send_window::default_window;
+
+      // Learn the peer's initial stream window before choosing DATA frame
+      // boundaries. A peer may advertise a window smaller than 16 KiB; using
+      // the default frame size in that case can wait forever for credit that
+      // the peer expects us to consume in smaller frames.
+      phase_.store(http_origin_fallback_phase::http2_read_peer_settings,
+                   std::memory_order_relaxed);
+      auto initial = co_await http_origin_fallback_detail::read_h2_frame(
+          *tls_stream_, options_.limits);
+      if (!initial)
+        co_return ntl::unexpected(initial.status());
+      status = co_await consume_h2_frame(
+          *initial, first_peer_frame, peer_initial_window, peer_window,
+          inspector, sink);
+      if (!status.is_ok())
+        co_return ntl::unexpected(status);
+      const std::size_t request_frame_size =
+          peer_initial_window == 0
+              ? 1
+              : (std::min)(
+                    static_cast<std::size_t>(peer_initial_window),
+                    ntl::net::http2::default_maximum_frame_size);
+      auto request_frames = ntl::net::http2::encode_request_frames(
+          http_origin_fallback_detail::h2_response_sink::request_stream_id,
+          request_, request_.body, request_frame_size,
+          options_.limits.maximum_header_wire);
+      if (!request_frames)
+        co_return ntl::unexpected(request_frames.status());
+
+      for (auto &frame : *request_frames) {
+        while (frame.flow_controlled_bytes != 0 &&
+               !peer_window.try_reserve(frame.stream_id,
+                                        frame.flow_controlled_bytes)) {
+          auto incoming = co_await http_origin_fallback_detail::read_h2_frame(
+              *tls_stream_, options_.limits);
+          if (!incoming)
+            co_return ntl::unexpected(incoming.status());
+          status = co_await consume_h2_frame(
+              *incoming, first_peer_frame, peer_initial_window, peer_window,
+              inspector, sink);
+          if (!status.is_ok())
+            co_return ntl::unexpected(status);
+          if (sink.complete())
+            break;
+        }
+        if (sink.complete())
+          break;
+        phase_.store(http_origin_fallback_phase::http2_write_request,
+                     std::memory_order_relaxed);
+        status = co_await http_origin_fallback_detail::write_tls(
+            *tls_stream_, frame.wire);
+        if (!status.is_ok())
+          co_return ntl::unexpected(status);
+      }
+
+      while (!sink.complete()) {
+        phase_.store(http_origin_fallback_phase::http2_read_response,
+                     std::memory_order_relaxed);
+        auto incoming = co_await http_origin_fallback_detail::read_h2_frame(
+            *tls_stream_, options_.limits);
+        if (!incoming)
+          co_return ntl::unexpected(incoming.status());
+        status = co_await consume_h2_frame(
+            *incoming, first_peer_frame, peer_initial_window, peer_window,
+            inspector, sink);
+        if (!status.is_ok())
+          co_return ntl::unexpected(status);
+      }
+      if (first_peer_frame)
+        co_return ntl::unexpected(STATUS_PROTOCOL_NOT_SUPPORTED);
+      co_return sink.take();
+    } catch (const std::bad_alloc &) {
+      co_return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      co_return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+  ntl::net::kernel::task<ntl::status> consume_h2_frame(
+      const http_origin_fallback_detail::h2_wire_frame &wire,
+      bool &first_peer_frame, std::uint32_t &peer_initial_window,
+      ntl::net::http2::send_window &peer_window,
+      ntl::net::http2::borrowed_connection_inspector &inspector,
+      http_origin_fallback_detail::h2_response_sink &sink) {
+    auto frame = ntl::net::http2::frame_view::parse(
+        ntl::net::scatter_view::from_contiguous(wire.bytes),
+        {options_.limits.maximum_h2_frame_payload, false});
+    if (!frame)
+      co_return frame.status();
+    const auto &header = frame->header();
+    if (first_peer_frame) {
+      if (header.type != ntl::net::http2::frame_type::settings ||
+          header.acknowledgement())
+        co_return ntl::status{STATUS_DATA_ERROR};
+      first_peer_frame = false;
+    }
+
+    if (header.type == ntl::net::http2::frame_type::settings) {
+      if (header.acknowledgement())
+        co_return ntl::status::ok();
+      for (std::size_t offset = 0; offset != header.payload_size;
+           offset += 6) {
+        std::array<std::byte, 6> setting{};
+        if (!frame->payload().copy_to(setting, offset).is_ok())
+          co_return ntl::status{STATUS_DATA_ERROR};
+        const std::uint16_t identifier = static_cast<std::uint16_t>(
+            (std::to_integer<std::uint8_t>(setting[0]) << 8) |
+            std::to_integer<std::uint8_t>(setting[1]));
+        const std::uint32_t value =
+            http_origin_fallback_detail::read_h2_u32(
+                ntl::net::scatter_view::from_contiguous(setting), 2);
+        if (identifier == 0x4u) {
+          if (!peer_window.set_initial(value))
+            co_return ntl::status{STATUS_DATA_ERROR};
+          peer_initial_window = value;
+        }
+        if (identifier == 0x5u &&
+            (value < ntl::net::http2::default_maximum_frame_size ||
+             value > ntl::net::http2::absolute_maximum_frame_size))
+          co_return ntl::status{STATUS_DATA_ERROR};
+      }
+      auto acknowledgement =
+          ntl::net::http2::transform_detail::make_frame(
+              ntl::net::http2::frame_type::settings, 0x01u, 0, {});
+      if (!acknowledgement)
+        co_return acknowledgement.status();
+      co_return co_await http_origin_fallback_detail::write_tls(
+          *tls_stream_, acknowledgement->wire);
+    }
+
+    if (header.type == ntl::net::http2::frame_type::window_update) {
+      const std::uint32_t increment =
+          http_origin_fallback_detail::read_h2_u32(frame->payload()) &
+          0x7fffffffu;
+      co_return peer_window.update(header.stream_id, increment)
+                    ? ntl::status::ok()
+                    : ntl::status{STATUS_DATA_ERROR};
+    }
+    if (header.type == ntl::net::http2::frame_type::ping) {
+      if (header.acknowledgement())
+        co_return ntl::status::ok();
+      std::array<std::byte, 8> payload{};
+      if (!frame->payload().copy_to(payload).is_ok())
+        co_return ntl::status{STATUS_DATA_ERROR};
+      auto acknowledgement =
+          ntl::net::http2::transform_detail::make_frame(
+              ntl::net::http2::frame_type::ping, 0x01u, 0, payload);
+      if (!acknowledgement)
+        co_return acknowledgement.status();
+      co_return co_await http_origin_fallback_detail::write_tls(
+          *tls_stream_, acknowledgement->wire);
+    }
+    if (header.type == ntl::net::http2::frame_type::goaway ||
+        header.type == ntl::net::http2::frame_type::reset_stream ||
+        header.type == ntl::net::http2::frame_type::push_promise)
+      co_return ntl::status{STATUS_CONNECTION_ABORTED};
+
+    const ntl::status inspected = inspector.consume(*frame, sink);
+    if (inspected.is_ok()) {
+      if (header.type == ntl::net::http2::frame_type::data &&
+          header.payload_size != 0) {
+        const auto increment =
+            static_cast<std::uint32_t>(header.payload_size);
+        auto connection = ntl::net::http2::encode_window_update(0, increment);
+        if (!connection)
+          co_return connection.status();
+        ntl::status status =
+            co_await http_origin_fallback_detail::write_tls(
+                *tls_stream_, connection->wire);
+        if (!status.is_ok())
+          co_return status;
+        if (!header.end_stream()) {
+          auto stream = ntl::net::http2::encode_window_update(
+              header.stream_id, increment);
+          if (!stream)
+            co_return stream.status();
+          status = co_await http_origin_fallback_detail::write_tls(
+              *tls_stream_, stream->wire);
+          if (!status.is_ok())
+            co_return status;
+        }
+      }
+      co_return ntl::status::ok();
+    }
+    co_return inspected;
+  }
+
+  void stop_and_drain() noexcept {
+    if (transport_stream_) {
+      transport_stream_->close();
+      auto drain = stop_and_drain_origin_transport_at_thread_boundary(
+          *transport_stream_);
+      (void)drain.wait();
+    } else if (backend_) {
+      backend_->stop();
+      (void)backend_->drain();
+    }
+    tls_stream_.reset();
+    transport_stream_.reset();
+    backend_.reset();
+  }
+
+  std::shared_ptr<ntl::net::kernel::wsk_provider> provider_;
+  std::string server_name_;
+  std::wstring wide_server_name_;
+  std::uint16_t port_ = 0;
+  ntl::net::http::request_message request_;
+  ntl::net::kernel::schannel_credentials client_credentials_{};
+  std::shared_ptr<ntl::net::kernel::schannel_peer_certificate_policy>
+      peer_policy_;
+  http_origin_fallback_options options_{};
+  KEVENT cancellation_event_{};
+  std::atomic<bool> run_started_{false};
+  std::atomic<http_origin_fallback_phase> phase_{
+      http_origin_fallback_phase::none};
+  ntl::net::kernel::wsk_tcp_transport::pointer backend_{};
+  ntl::net::io::async_transport_stream::pointer transport_stream_{};
+  std::optional<ntl::net::kernel::tls_stream> tls_stream_;
+  std::optional<http3_origin_result> completed_result_;
+};
+
+#endif // NTL_HAS_COROUTINE_SUPPORT
+
+} // namespace ntl::net::kernel

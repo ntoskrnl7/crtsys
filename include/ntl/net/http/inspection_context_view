@@ -1,0 +1,187 @@
+/**
+ * @file http_inspection_context_view
+ * @brief Protocol-neutral semantic HTTP inspection context.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include <ntl/net/http/transform>
+#include <cstddef>
+#include <cstdint>
+#include <optional>
+#include <span>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace ntl::net::http {
+
+enum class inspection_stage : std::uint8_t {
+  headers = 1,
+  body_chunk = 2,
+  message_complete = 3,
+};
+
+enum class message_direction : std::uint8_t {
+  request = 1,
+  response = 2,
+};
+
+/** Owning text form is deliberately family neutral (IPv4, IPv6, or name). */
+struct endpoint_metadata {
+  std::string address;
+  std::uint16_t port = 0;
+};
+
+/** Connection identity supplied by a WFP redirect/flow owner. */
+struct connection_metadata {
+  /** Proxy-local identity when the session owner assigned one. */
+  std::optional<std::uint64_t> connection_id;
+  /** Native WFP flow handle when the redirect layer supplied one. */
+  std::optional<std::uint64_t> flow_id;
+  std::optional<ntl::net::inspection::direction> flow_direction;
+  std::optional<endpoint_metadata> source;
+  std::optional<endpoint_metadata> destination;
+  std::optional<endpoint_metadata> original_source;
+  std::optional<endpoint_metadata> original_destination;
+  std::optional<std::uint64_t> process_id;
+  /** Exact opaque FWPM application identity copied by the redirect callout. */
+  std::optional<std::vector<std::byte>> application_id;
+  /** Optional human-readable label supplied independently by the product. */
+  std::optional<std::string> application_label;
+};
+
+struct tls_metadata {
+  std::optional<std::string> server_name;
+  std::optional<std::string> alpn;
+};
+
+struct inspection_session_metadata {
+  connection_metadata connection;
+  tls_metadata tls;
+};
+
+/**
+ * @brief Callback-lifetime view of one semantic HTTP inspection phase.
+ *
+ * HTTP/1 uses stream_id zero. HTTP/2 and HTTP/3 adapters populate their
+ * actual stream identifier while preserving this observer/decision contract.
+ * A response always carries both request and response; a request has no
+ * associated response yet.
+ */
+class inspection_context_view {
+public:
+  /** Constructs a request-direction view with no associated response. */
+  static inspection_context_view for_request(
+      protocol wire_protocol, std::uint64_t stream_id,
+      std::uint64_t exchange_id,
+      inspection_stage stage,
+      const inspection_session_metadata &session,
+      const request_message &request,
+      std::span<const std::byte> body_chunk = {}) noexcept {
+    return inspection_context_view(
+        wire_protocol, stream_id, exchange_id, message_direction::request,
+        stage, session, request, nullptr, body_chunk);
+  }
+
+  /** Constructs a response-direction view with both response and request. */
+  static inspection_context_view for_response(
+      protocol wire_protocol, std::uint64_t stream_id,
+      std::uint64_t exchange_id, inspection_stage stage,
+      const inspection_session_metadata &session,
+      const request_message &request, const response_message &response,
+      std::span<const std::byte> body_chunk = {}) noexcept {
+    return inspection_context_view(
+        wire_protocol, stream_id, exchange_id, message_direction::response,
+        stage, session, request, &response, body_chunk);
+  }
+
+  protocol wire_protocol() const noexcept { return wire_protocol_; }
+  std::uint64_t stream_id() const noexcept { return stream_id_; }
+  std::uint64_t exchange_id() const noexcept { return exchange_id_; }
+  message_direction direction() const noexcept { return direction_; }
+  inspection_stage stage() const noexcept { return stage_; }
+
+  const connection_metadata &connection() const noexcept {
+    return session_->connection;
+  }
+  const tls_metadata &tls() const noexcept { return session_->tls; }
+  const request_message &request() const noexcept { return *request_; }
+  const response_message *response() const noexcept { return response_; }
+  std::span<const std::byte> body_chunk() const noexcept {
+    return body_chunk_;
+  }
+
+  std::string_view method() const noexcept { return request_->method; }
+  std::string_view scheme() const noexcept { return request_->scheme; }
+  std::string_view authority() const noexcept { return request_->authority; }
+  /** Raw request target, including its optional query component. */
+  std::string_view target() const noexcept { return request_->path; }
+
+  /** Path without its optional query component. */
+  std::string_view path() const noexcept {
+    const auto target = std::string_view(request_->path);
+    const std::size_t query = target.find('?');
+    return target.substr(0, query);
+  }
+
+  /** Query without the leading '?'. */
+  std::string_view query() const noexcept {
+    const auto target = std::string_view(request_->path);
+    const std::size_t query = target.find('?');
+    return query == std::string_view::npos ? std::string_view{}
+                                           : target.substr(query + 1);
+  }
+
+  /** Distinguishes an absent query from an explicitly empty trailing '?'. */
+  bool has_query() const noexcept {
+    return std::string_view(request_->path).find('?') !=
+           std::string_view::npos;
+  }
+
+  const header_collection &headers() const noexcept {
+    return response_ ? response_->headers : request_->headers;
+  }
+  const header_collection &request_headers() const noexcept {
+    return request_->headers;
+  }
+  const header_collection *response_headers() const noexcept {
+    return response_ ? &response_->headers : nullptr;
+  }
+  std::optional<unsigned> response_status() const noexcept {
+    return response_ ? std::optional<unsigned>(response_->status)
+                     : std::nullopt;
+  }
+  const header_list &trailers() const noexcept {
+    return response_ ? response_->trailers : request_->trailers;
+  }
+  std::span<const std::byte> body() const noexcept {
+    return response_ ? std::span<const std::byte>(response_->body)
+                     : std::span<const std::byte>(request_->body);
+  }
+
+private:
+  inspection_context_view(
+      protocol wire_protocol, std::uint64_t stream_id,
+      std::uint64_t exchange_id, message_direction direction,
+      inspection_stage stage, const inspection_session_metadata &session,
+      const request_message &request, const response_message *response,
+      std::span<const std::byte> body_chunk) noexcept
+      : wire_protocol_(wire_protocol), stream_id_(stream_id),
+        exchange_id_(exchange_id), direction_(direction), stage_(stage),
+        session_(&session), request_(&request), response_(response),
+        body_chunk_(body_chunk) {}
+
+  protocol wire_protocol_ = protocol::http1;
+  std::uint64_t stream_id_ = 0;
+  std::uint64_t exchange_id_ = 0;
+  message_direction direction_ = message_direction::request;
+  inspection_stage stage_ = inspection_stage::headers;
+  const inspection_session_metadata *session_ = nullptr;
+  const request_message *request_ = nullptr;
+  const response_message *response_ = nullptr;
+  std::span<const std::byte> body_chunk_;
+};
+
+} // namespace ntl::net::http

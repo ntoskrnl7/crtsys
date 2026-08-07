@@ -12,8 +12,10 @@
 #include "packet"
 #include "../result"
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <type_traits>
 #include <utility>
 
@@ -22,22 +24,99 @@ namespace ntl::wfp {
 class connect_redirector;
 template <class Layer, class Context> class stream_event;
 namespace detail {
-template <class Layer, class Context, auto Callback>
-struct detail_flow_classify_adapter;
+template <class Binding, std::size_t SlotCount>
+struct owning_classify_slots;
+template <class Binding, std::size_t SlotCount>
+struct owning_flow_classify_slots;
 }
 
 /**
- * @brief The complete decision surface available to a synchronous callout.
+ * @brief Result accepted by a terminating callout.
  *
- * Returning a value instead of exposing FWPS_CLASSIFY_OUT prevents callbacks
- * from accidentally violating ACTION_WRITE and CLEAR_ACTION_RIGHT rules.
+ * WFP normalizes CONTINUE from a terminating callout to BLOCK.  Omitting that
+ * value from this type makes the invalid result impossible to express.
  */
-enum class decision {
+enum class terminating_decision {
+  permit,
+  block,
+  block_and_absorb,
+};
+
+/**
+ * @brief Result accepted by an UNKNOWN/arbitrating callout.
+ *
+ * These callouts may continue arbitration or make a permit/block decision.
+ */
+enum class arbitration_decision {
   continue_classification,
   permit,
   block,
   block_and_absorb,
 };
+
+namespace detail {
+
+/** Internal normalized action; public callbacks use their exact result type. */
+enum class classification_action {
+  continue_classification,
+  permit,
+  block,
+  block_and_absorb,
+};
+
+constexpr classification_action
+to_classification_action(terminating_decision value) noexcept {
+  switch (value) {
+  case terminating_decision::permit:
+    return classification_action::permit;
+  case terminating_decision::block:
+    return classification_action::block;
+  case terminating_decision::block_and_absorb:
+    return classification_action::block_and_absorb;
+  }
+  return classification_action::block;
+}
+
+constexpr classification_action
+to_classification_action(arbitration_decision value) noexcept {
+  switch (value) {
+  case arbitration_decision::continue_classification:
+    return classification_action::continue_classification;
+  case arbitration_decision::permit:
+    return classification_action::permit;
+  case arbitration_decision::block:
+    return classification_action::block;
+  case arbitration_decision::block_and_absorb:
+    return classification_action::block_and_absorb;
+  }
+  return classification_action::block;
+}
+
+template <class T>
+inline constexpr bool classification_callback_result =
+    std::is_void_v<T> ||
+    std::is_same_v<T, terminating_decision> ||
+    std::is_same_v<T, arbitration_decision>;
+
+template <class Result> struct callout_kind_for_result;
+
+template <> struct callout_kind_for_result<void> {
+  static constexpr callout_kind value = callout_kind::inspection;
+};
+
+template <> struct callout_kind_for_result<terminating_decision> {
+  static constexpr callout_kind value = callout_kind::terminating;
+};
+
+template <> struct callout_kind_for_result<arbitration_decision> {
+  static constexpr callout_kind value = callout_kind::arbitrating;
+};
+
+template <class Result>
+inline constexpr callout_kind callout_kind_for_result_v =
+    callout_kind_for_result<Result>::value;
+
+} // namespace detail
 
 /**
  * @brief A checked, read-only view of one fixed incoming value.
@@ -142,6 +221,30 @@ public:
     if (!present(FWPS_METADATA_FIELD_TRANSPORT_HEADER_SIZE))
       return std::nullopt;
     return values_->transportHeaderSize;
+  }
+
+  std::optional<SCOPE_ID> remote_scope_id() const noexcept {
+    if (!present(FWPS_METADATA_FIELD_REMOTE_SCOPE_ID))
+      return std::nullopt;
+    return values_->remoteScopeId;
+  }
+
+  /**
+   * @brief Views optional WSASendMsg ancillary data for the classify callback.
+   *
+   * An absent metadata field is a valid empty view. `nullopt` is reserved for
+   * an inconsistent native value that reports bytes without a backing buffer.
+   * Copy the view before returning from the callback when it is needed later.
+   */
+  std::optional<std::span<const std::byte>>
+  transport_control_data() const noexcept {
+    if (!present(FWPS_METADATA_FIELD_TRANSPORT_CONTROL_DATA))
+      return std::span<const std::byte>{};
+    if (values_->controlDataLength != 0 && !values_->controlData)
+      return std::nullopt;
+    return std::span<const std::byte>(
+        reinterpret_cast<const std::byte *>(values_->controlData),
+        values_->controlDataLength);
   }
 
   bool present(std::uint32_t field) const noexcept {
@@ -265,8 +368,9 @@ public:
   /**
    * @brief Reports whether this callout may write the current action.
    *
-   * This is diagnostic state only. Callbacks still return decision and cannot
-   * mutate FWPS_CLASSIFY_OUT directly.
+   * This is diagnostic state only. Enforcement callbacks return a typed
+   * decision, inspection callbacks return void, and neither can mutate
+   * FWPS_CLASSIFY_OUT directly.
    */
   bool action_write_available() const noexcept {
     return output_ &&
@@ -290,9 +394,10 @@ public:
 private:
   friend class connect_redirector;
   friend class bind_redirector;
-  template <class, auto> friend struct detail_classify_adapter;
-  template <class, class, auto>
-  friend struct detail::detail_flow_classify_adapter;
+  template <class, std::size_t>
+  friend struct detail::owning_classify_slots;
+  template <class, std::size_t>
+  friend struct detail::owning_flow_classify_slots;
 
   classify_event(const FWPS_INCOMING_VALUES0 *values,
                  const FWPS_INCOMING_METADATA_VALUES0 *metadata,
@@ -313,39 +418,41 @@ private:
 
 namespace detail {
 
-inline decision normalize_decision(decision value,
-                                   const FWPS_FILTER2 *filter) noexcept {
+inline classification_action normalize_decision(
+    classification_action value, const FWPS_FILTER2 *filter) noexcept {
   if (!filter)
     return value;
 
   switch (filter->action.type) {
   case FWP_ACTION_CALLOUT_INSPECTION:
-    return decision::continue_classification;
+    return classification_action::continue_classification;
   case FWP_ACTION_CALLOUT_TERMINATING:
     // WFP treats every non-permit/non-block terminating result as block.
-    return value == decision::continue_classification ? decision::block
-                                                       : value;
+    return value == classification_action::continue_classification
+               ? classification_action::block
+               : value;
   case FWP_ACTION_CALLOUT_UNKNOWN:
     return value;
   default:
     // A native policy not built by ntl::wfp supplied an incompatible action.
-    return decision::block;
+    return classification_action::block;
   }
 }
 
-inline void apply_decision(decision value, const FWPS_FILTER2 *filter,
+inline void apply_decision(classification_action value,
+                           const FWPS_FILTER2 *filter,
                            FWPS_CLASSIFY_OUT0 &output) noexcept {
   value = normalize_decision(value, filter);
   const bool may_write =
       (output.rights & FWPS_RIGHT_ACTION_WRITE) != 0;
 
   switch (value) {
-  case decision::continue_classification:
+  case classification_action::continue_classification:
     if (may_write)
       output.actionType = FWP_ACTION_CONTINUE;
     return;
 
-  case decision::permit:
+  case classification_action::permit:
     if (!may_write)
       return;
     output.actionType = FWP_ACTION_PERMIT;
@@ -354,40 +461,19 @@ inline void apply_decision(decision value, const FWPS_FILTER2 *filter,
       output.rights &= ~FWPS_RIGHT_ACTION_WRITE;
     return;
 
-  case decision::block:
-  case decision::block_and_absorb:
+  case classification_action::block:
+  case classification_action::block_and_absorb:
     // Without ACTION_WRITE a callout may still veto a preceding permit.
     if (!may_write && output.actionType != FWP_ACTION_PERMIT)
       return;
     output.actionType = FWP_ACTION_BLOCK;
     output.rights &= ~FWPS_RIGHT_ACTION_WRITE;
-    if (value == decision::block_and_absorb)
+    if (value == classification_action::block_and_absorb)
       output.flags |= FWPS_CLASSIFY_OUT_FLAG_ABSORB;
     return;
   }
 }
 
 } // namespace detail
-
-template <class Layer, auto Callback> struct detail_classify_adapter {
-  static_assert(
-      std::is_nothrow_invocable_r_v<decision, decltype(Callback),
-                                    const classify_event<Layer> &>,
-      "a WFP classify callback must be noexcept and return ntl::wfp::decision");
-
-  static void NTAPI invoke(
-      const FWPS_INCOMING_VALUES0 *values,
-      const FWPS_INCOMING_METADATA_VALUES0 *metadata, void *layer_data,
-      const void *classify_context, const FWPS_FILTER2 *filter,
-      UINT64 flow_context, FWPS_CLASSIFY_OUT0 *output) noexcept {
-    if (!output)
-      return;
-
-    classify_event<Layer> event(values, metadata, layer_data,
-                                classify_context, filter, flow_context,
-                                output);
-    detail::apply_decision(Callback(event), filter, *output);
-  }
-};
 
 } // namespace ntl::wfp

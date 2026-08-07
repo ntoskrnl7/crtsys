@@ -4,11 +4,29 @@ param(
   [string] $PackageRoot,
 
   [Parameter(Mandatory)]
-  [uri] $Url
+  [uri] $Url,
+
+  [switch] $AllowDisposableGuestMutation,
+
+  [string] $DisposableGuestSentinelPath =
+      'C:\crtsys-disposable-test-guest.sentinel'
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+$guardScript = @(
+  Join-Path $PSScriptRoot 'DisposableGuestGuard.ps1'
+  Join-Path $PSScriptRoot '..\common\DisposableGuestGuard.ps1'
+) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+    Select-Object -First 1
+if (-not $guardScript) {
+  throw 'DisposableGuestGuard.ps1 was not found.'
+}
+. $guardScript
+Assert-CrtSysDisposableGuest `
+    -AllowDisposableGuestMutation:$AllowDisposableGuestMutation `
+    -SentinelPath $DisposableGuestSentinelPath
 
 function Assert-Administrator {
   $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -43,11 +61,13 @@ Assert-Administrator
 $PackageRoot = (Resolve-Path -LiteralPath $PackageRoot).Path
 $driver = Join-Path $PackageRoot (
     'crtsys_wfp_browser_https_inspection.sys')
+$driverInf = Join-Path $PackageRoot (
+    'crtsys_wfp_browser_https_inspection.inf')
 $certificate = Join-Path $PackageRoot (
     'crtsys_wfp_browser_https_inspection.cer')
 $testScript = Join-Path $PackageRoot (
     'Start-WfpManagedHttp3Inspection.ps1')
-foreach ($path in @($driver, $certificate, $testScript)) {
+foreach ($path in @($driver, $driverInf, $certificate, $testScript)) {
   if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
     throw "Required WFP managed HTTP/3 artifact is missing: $path"
   }
@@ -93,7 +113,7 @@ try {
 
     & $testScript -PackageRoot $PackageRoot -Url $Url
     if ($LASTEXITCODE -ne 0) {
-      throw 'The WFP managed HTTP/3 redirect test failed.'
+      throw 'The WFP managed HTTP/3 translation test failed.'
     }
   } finally {
     Remove-DriverService

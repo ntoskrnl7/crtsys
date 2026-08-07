@@ -1,16 +1,12 @@
 /**
  * @file content_decoder
- * @brief User-mode adapter point for bounded content transformations.
+ * @brief Dual-runtime adapter point for bounded content transformations.
  *
  * Compression backends adapt to this push/final contract and registry.
  *
  * @copyright Copyright (c) 2022 NT Template Library Authors.
  */
 #pragma once
-
-#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
-#error "ntl/net/inspection/content_decoder is a user-mode header"
-#endif
 
 #include <ntl/net/inspection/core>
 #include <ntl/result>
@@ -161,7 +157,7 @@ public:
     return decoder_.decode(input, final, output);
   }
 
-  Decoder &underlying() noexcept { return decoder_; }
+  Decoder &underlying_ref() noexcept { return decoder_; }
 
 private:
   Decoder decoder_;

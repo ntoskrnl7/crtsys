@@ -110,7 +110,7 @@ public:
 };
 
 inline ntl::status apply_ech_result(
-    tls_inspection_observation &observation,
+    tls_inspection_observation_view &observation,
     const ech_frontend_result &result) noexcept {
   switch (result.state) {
   case ech_offer_state::absent:
@@ -145,7 +145,8 @@ enum class downstream_trust_state : std::uint8_t {
   unknown = 3,
 };
 
-struct downstream_trust_query {
+/** Callback-scoped trust query; the spans and views are not retained. */
+struct downstream_trust_query_view {
   std::span<const std::byte> application_id;
   std::wstring_view server_name;
 };
@@ -161,14 +162,14 @@ class downstream_trust_provider {
 public:
   virtual ~downstream_trust_provider() = default;
   virtual downstream_trust_state
-  classify(const downstream_trust_query &query) noexcept = 0;
+  classify(const downstream_trust_query_view &query) noexcept = 0;
 };
 
 class inspectable_downstream_trust final
     : public downstream_trust_provider {
 public:
   downstream_trust_state classify(
-      const downstream_trust_query &) noexcept override {
+      const downstream_trust_query_view &) noexcept override {
     return downstream_trust_state::inspectable;
   }
 };
@@ -200,7 +201,7 @@ public:
   }
 
   downstream_trust_state classify(
-      const downstream_trust_query &query) noexcept override {
+      const downstream_trust_query_view &query) noexcept override {
     try {
       const auto server_name =
           normalize_dns_name(std::wstring(query.server_name));
@@ -232,7 +233,8 @@ private:
   std::vector<rule> rules_;
 };
 
-struct origin_client_identity_request {
+/** Callback-scoped identity request; copy fields needed asynchronously. */
+struct origin_client_identity_request_view {
   std::wstring_view server_name;
   std::span<const std::byte> acceptable_issuers;
 };
@@ -280,7 +282,9 @@ public:
   explicit operator bool() const noexcept {
     return certificate_ != nullptr;
   }
-  PCCERT_CONTEXT get() const noexcept { return certificate_; }
+  PCCERT_CONTEXT borrowed_certificate() const noexcept {
+    return certificate_;
+  }
 
   void swap(selected_client_identity &other) noexcept {
     std::swap(certificate_, other.certificate_);
@@ -307,14 +311,14 @@ class origin_client_identity_provider {
 public:
   virtual ~origin_client_identity_provider() = default;
   virtual ntl::result<selected_client_identity>
-  select(const origin_client_identity_request &request) noexcept = 0;
+  select(const origin_client_identity_request_view &request) noexcept = 0;
 };
 
 class unavailable_origin_client_identity final
     : public origin_client_identity_provider {
 public:
   ntl::result<selected_client_identity>
-  select(const origin_client_identity_request &)
+  select(const origin_client_identity_request_view &)
       noexcept override {
     return ntl::ok(selected_client_identity{});
   }
@@ -346,7 +350,7 @@ public:
   }
 
   ntl::result<selected_client_identity>
-  select(const origin_client_identity_request &request)
+  select(const origin_client_identity_request_view &request)
       noexcept override {
     try {
       std::lock_guard guard(lock_);

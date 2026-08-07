@@ -12,8 +12,16 @@
 #endif
 
 #include "device"
+#include "callback_activity"
+#include "irql"
 
+#include <array>
+#include <cstring>
+#include <functional>
+#include <memory>
+#include <new>
 #include <type_traits>
+#include <utility>
 
 namespace ntl {
 
@@ -59,23 +67,37 @@ using ioctl_from_contract =
           Contract::access, typename Contract::input_type,
           typename Contract::output_type>;
 
+/** Normalized metadata for either ntl::ioctl or a shared contract type. */
+template <class Descriptor> struct ioctl_traits {
+  using input_type = typename Descriptor::input_type;
+  using output_type = typename Descriptor::output_type;
+
+  static constexpr ULONG device_type = Descriptor::device_type;
+  static constexpr ULONG function = Descriptor::function;
+  static constexpr ULONG method = Descriptor::method;
+  static constexpr ULONG access = Descriptor::access;
+  static constexpr ULONG code =
+      CTL_CODE(device_type, function, method, access);
+};
+
 /**
  * @brief Returns true when a runtime device-control code matches an IOCTL type.
  */
 template <class Ioctl>
 constexpr bool is_ioctl(ntl::device_control::code code) noexcept {
-  return code.value == Ioctl::code;
+  return code.value == ioctl_traits<Ioctl>::code;
 }
 
 /**
  * @brief Reads an IOCTL input payload from a device-control input buffer.
  */
 template <class Ioctl>
-const typename Ioctl::input_type *
+const typename ioctl_traits<Ioctl>::input_type *
 ioctl_input_as(const ntl::device_control::in_buffer &buffer) noexcept {
-  static_assert(!std::is_void<typename Ioctl::input_type>::value,
+  using input_type = typename ioctl_traits<Ioctl>::input_type;
+  static_assert(!std::is_void<input_type>::value,
                 "This IOCTL has no typed input payload.");
-  return buffer.template as<typename Ioctl::input_type>();
+  return buffer.template as<input_type>();
 }
 
 /**
@@ -83,10 +105,295 @@ ioctl_input_as(const ntl::device_control::in_buffer &buffer) noexcept {
  */
 template <class Ioctl>
 bool ioctl_write_output(ntl::device_control::out_buffer &buffer,
-                        const typename Ioctl::output_type &value) noexcept {
-  static_assert(!std::is_void<typename Ioctl::output_type>::value,
+                        const typename ioctl_traits<Ioctl>::output_type
+                            &value) noexcept {
+  using output_type = typename ioctl_traits<Ioctl>::output_type;
+  static_assert(!std::is_void<output_type>::value,
                 "This IOCTL has no typed output payload.");
-  return buffer.template write<typename Ioctl::output_type>(value);
+  return buffer.template write<output_type>(value);
 }
+
+/**
+ * @brief Initializes an IOCTL output payload directly in the caller-owned
+
+ * *        device-control buffer.
+ *
+ * Large kernel output contracts should
+ * use this helper instead of creating a
+ * payload on the kernel stack and
+ * passing it to ioctl_write_output(). The
+ * returned storage is
+ * zero-initialized and the reported output size is set to
+ *
+ * sizeof(Ioctl::output_type).
+ *
+ * @return Pointer to writable output storage,
+ * or nullptr when the buffer is
+ *         too small.
+ */
+template <class Ioctl>
+typename ioctl_traits<Ioctl>::output_type *
+ioctl_initialize_output(ntl::device_control::out_buffer &buffer) noexcept {
+  using output_type = typename ioctl_traits<Ioctl>::output_type;
+  static_assert(!std::is_void<output_type>::value,
+                "This IOCTL has no typed output payload.");
+  static_assert(std::is_trivially_copyable<output_type>::value,
+                "IOCTL output payloads must be trivially copyable.");
+  auto *output = buffer.template as<output_type>();
+  if (!output) {
+    buffer.clear();
+    return nullptr;
+  }
+  std::memset(output, 0, sizeof(output_type));
+  buffer.size = sizeof(output_type);
+  return output;
+}
+
+namespace device_control {
+
+/**
+ * @brief Fixed-capacity owning dispatcher for METHOD_BUFFERED typed IOCTLs.
+ *
+ * A descriptor supplies device_type, function, method, access, input_type,
+ * and output_type. add<Descriptor>() derives the control code and the exact
+ * handler signature from those members, validates input before invocation,
+ * initializes output in the IRP buffer, and owns the handler capture until
+ * callback rundown completes.
+ */
+template <std::size_t Capacity = 16> class ioctl_router {
+  struct route {
+    ULONG code = 0;
+    std::function<ntl::status(const in_buffer &, out_buffer &)> invoke;
+  };
+
+public:
+  ioctl_router() noexcept {
+    ExInitializeRundownProtection(&rundown_);
+    KeInitializeEvent(&drained_, NotificationEvent, FALSE);
+    KeInitializeSpinLock(&routes_lock_);
+  }
+
+  ioctl_router(const ioctl_router &) = delete;
+  ioctl_router &operator=(const ioctl_router &) = delete;
+
+  ~ioctl_router() {
+    stop_accepting();
+    if (ntl::current_irql() == ntl::irql::passive &&
+        !activity_.current_thread_active())
+      (void)drain();
+    NT_ASSERT(InterlockedCompareExchange(&drain_complete_, 0, 0) != 0);
+  }
+
+  template <class Descriptor, class Handler>
+  ntl::status add(Handler handler) noexcept {
+    using traits = ntl::ioctl_traits<Descriptor>;
+    using input_type = typename traits::input_type;
+    using output_type = typename traits::output_type;
+    using handler_type = std::decay_t<Handler>;
+
+    static_assert(traits::method == METHOD_BUFFERED,
+                  "The owning typed IOCTL router accepts METHOD_BUFFERED only; "
+                  "use an explicitly borrowed low-level path for direct or "
+                  "METHOD_NEITHER buffers.");
+    static_assert(std::is_void_v<input_type> ||
+                      std::is_trivially_copyable_v<input_type>,
+                  "Typed IOCTL input must be void or trivially copyable.");
+    static_assert(std::is_void_v<output_type> ||
+                      std::is_trivially_copyable_v<output_type>,
+                  "Typed IOCTL output must be void or trivially copyable.");
+    static_assert(valid_handler<handler_type, input_type, output_type>(),
+                  "A typed IOCTL handler must be noexcept and return "
+                  "ntl::status. Its parameters are (const Input&, Output&), "
+                  "(const Input&), (Output&), or () according to the contract.");
+
+    if (ntl::current_irql() != ntl::irql::passive)
+      return STATUS_INVALID_DEVICE_STATE;
+
+    try {
+      auto owned = std::make_shared<handler_type>(std::move(handler));
+      route prepared{
+          traits::code,
+          [owned = std::move(owned)](const in_buffer &input,
+                                     out_buffer &output) noexcept {
+            return invoke_typed<Descriptor>(*owned, input, output);
+          }};
+
+      KIRQL previous_irql{};
+      KeAcquireSpinLock(&routes_lock_, &previous_irql);
+      ntl::status result = ntl::status::ok();
+      if (InterlockedCompareExchange(&closing_, 0, 0) != 0)
+        result = STATUS_DELETE_PENDING;
+      else if (InterlockedCompareExchange(&sealed_, 0, 0) != 0)
+        result = STATUS_INVALID_DEVICE_STATE;
+      else if (count_ == routes_.size())
+        result = STATUS_INSUFFICIENT_RESOURCES;
+      else {
+        for (std::size_t index = 0; index != count_; ++index) {
+          if (routes_[index].code == traits::code) {
+            result = STATUS_OBJECT_NAME_COLLISION;
+            break;
+          }
+        }
+      }
+      if (result.is_ok())
+        routes_[count_++] = std::move(prepared);
+      KeReleaseSpinLock(&routes_lock_, previous_irql);
+      return result;
+    } catch (...) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+  }
+
+  ntl::status dispatch(const code &control, const in_buffer &input,
+                       out_buffer &output) noexcept {
+    if (ntl::current_irql() != ntl::irql::passive) {
+      output.clear();
+      return STATUS_INVALID_DEVICE_STATE;
+    }
+    if (InterlockedCompareExchange(&closing_, 0, 0) != 0 ||
+        ExAcquireRundownProtection(&rundown_) == FALSE) {
+      output.clear();
+      return STATUS_DELETE_PENDING;
+    }
+    if (InterlockedCompareExchange(&closing_, 0, 0) != 0) {
+      ExReleaseRundownProtection(&rundown_);
+      output.clear();
+      return STATUS_DELETE_PENDING;
+    }
+
+    KIRQL previous_irql{};
+    KeAcquireSpinLock(&routes_lock_, &previous_irql);
+    InterlockedExchange(&sealed_, 1);
+    const std::size_t route_count = count_;
+    KeReleaseSpinLock(&routes_lock_, previous_irql);
+
+    const auto activity = activity_.enter();
+    ntl::status result{STATUS_INVALID_DEVICE_REQUEST};
+    for (std::size_t index = 0; index != route_count; ++index) {
+      if (routes_[index].code == control.value) {
+        result = routes_[index].invoke(input, output);
+        break;
+      }
+    }
+    if (!result.is_ok())
+      output.clear();
+    activity_.leave(activity);
+    ExReleaseRundownProtection(&rundown_);
+    return result;
+  }
+
+  void stop_accepting() noexcept { InterlockedExchange(&closing_, 1); }
+
+  bool current_thread_dispatching() const noexcept {
+    return activity_.current_thread_active();
+  }
+
+  ntl::status drain() noexcept {
+    stop_accepting();
+    if (ntl::current_irql() != ntl::irql::passive)
+      return STATUS_INVALID_DEVICE_STATE;
+    if (current_thread_dispatching())
+      return STATUS_PENDING;
+
+    if (InterlockedCompareExchange(&drain_started_, 1, 0) == 0) {
+      ExWaitForRundownProtectionRelease(&rundown_);
+      InterlockedExchange(&drain_complete_, 1);
+      KeSetEvent(&drained_, IO_NO_INCREMENT, FALSE);
+      return ntl::status::ok();
+    }
+    const NTSTATUS waited = KeWaitForSingleObject(
+        &drained_, Executive, KernelMode, FALSE, nullptr);
+    return waited;
+  }
+
+  std::size_t size() const noexcept {
+    KIRQL previous_irql{};
+    KeAcquireSpinLock(&routes_lock_, &previous_irql);
+    const std::size_t result = count_;
+    KeReleaseSpinLock(&routes_lock_, previous_irql);
+    return result;
+  }
+
+private:
+  template <class Handler, class Input, class Output>
+  static consteval bool valid_handler() {
+    if constexpr (!std::is_void_v<Input> && !std::is_void_v<Output>)
+      return std::is_nothrow_invocable_r_v<ntl::status, Handler &,
+                                            const Input &, Output &>;
+    else if constexpr (!std::is_void_v<Input>)
+      return std::is_nothrow_invocable_r_v<ntl::status, Handler &,
+                                            const Input &>;
+    else if constexpr (!std::is_void_v<Output>)
+      return std::is_nothrow_invocable_r_v<ntl::status, Handler &, Output &>;
+    else
+      return std::is_nothrow_invocable_r_v<ntl::status, Handler &>;
+  }
+
+  template <class Descriptor, class Handler>
+  static ntl::status invoke_typed(Handler &handler, const in_buffer &input,
+                                  out_buffer &output) noexcept {
+    using traits = ntl::ioctl_traits<Descriptor>;
+    using input_type = typename traits::input_type;
+    using output_type = typename traits::output_type;
+
+    if constexpr (!std::is_void_v<input_type>) {
+      if (input.ptr == nullptr || input.size < sizeof(input_type))
+        return STATUS_BUFFER_TOO_SMALL;
+      if (input.size != sizeof(input_type))
+        return STATUS_INFO_LENGTH_MISMATCH;
+
+      if constexpr (!std::is_void_v<output_type>) {
+        // METHOD_BUFFERED aliases input and output through SystemBuffer. Copy
+        // the validated input before zero-initializing the typed output.
+        std::unique_ptr<input_type> copied(new (std::nothrow) input_type);
+        if (!copied)
+          return STATUS_INSUFFICIENT_RESOURCES;
+        std::memcpy(copied.get(), input.ptr, sizeof(input_type));
+        auto *typed_output = output.template as<output_type>();
+        if (!typed_output) {
+          output.clear();
+          return STATUS_BUFFER_TOO_SMALL;
+        }
+        std::memset(typed_output, 0, sizeof(output_type));
+        const ntl::status result = handler(*copied, *typed_output);
+        output.size = result.is_ok() ? sizeof(output_type) : 0;
+        return result;
+      } else {
+        output.clear();
+        return handler(*static_cast<const input_type *>(input.ptr));
+      }
+    } else {
+      if (input.size != 0)
+        return STATUS_INFO_LENGTH_MISMATCH;
+      if constexpr (!std::is_void_v<output_type>) {
+        auto *typed_output = output.template as<output_type>();
+        if (!typed_output) {
+          output.clear();
+          return STATUS_BUFFER_TOO_SMALL;
+        }
+        std::memset(typed_output, 0, sizeof(output_type));
+        const ntl::status result = handler(*typed_output);
+        output.size = result.is_ok() ? sizeof(output_type) : 0;
+        return result;
+      } else {
+        output.clear();
+        return handler();
+      }
+    }
+  }
+
+  std::array<route, Capacity> routes_{};
+  std::size_t count_ = 0;
+  mutable KSPIN_LOCK routes_lock_{};
+  EX_RUNDOWN_REF rundown_{};
+  ntl::detail::callback_activity activity_;
+  KEVENT drained_{};
+  volatile LONG closing_ = 0;
+  volatile LONG sealed_ = 0;
+  volatile LONG drain_started_ = 0;
+  volatile LONG drain_complete_ = 0;
+};
+
+} // namespace device_control
 
 } // namespace ntl

@@ -12,6 +12,7 @@
 #include <ntl/irql>
 #include <ntl/lookaside_list>
 #include <ntl/mdl>
+#include <ntl/net/kernel/workspace_pool>
 #include <ntl/passive_executor>
 #include <ntl/pool_allocator>
 #include <ntl/registry>
@@ -25,6 +26,7 @@
 #include <ntl/work_item>
 
 #include <atomic>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <exception>
@@ -65,6 +67,7 @@ __declspec(noinline) void raise_seh_test_status() {
 
 long g_pool_test_object_count = 0;
 long g_lookaside_test_object_count = 0;
+long g_network_workspace_test_object_count = 0;
 
 struct pool_test_object {
   explicit pool_test_object(int value) : value(value) {
@@ -84,6 +87,19 @@ struct lookaside_test_object {
   ~lookaside_test_object() { --g_lookaside_test_object_count; }
 
   int value;
+};
+
+struct network_workspace_test_object {
+  network_workspace_test_object() {
+    ++g_network_workspace_test_object_count;
+  }
+
+  ~network_workspace_test_object() {
+    --g_network_workspace_test_object_count;
+  }
+
+  std::array<std::byte, 4096> scratch{};
+  int value = 0;
 };
 
 struct ioctl_test_input {
@@ -1163,6 +1179,75 @@ bool ntl_lookaside_list_test() {
   paged.flush();
   cache_aligned.flush();
   return g_lookaside_test_object_count == 0;
+}
+
+bool ntl_network_workspace_pool_test() {
+  g_network_workspace_test_object_count = 0;
+  using workspace_pool = ntl::net::kernel::workspace_pool<
+      network_workspace_test_object, ntl::pool_tag("tNwN")>;
+  static_assert(workspace_pool::entry_size() ==
+                sizeof(network_workspace_test_object));
+  static_assert(!std::is_copy_constructible_v<workspace_pool::lease>);
+  static_assert(std::is_move_constructible_v<workspace_pool::lease>);
+
+  workspace_pool workspaces(0, 1);
+  if (workspaces.active() != 0 || workspaces.maximum_active() != 1)
+    return false;
+  auto acquired = workspaces.try_acquire();
+  if (!acquired || workspaces.active() != 1 ||
+      g_network_workspace_test_object_count != 1)
+    return false;
+  const auto exhausted = workspaces.try_acquire();
+  if (exhausted || exhausted.status() != STATUS_QUOTA_EXCEEDED ||
+      workspaces.active() != 1)
+    return false;
+
+  auto workspace = std::move(*acquired);
+  workspace->value = 42;
+  workspace->scratch.front() = std::byte{0x2a};
+  if (workspace->value != 42 ||
+      workspace->scratch.front() != std::byte{0x2a})
+    return false;
+
+  auto moved = std::move(workspace);
+  if (workspace || !moved || moved->value != 42 ||
+      workspaces.active() != 1)
+    return false;
+  moved.reset();
+  if (workspaces.active() != 0 ||
+      g_network_workspace_test_object_count != 0)
+    return false;
+
+  auto reused = workspaces.try_acquire();
+  if (!reused || workspaces.active() != 1 ||
+      g_network_workspace_test_object_count != 1 ||
+      (*reused)->value != 0 ||
+      (*reused)->scratch.front() != std::byte{0})
+    return false;
+  reused->reset();
+  if (workspaces.active() != 0)
+    return false;
+  workspaces.flush();
+  if (g_network_workspace_test_object_count != 0)
+    return false;
+
+  // A lease owns the backing pool state. Destroying the facade first must not
+  // invalidate the workspace or require declaration-order knowledge.
+  workspace_pool::lease surviving;
+  {
+    workspace_pool short_lived_pool(0, 1);
+    auto value = short_lived_pool.try_acquire();
+    if (!value)
+      return false;
+    surviving = std::move(*value);
+    surviving->value = 73;
+  }
+  if (!surviving || surviving->value != 73 ||
+      g_network_workspace_test_object_count != 1)
+    return false;
+  surviving.reset();
+  surviving.reset();
+  return g_network_workspace_test_object_count == 0;
 }
 
 bool ntl_result_test() {
@@ -2311,6 +2396,10 @@ TEST(ntl_test, ntl_pool_allocator_test) {
 
 TEST(ntl_test, ntl_lookaside_list_test) {
   EXPECT_TRUE(ntl_lookaside_list_test());
+}
+
+TEST(ntl_test, ntl_network_workspace_pool_test) {
+  EXPECT_TRUE(ntl_network_workspace_pool_test());
 }
 
 TEST(ntl_test, ntl_result_test) { EXPECT_TRUE(ntl_result_test()); }

@@ -267,7 +267,9 @@ public:
 
   ~issued_tls_certificate() { reset(); }
 
-  PCCERT_CONTEXT get() const noexcept { return certificate_; }
+  PCCERT_CONTEXT borrowed_certificate() const noexcept {
+    return certificate_;
+  }
   explicit operator bool() const noexcept {
     return certificate_ != nullptr &&
            (key_ != 0 || key_lifetime_ != nullptr);
@@ -672,7 +674,7 @@ public:
       issued_tls_certificate certificate)
       : certificate_(std::move(certificate)),
         credentials_(
-            tls_credentials::server(certificate_.get())) {
+            tls_credentials::server(certificate_.borrowed_certificate())) {
     if (!certificate_)
       throw std::invalid_argument(
           "TLS server identity requires a certificate");
@@ -682,10 +684,10 @@ public:
   tls_server_identity &
   operator=(const tls_server_identity &) = delete;
 
-  PCCERT_CONTEXT certificate() const noexcept {
-    return certificate_.get();
+  PCCERT_CONTEXT borrowed_certificate() const noexcept {
+    return certificate_.borrowed_certificate();
   }
-  tls_credentials &credentials() noexcept {
+  tls_credentials credentials() const noexcept {
     return credentials_;
   }
 
@@ -708,19 +710,21 @@ class cached_tls_server_identity_provider final
     : public tls_server_identity_provider {
 public:
   cached_tls_server_identity_provider(
-      tls_certificate_issuer &issuer,
+      std::shared_ptr<tls_certificate_issuer> issuer,
       std::size_t maximum_entries)
-      : issuer_(&issuer),
+      : issuer_(std::move(issuer)),
         maximum_entries_(maximum_entries) {
-    if (maximum_entries_ == 0)
+    if (!issuer_ || maximum_entries_ == 0)
       throw std::invalid_argument(
-          "TLS identity cache capacity must be positive");
+          "TLS identity cache requires an issuer and positive capacity");
   }
 
   cached_tls_server_identity_provider(
       const cached_tls_server_identity_provider &) = delete;
   cached_tls_server_identity_provider &
   operator=(const cached_tls_server_identity_provider &) = delete;
+
+  ~cached_tls_server_identity_provider() override { close(); }
 
   std::shared_ptr<tls_server_identity>
   select(const tls_client_hello &hello) override {
@@ -736,6 +740,10 @@ public:
     const std::wstring normalized =
         detail::normalize_certificate_dns_name(server_name);
     std::lock_guard guard(lock_);
+    if (closed_)
+      throw std::system_error(
+          ERROR_OPERATION_ABORTED, std::system_category(),
+          "TLS identity cache is closed");
     for (auto current = identities_.begin();
          current != identities_.end(); ++current) {
       if (current->server_name == normalized) {
@@ -765,16 +773,25 @@ public:
     identities_.clear();
   }
 
+  /** Rejects new selections and releases cached entries; already returned
+   * identities remain valid through their shared ownership. */
+  void close() noexcept {
+    std::lock_guard guard(lock_);
+    closed_ = true;
+    identities_.clear();
+  }
+
 private:
   struct cache_entry {
     std::wstring server_name;
     std::shared_ptr<tls_server_identity> identity;
   };
 
-  tls_certificate_issuer *issuer_ = nullptr;
+  std::shared_ptr<tls_certificate_issuer> issuer_;
   std::size_t maximum_entries_ = 0;
   mutable std::mutex lock_;
   std::list<cache_entry> identities_;
+  bool closed_ = false;
 };
 
 /**

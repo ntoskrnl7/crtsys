@@ -19,16 +19,24 @@ For buildable samples, see:
 
 - [NTL typed IOCTL sample driver](../../examples/ntl-driver)
 - [NTL RPC sample driver](../../examples/ntl-rpc-driver)
+- [NTL kernel/user networking contract test](../../test/net/kernel-contracts)
 - [NTL KMDF driver/app samples](../../examples/kmdf)
 - [NTL KMDF DMA driver template](../../examples/kmdf/dma)
 - [NTL KMDF USB driver template](../../examples/kmdf/usb)
 - [NTL KMDF WMI driver/app sample](../../examples/kmdf/wmi)
 - [NTL KMDF bus/PDO driver/app sample](../../examples/kmdf/bus)
 - [NTL minifilter driver/app samples](../../examples/minifilter)
-- [NTL WFP ALE connect-block driver/controller](../../examples/wfp/ale-connect-block)
-- [NTL WFP connect-redirect coroutine TCP proxy](../../examples/wfp/connect-redirect)
-- [NTL WFP TLS plaintext inspection proxy](../../examples/wfp/tls-inspection-proxy)
-- [NTL WFP browser HTTPS inspection](../../examples/wfp/browser-https-inspection)
+- [NTL WFP ALE connect-block driver/controller](../../examples/wfp/kernel/ale-connect-block)
+- [NTL WFP connect-redirect coroutine TCP proxy](../../examples/wfp/user/connect-redirect)
+- [NTL WFP TLS plaintext inspection proxy](../../examples/wfp/user/tls-inspection-proxy)
+- [NTL WFP browser HTTPS inspection](../../examples/wfp/user/browser-https-inspection)
+- [NTL WFP paired user/kernel samples](../../examples/wfp)
+- [NTL kernel-direct TCP content filter](../../examples/wfp/kernel/tcp-content-filter)
+- [NTL kernel-direct UDP content filter](../../examples/wfp/kernel/udp-content-filter)
+- [NTL kernel-direct connect redirect](../../examples/wfp/kernel/connect-redirect)
+- [NTL kernel-direct TLS inspection proxy](../../examples/wfp/kernel/tls-inspection-proxy)
+- [NTL kernel-direct browser HTTPS inspection](../../examples/wfp/kernel/browser-https-inspection)
+- [NTL kernel-direct HTTP/3 inspection](../../examples/wfp/kernel/http3-inspection)
 
 ## Topics
 
@@ -44,7 +52,9 @@ For buildable samples, see:
 | [KMDF helpers](./kmdf.md) | Optional `ntl::kmdf::main`, C++ contexts, typed I/O, manual queues and cancellation, hardware resources, power policy, DMA/USB/WMI, common WDF objects, interrupt/timer/work-item, child-list/PDO, typed query interfaces, registry, and device-property facades |
 | [KMDF engineering checklist](./kmdf-driver-checklist.md) | Ownership, callback lifetime, request cancellation, PnP/power, ABI, Driver Verifier, and software/hardware release gates |
 | [Minifilter helpers](./minifilter.md) | `ntl::flt::main`, typed pre/post callbacks and contexts, per-volume metadata, owned legacy control devices, typed communication ports, and shared regions |
+| [WFP guide for driver developers](./wfp-guide.md) | WFP concepts, kernel-centered and user-mode-centered execution models, typed callout decisions, payload boundaries, TLS/QUIC inspection, sample order, and verification |
 | [WFP helpers](./wfp.md) | Typed callout layers and conditions, safe connect redirection and proxy handoff, fragmented packet/stream views, bounded coroutine observation, flow contexts, injection ownership, explicit session/persistent policy lifecycle, health checks, and event telemetry |
+| [Network dual-runtime model](./network-dual-runtime.md) | One bounded protocol/policy contract across user and kernel code, explicit direct/offload capabilities, draining kernel execution, and the QUIC provider boundary |
 | [Content inspection and framing](./inspection.md) | Complete UDP/TCP message boundaries, typed verdicts, custom framers, decoder adapters, bounded HTTP/3 inspection composition, and the TLS plaintext boundary |
 | [HTTP, WebSocket, gRPC, and WebTransport inspection](./protocol-inspection.md) | Shared sync/async/stream transforms, HTTP/1, HTTP/2/HPACK, HTTP/3/QPACK, WebSocket, gRPC, WebTransport, content coding, ALPN, ECH, pinning, mTLS, and product enforcement boundaries |
 | [User-mode Schannel TLS streams](./tls-stream.md) | Coroutine Schannel I/O, bounded ClientHello/SNI observation, injectable per-host certificate issuance/cache, TLS plaintext framing, HTTP/1 boundaries, and clean shutdown |
@@ -62,7 +72,7 @@ For buildable samples, see:
 | [Work item](./work-item.md) | Deferring resident work to a `PASSIVE_LEVEL` system worker thread |
 | [Passive executor](./passive-executor.md) | Inline-or-defer policy for running callables at `PASSIVE_LEVEL` |
 | [Kernel coroutine context](./coroutine.md) | Optional C++20 awaiter for resuming an explicitly deferred continuation at `PASSIVE_LEVEL` |
-| [User-mode coroutine sockets](./async-socket.md) | IOCP-backed `read_some`, `read_exactly`, and `write_all`, with cancellation and explicit task/buffer lifetimes |
+| [User-mode coroutine sockets](./async-socket.md) | IOCP-backed `read_some_borrowed`, `read_exactly_borrowed`, and owning `write_all`, with cancellation and explicit task/buffer lifetimes |
 | [Pool allocator](./pool-allocator.md) | Kernel pool-backed ownership helpers, STL allocators, PMR resources, pool tags, and IRQL rules |
 | [Lookaside list](./lookaside-list.md) | Fixed-size kernel object cache wrapper over `LOOKASIDE_LIST_EX` |
 | [MDL helper](./mdl.md) | RAII ownership for MDLs allocated by `IoAllocateMdl` |

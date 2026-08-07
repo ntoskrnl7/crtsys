@@ -1,0 +1,876 @@
+/**
+ * @file http1_proxy_connection
+ * @brief Bounded persistent HTTP/1.1 inspection-proxy session.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/http/http1_proxy_connection is a user-mode header"
+#endif
+
+#include <ntl/net/buffer/scatter_view>
+#include <ntl/net/framing>
+#include <ntl/net/http/authority>
+#include <ntl/net/http/http1_framing>
+#include <ntl/net/http/http1_proxy_types>
+#include <ntl/net/http/http1_transform>
+#include <ntl/net/http/inspection_policy>
+#include <ntl/net/inspection/content_decoder>
+#include <ntl/net/inspection/content_encoder>
+#include <ntl/net/user/task>
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <cstddef>
+#include <cstring>
+#include <functional>
+#include <limits>
+#include <optional>
+#include <span>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+namespace ntl::net::http {
+
+namespace http1_proxy_detail {
+
+inline std::shared_ptr<const transform_pipeline> owned_transforms(
+    const std::shared_ptr<const inspection_policy> &policy) {
+  if (!policy)
+    throw std::invalid_argument("HTTP/1 inspection policy is null");
+  return {policy, &policy->transforms_ref()};
+}
+
+template <http1_observer Observer>
+void notify_request_event(Observer &observer,
+                          const http1_request_event_view &event) noexcept {
+  try {
+    observer.on_request(event);
+  } catch (...) {
+    // Telemetry cannot replace policy or terminate message forwarding.
+  }
+}
+
+template <http1_observer Observer>
+void notify_response_event(Observer &observer,
+                           const http1_response_event_view &event) noexcept {
+  try {
+    observer.on_response(event);
+  } catch (...) {
+    // Telemetry cannot replace policy or terminate message forwarding.
+  }
+}
+
+template <http1_observer Observer>
+void notify_context(Observer &observer,
+                     const inspection_context_view &context) noexcept {
+  try {
+    observer.on_inspection(context);
+  } catch (...) {
+    // Telemetry cannot replace policy or terminate message forwarding.
+  }
+}
+
+template <class Policy>
+ntl::net::inspection::verdict
+decide_context(Policy &policy, const inspection_context_view &context) {
+  if constexpr (requires { policy.decide(context); })
+    return static_cast<ntl::net::inspection::verdict>(
+        policy.decide(context));
+  else
+    return static_cast<ntl::net::inspection::verdict>(
+        std::invoke(policy, context));
+}
+
+template <class Policy, class Observer>
+ntl::net::inspection::verdict inspect_message(
+    Policy &policy, Observer &observer,
+    const inspection_session_metadata &session,
+    std::uint64_t exchange_id,
+    const request_message &request,
+    const response_message *response) {
+  const auto inspect_stage = [&](inspection_stage stage,
+                                 std::span<const std::byte> chunk) {
+    const auto context = response
+                             ? inspection_context_view::for_response(
+                                   protocol::http1, 0, exchange_id, stage,
+                                   session, request, *response, chunk)
+                             : inspection_context_view::for_request(
+                                   protocol::http1, 0, exchange_id, stage,
+                                   session, request, chunk);
+    notify_context(observer, context);
+    return decide_context(policy, context);
+  };
+  auto verdict = inspect_stage(inspection_stage::headers, {});
+  if (verdict != ntl::net::inspection::verdict::permit)
+    return verdict;
+  const auto body = response ? std::span<const std::byte>(response->body)
+                             : std::span<const std::byte>(request.body);
+  if (!body.empty()) {
+    verdict = inspect_stage(inspection_stage::body_chunk, body);
+    if (verdict != ntl::net::inspection::verdict::permit)
+      return verdict;
+  }
+  return inspect_stage(inspection_stage::message_complete, {});
+}
+
+inline bool header_has_token(const header_collection &headers,
+                             std::string_view name,
+                             std::string_view token) noexcept {
+  for (const auto &field : headers.fields()) {
+    if (transform_detail::ascii_equal_ci(field.name, name) &&
+        http1_transform_detail::contains_token_ci(field.value, token))
+      return true;
+  }
+  return false;
+}
+
+inline std::optional<http1_tunnel_offer_view> tunnel_offer(
+    const request_message &request, bool websocket_upgrade,
+    std::string_view websocket_extensions) noexcept {
+  if (websocket_upgrade)
+    return http1_tunnel_offer_view{
+        request, websocket_extensions, http1_tunnel_kind::websocket};
+  if (transform_detail::ascii_equal_ci(request.method, "CONNECT"))
+    return http1_tunnel_offer_view{
+        request, websocket_extensions, http1_tunnel_kind::connect};
+  if (header_has_token(request.headers, "connection", "upgrade") &&
+      request.headers.first("upgrade"))
+    return http1_tunnel_offer_view{
+        request, websocket_extensions,
+        http1_tunnel_kind::switch_protocol};
+  return std::nullopt;
+}
+
+inline bool valid_tunnel_disposition(
+    http1_tunnel_disposition disposition) noexcept {
+  return disposition == http1_tunnel_disposition::reject ||
+         disposition == http1_tunnel_disposition::inspect ||
+         disposition == http1_tunnel_disposition::passthrough;
+}
+
+template <class Handler>
+ntl::result<http1_tunnel_disposition> admit_tunnel(
+    Handler &handler, const http1_tunnel_offer_view &offer) noexcept {
+  if constexpr (requires { handler.admit(offer); }) {
+    try {
+      auto result = handler.admit(offer);
+      if (!result)
+        return ntl::unexpected(result.status());
+      if (!valid_tunnel_disposition(*result))
+        return ntl::unexpected(STATUS_INVALID_PARAMETER);
+      return ntl::ok(*result);
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  } else {
+    return ntl::ok(http1_tunnel_disposition::reject);
+  }
+}
+
+inline bool response_is_close_delimited(
+    const request_message &request,
+    const response_message &response) noexcept {
+  if (response_body_forbidden(request, response))
+    return false;
+  return !response.headers.first("content-length") &&
+         !response.headers.first("transfer-encoding");
+}
+
+[[noreturn]] inline void throw_framing_error(NTSTATUS status) {
+  int error = 13; // ERROR_INVALID_DATA
+  switch (status) {
+  case STATUS_BUFFER_OVERFLOW:
+  case STATUS_BUFFER_TOO_SMALL:
+    error = 111; // ERROR_BUFFER_OVERFLOW
+    break;
+  case STATUS_INSUFFICIENT_RESOURCES:
+    error = 8; // ERROR_NOT_ENOUGH_MEMORY
+    break;
+  case STATUS_IO_TIMEOUT:
+    error = 1460; // ERROR_TIMEOUT
+    break;
+  case STATUS_CANCELLED:
+    error = 995; // ERROR_OPERATION_ABORTED
+    break;
+  case STATUS_NOT_SUPPORTED:
+    error = 50; // ERROR_NOT_SUPPORTED
+    break;
+  default:
+    break;
+  }
+  throw std::system_error(
+      error, std::system_category(), "HTTP/1 framed stream");
+}
+
+template <class Stream> class framed_reader {
+public:
+  framed_reader(Stream &stream, http1_message_kind kind,
+                http1_framing_limits framing_limits,
+                std::size_t maximum_wire_message_size,
+                std::size_t receive_chunk_size,
+                http1_expect_continue_policy expect_continue =
+                    http1_expect_continue_policy::reject)
+      : stream_(&stream), framer_(kind, framing_limits),
+        kind_(kind),
+        maximum_wire_message_size_(maximum_wire_message_size),
+        receive_chunk_size_(receive_chunk_size),
+        expect_continue_(expect_continue) {
+    if (maximum_wire_message_size_ == 0 || receive_chunk_size_ == 0)
+      throw std::invalid_argument("invalid HTTP/1 framed reader limits");
+  }
+
+  void append_buffered(std::span<const std::byte> bytes) {
+    if (bytes.size() > maximum_wire_message_size_ - buffer_.size())
+      throw std::system_error(
+          111, std::system_category(),
+          "HTTP/1 carry-over exceeds its wire limit");
+    buffer_.insert(buffer_.end(), bytes.begin(), bytes.end());
+  }
+
+  std::vector<std::byte> release_buffered() noexcept {
+    return std::exchange(buffer_, {});
+  }
+
+  ntl::net::user::task<std::optional<std::vector<std::byte>>>
+  read_or_eof() {
+    for (;;) {
+      const auto view = scatter_view::from_contiguous(
+          std::span<const std::byte>(buffer_));
+      const auto probe = framing::probe(
+          framer_, view,
+          {.maximum_frame_size = maximum_wire_message_size_});
+      if (probe.state() == framing::probe_state::complete) {
+        std::vector<std::byte> result(probe.frame_size());
+        if (!result.empty())
+          std::memcpy(result.data(), buffer_.data(), result.size());
+        buffer_.erase(
+            buffer_.begin(),
+            buffer_.begin() + static_cast<std::ptrdiff_t>(result.size()));
+        co_return result;
+      }
+      if (probe.state() == framing::probe_state::malformed)
+        throw_framing_error(probe.error());
+
+      if (kind_ == http1_message_kind::request) {
+        const auto expectation = inspect_http1_request_expectation(view);
+        if (expectation == http1_request_expectation::continue_100 &&
+            !continue_sent_) {
+          if (expect_continue_ !=
+              http1_expect_continue_policy::local_continue)
+            throw_framing_error(STATUS_NOT_SUPPORTED);
+          constexpr std::string_view provisional =
+              "HTTP/1.1 100 Continue\r\n\r\n";
+          const auto wire = std::as_bytes(std::span<const char>(
+              provisional.data(), provisional.size()));
+          if (co_await stream_->write_all(wire) != wire.size())
+            throw std::runtime_error(
+                "HTTP/1 100 Continue response completed short");
+          continue_sent_ = true;
+        }
+        if (expectation == http1_request_expectation::unsupported)
+          throw_framing_error(STATUS_NOT_SUPPORTED);
+        if (expectation == http1_request_expectation::malformed)
+          throw_framing_error(STATUS_DATA_ERROR);
+      }
+
+      const std::size_t current = buffer_.size();
+      if (current >= maximum_wire_message_size_)
+        throw_framing_error(STATUS_BUFFER_OVERFLOW);
+      const std::size_t room = maximum_wire_message_size_ - current;
+      const std::size_t growth = (std::min)(receive_chunk_size_, room);
+      const std::size_t target =
+          (std::max)(probe.required_total(), current + growth);
+      if (target <= current || target > maximum_wire_message_size_)
+        throw_framing_error(STATUS_BUFFER_OVERFLOW);
+      buffer_.resize(target);
+      const std::size_t received = co_await stream_->read_some_borrowed(
+          std::span<std::byte>(buffer_.data() + current, target - current));
+      if (received > target - current)
+        throw std::runtime_error("HTTP/1 stream returned an invalid size");
+      buffer_.resize(current + received);
+      if (received != 0)
+        continue;
+      if (current == 0)
+        co_return std::nullopt;
+
+      const auto final_view = scatter_view::from_contiguous(
+          std::span<const std::byte>(buffer_));
+      const auto final = framing::finish(
+          framer_, final_view,
+          {.maximum_frame_size = maximum_wire_message_size_});
+      if (final.state() != framing::probe_state::complete)
+        throw_framing_error(final.error());
+      std::vector<std::byte> result(final.frame_size());
+      if (!result.empty())
+        std::memcpy(result.data(), buffer_.data(), result.size());
+      buffer_.erase(
+          buffer_.begin(),
+          buffer_.begin() + static_cast<std::ptrdiff_t>(result.size()));
+      co_return result;
+    }
+  }
+
+private:
+  Stream *stream_ = nullptr;
+  http1_message_framer framer_;
+  http1_message_kind kind_ = http1_message_kind::request;
+  std::size_t maximum_wire_message_size_ = 0;
+  std::size_t receive_chunk_size_ = 0;
+  http1_expect_continue_policy expect_continue_ =
+      http1_expect_continue_policy::reject;
+  bool continue_sent_ = false;
+  std::vector<std::byte> buffer_;
+};
+
+inline response_message forbidden_response() {
+  response_message response;
+  response.wire_protocol = protocol::http1;
+  response.status = 403;
+  response.headers.append(
+      "content-type", "text/plain; charset=utf-8");
+  constexpr std::string_view text = "Request blocked by policy.\n";
+  response.body.assign(
+      reinterpret_cast<const std::byte *>(text.data()),
+      reinterpret_cast<const std::byte *>(text.data() + text.size()));
+  return response;
+}
+
+template <class Stream>
+ntl::net::user::task<unsigned> send_terminal_response(
+    Stream &downstream, std::optional<response_message> response,
+    const ntl::net::inspection::content_encoder_registry &encoders,
+    const transform_limits &limits, bool response_to_head,
+    response_message *sent) {
+  auto message = response ? std::move(*response) : forbidden_response();
+  message.wire_protocol = protocol::http1;
+  const std::string original_coding =
+      message.headers.joined("content-encoding");
+  auto encoded = encode_body(
+      message.headers, message.body, original_coding,
+      transformed_body_coding::preserve, encoders, limits);
+  if (!encoded)
+    throw std::system_error(
+        static_cast<int>(encoded.status()), std::system_category(),
+        "HTTP/1 terminal response encoder rejected the body");
+  auto wire = serialize_http1_response(
+      message,
+      response_to_head ? std::span<const std::byte>{}
+                       : std::span<const std::byte>(*encoded),
+      limits, response_to_head);
+  if (!wire)
+    throw std::system_error(
+        static_cast<int>(wire.status()), std::system_category(),
+        "HTTP/1 terminal response serializer rejected the message");
+  if (co_await downstream.write_all(*wire) != wire->size())
+    throw std::runtime_error("HTTP/1 terminal response completed short");
+  if (sent)
+    *sent = message;
+  co_return message.status;
+}
+
+template <class Stream>
+ntl::net::user::task<void> shutdown(Stream &stream) {
+  try {
+    co_await stream.shutdown();
+  } catch (const std::system_error &error) {
+    const int value = error.code().value();
+    // A peer may close immediately after a complete HTTP exchange.  Treat
+    // that as an orderly terminal state, while preserving every other error.
+    if (value != 10058 && // WSAESHUTDOWN
+        value != 10054 && // WSAECONNRESET
+        value != 10053 && // WSAECONNABORTED
+        value != 38)      // ERROR_HANDLE_EOF
+      throw;
+  }
+}
+
+template <class Stream>
+ntl::net::user::task<void> drain_authenticated_close(Stream &stream) {
+  if constexpr (requires {
+                  stream.received_close_notify();
+                  stream.read_some_borrowed(
+                      std::declval<std::span<std::byte>>());
+                }) {
+    std::array<std::byte, 4096> discard{};
+    while (!stream.received_close_notify()) {
+      if (co_await stream.read_some_borrowed(discard) == 0)
+        break;
+    }
+    if (!stream.received_close_notify())
+      throw std::runtime_error(
+          "TLS peer closed without close_notify");
+  }
+  co_return;
+}
+
+template <class Stream>
+void close_transport(Stream &stream) noexcept {
+  try {
+    if constexpr (requires { stream.close(); }) {
+      stream.close();
+    } else if constexpr (requires { stream.cancel(); }) {
+      (void)stream.cancel();
+    }
+  } catch (...) {
+    // close() is a cancellation boundary and must remain noexcept.
+  }
+}
+
+} // namespace http1_proxy_detail
+
+/**
+ * @brief Owns one bounded persistent HTTP/1 inspection-proxy conversation.
+ *
+ * Stream must expose asynchronous read_some, write_all, and shutdown methods.
+ * Policy remains in transform_pipeline.  Observer receives semantic messages;
+ * UpgradeHandler receives the two live streams and all decrypted carry-over.
+ */
+template <class DownstreamStream, class UpstreamStream>
+class http1_proxy_connection
+    : public std::enable_shared_from_this<
+          http1_proxy_connection<DownstreamStream, UpstreamStream>> {
+public:
+  http1_proxy_connection(
+      std::shared_ptr<DownstreamStream> downstream,
+      std::shared_ptr<UpstreamStream> upstream,
+      std::shared_ptr<const transform_pipeline> transforms,
+      std::shared_ptr<const ntl::net::inspection::content_decoder_registry>
+          decoders,
+      std::shared_ptr<const ntl::net::inspection::content_encoder_registry>
+          encoders,
+      http1_request_target_context target_context,
+      http1_proxy_limits limits = {},
+      inspection_session_metadata session = {})
+      : downstream_(std::move(downstream)), upstream_(std::move(upstream)),
+        transforms_(std::move(transforms)), decoders_(std::move(decoders)),
+        encoders_(std::move(encoders)),
+        origin_scheme_(target_context.origin_scheme), limits_(limits),
+        session_(std::move(session)) {
+    if (!downstream_ || !upstream_ || !transforms_ || !decoders_ ||
+        !encoders_ || !limits_.valid() || !target_context.valid())
+      throw std::invalid_argument("invalid HTTP/1 proxy limits");
+    limits_.framing.allow_close_delimited_response = true;
+  }
+
+  http1_proxy_connection(
+      std::shared_ptr<DownstreamStream> downstream,
+      std::shared_ptr<UpstreamStream> upstream,
+      std::shared_ptr<const inspection_policy> policy,
+      http1_request_target_context target_context,
+      http1_proxy_limits limits = {},
+      inspection_session_metadata session = {})
+      : http1_proxy_connection(
+            std::move(downstream), std::move(upstream),
+            http1_proxy_detail::owned_transforms(policy),
+            policy ? policy->content_decoders() : nullptr,
+            policy ? policy->content_encoders() : nullptr,
+            target_context, limits, std::move(session)) {
+    policy_ = std::move(policy);
+    context_policy_ = &policy_->decisions_ref();
+  }
+
+  http1_proxy_connection(const http1_proxy_connection &) = delete;
+  http1_proxy_connection &operator=(const http1_proxy_connection &) = delete;
+  ~http1_proxy_connection() { close(); }
+
+  /** Idempotently rejects a new run and wakes supported stream backends. */
+  void close() noexcept {
+    if (closed_.exchange(true, std::memory_order_acq_rel))
+      return;
+    http1_proxy_detail::close_transport(*downstream_);
+    http1_proxy_detail::close_transport(*upstream_);
+  }
+
+  bool is_closed() const noexcept {
+    return closed_.load(std::memory_order_acquire);
+  }
+
+  template <http1_observer Observer, class UpgradeHandler>
+  ntl::net::user::task<http1_proxy_result>
+  run(Observer observer, UpgradeHandler upgrade_handler) {
+    begin_run();
+    auto lifetime = this->shared_from_this();
+    if (context_policy_)
+      return run_owned(
+          std::move(lifetime),
+          std::cref(*context_policy_), std::move(observer),
+          std::move(upgrade_handler));
+    return run_owned(
+        std::move(lifetime),
+        permit_inspection_context{}, std::move(observer),
+        std::move(upgrade_handler));
+  }
+
+  template <class ContextPolicy, http1_observer Observer,
+            class UpgradeHandler>
+  ntl::net::user::task<http1_proxy_result>
+  run(ContextPolicy context_policy, Observer observer,
+      UpgradeHandler upgrade_handler) {
+    begin_run();
+    return run_owned(
+        this->shared_from_this(), std::move(context_policy),
+        std::move(observer), std::move(upgrade_handler));
+  }
+
+private:
+  void begin_run() {
+    if (closed_.load(std::memory_order_acquire))
+      throw std::system_error(
+          995, std::system_category(), "HTTP/1 proxy is closed");
+    if (started_.exchange(true, std::memory_order_acq_rel))
+      throw std::system_error(
+          995, std::system_category(), "HTTP/1 proxy already started");
+    if (closed_.load(std::memory_order_acquire)) {
+      started_.store(false, std::memory_order_release);
+      throw std::system_error(
+          995, std::system_category(), "HTTP/1 proxy closed while starting");
+    }
+  }
+
+  template <class ContextPolicy, class Observer, class UpgradeHandler>
+  ntl::net::user::task<http1_proxy_result>
+  run_owned(
+      std::shared_ptr<http1_proxy_connection> lifetime,
+      ContextPolicy context_policy, Observer observer,
+      UpgradeHandler upgrade_handler) {
+    try {
+      co_return co_await run_owned_impl(
+          std::move(lifetime), std::move(context_policy),
+          std::move(observer), std::move(upgrade_handler));
+    } catch (...) {
+      if (!closed_.load(std::memory_order_acquire))
+        throw;
+      http1_proxy_result result;
+      result.termination = http1_proxy_termination::closed;
+      co_return result;
+    }
+  }
+
+  template <class ContextPolicy, class Observer, class UpgradeHandler>
+  ntl::net::user::task<http1_proxy_result>
+  run_owned_impl(
+      std::shared_ptr<http1_proxy_connection> lifetime,
+      ContextPolicy context_policy, Observer observer,
+      UpgradeHandler upgrade_handler) {
+    (void)lifetime;
+    std::vector<std::byte> downstream_carry;
+    std::vector<std::byte> upstream_carry;
+    http1_proxy_result result;
+
+    for (;;) {
+      if (closed_.load(std::memory_order_acquire)) {
+        result.termination = http1_proxy_termination::closed;
+        break;
+      }
+      auto request_limits = limits_.framing;
+      request_limits.allow_close_delimited_response = false;
+      request_limits.response_body_forbidden = false;
+      http1_proxy_detail::framed_reader<DownstreamStream> requests(
+          *downstream_, http1_message_kind::request, request_limits,
+          limits_.maximum_wire_message_size,
+          limits_.request_receive_chunk_size, limits_.expect_continue);
+      requests.append_buffered(downstream_carry);
+      auto request_wire = co_await requests.read_or_eof();
+      if (!request_wire) {
+        result.termination = http1_proxy_termination::downstream_eof;
+        break;
+      }
+      downstream_carry = requests.release_buffered();
+
+      auto request = transform_http1_request(
+          *request_wire, *transforms_, *decoders_, *encoders_,
+          {origin_scheme_});
+      if (!request)
+        throw std::system_error(
+            static_cast<int>(request.status()), std::system_category(),
+            "HTTP/1 request transform rejected the message");
+      auto contextual_request = ntl::net::inspection::verdict::permit;
+      // A terminal transform is authoritative.  Running staged policy after
+      // it could replace a caller-supplied response with the generic policy
+      // block and would evaluate a message that will never be forwarded.
+      if (request->outcome.action == rewrite_action::forward)
+        contextual_request = http1_proxy_detail::inspect_message(
+            context_policy, observer, session_,
+            result.completed_exchanges + 1, request->message, nullptr);
+      http1_proxy_detail::notify_request_event(
+          observer, http1_request_event_view{
+                        request->message, request_wire->size(),
+                        request->websocket_upgrade});
+      if (closed_.load(std::memory_order_acquire)) {
+        result.termination = http1_proxy_termination::closed;
+        break;
+      }
+      const bool request_closes = http1_proxy_detail::header_has_token(
+          request->message.headers, "connection", "close");
+
+      if (request->outcome.action == rewrite_action::drop ||
+          contextual_request ==
+              ntl::net::inspection::verdict::drop_flow) {
+        result.termination = http1_proxy_termination::request_drop;
+        break;
+      }
+      if (request->outcome.action != rewrite_action::forward ||
+          contextual_request == ntl::net::inspection::verdict::block) {
+        response_message sent;
+        result.last_status =
+            co_await http1_proxy_detail::send_terminal_response(
+                *downstream_, std::move(request->outcome.response),
+                *encoders_, transforms_->limits_ref(),
+                request->message.method == "HEAD", &sent);
+        http1_proxy_detail::notify_response_event(
+            observer,
+            http1_response_event_view{request->message, sent, 0, false, true,
+                                 false});
+        ++result.blocked_exchanges;
+        ++result.completed_exchanges;
+        const bool synthetic_closes =
+            http1_proxy_detail::header_has_token(
+                sent.headers, "connection", "close");
+        if (request_closes || synthetic_closes) {
+          result.termination = http1_proxy_termination::connection_close;
+          break;
+        }
+        continue;
+      }
+      if (limits_.require_server_name_authority_binding &&
+          transform_detail::ascii_equal_ci(origin_scheme_, "https") &&
+          !authority_matches_tls_session(
+              request->message.authority, session_)) {
+        response_message sent;
+        result.last_status =
+            co_await http1_proxy_detail::send_terminal_response(
+                *downstream_, std::nullopt, *encoders_,
+                transforms_->limits_ref(),
+                request->message.method == "HEAD",
+                &sent);
+        http1_proxy_detail::notify_response_event(
+            observer,
+            http1_response_event_view{request->message, sent, 0, false, true,
+                                 false});
+        ++result.blocked_exchanges;
+        result.termination = http1_proxy_termination::terminal_response;
+        break;
+      }
+
+      const auto offer = http1_proxy_detail::tunnel_offer(
+          request->message, request->websocket_upgrade,
+          request->websocket_extensions);
+      std::optional<http1_tunnel_disposition> tunnel_disposition;
+      if (offer) {
+        auto admitted =
+            http1_proxy_detail::admit_tunnel(upgrade_handler, *offer);
+        if (!admitted)
+          throw std::system_error(
+              static_cast<int>(admitted.status()), std::system_category(),
+              "HTTP/1 tunnel admission failed");
+        tunnel_disposition = *admitted;
+        if (*tunnel_disposition == http1_tunnel_disposition::reject) {
+          response_message sent;
+          result.last_status =
+              co_await http1_proxy_detail::send_terminal_response(
+                  *downstream_, std::nullopt, *encoders_,
+                  transforms_->limits_ref(),
+                  request->message.method == "HEAD",
+                  &sent);
+          http1_proxy_detail::notify_response_event(
+              observer,
+              http1_response_event_view{request->message, sent, 0, false, true,
+                                   false});
+          ++result.blocked_exchanges;
+          result.termination = http1_proxy_termination::terminal_response;
+          break;
+        }
+      }
+      if (co_await upstream_->write_all(request->wire) !=
+          request->wire.size())
+        throw std::runtime_error("HTTP/1 upstream request completed short");
+
+      auto response_limits = limits_.framing;
+      response_limits.allow_close_delimited_response = true;
+      response_limits.response_body_forbidden =
+          request->message.method == "HEAD";
+      response_limits.response_to_connect =
+          transform_detail::ascii_equal_ci(
+              request->message.method, "CONNECT");
+      http1_proxy_detail::framed_reader<UpstreamStream> responses(
+          *upstream_, http1_message_kind::response, response_limits,
+          limits_.maximum_wire_message_size,
+          limits_.response_receive_chunk_size);
+      responses.append_buffered(upstream_carry);
+
+      bool exchange_complete = false;
+      bool response_closes = false;
+      for (;;) {
+        auto response_wire = co_await responses.read_or_eof();
+        if (!response_wire)
+          throw std::runtime_error(
+              "HTTP/1 origin closed before its response");
+        auto response = transform_http1_response(
+            *response_wire, request->message, *transforms_,
+            *decoders_, *encoders_);
+        if (!response)
+          throw std::system_error(
+            static_cast<int>(response.status()), std::system_category(),
+              "HTTP/1 response transform rejected the message (NTSTATUS " +
+                  std::to_string(static_cast<unsigned long>(
+                      static_cast<NTSTATUS>(response.status()))) + ")");
+        const bool informational = response->message.status >= 100 &&
+                                   response->message.status < 200 &&
+                                   response->message.status != 101;
+
+        auto contextual_response = ntl::net::inspection::verdict::permit;
+        if (response->outcome.action == rewrite_action::forward)
+          contextual_response = http1_proxy_detail::inspect_message(
+              context_policy, observer, session_,
+              result.completed_exchanges + 1, request->message,
+              &response->message);
+        if (closed_.load(std::memory_order_acquire)) {
+          result.termination = http1_proxy_termination::closed;
+          exchange_complete = true;
+          break;
+        }
+        if (response->outcome.action == rewrite_action::drop ||
+            contextual_response ==
+                ntl::net::inspection::verdict::drop_flow) {
+          upstream_carry = responses.release_buffered();
+          result.termination = http1_proxy_termination::response_drop;
+          exchange_complete = true;
+          break;
+        }
+        if (response->outcome.action != rewrite_action::forward ||
+            contextual_response == ntl::net::inspection::verdict::block) {
+          const bool origin_response_closes =
+              http1_proxy_detail::header_has_token(
+                  response->message.headers, "connection", "close") ||
+              http1_proxy_detail::response_is_close_delimited(
+                  request->message, response->message);
+          response_message sent;
+          result.last_status =
+              co_await http1_proxy_detail::send_terminal_response(
+                  *downstream_, std::move(response->outcome.response),
+                  *encoders_, transforms_->limits_ref(),
+                  request->message.method == "HEAD", &sent);
+          http1_proxy_detail::notify_response_event(
+              observer,
+              http1_response_event_view{request->message, sent, 0, false, true,
+                                   false});
+          upstream_carry = responses.release_buffered();
+          ++result.blocked_exchanges;
+          if (informational) {
+            result.termination =
+                http1_proxy_termination::terminal_response;
+          } else {
+            ++result.completed_exchanges;
+            response_closes = origin_response_closes ||
+                http1_proxy_detail::header_has_token(
+                    sent.headers, "connection", "close");
+          }
+          exchange_complete = true;
+          break;
+        }
+
+        if (co_await downstream_->write_all(response->wire) !=
+            response->wire.size())
+          throw std::runtime_error(
+              "HTTP/1 downstream response completed short");
+        http1_proxy_detail::notify_response_event(
+            observer,
+            http1_response_event_view{request->message, response->message,
+                                 response->wire.size(), informational, false,
+                                 response->websocket_upgrade});
+        if (informational)
+          continue;
+
+        upstream_carry = responses.release_buffered();
+        result.last_status = response->message.status;
+        ++result.completed_exchanges;
+        response_closes = http1_proxy_detail::header_has_token(
+                              response->message.headers, "connection",
+                              "close") ||
+                          http1_proxy_detail::response_is_close_delimited(
+                              request->message, response->message);
+
+        const bool connect_tunnel =
+            transform_detail::ascii_equal_ci(
+                request->message.method, "CONNECT") &&
+            response->message.status >= 200 &&
+            response->message.status < 300;
+        const bool switched_protocol = response->message.status == 101;
+        if (response->websocket_upgrade || connect_tunnel ||
+            switched_protocol) {
+          if (response->websocket_upgrade && !request->websocket_upgrade)
+            throw std::runtime_error(
+                "origin switched protocols without a matching request");
+          const auto tunnel_kind = response->websocket_upgrade
+                                       ? http1_tunnel_kind::websocket
+                                       : connect_tunnel
+                                             ? http1_tunnel_kind::connect
+                                             : http1_tunnel_kind::switch_protocol;
+          if (!offer || !tunnel_disposition ||
+              offer->kind != tunnel_kind)
+            throw std::runtime_error(
+                "origin switched protocols without an admitted matching request");
+          http1_upgrade_context_view<DownstreamStream, UpstreamStream> context{
+              *downstream_, *upstream_, request->message, response->message,
+              downstream_carry, upstream_carry,
+              request->websocket_extensions,
+              response->websocket_extensions, tunnel_kind,
+              *tunnel_disposition};
+          co_await std::invoke(upgrade_handler, context);
+          result.termination = http1_proxy_termination::upgraded;
+          exchange_complete = true;
+          break;
+        }
+        exchange_complete = true;
+        break;
+      }
+
+      if (result.termination == http1_proxy_termination::request_drop ||
+          result.termination == http1_proxy_termination::response_drop ||
+          result.termination == http1_proxy_termination::terminal_response ||
+          result.termination == http1_proxy_termination::upgraded ||
+          result.termination == http1_proxy_termination::closed)
+        break;
+      if (!exchange_complete)
+        throw std::logic_error("HTTP/1 exchange made no progress");
+      if (request_closes || response_closes) {
+        result.termination = http1_proxy_termination::connection_close;
+        break;
+      }
+    }
+
+    co_await http1_proxy_detail::shutdown(*downstream_);
+    co_await http1_proxy_detail::shutdown(*upstream_);
+    co_await http1_proxy_detail::drain_authenticated_close(*downstream_);
+    co_await http1_proxy_detail::drain_authenticated_close(*upstream_);
+    co_return result;
+  }
+
+  std::shared_ptr<DownstreamStream> downstream_;
+  std::shared_ptr<UpstreamStream> upstream_;
+  std::shared_ptr<const transform_pipeline> transforms_;
+  std::shared_ptr<const inspection_policy> policy_;
+  std::shared_ptr<const ntl::net::inspection::content_decoder_registry>
+      decoders_;
+  std::shared_ptr<const ntl::net::inspection::content_encoder_registry>
+      encoders_;
+  std::string origin_scheme_;
+  http1_proxy_limits limits_{};
+  inspection_session_metadata session_{};
+  const decision_policy *context_policy_ = nullptr;
+  std::atomic<bool> started_{false};
+  std::atomic<bool> closed_{false};
+};
+
+} // namespace ntl::net::http

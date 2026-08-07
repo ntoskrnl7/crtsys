@@ -184,7 +184,7 @@ public:
    * @param options WDM device options. A non-empty short device name is
    * required.
    * @param configure Callback that registers typed create/cleanup/close/IOCTL
-   * handlers on the device before its DOS link is published. It may return
+   * handlers on the endpoint before its DOS link is published. It may return
    * void or ntl::status.
    * @param link_name Optional full DOS link name. Empty selects
    * "\\DosDevices\\" + options.name().
@@ -203,7 +203,8 @@ public:
                                  std::wstring link_name = {}) noexcept {
     using configure_type = std::decay_t<Configure>;
     using configure_result =
-        std::invoke_result_t<configure_type &, ntl::device<Extension> &>;
+        std::invoke_result_t<configure_type &,
+                             ntl::device_endpoint<Extension> &>;
     static_assert(std::is_void_v<configure_result> ||
                       std::is_same_v<configure_result, ntl::status>,
                   "control-device configure callback must return void or "
@@ -377,28 +378,25 @@ private:
           return created_device.status();
         auto device = std::move(*created_device);
 
+        std::wstring published_link =
+            link_name.empty() ? ntl::dos_device_name(options.name())
+                              : link_name;
+        endpoint = ntl::device_endpoint<Extension>::make_unpublished(
+            std::move(device), std::move(published_link),
+            ntl::device_target_name(options.name()));
+
         using configure_result =
-            std::invoke_result_t<Configure &, ntl::device<Extension> &>;
+            std::invoke_result_t<Configure &,
+                                 ntl::device_endpoint<Extension> &>;
         if constexpr (std::is_void_v<configure_result>) {
-          std::invoke(configure, *device);
+          std::invoke(configure, endpoint);
         } else {
-          const ntl::status status = std::invoke(configure, *device);
+          const ntl::status status = std::invoke(configure, endpoint);
           if (status.is_err())
             return status;
         }
 
-        std::wstring published_link =
-            link_name.empty() ? ntl::dos_device_name(options.name())
-                              : link_name;
-        auto created_link = ntl::try_create_symbolic_link(
-            std::move(published_link),
-            ntl::device_target_name(options.name()));
-        if (!created_link)
-          return created_link.status();
-
-        endpoint = ntl::device_endpoint<Extension>{
-            std::move(device), std::move(*created_link)};
-        return STATUS_SUCCESS;
+        return endpoint.publish();
       } catch (const ntl::exception &error) {
         reset();
         return error.get_status();
@@ -411,7 +409,7 @@ private:
       }
     }
 
-    void reset() noexcept override { endpoint.reset(); }
+    void reset() noexcept override { (void)endpoint.close(); }
 
     ntl::device_options options;
     Configure configure;

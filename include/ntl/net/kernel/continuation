@@ -1,0 +1,69 @@
+/**
+ * @file kernel_continuation
+ * @brief Stack-safe coroutine continuation dispatch for kernel networking.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/net/kernel/continuation is a kernel-mode header"
+#endif
+
+#include <ntl/coroutine>
+#include <ntl/irql>
+#include <ntl/passive_executor>
+
+#include <coroutine>
+
+namespace ntl::net::kernel {
+
+#if NTL_HAS_COROUTINE_SUPPORT
+namespace continuation_detail {
+
+struct expanded_resume_context {
+  std::coroutine_handle<> continuation{};
+};
+
+inline VOID NTAPI resume_on_expanded_stack(void *context) noexcept {
+  const auto continuation =
+      static_cast<expanded_resume_context *>(context)->continuation;
+  if (continuation)
+    continuation.resume();
+}
+
+} // namespace continuation_detail
+
+/**
+ * Resumes on a fresh PASSIVE worker stack instead of recursively resuming the
+ * awaiting coroutine from a transport or sibling-coroutine callback.
+ *
+ * The detached work item owns its callable until resume() returns. If the
+ * small nonpaged work-item allocation is unavailable, the WDK stack-expansion
+ * callout is used synchronously so low-resource handling does not reintroduce
+ * an unbounded resume chain.
+ */
+inline void resume_deferred(std::coroutine_handle<> continuation) noexcept {
+  if (!continuation)
+    return;
+
+  const ntl::passive_executor executor(
+      DelayedWorkQueue, ntl::pool_tag("cNtN"));
+  const ntl::status queued = executor.post(
+      [continuation]() noexcept { continuation.resume(); });
+  if (queued.is_ok())
+    return;
+
+  continuation_detail::expanded_resume_context context{continuation};
+  const BOOLEAN wait =
+      ntl::current_irql() <= ntl::irql::apc ? TRUE : FALSE;
+  const NTSTATUS expanded = KeExpandKernelStackAndCalloutEx(
+      &continuation_detail::resume_on_expanded_stack, &context,
+      MAXIMUM_EXPANSION_SIZE, wait, nullptr);
+  if (!NT_SUCCESS(expanded))
+    continuation.resume();
+}
+
+#endif // NTL_HAS_COROUTINE_SUPPORT
+
+} // namespace ntl::net::kernel

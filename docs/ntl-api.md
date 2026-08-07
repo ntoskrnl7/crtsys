@@ -29,6 +29,7 @@ The detailed API reference is split by topic:
 | [KMDF engineering checklist](./ntl/kmdf-driver-checklist.md) | Reviewable ownership, callback, cancellation, PnP/power, ABI, and verification rules for production drivers |
 | [Minifilter helpers](./ntl/minifilter.md) | `ntl::flt::main`, typed Filter Manager operation callbacks, RAII name information, and typed file/stream/stream-handle contexts |
 | [WFP helpers](./ntl/wfp.md) | Layer-typed callouts, safe connect redirection and proxy handoff, fragmented byte views, bounded coroutine observation, rule-safe results, flow-context and injection ownership, and transactional user-mode policy |
+| [Network dual-runtime model](./ntl/network-dual-runtime.md) | Kernel-safe framing, ClientHello, HTTP/2/3, QPACK, gRPC, WebSocket, WebTransport and transform contracts with explicit direct/offloaded backends |
 | [Content inspection and framing](./ntl/inspection.md) | UDP datagram and TCP message boundaries, typed policy verdicts, custom framers, decoder adapters, bounded HTTP/3 inspection composition, and TLS limits |
 | [User-mode Schannel TLS streams](./ntl/tls-stream.md) | Schannel coroutine I/O, ClientHello/SNI handoff, injectable per-host issuance and identity cache, private-CA validation, TLS plaintext framing, bounded HTTP/1 boundaries, and `close_notify` |
 | [Typed IOCTL helper](./ntl/ioctl.md) | `ntl::ioctl`, `is_ioctl`, typed input/output buffer helpers |

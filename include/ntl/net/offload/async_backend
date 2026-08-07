@@ -1,0 +1,105 @@
+/**
+ * @file net_offload_async_backend
+ * @brief Drainable asynchronous kernel-to-user network operation contract.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include <ntl/net/offload/protocol>
+#include <ntl/net/runtime>
+#include <ntl/status>
+
+#include <cstdint>
+#include <span>
+
+namespace ntl::net::offload {
+
+class completion_sink {
+public:
+  virtual ~completion_sink() = default;
+  virtual void on_complete(const response_header &response) noexcept = 0;
+};
+
+/**
+ * @brief Asynchronous provider used when a classify/callback path cannot wait.
+ *
+ * submit() returning success accepts exactly one completion. Completion may be
+ * inline. The caller keeps input, output, and sink storage alive until that
+ * callback. The provider copies the fixed request header before submit()
+ * returns. A successful cancel requests cancellation but does not suppress the
+ * one completion. stop() rejects new submissions; drain() waits until every
+ * accepted completion has left caller-owned code.
+ */
+class async_backend {
+public:
+  virtual ~async_backend() = default;
+  virtual runtime_descriptor runtime() const noexcept = 0;
+  virtual ntl::status submit_borrowed(
+      request_header request, scatter_view input,
+      std::span<std::byte> output, completion_sink &sink) noexcept = 0;
+  virtual ntl::status cancel(std::uint64_t request_id) noexcept = 0;
+  virtual void stop() noexcept = 0;
+  virtual ntl::status drain() noexcept = 0;
+};
+
+struct borrowed_async_callbacks {
+  ntl::status (*submit_borrowed)(void *, request_header, scatter_view,
+                        std::span<std::byte>, completion_sink &) noexcept =
+      nullptr;
+  ntl::status (*cancel)(void *, std::uint64_t) noexcept = nullptr;
+  void (*stop)(void *) noexcept = nullptr;
+  ntl::status (*drain)(void *) noexcept = nullptr;
+};
+
+/** Allocation-free adapter for NTL RPC, shared-memory, or product providers. */
+class borrowed_callback_async_backend final : public async_backend {
+public:
+  constexpr borrowed_callback_async_backend(
+      runtime_descriptor runtime, void *context,
+      borrowed_async_callbacks callbacks) noexcept
+      : runtime_(runtime), context_(context), callbacks_(callbacks) {}
+
+  runtime_descriptor runtime() const noexcept override { return runtime_; }
+
+  ntl::status submit_borrowed(
+      request_header request, scatter_view input,
+      std::span<std::byte> output,
+      completion_sink &sink) noexcept override {
+    if (!callbacks_.submit_borrowed || !input ||
+        input.size() != request.input_size ||
+        output.size() < request.output_capacity)
+      return STATUS_INVALID_PARAMETER;
+    const ntl::status accepted = validate(request, runtime_);
+    if (!accepted.is_ok())
+      return accepted;
+    return callbacks_.submit_borrowed(
+        context_, request, input,
+        output.first(request.output_capacity), sink);
+  }
+
+  ntl::status cancel(std::uint64_t request_id) noexcept override {
+    if (request_id == 0)
+      return STATUS_INVALID_PARAMETER;
+    return callbacks_.cancel
+               ? callbacks_.cancel(context_, request_id)
+               : ntl::status{STATUS_NOT_SUPPORTED};
+  }
+
+  void stop() noexcept override {
+    if (callbacks_.stop)
+      callbacks_.stop(context_);
+  }
+
+  ntl::status drain() noexcept override {
+    return callbacks_.drain ? callbacks_.drain(context_)
+                            : ntl::status{STATUS_NOT_SUPPORTED};
+  }
+
+private:
+  runtime_descriptor runtime_{};
+  void *context_ = nullptr;
+  borrowed_async_callbacks callbacks_{};
+};
+
+} // namespace ntl::net::offload

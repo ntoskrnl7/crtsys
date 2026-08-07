@@ -1,0 +1,140 @@
+/**
+ * @file net_io_transport
+ * @brief Execution-domain-neutral byte-stream transport contract.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include <ntl/net/buffer/scatter_view>
+#include <ntl/net/runtime>
+#include <ntl/status>
+
+#include <cstddef>
+#include <cstdint>
+
+namespace ntl::net::io {
+
+struct transport_capabilities {
+  bool available = false;
+  bool full_duplex = false;
+  bool half_close = false;
+  bool cancellation = false;
+  bool message_boundaries = false;
+  bool plaintext = true;
+};
+
+class transport_sink {
+public:
+  virtual ~transport_sink() = default;
+
+  /** The view is callback-scoped and is never retained by NTL. */
+  virtual ntl::status on_receive(scatter_view bytes, bool final) noexcept = 0;
+  virtual void on_write_complete(std::uint64_t operation_id,
+                                 NTSTATUS status,
+                                 std::size_t transferred) noexcept = 0;
+  virtual void on_closed(NTSTATUS status) noexcept = 0;
+};
+
+/**
+ * @brief Common provider contract for Winsock, WSK, or an offload channel.
+ *
+ * A successful write retains the caller's byte storage until exactly one
+ * on_write_complete callback for its nonzero operation ID. Completion may be
+ * inline, before write() returns. stop() prevents new callbacks from being
+ * created; drain() waits for accepted callbacks to leave provider and driver
+ * code.
+ */
+class transport_backend {
+public:
+  virtual ~transport_backend() = default;
+
+  virtual runtime_descriptor runtime() const noexcept {
+    return {
+        .domain = native_execution_domain,
+        .path = execution_path::direct,
+        .features = feature_set(network_feature::byte_transport),
+    };
+  }
+  virtual transport_capabilities capabilities() const noexcept = 0;
+  /** Explicit borrowed sink hook used by owning stream facades. */
+  virtual ntl::status start_borrowed(transport_sink &sink) noexcept = 0;
+  virtual ntl::status write(std::uint64_t operation_id, scatter_view bytes,
+                            bool final) noexcept = 0;
+  virtual ntl::status cancel(std::uint64_t operation_id) noexcept = 0;
+  virtual void stop() noexcept = 0;
+  virtual ntl::status drain() noexcept = 0;
+};
+
+struct borrowed_transport_callbacks {
+  ntl::status (*start_borrowed)(void *, transport_sink &) noexcept = nullptr;
+  ntl::status (*write)(void *, std::uint64_t, scatter_view,
+                       bool) noexcept = nullptr;
+  ntl::status (*cancel)(void *, std::uint64_t) noexcept = nullptr;
+  void (*stop)(void *) noexcept = nullptr;
+  ntl::status (*drain)(void *) noexcept = nullptr;
+};
+
+/** Non-owning provider-vtable adapter suitable for user or driver globals. */
+class borrowed_callback_transport final : public transport_backend {
+public:
+  constexpr borrowed_callback_transport(
+      void *context, borrowed_transport_callbacks callbacks,
+      transport_capabilities capabilities,
+      runtime_descriptor runtime) noexcept
+      : context_(context), callbacks_(callbacks),
+        capabilities_(capabilities), runtime_(runtime) {}
+
+  runtime_descriptor runtime() const noexcept override { return runtime_; }
+  transport_capabilities capabilities() const noexcept override {
+    return capabilities_;
+  }
+
+  ntl::status start_borrowed(transport_sink &sink) noexcept override {
+    if (!capabilities_.available ||
+        !runtime_.supports(network_feature::byte_transport,
+                           runtime_.path))
+      return STATUS_NOT_SUPPORTED;
+    return callbacks_.start_borrowed
+               ? callbacks_.start_borrowed(context_, sink)
+               : ntl::status{STATUS_NOT_SUPPORTED};
+  }
+
+  ntl::status write(std::uint64_t operation_id, scatter_view bytes,
+                    bool final) noexcept override {
+    if (operation_id == 0 || (!bytes && !final) ||
+        bytes.size() > runtime_.limits.maximum_input_bytes)
+      return STATUS_INVALID_PARAMETER;
+    return callbacks_.write
+               ? callbacks_.write(context_, operation_id, bytes, final)
+               : ntl::status{STATUS_NOT_SUPPORTED};
+  }
+
+  ntl::status cancel(std::uint64_t operation_id) noexcept override {
+    if (operation_id == 0)
+      return STATUS_INVALID_PARAMETER;
+    if (!capabilities_.cancellation)
+      return STATUS_NOT_SUPPORTED;
+    return callbacks_.cancel
+               ? callbacks_.cancel(context_, operation_id)
+               : ntl::status{STATUS_NOT_SUPPORTED};
+  }
+
+  void stop() noexcept override {
+    if (callbacks_.stop)
+      callbacks_.stop(context_);
+  }
+
+  ntl::status drain() noexcept override {
+    return callbacks_.drain ? callbacks_.drain(context_)
+                            : ntl::status{STATUS_NOT_SUPPORTED};
+  }
+
+private:
+  void *context_ = nullptr;
+  borrowed_transport_callbacks callbacks_{};
+  transport_capabilities capabilities_{};
+  runtime_descriptor runtime_{};
+};
+
+} // namespace ntl::net::io

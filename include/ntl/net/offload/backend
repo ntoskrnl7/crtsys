@@ -1,0 +1,78 @@
+/**
+ * @file net_offload_backend
+ * @brief Transport-neutral bounded operation backend used on both sides of RPC.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include <ntl/net/buffer/scatter_view>
+#include <ntl/net/offload/protocol>
+#include <ntl/net/runtime>
+#include <ntl/status>
+
+#include <span>
+
+namespace ntl::net::offload {
+
+/**
+ * @brief Synchronous backend for PASSIVE_LEVEL or an inline service table.
+ *
+ * A kernel path that cannot wait uses async_backend instead of blocking a
+ * classify, DPC, or transport callback.
+ */
+class backend {
+public:
+  virtual ~backend() = default;
+  virtual runtime_descriptor runtime() const noexcept = 0;
+  virtual ntl::status execute(
+      const request_header &request, scatter_view input,
+      std::span<std::byte> output, response_header &response) noexcept = 0;
+};
+
+struct callback {
+  using function_type = ntl::status (*)(
+      void *, const request_header &, scatter_view,
+      std::span<std::byte>, response_header &) noexcept;
+
+  function_type function = nullptr;
+  void *context = nullptr;
+};
+
+/** Small non-owning backend suitable for driver globals and service tables. */
+class borrowed_callback_backend final : public backend {
+public:
+  constexpr borrowed_callback_backend(runtime_descriptor runtime,
+                                      callback handler) noexcept
+      : runtime_(runtime), handler_(handler) {}
+
+  runtime_descriptor runtime() const noexcept override { return runtime_; }
+
+  ntl::status execute(const request_header &request, scatter_view input,
+                      std::span<std::byte> output,
+                      response_header &response) noexcept override {
+    if (!handler_.function || !input || input.size() != request.input_size ||
+        output.size() < request.output_capacity)
+      return STATUS_INVALID_PARAMETER;
+    const ntl::status accepted = validate(request, runtime_);
+    if (!accepted.is_ok())
+      return accepted;
+    response = {
+        .kind = request.kind,
+        .request_id = request.request_id,
+        .completion_status = STATUS_PENDING,
+    };
+    const ntl::status executed = handler_.function(
+        handler_.context, request, input,
+        output.first(request.output_capacity), response);
+    if (!executed.is_ok())
+      return executed;
+    return validate(response, request);
+  }
+
+private:
+  runtime_descriptor runtime_{};
+  callback handler_{};
+};
+
+} // namespace ntl::net::offload

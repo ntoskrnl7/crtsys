@@ -1,0 +1,301 @@
+/**
+ * @file kernel_passive_cleanup_domain
+ * @brief Allocation-free retirement to a joined PASSIVE_LEVEL worker.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/net/kernel/passive_cleanup_domain is a kernel-mode header"
+#endif
+
+#include <ntddk.h>
+
+#include <atomic>
+#include <cstddef>
+#include <utility>
+
+#include <ntl/irql>
+#include <ntl/net/kernel/passive_cleanup_item>
+#include <ntl/status>
+#include <ntl/system_thread>
+
+namespace ntl::net::kernel {
+
+/**
+ * @brief Drains IRQL-sensitive resources on one joined system thread.
+ *
+ * Resource creation registers a preallocated intrusive node. Final release at
+ * PASSIVE_LEVEL cleans it inline; release at APC_LEVEL or DISPATCH_LEVEL adds
+ * it to this domain without allocating. stop_and_drain() closes registration,
+ * processes every retired node, and joins the worker before returning. Joining
+ * the thread guarantees that no cleanup callback remains in driver code when
+ * the owning service proceeds with unload.
+ */
+class passive_cleanup_domain {
+public:
+  passive_cleanup_domain() noexcept {
+    KeInitializeSpinLock(&lock_);
+    InitializeListHead(&retired_);
+    KeInitializeEvent(&wake_, SynchronizationEvent, FALSE);
+    if (ntl::current_irql() != ntl::irql::passive) {
+      start_status_ = STATUS_INVALID_DEVICE_STATE;
+      return;
+    }
+    auto created = ntl::system_thread::create(
+        &passive_cleanup_domain::worker, this);
+    if (!created) {
+      start_status_ = static_cast<NTSTATUS>(created.status());
+      return;
+    }
+    worker_ = std::move(*created);
+  }
+
+  passive_cleanup_domain(const passive_cleanup_domain &) = delete;
+  passive_cleanup_domain &operator=(const passive_cleanup_domain &) = delete;
+
+  ~passive_cleanup_domain() {
+    NT_ASSERT(ntl::current_irql() == ntl::irql::passive);
+    if (ntl::current_irql() == ntl::irql::passive && !joined_)
+      (void)stop_and_drain();
+    NT_ASSERT(joined_);
+    NT_ASSERT(live_ == 0);
+    NT_ASSERT(IsListEmpty(&retired_));
+  }
+
+  /** Registers one node before its resource becomes externally visible. */
+  [[nodiscard]] ntl::status
+  register_item(passive_cleanup_item &item) noexcept {
+    if (!NT_SUCCESS(start_status_))
+      return start_status_;
+    if (!item.cleanup_ || item.owner_ || item.retired_ ||
+        ntl::current_irql() > ntl::irql::dispatch)
+      return STATUS_INVALID_PARAMETER;
+
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    if (stopping_) {
+      KeReleaseSpinLock(&lock_, old_irql);
+      return STATUS_DELETE_PENDING;
+    }
+    item.owner_ = this;
+    ++live_;
+    KeReleaseSpinLock(&lock_, old_irql);
+    return ntl::status::ok();
+  }
+
+  /**
+   * @brief Retires a registered node from any IRQL at or below DISPATCH_LEVEL.
+   *
+   * The callback runs inline only at PASSIVE_LEVEL. At a higher IRQL this
+   * function performs no allocation and wakes the domain's dedicated worker.
+   */
+  void retire(passive_cleanup_item &item) noexcept {
+    const auto irql = ntl::current_irql();
+    NT_ASSERT(irql <= ntl::irql::dispatch);
+    if (irql > ntl::irql::dispatch)
+      return;
+
+    bool cleanup_inline = false;
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    NT_ASSERT(item.owner_ == this && !item.retired_);
+    if (item.owner_ != this || item.retired_) {
+      KeReleaseSpinLock(&lock_, old_irql);
+      return;
+    }
+    item.retired_ = true;
+    if (irql == ntl::irql::passive) {
+      item.owner_ = nullptr;
+      cleanup_inline = true;
+    } else {
+      InsertTailList(&retired_, &item.entry_);
+    }
+    KeReleaseSpinLock(&lock_, old_irql);
+
+    if (cleanup_inline) {
+      item.cleanup_(item.context_);
+      complete_one();
+      return;
+    }
+    KeSetEvent(&wake_, IO_NO_INCREMENT, FALSE);
+  }
+
+  /**
+   * Retires through the joined worker even when the caller is already at
+   * PASSIVE_LEVEL. Use this for resources whose cleanup joins callbacks: the
+   * final reference is allowed to disappear inside one of those callbacks,
+   * and inline cleanup would otherwise wait for itself.
+   */
+  void retire_deferred(passive_cleanup_item &item) noexcept {
+    const auto irql = ntl::current_irql();
+    NT_ASSERT(irql <= ntl::irql::dispatch);
+    if (irql > ntl::irql::dispatch)
+      return;
+
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    NT_ASSERT(item.owner_ == this && !item.retired_);
+    if (item.owner_ != this || item.retired_) {
+      KeReleaseSpinLock(&lock_, old_irql);
+      return;
+    }
+    item.retired_ = true;
+    InsertTailList(&retired_, &item.entry_);
+    KeReleaseSpinLock(&lock_, old_irql);
+    KeSetEvent(&wake_, IO_NO_INCREMENT, FALSE);
+  }
+
+  /**
+   * @brief Stops new registrations, drains resources, and joins the worker.
+   * @note PASSIVE_LEVEL only. Existing resources may retire while this waits.
+   */
+  [[nodiscard]] ntl::status stop_and_drain() noexcept {
+    if (ntl::current_irql() != ntl::irql::passive)
+      return STATUS_INVALID_DEVICE_STATE;
+    if (joined_)
+      return ntl::status::ok();
+
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    stopping_ = true;
+    KeReleaseSpinLock(&lock_, old_irql);
+    KeSetEvent(&wake_, IO_NO_INCREMENT, FALSE);
+
+    if (!worker_) {
+      joined_ = true;
+      return live_ == 0 ? ntl::status::ok()
+                        : ntl::status{STATUS_INVALID_DEVICE_STATE};
+    }
+    const auto status = worker_.join();
+    if (status.is_ok())
+      joined_ = true;
+    return status;
+  }
+
+  std::size_t live() const noexcept {
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    const std::size_t result = live_;
+    KeReleaseSpinLock(&lock_, old_irql);
+    return result;
+  }
+
+  /**
+   * Waits until every retirement queued before this call has completed.
+   *
+   * This does not stop registration and does not compare a process-wide live
+   * count. A FIFO barrier therefore remains correct while unrelated owners
+   * are being created or destroyed concurrently. Network facades drain their
+   * own callbacks internally; this hook is for runtime boundaries and stress
+   * contracts that require deterministic reclamation evidence.
+   */
+  [[nodiscard]] ntl::status flush_retired() noexcept {
+    if (ntl::current_irql() != ntl::irql::passive)
+      return STATUS_INVALID_DEVICE_STATE;
+    struct barrier_context {
+      barrier_context() noexcept
+          : item(&barrier_context::complete, this) {
+        KeInitializeEvent(&completed, NotificationEvent, FALSE);
+      }
+
+      static void complete(void *context) noexcept {
+        auto *const barrier = static_cast<barrier_context *>(context);
+        KeSetEvent(&barrier->completed, IO_NO_INCREMENT, FALSE);
+      }
+
+      KEVENT completed{};
+      passive_cleanup_item item;
+    } barrier;
+
+    const ntl::status registered = register_item(barrier.item);
+    if (!registered.is_ok())
+      return registered;
+    retire_deferred(barrier.item);
+    return KeWaitForSingleObject(&barrier.completed, Executive, KernelMode,
+                                 FALSE, nullptr);
+  }
+
+  ntl::status start_status() const noexcept { return start_status_; }
+
+  /** True only while called by this domain's joined cleanup worker. */
+  bool running_on_cleanup_worker() const noexcept {
+    return worker_thread_.load(std::memory_order_acquire) ==
+           KeGetCurrentThread();
+  }
+
+private:
+  static void worker(void *context) noexcept {
+    static_cast<passive_cleanup_domain *>(context)->run_worker();
+    PsTerminateSystemThread(STATUS_SUCCESS);
+  }
+
+  void run_worker() noexcept {
+    worker_thread_.store(KeGetCurrentThread(), std::memory_order_release);
+    for (;;) {
+      (void)KeWaitForSingleObject(
+          &wake_, Executive, KernelMode, FALSE, nullptr);
+      for (;;) {
+        passive_cleanup_item *item = nullptr;
+        bool exit = false;
+        KIRQL old_irql = 0;
+        KeAcquireSpinLock(&lock_, &old_irql);
+        if (!IsListEmpty(&retired_)) {
+          auto *entry = RemoveHeadList(&retired_);
+          item = CONTAINING_RECORD(
+              entry, passive_cleanup_item, entry_);
+          item->owner_ = nullptr;
+        } else {
+          exit = stopping_ && live_ == 0;
+        }
+        KeReleaseSpinLock(&lock_, old_irql);
+
+        if (item) {
+          item->cleanup_(item->context_);
+          complete_one();
+          continue;
+        }
+        if (exit) {
+          worker_thread_.store(nullptr, std::memory_order_release);
+          return;
+        }
+        break;
+      }
+    }
+  }
+
+  void complete_one() noexcept {
+    bool wake_for_stop = false;
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    NT_ASSERT(live_ != 0);
+    if (live_ != 0)
+      --live_;
+    wake_for_stop = stopping_ && live_ == 0;
+    KeReleaseSpinLock(&lock_, old_irql);
+    if (wake_for_stop)
+      KeSetEvent(&wake_, IO_NO_INCREMENT, FALSE);
+  }
+
+  mutable KSPIN_LOCK lock_{};
+  LIST_ENTRY retired_{};
+  KEVENT wake_{};
+  ntl::system_thread worker_{};
+  std::atomic<PKTHREAD> worker_thread_{nullptr};
+  NTSTATUS start_status_ = STATUS_SUCCESS;
+  std::size_t live_ = 0;
+  bool stopping_ = false;
+  bool joined_ = false;
+};
+
+/**
+ * @brief Driver-runtime-owned retirement domain.
+ *
+ * CrtSys initializes this before ntl::main and drains it before CRT teardown.
+ * Public network facades use it internally; applications never own or drain
+ * this domain.
+ */
+passive_cleanup_domain *borrowed_runtime_passive_cleanup_domain() noexcept;
+
+} // namespace ntl::net::kernel

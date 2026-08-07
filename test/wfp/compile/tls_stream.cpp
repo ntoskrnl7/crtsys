@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <coroutine>
 #include <cstddef>
 #include <cstdint>
@@ -20,6 +21,7 @@
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -328,7 +330,7 @@ run_server(ntl::net::tls_stream &stream,
   std::array<std::byte, 37> buffer{};
   std::size_t received = 0;
   while (received != expected.size()) {
-    const std::size_t count = co_await stream.read_some(buffer);
+    const std::size_t count = co_await stream.read_some_borrowed(buffer);
     if (count == 0 || count > expected.size() - received)
       throw std::runtime_error(
           "TLS server received an invalid request size");
@@ -348,13 +350,13 @@ run_server(ntl::net::tls_stream &stream,
 
 coroutine_task<std::size_t>
 run_probed_server(
-    ntl::net::async_socket &socket,
-    ntl::net::tls_server_identity_provider &provider,
+    ntl::net::async_socket socket,
+    std::shared_ptr<ntl::net::tls_server_identity_provider> provider,
     std::wstring_view expected_server_name,
     std::span<const std::byte> expected,
     std::span<const std::byte> reply) {
   auto accepted = co_await ntl::net::accept_tls(
-      socket, provider,
+      std::move(socket), std::move(provider),
       {.maximum_buffered_ciphertext = 128 * 1024,
        .maximum_client_hello = 64 * 1024,
        .receive_chunk_size = 7,
@@ -363,10 +365,10 @@ run_probed_server(
        .receive_chunk_size = 128},
       {.application_protocols = {"h2"},
        .require_application_protocol = false});
-  auto &stream = accepted.stream();
-  if (accepted.client_hello().server_name() !=
+  auto &stream = accepted.borrowed_stream();
+  if (accepted.client_hello_ref().server_name() !=
           expected_server_name ||
-      !accepted.certificate() ||
+      !accepted.borrowed_certificate() ||
       (!stream.negotiated_application_protocol().empty() &&
        stream.negotiated_application_protocol() != "h2"))
     throw std::runtime_error(
@@ -392,13 +394,13 @@ run_probed_server(
 
 coroutine_task<std::size_t>
 run_client(ntl::net::tls_stream &stream,
-           ntl::net::tls_peer_certificate_policy &policy,
+           std::shared_ptr<ntl::net::tls_peer_certificate_policy> policy,
            std::wstring server_name,
            std::span<const std::byte> request,
            std::span<const std::byte> expected_reply) {
   co_await stream.handshake_client({
       .server_name = std::move(server_name),
-      .certificate_policy = &policy,
+      .certificate_policy = std::move(policy),
       .application_protocols = {"h2", "http/1.1"},
       .require_application_protocol = false});
   if (!stream.negotiated_application_protocol().empty() &&
@@ -420,7 +422,7 @@ run_client(ntl::net::tls_stream &stream,
   std::array<std::byte, 113> buffer{};
   std::size_t received = 0;
   while (received != expected_reply.size()) {
-    const std::size_t count = co_await stream.read_some(buffer);
+    const std::size_t count = co_await stream.read_some_borrowed(buffer);
     if (count == 0 ||
         count > expected_reply.size() - received)
       throw std::runtime_error(
@@ -433,7 +435,7 @@ run_client(ntl::net::tls_stream &stream,
     received += count;
   }
 
-  if (co_await stream.read_some(buffer) != 0 ||
+  if (co_await stream.read_some_borrowed(buffer) != 0 ||
       !stream.received_close_notify())
     throw std::runtime_error(
         "TLS client did not receive close_notify");
@@ -454,8 +456,8 @@ class alpn_observing_identity_provider final
     : public ntl::net::tls_server_identity_provider {
 public:
   explicit alpn_observing_identity_provider(
-      ntl::net::cached_tls_server_identity_provider &inner) noexcept
-      : inner_(&inner) {}
+      std::shared_ptr<ntl::net::cached_tls_server_identity_provider> inner)
+      : inner_(std::move(inner)) {}
 
   std::shared_ptr<ntl::net::tls_server_identity>
   select(const ntl::net::tls_client_hello &hello) override {
@@ -468,15 +470,15 @@ public:
   }
 
 private:
-  ntl::net::cached_tls_server_identity_provider *inner_;
+  std::shared_ptr<ntl::net::cached_tls_server_identity_provider> inner_;
 };
 
 coroutine_task<bool>
 run_rejected_client(ntl::net::tls_stream &stream,
-                    rejecting_policy &policy) {
+                    std::shared_ptr<rejecting_policy> policy) {
   try {
     co_await stream.handshake_client(
-        {L"localhost", &policy});
+        {L"localhost", std::move(policy)});
   } catch (const std::system_error &) {
     co_return true;
   }
@@ -495,12 +497,12 @@ run_handshake_only_server(ntl::net::tls_stream &stream) {
 
 coroutine_task<bool> run_mtls_server(
     ntl::net::tls_stream &stream,
-    ntl::net::tls_client_certificate_policy &policy) {
+    std::shared_ptr<ntl::net::tls_client_certificate_policy> policy) {
   co_await stream.handshake_server(
       {.require_client_certificate = true,
-       .client_certificate_policy = &policy});
+       .client_certificate_policy = std::move(policy)});
   std::array<std::byte, 1> request{};
-  if (co_await stream.read_some(request) != 1 ||
+  if (co_await stream.read_some_borrowed(request) != 1 ||
       request[0] != std::byte{0x5a})
     throw std::runtime_error(
         "mTLS server did not receive the authenticated request");
@@ -513,31 +515,31 @@ coroutine_task<bool> run_mtls_server(
 
 coroutine_task<bool> run_mtls_client(
     ntl::net::tls_stream &stream,
-    ntl::net::tls_peer_certificate_policy &policy) {
+    std::shared_ptr<ntl::net::tls_peer_certificate_policy> policy) {
   co_await stream.handshake_client(
       {.server_name = L"localhost",
-       .certificate_policy = &policy});
+       .certificate_policy = std::move(policy)});
   constexpr std::array request{std::byte{0x5a}};
   if (co_await stream.write_all(request) != request.size())
     throw std::runtime_error("mTLS client request completed short");
   std::array<std::byte, 1> reply{};
-  if (co_await stream.read_some(reply) != 1 ||
+  if (co_await stream.read_some_borrowed(reply) != 1 ||
       reply[0] != std::byte{0xa5})
     throw std::runtime_error(
         "mTLS client did not receive the authenticated reply");
-  if (co_await stream.read_some(reply) != 0)
+  if (co_await stream.read_some_borrowed(reply) != 0)
     throw std::runtime_error("mTLS server did not close cleanly");
   co_await stream.shutdown();
   co_return true;
 }
 
-static_assert(!std::is_copy_constructible_v<
+static_assert(std::is_copy_constructible_v<
               ntl::net::tls_credentials>);
 static_assert(std::is_move_constructible_v<
               ntl::net::tls_credentials>);
 static_assert(!std::is_copy_constructible_v<
               ntl::net::tls_stream>);
-static_assert(!std::is_move_constructible_v<
+static_assert(std::is_move_constructible_v<
               ntl::net::tls_stream>);
 
 void test_http1_framing() {
@@ -675,7 +677,7 @@ public:
 };
 
 bool test_tls_frontend_boundaries() {
-  ntl::net::inspection::tls_inspection_observation observation;
+  ntl::net::inspection::tls_inspection_observation_view observation;
   observation.server_name = L"outer.example";
   observation.protocol_adapter_available = true;
   const ntl::net::inspection::ech_frontend_result confirmed{
@@ -711,20 +713,70 @@ bool test_tls_frontend_boundaries() {
 
 bool test_product_tls_backend_audit() {
   using namespace ntl::net::inspection;
-  bounded_tls_audit_sink audit(2);
-  unavailable_origin_client_identity unavailable;
-  audited_origin_client_identity_provider provider(unavailable, audit);
-  const auto selected = provider.select({L"mtls.example", {}});
+  auto audit = std::make_shared<bounded_tls_audit_sink>(2);
+  auto unavailable =
+      std::make_shared<unavailable_origin_client_identity>();
+  auto provider = std::make_shared<
+      audited_origin_client_identity_provider>(unavailable, audit);
+  const auto selected = provider->select({L"mtls.example", {}});
   if (!selected || static_cast<bool>(*selected))
     return false;
-  audit.record({tls_audit_kind::blocked_confirmed_ech,
-                std::chrono::system_clock::now(), L"ech.example",
-                STATUS_ACCESS_DENIED});
-  audit.record({tls_audit_kind::downstream_identity_selected,
-                std::chrono::system_clock::now(), L"site.example",
-                STATUS_SUCCESS});
-  const auto snapshot = audit.snapshot();
-  return snapshot.size() == 2 && audit.discarded() == 1 &&
+  provider->close();
+  provider->close();
+  const auto rejected =
+      provider->select({L"after-close.example", {}});
+  if (rejected || rejected.status() != STATUS_DELETE_PENDING)
+    return false;
+
+  auto race_audit = std::make_shared<bounded_tls_audit_sink>(2);
+  auto race_provider = std::make_shared<
+      audited_origin_client_identity_provider>(unavailable, race_audit);
+  std::atomic<bool> start{false};
+  std::atomic<unsigned> selections_before_close{0};
+  std::atomic<unsigned> rejected_after_close{0};
+  std::atomic<bool> unexpected_status{false};
+  std::thread selector(
+      [retained = race_provider, &start, &selections_before_close,
+       &rejected_after_close, &unexpected_status] {
+        while (!start.load(std::memory_order_acquire))
+          std::this_thread::yield();
+        for (;;) {
+          const auto result = retained->select({L"mtls-race.example", {}});
+          if (result) {
+            if (static_cast<bool>(*result)) {
+              unexpected_status.store(true, std::memory_order_release);
+              return;
+            }
+            selections_before_close.fetch_add(1, std::memory_order_release);
+            continue;
+          }
+          if (result.status() == STATUS_DELETE_PENDING) {
+            rejected_after_close.fetch_add(1, std::memory_order_release);
+            return;
+          }
+          unexpected_status.store(true, std::memory_order_release);
+          return;
+        }
+      });
+  start.store(true, std::memory_order_release);
+  while (selections_before_close.load(std::memory_order_acquire) == 0)
+    std::this_thread::yield();
+  race_provider->close();
+  race_provider->close();
+  race_provider.reset();
+  selector.join();
+  if (unexpected_status.load(std::memory_order_acquire) ||
+      rejected_after_close.load(std::memory_order_acquire) != 1)
+    return false;
+
+  audit->record({tls_audit_kind::blocked_confirmed_ech,
+                 std::chrono::system_clock::now(), L"ech.example",
+                 STATUS_ACCESS_DENIED});
+  audit->record({tls_audit_kind::downstream_identity_selected,
+                 std::chrono::system_clock::now(), L"site.example",
+                 STATUS_SUCCESS});
+  const auto snapshot = audit->snapshot();
+  return snapshot.size() == 2 && audit->discarded() == 1 &&
          snapshot.front().kind == tls_audit_kind::blocked_confirmed_ech &&
          snapshot.back().kind ==
              tls_audit_kind::downstream_identity_selected;
@@ -806,20 +858,196 @@ int main() {
         shared_key_issuer.issue(L"first.example.test");
     auto shared_second =
         shared_key_issuer.issue(L"second.example.test");
-    if (certificate_spki_sha256(shared_first.get()) !=
-        certificate_spki_sha256(shared_second.get()))
+    if (certificate_spki_sha256(shared_first.borrowed_certificate()) !=
+        certificate_spki_sha256(shared_second.borrowed_certificate()))
       throw std::runtime_error(
           "shared leaf issuer changed SPKI between hosts");
 
-    ntl::net::windows_tls_certificate_issuer issuer(
+    auto issuer = std::make_shared<
+        ntl::net::windows_tls_certificate_issuer>(
         certificate.get(),
-        {.key_name_prefix = L"crtsys-ntl-tls-contract",
-         .rsa_bits = 2048,
-         .validity_days = 2,
-         .machine_keys = false});
-    ntl::net::cached_tls_server_identity_provider
-        identities(issuer, 2);
-    alpn_observing_identity_provider observed_identities(identities);
+        ntl::net::windows_tls_certificate_issuer_options{
+            .key_name_prefix = L"crtsys-ntl-tls-contract",
+            .rsa_bits = 2048,
+            .validity_days = 2,
+            .machine_keys = false});
+    auto identities = std::make_shared<
+        ntl::net::cached_tls_server_identity_provider>(issuer, 2);
+    auto observed_identities =
+        std::make_shared<alpn_observing_identity_provider>(identities);
+
+    {
+      auto frontend = std::make_shared<
+          ntl::net::inspection::managed_tls_frontend>(
+          identities,
+          std::make_shared<
+              ntl::net::inspection::unavailable_ech_frontend>(),
+          std::make_shared<
+              ntl::net::inspection::inspectable_downstream_trust>(),
+          std::make_shared<
+              ntl::net::inspection::null_tls_audit_sink>());
+      std::atomic<unsigned> selections_before_close{0};
+      std::atomic<unsigned> rejected_after_close{0};
+      std::atomic<bool> unexpected_frontend_status{false};
+      const ntl::net::tls_client_hello empty_hello;
+      std::thread selector(
+          [retained = frontend, &selections_before_close,
+           &rejected_after_close, &unexpected_frontend_status,
+           &empty_hello] {
+            for (;;) {
+              const auto selected = retained->select(empty_hello, {});
+              if (selected) {
+                unexpected_frontend_status.store(true,
+                                                 std::memory_order_release);
+                return;
+              }
+              const auto status = static_cast<NTSTATUS>(selected.status());
+              if (status == STATUS_DELETE_PENDING) {
+                rejected_after_close.fetch_add(1, std::memory_order_release);
+                return;
+              }
+              if (status != STATUS_NOT_FOUND) {
+                unexpected_frontend_status.store(true,
+                                                 std::memory_order_release);
+                return;
+              }
+              selections_before_close.fetch_add(1,
+                                                std::memory_order_release);
+            }
+          });
+      while (selections_before_close.load(std::memory_order_acquire) == 0)
+        std::this_thread::yield();
+      frontend->close();
+      frontend->close();
+      frontend.reset();
+      selector.join();
+      if (unexpected_frontend_status.load(std::memory_order_acquire) ||
+          rejected_after_close.load(std::memory_order_acquire) != 1)
+        throw std::runtime_error(
+            "managed TLS frontend close/use lifetime contract failed");
+      auto closed_frontend = std::make_shared<
+          ntl::net::inspection::managed_tls_frontend>(
+          identities,
+          std::make_shared<
+              ntl::net::inspection::unavailable_ech_frontend>(),
+          std::make_shared<
+              ntl::net::inspection::inspectable_downstream_trust>(),
+          std::make_shared<
+              ntl::net::inspection::null_tls_audit_sink>());
+      closed_frontend->close();
+      const auto rejected = closed_frontend->select(empty_hello, {});
+      if (rejected || rejected.status() != STATUS_DELETE_PENDING)
+        throw std::runtime_error(
+            "closed managed TLS frontend accepted new work");
+    }
+
+    {
+      auto closing_cache = std::make_shared<
+          ntl::net::cached_tls_server_identity_provider>(issuer, 2);
+      auto retained_identity =
+          closing_cache->select(L"cache-race.example.test");
+      auto retained_credentials = retained_identity->credentials();
+      std::atomic<bool> start{false};
+      std::atomic<unsigned> successful_selections{0};
+      std::atomic<unsigned> rejected_selections{0};
+      std::atomic<bool> unexpected_error{false};
+      std::thread selector([&] {
+        while (!start.load(std::memory_order_acquire))
+          std::this_thread::yield();
+        for (;;) {
+          try {
+            auto selected =
+                closing_cache->select(L"cache-race.example.test");
+            if (!selected || !selected->credentials()) {
+              unexpected_error.store(true, std::memory_order_release);
+              return;
+            }
+            successful_selections.fetch_add(1, std::memory_order_release);
+          } catch (const std::system_error &error) {
+            if (error.code().value() == ERROR_OPERATION_ABORTED) {
+              rejected_selections.fetch_add(1, std::memory_order_release);
+              return;
+            }
+            unexpected_error.store(true, std::memory_order_release);
+            return;
+          } catch (...) {
+            unexpected_error.store(true, std::memory_order_release);
+            return;
+          }
+        }
+      });
+      start.store(true, std::memory_order_release);
+      while (successful_selections.load(std::memory_order_acquire) == 0)
+        std::this_thread::yield();
+      closing_cache->close();
+      closing_cache->close();
+      selector.join();
+
+      if (unexpected_error.load(std::memory_order_acquire) ||
+          rejected_selections.load(std::memory_order_acquire) != 1 ||
+          !retained_identity->borrowed_certificate() ||
+          !retained_credentials)
+        throw std::runtime_error(
+            "TLS identity cache close/use lifetime contract failed");
+      try {
+        (void)closing_cache->select(L"after-close.example.test");
+        throw std::runtime_error(
+            "closed TLS identity cache accepted new work");
+      } catch (const std::system_error &error) {
+        if (error.code().value() != ERROR_OPERATION_ABORTED)
+          throw;
+      }
+    }
+
+    {
+      auto bounded_cache = std::make_shared<
+          ntl::net::cached_tls_server_identity_provider>(issuer, 2);
+      auto first = bounded_cache->select(L"lru-first.example.test");
+      auto second = bounded_cache->select(L"lru-second.example.test");
+      auto third = bounded_cache->select(L"lru-third.example.test");
+      if (!first || !second || !third || bounded_cache->size() != 2)
+        throw std::runtime_error("TLS identity cache capacity failed");
+
+      auto reissued_first =
+          bounded_cache->select(L"lru-first.example.test");
+      if (!reissued_first || reissued_first == first ||
+          bounded_cache->size() != 2 ||
+          !first->borrowed_certificate() || !first->credentials())
+        throw std::runtime_error(
+            "TLS identity cache eviction ownership failed");
+
+      std::shared_ptr<ntl::net::tls_server_identity> concurrent_first;
+      std::shared_ptr<ntl::net::tls_server_identity> concurrent_second;
+      std::atomic<bool> select_start{false};
+      std::thread first_selector([&] {
+        while (!select_start.load(std::memory_order_acquire))
+          std::this_thread::yield();
+        concurrent_first =
+            bounded_cache->select(L"concurrent.example.test");
+      });
+      std::thread second_selector([&] {
+        while (!select_start.load(std::memory_order_acquire))
+          std::this_thread::yield();
+        concurrent_second =
+            bounded_cache->select(L"concurrent.example.test");
+      });
+      select_start.store(true, std::memory_order_release);
+      first_selector.join();
+      second_selector.join();
+      if (!concurrent_first || concurrent_first != concurrent_second ||
+          bounded_cache->size() != 2)
+        throw std::runtime_error(
+            "TLS identity cache concurrent selection failed");
+
+      auto retained_identity = concurrent_first;
+      auto retained_credentials = retained_identity->credentials();
+      bounded_cache->close();
+      bounded_cache.reset();
+      if (!retained_identity->borrowed_certificate() ||
+          !retained_credentials)
+        throw std::runtime_error(
+            "TLS identity did not outlive its cache facade");
+    }
     auto client_credentials =
         ntl::net::tls_credentials::client(
             {.manual_peer_validation = true});
@@ -837,13 +1065,15 @@ int main() {
     auto mtls_client_credentials =
         ntl::net::tls_credentials::client(
             {.manual_peer_validation = true,
-             .certificate = client_certificate.get()});
-    ntl::net::exact_client_certificate_policy
-        client_identity(client_certificate.get());
+             .borrowed_certificate =
+                 client_certificate.borrowed_certificate()});
+    auto client_identity =
+        std::make_shared<ntl::net::exact_client_certificate_policy>(
+            client_certificate.borrowed_certificate());
     ntl::net::inspection::mapped_origin_client_identity
         mapped_origin_identity;
     mapped_origin_identity.add(
-        L"mtls.example.test", client_certificate.get());
+        L"mtls.example.test", client_certificate.borrowed_certificate());
     const auto mapped_selection =
         mapped_origin_identity.select(
             {.server_name = L"MTLS.Example.Test.",
@@ -874,11 +1104,60 @@ int main() {
             ntl::net::inspection::downstream_trust_state::unknown)
       throw std::runtime_error(
           "configured downstream trust selection failed");
-    ntl::net::certificate_authority_policy authority(
-        certificate.get());
+    auto authority =
+        std::make_shared<ntl::net::certificate_authority_policy>(
+            certificate.get());
 
     const auto request = make_pattern(128 * 1024 + 31, 0x31);
     const auto reply = make_pattern(96 * 1024 + 17, 0x92);
+
+    {
+      auto listener = make_listener();
+      auto client_socket = connect_loopback(listener.port);
+      auto server_socket = accept_one(listener);
+      ntl::net::io_completion_context context;
+      ntl::net::async_socket client(
+          context, client_socket.release());
+      ntl::net::tls_stream stream(client, client_credentials);
+      std::atomic<bool> start{false};
+      std::atomic<bool> closed{false};
+      std::atomic<unsigned> observations{0};
+      std::atomic<bool> rejected{false};
+      std::atomic<bool> unexpected{false};
+      std::thread user([&] {
+        while (!start.load(std::memory_order_acquire))
+          std::this_thread::yield();
+        while (!closed.load(std::memory_order_acquire)) {
+          (void)stream.is_handshaken();
+          (void)stream.maximum_plaintext_record();
+          stream.cancel();
+          observations.fetch_add(1, std::memory_order_release);
+        }
+        try {
+          std::array<std::byte, 1> byte{};
+          (void)stream.read_some_borrowed(byte);
+          unexpected.store(true, std::memory_order_release);
+        } catch (const std::system_error &error) {
+          rejected.store(
+              error.code().value() == ERROR_OPERATION_ABORTED,
+              std::memory_order_release);
+        } catch (...) {
+          unexpected.store(true, std::memory_order_release);
+        }
+      });
+      start.store(true, std::memory_order_release);
+      while (observations.load(std::memory_order_acquire) == 0)
+        std::this_thread::yield();
+      stream.close();
+      stream.close();
+      closed.store(true, std::memory_order_release);
+      user.join();
+      context.close();
+      if (!rejected.load(std::memory_order_acquire) ||
+          unexpected.load(std::memory_order_acquire))
+        throw std::runtime_error(
+            "TLS same-facade close/use race contract failed");
+    }
 
     {
       auto listener = make_listener();
@@ -894,7 +1173,7 @@ int main() {
 
       auto server_task =
           run_probed_server(
-              server, observed_identities, L"auto.example.test",
+              std::move(server), observed_identities, L"auto.example.test",
               request, reply);
       auto client_task =
           run_client(
@@ -919,11 +1198,15 @@ int main() {
       ntl::net::async_socket server(
           context, server_socket.release());
       auto localhost_identity =
-          identities.select(L"localhost");
+          identities->select(L"localhost");
+      auto retained_server_credentials =
+          localhost_identity->credentials();
+      localhost_identity.reset();
+      identities->clear();
       ntl::net::tls_stream client_tls(
           client, mtls_client_credentials);
       ntl::net::tls_stream server_tls(
-          server, localhost_identity->credentials());
+          server, std::move(retained_server_credentials));
 
       auto server_task =
           run_mtls_server(server_tls, client_identity);
@@ -949,12 +1232,12 @@ int main() {
           {.maximum_buffered_ciphertext = 1024 * 1024,
            .receive_chunk_size = 128});
       auto localhost_identity =
-          identities.select(L"localhost");
+          identities->select(L"localhost");
       ntl::net::tls_stream server_tls(
           server, localhost_identity->credentials(),
           {.maximum_buffered_ciphertext = 1024 * 1024,
            .receive_chunk_size = 128});
-      rejecting_policy reject;
+      auto reject = std::make_shared<rejecting_policy>();
 
       auto server_task =
           run_handshake_only_server(server_tls);
@@ -975,6 +1258,9 @@ int main() {
         "ech=provider-boundary, pinning=explicit-policy, "
         "revocation=explicit-policy, "
         "http1=bounded, shared-leaf-spki=stable, "
+        "credential-cache-owner-first=safe, "
+        "identity-cache-close-race=safe, frontend-close-race=safe, "
+        "stream-close-use-race=safe, "
         "close-notify=both\n",
         request.size(), reply.size());
     return 0;

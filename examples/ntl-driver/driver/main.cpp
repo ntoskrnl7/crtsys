@@ -15,7 +15,6 @@
 #include <ntl/passive_executor>
 #include <ntl/pool_allocator>
 #include <ntl/registry>
-#include <ntl/remove_lock>
 #include <ntl/result>
 #include <ntl/status>
 
@@ -40,14 +39,12 @@ public:
     return sequence_.fetch_add(1, std::memory_order_relaxed) + 1;
   }
 
-  ntl::remove_lock &remove_lock() noexcept { return remove_lock_; }
   ntl::passive_executor &executor() noexcept { return executor_; }
   ntl::pmr::pool_resource &scratch_pool() noexcept { return scratch_pool_; }
 
 private:
   std::uint32_t flags_ = 0;
   std::atomic<std::uint32_t> sequence_{0};
-  ntl::remove_lock remove_lock_{ntl::pool_tag("NSrm")};
   ntl::passive_executor executor_{DelayedWorkQueue, "NSpw"};
   ntl::pmr::pool_resource scratch_pool_{ntl::pool_kind::nonpaged,
                                         ntl::pool_option::none, "NSpm"};
@@ -89,28 +86,23 @@ std::uint32_t compute_checksum(sample_state &state,
   return checksum;
 }
 
-void handle_ping(sample_state &state,
-                 const ntl::device_control::in_buffer &in,
-                 ntl::device_control::out_buffer &out) {
-  auto guard = state.remove_lock().acquire(&state);
-  if (!guard)
-    throw ntl::exception(guard.status(), "device is stopping.");
-
-  const auto *request = ntl::ioctl_input_as<ping_ioctl>(in);
-  if (!request)
-    throw ntl::exception(STATUS_BUFFER_TOO_SMALL,
-                         "NTL sample ping input is too small.");
-
-  const auto sequence = state.next_sequence();
-  ntl_sample::ping_reply reply{};
-  reply.value = request->value + 1;
-  reply.sequence = sequence;
-  reply.configured_flags = state.flags();
-  reply.checksum = compute_checksum(state, *request, sequence);
-
-  if (!ntl::ioctl_write_output<ping_ioctl>(out, reply))
-    throw ntl::exception(STATUS_BUFFER_TOO_SMALL,
-                         "NTL sample ping output is too small.");
+ntl::status handle_ping(sample_state &state,
+                        const ntl_sample::ping_request &request,
+                        ntl_sample::ping_reply &reply) noexcept {
+  try {
+    const auto sequence = state.next_sequence();
+    reply.value = request.value + 1;
+    reply.sequence = sequence;
+    reply.configured_flags = state.flags();
+    reply.checksum = compute_checksum(state, request, sequence);
+    return ntl::status::ok();
+  } catch (const ntl::exception &error) {
+    return error.get_status();
+  } catch (const std::bad_alloc &) {
+    return STATUS_INSUFFICIENT_RESOURCES;
+  } catch (...) {
+    return STATUS_UNHANDLED_EXCEPTION;
+  }
 }
 
 } // namespace
@@ -133,44 +125,34 @@ ntl::status ntl::main(ntl::driver &driver,
   if (!endpoint_result)
     return endpoint_result.status();
 
-  auto endpoint = std::make_shared<ntl::device_endpoint<sample_extension>>(
-      std::move(*endpoint_result));
-  auto device = endpoint->device();
-  if (!device)
-    return STATUS_INVALID_DEVICE_STATE;
-
-  std::weak_ptr<ntl::device<sample_extension>> weak_device = device;
-
-  device->on_create([weak_device](ntl::irp &request) {
-    if (auto device = weak_device.lock())
-      ++device->extension().create_count;
-    request.succeed();
-  });
-
-  device->on_close([weak_device](ntl::irp &request) {
-    if (auto device = weak_device.lock())
-      ++device->extension().close_count;
-    request.succeed();
-  });
-
-  device->on_device_control(
-      [state](const ntl::device_control::code &code,
-              const ntl::device_control::in_buffer &in,
-              ntl::device_control::out_buffer &out) {
-        if (ntl::is_ioctl<ping_ioctl>(code)) {
-          handle_ping(*state, in, out);
-          return;
-        }
-
-        out.clear();
-        throw ntl::exception(STATUS_INVALID_DEVICE_REQUEST,
-                             "unknown NTL sample IOCTL.");
+  auto endpoint = std::move(*endpoint_result);
+  ntl::status callback_status = endpoint.on_create(
+      [](sample_extension &extension, ntl::irp &request) noexcept {
+        ++extension.create_count;
+        request.succeed();
       });
+  if (!callback_status.is_ok())
+    return callback_status;
+
+  callback_status = endpoint.on_close(
+      [](sample_extension &extension, ntl::irp &request) noexcept {
+        ++extension.close_count;
+        request.succeed();
+      });
+  if (!callback_status.is_ok())
+    return callback_status;
+
+  const ntl::status route_status = endpoint.on_ioctl<ping_ioctl>(
+      [state](const ntl_sample::ping_request &request,
+              ntl_sample::ping_reply &reply) noexcept {
+        return handle_ping(*state, request, reply);
+      });
+  if (!route_status.is_ok())
+    return route_status;
 
   driver.on_unload([endpoint, state]() mutable {
-    endpoint->link().reset();
-    state->remove_lock().release_and_wait(state.get());
-    endpoint->reset();
+    const ntl::status closed = endpoint.close();
+    NT_ASSERT(closed.is_ok());
   });
 
   return ntl::status::ok();

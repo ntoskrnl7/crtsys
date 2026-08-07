@@ -10,10 +10,6 @@
  */
 #pragma once
 
-#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
-#error "ntl/net/http3/webtransport is a user-mode header"
-#endif
-
 #include <ntl/net/http/datagram>
 #include <ntl/net/http/extended_connect>
 #include <ntl/net/http3/framing>
@@ -115,8 +111,8 @@ struct prerequisites {
 };
 
 template <class HeaderField>
-ntl::result<ntl::net::http::connect_request>
-validate_session_request(
+ntl::result<ntl::net::http::connect_request_view>
+validate_session_request_view(
     std::span<const HeaderField> fields,
     prerequisites negotiated,
     bool browser_client = true,
@@ -124,7 +120,7 @@ validate_session_request(
         64 * 1024) noexcept {
   if (!negotiated.ready())
     return ntl::unexpected(STATUS_NOT_SUPPORTED);
-  auto request = ntl::net::http::validate_connect_request(
+  auto request = ntl::net::http::validate_connect_request_view(
       fields,
       {.peer_enabled_extended_connect = true,
        .browser_origin_required = browser_client,
@@ -138,12 +134,39 @@ validate_session_request(
   return request;
 }
 
+template <class HeaderField>
+ntl::result<ntl::net::http::connect_request>
+validate_session_request(
+    std::span<const HeaderField> fields,
+    prerequisites negotiated,
+    bool browser_client = true,
+    std::size_t maximum_field_bytes = 64 * 1024) noexcept {
+  auto request = validate_session_request_view(
+      fields, negotiated, browser_client, maximum_field_bytes);
+  if (!request)
+    return ntl::unexpected(request.status());
+  try {
+    return ntl::ok(ntl::net::http::connect_request{
+        .extended = request->extended,
+        .capsule_protocol = request->capsule_protocol,
+        .protocol = std::string(request->protocol),
+        .scheme = std::string(request->scheme),
+        .authority = std::string(request->authority),
+        .path = std::string(request->path),
+        .origin = std::string(request->origin),
+    });
+  } catch (...) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  }
+}
+
 enum class stream_direction {
   bidirectional,
   unidirectional,
 };
 
-struct stream_prefix {
+/** Callback-scoped view into one WebTransport stream prefix and body. */
+struct stream_prefix_view {
   stream_direction direction =
       stream_direction::bidirectional;
   std::uint64_t session_id = 0;
@@ -157,7 +180,7 @@ inline bool valid_session_id(
          session_id <= maximum_quic_varint;
 }
 
-inline ntl::result<stream_prefix>
+inline ntl::result<stream_prefix_view>
 parse_stream_prefix(
     stream_direction direction,
     ntl::net::scatter_view wire) noexcept {
@@ -184,7 +207,7 @@ parse_stream_prefix(
       header_size, wire.size() - header_size);
   if (!body)
     return ntl::unexpected(body.status());
-  return ntl::ok(stream_prefix{
+  return ntl::ok(stream_prefix_view{
       direction, session->value, header_size, *body});
 }
 

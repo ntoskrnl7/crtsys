@@ -1,0 +1,46 @@
+[Version]
+Signature="$WINDOWS NT$"
+Class=ActivityMonitor
+ClassGuid={b86dff51-a31e-4bac-b3cf-e8cfe75c9fc2}
+Provider=%ProviderName%
+DriverVer=07/27/2026,1.0.0.0
+CatalogFile=crtsys_wfp_flow_monitor.cat
+PnpLockdown=1
+
+[DestinationDirs]
+DefaultDestDir=13
+
+[DefaultInstall.NTamd64]
+CopyFiles=DriverCopyFiles
+
+[DefaultInstall.NTamd64.Services]
+AddService=crtsys_wfp_flow_monitor,0x00000002,ServiceInstall
+
+[DefaultInstall.NTarm64]
+CopyFiles=DriverCopyFiles
+
+[DefaultInstall.NTarm64.Services]
+AddService=crtsys_wfp_flow_monitor,0x00000002,ServiceInstall
+
+[DriverCopyFiles]
+crtsys_wfp_flow_monitor.sys
+
+[ServiceInstall]
+DisplayName=%ServiceName%
+Description=%ServiceDescription%
+ServiceType=1
+StartType=3
+ErrorControl=1
+ServiceBinary=%13%\crtsys_wfp_flow_monitor.sys
+
+[SourceDisksFiles]
+crtsys_wfp_flow_monitor.sys=1
+
+[SourceDisksNames]
+1=%DiskName%,,,
+
+[Strings]
+DiskName="crtsys NTL WFP flow monitor media"
+ProviderName="crtsys"
+ServiceName="crtsys NTL WFP flow monitor"
+ServiceDescription="Observes selected outbound TCP flow lifetime and stream byte counts without modifying traffic"

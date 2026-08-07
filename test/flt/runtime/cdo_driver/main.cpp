@@ -23,74 +23,64 @@ struct cdo_extension {
 cdo_extension *active_extension = nullptr;
 
 ntl::status configure_control_device(
-    ntl::device<cdo_extension> &device) noexcept {
-  auto *const state = &device.extension();
-  active_extension = state;
-
-  device
-      .on_create([state](ntl::irp &request) {
+    ntl::device_endpoint<cdo_extension> &endpoint) noexcept {
+  ntl::status result = endpoint.on_create(
+      [](cdo_extension &state, ntl::irp &request) noexcept {
+        active_extension = &state;
         bool expected = false;
-        if (!state->open_reference.compare_exchange_strong(
+        if (!state.open_reference.compare_exchange_strong(
                 expected, true, std::memory_order_acq_rel,
                 std::memory_order_acquire)) {
           request.fail(STATUS_DEVICE_ALREADY_ATTACHED);
           return;
         }
 
-        state->open_handle.store(true, std::memory_order_release);
-        state->create_count.fetch_add(1, std::memory_order_relaxed);
+        state.open_handle.store(true, std::memory_order_release);
+        state.create_count.fetch_add(1, std::memory_order_relaxed);
         request.succeed(FILE_OPENED);
-      })
-      .on_cleanup([state](ntl::irp &request) {
-        if (state->open_handle.exchange(false,
+      });
+  if (!result.is_ok())
+    return result;
+
+  result = endpoint.on_cleanup(
+      [](cdo_extension &state, ntl::irp &request) noexcept {
+        if (state.open_handle.exchange(false,
                                         std::memory_order_acq_rel)) {
-          state->cleanup_count.fetch_add(1, std::memory_order_relaxed);
+          state.cleanup_count.fetch_add(1, std::memory_order_relaxed);
         }
         request.succeed();
-      })
-      .on_close([state](ntl::irp &request) {
-        state->open_handle.store(false, std::memory_order_release);
-        if (state->open_reference.exchange(false,
+      });
+  if (!result.is_ok())
+    return result;
+
+  result = endpoint.on_close(
+      [](cdo_extension &state, ntl::irp &request) noexcept {
+        state.open_handle.store(false, std::memory_order_release);
+        if (state.open_reference.exchange(false,
                                            std::memory_order_acq_rel)) {
-          state->close_count.fetch_add(1, std::memory_order_relaxed);
+          state.close_count.fetch_add(1, std::memory_order_relaxed);
         }
         request.succeed();
-      })
-      .on_device_control(
-          [state](const ntl::device_control::code &code,
-                  const ntl::device_control::in_buffer &input,
-                  ntl::device_control::out_buffer &output) {
-            if (!ntl::is_ioctl<ping_ioctl_type>(code))
-              throw ntl::exception(STATUS_INVALID_DEVICE_REQUEST,
-                                   "unknown CDO runtime IOCTL");
-            if (!state->open_handle.load(std::memory_order_acquire))
-              throw ntl::exception(STATUS_FILE_CLOSED,
-                                   "CDO handle was cleaned up");
+      });
+  if (!result.is_ok())
+    return result;
 
-            const auto *request =
-                ntl::ioctl_input_as<ping_ioctl_type>(input);
-            if (!request)
-              throw ntl::exception(STATUS_BUFFER_TOO_SMALL,
-                                   "CDO ping input is too small");
-
-            ping_reply reply{};
-            reply.value = request->value + 1;
-            reply.sequence =
-                state->sequence.fetch_add(1, std::memory_order_relaxed) + 1;
-            reply.create_count =
-                state->create_count.load(std::memory_order_acquire);
-            reply.ioctl_count =
-                state->ioctl_count.fetch_add(1,
-                                             std::memory_order_acq_rel) +
-                1;
-            reply.unload_veto_count =
-                state->unload_veto_count.load(std::memory_order_acquire);
-            if (!ntl::ioctl_write_output<ping_ioctl_type>(output, reply))
-              throw ntl::exception(STATUS_BUFFER_TOO_SMALL,
-                                   "CDO ping output is too small");
-          });
-
-  return STATUS_SUCCESS;
+  return endpoint.on_ioctl<ping_ioctl_type>(
+      [](cdo_extension &state, const ping_request &request,
+         ping_reply &reply) noexcept -> ntl::status {
+        if (!state.open_handle.load(std::memory_order_acquire))
+          return STATUS_FILE_CLOSED;
+        reply.value = request.value + 1;
+        reply.sequence =
+            state.sequence.fetch_add(1, std::memory_order_relaxed) + 1;
+        reply.create_count =
+            state.create_count.load(std::memory_order_acquire);
+        reply.ioctl_count =
+            state.ioctl_count.fetch_add(1, std::memory_order_acq_rel) + 1;
+        reply.unload_veto_count =
+            state.unload_veto_count.load(std::memory_order_acquire);
+        return ntl::status::ok();
+      });
 }
 
 ntl::status on_unload(ntl::flt::unload_flags flags) noexcept {

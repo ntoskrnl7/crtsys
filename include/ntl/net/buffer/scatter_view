@@ -526,9 +526,9 @@ private:
 /**
  * @brief Bounds-checked sequential reader over a scatter_view.
  */
-class byte_cursor {
+class borrowed_byte_cursor {
 public:
-  explicit byte_cursor(scatter_view bytes) noexcept : bytes_(bytes) {}
+  explicit borrowed_byte_cursor(scatter_view bytes) noexcept : bytes_(bytes) {}
 
   std::size_t position() const noexcept { return position_; }
   std::size_t remaining() const noexcept {

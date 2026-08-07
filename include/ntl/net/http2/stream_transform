@@ -9,10 +9,6 @@
  */
 #pragma once
 
-#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
-#error "ntl/net/http2/stream_transform is a user-mode header"
-#endif
-
 #include <ntl/net/http/stream_transform>
 #include <ntl/net/http2/transform>
 
@@ -161,14 +157,28 @@ inline std::vector<header_field>
 request_fields(const ntl::net::http::request_message &message) {
   std::vector<header_field> result;
   result.reserve(message.headers.size() + 5);
-  result.push_back({":method", message.method, false});
+  result.push_back({":method",
+                    std::string(message.method.begin(), message.method.end()),
+                    false});
   if (message.method != "CONNECT" || message.extended_protocol) {
-    result.push_back({":scheme", message.scheme, false});
-    result.push_back({":path", message.path, false});
+    result.push_back({":scheme",
+                      std::string(message.scheme.begin(),
+                                  message.scheme.end()),
+                      false});
+    result.push_back({":path",
+                      std::string(message.path.begin(), message.path.end()),
+                      false});
   }
-  result.push_back({":authority", message.authority, false});
+  result.push_back({":authority",
+                    std::string(message.authority.begin(),
+                                message.authority.end()),
+                    false});
   if (message.extended_protocol)
-    result.push_back({":protocol", *message.extended_protocol, false});
+    result.push_back({
+        ":protocol",
+        std::string(message.extended_protocol->begin(),
+                    message.extended_protocol->end()),
+        false});
   auto ordinary = transform_detail::ordinary_fields(message.headers);
   result.insert(result.end(),
                 std::make_move_iterator(ordinary.begin()),
@@ -201,19 +211,20 @@ class streaming_connection_transformer {
 public:
   streaming_connection_transformer(
       connection_direction direction,
-      exchange_store &exchanges,
+      std::shared_ptr<exchange_store> exchanges,
       const ntl::net::http::stream_transform_pipeline &pipeline,
       const ntl::net::inspection::content_decoder_registry &decoders,
       const ntl::net::inspection::content_encoder_registry &encoders,
       ntl::net::http::transform_limits semantic_limits = {},
       std::size_t maximum_frame_size = default_maximum_frame_size)
-      : direction_(direction), exchanges_(&exchanges), pipeline_(&pipeline),
-        decoders_(&decoders), encoders_(&encoders),
+      : direction_(direction), exchanges_(std::move(exchanges)),
+        pipeline_(pipeline),
+        decoders_(decoders), encoders_(encoders),
         semantic_limits_(semantic_limits),
         decoder_(hpack_limits{semantic_limits.maximum_header_bytes}),
         assembler_(semantic_limits.maximum_header_bytes),
         maximum_frame_size_(maximum_frame_size) {
-    if (maximum_frame_size_ == 0 ||
+    if (!exchanges_ || maximum_frame_size_ == 0 ||
         maximum_frame_size_ > absolute_maximum_frame_size)
       throw std::invalid_argument("invalid streaming HTTP/2 frame size");
   }
@@ -359,17 +370,17 @@ private:
     stream_state state;
     if (direction_ == connection_direction::requests) {
       auto request = stream_transform_detail::parse_request_head(
-          fields, *decoders_, semantic_limits_);
+          fields, decoders_, semantic_limits_);
       if (!request)
         return ntl::unexpected(request.status());
       auto length = stream_transform_detail::content_length(request->headers);
       if (!length)
         return ntl::unexpected(length.status());
       state.content_length = *length;
-      const ntl::status prepared = pipeline_->prepare_headers(*request);
+      const ntl::status prepared = pipeline_.prepare_headers(*request);
       if (!prepared.is_ok())
         return ntl::unexpected(prepared);
-      auto opened = pipeline_->open(*request, *decoders_, *encoders_);
+      auto opened = pipeline_.open(*request, decoders_, encoders_);
       if (!opened)
         return ntl::unexpected(opened.status());
       state.request = std::move(*request);
@@ -385,7 +396,7 @@ private:
       if (!request)
         return ntl::unexpected(request.status());
       auto response = stream_transform_detail::parse_response_head(
-          fields, *request, *decoders_, semantic_limits_);
+          fields, *request, decoders_, semantic_limits_);
       if (!response)
         return ntl::unexpected(response.status());
       if (response->status >= 100 && response->status < 200) {
@@ -406,11 +417,11 @@ private:
       state.body_forbidden = forbidden;
       if (!forbidden) {
         const ntl::status prepared =
-            pipeline_->prepare_headers(*request, *response);
+            pipeline_.prepare_headers(*request, *response);
         if (!prepared.is_ok())
           return ntl::unexpected(prepared);
-        auto opened = pipeline_->open(
-            *request, *response, *decoders_, *encoders_);
+        auto opened = pipeline_.open(
+            *request, *response, decoders_, encoders_);
         if (!opened)
           return ntl::unexpected(opened.status());
         state.session.emplace(std::move(*opened));
@@ -554,10 +565,10 @@ private:
   }
 
   connection_direction direction_;
-  exchange_store *exchanges_ = nullptr;
-  const ntl::net::http::stream_transform_pipeline *pipeline_ = nullptr;
-  const ntl::net::inspection::content_decoder_registry *decoders_ = nullptr;
-  const ntl::net::inspection::content_encoder_registry *encoders_ = nullptr;
+  std::shared_ptr<exchange_store> exchanges_;
+  ntl::net::http::stream_transform_pipeline pipeline_;
+  ntl::net::inspection::content_decoder_registry decoders_;
+  ntl::net::inspection::content_encoder_registry encoders_;
   ntl::net::http::transform_limits semantic_limits_{};
   hpack_decoder_adapter<bounded_hpack_decoder> decoder_;
   header_block_assembler assembler_;

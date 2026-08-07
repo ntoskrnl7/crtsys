@@ -19,6 +19,7 @@ extern "C" void crtsys_flt_require_cross_target_abi() noexcept;
 
 namespace {
 
+#if !defined(CRTSYS_MINIMAL_GTEST)
 class driver_gtest_failure_listener final
     : public testing::EmptyTestEventListener {
 public:
@@ -38,6 +39,9 @@ void install_driver_gtest_failure_listener() {
   testing::UnitTest::GetInstance()->listeners().Append(
       new driver_gtest_failure_listener());
 }
+#else
+void install_driver_gtest_failure_listener() {}
+#endif
 
 } // namespace
 
@@ -360,60 +364,60 @@ ntl::status ntl::main(ntl::driver &driver, const std::wstring &registry_path) {
     return test_endpoint_result.status();
   }
 
-  auto test_endpoint =
-      std::make_shared<ntl::device_endpoint<test_extension>>(
-          std::move(test_endpoint_result).value());
-  auto test_dev = test_endpoint->device();
-  if (test_dev) {
-    test_dev->extension().val = 100;
-    test_dev->extension().inc();
+  auto test_endpoint = std::move(test_endpoint_result).value();
+  ntl::status endpoint_callback = test_endpoint.on_create(
+      [](test_extension &extension, ntl::irp &irp) noexcept {
+        extension.val = 100;
+        extension.inc();
+        extension.create_count++;
+        irp.succeed();
+      });
+  if (!endpoint_callback.is_ok())
+    return endpoint_callback;
 
-    std::weak_ptr test_dev_weak = test_dev;
-    test_dev->on_create([test_dev_weak](ntl::irp &irp) {
-      if (auto test_dev = test_dev_weak.lock())
-        test_dev->extension().create_count++;
-      irp.succeed();
-    });
-    test_dev->on_close([test_dev_weak](ntl::irp &irp) {
-      if (auto test_dev = test_dev_weak.lock())
-        test_dev->extension().close_count++;
-      irp.succeed();
-    });
-    test_dev->on_cleanup([test_dev_weak](ntl::irp &irp) {
-      if (auto test_dev = test_dev_weak.lock())
-        test_dev->extension().close_mapping(
-            irp.stack_location()->FileObject, true);
-      irp.succeed();
-    });
-    test_dev->on_pending_device_control(
-        [test_dev_weak](ntl::irp &request,
+  endpoint_callback = test_endpoint.on_close(
+      [](test_extension &extension, ntl::irp &irp) noexcept {
+        extension.close_count++;
+        irp.succeed();
+      });
+  if (!endpoint_callback.is_ok())
+    return endpoint_callback;
+
+  endpoint_callback = test_endpoint.on_cleanup(
+      [](test_extension &extension, ntl::irp &irp) noexcept {
+        extension.close_mapping(irp.stack_location()->FileObject, true);
+        irp.succeed();
+      });
+  if (!endpoint_callback.is_ok())
+    return endpoint_callback;
+
+  endpoint_callback = test_endpoint.on_borrowed_pending_ioctl(
+        [](test_extension &extension, ntl::irp &request,
                         const ntl::device_control::code &code,
                         const ntl::device_control::in_buffer &in,
-                        ntl::device_control::out_buffer &out) {
+                        ntl::device_control::out_buffer &out) noexcept {
       NTSTATUS operation_status = STATUS_SUCCESS;
       if (code == TEST_DEVICE_CTL) {
-        if (auto test_dev = test_dev_weak.lock())
-          test_dev->extension().val--;
-        std::string actual(reinterpret_cast<const char *>(in.ptr), in.size);
-        if (actual != "hello")
-          std::cout << "[FAILED] expect : hello, actual : " << actual << '\n';
+        extension.val--;
+        constexpr char expected[] = "hello";
+        if (in.size != sizeof(expected) - 1 || !in.ptr ||
+            std::memcmp(in.ptr, expected, sizeof(expected) - 1) != 0)
+          std::cout << "[FAILED] expected device input: hello\n";
         constexpr char reply[] = "world";
         if (!out.write_bytes(reply, sizeof(reply))) {
           std::cout << "[FAILED] out_buffer is too small\n";
         }
       } else if (code == TEST_DEVICE_STATE_CTL) {
         test_device_state state{};
-        if (auto test_dev = test_dev_weak.lock()) {
-          state.create_count = test_dev->extension().create_count;
-          state.close_count = test_dev->extension().close_count;
-          state.active_mappings = test_dev->extension().mapping_count();
+          state.create_count = extension.create_count;
+          state.close_count = extension.close_count;
+          state.active_mappings = extension.mapping_count();
           state.explicit_mapping_closes =
-              test_dev->extension().explicit_mapping_closes.load(
+              extension.explicit_mapping_closes.load(
                   std::memory_order_relaxed);
           state.cleanup_mapping_closes =
-              test_dev->extension().cleanup_mapping_closes.load(
+              extension.cleanup_mapping_closes.load(
                   std::memory_order_relaxed);
-        }
         if (!out.write(state)) {
           std::cout << "[FAILED] state out_buffer is too small\n";
           out.clear();
@@ -423,17 +427,11 @@ ntl::status ntl::main(ntl::driver &driver, const std::wstring &registry_path) {
             std::cout << "[FAILED] state write verification failed\n";
         }
       } else if (code == TEST_DEVICE_MAPPING_BEGIN_CTL) {
-        if (auto test_dev = test_dev_weak.lock())
-          operation_status = static_cast<NTSTATUS>(
-              test_dev->extension().begin_mapping(request, out));
-        else
-          operation_status = STATUS_DELETE_PENDING;
+        operation_status = static_cast<NTSTATUS>(
+            extension.begin_mapping(request, out));
       } else if (code == TEST_DEVICE_MAPPING_CLOSE_CTL) {
-        if (auto test_dev = test_dev_weak.lock())
-          operation_status = static_cast<NTSTATUS>(
-              test_dev->extension().close_mapping_explicit(request, in, out));
-        else
-          operation_status = STATUS_DELETE_PENDING;
+        operation_status = static_cast<NTSTATUS>(
+            extension.close_mapping_explicit(request, in, out));
       } else if (code == TEST_DEVICE_AUTO_BUFFERED_CTL ||
                  code == TEST_DEVICE_AUTO_BUFFERED_TAIL_CTL ||
                  code == TEST_DEVICE_AUTO_IN_DIRECT_CTL ||
@@ -450,7 +448,8 @@ ntl::status ntl::main(ntl::driver &driver, const std::wstring &registry_path) {
       }
       return ntl::device_control::dispatch_result::complete;
     });
-  }
+  if (!endpoint_callback.is_ok())
+    return endpoint_callback;
 
   ntl::rpc::server_options rpc_options(L"test_rpc");
   rpc_options.asynchronous().max_pending_calls(32);
@@ -469,11 +468,27 @@ ntl::status ntl::main(ntl::driver &driver, const std::wstring &registry_path) {
     if (lifetime_worker->joinable())
       lifetime_worker->join();
 
-    auto test_dev = test_endpoint->device();
-    if (test_dev)
-      std::wcout << L"delete device :" << test_dev->name() << " - "
-                 << test_dev->extension().val << L'\n';
-    test_endpoint->reset();
+    auto endpoint_copy = test_endpoint;
+    const ntl::status endpoint_status = test_endpoint.close();
+    NT_ASSERT(endpoint_status.is_ok());
+    NT_ASSERT(!test_endpoint);
+    NT_ASSERT(!endpoint_copy);
+    const ntl::status duplicate_close = endpoint_copy.close();
+    NT_ASSERT(duplicate_close.is_ok());
+
+    // The last facade may disappear in a DPC/callback after an explicit close.
+    // Its shared-state deleter must queue PASSIVE cleanup without asking the
+    // driver to own a work item or rundown object.
+    auto final_endpoint = std::move(test_endpoint);
+    endpoint_copy = {};
+    KIRQL previous_irql = PASSIVE_LEVEL;
+    KeRaiseIrql(DISPATCH_LEVEL, &previous_irql);
+    final_endpoint = {};
+    KeLowerIrql(previous_irql);
+    const ntl::status flushed =
+        ntl::net::kernel::detail::flush_runtime_passive_cleanup();
+    NT_ASSERT(flushed.is_ok());
+
     rpc_server.reset();
     std::wcout << L"unload driver (registry_path :" << registry_path << L")\n";
   });

@@ -6,10 +6,6 @@
  */
 #pragma once
 
-#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
-#error "ntl/net/websocket/framing is a user-mode header"
-#endif
-
 #include <ntl/net/framing>
 #include <ntl/result>
 #include <ntl/net/buffer/scatter_view>
@@ -243,6 +239,38 @@ inspect_header(ntl::net::scatter_view frame, sender_role sender,
               static_cast<std::size_t>(parsed->payload_size))
     return ntl::unexpected(STATUS_BUFFER_TOO_SMALL);
   return parsed;
+}
+
+/**
+ * @brief Copies and unmasks a payload into caller-owned storage.
+ *
+ * This is the allocation-free user/kernel primitive.  The convenience
+ * vector-returning overload below is intentionally user-mode-only.
+ */
+inline ntl::result<std::size_t>
+decode_payload_to(ntl::net::scatter_view frame,
+                  const frame_header &header,
+                  std::span<std::byte> output) noexcept {
+  if (!frame || header.payload_size > output.size() ||
+      header.payload_size > (std::numeric_limits<std::size_t>::max)() ||
+      header.header_size > frame.size() ||
+      static_cast<std::size_t>(header.payload_size) >
+          frame.size() - header.header_size)
+    return ntl::unexpected(
+        header.payload_size > output.size() ? STATUS_BUFFER_TOO_SMALL
+                                            : STATUS_INVALID_PARAMETER);
+
+  const auto size = static_cast<std::size_t>(header.payload_size);
+  for (std::size_t index = 0; index != size; ++index) {
+    const auto value = frame.read<std::byte>(header.header_size + index);
+    if (!value)
+      return ntl::unexpected(value.status());
+    output[index] =
+        header.masked
+            ? *value ^ header.masking_key[index % header.masking_key.size()]
+            : *value;
+  }
+  return ntl::ok(size);
 }
 
 inline ntl::result<std::vector<std::byte>>

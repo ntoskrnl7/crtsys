@@ -79,15 +79,21 @@ ntl::status ntl::main(ntl::driver &driver, const std::wstring &registry_path) {
   device->extension().tls_index = tls_index;
 
   std::weak_ptr device_weak = device;
-  device->on_device_control(
+  device->on_borrowed_device_control(
       [device_weak](const ntl::device_control::code &code,
                     const ntl::device_control::in_buffer &in,
-                    ntl::device_control::out_buffer &out) {
+                    ntl::device_control::out_buffer &out) noexcept
+          -> ntl::status {
         if (code != CRTSYS_MULTI_INSTANCE_IOCTL || !in.ptr || !out.ptr ||
-            in.size < sizeof(crtsys_multi_instance_request) ||
+            in.size != sizeof(crtsys_multi_instance_request) ||
             out.size < sizeof(crtsys_multi_instance_response)) {
           out.size = 0;
-          return;
+          if (code != CRTSYS_MULTI_INSTANCE_IOCTL)
+            return STATUS_INVALID_DEVICE_REQUEST;
+          if (in.size < sizeof(crtsys_multi_instance_request) || !in.ptr ||
+              !out.ptr || out.size < sizeof(crtsys_multi_instance_response))
+            return STATUS_BUFFER_TOO_SMALL;
+          return STATUS_INFO_LENGTH_MISMATCH;
         }
 
         const auto request =
@@ -98,7 +104,7 @@ ntl::status ntl::main(ntl::driver &driver, const std::wstring &registry_path) {
         auto device = device_weak.lock();
         if (!device) {
           out.size = 0;
-          return;
+          return STATUS_DELETE_PENDING;
         }
 
         if (request.command == CRTSYS_MULTI_INSTANCE_SET_QUERY) {
@@ -108,7 +114,7 @@ ntl::status ntl::main(ntl::driver &driver, const std::wstring &registry_path) {
           SetLastError(request.last_error_value);
         } else if (request.command != CRTSYS_MULTI_INSTANCE_QUERY) {
           out.size = 0;
-          return;
+          return STATUS_INVALID_PARAMETER;
         }
 
         const ULONG last_error_value = GetLastError();
@@ -141,6 +147,7 @@ ntl::status ntl::main(ntl::driver &driver, const std::wstring &registry_path) {
         response->crtsys_compiler_tls_installed_slots =
             reinterpret_cast<unsigned __int64>(installed_slots);
         out.size = sizeof(*response);
+        return ntl::status::ok();
       });
 
   driver.on_unload([device, tls_owner]() {

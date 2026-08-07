@@ -1,12 +1,15 @@
 build*/
 !nuget/build/
 !nuget/build/**
-.vscode
+.vscode/
 .vs/
 *.vcxproj.user
 artifacts/
+out/
+.local/
 lib/
 .cpm-cache/
+submodules/
 
 # Visual Studio sample and NuGet consumer outputs.
 examples/**/obj/

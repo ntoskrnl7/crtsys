@@ -12,11 +12,29 @@ param(
   [switch] $AllowUnavailableRevocation,
 
   [string] $LogPath =
-      (Join-Path $PackageRoot 'https-live-host.log')
+      (Join-Path $PackageRoot 'https-live-host.log'),
+
+  [switch] $AllowDisposableGuestMutation,
+
+  [string] $DisposableGuestSentinelPath =
+      'C:\crtsys-disposable-test-guest.sentinel'
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+$guardScript = @(
+  Join-Path $PSScriptRoot 'DisposableGuestGuard.ps1'
+  Join-Path $PSScriptRoot '..\common\DisposableGuestGuard.ps1'
+) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+    Select-Object -First 1
+if (-not $guardScript) {
+  throw 'DisposableGuestGuard.ps1 was not found.'
+}
+. $guardScript
+Assert-CrtSysDisposableGuest `
+    -AllowDisposableGuestMutation:$AllowDisposableGuestMutation `
+    -SentinelPath $DisposableGuestSentinelPath
 
 function Assert-Administrator {
   $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -38,9 +56,10 @@ function Remove-TestService([string] $Name) {
 Assert-Administrator
 $root = (Resolve-Path -LiteralPath $PackageRoot).Path
 $driver = Join-Path $root 'crtsys_wfp_tls_inspection_proxy.sys'
+$driverInf = Join-Path $root 'crtsys_wfp_tls_inspection_proxy.inf'
 $application =
-    Join-Path $root 'crtsys_wfp_tls_inspection_proxy_app.exe'
-foreach ($required in @($driver, $application)) {
+    Join-Path $root 'crtsys_wfp_tls_inspection_proxy_live_acceptance.exe'
+foreach ($required in @($driver, $driverInf, $application)) {
   if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
     throw "Required live HTTPS artifact is missing: $required"
   }

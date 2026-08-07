@@ -1,0 +1,160 @@
+/**
+ * @file net_user_cleanup_domain
+ * @brief Intrusive, allocation-free deferred cleanup for user-mode callbacks.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/user/cleanup_domain is a user-mode header"
+#endif
+
+#include <ntl/status>
+
+#include <condition_variable>
+#include <cstddef>
+#include <mutex>
+#include <thread>
+#include <utility>
+
+namespace ntl::net::user {
+
+class cleanup_domain;
+
+/** Embedded once in an owning state which may need callback-safe destruction. */
+class cleanup_item {
+public:
+  using cleanup_fn = void (*)(void *) noexcept;
+
+  constexpr cleanup_item(cleanup_fn cleanup, void *context) noexcept
+      : cleanup_(cleanup), context_(context) {}
+
+  cleanup_item(const cleanup_item &) = delete;
+  cleanup_item &operator=(const cleanup_item &) = delete;
+
+private:
+  friend class cleanup_domain;
+  cleanup_fn cleanup_ = nullptr;
+  void *context_ = nullptr;
+  cleanup_item *next_ = nullptr;
+  bool queued_ = false;
+};
+
+/**
+ * A joined cleanup worker used when an object's final release occurs inside
+ * one of its own callbacks or worker threads. Queueing is intrusive, so the
+ * final-release path cannot fail because of an allocation.
+ */
+class cleanup_domain {
+public:
+  cleanup_domain() : worker_([this] { run(); }) {}
+  cleanup_domain(const cleanup_domain &) = delete;
+  cleanup_domain &operator=(const cleanup_domain &) = delete;
+
+  ~cleanup_domain() { (void)stop_and_drain(); }
+
+  ntl::status retire_deferred(cleanup_item &item) noexcept {
+    {
+      std::lock_guard guard(lock_);
+      if (item.queued_)
+        return ntl::status::ok();
+      if (!accepting_)
+        return STATUS_DELETE_PENDING;
+      if (!item.cleanup_)
+        return STATUS_INVALID_PARAMETER;
+      item.queued_ = true;
+      item.next_ = nullptr;
+      if (tail_)
+        tail_->next_ = &item;
+      else
+        head_ = &item;
+      tail_ = &item;
+      ++pending_;
+    }
+    ready_.notify_one();
+    return ntl::status::ok();
+  }
+
+  ntl::status drain() noexcept {
+    if (worker_.get_id() == std::this_thread::get_id())
+      return STATUS_INVALID_DEVICE_STATE;
+    std::unique_lock guard(lock_);
+    drained_.wait(guard, [this] { return pending_ == 0; });
+    return ntl::status::ok();
+  }
+
+  ntl::status stop_and_drain() noexcept {
+    if (worker_.get_id() == std::this_thread::get_id())
+      return STATUS_INVALID_DEVICE_STATE;
+    {
+      std::lock_guard guard(lock_);
+      accepting_ = false;
+      stopping_ = true;
+    }
+    ready_.notify_all();
+    if (worker_.joinable())
+      worker_.join();
+    return ntl::status::ok();
+  }
+
+  std::size_t live() const noexcept {
+    std::lock_guard guard(lock_);
+    return pending_;
+  }
+
+private:
+  void run() noexcept {
+    for (;;) {
+      cleanup_item *item = nullptr;
+      {
+        std::unique_lock guard(lock_);
+        ready_.wait(guard, [this] { return stopping_ || head_ != nullptr; });
+        if (!head_) {
+          if (stopping_)
+            break;
+          continue;
+        }
+        item = head_;
+        head_ = item->next_;
+        if (!head_)
+          tail_ = nullptr;
+      }
+
+      item->cleanup_(item->context_);
+
+      {
+        std::lock_guard guard(lock_);
+        if (pending_ != 0)
+          --pending_;
+        if (pending_ == 0)
+          drained_.notify_all();
+      }
+    }
+  }
+
+  mutable std::mutex lock_;
+  std::condition_variable ready_;
+  std::condition_variable drained_;
+  cleanup_item *head_ = nullptr;
+  cleanup_item *tail_ = nullptr;
+  std::size_t pending_ = 0;
+  bool accepting_ = true;
+  bool stopping_ = false;
+  std::thread worker_;
+};
+
+/**
+ * Non-owning access to the module-local joined cleanup runtime. Public network
+ * facades use it internally; applications do not drain or order it manually.
+ */
+inline cleanup_domain *borrowed_runtime_cleanup_domain() noexcept {
+  try {
+    static cleanup_domain domain;
+    return &domain;
+  } catch (...) {
+    return nullptr;
+  }
+}
+
+} // namespace ntl::net::user

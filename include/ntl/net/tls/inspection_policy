@@ -45,7 +45,8 @@ enum class tls_inspection_action : std::uint8_t {
   metadata_only = 4,
 };
 
-struct tls_inspection_observation {
+/** Callback-scoped TLS facts. Copy any strings that must outlive the call. */
+struct tls_inspection_observation_view {
   encrypted_transport transport = encrypted_transport::tcp_tls;
   application_protocol protocol = application_protocol::unknown;
   std::wstring_view server_name;
@@ -141,7 +142,7 @@ public:
       : options_(options) {}
 
   constexpr tls_inspection_decision
-  decide(const tls_inspection_observation &value) const noexcept {
+  decide(const tls_inspection_observation_view &value) const noexcept {
     if (value.transport == encrypted_transport::quic &&
         !value.quic_backend_available)
       return {options_.unavailable_quic_backend,

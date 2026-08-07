@@ -22,42 +22,20 @@ namespace ntl::net::http3 {
 class standard_inspection_proxy {
 public:
   standard_inspection_proxy(
-      origin_transport &origin,
-      inspection_policy &policy,
+      std::shared_ptr<origin_transport> origin,
+      std::shared_ptr<inspection_policy> policy,
       proxy_limits limits = {})
-      : proxy_(origin, policy, decoders_, limits) {
-    ntl::net::inspection::register_standard_content_decoders(
-        decoders_);
-  }
+      : proxy_(std::move(origin), std::move(policy),
+               standard_decoders(), limits) {}
 
   standard_inspection_proxy(
-      origin_transport &origin,
-      inspection_policy &policy,
-      const ntl::net::http::transform_pipeline &transforms,
+      std::shared_ptr<origin_transport> origin,
+      std::shared_ptr<inspection_policy> policy,
+      ntl::net::http::transform_pipeline transforms,
       proxy_limits limits = {})
       : proxy_(
-            origin, policy, decoders_, encoders_,
-            transforms, limits) {
-    ntl::net::inspection::register_standard_content_decoders(
-        decoders_);
-    ntl::net::inspection::register_standard_content_encoders(
-        encoders_);
-  }
-
-  standard_inspection_proxy(
-      origin_transport &origin,
-      inspection_policy &policy,
-      const ntl::net::http::transform_pipeline *transforms,
-      proxy_limits limits = {})
-      : proxy_(
-            origin, policy, decoders_,
-            transforms ? &encoders_ : nullptr,
-            transforms, limits) {
-    ntl::net::inspection::register_standard_content_decoders(
-        decoders_);
-    ntl::net::inspection::register_standard_content_encoders(
-        encoders_);
-  }
+            std::move(origin), std::move(policy), standard_decoders(),
+            standard_encoders(), std::move(transforms), limits) {}
 
   standard_inspection_proxy(
       const standard_inspection_proxy &) = delete;
@@ -70,8 +48,20 @@ public:
   }
 
 private:
-  ntl::net::inspection::content_decoder_registry decoders_;
-  ntl::net::inspection::content_encoder_registry encoders_;
+  static ntl::net::inspection::content_decoder_registry
+  standard_decoders() {
+    ntl::net::inspection::content_decoder_registry result;
+    ntl::net::inspection::register_standard_content_decoders(result);
+    return result;
+  }
+
+  static ntl::net::inspection::content_encoder_registry
+  standard_encoders() {
+    ntl::net::inspection::content_encoder_registry result;
+    ntl::net::inspection::register_standard_content_encoders(result);
+    return result;
+  }
+
   inspection_proxy proxy_;
 };
 

@@ -1,0 +1,739 @@
+/**
+ * @file kernel_x509
+ * @brief Bounded CNG RSA and DER X.509 certificate issuer for drivers.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/net/kernel/x509 is a kernel-mode header"
+#endif
+
+#include <ntddk.h>
+#include <bcrypt.h>
+
+#include <ntl/net/buffer/owned_bytes>
+#include <ntl/result>
+
+#include <algorithm>
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <limits>
+#include <span>
+#include <string_view>
+#include <utility>
+
+namespace ntl::net::kernel {
+
+extern "C" NTKERNELAPI void
+KeQuerySystemTimePrecise(LARGE_INTEGER *current_time);
+
+struct x509_issuer_limits {
+  ULONG rsa_bits = 2048;
+  std::size_t maximum_certificate_bytes = 16 * 1024;
+  std::size_t maximum_common_name_bytes = 253;
+  std::uint32_t validity_days = 30;
+};
+
+namespace x509_detail {
+
+inline constexpr std::array<std::byte, 9> oid_sha256_rsa{
+    std::byte{0x2a}, std::byte{0x86}, std::byte{0x48}, std::byte{0x86},
+    std::byte{0xf7}, std::byte{0x0d}, std::byte{0x01}, std::byte{0x01},
+    std::byte{0x0b}};
+inline constexpr std::array<std::byte, 9> oid_rsa_encryption{
+    std::byte{0x2a}, std::byte{0x86}, std::byte{0x48}, std::byte{0x86},
+    std::byte{0xf7}, std::byte{0x0d}, std::byte{0x01}, std::byte{0x01},
+    std::byte{0x01}};
+inline constexpr std::array<std::byte, 3> oid_common_name{
+    std::byte{0x55}, std::byte{0x04}, std::byte{0x03}};
+inline constexpr std::array<std::byte, 3> oid_basic_constraints{
+    std::byte{0x55}, std::byte{0x1d}, std::byte{0x13}};
+inline constexpr std::array<std::byte, 3> oid_key_usage{
+    std::byte{0x55}, std::byte{0x1d}, std::byte{0x0f}};
+inline constexpr std::array<std::byte, 3> oid_extended_key_usage{
+    std::byte{0x55}, std::byte{0x1d}, std::byte{0x25}};
+inline constexpr std::array<std::byte, 3> oid_subject_alt_name{
+    std::byte{0x55}, std::byte{0x1d}, std::byte{0x11}};
+inline constexpr std::array<std::byte, 8> oid_server_auth{
+    std::byte{0x2b}, std::byte{0x06}, std::byte{0x01}, std::byte{0x05},
+    std::byte{0x05}, std::byte{0x07}, std::byte{0x03}, std::byte{0x01}};
+
+class der_writer {
+public:
+  explicit der_writer(std::span<std::byte> storage) noexcept
+      : storage_(storage) {}
+
+  ntl::status begin(std::uint8_t tag) noexcept {
+    if (depth_ == frames_.size() || remaining() < 6)
+      return STATUS_BUFFER_TOO_SMALL;
+    storage_[size_++] = static_cast<std::byte>(tag);
+    frames_[depth_++] = size_;
+    std::memset(storage_.data() + size_, 0, 5);
+    size_ += 5;
+    return ntl::status::ok();
+  }
+
+  ntl::status end() noexcept {
+    if (depth_ == 0)
+      return STATUS_INVALID_DEVICE_STATE;
+    const std::size_t length_offset = frames_[--depth_];
+    const std::size_t content_offset = length_offset + 5;
+    const std::size_t content_length = size_ - content_offset;
+    std::array<std::byte, 5> encoded{};
+    const std::size_t encoded_size = encode_length(content_length, encoded);
+    const std::size_t shift = 5 - encoded_size;
+    std::memmove(storage_.data() + length_offset + encoded_size,
+                 storage_.data() + content_offset, content_length);
+    std::memcpy(storage_.data() + length_offset, encoded.data(), encoded_size);
+    size_ -= shift;
+    return ntl::status::ok();
+  }
+
+  ntl::status append(std::span<const std::byte> bytes) noexcept {
+    if (bytes.size() > remaining())
+      return STATUS_BUFFER_TOO_SMALL;
+    if (!bytes.empty())
+      std::memcpy(storage_.data() + size_, bytes.data(), bytes.size());
+    size_ += bytes.size();
+    return ntl::status::ok();
+  }
+
+  ntl::status tlv(std::uint8_t tag,
+                  std::span<const std::byte> bytes) noexcept {
+    ntl::status status = begin(tag);
+    if (!status.is_ok())
+      return status;
+    status = append(bytes);
+    return status.is_ok() ? end() : status;
+  }
+
+  ntl::status null_value() noexcept { return tlv(0x05, {}); }
+  ntl::status oid(std::span<const std::byte> value) noexcept {
+    return tlv(0x06, value);
+  }
+  ntl::status boolean(bool value) noexcept {
+    const std::byte encoded = value ? std::byte{0xff} : std::byte{0};
+    return tlv(0x01, {&encoded, 1});
+  }
+
+  ntl::status positive_integer(std::span<const std::byte> value) noexcept {
+    while (value.size() > 1 && value.front() == std::byte{0})
+      value = value.subspan(1);
+    ntl::status status = begin(0x02);
+    if (!status.is_ok())
+      return status;
+    if (value.empty()) {
+      const std::byte zero{};
+      status = append({&zero, 1});
+    } else {
+      if ((std::to_integer<unsigned char>(value.front()) & 0x80u) != 0) {
+        const std::byte zero{};
+        status = append({&zero, 1});
+      }
+      if (status.is_ok())
+        status = append(value);
+    }
+    return status.is_ok() ? end() : status;
+  }
+
+  ntl::status bit_string(std::span<const std::byte> value,
+                         std::uint8_t unused_bits = 0) noexcept {
+    if (unused_bits > 7)
+      return STATUS_INVALID_PARAMETER;
+    ntl::status status = begin(0x03);
+    if (!status.is_ok())
+      return status;
+    const std::byte unused = static_cast<std::byte>(unused_bits);
+    status = append({&unused, 1});
+    if (status.is_ok())
+      status = append(value);
+    return status.is_ok() ? end() : status;
+  }
+
+  std::span<const std::byte> written() const noexcept {
+    return storage_.first(size_);
+  }
+  bool complete() const noexcept { return depth_ == 0; }
+
+private:
+  static std::size_t encode_length(
+      std::size_t length, std::array<std::byte, 5> &output) noexcept {
+    if (length < 128) {
+      output[0] = static_cast<std::byte>(length);
+      return 1;
+    }
+    std::array<std::byte, sizeof(std::uint32_t)> reversed{};
+    std::size_t count = 0;
+    std::uint32_t remaining = static_cast<std::uint32_t>(length);
+    while (remaining != 0) {
+      reversed[count++] = static_cast<std::byte>(remaining & 0xffu);
+      remaining >>= 8;
+    }
+    output[0] = static_cast<std::byte>(0x80u | count);
+    for (std::size_t index = 0; index != count; ++index)
+      output[index + 1] = reversed[count - index - 1];
+    return count + 1;
+  }
+
+  std::size_t remaining() const noexcept { return storage_.size() - size_; }
+
+  std::span<std::byte> storage_{};
+  std::array<std::size_t, 16> frames_{};
+  std::size_t size_ = 0;
+  std::size_t depth_ = 0;
+};
+
+inline ntl::status algorithm_identifier(der_writer &writer,
+                                        std::span<const std::byte> oid) noexcept {
+  ntl::status status = writer.begin(0x30);
+  if (status.is_ok())
+    status = writer.oid(oid);
+  if (status.is_ok())
+    status = writer.null_value();
+  return status.is_ok() ? writer.end() : status;
+}
+
+inline ntl::status name(der_writer &writer,
+                        std::string_view common_name) noexcept {
+  ntl::status status = writer.begin(0x30);
+  if (status.is_ok())
+    status = writer.begin(0x31);
+  if (status.is_ok())
+    status = writer.begin(0x30);
+  if (status.is_ok())
+    status = writer.oid(oid_common_name);
+  if (status.is_ok())
+    status = writer.tlv(
+        0x0c, std::as_bytes(std::span(common_name.data(),
+                                      common_name.size())));
+  if (status.is_ok())
+    status = writer.end();
+  if (status.is_ok())
+    status = writer.end();
+  return status.is_ok() ? writer.end() : status;
+}
+
+inline ntl::status utc_time(der_writer &writer,
+                            const LARGE_INTEGER &time) noexcept {
+  TIME_FIELDS fields{};
+  RtlTimeToTimeFields(const_cast<LARGE_INTEGER *>(&time), &fields);
+  if (fields.Year < 1950 || fields.Year >= 2050)
+    return STATUS_INTEGER_OVERFLOW;
+  std::array<char, 13> text{};
+  const auto two = [&text](std::size_t offset, USHORT value) noexcept {
+    text[offset] = static_cast<char>('0' + (value / 10) % 10);
+    text[offset + 1] = static_cast<char>('0' + value % 10);
+  };
+  two(0, static_cast<USHORT>(fields.Year % 100));
+  two(2, fields.Month);
+  two(4, fields.Day);
+  two(6, fields.Hour);
+  two(8, fields.Minute);
+  two(10, fields.Second);
+  text[12] = 'Z';
+  return writer.tlv(0x17, std::as_bytes(std::span(text)));
+}
+
+inline ntl::status validity(der_writer &writer,
+                            std::uint32_t days) noexcept {
+  LARGE_INTEGER now{};
+  KeQuerySystemTimePrecise(&now);
+  LARGE_INTEGER before = now;
+  before.QuadPart -= 5LL * 60 * 10'000'000;
+  LARGE_INTEGER after = now;
+  constexpr LONGLONG ticks_per_day = 86'400LL * 10'000'000;
+  if (days == 0 || days >
+                       static_cast<std::uint64_t>(
+                           (std::numeric_limits<LONGLONG>::max)() /
+                           ticks_per_day))
+    return STATUS_INVALID_PARAMETER;
+  after.QuadPart += static_cast<LONGLONG>(days) * ticks_per_day;
+  ntl::status status = writer.begin(0x30);
+  if (status.is_ok())
+    status = utc_time(writer, before);
+  if (status.is_ok())
+    status = utc_time(writer, after);
+  return status.is_ok() ? writer.end() : status;
+}
+
+class algorithm_handle {
+public:
+  algorithm_handle() noexcept = default;
+  algorithm_handle(const algorithm_handle &) = delete;
+  algorithm_handle &operator=(const algorithm_handle &) = delete;
+  ~algorithm_handle() {
+    if (handle_)
+      (void)BCryptCloseAlgorithmProvider(handle_, 0);
+  }
+  BCRYPT_ALG_HANDLE *address() noexcept { return &handle_; }
+  operator BCRYPT_ALG_HANDLE() const noexcept { return handle_; }
+
+private:
+  BCRYPT_ALG_HANDLE handle_ = nullptr;
+};
+
+inline NTSTATUS open_algorithm(algorithm_handle &result,
+                               LPCWSTR name) noexcept {
+  return BCryptOpenAlgorithmProvider(result.address(), name, nullptr,
+                                     BCRYPT_PROV_DISPATCH);
+}
+
+class rsa_key {
+public:
+  rsa_key() noexcept = default;
+  rsa_key(const rsa_key &) = delete;
+  rsa_key &operator=(const rsa_key &) = delete;
+  rsa_key(rsa_key &&other) noexcept
+      : handle_(std::exchange(other.handle_, nullptr)) {}
+  rsa_key &operator=(rsa_key &&other) noexcept {
+    if (this != &other) {
+      reset();
+      handle_ = std::exchange(other.handle_, nullptr);
+    }
+    return *this;
+  }
+  ~rsa_key() { reset(); }
+  void reset() noexcept {
+    if (handle_)
+      (void)BCryptDestroyKey(handle_);
+    handle_ = nullptr;
+  }
+  BCRYPT_KEY_HANDLE get() const noexcept { return handle_; }
+  BCRYPT_KEY_HANDLE *address() noexcept { return &handle_; }
+
+private:
+  BCRYPT_KEY_HANDLE handle_ = nullptr;
+};
+
+inline ntl::result<rsa_key> generate_rsa(ULONG bits) noexcept {
+  if (KeGetCurrentIrql() != PASSIVE_LEVEL || bits < 2048 || bits > 8192 ||
+      (bits % 256) != 0)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  algorithm_handle rsa;
+  NTSTATUS status = open_algorithm(rsa, BCRYPT_RSA_ALGORITHM);
+  if (!NT_SUCCESS(status))
+    return ntl::unexpected(status);
+  rsa_key key;
+  status = BCryptGenerateKeyPair(rsa, key.address(), bits, 0);
+  if (NT_SUCCESS(status))
+    status = BCryptFinalizeKeyPair(key.get(), 0);
+  if (!NT_SUCCESS(status))
+    return ntl::unexpected(status);
+  return ntl::ok(std::move(key));
+}
+
+inline ntl::result<owned_bytes>
+export_key(BCRYPT_KEY_HANDLE key, LPCWSTR kind,
+           std::size_t maximum, ULONG tag) noexcept {
+  ULONG required = 0;
+  NTSTATUS status = BCryptExportKey(key, nullptr, kind, nullptr, 0,
+                                    &required, 0);
+  if (!NT_SUCCESS(status))
+    return ntl::unexpected(status);
+  if (required == 0 || required > maximum)
+    return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+  auto output = owned_bytes::try_allocate(required, buffer_limits{maximum},
+                                           tag);
+  if (!output)
+    return output;
+  ULONG written = 0;
+  status = BCryptExportKey(
+      key, nullptr, kind, reinterpret_cast<PUCHAR>(output->data()), required,
+      &written, 0);
+  if (!NT_SUCCESS(status) || written != required)
+    return ntl::unexpected(NT_SUCCESS(status) ? STATUS_DATA_ERROR : status);
+  return output;
+}
+
+inline ntl::result<owned_bytes>
+sign_sha256(BCRYPT_KEY_HANDLE key, std::span<const std::byte> data,
+            std::size_t maximum) noexcept {
+  algorithm_handle sha256;
+  NTSTATUS status = open_algorithm(sha256, BCRYPT_SHA256_ALGORITHM);
+  if (!NT_SUCCESS(status))
+    return ntl::unexpected(status);
+  ULONG object_size = 0;
+  ULONG property_size = 0;
+  status = BCryptGetProperty(
+      sha256, BCRYPT_OBJECT_LENGTH,
+      reinterpret_cast<PUCHAR>(&object_size), sizeof(object_size),
+      &property_size, 0);
+  if (!NT_SUCCESS(status) || property_size != sizeof(object_size) ||
+      object_size == 0 || object_size > maximum)
+    return ntl::unexpected(NT_SUCCESS(status) ? STATUS_BUFFER_OVERFLOW
+                                               : status);
+  auto hash_object = owned_bytes::try_allocate(
+      object_size, buffer_limits{maximum}, ntl::pool_tag("oXtN"));
+  if (!hash_object)
+    return ntl::unexpected(hash_object.status());
+  BCRYPT_HASH_HANDLE hash = nullptr;
+  status = BCryptCreateHash(
+      sha256, &hash, reinterpret_cast<PUCHAR>(hash_object->data()),
+      object_size, nullptr, 0, 0);
+  if (!NT_SUCCESS(status))
+    return ntl::unexpected(status);
+  struct hash_guard {
+    BCRYPT_HASH_HANDLE value;
+    ~hash_guard() {
+      if (value)
+        (void)BCryptDestroyHash(value);
+    }
+  } guard{hash};
+  std::array<std::byte, 32> digest{};
+  status = BCryptHashData(
+      hash,
+      reinterpret_cast<PUCHAR>(const_cast<std::byte *>(data.data())),
+      static_cast<ULONG>(data.size()), 0);
+  if (NT_SUCCESS(status))
+    status = BCryptFinishHash(
+        hash, reinterpret_cast<PUCHAR>(digest.data()),
+        static_cast<ULONG>(digest.size()), 0);
+  if (!NT_SUCCESS(status))
+    return ntl::unexpected(status);
+  BCRYPT_PKCS1_PADDING_INFO padding{BCRYPT_SHA256_ALGORITHM};
+  ULONG required = 0;
+  status = BCryptSignHash(
+      key, &padding, reinterpret_cast<PUCHAR>(digest.data()),
+      static_cast<ULONG>(digest.size()), nullptr, 0, &required,
+      BCRYPT_PAD_PKCS1);
+  if (!NT_SUCCESS(status))
+    return ntl::unexpected(status);
+  if (required == 0 || required > maximum)
+    return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+  auto signature = owned_bytes::try_allocate(
+      required, buffer_limits{maximum}, ntl::pool_tag("sXtN"));
+  if (!signature)
+    return signature;
+  ULONG written = 0;
+  status = BCryptSignHash(
+      key, &padding, reinterpret_cast<PUCHAR>(digest.data()),
+      static_cast<ULONG>(digest.size()),
+      reinterpret_cast<PUCHAR>(signature->data()), required, &written,
+      BCRYPT_PAD_PKCS1);
+  if (!NT_SUCCESS(status) || written != required)
+    return ntl::unexpected(NT_SUCCESS(status) ? STATUS_DATA_ERROR : status);
+  return signature;
+}
+
+inline ntl::status subject_public_key(der_writer &writer,
+                                      BCRYPT_KEY_HANDLE key,
+                                      std::size_t maximum) noexcept {
+  auto blob = export_key(key, BCRYPT_RSAPUBLIC_BLOB, maximum,
+                         ntl::pool_tag("uXtN"));
+  if (!blob)
+    return blob.status();
+  if (blob->size() < sizeof(BCRYPT_RSAKEY_BLOB))
+    return STATUS_DATA_ERROR;
+  const auto *header =
+      reinterpret_cast<const BCRYPT_RSAKEY_BLOB *>(blob->data());
+  const std::size_t payload = sizeof(*header) + header->cbPublicExp +
+                              header->cbModulus;
+  if (header->Magic != BCRYPT_RSAPUBLIC_MAGIC ||
+      payload > blob->size() || header->cbPublicExp == 0 ||
+      header->cbModulus == 0)
+    return STATUS_DATA_ERROR;
+  const auto exponent = std::span<const std::byte>(
+      blob->data() + sizeof(*header), header->cbPublicExp);
+  const auto modulus = std::span<const std::byte>(
+      blob->data() + sizeof(*header) + header->cbPublicExp,
+      header->cbModulus);
+
+  auto rsa_storage = owned_bytes::try_allocate(
+      maximum, buffer_limits{maximum}, ntl::pool_tag("rXtN"));
+  if (!rsa_storage)
+    return rsa_storage.status();
+  der_writer rsa(rsa_storage->span());
+  ntl::status status = rsa.begin(0x30);
+  if (status.is_ok())
+    status = rsa.positive_integer(modulus);
+  if (status.is_ok())
+    status = rsa.positive_integer(exponent);
+  if (status.is_ok())
+    status = rsa.end();
+  if (!status.is_ok() || !rsa.complete())
+    return status.is_ok() ? ntl::status{STATUS_DATA_ERROR} : status;
+
+  status = writer.begin(0x30);
+  if (status.is_ok())
+    status = algorithm_identifier(writer, oid_rsa_encryption);
+  if (status.is_ok())
+    status = writer.bit_string(rsa.written());
+  return status.is_ok() ? writer.end() : status;
+}
+
+inline ntl::status extension(der_writer &writer,
+                             std::span<const std::byte> oid,
+                             bool critical,
+                             std::span<const std::byte> value) noexcept {
+  ntl::status status = writer.begin(0x30);
+  if (status.is_ok())
+    status = writer.oid(oid);
+  if (status.is_ok() && critical)
+    status = writer.boolean(true);
+  if (status.is_ok())
+    status = writer.tlv(0x04, value);
+  return status.is_ok() ? writer.end() : status;
+}
+
+inline ntl::status extensions(der_writer &writer, bool is_ca,
+                              std::string_view dns_name,
+                              std::size_t maximum) noexcept {
+  auto value_storage = owned_bytes::try_allocate(
+      maximum, buffer_limits{maximum}, ntl::pool_tag("vXtN"));
+  if (!value_storage)
+    return value_storage.status();
+
+  ntl::status status = writer.begin(0xa3);
+  if (status.is_ok())
+    status = writer.begin(0x30);
+
+  der_writer value(value_storage->span());
+  if (status.is_ok())
+    status = value.begin(0x30);
+  if (status.is_ok() && is_ca)
+    status = value.boolean(true);
+  if (status.is_ok())
+    status = value.end();
+  if (status.is_ok())
+    status = extension(writer, oid_basic_constraints, true, value.written());
+  if (!status.is_ok())
+    return status;
+
+  value = der_writer(value_storage->span());
+  const std::byte usage = is_ca ? std::byte{0x06} : std::byte{0xa0};
+  status = value.bit_string({&usage, 1}, is_ca ? 1 : 5);
+  if (status.is_ok())
+    status = extension(writer, oid_key_usage, true, value.written());
+  if (!status.is_ok())
+    return status;
+
+  if (!is_ca) {
+    value = der_writer(value_storage->span());
+    status = value.begin(0x30);
+    if (status.is_ok())
+      status = value.oid(oid_server_auth);
+    if (status.is_ok())
+      status = value.end();
+    if (status.is_ok())
+      status = extension(writer, oid_extended_key_usage, false,
+                         value.written());
+    if (!status.is_ok())
+      return status;
+
+    value = der_writer(value_storage->span());
+    status = value.begin(0x30);
+    if (status.is_ok())
+      status = value.tlv(
+          0x82, std::as_bytes(std::span(dns_name.data(), dns_name.size())));
+    if (status.is_ok())
+      status = value.end();
+    if (status.is_ok())
+      status = extension(writer, oid_subject_alt_name, false,
+                         value.written());
+    if (!status.is_ok())
+      return status;
+  }
+
+  status = writer.end();
+  return status.is_ok() ? writer.end() : status;
+}
+
+inline ntl::result<owned_bytes>
+build_tbs(BCRYPT_KEY_HANDLE subject_key, std::string_view issuer,
+          std::string_view subject, bool is_ca, std::uint32_t validity_days,
+          std::size_t maximum) noexcept {
+  auto storage = owned_bytes::try_allocate(
+      maximum, buffer_limits{maximum}, ntl::pool_tag("tXtN"));
+  if (!storage)
+    return storage;
+  der_writer writer(storage->span());
+  ntl::status status = writer.begin(0x30);
+
+  if (status.is_ok())
+    status = writer.begin(0xa0);
+  const std::byte version = std::byte{2};
+  if (status.is_ok())
+    status = writer.positive_integer({&version, 1});
+  if (status.is_ok())
+    status = writer.end();
+
+  std::array<std::byte, 16> serial{};
+  if (status.is_ok()) {
+    const NTSTATUS random = BCryptGenRandom(
+        nullptr, reinterpret_cast<PUCHAR>(serial.data()),
+        static_cast<ULONG>(serial.size()), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+    if (!NT_SUCCESS(random))
+      status = random;
+    serial[0] = static_cast<std::byte>(
+        std::to_integer<unsigned char>(serial[0]) & 0x7fu);
+  }
+  if (status.is_ok())
+    status = writer.positive_integer(serial);
+  if (status.is_ok())
+    status = algorithm_identifier(writer, oid_sha256_rsa);
+  if (status.is_ok())
+    status = name(writer, issuer);
+  if (status.is_ok())
+    status = validity(writer, validity_days);
+  if (status.is_ok())
+    status = name(writer, subject);
+  if (status.is_ok())
+    status = subject_public_key(writer, subject_key, maximum);
+  if (status.is_ok())
+    status = extensions(writer, is_ca, is_ca ? std::string_view{} : subject,
+                        maximum);
+  if (status.is_ok())
+    status = writer.end();
+  if (!status.is_ok() || !writer.complete())
+    return ntl::unexpected(status.is_ok()
+                               ? STATUS_DATA_ERROR
+                               : static_cast<NTSTATUS>(status));
+  return owned_bytes::try_copy(writer.written(), buffer_limits{maximum},
+                               ntl::pool_tag("dXtN"));
+}
+
+inline ntl::result<owned_bytes>
+assemble_certificate(std::span<const std::byte> tbs,
+                     BCRYPT_KEY_HANDLE issuer_key,
+                     std::size_t maximum) noexcept {
+  auto signature = sign_sha256(issuer_key, tbs, maximum);
+  if (!signature)
+    return ntl::unexpected(signature.status());
+  auto storage = owned_bytes::try_allocate(
+      maximum, buffer_limits{maximum}, ntl::pool_tag("cXtN"));
+  if (!storage)
+    return storage;
+  der_writer writer(storage->span());
+  ntl::status status = writer.begin(0x30);
+  if (status.is_ok())
+    status = writer.append(tbs);
+  if (status.is_ok())
+    status = algorithm_identifier(writer, oid_sha256_rsa);
+  if (status.is_ok())
+    status = writer.bit_string(signature->span());
+  if (status.is_ok())
+    status = writer.end();
+  if (!status.is_ok() || !writer.complete())
+    return ntl::unexpected(status.is_ok()
+                               ? STATUS_DATA_ERROR
+                               : static_cast<NTSTATUS>(status));
+  return owned_bytes::try_copy(writer.written(), buffer_limits{maximum},
+                               ntl::pool_tag("dXtN"));
+}
+
+} // namespace x509_detail
+
+class x509_certificate {
+public:
+  x509_certificate() noexcept = default;
+  x509_certificate(const x509_certificate &) = delete;
+  x509_certificate &operator=(const x509_certificate &) = delete;
+  x509_certificate(x509_certificate &&) noexcept = default;
+  x509_certificate &operator=(x509_certificate &&) noexcept = default;
+
+  std::span<const std::byte> der() const noexcept { return der_.span(); }
+  bool has_private_key() const noexcept { return key_.get() != nullptr; }
+
+  ntl::result<owned_bytes>
+  export_full_private_key(std::size_t maximum = 16 * 1024) const noexcept {
+    if (!key_.get())
+      return ntl::unexpected(STATUS_INVALID_HANDLE);
+    return x509_detail::export_key(
+        key_.get(), BCRYPT_RSAFULLPRIVATE_BLOB, maximum,
+        ntl::pool_tag("kXtN"));
+  }
+
+private:
+  friend class x509_certificate_authority;
+  x509_certificate(x509_detail::rsa_key &&key,
+                   owned_bytes &&der) noexcept
+      : key_(std::move(key)), der_(std::move(der)) {}
+
+  x509_detail::rsa_key key_{};
+  owned_bytes der_{};
+};
+
+/**
+ * @brief Small in-memory CA for controlled kernel TLS test/provisioning flows.
+ *
+ * The produced DER and CNG private-key blob are artifacts for an installer or
+ * trusted user service to provision. Kernel Schannel itself selects server
+ * identities by machine-store thumbprint; it does not consume this CNG handle
+ * directly.
+ */
+class x509_certificate_authority {
+public:
+  x509_certificate_authority() noexcept = default;
+  x509_certificate_authority(const x509_certificate_authority &) = delete;
+  x509_certificate_authority &
+  operator=(const x509_certificate_authority &) = delete;
+  x509_certificate_authority(x509_certificate_authority &&) noexcept = default;
+  x509_certificate_authority &
+  operator=(x509_certificate_authority &&) noexcept = default;
+
+  static ntl::result<x509_certificate_authority>
+  try_create(std::string_view common_name,
+             x509_issuer_limits limits = {}) noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL || common_name.empty() ||
+        common_name.size() > limits.maximum_common_name_bytes ||
+        limits.maximum_certificate_bytes < 1024 || limits.validity_days == 0)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    auto key = x509_detail::generate_rsa(limits.rsa_bits);
+    if (!key)
+      return ntl::unexpected(key.status());
+    auto tbs = x509_detail::build_tbs(
+        key->get(), common_name, common_name, true, limits.validity_days,
+        limits.maximum_certificate_bytes);
+    if (!tbs)
+      return ntl::unexpected(tbs.status());
+    auto der = x509_detail::assemble_certificate(
+        tbs->span(), key->get(), limits.maximum_certificate_bytes);
+    if (!der)
+      return ntl::unexpected(der.status());
+
+    x509_certificate_authority result;
+    result.certificate_ = x509_certificate(std::move(*key), std::move(*der));
+    std::copy(common_name.begin(), common_name.end(), result.name_.begin());
+    result.name_size_ = common_name.size();
+    result.limits_ = limits;
+    return ntl::ok(std::move(result));
+  }
+
+  ntl::result<x509_certificate>
+  issue_server(std::string_view dns_name) const noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL ||
+        !certificate_.key_.get() || dns_name.empty() ||
+        dns_name.size() > limits_.maximum_common_name_bytes)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    auto key = x509_detail::generate_rsa(limits_.rsa_bits);
+    if (!key)
+      return ntl::unexpected(key.status());
+    auto tbs = x509_detail::build_tbs(
+        key->get(), std::string_view(name_.data(), name_size_), dns_name,
+        false, limits_.validity_days, limits_.maximum_certificate_bytes);
+    if (!tbs)
+      return ntl::unexpected(tbs.status());
+    auto der = x509_detail::assemble_certificate(
+        tbs->span(), certificate_.key_.get(),
+        limits_.maximum_certificate_bytes);
+    if (!der)
+      return ntl::unexpected(der.status());
+    return ntl::ok(x509_certificate(std::move(*key), std::move(*der)));
+  }
+
+  const x509_certificate &certificate_ref() const noexcept {
+    return certificate_;
+  }
+
+private:
+  x509_certificate certificate_{};
+  std::array<char, 254> name_{};
+  std::size_t name_size_ = 0;
+  x509_issuer_limits limits_{};
+};
+
+} // namespace ntl::net::kernel

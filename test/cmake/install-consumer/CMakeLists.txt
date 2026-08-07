@@ -11,6 +11,14 @@ set(CRTSYS_NTL_MAIN ON)
 find_package(crtsys CONFIG REQUIRED PATHS "${CRTSYS_PACKAGE_ROOT}" NO_DEFAULT_PATH)
 
 crtsys_add_driver(crtsys_install_consumer src/main.cpp)
+crtsys_add_driver(
+  crtsys_install_kernel_msquic_consumer
+  src/kernel_msquic.cpp
+  WFP
+  NTL
+  KERNEL_MSQUIC
+  KERNEL_CONTENT_CODECS
+)
 
 include(
   "${CRTSYS_PACKAGE_ROOT}/share/crtsys/cmake/NtlContentCodecs.cmake"

@@ -1,0 +1,635 @@
+/**
+ * @file kernel_http3_origin_pool
+ * @brief Owning bounded asynchronous HTTP/3 origin execution for kernel mode.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/net/kernel/http3_origin_pool is a kernel-mode header"
+#endif
+
+#include <ntddk.h>
+
+#include <ntl/net/http3/inspection_proxy>
+#include <ntl/net/kernel/executor>
+#include <ntl/net/kernel/passive_cleanup_item>
+#include <ntl/result>
+#include <ntl/status>
+
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <limits>
+#include <memory>
+#include <new>
+#include <utility>
+
+namespace ntl::net::kernel {
+
+class origin_cancellation_view {
+public:
+  bool cancelled() const noexcept {
+    return event_ && KeReadStateEvent(event_) != 0;
+  }
+
+  /** Explicit borrowed native event for WSK/MsQuic wait integration. */
+  PKEVENT borrowed_native_event() const noexcept { return event_; }
+
+private:
+  friend class http3_origin_pool;
+  explicit origin_cancellation_view(PKEVENT event) noexcept : event_(event) {}
+  PKEVENT event_ = nullptr;
+};
+
+struct http3_origin_pool_limits {
+  std::size_t maximum_concurrency = 4;
+  std::size_t maximum_pending_operations = 256;
+  std::size_t maximum_buffered_request_bytes = 16 * 1024 * 1024;
+
+  constexpr bool valid() const noexcept {
+    return maximum_concurrency != 0 &&
+           maximum_concurrency <= static_cast<std::size_t>(LONG_MAX) &&
+           maximum_pending_operations >= maximum_concurrency &&
+           maximum_buffered_request_bytes != 0;
+  }
+};
+
+struct http3_origin_pool_statistics {
+  /** Accepted operations whose completion callback has not returned. */
+  std::size_t pending_operations = 0;
+  std::size_t peak_pending_operations = 0;
+  std::size_t running_operations = 0;
+  std::size_t peak_running_operations = 0;
+  std::size_t buffered_request_bytes = 0;
+  std::size_t peak_buffered_request_bytes = 0;
+  std::uint64_t submitted = 0;
+  /** Operations whose completion callback and bookkeeping both finished. */
+  std::uint64_t completed = 0;
+  std::uint64_t canceled = 0;
+  std::uint64_t operation_quota_rejections = 0;
+  std::uint64_t byte_quota_rejections = 0;
+};
+
+/**
+ * @brief Owns the worker, handler, cancellation, and callback rundown.
+ *
+ * A channel returned by make_transport() retains the shared runtime. Destroying
+ * the pool facade first therefore does not invalidate existing channels.
+ * close() is idempotent, rejects new submissions, signals every accepted
+ * operation, and lets the runtime cleanup domain join the worker automatically.
+ */
+class http3_origin_pool final {
+public:
+  using handler_type = std::function<
+      ntl::result<ntl::net::http3::origin_response>(
+          ntl::net::http3::origin_request,
+          origin_cancellation_view)>;
+
+  static ntl::result<http3_origin_pool> try_create(
+      handler_type handler,
+      http3_origin_pool_limits limits = {}) noexcept;
+
+  http3_origin_pool() noexcept = default;
+  http3_origin_pool(const http3_origin_pool &) noexcept = default;
+  http3_origin_pool &operator=(const http3_origin_pool &) noexcept = default;
+  http3_origin_pool(http3_origin_pool &&) noexcept = default;
+  http3_origin_pool &operator=(http3_origin_pool &&) noexcept = default;
+  ~http3_origin_pool() = default;
+
+  std::shared_ptr<ntl::net::http3::async_origin_transport>
+  make_transport() const noexcept;
+
+  void close() noexcept;
+
+  http3_origin_pool_statistics statistics() const noexcept;
+
+private:
+  class channel;
+  struct shared_state;
+
+  struct operation {
+    operation(std::shared_ptr<channel> channel_value,
+              std::shared_ptr<shared_state> state_value,
+              std::uint64_t exchange_id_value,
+              std::size_t accounted_bytes_value,
+              ntl::net::http3::origin_request request_value,
+              ntl::net::http3::origin_completion completion_value) noexcept
+        : channel_owner(std::move(channel_value)),
+          state_owner(std::move(state_value)),
+          exchange_id(exchange_id_value),
+          accounted_bytes(accounted_bytes_value),
+          request(std::move(request_value)),
+          completion(std::move(completion_value)) {
+      InitializeListHead(&state_entry);
+      InitializeListHead(&channel_entry);
+      KeInitializeEvent(&cancellation, NotificationEvent, FALSE);
+    }
+
+    ~operation() {
+      NT_ASSERT(!state_registered && !channel_registered);
+    }
+
+    std::shared_ptr<channel> channel_owner;
+    std::shared_ptr<shared_state> state_owner;
+    std::uint64_t exchange_id = 0;
+    std::size_t accounted_bytes = 0;
+    ntl::net::http3::origin_request request;
+    ntl::net::http3::origin_completion completion;
+    LIST_ENTRY state_entry{};
+    LIST_ENTRY channel_entry{};
+    KEVENT cancellation{};
+    std::atomic<bool> canceled{false};
+    bool state_registered = false;
+    bool channel_registered = false;
+  };
+
+  struct shared_state {
+    shared_state(handler_type handler_value,
+                 http3_origin_pool_limits limits_value) noexcept
+        : cleanup(&shared_state::cleanup_at_passive, this),
+          handler(std::move(handler_value)), limits(limits_value) {
+      KeInitializeSpinLock(&operation_lock);
+      InitializeListHead(&operations);
+      KeInitializeSemaphore(
+          &concurrency, static_cast<LONG>(limits.maximum_concurrency),
+          static_cast<LONG>(limits.maximum_concurrency));
+    }
+
+    void close() noexcept {
+      KIRQL old_irql = 0;
+      KeAcquireSpinLock(&operation_lock, &old_irql);
+      if (!closing.exchange(true, std::memory_order_acq_rel)) {
+        for (auto *entry = operations.Flink; entry != &operations;
+             entry = entry->Flink) {
+          auto *value = CONTAINING_RECORD(
+              entry, operation, state_entry);
+          if (!value->canceled.exchange(true, std::memory_order_acq_rel))
+            canceled_count.fetch_add(1, std::memory_order_relaxed);
+          KeSetEvent(&value->cancellation, IO_NO_INCREMENT, FALSE);
+        }
+      }
+      KeReleaseSpinLock(&operation_lock, old_irql);
+      worker.close();
+    }
+
+    ntl::status register_operation(operation &value) noexcept {
+      KIRQL old_irql = 0;
+      KeAcquireSpinLock(&operation_lock, &old_irql);
+      const std::size_t current = pending.load(std::memory_order_relaxed);
+      const std::size_t bytes =
+          buffered_bytes.load(std::memory_order_relaxed);
+      if (closing.load(std::memory_order_acquire)) {
+        KeReleaseSpinLock(&operation_lock, old_irql);
+        return STATUS_DELETE_PENDING;
+      }
+      if (current >= limits.maximum_pending_operations) {
+        operation_quota_rejections.fetch_add(1, std::memory_order_relaxed);
+        KeReleaseSpinLock(&operation_lock, old_irql);
+        return STATUS_QUOTA_EXCEEDED;
+      }
+      if (value.accounted_bytes > limits.maximum_buffered_request_bytes ||
+          bytes > limits.maximum_buffered_request_bytes -
+                      value.accounted_bytes) {
+        byte_quota_rejections.fetch_add(1, std::memory_order_relaxed);
+        KeReleaseSpinLock(&operation_lock, old_irql);
+        return STATUS_QUOTA_EXCEEDED;
+      }
+      InsertTailList(&operations, &value.state_entry);
+      value.state_registered = true;
+      pending.store(current + 1, std::memory_order_release);
+      buffered_bytes.store(bytes + value.accounted_bytes,
+                           std::memory_order_release);
+      submitted.fetch_add(1, std::memory_order_relaxed);
+      std::size_t peak = peak_pending.load(std::memory_order_relaxed);
+      while (peak < current + 1 &&
+             !peak_pending.compare_exchange_weak(
+                 peak, current + 1, std::memory_order_relaxed)) {
+      }
+      std::size_t peak_bytes =
+          peak_buffered_bytes.load(std::memory_order_relaxed);
+      while (peak_bytes < bytes + value.accounted_bytes &&
+             !peak_buffered_bytes.compare_exchange_weak(
+                 peak_bytes, bytes + value.accounted_bytes,
+                 std::memory_order_relaxed)) {
+      }
+      KeReleaseSpinLock(&operation_lock, old_irql);
+      return ntl::status::ok();
+    }
+
+    void unregister_operation(operation &value) noexcept {
+      KIRQL old_irql = 0;
+      KeAcquireSpinLock(&operation_lock, &old_irql);
+      if (value.state_registered) {
+        RemoveEntryList(&value.state_entry);
+        InitializeListHead(&value.state_entry);
+        value.state_registered = false;
+        const std::size_t current = pending.load(std::memory_order_relaxed);
+        NT_ASSERT(current != 0);
+        pending.store(current == 0 ? 0 : current - 1,
+                      std::memory_order_release);
+        const std::size_t bytes =
+            buffered_bytes.load(std::memory_order_relaxed);
+        NT_ASSERT(bytes >= value.accounted_bytes);
+        buffered_bytes.store(
+            bytes < value.accounted_bytes ? 0
+                                          : bytes - value.accounted_bytes,
+            std::memory_order_release);
+      }
+      KeReleaseSpinLock(&operation_lock, old_irql);
+    }
+
+    /**
+     * Remove a running operation from cancellation and byte accounting while
+     * retaining its pending slot. The pending slot is released only after the
+     * completion callback and completed counter are published, so observing
+     * pending_operations == 0 is a real drain boundary.
+     */
+    bool detach_completing_operation(operation &value) noexcept {
+      bool detached = false;
+      KIRQL old_irql = 0;
+      KeAcquireSpinLock(&operation_lock, &old_irql);
+      if (value.state_registered) {
+        RemoveEntryList(&value.state_entry);
+        InitializeListHead(&value.state_entry);
+        value.state_registered = false;
+        const std::size_t bytes =
+            buffered_bytes.load(std::memory_order_relaxed);
+        NT_ASSERT(bytes >= value.accounted_bytes);
+        buffered_bytes.store(
+            bytes < value.accounted_bytes ? 0
+                                          : bytes - value.accounted_bytes,
+            std::memory_order_release);
+        detached = true;
+      }
+      KeReleaseSpinLock(&operation_lock, old_irql);
+      return detached;
+    }
+
+    void release_completed_operation() noexcept {
+      KIRQL old_irql = 0;
+      KeAcquireSpinLock(&operation_lock, &old_irql);
+      const std::size_t current = pending.load(std::memory_order_relaxed);
+      NT_ASSERT(current != 0);
+      pending.store(current == 0 ? 0 : current - 1,
+                    std::memory_order_release);
+      KeReleaseSpinLock(&operation_lock, old_irql);
+    }
+
+    http3_origin_pool_statistics statistics() const noexcept {
+      return {.pending_operations = pending.load(std::memory_order_acquire),
+              .peak_pending_operations =
+                  peak_pending.load(std::memory_order_acquire),
+              .running_operations =
+                  running.load(std::memory_order_acquire),
+              .peak_running_operations =
+                  peak_running.load(std::memory_order_acquire),
+              .buffered_request_bytes =
+                  buffered_bytes.load(std::memory_order_acquire),
+              .peak_buffered_request_bytes =
+                  peak_buffered_bytes.load(std::memory_order_acquire),
+              .submitted = submitted.load(std::memory_order_acquire),
+              .completed = completed.load(std::memory_order_acquire),
+              .canceled = canceled_count.load(std::memory_order_acquire),
+              .operation_quota_rejections =
+                  operation_quota_rejections.load(std::memory_order_acquire),
+              .byte_quota_rejections =
+                  byte_quota_rejections.load(std::memory_order_acquire)};
+    }
+
+    void retire() noexcept {
+      close();
+      ntl::net::kernel::detail::
+          retire_runtime_passive_cleanup_deferred(cleanup);
+    }
+
+    static void cleanup_at_passive(void *context) noexcept {
+      auto *const self = static_cast<shared_state *>(context);
+      NT_ASSERT(KeGetCurrentIrql() == PASSIVE_LEVEL);
+      self->close();
+      (void)self->worker.drain();
+      NT_ASSERT(self->pending.load(std::memory_order_acquire) == 0);
+      delete self;
+    }
+
+    passive_cleanup_item cleanup;
+    handler_type handler;
+    http3_origin_pool_limits limits{};
+    ntl::net::kernel::executor worker{};
+    KSPIN_LOCK operation_lock{};
+    LIST_ENTRY operations{};
+    KSEMAPHORE concurrency{};
+    std::atomic<bool> closing{false};
+    std::atomic<std::size_t> pending{0};
+    std::atomic<std::size_t> peak_pending{0};
+    std::atomic<std::size_t> running{0};
+    std::atomic<std::size_t> peak_running{0};
+    std::atomic<std::size_t> buffered_bytes{0};
+    std::atomic<std::size_t> peak_buffered_bytes{0};
+    std::atomic<std::uint64_t> submitted{0};
+    std::atomic<std::uint64_t> completed{0};
+    std::atomic<std::uint64_t> canceled_count{0};
+    std::atomic<std::uint64_t> operation_quota_rejections{0};
+    std::atomic<std::uint64_t> byte_quota_rejections{0};
+  };
+
+  class channel final
+      : public ntl::net::http3::async_origin_transport,
+        public std::enable_shared_from_this<channel> {
+  public:
+    explicit channel(std::shared_ptr<shared_state> state) noexcept
+        : state_(std::move(state)) {
+      KeInitializeSpinLock(&operation_lock_);
+      InitializeListHead(&operations_);
+    }
+
+    ~channel() override { close(); }
+
+    ntl::status submit(
+        std::uint64_t exchange_id,
+        ntl::net::http3::origin_request request,
+        ntl::net::http3::origin_completion completion) noexcept override {
+      if (!completion)
+        return STATUS_INVALID_PARAMETER;
+      const auto accounted = request_size(request);
+      if (!accounted)
+        return accounted.status();
+      std::shared_ptr<operation> pending;
+      std::unique_ptr<std::shared_ptr<operation>> job;
+      try {
+        pending = std::make_shared<operation>(
+            shared_from_this(), state_, exchange_id, *accounted,
+            std::move(request), std::move(completion));
+        job.reset(new (std::nothrow) std::shared_ptr<operation>(pending));
+        if (!job)
+          return STATUS_INSUFFICIENT_RESOURCES;
+        KIRQL old_irql = 0;
+        KeAcquireSpinLock(&operation_lock_, &old_irql);
+        if (closed_) {
+          KeReleaseSpinLock(&operation_lock_, old_irql);
+          return STATUS_DELETE_PENDING;
+        }
+        for (auto *entry = operations_.Flink; entry != &operations_;
+             entry = entry->Flink) {
+          auto *current = CONTAINING_RECORD(
+              entry, operation, channel_entry);
+          if (current->exchange_id == exchange_id) {
+            KeReleaseSpinLock(&operation_lock_, old_irql);
+            return STATUS_OBJECT_NAME_COLLISION;
+          }
+        }
+        InsertTailList(&operations_, &pending->channel_entry);
+        pending->channel_registered = true;
+        KeReleaseSpinLock(&operation_lock_, old_irql);
+
+        const ntl::status registered =
+            state_->register_operation(*pending);
+        if (!registered.is_ok()) {
+          unlink_channel(*pending);
+          return registered;
+        }
+      } catch (const std::bad_alloc &) {
+        return STATUS_INSUFFICIENT_RESOURCES;
+      } catch (...) {
+        return STATUS_UNHANDLED_EXCEPTION;
+      }
+      const ntl::status posted = state_->worker.post_borrowed(
+          {.callback = &channel::run, .context = job.get()});
+      if (posted.is_ok()) {
+        (void)job.release();
+        return posted;
+      }
+      state_->unregister_operation(*pending);
+      unlink_channel(*pending);
+      return posted;
+    }
+
+    void cancel(std::uint64_t exchange_id) noexcept override {
+      KIRQL old_irql = 0;
+      KeAcquireSpinLock(&operation_lock_, &old_irql);
+      for (auto *entry = operations_.Flink; entry != &operations_;
+           entry = entry->Flink) {
+        auto *value = CONTAINING_RECORD(
+            entry, operation, channel_entry);
+        if (value->exchange_id != exchange_id)
+          continue;
+        if (!value->canceled.exchange(true, std::memory_order_acq_rel))
+          state_->canceled_count.fetch_add(1, std::memory_order_relaxed);
+        KeSetEvent(&value->cancellation, IO_NO_INCREMENT, FALSE);
+        break;
+      }
+      KeReleaseSpinLock(&operation_lock_, old_irql);
+    }
+
+    void close() noexcept {
+      KIRQL old_irql = 0;
+      KeAcquireSpinLock(&operation_lock_, &old_irql);
+      if (!closed_) {
+        closed_ = true;
+        for (auto *entry = operations_.Flink; entry != &operations_;
+             entry = entry->Flink) {
+          auto *value = CONTAINING_RECORD(
+              entry, operation, channel_entry);
+          if (!value->canceled.exchange(true, std::memory_order_acq_rel))
+            state_->canceled_count.fetch_add(1, std::memory_order_relaxed);
+          KeSetEvent(&value->cancellation, IO_NO_INCREMENT, FALSE);
+        }
+      }
+      KeReleaseSpinLock(&operation_lock_, old_irql);
+    }
+
+  private:
+    static void run(void *context) noexcept {
+      std::unique_ptr<std::shared_ptr<operation>> job(
+          static_cast<std::shared_ptr<operation> *>(context));
+      const auto value = job ? std::move(*job) : nullptr;
+      if (!value)
+        return;
+      ntl::result<ntl::net::http3::origin_response> response =
+          ntl::unexpected(STATUS_CANCELLED);
+      PVOID gates[] = {&value->cancellation,
+                       &value->state_owner->concurrency};
+      const NTSTATUS gate = KeWaitForMultipleObjects(
+          RTL_NUMBER_OF(gates), gates, WaitAny, Executive,
+          KernelMode, FALSE, nullptr, nullptr);
+      const bool acquired = gate == STATUS_WAIT_1;
+      if (acquired) {
+        const std::size_t running =
+            value->state_owner->running.fetch_add(
+                1, std::memory_order_acq_rel) + 1;
+        std::size_t peak =
+            value->state_owner->peak_running.load(
+                std::memory_order_relaxed);
+        while (peak < running &&
+               !value->state_owner->peak_running.compare_exchange_weak(
+                   peak, running, std::memory_order_relaxed)) {
+        }
+      }
+      if (acquired &&
+          !value->canceled.load(std::memory_order_acquire)) {
+        try {
+          response = value->state_owner->handler(
+              std::move(value->request),
+              origin_cancellation_view(&value->cancellation));
+        } catch (const std::bad_alloc &) {
+          response = ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+        } catch (...) {
+          response = ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+        }
+      }
+      if (acquired) {
+        value->state_owner->running.fetch_sub(
+            1, std::memory_order_acq_rel);
+        KeReleaseSemaphore(
+            &value->state_owner->concurrency, IO_NO_INCREMENT, 1, FALSE);
+      }
+      const bool detached =
+          value->state_owner->detach_completing_operation(*value);
+      value->channel_owner->finish(*value, std::move(response));
+      value->state_owner->completed.fetch_add(1, std::memory_order_release);
+      if (detached)
+        value->state_owner->release_completed_operation();
+    }
+
+    void finish(
+        operation &value,
+        ntl::result<ntl::net::http3::origin_response> response) noexcept {
+      ntl::net::http3::origin_completion completion;
+      KIRQL old_irql = 0;
+      KeAcquireSpinLock(&operation_lock_, &old_irql);
+      if (value.channel_registered) {
+        RemoveEntryList(&value.channel_entry);
+        InitializeListHead(&value.channel_entry);
+        value.channel_registered = false;
+      }
+      if (!closed_ &&
+          !value.canceled.load(std::memory_order_acquire))
+        completion = std::move(value.completion);
+      KeReleaseSpinLock(&operation_lock_, old_irql);
+      if (!completion)
+        return;
+      try {
+        completion(std::move(response));
+      } catch (...) {
+      }
+    }
+
+    static ntl::result<std::size_t> request_size(
+        const ntl::net::http3::origin_request &request) noexcept {
+      std::size_t total = request.server_name.size();
+      const auto add = [&total](std::size_t value) noexcept {
+        if (total > (std::numeric_limits<std::size_t>::max)() - value)
+          return false;
+        total += value;
+        return true;
+      };
+      if (!add(request.method.size()) || !add(request.scheme.size()) ||
+          !add(request.authority.size()) || !add(request.path.size()) ||
+          !add(request.body.size()))
+        return ntl::unexpected(STATUS_INTEGER_OVERFLOW);
+      for (const auto &field : request.headers) {
+        if (!add(field.name.size()) || !add(field.value.size()))
+          return ntl::unexpected(STATUS_INTEGER_OVERFLOW);
+      }
+      for (const auto &field : request.trailers) {
+        if (!add(field.name.size()) || !add(field.value.size()))
+          return ntl::unexpected(STATUS_INTEGER_OVERFLOW);
+      }
+      return ntl::ok(total);
+    }
+
+    void unlink_channel(operation &value) noexcept {
+      KIRQL old_irql = 0;
+      KeAcquireSpinLock(&operation_lock_, &old_irql);
+      if (value.channel_registered) {
+        RemoveEntryList(&value.channel_entry);
+        InitializeListHead(&value.channel_entry);
+        value.channel_registered = false;
+      }
+      KeReleaseSpinLock(&operation_lock_, old_irql);
+    }
+
+    std::shared_ptr<shared_state> state_;
+    KSPIN_LOCK operation_lock_{};
+    LIST_ENTRY operations_{};
+    bool closed_ = false;
+  };
+
+  explicit http3_origin_pool(
+      std::shared_ptr<shared_state> state) noexcept
+      : state_(std::move(state)) {}
+
+  std::shared_ptr<shared_state> state_;
+};
+
+inline ntl::result<http3_origin_pool> http3_origin_pool::try_create(
+    handler_type handler, http3_origin_pool_limits limits) noexcept {
+  if (!handler || !limits.valid())
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+
+  shared_state *raw = nullptr;
+  bool registered = false;
+  try {
+    raw = new (std::nothrow) shared_state(std::move(handler), limits);
+    if (!raw)
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    if (!raw->worker.creation_status().is_ok()) {
+      const ntl::status status = raw->worker.creation_status();
+      delete raw;
+      return ntl::unexpected(status);
+    }
+    const ntl::status registration =
+        ntl::net::kernel::detail::register_runtime_passive_cleanup(
+            raw->cleanup);
+    if (!registration.is_ok()) {
+      delete raw;
+      return ntl::unexpected(registration);
+    }
+    registered = true;
+    std::shared_ptr<shared_state> state(
+        raw, [](shared_state *value) noexcept { value->retire(); });
+    return ntl::ok(http3_origin_pool(std::move(state)));
+  } catch (const std::bad_alloc &) {
+    if (raw) {
+      if (registered)
+        raw->retire();
+      else
+        delete raw;
+    }
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    if (raw) {
+      if (registered)
+        raw->retire();
+      else
+        delete raw;
+    }
+    return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+}
+
+inline std::shared_ptr<ntl::net::http3::async_origin_transport>
+http3_origin_pool::make_transport() const noexcept {
+  if (!state_ || state_->closing.load(std::memory_order_acquire))
+    return {};
+  try {
+    return std::make_shared<channel>(state_);
+  } catch (...) {
+    return {};
+  }
+}
+
+inline void http3_origin_pool::close() noexcept {
+  if (state_)
+    state_->close();
+}
+
+inline http3_origin_pool_statistics
+http3_origin_pool::statistics() const noexcept {
+  return state_ ? state_->statistics()
+                : http3_origin_pool_statistics{};
+}
+
+} // namespace ntl::net::kernel

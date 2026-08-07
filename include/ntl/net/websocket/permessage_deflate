@@ -8,12 +8,9 @@
  */
 #pragma once
 
-#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
-#error "ntl/net/websocket/permessage_deflate is a user-mode header"
-#endif
-
 #include <ntl/result>
 #include <ntl/status>
+#include <ntl/net/inspection/codec_memory>
 #include <ntl/net/websocket/framing>
 
 #include <algorithm>
@@ -193,10 +190,12 @@ class permessage_deflate_decoder {
 public:
   permessage_deflate_decoder(
       std::uint8_t window_bits, bool no_context_takeover,
-      std::size_t maximum_message_size) noexcept
+      std::size_t maximum_message_size,
+      ntl::net::inspection::codec_memory_limits memory_limits = {}) noexcept
       : window_bits_(window_bits),
         no_context_takeover_(no_context_takeover),
-        maximum_message_size_(maximum_message_size) {}
+        maximum_message_size_(maximum_message_size), memory_(memory_limits),
+        scratch_(memory_) {}
 
   permessage_deflate_decoder(
       const permessage_deflate_decoder &) = delete;
@@ -226,6 +225,8 @@ public:
     if (!initialize())
       return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
 
+    const std::span<std::byte> buffer = scratch_.bytes();
+
     constexpr std::array<std::byte, 4> tail{
         std::byte{0x00}, std::byte{0x00},
         std::byte{0xff}, std::byte{0xff}};
@@ -239,7 +240,7 @@ public:
     }
 
     const auto inflate_part =
-        [this, &output](
+        [this, &output, &buffer](
             std::span<const std::byte> input)
         -> ntl::status {
       std::size_t offset = 0;
@@ -255,7 +256,6 @@ public:
         do {
           if (output.size() == maximum_message_size_)
             return STATUS_BUFFER_OVERFLOW;
-          std::array<std::byte, 16 * 1024> buffer{};
           const std::size_t capacity =
               (std::min)(
                   buffer.size(),
@@ -309,11 +309,30 @@ private:
   bool initialize() noexcept {
     if (initialized_)
       return true;
+    if (!scratch_.ensure(scratch_size))
+      return false;
     stream_ = {};
+    stream_.zalloc = &allocate;
+    stream_.zfree = &release_allocation;
+    stream_.opaque = &memory_;
     initialized_ =
         ::inflateInit2(
             &stream_, -static_cast<int>(window_bits_)) == Z_OK;
+    if (!initialized_)
+      scratch_.reset();
     return initialized_;
+  }
+
+  static voidpf allocate(voidpf opaque, uInt count, uInt size) noexcept {
+    return opaque ? static_cast<ntl::net::inspection::codec_memory_budget *>(
+                        opaque)->allocate_array(count, size)
+                  : nullptr;
+  }
+
+  static void release_allocation(voidpf opaque, voidpf pointer) noexcept {
+    if (opaque)
+      static_cast<ntl::net::inspection::codec_memory_budget *>(opaque)
+          ->release(pointer);
   }
 
   void release() noexcept {
@@ -321,12 +340,16 @@ private:
       (void)::inflateEnd(&stream_);
     stream_ = {};
     initialized_ = false;
+    scratch_.reset();
   }
 
   z_stream stream_{};
   std::uint8_t window_bits_ = 15;
   bool no_context_takeover_ = false;
   std::size_t maximum_message_size_ = 0;
+  ntl::net::inspection::codec_memory_budget memory_;
+  ntl::net::inspection::borrowed_codec_scratch_buffer scratch_;
+  static constexpr std::size_t scratch_size = 16 * 1024;
   bool initialized_ = false;
 };
 
@@ -341,11 +364,13 @@ public:
   permessage_deflate_encoder(
       std::uint8_t window_bits, bool no_context_takeover,
       std::size_t maximum_input_size,
-      std::size_t maximum_output_size) noexcept
+      std::size_t maximum_output_size,
+      ntl::net::inspection::codec_memory_limits memory_limits = {}) noexcept
       : window_bits_(window_bits),
         no_context_takeover_(no_context_takeover),
         maximum_input_size_(maximum_input_size),
-        maximum_output_size_(maximum_output_size) {}
+        maximum_output_size_(maximum_output_size), memory_(memory_limits),
+        scratch_(memory_) {}
 
   permessage_deflate_encoder(const permessage_deflate_encoder &) = delete;
   permessage_deflate_encoder &
@@ -374,6 +399,8 @@ public:
     if (!initialize())
       return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
 
+    const std::span<std::byte> buffer = scratch_.bytes();
+
     std::vector<std::byte> output;
     try {
       output.reserve((std::min)(
@@ -397,7 +424,6 @@ public:
           release();
           return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
         }
-        std::array<std::byte, 16 * 1024> buffer{};
         const std::size_t capacity = (std::min)(
             buffer.size(), maximum_output_size_ - output.size());
         stream_.next_out = reinterpret_cast<Bytef *>(buffer.data());
@@ -444,12 +470,31 @@ private:
   bool initialize() noexcept {
     if (initialized_)
       return true;
+    if (!scratch_.ensure(scratch_size))
+      return false;
     stream_ = {};
+    stream_.zalloc = &allocate;
+    stream_.zfree = &release_allocation;
+    stream_.opaque = &memory_;
     initialized_ = ::deflateInit2(
         &stream_, Z_DEFAULT_COMPRESSION, Z_DEFLATED,
         -static_cast<int>(window_bits_), 8,
         Z_DEFAULT_STRATEGY) == Z_OK;
+    if (!initialized_)
+      scratch_.reset();
     return initialized_;
+  }
+
+  static voidpf allocate(voidpf opaque, uInt count, uInt size) noexcept {
+    return opaque ? static_cast<ntl::net::inspection::codec_memory_budget *>(
+                        opaque)->allocate_array(count, size)
+                  : nullptr;
+  }
+
+  static void release_allocation(voidpf opaque, voidpf pointer) noexcept {
+    if (opaque)
+      static_cast<ntl::net::inspection::codec_memory_budget *>(opaque)
+          ->release(pointer);
   }
 
   void release() noexcept {
@@ -457,6 +502,7 @@ private:
       (void)::deflateEnd(&stream_);
     stream_ = {};
     initialized_ = false;
+    scratch_.reset();
   }
 
   z_stream stream_{};
@@ -464,6 +510,9 @@ private:
   bool no_context_takeover_ = false;
   std::size_t maximum_input_size_ = 0;
   std::size_t maximum_output_size_ = 0;
+  ntl::net::inspection::codec_memory_budget memory_;
+  ntl::net::inspection::borrowed_codec_scratch_buffer scratch_;
+  static constexpr std::size_t scratch_size = 16 * 1024;
   bool initialized_ = false;
 };
 

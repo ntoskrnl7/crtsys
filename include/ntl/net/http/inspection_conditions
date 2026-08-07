@@ -1,0 +1,688 @@
+/**
+ * @file http_inspection_conditions
+ * @brief Composable typed conditions for semantic HTTP inspection policy.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include <ntl/net/http/inspection_context_view>
+
+#include <algorithm>
+#include <cstddef>
+#include <functional>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <tuple>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+namespace ntl::net::http::condition {
+
+namespace detail {
+
+inline std::string normalized_header_name_prefix(std::string prefix) {
+  if (prefix.empty())
+    throw std::invalid_argument("HTTP header-name prefix is empty");
+  prefix = transform_detail::normalized_name(std::move(prefix));
+  if (!transform_detail::is_token(prefix))
+    throw std::invalid_argument("HTTP header-name prefix is invalid");
+  return prefix;
+}
+
+inline bool has_header_value(
+    const header_collection &headers, std::string_view name,
+    std::string_view expected, bool value_case_insensitive) noexcept {
+  for (const auto &field : headers.fields()) {
+    if (!transform_detail::ascii_equal_ci(field.name, name))
+      continue;
+    if (value_case_insensitive
+            ? transform_detail::ascii_equal_ci(field.value, expected)
+            : field.value == expected)
+      return true;
+  }
+  return false;
+}
+
+inline std::size_t header_count(
+    const header_collection &headers, std::string_view name) noexcept {
+  return static_cast<std::size_t>(std::count_if(
+      headers.fields().begin(), headers.fields().end(),
+      [&](const header_field &field) noexcept {
+        return transform_detail::ascii_equal_ci(field.name, name);
+      }));
+}
+
+template <class Predicate>
+bool all_header_values(
+    const header_collection &headers, std::string_view name,
+    Predicate &predicate) {
+  bool found = false;
+  for (const auto &field : headers.fields()) {
+    if (!transform_detail::ascii_equal_ci(field.name, name))
+      continue;
+    found = true;
+    if (!static_cast<bool>(std::invoke(predicate, field.value)))
+      return false;
+  }
+  return found;
+}
+
+} // namespace detail
+
+/** Logical AND over independently reusable typed conditions. */
+template <class... Predicates>
+auto all_of(Predicates &&...predicates) {
+  static_assert(sizeof...(Predicates) != 0,
+                "all_of requires at least one HTTP inspection condition");
+  return [conditions =
+              std::tuple<std::decay_t<Predicates>...>(
+                  std::forward<Predicates>(predicates)...)](
+             const inspection_context_view &context) {
+    return std::apply(
+        [&](auto &...condition) {
+          return (... && static_cast<bool>(
+                             std::invoke(condition, context)));
+        },
+        conditions);
+  };
+}
+
+/** Logical OR over independently reusable typed conditions. */
+template <class... Predicates>
+auto any_of(Predicates &&...predicates) {
+  static_assert(sizeof...(Predicates) != 0,
+                "any_of requires at least one HTTP inspection condition");
+  return [conditions =
+              std::tuple<std::decay_t<Predicates>...>(
+                  std::forward<Predicates>(predicates)...)](
+             const inspection_context_view &context) {
+    return std::apply(
+        [&](auto &...condition) {
+          return (... || static_cast<bool>(
+                             std::invoke(condition, context)));
+        },
+        conditions);
+  };
+}
+
+/** Logical negation without erasing the concrete predicate type. */
+template <class Predicate>
+auto none_of(Predicate &&predicate) {
+  return [condition =
+              std::decay_t<Predicate>(std::forward<Predicate>(predicate))](
+             const inspection_context_view &context) {
+    return !static_cast<bool>(std::invoke(condition, context));
+  };
+}
+
+inline auto protocol_is(protocol expected) noexcept {
+  return [expected](const inspection_context_view &context) noexcept {
+    return context.wire_protocol() == expected;
+  };
+}
+
+inline auto method_is(std::string expected) {
+  return [expected = std::move(expected)](
+             const inspection_context_view &context) noexcept {
+    return context.method() == expected;
+  };
+}
+
+/** Explicit non-standard case-insensitive method comparison. */
+inline auto method_is_ci(std::string expected) {
+  return [expected = std::move(expected)](
+             const inspection_context_view &context) noexcept {
+    return transform_detail::ascii_equal_ci(context.method(), expected);
+  };
+}
+
+inline auto scheme_is(std::string expected) {
+  return [expected = std::move(expected)](
+             const inspection_context_view &context) noexcept {
+    return transform_detail::ascii_equal_ci(context.scheme(), expected);
+  };
+}
+
+inline auto authority_is(std::string expected) {
+  return [expected = std::move(expected)](
+             const inspection_context_view &context) noexcept {
+    return transform_detail::ascii_equal_ci(context.authority(), expected);
+  };
+}
+
+inline auto path_is(std::string expected) {
+  return [expected = std::move(expected)](
+             const inspection_context_view &context) noexcept {
+    return context.path() == expected;
+  };
+}
+
+inline auto path_starts_with(std::string prefix) {
+  return [prefix = std::move(prefix)](
+             const inspection_context_view &context) noexcept {
+    return context.path().starts_with(prefix);
+  };
+}
+
+inline auto method_is_any(std::vector<std::string> expected) {
+  return [expected = std::move(expected)](
+             const inspection_context_view &context) noexcept {
+    return std::any_of(
+        expected.begin(), expected.end(), [&](const std::string &method) {
+          return context.method() == method;
+        });
+  };
+}
+
+inline auto query_is(std::string expected) {
+  return [expected = std::move(expected)](
+             const inspection_context_view &context) noexcept {
+    return context.has_query() && context.query() == expected;
+  };
+}
+
+inline auto query_present() noexcept {
+  return [](const inspection_context_view &context) noexcept {
+    return context.has_query();
+  };
+}
+
+inline auto query_absent() noexcept {
+  return [](const inspection_context_view &context) noexcept {
+    return !context.has_query();
+  };
+}
+
+inline auto header_present(std::string name) {
+  return [name = std::move(name)](
+             const inspection_context_view &context) noexcept {
+    return context.headers().contains(name);
+  };
+}
+
+inline auto header_is(std::string name, std::string expected) {
+  return [name = std::move(name), expected = std::move(expected)](
+             const inspection_context_view &context) noexcept {
+    return detail::has_header_value(
+        context.headers(), name, expected, false);
+  };
+}
+
+inline auto header_is_ci(std::string name, std::string expected) {
+  return [name = std::move(name), expected = std::move(expected)](
+             const inspection_context_view &context) noexcept {
+    return detail::has_header_value(
+        context.headers(), name, expected, true);
+  };
+}
+
+inline auto header_count_is(std::string name, std::size_t expected) {
+  return [name = std::move(name), expected](
+             const inspection_context_view &context) noexcept {
+    return detail::header_count(context.headers(), name) == expected;
+  };
+}
+
+inline auto unique_header_is(std::string name, std::string expected) {
+  return [name = std::move(name), expected = std::move(expected)](
+             const inspection_context_view &context) noexcept {
+    return detail::header_count(context.headers(), name) == 1 &&
+           detail::has_header_value(
+               context.headers(), name, expected, false);
+  };
+}
+
+inline auto unique_header_is_ci(std::string name, std::string expected) {
+  return [name = std::move(name), expected = std::move(expected)](
+             const inspection_context_view &context) noexcept {
+    return detail::header_count(context.headers(), name) == 1 &&
+           detail::has_header_value(
+               context.headers(), name, expected, true);
+  };
+}
+
+/** Requires at least one named field and accepts only if every value matches. */
+template <class Predicate>
+auto all_header_values(std::string name, Predicate &&predicate) {
+  return [name = std::move(name),
+          condition = std::decay_t<Predicate>(
+              std::forward<Predicate>(predicate))](
+             const inspection_context_view &context) {
+    return detail::all_header_values(
+        context.headers(), name, condition);
+  };
+}
+
+/** Applies an application-defined predicate to each current-message field. */
+template <class Predicate>
+auto any_header(Predicate &&predicate) {
+  return [condition =
+              std::decay_t<Predicate>(std::forward<Predicate>(predicate))](
+             const inspection_context_view &context) {
+    const auto fields = context.headers().fields();
+    return std::any_of(
+        fields.begin(), fields.end(), [&](const header_field &field) {
+          return static_cast<bool>(std::invoke(condition, field));
+        });
+  };
+}
+
+/** Applies an application-defined predicate to the associated request. */
+template <class Predicate>
+auto any_request_header(Predicate &&predicate) {
+  return [condition =
+              std::decay_t<Predicate>(std::forward<Predicate>(predicate))](
+             const inspection_context_view &context) {
+    const auto fields = context.request().headers.fields();
+    return std::any_of(
+        fields.begin(), fields.end(), [&](const header_field &field) {
+          return static_cast<bool>(std::invoke(condition, field));
+        });
+  };
+}
+
+/** Applies an application-defined predicate to response fields, if present. */
+template <class Predicate>
+auto any_response_header(Predicate &&predicate) {
+  return [condition =
+              std::decay_t<Predicate>(std::forward<Predicate>(predicate))](
+             const inspection_context_view &context) {
+    if (!context.response())
+      return false;
+    const auto fields = context.response()->headers.fields();
+    return std::any_of(
+        fields.begin(), fields.end(), [&](const header_field &field) {
+          return static_cast<bool>(std::invoke(condition, field));
+        });
+  };
+}
+
+inline auto header_name_starts_with(std::string prefix) {
+  prefix = detail::normalized_header_name_prefix(std::move(prefix));
+  return any_header(
+      [prefix = std::move(prefix)](const header_field &field) noexcept {
+        return field.name.starts_with(prefix);
+      });
+}
+
+inline auto request_header_name_starts_with(std::string prefix) {
+  prefix = detail::normalized_header_name_prefix(std::move(prefix));
+  return any_request_header(
+      [prefix = std::move(prefix)](const header_field &field) noexcept {
+        return field.name.starts_with(prefix);
+      });
+}
+
+inline auto response_header_name_starts_with(std::string prefix) {
+  prefix = detail::normalized_header_name_prefix(std::move(prefix));
+  return any_response_header(
+      [prefix = std::move(prefix)](const header_field &field) noexcept {
+        return field.name.starts_with(prefix);
+      });
+}
+
+inline auto request_header_present(std::string name) {
+  return [name = std::move(name)](
+             const inspection_context_view &context) noexcept {
+    return context.request().headers.contains(name);
+  };
+}
+
+inline auto request_header_is(std::string name, std::string expected) {
+  return [name = std::move(name), expected = std::move(expected)](
+             const inspection_context_view &context) noexcept {
+    return detail::has_header_value(
+        context.request().headers, name, expected, false);
+  };
+}
+
+inline auto request_header_is_ci(std::string name, std::string expected) {
+  return [name = std::move(name), expected = std::move(expected)](
+             const inspection_context_view &context) noexcept {
+    return detail::has_header_value(
+        context.request().headers, name, expected, true);
+  };
+}
+
+inline auto request_header_count_is(
+    std::string name, std::size_t expected) {
+  return [name = std::move(name), expected](
+             const inspection_context_view &context) noexcept {
+    return detail::header_count(context.request().headers, name) == expected;
+  };
+}
+
+template <class Predicate>
+auto all_request_header_values(std::string name, Predicate &&predicate) {
+  return [name = std::move(name),
+          condition = std::decay_t<Predicate>(
+              std::forward<Predicate>(predicate))](
+             const inspection_context_view &context) {
+    return detail::all_header_values(
+        context.request().headers, name, condition);
+  };
+}
+
+inline auto unique_request_header_is(
+    std::string name, std::string expected) {
+  return [name = std::move(name), expected = std::move(expected)](
+             const inspection_context_view &context) noexcept {
+    return detail::header_count(context.request().headers, name) == 1 &&
+           detail::has_header_value(
+               context.request().headers, name, expected, false);
+  };
+}
+
+inline auto response_header_present(std::string name) {
+  return [name = std::move(name)](
+             const inspection_context_view &context) noexcept {
+    return context.response() && context.response()->headers.contains(name);
+  };
+}
+
+inline auto response_header_is(std::string name, std::string expected) {
+  return [name = std::move(name), expected = std::move(expected)](
+             const inspection_context_view &context) noexcept {
+    return context.response() && detail::has_header_value(
+                                     context.response()->headers, name,
+                                     expected, false);
+  };
+}
+
+inline auto response_header_is_ci(std::string name, std::string expected) {
+  return [name = std::move(name), expected = std::move(expected)](
+             const inspection_context_view &context) noexcept {
+    return context.response() && detail::has_header_value(
+                                     context.response()->headers, name,
+                                     expected, true);
+  };
+}
+
+inline auto response_header_count_is(
+    std::string name, std::size_t expected) {
+  return [name = std::move(name), expected](
+             const inspection_context_view &context) noexcept {
+    return context.response() &&
+           detail::header_count(context.response()->headers, name) == expected;
+  };
+}
+
+template <class Predicate>
+auto all_response_header_values(std::string name, Predicate &&predicate) {
+  return [name = std::move(name),
+          condition = std::decay_t<Predicate>(
+              std::forward<Predicate>(predicate))](
+             const inspection_context_view &context) {
+    return context.response() && detail::all_header_values(
+                                     context.response()->headers, name,
+                                     condition);
+  };
+}
+
+inline auto unique_response_header_is(
+    std::string name, std::string expected) {
+  return [name = std::move(name), expected = std::move(expected)](
+             const inspection_context_view &context) noexcept {
+    return context.response() &&
+           detail::header_count(context.response()->headers, name) == 1 &&
+           detail::has_header_value(
+               context.response()->headers, name, expected, false);
+  };
+}
+
+/** Applies an arbitrary predicate to current-message trailer fields. */
+template <class Predicate>
+auto any_trailer(Predicate &&predicate) {
+  return [condition =
+              std::decay_t<Predicate>(std::forward<Predicate>(predicate))](
+             const inspection_context_view &context) {
+    return std::any_of(
+        context.trailers().begin(), context.trailers().end(),
+        [&](const header_field &field) {
+          return static_cast<bool>(std::invoke(condition, field));
+        });
+  };
+}
+
+inline auto trailer_present(std::string name) {
+  return any_trailer(
+      [name = std::move(name)](const header_field &field) noexcept {
+        return transform_detail::ascii_equal_ci(field.name, name);
+      });
+}
+
+inline auto trailer_is(std::string name, std::string expected) {
+  return any_trailer(
+      [name = std::move(name), expected = std::move(expected)](
+          const header_field &field) noexcept {
+        return transform_detail::ascii_equal_ci(field.name, name) &&
+               field.value == expected;
+      });
+}
+
+template <class Predicate>
+auto any_request_trailer(Predicate &&predicate) {
+  return [condition =
+              std::decay_t<Predicate>(std::forward<Predicate>(predicate))](
+             const inspection_context_view &context) {
+    return std::any_of(
+        context.request().trailers.begin(), context.request().trailers.end(),
+        [&](const header_field &field) {
+          return static_cast<bool>(std::invoke(condition, field));
+        });
+  };
+}
+
+inline auto request_trailer_present(std::string name) {
+  return any_request_trailer(
+      [name = std::move(name)](const header_field &field) noexcept {
+        return transform_detail::ascii_equal_ci(field.name, name);
+      });
+}
+
+inline auto request_trailer_is(std::string name, std::string expected) {
+  return any_request_trailer(
+      [name = std::move(name), expected = std::move(expected)](
+          const header_field &field) noexcept {
+        return transform_detail::ascii_equal_ci(field.name, name) &&
+               field.value == expected;
+      });
+}
+
+template <class Predicate>
+auto any_response_trailer(Predicate &&predicate) {
+  return [condition =
+              std::decay_t<Predicate>(std::forward<Predicate>(predicate))](
+             const inspection_context_view &context) {
+    return context.response() && std::any_of(
+        context.response()->trailers.begin(),
+        context.response()->trailers.end(),
+        [&](const header_field &field) {
+          return static_cast<bool>(std::invoke(condition, field));
+        });
+  };
+}
+
+inline auto response_trailer_present(std::string name) {
+  return any_response_trailer(
+      [name = std::move(name)](const header_field &field) noexcept {
+        return transform_detail::ascii_equal_ci(field.name, name);
+      });
+}
+
+inline auto response_trailer_is(
+    std::string name, std::string expected) {
+  return any_response_trailer(
+      [name = std::move(name), expected = std::move(expected)](
+          const header_field &field) noexcept {
+        return transform_detail::ascii_equal_ci(field.name, name) &&
+               field.value == expected;
+      });
+}
+
+inline auto response_status_is(unsigned expected) noexcept {
+  return [expected](const inspection_context_view &context) noexcept {
+    return context.response() && context.response()->status == expected;
+  };
+}
+
+inline auto response_status_between(unsigned first,
+                                    unsigned last) {
+  if (first > last || first < 100 || last > 999)
+    throw std::invalid_argument("invalid HTTP response status range");
+  return [first, last](const inspection_context_view &context) noexcept {
+    return context.response() && context.response()->status >= first &&
+           context.response()->status <= last;
+  };
+}
+
+inline auto tls_server_name_is(std::string expected) {
+  return [expected = std::move(expected)](
+             const inspection_context_view &context) noexcept {
+    return context.tls().server_name && transform_detail::ascii_equal_ci(
+                                            *context.tls().server_name,
+                                            expected);
+  };
+}
+
+inline auto alpn_is(std::string expected) {
+  return [expected = std::move(expected)](
+             const inspection_context_view &context) noexcept {
+    return context.tls().alpn && *context.tls().alpn == expected;
+  };
+}
+
+/** Matches only the optional display label, not the trusted WFP app ID. */
+inline auto application_label_is(std::string expected) {
+  return [expected = std::move(expected)](
+             const inspection_context_view &context) noexcept {
+    return context.connection().application_label &&
+           transform_detail::ascii_equal_ci(
+               *context.connection().application_label, expected);
+  };
+}
+
+inline auto process_is(std::uint64_t expected) noexcept {
+  return [expected](const inspection_context_view &context) noexcept {
+    return context.connection().process_id &&
+           *context.connection().process_id == expected;
+  };
+}
+
+inline auto connection_is(std::uint64_t expected) noexcept {
+  return [expected](const inspection_context_view &context) noexcept {
+    return context.connection().connection_id &&
+           *context.connection().connection_id == expected;
+  };
+}
+
+inline auto flow_is(std::uint64_t expected) noexcept {
+  return [expected](const inspection_context_view &context) noexcept {
+    return context.connection().flow_id &&
+           *context.connection().flow_id == expected;
+  };
+}
+
+inline auto flow_direction_is(
+    ntl::net::inspection::direction expected) noexcept {
+  return [expected](const inspection_context_view &context) noexcept {
+    return context.connection().flow_direction &&
+           *context.connection().flow_direction == expected;
+  };
+}
+
+inline auto source_address_is(std::string expected) {
+  return [expected = std::move(expected)](
+             const inspection_context_view &context) noexcept {
+    return context.connection().source &&
+           context.connection().source->address == expected;
+  };
+}
+
+inline auto source_port_is(std::uint16_t expected) noexcept {
+  return [expected](const inspection_context_view &context) noexcept {
+    return context.connection().source &&
+           context.connection().source->port == expected;
+  };
+}
+
+inline auto destination_address_is(std::string expected) {
+  return [expected = std::move(expected)](
+             const inspection_context_view &context) noexcept {
+    return context.connection().destination &&
+           context.connection().destination->address == expected;
+  };
+}
+
+inline auto destination_port_is(std::uint16_t expected) noexcept {
+  return [expected](const inspection_context_view &context) noexcept {
+    return context.connection().destination &&
+           context.connection().destination->port == expected;
+  };
+}
+
+inline auto original_destination_address_is(std::string expected) {
+  return [expected = std::move(expected)](
+             const inspection_context_view &context) noexcept {
+    return context.connection().original_destination &&
+           context.connection().original_destination->address == expected;
+  };
+}
+
+inline auto original_destination_port_is(
+    std::uint16_t expected) noexcept {
+  return [expected](const inspection_context_view &context) noexcept {
+    return context.connection().original_destination &&
+           context.connection().original_destination->port == expected;
+  };
+}
+
+inline auto application_id_is(std::vector<std::byte> expected) {
+  return [expected = std::move(expected)](
+             const inspection_context_view &context) noexcept {
+    const auto &actual = context.connection().application_id;
+    return actual && actual->size() == expected.size() &&
+           std::equal(actual->begin(), actual->end(), expected.begin());
+  };
+}
+
+inline auto body_size_between(std::size_t minimum,
+                              std::size_t maximum) {
+  if (minimum > maximum)
+    throw std::invalid_argument("invalid HTTP body size range");
+  return [minimum, maximum](const inspection_context_view &context) noexcept {
+    const auto size = context.body().size();
+    return size >= minimum && size <= maximum;
+  };
+}
+
+inline bool contains_bytes(std::span<const std::byte> bytes,
+                           std::string_view expected) noexcept {
+  return std::search(
+             bytes.begin(), bytes.end(),
+             reinterpret_cast<const std::byte *>(expected.data()),
+             reinterpret_cast<const std::byte *>(
+                 expected.data() + expected.size())) != bytes.end();
+}
+
+/** Searches only this callback chunk; it does not span chunk boundaries. */
+inline auto current_body_chunk_contains(std::string expected) {
+  return [expected = std::move(expected)](
+             const inspection_context_view &context) noexcept {
+    return context.stage() == inspection_stage::body_chunk &&
+           contains_bytes(context.body_chunk(), expected);
+  };
+}
+
+inline auto complete_body_contains(std::string expected) {
+  return [expected = std::move(expected)](
+             const inspection_context_view &context) noexcept {
+    return context.stage() == inspection_stage::message_complete &&
+           contains_bytes(context.body(), expected);
+  };
+}
+
+} // namespace ntl::net::http::condition

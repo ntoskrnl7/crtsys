@@ -4,10 +4,6 @@
  */
 #pragma once
 
-#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
-#error "ntl/net/inspection/content_stream is a user-mode header"
-#endif
-
 #include <ntl/net/inspection/content_decoder>
 #include <ntl/net/inspection/content_encoder>
 #include <ntl/result>

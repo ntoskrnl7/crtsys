@@ -6,6 +6,9 @@ param(
   [ValidateSet('v143', 'v145')]
   [string] $PlatformToolset = 'v145',
 
+  [ValidateSet('x64', 'ARM64')]
+  [string] $Architecture = 'x64',
+
   [string] $WindowsSdkVersion = '10.0.22621.0',
 
   [string] $OutputRoot = '',
@@ -39,7 +42,7 @@ if (-not $SkipBuild) {
   & powershell.exe -NoProfile -ExecutionPolicy Bypass `
       -File $buildScript `
       -Project 'wfp-browser-https-inspection' `
-      -Architecture x64 `
+      -Architecture $Architecture `
       -Configuration $Configuration `
       -WindowsSdkVersion $WindowsSdkVersion `
       -WdkVersion $WindowsSdkVersion `
@@ -50,11 +53,11 @@ if (-not $SkipBuild) {
 }
 
 $buildRoot = Join-Path $repoRoot (
-    "examples\wfp\browser-https-inspection\" +
-    "build_x64_$PlatformToolset\$Configuration")
+    "examples\wfp\user\browser-https-inspection\" +
+    "build_${Architecture}_$PlatformToolset\$Configuration")
 $files = @(
-  'crtsys_wfp_browser_https_inspection_app.exe'
-  'crtsys_ntl_managed_http3_client.exe'
+  'crtsys_wfp_browser_https_inspection_acceptance.exe'
+  'crtsys_wfp_browser_https_inspection_managed_client_acceptance.exe'
   'msh3.dll'
   'msquic.dll'
 )
@@ -134,6 +137,7 @@ Write-Host (
     $package.FullName)
 [pscustomobject]@{
   Root = $package.FullName
+  Architecture = $Architecture
   Test = Join-Path $package.FullName `
       'Start-ControlledHttp3EndToEnd.ps1'
   ContainsDriver = $false

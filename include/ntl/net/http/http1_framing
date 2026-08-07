@@ -26,6 +26,7 @@ struct http1_framing_limits {
   std::size_t maximum_trailer_size = 16 * 1024;
   bool allow_close_delimited_response = false;
   bool response_body_forbidden = false;
+  bool response_to_connect = false;
 };
 
 namespace detail {
@@ -501,6 +502,91 @@ inline ntl::net::framing::frame_probe probe_chunked(
 
 } // namespace detail
 
+enum class http1_request_expectation : std::uint8_t {
+  incomplete = 0,
+  none = 1,
+  continue_100 = 2,
+  unsupported = 3,
+  malformed = 4,
+};
+
+/** Inspects Expect after a complete request head is buffered. */
+inline http1_request_expectation inspect_http1_request_expectation(
+    ntl::net::scatter_view bytes) noexcept {
+  std::size_t header_end = bytes.size();
+  bool complete_head = false;
+  for (std::size_t index = 0; index + 3 < bytes.size(); ++index) {
+    std::uint8_t a = 0, b = 0, c = 0, d = 0;
+    if (!detail::byte_at(bytes, index, a) ||
+        !detail::byte_at(bytes, index + 1, b) ||
+        !detail::byte_at(bytes, index + 2, c) ||
+        !detail::byte_at(bytes, index + 3, d))
+      return http1_request_expectation::malformed;
+    if (a == '\r' && b == '\n' && c == '\r' && d == '\n') {
+      header_end = index + 4;
+      complete_head = true;
+      break;
+    }
+  }
+  if (!complete_head)
+    return http1_request_expectation::incomplete;
+
+  std::size_t line_end = 0;
+  if (!detail::find_crlf(bytes, 0, header_end, line_end))
+    return http1_request_expectation::malformed;
+  std::size_t cursor = line_end + 2;
+  bool continue_seen = false;
+  while (cursor + 2 <= header_end) {
+    std::uint8_t first = 0, second = 0;
+    if (!detail::byte_at(bytes, cursor, first) ||
+        !detail::byte_at(bytes, cursor + 1, second))
+      return http1_request_expectation::malformed;
+    if (first == '\r' && second == '\n')
+      break;
+    if (!detail::find_crlf(bytes, cursor, header_end, line_end))
+      return http1_request_expectation::malformed;
+    std::size_t colon = cursor;
+    for (; colon != line_end; ++colon) {
+      std::uint8_t value = 0;
+      if (!detail::byte_at(bytes, colon, value))
+        return http1_request_expectation::malformed;
+      if (value == ':')
+        break;
+      if (!detail::is_tchar(value))
+        return http1_request_expectation::malformed;
+    }
+    if (colon == cursor || colon == line_end)
+      return http1_request_expectation::malformed;
+    if (detail::range_equal_ci(bytes, cursor, colon, "expect", 6)) {
+      std::size_t begin = colon + 1;
+      std::size_t end = line_end;
+      while (begin != end) {
+        std::uint8_t value = 0;
+        if (!detail::byte_at(bytes, begin, value))
+          return http1_request_expectation::malformed;
+        if (!detail::is_ows(value))
+          break;
+        ++begin;
+      }
+      while (end != begin) {
+        std::uint8_t value = 0;
+        if (!detail::byte_at(bytes, end - 1, value))
+          return http1_request_expectation::malformed;
+        if (!detail::is_ows(value))
+          break;
+        --end;
+      }
+      if (!detail::range_equal_ci(
+              bytes, begin, end, "100-continue", 12))
+        return http1_request_expectation::unsupported;
+      continue_seen = true;
+    }
+    cursor = line_end + 2;
+  }
+  return continue_seen ? http1_request_expectation::continue_100
+                       : http1_request_expectation::none;
+}
+
 /**
  * @brief Frames one bounded, self-delimiting HTTP/1.x request or response.
  *
@@ -605,7 +691,9 @@ private:
         kind_ == http1_message_kind::response &&
         (limits_.response_body_forbidden ||
          (response_status >= 100 && response_status < 200) ||
-         response_status == 204 || response_status == 304);
+         response_status == 204 || response_status == 304 ||
+         (limits_.response_to_connect && response_status >= 200 &&
+          response_status < 300));
     if (body_forbidden) {
       if (headers.has_transfer_encoding)
         return ntl::net::framing::frame_probe::malformed();
@@ -633,7 +721,9 @@ private:
 
     if (kind_ == http1_message_kind::response &&
         !((response_status >= 100 && response_status < 200) ||
-          response_status == 204 || response_status == 304)) {
+          response_status == 204 || response_status == 304 ||
+          (limits_.response_to_connect && response_status >= 200 &&
+           response_status < 300))) {
       if (!limits_.allow_close_delimited_response)
         return ntl::net::framing::frame_probe::malformed(
             STATUS_NOT_SUPPORTED);
