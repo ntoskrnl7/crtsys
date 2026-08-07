@@ -58,15 +58,6 @@ ntl::status configure(ntl::device_endpoint<control_state> &endpoint) noexcept {
       });
 }
 
-ntl::status unload(ntl::flt::unload_flags flags) noexcept {
-  if (!flags.mandatory() && active_state &&
-      active_state->open.load(std::memory_order_acquire)) {
-    active_state->unload_vetoes.fetch_add(1, std::memory_order_relaxed);
-    return STATUS_FLT_DO_NOT_DETACH;
-  }
-  return STATUS_SUCCESS;
-}
-
 } // namespace
 
 ntl::status ntl::flt::main(ntl::flt::driver &driver, std::wstring_view) {
@@ -81,6 +72,13 @@ ntl::status ntl::flt::main(ntl::flt::driver &driver, std::wstring_view) {
     return added;
 
   ntl::flt::registration callbacks;
-  callbacks.on_unload(unload);
+  callbacks.on_unload([](ntl::flt::unload_flags flags) noexcept -> ntl::status {
+    if (!flags.mandatory() && active_state &&
+        active_state->open.load(std::memory_order_acquire)) {
+      active_state->unload_vetoes.fetch_add(1, std::memory_order_relaxed);
+      return STATUS_FLT_DO_NOT_DETACH;
+    }
+    return STATUS_SUCCESS;
+  });
   return driver.start(std::move(callbacks));
 }
