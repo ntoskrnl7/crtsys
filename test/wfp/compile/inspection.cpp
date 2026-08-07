@@ -61,7 +61,7 @@ public:
     auto header = bytes.subview(1, length_size);
     if (!header)
       return ntl::net::framing::frame_probe::malformed();
-    ntl::net::byte_cursor cursor(*header);
+    ntl::net::borrowed_byte_cursor cursor(*header);
     std::uint32_t payload = 0;
     if (length_size == 2) {
       const auto value = cursor.read_be16();

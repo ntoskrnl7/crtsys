@@ -1,0 +1,98 @@
+/**
+ * @file net_offload_inspect_adapter
+ * @brief Explicit user-service verdict stage for transform_pipeline.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include <ntl/net/offload/backend>
+#include <ntl/net/transform_pipeline>
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#include <ntl/irql>
+#endif
+
+#include <atomic>
+#include <cstdint>
+#include <memory>
+#include <utility>
+
+namespace ntl::net::offload {
+
+/**
+ * @brief Synchronous PASSIVE_LEVEL inspection adapter.
+ *
+ * Kernel classify paths that cannot block must use async_backend, pend native
+ * work, and resume it from completion. This adapter never hides backend
+ * failure: transform_pipeline::run() returns the error and the native policy
+ * owner applies the configured fail-open/fail-closed rule.
+ */
+class inspect_adapter {
+public:
+  explicit inspect_adapter(
+      std::shared_ptr<backend> implementation,
+      std::uint32_t timeout_milliseconds = 30'000,
+      inspection::failure_policy failure =
+          inspection::failure_policy::fail_closed) noexcept
+      : implementation_(std::move(implementation)),
+        timeout_milliseconds_(timeout_milliseconds), failure_(failure) {}
+
+  inspect_adapter(const inspect_adapter &) = delete;
+  inspect_adapter &operator=(const inspect_adapter &) = delete;
+
+  borrowed_verdict_stage stage() noexcept {
+    return {&inspect_adapter::invoke, this, execution_path::offloaded};
+  }
+
+  inspection::failure_policy failure_policy() const noexcept {
+    return failure_;
+  }
+
+  inspection::verdict failure_verdict() const noexcept {
+    return failure_ == inspection::failure_policy::fail_closed
+               ? inspection::verdict::block
+               : inspection::verdict::permit;
+  }
+
+private:
+  static ntl::result<inspection::verdict>
+  invoke(void *context, const transform_context &metadata,
+         inspection::content_view input) noexcept {
+    auto &self = *static_cast<inspect_adapter *>(context);
+    if (!self.implementation_ || self.timeout_milliseconds_ == 0)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+    if (ntl::current_irql() != ntl::irql::passive)
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+#endif
+
+    std::uint64_t request_id =
+        self.next_request_id_.fetch_add(1, std::memory_order_relaxed);
+    if (request_id == 0)
+      request_id =
+          self.next_request_id_.fetch_add(1, std::memory_order_relaxed);
+    const auto request = make_request(
+        operation::inspect_content, request_id, metadata.network,
+        metadata.protocol_features, input.size(), 0,
+        self.timeout_milliseconds_, self.failure_);
+    if (!request)
+      return ntl::unexpected(request.status());
+
+    response_header response{};
+    const ntl::status executed = self.implementation_->execute(
+        *request, input.bytes(), {}, response);
+    if (!executed.is_ok())
+      return ntl::unexpected(executed);
+    if (!NT_SUCCESS(response.completion_status))
+      return ntl::unexpected(response.completion_status);
+    return ntl::ok(response.verdict);
+  }
+
+  std::shared_ptr<backend> implementation_;
+  std::uint32_t timeout_milliseconds_ = 30'000;
+  inspection::failure_policy failure_ =
+      inspection::failure_policy::fail_closed;
+  std::atomic<std::uint64_t> next_request_id_{1};
+};
+
+} // namespace ntl::net::offload

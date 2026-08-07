@@ -1,0 +1,692 @@
+/**
+ * @file async_transport_stream
+ * @brief Coroutine facade over a drainable kernel byte transport backend.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/net/io/async_transport_stream is a kernel-mode header"
+#endif
+
+#include <ntl/coroutine>
+#include <ntl/except>
+#include <ntl/net/buffer/owned_bytes>
+#include <ntl/net/io/async_byte_stream>
+#include <ntl/net/io/transport>
+#include <ntl/net/kernel/passive_cleanup_domain>
+#include <ntl/net/kernel/task>
+#include <ntl/pool_allocator>
+
+#include <atomic>
+#include <coroutine>
+#include <cstddef>
+#include <cstdint>
+#include <new>
+#include <memory>
+#include <span>
+#include <utility>
+
+namespace ntl::net::io {
+
+#if NTL_HAS_COROUTINE_SUPPORT
+
+enum class async_transport_close_reason : std::uint8_t {
+  none = 0,
+  explicit_close = 1,
+  structured_drain = 2,
+  owner_release = 3,
+  tls_owner_release = 4,
+  receive_failure = 5,
+  write_protocol_error = 6,
+  backend_closed = 7,
+};
+
+struct transport_write_result {
+  ntl::status status{STATUS_PENDING};
+  std::size_t transferred = 0;
+};
+
+/**
+ * @brief Stable-address coroutine stream over transport_backend.
+ *
+ * One reader is enforced by async_byte_stream and one write may be pending.
+ * A backend completion may occur inline. The awaiter closes that race without
+ * resuming a coroutine before write() has published its suspension state.
+ * Deferred continuations run on a system worker at PASSIVE_LEVEL.
+ */
+class async_transport_stream final
+    : public transport_sink,
+      public std::enable_shared_from_this<async_transport_stream> {
+public:
+  using pointer = std::shared_ptr<async_transport_stream>;
+
+  async_transport_stream(const async_transport_stream &) = delete;
+  async_transport_stream &operator=(const async_transport_stream &) = delete;
+
+  ~async_transport_stream() override {
+    NT_ASSERT(KeGetCurrentIrql() == PASSIVE_LEVEL);
+    NT_ASSERT(!started_ && idle_now());
+  }
+
+  static ntl::result<pointer>
+  try_create(std::shared_ptr<transport_backend> backend,
+             std::size_t receive_capacity,
+             WORK_QUEUE_TYPE queue_type = DelayedWorkQueue) noexcept {
+    if (!backend || receive_capacity == 0)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    const transport_capabilities capabilities = backend->capabilities();
+    const runtime_descriptor runtime = backend->runtime();
+    if (!capabilities.available)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    auto *domain = kernel::borrowed_runtime_passive_cleanup_domain();
+    if (!domain)
+      return ntl::unexpected(STATUS_DEVICE_NOT_READY);
+    auto incoming = async_byte_stream::try_create(receive_capacity, queue_type);
+    if (!incoming)
+      return ntl::unexpected(incoming.status());
+    void *const storage = ntl::detail::allocate_pool_bytes(
+        sizeof(async_transport_stream), alignof(async_transport_stream),
+        ntl::pool_kind::nonpaged, ntl::pool_option::none,
+        ntl::pool_tag("aTtN"));
+    if (!storage)
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    auto *const stream = new (storage) async_transport_stream(
+        std::move(backend), runtime, capabilities, std::move(*incoming),
+        queue_type, domain);
+    const ntl::status registered = domain->register_item(stream->cleanup_);
+    if (!registered.is_ok()) {
+      ntl::pool_deleter<async_transport_stream>{
+          ntl::pool_tag("aTtN"), ntl::pool_kind::nonpaged}(stream);
+      return ntl::unexpected(registered);
+    }
+    pointer lifetime;
+    try {
+      lifetime = pointer(stream, [](async_transport_stream *value) noexcept {
+        value->close(async_transport_close_reason::owner_release);
+        value->cleanup_domain_->retire_deferred(value->cleanup_);
+      });
+    } catch (...) {
+      domain->retire(stream->cleanup_);
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+    const ntl::status started = stream->backend_->start_borrowed(*stream);
+    if (!started.is_ok()) {
+      lifetime.reset();
+      return ntl::unexpected(started);
+    }
+    stream->started_ = true;
+    return ntl::ok(std::move(lifetime));
+  }
+
+  /** Explicitly borrowed adapter for low-level provider contract tests. */
+  static ntl::result<pointer>
+  try_create_borrowed(transport_backend &backend,
+                      std::size_t receive_capacity,
+                      WORK_QUEUE_TYPE queue_type = DelayedWorkQueue) noexcept {
+    try {
+      return try_create(std::shared_ptr<transport_backend>(
+                            &backend, [](transport_backend *) noexcept {}),
+                        receive_capacity, queue_type);
+    } catch (...) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+  }
+
+  class write_awaiter {
+  public:
+    write_awaiter(pointer owner, scatter_view bytes, bool final) noexcept
+        : owner_(std::move(owner)), final_(final) {
+      if (!owner_ || !bytes || (!final && bytes.empty())) {
+        preparation_status_ = STATUS_INVALID_PARAMETER;
+        return;
+      }
+      if (bytes.empty()) {
+        preparation_status_ = ntl::status::ok();
+        return;
+      }
+      auto copied = owned_bytes::try_copy(
+          bytes,
+          buffer_limits{owner_->runtime_.limits.maximum_input_bytes},
+          ntl::pool_tag("wAtN"));
+      if (!copied) {
+        preparation_status_ = copied.status();
+        return;
+      }
+      bytes_ = std::move(*copied);
+      preparation_status_ = ntl::status::ok();
+    }
+    write_awaiter(const write_awaiter &) = delete;
+    write_awaiter &operator=(const write_awaiter &) = delete;
+    write_awaiter(write_awaiter &&) = delete;
+    write_awaiter &operator=(write_awaiter &&) = delete;
+    ~write_awaiter() {
+      if (registered_ && owner_)
+        owner_->abandon_write(operation_id_);
+    }
+
+    bool await_ready() const noexcept { return false; }
+    bool await_suspend(std::coroutine_handle<> continuation) noexcept {
+      if (!preparation_status_.is_ok()) {
+        operation_id_ = 0;
+        return false;
+      }
+      registered_ = true;
+      return owner_->begin_write(
+          continuation, scatter_view::from_contiguous(bytes_.span()), final_,
+          operation_id_);
+    }
+    transport_write_result await_resume() noexcept {
+      registered_ = false;
+      if (!preparation_status_.is_ok())
+        return {preparation_status_, 0};
+      return owner_->finish_write(operation_id_);
+    }
+
+  private:
+    pointer owner_;
+    owned_bytes bytes_{};
+    ntl::status preparation_status_{STATUS_PENDING};
+    std::uint64_t operation_id_ = 0;
+    bool final_ = false;
+    bool registered_ = false;
+  };
+
+  write_awaiter write(scatter_view bytes, bool final = false) noexcept {
+    return write_awaiter(weak_from_this().lock(), bytes, final);
+  }
+  write_awaiter write(std::span<const std::byte> bytes,
+                      bool final = false) noexcept {
+    return write(scatter_view::from_contiguous(bytes), final);
+  }
+
+  /** Completes the local write side after every preceding write. */
+  write_awaiter shutdown_write() noexcept {
+    return write(scatter_view::from_contiguous({}), true);
+  }
+
+  detail::read_into_awaiter
+  read_exactly_borrowed(std::span<std::byte> destination,
+                        read_options options = {}) noexcept {
+    return incoming_.read_exactly_borrowed(destination, options,
+                                           weak_from_this().lock());
+  }
+  detail::read_some_awaiter
+  read_some_borrowed(std::span<std::byte> destination,
+                     read_options options = {}) noexcept {
+    return incoming_.read_some_borrowed(destination, options,
+                                        weak_from_this().lock());
+  }
+  template <class T>
+  detail::read_value_awaiter<T>
+  read_exactly(read_options options = {}) noexcept {
+    return incoming_.read_exactly<T>(options, weak_from_this().lock());
+  }
+
+  std::size_t buffered_size() const noexcept {
+    return incoming_.buffered_size();
+  }
+
+  /**
+   * Wakes the current reader without stopping the backend or closing either
+   * transport direction. A later read may be issued normally.
+   */
+  void cancel_pending_read(
+      ntl::status status = STATUS_CANCELLED) noexcept {
+    incoming_.cancel_pending_read(status);
+  }
+
+  transport_capabilities capabilities() const noexcept {
+    return capabilities_;
+  }
+
+  /** Idempotently rejects new operations and starts asynchronous shutdown. */
+  void close() noexcept {
+    close(async_transport_close_reason::explicit_close);
+  }
+
+  void close(async_transport_close_reason reason) noexcept {
+    close_with_status(STATUS_CANCELLED, reason);
+  }
+
+  async_transport_close_reason close_reason() const noexcept {
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    const auto result = close_reason_;
+    KeReleaseSpinLock(&lock_, old_irql);
+    return result;
+  }
+
+private:
+  void close_with_status(NTSTATUS status,
+                         async_transport_close_reason reason) noexcept {
+    bool issue_stop = false;
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    if (!stopping_) {
+      stopping_ = true;
+      terminal_status_ = status;
+      close_reason_ = reason;
+      issue_stop = true;
+    }
+    KeReleaseSpinLock(&lock_, old_irql);
+    incoming_.close(status);
+    if (issue_stop)
+      backend_->stop();
+  }
+
+public:
+
+  /**
+   * Stops both directions and joins every callback without blocking the
+   * callback which resumed the caller. This is the only public drain path.
+   */
+  [[nodiscard]] ntl::net::kernel::task<ntl::status>
+  stop_and_drain() noexcept {
+    auto lifetime = weak_from_this().lock();
+    if (!lifetime)
+      return status_task(STATUS_INVALID_DEVICE_STATE);
+    return stop_and_drain_owned(std::move(lifetime));
+  }
+
+private:
+  static ntl::net::kernel::task<ntl::status>
+  status_task(NTSTATUS status) noexcept {
+    co_return ntl::status{status};
+  }
+
+  static ntl::net::kernel::task<ntl::status>
+  stop_and_drain_owned(
+      std::shared_ptr<async_transport_stream> lifetime) noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+      co_return ntl::status{STATUS_INVALID_DEVICE_STATE};
+    {
+      KIRQL old_irql = 0;
+      KeAcquireSpinLock(&lifetime->lock_, &old_irql);
+      if (lifetime->draining_) {
+        KeReleaseSpinLock(&lifetime->lock_, old_irql);
+        co_return ntl::status{STATUS_DEVICE_BUSY};
+      }
+      lifetime->draining_ = true;
+      KeReleaseSpinLock(&lifetime->lock_, old_irql);
+    }
+    lifetime->close(async_transport_close_reason::structured_drain);
+    // This await always suspends, even when no read is pending. Therefore the
+    // remainder cannot execute inside incoming_'s or this stream's resume
+    // callback and can safely perform the backend's blocking join.
+    const ntl::status input_status =
+        co_await lifetime->incoming_.cancel_and_drain();
+    auto backend = lifetime->backend_;
+    const ntl::status backend_status =
+        backend ? backend->drain()
+                : ntl::status{STATUS_INVALID_DEVICE_STATE};
+    const NTSTATUS local_status =
+        KeWaitForSingleObject(
+            &lifetime->idle_, Executive, KernelMode, FALSE, nullptr);
+    std::shared_ptr<transport_backend> detached_backend;
+    {
+      KIRQL old_irql = 0;
+      KeAcquireSpinLock(&lifetime->lock_, &old_irql);
+      lifetime->started_ = false;
+      lifetime->draining_ = false;
+      detached_backend = std::move(lifetime->backend_);
+      KeReleaseSpinLock(&lifetime->lock_, old_irql);
+    }
+    // drain() is the lifetime boundary for a borrowed provider. Detach the
+    // backend while it is still known to be alive so deferred destruction of
+    // this facade never calls back through a stale borrowed vtable.
+    detached_backend.reset();
+    backend.reset();
+    if (!backend_status.is_ok())
+      co_return backend_status;
+    if (!input_status.is_ok())
+      co_return input_status;
+    co_return ntl::status{local_status};
+  }
+
+public:
+
+  ntl::status on_receive(scatter_view bytes, bool final) noexcept override {
+    const ntl::status appended = incoming_.append_received_data(bytes);
+    if (!appended.is_ok()) {
+      close_with_status(static_cast<NTSTATUS>(appended),
+                        async_transport_close_reason::receive_failure);
+      return appended;
+    }
+    if (final)
+      incoming_.close(STATUS_END_OF_FILE);
+    return ntl::status::ok();
+  }
+
+  void on_write_complete(std::uint64_t operation_id, NTSTATUS status,
+                         std::size_t transferred) noexcept override {
+    bool queue = false;
+    bool protocol_error = false;
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    if (!operation_pending_ || operation_id_ != operation_id) {
+      protocol_error = true;
+    } else {
+      operation_pending_ = false;
+      write_completed_ = true;
+      write_result_ = {ntl::status{status}, transferred};
+      if (write_continuation_ && !submitting_) {
+        if (!resume_queued_ && !resume_active_) {
+          resume_queued_ = true;
+          queue = true;
+        }
+      } else if (!write_continuation_) {
+        write_completed_ = false;
+      }
+      update_idle_locked();
+    }
+    KeReleaseSpinLock(&lock_, old_irql);
+    if (queue)
+      queue_completion();
+    if (protocol_error) {
+      incoming_.close(STATUS_DATA_ERROR);
+      close_with_status(STATUS_DATA_ERROR,
+                        async_transport_close_reason::write_protocol_error);
+    }
+  }
+
+  void on_closed(NTSTATUS status) noexcept override {
+    incoming_.close(status);
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    if (!stopping_)
+      close_reason_ = async_transport_close_reason::backend_closed;
+    stopping_ = true;
+    terminal_status_ = status;
+    KeReleaseSpinLock(&lock_, old_irql);
+  }
+
+private:
+  async_transport_stream(std::shared_ptr<transport_backend> backend,
+                         runtime_descriptor runtime,
+                         transport_capabilities capabilities,
+                         async_byte_stream &&incoming,
+                         WORK_QUEUE_TYPE queue_type,
+                         kernel::passive_cleanup_domain *cleanup_domain) noexcept
+      : cleanup_(&async_transport_stream::cleanup_at_passive, this),
+        cleanup_domain_(cleanup_domain), runtime_(runtime),
+        capabilities_(capabilities), backend_(std::move(backend)),
+        incoming_(std::move(incoming)), queue_type_(queue_type) {
+    KeInitializeSpinLock(&lock_);
+    KeInitializeEvent(&idle_, NotificationEvent, TRUE);
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4996)
+#endif
+    ExInitializeWorkItem(&completion_work_, &async_transport_stream::resume,
+                         this);
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+  }
+
+  static void cleanup_at_passive(void *context) noexcept {
+    auto *self = static_cast<async_transport_stream *>(context);
+    NT_ASSERT(KeGetCurrentIrql() == PASSIVE_LEVEL);
+    self->close(async_transport_close_reason::owner_release);
+    auto backend = std::move(self->backend_);
+    if (backend)
+      (void)backend->drain();
+    (void)KeWaitForSingleObject(&self->idle_, Executive, KernelMode, FALSE,
+                                nullptr);
+    self->incoming_.reset();
+    self->started_ = false;
+    self->draining_ = false;
+    ntl::pool_deleter<async_transport_stream>{
+        ntl::pool_tag("aTtN"), ntl::pool_kind::nonpaged}(self);
+  }
+
+  bool begin_write(std::coroutine_handle<> continuation, scatter_view bytes,
+                   bool final, std::uint64_t &operation_id) noexcept {
+    if (!bytes || (!final && bytes.empty())) {
+      immediate_result_ = {STATUS_INVALID_PARAMETER, 0};
+      operation_id = 0;
+      return false;
+    }
+    if (final && !capabilities_.half_close) {
+      immediate_result_ = {STATUS_NOT_SUPPORTED, 0};
+      operation_id = 0;
+      return false;
+    }
+
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    if (stopping_ || !started_) {
+      immediate_result_ = {
+          stopping_ ? ntl::status{terminal_status_}
+                    : ntl::status{STATUS_DELETE_PENDING},
+          0};
+      operation_id = 0;
+      KeReleaseSpinLock(&lock_, old_irql);
+      return false;
+    }
+    if (write_shutdown_) {
+      immediate_result_ = {STATUS_CONNECTION_DISCONNECTED, 0};
+      operation_id = 0;
+      KeReleaseSpinLock(&lock_, old_irql);
+      return false;
+    }
+    if (operation_pending_ || write_continuation_ || write_completed_) {
+      immediate_result_ = {STATUS_DEVICE_BUSY, 0};
+      operation_id = 0;
+      KeReleaseSpinLock(&lock_, old_irql);
+      return false;
+    }
+    operation_id = ++next_operation_id_;
+    if (operation_id == 0)
+      operation_id = ++next_operation_id_;
+    operation_id_ = operation_id;
+    write_continuation_ = continuation;
+    write_result_ = {STATUS_PENDING, 0};
+    write_completed_ = false;
+    operation_pending_ = true;
+    submitting_ = true;
+    KeClearEvent(&idle_);
+    KeReleaseSpinLock(&lock_, old_irql);
+
+    const ntl::status submitted = backend_->write(operation_id, bytes, final);
+
+    KeAcquireSpinLock(&lock_, &old_irql);
+    submitting_ = false;
+    const bool completed_inline = write_completed_;
+    if (!submitted.is_ok() && operation_pending_) {
+      operation_pending_ = false;
+      write_completed_ = true;
+      write_result_ = {submitted, 0};
+    }
+    if (final && (submitted.is_ok() || completed_inline))
+      write_shutdown_ = true;
+    const bool suspend = !write_completed_;
+    KeReleaseSpinLock(&lock_, old_irql);
+    return suspend;
+  }
+
+  transport_write_result finish_write(std::uint64_t operation_id) noexcept {
+    if (operation_id == 0)
+      return immediate_result_;
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    transport_write_result result{STATUS_INVALID_DEVICE_STATE, 0};
+    if (operation_id_ == operation_id && write_completed_) {
+      result = write_result_;
+      write_completed_ = false;
+      write_continuation_ = {};
+    }
+    update_idle_locked();
+    KeReleaseSpinLock(&lock_, old_irql);
+    return result;
+  }
+
+  void abandon_write(std::uint64_t operation_id) noexcept {
+    if (operation_id == 0)
+      return;
+    bool cancel = false;
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    if (operation_id_ == operation_id && write_continuation_) {
+      write_continuation_ = {};
+      if (operation_pending_) {
+        cancel = true;
+      } else {
+        write_completed_ = false;
+      }
+      update_idle_locked();
+    }
+    KeReleaseSpinLock(&lock_, old_irql);
+    if (cancel)
+      (void)backend_->cancel(operation_id);
+  }
+
+  bool idle_now() noexcept {
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    const bool result = !operation_pending_ && !resume_queued_ &&
+                        !resume_active_ && !submitting_;
+    KeReleaseSpinLock(&lock_, old_irql);
+    return result;
+  }
+
+  void update_idle_locked() noexcept {
+    if (!operation_pending_ && !resume_queued_ && !resume_active_ &&
+        !submitting_)
+      KeSetEvent(&idle_, IO_NO_INCREMENT, FALSE);
+    else
+      KeClearEvent(&idle_);
+  }
+
+  void queue_completion() noexcept {
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4996)
+#endif
+    ExQueueWorkItem(&completion_work_, queue_type_);
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+  }
+
+  static void resume(void *context) noexcept {
+    auto *const self = static_cast<async_transport_stream *>(context);
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&self->lock_, &old_irql);
+    self->resume_queued_ = false;
+    self->resume_active_ = true;
+
+    for (;;) {
+      std::coroutine_handle<> continuation{};
+      if (self->write_completed_ && self->write_continuation_ &&
+          !self->submitting_) {
+        continuation = self->write_continuation_;
+      }
+      self->update_idle_locked();
+      KeReleaseSpinLock(&self->lock_, old_irql);
+
+      if (continuation)
+        continuation.resume();
+
+      KeAcquireSpinLock(&self->lock_, &old_irql);
+      if (!self->write_completed_ || !self->write_continuation_ ||
+          self->submitting_) {
+        self->resume_active_ = false;
+        self->update_idle_locked();
+        KeReleaseSpinLock(&self->lock_, old_irql);
+        return;
+      }
+    }
+  }
+
+  kernel::passive_cleanup_item cleanup_;
+  kernel::passive_cleanup_domain *cleanup_domain_ = nullptr;
+  runtime_descriptor runtime_{};
+  transport_capabilities capabilities_{};
+  std::shared_ptr<transport_backend> backend_;
+  async_byte_stream incoming_{};
+  WORK_QUEUE_TYPE queue_type_ = DelayedWorkQueue;
+  mutable KSPIN_LOCK lock_{};
+  KEVENT idle_{};
+  WORK_QUEUE_ITEM completion_work_{};
+
+  std::coroutine_handle<> write_continuation_{};
+  transport_write_result write_result_{};
+  transport_write_result immediate_result_{};
+  std::uint64_t next_operation_id_ = 0;
+  std::uint64_t operation_id_ = 0;
+  bool started_ = false;
+  bool stopping_ = false;
+  bool draining_ = false;
+  bool operation_pending_ = false;
+  bool submitting_ = false;
+  bool write_completed_ = false;
+  bool write_shutdown_ = false;
+  NTSTATUS terminal_status_ = STATUS_DELETE_PENDING;
+  async_transport_close_reason close_reason_ =
+      async_transport_close_reason::none;
+  bool resume_queued_ = false;
+  bool resume_active_ = false;
+};
+
+/**
+ * Runs one structured operation with an async transport and always joins its
+ * callbacks before the transport owner is released.
+ *
+ * Prefer this function for request/session-sized operations.  It makes early
+ * returns and exceptions safe because stream shutdown is owned by this frame.
+ * Long-lived service owners may use try_create() directly. Releasing its last
+ * shared owner closes admission and schedules the provider join in the runtime
+ * PASSIVE cleanup domain. stop_and_drain() remains available when a service
+ * needs deterministic completion before continuing, but is not required for
+ * memory safety or driver-image lifetime.
+ */
+template <class Operation>
+[[nodiscard]] ntl::net::kernel::task<ntl::status>
+with_async_transport(std::shared_ptr<transport_backend> backend,
+                     std::size_t receive_capacity, Operation operation,
+                     WORK_QUEUE_TYPE queue_type = DelayedWorkQueue) noexcept {
+  auto stream = async_transport_stream::try_create(
+      backend, receive_capacity, queue_type);
+  if (!stream)
+    co_return stream.status();
+
+  ntl::status operation_status{STATUS_UNHANDLED_EXCEPTION};
+  try {
+    operation_status = co_await operation(*stream);
+  } catch (const ntl::exception &error) {
+    operation_status = error.get_status();
+  } catch (const std::bad_alloc &) {
+    operation_status = STATUS_INSUFFICIENT_RESOURCES;
+  } catch (...) {
+    operation_status = STATUS_UNHANDLED_EXCEPTION;
+  }
+
+  const ntl::status drain_status = co_await (**stream).stop_and_drain();
+  co_return operation_status.is_ok() ? drain_status : operation_status;
+}
+
+/** Explicitly borrowed counterpart used by provider-vtable contract tests. */
+template <class Operation>
+[[nodiscard]] ntl::net::kernel::task<ntl::status>
+with_async_transport_borrowed(
+    transport_backend &backend, std::size_t receive_capacity,
+    Operation operation,
+    WORK_QUEUE_TYPE queue_type = DelayedWorkQueue) noexcept {
+  std::shared_ptr<transport_backend> borrowed;
+  try {
+    borrowed = std::shared_ptr<transport_backend>(
+        &backend, [](transport_backend *) noexcept {});
+  } catch (...) {
+    co_return ntl::status{STATUS_INSUFFICIENT_RESOURCES};
+  }
+  co_return co_await with_async_transport(
+      std::move(borrowed), receive_capacity, std::move(operation),
+      queue_type);
+}
+
+#endif // NTL_HAS_COROUTINE_SUPPORT
+
+} // namespace ntl::net::io

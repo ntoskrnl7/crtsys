@@ -1,0 +1,62 @@
+/**
+ * @file kernel_bounded_wait_set
+ * @brief Stack-bounded, allocation-free kernel wait-object collection.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/net/kernel/bounded_wait_set is a kernel-mode header"
+#endif
+
+#include <ntddk.h>
+
+#include <array>
+#include <cstddef>
+
+namespace ntl::net::kernel {
+
+/**
+ * Owns both the object pointer array and the KWAIT_BLOCK storage required by
+ * KeWaitForMultipleObjects. Supplying the wait blocks unconditionally keeps
+ * callers safe when the set grows beyond the thread's built-in wait blocks.
+ */
+template <std::size_t Capacity>
+class bounded_wait_set {
+  static_assert(Capacity != 0);
+  static_assert(Capacity <= MAXIMUM_WAIT_OBJECTS);
+
+public:
+  bool try_add_unique(PVOID object) noexcept {
+    if (!object)
+      return false;
+    for (ULONG index = 0; index != count_; ++index) {
+      if (objects_[index] == object)
+        return true;
+    }
+    if (count_ == Capacity)
+      return false;
+    objects_[count_++] = object;
+    return true;
+  }
+
+  ULONG size() const noexcept { return count_; }
+
+  NTSTATUS wait_any(
+      KWAIT_REASON reason = Executive,
+      KPROCESSOR_MODE mode = KernelMode,
+      BOOLEAN alertable = FALSE,
+      PLARGE_INTEGER timeout = nullptr) noexcept {
+    if (count_ == 0)
+      return STATUS_INVALID_PARAMETER;
+    return KeWaitForMultipleObjects(
+        count_, objects_.data(), WaitAny, reason, mode, alertable, timeout,
+        wait_blocks_.data());
+  }
+
+private:
+  std::array<PVOID, Capacity> objects_{};
+  std::array<KWAIT_BLOCK, Capacity> wait_blocks_{};
+  ULONG count_ = 0;
+};
+
+} // namespace ntl::net::kernel

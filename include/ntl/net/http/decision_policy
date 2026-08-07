@@ -1,0 +1,236 @@
+/**
+ * @file http_decision_policy
+ * @brief Ordered staged decisions over protocol-neutral HTTP context.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include <ntl/net/http/inspection_context_view>
+#include <ntl/net/inspection/core>
+
+#include <functional>
+#include <memory>
+#include <stdexcept>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+namespace ntl::net::http {
+
+struct permit_inspection_context {
+  constexpr ntl::net::inspection::verdict
+  operator()(const inspection_context_view &) const noexcept {
+    return ntl::net::inspection::verdict::permit;
+  }
+};
+
+class decision_policy;
+
+using inspection_predicate =
+    std::function<bool(const inspection_context_view &)>;
+using inspection_decision =
+    std::function<ntl::net::inspection::verdict(
+        const inspection_context_view &)>;
+
+struct decision_policy_rule {
+  message_direction direction = message_direction::request;
+  inspection_stage stage = inspection_stage::headers;
+  std::vector<inspection_predicate> conditions;
+  inspection_decision decide;
+};
+
+struct decision_policy_state {
+  explicit decision_policy_state(
+      ntl::net::inspection::failure_policy selected) noexcept
+      : failure(selected) {}
+
+  ntl::net::inspection::failure_policy failure =
+      ntl::net::inspection::failure_policy::fail_closed;
+  std::vector<decision_policy_rule> rules;
+};
+
+class inspection_rule_selector {
+public:
+  using predicate = inspection_predicate;
+
+  inspection_rule_selector(const inspection_rule_selector &) = delete;
+  inspection_rule_selector &operator=(const inspection_rule_selector &) =
+      delete;
+  inspection_rule_selector(inspection_rule_selector &&other) noexcept
+      : state_(std::move(other.state_)),
+        direction_(other.direction_), stage_(other.stage_),
+        conditions_(std::move(other.conditions_)) {}
+  inspection_rule_selector &
+  operator=(inspection_rule_selector &&) = delete;
+
+  template <class Predicate>
+  inspection_rule_selector &when(Predicate &&condition);
+
+  template <class Function>
+  void decide(Function &&function);
+
+private:
+  friend class decision_policy;
+  friend class inspection_direction_selector;
+  inspection_rule_selector(
+      std::shared_ptr<decision_policy_state> state,
+      message_direction direction,
+      inspection_stage stage) noexcept
+      : state_(std::move(state)), direction_(direction), stage_(stage) {}
+
+  std::shared_ptr<decision_policy_state> state_;
+  message_direction direction_ = message_direction::request;
+  inspection_stage stage_ = inspection_stage::headers;
+  std::vector<predicate> conditions_;
+};
+
+class inspection_direction_selector {
+public:
+  inspection_rule_selector at_headers() const;
+  inspection_rule_selector at_body_chunk() const;
+  inspection_rule_selector at_message_complete() const;
+
+private:
+  friend class decision_policy;
+  inspection_direction_selector(
+      std::shared_ptr<decision_policy_state> state,
+      message_direction direction) noexcept
+      : state_(std::move(state)), direction_(direction) {}
+
+  std::shared_ptr<decision_policy_state> state_;
+  message_direction direction_ = message_direction::request;
+};
+
+/**
+ * @brief Ordered fail-closed decisions over full staged HTTP context.
+ *
+ * Rules use registration-order, first-match semantics. permit accepts the
+ * current stage, block emits the protocol adapter's bounded terminal response,
+ * and drop_flow closes the flow. If no rule matches, the stage is permitted.
+ * Message transformations remain separate and run before these staged
+ * decisions, so message_complete observes the final decoded semantic body
+ * that will be serialized and forwarded.
+ */
+class decision_policy {
+public:
+  explicit decision_policy(
+      ntl::net::inspection::failure_policy failure =
+          ntl::net::inspection::failure_policy::fail_closed)
+      : state_(std::make_shared<decision_policy_state>(failure)) {}
+
+  inspection_direction_selector requests() noexcept {
+    return inspection_direction_selector(state_, message_direction::request);
+  }
+  inspection_direction_selector responses() noexcept {
+    return inspection_direction_selector(state_, message_direction::response);
+  }
+
+  ntl::net::inspection::verdict
+  evaluate(const inspection_context_view &context) const noexcept {
+    try {
+      for (const auto &rule : state_->rules) {
+        if (rule.direction != context.direction() ||
+            rule.stage != context.stage())
+          continue;
+        bool matches = true;
+        for (const auto &condition : rule.conditions) {
+          if (!condition(context)) {
+            matches = false;
+            break;
+          }
+        }
+        if (!matches)
+          continue;
+        const auto result = rule.decide(context);
+        if (result == ntl::net::inspection::verdict::permit ||
+            result == ntl::net::inspection::verdict::block ||
+            result == ntl::net::inspection::verdict::drop_flow)
+          return result;
+        return failure_verdict();
+      }
+      return ntl::net::inspection::verdict::permit;
+    } catch (...) {
+      return failure_verdict();
+    }
+  }
+
+  ntl::net::inspection::verdict
+  operator()(const inspection_context_view &context) const noexcept {
+    return evaluate(context);
+  }
+
+private:
+  ntl::net::inspection::verdict failure_verdict() const noexcept {
+    return state_->failure ==
+                   ntl::net::inspection::failure_policy::fail_open
+               ? ntl::net::inspection::verdict::permit
+               : ntl::net::inspection::verdict::block;
+  }
+
+  std::shared_ptr<decision_policy_state> state_;
+};
+
+template <class Predicate>
+inspection_rule_selector &inspection_rule_selector::when(
+    Predicate &&condition) {
+  if (!state_)
+    throw std::logic_error(
+        "HTTP inspection rule builder was already committed");
+  using predicate_type = std::decay_t<Predicate>;
+  static_assert(
+      std::is_invocable_r_v<bool, const predicate_type &,
+                            const inspection_context_view &>,
+      "HTTP inspection predicates must be const-invocable and return a "
+      "bool-convertible result");
+  predicate erased(std::forward<Predicate>(condition));
+  if (!erased)
+    throw std::invalid_argument(
+        "HTTP inspection predicate is empty");
+  conditions_.push_back(std::move(erased));
+  return *this;
+}
+
+template <class Function>
+void
+inspection_rule_selector::decide(Function &&function) {
+  if (!state_)
+    throw std::logic_error(
+        "HTTP inspection rule builder was already committed");
+  using function_type = std::decay_t<Function>;
+  using result_type = std::invoke_result_t<
+      const function_type &, const inspection_context_view &>;
+  static_assert(
+      std::is_same_v<std::remove_cvref_t<result_type>,
+                      ntl::net::inspection::verdict>,
+      "HTTP inspection decisions must be const-invocable and return "
+      "inspection::verdict exactly");
+  std::function<ntl::net::inspection::verdict(
+      const inspection_context_view &)> decision(std::forward<Function>(function));
+  if (!decision)
+    throw std::invalid_argument(
+        "HTTP inspection decision is empty");
+  state_->rules.push_back(
+      {direction_, stage_, std::move(conditions_), std::move(decision)});
+  state_.reset();
+}
+
+inline inspection_rule_selector
+inspection_direction_selector::at_headers() const {
+  return inspection_rule_selector(
+      state_, direction_, inspection_stage::headers);
+}
+
+inline inspection_rule_selector
+inspection_direction_selector::at_body_chunk() const {
+  return inspection_rule_selector(
+      state_, direction_, inspection_stage::body_chunk);
+}
+
+inline inspection_rule_selector
+inspection_direction_selector::at_message_complete() const {
+  return inspection_rule_selector(
+      state_, direction_, inspection_stage::message_complete);
+}
+
+} // namespace ntl::net::http

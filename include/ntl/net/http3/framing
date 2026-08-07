@@ -6,10 +6,7 @@
  */
 #pragma once
 
-#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
-#error "ntl/net/http3/framing is a user-mode header"
-#endif
-
+#include <ntl/net/borrowed_bounded_writer>
 #include <ntl/net/framing>
 #include <ntl/result>
 #include <ntl/net/buffer/scatter_view>
@@ -18,8 +15,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
-#include <new>
 #include <span>
+#include <new>
 #include <string>
 #include <utility>
 #include <vector>
@@ -69,6 +66,25 @@ quic_varint_size(std::uint64_t value) noexcept {
                    : value <= 1073741823
                          ? 4
                          : value <= maximum_quic_varint ? 8 : 0;
+}
+
+inline ntl::result<std::size_t>
+write_quic_varint(std::span<std::byte> output,
+                  std::uint64_t value) noexcept {
+  const std::size_t size = quic_varint_size(value);
+  if (size == 0)
+    return ntl::unexpected(STATUS_INTEGER_OVERFLOW);
+  if (output.size() < size)
+    return ntl::unexpected(STATUS_BUFFER_TOO_SMALL);
+  for (std::size_t index = 0; index != size; ++index) {
+    output[size - index - 1] = static_cast<std::byte>(value & 0xffu);
+    value >>= 8;
+  }
+  const std::uint8_t prefix =
+      size == 1 ? 0x00u
+                : size == 2 ? 0x40u : size == 4 ? 0x80u : 0xc0u;
+  output[0] |= static_cast<std::byte>(prefix);
+  return ntl::ok(size);
 }
 
 inline ntl::status append_quic_varint(
@@ -213,7 +229,7 @@ public:
     return ntl::ok(frame_view(*header, *payload));
   }
 
-  const frame_header &header() const noexcept { return header_; }
+  frame_header header() const noexcept { return header_; }
   ntl::net::scatter_view payload() const noexcept { return payload_; }
 
 private:
@@ -351,7 +367,7 @@ public:
     }
   }
 
-  Decoder &underlying() noexcept { return decoder_; }
+  Decoder &underlying_ref() noexcept { return decoder_; }
 
 private:
   Decoder decoder_;
@@ -411,9 +427,9 @@ public:
  * STATUS_RETRY result from QPACK is preserved so that backend can resume the
  * blocked request after processing encoder-stream instructions.
  */
-class stream_inspector {
+class borrowed_stream_inspector {
 public:
-  explicit stream_inspector(
+  explicit borrowed_stream_inspector(
       qpack_decoder &decoder,
       std::size_t maximum_decoded_header_size =
           256 * 1024) noexcept

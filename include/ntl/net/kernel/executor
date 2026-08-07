@@ -1,0 +1,349 @@
+/**
+ * @file kernel_net_executor
+ * @brief Owning, drainable PASSIVE_LEVEL executor for kernel networking.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/net/kernel/executor is a kernel-mode header"
+#endif
+
+#include <ntl/irql>
+#include <ntl/net/executor>
+#include <ntl/net/kernel/passive_cleanup_item>
+#include <ntl/pool_allocator>
+
+#include <atomic>
+#include <memory>
+#include <new>
+#include <type_traits>
+#include <utility>
+
+namespace ntl::net::kernel {
+
+struct executor_limits {
+  std::size_t maximum_pending = 256;
+
+  constexpr bool valid() const noexcept {
+    return maximum_pending != 0 && maximum_pending <= 64 * 1024;
+  }
+};
+
+/**
+ * @brief Copyable owning handle to a shared, runtime-drained work queue.
+ *
+ * Copies retain the queue state. Destroying a facade never invalidates a copy
+ * already stored by a child object, so member declaration order is irrelevant.
+ * close() is idempotent and rejects later posts. The last handle retires the
+ * queue through the CrtSys PASSIVE cleanup domain; accepted callbacks therefore
+ * leave driver code before runtime teardown even when the last handle is
+ * released from APC_LEVEL, DISPATCH_LEVEL, or from one of its own callbacks.
+ */
+class executor final : public ntl::net::executor {
+public:
+  explicit executor(WORK_QUEUE_TYPE queue_type = DelayedWorkQueue,
+                    ULONG tag = ntl::pool_tag("xNtN"),
+                    executor_limits limits = {}) noexcept {
+    if (!limits.valid()) {
+      creation_status_ = STATUS_INVALID_PARAMETER;
+      return;
+    }
+    state_ = shared_state::try_create(queue_type, tag, limits);
+    if (!state_)
+      creation_status_ = STATUS_INSUFFICIENT_RESOURCES;
+  }
+
+  executor(const executor &other) noexcept
+      : state_(other.state_), creation_status_(other.creation_status_) {
+    retain();
+  }
+
+  executor &operator=(const executor &other) noexcept {
+    if (this == &other)
+      return *this;
+    release();
+    state_ = other.state_;
+    creation_status_ = other.creation_status_;
+    retain();
+    return *this;
+  }
+
+  executor(executor &&other) noexcept
+      : state_(std::exchange(other.state_, nullptr)),
+        creation_status_(other.creation_status_) {}
+
+  executor &operator=(executor &&other) noexcept {
+    if (this == &other)
+      return *this;
+    release();
+    state_ = std::exchange(other.state_, nullptr);
+    creation_status_ = other.creation_status_;
+    return *this;
+  }
+
+  ~executor() override { release(); }
+
+  ntl::status
+  post_borrowed(ntl::net::borrowed_work_item work) noexcept override {
+    return state_ ? state_->post_borrowed(work) : creation_status_;
+  }
+
+  /**
+   * Queues a callback while retaining its shared owner through completion.
+   * The owner must be an lvalue so a rejected post cannot consume the caller's
+   * final reference at elevated IRQL.
+   */
+  template <class State>
+  ntl::status post(const std::shared_ptr<State> &owner,
+                   void (*callback)(State &) noexcept) noexcept {
+    static_assert(!std::is_void_v<State>);
+    if (!state_)
+      return creation_status_;
+    if (!owner || !callback)
+      return STATUS_INVALID_PARAMETER;
+    return state_->post_owned(owner, callback);
+  }
+
+  template <class State>
+  ntl::status post(std::shared_ptr<State> &&,
+                   void (*)(State &) noexcept) noexcept = delete;
+
+  void stop_accepting() noexcept override {
+    if (state_)
+      state_->stop_accepting();
+  }
+
+  /** Stops new posts and waits for accepted callbacks. PASSIVE_LEVEL only. */
+  ntl::status drain() noexcept override {
+    return state_ ? state_->drain() : creation_status_;
+  }
+
+  /** Idempotent nonblocking close; accepted callbacks remain runtime-owned. */
+  void close() noexcept { stop_accepting(); }
+
+  std::size_t pending() const noexcept {
+    return state_ ? state_->pending.load(std::memory_order_acquire) : 0;
+  }
+
+  ntl::status creation_status() const noexcept {
+    return state_ ? ntl::status::ok() : creation_status_;
+  }
+
+private:
+  struct shared_state;
+
+  struct queued_work {
+    shared_state *owner = nullptr;
+    ntl::net::borrowed_work_item work{};
+    void (*release_context)(void *) noexcept = nullptr;
+    WORK_QUEUE_ITEM native{};
+  };
+
+  template <class State> struct owned_invocation {
+    std::shared_ptr<State> owner;
+    void (*callback)(State &) noexcept = nullptr;
+    ULONG tag = ntl::default_pool_tag;
+
+    static void invoke(void *context) noexcept {
+      auto *const self = static_cast<owned_invocation *>(context);
+      self->callback(*self->owner);
+    }
+
+    static void release(void *context) noexcept {
+      auto *const self = static_cast<owned_invocation *>(context);
+      const ULONG allocation_tag = self->tag;
+      self->~owned_invocation();
+      ntl::detail::free_pool_bytes(
+          self, ntl::pool_kind::nonpaged, allocation_tag);
+    }
+  };
+
+  struct shared_state {
+    shared_state(WORK_QUEUE_TYPE queue_type_value, ULONG tag_value,
+                 executor_limits limits_value) noexcept
+        : cleanup(&shared_state::cleanup_at_passive, this),
+          queue_type(queue_type_value), tag(tag_value), limits(limits_value) {
+      KeInitializeSpinLock(&lock);
+      KeInitializeEvent(&drained, NotificationEvent, TRUE);
+    }
+
+    static shared_state *try_create(
+        WORK_QUEUE_TYPE queue_type, ULONG tag,
+        executor_limits limits) noexcept {
+      void *const storage = ntl::detail::allocate_pool_bytes(
+          sizeof(shared_state), alignof(shared_state),
+          ntl::pool_kind::nonpaged, ntl::pool_option::none, tag);
+      if (!storage)
+        return nullptr;
+      auto *const result =
+          new (storage) shared_state(queue_type, tag, limits);
+      const ntl::status registered =
+          ntl::net::kernel::detail::register_runtime_passive_cleanup(
+              result->cleanup);
+      if (registered.is_ok())
+        return result;
+      result->~shared_state();
+      ntl::detail::free_pool_bytes(
+          storage, ntl::pool_kind::nonpaged, tag);
+      return nullptr;
+    }
+
+    void retain() noexcept {
+      references.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void release() noexcept {
+      if (references.fetch_sub(1, std::memory_order_acq_rel) != 1)
+        return;
+      stop_accepting();
+      ntl::net::kernel::detail::
+          retire_runtime_passive_cleanup_deferred(cleanup);
+    }
+
+    ntl::status
+    post_borrowed(ntl::net::borrowed_work_item work) noexcept {
+      return post(work, nullptr);
+    }
+
+    ntl::status post(
+        ntl::net::borrowed_work_item work,
+        void (*release_context)(void *) noexcept) noexcept {
+      if (!work)
+        return STATUS_INVALID_PARAMETER;
+      if (ntl::current_irql() > ntl::irql::dispatch)
+        return STATUS_INVALID_DEVICE_STATE;
+
+      auto *node = static_cast<queued_work *>(
+          ntl::detail::allocate_pool_bytes(
+              sizeof(queued_work), alignof(queued_work),
+              ntl::pool_kind::nonpaged, ntl::pool_option::none, tag));
+      if (!node)
+        return STATUS_INSUFFICIENT_RESOURCES;
+      node->owner = this;
+      node->work = work;
+      node->release_context = release_context;
+
+      KIRQL old_irql = 0;
+      KeAcquireSpinLock(&lock, &old_irql);
+      if (stopping) {
+        KeReleaseSpinLock(&lock, old_irql);
+        ntl::detail::free_pool_bytes(
+            node, ntl::pool_kind::nonpaged, tag);
+        return STATUS_DELETE_PENDING;
+      }
+      if (pending.load(std::memory_order_relaxed) >=
+          limits.maximum_pending) {
+        KeReleaseSpinLock(&lock, old_irql);
+        ntl::detail::free_pool_bytes(
+            node, ntl::pool_kind::nonpaged, tag);
+        return STATUS_QUOTA_EXCEEDED;
+      }
+      retain();
+      if (pending.fetch_add(1, std::memory_order_acq_rel) == 0)
+        KeClearEvent(&drained);
+      KeReleaseSpinLock(&lock, old_irql);
+
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4996)
+#endif
+      ExInitializeWorkItem(&node->native, &shared_state::invoke, node);
+      ExQueueWorkItem(&node->native, queue_type);
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+      return ntl::status::ok();
+    }
+
+    template <class State>
+    ntl::status post_owned(
+        const std::shared_ptr<State> &owner,
+        void (*callback)(State &) noexcept) noexcept {
+      using invocation = owned_invocation<State>;
+      void *const storage = ntl::detail::allocate_pool_bytes(
+          sizeof(invocation), alignof(invocation),
+          ntl::pool_kind::nonpaged, ntl::pool_option::none, tag);
+      if (!storage)
+        return STATUS_INSUFFICIENT_RESOURCES;
+      auto *const call = new (storage) invocation{owner, callback, tag};
+      const ntl::status posted = post(
+          {.callback = &invocation::invoke, .context = call},
+          &invocation::release);
+      if (posted.is_ok())
+        return posted;
+      invocation::release(call);
+      return posted;
+    }
+
+    void stop_accepting() noexcept {
+      KIRQL old_irql = 0;
+      KeAcquireSpinLock(&lock, &old_irql);
+      stopping = true;
+      KeReleaseSpinLock(&lock, old_irql);
+    }
+
+    ntl::status drain() noexcept {
+      if (ntl::current_irql() != ntl::irql::passive)
+        return STATUS_INVALID_DEVICE_STATE;
+      stop_accepting();
+      return KeWaitForSingleObject(
+          &drained, Executive, KernelMode, FALSE, nullptr);
+    }
+
+    static void invoke(void *context) noexcept {
+      auto *node = static_cast<queued_work *>(context);
+      shared_state *const owner = node->owner;
+      const auto work = node->work;
+      const auto release_context = node->release_context;
+      const ULONG tag = owner->tag;
+      work.invoke();
+      ntl::detail::free_pool_bytes(
+          node, ntl::pool_kind::nonpaged, tag);
+      if (owner->pending.fetch_sub(1, std::memory_order_acq_rel) == 1)
+        KeSetEvent(&owner->drained, IO_NO_INCREMENT, FALSE);
+      owner->release();
+      // Release the callback owner only after the queue no longer counts this
+      // invocation. If this is the last service reference, its destructor may
+      // safely close and drain the same executor without self-deadlocking.
+      if (release_context)
+        release_context(work.context);
+    }
+
+    static void cleanup_at_passive(void *context) noexcept {
+      auto *const self = static_cast<shared_state *>(context);
+      NT_ASSERT(ntl::current_irql() == ntl::irql::passive);
+      (void)self->drain();
+      const ULONG tag = self->tag;
+      self->~shared_state();
+      ntl::detail::free_pool_bytes(
+          self, ntl::pool_kind::nonpaged, tag);
+    }
+
+    passive_cleanup_item cleanup;
+    WORK_QUEUE_TYPE queue_type = DelayedWorkQueue;
+    ULONG tag = ntl::default_pool_tag;
+    executor_limits limits{};
+    KSPIN_LOCK lock{};
+    bool stopping = false;
+    std::atomic<std::size_t> pending{0};
+    std::atomic<std::size_t> references{1};
+    KEVENT drained{};
+  };
+
+  void retain() noexcept {
+    if (state_)
+      state_->retain();
+  }
+
+  void release() noexcept {
+    if (state_)
+      std::exchange(state_, nullptr)->release();
+  }
+
+  shared_state *state_ = nullptr;
+  ntl::status creation_status_{STATUS_SUCCESS};
+};
+
+} // namespace ntl::net::kernel

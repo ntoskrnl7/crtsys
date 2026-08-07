@@ -1,10 +1,11 @@
 /**
  * @file all
- * @brief Platform-appropriate ntl::wfp umbrella header.
+ * @brief Platform-appropriate aggregate header for ntl::wfp.
  */
 #pragma once
 
 #include "layers"
+#include "transparent_udp_proxy_contract"
 
 #if defined(_KERNEL_MODE) || defined(_KERNEL32_)
 #include "callout"
@@ -16,6 +17,7 @@
 #include "packet"
 #include "stream"
 #include "stream_reader"
+#include "transparent_udp_proxy"
 #else
 #include "connect_redirect"
 #include "management"

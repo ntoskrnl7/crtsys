@@ -18,7 +18,12 @@ param(
 
   [string[]] $RequiredProviderPattern = @(),
 
-  [string] $EvidenceDirectory = ''
+  [string] $EvidenceDirectory = '',
+
+  [switch] $AllowDisposableGuestMutation,
+
+  [string] $DisposableGuestSentinelPath =
+      'C:\crtsys-disposable-test-guest.sentinel'
 )
 
 Set-StrictMode -Version Latest
@@ -88,10 +93,23 @@ function Get-Percentile([double[]] $Values, [double] $Percentile) {
 }
 
 Assert-Administrator
+$guardScript = Join-Path $PSScriptRoot '..\common\DisposableGuestGuard.ps1'
+if (-not (Test-Path -LiteralPath $guardScript -PathType Leaf)) {
+  throw "Disposable guest guard was not found: $guardScript"
+}
+. $guardScript
+Assert-CrtSysDisposableGuest `
+    -AllowDisposableGuestMutation:$AllowDisposableGuestMutation `
+    -SentinelPath $DisposableGuestSentinelPath
+
 $PackageRoot = (Resolve-Path -LiteralPath $PackageRoot).Path
 $suite = Join-Path $PSScriptRoot 'Run-WfpAdvancedSuite.ps1'
-if (-not (Test-Path -LiteralPath $suite -PathType Leaf)) {
-  throw "Advanced WFP suite was not found: $suite"
+$crashPostcheck =
+    Join-Path $PSScriptRoot '..\..\..\common\Test-VmCrashPostcheck.ps1'
+foreach ($requiredScript in @($suite, $crashPostcheck)) {
+  if (-not (Test-Path -LiteralPath $requiredScript -PathType Leaf)) {
+    throw "Advanced WFP runtime script was not found: $requiredScript"
+  }
 }
 if ([string]::IsNullOrWhiteSpace($EvidenceDirectory)) {
   $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
@@ -102,16 +120,10 @@ New-Item -ItemType Directory -Path $EvidenceDirectory -Force | Out-Null
 
 $started = Get-Date
 $deadline = $started.AddMinutes($DurationMinutes)
-$crashIds = @(41, 1001)
-$dumpRoot = Join-Path $env:SystemRoot 'Minidump'
-$dumpsBefore = @(
-  Get-ChildItem -LiteralPath $dumpRoot -File -ErrorAction SilentlyContinue |
-      Select-Object -ExpandProperty FullName)
-$eventsBefore = @(
-  Get-WinEvent -FilterHashtable @{
-    LogName = 'System'; Id = $crashIds; StartTime = $started.AddMinutes(-1)
-  } -ErrorAction SilentlyContinue |
-      Select-Object -ExpandProperty RecordId)
+$eventBaseline = Join-Path $EvidenceDirectory 'crash-event-baseline.txt'
+$dumpBaseline = Join-Path $EvidenceDirectory 'crash-dump-baseline.txt'
+& $crashPostcheck -EventBaselinePath $eventBaseline `
+    -DumpBaselinePath $dumpBaseline -CaptureBaseline
 
 $beforeState = Join-Path $EvidenceDirectory 'wfp-before.xml'
 Save-WfpState $beforeState
@@ -128,7 +140,9 @@ try {
     $log = Join-Path $EvidenceDirectory ("cycle-{0:D4}.log" -f $cycle)
     & $suite -PackageRoot $PackageRoot `
         -SelectedSample $SelectedSample `
-        -Iterations $IterationsPerCycle *>&1 |
+        -Iterations $IterationsPerCycle `
+        -AllowDisposableGuestMutation:$AllowDisposableGuestMutation `
+        -DisposableGuestSentinelPath $DisposableGuestSentinelPath *>&1 |
         Tee-Object -FilePath $log
     $cycleSeconds = ((Get-Date) - $cycleStarted).TotalSeconds
     $text = Get-Content -LiteralPath $log -Raw
@@ -154,18 +168,14 @@ try {
 }
 
 $finished = Get-Date
-$eventsAfter = @(
-  Get-WinEvent -FilterHashtable @{
-    LogName = 'System'; Id = $crashIds; StartTime = $started
-  } -ErrorAction SilentlyContinue |
-      Where-Object { $_.RecordId -notin $eventsBefore })
-$dumpsAfter = @(
-  Get-ChildItem -LiteralPath $dumpRoot -File -ErrorAction SilentlyContinue |
-      Where-Object { $_.FullName -notin $dumpsBefore })
-if ($eventsAfter.Count -ne 0 -or $dumpsAfter.Count -ne 0) {
-  throw (
-      "The soak gate detected $($eventsAfter.Count) new crash events and " +
-      "$($dumpsAfter.Count) new dump files.")
+$crashResult = Join-Path $EvidenceDirectory 'crash-postcheck.txt'
+& $crashPostcheck -EventBaselinePath $eventBaseline `
+    -DumpBaselinePath $dumpBaseline -OutputPath $crashResult
+$crashText = Get-Content -LiteralPath $crashResult -Raw
+if ($crashText -notmatch 'EVENT_COUNT=0' -or
+    $crashText -notmatch 'DUMP_COUNT=0' -or
+    $crashText -notmatch 'EVENT_LOG_RESET=0') {
+  throw "The soak gate detected a crash or event-log reset: $crashText"
 }
 
 $durations = [double[]] @($cycles | ForEach-Object elapsedSeconds)

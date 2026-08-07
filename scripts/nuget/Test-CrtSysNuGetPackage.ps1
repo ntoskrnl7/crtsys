@@ -32,6 +32,8 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'CrtSysMsQuicHeaderContract.ps1')
+. (Join-Path $PSScriptRoot 'CrtSysWdkBuildTaskContract.ps1')
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $isDriverConsumer = $Consumer -eq 'Driver'
@@ -152,6 +154,11 @@ if ($isDriverConsumer -and -not $SkipDriverBuild) {
   if (-not (Test-Path (Join-Path $wdkKernelLibDirectory 'aux_klib.lib'))) {
     throw "WDK kernel library directory is missing aux_klib.lib: $wdkKernelLibDirectory"
   }
+  $wdkBuildTaskVisualStudioVersion =
+      Resolve-CrtSysWdkBuildTaskVisualStudioVersion `
+          -WindowsKitsRoot $windowsKitsRoot `
+          -WdkVersion $WdkVersion `
+          -MsBuildPath $msbuild
 }
 
 Write-Host "Requested Windows SDK version: $WindowsSdkVersion"
@@ -182,10 +189,19 @@ New-Item -ItemType Directory -Force -Path $cmakeTestDirectory | Out-Null
 foreach ($sourceFile in @(
   'README.md',
   'crtsys_nuget_app_test.vcxproj',
-  'crtsys_nuget_test.vcxproj'
+  'crtsys_nuget_test.vcxproj',
+  'msquic_user_contract.cpp',
+  'msquic_kernel_contract.cpp',
+  'wsk_kernel_contract.cpp'
 )) {
   Copy-Item -LiteralPath (Join-Path $testProjectSource $sourceFile) `
     -Destination $testProjectDirectory -Force
+}
+foreach ($abiSource in @('abi_win7_provider.cpp', 'abi_win8_consumer.cpp')) {
+  Copy-Item -LiteralPath `
+    (Join-Path $repoRoot "test\flt\compile\$abiSource") `
+    -Destination (Join-Path $testProjectDirectory $abiSource) `
+    -Force
 }
 Copy-Item -LiteralPath (Join-Path $testProjectSource 'gtest') `
   -Destination $testProjectDirectory -Recurse -Force
@@ -238,6 +254,11 @@ $requiredPackagePaths = @(
   'build\native\crtsys.targets',
   'build\native\crtsys.xml',
   'build\native\crtsys-kmdf.xml',
+  'include\ntl\net\borrowed_memory_resource',
+  'include\ntl\net\borrowed_bounded_writer',
+  'include\ntl\net\executor',
+  'include\ntl\net\runtime',
+  'include\ntl\net\transform_pipeline',
   'include\ntl\net\io\async_framed_stream',
   'include\ntl\net\io\async_socket',
   'include\ntl\net\inspection\content_decoder',
@@ -247,13 +268,30 @@ $requiredPackagePaths = @(
   'include\ntl\net\inspection\content_encoder_brotli',
   'include\ntl\net\inspection\content_encoder_zlib',
   'include\ntl\net\inspection\content_stream',
+  'include\ntl\net\inspection\codec_memory',
   'include\ntl\net\inspection\standard_content_encoders',
   'include\ntl\flt\communication_client',
   'include\ntl\flt\port_common',
+  'include\ntl\net\kernel\all',
+  'include\ntl\net\kernel\executor',
+  'include\ntl\net\kernel\started_task',
+  'include\ntl\net\kernel\workspace_pool',
+  'include\ntl\net\kernel\http1_proxy_session',
+  'include\ntl\net\kernel\http2_proxy_session',
+  'include\ntl\net\user\task',
+  'include\ntl\net\user\redirected_tls_session',
+  'include\ntl\net\user\redirected_tls_inspection',
   'include\ntl\net\framing',
   'include\ntl\net\http\http1_framing',
   'include\ntl\net\http\http1_transform',
   'include\ntl\net\http\http1_stream_transform',
+  'include\ntl\net\http\http1_proxy_connection',
+  'include\ntl\net\http\authority',
+  'include\ntl\net\http\http1_proxy_types',
+  'include\ntl\net\http\inspection_context_view',
+  'include\ntl\net\http\inspection_conditions',
+  'include\ntl\net\http\decision_policy',
+  'include\ntl\net\http\inspection_policy',
   'include\ntl\net\http\async_transform',
   'include\ntl\net\http\stream_transform',
   'include\ntl\net\http\transform',
@@ -263,10 +301,20 @@ $requiredPackagePaths = @(
   'include\ntl\net\http2\hpack',
   'include\ntl\net\http2\transform',
   'include\ntl\net\http2\stream_transform',
+  'include\ntl\net\http2\flow_control',
+  'include\ntl\net\http2\proxy_connection',
+  'include\ntl\net\http2\proxy_session',
+  'include\ntl\net\http2\websocket_tunnel',
+  'include\ntl\net\http3\async_origin_pool',
   'include\ntl\net\http3\backend',
   'include\ntl\net\http3\framing',
   'include\ntl\net\http3\inspection_proxy',
+  'include\ntl\net\http3\msquic_backend',
+  'include\ntl\net\http3\msquic_runtime',
+  'include\ntl\net\http3\msquic_server',
+  'include\ntl\net\http3\proxy_connection',
   'include\ntl\net\http3\qpack',
+  'include\ntl\net\http3\qpack_core',
   'include\ntl\net\http3\standard_inspection_proxy',
   'include\ntl\net\http3\stream_transform',
   'include\ntl\net\http3\webtransport_transform',
@@ -287,13 +335,20 @@ $requiredPackagePaths = @(
   'include\ntl\net\websocket\transform',
   'build\native\codecs\include\zlib.h',
   'build\native\codecs\include\brotli\decode.h',
+  'build\native\msquic\include\msquic.h',
+  'build\native\msquic\include\msquic_winuser.h',
+  'build\native\msquic\include\msquic_winkernel.h',
+  'build\native\msquic\REVISION.txt',
   "build\native\codecs\lib\$Toolset\$Architecture\$Configuration\zlibstatic.lib",
   "build\native\codecs\lib\$Toolset\$Architecture\$Configuration\brotlicommon.lib",
   "build\native\codecs\lib\$Toolset\$Architecture\$Configuration\brotlidec.lib",
   "build\native\codecs\lib\$Toolset\$Architecture\$Configuration\brotlienc.lib",
+  "build\native\kernel-codecs\lib\$Toolset\$Architecture\$Configuration\crtsys_ntl_kernel_zlib.lib",
+  "build\native\kernel-codecs\lib\$Toolset\$Architecture\$Configuration\crtsys_ntl_kernel_brotli.lib",
   'include\ntl\rpc\client',
   'docs\ntl-api.md'
 )
+
 if ($isDriverConsumer) {
   $requiredPackagePaths += @(
     "build\native\lib\native\$Toolset\$Architecture\$Configuration\crtsys.lib",
@@ -335,6 +390,10 @@ foreach ($requiredPath in $requiredPackagePaths) {
     throw "Installed package is missing expected file: $fullPath"
   }
 }
+
+Assert-CrtSysMsQuicHeaderSet `
+  -IncludeDirectory (Join-Path $packageRoot 'build\native\msquic\include') `
+  -Description 'Installed NuGet MsQuic public header set'
 
 if ($isDriverConsumer -and -not $SkipDriverBuild) {
   $externalPackagesDirectory = Join-Path $testProjectDirectory 'external-packages'
@@ -394,6 +453,7 @@ $msbuildArguments = @(
 )
 if ($isDriverConsumer) {
   $msbuildArguments += "/p:WindowsTargetPlatformVersion=$WdkVersion"
+  $msbuildArguments += "/p:VisualStudioVersion=$wdkBuildTaskVisualStudioVersion"
   $msbuildArguments += '/p:SignMode=Off'
   $msbuildArguments += "/p:NlohmannJsonPackageRoot=$nlohmannJsonPackageRoot"
 } else {

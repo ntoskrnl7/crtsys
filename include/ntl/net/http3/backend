@@ -6,15 +6,16 @@
  */
 #pragma once
 
-#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
-#error "ntl/net/http3/backend is a user-mode header"
-#endif
-
 #include <ntl/net/http3/framing>
 #include <ntl/result>
 #include <ntl/net/buffer/scatter_view>
 #include <ntl/status>
 
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#include <ntl/net/kernel/dispatcher_executor>
+#endif
+
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -23,122 +24,6 @@
 #include <vector>
 
 namespace ntl::net::http3 {
-
-struct quic_backend_capabilities {
-  bool available = false;
-  bool tls13_termination = false;
-  bool destination_redirection = false;
-  bool qpack_dynamic_table = false;
-  bool bidirectional_streams = false;
-  bool unidirectional_streams = false;
-  bool quic_datagrams = false;
-  bool reliable_reset_at = false;
-  bool extended_connect = false;
-  bool webtransport = false;
-  bool origin_client = false;
-  bool encrypted_client_hello = false;
-  /**
-   * True only when the selected, unmodified browser will accept the
-   * backend's per-origin server identity for QUIC. Installing a private CA
-   * in the Windows trust store is not, by itself, evidence of this.
-   */
-  bool arbitrary_browser_server_identity = false;
-
-  constexpr bool
-  ready_for_transparent_browser() const noexcept {
-    return available && tls13_termination &&
-           destination_redirection &&
-           arbitrary_browser_server_identity;
-  }
-};
-
-class quic_backend_sink {
-public:
-  virtual ~quic_backend_sink() = default;
-  virtual ntl::status
-  on_connected(std::string_view negotiated_alpn) noexcept = 0;
-  virtual ntl::status on_request_stream(
-      std::uint64_t stream_id, ntl::net::scatter_view plaintext,
-      bool final) noexcept = 0;
-  virtual ntl::status on_qpack_encoder_stream(
-      ntl::net::scatter_view plaintext) noexcept = 0;
-  virtual ntl::status on_peer_bidirectional_stream(
-      std::uint64_t, ntl::net::scatter_view, bool) noexcept {
-    return STATUS_NOT_SUPPORTED;
-  }
-  virtual ntl::status on_peer_unidirectional_stream(
-      std::uint64_t, ntl::net::scatter_view, bool) noexcept {
-    return STATUS_NOT_SUPPORTED;
-  }
-  virtual ntl::status on_datagram(
-      ntl::net::scatter_view) noexcept {
-    return STATUS_NOT_SUPPORTED;
-  }
-  virtual ntl::status on_peer_send_aborted(
-      std::uint64_t, std::uint64_t) noexcept {
-    return ntl::status::ok();
-  }
-  virtual ntl::status on_peer_receive_aborted(
-      std::uint64_t, std::uint64_t) noexcept {
-    return ntl::status::ok();
-  }
-  virtual void on_datagram_send_state(bool, std::size_t) noexcept {}
-  virtual void on_reliable_reset_negotiated(bool) noexcept {}
-  virtual void on_closed(NTSTATUS status) noexcept = 0;
-};
-
-/**
- * @brief Adapter implemented by MsQuic, another QUIC stack, or a test replay.
- *
- * WFP classifies or redirects UDP. The backend, not WFP and not the HTTP/3
- * parser, owns QUIC packet protection, TLS 1.3, loss recovery, connection IDs,
- * flow control, stream lifetimes, and QPACK control-stream scheduling.
- */
-class quic_transport_backend {
-public:
-  virtual ~quic_transport_backend() = default;
-  virtual quic_backend_capabilities
-  capabilities() const noexcept = 0;
-  virtual ntl::status run(quic_backend_sink &sink) noexcept = 0;
-  virtual ntl::status write_stream(
-      std::uint64_t stream_id, ntl::net::scatter_view plaintext,
-      bool final) noexcept = 0;
-  virtual ntl::status write_qpack_decoder_stream(
-      ntl::net::scatter_view) noexcept {
-    return STATUS_NOT_SUPPORTED;
-  }
-  virtual ntl::status open_bidirectional_stream(
-      std::uint64_t &) noexcept {
-    return STATUS_NOT_SUPPORTED;
-  }
-  virtual ntl::status open_request_stream(
-      std::uint64_t &stream_id) noexcept {
-    return open_bidirectional_stream(stream_id);
-  }
-  virtual ntl::status open_unidirectional_stream(
-      std::uint64_t &) noexcept {
-    return STATUS_NOT_SUPPORTED;
-  }
-  virtual ntl::status send_datagram(
-      ntl::net::scatter_view) noexcept {
-    return STATUS_NOT_SUPPORTED;
-  }
-  /** Aborts both directions of one ordinary QUIC stream. */
-  virtual ntl::status reset_stream(
-      std::uint64_t, std::uint64_t) noexcept {
-    return STATUS_NOT_SUPPORTED;
-  }
-  /**
-   * Aborts the send side after keeping a negotiated prefix reliable.
-   * This is a WebTransport extension and is not a substitute for reset_stream.
-   */
-  virtual ntl::status reset_stream_at(
-      std::uint64_t, std::uint64_t,
-      std::uint64_t) noexcept {
-    return STATUS_NOT_SUPPORTED;
-  }
-  virtual void stop() noexcept = 0;
-};
 
 struct connection_limits {
   std::size_t maximum_concurrent_request_streams = 256;
@@ -150,9 +35,9 @@ struct connection_limits {
 /**
  * @brief Reassembles HTTP/3 frames from arbitrarily split QUIC stream data.
  */
-class connection_inspector {
+class borrowed_connection_inspector {
 public:
-  connection_inspector(
+  borrowed_connection_inspector(
       qpack_decoder &decoder, connection_limits limits = {},
       std::size_t maximum_decoded_header_size =
           256 * 1024) noexcept
@@ -169,7 +54,22 @@ public:
       ntl::net::scatter_view plaintext) noexcept {
     if (!plaintext)
       return STATUS_INVALID_PARAMETER;
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+    try {
+      return ntl::net::kernel::dispatcher_executor::invoke(
+          [this, plaintext]() noexcept {
+            return decoder_->consume_encoder_stream(plaintext);
+          });
+    } catch (const ntl::exception &error) {
+      return error.get_status();
+    } catch (const std::bad_alloc &) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    } catch (...) {
+      return STATUS_UNHANDLED_EXCEPTION;
+    }
+#else
     return decoder_->consume_encoder_stream(plaintext);
+#endif
   }
 
   ntl::result<std::vector<std::byte>>
@@ -178,6 +78,69 @@ public:
   }
 
   ntl::status consume_request_stream(
+      std::uint64_t stream_id, ntl::net::scatter_view plaintext,
+      bool final, inspection_sink &sink) noexcept {
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+    try {
+      return ntl::net::kernel::dispatcher_executor::invoke(
+          [this, stream_id, plaintext, final, &sink]() noexcept {
+            return consume_request_stream_on_current_stack(
+                stream_id, plaintext, final, sink);
+          });
+    } catch (const ntl::exception &error) {
+      return error.get_status();
+    } catch (const std::bad_alloc &) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    } catch (...) {
+      return STATUS_UNHANDLED_EXCEPTION;
+    }
+#else
+    return consume_request_stream_on_current_stack(
+        stream_id, plaintext, final, sink);
+#endif
+  }
+
+  /**
+   * @brief Retries a request stream after encoder instructions unblocked it.
+   */
+  ntl::status resume_request_stream(
+      std::uint64_t stream_id,
+      inspection_sink &sink) noexcept {
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+    try {
+      return ntl::net::kernel::dispatcher_executor::invoke(
+          [this, stream_id, &sink]() noexcept {
+            return resume_request_stream_on_current_stack(stream_id, sink);
+          });
+    } catch (const ntl::exception &error) {
+      return error.get_status();
+    } catch (const std::bad_alloc &) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    } catch (...) {
+      return STATUS_UNHANDLED_EXCEPTION;
+    }
+#else
+    return resume_request_stream_on_current_stack(stream_id, sink);
+#endif
+  }
+
+  ntl::status cancel_request_stream(
+      std::uint64_t stream_id) noexcept {
+    try {
+      const auto found = streams_.find(stream_id);
+      if (found == streams_.end())
+        return STATUS_NOT_FOUND;
+      const ntl::status canceled =
+          decoder_->cancel_stream(stream_id);
+      streams_.erase(found);
+      return canceled;
+    } catch (...) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+  }
+
+private:
+  ntl::status consume_request_stream_on_current_stack(
       std::uint64_t stream_id, ntl::net::scatter_view plaintext,
       bool final, inspection_sink &sink) noexcept {
     if ((!plaintext && !final) ||
@@ -198,23 +161,62 @@ public:
         return STATUS_INVALID_DEVICE_STATE;
       auto &buffer = state.buffer;
       if (plaintext) {
-        if (plaintext.size() >
-            limits_.maximum_buffered_bytes_per_stream -
-                buffer.size())
-          return STATUS_BUFFER_OVERFLOW;
-        const ntl::status copied = plaintext.for_each_chunk(
-            [&buffer](
-                std::span<const std::byte> chunk) noexcept {
-              try {
-                buffer.insert(
-                    buffer.end(), chunk.begin(), chunk.end());
-                return true;
-              } catch (...) {
-                return false;
-              }
-            });
-        if (!copied.is_ok())
-          return STATUS_INSUFFICIENT_RESOURCES;
+        std::size_t consumed = 0;
+        while (consumed != plaintext.size()) {
+          if (buffer.size() >=
+              limits_.maximum_buffered_bytes_per_stream)
+            return STATUS_BUFFER_OVERFLOW;
+          const std::size_t available =
+              limits_.maximum_buffered_bytes_per_stream -
+              buffer.size();
+          const std::size_t count = (std::min)(
+              available, plaintext.size() - consumed);
+          const std::size_t offset = buffer.size();
+          try {
+            buffer.resize(offset + count);
+          } catch (...) {
+            return STATUS_INSUFFICIENT_RESOURCES;
+          }
+          const ntl::status copied = plaintext.copy_to(
+              std::span<std::byte>(buffer).subspan(offset, count),
+              consumed);
+          if (!copied.is_ok()) {
+            buffer.resize(offset);
+            return copied;
+          }
+          consumed += count;
+
+          // A transport receive indication may coalesce several complete
+          // frames and be larger than the bounded assembly workspace. Drain
+          // each complete frame before copying more of the indication.
+          const ntl::status drained =
+              drain(stream_id, found, sink);
+          if (drained == STATUS_RETRY) {
+            const std::size_t remaining =
+                plaintext.size() - consumed;
+            if (remaining >
+                limits_.maximum_buffered_bytes_per_stream -
+                    buffer.size())
+              return STATUS_BUFFER_OVERFLOW;
+            const std::size_t tail = buffer.size();
+            try {
+              buffer.resize(tail + remaining);
+            } catch (...) {
+              return STATUS_INSUFFICIENT_RESOURCES;
+            }
+            const ntl::status tail_copied = plaintext.copy_to(
+                std::span<std::byte>(buffer).subspan(tail, remaining),
+                consumed);
+            if (!tail_copied.is_ok()) {
+              buffer.resize(tail);
+              return tail_copied;
+            }
+            state.final = final;
+            return drained;
+          }
+          if (!drained.is_ok())
+            return drained;
+        }
       }
 
       state.final = final;
@@ -224,10 +226,7 @@ public:
     }
   }
 
-  /**
-   * @brief Retries a request stream after encoder instructions unblocked it.
-   */
-  ntl::status resume_request_stream(
+  ntl::status resume_request_stream_on_current_stack(
       std::uint64_t stream_id,
       inspection_sink &sink) noexcept {
     try {
@@ -240,22 +239,6 @@ public:
     }
   }
 
-  ntl::status cancel_request_stream(
-      std::uint64_t stream_id) noexcept {
-    try {
-      const auto found = streams_.find(stream_id);
-      if (found == streams_.end())
-        return STATUS_NOT_FOUND;
-      const ntl::status canceled =
-          decoder_->cancel_stream(stream_id);
-      streams_.erase(found);
-      return canceled;
-    } catch (...) {
-      return STATUS_INSUFFICIENT_RESOURCES;
-    }
-  }
-
-private:
   struct request_stream_state {
     std::vector<std::byte> buffer;
     bool final = false;
@@ -311,7 +294,7 @@ private:
     return ended;
   }
 
-  stream_inspector frame_inspector_;
+  borrowed_stream_inspector frame_inspector_;
   qpack_decoder *decoder_ = nullptr;
   connection_limits limits_{};
   stream_map streams_;

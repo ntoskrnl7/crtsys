@@ -1,0 +1,85 @@
+/**
+ * @file borrowed_bounded_writer
+ * @brief Allocation-free writer for caller-owned protocol buffers.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include <ntl/net/buffer/scatter_view>
+#include <ntl/status>
+
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <span>
+
+namespace ntl::net {
+
+class borrowed_bounded_writer {
+public:
+  explicit constexpr borrowed_bounded_writer(
+      std::span<std::byte> storage) noexcept
+      : storage_(storage) {}
+
+  constexpr std::size_t size() const noexcept { return size_; }
+  constexpr std::size_t capacity() const noexcept { return storage_.size(); }
+  constexpr std::size_t remaining() const noexcept {
+    return storage_.size() - size_;
+  }
+  constexpr std::span<const std::byte> written() const noexcept {
+    return storage_.first(size_);
+  }
+
+  ntl::status append(std::span<const std::byte> bytes) noexcept {
+    if (bytes.size() > remaining())
+      return STATUS_BUFFER_TOO_SMALL;
+    if (!bytes.empty())
+      std::memcpy(storage_.data() + size_, bytes.data(), bytes.size());
+    size_ += bytes.size();
+    return ntl::status::ok();
+  }
+
+  ntl::status append(scatter_view bytes) noexcept {
+    if (!bytes)
+      return STATUS_INVALID_PARAMETER;
+    if (bytes.size() > remaining())
+      return STATUS_BUFFER_TOO_SMALL;
+    const ntl::status copied = bytes.copy_to(storage_.subspan(size_));
+    if (!copied.is_ok())
+      return copied;
+    size_ += bytes.size();
+    return ntl::status::ok();
+  }
+
+  ntl::status write_u8(std::uint8_t value) noexcept {
+    if (remaining() == 0)
+      return STATUS_BUFFER_TOO_SMALL;
+    storage_[size_++] = static_cast<std::byte>(value);
+    return ntl::status::ok();
+  }
+
+  ntl::status write_be16(std::uint16_t value) noexcept {
+    const std::byte bytes[] = {
+        static_cast<std::byte>((value >> 8) & 0xffu),
+        static_cast<std::byte>(value & 0xffu),
+    };
+    return append(bytes);
+  }
+
+  ntl::status write_be32(std::uint32_t value) noexcept {
+    const std::byte bytes[] = {
+        static_cast<std::byte>((value >> 24) & 0xffu),
+        static_cast<std::byte>((value >> 16) & 0xffu),
+        static_cast<std::byte>((value >> 8) & 0xffu),
+        static_cast<std::byte>(value & 0xffu),
+    };
+    return append(bytes);
+  }
+
+private:
+  std::span<std::byte> storage_{};
+  std::size_t size_ = 0;
+};
+
+} // namespace ntl::net

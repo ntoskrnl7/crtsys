@@ -1,0 +1,1050 @@
+/**
+ * @file kernel_tls_stream
+ * @brief Bounded coroutine TLS stream over kernel Schannel and byte transport.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/net/kernel/tls_stream is a kernel-mode header"
+#endif
+
+#include <ntl/net/io/async_transport_stream>
+#include <ntl/net/kernel/schannel>
+#include <ntl/net/kernel/task>
+#include <ntl/net/detail/async_mutex>
+
+#include <algorithm>
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <memory>
+#include <span>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace ntl::net::kernel {
+
+#if NTL_HAS_COROUTINE_SUPPORT
+
+enum class tls_close_stage : std::uint8_t {
+  none = 0,
+  generate_close_notify = 1,
+  send_close_notify = 2,
+  receive_close_notify = 3,
+  transport_half_close = 4,
+};
+
+namespace detail {
+
+/**
+ * A peer may complete its TCP close immediately after its authenticated
+ * close_notify. In that case WSK can report that the transport is already
+ * closing when TLS performs the final local half-close. These terminal states
+ * are an idempotent close result, not a failed TLS session.
+ */
+constexpr bool transport_half_close_completed(NTSTATUS status) noexcept {
+  return NT_SUCCESS(status) || status == STATUS_DELETE_PENDING ||
+         status == STATUS_INVALID_PARAMETER || status == STATUS_END_OF_FILE ||
+         status == STATUS_CONNECTION_RESET ||
+         status == STATUS_CONNECTION_DISCONNECTED ||
+         status == STATUS_PIPE_DISCONNECTED;
+}
+
+} // namespace detail
+
+struct tls_stream_limits {
+  std::size_t maximum_buffered_ciphertext = 1024 * 1024;
+  std::size_t maximum_plaintext_record = 256 * 1024;
+  std::chrono::milliseconds receive_timeout = std::chrono::seconds(30);
+};
+
+struct tls_client_handshake_options {
+  std::vector<std::string> application_protocols;
+  bool require_application_protocol = false;
+  std::shared_ptr<schannel_peer_certificate_policy> peer_certificate_policy;
+};
+
+struct tls_server_handshake_options {
+  std::vector<std::byte> initial_ciphertext;
+  std::vector<std::string> application_protocols;
+  bool require_application_protocol = false;
+  bool require_client_certificate = false;
+  std::shared_ptr<schannel_peer_certificate_policy> client_certificate_policy;
+};
+
+/**
+ * @brief Stateful TLS stream with the same read/write shape as user TLS.
+ *
+ * Schannel cryptography is synchronous on the PASSIVE_LEVEL continuation.
+ * WSK receive and send remain callback driven through async_transport_stream.
+ * Exactly one reader and one writer may be active. The state retains its
+ * transport; normal request/session code should use with_tls_connection(),
+ * which also provides deterministic structured shutdown.
+ */
+class tls_stream_state {
+public:
+  tls_stream_state(std::shared_ptr<io::async_transport_stream> transport,
+                   tls_stream_limits limits = {}) noexcept
+      : cleanup_(&tls_stream_state::cleanup_at_passive, this),
+        cleanup_domain_(borrowed_runtime_passive_cleanup_domain()),
+        transport_(std::move(transport)),
+        context_({.maximum_handshake_token =
+                      limits.maximum_buffered_ciphertext,
+                  .maximum_ciphertext = limits.maximum_buffered_ciphertext,
+                  .maximum_plaintext = limits.maximum_plaintext_record}),
+        limits_(limits) {
+    KeInitializeSpinLock(&metadata_lock_);
+  }
+
+  tls_stream_state(const tls_stream_state &) = delete;
+  tls_stream_state &operator=(const tls_stream_state &) = delete;
+
+  ~tls_stream_state() {
+    NT_ASSERT(KeGetCurrentIrql() == PASSIVE_LEVEL);
+    if (transport_)
+      transport_->close(
+          io::async_transport_close_reason::tls_owner_release);
+  }
+
+  task<ntl::status>
+  handshake_client(schannel_credentials credentials,
+                   std::wstring server_name,
+                   tls_client_handshake_options options) {
+    if (credentials.role() != schannel_role::client ||
+        (credentials.manual_peer_validation() &&
+         !options.peer_certificate_policy))
+      co_return ntl::status{STATUS_INVALID_DEVICE_STATE};
+    if (handshake_started_.exchange(true, std::memory_order_acq_rel) ||
+        handshaken_.load(std::memory_order_acquire))
+      co_return ntl::status{STATUS_INVALID_DEVICE_STATE};
+    const ntl::status target = context_.set_client_target(server_name);
+    if (!target.is_ok())
+      co_return target;
+    std::vector<std::string_view> protocols;
+    try {
+      protocols.reserve(options.application_protocols.size());
+      for (const auto &protocol : options.application_protocols)
+        protocols.emplace_back(protocol);
+    } catch (const std::bad_alloc &) {
+      co_return ntl::status{STATUS_INSUFFICIENT_RESOURCES};
+    }
+    const ntl::status alpn = context_.set_application_protocols(
+        protocols, options.require_application_protocol);
+    if (!alpn.is_ok())
+      co_return alpn;
+    const ntl::status completed = co_await run_handshake(credentials, false);
+    if (!completed.is_ok())
+      co_return completed;
+    if (options.peer_certificate_policy) {
+      auto certificates = context_.peer_certificates();
+      if (!certificates)
+        co_return certificates.status();
+      const ntl::status verified = options.peer_certificate_policy->verify(
+          *certificates, server_name);
+      if (!verified.is_ok())
+        co_return verified;
+    }
+    publish_handshake_complete();
+    co_return completed;
+  }
+
+  task<ntl::status>
+  handshake_server(schannel_credentials credentials,
+                   tls_server_handshake_options options) {
+    if (credentials.role() != schannel_role::server ||
+        options.initial_ciphertext.size() >
+            limits_.maximum_buffered_ciphertext ||
+        (options.require_client_certificate &&
+         !options.client_certificate_policy))
+      co_return ntl::status{STATUS_INVALID_DEVICE_STATE};
+    if (handshake_started_.exchange(true, std::memory_order_acq_rel) ||
+        handshaken_.load(std::memory_order_acquire))
+      co_return ntl::status{STATUS_INVALID_DEVICE_STATE};
+    std::vector<std::string_view> protocols;
+    try {
+      protocols.reserve(options.application_protocols.size());
+      for (const auto &protocol : options.application_protocols)
+        protocols.emplace_back(protocol);
+    } catch (const std::bad_alloc &) {
+      co_return ntl::status{STATUS_INSUFFICIENT_RESOURCES};
+    }
+    const ntl::status alpn = context_.set_application_protocols(
+        protocols, options.require_application_protocol);
+    if (!alpn.is_ok())
+      co_return alpn;
+    const ntl::status client_certificate =
+        context_.require_client_certificate(
+            options.require_client_certificate);
+    if (!client_certificate.is_ok())
+      co_return client_certificate;
+    const ntl::status copied =
+        replace_ciphertext(options.initial_ciphertext);
+    if (!copied.is_ok())
+      co_return copied;
+    const ntl::status completed = co_await run_handshake(credentials, true);
+    if (!completed.is_ok())
+      co_return completed;
+    if (options.require_client_certificate ||
+        options.client_certificate_policy) {
+      auto certificates = context_.peer_certificates();
+      if (!certificates) {
+        if (!options.require_client_certificate &&
+            static_cast<NTSTATUS>(certificates.status()) ==
+                static_cast<NTSTATUS>(detail::security_no_credentials)) {
+          publish_handshake_complete();
+          co_return completed;
+        }
+        co_return options.require_client_certificate
+                      ? ntl::status{STATUS_ACCESS_DENIED}
+                      : certificates.status();
+      }
+      if (options.client_certificate_policy) {
+        const ntl::status verified =
+            options.client_certificate_policy->verify(*certificates, {});
+        if (!verified.is_ok())
+          co_return verified;
+      }
+    }
+    publish_handshake_complete();
+    co_return completed;
+  }
+
+  task<ntl::result<std::size_t>>
+  read_some_borrowed(std::span<std::byte> destination) {
+    co_return co_await read_some_borrowed(
+        destination, {.timeout = limits_.receive_timeout});
+  }
+
+  /**
+   * @brief Reads plaintext with an operation-specific idle timeout.
+   *
+   * Handshake reads continue to use tls_stream_limits::receive_timeout.  A
+   * long-lived HTTP/2 or WebSocket session can pass milliseconds::max() here
+   * without weakening the bounded handshake timeout or mutating shared stream
+   * state.  Exactly one read operation may still be active at a time.
+   */
+  task<ntl::result<std::size_t>>
+  read_some_borrowed(std::span<std::byte> destination, read_options options) {
+    if (close_requested_.load(std::memory_order_acquire))
+      co_return ntl::unexpected(STATUS_DELETE_PENDING);
+    auto read_guard = co_await read_gate_.acquire();
+    if (close_requested_.load(std::memory_order_acquire))
+      co_return ntl::unexpected(STATUS_DELETE_PENDING);
+    co_return co_await read_some_unlocked(destination, options);
+  }
+
+  task<ntl::result<std::size_t>>
+  read_some_unlocked(std::span<std::byte> destination, read_options options) {
+    if (!handshaken_.load(std::memory_order_acquire))
+      co_return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+    if (destination.empty())
+      co_return ntl::ok<std::size_t>(0);
+
+    for (;;) {
+      const std::size_t copied = copy_plaintext(destination);
+      if (copied != 0)
+        co_return ntl::ok(copied);
+      if (received_close_notify_.load(std::memory_order_acquire))
+        co_return ntl::ok<std::size_t>(0);
+
+      if (ciphertext_.empty()) {
+        const ntl::status received =
+            co_await receive_more_ciphertext(options);
+        if (!received.is_ok())
+          co_return ntl::unexpected(received);
+      }
+
+      auto context_guard = co_await context_gate_.acquire();
+      auto decrypted = context_.decrypt(ciphertext_);
+      if (!decrypted)
+        co_return ntl::unexpected(decrypted.status());
+      const SECURITY_STATUS security = decrypted->security_status;
+      if (security == detail::security_incomplete_message) {
+        context_guard.reset();
+        const ntl::status preserved =
+            replace_ciphertext(decrypted->extra_ciphertext.span());
+        if (!preserved.is_ok())
+          co_return ntl::unexpected(preserved);
+        const ntl::status received =
+            co_await receive_more_ciphertext(options);
+        if (!received.is_ok())
+          co_return ntl::unexpected(received);
+        continue;
+      }
+      if (security != detail::security_ok &&
+          security != detail::security_renegotiate &&
+          security != detail::security_context_expired)
+        co_return ntl::unexpected(static_cast<NTSTATUS>(security));
+
+      const ntl::status extra =
+          replace_ciphertext(decrypted->extra_ciphertext.span());
+      if (!extra.is_ok())
+        co_return ntl::unexpected(extra);
+      const ntl::status plaintext =
+          replace_plaintext(decrypted->plaintext.span());
+      if (!plaintext.is_ok())
+        co_return ntl::unexpected(plaintext);
+
+      if (security == detail::security_context_expired)
+        received_close_notify_.store(true, std::memory_order_release);
+      if (security == detail::security_renegotiate) {
+        // DecryptMessage has placed this SSPI context into a post-handshake
+        // transition. Keep EncryptMessage suspended until the continuation
+        // completes; Schannel rejects application encryption in between with
+        // SEC_E_CONTEXT_EXPIRED/SEC_E_INTERNAL_ERROR.
+        const ntl::status renegotiated =
+            co_await run_handshake(credentials_, false);
+        if (!renegotiated.is_ok())
+          co_return ntl::unexpected(renegotiated);
+      } else {
+        context_guard.reset();
+      }
+    }
+  }
+
+  task<ntl::result<std::size_t>>
+  write_all(std::span<const std::byte> source) {
+    if (close_requested_.load(std::memory_order_acquire))
+      co_return ntl::unexpected(STATUS_DELETE_PENDING);
+    auto write_guard = co_await write_gate_.acquire();
+    if (close_requested_.load(std::memory_order_acquire))
+      co_return ntl::unexpected(STATUS_DELETE_PENDING);
+    co_return co_await write_all_unlocked(source);
+  }
+
+  task<ntl::result<std::size_t>>
+  write_all_unlocked(std::span<const std::byte> source) {
+    if (!handshaken_.load(std::memory_order_acquire) ||
+        write_closed_.load(std::memory_order_acquire))
+      co_return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+    std::size_t written = 0;
+    while (written != source.size()) {
+      auto context_guard = co_await context_gate_.acquire();
+      const std::size_t maximum = context_.maximum_plaintext_record();
+      if (maximum == 0)
+        co_return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+      const std::size_t count =
+          (std::min)(maximum, source.size() - written);
+      auto encrypted = context_.encrypt(source.subspan(written, count));
+      if (!encrypted)
+        co_return ntl::unexpected(encrypted.status());
+      context_guard.reset();
+      const auto sent = co_await transport_->write(encrypted->span());
+      if (!sent.status.is_ok())
+        co_return ntl::unexpected(sent.status);
+      if (sent.transferred != encrypted->size())
+        co_return ntl::unexpected(STATUS_DATA_ERROR);
+      written += count;
+    }
+    co_return ntl::ok(written);
+  }
+
+  task<ntl::status> shutdown() {
+    if (close_requested_.load(std::memory_order_acquire))
+      co_return ntl::status{STATUS_DELETE_PENDING};
+    auto write_guard = co_await write_gate_.acquire();
+    if (close_requested_.load(std::memory_order_acquire))
+      co_return ntl::status{STATUS_DELETE_PENDING};
+    co_return co_await shutdown_unlocked();
+  }
+
+  task<ntl::status> shutdown_unlocked() {
+    if (!handshaken_.load(std::memory_order_acquire) ||
+        write_closed_.load(std::memory_order_acquire))
+      co_return ntl::status{STATUS_INVALID_DEVICE_STATE};
+    last_close_stage_.store(tls_close_stage::generate_close_notify,
+                            std::memory_order_release);
+    auto context_guard = co_await context_gate_.acquire();
+    auto token = context_.close_notify();
+    if (!token)
+      co_return token.status();
+    if (token->output_token.empty())
+      co_return ntl::status{STATUS_DATA_ERROR};
+    context_guard.reset();
+    // Keep the transport read side fully active. close() performs the TCP
+    // half-close only after the authenticated peer close_notify is consumed.
+    last_close_stage_.store(tls_close_stage::send_close_notify,
+                            std::memory_order_release);
+    const auto sent = co_await transport_->write(token->output_token.span());
+    if (!sent.status.is_ok())
+      co_return sent.status;
+    if (sent.transferred != token->output_token.size())
+      co_return ntl::status{STATUS_DATA_ERROR};
+    // Schannel can report SEC_E_CONTEXT_EXPIRED after the authenticated peer
+    // close_notify has already expired the read context while still returning
+    // the response alert token. The token is authoritative: send it before
+    // classifying the terminal status so the peer never observes a TCP reset
+    // in place of our close_notify.
+    if (token->security_status != detail::security_ok &&
+        token->security_status != detail::security_context_expired &&
+        token->security_status != detail::security_context_expired_error)
+      co_return ntl::status{
+          static_cast<NTSTATUS>(token->security_status)};
+    write_closed_.store(true, std::memory_order_release);
+    co_return ntl::status::ok();
+  }
+
+  /**
+   * @brief Completes the bidirectional TLS close handshake.
+   *
+   * Sends close_notify when necessary, then keeps the transport read side
+   * alive until the peer's close_notify is received. Any final application
+   * bytes are discarded because the caller has explicitly ended the session.
+   * The wait remains bounded by tls_stream_limits::receive_timeout.
+   */
+  task<ntl::status> close() {
+    const bool starts_close =
+        !close_requested_.exchange(true, std::memory_order_acq_rel);
+    if (starts_close)
+      transport_->cancel_pending_read(STATUS_CANCELLED);
+    auto close_guard = co_await close_gate_.acquire();
+    if (close_completed_)
+      co_return ntl::status{close_result_};
+    const ntl::status result = co_await close_once();
+    close_result_ = static_cast<NTSTATUS>(result);
+    close_completed_ = true;
+    co_return result;
+  }
+
+  /** Wakes one blocked read without closing TLS or either transport side. */
+  void cancel_pending_read(
+      ntl::status status = STATUS_CANCELLED) noexcept {
+    if (transport_)
+      transport_->cancel_pending_read(status);
+  }
+
+  bool is_handshaken() const noexcept {
+    return handshaken_.load(std::memory_order_acquire);
+  }
+  bool is_write_closed() const noexcept {
+    return write_closed_.load(std::memory_order_acquire);
+  }
+  bool received_close_notify() const noexcept {
+    return received_close_notify_.load(std::memory_order_acquire);
+  }
+  tls_close_stage last_close_stage() const noexcept {
+    return last_close_stage_.load(std::memory_order_acquire);
+  }
+  std::string negotiated_application_protocol() const {
+    std::array<char, 255> snapshot{};
+    std::size_t size = 0;
+    KIRQL old_irql = PASSIVE_LEVEL;
+    KeAcquireSpinLock(&metadata_lock_, &old_irql);
+    size = negotiated_protocol_size_;
+    std::copy_n(negotiated_protocol_.begin(), size, snapshot.begin());
+    KeReleaseSpinLock(&metadata_lock_, old_irql);
+    return std::string(snapshot.data(), size);
+  }
+
+private:
+  task<ntl::status> close_once() {
+    if (fully_closed_.load(std::memory_order_acquire))
+      co_return ntl::status::ok();
+    if (!handshaken_.load(std::memory_order_acquire))
+      co_return ntl::status{STATUS_INVALID_DEVICE_STATE};
+    auto write_guard = co_await write_gate_.acquire();
+    auto read_guard = co_await read_gate_.acquire();
+    if (!write_closed_.load(std::memory_order_acquire)) {
+      const ntl::status sent = co_await shutdown_unlocked();
+      if (!sent.is_ok())
+        co_return sent;
+    }
+    std::array<std::byte, 4096> discard{};
+    last_close_stage_.store(tls_close_stage::receive_close_notify,
+                            std::memory_order_release);
+    while (!received_close_notify_.load(std::memory_order_acquire)) {
+      auto received = co_await read_some_unlocked(
+          discard, {.timeout = limits_.receive_timeout});
+      if (!received)
+        co_return received.status();
+      if (*received == 0)
+        break;
+    }
+    if (!received_close_notify_.load(std::memory_order_acquire))
+      co_return ntl::status{STATUS_CONNECTION_RESET};
+    last_close_stage_.store(tls_close_stage::transport_half_close,
+                            std::memory_order_release);
+    const auto half_closed = co_await transport_->shutdown_write();
+    const NTSTATUS half_close_status =
+        static_cast<NTSTATUS>(half_closed.status);
+    if (!detail::transport_half_close_completed(half_close_status))
+      co_return half_closed.status;
+    fully_closed_.store(true, std::memory_order_release);
+    co_return ntl::status::ok();
+  }
+  friend class tls_stream;
+
+  static void cleanup_at_passive(void *context) noexcept {
+    delete static_cast<tls_stream_state *>(context);
+  }
+
+  void publish_handshake_complete() noexcept {
+    const std::string_view protocol =
+        context_.negotiated_application_protocol();
+    const std::size_t size =
+        (std::min)(protocol.size(), negotiated_protocol_.size());
+    KIRQL old_irql = PASSIVE_LEVEL;
+    KeAcquireSpinLock(&metadata_lock_, &old_irql);
+    std::copy_n(protocol.begin(), size, negotiated_protocol_.begin());
+    negotiated_protocol_size_ = size;
+    KeReleaseSpinLock(&metadata_lock_, old_irql);
+    handshaken_.store(true, std::memory_order_release);
+  }
+
+  task<ntl::status> run_handshake(schannel_credentials &credentials,
+                                  bool server) {
+    credentials_ = credentials;
+    if (server && ciphertext_.empty()) {
+      const ntl::status received = co_await receive_more_ciphertext(
+          {.timeout = limits_.receive_timeout});
+      if (!received.is_ok())
+        co_return received;
+    }
+
+    for (;;) {
+      auto step = context_.handshake(credentials, ciphertext_);
+      if (!step)
+        co_return step.status();
+      const SECURITY_STATUS security = step->security_status;
+      const ntl::status extra = replace_ciphertext(step->extra_input.span());
+      if (!extra.is_ok())
+        co_return extra;
+      if (!step->output_token.empty()) {
+        const auto sent =
+            co_await transport_->write(step->output_token.span());
+        if (!sent.status.is_ok())
+          co_return sent.status;
+        if (sent.transferred != step->output_token.size())
+          co_return ntl::status{STATUS_DATA_ERROR};
+      }
+      if (security == detail::security_ok)
+        co_return ntl::status::ok();
+      if (security != detail::security_continue_needed &&
+          security != detail::security_incomplete_message)
+        co_return ntl::status{static_cast<NTSTATUS>(security)};
+      if (security == detail::security_incomplete_message ||
+          ciphertext_.empty()) {
+        const ntl::status received = co_await receive_more_ciphertext(
+            {.timeout = limits_.receive_timeout});
+        if (!received.is_ok())
+          co_return received;
+      }
+    }
+  }
+
+  task<ntl::status> receive_more_ciphertext(read_options options) {
+    if (ciphertext_.size() >= limits_.maximum_buffered_ciphertext)
+      co_return ntl::status{STATUS_BUFFER_OVERFLOW};
+
+    // SSPI can return an incomplete tail supplied by the caller (notably an
+    // initial ClientHello passed to handshake_server).  Complete that tail
+    // before asking the transport for a new record.  If all buffered records
+    // are already complete, append one additional record because Schannel is
+    // explicitly asking for more handshake input.
+    constexpr std::size_t tls_header_size = 5;
+    std::size_t offset = 0;
+    for (;;) {
+      const std::size_t remaining = ciphertext_.size() - offset;
+      if (remaining < tls_header_size) {
+        const ntl::status completed_header =
+            co_await append_ciphertext(tls_header_size - remaining,
+                                       options);
+        if (!completed_header.is_ok())
+          co_return completed_header;
+      }
+
+      const auto *header = ciphertext_.data() + offset;
+      const std::size_t payload =
+          (static_cast<std::size_t>(
+               std::to_integer<unsigned char>(header[3]))
+           << 8) |
+          std::to_integer<unsigned char>(header[4]);
+      const std::size_t record_size = tls_header_size + payload;
+      if (record_size > limits_.maximum_buffered_ciphertext - offset)
+        co_return ntl::status{STATUS_BUFFER_OVERFLOW};
+
+      const std::size_t buffered = ciphertext_.size() - offset;
+      if (buffered < record_size) {
+        const ntl::status completed_record =
+            co_await append_ciphertext(record_size - buffered, options);
+        co_return completed_record;
+      }
+
+      offset += record_size;
+      if (offset == ciphertext_.size()) {
+        const ntl::status next_header =
+            co_await append_ciphertext(tls_header_size, options);
+        if (!next_header.is_ok())
+          co_return next_header;
+        // The next iteration parses and completes the newly appended record.
+      }
+    }
+  }
+
+  task<ntl::status> append_ciphertext(std::size_t count,
+                                      read_options options) {
+    if (count == 0)
+      co_return ntl::status::ok();
+    const std::size_t offset = ciphertext_.size();
+    if (offset > limits_.maximum_buffered_ciphertext ||
+        count > limits_.maximum_buffered_ciphertext - offset)
+      co_return ntl::status{STATUS_BUFFER_OVERFLOW};
+    try {
+      ciphertext_.resize(offset + count);
+    } catch (const std::bad_alloc &) {
+      co_return ntl::status{STATUS_INSUFFICIENT_RESOURCES};
+    } catch (...) {
+      co_return ntl::status{STATUS_UNHANDLED_EXCEPTION};
+    }
+    const ntl::status received = co_await transport_->read_exactly_borrowed(
+        std::span<std::byte>(ciphertext_).subspan(offset, count),
+        options);
+    if (!received.is_ok())
+      ciphertext_.resize(offset);
+    co_return received;
+  }
+
+  ntl::status replace_ciphertext(
+      std::span<const std::byte> bytes) noexcept {
+    if (bytes.size() > limits_.maximum_buffered_ciphertext)
+      return STATUS_BUFFER_OVERFLOW;
+    try {
+      ciphertext_.assign(bytes.begin(), bytes.end());
+      return ntl::status::ok();
+    } catch (const std::bad_alloc &) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    } catch (...) {
+      return STATUS_UNHANDLED_EXCEPTION;
+    }
+  }
+
+  ntl::status replace_plaintext(
+      std::span<const std::byte> bytes) noexcept {
+    if (bytes.size() > limits_.maximum_plaintext_record)
+      return STATUS_BUFFER_OVERFLOW;
+    try {
+      plaintext_.assign(bytes.begin(), bytes.end());
+      plaintext_offset_ = 0;
+      return ntl::status::ok();
+    } catch (const std::bad_alloc &) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    } catch (...) {
+      return STATUS_UNHANDLED_EXCEPTION;
+    }
+  }
+
+  std::size_t copy_plaintext(std::span<std::byte> destination) noexcept {
+    if (plaintext_offset_ >= plaintext_.size()) {
+      plaintext_.clear();
+      plaintext_offset_ = 0;
+      return 0;
+    }
+    const std::size_t count = (std::min)(
+        destination.size(), plaintext_.size() - plaintext_offset_);
+    std::memcpy(destination.data(), plaintext_.data() + plaintext_offset_,
+                count);
+    plaintext_offset_ += count;
+    if (plaintext_offset_ == plaintext_.size()) {
+      plaintext_.clear();
+      plaintext_offset_ = 0;
+    }
+    return count;
+  }
+
+  passive_cleanup_item cleanup_;
+  passive_cleanup_domain *cleanup_domain_ = nullptr;
+  std::shared_ptr<io::async_transport_stream> transport_;
+  schannel_context context_;
+  ntl::net::detail::async_mutex context_gate_;
+  ntl::net::detail::async_mutex read_gate_;
+  ntl::net::detail::async_mutex write_gate_;
+  ntl::net::detail::async_mutex close_gate_;
+  tls_stream_limits limits_{};
+  schannel_credentials credentials_{};
+  std::vector<std::byte> ciphertext_{};
+  std::vector<std::byte> plaintext_{};
+  std::size_t plaintext_offset_ = 0;
+  mutable KSPIN_LOCK metadata_lock_{};
+  std::array<char, 255> negotiated_protocol_{};
+  std::size_t negotiated_protocol_size_ = 0;
+  std::atomic<bool> handshake_started_{false};
+  std::atomic<bool> handshaken_{false};
+  std::atomic<bool> close_requested_{false};
+  std::atomic<bool> write_closed_{false};
+  std::atomic<bool> received_close_notify_{false};
+  std::atomic<bool> fully_closed_{false};
+  NTSTATUS close_result_ = STATUS_PENDING;
+  bool close_completed_ = false;
+  std::atomic<tls_close_stage> last_close_stage_{tls_close_stage::none};
+};
+
+/**
+ * @brief Owning kernel TLS facade with callback-safe PASSIVE destruction.
+ *
+ * Every asynchronous operation captures the session state before suspension.
+ * Input bytes, server names, ALPN values, credentials, and policy callbacks
+ * are owned by that operation/state. Destroying or moving the facade aborts
+ * new work but cannot invalidate an in-flight coroutine or its transport.
+ */
+class tls_stream {
+public:
+  tls_stream() noexcept { KeInitializeSpinLock(&state_lock_); }
+  tls_stream(const tls_stream &) = delete;
+  tls_stream &operator=(const tls_stream &) = delete;
+  tls_stream(tls_stream &&other) noexcept : tls_stream() {
+    state_ = other.take_state();
+  }
+  tls_stream &operator=(tls_stream &&other) noexcept {
+    if (this != &other) {
+      abort();
+      install_state(other.take_state());
+    }
+    return *this;
+  }
+  ~tls_stream() { abort(); }
+
+  static ntl::result<tls_stream>
+  try_create(std::shared_ptr<io::async_transport_stream> transport,
+             tls_stream_limits limits = {}) noexcept {
+    if (!transport ||
+        limits.maximum_buffered_ciphertext == 0 ||
+        limits.maximum_plaintext_record == 0)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    auto *raw = new (std::nothrow)
+        tls_stream_state(std::move(transport), limits);
+    if (!raw)
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    if (!raw->cleanup_domain_) {
+      delete raw;
+      return ntl::unexpected(STATUS_DEVICE_NOT_READY);
+    }
+    const ntl::status registered =
+        raw->cleanup_domain_->register_item(raw->cleanup_);
+    if (!registered.is_ok()) {
+      delete raw;
+      return ntl::unexpected(registered);
+    }
+    try {
+      std::shared_ptr<tls_stream_state> state(
+          raw, [](tls_stream_state *value) noexcept {
+            if (value->transport_)
+              value->transport_->close(
+                  io::async_transport_close_reason::tls_owner_release);
+            value->cleanup_domain_->retire_deferred(value->cleanup_);
+          });
+      return ntl::ok(tls_stream(std::move(state)));
+    } catch (...) {
+      raw->cleanup_domain_->retire(raw->cleanup_);
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+  }
+
+  explicit operator bool() const noexcept {
+    return static_cast<bool>(require_state());
+  }
+
+  /** Idempotently rejects new work; in-flight operations retain the state. */
+  void abort() noexcept {
+    auto state = take_state();
+    if (state && state->transport_)
+      state->transport_->close(
+          io::async_transport_close_reason::tls_owner_release);
+  }
+
+  task<ntl::status> handshake_client(
+      schannel_credentials credentials, std::wstring_view server_name,
+      tls_client_handshake_options options = {}) {
+    try {
+      return handshake_client_impl(
+          require_state(), std::move(credentials), std::wstring(server_name),
+          std::move(options));
+    } catch (...) {
+      return status_task(STATUS_INSUFFICIENT_RESOURCES);
+    }
+  }
+
+  task<ntl::status> handshake_client(
+      schannel_credentials credentials, std::wstring_view server_name,
+      std::span<const std::string_view> protocols,
+      bool require_protocol = false) {
+    tls_client_handshake_options options;
+    options.require_application_protocol = require_protocol;
+    try {
+      options.application_protocols.reserve(protocols.size());
+      for (const auto protocol : protocols)
+        options.application_protocols.emplace_back(protocol);
+      return handshake_client(std::move(credentials),
+                              std::wstring(server_name), std::move(options));
+    } catch (...) {
+      return status_task(STATUS_INSUFFICIENT_RESOURCES);
+    }
+  }
+
+  task<ntl::status> handshake_server(
+      schannel_credentials credentials,
+      tls_server_handshake_options options = {}) {
+    return handshake_server_impl(require_state(), std::move(credentials),
+                                 std::move(options));
+  }
+
+  task<ntl::status> handshake_server(
+      schannel_credentials credentials,
+      std::span<const std::byte> initial_ciphertext,
+      std::span<const std::string_view> protocols,
+      bool require_protocol = false) {
+    tls_server_handshake_options options;
+    options.require_application_protocol = require_protocol;
+    try {
+      options.initial_ciphertext.assign(initial_ciphertext.begin(),
+                                        initial_ciphertext.end());
+      options.application_protocols.reserve(protocols.size());
+      for (const auto protocol : protocols)
+        options.application_protocols.emplace_back(protocol);
+      return handshake_server(std::move(credentials), std::move(options));
+    } catch (...) {
+      return status_task(STATUS_INSUFFICIENT_RESOURCES);
+    }
+  }
+
+  task<ntl::result<std::size_t>>
+  read_some_borrowed(std::span<std::byte> destination,
+                     read_options options = {}) {
+    return read_some_borrowed_impl(require_state(), destination, options);
+  }
+
+  task<ntl::result<std::size_t>>
+  write_all(std::span<const std::byte> source) {
+    try {
+      return write_all_impl(require_state(),
+                            std::vector<std::byte>(source.begin(),
+                                                   source.end()));
+    } catch (...) {
+      return size_result_task(STATUS_INSUFFICIENT_RESOURCES);
+    }
+  }
+
+  task<ntl::status> shutdown() {
+    return shutdown_impl(require_state());
+  }
+  task<ntl::status> close() { return close_impl(require_state()); }
+
+  /**
+   * Wakes the current read while preserving the TLS session for orderly
+   * close_notify. Protocol relays use this internally to join both directions;
+   * normal callers do not coordinate transport cancellation.
+   */
+  void cancel_pending_read(
+      ntl::status status = STATUS_CANCELLED) noexcept {
+    auto state = require_state();
+    if (state)
+      state->cancel_pending_read(status);
+  }
+
+  bool is_handshaken() const noexcept {
+    auto state = require_state();
+    return state && state->is_handshaken();
+  }
+  bool is_write_closed() const noexcept {
+    auto state = require_state();
+    return state && state->is_write_closed();
+  }
+  bool received_close_notify() const noexcept {
+    auto state = require_state();
+    return state && state->received_close_notify();
+  }
+  tls_close_stage last_close_stage() const noexcept {
+    auto state = require_state();
+    return state ? state->last_close_stage() : tls_close_stage::none;
+  }
+  std::string negotiated_application_protocol() const {
+    auto state = require_state();
+    return state ? std::string(state->negotiated_application_protocol())
+                 : std::string{};
+  }
+
+private:
+  explicit tls_stream(std::shared_ptr<tls_stream_state> state) noexcept
+      : tls_stream() {
+    state_ = std::move(state);
+  }
+
+  std::shared_ptr<tls_stream_state> require_state() const noexcept {
+    std::shared_ptr<tls_stream_state> state;
+    KIRQL old_irql = PASSIVE_LEVEL;
+    KeAcquireSpinLock(&state_lock_, &old_irql);
+    state = state_;
+    KeReleaseSpinLock(&state_lock_, old_irql);
+    return state;
+  }
+
+  std::shared_ptr<tls_stream_state> take_state() noexcept {
+    std::shared_ptr<tls_stream_state> state;
+    KIRQL old_irql = PASSIVE_LEVEL;
+    KeAcquireSpinLock(&state_lock_, &old_irql);
+    state = std::move(state_);
+    KeReleaseSpinLock(&state_lock_, old_irql);
+    return state;
+  }
+
+  void install_state(std::shared_ptr<tls_stream_state> state) noexcept {
+    KIRQL old_irql = PASSIVE_LEVEL;
+    KeAcquireSpinLock(&state_lock_, &old_irql);
+    NT_ASSERT(!state_);
+    state_ = std::move(state);
+    KeReleaseSpinLock(&state_lock_, old_irql);
+  }
+
+  static task<ntl::status> status_task(NTSTATUS status) {
+    co_return ntl::status{status};
+  }
+  static task<ntl::result<std::size_t>> size_result_task(NTSTATUS status) {
+    co_return ntl::unexpected(status);
+  }
+  static task<ntl::status> handshake_client_impl(
+      std::shared_ptr<tls_stream_state> state,
+      schannel_credentials credentials, std::wstring server_name,
+      tls_client_handshake_options options) {
+    if (!state)
+      co_return ntl::status{STATUS_DELETE_PENDING};
+    co_return co_await state->handshake_client(
+        std::move(credentials), std::move(server_name), std::move(options));
+  }
+  static task<ntl::status> handshake_server_impl(
+      std::shared_ptr<tls_stream_state> state,
+      schannel_credentials credentials, tls_server_handshake_options options) {
+    if (!state)
+      co_return ntl::status{STATUS_DELETE_PENDING};
+    co_return co_await state->handshake_server(std::move(credentials),
+                                               std::move(options));
+  }
+  static task<ntl::result<std::size_t>> read_some_borrowed_impl(
+      std::shared_ptr<tls_stream_state> state,
+      std::span<std::byte> destination, read_options options) {
+    if (!state)
+      co_return ntl::unexpected(STATUS_DELETE_PENDING);
+    co_return co_await state->read_some_borrowed(destination, options);
+  }
+  static task<ntl::result<std::size_t>> write_all_impl(
+      std::shared_ptr<tls_stream_state> state,
+      std::vector<std::byte> source) {
+    if (!state)
+      co_return ntl::unexpected(STATUS_DELETE_PENDING);
+    co_return co_await state->write_all(source);
+  }
+  static task<ntl::status>
+  shutdown_impl(std::shared_ptr<tls_stream_state> state) {
+    if (!state)
+      co_return ntl::status{STATUS_DELETE_PENDING};
+    co_return co_await state->shutdown();
+  }
+  static task<ntl::status>
+  close_impl(std::shared_ptr<tls_stream_state> state) {
+    if (!state)
+      co_return ntl::status::ok();
+    co_return co_await state->close();
+  }
+
+  mutable KSPIN_LOCK state_lock_{};
+  std::shared_ptr<tls_stream_state> state_;
+};
+
+/**
+ * @brief Runs one TLS operation over an already owned asynchronous transport.
+ *
+ * The returned coroutine owns both the transport and TLS facade for the whole
+ * operation. It always attempts close-notify after a successful operation and
+ * abortive TLS shutdown after a failure. Transport callback draining remains
+ * the responsibility of the transport owner; normal code obtains that owner
+ * from `io::with_async_transport()` or another owning session facade.
+ */
+template <class Operation>
+[[nodiscard]] task<ntl::status>
+with_tls_stream(std::shared_ptr<io::async_transport_stream> transport,
+                tls_stream_limits limits, Operation operation) noexcept {
+  if (!transport)
+    co_return ntl::status{STATUS_INVALID_PARAMETER};
+  auto created = tls_stream::try_create(transport, limits);
+  if (!created)
+    co_return created.status();
+  std::shared_ptr<tls_stream> stream;
+  try {
+    stream = std::make_shared<tls_stream>(std::move(*created));
+  } catch (...) {
+    co_return ntl::status{STATUS_INSUFFICIENT_RESOURCES};
+  }
+
+  ntl::status operation_status{STATUS_UNHANDLED_EXCEPTION};
+  try {
+    operation_status = co_await operation(stream);
+  } catch (const ntl::exception &error) {
+    operation_status = error.get_status();
+  } catch (const std::bad_alloc &) {
+    operation_status = STATUS_INSUFFICIENT_RESOURCES;
+  } catch (...) {
+    operation_status = STATUS_UNHANDLED_EXCEPTION;
+  }
+  if (stream->is_handshaken()) {
+    ntl::status closed = ntl::status::ok();
+    if (operation_status.is_ok())
+      closed = co_await stream->close();
+    else if (!stream->is_write_closed())
+      closed = co_await stream->shutdown();
+    if (operation_status.is_ok() && !closed.is_ok())
+      operation_status = closed;
+  }
+  co_return operation_status;
+}
+
+/**
+ * @brief Runs one TLS operation and always closes TLS and drains transport.
+ *
+ * The coroutine retains the backend, TLS stream, asynchronous callback state,
+ * close-notify attempt, and callback join. The caller may release its backend
+ * facade immediately after this operation is created; early returns and
+ * exceptions cannot skip transport cleanup.
+ */
+template <class Operation>
+[[nodiscard]] task<ntl::status>
+with_tls_connection(std::shared_ptr<io::transport_backend> backend,
+                    std::size_t receive_capacity,
+                    tls_stream_limits limits, Operation operation,
+                    WORK_QUEUE_TYPE queue_type = DelayedWorkQueue) noexcept {
+  co_return co_await io::with_async_transport(
+      std::move(backend), receive_capacity,
+      [&](std::shared_ptr<io::async_transport_stream> transport)
+          -> task<ntl::status> {
+        co_return co_await with_tls_stream(
+            transport, limits,
+            [&](std::shared_ptr<tls_stream> stream) -> task<ntl::status> {
+              co_return co_await operation(std::move(stream), transport);
+            });
+      },
+      queue_type);
+}
+
+/** Explicitly borrowed backend adapter for low-level transport tests. */
+template <class Operation>
+[[nodiscard]] task<ntl::status>
+with_tls_connection_borrowed(
+    io::transport_backend &backend, std::size_t receive_capacity,
+    tls_stream_limits limits, Operation operation,
+    WORK_QUEUE_TYPE queue_type = DelayedWorkQueue) noexcept {
+  std::shared_ptr<io::transport_backend> borrowed;
+  try {
+    borrowed = std::shared_ptr<io::transport_backend>(
+        &backend, [](io::transport_backend *) noexcept {});
+  } catch (...) {
+    co_return ntl::status{STATUS_INSUFFICIENT_RESOURCES};
+  }
+  co_return co_await with_tls_connection(
+      std::move(borrowed), receive_capacity, limits, std::move(operation),
+      queue_type);
+}
+
+#endif // NTL_HAS_COROUTINE_SUPPORT
+
+} // namespace ntl::net::kernel

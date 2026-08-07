@@ -23,7 +23,7 @@ bool test_fragmented_read() noexcept {
   if (!expect(bytes.size() == 6))
     return false;
 
-  ntl::net::byte_cursor cursor(bytes);
+  ntl::net::borrowed_byte_cursor cursor(bytes);
   const auto word = cursor.read_be16();
   const auto dword = cursor.read_be32();
   return expect(word && *word == 0x1234) &&

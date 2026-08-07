@@ -5,13 +5,11 @@ param(
 
   [string] $BrowserPath,
 
-  [uri] $Url = 'https://example.com/',
+  [uri] $Url,
 
   [uri[]] $Urls,
 
   [switch] $RequireQuicBlockedFallback,
-
-  [string] $NetLogPath,
 
   [string] $LogDirectory =
       (Join-Path $PackageRoot 'browser-https-logs'),
@@ -19,11 +17,32 @@ param(
   [ValidateRange(0, 3600)]
   [int] $DurationSeconds = 0,
 
-  [string] $ServiceName = 'CrtSysWfpBrowserHttpsInspection'
+  [ValidateRange(0, 300)]
+  [int] $BrowserProcessWaitSeconds = 30,
+
+  [string] $ServiceName = 'CrtSysWfpBrowserHttpsInspection',
+
+  [switch] $AllowDisposableGuestMutation,
+
+  [string] $DisposableGuestSentinelPath =
+      'C:\crtsys-disposable-test-guest.sentinel'
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+$guardScript = @(
+  Join-Path $PSScriptRoot 'DisposableGuestGuard.ps1'
+  Join-Path $PSScriptRoot '..\common\DisposableGuestGuard.ps1'
+) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+    Select-Object -First 1
+if (-not $guardScript) {
+  throw 'DisposableGuestGuard.ps1 was not found.'
+}
+. $guardScript
+Assert-CrtSysDisposableGuest `
+    -AllowDisposableGuestMutation:$AllowDisposableGuestMutation `
+    -SentinelPath $DisposableGuestSentinelPath
 
 function Assert-Administrator {
   $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -58,46 +77,51 @@ function Find-Edge {
   throw 'Microsoft Edge was not found; pass -BrowserPath explicitly.'
 }
 
-function Stop-TestBrowser([string] $ProfilePath) {
-  $escaped = [Regex]::Escape($ProfilePath)
-  $processes = @(
-    Get-CimInstance Win32_Process -Filter "Name = 'msedge.exe'" |
+function Get-ObservedBrowserProcess([string] $Path) {
+  $fullPath = [IO.Path]::GetFullPath($Path)
+  $processName = [IO.Path]::GetFileName($fullPath).Replace("'", "''")
+  return @(
+    Get-CimInstance Win32_Process `
+        -Filter "Name = '$processName'" -ErrorAction SilentlyContinue |
         Where-Object {
-          $_.CommandLine -and $_.CommandLine -match $escaped
+          $_.ExecutablePath -and
+          [IO.Path]::GetFullPath($_.ExecutablePath).Equals(
+              $fullPath, [StringComparison]::OrdinalIgnoreCase)
         }
   )
-  foreach ($process in $processes) {
-    Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
-  }
 }
 
-function Wait-NetLogStable([string] $Path) {
-  $previousLength = -1L
-  $stableSamples = 0
-  for ($attempt = 0; $attempt -lt 50; ++$attempt) {
-    if (Test-Path -LiteralPath $Path -PathType Leaf) {
-      $length = (Get-Item -LiteralPath $Path).Length
-      if ($length -gt 0 -and $length -eq $previousLength) {
-        ++$stableSamples
-        if ($stableSamples -ge 3) {
-          return
-        }
-      } else {
-        $stableSamples = 0
-        $previousLength = $length
-      }
+function Wait-ObservedBrowserProcess(
+    [string] $Path,
+    [int] $WaitSeconds) {
+  $deadline = (Get-Date).AddSeconds($WaitSeconds)
+  do {
+    $processes = @(Get-ObservedBrowserProcess $Path)
+    if ($processes.Count -gt 0) {
+      return $processes
     }
-    Start-Sleep -Milliseconds 100
-  }
-  throw "Edge NetLog did not become stable: $Path"
+    if ((Get-Date) -ge $deadline) {
+      break
+    }
+    Start-Sleep -Milliseconds 250
+  } while ($true)
+
+  throw (
+      'No already-running browser process matches BrowserPath. Start the ' +
+      'browser normally, without test flags or a temporary profile, and ' +
+      'then run this wrapper again.')
 }
 
 Assert-Administrator
 $root = (Resolve-Path -LiteralPath $PackageRoot).Path
 $driver = Join-Path $root 'crtsys_wfp_browser_https_inspection.sys'
+$driverInf = Join-Path $root 'crtsys_wfp_browser_https_inspection.inf'
 $application =
-    Join-Path $root 'crtsys_wfp_browser_https_inspection_app.exe'
-foreach ($required in @($driver, $application)) {
+    Join-Path $root 'crtsys_wfp_browser_https_inspection_controller.exe'
+$evidenceAnalyzer =
+    Join-Path $root 'Test-WfpBrowserTransportEvidence.ps1'
+foreach ($required in @(
+    $driver, $driverInf, $application, $evidenceAnalyzer)) {
   if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
     throw "Required browser HTTPS artifact is missing: $required"
   }
@@ -106,46 +130,44 @@ if (-not $BrowserPath) {
   $BrowserPath = Find-Edge
 }
 $BrowserPath = (Resolve-Path -LiteralPath $BrowserPath).Path
+$observedBrowserProcesses = @(
+  Wait-ObservedBrowserProcess $BrowserPath $BrowserProcessWaitSeconds
+)
+
 if (-not $Urls -or $Urls.Count -eq 0) {
-  $Urls = @($Url)
+  if ($null -ne $Url) {
+    $Urls = @($Url)
+  } else {
+    $Urls = @()
+  }
 }
 foreach ($targetUrl in $Urls) {
   if ($targetUrl.Scheme -ne 'https' -or $targetUrl.Port -ne 443) {
-    throw 'Every browser inspection URL must use HTTPS port 443.'
+    throw 'Every expected browser inspection URL must use HTTPS port 443.'
   }
 }
+$expectedHosts = @(
+  $Urls | ForEach-Object { $_.DnsSafeHost } | Sort-Object -Unique
+)
+
 New-Item -ItemType Directory -Path $LogDirectory -Force | Out-Null
 $LogDirectory = (Resolve-Path -LiteralPath $LogDirectory).Path
-if ($RequireQuicBlockedFallback -and
-    [string]::IsNullOrWhiteSpace($NetLogPath)) {
-  $NetLogPath = Join-Path $LogDirectory 'edge-netlog.json'
-}
-$netLogAnalyzer =
-    Join-Path $root 'Test-EdgeNetLogQuicPolicy.ps1'
-$telemetryAnalyzer =
-    Join-Path $root 'Test-WfpQuicTelemetry.ps1'
-if ($RequireQuicBlockedFallback) {
-  foreach ($analyzer in @($netLogAnalyzer, $telemetryAnalyzer)) {
-    if (-not (Test-Path -LiteralPath $analyzer -PathType Leaf)) {
-      throw "QUIC policy analyzer is missing: $analyzer"
-    }
-  }
-}
-$profile = Join-Path $LogDirectory (
-    'edge-profile-' + [Guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Path $profile | Out-Null
 $proxyStdout = Join-Path $LogDirectory 'proxy.stdout.log'
 $proxyStderr = Join-Path $LogDirectory 'proxy.stderr.log'
 $caPath = Join-Path $LogDirectory 'ntl-browser-inspection-ca.cer'
 $stopPath = Join-Path $LogDirectory 'stop.request'
+$inventoryPath =
+    Join-Path $LogDirectory 'wfp-policy-diagnostics.log'
+$transportEvidencePath =
+    Join-Path $LogDirectory 'browser-transport-evidence.json'
 $proxy = $null
 $importedThumbprint = $null
 $certificate = $null
 $sessionStartedUtc = [DateTime]::UtcNow
-$resolvedNetLogPath = ''
 
-Remove-Item -LiteralPath $proxyStdout, $proxyStderr, $caPath, $stopPath `
-    -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $proxyStdout, $proxyStderr, $caPath, $stopPath,
+    $inventoryPath, $transportEvidencePath -Force `
+    -ErrorAction SilentlyContinue
 Remove-TestService $ServiceName
 
 try {
@@ -173,7 +195,9 @@ try {
     if ($proxy.HasExited) {
       throw "The browser inspection proxy exited with $($proxy.ExitCode)."
     }
-    $ready = Test-Path -LiteralPath $caPath -PathType Leaf
+    $ready =
+        (Test-Path -LiteralPath $caPath -PathType Leaf) -and
+        (Test-Path -LiteralPath $inventoryPath -PathType Leaf)
     if ($ready -and (Test-Path -LiteralPath $proxyStdout)) {
       $readyText = Get-Content -LiteralPath $proxyStdout -Raw
       $ready = $null -ne $readyText -and
@@ -198,74 +222,33 @@ try {
   if ($LASTEXITCODE -ne 0 -or -not $importedThumbprint) {
     throw 'Importing the temporary browser inspection CA failed.'
   }
-  Write-Host (
-      'Temporary test CA trusted for this machine: ' +
-      $importedThumbprint)
-  Write-Warning (
-      'WFP scopes by browser executable path, so every process using ' +
-      "$BrowserPath is inspected until this test stops.")
 
-$browserArguments = @(
-    "`"--user-data-dir=$profile`"",
-    '--no-first-run',
-    '--no-default-browser-check',
-    '--new-window'
-  )
-  if (-not [string]::IsNullOrWhiteSpace($NetLogPath)) {
-    $resolvedNetLogPath = [IO.Path]::GetFullPath($NetLogPath)
-    $netLogParent = Split-Path -Parent $resolvedNetLogPath
-    if ([string]::IsNullOrWhiteSpace($netLogParent)) {
-      throw 'NetLogPath must include a parent directory.'
-    }
-    New-Item -ItemType Directory -Path $netLogParent -Force |
-        Out-Null
-    Remove-Item -LiteralPath $resolvedNetLogPath -Force `
-        -ErrorAction SilentlyContinue
-    $browserArguments +=
-        "`"--log-net-log=$resolvedNetLogPath`""
-  }
-  $browserArguments += @(
-    $Urls | ForEach-Object { $_.AbsoluteUri }
-  )
-  Start-Process -FilePath $BrowserPath `
-      -ArgumentList $browserArguments | Out-Null
+  Write-Host (
+      'Browser HTTPS inspection is observing the already-running browser: ' +
+      "$BrowserPath (PID $((@($observedBrowserProcesses.ProcessId) -join ', '))).")
+  Write-Warning (
+      'WFP scopes by executable path, so every process using that browser ' +
+      'executable is inspected until this wrapper stops.')
+  Write-Host (
+      'No browser was launched, terminated, reprofiled, or given command-line ' +
+      'feature, certificate, QUIC, ECH, or logging switches.')
 
   if ($DurationSeconds -eq 0) {
-    Write-Host 'Browse HTTPS pages in the opened window.'
+    Write-Host (
+        'Use the already-open browser normally. Visit the HTTPS pages to ' +
+        'inspect, then return here.')
     Read-Host 'Press Enter to stop inspection' | Out-Null
   } else {
+    Write-Host (
+        "Observing existing browser traffic for $DurationSeconds second(s). " +
+        'Navigate in the already-open browser while this interval is active.')
     $deadline = (Get-Date).AddSeconds($DurationSeconds)
-    do {
+    while ((Get-Date) -lt $deadline) {
       Start-Sleep -Milliseconds 250
-      $html = @(
-        Get-ChildItem -LiteralPath $LogDirectory -Filter '*.html' `
-            -File -ErrorAction SilentlyContinue |
-            Where-Object {
-              $_.LastWriteTimeUtc -ge $sessionStartedUtc
-            }
-      )
-      $events = if (Test-Path -LiteralPath (
-          Join-Path $LogDirectory 'events.log')) {
-        Get-Content -LiteralPath (
-            Join-Path $LogDirectory 'events.log') -Raw
-      } else {
-        ''
+      if ($proxy.HasExited) {
+        throw "The browser inspection proxy exited with $($proxy.ExitCode)."
       }
-      $completed = @(
-        $Urls | Where-Object {
-          $targetDnsHost = $_.DnsSafeHost
-          $hasHtml = @(
-            $html | Where-Object {
-              $_.BaseName.EndsWith(
-                  ('-' + $targetDnsHost),
-                  [StringComparison]::OrdinalIgnoreCase)
-            }
-          ).Count -gt 0
-          $hasHtml
-        }
-      )
-    } while ($completed.Count -lt $Urls.Count -and
-        (Get-Date) -lt $deadline)
+    }
   }
 
   New-Item -ItemType File -Path $stopPath -Force | Out-Null
@@ -278,63 +261,25 @@ $browserArguments = @(
       'NTL WFP browser HTTPS inspection stopped:')) {
     throw 'The browser inspection proxy did not report a clean stop.'
   }
-  if ($RequireQuicBlockedFallback -and
-      -not $proxyOutput.Contains(
-          'quic-policy=blocked-for-tcp-fallback')) {
-    throw 'The browser runtime did not report fail-closed QUIC policy.'
+
+  $evidenceArguments = @{
+    ProxyLogPath = $proxyStdout
+    PolicyInventoryPath = $inventoryPath
+    LogDirectory = $LogDirectory
+    ExpectedHost = $expectedHosts
+    SessionStartedUtc = $sessionStartedUtc
+    ResultPath = $transportEvidencePath
+    RequireObservedUdpBlock = $RequireQuicBlockedFallback
   }
-  if ($RequireQuicBlockedFallback -and
-      -not $proxyOutput.Contains(
-          'NTL WFP QUIC telemetry:')) {
-    throw 'The browser runtime did not report kernel QUIC telemetry.'
-  }
-  if ($RequireQuicBlockedFallback) {
-    & $telemetryAnalyzer -ProxyLogPath $proxyStdout `
-        -ResultPath (Join-Path $LogDirectory 'quic-telemetry.json') `
-        -RequireObservedBlock |
-        ForEach-Object { Write-Host $_ }
-  }
-  if ($RequireQuicBlockedFallback -and
-      -not $proxyOutput.Contains(
-          'NTL WFP policy diagnostics: verified')) {
-    throw 'The browser runtime did not verify the active WFP policy.'
-  }
+  & $evidenceAnalyzer @evidenceArguments |
+      ForEach-Object { Write-Host $_ }
+
   $html = @(
     Get-ChildItem -LiteralPath $LogDirectory -Filter '*.html' -File |
         Where-Object {
           $_.LastWriteTimeUtc -ge $sessionStartedUtc
         }
   )
-  $events = Get-Content -LiteralPath (
-      Join-Path $LogDirectory 'events.log') -Raw
-  foreach ($targetUrl in $Urls) {
-    $targetHost = $targetUrl.DnsSafeHost
-    $hostHtml = @(
-      $html | Where-Object {
-        $_.BaseName.EndsWith(
-            ('-' + $targetHost),
-            [StringComparison]::OrdinalIgnoreCase)
-      }
-    )
-    if ($hostHtml.Count -eq 0) {
-      throw (
-          "No decrypted HTML response was logged for $targetHost.")
-    }
-  }
-  Stop-TestBrowser $profile
-  if ($RequireQuicBlockedFallback) {
-    Wait-NetLogStable $resolvedNetLogPath
-    foreach ($targetHost in @(
-        $Urls | ForEach-Object { $_.DnsSafeHost } |
-            Sort-Object -Unique)) {
-      $resultPath =
-          Join-Path $LogDirectory "quic-policy-$targetHost.json"
-      & $netLogAnalyzer -NetLogPath $resolvedNetLogPath `
-          -TargetHost $targetHost -ResultPath $resultPath `
-          -RequireBlocked |
-          ForEach-Object { Write-Host $_ }
-    }
-  }
   Write-Host (
       "Browser HTTPS inspection passed: $($html.Count) HTML file(s).")
   $html | ForEach-Object { Write-Host "  $($_.FullName)" }
@@ -346,7 +291,6 @@ $browserArguments = @(
       Stop-Process -Id $proxy.Id -Force -ErrorAction SilentlyContinue
     }
   }
-  Stop-TestBrowser $profile
   if ($importedThumbprint) {
     Remove-Item -LiteralPath (
         'Cert:\LocalMachine\Root\' + $importedThumbprint) `

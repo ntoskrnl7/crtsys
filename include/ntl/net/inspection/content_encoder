@@ -1,6 +1,6 @@
 /**
  * @file content_encoder
- * @brief User-mode adapter point for bounded HTTP Content-Encoding output.
+ * @brief Dual-runtime adapter point for bounded HTTP Content-Encoding output.
  *
  * Encoders are deliberately separate from content_decoder. A proxy can
  * inspect compressed input without acquiring the authority or dependencies
@@ -9,10 +9,6 @@
  * @copyright Copyright (c) 2022 NT Template Library Authors.
  */
 #pragma once
-
-#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
-#error "ntl/net/inspection/content_encoder is a user-mode header"
-#endif
 
 #include <ntl/result>
 #include <ntl/status>
@@ -126,7 +122,7 @@ public:
     return encoder_.encode(input, final, output);
   }
 
-  Encoder &underlying() noexcept { return encoder_; }
+  Encoder &underlying_ref() noexcept { return encoder_; }
 
 private:
   Encoder encoder_;

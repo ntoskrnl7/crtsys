@@ -30,6 +30,8 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'CrtSysMsQuicHeaderContract.ps1')
+. (Join-Path $PSScriptRoot 'CrtSysWdkBuildTaskContract.ps1')
 
 function ConvertTo-XmlEscapedText {
   param([Parameter(Mandatory = $true)][string] $Text)
@@ -131,12 +133,18 @@ if ([string]::IsNullOrWhiteSpace($WdkVersion)) {
   }
 }
 
+$msbuild = Resolve-MsBuildPath -RequestedMajor $VisualStudioMajorVersion
 $wdkPlatformByArchitecture = @{
   x86 = 'x86'
   x64 = 'x64'
   ARM = 'arm'
   ARM64 = 'arm64'
 }
+$wdkBuildTaskVisualStudioVersion =
+    Resolve-CrtSysWdkBuildTaskVisualStudioVersion `
+        -WindowsKitsRoot $windowsKitsRoot `
+        -WdkVersion $WdkVersion `
+        -MsBuildPath $msbuild
 $wdkKernelLibDirectory = Join-Path $windowsKitsRoot "Lib\$WdkVersion\km\$($wdkPlatformByArchitecture[$Architecture])"
 $requiredWdkLibraries = @('ntoskrnl.lib', 'hal.lib', 'wmilib.lib', 'libcntpr.lib', 'cng.lib', 'aux_klib.lib')
 if ($DriverModel -eq 'NTL_FLT') {
@@ -191,8 +199,6 @@ if ($WdkVersion -ne $WindowsSdkVersion) {
   Write-Host "Using Windows SDK $WindowsSdkVersion with WDK libraries $WdkVersion for $Architecture."
 }
 
-$msbuild = Resolve-MsBuildPath -RequestedMajor $VisualStudioMajorVersion
-
 $WorkDirectory = [System.IO.Path]::GetFullPath($WorkDirectory)
 $repoRootPrefix = $repoRoot.TrimEnd('\') + '\'
 if (-not $WorkDirectory.StartsWith($repoRootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
@@ -234,6 +240,29 @@ if (-not (Test-Path $packageRoot)) {
 
 $packageRoot = (Resolve-Path $packageRoot).Path
 
+$driverModelRulePath = Join-Path $packageRoot 'build\native\crtsys.xml'
+try {
+  [xml] $driverModelRule = Get-Content -LiteralPath $driverModelRulePath -Raw
+} catch {
+  throw "Invalid Visual Studio property-page XML '$driverModelRulePath': $($_.Exception.Message)"
+}
+$kernelMsQuicProperty = $driverModelRule.SelectSingleNode(
+  "/*[local-name()='Rule']/*[local-name()='BoolProperty' and @Name='CrtSysUseNtlKernelMsQuic']")
+if (-not $kernelMsQuicProperty) {
+  throw 'The package property page does not expose CrtSysUseNtlKernelMsQuic.'
+}
+if ($kernelMsQuicProperty.GetAttribute('Category') -ne 'DriverModel' -or
+    $kernelMsQuicProperty.GetAttribute('Default') -ne 'false') {
+  throw 'CrtSysUseNtlKernelMsQuic must be an opt-in DriverModel property.'
+}
+$kernelMsQuicDataSource = $kernelMsQuicProperty.SelectSingleNode(
+  "*[local-name()='BoolProperty.DataSource']/*[local-name()='DataSource']")
+if (-not $kernelMsQuicDataSource -or
+    $kernelMsQuicDataSource.GetAttribute('Persistence') -ne 'ProjectFile' -or
+    $kernelMsQuicDataSource.GetAttribute('HasConfigurationCondition') -ne 'true') {
+  throw 'CrtSysUseNtlKernelMsQuic must persist per configuration in the project file.'
+}
+
 foreach ($requiredPath in @(
   'build\native\crtsys.props',
   'build\native\crtsys.targets',
@@ -241,6 +270,17 @@ foreach ($requiredPath in @(
   'build\native\crtsys-kmdf.xml',
   'docs\third-party-notices.md',
   'include\ntl\driver',
+  'include\ntl\net\borrowed_bounded_writer',
+  'include\ntl\net\borrowed_memory_resource',
+  'include\ntl\net\kernel\all',
+  'include\ntl\net\kernel\executor',
+  'include\ntl\net\kernel\started_task',
+  'include\ntl\net\kernel\workspace_pool',
+  'include\ntl\net\kernel\http1_proxy_session',
+  'include\ntl\net\kernel\http2_proxy_session',
+  'include\ntl\net\user\task',
+  'include\ntl\net\user\redirected_tls_session',
+  'include\ntl\net\user\redirected_tls_inspection',
   'include\ntl\net\inspection\content_decoder',
   'include\ntl\net\inspection\content_decoder_brotli',
   'include\ntl\net\inspection\content_decoder_zlib',
@@ -251,6 +291,13 @@ foreach ($requiredPath in @(
   'include\ntl\net\inspection\standard_content_encoders',
   'include\ntl\net\http\http1_transform',
   'include\ntl\net\http\http1_stream_transform',
+  'include\ntl\net\http\http1_proxy_connection',
+  'include\ntl\net\http\authority',
+  'include\ntl\net\http\http1_proxy_types',
+  'include\ntl\net\http\inspection_context_view',
+  'include\ntl\net\http\inspection_conditions',
+  'include\ntl\net\http\decision_policy',
+  'include\ntl\net\http\inspection_policy',
   'include\ntl\net\http\async_transform',
   'include\ntl\net\http\stream_transform',
   'include\ntl\net\http\transform',
@@ -260,10 +307,20 @@ foreach ($requiredPath in @(
   'include\ntl\net\http2\hpack',
   'include\ntl\net\http2\transform',
   'include\ntl\net\http2\stream_transform',
+  'include\ntl\net\http2\flow_control',
+  'include\ntl\net\http2\proxy_connection',
+  'include\ntl\net\http2\proxy_session',
+  'include\ntl\net\http2\websocket_tunnel',
+  'include\ntl\net\http3\async_origin_pool',
   'include\ntl\net\http3\backend',
   'include\ntl\net\http3\framing',
   'include\ntl\net\http3\inspection_proxy',
+  'include\ntl\net\http3\msquic_backend',
+  'include\ntl\net\http3\msquic_runtime',
+  'include\ntl\net\http3\msquic_server',
+  'include\ntl\net\http3\proxy_connection',
   'include\ntl\net\http3\qpack',
+  'include\ntl\net\http3\qpack_core',
   'include\ntl\net\http3\standard_inspection_proxy',
   'include\ntl\net\http3\stream_transform',
   'include\ntl\net\http3\webtransport_transform',
@@ -278,10 +335,16 @@ foreach ($requiredPath in @(
   'include\ntl\net\websocket\transform',
   'build\native\codecs\include\zlib.h',
   'build\native\codecs\include\brotli\decode.h',
+  'build\native\msquic\include\msquic.h',
+  'build\native\msquic\include\msquic_winuser.h',
+  'build\native\msquic\include\msquic_winkernel.h',
+  'build\native\msquic\REVISION.txt',
   "build\native\codecs\lib\$Toolset\$Architecture\$Configuration\zlibstatic.lib",
   "build\native\codecs\lib\$Toolset\$Architecture\$Configuration\brotlicommon.lib",
   "build\native\codecs\lib\$Toolset\$Architecture\$Configuration\brotlidec.lib",
   "build\native\codecs\lib\$Toolset\$Architecture\$Configuration\brotlienc.lib",
+  "build\native\kernel-codecs\lib\$Toolset\$Architecture\$Configuration\crtsys_ntl_kernel_zlib.lib",
+  "build\native\kernel-codecs\lib\$Toolset\$Architecture\$Configuration\crtsys_ntl_kernel_brotli.lib",
   'include\ntl\deps\zpp\LICENSE',
   'include\ntl\deps\zpp\README.md',
   'include\ntl\deps\zpp\serializer.h',
@@ -318,6 +381,10 @@ foreach ($requiredPath in @(
     throw "Installed package is missing expected file: $fullPath"
   }
 }
+
+Assert-CrtSysMsQuicHeaderSet `
+  -IncludeDirectory (Join-Path $packageRoot 'build\native\msquic\include') `
+  -Description 'Installed MSBuild MsQuic public header set'
 
 $platformByArchitecture = @{
   x86 = 'Win32'
@@ -375,7 +442,12 @@ $wdmEntryPointProperty = if ($DriverModel -eq 'NTL_WFP') {
 } else {
   ''
 }
-$targetWinver = if ($DriverModel -eq 'NTL_WFP') { '0x0602' } else { '0x0601' }
+$kernelMsQuicProperty = if ($DriverModel -eq 'NTL_WFP') {
+  '    <CrtSysUseNtlKernelMsQuic>true</CrtSysUseNtlKernelMsQuic>'
+} else {
+  ''
+}
+$targetWinver = if ($DriverModel -eq 'NTL_WFP') { '0x0A00' } else { '0x0601' }
 $kmdfVersionProperty = if ($isKmdf) { "    <KmdfVersion>$kmdfVersion</KmdfVersion>" } else { '' }
 $additionalDriverIncludes = if ($isKmdf) {
   (ConvertTo-XmlEscapedText $wdfIncludeDirectory) + ';'
@@ -425,6 +497,7 @@ $kmdfVersionProperty
     <CrtSysUseNtlFltMain>$useNtlFltMain</CrtSysUseNtlFltMain>
     <CrtSysIsWfp>$isWfp</CrtSysIsWfp>
 $wdmEntryPointProperty
+$kernelMsQuicProperty
     <CrtSysExpectedLibToolset>$escapedToolset</CrtSysExpectedLibToolset>
   </PropertyGroup>
   <Import Project="$crtsysProps" Condition="Exists('$crtsysProps')" />
@@ -584,30 +657,56 @@ ntl::status ntl::flt::main(ntl::flt::driver &driver,
 #include <memory>
 
 #include <ntl/driver>
+#include <ntl/net/kernel/all>
+#include <ntl/net/kernel/content_codecs>
+#include <ntl/net/kernel/msquic>
 #include <ntl/wfp/all>
+
+static_assert(ntl::net::native_execution_domain ==
+              ntl::net::execution_domain::kernel);
+static_assert(sizeof(ntl::net::kernel::msquic_provider) > 0);
 
 namespace {
 using layer = ntl::wfp::layers::ale_auth_connect_v4;
+volatile bool exercise_msquic_link_contract = false;
 
 constexpr GUID callout_guid = {
     0x2fde27d7, 0x7bc8, 0x4f0e,
     {0x82, 0x0d, 0x97, 0xac, 0x36, 0xe0, 0x1f, 0xb3}};
-constexpr ntl::wfp::callout_key<layer> callout_key(callout_guid);
+constexpr ntl::wfp::terminating_callout_key<layer> callout_key(callout_guid);
 
 constexpr auto classify =
     +[](const ntl::wfp::classify_event<layer>&) noexcept {
-      return ntl::wfp::decision::continue_classification;
+      return ntl::wfp::terminating_decision::permit;
     };
 }
 
 ntl::status ntl::main(ntl::driver& driver, const std::wstring&) {
-  auto callouts = std::make_shared<ntl::wfp::callout_driver<>>(driver);
-  const ntl::status status = callouts->add<classify>(callout_key);
+  if (exercise_msquic_link_contract) {
+    auto provider = ntl::net::kernel::msquic_provider::try_open({});
+    if (!provider)
+      return provider.status();
+  }
+
+  try {
+    ntl::net::inspection::content_encoder_registry encoders;
+    ntl::net::inspection::content_decoder_registry decoders;
+    ntl::net::inspection::register_standard_content_encoders(encoders);
+    ntl::net::inspection::register_standard_content_decoders(decoders);
+  } catch (const std::bad_alloc&) {
+    return STATUS_INSUFFICIENT_RESOURCES;
+  } catch (...) {
+    return STATUS_UNHANDLED_EXCEPTION;
+  }
+
+  ntl::wfp::callout_driver<> callouts(driver);
+  const ntl::status status =
+      callouts.add_terminating(callout_key, classify);
   if (!status.is_ok())
     return status;
 
   driver.on_unload([callouts] {
-    const ntl::status result = callouts->reset();
+    const ntl::status result = callouts.close();
     NT_ASSERT(result.is_ok());
   });
   return ntl::status::ok();
@@ -1508,7 +1607,8 @@ $msbuildArgs = @(
   '/m',
   '/v:m',
   "/p:Configuration=$Configuration",
-  "/p:Platform=$platform"
+  "/p:Platform=$platform",
+  "/p:VisualStudioVersion=$wdkBuildTaskVisualStudioVersion"
 )
 
 Write-Host "Building NuGet native MSBuild $DriverModel consumer for crtsys $Toolset $Architecture $Configuration"

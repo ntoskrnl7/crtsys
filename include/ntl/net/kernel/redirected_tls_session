@@ -1,0 +1,514 @@
+/**
+ * @file kernel_redirected_tls_session
+ * @brief Owning WSK, Schannel, and WFP redirected TLS session composition.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/net/kernel/redirected_tls_session is a kernel-mode header"
+#endif
+
+#include <ntl/net/http/inspection_context_view>
+#include <ntl/net/io/async_transport_stream>
+#include <ntl/net/kernel/tls_client_hello>
+#include <ntl/net/kernel/tls_stream>
+#include <ntl/net/kernel/wsk_redirect>
+#include <ntl/net/kernel/wsk_transport>
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <new>
+#include <string>
+#include <string_view>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+namespace ntl::net::kernel {
+
+enum class inspected_http_protocol : std::uint8_t {
+  http1 = 1,
+  http2 = 2,
+};
+
+struct inspected_http_session_summary {
+  std::size_t completed_exchanges = 0;
+  unsigned last_status = 0;
+  bool blocked = false;
+  bool dropped = false;
+};
+
+struct redirected_tls_session_limits {
+  ntl::net::tls_client_hello_limits client_hello{
+      .maximum_buffered_ciphertext = 256 * 1024,
+      .maximum_client_hello = 128 * 1024,
+      .receive_chunk_size = 4096,
+      .maximum_alpn_protocols = 32};
+  ntl::net::kernel::tls_stream_limits downstream_tls{
+      .maximum_buffered_ciphertext = 1024 * 1024,
+      .maximum_plaintext_record = 64 * 1024,
+      .receive_timeout = std::chrono::seconds(15)};
+  ntl::net::kernel::tls_stream_limits upstream_tls{
+      .maximum_buffered_ciphertext = 1024 * 1024,
+      .maximum_plaintext_record = 64 * 1024,
+      .receive_timeout = std::chrono::seconds(15)};
+  ntl::net::kernel::wsk_transport_limits upstream_transport{
+      .maximum_write_bytes = 1024 * 1024,
+      .receive_buffer_bytes = 64 * 1024,
+      .connect_timeout = std::chrono::seconds(15)};
+  std::size_t transport_receive_capacity = 1024 * 1024;
+
+  constexpr bool valid() const noexcept {
+    return client_hello.maximum_buffered_ciphertext != 0 &&
+           client_hello.maximum_client_hello != 0 &&
+           client_hello.maximum_client_hello <=
+               client_hello.maximum_buffered_ciphertext &&
+           client_hello.receive_chunk_size != 0 &&
+           downstream_tls.maximum_buffered_ciphertext != 0 &&
+           downstream_tls.maximum_plaintext_record != 0 &&
+           upstream_tls.maximum_buffered_ciphertext != 0 &&
+           upstream_tls.maximum_plaintext_record != 0 &&
+           upstream_transport.maximum_write_bytes != 0 &&
+           upstream_transport.receive_buffer_bytes != 0 &&
+           transport_receive_capacity != 0;
+  }
+};
+
+struct redirected_tls_identity_request_view {
+  std::string_view server_name;
+  std::uint64_t session_id = 0;
+};
+
+struct redirected_tls_origin_security {
+  std::shared_ptr<schannel_credentials> credentials;
+  std::shared_ptr<schannel_peer_certificate_policy> peer_certificate_policy;
+
+  explicit operator bool() const noexcept {
+    return static_cast<bool>(credentials);
+  }
+};
+
+/** The provider returns an owning credential handle for the selected SNI. */
+class redirected_tls_server_identity_provider {
+public:
+  virtual ~redirected_tls_server_identity_provider() = default;
+  virtual ntl::result<std::shared_ptr<schannel_credentials>>
+  select(const redirected_tls_identity_request_view &request) noexcept = 0;
+};
+
+class redirected_tls_session_observer {
+public:
+  virtual ~redirected_tls_session_observer() = default;
+  virtual void on_downstream_handshake(
+      std::uint64_t, inspected_http_protocol,
+      std::string_view) noexcept {}
+  virtual void on_origin_handshake(
+      std::uint64_t, inspected_http_protocol) noexcept {}
+  virtual void on_origin_certificate_validated(
+      std::uint64_t, inspected_http_protocol) noexcept {}
+  virtual void on_session_complete(
+      std::uint64_t, ntl::status) noexcept {}
+};
+
+/** Selects owning origin credentials and verification policy after SNI. */
+class redirected_tls_origin_security_provider {
+public:
+  virtual ~redirected_tls_origin_security_provider() = default;
+  virtual ntl::result<redirected_tls_origin_security>
+  select(const redirected_tls_identity_request_view &request) noexcept = 0;
+};
+
+class null_redirected_tls_session_observer final
+    : public redirected_tls_session_observer {};
+
+template <class Function>
+class functional_redirected_tls_server_identity_provider final
+    : public redirected_tls_server_identity_provider {
+public:
+  explicit functional_redirected_tls_server_identity_provider(Function value)
+      : value_(std::move(value)) {}
+
+  ntl::result<std::shared_ptr<schannel_credentials>>
+  select(const redirected_tls_identity_request_view &request) noexcept override {
+    try {
+      return std::invoke(value_, request);
+    } catch (const ntl::exception &error) {
+      return ntl::unexpected(static_cast<NTSTATUS>(error.get_status()));
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+private:
+  Function value_;
+};
+
+template <class Function>
+auto make_redirected_tls_server_identity_provider(Function &&value) {
+  using provider_type = functional_redirected_tls_server_identity_provider<
+      std::decay_t<Function>>;
+  return std::make_shared<provider_type>(std::forward<Function>(value));
+}
+
+template <class Function>
+class functional_redirected_tls_origin_security_provider final
+    : public redirected_tls_origin_security_provider {
+public:
+  explicit functional_redirected_tls_origin_security_provider(Function value)
+      : value_(std::move(value)) {}
+
+  ntl::result<redirected_tls_origin_security>
+  select(const redirected_tls_identity_request_view &request) noexcept override {
+    try {
+      return std::invoke(value_, request);
+    } catch (const ntl::exception &error) {
+      return ntl::unexpected(static_cast<NTSTATUS>(error.get_status()));
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+private:
+  Function value_;
+};
+
+template <class Function>
+auto make_redirected_tls_origin_security_provider(Function &&value) {
+  using provider_type = functional_redirected_tls_origin_security_provider<
+      std::decay_t<Function>>;
+  return std::make_shared<provider_type>(std::forward<Function>(value));
+}
+
+inline std::shared_ptr<redirected_tls_origin_security_provider>
+make_fixed_redirected_tls_origin_security_provider(
+    std::shared_ptr<schannel_credentials> credentials,
+    std::shared_ptr<schannel_peer_certificate_policy> policy = {}) {
+  return make_redirected_tls_origin_security_provider(
+      [credentials = std::move(credentials),
+       policy = std::move(policy)](const redirected_tls_identity_request_view &)
+          -> ntl::result<redirected_tls_origin_security> {
+        if (!credentials)
+          return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+        return ntl::ok(redirected_tls_origin_security{credentials, policy});
+      });
+}
+
+/**
+ * One-shot owning connector for the original destination captured by WFP.
+ * Redirect records, WSK provider state, client credentials, and SNI all remain
+ * alive until the operation and every transport callback have drained.
+ */
+class redirected_tls_origin final
+    : public std::enable_shared_from_this<redirected_tls_origin> {
+public:
+  static ntl::result<std::shared_ptr<redirected_tls_origin>> create(
+      wsk_redirected_connection handoff,
+      std::shared_ptr<wsk_provider> provider,
+      redirected_tls_origin_security security,
+      std::shared_ptr<redirected_tls_session_observer> observer,
+      std::uint64_t session_id, std::wstring server_name,
+      redirected_tls_session_limits limits) noexcept {
+    if (!provider || !security || session_id == 0 ||
+        server_name.empty() || !limits.valid())
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    try {
+      return ntl::ok(std::shared_ptr<redirected_tls_origin>(
+          new redirected_tls_origin(
+              std::move(handoff), std::move(provider), std::move(security),
+              std::move(observer), session_id, std::move(server_name), limits)));
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+  redirected_tls_origin(const redirected_tls_origin &) = delete;
+  redirected_tls_origin &operator=(const redirected_tls_origin &) = delete;
+
+  template <class Operation>
+  task<ntl::status> with_connection(inspected_http_protocol protocol,
+                                    Operation operation) noexcept {
+    auto self = weak_from_this().lock();
+    if (!self)
+      return reject_unowned();
+    return with_connection_owned(
+        std::move(self), protocol, std::move(operation));
+  }
+
+  const wsk_redirected_connection &handoff_ref() const noexcept {
+    return handoff_;
+  }
+
+private:
+  redirected_tls_origin(
+      wsk_redirected_connection handoff,
+      std::shared_ptr<wsk_provider> provider,
+      redirected_tls_origin_security security,
+      std::shared_ptr<redirected_tls_session_observer> observer,
+      std::uint64_t session_id, std::wstring server_name,
+      redirected_tls_session_limits limits) noexcept
+      : handoff_(std::move(handoff)), provider_(std::move(provider)),
+        security_(std::move(security)), observer_(std::move(observer)),
+        session_id_(session_id), server_name_(std::move(server_name)),
+        limits_(limits) {}
+
+  static task<ntl::status> reject_unowned() noexcept {
+    co_return ntl::status{STATUS_INVALID_DEVICE_STATE};
+  }
+
+  template <class Operation>
+  static task<ntl::status> with_connection_owned(
+      std::shared_ptr<redirected_tls_origin> self,
+      inspected_http_protocol protocol, Operation operation) noexcept {
+    if (self->used_.exchange(true, std::memory_order_acq_rel))
+      co_return ntl::status{STATUS_INVALID_DEVICE_STATE};
+    if (!self->provider_ || !self->security_)
+      co_return ntl::status{STATUS_INVALID_PARAMETER};
+    auto backend = self->handoff_.try_connect_original(
+        *self->provider_, self->limits_.upstream_transport);
+    if (!backend)
+      co_return backend.status();
+    std::shared_ptr<ntl::net::io::transport_backend> owned_backend = *backend;
+    const std::string_view alpn =
+        protocol == inspected_http_protocol::http2 ? "h2" : "http/1.1";
+    co_return co_await with_tls_connection(
+        std::move(owned_backend), self->limits_.transport_receive_capacity,
+        self->limits_.upstream_tls,
+        [security = self->security_, observer = self->observer_,
+         session_id = self->session_id_, protocol,
+         server_name = self->server_name_, alpn,
+         operation = std::move(operation)](
+            std::shared_ptr<tls_stream> stream,
+            std::shared_ptr<ntl::net::io::async_transport_stream> transport)
+            mutable -> task<ntl::status> {
+          const std::array protocols{alpn};
+          tls_client_handshake_options options;
+          options.require_application_protocol = true;
+          options.peer_certificate_policy = security.peer_certificate_policy;
+          try {
+            options.application_protocols.emplace_back(alpn);
+          } catch (...) {
+            co_return ntl::status{STATUS_INSUFFICIENT_RESOURCES};
+          }
+          const ntl::status handshaken = co_await stream->handshake_client(
+              *security.credentials, server_name, std::move(options));
+          if (!handshaken.is_ok())
+            co_return handshaken;
+          if (observer)
+            observer->on_origin_handshake(session_id, protocol);
+          if (observer && security.peer_certificate_policy)
+            observer->on_origin_certificate_validated(session_id, protocol);
+          co_return co_await std::invoke(
+              operation, std::move(stream), std::move(transport));
+        });
+  }
+  wsk_redirected_connection handoff_;
+  std::shared_ptr<wsk_provider> provider_;
+  redirected_tls_origin_security security_;
+  std::shared_ptr<redirected_tls_session_observer> observer_;
+  std::uint64_t session_id_ = 0;
+  std::wstring server_name_;
+  redirected_tls_session_limits limits_{};
+  std::atomic<bool> used_{false};
+};
+
+class redirected_tls_http_dispatcher {
+public:
+  virtual ~redirected_tls_http_dispatcher() = default;
+  virtual task<ntl::status> run(
+      inspected_http_protocol protocol,
+      std::shared_ptr<tls_stream> downstream,
+      std::shared_ptr<ntl::net::io::async_transport_stream>
+          downstream_transport,
+      std::shared_ptr<redirected_tls_origin> origin,
+      const ntl::net::http::inspection_session_metadata &metadata) = 0;
+};
+
+/**
+ * Structured lifetime for one accepted WSK connection redirected by WFP.
+ * The facade owns every dependency; destroying an external provider, policy,
+ * or certificate facade cannot invalidate an accepted session.
+ */
+class redirected_tls_session final
+    : public std::enable_shared_from_this<redirected_tls_session> {
+public:
+  static ntl::result<std::shared_ptr<redirected_tls_session>> create(
+      std::shared_ptr<ntl::net::io::transport_backend> accepted,
+      wsk_redirected_connection handoff,
+      std::shared_ptr<wsk_provider> provider,
+      std::shared_ptr<redirected_tls_origin_security_provider>
+          origin_security,
+      std::shared_ptr<redirected_tls_server_identity_provider> identities,
+      std::shared_ptr<redirected_tls_http_dispatcher> dispatcher,
+      std::uint64_t session_id,
+      std::shared_ptr<redirected_tls_session_observer> observer = {},
+      redirected_tls_session_limits limits = {}) noexcept {
+    if (!accepted || !provider || !origin_security || !identities ||
+        !dispatcher || session_id == 0 || !limits.valid())
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    try {
+      return ntl::ok(std::shared_ptr<redirected_tls_session>(
+          new redirected_tls_session(
+              std::move(accepted), std::move(handoff), std::move(provider),
+              std::move(origin_security), std::move(identities),
+              std::move(dispatcher),
+              observer ? std::move(observer)
+                       : std::make_shared<
+                             null_redirected_tls_session_observer>(),
+              session_id, limits)));
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+  redirected_tls_session(const redirected_tls_session &) = delete;
+  redirected_tls_session &operator=(const redirected_tls_session &) = delete;
+
+  [[nodiscard]] task<ntl::status> run() {
+    return run_owned(shared_from_this());
+  }
+
+private:
+  redirected_tls_session(
+      std::shared_ptr<ntl::net::io::transport_backend> accepted,
+      wsk_redirected_connection handoff,
+      std::shared_ptr<wsk_provider> provider,
+      std::shared_ptr<redirected_tls_origin_security_provider>
+          origin_security,
+      std::shared_ptr<redirected_tls_server_identity_provider> identities,
+      std::shared_ptr<redirected_tls_http_dispatcher> dispatcher,
+      std::shared_ptr<redirected_tls_session_observer> observer,
+      std::uint64_t session_id,
+      redirected_tls_session_limits limits) noexcept
+      : accepted_(std::move(accepted)), handoff_(std::move(handoff)),
+        provider_(std::move(provider)),
+        origin_security_(std::move(origin_security)),
+        identities_(std::move(identities)), dispatcher_(std::move(dispatcher)),
+        observer_(std::move(observer)),
+        session_id_(session_id), limits_(limits) {}
+
+  static task<ntl::status>
+  run_owned(std::shared_ptr<redirected_tls_session> self) {
+    if (!self || self->started_.exchange(true, std::memory_order_acq_rel))
+      co_return ntl::status{STATUS_INVALID_DEVICE_STATE};
+    const ntl::status result = co_await ntl::net::io::with_async_transport(
+        self->accepted_, self->limits_.transport_receive_capacity,
+        [self](std::shared_ptr<ntl::net::io::async_transport_stream> transport)
+            -> task<ntl::status> {
+          auto hello = co_await read_tls_client_hello(
+              transport, self->limits_.client_hello,
+              self->limits_.downstream_tls.receive_timeout);
+          if (!hello)
+            co_return hello.status();
+          if (hello->server_name.empty())
+            co_return ntl::status{STATUS_INVALID_ADDRESS};
+          auto identity = self->identities_->select(
+              {.server_name = hello->server_name,
+               .session_id = self->session_id_});
+          if (!identity)
+            co_return identity.status();
+          if (!*identity)
+            co_return ntl::status{STATUS_NOT_FOUND};
+          auto origin_security = self->origin_security_->select(
+              {.server_name = hello->server_name,
+               .session_id = self->session_id_});
+          if (!origin_security)
+            co_return origin_security.status();
+          if (!*origin_security)
+            co_return ntl::status{STATUS_NOT_FOUND};
+
+          std::wstring server_name;
+          try {
+            server_name.assign(hello->server_name.begin(),
+                               hello->server_name.end());
+          } catch (...) {
+            co_return ntl::status{STATUS_INSUFFICIENT_RESOURCES};
+          }
+          const auto offered = hello->application_protocols;
+          const bool offered_h2 =
+              std::find(offered.begin(), offered.end(), "h2") != offered.end();
+          const bool offered_http1 =
+              std::find(offered.begin(), offered.end(), "http/1.1") !=
+              offered.end();
+          if (!offered_h2 && !offered_http1 && !offered.empty())
+            co_return ntl::status{STATUS_NOT_SUPPORTED};
+          const inspected_http_protocol protocol =
+              offered_h2 ? inspected_http_protocol::http2
+                         : inspected_http_protocol::http1;
+          const std::string_view alpn =
+              protocol == inspected_http_protocol::http2 ? "h2" : "http/1.1";
+          const std::array protocols{alpn};
+
+          auto handoff = std::move(self->handoff_);
+          auto origin_result = redirected_tls_origin::create(
+              std::move(handoff), self->provider_,
+              std::move(*origin_security),
+              self->observer_, self->session_id_, server_name, self->limits_);
+          if (!origin_result)
+            co_return origin_result.status();
+          auto origin = std::move(*origin_result);
+          ntl::net::http::inspection_session_metadata metadata;
+          metadata.connection.connection_id = self->session_id_;
+          metadata.connection.flow_direction =
+              ntl::net::inspection::direction::outbound;
+          metadata.connection.original_source = {
+              {}, origin->handoff_ref().original_source().port()};
+          metadata.connection.original_destination = {
+              std::string(hello->server_name),
+              origin->handoff_ref().original_destination().port()};
+          metadata.tls = {.server_name = std::string(hello->server_name),
+                          .alpn = std::string(alpn)};
+
+          co_return co_await with_tls_stream(
+              transport, self->limits_.downstream_tls,
+              [self, transport, hello = std::move(*hello),
+               identity = std::move(*identity),
+               origin = std::move(origin), metadata = std::move(metadata),
+               protocol, protocols](std::shared_ptr<tls_stream> downstream)
+                  mutable
+                  -> task<ntl::status> {
+                const ntl::status handshaken =
+                    co_await downstream->handshake_server(
+                        *identity, hello.initial_ciphertext, protocols, true);
+                if (!handshaken.is_ok())
+                  co_return handshaken;
+                self->observer_->on_downstream_handshake(
+                    self->session_id_, protocol, hello.server_name);
+                co_return co_await self->dispatcher_->run(
+                    protocol, std::move(downstream), transport,
+                    std::move(origin),
+                    metadata);
+              });
+        });
+    self->observer_->on_session_complete(self->session_id_, result);
+    co_return result;
+  }
+
+  std::shared_ptr<ntl::net::io::transport_backend> accepted_;
+  wsk_redirected_connection handoff_;
+  std::shared_ptr<wsk_provider> provider_;
+  std::shared_ptr<redirected_tls_origin_security_provider> origin_security_;
+  std::shared_ptr<redirected_tls_server_identity_provider> identities_;
+  std::shared_ptr<redirected_tls_http_dispatcher> dispatcher_;
+  std::shared_ptr<redirected_tls_session_observer> observer_;
+  std::uint64_t session_id_ = 0;
+  redirected_tls_session_limits limits_{};
+  std::atomic<bool> started_{false};
+};
+
+} // namespace ntl::net::kernel

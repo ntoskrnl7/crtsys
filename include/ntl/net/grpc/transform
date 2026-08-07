@@ -4,10 +4,6 @@
  */
 #pragma once
 
-#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
-#error "ntl/net/grpc/transform is a user-mode header"
-#endif
-
 #include <ntl/net/grpc/framing>
 #include <ntl/net/inspection/content_decoder>
 #include <ntl/net/inspection/content_encoder>
@@ -167,7 +163,7 @@ public:
       const ntl::net::inspection::content_decoder_registry &decoders,
       const ntl::net::inspection::content_encoder_registry &encoders)
       : flow_(flow), encoding_(normalize(std::move(grpc_encoding))),
-        pipeline_(&pipeline), decoders_(&decoders), encoders_(&encoders) {
+        pipeline_(pipeline), decoders_(decoders), encoders_(encoders) {
     if (encoding_.empty())
       encoding_ = "identity";
   }
@@ -177,7 +173,7 @@ public:
     feed_outcome outcome;
     try {
       if (finished_ || bytes.size() >
-                           pipeline_->limits().maximum_buffered_bytes -
+                           pipeline_.limits().maximum_buffered_bytes -
                                buffer_.size())
         return fail(finished_ ? STATUS_INVALID_DEVICE_STATE
                               : STATUS_BUFFER_OVERFLOW);
@@ -188,14 +184,14 @@ public:
         const auto remaining = std::span<const std::byte>(buffer_).subspan(consumed);
         const auto view = ntl::net::scatter_view::from_contiguous(remaining);
         const auto probe = message_framer(
-            pipeline_->limits().maximum_encoded_message_bytes).probe(view);
+            pipeline_.limits().maximum_encoded_message_bytes).probe(view);
         if (probe.state() == ntl::net::framing::probe_state::need_more)
           break;
         if (probe.state() != ntl::net::framing::probe_state::complete)
           return fail(probe.error());
 
         const auto header = inspect_header(
-            view, pipeline_->limits().maximum_encoded_message_bytes);
+            view, pipeline_.limits().maximum_encoded_message_bytes);
         if (!header)
           return fail(header.status());
         std::vector<std::byte> payload(
@@ -205,13 +201,13 @@ public:
         if (header->compressed) {
           if (encoding_ == "identity")
             return fail(STATUS_DATA_ERROR);
-          auto decoder = decoders_->create(encoding_);
+          auto decoder = decoders_.create(encoding_);
           if (!decoder)
             return fail(STATUS_NOT_SUPPORTED);
           auto decoded = ntl::net::inspection::decode_complete(
               *decoder, ntl::net::scatter_view::from_contiguous(
                             std::span<const std::byte>(payload)),
-              pipeline_->limits().maximum_decoded_message_bytes);
+              pipeline_.limits().maximum_decoded_message_bytes);
           if (!decoded)
             return fail(decoded.status());
           payload = std::move(*decoded);
@@ -221,7 +217,7 @@ public:
             flow_, sequence_++, header->compressed, encoding_,
             std::move(payload)};
         bool modified = false;
-        outcome.action = pipeline_->apply(message, modified);
+        outcome.action = pipeline_.apply(message, modified);
         if (outcome.action != transform_action::forward)
           return outcome;
         if (modified)
@@ -229,23 +225,23 @@ public:
 
         std::vector<std::byte> encoded_payload = std::move(message.payload);
         if (header->compressed) {
-          auto encoder = encoders_->create(encoding_);
+          auto encoder = encoders_.create(encoding_);
           if (!encoder)
             return fail(STATUS_NOT_SUPPORTED);
           auto encoded = ntl::net::inspection::encode_complete(
               *encoder, encoded_payload,
-              pipeline_->limits().maximum_encoded_message_bytes);
+              pipeline_.limits().maximum_encoded_message_bytes);
           if (!encoded)
             return fail(encoded.status());
           encoded_payload = std::move(*encoded);
         }
         auto wire = encode_message(
             encoded_payload, header->compressed,
-            pipeline_->limits().maximum_encoded_message_bytes);
+            pipeline_.limits().maximum_encoded_message_bytes);
         if (!wire)
           return fail(wire.status());
         if (wire->size() >
-            pipeline_->limits().maximum_buffered_bytes - outcome.wire.size())
+            pipeline_.limits().maximum_buffered_bytes - outcome.wire.size())
           return fail(STATUS_BUFFER_OVERFLOW);
         outcome.wire.insert(outcome.wire.end(), wire->begin(), wire->end());
         ++outcome.messages;
@@ -283,9 +279,9 @@ private:
 
   direction flow_ = direction::request;
   std::string encoding_ = "identity";
-  const message_transform_pipeline *pipeline_ = nullptr;
-  const ntl::net::inspection::content_decoder_registry *decoders_ = nullptr;
-  const ntl::net::inspection::content_encoder_registry *encoders_ = nullptr;
+  message_transform_pipeline pipeline_;
+  ntl::net::inspection::content_decoder_registry decoders_;
+  ntl::net::inspection::content_encoder_registry encoders_;
   std::vector<std::byte> buffer_;
   std::uint64_t sequence_ = 0;
   bool finished_ = false;

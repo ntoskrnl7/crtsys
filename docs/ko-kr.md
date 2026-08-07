@@ -202,8 +202,17 @@ Package는 Windows 8 WFP 계약, architecture별 NDIS 정의와
 crtsys_add_driver(my_wfp_callout WFP NTL src/main.cpp)
 ```
 
-API와 소유권 규칙은 [WFP 가이드](./ntl/wfp.md), 실행 가능한 구성은
+커널 MsQuic NMR backend를 사용하는 드라이버는 같은 호출에
+`KERNEL_MSQUIC`를 추가합니다. 고정된 header ABI, Windows 10 version 2004
+target과 `netio.lib`가 함께 선택됩니다.
+
+WFP를 처음 사용하는 드라이버 개발자는
+[NTL WFP 입문 가이드](./ntl/wfp-guide.ko-KR.md)부터 볼 수 있습니다. API와
+소유권 규칙은 [WFP API 가이드](./ntl/wfp.md), 실행 가능한 구성은
 [WFP 예제 모음](../examples/wfp)에 정리되어 있습니다.
+사용자 모드와 커널에서 같은 프로토콜·정책 API를 사용하는 방법은
+[네트워크 dual-runtime 가이드](./ntl/network-dual-runtime.ko-KR.md)와
+[커널 네트워크 계약 테스트](../test/net/kernel-contracts/README.ko-KR.md)를 보십시오.
 
 ## Runtime Stack
 
@@ -272,8 +281,10 @@ flowchart TD
 | [NTL KMDF WMI 예제](../examples/kmdf/wmi) | MOF 기반 typed WMI query/set/method provider, event 전달과 `ROOT\\WMI` user-mode 검증 앱 |
 | [NTL KMDF 버스 예제](../examples/kmdf/bus) | dynamic PDO plug/remove/eject 수명 주기와 버스/자식 function driver 사이 typed `QUERY_INTERFACE` 검증 예제 |
 | [NTL minifilter 예제 모음](../examples/minifilter) | 기본 callback/context, Filter Manager 통신, swapped-buffer를 독립 프로젝트로 분리한 driver/app 예제 |
-| [NTL WFP 가이드](./ntl/wfp.md) | typed callout, flow/packet/stream ownership, injection, redirect와 동적 정책 계약 |
+| [NTL WFP 입문 가이드](./ntl/wfp-guide.ko-KR.md) | WFP 개념, user/kernel 실행 모델, callout 판정, packet/stream/message 경계, TLS/QUIC 검사, 예제 선택과 검증 순서 |
+| [NTL WFP API 가이드](./ntl/wfp.md) | typed callout, flow/packet/stream ownership, injection, redirect와 동적 정책 계약 |
 | [NTL WFP 예제 모음](../examples/wfp) | ALE, datagram, flow, stream, redirect, TLS/HTTPS와 TCP/UDP content-filter 예제 |
+| [NTL 커널 네트워크 계약](../test/net/kernel-contracts/README.ko-KR.md) | 합성 IOCTL로 HTTP/1/2/3, gRPC, QPACK, WebSocket, WebTransport, TLS ClientHello, direct/offload 정책과 drainable 실행을 검증하는 드라이버/앱 계약 테스트; 실제 트래픽 예제는 `examples/wfp`에 유지 |
 | [CI driver load tests](./ci-driver-load-tests.md) | optional self-hosted driver load/run workflow |
 
 ## Operational Boundaries

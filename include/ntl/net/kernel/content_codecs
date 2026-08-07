@@ -1,0 +1,20 @@
+/**
+ * @file kernel_content_codecs
+ * @brief Optional PASSIVE_LEVEL zlib and Brotli kernel codec surface.
+ *
+ * Link the driver with the CMake target produced by
+ * crtsys_add_ntl_kernel_content_codecs().
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/net/kernel/content_codecs is a kernel-mode header"
+#endif
+
+#include <ntl/net/inspection/content_decoder_brotli>
+#include <ntl/net/inspection/content_decoder_zlib>
+#include <ntl/net/inspection/content_encoder_brotli>
+#include <ntl/net/inspection/content_encoder_zlib>
+#include <ntl/net/inspection/content_stream>
+#include <ntl/net/inspection/standard_content_decoders>
+#include <ntl/net/inspection/standard_content_encoders>

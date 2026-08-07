@@ -1,0 +1,139 @@
+/**
+ * @file http_authority
+ * @brief Allocation-free HTTPS authority and TLS server-name binding.
+ */
+#pragma once
+
+#include <ntl/net/http/inspection_context_view>
+
+#include <charconv>
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <string_view>
+
+namespace ntl::net::http {
+
+/** Allocation-free view into the authority string supplied to parse_authority. */
+struct parsed_authority_view {
+  std::string_view host;
+  std::uint16_t port = 443;
+  bool bracketed_literal = false;
+};
+
+inline std::optional<parsed_authority_view> parse_authority(
+    std::string_view authority,
+    std::uint16_t default_port = 443) noexcept {
+  if (authority.empty() || default_port == 0)
+    return std::nullopt;
+  parsed_authority_view result{.port = default_port};
+  std::string_view port;
+  if (authority.front() == '[') {
+    const std::size_t close = authority.find(']');
+    if (close == std::string_view::npos || close == 1)
+      return std::nullopt;
+    result.host = authority.substr(1, close - 1);
+    result.bracketed_literal = true;
+    const auto suffix = authority.substr(close + 1);
+    if (!suffix.empty()) {
+      if (suffix.front() != ':' || suffix.size() == 1)
+        return std::nullopt;
+      port = suffix.substr(1);
+    }
+  } else {
+    const std::size_t first = authority.find(':');
+    if (first == std::string_view::npos) {
+      result.host = authority;
+    } else {
+      // An IPv6 literal in an HTTP authority must be bracketed.
+      if (authority.find(':', first + 1) != std::string_view::npos ||
+          first == 0 || first + 1 == authority.size())
+        return std::nullopt;
+      result.host = authority.substr(0, first);
+      port = authority.substr(first + 1);
+    }
+  }
+  if (!port.empty()) {
+    unsigned parsed = 0;
+    const auto converted = std::from_chars(
+        port.data(), port.data() + port.size(), parsed);
+    if (converted.ec != std::errc{} ||
+        converted.ptr != port.data() + port.size() ||
+        parsed == 0 || parsed > 65535)
+      return std::nullopt;
+    result.port = static_cast<std::uint16_t>(parsed);
+  }
+  if (!result.bracketed_literal && result.host.size() > 1 &&
+      result.host.back() == '.')
+    result.host.remove_suffix(1);
+  return result.host.empty()
+             ? std::nullopt
+             : std::optional<parsed_authority_view>(result);
+}
+
+inline bool authority_ascii_equal_ci(
+    std::string_view left, std::string_view right) noexcept {
+  if (left.size() != right.size())
+    return false;
+  for (std::size_t index = 0; index != left.size(); ++index) {
+    const auto fold = [](unsigned char value) noexcept {
+      return value >= 'A' && value <= 'Z'
+                 ? static_cast<unsigned char>(value - 'A' + 'a')
+                 : value;
+    };
+    if (fold(static_cast<unsigned char>(left[index])) !=
+        fold(static_cast<unsigned char>(right[index])))
+      return false;
+  }
+  return true;
+}
+
+/**
+ * Match one HTTPS authority to the SNI that selected its origin connection.
+ * Missing SNI and non-default ports fail closed. DNS names ignore ASCII case
+ * and one terminal root dot; IPv6 authorities must retain RFC brackets.
+ */
+inline bool authority_matches_server_name(
+    std::string_view authority,
+    const std::optional<std::string> &server_name,
+    std::uint16_t required_port = 443) noexcept {
+  if (!server_name || server_name->empty() || required_port == 0)
+    return false;
+  const auto parsed = parse_authority(authority, required_port);
+  if (!parsed || parsed->port != required_port)
+    return false;
+
+  std::string_view expected = *server_name;
+  bool expected_literal = expected.find(':') != std::string_view::npos;
+  if (expected.size() > 2 && expected.front() == '[' &&
+      expected.back() == ']') {
+    expected.remove_prefix(1);
+    expected.remove_suffix(1);
+    expected_literal = true;
+  }
+  if (!expected_literal && expected.size() > 1 && expected.back() == '.')
+    expected.remove_suffix(1);
+  if (expected.empty() || parsed->bracketed_literal != expected_literal)
+    return false;
+  return authority_ascii_equal_ci(parsed->host, expected);
+}
+
+/**
+ * Bind an HTTPS authority to the TLS SNI and intercepted destination port.
+ * Redirected HTTPS may legitimately use a non-443 port. When original-
+ * destination metadata exists, that port is authoritative and zero fails
+ * closed. Sessions without redirect metadata use default_port.
+ */
+inline bool authority_matches_tls_session(
+    std::string_view authority,
+    const inspection_session_metadata &session,
+    std::uint16_t default_port = 443) noexcept {
+  const std::uint16_t required_port =
+      session.connection.original_destination
+          ? session.connection.original_destination->port
+          : default_port;
+  return authority_matches_server_name(
+      authority, session.tls.server_name, required_port);
+}
+
+} // namespace ntl::net::http

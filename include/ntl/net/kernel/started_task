@@ -1,0 +1,136 @@
+/**
+ * @file kernel_started_task
+ * @brief Eager child operation used by structured kernel connection joins.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/net/kernel/started_task is a kernel-mode header"
+#endif
+
+#include <ntl/coroutine>
+#include <ntl/except>
+#include <ntl/net/kernel/continuation>
+
+#include <coroutine>
+#include <exception>
+#include <memory>
+#include <mutex>
+#include <utility>
+
+namespace ntl::net::kernel {
+
+#if NTL_HAS_COROUTINE_SUPPORT
+
+/**
+ * @brief An eager PASSIVE_LEVEL child which must be joined by its owner.
+ *
+ * This is not a detach primitive. The coroutine frame owns a shared
+ * completion state, starts immediately, and destroys itself only after it has
+ * published completion. Connection scopes create every child, stop sibling
+ * I/O on the first terminal result, and await every child before returning.
+ */
+class started_task {
+public:
+  struct promise_type;
+
+private:
+  struct shared_state {
+    void complete(std::exception_ptr value) noexcept {
+      std::coroutine_handle<> continuation;
+      {
+        std::lock_guard lock(mutex);
+        failure = std::move(value);
+        ready = true;
+        continuation = std::exchange(awaiter, {});
+      }
+      if (continuation)
+        ntl::net::kernel::resume_deferred(continuation);
+    }
+
+    bool is_ready() const noexcept {
+      std::lock_guard lock(mutex);
+      return ready;
+    }
+
+    bool suspend(std::coroutine_handle<> continuation) noexcept {
+      std::lock_guard lock(mutex);
+      if (ready)
+        return false;
+      if (awaiter) {
+        duplicate_awaiter = true;
+        return false;
+      }
+      awaiter = continuation;
+      return true;
+    }
+
+    void rethrow_if_failed() const {
+      std::lock_guard lock(mutex);
+      if (duplicate_awaiter)
+        throw ntl::exception(STATUS_INVALID_DEVICE_STATE,
+                             "kernel started_task already has an awaiter");
+      if (failure)
+        std::rethrow_exception(failure);
+    }
+
+    mutable std::mutex mutex;
+    bool ready = false;
+    bool duplicate_awaiter = false;
+    std::coroutine_handle<> awaiter{};
+    std::exception_ptr failure;
+  };
+
+public:
+  started_task(const started_task &) = delete;
+  started_task &operator=(const started_task &) = delete;
+  started_task(started_task &&) noexcept = default;
+  started_task &operator=(started_task &&) noexcept = default;
+
+  class awaitable {
+  public:
+    explicit awaitable(std::shared_ptr<shared_state> state) noexcept
+        : state_(std::move(state)) {}
+
+    bool await_ready() const noexcept { return state_->is_ready(); }
+    bool await_suspend(std::coroutine_handle<> continuation) noexcept {
+      return state_->suspend(continuation);
+    }
+    void await_resume() const { state_->rethrow_if_failed(); }
+
+  private:
+    std::shared_ptr<shared_state> state_;
+  };
+
+  awaitable operator co_await() && {
+    if (!state_)
+      throw ntl::exception(STATUS_INVALID_HANDLE,
+                           "awaited an empty kernel started_task");
+    return awaitable(std::exchange(state_, {}));
+  }
+
+  struct promise_type {
+    started_task get_return_object() noexcept { return started_task(state); }
+    std::suspend_never initial_suspend() const noexcept { return {}; }
+    std::suspend_never final_suspend() const noexcept { return {}; }
+    void return_void() noexcept { state->complete({}); }
+    void unhandled_exception() noexcept {
+      state->complete(std::current_exception());
+    }
+
+    std::shared_ptr<shared_state> state =
+        std::make_shared<shared_state>();
+  };
+
+private:
+  explicit started_task(std::shared_ptr<shared_state> state) noexcept
+      : state_(std::move(state)) {}
+
+  std::shared_ptr<shared_state> state_;
+};
+
+#endif // NTL_HAS_COROUTINE_SUPPORT
+
+} // namespace ntl::net::kernel

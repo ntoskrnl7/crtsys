@@ -1,0 +1,42 @@
+/**
+ * @file http_standard_inspection_policy
+ * @brief Owning HTTP inspection policy with standard content codings.
+ *
+ * Targets using this convenience factory link the NTL content-codec backend.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include <ntl/net/http/inspection_policy>
+#include <ntl/net/inspection/standard_content_decoders>
+#include <ntl/net/inspection/standard_content_encoders>
+
+#include <memory>
+
+namespace ntl::net::http {
+
+/** Adds gzip, deflate, and Brotli decode/encode support to one policy. */
+inline inspection_policy &
+use_standard_content_codecs(inspection_policy &policy) {
+  auto decoders = std::make_shared<
+      ntl::net::inspection::content_decoder_registry>();
+  auto encoders = std::make_shared<
+      ntl::net::inspection::content_encoder_registry>();
+  ntl::net::inspection::register_standard_content_decoders(*decoders);
+  ntl::net::inspection::register_standard_content_encoders(*encoders);
+  return policy.use_content_codecs(std::move(decoders),
+                                   std::move(encoders));
+}
+
+/** Creates one owning fail-closed policy with standard content codings. */
+inline std::shared_ptr<inspection_policy> make_standard_inspection_policy(
+    transform_limits limits = {},
+    ntl::net::inspection::failure_policy failure =
+        ntl::net::inspection::failure_policy::fail_closed) {
+  auto policy = std::make_shared<inspection_policy>(limits, failure);
+  use_standard_content_codecs(*policy);
+  return policy;
+}
+
+} // namespace ntl::net::http

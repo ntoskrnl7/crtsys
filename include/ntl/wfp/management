@@ -10,6 +10,7 @@
 
 #include "conditions"
 #include "connect_redirect"
+#include "transparent_udp_proxy_contract"
 
 #include <algorithm>
 #include <array>
@@ -180,11 +181,27 @@ struct sublayer_spec {
   std::uint16_t weight = 0x100;
 };
 
-template <class Layer> struct callout_spec {
-  callout_key<Layer> key;
+template <class Layer, callout_kind Kind> struct basic_callout_spec {
+  basic_callout_key<Layer, Kind> key;
   std::wstring name;
   std::wstring description;
 };
+
+template <class Layer>
+using inspection_callout_spec =
+    basic_callout_spec<Layer, callout_kind::inspection>;
+
+template <class Layer>
+using terminating_callout_spec =
+    basic_callout_spec<Layer, callout_kind::terminating>;
+
+template <class Layer>
+using arbitrating_callout_spec =
+    basic_callout_spec<Layer, callout_kind::arbitrating>;
+
+template <class Layer>
+using stream_callout_spec =
+    basic_callout_spec<Layer, callout_kind::stream>;
 
 /** @brief Controls whether installed WFP objects follow the process lifetime. */
 enum class policy_scope {
@@ -235,8 +252,8 @@ public:
     return *this;
   }
 
-  template <class Layer>
-  policy_manifest &include(callout_key<Layer> key) {
+  template <class Layer, callout_kind Kind>
+  policy_manifest &include(basic_callout_key<Layer, Kind> key) {
     append_unique(callouts_, key.native());
     return *this;
   }
@@ -553,6 +570,61 @@ private:
   std::uint64_t context_ = 0;
 };
 
+namespace detail {
+
+template <class Layer>
+inline constexpr bool local_udp_proxy_reply_layer =
+    std::is_same_v<Layer, layers::outbound_ip_packet_v4> ||
+    std::is_same_v<Layer, layers::outbound_ip_packet_v6>;
+
+} // namespace detail
+
+/**
+ * @brief A callout filter that participates in WFP arbitration.
+ *
+ * Its native action is fixed to FWP_ACTION_CALLOUT_UNKNOWN: the callback may
+ * continue classification or return a permit/block decision. Use this rather
+ * than an inspection filter whenever a callback can fail closed.
+ */
+template <class Layer>
+class arbitration_filter_builder
+    : public detail::typed_condition_builder<
+          arbitration_filter_builder<Layer>, Layer> {
+public:
+  arbitration_filter_builder(filter_key<Layer> key, std::wstring name,
+                             callout_unavailable unavailable)
+      : key_(key), name_(std::move(name)), unavailable_(unavailable) {
+    static_assert(
+        detail::callout_layer<Layer> && detail::decision_layer<Layer>,
+        "arbitration_filter_builder requires a decision-capable callout layer");
+  }
+
+  arbitration_filter_builder &description(std::wstring value) {
+    description_ = std::move(value);
+    return *this;
+  }
+
+  arbitration_filter_builder &weight(std::uint8_t value) noexcept {
+    weight_ = value;
+    return *this;
+  }
+
+  arbitration_filter_builder &context(std::uint64_t value) noexcept {
+    context_ = value;
+    return *this;
+  }
+
+private:
+  friend class policy_transaction;
+
+  filter_key<Layer> key_;
+  std::wstring name_;
+  std::wstring description_;
+  std::uint8_t weight_ = 8;
+  std::uint64_t context_ = 0;
+  callout_unavailable unavailable_;
+};
+
 /**
  * @brief A terminating packet filter for datagram and transport layers.
  *
@@ -561,6 +633,7 @@ private:
  * action or forget CLEAR_ACTION_RIGHT.
  */
 template <class Layer>
+  requires(!detail::local_udp_proxy_reply_layer<Layer>)
 class packet_filter_builder
     : public detail::typed_condition_builder<
           packet_filter_builder<Layer>, Layer> {
@@ -599,19 +672,108 @@ private:
   callout_unavailable unavailable_;
 };
 
+namespace advanced {
+
+/** Explicit opt-in for broad native packet-layer policy composition. */
+template <class Layer>
+class packet_filter_builder
+    : public detail::typed_condition_builder<
+          packet_filter_builder<Layer>, Layer> {
+public:
+  packet_filter_builder(filter_key<Layer> key, std::wstring name,
+                        callout_unavailable unavailable)
+      : key_(key), name_(std::move(name)), unavailable_(unavailable) {
+    static_assert(detail::packet_decision_layer<Layer>);
+  }
+  packet_filter_builder &description(std::wstring value) {
+    description_ = std::move(value);
+    return *this;
+  }
+  packet_filter_builder &weight(std::uint8_t value) noexcept {
+    weight_ = value;
+    return *this;
+  }
+  packet_filter_builder &context(std::uint64_t value) noexcept {
+    context_ = value;
+    return *this;
+  }
+
+private:
+  friend class ::ntl::wfp::policy_transaction;
+  filter_key<Layer> key_;
+  std::wstring name_;
+  std::wstring description_;
+  std::uint8_t weight_ = 8;
+  std::uint64_t context_ = 0;
+  callout_unavailable unavailable_;
+};
+
+} // namespace advanced
+
 /**
- * @brief A terminating stream-edit filter.
+ * @brief Safe policy filter for replies emitted by a local UDP proxy.
  *
- * Only stream layers are accepted. The terminating action and clear-right
- * flag are selected by add_stream_filter(), never by application code.
+ * OUTBOUND_IPPACKET does not expose protocol or port conditions. A generic
+ * terminating filter at this layer would therefore either fail open or block
+ * unrelated loopback traffic while its callout is unavailable. This builder
+ * fixes the observation scope to the IP-family loopback address, stores the
+ * nonzero proxy port as callout context, and keeps unrelated traffic
+ * fail-open until the callout validates the UDP header and matching port.
+ */
+template <class Layer>
+  requires detail::local_udp_proxy_reply_layer<Layer>
+class local_udp_proxy_reply_filter_builder {
+public:
+  local_udp_proxy_reply_filter_builder(filter_key<Layer> key,
+                                       std::wstring name,
+                                       std::uint16_t proxy_port)
+      : builder_(key, std::move(name), callout_unavailable::permit) {
+    if (proxy_port == 0)
+      throw std::invalid_argument("local UDP proxy port cannot be zero");
+    if constexpr (std::is_same_v<Layer,
+                                 layers::outbound_ip_packet_v4>) {
+      builder_.local_address_equal(
+          ipv4_address::from_octets(127, 0, 0, 1));
+    } else {
+      builder_.local_address_equal(ipv6_address(
+          std::array<std::uint8_t, 16>{0, 0, 0, 0, 0, 0, 0, 0,
+                                       0, 0, 0, 0, 0, 0, 0, 1}));
+    }
+    builder_.context(proxy_port);
+  }
+
+  local_udp_proxy_reply_filter_builder &description(std::wstring value) {
+    builder_.description(std::move(value));
+    return *this;
+  }
+
+  local_udp_proxy_reply_filter_builder &weight(
+      std::uint8_t value) noexcept {
+    builder_.weight(value);
+    return *this;
+  }
+
+private:
+  friend class policy_transaction;
+  advanced::packet_filter_builder<Layer> builder_;
+};
+
+/**
+ * @brief A stream inspection and editing filter.
+ *
+ * The native action is always FWP_ACTION_CALLOUT_UNKNOWN because a stream
+ * callback may permit/block byte ranges or select NEED_MORE_DATA, DEFER,
+ * DROP_CONNECTION, or ALLOW_CONNECTION. Applications cannot accidentally
+ * pair stream_result with an incompatible terminating/inspection action.
  */
 template <class Layer>
 class stream_filter_builder
     : public detail::typed_condition_builder<
           stream_filter_builder<Layer>, Layer> {
 public:
-  stream_filter_builder(filter_key<Layer> key, std::wstring name,
-                        callout_unavailable unavailable)
+  stream_filter_builder(
+      filter_key<Layer> key, std::wstring name,
+      callout_unavailable unavailable)
       : key_(key), name_(std::move(name)),
         unavailable_(unavailable) {
     static_assert(detail::stream_layer<Layer>,
@@ -629,53 +791,6 @@ public:
   }
 
   stream_filter_builder &context(std::uint64_t value) noexcept {
-    context_ = value;
-    return *this;
-  }
-
-private:
-  friend class policy_transaction;
-
-  filter_key<Layer> key_;
-  std::wstring name_;
-  std::wstring description_;
-  std::uint8_t weight_ = 8;
-  std::uint64_t context_ = 0;
-  callout_unavailable unavailable_;
-};
-
-/**
- * @brief An unknown-action stream filter for connection-level stream actions.
- *
- * Use this only when the callback may return drop_connection() or needs WFP
- * to arbitrate permit/block/continue. The native action remains fixed and is
- * not writable by application code.
- */
-template <class Layer>
-class stream_control_filter_builder
-    : public detail::typed_condition_builder<
-          stream_control_filter_builder<Layer>, Layer> {
-public:
-  stream_control_filter_builder(
-      filter_key<Layer> key, std::wstring name,
-      callout_unavailable unavailable)
-      : key_(key), name_(std::move(name)),
-        unavailable_(unavailable) {
-    static_assert(detail::stream_layer<Layer>,
-                  "stream_control_filter_builder requires a stream layer");
-  }
-
-  stream_control_filter_builder &description(std::wstring value) {
-    description_ = std::move(value);
-    return *this;
-  }
-
-  stream_control_filter_builder &weight(std::uint8_t value) noexcept {
-    weight_ = value;
-    return *this;
-  }
-
-  stream_control_filter_builder &context(std::uint64_t value) noexcept {
     context_ = value;
     return *this;
   }
@@ -804,21 +919,38 @@ private:
   std::uint64_t transaction_ = 0;
 };
 
-template <class Layer> class callout_ref {
+template <class Layer, callout_kind Kind> class basic_callout_ref {
 public:
-  callout_ref(const callout_ref &) = default;
-  callout_ref &operator=(const callout_ref &) = default;
+  basic_callout_ref(const basic_callout_ref &) = default;
+  basic_callout_ref &operator=(const basic_callout_ref &) = default;
 
 private:
   friend class policy_transaction;
-  callout_ref(callout_key<Layer> key, provider_key provider,
-              std::uint64_t transaction) noexcept
+  basic_callout_ref(basic_callout_key<Layer, Kind> key,
+                    provider_key provider,
+                    std::uint64_t transaction) noexcept
       : key_(key), provider_(provider), transaction_(transaction) {}
 
-  callout_key<Layer> key_;
+  basic_callout_key<Layer, Kind> key_;
   provider_key provider_;
   std::uint64_t transaction_ = 0;
 };
+
+template <class Layer>
+using inspection_callout_ref =
+    basic_callout_ref<Layer, callout_kind::inspection>;
+
+template <class Layer>
+using terminating_callout_ref =
+    basic_callout_ref<Layer, callout_kind::terminating>;
+
+template <class Layer>
+using arbitrating_callout_ref =
+    basic_callout_ref<Layer, callout_kind::arbitrating>;
+
+template <class Layer>
+using stream_callout_ref =
+    basic_callout_ref<Layer, callout_kind::stream>;
 
 /**
  * @brief Transaction-scoped policy writer.
@@ -884,8 +1016,38 @@ public:
   }
 
   template <class Layer>
-  callout_ref<Layer> add_callout(const provider_ref &owner,
-                                 const callout_spec<Layer> &spec) {
+  inspection_callout_ref<Layer>
+  add_callout(const provider_ref &owner,
+              const inspection_callout_spec<Layer> &spec) {
+    return add_callout_impl(owner, spec);
+  }
+
+  template <class Layer>
+  terminating_callout_ref<Layer>
+  add_callout(const provider_ref &owner,
+              const terminating_callout_spec<Layer> &spec) {
+    return add_callout_impl(owner, spec);
+  }
+
+  template <class Layer>
+  arbitrating_callout_ref<Layer>
+  add_callout(const provider_ref &owner,
+              const arbitrating_callout_spec<Layer> &spec) {
+    return add_callout_impl(owner, spec);
+  }
+
+  template <class Layer>
+  stream_callout_ref<Layer>
+  add_callout(const provider_ref &owner,
+              const stream_callout_spec<Layer> &spec) {
+    return add_callout_impl(owner, spec);
+  }
+
+private:
+  template <class Layer, callout_kind Kind>
+  basic_callout_ref<Layer, Kind>
+  add_callout_impl(const provider_ref &owner,
+                   const basic_callout_spec<Layer, Kind> &spec) {
     static_assert(
         detail::callout_layer<Layer>,
         "add_callout() requires a third-party kernel callout layer");
@@ -904,12 +1066,15 @@ public:
     check(FwpmCalloutAdd0(engine_, &callout, nullptr, nullptr),
           "FwpmCalloutAdd0");
     callouts_.push_back(spec.key.native());
-    return callout_ref<Layer>(spec.key, owner.key_, transaction_);
+    return basic_callout_ref<Layer, Kind>(spec.key, owner.key_,
+                                         transaction_);
   }
+
+public:
 
   template <class Layer>
   void add_filter(const sublayer_ref &sublayer,
-                  const callout_ref<Layer> &callout,
+                  const terminating_callout_ref<Layer> &callout,
                   filter_builder<Layer> &builder) {
     static_assert(detail::ale_authorization_layer<Layer>,
                   "add_filter() is limited to ALE authorization layers");
@@ -922,7 +1087,7 @@ public:
   template <class Layer>
   void add_connect_redirect_filter(
       const sublayer_ref &sublayer,
-      const callout_ref<Layer> &callout,
+      const terminating_callout_ref<Layer> &callout,
       connect_redirect_filter_builder<Layer> &builder) {
     static_assert(detail::connect_redirect_layer<Layer>,
                   "add_connect_redirect_filter() requires an "
@@ -936,7 +1101,7 @@ public:
   template <class Layer>
   void add_bind_redirect_filter(
       const sublayer_ref &sublayer,
-      const callout_ref<Layer> &callout,
+      const terminating_callout_ref<Layer> &callout,
       bind_redirect_filter_builder<Layer> &builder) {
     static_assert(detail::bind_redirect_layer<Layer>,
                   "add_bind_redirect_filter() requires an "
@@ -949,7 +1114,8 @@ public:
 
   template <class Layer>
   void add_inspection_filter(
-      const sublayer_ref &sublayer, const callout_ref<Layer> &callout,
+      const sublayer_ref &sublayer,
+      const inspection_callout_ref<Layer> &callout,
       inspection_filter_builder<Layer> &builder) {
     static_assert(
         detail::callout_layer<Layer>,
@@ -960,8 +1126,21 @@ public:
   }
 
   template <class Layer>
+  void add_arbitration_filter(
+      const sublayer_ref &sublayer,
+      const arbitrating_callout_ref<Layer> &callout,
+      arbitration_filter_builder<Layer> &builder) {
+    static_assert(
+        detail::callout_layer<Layer> && detail::decision_layer<Layer>,
+        "add_arbitration_filter() requires a decision-capable callout layer");
+    add_callout_filter(sublayer, callout, builder,
+                       FWP_ACTION_CALLOUT_UNKNOWN, 0,
+                       builder.unavailable_);
+  }
+
+  template <class Layer>
   void add_packet_filter(const sublayer_ref &sublayer,
-                         const callout_ref<Layer> &callout,
+                         const terminating_callout_ref<Layer> &callout,
                          packet_filter_builder<Layer> &builder) {
     static_assert(detail::packet_decision_layer<Layer>,
                   "add_packet_filter() requires a packet decision layer");
@@ -972,11 +1151,11 @@ public:
   }
 
   template <class Layer>
-  void add_stream_filter(const sublayer_ref &sublayer,
-                         const callout_ref<Layer> &callout,
-                         stream_filter_builder<Layer> &builder) {
-    static_assert(detail::stream_layer<Layer>,
-                  "add_stream_filter() requires a stream layer");
+  void add_packet_filter(
+      const sublayer_ref &sublayer,
+      const terminating_callout_ref<Layer> &callout,
+      advanced::packet_filter_builder<Layer> &builder) {
+    static_assert(detail::packet_decision_layer<Layer>);
     add_callout_filter(sublayer, callout, builder,
                        FWP_ACTION_CALLOUT_TERMINATING,
                        FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT,
@@ -984,11 +1163,20 @@ public:
   }
 
   template <class Layer>
-  void add_stream_control_filter(
-      const sublayer_ref &sublayer, const callout_ref<Layer> &callout,
-      stream_control_filter_builder<Layer> &builder) {
+    requires detail::local_udp_proxy_reply_layer<Layer>
+  void add_local_udp_proxy_reply_filter(
+      const sublayer_ref &sublayer,
+      const terminating_callout_ref<Layer> &callout,
+      local_udp_proxy_reply_filter_builder<Layer> &builder) {
+    add_packet_filter(sublayer, callout, builder.builder_);
+  }
+
+  template <class Layer>
+  void add_stream_filter(const sublayer_ref &sublayer,
+                         const stream_callout_ref<Layer> &callout,
+                         stream_filter_builder<Layer> &builder) {
     static_assert(detail::stream_layer<Layer>,
-                  "add_stream_control_filter() requires a stream layer");
+                  "add_stream_filter() requires a stream layer");
     add_callout_filter(sublayer, callout, builder,
                        FWP_ACTION_CALLOUT_UNKNOWN, 0,
                        builder.unavailable_);
@@ -1075,9 +1263,9 @@ public:
   }
 
 private:
-  template <class Layer, class Builder>
+  template <class Layer, callout_kind Kind, class Builder>
   void add_callout_filter(const sublayer_ref &sublayer,
-                          const callout_ref<Layer> &callout,
+                          const basic_callout_ref<Layer, Kind> &callout,
                           Builder &builder, FWP_ACTION_TYPE action,
                           UINT32 flags,
                           std::optional<callout_unavailable>
@@ -1479,8 +1667,8 @@ public:
   /**
    * @brief Tests whether a typed callout exists on its declared layer.
    */
-  template <class Layer>
-  bool callout_present(callout_key<Layer> key) const {
+  template <class Layer, callout_kind Kind>
+  bool callout_present(basic_callout_key<Layer, Kind> key) const {
     FWPM_CALLOUT0 *native = nullptr;
     const DWORD result =
         FwpmCalloutGetByKey0(engine_, &key.native(), &native);
@@ -1834,6 +2022,139 @@ private:
   HANDLE engine_ = nullptr;
   std::wstring name_;
   policy_scope scope_ = policy_scope::ephemeral;
+};
+
+/** Application-scoped selector for the standard transparent UDP proxy. */
+struct transparent_udp_proxy_policy_options {
+  application_id application;
+  std::uint16_t original_port = 0;
+  std::uint16_t local_proxy_port = 0;
+  std::uint16_t sublayer_weight = 0x7200;
+
+  bool valid() const noexcept {
+    return original_port != 0 && local_proxy_port != 0;
+  }
+};
+
+/**
+ * Installs the complete safe dual-stack policy graph. The caller cannot omit
+ * the reverse hook, select a callout-unavailable action, or expose a broad
+ * OUTBOUND_IPPACKET filter.
+ */
+class transparent_udp_proxy_policy {
+public:
+  static void add_to(policy_transaction &transaction,
+                     const provider_ref &provider,
+                     const sublayer_ref &sublayer,
+                     const transparent_udp_proxy_keys &keys,
+                     const transparent_udp_proxy_policy_options &options) {
+    if (!options.valid())
+      throw std::invalid_argument("invalid transparent UDP proxy policy");
+
+    add_graph(transaction, provider, sublayer, keys, options);
+  }
+
+  static void install(policy_session &session,
+                      const transparent_udp_proxy_keys &keys,
+                      const transparent_udp_proxy_policy_options &options) {
+    if (!options.valid())
+      throw std::invalid_argument("invalid transparent UDP proxy policy");
+    session.install([&](policy_transaction &transaction) {
+      const auto provider = transaction.add_provider(
+          {keys.provider, L"NTL transparent UDP proxy provider",
+           L"Owning dual-stack UDP proxy policy"});
+      const auto sublayer = transaction.add_sublayer(
+          provider,
+          {keys.sublayer, L"NTL transparent UDP proxy sublayer",
+           L"Removed atomically with its owning policy session",
+           options.sublayer_weight});
+
+      add_graph(transaction, provider, sublayer, keys, options);
+    });
+  }
+
+private:
+  static void add_graph(policy_transaction &transaction,
+                        const provider_ref &provider,
+                        const sublayer_ref &sublayer,
+                        const transparent_udp_proxy_keys &keys,
+                        const transparent_udp_proxy_policy_options &options) {
+      const auto flow_v4 = transaction.add_callout<
+          layers::ale_flow_established_v4>(
+          provider, {keys.flow_v4, L"Select IPv4 UDP proxy flows",
+                     L"Associates bounded proxy state"});
+      const auto flow_v6 = transaction.add_callout<
+          layers::ale_flow_established_v6>(
+          provider, {keys.flow_v6, L"Select IPv6 UDP proxy flows",
+                     L"Associates bounded proxy state"});
+      const auto datagram_v4 = transaction.add_callout<
+          layers::datagram_data_v4>(
+          provider, {keys.datagram_v4, L"Redirect IPv4 UDP datagrams",
+                     L"Clone, rewrite, inject, and absorb"});
+      const auto datagram_v6 = transaction.add_callout<
+          layers::datagram_data_v6>(
+          provider, {keys.datagram_v6, L"Redirect IPv6 UDP datagrams",
+                     L"Clone, rewrite, inject, and absorb"});
+      const auto reverse_v4 = transaction.add_callout<
+          layers::outbound_ip_packet_v4>(
+          provider, {keys.reverse_v4, L"Restore IPv4 UDP replies",
+                     L"Restores the original source tuple"});
+      const auto reverse_v6 = transaction.add_callout<
+          layers::outbound_ip_packet_v6>(
+          provider, {keys.reverse_v6, L"Restore IPv6 UDP replies",
+                     L"Restores the original source tuple"});
+
+      arbitration_filter_builder<layers::ale_flow_established_v4> flow4(
+          keys.flow_filter_v4, L"Select outbound IPv4 UDP proxy flows",
+          callout_unavailable::block);
+      flow4.application_equal(options.application)
+          .protocol_equal(IPPROTO_UDP)
+          .direction_equal(FWP_DIRECTION_OUTBOUND)
+          .remote_port_equal(options.original_port)
+          .context(options.local_proxy_port);
+      transaction.add_arbitration_filter(sublayer, flow_v4, flow4);
+
+      arbitration_filter_builder<layers::ale_flow_established_v6> flow6(
+          keys.flow_filter_v6, L"Select outbound IPv6 UDP proxy flows",
+          callout_unavailable::block);
+      flow6.application_equal(options.application)
+          .protocol_equal(IPPROTO_UDP)
+          .direction_equal(FWP_DIRECTION_OUTBOUND)
+          .remote_port_equal(options.original_port)
+          .context(options.local_proxy_port);
+      transaction.add_arbitration_filter(sublayer, flow_v6, flow6);
+
+      packet_filter_builder<layers::datagram_data_v4> datagram4(
+          keys.datagram_filter_v4, L"Redirect selected IPv4 UDP datagrams",
+          callout_unavailable::block);
+      datagram4.protocol_equal(IPPROTO_UDP)
+          .direction_equal(FWP_DIRECTION_OUTBOUND)
+          .remote_port_equal(options.original_port)
+          .context(options.local_proxy_port);
+      transaction.add_packet_filter(sublayer, datagram_v4, datagram4);
+
+      packet_filter_builder<layers::datagram_data_v6> datagram6(
+          keys.datagram_filter_v6, L"Redirect selected IPv6 UDP datagrams",
+          callout_unavailable::block);
+      datagram6.protocol_equal(IPPROTO_UDP)
+          .direction_equal(FWP_DIRECTION_OUTBOUND)
+          .remote_port_equal(options.original_port)
+          .context(options.local_proxy_port);
+      transaction.add_packet_filter(sublayer, datagram_v6, datagram6);
+
+      local_udp_proxy_reply_filter_builder<layers::outbound_ip_packet_v4>
+          reverse4(keys.reverse_filter_v4,
+                   L"Restore replies from the local IPv4 UDP proxy",
+                   options.local_proxy_port);
+      transaction.add_local_udp_proxy_reply_filter(
+          sublayer, reverse_v4, reverse4);
+      local_udp_proxy_reply_filter_builder<layers::outbound_ip_packet_v6>
+          reverse6(keys.reverse_filter_v6,
+                   L"Restore replies from the local IPv6 UDP proxy",
+                   options.local_proxy_port);
+      transaction.add_local_udp_proxy_reply_filter(
+          sublayer, reverse_v6, reverse6);
+  }
 };
 
 } // namespace ntl::wfp

@@ -1,0 +1,158 @@
+/**
+ * @file kernel_tls_client_hello
+ * @brief Bounded fragmented ClientHello reader over a kernel byte stream.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/net/kernel/tls_client_hello is a kernel-mode header"
+#endif
+
+#include <ntl/net/io/async_transport_stream>
+#include <ntl/net/kernel/task>
+#include <ntl/net/tls/client_hello_parser>
+
+#include <algorithm>
+#include <chrono>
+#include <cstddef>
+#include <limits>
+#include <memory>
+#include <new>
+#include <span>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace ntl::net::kernel {
+
+/** Complete ClientHello metadata plus every ciphertext byte read. */
+struct tls_client_hello {
+  std::string server_name;
+  std::vector<std::string> application_protocols;
+  std::vector<std::byte> initial_ciphertext;
+  bool encrypted_client_hello_extension_present = false;
+};
+
+namespace detail {
+
+class tls_client_hello_collector final
+    : public ntl::net::tls_client_hello_observer {
+public:
+  explicit tls_client_hello_collector(tls_client_hello &result) noexcept
+      : result_(&result) {}
+
+  ntl::status on_server_name(std::string_view value) noexcept override {
+    try {
+      result_->server_name.assign(value);
+      return ntl::status::ok();
+    } catch (...) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+  }
+
+  ntl::status
+  on_application_protocol(std::string_view value) noexcept override {
+    try {
+      result_->application_protocols.emplace_back(value);
+      return ntl::status::ok();
+    } catch (...) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+  }
+
+private:
+  tls_client_hello *result_;
+};
+
+} // namespace detail
+
+/**
+ * Reads and parses one fragmented ClientHello without discarding ciphertext.
+ *
+ * The returned initial_ciphertext must be passed unchanged to
+ * tls_stream::handshake_server(). A missing outer SNI is reported as
+ * STATUS_NOT_FOUND when require_server_name is true. ECH extension presence
+ * is observation only; this function never claims to recover ClientHelloInner.
+ */
+inline task<ntl::result<tls_client_hello>> read_tls_client_hello_borrowed(
+    io::async_transport_stream &transport,
+    ntl::net::tls_client_hello_limits limits = {},
+    std::chrono::milliseconds timeout = std::chrono::seconds(5),
+    bool require_server_name = true) {
+  if (limits.maximum_buffered_ciphertext == 0 ||
+      limits.maximum_client_hello == 0 || limits.receive_chunk_size == 0 ||
+      limits.maximum_alpn_protocols == 0 ||
+      limits.maximum_client_hello >
+          (std::numeric_limits<std::size_t>::max)() - 4 ||
+      limits.maximum_client_hello > limits.maximum_buffered_ciphertext ||
+      limits.receive_chunk_size > limits.maximum_buffered_ciphertext ||
+      timeout <= std::chrono::milliseconds::zero())
+    co_return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  try {
+    tls_client_hello result;
+    result.initial_ciphertext.reserve(limits.receive_chunk_size);
+    std::vector<std::byte> workspace(limits.maximum_client_hello + 4);
+    for (;;) {
+      result.server_name.clear();
+      result.application_protocols.clear();
+      result.encrypted_client_hello_extension_present = false;
+      detail::tls_client_hello_collector observer(result);
+      auto parsed = ntl::net::inspect_tls_client_hello(
+          ntl::net::scatter_view::from_contiguous(
+              result.initial_ciphertext),
+          workspace, observer, limits);
+      if (parsed) {
+        if (require_server_name &&
+            (!parsed->server_name_present || result.server_name.empty()))
+          co_return ntl::unexpected(STATUS_NOT_FOUND);
+        result.encrypted_client_hello_extension_present =
+            parsed->encrypted_client_hello_extension_present;
+        co_return ntl::ok(std::move(result));
+      }
+      if (static_cast<NTSTATUS>(parsed.status()) != STATUS_BUFFER_TOO_SMALL)
+        co_return ntl::unexpected(parsed.status());
+      if (result.initial_ciphertext.size() >=
+          limits.maximum_buffered_ciphertext)
+        co_return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+
+      const std::size_t room = limits.maximum_buffered_ciphertext -
+                               result.initial_ciphertext.size();
+      const std::size_t count =
+          (std::min)(room, limits.receive_chunk_size);
+      const std::size_t offset = result.initial_ciphertext.size();
+      result.initial_ciphertext.resize(offset + count);
+      auto received = co_await transport.read_some_borrowed(
+          std::span(result.initial_ciphertext).subspan(offset),
+          {.timeout = timeout});
+      if (!received) {
+        result.initial_ciphertext.resize(offset);
+        co_return ntl::unexpected(received.status());
+      }
+      if (*received == 0) {
+        result.initial_ciphertext.resize(offset);
+        co_return ntl::unexpected(STATUS_END_OF_FILE);
+      }
+      result.initial_ciphertext.resize(offset + *received);
+    }
+  } catch (const std::bad_alloc &) {
+    co_return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    co_return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+}
+
+/** Owning form; the stream remains alive until parsing completes. */
+inline task<ntl::result<tls_client_hello>> read_tls_client_hello(
+    std::shared_ptr<io::async_transport_stream> transport,
+    ntl::net::tls_client_hello_limits limits = {},
+    std::chrono::milliseconds timeout = std::chrono::seconds(5),
+    bool require_server_name = true) {
+  if (!transport)
+    co_return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  co_return co_await read_tls_client_hello_borrowed(
+      *transport, limits, timeout, require_server_name);
+}
+
+} // namespace ntl::net::kernel

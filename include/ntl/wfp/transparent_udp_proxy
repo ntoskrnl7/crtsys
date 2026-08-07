@@ -1,0 +1,1516 @@
+/**
+ * @file transparent_udp_proxy
+ * @brief Bounded bidirectional UDP tuple translation for local proxies.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/wfp/transparent_udp_proxy is a kernel-mode header"
+#endif
+
+#include "classify"
+#include "callout"
+#include "flow"
+#include "injection"
+#include "layers"
+#include "transparent_udp_proxy_contract"
+
+#include <ntl/net/kernel/executor>
+#include <ntl/net/kernel/passive_cleanup_domain>
+#include <ntl/pool_allocator>
+
+#include <array>
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <limits>
+#include <memory>
+#include <new>
+#include <optional>
+#include <span>
+#include <type_traits>
+#include <utility>
+
+namespace ntl::wfp {
+
+struct transparent_udp_proxy_limits {
+  std::size_t maximum_mappings = 512;
+  std::size_t maximum_control_data_size = 4096;
+  std::size_t maximum_packet_size = 64 * 1024;
+  std::size_t maximum_deferred_injections = 256;
+  std::size_t maximum_in_flight_injections = 1024;
+
+  constexpr bool valid() const noexcept {
+    return maximum_mappings != 0 && maximum_mappings <= 1024 &&
+           maximum_control_data_size != 0 &&
+           maximum_control_data_size <= 64 * 1024 &&
+           maximum_packet_size >= 28 && maximum_packet_size <= 64 * 1024 &&
+           maximum_deferred_injections != 0 &&
+           maximum_deferred_injections <= 4096 &&
+           maximum_in_flight_injections != 0 &&
+           maximum_in_flight_injections <= 64 * 1024;
+  }
+};
+
+struct transparent_udp_proxy_statistics {
+  std::uint64_t outbound_packets = 0;
+  std::uint64_t inbound_packets = 0;
+  std::uint64_t mapping_updates = 0;
+  std::uint64_t mapping_misses = 0;
+  std::uint64_t injection_failures = 0;
+  std::uint64_t quota_rejections = 0;
+  std::uint64_t asynchronous_injection_failures = 0;
+  NTSTATUS last_asynchronous_injection_status = STATUS_SUCCESS;
+  std::uint32_t last_mapping_family = AF_UNSPEC;
+  std::uint32_t last_mapping_source_port = 0;
+  std::uint32_t last_mapping_destination_port = 0;
+  std::uint32_t last_mapping_proxy_port = 0;
+  std::uint32_t last_resolution_peer_family = AF_UNSPEC;
+  std::uint32_t last_resolution_peer_port = 0;
+  std::uint32_t last_resolution_proxy_family = AF_UNSPEC;
+  std::uint32_t last_resolution_proxy_port = 0;
+  NTSTATUS last_resolution_status = STATUS_SUCCESS;
+};
+
+/** Value-owned endpoint captured from an original UDP flow. */
+struct transparent_udp_endpoint {
+  ADDRESS_FAMILY family = AF_UNSPEC;
+  std::array<std::byte, 16> address{};
+  std::uint16_t port = 0;
+
+  constexpr bool valid() const noexcept {
+    return (family == AF_INET || family == AF_INET6) && port != 0;
+  }
+
+  static std::optional<transparent_udp_endpoint> from_native(
+      const SOCKADDR_INET &native) noexcept {
+    transparent_udp_endpoint result{};
+    result.family = native.si_family;
+    if (result.family == AF_INET) {
+      result.port = RtlUshortByteSwap(native.Ipv4.sin_port);
+      std::memcpy(result.address.data(), &native.Ipv4.sin_addr, 4);
+    } else if (result.family == AF_INET6) {
+      result.port = RtlUshortByteSwap(native.Ipv6.sin6_port);
+      std::memcpy(result.address.data(), &native.Ipv6.sin6_addr, 16);
+    } else {
+      return std::nullopt;
+    }
+    return result.valid()
+               ? std::optional<transparent_udp_endpoint>(result)
+               : std::nullopt;
+  }
+};
+
+/**
+ * Value-owned original tuple for a connection accepted by a local UDP proxy.
+ * The snapshot remains valid independently of the WFP flow context.
+ */
+struct transparent_udp_original_flow {
+  transparent_udp_endpoint source;
+  transparent_udp_endpoint destination;
+  COMPARTMENT_ID compartment = UNSPECIFIED_COMPARTMENT_ID;
+
+  constexpr bool valid() const noexcept {
+    return source.valid() && destination.valid() &&
+           source.family == destination.family;
+  }
+};
+
+namespace transparent_udp_proxy_detail {
+
+struct endpoint {
+  std::array<std::byte, 16> address{};
+  std::uint16_t port = 0;
+};
+
+struct mapping {
+  endpoint local;
+  endpoint remote;
+  std::uint16_t proxy_port = 0;
+  COMPARTMENT_ID compartment = UNSPECIFIED_COMPARTMENT_ID;
+  ADDRESS_FAMILY family = AF_UNSPEC;
+  IF_INDEX interface_index = 0;
+  IF_INDEX subinterface_index = 0;
+  std::uint64_t touched = 0;
+  std::size_t references = 0;
+  bool valid = false;
+};
+
+inline bool same_endpoint(const endpoint &left, const endpoint &right,
+                          ADDRESS_FAMILY family) noexcept {
+  const std::size_t address_size = family == AF_INET ? 4u : 16u;
+  return left.port == right.port &&
+         std::memcmp(left.address.data(), right.address.data(),
+                     address_size) == 0;
+}
+
+/** Bounded tuple ownership table; independent from native injection handles. */
+class mapping_table {
+public:
+  explicit mapping_table(std::size_t maximum) noexcept
+      : maximum_(maximum != 0 && maximum <= 1024 ? maximum : 0),
+        storage_(maximum_ != 0
+                     ? ntl::make_pool_buffer(
+                           maximum_ * sizeof(mapping),
+                           ntl::pool_kind::nonpaged, ntl::pool_option::none,
+                           ntl::pool_tag("UTmN"))
+                     : ntl::pool_buffer{}),
+        mappings_(static_cast<mapping *>(storage_.get())) {
+    KeInitializeSpinLock(&lock_);
+    if (mappings_)
+      RtlZeroMemory(mappings_, maximum_ * sizeof(mapping));
+  }
+
+  bool valid() const noexcept { return mappings_ != nullptr; }
+
+  bool remember(ADDRESS_FAMILY family, COMPARTMENT_ID compartment,
+                const endpoint &local, const endpoint &remote,
+                std::uint16_t proxy_port) noexcept {
+    if (proxy_port == 0) {
+      quota_rejections_.fetch_add(1, std::memory_order_relaxed);
+      return false;
+    }
+    if (!valid()) {
+      quota_rejections_.fetch_add(1, std::memory_order_relaxed);
+      return false;
+    }
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    std::size_t selected = maximum_;
+    for (std::size_t index = 0; index != maximum_; ++index) {
+      auto &entry = mappings_[index];
+      if (entry.valid && entry.family == family &&
+          entry.compartment == compartment &&
+          same_endpoint(entry.local, local, family) &&
+          entry.proxy_port == proxy_port) {
+        if (!same_endpoint(entry.remote, remote, family) ||
+            entry.references ==
+                (std::numeric_limits<std::size_t>::max)()) {
+          KeReleaseSpinLock(&lock_, old_irql);
+          quota_rejections_.fetch_add(1, std::memory_order_relaxed);
+          return false;
+        }
+        ++entry.references;
+        entry.touched = ++clock_;
+        KeReleaseSpinLock(&lock_, old_irql);
+        updates_.fetch_add(1, std::memory_order_relaxed);
+        return true;
+      }
+      if (!entry.valid) {
+        selected = index;
+        break;
+      }
+    }
+    if (selected == maximum_) {
+      KeReleaseSpinLock(&lock_, old_irql);
+      quota_rejections_.fetch_add(1, std::memory_order_relaxed);
+      return false;
+    }
+    auto &entry = mappings_[selected];
+    entry.local = local;
+    entry.remote = remote;
+    entry.proxy_port = proxy_port;
+    entry.compartment = compartment;
+    entry.family = family;
+    entry.touched = ++clock_;
+    entry.references = 1;
+    entry.valid = true;
+    KeReleaseSpinLock(&lock_, old_irql);
+    updates_.fetch_add(1, std::memory_order_relaxed);
+    return true;
+  }
+
+  void forget(ADDRESS_FAMILY family, COMPARTMENT_ID compartment,
+              const endpoint &local, std::uint16_t proxy_port) noexcept {
+    if (!valid())
+      return;
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    for (std::size_t index = 0; index != maximum_; ++index) {
+      auto &entry = mappings_[index];
+      if (entry.valid && entry.family == family &&
+          entry.compartment == compartment &&
+          same_endpoint(entry.local, local, family) &&
+          entry.proxy_port == proxy_port) {
+        if (entry.references > 1)
+          --entry.references;
+        else
+          entry = {};
+        break;
+      }
+    }
+    KeReleaseSpinLock(&lock_, old_irql);
+  }
+
+  bool remember_route(ADDRESS_FAMILY family, COMPARTMENT_ID compartment,
+                      const endpoint &local, std::uint16_t proxy_port,
+                      IF_INDEX interface_index,
+                      IF_INDEX subinterface_index) noexcept {
+    if (!valid()) {
+      misses_.fetch_add(1, std::memory_order_relaxed);
+      return false;
+    }
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    bool found = false;
+    for (std::size_t index = 0; index != maximum_; ++index) {
+      auto &entry = mappings_[index];
+      if (!entry.valid || entry.family != family ||
+          entry.compartment != compartment ||
+          !same_endpoint(entry.local, local, family) ||
+          entry.proxy_port != proxy_port)
+        continue;
+      entry.interface_index = interface_index;
+      entry.subinterface_index = subinterface_index;
+      entry.touched = ++clock_;
+      found = true;
+      break;
+    }
+    KeReleaseSpinLock(&lock_, old_irql);
+    if (!found)
+      misses_.fetch_add(1, std::memory_order_relaxed);
+    return found;
+  }
+
+  bool find(ADDRESS_FAMILY family, COMPARTMENT_ID compartment,
+            const endpoint &local, std::uint16_t proxy_port,
+            mapping &result) noexcept {
+    if (!valid()) {
+      misses_.fetch_add(1, std::memory_order_relaxed);
+      return false;
+    }
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    bool found = false;
+    for (std::size_t index = 0; index != maximum_; ++index) {
+      auto &entry = mappings_[index];
+      if (!entry.valid || entry.family != family ||
+          entry.compartment != compartment ||
+          !same_endpoint(entry.local, local, family) ||
+          entry.proxy_port != proxy_port)
+        continue;
+      entry.touched = ++clock_;
+      result = entry;
+      found = true;
+      break;
+    }
+    KeReleaseSpinLock(&lock_, old_irql);
+    if (!found)
+      misses_.fetch_add(1, std::memory_order_relaxed);
+    return found;
+  }
+
+  /**
+   * Finds the original client tuple for a local-proxy reply.
+   *
+   * A transport injection directed at loopback can cause TCP/IP to select a
+   * different local address for the proxy-facing leg than the address chosen
+   * for the original routed flow.  Prefer the exact endpoint, then accept a
+   * port-only match only when it is unique in the compartment.  Ambiguous
+   * shared-port mappings fail closed rather than restoring the wrong flow.
+   */
+  bool find_reply(ADDRESS_FAMILY family, COMPARTMENT_ID compartment,
+                  const endpoint &observed_local,
+                  std::uint16_t proxy_port, mapping &result) noexcept {
+    if (!valid()) {
+      misses_.fetch_add(1, std::memory_order_relaxed);
+      return false;
+    }
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    std::size_t selected = maximum_;
+    std::size_t unique_port_match = maximum_;
+    bool ambiguous = false;
+    for (std::size_t index = 0; index != maximum_; ++index) {
+      auto &entry = mappings_[index];
+      if (!entry.valid || entry.family != family ||
+          entry.compartment != compartment ||
+          entry.local.port != observed_local.port ||
+          entry.proxy_port != proxy_port)
+        continue;
+      if (same_endpoint(entry.local, observed_local, family)) {
+        selected = index;
+        break;
+      }
+      if (unique_port_match == maximum_)
+        unique_port_match = index;
+      else
+        ambiguous = true;
+    }
+    if (selected == maximum_ && !ambiguous)
+      selected = unique_port_match;
+    const bool found = selected != maximum_;
+    if (found) {
+      auto &entry = mappings_[selected];
+      entry.touched = ++clock_;
+      result = entry;
+    }
+    KeReleaseSpinLock(&lock_, old_irql);
+    if (!found)
+      misses_.fetch_add(1, std::memory_order_relaxed);
+    return found;
+  }
+
+  /**
+   * Resolves the original tuple seen by an accepted local-proxy connection.
+   * A source tuple duplicated across compartments is deliberately ambiguous
+   * and fails closed instead of disclosing the wrong destination.
+   */
+  NTSTATUS find_original_flow(ADDRESS_FAMILY family,
+                              const endpoint &proxy_peer,
+                              std::uint16_t proxy_port,
+                              mapping &result) noexcept {
+    if (!valid()) {
+      misses_.fetch_add(1, std::memory_order_relaxed);
+      return STATUS_INVALID_DEVICE_STATE;
+    }
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    std::size_t exact_match = maximum_;
+    std::size_t unique_port_match = maximum_;
+    bool exact_ambiguous = false;
+    bool port_ambiguous = false;
+    for (std::size_t index = 0; index != maximum_; ++index) {
+      auto &entry = mappings_[index];
+      if (!entry.valid || entry.family != family ||
+          entry.proxy_port != proxy_port ||
+          entry.local.port != proxy_peer.port)
+        continue;
+      if (same_endpoint(entry.local, proxy_peer, family)) {
+        if (exact_match == maximum_)
+          exact_match = index;
+        else
+          exact_ambiguous = true;
+      } else {
+        if (unique_port_match == maximum_)
+          unique_port_match = index;
+        else
+          port_ambiguous = true;
+      }
+    }
+    std::size_t selected = maximum_;
+    bool ambiguous = false;
+    if (exact_match != maximum_) {
+      selected = exact_match;
+      ambiguous = exact_ambiguous;
+    } else if (unique_port_match != maximum_) {
+      selected = unique_port_match;
+      ambiguous = port_ambiguous;
+    }
+    const bool found = selected != maximum_ && !ambiguous;
+    if (found) {
+      auto &entry = mappings_[selected];
+      entry.touched = ++clock_;
+      result = entry;
+    }
+    KeReleaseSpinLock(&lock_, old_irql);
+    if (!found)
+      misses_.fetch_add(1, std::memory_order_relaxed);
+    return ambiguous ? STATUS_OBJECT_NAME_COLLISION
+                     : found ? STATUS_SUCCESS : STATUS_NOT_FOUND;
+  }
+
+  std::uint64_t updates() const noexcept {
+    return updates_.load(std::memory_order_relaxed);
+  }
+  std::uint64_t misses() const noexcept {
+    return misses_.load(std::memory_order_relaxed);
+  }
+  std::uint64_t quota_rejections() const noexcept {
+    return quota_rejections_.load(std::memory_order_relaxed);
+  }
+
+private:
+  std::size_t maximum_ = 0;
+  ntl::pool_buffer storage_{};
+  mapping *mappings_ = nullptr;
+  mutable KSPIN_LOCK lock_{};
+  std::uint64_t clock_ = 0;
+  std::atomic<std::uint64_t> updates_{0};
+  std::atomic<std::uint64_t> misses_{0};
+  std::atomic<std::uint64_t> quota_rejections_{0};
+};
+
+class state {
+public:
+  state(transport_injector &&v4, transport_injector &&v6,
+        network_injector &&network_v4_value,
+        network_injector &&network_v6_value,
+        transparent_udp_proxy_limits limits,
+        ntl::net::kernel::passive_cleanup_domain &domain) noexcept
+      : injector_v4(std::move(v4)), injector_v6(std::move(v6)),
+        network_v4(std::move(network_v4_value)),
+        network_v6(std::move(network_v6_value)),
+        deferred_injections(
+            DelayedWorkQueue, ntl::pool_tag("dUwN"),
+            {limits.maximum_deferred_injections}),
+        limits(limits), mappings(limits.maximum_mappings),
+        cleanup(&state::cleanup_state, this),
+        domain(&domain) {
+  }
+
+  static void cleanup_state(void *context) noexcept {
+    auto *self = static_cast<state *>(context);
+    self->injector_v4.reset();
+    self->injector_v6.reset();
+    self->network_v4.reset();
+    self->network_v6.reset();
+    delete self;
+  }
+
+  void retire() noexcept { domain->retire_deferred(cleanup); }
+
+  transport_injector &injector(ADDRESS_FAMILY family) noexcept {
+    return family == AF_INET ? injector_v4 : injector_v6;
+  }
+
+  network_injector &network(ADDRESS_FAMILY family) noexcept {
+    return family == AF_INET ? network_v4 : network_v6;
+  }
+
+  bool remember(ADDRESS_FAMILY family, COMPARTMENT_ID compartment,
+                const endpoint &local, const endpoint &remote,
+                std::uint16_t proxy_port) noexcept {
+    const bool remembered =
+        mappings.remember(family, compartment, local, remote, proxy_port);
+    if (remembered) {
+      last_mapping_family.store(family, std::memory_order_relaxed);
+      last_mapping_source_port.store(local.port, std::memory_order_relaxed);
+      last_mapping_destination_port.store(remote.port,
+                                          std::memory_order_relaxed);
+      last_mapping_proxy_port.store(proxy_port, std::memory_order_relaxed);
+    }
+    return remembered;
+  }
+
+  void forget(ADDRESS_FAMILY family, COMPARTMENT_ID compartment,
+              const endpoint &local, std::uint16_t proxy_port) noexcept {
+    mappings.forget(family, compartment, local, proxy_port);
+  }
+
+  bool remember_route(ADDRESS_FAMILY family, COMPARTMENT_ID compartment,
+                      const endpoint &local, std::uint16_t proxy_port,
+                      IF_INDEX interface_index,
+                      IF_INDEX subinterface_index) noexcept {
+    return mappings.remember_route(family, compartment, local, proxy_port,
+                                   interface_index, subinterface_index);
+  }
+
+  bool find(ADDRESS_FAMILY family, COMPARTMENT_ID compartment,
+            const endpoint &local, std::uint16_t proxy_port,
+            mapping &result) noexcept {
+    return mappings.find(family, compartment, local, proxy_port, result);
+  }
+
+  bool find_reply(ADDRESS_FAMILY family, COMPARTMENT_ID compartment,
+                  const endpoint &local, std::uint16_t proxy_port,
+                  mapping &result) noexcept {
+    return mappings.find_reply(family, compartment, local, proxy_port,
+                               result);
+  }
+
+  NTSTATUS find_original_flow(ADDRESS_FAMILY family,
+                              const endpoint &proxy_peer,
+                              std::uint16_t proxy_port,
+                              mapping &result) noexcept {
+    const NTSTATUS status = mappings.find_original_flow(
+        family, proxy_peer, proxy_port, result);
+    last_resolution_peer_family.store(family, std::memory_order_relaxed);
+    last_resolution_peer_port.store(proxy_peer.port,
+                                    std::memory_order_relaxed);
+    last_resolution_proxy_port.store(proxy_port,
+                                     std::memory_order_relaxed);
+    last_resolution_status.store(status, std::memory_order_relaxed);
+    return status;
+  }
+
+  transparent_udp_proxy_statistics statistics() const noexcept {
+    const auto transport_v4 = injector_v4.statistics();
+    const auto transport_v6 = injector_v6.statistics();
+    const auto ip_v4 = network_v4.statistics();
+    const auto ip_v6 = network_v6.statistics();
+    const std::uint64_t asynchronous_failures =
+        transport_v4.completion_failures +
+        transport_v6.completion_failures + ip_v4.completion_failures +
+        ip_v6.completion_failures;
+    const NTSTATUS last_asynchronous_status =
+        !NT_SUCCESS(ip_v6.last_completion_status)
+            ? ip_v6.last_completion_status
+        : !NT_SUCCESS(ip_v4.last_completion_status)
+            ? ip_v4.last_completion_status
+        : !NT_SUCCESS(transport_v6.last_completion_status)
+            ? transport_v6.last_completion_status
+            : transport_v4.last_completion_status;
+    return {
+        outbound_packets.load(std::memory_order_relaxed),
+        inbound_packets.load(std::memory_order_relaxed),
+        mappings.updates(),
+        mappings.misses(),
+        injection_failures.load(std::memory_order_relaxed),
+        mappings.quota_rejections() +
+            allocation_quota_rejections.load(std::memory_order_relaxed) +
+            transport_v4.quota_rejections + transport_v6.quota_rejections +
+            ip_v4.quota_rejections + ip_v6.quota_rejections,
+        asynchronous_failures,
+        last_asynchronous_status,
+        last_mapping_family.load(std::memory_order_relaxed),
+        last_mapping_source_port.load(std::memory_order_relaxed),
+        last_mapping_destination_port.load(std::memory_order_relaxed),
+        last_mapping_proxy_port.load(std::memory_order_relaxed),
+        last_resolution_peer_family.load(std::memory_order_relaxed),
+        last_resolution_peer_port.load(std::memory_order_relaxed),
+        last_resolution_proxy_family.load(std::memory_order_relaxed),
+        last_resolution_proxy_port.load(std::memory_order_relaxed),
+        last_resolution_status.load(std::memory_order_relaxed)};
+  }
+
+  transport_injector injector_v4;
+  transport_injector injector_v6;
+  network_injector network_v4;
+  network_injector network_v6;
+  ntl::net::kernel::executor deferred_injections;
+  transparent_udp_proxy_limits limits{};
+  mapping_table mappings;
+  std::atomic<bool> accepting{true};
+  std::atomic<std::uint64_t> outbound_packets{0};
+  std::atomic<std::uint64_t> inbound_packets{0};
+  std::atomic<std::uint64_t> injection_failures{0};
+  std::atomic<std::uint64_t> allocation_quota_rejections{0};
+  std::atomic<std::uint32_t> last_mapping_family{AF_UNSPEC};
+  std::atomic<std::uint32_t> last_mapping_source_port{0};
+  std::atomic<std::uint32_t> last_mapping_destination_port{0};
+  std::atomic<std::uint32_t> last_mapping_proxy_port{0};
+  std::atomic<std::uint32_t> last_resolution_peer_family{AF_UNSPEC};
+  std::atomic<std::uint32_t> last_resolution_peer_port{0};
+  std::atomic<std::uint32_t> last_resolution_proxy_family{AF_UNSPEC};
+  std::atomic<std::uint32_t> last_resolution_proxy_port{0};
+  std::atomic<NTSTATUS> last_resolution_status{STATUS_SUCCESS};
+  ntl::net::kernel::passive_cleanup_item cleanup;
+  ntl::net::kernel::passive_cleanup_domain *domain = nullptr;
+};
+
+template <class Layer>
+inline constexpr bool ipv4_layer =
+    std::is_same_v<Layer, layers::ale_flow_established_v4> ||
+    std::is_same_v<Layer, layers::datagram_data_v4> ||
+    std::is_same_v<Layer, layers::outbound_transport_v4> ||
+    std::is_same_v<Layer, layers::outbound_ip_packet_v4>;
+
+template <class Layer>
+constexpr ADDRESS_FAMILY family() noexcept {
+  return ipv4_layer<Layer> ? AF_INET : AF_INET6;
+}
+
+template <class Layer>
+bool read_address(const classify_event<Layer> &event,
+                  typename Layer::field field,
+                  std::array<std::byte, 16> &destination) noexcept {
+  if constexpr (ipv4_layer<Layer>) {
+    const auto address = event.value(field).uint32();
+    if (!address)
+      return false;
+    const std::uint32_t network = RtlUlongByteSwap(*address);
+    std::memcpy(destination.data(), &network, sizeof(network));
+    return true;
+  } else {
+    const auto *address = event.value(field).byte_array16();
+    if (!address)
+      return false;
+    std::memcpy(destination.data(), address->byteArray16, 16);
+    return true;
+  }
+}
+
+inline std::span<const std::byte> address_span(
+    const endpoint &value, ADDRESS_FAMILY family) noexcept {
+  return std::span<const std::byte>(value.address).first(
+      family == AF_INET ? 4u : 16u);
+}
+
+inline endpoint loopback(ADDRESS_FAMILY family,
+                         std::uint16_t port) noexcept {
+  endpoint result{};
+  result.port = port;
+  if (family == AF_INET) {
+    result.address[0] = std::byte{127};
+    result.address[3] = std::byte{1};
+  } else {
+    result.address[15] = std::byte{1};
+  }
+  return result;
+}
+
+struct udp_ip_layout {
+  std::uint32_t ip_header_size = 0;
+  std::uint16_t source_port = 0;
+  std::uint16_t destination_port = 0;
+  std::array<std::byte, 16> destination_address{};
+};
+
+inline ntl::result<std::uint8_t>
+read_u8(ntl::net::scatter_view bytes, std::size_t offset) noexcept {
+  return bytes.read<std::uint8_t>(offset);
+}
+
+inline ntl::result<std::uint16_t>
+read_be16(ntl::net::scatter_view bytes, std::size_t offset) noexcept {
+  std::array<std::byte, 2> value{};
+  const ntl::status copied = bytes.copy_to(value, offset);
+  if (!copied.is_ok())
+    return ntl::unexpected(static_cast<NTSTATUS>(copied));
+  return ntl::ok(static_cast<std::uint16_t>(
+      (std::to_integer<std::uint16_t>(value[0]) << 8) |
+      std::to_integer<std::uint16_t>(value[1])));
+}
+
+/** Allocation-free IPv4/IPv6 UDP header location with bounded extension walk. */
+inline ntl::result<udp_ip_layout>
+parse_udp_ip_packet(ntl::net::scatter_view bytes,
+                    ADDRESS_FAMILY family) noexcept {
+  constexpr std::uint8_t udp_protocol = IPPROTO_UDP;
+  std::size_t transport_offset = 0;
+  std::size_t packet_size = 0;
+  std::array<std::byte, 16> destination_address{};
+  if (family == AF_INET) {
+    if (bytes.size() < 28)
+      return ntl::unexpected(STATUS_BUFFER_TOO_SMALL);
+    auto version_ihl = read_u8(bytes, 0);
+    auto protocol = read_u8(bytes, 9);
+    auto fragment = read_be16(bytes, 6);
+    auto total_length = read_be16(bytes, 2);
+    if (!version_ihl || !protocol || !fragment || !total_length)
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    const std::uint8_t version = static_cast<std::uint8_t>(*version_ihl >> 4);
+    const std::size_t ihl =
+        static_cast<std::size_t>(*version_ihl & 0x0f) * 4u;
+    if (version != 4 || ihl < 20 || ihl > 60 ||
+        *protocol != udp_protocol || (*fragment & 0x3fff) != 0 ||
+        ihl > bytes.size() || bytes.size() - ihl < 8 ||
+        *total_length < ihl + 8 || *total_length > bytes.size())
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    transport_offset = ihl;
+    packet_size = *total_length;
+    const ntl::status copied = bytes.copy_to(
+        std::span(destination_address).first(4), 16);
+    if (!copied.is_ok())
+      return ntl::unexpected(static_cast<NTSTATUS>(copied));
+  } else if (family == AF_INET6) {
+    if (bytes.size() < 48)
+      return ntl::unexpected(STATUS_BUFFER_TOO_SMALL);
+    auto version = read_u8(bytes, 0);
+    auto next = read_u8(bytes, 6);
+    auto payload_length = read_be16(bytes, 4);
+    if (!version || !next || !payload_length || (*version >> 4) != 6 ||
+        *payload_length == 0 ||
+        static_cast<std::size_t>(*payload_length) > bytes.size() - 40)
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    packet_size = 40u + static_cast<std::size_t>(*payload_length);
+    const ntl::status copied = bytes.copy_to(destination_address, 24);
+    if (!copied.is_ok())
+      return ntl::unexpected(static_cast<NTSTATUS>(copied));
+    std::size_t offset = 40;
+    for (std::size_t extensions = 0; *next != udp_protocol; ++extensions) {
+      if (extensions == 8 || offset > packet_size ||
+          packet_size - offset < 8)
+        return ntl::unexpected(STATUS_NOT_SUPPORTED);
+      const std::uint8_t type = *next;
+      auto following = read_u8(bytes, offset);
+      if (!following)
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      std::size_t length = 0;
+      if (type == 0 || type == 43 || type == 60) {
+        auto units = read_u8(bytes, offset + 1);
+        if (!units)
+          return ntl::unexpected(STATUS_DATA_ERROR);
+        length = (static_cast<std::size_t>(*units) + 1u) * 8u;
+      } else if (type == 44) {
+        auto fragment = read_be16(bytes, offset + 2);
+        if (!fragment || (*fragment & 0xfff9) != 0)
+          return ntl::unexpected(STATUS_NOT_SUPPORTED);
+        length = 8;
+      } else if (type == 51) {
+        auto units = read_u8(bytes, offset + 1);
+        if (!units)
+          return ntl::unexpected(STATUS_DATA_ERROR);
+        length = (static_cast<std::size_t>(*units) + 2u) * 4u;
+      } else {
+        return ntl::unexpected(STATUS_NOT_SUPPORTED);
+      }
+      if (length < 8 || length > packet_size - offset)
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      offset += length;
+      next = following;
+    }
+    if (offset > packet_size || packet_size - offset < 8 ||
+        offset > (std::numeric_limits<std::uint32_t>::max)())
+      return ntl::unexpected(STATUS_BUFFER_TOO_SMALL);
+    transport_offset = offset;
+  } else {
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  }
+
+  auto source = read_be16(bytes, transport_offset);
+  auto destination = read_be16(bytes, transport_offset + 2);
+  auto udp_length = read_be16(bytes, transport_offset + 4);
+  if (!source || !destination || !udp_length || *source == 0 ||
+      *destination == 0 || *udp_length < 8 ||
+      *udp_length > packet_size - transport_offset)
+    return ntl::unexpected(STATUS_DATA_ERROR);
+  return ntl::ok(udp_ip_layout{
+      static_cast<std::uint32_t>(transport_offset), *source, *destination,
+      destination_address});
+}
+
+} // namespace transparent_udp_proxy_detail
+
+/** Per-flow state owned by flow_target and safe after facade destruction. */
+struct transparent_udp_proxy_flow {
+  ~transparent_udp_proxy_flow() noexcept {
+    if (owner && local.port != 0)
+      owner->forget(family, compartment, local, proxy_port);
+  }
+
+  std::shared_ptr<transparent_udp_proxy_detail::state> owner;
+  transparent_udp_proxy_detail::endpoint local;
+  transparent_udp_proxy_detail::endpoint remote;
+  std::uint16_t proxy_port = 0;
+  COMPARTMENT_ID compartment = UNSPECIFIED_COMPARTMENT_ID;
+  ADDRESS_FAMILY family = AF_UNSPEC;
+};
+
+/**
+ * @brief Owning, closeable runtime for a local transparent UDP proxy.
+ *
+ * close() is nonblocking and idempotent. Existing flow contexts retain the
+ * injection handles; their final release is retired to the driver runtime's
+ * PASSIVE cleanup worker, even when WFP deletes the last flow at DISPATCH.
+ */
+class transparent_udp_proxy {
+public:
+  transparent_udp_proxy() = default;
+
+  static ntl::result<transparent_udp_proxy> try_create(
+      PDRIVER_OBJECT driver,
+      transparent_udp_proxy_limits limits = {}) noexcept {
+    if (!driver || !limits.valid() || KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    const injection_limits injection_limit{
+        limits.maximum_in_flight_injections};
+    auto v4 = transport_injector::try_create(AF_INET, injection_limit);
+    if (!v4)
+      return ntl::unexpected(v4.status());
+    auto v6 = transport_injector::try_create(AF_INET6, injection_limit);
+    if (!v6)
+      return ntl::unexpected(v6.status());
+    auto network_v4 =
+        network_injector::try_create(driver, AF_INET, injection_limit);
+    if (!network_v4)
+      return ntl::unexpected(network_v4.status());
+    auto network_v6 =
+        network_injector::try_create(driver, AF_INET6, injection_limit);
+    if (!network_v6)
+      return ntl::unexpected(network_v6.status());
+    auto *domain =
+        ntl::net::kernel::borrowed_runtime_passive_cleanup_domain();
+    if (!domain)
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+    auto *raw = new (std::nothrow) transparent_udp_proxy_detail::state(
+        std::move(*v4), std::move(*v6), std::move(*network_v4),
+        std::move(*network_v6), limits, *domain);
+    if (!raw)
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    if (!raw->mappings.valid() ||
+        !raw->deferred_injections.creation_status().is_ok()) {
+      delete raw;
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+    const ntl::status registered = domain->register_item(raw->cleanup);
+    if (!registered.is_ok()) {
+      delete raw;
+      return ntl::unexpected(static_cast<NTSTATUS>(registered));
+    }
+    try {
+      std::shared_ptr<transparent_udp_proxy_detail::state> state(
+          raw, [](transparent_udp_proxy_detail::state *value) noexcept {
+            value->retire();
+          });
+      return ntl::ok(transparent_udp_proxy(std::move(state)));
+    } catch (...) {
+      raw->retire();
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+  }
+
+  void close() noexcept {
+    if (state_) {
+      state_->accepting.store(false, std::memory_order_release);
+      state_->deferred_injections.close();
+    }
+  }
+
+  explicit operator bool() const noexcept {
+    return state_ && state_->accepting.load(std::memory_order_acquire);
+  }
+
+  transparent_udp_proxy_statistics statistics() const noexcept {
+    return state_ ? state_->statistics()
+                  : transparent_udp_proxy_statistics{};
+  }
+
+  /**
+   * Resolves an accepted local-proxy peer to its original WFP flow tuple.
+   * Both native addresses are copied during the call; the returned snapshot
+   * owns all data and does not borrow the MsQuic/WSK address storage.
+   */
+  ntl::result<transparent_udp_original_flow> resolve_original_flow(
+      const transparent_udp_endpoint &proxy_peer,
+      std::uint16_t proxy_port) const noexcept {
+    auto owner = state_;
+    if (!owner || !proxy_peer.valid() || proxy_port == 0)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    owner->last_resolution_proxy_family.store(
+        proxy_peer.family, std::memory_order_relaxed);
+
+    transparent_udp_proxy_detail::endpoint peer{};
+    peer.port = proxy_peer.port;
+    peer.address = proxy_peer.address;
+
+    transparent_udp_proxy_detail::mapping mapped{};
+    const NTSTATUS resolved = owner->find_original_flow(
+        proxy_peer.family, peer, proxy_port, mapped);
+    if (!NT_SUCCESS(resolved))
+      return ntl::unexpected(resolved);
+
+    transparent_udp_original_flow result{};
+    result.source.family = proxy_peer.family;
+    result.source.address = mapped.local.address;
+    result.source.port = mapped.local.port;
+    result.destination.family = proxy_peer.family;
+    result.destination.address = mapped.remote.address;
+    result.destination.port = mapped.remote.port;
+    result.compartment = mapped.compartment;
+    return result.valid() ? ntl::ok(result)
+                          : ntl::unexpected(STATUS_DATA_ERROR);
+  }
+
+  ntl::result<transparent_udp_original_flow> resolve_original_flow(
+      const SOCKADDR_INET &proxy_peer,
+      const SOCKADDR_INET &proxy_local) const noexcept {
+    const auto peer_value = transparent_udp_endpoint::from_native(proxy_peer);
+    const auto local_value = transparent_udp_endpoint::from_native(proxy_local);
+    if (!peer_value || !local_value ||
+        peer_value->family != local_value->family)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    return resolve_original_flow(*peer_value, local_value->port);
+  }
+
+  template <class FlowLayer, class DatagramLayer>
+  ntl::wfp::arbitration_decision remember_flow(
+      const classify_event<FlowLayer> &event,
+      const flow_target<DatagramLayer,
+                        transparent_udp_proxy_flow> &target) const noexcept {
+    static_assert(
+        transparent_udp_proxy_detail::family<FlowLayer>() ==
+        transparent_udp_proxy_detail::family<DatagramLayer>());
+    auto state = state_;
+    if (!state ||
+        !state->accepting.load(std::memory_order_acquire))
+      return arbitration_decision::continue_classification;
+    const auto flow = event.metadata().flow_handle();
+    const auto protocol = event.value(FlowLayer::field::protocol).uint8();
+    const auto direction = event.value(FlowLayer::field::direction).uint32();
+    const auto local_port = event.value(FlowLayer::field::local_port).uint16();
+    const auto remote_port =
+        event.value(FlowLayer::field::remote_port).uint16();
+    const auto compartment = event.metadata().compartment_id();
+    const std::uint64_t context = event.filter().context();
+    if (!flow || !protocol || !direction || !local_port || !remote_port ||
+        !compartment ||
+        *protocol != IPPROTO_UDP || *direction != FWP_DIRECTION_OUTBOUND ||
+        context == 0 || context > MAXUSHORT)
+      return arbitration_decision::continue_classification;
+    auto remembered = std::unique_ptr<transparent_udp_proxy_flow>(
+        new (std::nothrow) transparent_udp_proxy_flow{});
+    if (!remembered) {
+      state->allocation_quota_rejections.fetch_add(
+          1, std::memory_order_relaxed);
+      return arbitration_decision::block;
+    }
+    remembered->owner = std::move(state);
+    remembered->local.port = *local_port;
+    remembered->remote.port = *remote_port;
+    remembered->proxy_port = static_cast<std::uint16_t>(context);
+    remembered->compartment =
+        static_cast<COMPARTMENT_ID>(*compartment);
+    remembered->family =
+        transparent_udp_proxy_detail::family<FlowLayer>();
+    if (!transparent_udp_proxy_detail::read_address(
+            event, FlowLayer::field::local_address,
+            remembered->local.address) ||
+        !transparent_udp_proxy_detail::read_address(
+            event, FlowLayer::field::remote_address,
+            remembered->remote.address))
+      return arbitration_decision::block;
+    auto owner = remembered->owner;
+    const auto remembered_family = remembered->family;
+    const auto remembered_compartment = remembered->compartment;
+    const auto remembered_local = remembered->local;
+    if (!owner->remember(remembered_family, remembered_compartment,
+                         remembered->local, remembered->remote,
+                         remembered->proxy_port))
+      return arbitration_decision::block;
+    const ntl::status associated =
+        target.associate(*flow, std::move(remembered));
+    if (!associated.is_ok())
+      owner->forget(remembered_family, remembered_compartment,
+                    remembered_local,
+                    static_cast<std::uint16_t>(context));
+    return associated.is_ok()
+               ? arbitration_decision::continue_classification
+               : arbitration_decision::block;
+  }
+
+  template <class DatagramLayer>
+  terminating_decision classify(
+      const classify_event<DatagramLayer> &event,
+      transparent_udp_proxy_flow *flow) const noexcept {
+    using namespace transparent_udp_proxy_detail;
+    std::shared_ptr<state> owner = flow ? flow->owner : state_;
+    if (!owner)
+      return terminating_decision::permit;
+    if (!owner->accepting.load(std::memory_order_acquire))
+      return terminating_decision::block_and_absorb;
+    const borrowed_packet packet = event.packet();
+    const auto direction = event.value(DatagramLayer::field::direction).uint32();
+    const auto protocol = event.value(DatagramLayer::field::protocol).uint8();
+    const auto compartment = event.metadata().compartment_id();
+    if (!packet || !direction || !protocol || !compartment ||
+        *protocol != IPPROTO_UDP)
+      return terminating_decision::block_and_absorb;
+    const ADDRESS_FAMILY packet_family = family<DatagramLayer>();
+    auto &injector = owner->injector(packet_family);
+    const auto injected = injector.query(packet);
+    if (injected == FWPS_PACKET_INJECTED_BY_SELF ||
+        injected == FWPS_PACKET_PREVIOUSLY_INJECTED_BY_SELF)
+      return terminating_decision::permit;
+
+    if (*direction == FWP_DIRECTION_OUTBOUND) {
+      if (auto reverse = try_reverse_outbound(
+              event, *owner, packet, packet_family,
+              static_cast<COMPARTMENT_ID>(*compartment));
+          reverse)
+        return *reverse;
+
+      // The packet filter can be broader than the application-scoped
+      // FLOW_ESTABLISHED filter because DATAGRAM_DATA has no application-ID
+      // condition. A missing context therefore means this is an unrelated
+      // flow (including the proxy's own origin transport), not an admission
+      // failure. Selected flows fail closed synchronously in remember_flow().
+      if (!flow)
+        // DATAGRAM_DATA translation uses a terminating filter.  Returning
+        // CONTINUE from such a callout is normalized to BLOCK, so explicitly
+        // permit traffic that the application-scoped FLOW_ESTABLISHED filter
+        // did not select.  This also prevents a local proxy from intercepting
+        // its own origin connection when it targets the same remote port.
+        return terminating_decision::permit;
+      const auto endpoint_handle =
+          event.metadata().transport_endpoint_handle();
+      const auto control = event.metadata().transport_control_data();
+      const auto interface_index =
+          event.value(DatagramLayer::field::interface_index).uint32();
+      const auto subinterface_index =
+          event.value(DatagramLayer::field::subinterface_index).uint32();
+      if (!endpoint_handle || !control || !interface_index ||
+          !subinterface_index ||
+          control->size() > owner->limits.maximum_control_data_size)
+        return fail(*owner);
+      if (!owner->remember_route(
+              packet_family, static_cast<COMPARTMENT_ID>(*compartment),
+              flow->local, flow->proxy_port, *interface_index,
+              *subinterface_index))
+        return fail(*owner);
+      auto clone = cloned_packet::try_create(packet);
+      const endpoint target = loopback(flow->family, flow->proxy_port);
+      if (!clone || !clone->rewrite_udp_destination_port(
+                         flow->proxy_port).is_ok())
+        return fail(*owner);
+      auto request = transport_send_request::try_copy(
+          *endpoint_handle, flow->family,
+          static_cast<COMPARTMENT_ID>(*compartment),
+          address_span(target, flow->family), SCOPE_ID{}, *control,
+          ntl::net::buffer_limits{
+              owner->limits.maximum_control_data_size},
+          ntl::pool_tag("qUwN"));
+      if (!request ||
+          !injector
+               .inject_send(transport_send_packet(
+                   std::move(*clone), std::move(*request)))
+               .is_ok())
+        return fail(*owner);
+      owner->outbound_packets.fetch_add(1, std::memory_order_relaxed);
+      return terminating_decision::block_and_absorb;
+    }
+
+    if (*direction != FWP_DIRECTION_INBOUND)
+      return terminating_decision::block_and_absorb;
+    const auto local_port =
+        event.value(DatagramLayer::field::local_port).uint16();
+    const auto remote_port =
+        event.value(DatagramLayer::field::remote_port).uint16();
+    const std::uint64_t context = event.filter().context();
+    if (!local_port || !remote_port || context == 0 ||
+        context > MAXUSHORT ||
+        *remote_port != static_cast<std::uint16_t>(context))
+      return terminating_decision::permit;
+    mapping translated{};
+    if (flow) {
+      translated.local = flow->local;
+      translated.remote = flow->remote;
+      translated.compartment = flow->compartment;
+      translated.family = flow->family;
+      translated.valid = true;
+    } else {
+      endpoint local{};
+      local.port = *local_port;
+      if (!read_address(event, DatagramLayer::field::local_address,
+                        local.address) ||
+          !owner->find_reply(packet_family,
+                             static_cast<COMPARTMENT_ID>(*compartment), local,
+                             static_cast<std::uint16_t>(context), translated))
+      return terminating_decision::block_and_absorb;
+    }
+    const auto ip_header = event.metadata().ip_header_size();
+    const auto transport_header =
+        event.metadata().transport_header_size();
+    const auto interface_index =
+        event.value(DatagramLayer::field::interface_index).uint32();
+    const auto subinterface_index =
+        event.value(DatagramLayer::field::subinterface_index).uint32();
+    if (!ip_header || !transport_header || !interface_index ||
+        !subinterface_index)
+      return fail(*owner);
+    auto receive = transport_receive_packet::try_clone(
+        packet, *ip_header, *transport_header);
+    if (!receive ||
+        !receive->rewrite_udp_source(
+                    translated.remote.port, packet_family,
+                    address_span(translated.remote, packet_family),
+                    address_span(translated.local, packet_family),
+                    0, 0)
+             .is_ok() ||
+        !injector.inject_receive(
+                    std::move(*receive), packet_family,
+                    static_cast<COMPARTMENT_ID>(*compartment),
+                    *interface_index, *subinterface_index)
+             .is_ok())
+      return fail(*owner);
+    owner->inbound_packets.fetch_add(1, std::memory_order_relaxed);
+    return terminating_decision::block_and_absorb;
+  }
+
+  /**
+   * @brief Restores proxy replies at an outbound transport layer.
+   *
+   * Connected UDP clients can discard a local proxy reply before an inbound
+   * datagram callout observes it because the proxy source tuple is not the
+   * connected peer.  Register this handler at OUTBOUND_TRANSPORT_V4/V6 for
+   * the dedicated proxy source port.  It reconstructs the original peer tuple
+   * and injects the clone directly into the receive path.
+   */
+  template <class OutboundTransportLayer>
+  terminating_decision classify_reverse_outbound(
+      const classify_event<OutboundTransportLayer> &event) const noexcept {
+    static_assert(
+        std::is_same_v<OutboundTransportLayer,
+                       layers::outbound_transport_v4> ||
+        std::is_same_v<OutboundTransportLayer,
+                       layers::outbound_transport_v6>);
+    using namespace transparent_udp_proxy_detail;
+    auto owner = state_;
+    if (!owner)
+      return terminating_decision::permit;
+    if (!owner->accepting.load(std::memory_order_acquire))
+      return terminating_decision::block_and_absorb;
+    const borrowed_packet packet = event.packet();
+    const auto protocol =
+        event.value(OutboundTransportLayer::field::protocol).uint8();
+    const auto compartment = event.metadata().compartment_id();
+    if (!packet || !protocol || !compartment || *protocol != IPPROTO_UDP)
+      return terminating_decision::permit;
+    const ADDRESS_FAMILY packet_family = family<OutboundTransportLayer>();
+    auto &injector = owner->injector(packet_family);
+    const auto injected = injector.query(packet);
+    if (injected == FWPS_PACKET_INJECTED_BY_SELF ||
+        injected == FWPS_PACKET_PREVIOUSLY_INJECTED_BY_SELF)
+      return terminating_decision::permit;
+    auto reverse = try_reverse_outbound(
+        event, *owner, packet, packet_family,
+        static_cast<COMPARTMENT_ID>(*compartment));
+    return reverse ? *reverse : terminating_decision::permit;
+  }
+
+  /**
+   * @brief Restores proxy replies emitted through a kernel fast UDP datapath.
+   *
+   * Some kernel transports bypass DATAGRAM_DATA and the ordinary outbound
+   * transport layer.  OUTBOUND_IPPACKET remains the supported interception
+   * point.  This handler parses a bounded IPv4/IPv6 header chain, validates the
+   * dedicated proxy source port, restores the original tuple, and reinjects a
+   * fresh NBL through the network send path so TCP/IP performs normal loopback
+   * delivery.
+   */
+  template <class OutboundIpLayer>
+  terminating_decision classify_reverse_network(
+      const classify_event<OutboundIpLayer> &event) const noexcept {
+    static_assert(
+        std::is_same_v<OutboundIpLayer, layers::outbound_ip_packet_v4> ||
+        std::is_same_v<OutboundIpLayer, layers::outbound_ip_packet_v6>);
+    using namespace transparent_udp_proxy_detail;
+    auto owner = state_;
+    if (!owner)
+      return terminating_decision::permit;
+    if (!owner->accepting.load(std::memory_order_acquire))
+      return terminating_decision::permit;
+    const borrowed_packet packet = event.packet();
+    if (!packet)
+      return terminating_decision::permit;
+    const ADDRESS_FAMILY packet_family = family<OutboundIpLayer>();
+    auto &network = owner->network(packet_family);
+    const auto injected = network.query(packet);
+    if (injected == FWPS_PACKET_INJECTED_BY_SELF ||
+        injected == FWPS_PACKET_PREVIOUSLY_INJECTED_BY_SELF)
+      return terminating_decision::permit;
+
+    const auto layout = parse_udp_ip_packet(packet.bytes(), packet_family);
+    const std::uint64_t context = event.filter().context();
+    if (!layout || context == 0 || context > MAXUSHORT ||
+        layout->source_port != static_cast<std::uint16_t>(context))
+      return terminating_decision::permit;
+
+    const auto compartment = event.metadata().compartment_id();
+    if (!compartment)
+      return fail(*owner);
+    const COMPARTMENT_ID compartment_id =
+        static_cast<COMPARTMENT_ID>(*compartment);
+    mapping translated{};
+    endpoint local{};
+    local.address = layout->destination_address;
+    local.port = layout->destination_port;
+    if (!owner->find_reply(packet_family, compartment_id, local,
+                           static_cast<std::uint16_t>(context), translated))
+      return terminating_decision::block_and_absorb;
+    auto copied = network.try_copy_packet(
+        packet.bytes(),
+        ntl::net::buffer_limits{owner->limits.maximum_packet_size},
+        ntl::pool_tag("rUwN"));
+    if (!copied)
+      return fail(*owner);
+    auto rewritten = copied_udp_ip_packet::try_create(
+        std::move(*copied), layout->ip_header_size);
+    if (!rewritten ||
+        !rewritten->rewrite_udp_source(
+                    translated.remote.port, packet_family,
+                    address_span(translated.remote, packet_family),
+                    address_span(translated.local, packet_family),
+                    0, 0)
+             .is_ok())
+      return fail(*owner);
+
+    struct deferred_send {
+      std::shared_ptr<state> owner;
+      owned_injection_packet packet;
+      ADDRESS_FAMILY family = AF_UNSPEC;
+      COMPARTMENT_ID compartment = UNSPECIFIED_COMPARTMENT_ID;
+
+      static void inject(deferred_send &operation) noexcept {
+        const ntl::status injected =
+            operation.owner->network(operation.family)
+                .inject_send(network_send_packet(
+                                 std::move(operation.packet)),
+                             operation.compartment);
+        if (!injected.is_ok())
+          operation.owner->injection_failures.fetch_add(
+              1, std::memory_order_relaxed);
+      }
+    };
+    std::shared_ptr<deferred_send> operation;
+    try {
+      operation = std::make_shared<deferred_send>(deferred_send{
+          owner, rewritten->release(), packet_family, compartment_id});
+    } catch (...) {
+      return fail(*owner);
+    }
+    const ntl::status posted = owner->deferred_injections.post(
+        operation, &deferred_send::inject);
+    if (!posted.is_ok()) {
+      if (posted == STATUS_QUOTA_EXCEEDED)
+        owner->allocation_quota_rejections.fetch_add(
+            1, std::memory_order_relaxed);
+      return fail(*owner);
+    }
+    owner->inbound_packets.fetch_add(1, std::memory_order_relaxed);
+    return terminating_decision::block_and_absorb;
+  }
+
+private:
+  explicit transparent_udp_proxy(
+      std::shared_ptr<transparent_udp_proxy_detail::state> state) noexcept
+      : state_(std::move(state)) {}
+
+  static terminating_decision
+  fail(transparent_udp_proxy_detail::state &state) noexcept {
+    state.injection_failures.fetch_add(1, std::memory_order_relaxed);
+    return terminating_decision::block_and_absorb;
+  }
+
+  template <class PacketLayer>
+  static std::optional<terminating_decision> try_reverse_outbound(
+      const classify_event<PacketLayer> &event,
+      transparent_udp_proxy_detail::state &owner,
+      borrowed_packet packet, ADDRESS_FAMILY packet_family,
+      COMPARTMENT_ID compartment) noexcept {
+    using namespace transparent_udp_proxy_detail;
+    const auto local_port =
+        event.value(PacketLayer::field::local_port).uint16();
+    const auto remote_port =
+        event.value(PacketLayer::field::remote_port).uint16();
+    const std::uint64_t context = event.filter().context();
+    if (!local_port || !remote_port || context == 0 || context > MAXUSHORT ||
+        *local_port != static_cast<std::uint16_t>(context))
+      return std::nullopt;
+
+    mapping translated{};
+    endpoint local{};
+    local.port = *remote_port;
+    if (!read_address(event, PacketLayer::field::remote_address,
+                      local.address) ||
+        !owner.find_reply(packet_family, compartment, local,
+                          static_cast<std::uint16_t>(context), translated))
+      return terminating_decision::block_and_absorb;
+    if (translated.interface_index == 0)
+      return fail(owner);
+    auto receive = transport_receive_packet::try_clone_from_outbound(packet);
+    if (!receive ||
+        !receive->rewrite_udp_source(
+                    translated.remote.port, packet_family,
+                    address_span(translated.remote, packet_family),
+                    address_span(translated.local, packet_family),
+                    0, 0)
+             .is_ok() ||
+        !owner.network(packet_family)
+             .inject_receive(network_receive_packet(receive->release()),
+                             compartment,
+                             translated.interface_index,
+                             translated.subinterface_index)
+             .is_ok())
+      return fail(owner);
+    owner.inbound_packets.fetch_add(1, std::memory_order_relaxed);
+    return terminating_decision::block_and_absorb;
+  }
+
+  std::shared_ptr<transparent_udp_proxy_detail::state> state_;
+};
+
+/**
+ * Owns the complete driver-side transparent UDP proxy composition.
+ * Registration order, flow targets, callbacks, injection lifetime, and drain
+ * order are internal; a driver only creates and closes this facade.
+ */
+class transparent_udp_route_resolver {
+public:
+  ntl::result<transparent_udp_original_flow> resolve_original_flow(
+      const transparent_udp_endpoint &peer,
+      std::uint16_t proxy_port) const noexcept {
+    return routes_.resolve_original_flow(peer, proxy_port);
+  }
+  ntl::result<transparent_udp_original_flow> resolve_original_flow(
+      const SOCKADDR_INET &peer, const SOCKADDR_INET &local) const noexcept {
+    return routes_.resolve_original_flow(peer, local);
+  }
+
+private:
+  friend class transparent_udp_proxy_service;
+  explicit transparent_udp_route_resolver(
+      transparent_udp_proxy routes) noexcept
+      : routes_(std::move(routes)) {}
+  transparent_udp_proxy routes_;
+};
+
+class transparent_udp_proxy_observer {
+public:
+  virtual ~transparent_udp_proxy_observer() = default;
+  virtual void on_outbound(
+      const classify_event<layers::datagram_data_v4> &) noexcept {}
+  virtual void on_outbound(
+      const classify_event<layers::datagram_data_v6> &) noexcept {}
+  virtual void on_inbound(
+      const classify_event<layers::outbound_ip_packet_v4> &) noexcept {}
+  virtual void on_inbound(
+      const classify_event<layers::outbound_ip_packet_v6> &) noexcept {}
+};
+
+class transparent_udp_proxy_service {
+  using flow_v4 = layers::ale_flow_established_v4;
+  using flow_v6 = layers::ale_flow_established_v6;
+  using datagram_v4 = layers::datagram_data_v4;
+  using datagram_v6 = layers::datagram_data_v6;
+  using reverse_v4 = layers::outbound_ip_packet_v4;
+  using reverse_v6 = layers::outbound_ip_packet_v6;
+
+  struct service_state {
+    service_state(transparent_udp_proxy &&value,
+                  std::shared_ptr<transparent_udp_proxy_observer> observer_value)
+        noexcept
+        : proxy(std::move(value)), observer(std::move(observer_value)) {}
+    transparent_udp_proxy proxy;
+    std::shared_ptr<transparent_udp_proxy_observer> observer;
+    std::optional<flow_target<datagram_v4, transparent_udp_proxy_flow>>
+        target_v4;
+    std::optional<flow_target<datagram_v6, transparent_udp_proxy_flow>>
+        target_v6;
+  };
+
+public:
+  transparent_udp_proxy_service(const transparent_udp_proxy_service &) =
+      delete;
+  transparent_udp_proxy_service &
+  operator=(const transparent_udp_proxy_service &) = delete;
+  transparent_udp_proxy_service(transparent_udp_proxy_service &&) noexcept =
+      default;
+  transparent_udp_proxy_service &
+  operator=(transparent_udp_proxy_service &&) noexcept = default;
+  ~transparent_udp_proxy_service() { close(); }
+
+  static ntl::result<transparent_udp_proxy_service>
+  try_create(ntl::driver &driver, const transparent_udp_proxy_keys &keys,
+             transparent_udp_proxy_limits limits = {},
+             std::shared_ptr<transparent_udp_proxy_observer> observer = {})
+      noexcept {
+    auto proxy = transparent_udp_proxy::try_create(driver.native_handle(),
+                                                    limits);
+    if (!proxy)
+      return ntl::unexpected(proxy.status());
+    std::shared_ptr<service_state> state;
+    try {
+      state = std::make_shared<service_state>(std::move(*proxy),
+                                              std::move(observer));
+    } catch (...) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+    callout_driver<> callouts(driver);
+
+    auto target4 = callouts.add_flow_context_terminating<
+        transparent_udp_proxy_flow>(
+        keys.datagram_v4, state,
+        [](service_state &owner, const classify_event<datagram_v4> &event,
+           transparent_udp_proxy_flow *flow) noexcept {
+          if (owner.observer)
+            owner.observer->on_outbound(event);
+          return owner.proxy.classify(event, flow);
+        });
+    if (!target4)
+      return ntl::unexpected(target4.status());
+    state->target_v4 = *target4;
+
+    auto target6 = callouts.add_flow_context_terminating<
+        transparent_udp_proxy_flow>(
+        keys.datagram_v6, state,
+        [](service_state &owner, const classify_event<datagram_v6> &event,
+           transparent_udp_proxy_flow *flow) noexcept {
+          if (owner.observer)
+            owner.observer->on_outbound(event);
+          return owner.proxy.classify(event, flow);
+        });
+    if (!target6)
+      return ntl::unexpected(target6.status());
+    state->target_v6 = *target6;
+
+    ntl::status status = callouts.add_arbitrating(
+        keys.flow_v4, state,
+        [](service_state &owner,
+           const classify_event<flow_v4> &event) noexcept {
+          return owner.target_v4
+                     ? owner.proxy.template remember_flow<flow_v4,
+                                                          datagram_v4>(
+                           event, *owner.target_v4)
+                     : arbitration_decision::continue_classification;
+        });
+    if (!status.is_ok())
+      return ntl::unexpected(status);
+    status = callouts.add_arbitrating(
+        keys.flow_v6, state,
+        [](service_state &owner,
+           const classify_event<flow_v6> &event) noexcept {
+          return owner.target_v6
+                     ? owner.proxy.template remember_flow<flow_v6,
+                                                          datagram_v6>(
+                           event, *owner.target_v6)
+                     : arbitration_decision::continue_classification;
+        });
+    if (!status.is_ok())
+      return ntl::unexpected(status);
+    status = callouts.add_terminating(
+        keys.reverse_v4, state,
+        [](service_state &owner,
+           const classify_event<reverse_v4> &event) noexcept {
+          const auto result = owner.proxy.classify_reverse_network(event);
+          if (owner.observer &&
+              result == terminating_decision::block_and_absorb)
+            owner.observer->on_inbound(event);
+          return result;
+        });
+    if (!status.is_ok())
+      return ntl::unexpected(status);
+    status = callouts.add_terminating(
+        keys.reverse_v6, state,
+        [](service_state &owner,
+           const classify_event<reverse_v6> &event) noexcept {
+          const auto result = owner.proxy.classify_reverse_network(event);
+          if (owner.observer &&
+              result == terminating_decision::block_and_absorb)
+            owner.observer->on_inbound(event);
+          return result;
+        });
+    if (!status.is_ok())
+      return ntl::unexpected(status);
+
+    return ntl::ok(transparent_udp_proxy_service(
+        std::move(callouts), std::move(state)));
+  }
+
+  transparent_udp_proxy_statistics statistics() const noexcept {
+    return state_ ? state_->proxy.statistics()
+                  : transparent_udp_proxy_statistics{};
+  }
+
+  /**
+   * Returns an owning child for a protocol endpoint that must resolve an
+   * accepted local-proxy peer. The child retains native route state even when
+   * the service facade is destroyed; close() still rejects new resolutions.
+   */
+  transparent_udp_route_resolver share_routes() const noexcept {
+    return transparent_udp_route_resolver(
+        state_ ? state_->proxy : transparent_udp_proxy{});
+  }
+
+  /** Idempotently rejects new work and drains callbacks before destruction. */
+  void close() noexcept {
+    auto state = std::move(state_);
+    if (state)
+      state->proxy.close();
+    const ntl::status closed = callouts_.close();
+    NT_ASSERT(closed.is_ok());
+  }
+
+private:
+  transparent_udp_proxy_service(
+      callout_driver<> callouts,
+      std::shared_ptr<service_state> state) noexcept
+      : callouts_(std::move(callouts)), state_(std::move(state)) {}
+
+  callout_driver<> callouts_;
+  std::shared_ptr<service_state> state_;
+};
+
+} // namespace ntl::wfp

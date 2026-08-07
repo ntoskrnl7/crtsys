@@ -1,0 +1,285 @@
+/**
+ * @file kernel_net_workspace_pool
+ * @brief Reusable nonpaged workspaces for bounded kernel networking work.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/net/kernel/workspace_pool is a kernel-mode header"
+#endif
+
+#include <ntl/lookaside_list>
+#include <ntl/except>
+#include <ntl/net/kernel/passive_cleanup_domain>
+#include <ntl/result>
+
+#include <atomic>
+#include <cstddef>
+#include <limits>
+#include <memory>
+#include <new>
+#include <type_traits>
+#include <utility>
+
+namespace ntl::net::kernel {
+
+/**
+ * @brief Reuses fixed-size nonpaged workspaces without placing them on the
+ * kernel stack.
+ *
+ * A lease owns one constructed Workspace and returns it to the underlying
+ * lookaside list when the lease is destroyed. The lease retains the pool's
+ * backing state, so declaration order and facade destruction order do not
+ * affect safety. If the last lease is released above PASSIVE_LEVEL, both the
+ * Workspace destructor and lookaside-list return run in the driver runtime's
+ * joined PASSIVE cleanup domain.
+ *
+ * @tparam Workspace Object constructed in each cached entry.
+ * @tparam Tag Native pool tag used for backing allocations.
+ */
+template <class Workspace, ULONG Tag = ntl::pool_tag("wNtN")>
+class workspace_pool {
+  static_assert(!std::is_void_v<Workspace>,
+                "workspace_pool requires an object type");
+  static_assert(!std::is_array_v<Workspace>,
+                "workspace_pool does not manage array types directly");
+
+  using storage_pool = ntl::lookaside_list<Workspace, ntl::pool_kind::nonpaged,
+                                           ntl::pool_option::none, Tag>;
+
+public:
+  struct shared_state;
+  struct lease_state;
+
+  /**
+   * @brief Move-only ownership of one constructed workspace.
+   */
+  class lease {
+  public:
+    lease() noexcept = default;
+    lease(const lease &) = delete;
+    lease &operator=(const lease &) = delete;
+    lease(lease &&) noexcept = default;
+    lease &operator=(lease &&other) noexcept {
+      if (this != &other) {
+        reset();
+        state_ = std::move(other.state_);
+      }
+      return *this;
+    }
+    ~lease() { reset(); }
+
+    Workspace &operator*() const noexcept { return *state_->storage; }
+    Workspace *operator->() const noexcept { return state_->storage.get(); }
+    Workspace *borrowed_workspace() const noexcept {
+      return state_ ? state_->storage.get() : nullptr;
+    }
+    explicit operator bool() const noexcept {
+      return state_ && static_cast<bool>(state_->storage);
+    }
+    void reset() noexcept { state_.reset(); }
+
+  private:
+    friend class workspace_pool;
+    explicit lease(std::shared_ptr<lease_state> state) noexcept
+        : state_(std::move(state)) {}
+
+    std::shared_ptr<lease_state> state_;
+  };
+
+  struct shared_state {
+    shared_state(passive_cleanup_domain *domain, USHORT depth,
+                 std::size_t maximum_active) noexcept
+        : cleanup(&shared_state::cleanup_at_passive, this), domain(domain),
+          storage(depth), maximum_active(maximum_active) {}
+
+    ~shared_state() {
+      NT_ASSERT(ntl::current_irql() == ntl::irql::passive);
+      NT_ASSERT(active.load(std::memory_order_acquire) == 0);
+    }
+
+    static void cleanup_at_passive(void *context) noexcept {
+      delete static_cast<shared_state *>(context);
+    }
+
+    bool try_acquire_slot() noexcept {
+      std::size_t current = active.load(std::memory_order_acquire);
+      while (current < maximum_active) {
+        if (active.compare_exchange_weak(
+                current, current + 1, std::memory_order_acq_rel,
+                std::memory_order_acquire))
+          return true;
+      }
+      return false;
+    }
+
+    void release_slot() noexcept {
+      const std::size_t previous =
+          active.fetch_sub(1, std::memory_order_acq_rel);
+      NT_ASSERT(previous != 0);
+      (void)previous;
+    }
+
+    passive_cleanup_item cleanup;
+    passive_cleanup_domain *domain = nullptr;
+    storage_pool storage;
+    const std::size_t maximum_active;
+    std::atomic<std::size_t> active{0};
+  };
+
+  struct lease_state {
+    lease_state(std::shared_ptr<shared_state> owner,
+                typename storage_pool::pointer storage) noexcept
+        : cleanup(&lease_state::cleanup_at_passive, this),
+          owner(std::move(owner)), storage(std::move(storage)) {}
+
+    ~lease_state() {
+      NT_ASSERT(ntl::current_irql() == ntl::irql::passive);
+      storage.reset();
+      owner->release_slot();
+    }
+
+    static void cleanup_at_passive(void *context) noexcept {
+      delete static_cast<lease_state *>(context);
+    }
+
+    passive_cleanup_item cleanup;
+    std::shared_ptr<shared_state> owner;
+    typename storage_pool::pointer storage;
+  };
+
+  /**
+   * @brief Creates a workspace cache with the system-default lookaside depth.
+   */
+  explicit workspace_pool(
+      USHORT depth = 0,
+      std::size_t maximum_active =
+          (std::numeric_limits<std::size_t>::max)())
+      : state_(make_state(depth, maximum_active)) {
+    KeInitializeSpinLock(&state_lock_);
+  }
+
+  workspace_pool(const workspace_pool &) = delete;
+  workspace_pool &operator=(const workspace_pool &) = delete;
+  workspace_pool(workspace_pool &&) = delete;
+  workspace_pool &operator=(workspace_pool &&) = delete;
+  ~workspace_pool() { close(); }
+
+  /** Idempotently rejects new leases; outstanding leases keep state alive. */
+  void close() noexcept {
+    std::shared_ptr<shared_state> released;
+    KIRQL previous = PASSIVE_LEVEL;
+    KeAcquireSpinLock(&state_lock_, &previous);
+    released = std::move(state_);
+    KeReleaseSpinLock(&state_lock_, previous);
+    released.reset();
+  }
+
+  bool is_closed() const noexcept { return !retain_state(); }
+
+  /**
+   * @brief Constructs and leases one workspace.
+   * @return A move-only lease, or an NTSTATUS allocation/construction failure.
+   */
+  template <class... Args>
+  [[nodiscard]] ntl::result<lease>
+  try_acquire(Args &&...args) noexcept {
+    auto owner = retain_state();
+    if (!owner)
+      return ntl::unexpected(STATUS_DELETE_PENDING);
+    if (!owner->try_acquire_slot())
+      return ntl::unexpected(STATUS_QUOTA_EXCEEDED);
+    auto storage = owner->storage.try_make(std::forward<Args>(args)...);
+    if (!storage) {
+      owner->release_slot();
+      return ntl::unexpected(storage.status());
+    }
+    auto *raw = new (std::nothrow)
+        lease_state(owner, std::move(*storage));
+    if (!raw) {
+      owner->release_slot();
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+    const ntl::status registered =
+        owner->domain->register_item(raw->cleanup);
+    if (!registered.is_ok()) {
+      delete raw;
+      return ntl::unexpected(registered);
+    }
+    try {
+      std::shared_ptr<lease_state> lifetime(
+          raw, [](lease_state *value) noexcept {
+            value->owner->domain->retire(value->cleanup);
+          });
+      return ntl::ok(lease{std::move(lifetime)});
+    } catch (...) {
+      owner->domain->retire(raw->cleanup);
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+  }
+
+  /**
+   * @brief Releases currently cached free entries back to nonpaged pool.
+   */
+  void flush() noexcept {
+    if (auto state = retain_state())
+      state->storage.flush();
+  }
+
+  static constexpr std::size_t entry_size() noexcept {
+    return storage_pool::entry_size();
+  }
+  static constexpr ULONG tag() noexcept { return Tag; }
+  std::size_t active() const noexcept {
+    auto state = retain_state();
+    return state ? state->active.load(std::memory_order_acquire) : 0;
+  }
+  std::size_t maximum_active() const noexcept {
+    auto state = retain_state();
+    return state ? state->maximum_active : 0;
+  }
+
+private:
+  std::shared_ptr<shared_state> retain_state() const noexcept {
+    KIRQL previous = PASSIVE_LEVEL;
+    KeAcquireSpinLock(&state_lock_, &previous);
+    auto state = state_;
+    KeReleaseSpinLock(&state_lock_, previous);
+    return state;
+  }
+
+  static std::shared_ptr<shared_state>
+  make_state(USHORT depth, std::size_t maximum_active) {
+    if (ntl::current_irql() != ntl::irql::passive || maximum_active == 0)
+      throw ntl::exception(STATUS_INVALID_PARAMETER,
+                           "workspace_pool requires PASSIVE_LEVEL and a "
+                           "nonzero active limit");
+    auto *domain = borrowed_runtime_passive_cleanup_domain();
+    if (!domain)
+      throw ntl::exception(STATUS_DEVICE_NOT_READY,
+                           "kernel passive cleanup domain is unavailable");
+    auto *raw = new shared_state(domain, depth, maximum_active);
+    const ntl::status registered = domain->register_item(raw->cleanup);
+    if (!registered.is_ok()) {
+      delete raw;
+      throw ntl::exception(registered,
+                           "workspace_pool cleanup registration failed");
+    }
+    try {
+      return std::shared_ptr<shared_state>(
+          raw, [](shared_state *value) noexcept {
+            value->domain->retire(value->cleanup);
+          });
+    } catch (...) {
+      domain->retire(raw->cleanup);
+      throw;
+    }
+  }
+
+  mutable KSPIN_LOCK state_lock_{};
+  std::shared_ptr<shared_state> state_;
+};
+
+} // namespace ntl::net::kernel

@@ -1,0 +1,245 @@
+/**
+ * @file net_borrowed_memory_resource
+ * @brief Explicitly borrowed PMR resources for bounded network message work.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include <atomic>
+#include <cstddef>
+#include <limits>
+#include <memory>
+#include <memory_resource>
+#include <span>
+#include <stdexcept>
+#include <utility>
+
+namespace ntl::net {
+
+struct bounded_memory_limits {
+  std::size_t maximum_allocated_bytes = 16 * 1024 * 1024;
+  std::size_t maximum_single_allocation = 4 * 1024 * 1024;
+
+  constexpr bool valid() const noexcept {
+    return maximum_allocated_bytes != 0 &&
+           maximum_single_allocation != 0 &&
+           maximum_single_allocation <= maximum_allocated_bytes;
+  }
+};
+
+/**
+ * @brief Owning byte-budget facade for semantic network message storage.
+ *
+ * The default constructor retains no external object because the process or
+ * kernel default PMR resource has runtime lifetime.  The second constructor
+ * retains a custom upstream resource explicitly, so storing this object never
+ * creates a hidden borrowed lifetime dependency.
+ */
+class bounded_memory_resource final : public std::pmr::memory_resource {
+public:
+  explicit bounded_memory_resource(bounded_memory_limits limits) noexcept
+      : upstream_(std::pmr::get_default_resource()), limits_(limits) {}
+
+  bounded_memory_resource(
+      std::shared_ptr<std::pmr::memory_resource> upstream,
+      bounded_memory_limits limits)
+      : upstream_owner_(std::move(upstream)),
+        upstream_(upstream_owner_.get()), limits_(limits) {
+    if (!upstream_)
+      throw std::invalid_argument("bounded memory upstream is null");
+  }
+
+  bounded_memory_resource(const bounded_memory_resource &) = delete;
+  bounded_memory_resource &operator=(const bounded_memory_resource &) = delete;
+
+  bounded_memory_limits limits() const noexcept { return limits_; }
+  std::size_t allocated_bytes() const noexcept {
+    return allocated_.load(std::memory_order_acquire);
+  }
+  std::size_t peak_allocated_bytes() const noexcept {
+    return peak_.load(std::memory_order_acquire);
+  }
+
+private:
+  void *do_allocate(std::size_t bytes, std::size_t alignment) override {
+    if (bytes == 0)
+      bytes = 1;
+    if (!limits_.valid() || !upstream_ || alignment == 0 ||
+        bytes > limits_.maximum_single_allocation ||
+        bytes > limits_.maximum_allocated_bytes)
+      throw std::bad_alloc{};
+    std::size_t current = allocated_.load(std::memory_order_relaxed);
+    for (;;) {
+      if (current > limits_.maximum_allocated_bytes - bytes)
+        throw std::bad_alloc{};
+      if (allocated_.compare_exchange_weak(
+              current, current + bytes, std::memory_order_acq_rel,
+              std::memory_order_relaxed))
+        break;
+    }
+    try {
+      void *const result = upstream_->allocate(bytes, alignment);
+      update_peak(current + bytes);
+      return result;
+    } catch (...) {
+      allocated_.fetch_sub(bytes, std::memory_order_release);
+      throw;
+    }
+  }
+
+  void do_deallocate(void *pointer, std::size_t bytes,
+                     std::size_t alignment) override {
+    if (!pointer)
+      return;
+    if (bytes == 0)
+      bytes = 1;
+    upstream_->deallocate(pointer, bytes, alignment);
+    allocated_.fetch_sub(bytes, std::memory_order_release);
+  }
+
+  bool do_is_equal(
+      const std::pmr::memory_resource &other) const noexcept override {
+    return this == &other;
+  }
+
+  void update_peak(std::size_t value) noexcept {
+    std::size_t peak = peak_.load(std::memory_order_relaxed);
+    while (peak < value &&
+           !peak_.compare_exchange_weak(
+               peak, value, std::memory_order_release,
+               std::memory_order_relaxed)) {
+    }
+  }
+
+  std::shared_ptr<std::pmr::memory_resource> upstream_owner_;
+  std::pmr::memory_resource *upstream_ = nullptr;
+  bounded_memory_limits limits_{};
+  std::atomic<std::size_t> allocated_{0};
+  std::atomic<std::size_t> peak_{0};
+};
+
+/**
+ * @brief Applies a hard byte budget to a caller-selected PMR backend.
+ *
+ * The resource owns no storage.  The caller owns and must outlive the upstream
+ * resource and every allocation made through this adapter.  Allocation fails
+ * with std::bad_alloc before calling upstream when either limit would be
+ * exceeded.  The counters are thread-safe; the selected upstream resource must
+ * provide any additional synchronization required by its implementation.
+ */
+class borrowed_bounded_memory_resource final
+    : public std::pmr::memory_resource {
+public:
+  borrowed_bounded_memory_resource(
+      std::pmr::memory_resource &upstream,
+      bounded_memory_limits limits) noexcept
+      : upstream_(&upstream), limits_(limits) {}
+
+  borrowed_bounded_memory_resource(const borrowed_bounded_memory_resource &) = delete;
+  borrowed_bounded_memory_resource &
+  operator=(const borrowed_bounded_memory_resource &) = delete;
+
+  bounded_memory_limits limits() const noexcept { return limits_; }
+
+  std::size_t allocated_bytes() const noexcept {
+    return allocated_.load(std::memory_order_acquire);
+  }
+
+  std::size_t peak_allocated_bytes() const noexcept {
+    return peak_.load(std::memory_order_acquire);
+  }
+
+private:
+  void *do_allocate(std::size_t bytes, std::size_t alignment) override {
+    if (bytes == 0)
+      bytes = 1;
+    if (!limits_.valid() || alignment == 0 ||
+        bytes > limits_.maximum_single_allocation ||
+        bytes > limits_.maximum_allocated_bytes)
+      throw std::bad_alloc{};
+
+    std::size_t current = allocated_.load(std::memory_order_relaxed);
+    for (;;) {
+      if (current > limits_.maximum_allocated_bytes - bytes)
+        throw std::bad_alloc{};
+      if (allocated_.compare_exchange_weak(
+              current, current + bytes, std::memory_order_acq_rel,
+              std::memory_order_relaxed))
+        break;
+    }
+
+    try {
+      void *const result = upstream_->allocate(bytes, alignment);
+      update_peak(current + bytes);
+      return result;
+    } catch (...) {
+      allocated_.fetch_sub(bytes, std::memory_order_release);
+      throw;
+    }
+  }
+
+  void do_deallocate(void *pointer, std::size_t bytes,
+                     std::size_t alignment) override {
+    if (!pointer)
+      return;
+    if (bytes == 0)
+      bytes = 1;
+    upstream_->deallocate(pointer, bytes, alignment);
+    allocated_.fetch_sub(bytes, std::memory_order_release);
+  }
+
+  bool do_is_equal(
+      const std::pmr::memory_resource &other) const noexcept override {
+    return this == &other;
+  }
+
+  void update_peak(std::size_t value) noexcept {
+    std::size_t peak = peak_.load(std::memory_order_relaxed);
+    while (peak < value &&
+           !peak_.compare_exchange_weak(
+               peak, value, std::memory_order_release,
+               std::memory_order_relaxed)) {
+    }
+  }
+
+  std::pmr::memory_resource *upstream_ = nullptr;
+  bounded_memory_limits limits_{};
+  std::atomic<std::size_t> allocated_{0};
+  std::atomic<std::size_t> peak_{0};
+};
+
+/**
+ * @brief Allocation-only PMR arena backed solely by a caller-owned span.
+ *
+ * There is deliberately no upstream fallback.  Exhausting storage throws
+ * std::bad_alloc, allowing protocol adapters to translate it to a fail-closed
+ * NTSTATUS.  release() is valid only after every object using the arena has
+ * been destroyed.
+ */
+class borrowed_fixed_workspace_resource {
+public:
+  explicit borrowed_fixed_workspace_resource(
+      std::span<std::byte> storage) noexcept
+      : storage_(storage), resource_(
+            storage.data(), storage.size(),
+            std::pmr::null_memory_resource()) {}
+
+  borrowed_fixed_workspace_resource(const borrowed_fixed_workspace_resource &) = delete;
+  borrowed_fixed_workspace_resource &
+  operator=(const borrowed_fixed_workspace_resource &) = delete;
+
+  std::pmr::memory_resource *resource() noexcept { return &resource_; }
+  const std::pmr::memory_resource *resource() const noexcept {
+    return &resource_;
+  }
+  std::span<std::byte> storage() const noexcept { return storage_; }
+
+  void release() noexcept { resource_.release(); }
+
+private:
+  std::span<std::byte> storage_;
+  std::pmr::monotonic_buffer_resource resource_;
+};
+
+} // namespace ntl::net

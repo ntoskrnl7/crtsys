@@ -4,6 +4,48 @@ project(crtsys_wfp_compile_contracts LANGUAGES C CXX)
 
 enable_testing()
 
+find_program(CRTSYS_POWERSHELL_EXECUTABLE NAMES pwsh powershell REQUIRED)
+add_test(
+  NAME crtsys_wfp_example_pair_parity
+  COMMAND "${CRTSYS_POWERSHELL_EXECUTABLE}"
+          -NoProfile
+          -ExecutionPolicy Bypass
+          -File "${CMAKE_CURRENT_LIST_DIR}/../Test-WfpExamplePairParity.ps1"
+          -RepositoryRoot "${CMAKE_CURRENT_LIST_DIR}/../../.."
+)
+add_test(
+  NAME crtsys_wfp_inf_packages
+  COMMAND "${CRTSYS_POWERSHELL_EXECUTABLE}"
+          -NoProfile
+          -ExecutionPolicy Bypass
+          -File "${CMAKE_CURRENT_LIST_DIR}/../Test-WfpInfPackages.ps1"
+          -RepositoryRoot "${CMAKE_CURRENT_LIST_DIR}/../../.."
+)
+add_test(
+  NAME crtsys_wfp_disposable_guest_guard
+  COMMAND "${CRTSYS_POWERSHELL_EXECUTABLE}"
+          -NoProfile
+          -ExecutionPolicy Bypass
+          -File
+          "${CMAKE_CURRENT_LIST_DIR}/../runtime/common/Test-DisposableGuestGuardContract.ps1"
+)
+add_test(
+  NAME crtsys_wfp_runtime_packaging
+  COMMAND "${CRTSYS_POWERSHELL_EXECUTABLE}"
+          -NoProfile
+          -ExecutionPolicy Bypass
+          -File
+          "${CMAKE_CURRENT_LIST_DIR}/../runtime/advanced/Test-WfpRuntimePackagingContract.ps1"
+)
+add_test(
+  NAME crtsys_ntl_net_kernel_runtime_packaging
+  COMMAND "${CRTSYS_POWERSHELL_EXECUTABLE}"
+          -NoProfile
+          -ExecutionPolicy Bypass
+          -File
+          "${CMAKE_CURRENT_LIST_DIR}/../../net/kernel-contracts/Test-NtlNetKernelRuntimePackagingContract.ps1"
+          -RepositoryRoot "${CMAKE_CURRENT_LIST_DIR}/../../.."
+)
 option(CRTSYS_WFP_ENABLE_LIBFUZZER
   "Build the Clang coverage-guided WFP protocol fuzz target" OFF)
 
@@ -11,11 +53,11 @@ include("${CMAKE_CURRENT_LIST_DIR}/../../../cmake/CPM.cmake")
 
 CPMAddPackage(NAME crtsys SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../../..")
 include("${crtsys_SOURCE_DIR}/cmake/CrtSys.cmake")
-include("${crtsys_SOURCE_DIR}/cmake/NtlContentCodecs.cmake")
 
 crtsys_add_driver(crtsys_wfp_compile_contracts
   WFP
   NTL
+  KERNEL_CONTENT_CODECS
   kernel.cpp
 )
 target_link_libraries(crtsys_wfp_compile_contracts
@@ -40,6 +82,10 @@ add_executable(crtsys_wfp_tls_stream_contracts
 
 add_executable(crtsys_wfp_inspection_contracts
   inspection.cpp
+)
+
+add_executable(crtsys_ntl_transform_pipeline_contracts
+  transform_pipeline.cpp
 )
 
 add_executable(crtsys_wfp_protocol_contracts
@@ -119,9 +165,7 @@ add_executable(crtsys_wfp_policy_stress_contracts
 )
 
 add_executable(crtsys_wfp_browser_http3_contracts
-  browser_http3.cpp
-  ../../../examples/wfp/browser-https-inspection/app/browser_log.cpp
-  ../../../examples/wfp/browser-https-inspection/app/http3_inspection.cpp
+  ../../../examples/wfp/user/browser-https-inspection/test/http3_proxy_connection_contracts.cpp
 )
 
 target_link_libraries(crtsys_wfp_protocol_contracts
@@ -176,6 +220,11 @@ target_include_directories(crtsys_wfp_inspection_contracts
     "${crtsys_SOURCE_DIR}/include"
 )
 
+target_include_directories(crtsys_ntl_transform_pipeline_contracts
+  PRIVATE
+    "${crtsys_SOURCE_DIR}/include"
+)
+
 target_include_directories(crtsys_wfp_protocol_contracts
   PRIVATE
     "${crtsys_SOURCE_DIR}/include"
@@ -199,8 +248,8 @@ target_include_directories(crtsys_wfp_policy_stress_contracts
 target_include_directories(crtsys_wfp_browser_http3_contracts
   PRIVATE
     "${crtsys_SOURCE_DIR}/include"
-    "${crtsys_SOURCE_DIR}/examples/wfp/common"
-    "${crtsys_SOURCE_DIR}/examples/wfp/browser-https-inspection/app"
+    "${crtsys_SOURCE_DIR}/examples/wfp/shared"
+    "${crtsys_SOURCE_DIR}/examples/wfp/user/browser-https-inspection/app"
 )
 
 if(CMAKE_GENERATOR_PLATFORM MATCHES "^ARM64")
@@ -217,6 +266,9 @@ target_compile_definitions(
   PRIVATE ${crtsys_wfp_contract_architecture})
 target_compile_definitions(
   crtsys_wfp_inspection_contracts
+  PRIVATE ${crtsys_wfp_contract_architecture})
+target_compile_definitions(
+  crtsys_ntl_transform_pipeline_contracts
   PRIVATE ${crtsys_wfp_contract_architecture})
 target_compile_definitions(
   crtsys_wfp_protocol_contracts
@@ -239,6 +291,7 @@ target_link_libraries(crtsys_wfp_management_contracts
   PRIVATE
     advapi32
     fwpuclnt
+    uuid
 )
 
 foreach(contract_target
@@ -247,6 +300,7 @@ foreach(contract_target
     crtsys_wfp_async_socket_contracts
     crtsys_wfp_tls_stream_contracts
     crtsys_wfp_inspection_contracts
+    crtsys_ntl_transform_pipeline_contracts
     crtsys_wfp_protocol_contracts
     crtsys_wfp_http_transform_contracts
     crtsys_wfp_fuzz_contracts
@@ -319,6 +373,15 @@ target_compile_options(crtsys_wfp_inspection_contracts
     "$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:/MT>"
 )
 
+target_compile_options(crtsys_ntl_transform_pipeline_contracts
+  PRIVATE
+    "$<$<COMPILE_LANGUAGE:CXX>:/W4>"
+    "$<$<COMPILE_LANGUAGE:CXX>:/WX>"
+    "$<$<COMPILE_LANGUAGE:CXX>:/EHsc>"
+    "$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Debug>>:/MTd>"
+    "$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:/MT>"
+)
+
 target_compile_options(crtsys_wfp_protocol_contracts
   PRIVATE
     "$<$<COMPILE_LANGUAGE:CXX>:/W4>"
@@ -371,6 +434,7 @@ set_std_cxx_latest(crtsys_wfp_scatter_contracts)
 set_std_cxx_latest(crtsys_wfp_async_socket_contracts)
 set_std_cxx_latest(crtsys_wfp_tls_stream_contracts)
 set_std_cxx_latest(crtsys_wfp_inspection_contracts)
+set_std_cxx_latest(crtsys_ntl_transform_pipeline_contracts)
 set_std_cxx_latest(crtsys_wfp_protocol_contracts)
 set_std_cxx_latest(crtsys_wfp_http_transform_contracts)
 set_std_cxx_latest(crtsys_wfp_fuzz_contracts)

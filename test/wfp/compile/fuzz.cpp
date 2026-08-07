@@ -7,7 +7,9 @@
 #include <ntl/net/http2/hpack>
 #include <ntl/net/http3/framing>
 #include <ntl/net/http3/qpack>
+#include <ntl/net/http3/qpack_core>
 #include <ntl/net/inspection/standard_content_decoders>
+#include <ntl/net/offload/protocol>
 #include <ntl/net/websocket/framing>
 
 #include <algorithm>
@@ -15,6 +17,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <span>
 #include <vector>
@@ -23,6 +26,38 @@ namespace {
 
 constexpr std::size_t maximum_wire_size = 2048;
 constexpr std::size_t maximum_decoded_size = 4096;
+
+class fuzz_qpack_sink final : public ntl::net::http3::qpack_field_sink {
+public:
+  ntl::status
+  on_field(ntl::net::http3::qpack_field_view field) noexcept override {
+    if (field.name.size() > maximum_decoded_size - decoded_bytes ||
+        field.value.size() > maximum_decoded_size - decoded_bytes -
+                                 field.name.size())
+      return STATUS_BUFFER_OVERFLOW;
+    decoded_bytes += field.name.size() + field.value.size();
+    return ntl::status::ok();
+  }
+  std::size_t decoded_bytes = 0;
+};
+
+class fuzz_tls_observer final
+    : public ntl::net::tls_client_hello_observer {
+public:
+  ntl::status on_server_name(std::string_view value) noexcept override {
+    server_name_size = value.size();
+    return ntl::status::ok();
+  }
+  ntl::status
+  on_application_protocol(std::string_view value) noexcept override {
+    if (value.empty())
+      return STATUS_DATA_ERROR;
+    ++protocol_count;
+    return ntl::status::ok();
+  }
+  std::size_t server_name_size = 0;
+  std::size_t protocol_count = 0;
+};
 
 class deterministic_random {
 public:
@@ -80,6 +115,30 @@ bool exercise_protocols(std::span<const std::byte> storage,
           .first(segment_count));
   if (!bytes || bytes.size() != storage.size())
     return false;
+
+  const ntl::net::runtime_descriptor offload_service{
+      .domain = ntl::net::execution_domain::user,
+      .path = ntl::net::execution_path::offloaded,
+      .features = ntl::net::feature_set(
+          ntl::net::network_feature::content_inspection |
+          ntl::net::network_feature::content_transform),
+      .limits = {.maximum_input_bytes = maximum_wire_size,
+                 .maximum_output_bytes = maximum_decoded_size,
+                 .maximum_buffered_bytes = maximum_decoded_size,
+                 .timeout_milliseconds = 30'000,
+                 .maximum_in_flight = 64}};
+  if (storage.size() >= sizeof(ntl::net::offload::request_header)) {
+    ntl::net::offload::request_header request{};
+    std::memcpy(&request, storage.data(), sizeof(request));
+    (void)ntl::net::offload::validate(request, offload_service);
+    if (storage.size() >= sizeof(request) +
+                              sizeof(ntl::net::offload::response_header)) {
+      ntl::net::offload::response_header response{};
+      std::memcpy(&response, storage.data() + sizeof(request),
+                  sizeof(response));
+      (void)ntl::net::offload::validate(response, request);
+    }
+  }
 
   const ntl::net::http::http1_framing_limits http1_limits{
       .maximum_header_size = maximum_wire_size,
@@ -145,6 +204,13 @@ bool exercise_protocols(std::span<const std::byte> storage,
         *wire, *header, maximum_wire_size);
     if (!payload || payload->size() != header->payload_size)
       return false;
+    std::array<std::byte, maximum_wire_size> direct_payload{};
+    const auto direct = ntl::net::websocket::decode_payload_to(
+        *wire, *header, direct_payload);
+    if (!direct || *direct != payload->size() ||
+        !std::equal(payload->begin(), payload->end(),
+                    direct_payload.begin()))
+      return false;
   }
 
   const ntl::net::grpc::message_framer grpc_framer(maximum_wire_size);
@@ -199,6 +265,14 @@ bool exercise_protocols(std::span<const std::byte> storage,
   if (qpack_result &&
       qpack_result->decoded_bytes > maximum_decoded_size)
     return false;
+  std::array<std::byte, maximum_decoded_size> qpack_scratch{};
+  fuzz_qpack_sink qpack_sink;
+  const auto direct_qpack = ntl::net::http3::decode_static_qpack(
+      bytes, qpack_scratch, qpack_sink, maximum_decoded_size);
+  if (direct_qpack &&
+      (direct_qpack->decoded_bytes > maximum_decoded_size ||
+       direct_qpack->decoded_bytes != qpack_sink.decoded_bytes))
+    return false;
 
   const ntl::net::tls_client_hello_limits tls_limits{
       .maximum_buffered_ciphertext = maximum_wire_size,
@@ -216,6 +290,15 @@ bool exercise_protocols(std::span<const std::byte> storage,
         return false;
     }
   }
+  std::array<std::byte, maximum_wire_size> tls_workspace{};
+  fuzz_tls_observer tls_observer;
+  const auto direct_tls = ntl::net::inspect_tls_client_hello(
+      bytes, tls_workspace, tls_observer, tls_limits);
+  if (direct_tls &&
+      (direct_tls->handshake_size > maximum_wire_size ||
+       tls_observer.server_name_size > 253 ||
+       tls_observer.protocol_count > tls_limits.maximum_alpn_protocols))
+    return false;
 
   for (const auto coding : {"gzip", "deflate", "br"}) {
     auto decoder = decoders.create(coding);
@@ -354,7 +437,7 @@ int main() {
   std::cout
       << "wfp parser fuzz contracts passed: HTTP/1, HTTP/2+HPACK, "
          "HTTP/3+QPACK, WebSocket, gRPC, capsules, content-coding, "
-         "TLS ClientHello\n";
+         "TLS ClientHello, offload ABI\n";
   return 0;
 }
 #endif

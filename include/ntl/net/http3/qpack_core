@@ -1,0 +1,265 @@
+/**
+ * @file http3_qpack_core
+ * @brief Allocation-free zero-dynamic-table QPACK decoder.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include <ntl/net/http2/hpack>
+#include <ntl/net/http3/framing>
+#include <ntl/result>
+#include <ntl/status>
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <span>
+#include <string_view>
+
+namespace ntl::net::http3 {
+
+struct qpack_field_view {
+  std::string_view name;
+  std::string_view value;
+  bool never_index = false;
+};
+
+class qpack_field_sink {
+public:
+  virtual ~qpack_field_sink() = default;
+  virtual ntl::status on_field(qpack_field_view field) noexcept = 0;
+};
+
+struct qpack_decode_result {
+  std::size_t field_count = 0;
+  std::size_t decoded_bytes = 0;
+};
+
+namespace qpack_core_detail {
+
+struct static_entry {
+  std::string_view name;
+  std::string_view value;
+};
+
+inline constexpr std::array<static_entry, 99> static_table{{
+    {":authority", ""}, {":path", "/"}, {"age", "0"},
+    {"content-disposition", ""}, {"content-length", "0"},
+    {"cookie", ""}, {"date", ""}, {"etag", ""},
+    {"if-modified-since", ""}, {"if-none-match", ""},
+    {"last-modified", ""}, {"link", ""}, {"location", ""},
+    {"referer", ""}, {"set-cookie", ""}, {":method", "CONNECT"},
+    {":method", "DELETE"}, {":method", "GET"}, {":method", "HEAD"},
+    {":method", "OPTIONS"}, {":method", "POST"}, {":method", "PUT"},
+    {":scheme", "http"}, {":scheme", "https"}, {":status", "103"},
+    {":status", "200"}, {":status", "304"}, {":status", "404"},
+    {":status", "503"}, {"accept", "*/*"},
+    {"accept", "application/dns-message"},
+    {"accept-encoding", "gzip, deflate, br"}, {"accept-ranges", "bytes"},
+    {"access-control-allow-headers", "cache-control"},
+    {"access-control-allow-headers", "content-type"},
+    {"access-control-allow-origin", "*"},
+    {"cache-control", "max-age=0"},
+    {"cache-control", "max-age=2592000"},
+    {"cache-control", "max-age=604800"}, {"cache-control", "no-cache"},
+    {"cache-control", "no-store"},
+    {"cache-control", "public, max-age=31536000"},
+    {"content-encoding", "br"}, {"content-encoding", "gzip"},
+    {"content-type", "application/dns-message"},
+    {"content-type", "application/javascript"},
+    {"content-type", "application/json"},
+    {"content-type", "application/x-www-form-urlencoded"},
+    {"content-type", "image/gif"}, {"content-type", "image/jpeg"},
+    {"content-type", "image/png"}, {"content-type", "text/css"},
+    {"content-type", "text/html; charset=utf-8"},
+    {"content-type", "text/plain"},
+    {"content-type", "text/plain;charset=utf-8"},
+    {"range", "bytes=0-"},
+    {"strict-transport-security", "max-age=31536000"},
+    {"strict-transport-security", "max-age=31536000; includesubdomains"},
+    {"strict-transport-security",
+     "max-age=31536000; includesubdomains; preload"},
+    {"vary", "accept-encoding"}, {"vary", "origin"},
+    {"x-content-type-options", "nosniff"},
+    {"x-xss-protection", "1; mode=block"}, {":status", "100"},
+    {":status", "204"}, {":status", "206"}, {":status", "302"},
+    {":status", "400"}, {":status", "403"}, {":status", "421"},
+    {":status", "425"}, {":status", "500"}, {"accept-language", ""},
+    {"access-control-allow-credentials", "FALSE"},
+    {"access-control-allow-credentials", "TRUE"},
+    {"access-control-allow-headers", "*"},
+    {"access-control-allow-methods", "get"},
+    {"access-control-allow-methods", "get, post, options"},
+    {"access-control-allow-methods", "options"},
+    {"access-control-expose-headers", "content-length"},
+    {"access-control-request-headers", "content-type"},
+    {"access-control-request-method", "get"},
+    {"access-control-request-method", "post"}, {"alt-svc", "clear"},
+    {"authorization", ""},
+    {"content-security-policy",
+     "script-src 'none'; object-src 'none'; base-uri 'none'"},
+    {"early-data", "1"}, {"expect-ct", ""}, {"forwarded", ""},
+    {"if-range", ""}, {"origin", ""}, {"purpose", "prefetch"},
+    {"server", ""}, {"timing-allow-origin", "*"},
+    {"upgrade-insecure-requests", "1"}, {"user-agent", ""},
+    {"x-forwarded-for", ""}, {"x-frame-options", "deny"},
+    {"x-frame-options", "sameorigin"},
+}};
+
+inline ntl::result<std::string_view> read_literal_to(
+    ntl::net::http2::hpack_detail::cursor &input,
+    std::uint8_t prefix_bits, std::uint8_t huffman_mask,
+    std::span<std::byte> storage, std::size_t &used) noexcept {
+  std::uint8_t first = 0;
+  if (!input.at(0, first))
+    return ntl::unexpected(STATUS_DATA_ERROR);
+  const bool huffman = (first & huffman_mask) != 0;
+  const auto length =
+      ntl::net::http2::hpack_detail::read_integer(input, prefix_bits);
+  if (!length)
+    return ntl::unexpected(length.status());
+  if (*length > input.remaining() || used > storage.size())
+    return ntl::unexpected(STATUS_DATA_ERROR);
+
+  const std::size_t begin = used;
+  if (huffman) {
+    auto decoded = ntl::net::http2::hpack_detail::read_huffman_to(
+        input, *length, storage.subspan(used));
+    if (!decoded)
+      return ntl::unexpected(decoded.status());
+    used += *decoded;
+  } else {
+    if (*length > storage.size() - used)
+      return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+    for (std::size_t index = 0; index != *length; ++index) {
+      std::uint8_t octet = 0;
+      if (!input.read(octet))
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      storage[used++] = static_cast<std::byte>(octet);
+    }
+  }
+  return ntl::ok(std::string_view(
+      reinterpret_cast<const char *>(storage.data() + begin), used - begin));
+}
+
+inline ntl::status emit(qpack_field_sink &sink, qpack_field_view field,
+                        std::size_t maximum_decoded_size,
+                        qpack_decode_result &result) noexcept {
+  if (field.name.size() > maximum_decoded_size - result.decoded_bytes ||
+      field.value.size() > maximum_decoded_size - result.decoded_bytes -
+                               field.name.size())
+    return STATUS_BUFFER_OVERFLOW;
+  const ntl::status accepted = sink.on_field(field);
+  if (!accepted.is_ok())
+    return accepted;
+  result.decoded_bytes += field.name.size() + field.value.size();
+  ++result.field_count;
+  return ntl::status::ok();
+}
+
+} // namespace qpack_core_detail
+
+/**
+ * @brief Decodes a QPACK block with zero dynamic capacity into a callback.
+ *
+ * Literal and Huffman strings use caller-owned scratch.  Field views are valid
+ * only for the duration of on_field().  Dynamic/post-base references return
+ * STATUS_NOT_SUPPORTED and can be routed to an explicit offload backend.
+ */
+inline ntl::result<qpack_decode_result>
+decode_static_qpack(ntl::net::scatter_view encoded,
+                    std::span<std::byte> scratch,
+                    qpack_field_sink &sink,
+                    std::size_t maximum_decoded_size =
+                        256 * 1024) noexcept {
+  if (!encoded || scratch.empty() || maximum_decoded_size == 0)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  ntl::net::http2::hpack_detail::cursor input(encoded);
+  const auto required_insert_count =
+      ntl::net::http2::hpack_detail::read_integer(input, 8);
+  const auto delta_base = required_insert_count
+                              ? ntl::net::http2::hpack_detail::read_integer(
+                                    input, 7)
+                              : ntl::result<std::size_t>(ntl::unexpected(
+                                    required_insert_count.status()));
+  if (!required_insert_count || !delta_base)
+    return ntl::unexpected(!required_insert_count
+                               ? required_insert_count.status()
+                               : delta_base.status());
+  if (*required_insert_count != 0 || *delta_base != 0)
+    return ntl::unexpected(STATUS_NOT_SUPPORTED);
+
+  qpack_decode_result result;
+  while (input.remaining() != 0) {
+    std::uint8_t first = 0;
+    if (!input.at(0, first))
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    std::size_t used = 0;
+
+    if ((first & 0x80u) != 0) {
+      const bool static_reference = (first & 0x40u) != 0;
+      const auto index =
+          ntl::net::http2::hpack_detail::read_integer(input, 6);
+      if (!index)
+        return ntl::unexpected(index.status());
+      if (!static_reference ||
+          *index >= qpack_core_detail::static_table.size())
+        return ntl::unexpected(static_reference ? STATUS_DATA_ERROR
+                                                 : STATUS_NOT_SUPPORTED);
+      const auto &entry = qpack_core_detail::static_table[*index];
+      const ntl::status emitted = qpack_core_detail::emit(
+          sink, {entry.name, entry.value, false}, maximum_decoded_size,
+          result);
+      if (!emitted.is_ok())
+        return ntl::unexpected(emitted);
+      continue;
+    }
+
+    if ((first & 0xc0u) == 0x40u) {
+      const bool never_index = (first & 0x20u) != 0;
+      const bool static_reference = (first & 0x10u) != 0;
+      const auto name_index =
+          ntl::net::http2::hpack_detail::read_integer(input, 4);
+      if (!name_index)
+        return ntl::unexpected(name_index.status());
+      if (!static_reference ||
+          *name_index >= qpack_core_detail::static_table.size())
+        return ntl::unexpected(static_reference ? STATUS_DATA_ERROR
+                                                 : STATUS_NOT_SUPPORTED);
+      const auto value = qpack_core_detail::read_literal_to(
+          input, 7, 0x80, scratch, used);
+      if (!value)
+        return ntl::unexpected(value.status());
+      const ntl::status emitted = qpack_core_detail::emit(
+          sink,
+          {qpack_core_detail::static_table[*name_index].name, *value,
+           never_index},
+          maximum_decoded_size, result);
+      if (!emitted.is_ok())
+        return ntl::unexpected(emitted);
+      continue;
+    }
+
+    if ((first & 0xe0u) == 0x20u) {
+      const bool never_index = (first & 0x10u) != 0;
+      const auto name = qpack_core_detail::read_literal_to(
+          input, 3, 0x08, scratch, used);
+      if (!name)
+        return ntl::unexpected(name.status());
+      const auto value = qpack_core_detail::read_literal_to(
+          input, 7, 0x80, scratch, used);
+      if (!value)
+        return ntl::unexpected(value.status());
+      const ntl::status emitted = qpack_core_detail::emit(
+          sink, {*name, *value, never_index}, maximum_decoded_size, result);
+      if (!emitted.is_ok())
+        return ntl::unexpected(emitted);
+      continue;
+    }
+    return ntl::unexpected(STATUS_NOT_SUPPORTED);
+  }
+  return ntl::ok(result);
+}
+
+} // namespace ntl::net::http3

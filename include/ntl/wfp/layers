@@ -67,9 +67,27 @@ private:
   GUID value_{};
 };
 
-template <class Layer> class callout_key {
+/**
+ * @brief Classification contract shared by policy and kernel registration.
+ *
+ * A callout key is deliberately tagged with the action installed by the
+ * policy controller.  This prevents a kernel callback with inspection
+ * semantics from being registered for a terminating filter (and vice versa).
+ */
+enum class callout_kind {
+  inspection,
+  terminating,
+  arbitrating,
+  stream,
+};
+
+template <class Layer, callout_kind Kind> class basic_callout_key {
 public:
-  constexpr explicit callout_key(const GUID &value) noexcept : value_(value) {}
+  using layer_type = Layer;
+  static constexpr callout_kind kind = Kind;
+
+  constexpr explicit basic_callout_key(const GUID &value) noexcept
+      : value_(value) {}
   bool matches(const GUID &value) const noexcept {
     return ::IsEqualGUID(value_, value);
   }
@@ -82,6 +100,22 @@ private:
   constexpr const GUID &native() const noexcept { return value_; }
   GUID value_{};
 };
+
+template <class Layer>
+using inspection_callout_key =
+    basic_callout_key<Layer, callout_kind::inspection>;
+
+template <class Layer>
+using terminating_callout_key =
+    basic_callout_key<Layer, callout_kind::terminating>;
+
+template <class Layer>
+using arbitrating_callout_key =
+    basic_callout_key<Layer, callout_kind::arbitrating>;
+
+template <class Layer>
+using stream_callout_key =
+    basic_callout_key<Layer, callout_kind::stream>;
 
 template <class Layer> class filter_key {
 public:
@@ -489,6 +523,50 @@ struct outbound_transport_v6 {
 };
 
 /**
+ * @brief Outbound IPv4 packets after the IP header has been constructed.
+ */
+struct outbound_ip_packet_v4 {
+#ifdef NTL_WFP_KERNEL_MODE
+  enum class field : std::uint16_t {
+    local_address = FWPS_FIELD_OUTBOUND_IPPACKET_V4_IP_LOCAL_ADDRESS,
+    remote_address = FWPS_FIELD_OUTBOUND_IPPACKET_V4_IP_REMOTE_ADDRESS,
+    interface_index = FWPS_FIELD_OUTBOUND_IPPACKET_V4_INTERFACE_INDEX,
+    subinterface_index = FWPS_FIELD_OUTBOUND_IPPACKET_V4_SUB_INTERFACE_INDEX,
+    flags = FWPS_FIELD_OUTBOUND_IPPACKET_V4_FLAGS,
+#if NTDDI_VERSION >= NTDDI_WIN10_RS2
+    compartment_id = FWPS_FIELD_OUTBOUND_IPPACKET_V4_COMPARTMENT_ID,
+#endif
+  };
+  static constexpr UINT16 runtime_id = FWPS_LAYER_OUTBOUND_IPPACKET_V4;
+#endif
+  static const GUID &policy_key() noexcept {
+    return FWPM_LAYER_OUTBOUND_IPPACKET_V4;
+  }
+};
+
+/**
+ * @brief Outbound IPv6 packets after the IP header has been constructed.
+ */
+struct outbound_ip_packet_v6 {
+#ifdef NTL_WFP_KERNEL_MODE
+  enum class field : std::uint16_t {
+    local_address = FWPS_FIELD_OUTBOUND_IPPACKET_V6_IP_LOCAL_ADDRESS,
+    remote_address = FWPS_FIELD_OUTBOUND_IPPACKET_V6_IP_REMOTE_ADDRESS,
+    interface_index = FWPS_FIELD_OUTBOUND_IPPACKET_V6_INTERFACE_INDEX,
+    subinterface_index = FWPS_FIELD_OUTBOUND_IPPACKET_V6_SUB_INTERFACE_INDEX,
+    flags = FWPS_FIELD_OUTBOUND_IPPACKET_V6_FLAGS,
+#if NTDDI_VERSION >= NTDDI_WIN10_RS2
+    compartment_id = FWPS_FIELD_OUTBOUND_IPPACKET_V6_COMPARTMENT_ID,
+#endif
+  };
+  static constexpr UINT16 runtime_id = FWPS_LAYER_OUTBOUND_IPPACKET_V6;
+#endif
+  static const GUID &policy_key() noexcept {
+    return FWPM_LAYER_OUTBOUND_IPPACKET_V6;
+  }
+};
+
+/**
  * @brief IPv4 endpoint-lifetime notification after socket closure.
  */
 struct ale_endpoint_closure_v4 {
@@ -776,6 +854,10 @@ inline constexpr bool known_layer<layers::outbound_transport_v4> = true;
 template <>
 inline constexpr bool known_layer<layers::outbound_transport_v6> = true;
 template <>
+inline constexpr bool known_layer<layers::outbound_ip_packet_v4> = true;
+template <>
+inline constexpr bool known_layer<layers::outbound_ip_packet_v6> = true;
+template <>
 inline constexpr bool known_layer<layers::ale_endpoint_closure_v4> = true;
 template <>
 inline constexpr bool known_layer<layers::ale_endpoint_closure_v6> = true;
@@ -857,6 +939,8 @@ inline constexpr bool packet_decision_layer =
     std::is_same_v<Layer, layers::inbound_transport_v6> ||
     std::is_same_v<Layer, layers::outbound_transport_v4> ||
     std::is_same_v<Layer, layers::outbound_transport_v6> ||
+    std::is_same_v<Layer, layers::outbound_ip_packet_v4> ||
+    std::is_same_v<Layer, layers::outbound_ip_packet_v6> ||
     std::is_same_v<Layer, layers::inbound_mac_frame_ethernet> ||
     std::is_same_v<Layer, layers::outbound_mac_frame_ethernet> ||
     std::is_same_v<Layer, layers::ingress_vswitch_ethernet> ||

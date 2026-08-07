@@ -77,8 +77,8 @@ public:
     reader_.close(status);
   }
   void cancel() noexcept { reader_.cancel(); }
-  ntl::status cancel_and_wait() noexcept {
-    return reader_.cancel_and_wait();
+  [[nodiscard]] auto cancel_and_drain() noexcept {
+    return reader_.cancel_and_drain();
   }
 
 private:

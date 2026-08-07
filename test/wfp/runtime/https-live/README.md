@@ -22,7 +22,9 @@ ephemeral keys, WFP services, crash events, dumps, and remaining processes.
 See [the Korean controlled-H3 guide](./CONTROLLED-HTTP3-README.ko-KR.md).
 
 `Run-WfpHttpsVmAcceptance.ps1` copies one portable package to VMware
-Workstation and can run four checks in one guest-operations session:
+Workstation and can run four checks in one guest-operations session. The
+browser check observes a browser that the VM operator already opened; it does
+not start, stop, or configure a browser:
 
 1. controlled-host TCP redirect and plaintext equality;
 2. normal browser HTTPS inspection with captured HTML;
@@ -52,12 +54,27 @@ Driver-signing certificates and the temporary HTTPS inspection CA are
 different certificates. The acceptance runner installs only the required
 public certificates and removes its temporary inspection CA.
 
+Every script that installs a driver or writes a machine certificate store
+requires two deliberate guest proofs. Create the sentinel once inside the
+disposable VM and pass the acknowledgement switch to direct suite commands:
+
+```powershell
+Set-Content C:\crtsys-disposable-test-guest.sentinel `
+    'CRTSYS_DISPOSABLE_TEST_GUEST' -NoNewline
+```
+
+The scripts never create this sentinel. `Run-WfpHttpsVmAcceptance.ps1`
+verifies it before changing the guest and requires the browser URL from the
+caller; no public host is selected by default.
+
 ## Controlled-host check
 
 ```powershell
 .\Run-WfpHttpsLiveTest.ps1 `
     -PackageRoot C:\crtsys-wfp-https `
-    -HostName $env:NTL_WFP_TEST_HOST
+    -HostName $env:NTL_WFP_TEST_HOST `
+    -AllowDisposableGuestMutation `
+    -DisposableGuestSentinelPath C:\crtsys-disposable-test-guest.sentinel
 ```
 
 The controller tries distinct IPv4 DNS results, validates the origin with
@@ -71,35 +88,49 @@ positively revoked certificates.
 Run from an elevated PowerShell in the copied package:
 
 ```powershell
+$inspectionUrl = [uri](Read-Host 'HTTPS URL to inspect')
 .\Start-WfpBrowserHttpsInspection.ps1 `
     -PackageRoot C:\crtsys-wfp-https `
-    -Urls @('https://www.google.com/') `
+    -Urls @($inspectionUrl) `
     -RequireQuicBlockedFallback `
     -LogDirectory C:\crtsys-wfp-https\browser-log `
-    -DurationSeconds 90
+    -DurationSeconds 90 `
+    -AllowDisposableGuestMutation `
+    -DisposableGuestSentinelPath C:\crtsys-disposable-test-guest.sentinel
 ```
 
-The script starts the sample driver and app, waits for readiness, temporarily
-trusts the generated inspection CA, and opens an isolated Edge profile. It
-does not disable QUIC, force QUIC, ignore certificate errors, or change Edge
-ECH policy. `-RequireQuicBlockedFallback` requires all of the following:
+Before starting the wrapper, open the browser normally and leave that process
+running. Do not supply a temporary profile or test flags. The wrapper finds
+the executable path (Edge by default), starts only the sample driver and app,
+waits for readiness, and temporarily trusts the generated inspection CA. It
+never launches or terminates the browser and never supplies profile, feature,
+certificate, QUIC, ECH, or logging arguments. Navigate in the already-open
+window while the observation interval is active.
 
-- the active provider, sublayer, callouts, filter action, and exact
-  application/UDP/443 conditions pass the bounded WFP policy diagnostic;
-- the kernel callout reports at least one matching classify with action-write
-  rights and a block decision;
-- Edge NetLog contains no direct target-host QUIC session that received and
-  authenticated public packets; and
-- the requested host still produced inspected HTML over TCP.
+`-Urls` lists expected captures; it does not navigate the browser. If it is
+omitted, at least one fresh inspected HTML response is still required.
+`-RequireQuicBlockedFallback` requires all of the following:
+
+- application-scoped IPv4 and IPv6 UDP/443 native block filters pass the
+  bounded WFP inventory check;
+- each filter ID printed by the runtime exists in the inventory from that
+  same run;
+- a WFP `classify_drop` net event for the observed browser, UDP/443, and one
+  of those exact native filter IDs is observed; and
+- fresh inspected HTML is captured over TCP, including every host supplied
+  through `-Urls`.
 
 The evidence directory includes `wfp-policy-diagnostics.log`,
-`quic-telemetry.json`, the original `edge-netlog.json`, and one
-`quic-policy-<host>.json` verdict. A run with no UDP/443 classify is
-inconclusive and fails the assertion instead of claiming that QUIC was
-blocked.
+`browser-transport-evidence.json`, the proxy logs, and captured HTML. Browser
+NetLog and callout `action_write` counters are deliberately not acceptance
+evidence. A run with no matching UDP/443 drop event is inconclusive and fails
+the assertion instead of claiming that QUIC fallback occurred.
 
-Without `-DurationSeconds`, browse manually and press Enter to stop. Omitting
-the assertion switch does not change runtime behavior.
+Without `-DurationSeconds`, browse manually and press Enter to stop. A timed
+run observes for the full requested interval; it does not stop after the first
+capture. Omitting the assertion switch does not change runtime policy, but it
+allows a run with no observed UDP challenge to report `NOT_OBSERVED` instead
+of failing.
 
 The normal driver redirects application-scoped IPv4/IPv6 TCP 443 to the
 Schannel proxy and blocks UDP 443. Chromium does not accept a custom
@@ -107,13 +138,9 @@ inspection CA for QUIC, so redirecting unchanged Edge to a private-CA QUIC
 server ends with TLS `certificate_unknown`. Blocking UDP makes Edge use the
 inspected TCP fallback without changing browser settings.
 
-The acceptance investigation also tested Edge's managed `CACertificates`
-trust policy. Edge validated the generated `www.google.com` chain with
-`cert_status=0`, but still reported `is_issued_by_known_root=false` to its QUIC
-proof verifier and rejected the connection. The policy is therefore not used
-by this runtime. This result describes the stock-browser path only; it does
-not generalize to products that install their own managed client or integrate
-with a browser.
+The stock-browser path does not depend on a managed browser trust policy or a
+site-specific certificate exception. This does not generalize to products
+that install their own managed client or integrate with a browser.
 
 ## Managed-client HTTP/3 inspection
 
@@ -122,9 +149,10 @@ launch or configure a browser, or write an inspection CA to a Windows trust
 store:
 
 ```powershell
+$inspectionUrl = [uri](Read-Host 'HTTPS URL to inspect')
 .\Start-ManagedHttp3Inspection.ps1 `
     -PackageRoot C:\crtsys-wfp-https `
-    -Url 'https://www.google.com/' `
+    -Url $inspectionUrl `
     -LogDirectory C:\crtsys-wfp-https\managed-http3-log
 ```
 
@@ -142,19 +170,26 @@ fallback.
 Add `-IncludeManagedHttp3` to `Run-WfpHttpsVmAcceptance.ps1` to run this check
 after the stock-browser fallback check in the same VM session.
 
+For `Run-WfpHttpsVmAcceptance.ps1`, the operator must open the ordinary
+browser before starting the runner and navigate to `-BrowserUrl` while the
+guest browser observation interval is active. `-BrowserUrl` is an expected
+capture, not a browser-launch instruction.
+
 The TCP path supports bounded HTTP/1.1, multiplexed HTTP/2, and WebSocket
 `permessage-deflate`. HTTP/1.1, HTTP/2, and ordinary HTTP/3 responses use the
 shared bounded gzip, zlib `deflate`, and Brotli decoders where applicable.
 Captured `.html` files are server response bodies, not rendered DOM snapshots.
 
-## Isolated SPKI diagnostic
+The evidence parser and the no-browser-mutation rule have offline contracts:
 
-`Start-BrowserHttp3SpkiDiagnostic.ps1` is retained only as a controlled
-transport diagnostic. It does not load WFP. It maps its disposable browser
-session to loopback, forces QUIC in that session, and supplies one exact
-ephemeral SPKI exception. It can distinguish browser QUIC certificate-policy
-problems from WFP redirect problems, but it is not the product-shaped path and
-is not part of the normal browser acceptance result.
+```powershell
+.\Test-WfpBrowserTransportEvidenceContract.ps1
+.\Test-WfpBrowserWrapperContract.ps1
+```
+
+The latter rejects browser launch/termination, disposable profiles, NetLog,
+certificate-bypass, QUIC/ECH feature, and host-mapping arguments if they are
+reintroduced into the ordinary-browser wrapper or VM runner.
 
 ## Security and unsupported boundaries
 

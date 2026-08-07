@@ -162,7 +162,7 @@ public:
     metadata_.kind = content_kind::udp_payload;
   }
 
-  const context &metadata() const noexcept { return metadata_; }
+  context metadata() const noexcept { return metadata_; }
   content_view payload() const noexcept { return payload_; }
 
 private:
@@ -181,7 +181,7 @@ public:
     metadata_.kind = content_kind::tcp_message;
   }
 
-  const context &metadata() const noexcept { return metadata_; }
+  context metadata() const noexcept { return metadata_; }
   content_view frame() const noexcept { return frame_; }
   content_view content() const noexcept { return content_; }
 

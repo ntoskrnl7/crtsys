@@ -13,15 +13,33 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function Read-UnsignedMetric(
+  [Parameter(Mandatory)][string] $Text,
+  [Parameter(Mandatory)][string] $Name
+) {
+  $match = [regex]::Match(
+      $Text, '(?:^|[ ,])' + [regex]::Escape($Name) + '=(\d+)')
+  if (-not $match.Success) {
+    throw "Missing $Name telemetry in the managed HTTP/3 proxy output."
+  }
+  return [UInt64]::Parse(
+      $match.Groups[1].Value,
+      [Globalization.CultureInfo]::InvariantCulture)
+}
+
 if ($Url.Scheme -ne 'https' -or $Url.Port -ne 443) {
   throw 'The WFP managed HTTP/3 URL must use HTTPS port 443.'
 }
 
 $root = (Resolve-Path -LiteralPath $PackageRoot).Path
 $proxyApplication =
-    Join-Path $root 'crtsys_wfp_browser_https_inspection_app.exe'
+    Join-Path $root (
+        'crtsys_wfp_browser_https_inspection_' +
+        'http3_proxy_service.exe')
 $clientApplication =
-    Join-Path $root 'crtsys_ntl_managed_http3_client.exe'
+    Join-Path $root (
+        'crtsys_wfp_browser_https_inspection_' +
+        'managed_client_acceptance.exe')
 foreach ($required in @(
     $proxyApplication, $clientApplication,
     (Join-Path $root 'msh3.dll'),
@@ -136,14 +154,25 @@ try {
   $proxyOutput = Get-Content -LiteralPath $proxyStdout -Raw
   $events = Get-Content -LiteralPath $eventsPath -Raw
   $hostName = $Url.DnsSafeHost
+  $udpOutbound = Read-UnsignedMetric $proxyOutput 'udp-outbound'
+  $udpInbound = Read-UnsignedMetric $proxyOutput 'udp-inbound'
+  $mappingUpdates = Read-UnsignedMetric $proxyOutput 'udp-mapping-updates'
+  $mappingMisses = Read-UnsignedMetric $proxyOutput 'udp-mapping-misses'
+  $injectionFailures =
+      Read-UnsignedMetric $proxyOutput 'udp-injection-failures'
+  $quotaRejections =
+      Read-UnsignedMetric $proxyOutput 'udp-quota-rejections'
   if (-not $clientOutput.Contains('protocol=h3') -or
       -not $clientOutput.Contains('trust=private-ca') -or
       -not $clientOutput.Contains('peer=original-destination') -or
       -not $proxyOutput.Contains('delivered-requests=1') -or
-      -not $events.Contains("tls host=$hostName protocol=h3")) {
+      -not $events.Contains("tls host=$hostName protocol=h3") -or
+      $udpOutbound -eq 0 -or $udpInbound -eq 0 -or
+      $mappingUpdates -eq 0 -or $mappingMisses -ne 0 -or
+      $injectionFailures -ne 0 -or $quotaRejections -ne 0) {
     throw (
-        'The run did not prove WFP UDP/443 redirect into the ' +
-        'HTTP/3 inspection endpoint.')
+        'The run did not prove clean bidirectional WFP UDP/443 tuple ' +
+        'translation into the HTTP/3 inspection endpoint.')
   }
   $html = @(
     Get-ChildItem -LiteralPath $LogDirectory -Filter '*.html' -File |
@@ -159,7 +188,7 @@ try {
 
   Write-Host $clientOutput.Trim()
   Write-Host (
-      "WFP managed HTTP/3 redirect passed: $($html[0].FullName)")
+      "WFP managed HTTP/3 translation passed: $($html[0].FullName)")
 } finally {
   if ($proxy -and -not $proxy.HasExited) {
     New-Item -ItemType File -Path $stopPath -Force `

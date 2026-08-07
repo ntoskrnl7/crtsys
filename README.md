@@ -181,15 +181,22 @@ CMake consumers use the equivalent helper:
 crtsys_add_driver(my_wfp_callout WFP NTL src/main.cpp)
 ```
 
-See the [WFP ALE connect-block driver/controller](./examples/wfp/ale-connect-block),
-its [Korean walkthrough](./examples/wfp/ale-connect-block/README.ko-KR.md), the
- [typed API and ownership guide](./docs/ntl/wfp.md), the
- [connect-redirect coroutine TCP proxy](./examples/wfp/connect-redirect), the
- [Schannel TLS inspection proxy](./examples/wfp/tls-inspection-proxy), the
- [separate browser HTTPS inspection example](./examples/wfp/browser-https-inspection), the
- [UDP content-filter](./examples/wfp/udp-content-filter) and
-[TCP content-filter](./examples/wfp/tcp-content-filter) driver/app samples, the
+If that driver uses the kernel MsQuic NMR backend, add `KERNEL_MSQUIC` to the
+same call. It selects the pinned headers, Windows 10 version-2004 target, and
+`netio.lib` together.
+
+See the [WFP ALE connect-block driver/controller](./examples/wfp/kernel/ale-connect-block),
+its [Korean walkthrough](./examples/wfp/kernel/ale-connect-block/README.ko-KR.md), the
+[WFP guide for driver developers](./docs/ntl/wfp-guide.md), the
+[typed API and ownership guide](./docs/ntl/wfp.md), the
+ [connect-redirect coroutine TCP proxy](./examples/wfp/user/connect-redirect), the
+ [Schannel TLS inspection proxy](./examples/wfp/user/tls-inspection-proxy), the
+ [separate browser HTTPS inspection example](./examples/wfp/user/browser-https-inspection), the
+ [UDP content-filter](./examples/wfp/user/udp-content-filter) and
+[TCP content-filter](./examples/wfp/user/tcp-content-filter) driver/app samples, the
 [content inspection and framing guide](./docs/ntl/inspection.md), the
+[kernel/user network dual-runtime guide](./docs/ntl/network-dual-runtime.md), the
+[kernel networking contract test](./test/net/kernel-contracts), the
 [user-mode TLS stream guide](./docs/ntl/tls-stream.md), and the
 [WDK sample coverage map](./test/wfp/WDK-SAMPLE-COVERAGE.md).
 
@@ -262,12 +269,17 @@ may compile or work.
 | [NTL KMDF USB template](./examples/kmdf/usb) | Buildable PnP USB device/interface/pipe and continuous-reader template with a user-mode inspection app |
 | [NTL KMDF WMI sample](./examples/kmdf/wmi) | MOF-backed typed WMI query/set/method providers, event delivery, and a `ROOT\\WMI` user-mode verifier |
 | [NTL minifilter samples](./examples/minifilter) | Independent typed callback/context, control-device, communication, MiniSpy-style operation-log, swapped-buffer, and MetadataManager-style driver/app examples with WDK sample-coverage mapping |
-| [NTL WFP ALE connect-block](./examples/wfp/ale-connect-block) | A purpose-named driver/controller sample that blocks one selected outbound IPv4 TCP connection, proves session-scoped recovery, and exercises persistent graph reconcile, health, and uninstall |
-| [NTL WFP connect-redirect](./examples/wfp/connect-redirect) | A local TCP proxy foundation that safely hands the original destination and opaque WFP redirect records to user mode, relays both directions with coroutines, and prevents redirect loops |
-| [NTL WFP TLS inspection-proxy](./examples/wfp/tls-inspection-proxy) | An authorized connect-redirect and two-leg Schannel proxy with bounded ClientHello/SNI identity selection, per-host certificate issuance/cache, HTTP/1.1 plaintext framing, and typed content policy outside the kernel |
-| [NTL WFP browser HTTPS inspection](./examples/wfp/browser-https-inspection) | An independent browser-scoped driver/app example with dynamic redirect policy, two-leg Schannel termination, HTTP/1.1 and HTTP/2 transforms, WebSocket/gRPC adapters, and bounded gzip/deflate/Brotli HTML decoding |
-| [NTL WFP UDP content-filter](./examples/wfp/udp-content-filter) | A fail-closed driver/policy-coroutine sample for complete outbound UDP datagrams; permit reinjects the retained clone and block discards only that datagram |
-| [NTL WFP TCP content-filter](./examples/wfp/tcp-content-filter) | A fail-closed driver/policy-coroutine sample for explicitly framed inbound TCP application messages; permit resumes exactly one frame and block drops the whole flow |
+| [NTL WFP guide](./docs/ntl/wfp-guide.md) | Concepts, user/kernel execution models, typed callout decisions, payload boundaries, TLS/QUIC inspection, sample order, and verification for developers new to WFP |
+| [NTL WFP ALE connect-block](./examples/wfp/kernel/ale-connect-block) | A purpose-named driver/controller sample that blocks one selected outbound IPv4 TCP connection, proves session-scoped recovery, and exercises persistent graph reconcile, health, and uninstall |
+| [NTL WFP connect-redirect](./examples/wfp/user/connect-redirect) | A local TCP proxy foundation that safely hands the original destination and opaque WFP redirect records to user mode, relays both directions with coroutines, and prevents redirect loops |
+| [NTL WFP TLS inspection-proxy](./examples/wfp/user/tls-inspection-proxy) | An authorized connect-redirect and two-leg Schannel proxy with bounded ClientHello/SNI identity selection, per-host certificate issuance/cache, HTTP/1.1 plaintext framing, and an owning `inspection_policy` outside the kernel |
+| [NTL WFP browser HTTPS inspection](./examples/wfp/user/browser-https-inspection) | An independent browser-scoped driver/service example with dynamic TCP and UDP redirect policy, Schannel HTTP/1.1·HTTP/2 and MsQuic HTTP/3 termination, one shared inspection/rewrite policy, WebSocket/gRPC/WebTransport adapters, and bounded gzip/deflate/Brotli decoding |
+| [NTL WFP UDP content-filter](./examples/wfp/user/udp-content-filter) | A fail-closed driver/policy-coroutine sample for complete outbound UDP datagrams; permit reinjects the retained clone and block discards only that datagram |
+| [NTL WFP TCP content-filter](./examples/wfp/user/tcp-content-filter) | A fail-closed driver/policy-coroutine sample for explicitly framed inbound TCP application messages; permit resumes exactly one frame and block drops the whole flow |
+| [NTL WFP kernel examples](./examples/wfp/kernel) | Direct kernel counterparts for TCP/UDP content decisions, connect redirect, Schannel TLS termination, controlled browser HTTPS capture, and MsQuic HTTP/3, plus the low-level WFP primitive samples |
+| [NTL WFP kernel browser HTTPS inspection](./examples/wfp/kernel/browser-https-inspection) | A separate example that keeps WSK, Schannel HTTP/1.1·HTTP/2, MsQuic HTTP/3, bounded capture, permit/block/drop, and header/body rewrite processing in the driver; continuous mode observes an already-running exact browser executable without launching it or changing browser settings or flags |
+| [NTL WFP kernel HTTP/3 inspection](./examples/wfp/kernel/http3-inspection) | A controlled kernel MsQuic NMR endpoint with TLS 1.3, H3 SETTINGS, bounded QPACK request parsing, IPv4/IPv6 WFP authorization, capture, and allow/block responses |
+| [NTL kernel networking contracts](./test/net/kernel-contracts) | Synthetic driver/app contract test for bounded HTTP/1/2/3, gRPC, QPACK, WebSocket, WebTransport, TLS ClientHello, direct/offloaded policy, and drainable execution; real traffic examples remain under `examples/wfp` |
 | [CI Driver Load Tests](./docs/ci-driver-load-tests.md) | Optional self-hosted driver load/run workflow |
 
 ## Operational Boundaries
@@ -379,7 +391,21 @@ Brotli HTTP, WebSocket, and gRPC transforms, including incremental chained
 `Content-Encoding` decode/re-encode. Package CI compiles and links this codec
 consumer across every packaged toolset, architecture, and configuration;
 x86/x64 jobs also execute one-byte-split round trips. Driver projects do not
-link these user-mode codecs.
+link these user-mode codecs. NTL WFP driver projects instead automatically
+receive the separately compiled `Z_SOLO` kernel zlib/Brotli archives, so
+`<ntl/net/kernel/content_codecs>` has the same one-property NuGet experience
+without linking user-mode CRT objects into a driver. Package CI compiles and
+links that kernel codec surface in every `NTL_WFP` consumer matrix entry.
+
+Selecting **NTL WFP** in the Visual Studio property page also supplies the NTL
+entry point, WFP definitions, `fwpkclnt.lib`, and the kernel codec archives.
+For CMake, use `crtsys_add_driver(target WFP NTL ...)` and add
+`KERNEL_CONTENT_CODECS` only when the driver directly uses
+gzip/deflate/Brotli. Add `KERNEL_MSQUIC` when it uses kernel MsQuic. Those
+options select the driver-safe codec archives, or the pinned public MsQuic
+ABI, Windows 10 version-2004 contract, and NMR client import, respectively.
+The compatible user DLL or kernel NMR provider remains an explicit runtime
+deployment dependency.
 
 The NuGet distribution is `crtsys.<version>.nupkg` for Visual Studio/MSBuild
 projects.
@@ -390,7 +416,8 @@ GitHub Release publishes these offline-only assets:
 
 - `crtsys-<version>-prebuilt.zip`: headers, docs, CMake helpers,
   and prebuilt `x86/x64/ARM/ARM64` `Debug`/`Release` libraries under an MSVC
-  toolset-specific layout, with ARM omitted for v145.
+  toolset-specific layout, including user and kernel content codecs, with ARM
+  omitted for v145.
 - `crtsys-<version>-SHA256SUMS.txt`
 
 The prebuilt bundle is intended for CMake projects that want a checked-in or

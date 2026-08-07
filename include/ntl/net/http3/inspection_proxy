@@ -12,10 +12,6 @@
  */
 #pragma once
 
-#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
-#error "ntl/net/http3/inspection_proxy is a user-mode header"
-#endif
-
 #include <ntl/net/inspection/content_decoder>
 #include <ntl/net/inspection/content_encoder>
 #include <ntl/net/inspection/core>
@@ -27,12 +23,15 @@
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
+#include <memory>
 #include <new>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <stdexcept>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -67,6 +66,7 @@ struct origin_request {
   std::string path;
   std::vector<proxy_header> headers;
   std::vector<std::byte> body;
+  std::vector<proxy_header> trailers;
 };
 
 struct origin_response {
@@ -74,6 +74,7 @@ struct origin_response {
   std::vector<proxy_header> headers;
   std::vector<std::byte> body;
   std::string negotiated_protocol;
+  std::vector<proxy_header> trailers;
 };
 
 /**
@@ -87,6 +88,57 @@ public:
   virtual ~origin_transport() = default;
   virtual ntl::result<origin_response>
   send(const origin_request &request) noexcept = 0;
+};
+
+using origin_completion =
+    std::function<void(ntl::result<origin_response>)>;
+
+/**
+ * @brief Non-blocking origin submission contract used by multiplexed H3.
+ *
+ * submit() takes ownership of the request and completion. It must return
+ * promptly after queueing work and invoke completion at most once. Completion
+ * may run inline or on another thread. cancel() prevents useful delivery, but
+ * a racing late completion is permitted; proxy_connection ignores it safely.
+ */
+class async_origin_transport {
+public:
+  virtual ~async_origin_transport() = default;
+  virtual ntl::status submit(
+      std::uint64_t exchange_id, origin_request request,
+      origin_completion completion) noexcept = 0;
+  virtual void cancel(std::uint64_t exchange_id) noexcept = 0;
+};
+
+/** Explicit adapter for a synchronous blocking origin. */
+class immediate_origin_transport_adapter final
+    : public async_origin_transport {
+public:
+  explicit immediate_origin_transport_adapter(
+      std::shared_ptr<origin_transport> origin)
+      : origin_(std::move(origin)) {
+    if (!origin_)
+      throw std::invalid_argument("HTTP/3 origin transport is null");
+  }
+
+  ntl::status submit(
+      std::uint64_t, origin_request request,
+      origin_completion completion) noexcept override {
+    if (!completion)
+      return STATUS_INVALID_PARAMETER;
+    auto response = origin_->send(request);
+    try {
+      completion(std::move(response));
+      return ntl::status::ok();
+    } catch (...) {
+      return STATUS_UNHANDLED_EXCEPTION;
+    }
+  }
+
+  void cancel(std::uint64_t) noexcept override {}
+
+private:
+  std::shared_ptr<origin_transport> origin_;
 };
 
 struct proxy_limits {
@@ -172,8 +224,8 @@ private:
 
 template <class Function>
 auto make_origin_transport(Function &&function) {
-  return functional_origin_transport<
-      std::decay_t<Function>>(
+  return std::make_shared<functional_origin_transport<
+      std::decay_t<Function>>>(
       std::forward<Function>(function));
 }
 
@@ -216,9 +268,9 @@ template <class RequestFunction, class ResponseFunction>
 auto make_inspection_policy(
     RequestFunction &&request,
     ResponseFunction &&response) {
-  return functional_inspection_policy<
+  return std::make_shared<functional_inspection_policy<
       std::decay_t<RequestFunction>,
-      std::decay_t<ResponseFunction>>(
+      std::decay_t<ResponseFunction>>>(
       std::forward<RequestFunction>(request),
       std::forward<ResponseFunction>(response));
 }
@@ -373,48 +425,34 @@ inline ntl::status verdict_status(
 /**
  * @brief Bounded HTTP/3 request, origin, decoding, and verdict composition.
  *
- * The decoder registry must not be mutated while forward() is active.
- * origin_transport and inspection_policy are non-owning and may be invoked
- * concurrently.
+ * The proxy owns the origin, policy, codec registries, and transform policy.
+ * Callbacks may be invoked concurrently, but destroying their original
+ * facades cannot invalidate an active proxy.
  */
 class inspection_proxy {
 public:
   inspection_proxy(
-      origin_transport &origin,
-      inspection_policy &policy,
-      const ntl::net::inspection::content_decoder_registry &decoders,
-      proxy_limits limits = {}) noexcept
-      : origin_(&origin),
-        policy_(&policy),
-        decoders_(&decoders),
+      std::shared_ptr<origin_transport> origin,
+      std::shared_ptr<inspection_policy> policy,
+      ntl::net::inspection::content_decoder_registry decoders,
+      proxy_limits limits = {})
+      : origin_(std::move(origin)),
+        policy_(std::move(policy)),
+        decoders_(std::move(decoders)),
         limits_(limits) {}
 
   inspection_proxy(
-      origin_transport &origin,
-      inspection_policy &policy,
-      const ntl::net::inspection::content_decoder_registry &decoders,
-      const ntl::net::inspection::content_encoder_registry &encoders,
-      const ntl::net::http::transform_pipeline &transforms,
-      proxy_limits limits = {}) noexcept
-      : origin_(&origin),
-        policy_(&policy),
-        decoders_(&decoders),
-        encoders_(&encoders),
-        transforms_(&transforms),
-        limits_(limits) {}
-
-  inspection_proxy(
-      origin_transport &origin,
-      inspection_policy &policy,
-      const ntl::net::inspection::content_decoder_registry &decoders,
-      const ntl::net::inspection::content_encoder_registry *encoders,
-      const ntl::net::http::transform_pipeline *transforms,
-      proxy_limits limits = {}) noexcept
-      : origin_(&origin),
-        policy_(&policy),
-        decoders_(&decoders),
-        encoders_(encoders),
-        transforms_(transforms),
+      std::shared_ptr<origin_transport> origin,
+      std::shared_ptr<inspection_policy> policy,
+      ntl::net::inspection::content_decoder_registry decoders,
+      ntl::net::inspection::content_encoder_registry encoders,
+      ntl::net::http::transform_pipeline transforms,
+      proxy_limits limits = {})
+      : origin_(std::move(origin)),
+        policy_(std::move(policy)),
+        decoders_(std::move(decoders)),
+        encoders_(std::move(encoders)),
+        transforms_(std::move(transforms)),
         limits_(limits) {}
 
   inspection_proxy(const inspection_proxy &) = delete;
@@ -566,7 +604,7 @@ public:
 
 private:
   bool valid_limits() const noexcept {
-    return origin_ && policy_ && decoders_ &&
+    return origin_ && policy_ &&
            (!transforms_ || encoders_) &&
            limits_.maximum_request_headers != 0 &&
            limits_.maximum_request_header_bytes != 0 &&
@@ -754,7 +792,7 @@ private:
 
     auto decoded =
         ntl::net::inspection::decode_content_encoding(
-            *decoders_,
+            decoders_,
             ntl::net::scatter_view::from_contiguous(
                 std::span<const std::byte>(body)),
             content_encoding,
@@ -829,7 +867,9 @@ private:
       destination.clear();
       destination.reserve(source.size());
       for (const auto &field : source.fields())
-        destination.push_back({field.name, field.value});
+        destination.push_back(
+            {std::string(field.name.begin(), field.name.end()),
+             std::string(field.value.begin(), field.value.end())});
       return ntl::status::ok();
     } catch (...) {
       return STATUS_INSUFFICIENT_RESOURCES;
@@ -850,7 +890,7 @@ private:
         auto encoded = ntl::net::http::encode_body(
             semantic.headers, semantic.body,
             original_coding, outcome.body_coding,
-            *encoders_, transforms_->limits());
+            *encoders_, transforms_->limits_ref());
         if (!encoded)
           return encoded.status();
         wire.body = std::move(*encoded);
@@ -880,7 +920,7 @@ private:
         auto encoded = ntl::net::http::encode_body(
             semantic.headers, semantic.body,
             original_coding, outcome.body_coding,
-            *encoders_, transforms_->limits());
+            *encoders_, transforms_->limits_ref());
         if (!encoded)
           return encoded.status();
         wire.body = std::move(*encoded);
@@ -949,7 +989,7 @@ private:
       auto encoded = ntl::net::http::encode_body(
           semantic.headers, semantic.body, original_coding,
           ntl::net::http::transformed_body_coding::preserve,
-          *encoders_, transforms_->limits());
+          *encoders_, transforms_->limits_ref());
       if (!encoded)
         return fail(static_cast<NTSTATUS>(encoded.status()));
       origin_response result;
@@ -983,14 +1023,11 @@ private:
     return ntl::unexpected(status);
   }
 
-  origin_transport *origin_ = nullptr;
-  inspection_policy *policy_ = nullptr;
-  const ntl::net::inspection::content_decoder_registry
-      *decoders_ = nullptr;
-  const ntl::net::inspection::content_encoder_registry
-      *encoders_ = nullptr;
-  const ntl::net::http::transform_pipeline
-      *transforms_ = nullptr;
+  std::shared_ptr<origin_transport> origin_;
+  std::shared_ptr<inspection_policy> policy_;
+  ntl::net::inspection::content_decoder_registry decoders_;
+  std::optional<ntl::net::inspection::content_encoder_registry> encoders_;
+  std::optional<ntl::net::http::transform_pipeline> transforms_;
   proxy_limits limits_{};
 };
 

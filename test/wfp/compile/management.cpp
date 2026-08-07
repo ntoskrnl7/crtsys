@@ -15,6 +15,7 @@ using flow_layer = ntl::wfp::layers::ale_flow_established_v4;
 using stream_layer = ntl::wfp::layers::stream_v4;
 using datagram_layer = ntl::wfp::layers::datagram_data_v4;
 using datagram_layer_v6 = ntl::wfp::layers::datagram_data_v6;
+using outbound_ip_layer = ntl::wfp::layers::outbound_ip_packet_v4;
 using mac_layer = ntl::wfp::layers::outbound_mac_frame_ethernet;
 using vswitch_layer =
     ntl::wfp::layers::egress_vswitch_ethernet;
@@ -62,11 +63,6 @@ constexpr GUID stream_filter_guid = {
     0x5d33,
     0x429d,
     {0xa7, 0x7e, 0x4c, 0x93, 0xe6, 0xf0, 0xaa, 0x01}};
-constexpr GUID stream_control_filter_guid = {
-    0x73aed1a8,
-    0x5d33,
-    0x429d,
-    {0xa7, 0x7e, 0x4c, 0x93, 0xe6, 0xf0, 0xaa, 0x01}};
 constexpr GUID datagram_callout_guid = {
     0x73aed1a9,
     0x5d33,
@@ -105,27 +101,65 @@ constexpr GUID enforcement_filter_guid = {
 
 constexpr ntl::wfp::provider_key provider_key(provider_guid);
 constexpr ntl::wfp::sublayer_key sublayer_key(sublayer_guid);
-constexpr ntl::wfp::callout_key<connect_layer>
+constexpr ntl::wfp::terminating_callout_key<connect_layer>
     connect_callout_key(connect_callout_guid);
 constexpr ntl::wfp::filter_key<connect_layer>
     connect_filter_key(connect_filter_guid);
-constexpr ntl::wfp::callout_key<flow_layer> flow_callout_key(flow_callout_guid);
+constexpr ntl::wfp::inspection_callout_key<flow_layer> flow_callout_key(flow_callout_guid);
 constexpr ntl::wfp::filter_key<flow_layer> flow_filter_key(flow_filter_guid);
-constexpr ntl::wfp::callout_key<stream_layer>
+constexpr ntl::wfp::stream_callout_key<stream_layer>
     stream_callout_key(stream_callout_guid);
 constexpr ntl::wfp::filter_key<stream_layer>
     stream_filter_key(stream_filter_guid);
-constexpr ntl::wfp::filter_key<stream_layer>
-    stream_control_filter_key(stream_control_filter_guid);
-constexpr ntl::wfp::callout_key<datagram_layer>
+constexpr ntl::wfp::terminating_callout_key<datagram_layer>
     datagram_callout_key(datagram_callout_guid);
 constexpr ntl::wfp::filter_key<datagram_layer>
     datagram_filter_key(datagram_filter_guid);
-constexpr ntl::wfp::callout_key<redirect_layer>
+
+template <class Ref>
+concept accepts_flow_inspection_filter =
+    requires(ntl::wfp::policy_transaction &transaction,
+             const ntl::wfp::sublayer_ref &sublayer,
+             const Ref &callout,
+             ntl::wfp::inspection_filter_builder<flow_layer> &filter) {
+      transaction.add_inspection_filter(sublayer, callout, filter);
+    };
+
+template <class Ref>
+concept accepts_datagram_packet_filter =
+    requires(ntl::wfp::policy_transaction &transaction,
+             const ntl::wfp::sublayer_ref &sublayer,
+             const Ref &callout,
+             ntl::wfp::packet_filter_builder<datagram_layer> &filter) {
+      transaction.add_packet_filter(sublayer, callout, filter);
+    };
+
+template <class Ref>
+concept accepts_flow_arbitration_filter =
+    requires(ntl::wfp::policy_transaction &transaction,
+             const ntl::wfp::sublayer_ref &sublayer,
+             const Ref &callout,
+             ntl::wfp::arbitration_filter_builder<flow_layer> &filter) {
+      transaction.add_arbitration_filter(sublayer, callout, filter);
+    };
+
+static_assert(accepts_flow_inspection_filter<
+              ntl::wfp::inspection_callout_ref<flow_layer>>);
+static_assert(!accepts_flow_inspection_filter<
+              ntl::wfp::terminating_callout_ref<flow_layer>>);
+static_assert(accepts_datagram_packet_filter<
+              ntl::wfp::terminating_callout_ref<datagram_layer>>);
+static_assert(!accepts_datagram_packet_filter<
+              ntl::wfp::inspection_callout_ref<datagram_layer>>);
+static_assert(accepts_flow_arbitration_filter<
+              ntl::wfp::arbitrating_callout_ref<flow_layer>>);
+static_assert(!accepts_flow_arbitration_filter<
+              ntl::wfp::inspection_callout_ref<flow_layer>>);
+constexpr ntl::wfp::terminating_callout_key<redirect_layer>
     redirect_callout_key(redirect_callout_guid);
 constexpr ntl::wfp::filter_key<redirect_layer>
     redirect_filter_key(redirect_filter_guid);
-constexpr ntl::wfp::callout_key<bind_redirect_layer>
+constexpr ntl::wfp::terminating_callout_key<bind_redirect_layer>
     bind_redirect_callout_key(bind_redirect_callout_guid);
 constexpr ntl::wfp::filter_key<bind_redirect_layer>
     bind_redirect_filter_key(bind_redirect_filter_guid);
@@ -306,6 +340,15 @@ struct has_icmp_condition<
 using connect_builder = ntl::wfp::filter_builder<connect_layer>;
 using stream_builder = ntl::wfp::stream_filter_builder<stream_layer>;
 using datagram_builder = ntl::wfp::packet_filter_builder<datagram_layer>;
+template <class Layer>
+concept has_public_packet_builder = requires {
+  typename ntl::wfp::packet_filter_builder<Layer>;
+};
+static_assert(!has_public_packet_builder<outbound_ip_layer>);
+using outbound_ip_builder =
+    ntl::wfp::advanced::packet_filter_builder<outbound_ip_layer>;
+using udp_proxy_reply_builder =
+    ntl::wfp::local_udp_proxy_reply_filter_builder<outbound_ip_layer>;
 using mac_builder = ntl::wfp::packet_filter_builder<mac_layer>;
 using vswitch_builder =
     ntl::wfp::packet_filter_builder<vswitch_layer>;
@@ -325,6 +368,17 @@ static_assert(!has_icmp_condition<stream_builder>::value);
 static_assert(has_direction_condition<datagram_builder>::value);
 static_assert(has_interface_condition<datagram_builder>::value);
 static_assert(has_icmp_condition<datagram_builder>::value);
+static_assert(!has_protocol_condition<outbound_ip_builder>::value);
+static_assert(!has_remote_port_condition<outbound_ip_builder>::value);
+static_assert(has_local_address_condition<outbound_ip_builder>::value);
+static_assert(has_interface_condition<outbound_ip_builder>::value);
+static_assert(std::is_constructible_v<
+              udp_proxy_reply_builder,
+              ntl::wfp::filter_key<outbound_ip_layer>, std::wstring,
+              std::uint16_t>);
+static_assert(!has_protocol_condition<udp_proxy_reply_builder>::value);
+static_assert(!has_remote_port_condition<udp_proxy_reply_builder>::value);
+static_assert(!has_local_address_condition<udp_proxy_reply_builder>::value);
 static_assert(!has_remote_port_condition<mac_builder>::value);
 static_assert(has_interface_condition<mac_builder>::value);
 static_assert(!has_interface_type_condition<mac_builder>::value);
@@ -348,6 +402,104 @@ static_assert(
     has_reauthorization_condition<bind_redirect_builder>::value);
 static_assert(
     !has_reauthorization_condition<datagram_builder>::value);
+
+template <class Layer>
+struct layer_schema_probe
+    : ntl::wfp::detail::typed_condition_builder<
+          layer_schema_probe<Layer>, Layer> {};
+
+template <class Layer>
+consteval bool verify_layer_schema_contract() {
+  using probe = layer_schema_probe<Layer>;
+  using namespace ntl::wfp;
+  using namespace ntl::wfp::detail;
+#define NTL_CHECK(tag, expression)                                            \
+  static_assert((requires(probe &value) { expression; }) ==                   \
+                layer_supports_condition<Layer, tag>)
+  NTL_CHECK(application_condition,
+            value.application_equal(
+                std::declval<const application_id &>()));
+  NTL_CHECK(user_condition,
+            value.user_equal(std::declval<const user_identity &>()));
+  NTL_CHECK(package_condition,
+            value.package_equal(std::declval<const package_identity &>()));
+  NTL_CHECK(protocol_condition, value.protocol_equal(6));
+  NTL_CHECK(local_port_condition, value.local_port_equal(443));
+  NTL_CHECK(remote_port_condition, value.remote_port_equal(443));
+  static_assert(
+      ((requires(probe &value) {
+          value.local_address_equal(
+              ipv4_address::from_octets(127, 0, 0, 1));
+        }) ||
+       (requires(probe &value) {
+          value.local_address_equal(ipv6_address(
+              std::array<std::uint8_t, 16>{}));
+        })) == layer_supports_condition<Layer, local_address_condition>);
+  static_assert(
+      ((requires(probe &value) {
+          value.remote_address_equal(
+              ipv4_address::from_octets(127, 0, 0, 1));
+        }) ||
+       (requires(probe &value) {
+          value.remote_address_equal(ipv6_address(
+              std::array<std::uint8_t, 16>{}));
+        })) == layer_supports_condition<Layer, remote_address_condition>);
+  NTL_CHECK(direction_condition,
+            value.direction_equal(FWP_DIRECTION_OUTBOUND));
+  NTL_CHECK(interface_condition, value.interface_index_equal(1));
+  NTL_CHECK(subinterface_condition, value.subinterface_index_equal(1));
+  NTL_CHECK(interface_type_condition, value.interface_type_equal(6));
+  NTL_CHECK(compartment_condition, value.compartment_equal(1));
+  NTL_CHECK(current_profile_condition,
+            value.current_profile_equal(network_profile::private_network));
+  NTL_CHECK(original_profile_condition,
+            value.original_profile_equal(network_profile::private_network));
+  NTL_CHECK(loopback_condition, value.loopback());
+  NTL_CHECK(reauthorization_condition, value.reauthorization());
+  NTL_CHECK(mac_frame_condition,
+            value.local_mac_equal(mac_address(
+                std::array<std::uint8_t, 6>{})));
+  NTL_CHECK(vswitch_condition,
+            value.switch_equal(std::declval<const virtual_switch_id &>()));
+#undef NTL_CHECK
+  return true;
+}
+
+#define NTL_VERIFY_LAYER(layer)                                               \
+  static_assert(verify_layer_schema_contract<ntl::wfp::layers::layer>())
+NTL_VERIFY_LAYER(ale_connect_redirect_v4);
+NTL_VERIFY_LAYER(ale_connect_redirect_v6);
+NTL_VERIFY_LAYER(ale_bind_redirect_v4);
+NTL_VERIFY_LAYER(ale_bind_redirect_v6);
+NTL_VERIFY_LAYER(ale_auth_connect_v4);
+NTL_VERIFY_LAYER(ale_auth_connect_v6);
+NTL_VERIFY_LAYER(ale_auth_recv_accept_v4);
+NTL_VERIFY_LAYER(ale_auth_recv_accept_v6);
+NTL_VERIFY_LAYER(ale_flow_established_v4);
+NTL_VERIFY_LAYER(ale_flow_established_v6);
+NTL_VERIFY_LAYER(stream_v4);
+NTL_VERIFY_LAYER(stream_v6);
+NTL_VERIFY_LAYER(datagram_data_v4);
+NTL_VERIFY_LAYER(datagram_data_v6);
+NTL_VERIFY_LAYER(inbound_transport_v4);
+NTL_VERIFY_LAYER(inbound_transport_v6);
+NTL_VERIFY_LAYER(outbound_transport_v4);
+NTL_VERIFY_LAYER(outbound_transport_v6);
+NTL_VERIFY_LAYER(outbound_ip_packet_v4);
+NTL_VERIFY_LAYER(outbound_ip_packet_v6);
+NTL_VERIFY_LAYER(ale_endpoint_closure_v4);
+NTL_VERIFY_LAYER(ale_endpoint_closure_v6);
+NTL_VERIFY_LAYER(name_resolution_cache_v4);
+NTL_VERIFY_LAYER(name_resolution_cache_v6);
+NTL_VERIFY_LAYER(ipsec_v4);
+NTL_VERIFY_LAYER(ipsec_v6);
+NTL_VERIFY_LAYER(inbound_mac_frame_ethernet);
+NTL_VERIFY_LAYER(outbound_mac_frame_ethernet);
+NTL_VERIFY_LAYER(ingress_vswitch_ethernet);
+NTL_VERIFY_LAYER(egress_vswitch_ethernet);
+NTL_VERIFY_LAYER(inbound_transport_fast);
+NTL_VERIFY_LAYER(outbound_transport_fast);
+#undef NTL_VERIFY_LAYER
 
 [[maybe_unused]] void compile_policy_graph() {
   const auto application = ntl::wfp::application_id::current_process();
@@ -416,13 +568,6 @@ static_assert(
         stream_filter_key, L"stream filter", fail_closed);
     stream_filter.remote_port_equal(443);
     transaction.add_stream_filter(sublayer, stream_callout, stream_filter);
-
-    ntl::wfp::stream_control_filter_builder<stream_layer> stream_control_filter(
-        stream_control_filter_key, L"stream control filter",
-        fail_closed);
-    stream_control_filter.remote_port_equal(8443);
-    transaction.add_stream_control_filter(sublayer, stream_callout,
-                                          stream_control_filter);
 
     const auto datagram_callout = transaction.add_callout<datagram_layer>(
         provider,

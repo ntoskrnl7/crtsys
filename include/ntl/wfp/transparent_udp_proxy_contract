@@ -1,0 +1,31 @@
+/**
+ * @file transparent_udp_proxy_contract
+ * @brief Shared typed keys for a dual-stack transparent UDP proxy.
+ */
+#pragma once
+
+#include "layers"
+
+namespace ntl::wfp {
+
+/** One indivisible controller/driver key set for the standard UDP proxy. */
+struct transparent_udp_proxy_keys {
+  provider_key provider;
+  sublayer_key sublayer;
+
+  arbitrating_callout_key<layers::ale_flow_established_v4> flow_v4;
+  arbitrating_callout_key<layers::ale_flow_established_v6> flow_v6;
+  terminating_callout_key<layers::datagram_data_v4> datagram_v4;
+  terminating_callout_key<layers::datagram_data_v6> datagram_v6;
+  terminating_callout_key<layers::outbound_ip_packet_v4> reverse_v4;
+  terminating_callout_key<layers::outbound_ip_packet_v6> reverse_v6;
+
+  filter_key<layers::ale_flow_established_v4> flow_filter_v4;
+  filter_key<layers::ale_flow_established_v6> flow_filter_v6;
+  filter_key<layers::datagram_data_v4> datagram_filter_v4;
+  filter_key<layers::datagram_data_v6> datagram_filter_v6;
+  filter_key<layers::outbound_ip_packet_v4> reverse_filter_v4;
+  filter_key<layers::outbound_ip_packet_v6> reverse_filter_v6;
+};
+
+} // namespace ntl::wfp

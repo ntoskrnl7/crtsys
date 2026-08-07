@@ -78,6 +78,7 @@ HANDLE CrtSyspCompilerTlsGateHandle = NULL;
 PMDL CrtSyspCompilerTlsRuntimeViewMdl = NULL;
 ULONG CrtSyspCompilerTlsIndex = CRTSYS_COMPILER_TLS_INDEX_INVALID;
 BOOLEAN CrtSyspTypeInfoInitialized = FALSE;
+BOOLEAN CrtSyspExitHandlersAvailable = FALSE;
 
 namespace {
 alignas(ntl::net::kernel::passive_cleanup_domain)
@@ -831,6 +832,11 @@ CrtSysInitializeRuntime(_In_ PDRIVER_OBJECT DriverObject,
     return STATUS_FAILED_DRIVER_ENTRY;
   }
 
+  // _cexit() runs UCRT pre-terminators such as _fcloseall().  Those routines
+  // are not safe until the C initializer table has completed successfully.
+  // In particular, a low-resource failure while preparing argv/environment
+  // reaches the common rollback path before stdio has initialized _piob.
+  CrtSyspExitHandlersAvailable = TRUE;
   _initterm(__xc_a, __xc_z);
 
   status = CrtSysInitializeNetworkPassiveCleanup();
@@ -860,7 +866,12 @@ CrtSysUninitializeRuntime (
 
     // LDK-created workers may still execute CRT code, so drain them first.
     LdkPrepareForTermination();
-    _cexit();
+    if (CrtSyspExitHandlersAvailable) {
+      // Clear the phase first so recursive or repeated cleanup cannot run the
+      // UCRT exit tables twice.
+      CrtSyspExitHandlersAvailable = FALSE;
+      _cexit();
+    }
     if (CrtSyspTypeInfoInitialized) {
       __scrt_uninitialize_type_info();
       CrtSyspTypeInfoInitialized = FALSE;

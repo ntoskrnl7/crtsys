@@ -1,0 +1,1964 @@
+/**
+ * @file http3_proxy_connection
+ * @brief Bounded HTTP/3 server-side inspection connection.
+ *
+ * This adapter owns the protocol glue which every HTTP/3 inspection service
+ * otherwise has to repeat: SETTINGS and control streams, dynamic QPACK
+ * unblock/acknowledgement, request assembly, semantic HTTP policy, origin
+ * request/response association, response framing, and WebTransport routing.
+ * The QUIC/TLS provider, origin transport, policy, and observer are injected.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include <ntl/net/http/authority>
+#include <ntl/net/http/inspection_policy>
+#include <ntl/net/http/transform>
+#include <ntl/net/http3/backend>
+#include <ntl/net/http3/inspection_proxy>
+#include <ntl/net/http3/qpack>
+#include <ntl/net/http3/stream_transform>
+#include <ntl/net/http3/webtransport_session>
+#include <ntl/net/http3/webtransport_transform>
+#include <ntl/net/quic/transport>
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <memory>
+#include <memory_resource>
+#include <mutex>
+#include <new>
+#include <optional>
+#include <span>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+
+namespace ntl::net::http3 {
+
+inline constexpr std::uint64_t h3_no_error = 0x100;
+inline constexpr std::uint64_t h3_general_protocol_error = 0x101;
+inline constexpr std::uint64_t h3_excessive_load = 0x107;
+
+struct proxy_connection_limits {
+  std::size_t maximum_concurrent_request_streams = 256;
+  std::size_t maximum_buffered_bytes_per_stream = 2 * 1024 * 1024;
+  std::size_t maximum_aggregate_body_bytes = 16 * 1024 * 1024;
+  std::size_t maximum_frame_payload = 1024 * 1024;
+  std::size_t maximum_decoded_header_bytes = 256 * 1024;
+  std::size_t maximum_control_stream_bytes = 64 * 1024;
+  std::size_t maximum_extension_stream_bytes = 1024 * 1024;
+  std::size_t maximum_concurrent_extension_streams = 256;
+  std::size_t maximum_aggregate_extension_stream_bytes = 16 * 1024 * 1024;
+  std::size_t maximum_capsule_wire_bytes = 256 * 1024;
+  std::size_t maximum_blocked_streams = 32;
+  std::size_t maximum_concurrent_webtransport_sessions = 64;
+  std::size_t qpack_table_capacity = 4096;
+  bool require_http3_origin = true;
+  bool require_server_name_authority_binding = true;
+  bool enable_webtransport = true;
+
+  constexpr bool valid() const noexcept {
+    return maximum_concurrent_request_streams != 0 &&
+           maximum_buffered_bytes_per_stream != 0 &&
+           maximum_aggregate_body_bytes != 0 &&
+           maximum_frame_payload != 0 &&
+           maximum_decoded_header_bytes != 0 &&
+           maximum_control_stream_bytes != 0 &&
+           maximum_extension_stream_bytes != 0 &&
+           maximum_concurrent_extension_streams != 0 &&
+           maximum_aggregate_extension_stream_bytes != 0 &&
+           maximum_capsule_wire_bytes != 0 &&
+           maximum_blocked_streams != 0 &&
+           maximum_concurrent_webtransport_sessions != 0;
+  }
+};
+
+/** Optional telemetry. It is never allowed to replace a policy verdict. */
+class proxy_connection_observer {
+public:
+  virtual ~proxy_connection_observer() = default;
+  virtual void on_connected(std::string_view) noexcept {}
+  virtual void on_inspection(
+      const ntl::net::http::inspection_context_view &) noexcept {}
+  virtual void on_webtransport_payload(
+      const webtransport::payload &) noexcept {}
+  virtual void on_qpack_stream_resumed(std::uint64_t) noexcept {}
+  virtual void on_webtransport_session_opened(std::uint64_t) noexcept {}
+  virtual void on_webtransport_session_closed(
+      std::uint64_t, NTSTATUS) noexcept {}
+  virtual void on_webtransport_reset(
+      std::uint64_t, std::uint32_t) noexcept {}
+  virtual void on_stream_rejected(
+      std::uint64_t, NTSTATUS) noexcept {}
+  virtual void on_stream_cancelled(std::uint64_t) noexcept {}
+  virtual void on_exchange_complete(
+      std::uint64_t, const ntl::net::http::request_message &,
+      const ntl::net::http::response_message &, bool) noexcept {}
+  virtual void on_closed(NTSTATUS) noexcept {}
+};
+
+/**
+ * @brief Owning destination for an inspected WebTransport payload.
+ *
+ * The proxy retains the handler for the connection lifetime and invokes it
+ * only after the per-session policy has permitted and transformed the
+ * payload.  A handler can bridge to an upstream transport, persist data, or
+ * deliberately echo a controlled fixture without coupling those product
+ * choices to the protocol parser.
+ */
+class webtransport_payload_handler {
+public:
+  virtual ~webtransport_payload_handler() = default;
+  virtual ntl::status handle(
+      webtransport::backend_session &session,
+      const webtransport::payload &payload) noexcept = 0;
+};
+
+/** A bounded terminal echo used by the controlled inspection examples. */
+class webtransport_echo_handler final
+    : public webtransport_payload_handler {
+public:
+  ntl::status handle(
+      webtransport::backend_session &session,
+      const webtransport::payload &payload) noexcept override {
+    using webtransport::payload_kind;
+    using webtransport::stream_direction;
+    switch (payload.kind) {
+    case payload_kind::stream:
+      return payload.direction == stream_direction::bidirectional
+                 ? session.send_bidirectional(payload.bytes)
+                 : session.send_unidirectional(payload.bytes);
+    case payload_kind::datagram:
+      return session.send_datagram(payload.bytes);
+    case payload_kind::capsule:
+      return session.send_capsule(payload.capsule_type, payload.bytes);
+    }
+    return STATUS_INVALID_PARAMETER;
+  }
+};
+
+struct proxy_connection_statistics {
+  std::uint64_t request_stream_calls = 0;
+  std::uint64_t request_stream_final_calls = 0;
+  std::uint64_t request_inspector_retries = 0;
+  std::uint64_t request_headers = 0;
+  std::uint64_t request_stream_ends = 0;
+  std::uint64_t origin_submit_calls = 0;
+  std::int32_t last_stream_end_status = STATUS_SUCCESS;
+  std::int32_t last_origin_submit_status = STATUS_SUCCESS;
+  std::size_t blocked_request_streams = 0;
+  std::size_t active_requests = 0;
+};
+
+enum class proxy_terminal_reason : std::uint8_t {
+  policy_block = 1,
+  origin_unavailable = 2,
+};
+
+struct proxy_terminal_context {
+  proxy_terminal_reason reason = proxy_terminal_reason::policy_block;
+  const ntl::net::http::request_message &request;
+  NTSTATUS failure = STATUS_SUCCESS;
+};
+
+/** Optional application-specific terminal response body. */
+class proxy_terminal_response_provider {
+public:
+  virtual ~proxy_terminal_response_provider() = default;
+  virtual ntl::result<ntl::net::http::response_message>
+  response_for(const proxy_terminal_context &context) noexcept = 0;
+};
+
+namespace proxy_connection_detail {
+
+inline ntl::result<ntl::net::http::protocol>
+origin_protocol(std::string_view negotiated) noexcept {
+  using ntl::net::http::protocol;
+  if (negotiated == "h3")
+    return ntl::ok(protocol::http3);
+  if (negotiated == "h2")
+    return ntl::ok(protocol::http2);
+  if (negotiated == "http/1.1" || negotiated == "http/1.0")
+    return ntl::ok(protocol::http1);
+  return ntl::unexpected(STATUS_PROTOCOL_NOT_SUPPORTED);
+}
+
+template <class ByteContainer>
+inline ntl::net::scatter_view scatter(
+    const ByteContainer &bytes) noexcept {
+  return bytes.empty()
+             ? ntl::net::scatter_view{}
+             : ntl::net::scatter_view::from_contiguous(
+                   std::span<const std::byte>(bytes.data(), bytes.size()));
+}
+
+template <class ByteContainer>
+inline ntl::status append(
+    ntl::net::scatter_view source, ByteContainer &destination,
+    std::size_t maximum) noexcept {
+  if (source.size() > maximum || destination.size() > maximum - source.size())
+    return STATUS_BUFFER_OVERFLOW;
+  try {
+    const std::size_t offset = destination.size();
+    destination.resize(offset + source.size());
+    return source.size() == 0
+               ? ntl::status::ok()
+               : source.copy_to(
+                     std::span<std::byte>(destination.data(),
+                                          destination.size())
+                         .subspan(offset, source.size()));
+  } catch (const std::bad_alloc &) {
+    return STATUS_INSUFFICIENT_RESOURCES;
+  } catch (...) {
+    return STATUS_UNHANDLED_EXCEPTION;
+  }
+}
+
+inline std::vector<proxy_header> proxy_headers(
+    const ntl::net::http::header_collection &headers) {
+  std::vector<proxy_header> result;
+  result.reserve(headers.size());
+  for (const auto &field : headers.fields())
+    result.push_back(
+        {std::string(field.name.begin(), field.name.end()),
+         std::string(field.value.begin(), field.value.end())});
+  return result;
+}
+
+inline std::vector<proxy_header> proxy_trailers(
+    const ntl::net::http::header_list &trailers) {
+  std::vector<proxy_header> result;
+  result.reserve(trailers.size());
+  for (const auto &field : trailers)
+    result.push_back(
+        {std::string(field.name.begin(), field.name.end()),
+         std::string(field.value.begin(), field.value.end())});
+  return result;
+}
+
+inline ntl::result<std::vector<header_field>> request_header_fields(
+    const ntl::net::http::request_message &request,
+    std::size_t maximum_header_bytes) noexcept {
+  try {
+    std::vector<header_field> result;
+    result.reserve(request.headers.size() +
+                   (request.extended_protocol ? 5u : 4u));
+    std::size_t bytes = 0;
+    const auto append = [&](std::string_view name,
+                            std::string_view value,
+                            bool never_index = false) -> ntl::status {
+      if (name.size() > maximum_header_bytes ||
+          value.size() > maximum_header_bytes - name.size() ||
+          bytes > maximum_header_bytes - name.size() - value.size())
+        return STATUS_BUFFER_OVERFLOW;
+      result.push_back({std::string(name), std::string(value), never_index});
+      bytes += name.size() + value.size();
+      return ntl::status::ok();
+    };
+    auto status = append(":method", request.method);
+    if (status.is_ok() && request.extended_protocol)
+      status = append(":protocol", *request.extended_protocol);
+    if (status.is_ok())
+      status = append(":scheme", request.scheme);
+    if (status.is_ok())
+      status = append(":authority", request.authority);
+    if (status.is_ok())
+      status = append(":path", request.path);
+    for (const auto &field : request.headers.fields()) {
+      if (!status.is_ok())
+        break;
+      status = append(field.name, field.value, field.sensitive);
+    }
+    return status.is_ok()
+               ? ntl::ok(std::move(result))
+               : ntl::unexpected(static_cast<NTSTATUS>(status));
+  } catch (const std::bad_alloc &) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+}
+
+inline ntl::status append_headers(
+    ntl::net::http::header_collection &destination,
+    const std::vector<proxy_header> &source) noexcept {
+  try {
+    for (const auto &field : source)
+      destination.append(field.name, field.value);
+    return ntl::status::ok();
+  } catch (const std::invalid_argument &) {
+    return STATUS_DATA_ERROR;
+  } catch (const std::bad_alloc &) {
+    return STATUS_INSUFFICIENT_RESOURCES;
+  } catch (...) {
+    return STATUS_UNHANDLED_EXCEPTION;
+  }
+}
+
+inline ntl::status append_trailers(
+    ntl::net::http::header_list &destination,
+    const std::vector<proxy_header> &source) noexcept {
+  try {
+    destination.reserve(source.size());
+    for (const auto &field : source)
+      destination.push_back({field.name, field.value, false});
+    return ntl::status::ok();
+  } catch (const std::bad_alloc &) {
+    return STATUS_INSUFFICIENT_RESOURCES;
+  } catch (...) {
+    return STATUS_UNHANDLED_EXCEPTION;
+  }
+}
+
+inline ntl::net::http::response_message forbidden_response(
+    ntl::net::http::message_memory_ref memory = {}) {
+  ntl::net::http::response_message response(memory);
+  response.wire_protocol = ntl::net::http::protocol::http3;
+  response.status = 403;
+  response.headers.append("content-type", "text/plain; charset=utf-8");
+  constexpr std::string_view text = "Request blocked by policy.\n";
+  response.body.assign(
+      reinterpret_cast<const std::byte *>(text.data()),
+      reinterpret_cast<const std::byte *>(text.data() + text.size()));
+  return response;
+}
+
+inline ntl::net::http::response_message bad_gateway_response(
+    ntl::net::http::message_memory_ref memory = {}) {
+  ntl::net::http::response_message response(memory);
+  response.wire_protocol = ntl::net::http::protocol::http3;
+  response.status = 502;
+  response.headers.append("content-type", "text/plain; charset=utf-8");
+  constexpr std::string_view body = "Origin transport unavailable.\n";
+  response.body.assign(
+      reinterpret_cast<const std::byte *>(body.data()),
+      reinterpret_cast<const std::byte *>(body.data() + body.size()));
+  return response;
+}
+
+inline ntl::result<std::vector<std::byte>> encode_control_stream(
+    bool webtransport_enabled,
+    webtransport::session_limits webtransport_limits,
+    std::size_t maximum) noexcept {
+  if (webtransport_enabled)
+    return webtransport::encode_control_stream(
+        true, webtransport_limits, maximum);
+  try {
+    std::vector<std::byte> result;
+    auto status = append_quic_varint(
+        result, webtransport::control_stream_type);
+    if (status.is_ok())
+      status = webtransport::session_detail::append_frame(
+          result, static_cast<std::uint64_t>(frame_type::settings), {});
+    if (!status.is_ok())
+      return ntl::unexpected(static_cast<NTSTATUS>(status));
+    if (result.size() > maximum)
+      return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+    return ntl::ok(std::move(result));
+  } catch (const std::bad_alloc &) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+}
+
+inline ntl::result<std::vector<std::byte>> encode_goaway(
+    std::uint64_t stream_id, std::size_t maximum) noexcept {
+  try {
+    std::vector<std::byte> payload;
+    auto status = append_quic_varint(payload, stream_id);
+    std::vector<std::byte> result;
+    if (status.is_ok())
+      status = webtransport::session_detail::append_frame(
+          result, static_cast<std::uint64_t>(frame_type::goaway), payload);
+    if (!status.is_ok())
+      return ntl::unexpected(static_cast<NTSTATUS>(status));
+    if (result.size() > maximum)
+      return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+    return ntl::ok(std::move(result));
+  } catch (const std::bad_alloc &) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
+}
+
+inline async_origin_transport &required_origin(
+    const std::unique_ptr<async_origin_transport> &origin) {
+  if (!origin)
+    throw std::invalid_argument("HTTP/3 proxy origin is null");
+  return *origin;
+}
+
+} // namespace proxy_connection_detail
+
+/**
+ * @brief One accepted HTTP/3 connection bound to a QUIC backend.
+ *
+ * `run()` delegates provider lifetime to the injected backend. All semantic
+ * decisions come from `http::inspection_policy`; controlled traffic and evidence
+ * generation intentionally do not belong here. The origin interface is
+ * async_origin_transport, so an MsH3, MsQuic, or test origin can be selected
+ * without changing policy code or blocking another request stream.
+ *
+ * Backend callbacks and origin completions are serialized internally per
+ * connection and may arrive from different threads. A backend may additionally
+ * serialize its own callbacks, as the supplied MsQuic backend does. Origin work
+ * uses async_origin_transport and may complete in any stream order.
+ * The explicit immediate_origin_transport_adapter remains available only for
+ * a synchronous blocking origin.
+ *
+ * WebTransport session state is keyed by CONNECT stream ID, so independent
+ * sessions may coexist up to maximum_concurrent_webtransport_sessions.
+ */
+class proxy_connection final
+    : public ntl::net::quic::backend_sink,
+      public std::enable_shared_from_this<proxy_connection>,
+      private inspection_sink {
+public:
+  static constexpr bool serializes_callbacks = true;
+  static constexpr bool asynchronous_origin_transport = true;
+
+  /**
+   * Creates an owning HTTP/3 sink. The transport may retain this returned
+   * shared pointer; origin completions also retain it while dispatching.
+  */
+  static ntl::result<std::shared_ptr<proxy_connection>> create(
+      std::shared_ptr<ntl::net::quic::transport_backend> backend,
+      std::shared_ptr<async_origin_transport> origin,
+      std::shared_ptr<const ntl::net::http::inspection_policy> policy,
+      ntl::net::http::inspection_session_metadata session = {},
+      std::shared_ptr<proxy_connection_observer> observer = {},
+      std::shared_ptr<webtransport::transform_session>
+          webtransport_policy = {},
+      std::shared_ptr<webtransport_payload_handler>
+          webtransport_handler = {},
+      proxy_connection_limits limits = {},
+      webtransport::session_limits webtransport_limits = {},
+      std::shared_ptr<proxy_terminal_response_provider>
+          terminal_responses = {},
+      std::shared_ptr<std::pmr::memory_resource> memory = {}) noexcept {
+    try {
+      const ntl::net::http::message_memory_ref memory_ref{
+          memory ? memory.get() : std::pmr::get_default_resource()};
+      auto decoders = policy ? policy->content_decoders() : nullptr;
+      auto encoders = policy ? policy->content_encoders() : nullptr;
+      return ntl::ok(std::shared_ptr<proxy_connection>(
+          new proxy_connection(
+              std::move(backend), std::move(origin), std::move(policy),
+              std::move(decoders), std::move(encoders),
+              std::move(session), std::move(observer),
+              std::move(webtransport_policy),
+              std::move(webtransport_handler), limits,
+              webtransport_limits, std::move(terminal_responses),
+              std::move(memory), memory_ref)));
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (const std::invalid_argument &) {
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+  /** Explicit low-level form for a caller-owned message allocator. */
+  static ntl::result<std::shared_ptr<proxy_connection>>
+  create_borrowed_memory(
+      std::shared_ptr<ntl::net::quic::transport_backend> backend,
+      std::shared_ptr<async_origin_transport> origin,
+      std::shared_ptr<const ntl::net::http::inspection_policy> policy,
+      ntl::net::http::inspection_session_metadata session,
+      std::shared_ptr<proxy_connection_observer> observer,
+      std::shared_ptr<webtransport::transform_session> webtransport_policy,
+      std::shared_ptr<webtransport_payload_handler> webtransport_handler,
+      proxy_connection_limits limits,
+      webtransport::session_limits webtransport_limits,
+      std::shared_ptr<proxy_terminal_response_provider> terminal_responses,
+      ntl::net::http::message_memory_ref borrowed_memory) noexcept {
+    try {
+      if (!borrowed_memory.valid())
+        return ntl::unexpected(STATUS_INVALID_PARAMETER);
+      auto decoders = policy ? policy->content_decoders() : nullptr;
+      auto encoders = policy ? policy->content_encoders() : nullptr;
+      return ntl::ok(std::shared_ptr<proxy_connection>(
+          new proxy_connection(
+              std::move(backend), std::move(origin), std::move(policy),
+              std::move(decoders), std::move(encoders),
+              std::move(session), std::move(observer),
+              std::move(webtransport_policy),
+              std::move(webtransport_handler), limits,
+              webtransport_limits, std::move(terminal_responses), {},
+              borrowed_memory)));
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (const std::invalid_argument &) {
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+private:
+
+  proxy_connection(
+      std::shared_ptr<ntl::net::quic::transport_backend> backend,
+      std::shared_ptr<async_origin_transport> origin,
+      std::shared_ptr<const ntl::net::http::inspection_policy> policy,
+      std::shared_ptr<const ntl::net::inspection::content_decoder_registry>
+          decoders,
+      std::shared_ptr<const ntl::net::inspection::content_encoder_registry>
+          encoders,
+      ntl::net::http::inspection_session_metadata session = {},
+      std::shared_ptr<proxy_connection_observer> observer = {},
+      std::shared_ptr<webtransport::transform_session>
+          webtransport_policy = {},
+      std::shared_ptr<webtransport_payload_handler>
+          webtransport_handler = {},
+      proxy_connection_limits limits = {},
+      webtransport::session_limits webtransport_limits = {},
+      std::shared_ptr<proxy_terminal_response_provider>
+          terminal_responses = {},
+      std::shared_ptr<std::pmr::memory_resource> memory_owner = {},
+      ntl::net::http::message_memory_ref memory = {})
+      : backend_(backend), origin_(std::move(origin)),
+        policy_(std::move(policy)), decoders_(std::move(decoders)),
+        encoders_(std::move(encoders)),
+        session_(std::move(session)),
+        observer_(std::move(observer)),
+        webtransport_policy_(std::move(webtransport_policy)),
+        webtransport_handler_(std::move(webtransport_handler)),
+        limits_(limits), webtransport_limits_(webtransport_limits),
+        terminal_responses_(std::move(terminal_responses)),
+        message_memory_owner_(std::move(memory_owner)),
+        message_memory_(memory),
+        qpack_(dynamic_qpack_limits{
+            .maximum_table_capacity = limits.qpack_table_capacity,
+            .maximum_blocked_streams = limits.maximum_blocked_streams,
+            .maximum_encoder_stream_buffer =
+                limits.maximum_control_stream_bytes,
+            .maximum_literal_size = limits.maximum_decoded_header_bytes}),
+        inspector_(
+            qpack_,
+            connection_limits{
+                .maximum_concurrent_request_streams =
+                    limits.maximum_concurrent_request_streams,
+                .maximum_buffered_bytes_per_stream =
+                    limits.maximum_buffered_bytes_per_stream,
+                .frames = {limits.maximum_frame_payload}},
+            limits.maximum_decoded_header_bytes) {
+    if (!backend || !origin_ || !policy_ || !decoders_ || !encoders_ ||
+        !limits_.valid())
+      throw std::invalid_argument("invalid HTTP/3 proxy connection limits");
+  }
+
+public:
+
+  ~proxy_connection() override {
+    close();
+  }
+
+  proxy_connection(const proxy_connection &) = delete;
+  proxy_connection &operator=(const proxy_connection &) = delete;
+
+  ntl::status run() noexcept {
+    // `run_borrowed()` may block until the native QUIC connection drains. Keep
+    // the owning sink alive for that whole interval even if the caller drops
+    // its last facade while another thread is waiting here.
+    auto self = weak_from_this().lock();
+    if (!self)
+      return STATUS_INVALID_DEVICE_STATE;
+
+    std::shared_ptr<ntl::net::quic::transport_backend> backend;
+    {
+      std::lock_guard guard(state_lock_);
+      if (closed_)
+        return STATUS_DELETE_PENDING;
+      backend = backend_.lock();
+    }
+    return backend ? backend->run_borrowed(*this)
+                   : ntl::status{STATUS_DELETE_PENDING};
+  }
+
+  /** Sends GOAWAY. Existing requests can finish; later request IDs reset. */
+  ntl::status begin_drain(
+      std::uint64_t last_accepted_stream_id = maximum_quic_varint) noexcept {
+    std::lock_guard guard(state_lock_);
+    if (closed_)
+      return STATUS_DELETE_PENDING;
+    return begin_drain_locked(last_accepted_stream_id);
+  }
+
+  /** Idempotently blocks new work and starts transport shutdown. */
+  void close() noexcept {
+    std::lock_guard guard(state_lock_);
+    if (closed_)
+      return;
+    closed_ = true;
+    if (connected_ && !local_draining_)
+      (void)begin_drain_locked(highest_request_stream_id_);
+    cancel_all_origins();
+    if (const auto backend = backend_.lock())
+      backend->stop();
+  }
+
+  void stop() noexcept { close(); }
+
+  ntl::status drain() noexcept {
+    const auto backend = backend_.lock();
+    return backend ? backend->drain() : ntl::status::ok();
+  }
+  bool connected() const noexcept {
+    std::lock_guard guard(state_lock_);
+    return connected_ && !closed_;
+  }
+  bool closed() const noexcept {
+    std::lock_guard guard(state_lock_);
+    return closed_;
+  }
+  bool draining() const noexcept {
+    std::lock_guard guard(state_lock_);
+    return local_draining_ || peer_draining_;
+  }
+  std::size_t active_requests() const noexcept {
+    std::lock_guard guard(state_lock_);
+    return requests_.size();
+  }
+  proxy_connection_statistics statistics() const noexcept {
+    std::lock_guard guard(state_lock_);
+    return {
+        .request_stream_calls = request_stream_calls_,
+        .request_stream_final_calls = request_stream_final_calls_,
+        .request_inspector_retries = request_inspector_retries_,
+        .request_headers = request_headers_,
+        .request_stream_ends = request_stream_ends_,
+        .origin_submit_calls = origin_submit_calls_,
+        .last_stream_end_status = last_stream_end_status_,
+        .last_origin_submit_status = last_origin_submit_status_,
+        .blocked_request_streams = blocked_streams_.size(),
+        .active_requests = requests_.size(),
+    };
+  }
+  std::size_t buffered_body_bytes() const noexcept {
+    std::lock_guard guard(state_lock_);
+    return aggregate_body_bytes_;
+  }
+  std::size_t active_extension_streams() const noexcept {
+    std::lock_guard guard(state_lock_);
+    return unidirectional_streams_.size() + bidirectional_streams_.size();
+  }
+  std::size_t buffered_extension_bytes() const noexcept {
+    std::lock_guard guard(state_lock_);
+    return aggregate_extension_stream_bytes_;
+  }
+  webtransport::peer_settings peer_settings() const noexcept {
+    std::lock_guard guard(state_lock_);
+    return peer_settings_;
+  }
+  std::shared_ptr<webtransport::backend_session> webtransport_session(
+      std::uint64_t session_id) noexcept {
+    std::lock_guard guard(state_lock_);
+    const auto found = webtransport_sessions_.find(session_id);
+    return found == webtransport_sessions_.end()
+               ? std::shared_ptr<webtransport::backend_session>{}
+               : found->second.transport;
+  }
+  std::size_t webtransport_session_count() const noexcept {
+    std::lock_guard guard(state_lock_);
+    return webtransport_sessions_.size();
+  }
+
+private:
+  ntl::status begin_drain_locked(
+      std::uint64_t last_accepted_stream_id) noexcept {
+    if (!connected_ || local_control_stream_id_ == invalid_stream_id)
+      return STATUS_INVALID_DEVICE_STATE;
+    auto frame = proxy_connection_detail::encode_goaway(
+        last_accepted_stream_id, limits_.maximum_control_stream_bytes);
+    if (!frame)
+      return frame.status();
+    const auto backend = backend_.lock();
+    if (!backend)
+      return STATUS_DELETE_PENDING;
+    const ntl::status sent = backend->write_stream(
+        local_control_stream_id_, proxy_connection_detail::scatter(*frame),
+        false);
+    if (sent.is_ok()) {
+      local_draining_ = true;
+      local_goaway_stream_id_ = last_accepted_stream_id;
+      cancel_requests_after(last_accepted_stream_id);
+    }
+    return sent;
+  }
+
+public:
+
+  ntl::status on_connected(std::string_view negotiated_alpn) noexcept override {
+    std::lock_guard guard(state_lock_);
+    if (closed_)
+      return STATUS_DELETE_PENDING;
+    if (negotiated_alpn != "h3")
+      return STATUS_PROTOCOL_NOT_SUPPORTED;
+    const auto backend = backend_.lock();
+    if (!backend)
+      return STATUS_DELETE_PENDING;
+    const auto capabilities = backend->capabilities();
+    advertise_webtransport_ =
+        limits_.enable_webtransport && capabilities.extended_connect &&
+        capabilities.webtransport && capabilities.quic_datagrams &&
+        capabilities.reliable_reset_at;
+    auto control = proxy_connection_detail::encode_control_stream(
+        advertise_webtransport_, webtransport_limits_,
+        limits_.maximum_control_stream_bytes);
+    if (!control)
+      return control.status();
+    std::uint64_t stream_id = invalid_stream_id;
+    auto status = backend->open_unidirectional_stream(stream_id);
+    if (status.is_ok())
+      status = backend->write_stream(
+          stream_id, proxy_connection_detail::scatter(*control), false);
+    if (!status.is_ok())
+      return status;
+    local_control_stream_id_ = stream_id;
+    connected_ = true;
+    if (observer_)
+      observer_->on_connected(negotiated_alpn);
+    return closed_ ? ntl::status{STATUS_DELETE_PENDING}
+                   : ntl::status::ok();
+  }
+
+  ntl::status on_request_stream(
+      std::uint64_t stream_id, ntl::net::scatter_view plaintext,
+      bool final) noexcept override {
+    std::lock_guard guard(state_lock_);
+    if (closed_)
+      return STATUS_DELETE_PENDING;
+    if ((!plaintext && !final) || !connected_)
+      return STATUS_INVALID_PARAMETER;
+    ++request_stream_calls_;
+    if (final)
+      ++request_stream_final_calls_;
+    if ((local_draining_ && stream_id > local_goaway_stream_id_) ||
+        (peer_draining_ && stream_id > peer_goaway_stream_id_)) {
+      stream_failure(stream_id, h3_stream_request_cancelled);
+      return ntl::status::ok();
+    }
+    highest_request_stream_id_ =
+        (std::max)(highest_request_stream_id_, stream_id);
+    ntl::status consumed = inspector_.consume_request_stream(
+        stream_id, plaintext, final, *this);
+    if (consumed == STATUS_RETRY) {
+      ++request_inspector_retries_;
+      if (blocked_streams_.size() >= limits_.maximum_blocked_streams) {
+        if (observer_)
+          observer_->on_stream_rejected(
+              stream_id, STATUS_QUOTA_EXCEEDED);
+        stream_failure(stream_id, h3_excessive_load);
+        return ntl::status::ok();
+      }
+      try {
+        blocked_streams_.insert(stream_id);
+      } catch (...) {
+        stream_failure(stream_id, h3_excessive_load);
+      }
+      return flush_qpack_decoder();
+    }
+    if (!consumed.is_ok()) {
+      if (observer_)
+        observer_->on_stream_rejected(
+            stream_id, static_cast<NTSTATUS>(consumed));
+      stream_failure(stream_id, h3_general_protocol_error);
+      return ntl::status::ok();
+    }
+    finish_pending_action(stream_id);
+    return flush_qpack_decoder();
+  }
+
+  ntl::status on_qpack_encoder_stream(
+      ntl::net::scatter_view plaintext) noexcept override {
+    std::lock_guard guard(state_lock_);
+    if (closed_)
+      return STATUS_DELETE_PENDING;
+    if (!plaintext)
+      return STATUS_INVALID_PARAMETER;
+    const ntl::status consumed =
+        inspector_.consume_qpack_encoder_stream(plaintext);
+    if (!consumed.is_ok())
+      return consumed;
+    for (auto current = blocked_streams_.begin();
+         current != blocked_streams_.end();) {
+      const std::uint64_t stream_id = *current;
+      const ntl::status resumed =
+          inspector_.resume_request_stream(stream_id, *this);
+      if (resumed == STATUS_RETRY) {
+        ++current;
+        continue;
+      }
+      current = blocked_streams_.erase(current);
+      if (!resumed.is_ok()) {
+        if (observer_)
+          observer_->on_stream_rejected(
+              stream_id, static_cast<NTSTATUS>(resumed));
+        stream_failure(stream_id, h3_general_protocol_error);
+        continue;
+      }
+      if (observer_)
+        observer_->on_qpack_stream_resumed(stream_id);
+      finish_pending_action(stream_id);
+    }
+    return flush_qpack_decoder();
+  }
+
+  ntl::status on_peer_unidirectional_stream(
+      std::uint64_t stream_id, ntl::net::scatter_view plaintext,
+      bool final) noexcept override {
+    std::lock_guard guard(state_lock_);
+    if (closed_)
+      return STATUS_DELETE_PENDING;
+    try {
+      auto found = unidirectional_streams_.find(stream_id);
+      if (found == unidirectional_streams_.end()) {
+        if (active_extension_streams() >=
+            limits_.maximum_concurrent_extension_streams)
+          return STATUS_QUOTA_EXCEEDED;
+        found = unidirectional_streams_.emplace(
+            stream_id, std::vector<std::byte>{}).first;
+      }
+      auto &wire = found->second;
+      if (plaintext.size() >
+              limits_.maximum_aggregate_extension_stream_bytes ||
+          aggregate_extension_stream_bytes_ >
+              limits_.maximum_aggregate_extension_stream_bytes -
+                  plaintext.size()) {
+        erase_extension_stream(unidirectional_streams_, found);
+        return STATUS_QUOTA_EXCEEDED;
+      }
+      auto status = proxy_connection_detail::append(
+          plaintext, wire,
+          (std::max)(limits_.maximum_extension_stream_bytes,
+                     limits_.maximum_control_stream_bytes));
+      if (!status.is_ok()) {
+        erase_extension_stream(unidirectional_streams_, found);
+        return status;
+      }
+      aggregate_extension_stream_bytes_ += plaintext.size();
+      const auto view = proxy_connection_detail::scatter(wire);
+      const auto type = read_quic_varint(view);
+      if (!type) {
+        if (!final && type.status() == STATUS_BUFFER_TOO_SMALL)
+          return ntl::status::ok();
+        const auto failure = final ? ntl::status{STATUS_END_OF_FILE}
+                                   : ntl::status{type.status()};
+        erase_extension_stream(unidirectional_streams_, found);
+        return failure;
+      }
+      if (type->value == webtransport::control_stream_type) {
+        status = consume_control_stream(stream_id, final);
+        if (final)
+          erase_extension_stream(unidirectional_streams_, found);
+        return status;
+      }
+      if (type->value == msquic_backend_qpack_decoder_stream_type) {
+        if (final)
+          erase_extension_stream(unidirectional_streams_, found);
+        return ntl::status::ok();
+      }
+      if (type->value != webtransport::unidirectional_stream_type) {
+        if (final)
+          erase_extension_stream(unidirectional_streams_, found);
+        return ntl::status::ok();
+      }
+      if (!final)
+        return ntl::status::ok();
+      const auto parsed = webtransport::parse_stream_prefix(
+          webtransport::stream_direction::unidirectional, view);
+      status = parsed
+                   ? dispatch_webtransport_payload(
+                         webtransport::payload_kind::stream,
+                         parsed->session_id,
+                         webtransport::stream_direction::unidirectional,
+                         0, parsed->body)
+                   : ntl::status{parsed.status()};
+      erase_extension_stream(unidirectional_streams_, found);
+      return status;
+    } catch (const std::bad_alloc &) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    } catch (...) {
+      return STATUS_UNHANDLED_EXCEPTION;
+    }
+  }
+
+  ntl::status on_peer_bidirectional_stream(
+      std::uint64_t stream_id, ntl::net::scatter_view plaintext,
+      bool final) noexcept override {
+    std::lock_guard guard(state_lock_);
+    if (closed_)
+      return STATUS_DELETE_PENDING;
+    try {
+      auto found = bidirectional_streams_.find(stream_id);
+      if (found == bidirectional_streams_.end()) {
+        if (active_extension_streams() >=
+            limits_.maximum_concurrent_extension_streams)
+          return STATUS_QUOTA_EXCEEDED;
+        found = bidirectional_streams_.emplace(
+            stream_id, std::vector<std::byte>{}).first;
+      }
+      auto &wire = found->second;
+      if (plaintext.size() >
+              limits_.maximum_aggregate_extension_stream_bytes ||
+          aggregate_extension_stream_bytes_ >
+              limits_.maximum_aggregate_extension_stream_bytes -
+                  plaintext.size()) {
+        erase_extension_stream(bidirectional_streams_, found);
+        return STATUS_QUOTA_EXCEEDED;
+      }
+      auto status = proxy_connection_detail::append(
+          plaintext, wire, limits_.maximum_extension_stream_bytes);
+      if (!status.is_ok()) {
+        erase_extension_stream(bidirectional_streams_, found);
+        return status;
+      }
+      aggregate_extension_stream_bytes_ += plaintext.size();
+      if (!final)
+        return ntl::status::ok();
+      const auto parsed = webtransport::parse_stream_prefix(
+          webtransport::stream_direction::bidirectional,
+          proxy_connection_detail::scatter(wire));
+      status = parsed
+                   ? dispatch_webtransport_payload(
+                         webtransport::payload_kind::stream,
+                         parsed->session_id,
+                         webtransport::stream_direction::bidirectional,
+                         0, parsed->body)
+                   : ntl::status{parsed.status()};
+      erase_extension_stream(bidirectional_streams_, found);
+      return status;
+    } catch (const std::bad_alloc &) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    } catch (...) {
+      return STATUS_UNHANDLED_EXCEPTION;
+    }
+  }
+
+  ntl::status on_datagram(
+      ntl::net::scatter_view plaintext) noexcept override {
+    std::lock_guard guard(state_lock_);
+    if (closed_)
+      return STATUS_DELETE_PENDING;
+    auto datagram = ntl::net::http::http3_datagram_view::parse(plaintext);
+    if (!datagram)
+      return datagram.status();
+    return dispatch_webtransport_payload(
+        webtransport::payload_kind::datagram,
+        datagram->request_stream_id(),
+        webtransport::stream_direction::bidirectional, 0,
+        datagram->payload());
+  }
+
+  ntl::status on_peer_send_aborted(
+      std::uint64_t stream_id, std::uint64_t error_code) noexcept override {
+    std::lock_guard guard(state_lock_);
+    if (closed_)
+      return STATUS_DELETE_PENDING;
+    (void)inspector_.cancel_request_stream(stream_id);
+    blocked_streams_.erase(stream_id);
+    const auto request = requests_.find(stream_id);
+    if (request != requests_.end()) {
+      cancel_origin(stream_id, request->second);
+      erase_request(request);
+    }
+    if (observer_)
+      observer_->on_stream_cancelled(stream_id);
+    const auto session = webtransport_sessions_.find(stream_id);
+    if (session != webtransport_sessions_.end())
+      webtransport_sessions_.erase(session);
+
+    const auto unidirectional = unidirectional_streams_.find(stream_id);
+    if (unidirectional != unidirectional_streams_.end()) {
+      erase_extension_stream(unidirectional_streams_, unidirectional);
+      return ntl::status::ok();
+
+    }
+    const auto found = bidirectional_streams_.find(stream_id);
+    if (found == bidirectional_streams_.end())
+      return ntl::status::ok();
+    const auto parsed = webtransport::parse_stream_prefix(
+        webtransport::stream_direction::bidirectional,
+        proxy_connection_detail::scatter(found->second));
+    const auto application_error =
+        webtransport::application_error_from_http3(error_code);
+    if (parsed && application_error && observer_)
+      observer_->on_webtransport_reset(
+          parsed->session_id, *application_error);
+    erase_extension_stream(bidirectional_streams_, found);
+    return ntl::status::ok();
+  }
+
+  ntl::status on_peer_receive_aborted(
+      std::uint64_t stream_id, std::uint64_t error_code) noexcept override {
+    std::lock_guard guard(state_lock_);
+    if (closed_)
+      return STATUS_DELETE_PENDING;
+    return on_peer_send_aborted(stream_id, error_code);
+  }
+
+  void on_datagram_send_state(
+      bool enabled, std::size_t) noexcept override {
+    std::lock_guard guard(state_lock_);
+    if (closed_)
+      return;
+    datagram_send_enabled_ = enabled;
+    update_webtransport_transport();
+  }
+
+  void on_reliable_reset_negotiated(bool enabled) noexcept override {
+    std::lock_guard guard(state_lock_);
+    if (closed_)
+      return;
+    reliable_reset_negotiated_ = enabled;
+    update_webtransport_transport();
+  }
+
+  void on_closed(NTSTATUS status) noexcept override {
+    std::lock_guard guard(state_lock_);
+    closed_ = true;
+    cancel_all_origins();
+    connected_ = false;
+    requests_.clear();
+    aggregate_body_bytes_ = 0;
+    aggregate_extension_stream_bytes_ = 0;
+    blocked_streams_.clear();
+    unidirectional_streams_.clear();
+    bidirectional_streams_.clear();
+    webtransport_sessions_.clear();
+    if (observer_ && !close_notified_)
+      observer_->on_closed(status);
+    close_notified_ = true;
+  }
+
+private:
+  static constexpr std::uint64_t invalid_stream_id =
+      (std::numeric_limits<std::uint64_t>::max)();
+  static constexpr std::uint64_t
+      msquic_backend_qpack_decoder_stream_type = 0x03;
+
+  enum class pending_action : std::uint8_t {
+    none,
+    cancel_parser,
+    drop_connection,
+  };
+
+  struct request_state {
+    explicit request_state(
+        ntl::net::http::message_memory_ref memory = {}) : message(memory) {}
+
+    ntl::net::http::request_message message;
+    std::string original_content_encoding;
+    std::vector<std::byte> capsule_wire;
+    pending_action action = pending_action::none;
+    bool headers_seen = false;
+    bool trailers_seen = false;
+    bool response_sent = false;
+    bool origin_pending = false;
+    bool webtransport = false;
+    std::optional<std::uint64_t> content_length;
+  };
+
+  struct webtransport_session_state {
+    std::shared_ptr<webtransport::backend_session> transport;
+    std::unique_ptr<webtransport::transform_session> policy;
+  };
+
+  ntl::status on_headers(
+      std::uint64_t stream_id,
+      std::span<const header_field> fields) noexcept override {
+    ++request_headers_;
+    try {
+      auto found = requests_.find(stream_id);
+      if (found != requests_.end()) {
+        auto &state = found->second;
+        if (!state.headers_seen || state.trailers_seen || state.webtransport)
+          return STATUS_DATA_ERROR;
+        ntl::net::http::header_list trailers(
+            state.message.resource());
+        trailers.reserve(fields.size());
+        for (const auto &field : fields) {
+          if (field.name.empty() || field.name.front() == ':')
+            return STATUS_DATA_ERROR;
+          trailers.push_back({field.name, field.value, field.never_index});
+        }
+        const ntl::status valid = ntl::net::http::validate_trailers(
+            trailers, ntl::net::http::protocol::http3,
+            policy_->transforms_ref().limits_ref());
+        if (!valid.is_ok())
+          return valid;
+        state.message.trailers = std::move(trailers);
+        state.trailers_seen = true;
+        return ntl::status::ok();
+      }
+
+      if (requests_.size() >= limits_.maximum_concurrent_request_streams)
+        return STATUS_QUOTA_EXCEEDED;
+      auto parsed = stream_transform_detail::parse_request_head(
+          fields, policy_->transforms_ref().limits_ref(), message_memory_);
+      if (!parsed)
+        return parsed.status();
+      request_state state(message_memory_);
+      state.message = std::move(*parsed);
+      auto content_length = stream_transform_detail::content_length(
+          state.message.headers);
+      if (!content_length)
+        return content_length.status();
+      state.content_length = *content_length;
+      state.headers_seen = true;
+      auto inserted = requests_.emplace(stream_id, std::move(state));
+      if (!inserted.second)
+        return STATUS_OBJECT_NAME_COLLISION;
+
+      auto &stored = inserted.first->second;
+      stored.webtransport =
+          stored.message.method == "CONNECT" &&
+          stored.message.extended_protocol &&
+          *stored.message.extended_protocol == webtransport::upgrade_token;
+      if (stored.webtransport)
+        return accept_webtransport(stream_id, stored);
+      // This adapter has no generic byte-tunnel origin contract.  Treating an
+      // unknown Extended CONNECT (or ordinary CONNECT) as an HTTP exchange
+      // would silently discard tunnel semantics, so only the explicitly
+      // implemented WebTransport route is admitted.
+      if (stored.message.method == "CONNECT")
+        return send_terminal(stream_id, stored, std::nullopt);
+      return ntl::status::ok();
+    } catch (const std::bad_alloc &) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    } catch (...) {
+      return STATUS_UNHANDLED_EXCEPTION;
+    }
+  }
+
+  ntl::status on_data(
+      std::uint64_t stream_id,
+      ntl::net::scatter_view data) noexcept override {
+    const auto found = requests_.find(stream_id);
+    if (found == requests_.end() || !data)
+      return STATUS_DATA_ERROR;
+    auto &state = found->second;
+    if (state.action != pending_action::none || state.response_sent)
+      return ntl::status::ok();
+    if (state.trailers_seen)
+      return STATUS_DATA_ERROR;
+    if (state.webtransport)
+      return consume_capsules(stream_id, state, data, false);
+    if (data.size() > limits_.maximum_buffered_bytes_per_stream ||
+        state.message.body.size() >
+            limits_.maximum_buffered_bytes_per_stream - data.size() ||
+        data.size() > limits_.maximum_aggregate_body_bytes ||
+        aggregate_body_bytes_ >
+            limits_.maximum_aggregate_body_bytes - data.size())
+      return STATUS_BUFFER_OVERFLOW;
+    const ntl::status appended = proxy_connection_detail::append(
+        data, state.message.body,
+        limits_.maximum_buffered_bytes_per_stream);
+    if (appended.is_ok())
+      aggregate_body_bytes_ += data.size();
+    return appended;
+  }
+
+  ntl::status on_stream_end(
+      std::uint64_t stream_id) noexcept override {
+    ++request_stream_ends_;
+    const auto found = requests_.find(stream_id);
+    if (found == requests_.end())
+      return STATUS_NOT_FOUND;
+    auto &state = found->second;
+    if (state.webtransport) {
+      const ntl::status ended =
+          consume_capsules(stream_id, state, {}, true);
+      if (observer_)
+        observer_->on_webtransport_session_closed(
+            stream_id, static_cast<NTSTATUS>(ended));
+      webtransport_sessions_.erase(stream_id);
+      erase_request(found);
+      return ended;
+    }
+    if (state.action != pending_action::none || state.response_sent)
+      return ntl::status::ok();
+    if (state.content_length &&
+        state.message.body.size() != *state.content_length)
+      return STATUS_DATA_ERROR;
+    const ntl::status completed = finish_request(stream_id, state);
+    last_stream_end_status_ = static_cast<NTSTATUS>(completed);
+    if (completed.is_ok()) {
+      const auto current = requests_.find(stream_id);
+      if (current != requests_.end() &&
+          current->second.action == pending_action::none &&
+          !current->second.response_sent &&
+          !current->second.origin_pending)
+        erase_request(current);
+    }
+    return completed;
+  }
+
+  ntl::status finish_request(
+      std::uint64_t stream_id, request_state &state) noexcept {
+    auto decoded = ntl::net::http::decode_body(
+        state.message.headers, state.message.body, *decoders_,
+        policy_->transforms_ref().limits_ref());
+    if (!decoded)
+      return decoded.status();
+    state.original_content_encoding =
+        std::move(decoded->original_content_encoding);
+    aggregate_body_bytes_ -= state.message.body.size();
+    state.message.body = std::move(decoded->bytes);
+    aggregate_body_bytes_ += state.message.body.size();
+    if (aggregate_body_bytes_ > limits_.maximum_aggregate_body_bytes)
+      return STATUS_BUFFER_OVERFLOW;
+
+    auto transformed = policy_->transforms_ref().apply(state.message);
+    if (transformed.action == ntl::net::http::rewrite_action::drop)
+      return apply_verdict(
+          stream_id, state,
+          ntl::net::inspection::verdict::drop_flow);
+    if (transformed.action != ntl::net::http::rewrite_action::forward)
+      return send_terminal(
+          stream_id, state,
+          std::move(transformed.response));
+
+    auto verdict = inspect(
+        stream_id, ntl::net::http::inspection_stage::headers,
+        state.message, nullptr, {});
+    if (verdict == ntl::net::inspection::verdict::permit &&
+        !state.message.body.empty())
+      verdict = inspect(
+          stream_id, ntl::net::http::inspection_stage::body_chunk,
+          state.message, nullptr, state.message.body);
+    if (verdict == ntl::net::inspection::verdict::permit)
+      verdict = inspect(
+          stream_id, ntl::net::http::inspection_stage::message_complete,
+          state.message, nullptr, {});
+    if (verdict != ntl::net::inspection::verdict::permit)
+      return apply_verdict(stream_id, state, verdict);
+
+    if (limits_.require_server_name_authority_binding &&
+        !ntl::net::http::authority_matches_tls_session(
+            state.message.authority, session_))
+      return STATUS_ACCESS_DENIED;
+
+    auto encoded = ntl::net::http::encode_body(
+        state.message.headers, state.message.body,
+        state.original_content_encoding, transformed.body_coding,
+        *encoders_, policy_->transforms_ref().limits_ref());
+    if (!encoded)
+      return encoded.status();
+    origin_request request{
+        .server_name = session_.tls.server_name.value_or(std::string{}),
+        .method = std::string(state.message.method.begin(),
+                              state.message.method.end()),
+        .scheme = std::string(state.message.scheme.begin(),
+                              state.message.scheme.end()),
+        .authority = std::string(state.message.authority.begin(),
+                                 state.message.authority.end()),
+        .path = std::string(state.message.path.begin(),
+                            state.message.path.end()),
+        .headers = proxy_connection_detail::proxy_headers(
+            state.message.headers),
+        .body = std::move(*encoded),
+        .trailers = proxy_connection_detail::proxy_trailers(
+            state.message.trailers)};
+    try {
+      std::weak_ptr<proxy_connection> weak_owner = weak_from_this();
+      origin_completion completion =
+          [weak_owner, stream_id](
+              ntl::result<origin_response> response) noexcept {
+            if (const auto owner = weak_owner.lock())
+              owner->complete_origin(stream_id, std::move(response));
+          };
+      state.origin_pending = true;
+      ++origin_submit_calls_;
+      const ntl::status submitted = origin_->submit(
+          stream_id, std::move(request), std::move(completion));
+      last_origin_submit_status_ = static_cast<NTSTATUS>(submitted);
+      if (submitted.is_ok())
+        return submitted;
+      const auto current = requests_.find(stream_id);
+      if (current == requests_.end() || !current->second.origin_pending)
+        return ntl::status::ok();
+      current->second.origin_pending = false;
+      return submitted;
+    } catch (const std::bad_alloc &) {
+      state.origin_pending = false;
+      return STATUS_INSUFFICIENT_RESOURCES;
+    } catch (...) {
+      state.origin_pending = false;
+      return STATUS_UNHANDLED_EXCEPTION;
+    }
+  }
+
+  void complete_origin(
+      std::uint64_t stream_id,
+      ntl::result<origin_response> response) noexcept {
+    std::lock_guard guard(state_lock_);
+    if (closed_)
+      return;
+    const auto found = requests_.find(stream_id);
+    if (found == requests_.end() || !found->second.origin_pending)
+      return;
+    found->second.origin_pending = false;
+    ntl::status completed = ntl::status::ok();
+    if (!response) {
+      completed = send_terminal(
+          stream_id, found->second, std::nullopt,
+          proxy_terminal_reason::origin_unavailable,
+          static_cast<NTSTATUS>(response.status()));
+    } else if (limits_.require_http3_origin &&
+               response->negotiated_protocol != "h3") {
+      completed = send_terminal(
+          stream_id, found->second, std::nullopt,
+          proxy_terminal_reason::origin_unavailable,
+          STATUS_PROTOCOL_NOT_SUPPORTED);
+    } else {
+      completed = finish_response(
+          stream_id, found->second, std::move(*response));
+    }
+    if (!completed.is_ok()) {
+      stream_failure(stream_id, h3_general_protocol_error);
+      return;
+    }
+    const auto current = requests_.find(stream_id);
+    if (current != requests_.end())
+      erase_request(current);
+  }
+
+  ntl::status finish_response(
+      std::uint64_t stream_id, request_state &state,
+      origin_response response) noexcept {
+    const auto source_protocol =
+        proxy_connection_detail::origin_protocol(
+            response.negotiated_protocol);
+    if (!source_protocol)
+      return source_protocol.status();
+    ntl::net::http::response_message semantic(message_memory_);
+    semantic.wire_protocol = *source_protocol;
+    semantic.status = response.status;
+    auto status = proxy_connection_detail::append_headers(
+        semantic.headers, response.headers);
+    if (status.is_ok())
+      status = proxy_connection_detail::append_trailers(
+          semantic.trailers, response.trailers);
+    if (!status.is_ok())
+      return status;
+    status = ntl::net::http::adapt_forwarded_message(
+        semantic, ntl::net::http::protocol::http3);
+    if (!status.is_ok())
+      return status;
+    auto decoded = ntl::net::http::decode_body(
+        semantic.headers, response.body, *decoders_,
+        policy_->transforms_ref().limits_ref());
+    if (!decoded)
+      return decoded.status();
+    const std::string original_content_encoding =
+        std::move(decoded->original_content_encoding);
+    semantic.body = std::move(decoded->bytes);
+
+    auto transformed = policy_->transforms_ref().apply(
+        state.message, semantic);
+    if (transformed.action == ntl::net::http::rewrite_action::drop)
+      return apply_verdict(
+          stream_id, state,
+          ntl::net::inspection::verdict::drop_flow);
+    if (transformed.action != ntl::net::http::rewrite_action::forward) {
+      auto terminal = std::move(transformed.response);
+      return send_terminal(stream_id, state, std::move(terminal));
+    }
+
+    auto verdict = inspect(
+        stream_id, ntl::net::http::inspection_stage::headers,
+        state.message, &semantic, {});
+    if (verdict == ntl::net::inspection::verdict::permit &&
+        !semantic.body.empty())
+      verdict = inspect(
+          stream_id, ntl::net::http::inspection_stage::body_chunk,
+          state.message, &semantic, semantic.body);
+    if (verdict == ntl::net::inspection::verdict::permit)
+      verdict = inspect(
+          stream_id, ntl::net::http::inspection_stage::message_complete,
+          state.message, &semantic, {});
+    if (verdict != ntl::net::inspection::verdict::permit)
+      return apply_verdict(stream_id, state, verdict);
+
+    auto encoded = ntl::net::http::encode_body(
+        semantic.headers, semantic.body, original_content_encoding,
+        transformed.body_coding, *encoders_,
+        policy_->transforms_ref().limits_ref());
+    if (!encoded)
+      return encoded.status();
+    return send_response(stream_id, state.message, semantic, *encoded);
+  }
+
+  ntl::net::inspection::verdict inspect(
+      std::uint64_t stream_id,
+      ntl::net::http::inspection_stage stage,
+      const ntl::net::http::request_message &request,
+      const ntl::net::http::response_message *response,
+      std::span<const std::byte> chunk) const noexcept {
+    const auto context = response
+                             ? ntl::net::http::inspection_context_view::for_response(
+                                   ntl::net::http::protocol::http3, stream_id,
+                                   stream_id, stage, session_, request,
+                                   *response, chunk)
+                             : ntl::net::http::inspection_context_view::for_request(
+                                   ntl::net::http::protocol::http3, stream_id,
+                                   stream_id, stage, session_, request, chunk);
+    if (observer_)
+      observer_->on_inspection(context);
+    if (closed_)
+      return ntl::net::inspection::verdict::drop_flow;
+    return policy_->decisions_ref().evaluate(context);
+  }
+
+  ntl::status apply_verdict(
+      std::uint64_t stream_id, request_state &state,
+      ntl::net::inspection::verdict verdict) noexcept {
+    if (verdict == ntl::net::inspection::verdict::permit)
+      return ntl::status::ok();
+    if (verdict == ntl::net::inspection::verdict::drop_flow) {
+      state.action = pending_action::drop_connection;
+      return ntl::status::ok();
+    }
+    return send_terminal(
+        stream_id, state, std::nullopt,
+        proxy_terminal_reason::policy_block, STATUS_ACCESS_DENIED);
+  }
+
+  ntl::status send_terminal(
+      std::uint64_t stream_id, request_state &state,
+      std::optional<ntl::net::http::response_message> response,
+      proxy_terminal_reason reason = proxy_terminal_reason::policy_block,
+      NTSTATUS failure = STATUS_ACCESS_DENIED) noexcept {
+    ntl::net::http::response_message terminal;
+    if (response) {
+      terminal = std::move(*response);
+    } else if (terminal_responses_) {
+      auto supplied = terminal_responses_->response_for(
+          {.reason = reason, .request = state.message, .failure = failure});
+      if (!supplied)
+        return supplied.status();
+      terminal = std::move(*supplied);
+    } else {
+      terminal = reason == proxy_terminal_reason::origin_unavailable
+                     ? proxy_connection_detail::bad_gateway_response(
+                           message_memory_)
+                     : proxy_connection_detail::forbidden_response(
+                           message_memory_);
+    }
+    // A rejected WebTransport Extended CONNECT becomes inactive as soon as
+    // the non-2xx response HEADERS arrive.  Sending a representation body
+    // afterwards races the peer closing the CONNECT stream and can turn a
+    // successful rejection into an apparent write failure.  Complete these
+    // terminal responses with one final HEADERS frame.
+    if (state.webtransport) {
+      terminal.body.clear();
+      terminal.trailers.clear();
+    }
+    terminal.wire_protocol = ntl::net::http::protocol::http3;
+    auto encoded = ntl::net::http::encode_body(
+        terminal.headers, terminal.body, {},
+        ntl::net::http::transformed_body_coding::identity,
+        *encoders_, policy_->transforms_ref().limits_ref());
+    if (!encoded)
+      return encoded.status();
+    const ntl::status sent = send_response(
+        stream_id, state.message, terminal, *encoded, true);
+    if (sent.is_ok()) {
+      state.response_sent = true;
+      state.action = pending_action::cancel_parser;
+    }
+    return sent;
+  }
+
+  ntl::status send_response(
+      std::uint64_t stream_id,
+      const ntl::net::http::request_message &request,
+      const ntl::net::http::response_message &response,
+      std::span<const std::byte> body,
+      bool terminal = false) noexcept {
+    try {
+      const auto backend = backend_.lock();
+      if (!backend)
+        return STATUS_DELETE_PENDING;
+      const bool body_forbidden =
+          ntl::net::http::response_body_forbidden(request, response);
+      if (body_forbidden && !body.empty())
+        return STATUS_DATA_ERROR;
+      const auto fields = stream_transform_detail::response_fields(response);
+      auto head = stream_transform_detail::headers_frame(
+          fields, policy_->transforms_ref().limits_ref().maximum_header_bytes,
+          limits_.maximum_frame_payload);
+      if (!head)
+        return head.status();
+      auto status = backend->write_stream(
+          stream_id, proxy_connection_detail::scatter(*head),
+          body.empty() && response.trailers.empty());
+      if (!status.is_ok())
+        return status;
+      if (!body.empty()) {
+        std::vector<outbound_stream_write> writes;
+        status = stream_transform_detail::append_data(
+            writes, body, response.trailers.empty(),
+            limits_.maximum_frame_payload);
+        if (!status.is_ok())
+          return status;
+        for (const auto &write : writes) {
+          status = backend->write_stream(
+              stream_id, proxy_connection_detail::scatter(write.wire),
+              write.final);
+          if (!status.is_ok())
+            return status;
+        }
+      }
+      if (!response.trailers.empty()) {
+        std::vector<header_field> trailers;
+        trailers.reserve(response.trailers.size());
+        for (const auto &field : response.trailers)
+          trailers.push_back(
+              {std::string(field.name.begin(), field.name.end()),
+               std::string(field.value.begin(), field.value.end()),
+               field.sensitive});
+        auto wire = stream_transform_detail::headers_frame(
+            trailers,
+            policy_->transforms_ref().limits_ref().maximum_header_bytes,
+            limits_.maximum_frame_payload);
+        if (!wire)
+          return wire.status();
+        status = backend->write_stream(
+            stream_id, proxy_connection_detail::scatter(*wire), true);
+      }
+      if (status.is_ok() && observer_)
+        observer_->on_exchange_complete(
+            stream_id, request, response, terminal);
+      return status;
+    } catch (const std::bad_alloc &) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    } catch (...) {
+      return STATUS_UNHANDLED_EXCEPTION;
+    }
+  }
+
+  ntl::status accept_webtransport(
+      std::uint64_t stream_id, request_state &state) noexcept {
+    if (!advertise_webtransport_ || !peer_settings_ready_)
+      return send_terminal(stream_id, state, std::nullopt);
+    const auto backend = backend_.lock();
+    if (!backend)
+      return STATUS_DELETE_PENDING;
+    const auto capabilities = backend->capabilities();
+    const webtransport::prerequisites prerequisites{
+        // The server advertises SETTINGS_ENABLE_CONNECT_PROTOCOL. A browser
+        // client does not echo that server-only permission in its SETTINGS.
+        .peer_enabled_extended_connect = advertise_webtransport_,
+        .peer_enabled_webtransport = peer_settings_.webtransport,
+        .local_h3_datagram = advertise_webtransport_,
+        .peer_h3_datagram = peer_settings_.h3_datagrams,
+        .local_quic_datagram = capabilities.quic_datagrams,
+        .peer_quic_datagram = datagram_send_enabled_,
+        .local_reset_stream_at = capabilities.reliable_reset_at,
+        .peer_reset_stream_at = reliable_reset_negotiated_};
+    auto transformed = policy_->transforms_ref().apply(state.message);
+    if (transformed.action != ntl::net::http::rewrite_action::forward)
+      return transformed.action == ntl::net::http::rewrite_action::drop
+                 ? apply_verdict(
+                       stream_id, state,
+                       ntl::net::inspection::verdict::drop_flow)
+                 : send_terminal(
+                       stream_id, state,
+                       std::move(transformed.response));
+    if (limits_.require_server_name_authority_binding &&
+        !ntl::net::http::authority_matches_tls_session(
+            state.message.authority, session_))
+      return send_terminal(stream_id, state, std::nullopt);
+    auto fields = proxy_connection_detail::request_header_fields(
+        state.message,
+        policy_->transforms_ref().limits_ref().maximum_header_bytes);
+    if (!fields)
+      return fields.status();
+    const auto validated = webtransport::validate_session_request(
+        std::span<const header_field>(*fields), prerequisites, true,
+        policy_->transforms_ref().limits_ref().maximum_header_bytes);
+    if (!validated)
+      return send_terminal(stream_id, state, std::nullopt);
+
+    auto verdict = inspect(
+        stream_id, ntl::net::http::inspection_stage::headers,
+        state.message, nullptr, {});
+    if (verdict == ntl::net::inspection::verdict::permit &&
+        !state.message.body.empty())
+      verdict = inspect(
+          stream_id, ntl::net::http::inspection_stage::body_chunk,
+          state.message, nullptr, state.message.body);
+    if (verdict == ntl::net::inspection::verdict::permit)
+      verdict = inspect(
+          stream_id, ntl::net::http::inspection_stage::message_complete,
+          state.message, nullptr, {});
+    if (verdict != ntl::net::inspection::verdict::permit)
+      return apply_verdict(stream_id, state, verdict);
+    if (webtransport_sessions_.size() >=
+        limits_.maximum_concurrent_webtransport_sessions)
+      return STATUS_QUOTA_EXCEEDED;
+    try {
+      auto session = std::make_shared<webtransport::backend_session>(
+          backend, webtransport_limits_);
+      session->set_negotiated_transport(
+          {datagram_send_enabled_, reliable_reset_negotiated_});
+      std::unique_ptr<webtransport::transform_session> policy;
+      if (webtransport_policy_)
+        policy = std::make_unique<webtransport::transform_session>(
+            webtransport_policy_->clone_for_new_session());
+      auto inserted = webtransport_sessions_.emplace(
+          stream_id,
+          webtransport_session_state{
+              std::move(session), std::move(policy)});
+      if (!inserted.second)
+        return STATUS_OBJECT_NAME_COLLISION;
+      const ntl::status accepted =
+          inserted.first->second.transport->accept_server(stream_id);
+      if (!accepted.is_ok()) {
+        webtransport_sessions_.erase(inserted.first);
+      } else if (observer_) {
+        observer_->on_webtransport_session_opened(stream_id);
+      }
+      return accepted;
+    } catch (const std::bad_alloc &) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    } catch (...) {
+      return STATUS_UNHANDLED_EXCEPTION;
+    }
+  }
+
+  ntl::status consume_capsules(
+      std::uint64_t stream_id, request_state &state,
+      ntl::net::scatter_view plaintext, bool final) noexcept {
+    auto status = proxy_connection_detail::append(
+        plaintext, state.capsule_wire,
+        limits_.maximum_capsule_wire_bytes);
+    if (!status.is_ok())
+      return status;
+    ntl::net::http::capsule_framer framer(
+        {.maximum_payload_size = limits_.maximum_capsule_wire_bytes});
+    while (!state.capsule_wire.empty()) {
+      const auto wire = proxy_connection_detail::scatter(state.capsule_wire);
+      const auto probe = framer.probe(wire);
+      if (probe.state() == ntl::net::framing::probe_state::need_more)
+        break;
+      if (probe.state() != ntl::net::framing::probe_state::complete)
+        return probe.error();
+      auto capsule_wire = wire.subview(0, probe.frame_size());
+      if (!capsule_wire)
+        return capsule_wire.status();
+      auto capsule = ntl::net::http::capsule_view::parse(
+          *capsule_wire,
+          {.maximum_payload_size = limits_.maximum_capsule_wire_bytes});
+      if (!capsule)
+        return capsule.status();
+      status = dispatch_webtransport_payload(
+          webtransport::payload_kind::capsule, stream_id,
+          webtransport::stream_direction::bidirectional,
+          capsule->header().type, capsule->payload());
+      if (!status.is_ok())
+        return status;
+      state.capsule_wire.erase(
+          state.capsule_wire.begin(),
+          state.capsule_wire.begin() +
+              static_cast<std::ptrdiff_t>(probe.frame_size()));
+    }
+    return final && !state.capsule_wire.empty()
+               ? ntl::status{STATUS_END_OF_FILE}
+               : ntl::status::ok();
+  }
+
+  ntl::status dispatch_webtransport_payload(
+      webtransport::payload_kind kind, std::uint64_t session_id,
+      webtransport::stream_direction direction,
+      std::uint64_t capsule_type,
+      ntl::net::scatter_view bytes) noexcept {
+    const auto session = webtransport_sessions_.find(session_id);
+    if (session == webtransport_sessions_.end() ||
+        !session->second.transport->active())
+      return STATUS_NOT_FOUND;
+    try {
+      webtransport::payload value{
+          .kind = kind,
+          .session_id = session_id,
+          .direction = direction,
+          .capsule_type = capsule_type,
+          .bytes = std::vector<std::byte>(bytes.size())};
+      if (!value.bytes.empty()) {
+        const ntl::status copied = bytes.copy_to(value.bytes);
+        if (!copied.is_ok())
+          return copied;
+      }
+      if (session->second.policy) {
+        if (kind == webtransport::payload_kind::stream) {
+          const ntl::status opened =
+              session->second.policy->open_stream(direction);
+          if (!opened.is_ok())
+            return opened;
+        }
+        const auto outcome = session->second.policy->apply(value);
+        if (outcome.failure != STATUS_SUCCESS)
+          return outcome.failure;
+        if (outcome.action == webtransport::transform_action::drop) {
+          if (const auto backend = backend_.lock())
+            backend->stop();
+          return ntl::status::ok();
+        }
+        if (outcome.action ==
+            webtransport::transform_action::block_session) {
+          if (const auto backend = backend_.lock())
+            (void)backend->reset_stream(
+                session_id, webtransport::wt_session_gone);
+          webtransport_sessions_.erase(session);
+          return ntl::status::ok();
+        }
+      }
+      if (observer_)
+        observer_->on_webtransport_payload(value);
+      if (closed_)
+        return STATUS_DELETE_PENDING;
+      return webtransport_handler_
+                 ? webtransport_handler_->handle(
+                       *session->second.transport, value)
+                 : ntl::status::ok();
+    } catch (const std::bad_alloc &) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    } catch (...) {
+      return STATUS_UNHANDLED_EXCEPTION;
+    }
+  }
+
+  ntl::status consume_control_stream(
+      std::uint64_t stream_id, bool final) noexcept {
+    if (peer_control_stream_id_ != invalid_stream_id &&
+        peer_control_stream_id_ != stream_id)
+      return STATUS_DATA_ERROR;
+    peer_control_stream_id_ = stream_id;
+    auto &wire = unidirectional_streams_[stream_id];
+    if (wire.size() > limits_.maximum_control_stream_bytes)
+      return STATUS_BUFFER_OVERFLOW;
+    const auto view = proxy_connection_detail::scatter(wire);
+    const auto type = read_quic_varint(view);
+    if (!type)
+      return final ? ntl::status{STATUS_END_OF_FILE}
+                   : ntl::status::ok();
+    if (control_parse_offset_ == 0)
+      control_parse_offset_ = type->encoded_size;
+    std::size_t offset = control_parse_offset_;
+    frame_framer framer({limits_.maximum_control_stream_bytes});
+    while (offset < view.size()) {
+      auto remaining = view.subview(offset);
+      if (!remaining)
+        return remaining.status();
+      const auto probe = framer.probe(*remaining);
+      if (probe.state() == ntl::net::framing::probe_state::need_more)
+        break;
+      if (probe.state() != ntl::net::framing::probe_state::complete)
+        return probe.error();
+      auto frame_wire = remaining->subview(0, probe.frame_size());
+      if (!frame_wire)
+        return frame_wire.status();
+      auto frame = frame_view::parse(
+          *frame_wire, {limits_.maximum_control_stream_bytes});
+      if (!frame)
+        return frame.status();
+      if (!peer_settings_ready_) {
+        if (frame->header().type() != frame_type::settings)
+          return STATUS_DATA_ERROR;
+        std::vector<std::byte> settings_wire;
+        try {
+          settings_wire.insert(
+              settings_wire.end(), wire.begin(),
+              wire.begin() + static_cast<std::ptrdiff_t>(
+                  offset + probe.frame_size()));
+        } catch (...) {
+          return STATUS_INSUFFICIENT_RESOURCES;
+        }
+        auto settings = webtransport::parse_control_stream(
+            proxy_connection_detail::scatter(settings_wire),
+            limits_.maximum_control_stream_bytes);
+        if (!settings)
+          return settings.status();
+        peer_settings_ = *settings;
+        peer_settings_ready_ = true;
+      } else if (frame->header().type() == frame_type::settings) {
+        return STATUS_DATA_ERROR;
+      } else if (frame->header().type() == frame_type::goaway) {
+        const auto last = read_quic_varint(frame->payload());
+        if (!last || last->encoded_size != frame->payload().size())
+          return STATUS_DATA_ERROR;
+        peer_draining_ = true;
+        peer_goaway_stream_id_ = last->value;
+      }
+      offset += probe.frame_size();
+      control_parse_offset_ = offset;
+    }
+    if (final)
+      return ntl::status{STATUS_END_OF_FILE};
+    return ntl::status::ok();
+  }
+
+  ntl::status flush_qpack_decoder() noexcept {
+    auto decoder = inspector_.take_qpack_decoder_stream();
+    if (!decoder)
+      return decoder.status();
+    if (decoder->empty())
+      return ntl::status::ok();
+    const auto backend = backend_.lock();
+    return backend
+               ? backend->write_qpack_decoder_stream(
+                     proxy_connection_detail::scatter(*decoder))
+               : ntl::status{STATUS_DELETE_PENDING};
+  }
+
+  void finish_pending_action(std::uint64_t stream_id) noexcept {
+    const auto found = requests_.find(stream_id);
+    if (found == requests_.end())
+      return;
+    const auto action = found->second.action;
+    if (action == pending_action::none && !found->second.response_sent)
+      return;
+    (void)inspector_.cancel_request_stream(stream_id);
+    cancel_origin(stream_id, found->second);
+    erase_request(found);
+    if (action == pending_action::drop_connection) {
+      if (const auto backend = backend_.lock())
+        backend->stop();
+    }
+  }
+
+  void stream_failure(
+      std::uint64_t stream_id, std::uint64_t error) noexcept {
+    (void)inspector_.cancel_request_stream(stream_id);
+    blocked_streams_.erase(stream_id);
+    const auto found = requests_.find(stream_id);
+    if (found != requests_.end()) {
+      cancel_origin(stream_id, found->second);
+      erase_request(found);
+    }
+    if (const auto backend = backend_.lock())
+      (void)backend->reset_stream(stream_id, error);
+  }
+
+  void erase_request(
+      std::unordered_map<std::uint64_t, request_state>::iterator found)
+      noexcept {
+    const std::size_t body = found->second.message.body.size();
+    aggregate_body_bytes_ = body > aggregate_body_bytes_
+                                ? 0
+                                : aggregate_body_bytes_ - body;
+    requests_.erase(found);
+  }
+
+  void cancel_origin(
+      std::uint64_t stream_id, request_state &state) noexcept {
+    if (!state.origin_pending)
+      return;
+    state.origin_pending = false;
+    origin_->cancel(stream_id);
+  }
+
+  void cancel_all_origins() noexcept {
+    for (auto &[stream_id, state] : requests_)
+      cancel_origin(stream_id, state);
+  }
+
+  void cancel_requests_after(std::uint64_t last_stream_id) noexcept {
+    for (auto current = requests_.begin(); current != requests_.end();) {
+      const auto stream_id = current->first;
+      ++current;
+      if (stream_id > last_stream_id)
+        stream_failure(stream_id, h3_stream_request_cancelled);
+    }
+  }
+
+  template <class Map>
+  void erase_extension_stream(
+      Map &streams, typename Map::iterator found) noexcept {
+    const std::size_t bytes = found->second.size();
+    aggregate_extension_stream_bytes_ =
+        bytes > aggregate_extension_stream_bytes_
+            ? 0
+            : aggregate_extension_stream_bytes_ - bytes;
+    streams.erase(found);
+  }
+
+  void update_webtransport_transport() noexcept {
+    for (auto &[id, session] : webtransport_sessions_) {
+      (void)id;
+      session.transport->set_negotiated_transport(
+          {datagram_send_enabled_, reliable_reset_negotiated_});
+    }
+  }
+
+  std::weak_ptr<ntl::net::quic::transport_backend> backend_;
+  std::shared_ptr<async_origin_transport> origin_;
+  mutable std::recursive_mutex state_lock_;
+  std::shared_ptr<const ntl::net::http::inspection_policy> policy_;
+  std::shared_ptr<const ntl::net::inspection::content_decoder_registry>
+      decoders_;
+  std::shared_ptr<const ntl::net::inspection::content_encoder_registry>
+      encoders_;
+  ntl::net::http::inspection_session_metadata session_{};
+  std::shared_ptr<proxy_connection_observer> observer_;
+  std::shared_ptr<webtransport::transform_session> webtransport_policy_;
+  std::shared_ptr<webtransport_payload_handler> webtransport_handler_;
+  proxy_connection_limits limits_{};
+  webtransport::session_limits webtransport_limits_{};
+  std::shared_ptr<proxy_terminal_response_provider> terminal_responses_;
+  std::shared_ptr<std::pmr::memory_resource> message_memory_owner_;
+  ntl::net::http::message_memory_ref message_memory_{};
+  qpack_decoder_adapter<bounded_dynamic_qpack_decoder> qpack_;
+  borrowed_connection_inspector inspector_;
+  std::unordered_map<
+      std::uint64_t, webtransport_session_state>
+      webtransport_sessions_;
+  std::unordered_map<std::uint64_t, request_state> requests_;
+  std::unordered_set<std::uint64_t> blocked_streams_;
+  std::unordered_map<std::uint64_t, std::vector<std::byte>>
+      unidirectional_streams_;
+  std::unordered_map<std::uint64_t, std::vector<std::byte>>
+      bidirectional_streams_;
+  webtransport::peer_settings peer_settings_{};
+  std::size_t aggregate_body_bytes_ = 0;
+  std::size_t aggregate_extension_stream_bytes_ = 0;
+  std::uint64_t request_stream_calls_ = 0;
+  std::uint64_t request_stream_final_calls_ = 0;
+  std::uint64_t request_inspector_retries_ = 0;
+  std::uint64_t request_headers_ = 0;
+  std::uint64_t request_stream_ends_ = 0;
+  std::uint64_t origin_submit_calls_ = 0;
+  std::int32_t last_stream_end_status_ = STATUS_SUCCESS;
+  std::int32_t last_origin_submit_status_ = STATUS_SUCCESS;
+  std::size_t control_parse_offset_ = 0;
+  std::uint64_t local_control_stream_id_ = invalid_stream_id;
+  std::uint64_t peer_control_stream_id_ = invalid_stream_id;
+  std::uint64_t highest_request_stream_id_ = 0;
+  std::uint64_t local_goaway_stream_id_ = maximum_quic_varint;
+  std::uint64_t peer_goaway_stream_id_ = maximum_quic_varint;
+  bool connected_ = false;
+  bool advertise_webtransport_ = false;
+  bool datagram_send_enabled_ = false;
+  bool reliable_reset_negotiated_ = false;
+  bool peer_settings_ready_ = false;
+  bool local_draining_ = false;
+  bool peer_draining_ = false;
+  bool closed_ = false;
+  bool close_notified_ = false;
+};
+
+} // namespace ntl::net::http3

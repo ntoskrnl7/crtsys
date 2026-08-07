@@ -1,6 +1,6 @@
 /**
  * @file callout
- * @brief Move-only ownership of kernel WFP callout registrations.
+ * @brief Shared ownership of kernel WFP callout registrations and callbacks.
  */
 #pragma once
 
@@ -9,6 +9,9 @@
 #endif
 
 #include "../driver"
+#include "../callback_activity"
+#include "../irql"
+#include "../net/kernel/passive_cleanup_item"
 #include "../result"
 #include "../status"
 #include "classify"
@@ -17,265 +20,1314 @@
 
 #include <array>
 #include <cstddef>
+#include <concepts>
+#include <functional>
 #include <memory>
+#include <optional>
+#include <type_traits>
+#include <utility>
 
 namespace ntl::wfp {
 
 namespace detail {
+template <class Result, class Callback, class... Arguments>
+concept exact_nothrow_callback =
+    requires(Callback &callback, Arguments... arguments) {
+      { std::invoke(callback, arguments...) } noexcept
+          -> std::same_as<Result>;
+    };
+
 inline NTSTATUS NTAPI accept_filter_notification(
     FWPS_CALLOUT_NOTIFY_TYPE, const GUID *, FWPS_FILTER2 *) noexcept {
   return STATUS_SUCCESS;
 }
 
-template <auto Callback>
-struct bfe_state_adapter {
-  static void CALLBACK invoke(
-      void *, FWPM_SERVICE_STATE state) noexcept {
-    Callback(state);
+class owning_callback_binding_base {
+public:
+  using release_slot_fn =
+      void (*)(owning_callback_binding_base &, std::size_t) noexcept;
+
+  explicit owning_callback_binding_base(
+      std::shared_ptr<callout_shutdown_gate> shutdown,
+      ntl::detail::callback_activity *activity) noexcept
+      : shutdown_(std::move(shutdown)), activity_(activity) {
+    ExInitializeRundownProtection(&rundown_);
   }
+
+  owning_callback_binding_base(const owning_callback_binding_base &) = delete;
+  owning_callback_binding_base &
+  operator=(const owning_callback_binding_base &) = delete;
+
+  virtual ~owning_callback_binding_base() = default;
+
+  bool try_enter() noexcept {
+    if (!shutdown_ || shutdown_->closing())
+      return false;
+    if (ExAcquireRundownProtection(&rundown_) == FALSE)
+      return false;
+    if (shutdown_->closing()) {
+      ExReleaseRundownProtection(&rundown_);
+      return false;
+    }
+    return true;
+  }
+
+  ntl::detail::callback_activity::token enter_activity() noexcept {
+    return activity_ ? activity_->enter()
+                     : ntl::detail::callback_activity::token{};
+  }
+
+  void leave(ntl::detail::callback_activity::token entered) noexcept {
+    if (activity_)
+      activity_->leave(entered);
+    ExReleaseRundownProtection(&rundown_);
+  }
+
+  void stop_and_drain() noexcept {
+    if (InterlockedCompareExchange(&stopping_, 1, 0) == 0)
+      ExWaitForRundownProtectionRelease(&rundown_);
+  }
+
+  void publish(std::size_t slot, release_slot_fn release) noexcept {
+    slot_ = slot;
+    release_ = release;
+    InterlockedExchange(&published_, 1);
+  }
+
+  void unpublish() noexcept {
+    if (InterlockedCompareExchange(&published_, 0, 1) == 1)
+      release_(*this, slot_);
+  }
+
+private:
+  EX_RUNDOWN_REF rundown_{};
+  volatile LONG stopping_ = 0;
+  volatile LONG published_ = 0;
+  std::size_t slot_ = 0;
+  release_slot_fn release_ = nullptr;
+  std::shared_ptr<callout_shutdown_gate> shutdown_;
+  ntl::detail::callback_activity *activity_ = nullptr;
+};
+
+template <class State, class Callback>
+class owning_bfe_binding final : public owning_callback_binding_base {
+public:
+  owning_bfe_binding(std::shared_ptr<callout_shutdown_gate> shutdown,
+                     ntl::detail::callback_activity *activity,
+                     std::shared_ptr<State> state,
+                     Callback callback) noexcept(
+      std::is_nothrow_move_constructible_v<Callback>)
+      : owning_callback_binding_base(std::move(shutdown), activity),
+        state_(std::move(state)),
+        callback_(std::move(callback)) {}
+
+  static void CALLBACK invoke(void *context,
+                              FWPM_SERVICE_STATE state) noexcept {
+    auto *binding = static_cast<owning_bfe_binding *>(context);
+    if (!binding || !binding->try_enter())
+      return;
+    const auto activity = binding->enter_activity();
+    std::invoke(binding->callback_, *binding->state_, state);
+    binding->leave(activity);
+  }
+
+private:
+  std::shared_ptr<State> state_;
+  Callback callback_;
+};
+
+template <class Result, class Layer, class State, class Callback>
+class owning_classify_binding final : public owning_callback_binding_base {
+public:
+  using layer_type = Layer;
+
+  owning_classify_binding(std::shared_ptr<callout_shutdown_gate> shutdown,
+                          ntl::detail::callback_activity *activity,
+                          std::shared_ptr<State> state,
+                          Callback callback) noexcept(
+      std::is_nothrow_move_constructible_v<Callback>)
+      : owning_callback_binding_base(std::move(shutdown), activity),
+        state_(std::move(state)),
+        callback_(std::move(callback)) {}
+
+  classification_action invoke(const classify_event<Layer> &event) noexcept {
+    if constexpr (std::is_void_v<Result>) {
+      std::invoke(callback_, *state_, event);
+      return classification_action::continue_classification;
+    } else {
+      return to_classification_action(
+          std::invoke(callback_, *state_, event));
+    }
+  }
+
+private:
+  std::shared_ptr<State> state_;
+  Callback callback_;
+};
+
+template <class Result, class Layer, class Callback>
+class owning_classify_callback_binding final
+    : public owning_callback_binding_base {
+public:
+  using layer_type = Layer;
+
+  owning_classify_callback_binding(
+                                   std::shared_ptr<callout_shutdown_gate> shutdown,
+                                   ntl::detail::callback_activity *activity,
+                                   Callback callback) noexcept(
+      std::is_nothrow_move_constructible_v<Callback>)
+      : owning_callback_binding_base(std::move(shutdown), activity),
+        callback_(std::move(callback)) {}
+
+  classification_action invoke(const classify_event<Layer> &event) noexcept {
+    if constexpr (std::is_void_v<Result>) {
+      std::invoke(callback_, event);
+      return classification_action::continue_classification;
+    } else {
+      return to_classification_action(std::invoke(callback_, event));
+    }
+  }
+
+private:
+  Callback callback_;
+};
+
+template <class Result, class Layer, class Context, class State,
+          class Callback>
+class owning_flow_classify_binding final
+    : public owning_callback_binding_base {
+public:
+  using layer_type = Layer;
+  using context_type = Context;
+
+  owning_flow_classify_binding(std::shared_ptr<callout_shutdown_gate> shutdown,
+                               ntl::detail::callback_activity *activity,
+                               std::shared_ptr<State> state,
+                               Callback callback) noexcept(
+      std::is_nothrow_move_constructible_v<Callback>)
+      : owning_callback_binding_base(std::move(shutdown), activity),
+        state_(std::move(state)),
+        callback_(std::move(callback)) {}
+
+  classification_action invoke(const classify_event<Layer> &event,
+                               Context *context) noexcept {
+    if constexpr (std::is_void_v<Result>) {
+      std::invoke(callback_, *state_, event, context);
+      return classification_action::continue_classification;
+    } else {
+      return to_classification_action(
+          std::invoke(callback_, *state_, event, context));
+    }
+  }
+
+private:
+  std::shared_ptr<State> state_;
+  Callback callback_;
+};
+
+template <class Layer, class Context, class State, class Callback>
+class owning_stream_binding final : public owning_callback_binding_base {
+public:
+  using layer_type = Layer;
+  using context_type = Context;
+
+  owning_stream_binding(std::shared_ptr<callout_shutdown_gate> shutdown,
+                        ntl::detail::callback_activity *activity,
+                        std::shared_ptr<State> state,
+                        Callback callback) noexcept(
+      std::is_nothrow_move_constructible_v<Callback>)
+      : owning_callback_binding_base(std::move(shutdown), activity),
+        state_(std::move(state)),
+        callback_(std::move(callback)) {}
+
+  stream_result invoke(const stream_event<Layer, Context> &event) noexcept {
+    return std::invoke(callback_, *state_, event);
+  }
+
+private:
+  std::shared_ptr<State> state_;
+  Callback callback_;
+};
+
+template <class Layer, class Context, class State, class Callback>
+class owning_stream_inspection_binding final
+    : public owning_callback_binding_base {
+public:
+  using layer_type = Layer;
+  using context_type = Context;
+
+  owning_stream_inspection_binding(
+      std::shared_ptr<callout_shutdown_gate> shutdown,
+      ntl::detail::callback_activity *activity,
+      std::shared_ptr<State> state, Callback callback) noexcept(
+      std::is_nothrow_move_constructible_v<Callback>)
+      : owning_callback_binding_base(std::move(shutdown), activity),
+        state_(std::move(state)), callback_(std::move(callback)) {}
+
+  void invoke(const stream_event<Layer, Context> &event) noexcept {
+    std::invoke(callback_, *state_, event);
+  }
+
+private:
+  std::shared_ptr<State> state_;
+  Callback callback_;
+};
+
+template <class Binding, std::size_t SlotCount>
+struct owning_classify_slots {
+  static_assert(SlotCount != 0);
+  using layer_type = typename Binding::layer_type;
+
+  struct claim_result {
+    std::size_t slot = 0;
+    FWPS_CALLOUT_CLASSIFY_FN2 callback = nullptr;
+  };
+
+  template <std::size_t Slot>
+  static void NTAPI invoke(
+      const FWPS_INCOMING_VALUES0 *values,
+      const FWPS_INCOMING_METADATA_VALUES0 *metadata, void *layer_data,
+      const void *classify_context, const FWPS_FILTER2 *filter,
+      UINT64 flow_context, FWPS_CLASSIFY_OUT0 *output) noexcept {
+    if (!output)
+      return;
+
+    Binding *binding = acquire(Slot);
+    if (!binding) {
+      apply_decision(classification_action::block, filter, *output);
+      return;
+    }
+
+    classify_event<layer_type> event(values, metadata, layer_data,
+                                     classify_context, filter, flow_context,
+                                     output);
+    const auto activity = binding->enter_activity();
+    const classification_action result = binding->invoke(event);
+    binding->leave(activity);
+    apply_decision(result, filter, *output);
+  }
+
+  static std::optional<claim_result> claim(Binding &binding) noexcept {
+    KIRQL old_irql;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    for (std::size_t index = 0; index != SlotCount; ++index) {
+      if (!slots_[index]) {
+        slots_[index] = &binding;
+        const claim_result result{index, callbacks_[index]};
+        KeReleaseSpinLock(&lock_, old_irql);
+        return result;
+      }
+    }
+    KeReleaseSpinLock(&lock_, old_irql);
+    return std::nullopt;
+  }
+
+  static void release(owning_callback_binding_base &base,
+                      std::size_t slot) noexcept {
+    KIRQL old_irql;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    if (slot < SlotCount && slots_[slot] == &base)
+      slots_[slot] = nullptr;
+    KeReleaseSpinLock(&lock_, old_irql);
+  }
+
+private:
+  static Binding *acquire(std::size_t slot) noexcept {
+    KIRQL old_irql;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    auto *binding = static_cast<Binding *>(slots_[slot]);
+    if (binding && !binding->try_enter())
+      binding = nullptr;
+    KeReleaseSpinLock(&lock_, old_irql);
+    return binding;
+  }
+
+  template <std::size_t... Slots>
+  static constexpr auto make_callbacks(
+      std::index_sequence<Slots...>) noexcept {
+    return std::array<FWPS_CALLOUT_CLASSIFY_FN2, sizeof...(Slots)>{
+        &invoke<Slots>...};
+  }
+
+  inline static KSPIN_LOCK lock_{};
+  inline static void *slots_[SlotCount]{};
+  inline static constexpr auto callbacks_ =
+      make_callbacks(std::make_index_sequence<SlotCount>{});
+};
+
+template <class Binding, std::size_t SlotCount>
+struct owning_flow_classify_slots {
+  static_assert(SlotCount != 0);
+  using layer_type = typename Binding::layer_type;
+  using context_type = typename Binding::context_type;
+
+  struct claim_result {
+    std::size_t slot = 0;
+    FWPS_CALLOUT_CLASSIFY_FN2 callback = nullptr;
+  };
+
+  template <std::size_t Slot>
+  static void NTAPI invoke(
+      const FWPS_INCOMING_VALUES0 *values,
+      const FWPS_INCOMING_METADATA_VALUES0 *metadata, void *layer_data,
+      const void *classify_context, const FWPS_FILTER2 *filter,
+      UINT64 flow_context, FWPS_CLASSIFY_OUT0 *output) noexcept {
+    if (!output)
+      return;
+
+    Binding *binding = acquire(Slot);
+    if (!binding) {
+      apply_decision(classification_action::block, filter, *output);
+      return;
+    }
+
+    classify_event<layer_type> event(values, metadata, layer_data,
+                                     classify_context, filter, flow_context,
+                                     output);
+    auto *holder = reinterpret_cast<
+        flow_context_holder<layer_type, context_type> *>(flow_context);
+    context_type *context = holder ? holder->context.get() : nullptr;
+    const auto activity = binding->enter_activity();
+    const classification_action result = binding->invoke(event, context);
+    binding->leave(activity);
+    apply_decision(result, filter, *output);
+  }
+
+  static std::optional<claim_result> claim(Binding &binding) noexcept {
+    KIRQL old_irql;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    for (std::size_t index = 0; index != SlotCount; ++index) {
+      if (!slots_[index]) {
+        slots_[index] = &binding;
+        const claim_result result{index, callbacks_[index]};
+        KeReleaseSpinLock(&lock_, old_irql);
+        return result;
+      }
+    }
+    KeReleaseSpinLock(&lock_, old_irql);
+    return std::nullopt;
+  }
+
+  static void release(owning_callback_binding_base &base,
+                      std::size_t slot) noexcept {
+    KIRQL old_irql;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    if (slot < SlotCount && slots_[slot] == &base)
+      slots_[slot] = nullptr;
+    KeReleaseSpinLock(&lock_, old_irql);
+  }
+
+private:
+  static Binding *acquire(std::size_t slot) noexcept {
+    KIRQL old_irql;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    auto *binding = static_cast<Binding *>(slots_[slot]);
+    if (binding && !binding->try_enter())
+      binding = nullptr;
+    KeReleaseSpinLock(&lock_, old_irql);
+    return binding;
+  }
+
+  template <std::size_t... Slots>
+  static constexpr auto make_callbacks(
+      std::index_sequence<Slots...>) noexcept {
+    return std::array<FWPS_CALLOUT_CLASSIFY_FN2, sizeof...(Slots)>{
+        &invoke<Slots>...};
+  }
+
+  inline static KSPIN_LOCK lock_{};
+  inline static void *slots_[SlotCount]{};
+  inline static constexpr auto callbacks_ =
+      make_callbacks(std::make_index_sequence<SlotCount>{});
+};
+
+template <class Binding, std::size_t SlotCount, callout_kind Kind>
+struct owning_stream_slots {
+  static_assert(SlotCount != 0);
+  using layer_type = typename Binding::layer_type;
+  using context_type = typename Binding::context_type;
+
+  struct claim_result {
+    std::size_t slot = 0;
+    FWPS_CALLOUT_CLASSIFY_FN2 callback = nullptr;
+  };
+
+  template <std::size_t Slot>
+  static void NTAPI invoke(
+      const FWPS_INCOMING_VALUES0 *values,
+      const FWPS_INCOMING_METADATA_VALUES0 *metadata, void *layer_data,
+      const void *, const FWPS_FILTER2 *filter, UINT64 flow_context,
+      FWPS_CLASSIFY_OUT0 *output) noexcept {
+    if (!layer_data || !output)
+      return;
+
+    auto *io_packet =
+        static_cast<FWPS_STREAM_CALLOUT_IO_PACKET0 *>(layer_data);
+    Binding *binding = acquire(Slot);
+    if (!binding) {
+      if constexpr (Kind == callout_kind::inspection) {
+        apply_decision(classification_action::continue_classification,
+                       filter, *output);
+      } else {
+        detail_apply_stream_result(
+            stream_result::block(io_packet->streamData
+                                     ? io_packet->streamData->dataLength
+                                     : 0),
+            filter, io_packet, *output);
+      }
+      return;
+    }
+
+    auto *holder = reinterpret_cast<
+        flow_context_holder<layer_type, context_type> *>(flow_context);
+    context_type *context = holder ? holder->context.get() : nullptr;
+    stream_event<layer_type, context_type> event(
+        values, metadata, io_packet, filter, context, output);
+    const auto activity = binding->enter_activity();
+    if constexpr (Kind == callout_kind::inspection) {
+      binding->invoke(event);
+      binding->leave(activity);
+      apply_decision(classification_action::continue_classification,
+                     filter, *output);
+    } else {
+      const stream_result result = binding->invoke(event);
+      binding->leave(activity);
+      detail_apply_stream_result(result, filter, io_packet, *output);
+    }
+  }
+
+  static std::optional<claim_result> claim(Binding &binding) noexcept {
+    KIRQL old_irql;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    for (std::size_t index = 0; index != SlotCount; ++index) {
+      if (!slots_[index]) {
+        slots_[index] = &binding;
+        const claim_result result{index, callbacks_[index]};
+        KeReleaseSpinLock(&lock_, old_irql);
+        return result;
+      }
+    }
+    KeReleaseSpinLock(&lock_, old_irql);
+    return std::nullopt;
+  }
+
+  static void release(owning_callback_binding_base &base,
+                      std::size_t slot) noexcept {
+    KIRQL old_irql;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    if (slot < SlotCount && slots_[slot] == &base)
+      slots_[slot] = nullptr;
+    KeReleaseSpinLock(&lock_, old_irql);
+  }
+
+private:
+  static Binding *acquire(std::size_t slot) noexcept {
+    KIRQL old_irql;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    auto *binding = static_cast<Binding *>(slots_[slot]);
+    if (binding && !binding->try_enter())
+      binding = nullptr;
+    KeReleaseSpinLock(&lock_, old_irql);
+    return binding;
+  }
+
+  template <std::size_t... Slots>
+  static constexpr auto make_callbacks(
+      std::index_sequence<Slots...>) noexcept {
+    return std::array<FWPS_CALLOUT_CLASSIFY_FN2, sizeof...(Slots)>{
+        &invoke<Slots>...};
+  }
+
+  inline static KSPIN_LOCK lock_{};
+  inline static void *slots_[SlotCount]{};
+  inline static constexpr auto callbacks_ =
+      make_callbacks(std::make_index_sequence<SlotCount>{});
 };
 } // namespace detail
 
 /**
- * @brief Owns the device object and run-time registrations for one callout
- * driver.
+ * @brief Shared owning facade for one callout driver's device and run-time
+ * registrations.
  *
- * reset() first drains tracked flow contexts, then unregisters in reverse
- * order before releasing the device. Keep this object alive until the
- * driver's unload callback and call reset() there.
+ * Copies retain one shared state, so member declaration order and facade
+ * destruction order are irrelevant. close() is idempotent across all copies.
+ * It first stops flow association, drains tracked flow contexts, unregisters
+ * every callout in reverse order, and finally releases the backing device.
+ * If the last facade is released above PASSIVE_LEVEL, destruction is handed to
+ * the runtime passive-cleanup domain; applications do not queue a work item or
+ * manage rundown themselves. close() may be called through DISPATCH_LEVEL. It
+ * completes synchronously for an ordinary PASSIVE_LEVEL caller; when invoked
+ * by one of its own callbacks or above PASSIVE_LEVEL, it queues the same drain
+ * to the joined runtime worker and returns STATUS_PENDING.
  */
 template <std::size_t Capacity = 16> class callout_driver {
+  struct registration {
+    UINT32 id = 0;
+    std::shared_ptr<detail::flow_registration_base> flow;
+    std::shared_ptr<detail::owning_callback_binding_base> callback;
+  };
+
+  struct shared_state {
+    explicit shared_state(ntl::driver &driver)
+        : cleanup(&shared_state::cleanup_at_passive, this),
+          deferred_close(&shared_state::close_at_passive, this) {
+      KeInitializeMutex(&lock, 0);
+      KeInitializeEvent(&closed, NotificationEvent, FALSE);
+      shutdown = std::make_shared<detail::callout_shutdown_gate>();
+      auto options =
+          ntl::device_options().type(FILE_DEVICE_NETWORK).exclusive(false);
+      device = driver.create_device<void>(options);
+    }
+
+    ~shared_state() {
+      NT_ASSERT(ntl::current_irql() == ntl::irql::passive);
+      if (InterlockedCompareExchange(&close_started, 0, 0) == 0) {
+        shutdown->close();
+        const ntl::status result = close_now();
+        NT_ASSERT(result.is_ok());
+      } else {
+        NT_ASSERT(KeReadStateEvent(&closed) != 0);
+        NT_ASSERT(NT_SUCCESS(static_cast<NTSTATUS>(
+            InterlockedCompareExchange(&close_status, 0, 0))));
+      }
+    }
+
+    static void cleanup_at_passive(void *context) noexcept {
+      delete static_cast<shared_state *>(context);
+    }
+
+    static void close_at_passive(void *context) noexcept {
+      static_cast<shared_state *>(context)->complete_close();
+    }
+
+    void lock_state() const noexcept {
+      const NTSTATUS result = KeWaitForSingleObject(
+          &lock, Executive, KernelMode, FALSE, nullptr);
+      NT_ASSERT(NT_SUCCESS(result));
+      (void)result;
+    }
+
+    void unlock_state() const noexcept {
+      (void)KeReleaseMutex(&lock, FALSE);
+    }
+
+    ntl::status request_close(
+        std::shared_ptr<shared_state> owner) noexcept {
+      if (ntl::current_irql() > ntl::irql::dispatch)
+        return STATUS_INVALID_DEVICE_STATE;
+      const bool reentrant_close =
+          InterlockedCompareExchangePointer(
+              &closing_thread, nullptr, nullptr) == KeGetCurrentThread();
+      const bool may_wait =
+          ntl::current_irql() == ntl::irql::passive &&
+          !activity.current_thread_active() && !reentrant_close;
+      if (InterlockedCompareExchange(&close_started, 1, 0) == 0) {
+        shutdown->close();
+        if (may_wait) {
+          complete_close();
+        } else {
+          deferred_owner = std::move(owner);
+          const ntl::status registered =
+              ntl::net::kernel::detail::register_runtime_passive_cleanup(
+                  deferred_close);
+          if (!registered.is_ok()) {
+            deferred_owner.reset();
+            InterlockedExchange(&close_started, 0);
+            return registered;
+          }
+          ntl::net::kernel::detail::
+              retire_runtime_passive_cleanup_deferred(deferred_close);
+        }
+      }
+
+      if (!may_wait)
+        return STATUS_PENDING;
+
+      const NTSTATUS waited = KeWaitForSingleObject(
+          &closed, Executive, KernelMode, FALSE, nullptr);
+      if (!NT_SUCCESS(waited))
+        return waited;
+      return ntl::status{static_cast<NTSTATUS>(
+          InterlockedCompareExchange(&close_status, 0, 0))};
+    }
+
+    void complete_close() noexcept {
+      InterlockedExchangePointer(&closing_thread, KeGetCurrentThread());
+      const ntl::status result = close_now();
+      InterlockedExchangePointer(&closing_thread, nullptr);
+      InterlockedExchange(&close_status,
+                          static_cast<NTSTATUS>(result));
+      KeSetEvent(&closed, IO_NO_INCREMENT, FALSE);
+      deferred_owner.reset();
+    }
+
+    ntl::status close_now() noexcept {
+      NT_ASSERT(ntl::current_irql() == ntl::irql::passive);
+      lock_state();
+
+      if (bfe_subscription) {
+        const NTSTATUS unsubscribed =
+            FwpmBfeStateUnsubscribeChanges0(bfe_subscription);
+        if (!NT_SUCCESS(unsubscribed)) {
+          unlock_state();
+          return unsubscribed;
+        }
+        bfe_subscription = nullptr;
+        if (bfe_callback)
+          bfe_callback->stop_and_drain();
+        bfe_callback.reset();
+      }
+
+      for (std::size_t index = 0; index != count; ++index) {
+        if (registrations[index].callback)
+          registrations[index].callback->stop_and_drain();
+      }
+
+      while (count != 0) {
+        registration &entry = registrations[count - 1];
+        if (entry.flow) {
+          const ntl::status drained = entry.flow->drain();
+          if (!drained.is_ok()) {
+            unlock_state();
+            return drained;
+          }
+        }
+
+        const NTSTATUS result = FwpsCalloutUnregisterById0(entry.id);
+        if (!NT_SUCCESS(result) &&
+            result != STATUS_FWP_CALLOUT_NOT_FOUND) {
+          unlock_state();
+          return result;
+        }
+
+        if (entry.callback)
+          entry.callback->unpublish();
+        entry = {};
+        --count;
+      }
+
+      device.reset();
+      unlock_state();
+      return ntl::status::ok();
+    }
+
+    ntl::net::kernel::passive_cleanup_item cleanup;
+    ntl::net::kernel::passive_cleanup_item deferred_close;
+    mutable KMUTEX lock{};
+    KEVENT closed{};
+    volatile LONG close_started = 0;
+    volatile LONG close_status = STATUS_PENDING;
+    PVOID volatile closing_thread = nullptr;
+    std::shared_ptr<detail::callout_shutdown_gate> shutdown;
+    ntl::detail::callback_activity activity;
+    std::shared_ptr<shared_state> deferred_owner;
+    std::shared_ptr<ntl::device<void>> device;
+    std::array<registration, Capacity> registrations{};
+    std::size_t count = 0;
+    HANDLE bfe_subscription = nullptr;
+    std::shared_ptr<detail::owning_callback_binding_base> bfe_callback;
+  };
+
 public:
-  explicit callout_driver(ntl::driver &driver) {
-    auto options =
-        ntl::device_options().type(FILE_DEVICE_NETWORK).exclusive(false);
-    device_ = driver.create_device<void>(options);
-  }
+  explicit callout_driver(ntl::driver &driver) : state_(make_state(driver)) {}
 
-  callout_driver(const callout_driver &) = delete;
-  callout_driver &operator=(const callout_driver &) = delete;
-  callout_driver(callout_driver &&) = delete;
-  callout_driver &operator=(callout_driver &&) = delete;
-
-  ~callout_driver() {
-    const ntl::status result = reset();
-    NT_ASSERT(result.is_ok());
-  }
-
-  /**
-   * @brief Subscribes once to BFE state changes for service reconciliation.
-   *
-   * The callback runs at PASSIVE_LEVEL and must only signal bounded,
-   * nonblocking driver state. A user-mode policy service can then call
-   * policy_session::recover() after observing BFE_RUNNING.
-   */
-  template <auto Callback>
-  ntl::status watch_bfe() noexcept {
-    static_assert(
-        std::is_nothrow_invocable_r_v<
-            void, decltype(Callback), FWPM_SERVICE_STATE>,
-        "a BFE state callback must be noexcept and accept FWPM_SERVICE_STATE");
-    if (!device_ || !device_->native_handle())
-      return STATUS_INVALID_DEVICE_STATE;
-    if (bfe_subscription_)
-      return STATUS_ALREADY_REGISTERED;
-    const NTSTATUS result =
-        FwpmBfeStateSubscribeChanges0(
-            device_->native_handle(),
-            &detail::bfe_state_adapter<Callback>::invoke,
-            nullptr, &bfe_subscription_);
-    return result;
-  }
+  callout_driver(const callout_driver &) noexcept = default;
+  callout_driver &operator=(const callout_driver &) noexcept = default;
+  callout_driver(callout_driver &&) noexcept = default;
+  callout_driver &operator=(callout_driver &&) noexcept = default;
+  ~callout_driver() = default;
 
   FWPM_SERVICE_STATE bfe_state() const noexcept {
     return FwpmBfeStateGet0();
   }
 
-  /**
-   * @brief Registers a synchronous, decision-returning callback for Layer.
-   */
-  template <auto Callback, class Layer>
-  ntl::status add(callout_key<Layer> key, UINT32 flags = 0) noexcept {
-    static_assert(detail::decision_layer<Layer>,
-                  "add() requires an ntl::wfp decision layer");
-    static_assert(
-        std::is_nothrow_invocable_r_v<decision, decltype(Callback),
-                                      const classify_event<Layer> &>,
-        "a WFP classify callback must be noexcept and return decision");
+  /** Registers an observation callback; WFP classification then continues. */
+  template <class Layer, class State, class Callback>
+    requires detail::exact_nothrow_callback<
+        void, std::decay_t<Callback>, State &,
+        const classify_event<Layer> &>
+  ntl::status add_inspection(
+      inspection_callout_key<Layer> key, std::shared_ptr<State> owned_state,
+      Callback callback, UINT32 flags = 0) noexcept {
+    return add_classify<void>(
+        key, std::move(owned_state), std::move(callback), flags);
+  }
 
-    if (!device_ || !device_->native_handle())
+  /** Registers a terminating callback for which CONTINUE is not a value. */
+  template <class Layer, class State, class Callback>
+    requires detail::exact_nothrow_callback<
+        terminating_decision, std::decay_t<Callback>, State &,
+        const classify_event<Layer> &>
+  ntl::status add_terminating(
+      terminating_callout_key<Layer> key, std::shared_ptr<State> owned_state,
+      Callback callback, UINT32 flags = 0) noexcept {
+    return add_classify<terminating_decision>(
+        key, std::move(owned_state), std::move(callback), flags);
+  }
+
+  /** Registers a callback that may continue or decide permit/block. */
+  template <class Layer, class State, class Callback>
+    requires detail::exact_nothrow_callback<
+        arbitration_decision, std::decay_t<Callback>, State &,
+        const classify_event<Layer> &>
+  ntl::status add_arbitrating(
+      arbitrating_callout_key<Layer> key,
+      std::shared_ptr<State> owned_state, Callback callback,
+      UINT32 flags = 0) noexcept {
+    return add_classify<arbitration_decision>(
+        key, std::move(owned_state), std::move(callback), flags);
+  }
+
+  /** Registers a self-contained inspection callback. */
+  template <class Layer, class Callback>
+    requires detail::exact_nothrow_callback<
+        void, std::decay_t<Callback>,
+        const classify_event<Layer> &>
+  ntl::status add_inspection(inspection_callout_key<Layer> key,
+                             Callback callback, UINT32 flags = 0) noexcept {
+    return add_classify<void>(
+        key, std::move(callback), flags);
+  }
+
+  /** Registers a self-contained terminating callback. */
+  template <class Layer, class Callback>
+    requires detail::exact_nothrow_callback<
+        terminating_decision, std::decay_t<Callback>,
+        const classify_event<Layer> &>
+  ntl::status add_terminating(terminating_callout_key<Layer> key,
+                              Callback callback,
+                              UINT32 flags = 0) noexcept {
+    return add_classify<terminating_decision>(
+        key, std::move(callback), flags);
+  }
+
+  /** Registers a self-contained callback that participates in arbitration. */
+  template <class Layer, class Callback>
+    requires detail::exact_nothrow_callback<
+        arbitration_decision, std::decay_t<Callback>,
+        const classify_event<Layer> &>
+  ntl::status add_arbitrating(arbitrating_callout_key<Layer> key,
+                              Callback callback,
+                              UINT32 flags = 0) noexcept {
+    return add_classify<arbitration_decision>(
+        key, std::move(callback), flags);
+  }
+
+private:
+  template <class Result, class Layer, class State, class Callback>
+  ntl::status add_classify(
+      basic_callout_key<
+          Layer, detail::callout_kind_for_result_v<Result>> key,
+      std::shared_ptr<State> owned_state,
+      Callback callback, UINT32 flags) noexcept {
+    using callback_type = std::decay_t<Callback>;
+    using binding_type =
+        detail::owning_classify_binding<Result, Layer, State, callback_type>;
+    using slots_type = detail::owning_classify_slots<binding_type, Capacity>;
+
+    static_assert(detail::classification_callback_result<Result>);
+    static_assert(detail::decision_layer<Layer>,
+                  "classification callback requires an ntl::wfp decision layer");
+    static_assert(
+        detail::exact_nothrow_callback<
+            Result, callback_type, State &,
+            const classify_event<Layer> &>,
+        "a typed WFP callback must be noexcept and return the exact result");
+    static_assert(std::is_nothrow_destructible_v<callback_type>,
+                  "a WFP callback must be nothrow destructible");
+
+    if (!state_ || !owned_state)
+      return STATUS_INVALID_PARAMETER;
+    state_->lock_state();
+    if (state_->shutdown->closing() ||
+        !state_->device || !state_->device->native_handle()) {
+      state_->unlock_state();
       return STATUS_INVALID_DEVICE_STATE;
-    if (count_ == registrations_.size())
+    }
+    if (state_->count == state_->registrations.size()) {
+      state_->unlock_state();
       return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    std::shared_ptr<binding_type> binding;
+    try {
+      binding = std::make_shared<binding_type>(
+          state_->shutdown, &state_->activity,
+          std::move(owned_state), std::move(callback));
+    } catch (...) {
+      state_->unlock_state();
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    const auto claimed = slots_type::claim(*binding);
+    if (!claimed) {
+      state_->unlock_state();
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    binding->publish(
+        claimed->slot,
+        [](detail::owning_callback_binding_base &base,
+           std::size_t slot) noexcept { slots_type::release(base, slot); });
 
     FWPS_CALLOUT2 callout{};
     callout.calloutKey = key.native();
     callout.flags = flags;
-    callout.classifyFn = &detail_classify_adapter<Layer, Callback>::invoke;
+    callout.classifyFn = claimed->callback;
     callout.notifyFn = &detail::accept_filter_notification;
 
     UINT32 id = 0;
-    const NTSTATUS result =
-        FwpsCalloutRegister2(device_->native_handle(), &callout, &id);
-    if (!NT_SUCCESS(result))
+    const NTSTATUS result = FwpsCalloutRegister2(
+        state_->device->native_handle(), &callout, &id);
+    if (!NT_SUCCESS(result)) {
+      binding->unpublish();
+      state_->unlock_state();
       return result;
+    }
 
-    registrations_[count_++] = registration{id, {}};
+    state_->registrations[state_->count++] =
+        registration{id, {}, std::move(binding)};
+    state_->unlock_state();
     return ntl::status::ok();
   }
 
-  /**
-   * @brief Registers a stream callback and returns the only capability that
-   * can associate Context objects with that registration.
-   */
-  template <class Context, auto Callback, class Layer>
-  ntl::result<flow_target<Layer, Context>>
-  add_stream(callout_key<Layer> key, UINT32 flags = 0) noexcept {
-    static_assert(detail::stream_layer<Layer>,
-                  "add_stream() requires an ntl::wfp stream layer");
+  template <class Result, class Layer, class Callback>
+  ntl::status add_classify(
+      basic_callout_key<
+          Layer, detail::callout_kind_for_result_v<Result>> key,
+      Callback callback, UINT32 flags) noexcept {
+    using callback_type = std::decay_t<Callback>;
+    using binding_type =
+        detail::owning_classify_callback_binding<Result, Layer,
+                                                 callback_type>;
+    using slots_type = detail::owning_classify_slots<binding_type, Capacity>;
+
+    static_assert(detail::classification_callback_result<Result>);
+    static_assert(detail::decision_layer<Layer>,
+                  "classification callback requires an ntl::wfp decision layer");
     static_assert(
-        std::is_nothrow_invocable_r_v<
-            stream_result, decltype(Callback),
-            const stream_event<Layer, Context> &>,
-        "a WFP stream callback must be noexcept and return stream_result");
-    static_assert(std::is_nothrow_destructible_v<Context>,
-                  "a WFP flow context destructor must be noexcept");
+        detail::exact_nothrow_callback<
+            Result, callback_type, const classify_event<Layer> &>,
+        "a typed WFP callback must be noexcept and return the exact result");
+    static_assert(std::is_nothrow_destructible_v<callback_type>,
+                  "a WFP callback must be nothrow destructible");
 
-    if (!device_ || !device_->native_handle())
-      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
-    if (count_ == registrations_.size())
-      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
-
-    std::shared_ptr<detail::flow_registration_state<Layer, Context>> state;
-    try {
-      state =
-          std::make_shared<detail::flow_registration_state<Layer, Context>>();
-    } catch (...) {
-      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    if (!state_)
+      return STATUS_INVALID_DEVICE_STATE;
+    state_->lock_state();
+    if (state_->shutdown->closing() ||
+        !state_->device || !state_->device->native_handle()) {
+      state_->unlock_state();
+      return STATUS_INVALID_DEVICE_STATE;
     }
+    if (state_->count == state_->registrations.size()) {
+      state_->unlock_state();
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    std::shared_ptr<binding_type> binding;
+    try {
+      binding = std::make_shared<binding_type>(
+          state_->shutdown, &state_->activity,
+          std::move(callback));
+    } catch (...) {
+      state_->unlock_state();
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    const auto claimed = slots_type::claim(*binding);
+    if (!claimed) {
+      state_->unlock_state();
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    binding->publish(
+        claimed->slot,
+        [](detail::owning_callback_binding_base &base,
+           std::size_t slot) noexcept { slots_type::release(base, slot); });
 
     FWPS_CALLOUT2 callout{};
     callout.calloutKey = key.native();
     callout.flags = flags;
-    callout.classifyFn =
-        &detail_stream_adapter<Layer, Context, Callback>::invoke;
+    callout.classifyFn = claimed->callback;
+    callout.notifyFn = &detail::accept_filter_notification;
+
+    UINT32 id = 0;
+    const NTSTATUS result = FwpsCalloutRegister2(
+        state_->device->native_handle(), &callout, &id);
+    if (!NT_SUCCESS(result)) {
+      binding->unpublish();
+      state_->unlock_state();
+      return result;
+    }
+
+    state_->registrations[state_->count++] =
+        registration{id, {}, std::move(binding)};
+    state_->unlock_state();
+    return ntl::status::ok();
+  }
+
+public:
+
+  /**
+   * @brief Registers an owning stream callback and typed flow context.
+   *
+   * The callback signature is
+   * `stream_result(State &, const stream_event<Layer, Context> &) noexcept`.
+   */
+  template <class Context, class Layer, class State, class Callback>
+    requires detail::exact_nothrow_callback<
+        stream_result, std::decay_t<Callback>, State &,
+        const stream_event<Layer, Context> &>
+  ntl::result<flow_target<Layer, Context>>
+  add_stream(stream_callout_key<Layer> key,
+             std::shared_ptr<State> owned_state,
+             Callback callback, UINT32 flags = 0) noexcept {
+    return add_stream_callback<callout_kind::stream, Context>(
+        key, std::move(owned_state), std::move(callback), flags);
+  }
+
+  /**
+   * @brief Registers an observation-only stream callback.
+   *
+   * The callback returns void because an inspection callout is not allowed to
+   * return permit or block. WFP classification always continues afterward.
+   */
+  template <class Context, class Layer, class State, class Callback>
+    requires detail::exact_nothrow_callback<
+        void, std::decay_t<Callback>, State &,
+        const stream_event<Layer, Context> &>
+  ntl::result<flow_target<Layer, Context>>
+  add_stream_inspection(inspection_callout_key<Layer> key,
+                        std::shared_ptr<State> owned_state,
+                        Callback callback, UINT32 flags = 0) noexcept {
+    return add_stream_callback<callout_kind::inspection, Context>(
+        key, std::move(owned_state), std::move(callback), flags);
+  }
+
+private:
+  template <callout_kind Kind, class Context, class Layer, class State,
+            class Callback>
+  ntl::result<flow_target<Layer, Context>>
+  add_stream_callback(basic_callout_key<Layer, Kind> key,
+                      std::shared_ptr<State> owned_state,
+                      Callback callback, UINT32 flags) noexcept {
+    static_assert(Kind == callout_kind::inspection ||
+                  Kind == callout_kind::stream);
+    using callback_type = std::decay_t<Callback>;
+    using binding_type = std::conditional_t<
+        Kind == callout_kind::inspection,
+        detail::owning_stream_inspection_binding<
+            Layer, Context, State, callback_type>,
+        detail::owning_stream_binding<
+            Layer, Context, State, callback_type>>;
+    using slots_type =
+        detail::owning_stream_slots<binding_type, Capacity, Kind>;
+
+    static_assert(detail::stream_layer<Layer>,
+                  "a stream callback requires an ntl::wfp stream layer");
+    static_assert(std::is_nothrow_destructible_v<Context>,
+                  "a WFP flow context destructor must be noexcept");
+    static_assert(std::is_nothrow_destructible_v<callback_type>,
+                  "a WFP callback must be nothrow destructible");
+
+    if (!state_ || !owned_state)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    state_->lock_state();
+    if (state_->shutdown->closing() ||
+        !state_->device || !state_->device->native_handle()) {
+      state_->unlock_state();
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+    }
+    if (state_->count == state_->registrations.size()) {
+      state_->unlock_state();
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+
+    std::shared_ptr<detail::flow_registration_state<Layer, Context>>
+        flow_state;
+    std::shared_ptr<binding_type> binding;
+    try {
+      flow_state = std::make_shared<
+          detail::flow_registration_state<Layer, Context>>(state_->shutdown);
+      binding = std::make_shared<binding_type>(
+          state_->shutdown, &state_->activity,
+          std::move(owned_state), std::move(callback));
+    } catch (...) {
+      state_->unlock_state();
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+
+    const auto claimed = slots_type::claim(*binding);
+    if (!claimed) {
+      state_->unlock_state();
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+    binding->publish(
+        claimed->slot,
+        [](detail::owning_callback_binding_base &base,
+           std::size_t slot) noexcept { slots_type::release(base, slot); });
+
+    FWPS_CALLOUT2 callout{};
+    callout.calloutKey = key.native();
+    callout.flags = flags;
+    callout.classifyFn = claimed->callback;
     callout.notifyFn = &detail::accept_filter_notification;
     callout.flowDeleteFn =
         &detail::flow_delete_adapter<Layer, Context>::invoke;
 
     UINT32 id = 0;
-    const NTSTATUS result =
-        FwpsCalloutRegister2(device_->native_handle(), &callout, &id);
-    if (!NT_SUCCESS(result))
+    const NTSTATUS result = FwpsCalloutRegister2(
+        state_->device->native_handle(), &callout, &id);
+    if (!NT_SUCCESS(result)) {
+      binding->unpublish();
+      state_->unlock_state();
       return ntl::unexpected(result);
+    }
 
-    state->activate(id);
-    registrations_[count_++] = registration{id, state};
-    return ntl::ok(flow_target<Layer, Context>(std::move(state)));
+    flow_state->activate(id);
+    state_->registrations[state_->count++] =
+        registration{id, flow_state, std::move(binding)};
+    state_->unlock_state();
+    return ntl::ok(
+        flow_target<Layer, Context>(std::move(flow_state)));
   }
 
-  /**
-   * @brief Registers a packet decision callback with a typed flow context.
-   *
-   * This is the datagram counterpart to add_stream(), used by proxy callouts
-   * that attach state at ALE_FLOW_ESTABLISHED and consume it at DATAGRAM_DATA.
-   */
-  template <class Context, auto Callback, class Layer>
+public:
+  /** Registers an observation callback with an owning typed flow context. */
+  template <class Context, class Layer, class State, class Callback>
+    requires detail::exact_nothrow_callback<
+        void, std::decay_t<Callback>, State &,
+        const classify_event<Layer> &, Context *>
   ntl::result<flow_target<Layer, Context>>
-  add_flow_context(callout_key<Layer> key, UINT32 flags = 0) noexcept {
+  add_flow_context_inspection(inspection_callout_key<Layer> key,
+                              std::shared_ptr<State> owned_state,
+                              Callback callback,
+                              UINT32 flags = 0) noexcept {
+    return add_flow_context_classify<void, Context>(
+        key, std::move(owned_state), std::move(callback), flags);
+  }
+
+  /** Registers a terminating callback with an owning typed flow context. */
+  template <class Context, class Layer, class State, class Callback>
+    requires detail::exact_nothrow_callback<
+        terminating_decision, std::decay_t<Callback>, State &,
+        const classify_event<Layer> &, Context *>
+  ntl::result<flow_target<Layer, Context>>
+  add_flow_context_terminating(terminating_callout_key<Layer> key,
+                               std::shared_ptr<State> owned_state,
+                               Callback callback,
+                               UINT32 flags = 0) noexcept {
+    return add_flow_context_classify<terminating_decision, Context>(
+        key, std::move(owned_state), std::move(callback), flags);
+  }
+
+  /** Registers an arbitrating callback with an owning typed flow context. */
+  template <class Context, class Layer, class State, class Callback>
+    requires detail::exact_nothrow_callback<
+        arbitration_decision, std::decay_t<Callback>, State &,
+        const classify_event<Layer> &, Context *>
+  ntl::result<flow_target<Layer, Context>>
+  add_flow_context_arbitrating(arbitrating_callout_key<Layer> key,
+                               std::shared_ptr<State> owned_state,
+                               Callback callback,
+                               UINT32 flags = 0) noexcept {
+    return add_flow_context_classify<arbitration_decision, Context>(
+        key, std::move(owned_state), std::move(callback), flags);
+  }
+
+private:
+  template <class Result, class Context, class Layer, class State,
+            class Callback>
+  ntl::result<flow_target<Layer, Context>>
+  add_flow_context_classify(
+      basic_callout_key<
+          Layer,
+          detail::callout_kind_for_result_v<Result>> key,
+      std::shared_ptr<State> owned_state,
+      Callback callback, UINT32 flags) noexcept {
+    using callback_type = std::decay_t<Callback>;
+    using binding_type = detail::owning_flow_classify_binding<
+        Result, Layer, Context, State, callback_type>;
+    using slots_type =
+        detail::owning_flow_classify_slots<binding_type, Capacity>;
+
+    static_assert(detail::classification_callback_result<Result>);
     static_assert(detail::flow_context_layer<Layer> &&
                       detail::decision_layer<Layer>,
-                  "add_flow_context() requires a contextual decision layer");
+                  "typed flow callback requires a contextual decision layer");
     static_assert(
-        std::is_nothrow_invocable_r_v<
-            decision, decltype(Callback), const classify_event<Layer> &,
-            Context *>,
-        "a contextual WFP callback must be noexcept and return decision");
+        detail::exact_nothrow_callback<
+            Result, callback_type, State &,
+            const classify_event<Layer> &, Context *>,
+        "a typed contextual callback must be noexcept and return the exact "
+        "result");
     static_assert(std::is_nothrow_destructible_v<Context>,
                   "a WFP flow context destructor must be noexcept");
+    static_assert(std::is_nothrow_destructible_v<callback_type>,
+                  "a WFP callback must be nothrow destructible");
 
-    if (!device_ || !device_->native_handle())
+    if (!state_ || !owned_state)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    state_->lock_state();
+    if (state_->shutdown->closing() ||
+        !state_->device || !state_->device->native_handle()) {
+      state_->unlock_state();
       return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
-    if (count_ == registrations_.size())
-      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
-
-    std::shared_ptr<detail::flow_registration_state<Layer, Context>> state;
-    try {
-      state =
-          std::make_shared<detail::flow_registration_state<Layer, Context>>();
-    } catch (...) {
+    }
+    if (state_->count == state_->registrations.size()) {
+      state_->unlock_state();
       return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
     }
+
+    std::shared_ptr<detail::flow_registration_state<Layer, Context>>
+        flow_state;
+    std::shared_ptr<binding_type> binding;
+    try {
+      flow_state = std::make_shared<
+          detail::flow_registration_state<Layer, Context>>(state_->shutdown);
+      binding = std::make_shared<binding_type>(
+          state_->shutdown, &state_->activity,
+          std::move(owned_state), std::move(callback));
+    } catch (...) {
+      state_->unlock_state();
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+
+    const auto claimed = slots_type::claim(*binding);
+    if (!claimed) {
+      state_->unlock_state();
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+    binding->publish(
+        claimed->slot,
+        [](detail::owning_callback_binding_base &base,
+           std::size_t slot) noexcept { slots_type::release(base, slot); });
 
     FWPS_CALLOUT2 callout{};
     callout.calloutKey = key.native();
     callout.flags = flags;
-    callout.classifyFn =
-        &detail::detail_flow_classify_adapter<Layer, Context,
-                                              Callback>::invoke;
+    callout.classifyFn = claimed->callback;
     callout.notifyFn = &detail::accept_filter_notification;
     callout.flowDeleteFn =
         &detail::flow_delete_adapter<Layer, Context>::invoke;
 
     UINT32 id = 0;
-    const NTSTATUS result =
-        FwpsCalloutRegister2(device_->native_handle(), &callout, &id);
-    if (!NT_SUCCESS(result))
+    const NTSTATUS result = FwpsCalloutRegister2(
+        state_->device->native_handle(), &callout, &id);
+    if (!NT_SUCCESS(result)) {
+      binding->unpublish();
+      state_->unlock_state();
       return ntl::unexpected(result);
+    }
 
-    state->activate(id);
-    registrations_[count_++] = registration{id, state};
-    return ntl::ok(flow_target<Layer, Context>(std::move(state)));
+    flow_state->activate(id);
+    state_->registrations[state_->count++] =
+        registration{id, flow_state, std::move(binding)};
+    state_->unlock_state();
+    return ntl::ok(
+        flow_target<Layer, Context>(std::move(flow_state)));
   }
+
+public:
 
   /**
    * @brief Drains flow contexts, then unregisters every callout before
    * deleting the backing device.
    *
    * The operation is idempotent, making entry failure and normal unload share
-   * the same cleanup path.
+   * the same cleanup path. STATUS_PENDING is a successful close request: NTL
+   * retains the state and completes native teardown on its joined PASSIVE
+   * worker without requiring a caller-owned work item or rundown object.
    */
-  [[nodiscard]] ntl::status reset() noexcept {
-    if (bfe_subscription_) {
-      const NTSTATUS unsubscribed =
-          FwpmBfeStateUnsubscribeChanges0(
-              bfe_subscription_);
-      if (!NT_SUCCESS(unsubscribed))
-        return unsubscribed;
-      bfe_subscription_ = nullptr;
-    }
-    while (count_ != 0) {
-      registration &entry = registrations_[count_ - 1];
-      if (entry.flow) {
-        const ntl::status drained = entry.flow->drain();
-        if (!drained.is_ok())
-          return drained;
-      }
-
-      const NTSTATUS result = FwpsCalloutUnregisterById0(entry.id);
-      if (!NT_SUCCESS(result) &&
-          result != STATUS_FWP_CALLOUT_NOT_FOUND)
-        return result;
-
-      entry = {};
-      --count_;
-    }
-    device_.reset();
-    return ntl::status::ok();
+  [[nodiscard]] ntl::status close() const noexcept {
+    return state_ ? state_->request_close(state_) : ntl::status::ok();
   }
 
-  std::size_t size() const noexcept { return count_; }
+  std::size_t size() const noexcept {
+    if (!state_)
+      return 0;
+    state_->lock_state();
+    const std::size_t result = state_->count;
+    state_->unlock_state();
+    return result;
+  }
+
+  /**
+   * @brief Subscribes to BFE state changes while owning callback state.
+   *
+   * The callback signature is
+   * `void(State &, FWPM_SERVICE_STATE) noexcept`.
+   */
+  template <class State, class Callback>
+  ntl::status watch_bfe(std::shared_ptr<State> owned_state,
+                        Callback callback) noexcept {
+    using callback_type = std::decay_t<Callback>;
+    using binding_type =
+        detail::owning_bfe_binding<State, callback_type>;
+    static_assert(
+        std::is_nothrow_invocable_r_v<void, callback_type &, State &,
+                                      FWPM_SERVICE_STATE>,
+        "an owning BFE callback must be noexcept and accept State and state");
+    static_assert(std::is_nothrow_destructible_v<callback_type>,
+                  "a BFE callback must be nothrow destructible");
+
+    if (!state_ || !owned_state)
+      return STATUS_INVALID_PARAMETER;
+    state_->lock_state();
+    if (state_->shutdown->closing() ||
+        !state_->device || !state_->device->native_handle()) {
+      state_->unlock_state();
+      return STATUS_INVALID_DEVICE_STATE;
+    }
+    if (state_->bfe_subscription) {
+      state_->unlock_state();
+      return STATUS_ALREADY_REGISTERED;
+    }
+
+    std::shared_ptr<binding_type> binding;
+    try {
+      binding = std::make_shared<binding_type>(
+          state_->shutdown, &state_->activity,
+          std::move(owned_state), std::move(callback));
+    } catch (...) {
+      state_->unlock_state();
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    const NTSTATUS result = FwpmBfeStateSubscribeChanges0(
+        state_->device->native_handle(), &binding_type::invoke,
+        binding.get(), &state_->bfe_subscription);
+    if (NT_SUCCESS(result))
+      state_->bfe_callback = std::move(binding);
+    state_->unlock_state();
+    return result;
+  }
 
 private:
-  struct registration {
-    UINT32 id = 0;
-    std::shared_ptr<detail::flow_registration_base> flow;
-  };
+  static std::shared_ptr<shared_state> make_state(ntl::driver &driver) {
+    auto *const raw = new shared_state(driver);
+    const ntl::status registered =
+        ntl::net::kernel::detail::register_runtime_passive_cleanup(
+            raw->cleanup);
+    if (!registered.is_ok()) {
+      delete raw;
+      throw ntl::exception(registered,
+                           "WFP callout cleanup registration failed");
+    }
 
-  std::shared_ptr<ntl::device<void>> device_;
-  std::array<registration, Capacity> registrations_{};
-  std::size_t count_ = 0;
-  HANDLE bfe_subscription_ = nullptr;
+    try {
+      return std::shared_ptr<shared_state>(
+          raw, [](shared_state *value) noexcept {
+            ntl::net::kernel::detail::
+                retire_runtime_passive_cleanup_deferred(value->cleanup);
+          });
+    } catch (...) {
+      ntl::net::kernel::detail::
+          retire_runtime_passive_cleanup_deferred(raw->cleanup);
+      throw;
+    }
+  }
+
+  std::shared_ptr<shared_state> state_;
 };
 
 } // namespace ntl::wfp

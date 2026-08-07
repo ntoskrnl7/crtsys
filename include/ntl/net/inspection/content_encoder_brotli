@@ -4,15 +4,11 @@
  */
 #pragma once
 
-#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
-#error "ntl/net/inspection/content_encoder_brotli is a user-mode header"
-#endif
-
 #include <ntl/net/inspection/content_encoder>
+#include <ntl/net/inspection/codec_memory>
 
 #include <algorithm>
 #include <memory>
-#include <array>
 #include <cstdint>
 #include <span>
 
@@ -22,7 +18,9 @@ namespace ntl::net::inspection {
 
 class brotli_content_encoder {
 public:
-  brotli_content_encoder() noexcept = default;
+  explicit brotli_content_encoder(
+      codec_memory_limits memory_limits = {}) noexcept
+      : memory_(memory_limits), scratch_(memory_) {}
   brotli_content_encoder(const brotli_content_encoder &) = delete;
   brotli_content_encoder &operator=(const brotli_content_encoder &) = delete;
 
@@ -40,13 +38,14 @@ public:
     if (!initialize())
       return encode_result::malformed(STATUS_INSUFFICIENT_RESOURCES);
 
+    const std::span<std::byte> buffer = scratch_.bytes();
+
     const std::uint8_t *next_in =
         reinterpret_cast<const std::uint8_t *>(input.data());
     std::size_t available_in = input.size();
     const BrotliEncoderOperation operation =
         final ? BROTLI_OPERATION_FINISH : BROTLI_OPERATION_PROCESS;
     for (;;) {
-      std::array<std::byte, 16 * 1024> buffer{};
       const std::size_t remaining = output.maximum_size() - output.size();
       std::size_t available_out =
           remaining == 0 ? 1 : (std::min)(remaining, buffer.size());
@@ -85,17 +84,37 @@ private:
   bool initialize() noexcept {
     if (state_)
       return true;
-    state_ = ::BrotliEncoderCreateInstance(nullptr, nullptr, nullptr);
+    if (!scratch_.ensure(scratch_size))
+      return false;
+    state_ = ::BrotliEncoderCreateInstance(
+        &allocate, &release_allocation, &memory_);
+    if (!state_)
+      scratch_.reset();
     return state_ != nullptr;
+  }
+
+  static void *allocate(void *opaque, std::size_t bytes) noexcept {
+    return opaque
+               ? static_cast<codec_memory_budget *>(opaque)->allocate(bytes)
+               : nullptr;
+  }
+
+  static void release_allocation(void *opaque, void *pointer) noexcept {
+    if (opaque)
+      static_cast<codec_memory_budget *>(opaque)->release(pointer);
   }
 
   void release() noexcept {
     if (state_)
       ::BrotliEncoderDestroyInstance(state_);
     state_ = nullptr;
+    scratch_.reset();
   }
 
+  codec_memory_budget memory_;
+  borrowed_codec_scratch_buffer scratch_;
   BrotliEncoderState *state_ = nullptr;
+  static constexpr std::size_t scratch_size = 16 * 1024;
   bool ended_ = false;
 };
 

@@ -8,10 +8,6 @@
  */
 #pragma once
 
-#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
-#error "ntl/net/http/http1_stream_transform is a user-mode header"
-#endif
-
 #include <ntl/net/http/http1_framing>
 #include <ntl/net/http/http1_transform>
 #include <ntl/net/http/stream_transform>
@@ -87,47 +83,13 @@ inline ntl::result<std::vector<std::byte>> serialize_head(
 
 inline ntl::result<request_message> request_from_head(
     const http1_transform_detail::wire_parts &parts,
+    http1_request_target_context target_context,
     const transform_limits &limits) noexcept {
-  try {
-    const std::size_t first_space = parts.start_line.find(' ');
-    const std::size_t last_space = parts.start_line.rfind(' ');
-    if (first_space == std::string_view::npos ||
-        last_space == first_space ||
-        parts.start_line.substr(last_space + 1) != "HTTP/1.1")
-      return ntl::unexpected(STATUS_DATA_ERROR);
-    request_message message;
-    message.wire_protocol = protocol::http1;
-    message.method.assign(parts.start_line.substr(0, first_space));
-    message.path.assign(parts.start_line.substr(
-        first_space + 1, last_space - first_space - 1));
-    message.headers = header_collection(parts.headers);
-    const auto host = message.headers.first("host");
-    if (!host)
-      return ntl::unexpected(STATUS_DATA_ERROR);
-    message.authority.assign(*host);
-    if (message.method == "CONNECT") {
-      if (!transform_detail::ascii_equal_ci(message.authority, message.path))
-        return ntl::unexpected(STATUS_DATA_ERROR);
-      message.authority = std::move(message.path);
-      message.scheme.clear();
-      message.path.clear();
-    }
-    if (!transform_detail::is_token(message.method) ||
-        !transform_detail::valid_uri_component(message.authority) ||
-        (message.method != "CONNECT" &&
-         !transform_detail::valid_uri_component(message.path)))
-      return ntl::unexpected(STATUS_DATA_ERROR);
-    const ntl::status valid = message.headers.validate(protocol::http1, limits);
-    return valid.is_ok()
-               ? ntl::ok(std::move(message))
-               : ntl::result<request_message>(ntl::unexpected(valid));
-  } catch (const std::invalid_argument &) {
-    return ntl::unexpected(STATUS_DATA_ERROR);
-  } catch (const std::bad_alloc &) {
-    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
-  } catch (...) {
-    return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
-  }
+  auto parsed = http1_transform_detail::parse_request_head(
+      parts, target_context, limits);
+  if (!parsed)
+    return ntl::unexpected(parsed.status());
+  return ntl::ok(std::move(parsed->message));
 }
 
 inline ntl::result<response_message> response_from_head(
@@ -303,10 +265,12 @@ public:
       const stream_transform_pipeline &pipeline,
       const ntl::net::inspection::content_decoder_registry &decoders,
       const ntl::net::inspection::content_encoder_registry &encoders,
+      http1_request_target_context target_context,
       transform_limits semantic_limits = {},
       http1_framing_limits framing_limits = {})
-      : kind_(http1_message_kind::request), pipeline_(&pipeline),
-        decoders_(&decoders), encoders_(&encoders),
+      : kind_(http1_message_kind::request), pipeline_(pipeline),
+        decoders_(decoders), encoders_(encoders),
+        origin_scheme_(target_context.origin_scheme),
         semantic_limits_(semantic_limits), framing_limits_(framing_limits) {
     validate_configuration();
   }
@@ -319,7 +283,7 @@ public:
       transform_limits semantic_limits = {},
       http1_framing_limits framing_limits = {})
       : kind_(http1_message_kind::response), request_(std::move(request)),
-        pipeline_(&pipeline), decoders_(&decoders), encoders_(&encoders),
+        pipeline_(pipeline), decoders_(decoders), encoders_(encoders),
         semantic_limits_(semantic_limits), framing_limits_(framing_limits) {
     validate_configuration();
   }
@@ -372,13 +336,14 @@ private:
   };
 
   void validate_configuration() {
-    if (!pipeline_ || !decoders_ || !encoders_ ||
-        semantic_limits_.maximum_header_bytes < 4 ||
+    if (semantic_limits_.maximum_header_bytes < 4 ||
         framing_limits_.maximum_header_size < 4 ||
         framing_limits_.maximum_body_size == 0 ||
         framing_limits_.maximum_chunk_line_size < 3 ||
         framing_limits_.maximum_trailer_size < 2 ||
-        (kind_ == http1_message_kind::response && !request_))
+        (kind_ == http1_message_kind::response && !request_) ||
+        (kind_ == http1_message_kind::request &&
+         !http1_request_target_context{origin_scheme_}.valid()))
       throw std::invalid_argument("invalid HTTP/1 stream transformer");
     framing_limits_.allow_close_delimited_response = true;
     if (kind_ == http1_message_kind::response && request_->method == "HEAD")
@@ -390,7 +355,7 @@ private:
         framing_limits_.maximum_header_size,
         (std::max)(framing_limits_.maximum_chunk_line_size,
                    framing_limits_.maximum_trailer_size)) +
-        pipeline_->limits().maximum_input_chunk_bytes;
+        pipeline_.limits().maximum_input_chunk_bytes;
   }
 
   ntl::status drain(
@@ -448,7 +413,7 @@ private:
     bool body_forbidden = false;
     if (kind_ == http1_message_kind::request) {
       auto request = http1_stream_detail::request_from_head(
-          *parts, semantic_limits_);
+          *parts, {.origin_scheme = origin_scheme_}, semantic_limits_);
       if (!request)
         return request.status();
       semantic_request_ = std::move(*request);
@@ -481,18 +446,18 @@ private:
                           : std::nullopt;
     ntl::status prepared = ntl::status::ok();
     if (semantic_response_)
-      prepared = pipeline_->prepare_headers(
+      prepared = pipeline_.prepare_headers(
           *semantic_request_, *semantic_response_);
     else
-      prepared = pipeline_->prepare_headers(*semantic_request_);
+      prepared = pipeline_.prepare_headers(*semantic_request_);
     if (!prepared.is_ok())
       return prepared;
     auto opened = semantic_response_
-                      ? pipeline_->open(
+                      ? pipeline_.open(
                             *semantic_request_, *semantic_response_,
-                            *decoders_, *encoders_)
-                      : pipeline_->open(
-                            *semantic_request_, *decoders_, *encoders_);
+                            decoders_, encoders_)
+                      : pipeline_.open(
+                            *semantic_request_, decoders_, encoders_);
     if (!opened)
       return opened.status();
     session_.emplace(std::move(*opened));
@@ -503,7 +468,9 @@ private:
       const std::string reason = semantic_response_->reason.empty()
                                      ? http1_transform_detail::reason_phrase(
                                            semantic_response_->status)
-                                     : semantic_response_->reason;
+                                     : std::string(
+                                           semantic_response_->reason.begin(),
+                                           semantic_response_->reason.end());
       outgoing = http1_stream_detail::serialize_head(
           "HTTP/1.1 " + std::to_string(semantic_response_->status) +
               " " + reason,
@@ -512,12 +479,18 @@ private:
       header_collection headers = semantic_request_->headers;
       headers.set("host", semantic_request_->authority);
       const bool connect = semantic_request_->method == "CONNECT";
+      const std::string_view target =
+          connect ? std::string_view(semantic_request_->authority)
+                  : std::string_view(semantic_request_->path);
+      std::string start_line;
+      start_line.reserve(
+          semantic_request_->method.size() + target.size() + 11);
+      start_line.append(semantic_request_->method);
+      start_line.push_back(' ');
+      start_line.append(target);
+      start_line.append(" HTTP/1.1");
       outgoing = http1_stream_detail::serialize_head(
-          semantic_request_->method + " " +
-              (connect ? semantic_request_->authority
-                       : semantic_request_->path) +
-              " HTTP/1.1",
-          headers, semantic_limits_);
+          std::move(start_line), headers, semantic_limits_);
     }
     if (!outgoing)
       return outgoing.status();
@@ -546,7 +519,7 @@ private:
     if (!session_)
       return STATUS_INVALID_DEVICE_STATE;
     const std::size_t maximum =
-        pipeline_->limits().maximum_input_chunk_bytes;
+        pipeline_.limits().maximum_input_chunk_bytes;
     std::size_t offset = 0;
     do {
       const std::size_t count =
@@ -725,9 +698,10 @@ private:
 
   http1_message_kind kind_ = http1_message_kind::request;
   std::optional<request_message> request_;
-  const stream_transform_pipeline *pipeline_ = nullptr;
-  const ntl::net::inspection::content_decoder_registry *decoders_ = nullptr;
-  const ntl::net::inspection::content_encoder_registry *encoders_ = nullptr;
+  stream_transform_pipeline pipeline_;
+  ntl::net::inspection::content_decoder_registry decoders_;
+  ntl::net::inspection::content_encoder_registry encoders_;
+  std::string origin_scheme_;
   transform_limits semantic_limits_{};
   http1_framing_limits framing_limits_{};
   std::vector<std::byte> buffer_;

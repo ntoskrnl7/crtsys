@@ -4,14 +4,11 @@
  */
 #pragma once
 
-#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
-#error "ntl/net/http3/webtransport_session is a user-mode header"
-#endif
-
 #include <ntl/net/http/datagram>
 #include <ntl/net/http3/backend>
 #include <ntl/net/http3/qpack>
 #include <ntl/net/http3/webtransport>
+#include <ntl/net/quic/transport>
 #include <ntl/result>
 
 #include <algorithm>
@@ -171,6 +168,7 @@ encode_control_stream(bool server, session_limits limits = {},
 inline ntl::result<peer_settings>
 parse_control_stream(ntl::net::scatter_view wire,
                      std::size_t maximum_size = 4096) noexcept {
+  try {
   if (!wire || wire.size() > maximum_size)
     return ntl::unexpected(wire ? STATUS_BUFFER_OVERFLOW
                                 : STATUS_INVALID_PARAMETER);
@@ -236,6 +234,11 @@ parse_control_stream(ntl::net::scatter_view wire,
     }
   }
   return ntl::ok(result);
+  } catch (const std::bad_alloc &) {
+    return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+  } catch (...) {
+    return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+  }
 }
 
 struct connect_parameters {
@@ -255,7 +258,7 @@ public:
   outbound_stream &operator=(const outbound_stream &) = delete;
 
   outbound_stream(outbound_stream &&other) noexcept
-      : owner_(std::exchange(other.owner_, nullptr)),
+      : owner_(std::move(other.owner_)),
         id_(other.id_), direction_(other.direction_),
         reliable_prefix_size_(other.reliable_prefix_size_),
         active_(std::exchange(other.active_, false)) {}
@@ -272,13 +275,13 @@ public:
 private:
   friend class backend_session;
 
-  outbound_stream(backend_session &owner, std::uint64_t id,
+  outbound_stream(std::shared_ptr<void> owner, std::uint64_t id,
                   stream_direction direction,
                   std::size_t reliable_prefix_size) noexcept
-      : owner_(&owner), id_(id), direction_(direction),
+      : owner_(std::move(owner)), id_(id), direction_(direction),
         reliable_prefix_size_(reliable_prefix_size), active_(true) {}
 
-  backend_session *owner_ = nullptr;
+  std::weak_ptr<void> owner_;
   std::uint64_t id_ = 0;
   stream_direction direction_ = stream_direction::bidirectional;
   std::size_t reliable_prefix_size_ = 0;
@@ -336,9 +339,11 @@ encode_connect_response(unsigned status = 200,
  */
 class backend_session {
 public:
-  explicit backend_session(quic_transport_backend &backend,
-                           session_limits limits = {}) noexcept
-      : backend_(&backend), guard_(limits), limits_(limits) {}
+  explicit backend_session(
+                           std::shared_ptr<ntl::net::quic::transport_backend>
+                               backend,
+                           session_limits limits = {})
+      : backend_(std::move(backend)), guard_(limits), limits_(limits) {}
 
   backend_session(const backend_session &) = delete;
   backend_session &operator=(const backend_session &) = delete;
@@ -350,7 +355,10 @@ public:
   }
 
   ntl::status send_local_settings(bool server) noexcept {
-    const auto capabilities = backend_->capabilities();
+    const auto backend = backend_.lock();
+    if (!backend)
+      return STATUS_DELETE_PENDING;
+    const auto capabilities = backend->capabilities();
     if (!capabilities.unidirectional_streams ||
         !capabilities.quic_datagrams || !capabilities.reliable_reset_at)
       return STATUS_NOT_SUPPORTED;
@@ -358,9 +366,9 @@ public:
     if (!wire)
       return wire.status();
     std::uint64_t stream = 0;
-    auto status = backend_->open_unidirectional_stream(stream);
+    auto status = backend->open_unidirectional_stream(stream);
     if (status.is_ok())
-      status = backend_->write_stream(
+      status = backend->write_stream(
           stream, session_detail::scatter(*wire), false);
     if (status.is_ok())
       control_stream_id_ = stream;
@@ -368,45 +376,109 @@ public:
   }
 
   ntl::status open_client(const connect_parameters &parameters) noexcept {
-    if (active_ || !requirements_ready())
-      return active_ ? ntl::status{STATUS_INVALID_DEVICE_STATE}
-                     : ntl::status{STATUS_NOT_SUPPORTED};
+    if (active_ || client_response_pending_ || !requirements_ready())
+      return (active_ || client_response_pending_)
+                 ? ntl::status{STATUS_INVALID_DEVICE_STATE}
+                 : ntl::status{STATUS_NOT_SUPPORTED};
     auto frame = encode_connect_request(parameters);
     if (!frame)
       return frame.status();
+    const auto backend = backend_.lock();
+    if (!backend)
+      return STATUS_DELETE_PENDING;
     std::uint64_t stream = 0;
-    auto status = backend_->open_request_stream(stream);
+    auto status = backend->open_request_stream(stream);
     if (!status.is_ok())
       return status;
     if (!valid_session_id(stream))
       return STATUS_DATA_ERROR;
-    status = backend_->write_stream(stream, session_detail::scatter(*frame),
+    // Publish the pending request before write_stream: a loopback/backend may
+    // synchronously deliver the response callback from inside the write.
+    session_id_ = stream;
+    client_response_pending_ = true;
+    status = backend->write_stream(stream, session_detail::scatter(*frame),
                                     false);
-    if (status.is_ok()) {
-      session_id_ = stream;
-      active_ = true;
+    if (!status.is_ok() && client_response_pending_ && session_id_ == stream) {
+      client_response_pending_ = false;
+      session_id_ = 0;
     }
     return status;
   }
 
-  ntl::status accept_server(std::uint64_t session_id,
-                            unsigned status_code = 200) noexcept {
+  /** Activates a client session only after a parsed final 2xx response. */
+  ntl::status accept_client_response(std::uint64_t session_id,
+                                     unsigned status_code) noexcept {
+    if (active_ || !client_response_pending_)
+      return STATUS_INVALID_DEVICE_STATE;
+    if (session_id != session_id_)
+      return STATUS_DATA_ERROR;
+    if (status_code < 200 || status_code > 299)
+      return STATUS_INVALID_PARAMETER;
+    client_response_pending_ = false;
+    active_ = true;
+    return ntl::status::ok();
+  }
+
+  /** Completes a rejected client request without establishing a session. */
+  ntl::status reject_client_response(std::uint64_t session_id,
+                                     unsigned status_code) noexcept {
+    if (active_ || !client_response_pending_)
+      return STATUS_INVALID_DEVICE_STATE;
+    if (session_id != session_id_)
+      return STATUS_DATA_ERROR;
+    if (status_code < 300 || status_code > 599)
+      return STATUS_INVALID_PARAMETER;
+    client_response_pending_ = false;
+    session_id_ = 0;
+    return ntl::status::ok();
+  }
+
+  ntl::status accept_server(std::uint64_t session_id) noexcept {
     if (active_)
       return STATUS_INVALID_DEVICE_STATE;
     if (!requirements_ready())
       return STATUS_NOT_SUPPORTED;
     if (!valid_session_id(session_id))
       return STATUS_DATA_ERROR;
-    auto frame = encode_connect_response(status_code);
+    auto frame = encode_connect_response(200);
     if (!frame)
       return frame.status();
-    auto status = backend_->write_stream(
-        session_id, session_detail::scatter(*frame), status_code / 100 != 2);
-    if (status.is_ok() && status_code / 100 == 2) {
+    const auto backend = backend_.lock();
+    if (!backend)
+      return STATUS_DELETE_PENDING;
+    auto status = backend->write_stream(
+        session_id, session_detail::scatter(*frame), false);
+    if (status.is_ok()) {
       session_id_ = session_id;
       active_ = true;
     }
     return status;
+  }
+
+  /**
+   * @brief Rejects Extended CONNECT without establishing a session.
+   *
+   * Rejection is a header-stage HTTP decision, so it intentionally does not
+   * require WebTransport SETTINGS, QUIC datagrams, or reliable-reset
+   * negotiation.  The typed status range prevents accidentally expressing a
+   * successful 2xx response through the rejection path.
+   */
+  ntl::status reject_server(std::uint64_t session_id,
+                            unsigned status_code) noexcept {
+    if (active_)
+      return STATUS_INVALID_DEVICE_STATE;
+    if (status_code < 300 || status_code > 599)
+      return STATUS_INVALID_PARAMETER;
+    if (!valid_session_id(session_id))
+      return STATUS_DATA_ERROR;
+    auto frame = encode_connect_response(status_code);
+    if (!frame)
+      return frame.status();
+    const auto backend = backend_.lock();
+    return backend
+               ? backend->write_stream(
+                     session_id, session_detail::scatter(*frame), true)
+               : ntl::status{STATUS_DELETE_PENDING};
   }
 
   ntl::result<outbound_stream>
@@ -422,7 +494,7 @@ public:
   ntl::status write(outbound_stream &stream,
                     std::span<const std::byte> payload,
                     bool final = false) noexcept {
-    if (!active_ || stream.owner_ != this || !stream.active_)
+    if (!active_ || stream.owner_.lock() != lifetime_ || !stream.active_)
       return STATUS_INVALID_DEVICE_STATE;
     auto status = guard_.consume_stream_data(payload.size());
     if (!status.is_ok())
@@ -430,7 +502,10 @@ public:
     const auto wire = payload.empty()
                           ? ntl::net::scatter_view{}
                           : ntl::net::scatter_view::from_contiguous(payload);
-    status = backend_->write_stream(stream.id_, wire, final);
+    const auto backend = backend_.lock();
+    if (!backend)
+      return STATUS_DELETE_PENDING;
+    status = backend->write_stream(stream.id_, wire, final);
     if (status.is_ok() && final)
       stream.active_ = false;
     return status;
@@ -438,9 +513,12 @@ public:
 
   ntl::status reset(outbound_stream &stream,
                     std::uint32_t application_error) noexcept {
-    if (!active_ || stream.owner_ != this || !stream.active_)
+    if (!active_ || stream.owner_.lock() != lifetime_ || !stream.active_)
       return STATUS_INVALID_DEVICE_STATE;
-    const auto status = backend_->reset_stream_at(
+    const auto backend = backend_.lock();
+    if (!backend)
+      return STATUS_DELETE_PENDING;
+    const auto status = backend->reset_stream_at(
         stream.id_, application_error_to_http3(application_error),
         stream.reliable_prefix_size_);
     if (status.is_ok())
@@ -471,7 +549,10 @@ public:
     auto wire = ntl::net::http::encode_http3_datagram(
         session_id_, payload,
         {limits_.maximum_datagram_payload});
-    return wire ? backend_->send_datagram(session_detail::scatter(*wire))
+    const auto backend = backend_.lock();
+    if (!backend)
+      return STATUS_DELETE_PENDING;
+    return wire ? backend->send_datagram(session_detail::scatter(*wire))
                 : ntl::status{wire.status()};
   }
 
@@ -486,8 +567,11 @@ public:
     std::vector<std::byte> frame;
     auto status = session_detail::append_frame(
         frame, static_cast<std::uint64_t>(frame_type::data), *capsule);
+    const auto backend = backend_.lock();
+    if (!backend)
+      return STATUS_DELETE_PENDING;
     return status.is_ok()
-               ? backend_->write_stream(session_id_,
+               ? backend->write_stream(session_id_,
                                         session_detail::scatter(frame), false)
                : status;
   }
@@ -495,7 +579,10 @@ public:
   ntl::status finish() noexcept {
     if (!active_)
       return STATUS_INVALID_DEVICE_STATE;
-    const auto status = backend_->write_stream(
+    const auto backend = backend_.lock();
+    if (!backend)
+      return STATUS_DELETE_PENDING;
+    const auto status = backend->write_stream(
         session_id_, ntl::net::scatter_view{}, true);
     if (status.is_ok())
       active_ = false;
@@ -503,6 +590,9 @@ public:
   }
 
   bool active() const noexcept { return active_; }
+  bool client_response_pending() const noexcept {
+    return client_response_pending_;
+  }
   std::uint64_t session_id() const noexcept { return session_id_; }
   std::uint64_t control_stream_id() const noexcept {
     return control_stream_id_;
@@ -517,6 +607,9 @@ private:
     if (!status.is_ok())
       return ntl::unexpected(static_cast<NTSTATUS>(status));
     try {
+      const auto backend = backend_.lock();
+      if (!backend)
+        return ntl::unexpected(STATUS_DELETE_PENDING);
       std::vector<std::byte> prefix;
       status = append_quic_varint(
           prefix, direction == stream_direction::bidirectional
@@ -528,15 +621,15 @@ private:
         return ntl::unexpected(static_cast<NTSTATUS>(status));
       std::uint64_t stream_id = 0;
       status = direction == stream_direction::bidirectional
-                   ? backend_->open_bidirectional_stream(stream_id)
-                   : backend_->open_unidirectional_stream(stream_id);
+                   ? backend->open_bidirectional_stream(stream_id)
+                   : backend->open_unidirectional_stream(stream_id);
       if (status.is_ok())
-        status = backend_->write_stream(
+        status = backend->write_stream(
             stream_id, session_detail::scatter(prefix), false);
       if (!status.is_ok())
         return ntl::unexpected(static_cast<NTSTATUS>(status));
       return ntl::ok(outbound_stream(
-          *this, stream_id, direction, prefix.size()));
+          lifetime_, stream_id, direction, prefix.size()));
     } catch (const std::bad_alloc &) {
       return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
     } catch (...) {
@@ -545,7 +638,10 @@ private:
   }
 
   bool requirements_ready() const noexcept {
-    const auto capabilities = backend_->capabilities();
+    const auto backend = backend_.lock();
+    if (!backend)
+      return false;
+    const auto capabilities = backend->capabilities();
     return transport_.ready() && capabilities.available &&
            capabilities.tls13_termination &&
            capabilities.bidirectional_streams &&
@@ -554,13 +650,15 @@ private:
            capabilities.extended_connect && capabilities.webtransport;
   }
 
-  quic_transport_backend *backend_ = nullptr;
+  std::weak_ptr<ntl::net::quic::transport_backend> backend_;
+  std::shared_ptr<void> lifetime_ = std::make_shared<std::byte>();
   session_guard guard_;
   session_limits limits_{};
   negotiated_transport transport_{};
   std::uint64_t session_id_ = 0;
   std::uint64_t control_stream_id_ = 0;
   bool active_ = false;
+  bool client_response_pending_ = false;
 };
 
 } // namespace ntl::net::http3::webtransport

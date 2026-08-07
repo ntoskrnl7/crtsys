@@ -1,0 +1,141 @@
+/**
+ * @file net_runtime
+ * @brief Execution-domain and capability contracts shared by user and kernel networking.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include <ntl/status>
+
+#include <cstddef>
+#include <cstdint>
+#include <type_traits>
+
+namespace ntl::net {
+
+/** The address space that executes one networking operation. */
+enum class execution_domain : std::uint8_t {
+  user = 1,
+  kernel = 2,
+};
+
+/** How an operation reaches its implementation. */
+enum class execution_path : std::uint8_t {
+  direct = 1,
+  offloaded = 2,
+};
+
+/**
+ * @brief Stable feature identifiers used by direct and offload backends.
+ *
+ * A feature bit describes behavior, not a particular Windows API.  This keeps
+ * parsers and policies independent from Winsock, WSK, Schannel, MsQuic, and
+ * the NTL RPC transport used by an offload service.
+ */
+enum class network_feature : std::uint64_t {
+  none = 0,
+  framing = std::uint64_t{1} << 0,
+  tls_client_hello = std::uint64_t{1} << 1,
+  http1 = std::uint64_t{1} << 2,
+  http2 = std::uint64_t{1} << 3,
+  http3 = std::uint64_t{1} << 4,
+  grpc = std::uint64_t{1} << 5,
+  websocket = std::uint64_t{1} << 6,
+  webtransport = std::uint64_t{1} << 7,
+  quic_transport = std::uint64_t{1} << 8,
+  tls_termination = std::uint64_t{1} << 9,
+  content_decode = std::uint64_t{1} << 10,
+  content_encode = std::uint64_t{1} << 11,
+  certificate_issuance = std::uint64_t{1} << 12,
+  content_transform = std::uint64_t{1} << 13,
+  byte_transport = std::uint64_t{1} << 14,
+  content_inspection = std::uint64_t{1} << 15,
+};
+
+constexpr network_feature operator|(network_feature left,
+                                    network_feature right) noexcept {
+  return static_cast<network_feature>(
+      static_cast<std::uint64_t>(left) |
+      static_cast<std::uint64_t>(right));
+}
+
+constexpr network_feature operator&(network_feature left,
+                                    network_feature right) noexcept {
+  return static_cast<network_feature>(
+      static_cast<std::uint64_t>(left) &
+      static_cast<std::uint64_t>(right));
+}
+
+class feature_set {
+public:
+  constexpr feature_set() noexcept = default;
+  constexpr feature_set(network_feature features) noexcept
+      : bits_(static_cast<std::uint64_t>(features)) {}
+
+  constexpr bool contains(network_feature feature) const noexcept {
+    const auto bits = static_cast<std::uint64_t>(feature);
+    return bits != 0 && (bits_ & bits) == bits;
+  }
+
+  constexpr std::uint64_t bits() const noexcept { return bits_; }
+
+private:
+  std::uint64_t bits_ = 0;
+};
+
+/** Bounds that every direct or offloaded operation must enforce. */
+struct operation_limits {
+  std::size_t maximum_input_bytes = 1024 * 1024;
+  std::size_t maximum_output_bytes = 4 * 1024 * 1024;
+  std::size_t maximum_buffered_bytes = 4 * 1024 * 1024;
+  std::uint32_t timeout_milliseconds = 30'000;
+  std::uint32_t maximum_in_flight = 64;
+
+  constexpr bool valid() const noexcept {
+    return maximum_input_bytes != 0 && maximum_output_bytes != 0 &&
+           maximum_buffered_bytes != 0 && timeout_milliseconds != 0 &&
+           maximum_in_flight != 0;
+  }
+};
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+inline constexpr execution_domain native_execution_domain =
+    execution_domain::kernel;
+#else
+inline constexpr execution_domain native_execution_domain =
+    execution_domain::user;
+#endif
+
+struct runtime_descriptor {
+  execution_domain domain = native_execution_domain;
+  execution_path path = execution_path::direct;
+  feature_set features{};
+  operation_limits limits{};
+
+  constexpr bool valid() const noexcept {
+    return (domain == execution_domain::user ||
+            domain == execution_domain::kernel) &&
+           (path == execution_path::direct ||
+            path == execution_path::offloaded) &&
+           limits.valid();
+  }
+
+  constexpr bool supports(network_feature feature,
+                          execution_path required_path) const noexcept {
+    return valid() && path == required_path &&
+           features.contains(feature);
+  }
+
+  ntl::status require(network_feature feature,
+                      execution_path required_path) const noexcept {
+    return supports(feature, required_path)
+               ? ntl::status::ok()
+               : ntl::status{STATUS_NOT_SUPPORTED};
+  }
+};
+
+static_assert(std::is_trivially_copyable_v<operation_limits>);
+static_assert(std::is_trivially_copyable_v<runtime_descriptor>);
+
+} // namespace ntl::net

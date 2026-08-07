@@ -1,0 +1,165 @@
+/**
+ * @file wsk_redirect
+ * @brief Kernel WSK handoff for WFP redirected TCP connections.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/net/kernel/wsk_redirect is a kernel-mode header"
+#endif
+
+#include <ntl/net/kernel/wsk_transport>
+#include <ntl/wfp/connect_redirect>
+
+#include <mstcpip.h>
+
+#include <chrono>
+#include <cstddef>
+#include <span>
+#include <utility>
+
+namespace ntl::net::kernel {
+
+struct wsk_redirect_limits {
+  std::size_t initial_records_bytes = 1024;
+  std::size_t maximum_records_bytes = 64 * 1024;
+  std::chrono::milliseconds control_timeout{15'000};
+};
+
+/**
+ * @brief Value-owned WFP handoff captured from an accepted WSK connection.
+ *
+ * Redirect records stay opaque. try_connect_original() attaches them before
+ * WskConnect, preserving attribution and preventing the outbound proxy leg
+ * from being redirected again.
+ */
+class wsk_redirected_connection {
+public:
+  wsk_redirected_connection(const wsk_redirected_connection &) = delete;
+  wsk_redirected_connection &
+  operator=(const wsk_redirected_connection &) = delete;
+  wsk_redirected_connection(wsk_redirected_connection &&) noexcept = default;
+  wsk_redirected_connection &
+  operator=(wsk_redirected_connection &&) noexcept = default;
+
+  static ntl::result<wsk_redirected_connection>
+  capture(wsk_tcp_transport &accepted,
+          wsk_redirect_limits limits = {}) noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL ||
+        limits.initial_records_bytes == 0 ||
+        limits.maximum_records_bytes < limits.initial_records_bytes ||
+        limits.control_timeout <= std::chrono::milliseconds::zero())
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+
+    auto records = owned_bytes::try_allocate(
+        limits.initial_records_bytes,
+        buffer_limits{limits.maximum_records_bytes}, ntl::pool_tag("rRfW"));
+    if (!records)
+      return ntl::unexpected(records.status());
+
+    std::size_t returned = 0;
+    ntl::status status = accepted.control_socket(
+        WskIoctl, SIO_QUERY_WFP_CONNECTION_REDIRECT_RECORDS, 0, {},
+        records->span(), &returned, limits.control_timeout);
+    if (!status.is_ok() &&
+        (static_cast<NTSTATUS>(status) != STATUS_BUFFER_TOO_SMALL &&
+         static_cast<NTSTATUS>(status) != STATUS_BUFFER_OVERFLOW))
+      return ntl::unexpected(status);
+    if (returned == 0 || returned > limits.maximum_records_bytes)
+      return ntl::unexpected(STATUS_INVALID_BUFFER_SIZE);
+    if (!status.is_ok() || returned > records->size()) {
+      auto resized = owned_bytes::try_allocate(
+          returned, buffer_limits{limits.maximum_records_bytes},
+          ntl::pool_tag("rRfW"));
+      if (!resized)
+        return ntl::unexpected(resized.status());
+      records = std::move(resized);
+      status = accepted.control_socket(
+          WskIoctl, SIO_QUERY_WFP_CONNECTION_REDIRECT_RECORDS, 0, {},
+          records->span(), &returned, limits.control_timeout);
+      if (!status.is_ok())
+        return ntl::unexpected(status);
+      if (returned == 0 || returned > records->size())
+        return ntl::unexpected(STATUS_INVALID_BUFFER_SIZE);
+    }
+    const std::size_t records_size = returned;
+
+    ntl::wfp::detail::connect_redirect_context context{};
+    returned = 0;
+    status = accepted.control_socket(
+        WskIoctl, SIO_QUERY_WFP_CONNECTION_REDIRECT_CONTEXT, 0, {},
+        std::as_writable_bytes(std::span(&context, std::size_t{1})),
+        &returned, limits.control_timeout);
+    if (!status.is_ok())
+      return ntl::unexpected(status);
+    if (returned != sizeof(context) ||
+        !ntl::wfp::detail::valid_connect_redirect_context(context))
+      return ntl::unexpected(STATUS_REVISION_MISMATCH);
+
+    const ULONG remote_size =
+        context.original_remote.ss_family == AF_INET
+            ? sizeof(SOCKADDR_IN)
+            : context.original_remote.ss_family == AF_INET6
+                  ? sizeof(SOCKADDR_IN6)
+                  : 0;
+    const ULONG local_size =
+        context.original_local.ss_family == AF_INET
+            ? sizeof(SOCKADDR_IN)
+            : context.original_local.ss_family == AF_INET6
+                  ? sizeof(SOCKADDR_IN6)
+                  : 0;
+    const auto remote = ip_endpoint::from_native(
+        reinterpret_cast<const SOCKADDR *>(&context.original_remote),
+        remote_size);
+    const auto local = ip_endpoint::from_native(
+        reinterpret_cast<const SOCKADDR *>(&context.original_local),
+        local_size);
+    if (!remote || !local || remote.family() != local.family())
+      return ntl::unexpected(STATUS_DATA_ERROR);
+
+    return ntl::ok(wsk_redirected_connection(
+        remote, local, std::move(*records), records_size));
+  }
+
+  ip_endpoint original_destination() const noexcept { return original_remote_; }
+
+  ip_endpoint original_source() const noexcept { return original_local_; }
+
+  ntl::result<wsk_tcp_transport::pointer> try_connect_original(
+      wsk_provider &provider, wsk_transport_limits limits = {}) const noexcept {
+    const ip_endpoint local =
+        original_remote_.family() == AF_INET
+            ? ip_endpoint::any_ipv4()
+            : original_remote_.family() == AF_INET6
+                  ? ip_endpoint::any_ipv6()
+                  : ip_endpoint{};
+    if (!local || records_size_ == 0 || records_size_ > records_.size())
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+
+    const wsk_socket_control_view control{
+        .request_type = WskIoctl,
+        .control_code = SIO_SET_WFP_CONNECTION_REDIRECT_RECORDS,
+        .level = 0,
+        .input = records_.span().first(records_size_),
+    };
+    return wsk_tcp_transport::try_connect_configured(
+        provider, local, original_remote_,
+        std::span<const wsk_socket_control_view>(&control, 1), limits);
+  }
+
+private:
+  wsk_redirected_connection(ip_endpoint remote, ip_endpoint local,
+                            owned_bytes &&records,
+                            std::size_t records_size) noexcept
+      : original_remote_(remote), original_local_(local),
+        records_(std::move(records)), records_size_(records_size) {}
+
+  ip_endpoint original_remote_{};
+  ip_endpoint original_local_{};
+  owned_bytes records_{};
+  std::size_t records_size_ = 0;
+};
+
+} // namespace ntl::net::kernel

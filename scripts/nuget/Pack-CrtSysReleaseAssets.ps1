@@ -7,6 +7,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'CrtSysMsQuicHeaderContract.ps1')
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 
@@ -104,12 +105,40 @@ foreach ($toolsetName in $Toolset) {
           throw "Required prebuilt release asset file is missing: $requiredPath."
         }
       }
+      foreach ($codecLibrary in @(
+          'zlibstatic.lib', 'brotlicommon.lib',
+          'brotlidec.lib', 'brotlienc.lib')) {
+        $requiredPath = Join-Path $stagingDirectory `
+          "codecs\lib\$toolsetName\$arch\$config\$codecLibrary"
+        if (-not (Test-Path $requiredPath)) {
+          throw "Required prebuilt release codec file is missing: $requiredPath."
+        }
+      }
+      foreach ($kernelCodecLibrary in @(
+          'crtsys_ntl_kernel_zlib.lib',
+          'crtsys_ntl_kernel_brotli.lib')) {
+        $requiredPath = Join-Path $stagingDirectory `
+          "kernel-codecs\lib\$toolsetName\$arch\$config\$kernelCodecLibrary"
+        if (-not (Test-Path $requiredPath)) {
+          throw "Required prebuilt release kernel codec file is missing: $requiredPath."
+        }
+      }
     }
   }
 }
 
+Assert-CrtSysMsQuicHeaderSet `
+  -IncludeDirectory (Join-Path $stagingDirectory 'msquic\include') `
+  -Description 'Staged release MsQuic public header set'
+
 Remove-UnselectedStagedLibraries `
   -NativeDirectory (Join-Path $stagingDirectory 'lib\native') `
+  -SelectedToolsets @($Toolset)
+Remove-UnselectedStagedLibraries `
+  -NativeDirectory (Join-Path $stagingDirectory 'codecs\lib') `
+  -SelectedToolsets @($Toolset)
+Remove-UnselectedStagedLibraries `
+  -NativeDirectory (Join-Path $stagingDirectory 'kernel-codecs\lib') `
   -SelectedToolsets @($Toolset)
 
 Remove-Item -Recurse -Force -Path $workDirectory -ErrorAction SilentlyContinue
@@ -125,6 +154,9 @@ Copy-Item -Path (Join-Path $repoRoot 'cmake') -Destination (Join-Path $bundleRoo
 Copy-Item -Path (Join-Path $repoRoot 'cmake\*') -Destination $bundleCMakePackageDirectory -Recurse -Force
 Copy-Item -Path (Join-Path $repoRoot 'nuget\build') -Destination (Join-Path $bundleRoot 'build') -Recurse -Force
 Copy-Item -Path (Join-Path $stagingDirectory 'lib') -Destination (Join-Path $bundleRoot 'lib') -Recurse -Force
+Copy-Item -Path (Join-Path $stagingDirectory 'codecs') -Destination (Join-Path $bundleRoot 'build\native\codecs') -Recurse -Force
+Copy-Item -Path (Join-Path $stagingDirectory 'kernel-codecs') -Destination (Join-Path $bundleRoot 'build\native\kernel-codecs') -Recurse -Force
+Copy-Item -Path (Join-Path $stagingDirectory 'msquic') -Destination (Join-Path $bundleRoot 'build\native\msquic') -Recurse -Force
 
 $versionMajor = ($Version -split '\.')[0]
 $configCMake = @"
@@ -166,7 +198,8 @@ Contents:
 - include/: public and internal compatibility headers
 - cmake/: CMake helpers; CrtSys.cmake links prebuilt libraries from this bundle
 - share/crtsys/cmake/: CMake package config for find_package(crtsys CONFIG)
-- build/native/: native MSBuild props and targets from the NuGet package
+- build/native/: native MSBuild props/targets, codec archives, and the pinned
+  public MsQuic ABI header from the NuGet package
 - lib/native/: prebuilt crtsys.lib and Ldk.lib by MSVC toolset, architecture, and configuration
 - docs/: repository documentation
 

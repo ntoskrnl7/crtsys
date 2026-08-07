@@ -1,0 +1,285 @@
+/**
+ * @file kernel_bidirectional_join
+ * @brief Nonblocking structured concurrency for two kernel I/O directions.
+ *
+ * Both branches are lazy and can only be started by join_bidirectional().
+ * The first non-success branch result cancels the shared transport. The
+ * parent is resumed only after both branches reach final suspend, so no
+ * branch can outlive the operation and no stream resume worker is
+ * synchronously blocked.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/net/kernel/bidirectional_join is a kernel-mode header"
+#endif
+
+#include <ntddk.h>
+
+#include <coroutine>
+#include <exception>
+#include <type_traits>
+#include <utility>
+
+#include <ntl/status>
+
+namespace ntl::net::kernel {
+
+namespace bidirectional_join_detail {
+
+using completion_callback = std::coroutine_handle<> (*)(
+    void *, unsigned) noexcept;
+
+} // namespace bidirectional_join_detail
+
+/**
+ * @brief One lazy branch owned by join_bidirectional().
+ *
+ * There is intentionally no wait() or operator co_await().  A branch must be
+ * paired with its opposite direction so cancellation and lifetime joining
+ * cannot be forgotten by the caller.
+ */
+class bidirectional_status_task {
+public:
+  struct promise_type;
+  using handle_type = std::coroutine_handle<promise_type>;
+
+  bidirectional_status_task(const bidirectional_status_task &) = delete;
+  bidirectional_status_task &
+  operator=(const bidirectional_status_task &) = delete;
+  bidirectional_status_task(bidirectional_status_task &&other) noexcept
+      : handle_(std::exchange(other.handle_, {})) {}
+  bidirectional_status_task &
+  operator=(bidirectional_status_task &&other) noexcept {
+    if (this != &other) {
+      reset();
+      handle_ = std::exchange(other.handle_, {});
+    }
+    return *this;
+  }
+  ~bidirectional_status_task() { reset(); }
+
+  struct promise_type {
+    bidirectional_status_task get_return_object() noexcept {
+      return bidirectional_status_task(handle_type::from_promise(*this));
+    }
+    std::suspend_always initial_suspend() const noexcept { return {}; }
+    struct final_awaiter {
+      bool await_ready() const noexcept { return false; }
+      std::coroutine_handle<>
+      await_suspend(handle_type handle) const noexcept {
+        auto &promise = handle.promise();
+        return promise.complete
+                   ? promise.complete(promise.owner, promise.index)
+                   : std::noop_coroutine();
+      }
+      void await_resume() const noexcept {}
+    };
+    final_awaiter final_suspend() const noexcept { return {}; }
+    void return_value(ntl::status value) noexcept { result = value; }
+    void unhandled_exception() noexcept {
+      result = STATUS_UNHANDLED_EXCEPTION;
+    }
+
+    void *owner = nullptr;
+    bidirectional_join_detail::completion_callback complete = nullptr;
+    unsigned index = 0;
+    ntl::status result{STATUS_PENDING};
+  };
+
+private:
+  template <class Cancel, class Expected>
+  friend class bidirectional_join_operation;
+
+  explicit bidirectional_status_task(handle_type handle) noexcept
+      : handle_(handle) {}
+
+  void attach(
+      void *owner,
+      bidirectional_join_detail::completion_callback complete,
+      unsigned index) noexcept {
+    handle_.promise().owner = owner;
+    handle_.promise().complete = complete;
+    handle_.promise().index = index;
+  }
+
+  void start() noexcept { handle_.resume(); }
+  bool valid() const noexcept { return static_cast<bool>(handle_); }
+  ntl::status result() const noexcept {
+    return handle_ ? handle_.promise().result
+                   : ntl::status{STATUS_INVALID_HANDLE};
+  }
+
+  void reset() noexcept {
+    if (handle_)
+      handle_.destroy();
+    handle_ = {};
+  }
+
+  handle_type handle_{};
+};
+
+template <class Cancel, class Expected>
+class bidirectional_join_operation {
+public:
+  static_assert(std::is_nothrow_invocable_v<Cancel &>,
+                "bidirectional cancellation must be noexcept");
+  static_assert(
+      std::is_nothrow_invocable_r_v<bool, Expected &, ntl::status>,
+      "expected-shutdown predicate must be noexcept and return bool");
+
+  bidirectional_join_operation(
+      bidirectional_status_task first,
+      bidirectional_status_task second, Cancel cancel,
+      Expected expected) noexcept
+      : branches_{std::move(first), std::move(second)},
+        cancel_(std::move(cancel)), expected_(std::move(expected)) {
+    KeInitializeSpinLock(&lock_);
+  }
+
+  bidirectional_join_operation(const bidirectional_join_operation &) = delete;
+  bidirectional_join_operation &
+  operator=(const bidirectional_join_operation &) = delete;
+  bidirectional_join_operation(bidirectional_join_operation &&) = delete;
+  bidirectional_join_operation &
+  operator=(bidirectional_join_operation &&) = delete;
+
+  bool await_ready() const noexcept { return false; }
+
+  bool await_suspend(std::coroutine_handle<> continuation) noexcept {
+    if (!branches_[0].valid() || !branches_[1].valid()) {
+      invalid_ = true;
+      return false;
+    }
+    continuation_ = continuation;
+    branches_[0].attach(this, &bidirectional_join_operation::complete, 0);
+    branches_[1].attach(this, &bidirectional_join_operation::complete, 1);
+
+    branches_[0].start();
+    branches_[1].start();
+
+    bool cancel = false;
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    starting_ = false;
+    if (cancel_pending_) {
+      cancel_pending_ = false;
+      cancel = true;
+      // Keep the operation alive if cancellation completes a branch inline.
+      ++active_callbacks_;
+    }
+    KeReleaseSpinLock(&lock_, old_irql);
+
+    if (cancel)
+      cancel_();
+
+    KeAcquireSpinLock(&lock_, &old_irql);
+    if (cancel)
+      --active_callbacks_;
+    if (completed_ == 2 && active_callbacks_ == 0) {
+      KeReleaseSpinLock(&lock_, old_irql);
+      return false;
+    }
+    parent_suspended_ = true;
+    KeReleaseSpinLock(&lock_, old_irql);
+    return true;
+  }
+
+  ntl::status await_resume() noexcept {
+    if (invalid_)
+      return ntl::status{STATUS_INVALID_HANDLE};
+    const unsigned other = first_completed_ == 0 ? 1u : 0u;
+    const ntl::status first = branches_[first_completed_].result();
+    const ntl::status second = branches_[other].result();
+    if (!first.is_ok() && !expected_(first))
+      return first;
+    if (!second.is_ok() && !expected_(second))
+      return second;
+    return ntl::status::ok();
+  }
+
+private:
+  static std::coroutine_handle<>
+  complete(void *context, unsigned index) noexcept {
+    return static_cast<bidirectional_join_operation *>(context)
+        ->on_complete(index);
+  }
+
+  std::coroutine_handle<> on_complete(unsigned index) noexcept {
+    const ntl::status branch_result = branches_[index].result();
+    const bool requests_cancel = !branch_result.is_ok();
+    bool cancel = false;
+    std::coroutine_handle<> continuation{};
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&lock_, &old_irql);
+    ++active_callbacks_;
+    if (!finished_[index]) {
+      finished_[index] = true;
+      if (completed_++ == 0) {
+        first_completed_ = index;
+      }
+      if (requests_cancel && !cancel_requested_) {
+        cancel_requested_ = true;
+        if (starting_)
+          cancel_pending_ = true;
+        else
+          cancel = true;
+      }
+    }
+    KeReleaseSpinLock(&lock_, old_irql);
+
+    if (cancel)
+      cancel_();
+
+    // Cancellation is deliberately outside the spin lock. It may complete
+    // the opposite branch synchronously, so the parent cannot be resumed
+    // until every nested or concurrent completion callback has returned.
+    KeAcquireSpinLock(&lock_, &old_irql);
+    --active_callbacks_;
+    if (completed_ == 2 && active_callbacks_ == 0 && parent_suspended_) {
+      parent_suspended_ = false;
+      continuation = continuation_;
+    }
+    KeReleaseSpinLock(&lock_, old_irql);
+    return continuation ? continuation : std::noop_coroutine();
+  }
+
+  bidirectional_status_task branches_[2];
+  Cancel cancel_;
+  Expected expected_;
+  KSPIN_LOCK lock_{};
+  std::coroutine_handle<> continuation_{};
+  unsigned completed_ = 0;
+  unsigned active_callbacks_ = 0;
+  unsigned first_completed_ = 0;
+  bool finished_[2]{false, false};
+  bool starting_ = true;
+  bool cancel_requested_ = false;
+  bool cancel_pending_ = false;
+  bool parent_suspended_ = false;
+  bool invalid_ = false;
+};
+
+/**
+ * @brief Starts, cancels, and joins two opposite I/O directions.
+ *
+ * Cancellation runs exactly once after the first non-success branch result.
+ * A successful branch lets the opposite direction finish normally. The
+ * expected_shutdown predicate affects only the final result: expected
+ * shutdown statuses still cancel the opposite direction, but are not
+ * reported as join failures.
+ */
+template <class Cancel, class Expected>
+auto join_bidirectional(
+    bidirectional_status_task first,
+    bidirectional_status_task second, Cancel &&cancel,
+    Expected &&expected_shutdown) noexcept {
+  using operation_type = bidirectional_join_operation<
+      std::decay_t<Cancel>, std::decay_t<Expected>>;
+  return operation_type(
+      std::move(first), std::move(second),
+      std::forward<Cancel>(cancel),
+      std::forward<Expected>(expected_shutdown));
+}
+
+} // namespace ntl::net::kernel

@@ -5,13 +5,13 @@
     <version>0.0.0</version>
     <authors>ntoskrnl7</authors>
     <title>crtsys</title>
-    <description>C/C++ runtime support for Windows kernel-mode drivers.</description>
+    <description>C/C++ runtime and typed NTL APIs for Windows WDM, KMDF, minifilter, WFP, and user/kernel networking projects.</description>
     <projectUrl>https://github.com/ntoskrnl7/crtsys</projectUrl>
     <repository type="git" url="https://github.com/ntoskrnl7/crtsys" />
     <license type="file">LICENSE</license>
     <readme>README.md</readme>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
-    <tags>windows kernel driver wdk native cpp crt stl cmake wfp filtering-platform</tags>
+    <tags>windows kernel driver wdk native cpp crt stl cmake wfp filtering-platform kmdf minifilter msquic http3</tags>
   </metadata>
   <files>
     <file src="README.md" target="README.md" />
@@ -20,6 +20,8 @@
     <file src="..\include\**\*" target="include" />
     <file src="..\artifacts\nuget-staging\lib\native\**\*" target="build\native\lib\native" />
     <file src="..\artifacts\nuget-staging\codecs\**\*" target="build\native\codecs" />
+    <file src="..\artifacts\nuget-staging\kernel-codecs\**\*" target="build\native\kernel-codecs" />
+    <file src="..\artifacts\nuget-staging\msquic\**\*" target="build\native\msquic" />
 
     <file src="build\native\crtsys.props" target="build\native" />
     <file src="build\native\crtsys.targets" target="build\native" />

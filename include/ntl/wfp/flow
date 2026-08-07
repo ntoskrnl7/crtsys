@@ -22,6 +22,17 @@ namespace ntl::wfp {
 
 namespace detail {
 
+struct callout_shutdown_gate {
+  bool closing() const noexcept {
+    return InterlockedCompareExchange(&closing_, 0, 0) != 0;
+  }
+
+  void close() noexcept { InterlockedExchange(&closing_, 1); }
+
+private:
+  mutable volatile LONG closing_ = 0;
+};
+
 class flow_registration_base {
 public:
   flow_registration_base(const flow_registration_base &) = delete;
@@ -58,7 +69,9 @@ class flow_registration_state final : public flow_registration_base {
 public:
   using holder_type = flow_context_holder<Layer, Context>;
 
-  flow_registration_state() noexcept {
+  explicit flow_registration_state(
+      std::shared_ptr<callout_shutdown_gate> shutdown) noexcept
+      : shutdown_(std::move(shutdown)) {
     KeInitializeSpinLock(&lock_);
     InitializeListHead(&flows_);
     ExInitializeRundownProtection(&rundown_);
@@ -70,6 +83,8 @@ public:
                         std::unique_ptr<Context> context) noexcept {
     if (!flow_id || !context || !callout_id_)
       return STATUS_INVALID_PARAMETER;
+    if (!shutdown_ || shutdown_->closing())
+      return STATUS_DELETE_PENDING;
     if (!ExAcquireRundownProtection(&rundown_))
       return STATUS_DELETE_PENDING;
 
@@ -86,7 +101,7 @@ public:
     KIRQL old_irql;
     KeAcquireSpinLock(&lock_, &old_irql);
     NTSTATUS result = STATUS_DELETE_PENDING;
-    if (accepting_) {
+    if (accepting_ && !shutdown_->closing()) {
       result = FwpsFlowAssociateContext0(
           flow_id, Layer::runtime_id, callout_id_,
           reinterpret_cast<UINT64>(holder));
@@ -178,6 +193,7 @@ private:
   KSPIN_LOCK lock_{};
   LIST_ENTRY flows_{};
   EX_RUNDOWN_REF rundown_{};
+  std::shared_ptr<callout_shutdown_gate> shutdown_;
   bool accepting_ = true;
   bool drained_ = false;
 };
@@ -193,32 +209,6 @@ template <class Layer, class Context> struct flow_delete_adapter {
   }
 };
 
-template <class Layer, class Context, auto Callback>
-struct detail_flow_classify_adapter {
-  static_assert(
-      std::is_nothrow_invocable_r_v<decision, decltype(Callback),
-                                    const classify_event<Layer> &, Context *>,
-      "a contextual WFP callback must be noexcept and return decision");
-
-  static void NTAPI invoke(
-      const FWPS_INCOMING_VALUES0 *values,
-      const FWPS_INCOMING_METADATA_VALUES0 *metadata, void *layer_data,
-      const void *classify_context, const FWPS_FILTER2 *filter,
-      UINT64 flow_context, FWPS_CLASSIFY_OUT0 *output) noexcept {
-    if (!output)
-      return;
-
-    classify_event<Layer> event(values, metadata, layer_data,
-                                classify_context, filter, flow_context,
-                                output);
-    auto *holder =
-        reinterpret_cast<flow_context_holder<Layer, Context> *>(
-            flow_context);
-    Context *context = holder ? holder->context.get() : nullptr;
-    detail::apply_decision(Callback(event, context), filter, *output);
-  }
-};
-
 } // namespace detail
 
 /**
@@ -227,7 +217,7 @@ struct detail_flow_classify_adapter {
  *
  * On successful association, WFP owns the context through an internal holder.
  * On failure, the holder deletes it. The registration tracks every successful
- * association so callout_driver::reset() can remove and drain all contexts
+ * association so callout_driver::close() can remove and drain all contexts
  * before unregistering the callout.
  */
 template <class Layer, class Context> class flow_target {

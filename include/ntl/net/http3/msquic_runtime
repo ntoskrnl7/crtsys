@@ -1,0 +1,311 @@
+/**
+ * @file http3_msquic_runtime
+ * @brief User-mode RAII for the public MsQuic API, registration, and config.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/http3/msquic_runtime is a user-mode header"
+#endif
+
+#include <ntl/net/http3/msquic_backend>
+
+#include <cstddef>
+#include <cstdint>
+#include <atomic>
+#include <memory>
+#include <mutex>
+#include <span>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+namespace ntl::net::http3::msquic_backend {
+
+namespace server_detail {
+class server_state;
+}
+
+namespace detail {
+
+struct runtime_state {
+  ~runtime_state() {
+    if (registration)
+      api->RegistrationClose(std::exchange(registration, nullptr));
+    if (api) {
+      close_api(api);
+      api = nullptr;
+    }
+    if (module)
+      ::FreeLibrary(std::exchange(module, nullptr));
+  }
+
+  HMODULE module = nullptr;
+  MsQuicCloseFn close_api = nullptr;
+  const QUIC_API_TABLE *api = nullptr;
+  HQUIC registration = nullptr;
+  std::atomic<bool> accepting{true};
+};
+
+struct configuration_state {
+  ~configuration_state() {
+    if (handle)
+      owner->api->ConfigurationClose(std::exchange(handle, nullptr));
+  }
+
+  std::shared_ptr<runtime_state> owner;
+  HQUIC handle = nullptr;
+  std::atomic<bool> accepting{true};
+
+  void begin_close() noexcept {
+    accepting.store(false, std::memory_order_release);
+  }
+
+  bool accepts_new_work() const noexcept {
+    return accepting.load(std::memory_order_acquire) && handle && owner &&
+           owner->accepting.load(std::memory_order_acquire);
+  }
+};
+
+} // namespace detail
+
+class runtime {
+public:
+  runtime() = default;
+  runtime(const runtime &) = delete;
+  runtime &operator=(const runtime &) = delete;
+  runtime(runtime &&) = delete;
+  runtime &operator=(runtime &&) = delete;
+  ~runtime() { close(); }
+
+  ntl::status open(
+      const char *application_name,
+      QUIC_EXECUTION_PROFILE profile =
+          QUIC_EXECUTION_PROFILE_LOW_LATENCY) noexcept {
+    if (!application_name || application_name[0] == '\0')
+      return STATUS_INVALID_PARAMETER;
+    std::unique_lock facade_guard(state_lock_);
+    if (state_)
+      return STATUS_INVALID_DEVICE_STATE;
+    std::shared_ptr<detail::runtime_state> state;
+    try {
+      state = std::make_shared<detail::runtime_state>();
+    } catch (...) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    state->module = ::LoadLibraryExW(
+        L"msquic.dll", nullptr,
+        LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!state->module)
+      return STATUS_DLL_NOT_FOUND;
+    const auto open_api = reinterpret_cast<MsQuicOpenVersionFn>(
+        ::GetProcAddress(state->module, "MsQuicOpenVersion"));
+    state->close_api = reinterpret_cast<MsQuicCloseFn>(
+        ::GetProcAddress(state->module, "MsQuicClose"));
+    if (!open_api || !state->close_api)
+      return STATUS_ENTRYPOINT_NOT_FOUND;
+    const void *table = nullptr;
+    const QUIC_STATUS opened = open_api(QUIC_API_VERSION_2, &table);
+    if (QUIC_FAILED(opened))
+      return detail::from_quic_status(opened);
+    state->api = static_cast<const QUIC_API_TABLE *>(table);
+    const QUIC_REGISTRATION_CONFIG registration{
+        application_name, profile};
+    const QUIC_STATUS registered =
+        state->api->RegistrationOpen(&registration, &state->registration);
+    if (QUIC_FAILED(registered)) {
+      return detail::from_quic_status(registered);
+    }
+    state_ = std::move(state);
+    return ntl::status::ok();
+  }
+
+  /** Idempotently rejects new children; existing children retain native state. */
+  void close() noexcept {
+    std::shared_ptr<detail::runtime_state> state;
+    {
+      std::lock_guard guard(state_lock_);
+      state = std::move(state_);
+    }
+    if (state)
+      state->accepting.store(false, std::memory_order_release);
+    state.reset();
+  }
+
+  explicit operator bool() const noexcept {
+    return static_cast<bool>(retain_state());
+  }
+  const QUIC_API_TABLE *borrowed_native_api() const noexcept {
+    auto state = retain_state();
+    return state ? state->api : nullptr;
+  }
+  HQUIC borrowed_native_registration() const noexcept {
+    auto state = retain_state();
+    return state ? state->registration : nullptr;
+  }
+
+private:
+  friend class configuration;
+  friend class server;
+  friend class server_detail::server_state;
+  std::shared_ptr<detail::runtime_state> retain_state() const noexcept {
+    std::shared_ptr<detail::runtime_state> state;
+    {
+      std::lock_guard guard(state_lock_);
+      state = state_;
+    }
+    return state && state->accepting.load(std::memory_order_acquire) &&
+                   state->api && state->registration
+               ? state
+               : nullptr;
+  }
+  mutable std::mutex state_lock_;
+  std::shared_ptr<detail::runtime_state> state_;
+};
+
+class configuration {
+public:
+  /** Copies are owning child handles; explicit close() invalidates all copies. */
+  configuration() = default;
+  configuration(const configuration &other) noexcept
+      : state_(other.retain_any_state()) {}
+  configuration &operator=(const configuration &other) noexcept {
+    if (this != &other)
+      replace_state(other.retain_any_state());
+    return *this;
+  }
+  configuration(configuration &&other) noexcept
+      : state_(other.take_state()) {}
+  configuration &operator=(configuration &&other) noexcept {
+    if (this != &other)
+      replace_state(other.take_state());
+    return *this;
+  }
+  ~configuration() = default;
+
+  ntl::status open(
+      runtime &owner,
+      std::span<const std::string_view> protocols,
+      const QUIC_SETTINGS *settings = nullptr) noexcept {
+    auto runtime_state = owner.retain_state();
+    if (!runtime_state || protocols.empty())
+      return STATUS_INVALID_PARAMETER;
+    std::unique_lock facade_guard(state_lock_);
+    if (state_)
+      return STATUS_INVALID_DEVICE_STATE;
+    std::vector<QUIC_BUFFER> buffers;
+    try {
+      buffers.reserve(protocols.size());
+      for (const auto protocol : protocols) {
+        if (protocol.empty() || protocol.size() > QUIC_MAX_ALPN_LENGTH)
+          return STATUS_INVALID_PARAMETER;
+        buffers.push_back(
+            {static_cast<std::uint32_t>(protocol.size()),
+             reinterpret_cast<std::uint8_t *>(
+                 const_cast<char *>(protocol.data()))});
+      }
+    } catch (const std::bad_alloc &) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    } catch (...) {
+      return STATUS_UNHANDLED_EXCEPTION;
+    }
+    HQUIC handle = nullptr;
+    const QUIC_STATUS opened = runtime_state->api->ConfigurationOpen(
+        runtime_state->registration, buffers.data(),
+        static_cast<std::uint32_t>(buffers.size()), settings,
+        settings ? sizeof(*settings) : 0, nullptr, &handle);
+    if (QUIC_FAILED(opened)) {
+      return detail::from_quic_status(opened);
+    }
+    try {
+      state_ = std::make_shared<detail::configuration_state>();
+      state_->owner = std::move(runtime_state);
+      state_->handle = handle;
+    } catch (...) {
+      runtime_state->api->ConfigurationClose(handle);
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    return ntl::status::ok();
+  }
+
+  ntl::status load_credential(
+      const QUIC_CREDENTIAL_CONFIG &credential) noexcept {
+    auto state = retain_state();
+    if (!state)
+      return STATUS_INVALID_DEVICE_STATE;
+    return detail::from_quic_status(
+        state->owner->api->ConfigurationLoadCredential(state->handle,
+                                                       &credential));
+  }
+
+  /** Idempotently rejects new work while children retain native state. */
+  void close() noexcept {
+    auto state = take_state();
+    if (state)
+      state->begin_close();
+    state.reset();
+  }
+
+  explicit operator bool() const noexcept {
+    return static_cast<bool>(retain_state());
+  }
+  HQUIC borrowed_native_configuration() const noexcept {
+    auto state = retain_state();
+    return state ? state->handle : nullptr;
+  }
+  const QUIC_API_TABLE *borrowed_native_api() const noexcept {
+    auto state = retain_state();
+    return state ? state->owner->api : nullptr;
+  }
+  HQUIC borrowed_native_registration() const noexcept {
+    auto state = retain_state();
+    return state ? state->owner->registration : nullptr;
+  }
+
+  /** Owning native connection input shared by user and kernel backends. */
+  msquic_backend::connection_context
+  make_connection_context() const noexcept {
+    auto state = retain_state();
+    if (!state)
+      return {};
+    // Capture borrowed values before moving their owner. Function argument
+    // evaluation order must not be allowed to empty `state` first.
+    const QUIC_API_TABLE *const api = state->owner->api;
+    const HQUIC registration = state->owner->registration;
+    const HQUIC configuration = state->handle;
+    return msquic_backend::connection_context::retain_borrowed_native(
+        api, registration, configuration, std::move(state));
+  }
+
+private:
+  friend class connection;
+  friend class server;
+  std::shared_ptr<detail::configuration_state> retain_state() const noexcept {
+    auto state = retain_any_state();
+    return state && state->accepts_new_work() ? state : nullptr;
+  }
+  std::shared_ptr<detail::configuration_state>
+  retain_any_state() const noexcept {
+    std::lock_guard guard(state_lock_);
+    return state_;
+  }
+  std::shared_ptr<detail::configuration_state> take_state() noexcept {
+    std::lock_guard guard(state_lock_);
+    return std::move(state_);
+  }
+  void replace_state(
+      std::shared_ptr<detail::configuration_state> state) noexcept {
+    std::shared_ptr<detail::configuration_state> previous;
+    {
+      std::lock_guard guard(state_lock_);
+      previous = std::exchange(state_, std::move(state));
+    }
+    previous.reset();
+  }
+  mutable std::mutex state_lock_;
+  std::shared_ptr<detail::configuration_state> state_;
+};
+
+} // namespace ntl::net::http3::msquic_backend

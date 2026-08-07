@@ -69,6 +69,7 @@ if (Test-Path -LiteralPath $sharedPropsPath -PathType Leaf) {
       'CrtSysDevelopmentPackageRoot',
       'CrtSysUseRepositoryDevelopmentFiles',
       'CrtSysUsePackageReference',
+      'CrtSysAllowExternalPackageImports',
       'ExcludeRestorePackageImports',
       'build\native\crtsys.props')) {
     if (-not $sharedProps.Contains($requiredToken)) {
@@ -157,3 +158,5 @@ if ($errors.Count -ne 0) {
 }
 
 Write-Host "Validated $($projects.Count) Visual Studio example projects."
+
+& (Join-Path $PSScriptRoot 'Test-CrtSysWfpExampleProjects.ps1')

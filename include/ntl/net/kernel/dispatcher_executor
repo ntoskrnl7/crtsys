@@ -1,0 +1,49 @@
+/**
+ * @file dispatcher_executor
+ * @brief One kernel execution contract for synchronous protocol policy work.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/net/kernel/dispatcher_executor is a kernel-mode header"
+#endif
+
+#include <ntl/except>
+#include <ntl/expand_stack>
+#include <ntl/irql>
+
+#include <cstddef>
+#include <type_traits>
+#include <utility>
+
+namespace ntl::net::kernel {
+
+class dispatcher_executor {
+public:
+  static constexpr std::size_t stack_budget = 48 * 1024;
+  static constexpr std::size_t minimum_inline_remaining_stack = 32 * 1024;
+  static_assert(stack_budget <= ntl::expand_stack_size_max);
+  static_assert(minimum_inline_remaining_stack < stack_budget);
+
+  template <class Function>
+  static decltype(auto) invoke(Function &&function) {
+    if (ntl::current_irql() != ntl::irql::passive)
+      throw ntl::exception(STATUS_INVALID_DEVICE_STATE,
+                           "kernel dispatcher requires PASSIVE_LEVEL");
+
+    // Protocol adapters deliberately share this boundary.  A dispatcher may
+    // therefore enter another adapter (HTTP/3 -> QPACK -> HTTP transform, for
+    // example).  Reuse an already-expanded stack instead of recursively
+    // requesting another large stack.  Ordinary x64 worker stacks are below
+    // this threshold once the dispatcher is reached, while the 48 KiB
+    // callout retains enough headroom for the deepest bounded parser path.
+    if (IoGetRemainingStackSize() >= minimum_inline_remaining_stack)
+      return std::forward<Function>(function)();
+
+    return ntl::expand_stack(
+        ntl::expand_stack_options{stack_budget, true, false},
+        std::forward<Function>(function));
+  }
+};
+
+} // namespace ntl::net::kernel

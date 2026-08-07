@@ -5,6 +5,7 @@
     <MSBuildProjectExtensionsPath>$(BaseIntermediateOutputPath)</MSBuildProjectExtensionsPath>
     <CrtSysUsePackageReference Condition="'$(CrtSysPackageRoot)' == ''">true</CrtSysUsePackageReference>
     <CrtSysPackageVersion Condition="'$(CrtSysPackageVersion)' == ''">*</CrtSysPackageVersion>
+    <CrtSysUseNtlKernelMsQuic>true</CrtSysUseNtlKernelMsQuic>
     <ExcludeRestorePackageImports Condition="'$(CrtSysPackageRoot)' != ''">true</ExcludeRestorePackageImports>
     <RestoreProjectStyle>PackageReference</RestoreProjectStyle>
   </PropertyGroup>
@@ -48,8 +49,8 @@
     <RootNamespace>CrtSysNuGetTest</RootNamespace>
     <Configuration Condition="'$(Configuration)' == ''">Release</Configuration>
     <Platform Condition="'$(Platform)' == ''">x64</Platform>
-    <!-- Prevent newer WDK headers from importing kernel APIs added after the Windows Driver RS5 baseline. -->
-    <_NT_TARGET_VERSION>0xA000006</_NT_TARGET_VERSION>
+    <!-- The dedicated package contract compiles the kernel MsQuic provider, whose public ABI requires Windows 10 version 2004. -->
+    <_NT_TARGET_VERSION>0xA000008</_NT_TARGET_VERSION>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Label="Configuration" Condition="'$(Configuration)'=='Debug'">
@@ -124,6 +125,14 @@
     <ClCompile Include="..\cmake\driver\src\libs\nlohmann_json.cpp" />
     <ClCompile Include="..\cmake\driver\src\main.cpp" />
     <ClCompile Include="..\cmake\driver\src\ntl.cpp" />
+    <ClCompile Include="abi_win7_provider.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_WIN32_WINNT=0x0601</PreprocessorDefinitions>
+    </ClCompile>
+    <ClCompile Include="abi_win8_consumer.cpp">
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);_WIN32_WINNT=0x0602</PreprocessorDefinitions>
+    </ClCompile>
+    <ClCompile Include="msquic_kernel_contract.cpp" />
+    <ClCompile Include="wsk_kernel_contract.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

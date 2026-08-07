@@ -1,0 +1,233 @@
+/**
+ * @file net_offload_protocol
+ * @brief Pointer-free contracts for bounded kernel-to-user network operations.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include <ntl/net/inspection/core>
+#include <ntl/net/runtime>
+#include <ntl/result>
+#include <ntl/status>
+
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <type_traits>
+
+namespace ntl::net::offload {
+
+inline constexpr std::uint32_t protocol_magic = 0x4f544e4e; // "NNTO"
+inline constexpr std::uint16_t protocol_version = 1;
+
+enum class operation : std::uint16_t {
+  tls_terminate = 1,
+  issue_certificate = 2,
+  decode_content = 3,
+  encode_content = 4,
+  inspect_content = 5,
+  transform_content = 6,
+  quic_transport = 7,
+};
+
+inline constexpr std::uint64_t protocol_feature_mask =
+    static_cast<std::uint64_t>(network_feature::framing) |
+    static_cast<std::uint64_t>(network_feature::tls_client_hello) |
+    static_cast<std::uint64_t>(network_feature::http1) |
+    static_cast<std::uint64_t>(network_feature::http2) |
+    static_cast<std::uint64_t>(network_feature::http3) |
+    static_cast<std::uint64_t>(network_feature::grpc) |
+    static_cast<std::uint64_t>(network_feature::websocket) |
+    static_cast<std::uint64_t>(network_feature::webtransport) |
+    static_cast<std::uint64_t>(network_feature::quic_transport);
+
+constexpr bool valid_protocol_features(feature_set features) noexcept {
+  return features.bits() != 0 &&
+         (features.bits() & ~protocol_feature_mask) == 0;
+}
+
+enum class request_flag : std::uint32_t {
+  none = 0,
+  final = 1u << 0,
+  cancel = 1u << 1,
+  fail_closed = 1u << 2,
+};
+
+constexpr request_flag operator|(request_flag left,
+                                 request_flag right) noexcept {
+  return static_cast<request_flag>(static_cast<std::uint32_t>(left) |
+                                   static_cast<std::uint32_t>(right));
+}
+
+constexpr bool has_flag(request_flag flags, request_flag value) noexcept {
+  return (static_cast<std::uint32_t>(flags) &
+          static_cast<std::uint32_t>(value)) != 0;
+}
+
+struct request_header {
+  std::uint32_t magic = protocol_magic;
+  std::uint16_t version = protocol_version;
+  operation kind = operation::transform_content;
+  std::uint64_t request_id = 0;
+  std::uint64_t flow_id = 0;
+  request_flag flags = request_flag::fail_closed;
+  std::uint32_t input_size = 0;
+  std::uint32_t output_capacity = 0;
+  std::uint32_t timeout_milliseconds = 0;
+  feature_set protocol_features{};
+  inspection::content_kind content_kind = inspection::content_kind::opaque;
+  inspection::direction direction = inspection::direction::unknown;
+  std::uint16_t source_port = 0;
+  std::uint16_t destination_port = 0;
+  std::uint16_t reserved = 0;
+};
+
+struct response_header {
+  std::uint32_t magic = protocol_magic;
+  std::uint16_t version = protocol_version;
+  operation kind = operation::transform_content;
+  std::uint64_t request_id = 0;
+  NTSTATUS completion_status = STATUS_UNSUCCESSFUL;
+  std::uint32_t output_size = 0;
+  inspection::verdict verdict = inspection::verdict::permit;
+  std::uint8_t reserved = 0;
+  std::uint16_t reserved2 = 0;
+};
+
+inline ntl::result<request_header> make_request(
+    operation kind, std::uint64_t request_id,
+    const inspection::context &metadata, feature_set protocol_features,
+    std::size_t input_size, std::size_t output_capacity,
+    std::uint32_t timeout_milliseconds,
+    inspection::failure_policy failure =
+        inspection::failure_policy::fail_closed,
+    request_flag flags = request_flag::none) noexcept {
+  if (request_id == 0 ||
+      kind < operation::tls_terminate || kind > operation::quic_transport ||
+      !valid_protocol_features(protocol_features) ||
+      input_size > (std::numeric_limits<std::uint32_t>::max)() ||
+      output_capacity > (std::numeric_limits<std::uint32_t>::max)() ||
+      timeout_milliseconds == 0 ||
+      (failure != inspection::failure_policy::fail_closed &&
+       failure != inspection::failure_policy::fail_open))
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  if (failure == inspection::failure_policy::fail_closed)
+    flags = flags | request_flag::fail_closed;
+  return ntl::ok(request_header{
+      .kind = kind,
+      .request_id = request_id,
+      .flow_id = metadata.flow_id,
+      .flags = flags,
+      .input_size = static_cast<std::uint32_t>(input_size),
+      .output_capacity = static_cast<std::uint32_t>(output_capacity),
+      .timeout_milliseconds = timeout_milliseconds,
+      .protocol_features = protocol_features,
+      .content_kind = metadata.kind,
+      .direction = metadata.flow_direction,
+      .source_port = metadata.source_port,
+      .destination_port = metadata.destination_port,
+  });
+}
+
+constexpr network_feature feature_for(operation value) noexcept {
+  switch (value) {
+  case operation::tls_terminate:
+    return network_feature::tls_termination;
+  case operation::issue_certificate:
+    return network_feature::certificate_issuance;
+  case operation::decode_content:
+    return network_feature::content_decode;
+  case operation::encode_content:
+    return network_feature::content_encode;
+  case operation::inspect_content:
+    return network_feature::content_inspection;
+  case operation::transform_content:
+    return network_feature::content_transform;
+  case operation::quic_transport:
+    return network_feature::quic_transport;
+  }
+  return network_feature::none;
+}
+
+inline ntl::status validate(const request_header &request,
+                            const runtime_descriptor &service) noexcept {
+  constexpr auto known_flags =
+      static_cast<std::uint32_t>(request_flag::final) |
+      static_cast<std::uint32_t>(request_flag::cancel) |
+      static_cast<std::uint32_t>(request_flag::fail_closed);
+  const auto flags = static_cast<std::uint32_t>(request.flags);
+  const auto content_kind =
+      static_cast<std::uint8_t>(request.content_kind);
+  const auto direction = static_cast<std::uint8_t>(request.direction);
+  if (request.magic != protocol_magic ||
+      request.version != protocol_version || request.request_id == 0 ||
+      service.domain != execution_domain::user ||
+      request.kind < operation::tls_terminate ||
+      request.kind > operation::quic_transport ||
+      !valid_protocol_features(request.protocol_features) ||
+      (flags & ~known_flags) != 0 || request.reserved != 0 ||
+      content_kind >
+          static_cast<std::uint8_t>(inspection::content_kind::tls_plaintext) ||
+      direction >
+          static_cast<std::uint8_t>(inspection::direction::outbound) ||
+      request.input_size > service.limits.maximum_input_bytes ||
+      request.output_capacity > service.limits.maximum_output_bytes ||
+      request.timeout_milliseconds == 0 ||
+      request.timeout_milliseconds > service.limits.timeout_milliseconds)
+    return STATUS_INVALID_PARAMETER;
+  if (has_flag(request.flags, request_flag::cancel) &&
+      (has_flag(request.flags, request_flag::final) ||
+       request.input_size != 0 || request.output_capacity != 0))
+    return STATUS_INVALID_PARAMETER;
+  if (!has_flag(request.flags, request_flag::cancel) &&
+      request.kind == operation::inspect_content &&
+      (request.input_size == 0 || request.output_capacity != 0))
+    return STATUS_INVALID_PARAMETER;
+  return service.require(feature_for(request.kind),
+                         execution_path::offloaded);
+}
+
+inline ntl::status validate(const response_header &response,
+                            const request_header &request) noexcept {
+  const auto verdict = static_cast<std::uint8_t>(response.verdict);
+  const bool decision_operation =
+      request.kind == operation::inspect_content ||
+      request.kind == operation::transform_content;
+  if (response.magic != protocol_magic ||
+      response.version != protocol_version ||
+      response.kind != request.kind ||
+      response.request_id != request.request_id ||
+      response.reserved != 0 || response.reserved2 != 0 ||
+      verdict < static_cast<std::uint8_t>(inspection::verdict::permit) ||
+      verdict > static_cast<std::uint8_t>(inspection::verdict::drop_flow) ||
+      (!decision_operation &&
+       response.verdict != inspection::verdict::permit) ||
+      response.completion_status == STATUS_PENDING ||
+      response.output_size > request.output_capacity ||
+      (request.kind == operation::inspect_content &&
+       response.output_size != 0) ||
+      (!NT_SUCCESS(response.completion_status) &&
+       (response.output_size != 0 ||
+        response.verdict != inspection::verdict::permit)) ||
+      (response.verdict != inspection::verdict::permit &&
+       response.output_size != 0))
+    return STATUS_DATA_ERROR;
+  return ntl::status::ok();
+}
+
+static_assert(std::is_trivially_copyable_v<request_header>);
+static_assert(std::is_trivially_copyable_v<response_header>);
+static_assert(std::is_standard_layout_v<request_header>);
+static_assert(std::is_standard_layout_v<response_header>);
+static_assert(sizeof(request_header) == 56);
+static_assert(sizeof(response_header) == 32);
+static_assert(offsetof(request_header, request_id) == 8);
+static_assert(offsetof(request_header, flow_id) == 16);
+static_assert(offsetof(request_header, protocol_features) == 40);
+static_assert(offsetof(request_header, content_kind) == 48);
+static_assert(offsetof(response_header, request_id) == 8);
+static_assert(offsetof(response_header, completion_status) == 16);
+static_assert(offsetof(response_header, verdict) == 24);
+
+} // namespace ntl::net::offload

@@ -1,0 +1,1715 @@
+/**
+ * @file kernel_schannel
+ * @brief Bounded kernel-mode Schannel record and handshake engine.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/net/kernel/schannel is a kernel-mode header"
+#endif
+
+#include <ntddk.h>
+
+// wdm.h defines _NTDDK_ so a later ntddk.h include becomes a no-op, but wdm.h
+// does not publish WELL_KNOWN_SID_TYPE.  The shared SSPI declaration needs
+// only its ABI type, so provide an opaque fixed-underlying-type declaration
+// when the full ntddk/ntifs surface was not included first.
+#if !defined(_NTDDK_INCLUDED_) && !defined(_NTIFS_INCLUDED_)
+enum _WELL_KNOWN_SID_TYPE : int;
+typedef enum _WELL_KNOWN_SID_TYPE WELL_KNOWN_SID_TYPE;
+#endif
+
+// ntddk.h intentionally exposes less account-management surface than
+// ntifs.h, while the shared kernel SSPI prototypes mention this enum.
+// Supplying the public ABI enum avoids the unsupported ntddk+ntifs mix.
+#if !defined(_NTIFS_)
+typedef enum _SID_NAME_USE {
+  SidTypeUser = 1,
+  SidTypeGroup,
+  SidTypeDomain,
+  SidTypeAlias,
+  SidTypeWellKnownGroup,
+  SidTypeDeletedAccount,
+  SidTypeInvalid,
+  SidTypeUnknown,
+  SidTypeComputer,
+  SidTypeLabel,
+  SidTypeLogonSession
+} SID_NAME_USE, *PSID_NAME_USE;
+#endif
+
+#ifndef SECURITY_KERNEL
+#define SECURITY_KERNEL
+#endif
+#pragma warning(push)
+// WDK 10.0.26100 sspi.h retains an ignored qualifier on a legacy function
+// declaration.  Keep consumer /WX enabled and scope the suppression to it.
+#pragma warning(disable : 4229)
+#include <security.h>
+#pragma warning(pop)
+
+#include <ntl/net/buffer/owned_bytes>
+#include <ntl/net/kernel/passive_cleanup_domain>
+#include <ntl/pool_allocator>
+#include <ntl/result>
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <limits>
+#include <span>
+#include <string_view>
+#include <utility>
+
+namespace ntl::net::kernel {
+
+extern "C" NTSYSAPI NTSTATUS NTAPI
+ZwAllocateVirtualMemory(HANDLE process, void **base_address,
+                        ULONG_PTR zero_bits, SIZE_T *region_size,
+                        ULONG allocation_type, ULONG protect);
+extern "C" NTSYSAPI NTSTATUS NTAPI
+ZwFreeVirtualMemory(HANDLE process, void **base_address,
+                    SIZE_T *region_size, ULONG free_type);
+
+// The kernel SSPI import library keeps the historical SealMessage and
+// UnsealMessage export names.  Their ABI is the same as the user-mode
+// EncryptMessage and DecryptMessage entry points, but current WDK headers no
+// longer declare the historical names.  Keep these declarations local to the
+// kernel adapter instead of leaking compatibility aliases into public code.
+extern "C" SECURITY_STATUS SEC_ENTRY
+SealMessage(PCtxtHandle context, ULONG quality_of_protection,
+            PSecBufferDesc message, ULONG message_sequence_number);
+extern "C" SECURITY_STATUS SEC_ENTRY
+UnsealMessage(PCtxtHandle context, PSecBufferDesc message,
+              ULONG message_sequence_number,
+              PULONG quality_of_protection);
+
+enum class schannel_role : std::uint8_t { client = 1, server = 2 };
+
+struct schannel_limits {
+  std::size_t maximum_handshake_token = 1024 * 1024;
+  std::size_t maximum_ciphertext = 1024 * 1024;
+  std::size_t maximum_plaintext = 256 * 1024;
+  std::size_t maximum_peer_certificate_chain = 1024 * 1024;
+  std::size_t maximum_peer_certificates = 32;
+};
+
+/**
+ * @brief Reference to a LocalMachine certificate and private key.
+ *
+ * Kernel Schannel consumes a SHA-1 certificate thumbprint from a machine
+ * certificate store. The certificate and its private key must be provisioned
+ * before the driver acquires server credentials.
+ */
+struct schannel_certificate_store_ref {
+  static constexpr std::size_t thumbprint_size = 20;
+  static constexpr std::size_t maximum_store_name = 128;
+
+  std::array<std::byte, thumbprint_size> sha1_thumbprint{};
+  std::array<wchar_t, maximum_store_name> store_name{};
+  bool machine_store = true;
+
+  static ntl::result<schannel_certificate_store_ref>
+  make(std::span<const std::byte> thumbprint,
+       std::wstring_view store = L"MY") noexcept {
+    if (thumbprint.size() != thumbprint_size || store.empty() ||
+        store.size() >= maximum_store_name)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    schannel_certificate_store_ref result;
+    std::copy(thumbprint.begin(), thumbprint.end(),
+              result.sha1_thumbprint.begin());
+    std::copy(store.begin(), store.end(), result.store_name.begin());
+    result.store_name[store.size()] = L'\0';
+    return ntl::ok(std::move(result));
+  }
+};
+
+/**
+ * @brief Selects peer validation and an optional client identity.
+ *
+ * An explicit certificate and the system's default client certificate are
+ * mutually exclusive.  The referenced store identity is consumed while
+ * acquiring the reusable credential handle and need not outlive it.
+ */
+struct schannel_client_credential_options {
+  bool manual_peer_validation = false;
+  bool use_default_client_certificate = false;
+  const schannel_certificate_store_ref *borrowed_certificate = nullptr;
+};
+
+namespace detail {
+
+// Public Schannel ABI structures are declared in the user-mode header with
+// certificate-context pointer types. Kernel callers use the documented hash
+// credential formats, so these private mirrors keep the ABI without importing
+// CryptoAPI user-mode declarations into a driver translation unit.
+inline constexpr ULONG sch_credentials_version = 5;
+inline constexpr ULONG sch_cred_format_cert_hash_store = 2;
+inline constexpr ULONG sch_machine_cert_hash = 1;
+inline constexpr ULONG sch_cred_no_system_mapper = 0x00000002;
+inline constexpr ULONG sch_cred_manual_validation = 0x00000008;
+inline constexpr ULONG sch_cred_no_default_creds = 0x00000010;
+inline constexpr ULONG sch_cred_use_default_creds = 0x00000040;
+inline constexpr ULONG sch_use_strong_crypto = 0x00400000;
+inline constexpr ULONG schannel_shutdown = 1;
+inline constexpr ULONG secpkg_attr_remote_certificates = 0x5f;
+
+inline constexpr SECURITY_STATUS security_ok = 0x00000000L;
+inline constexpr SECURITY_STATUS security_internal_error =
+    static_cast<SECURITY_STATUS>(0x80090304UL);
+inline constexpr SECURITY_STATUS security_continue_needed = 0x00090312L;
+inline constexpr SECURITY_STATUS security_complete_needed = 0x00090313L;
+inline constexpr SECURITY_STATUS security_complete_and_continue = 0x00090314L;
+inline constexpr SECURITY_STATUS security_context_expired = 0x00090317L;
+inline constexpr SECURITY_STATUS security_context_expired_error =
+    static_cast<SECURITY_STATUS>(0x80090317u);
+inline constexpr SECURITY_STATUS security_incomplete_message =
+    static_cast<SECURITY_STATUS>(0x80090318UL);
+inline constexpr SECURITY_STATUS security_no_credentials =
+    static_cast<SECURITY_STATUS>(0x8009030EUL);
+inline constexpr SECURITY_STATUS security_renegotiate = 0x00090321L;
+
+struct native_schannel_hash_store {
+  ULONG length = sizeof(native_schannel_hash_store);
+  ULONG flags = 0;
+  ULONG_PTR provider = 0;
+  std::array<std::byte, schannel_certificate_store_ref::thumbprint_size>
+      sha_hash{};
+  std::array<wchar_t, schannel_certificate_store_ref::maximum_store_name>
+      store_name{};
+};
+
+struct native_sch_credentials {
+  ULONG version = sch_credentials_version;
+  ULONG credential_format = 0;
+  ULONG credential_count = 0;
+  void **credentials = nullptr;
+  void *root_store = nullptr;
+  ULONG mapper_count = 0;
+  void **mappers = nullptr;
+  ULONG session_lifespan = 0;
+  ULONG flags = 0;
+  ULONG tls_parameter_count = 0;
+  void *tls_parameters = nullptr;
+};
+
+// Kernel Schannel exposes raw DER chains instead of CryptoAPI contexts.  The
+// returned buffer is allocated by SSPI and must be released with
+// FreeContextBuffer after it has been copied out of the callback boundary.
+struct native_secpkg_context_certificates {
+  ULONG certificate_count = 0;
+  ULONG certificate_chain_size = 0;
+  UCHAR *certificate_chain = nullptr;
+};
+
+class process_buffer {
+public:
+  process_buffer() noexcept = default;
+  process_buffer(const process_buffer &) = delete;
+  process_buffer &operator=(const process_buffer &) = delete;
+
+  process_buffer(process_buffer &&other) noexcept
+      : base_(std::exchange(other.base_, nullptr)),
+        region_size_(std::exchange(other.region_size_, 0)),
+        requested_size_(std::exchange(other.requested_size_, 0)) {}
+
+  process_buffer &operator=(process_buffer &&other) noexcept {
+    if (this != &other) {
+      reset();
+      base_ = std::exchange(other.base_, nullptr);
+      region_size_ = std::exchange(other.region_size_, 0);
+      requested_size_ = std::exchange(other.requested_size_, 0);
+    }
+    return *this;
+  }
+
+  ~process_buffer() { reset(); }
+
+  static ntl::result<process_buffer>
+  try_allocate(std::size_t size) noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+    if (size == 0)
+      return ntl::ok(process_buffer{});
+    void *base = nullptr;
+    SIZE_T region_size = size;
+    const NTSTATUS status = ZwAllocateVirtualMemory(
+        ZwCurrentProcess(), &base, 0, &region_size,
+        MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!NT_SUCCESS(status))
+      return ntl::unexpected(status);
+    return ntl::ok(process_buffer(base, region_size, size));
+  }
+
+  static ntl::result<process_buffer>
+  try_copy(std::span<const std::byte> bytes) noexcept {
+    auto result = try_allocate(bytes.size());
+    if (!result)
+      return result;
+    if (!bytes.empty())
+      std::memcpy(result->data(), bytes.data(), bytes.size());
+    return result;
+  }
+
+  void reset() noexcept {
+    if (base_) {
+      void *base = base_;
+      SIZE_T size = 0;
+      (void)ZwFreeVirtualMemory(ZwCurrentProcess(), &base, &size,
+                                MEM_RELEASE);
+    }
+    base_ = nullptr;
+    region_size_ = 0;
+    requested_size_ = 0;
+  }
+
+  std::byte *data() noexcept { return static_cast<std::byte *>(base_); }
+  const std::byte *data() const noexcept {
+    return static_cast<const std::byte *>(base_);
+  }
+  std::size_t size() const noexcept { return requested_size_; }
+  std::span<std::byte> span() noexcept { return {data(), requested_size_}; }
+  explicit operator bool() const noexcept {
+    return base_ != nullptr || requested_size_ == 0;
+  }
+
+private:
+  process_buffer(void *base, SIZE_T region_size,
+                 std::size_t requested_size) noexcept
+      : base_(base), region_size_(region_size),
+        requested_size_(requested_size) {}
+
+  void *base_ = nullptr;
+  SIZE_T region_size_ = 0;
+  std::size_t requested_size_ = 0;
+};
+
+inline ntl::result<owned_bytes>
+copy_security_buffer(const SecBuffer &source, std::size_t maximum,
+                     ULONG tag) noexcept {
+  if (source.cbBuffer > maximum ||
+      (source.cbBuffer != 0 && !source.pvBuffer))
+    return ntl::unexpected(source.cbBuffer > maximum
+                               ? STATUS_BUFFER_OVERFLOW
+                               : STATUS_INVALID_BUFFER_SIZE);
+  return owned_bytes::try_copy(
+      {static_cast<const std::byte *>(source.pvBuffer), source.cbBuffer},
+      buffer_limits{maximum}, tag);
+}
+
+inline const SecBuffer *find_buffer(const SecBuffer *buffers,
+                                    std::size_t count,
+                                    ULONG type) noexcept {
+  for (std::size_t index = 0; index != count; ++index) {
+    if (buffers[index].BufferType == type)
+      return &buffers[index];
+  }
+  return nullptr;
+}
+
+inline SECURITY_STATUS complete_auth_if_needed(SECURITY_STATUS status,
+                                                CtxtHandle &context,
+                                                SecBufferDesc &output) noexcept {
+  if (status != security_complete_needed &&
+      status != security_complete_and_continue)
+    return status;
+  const SECURITY_STATUS completed = CompleteAuthToken(&context, &output);
+  if (completed != security_ok)
+    return completed;
+  return status == security_complete_needed ? security_ok
+                                             : security_continue_needed;
+}
+
+inline bool context_may_exist(SECURITY_STATUS status) noexcept {
+  return status == security_ok || status == security_continue_needed ||
+         status == security_complete_needed ||
+         status == security_complete_and_continue;
+}
+
+} // namespace detail
+
+class schannel;
+class schannel_state;
+
+class schannel_credentials {
+public:
+  schannel_credentials() noexcept { KeInitializeSpinLock(&state_lock_); }
+  schannel_credentials(const schannel_credentials &other) noexcept;
+  schannel_credentials &
+  operator=(const schannel_credentials &other) noexcept;
+
+  schannel_credentials(schannel_credentials &&other) noexcept
+      : schannel_credentials() {
+    state_ = other.take_state();
+  }
+
+  schannel_credentials &operator=(schannel_credentials &&other) noexcept {
+    if (this != &other) {
+      reset();
+      install_state(other.take_state());
+    }
+    return *this;
+  }
+
+  /** Destruction is allocation-free and valid through DISPATCH_LEVEL. */
+  ~schannel_credentials() { reset(); }
+
+  explicit operator bool() const noexcept;
+  schannel_role role() const noexcept;
+  bool manual_peer_validation() const noexcept;
+
+private:
+  friend class schannel_context;
+  friend class schannel;
+  friend class schannel_state;
+
+  struct credential_state {
+    credential_state(schannel_role role_value,
+                     bool manual_validation_value) noexcept
+        : cleanup(&credential_state::cleanup_at_passive, this),
+          role(role_value), manual_validation(manual_validation_value) {
+      InitializeListHead(&registry_entry);
+      KeInitializeSpinLock(&use_lock);
+      KeInitializeEvent(&idle, NotificationEvent, TRUE);
+      SecInvalidateHandle(&handle);
+    }
+
+    ~credential_state() {
+      NT_ASSERT(owner.load(std::memory_order_acquire) == nullptr);
+      NT_ASSERT(!valid.load(std::memory_order_acquire));
+      NT_ASSERT(active_uses == 0);
+      NT_ASSERT(handles.load(std::memory_order_acquire) == 0);
+    }
+
+    static void cleanup_at_passive(void *context) noexcept;
+    void add_reference() noexcept {
+      references.fetch_add(1, std::memory_order_relaxed);
+    }
+    void release_reference() noexcept {
+      if (references.fetch_sub(1, std::memory_order_acq_rel) == 1)
+        ntl::pool_deleter<credential_state>{"cStN"}(this);
+    }
+    bool try_begin_use() noexcept;
+    void end_use() noexcept;
+    void close_native() noexcept;
+
+    passive_cleanup_item cleanup;
+    LIST_ENTRY registry_entry{};
+    std::atomic<schannel_state *> owner{nullptr};
+    std::atomic<std::size_t> references{1};
+    // Public credential values share one native credential. Internal users
+    // take references without extending this handle count; native retirement
+    // starts only when the last public value disappears (or schannel closes).
+    std::atomic<std::size_t> handles{0};
+    std::atomic<bool> retirement_started{false};
+    std::atomic<bool> valid{false};
+    KSPIN_LOCK use_lock{};
+    KEVENT idle{};
+    std::size_t active_uses = 0;
+    bool closing = false;
+    bool listed = false;
+    CredHandle handle{};
+    schannel_role role = schannel_role::client;
+    bool manual_validation = false;
+  };
+
+  class credential_use {
+  public:
+    credential_use() noexcept = default;
+    credential_use(const credential_use &) = delete;
+    credential_use &operator=(const credential_use &) = delete;
+    credential_use(credential_use &&other) noexcept
+        : state_(std::exchange(other.state_, nullptr)) {}
+    credential_use &operator=(credential_use &&other) noexcept {
+      if (this != &other) {
+        reset();
+        state_ = std::exchange(other.state_, nullptr);
+      }
+      return *this;
+    }
+    ~credential_use() { reset(); }
+
+    CredHandle *borrowed_native_handle() const noexcept {
+      return state_ ? &state_->handle : nullptr;
+    }
+
+  private:
+    friend class schannel_credentials;
+    explicit credential_use(credential_state *state) noexcept
+        : state_(state) {}
+    void reset() noexcept {
+      auto *state = std::exchange(state_, nullptr);
+      if (state) {
+        state->end_use();
+        state->release_reference();
+      }
+    }
+    credential_state *state_ = nullptr;
+  };
+
+  explicit schannel_credentials(credential_state *state) noexcept
+      : schannel_credentials() {
+    state_ = state;
+    if (state_)
+      state_->handles.fetch_add(1, std::memory_order_relaxed);
+  }
+
+  static ntl::result<schannel_credentials>
+  try_client(schannel_state &owner,
+             schannel_client_credential_options options) noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+    if (options.use_default_client_certificate &&
+        options.borrowed_certificate)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+
+    detail::native_schannel_hash_store native_certificate;
+    detail::native_sch_credentials native;
+    native.flags = detail::sch_use_strong_crypto |
+                   (options.use_default_client_certificate
+                        ? detail::sch_cred_use_default_creds
+                        : detail::sch_cred_no_default_creds);
+    if (options.borrowed_certificate) {
+      if (options.borrowed_certificate->store_name[0] == L'\0')
+        return ntl::unexpected(STATUS_INVALID_PARAMETER);
+      native_certificate.flags = options.borrowed_certificate->machine_store
+                                     ? detail::sch_machine_cert_hash
+                                     : 0;
+      native_certificate.sha_hash =
+          options.borrowed_certificate->sha1_thumbprint;
+      native_certificate.store_name = options.borrowed_certificate->store_name;
+      native.credential_format = detail::sch_cred_format_cert_hash_store;
+      native.credential_count = 1;
+      // For the kernel-only hash formats, SCH_CREDENTIALS::paCred is
+      // reinterpreted as the hash descriptor itself, not as the usual array
+      // of PCCERT_CONTEXT pointers.  An extra pointer level makes Schannel
+      // parse the pointer value as dwLength/dwFlags and reject the identity.
+      native.credentials =
+          reinterpret_cast<void **>(&native_certificate);
+    }
+    if (options.manual_peer_validation)
+      native.flags |= detail::sch_cred_manual_validation;
+
+    auto state = ntl::try_make_pool<credential_state>(
+        "cStN", schannel_role::client,
+        options.manual_peer_validation);
+    if (!state)
+      return ntl::unexpected(state.status());
+    const SECURITY_STATUS status = acquire(
+        **state, SECPKG_CRED_OUTBOUND, native);
+    if (status != detail::security_ok)
+      return ntl::unexpected(static_cast<NTSTATUS>(status));
+    const auto registered = register_with(owner, **state);
+    if (!registered.is_ok()) {
+      (*state)->close_native();
+      return ntl::unexpected(registered);
+    }
+    return ntl::ok(schannel_credentials{state->release()});
+  }
+
+  static ntl::result<schannel_credentials>
+  try_server(schannel_state &owner,
+             const schannel_certificate_store_ref &certificate) noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+    if (certificate.store_name[0] == L'\0')
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+
+    detail::native_schannel_hash_store native_certificate;
+    native_certificate.flags = certificate.machine_store
+                                   ? detail::sch_machine_cert_hash
+                                   : 0;
+    native_certificate.sha_hash = certificate.sha1_thumbprint;
+    native_certificate.store_name = certificate.store_name;
+    detail::native_sch_credentials native;
+    native.credential_format = detail::sch_cred_format_cert_hash_store;
+    native.credential_count = 1;
+    native.credentials = reinterpret_cast<void **>(&native_certificate);
+    native.flags = detail::sch_use_strong_crypto |
+                   detail::sch_cred_no_system_mapper;
+
+    auto state = ntl::try_make_pool<credential_state>(
+        "cStN", schannel_role::server, false);
+    if (!state)
+      return ntl::unexpected(state.status());
+    const SECURITY_STATUS status = acquire(
+        **state, SECPKG_CRED_INBOUND, native);
+    if (status != detail::security_ok)
+      return ntl::unexpected(static_cast<NTSTATUS>(status));
+    const auto registered = register_with(owner, **state);
+    if (!registered.is_ok()) {
+      (*state)->close_native();
+      return ntl::unexpected(registered);
+    }
+    return ntl::ok(schannel_credentials{state->release()});
+  }
+
+  static SECURITY_STATUS
+  acquire(credential_state &state, ULONG use,
+          detail::native_sch_credentials &native) noexcept {
+    UNICODE_STRING package{};
+    RtlInitUnicodeString(&package, L"Schannel");
+    TimeStamp expiry{};
+    const SECURITY_STATUS status = AcquireCredentialsHandleW(
+        nullptr, reinterpret_cast<PSECURITY_STRING>(&package), use, nullptr,
+        &native, nullptr, nullptr, &state.handle, &expiry);
+    state.valid.store(status == detail::security_ok,
+                      std::memory_order_release);
+    return status;
+  }
+
+  static ntl::status register_with(schannel_state &owner,
+                                   credential_state &state) noexcept;
+  ntl::result<credential_use> try_use() const noexcept;
+  bool same_identity(const schannel_credentials &other) const noexcept;
+  credential_state *retain_state() const noexcept;
+  credential_state *take_state() noexcept;
+  void install_state(credential_state *state) noexcept;
+  void reset() noexcept;
+
+  mutable KSPIN_LOCK state_lock_{};
+  credential_state *state_ = nullptr;
+};
+
+/** Internal shared owner retained by every public credential handle. */
+class schannel_state {
+public:
+  static ntl::result<schannel_state *> create() noexcept {
+    if (ntl::current_irql() != ntl::irql::passive)
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+    auto *domain = borrowed_runtime_passive_cleanup_domain();
+    if (!domain)
+      return ntl::unexpected(STATUS_DEVICE_NOT_READY);
+    auto value = ntl::try_make_pool<schannel_state>("sStN", domain);
+    if (!value)
+      return ntl::unexpected(value.status());
+    const ntl::status registered =
+        domain->register_item((*value)->cleanup_);
+    if (!registered.is_ok())
+      return ntl::unexpected(registered);
+    (*value)->registered_ = true;
+    return ntl::ok(value->release());
+  }
+
+  explicit schannel_state(passive_cleanup_domain *domain) noexcept
+      : domain_(domain), cleanup_(&schannel_state::cleanup_at_passive, this) {
+    KeInitializeSpinLock(&registry_lock_);
+    InitializeListHead(&credentials_);
+    KeInitializeEvent(&idle_, NotificationEvent, TRUE);
+  }
+
+  schannel_state(const schannel_state &) = delete;
+  schannel_state &operator=(const schannel_state &) = delete;
+
+  ~schannel_state() {
+    NT_ASSERT(ntl::current_irql() == ntl::irql::passive);
+    NT_ASSERT(IsListEmpty(&credentials_));
+    NT_ASSERT(live_ == 0);
+  }
+
+  void add_reference() noexcept {
+    references_.fetch_add(1, std::memory_order_relaxed);
+  }
+
+  void release_reference() noexcept {
+    if (references_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+      NT_ASSERT(registered_ && domain_);
+      if (registered_ && domain_)
+        domain_->retire(cleanup_);
+    }
+  }
+
+  ntl::status register_state(
+      schannel_credentials::credential_state &state) noexcept;
+  void retire(schannel_credentials::credential_state &state) noexcept {
+    domain_->retire_deferred(state.cleanup);
+  }
+  void detach(schannel_credentials::credential_state &state) noexcept;
+  void begin_close() noexcept;
+  ntl::status wait_closed() noexcept {
+    if (ntl::current_irql() != ntl::irql::passive)
+      return STATUS_INVALID_DEVICE_STATE;
+    // close() may be re-entered by an owning object's deferred destructor.
+    // The domain worker must never wait for cleanup queued behind itself.
+    if (domain_->running_on_cleanup_worker())
+      return ntl::status::ok();
+    (void)KeWaitForSingleObject(&idle_, Executive, KernelMode, FALSE, nullptr);
+    return ntl::status::ok();
+  }
+
+  std::size_t live() const noexcept {
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&registry_lock_, &old_irql);
+    const std::size_t result = live_;
+    KeReleaseSpinLock(&registry_lock_, old_irql);
+    return result;
+  }
+
+private:
+  friend class schannel_credentials;
+  static void cleanup_at_passive(void *context) noexcept {
+    auto *value = static_cast<schannel_state *>(context);
+    NT_ASSERT(value->live() == 0);
+    ntl::pool_deleter<schannel_state>{"sStN"}(value);
+  }
+
+  passive_cleanup_domain *domain_ = nullptr;
+  passive_cleanup_item cleanup_;
+  mutable KSPIN_LOCK registry_lock_{};
+  LIST_ENTRY credentials_{};
+  KEVENT idle_{};
+  std::atomic<std::size_t> references_{1};
+  std::size_t live_ = 0;
+  bool registered_ = false;
+  bool stopping_ = false;
+};
+
+/**
+ * @brief Owning kernel Schannel facade with order-independent children.
+ *
+ * Credentials retain the internal owner after this facade is destroyed.
+ * close() is idempotent, rejects new credentials, and retires native handles
+ * through the driver runtime's joined PASSIVE cleanup domain. Destruction is
+ * valid through DISPATCH_LEVEL; PASSIVE callers additionally wait for drain.
+ */
+class schannel {
+public:
+  schannel() noexcept {
+    KeInitializeSpinLock(&state_lock_);
+    auto created = schannel_state::create();
+    if (created)
+      state_ = *created;
+    else
+      start_status_ = created.status();
+  }
+  schannel(const schannel &) = delete;
+  schannel &operator=(const schannel &) = delete;
+  schannel(schannel &&other) noexcept
+      : start_status_(other.start_status_) {
+    KeInitializeSpinLock(&state_lock_);
+    state_ = other.take_state();
+  }
+  schannel &operator=(schannel &&other) noexcept {
+    if (this != &other) {
+      reset();
+      install_state(other.take_state());
+      start_status_ = other.start_status_;
+    }
+    return *this;
+  }
+  ~schannel() { reset(); }
+
+  ntl::result<schannel_credentials>
+  try_client(schannel_client_credential_options options = {}) noexcept {
+    auto *state = retain_state();
+    if (!state)
+      return ntl::unexpected(start_status_);
+    auto result = schannel_credentials::try_client(*state, options);
+    state->release_reference();
+    return result;
+  }
+
+  ntl::result<schannel_credentials>
+  try_server(const schannel_certificate_store_ref &certificate) noexcept {
+    auto *state = retain_state();
+    if (!state)
+      return ntl::unexpected(start_status_);
+    auto result = schannel_credentials::try_server(*state, certificate);
+    state->release_reference();
+    return result;
+  }
+
+  [[nodiscard]] ntl::status close() noexcept {
+    auto *state = retain_state();
+    if (!state)
+      return start_status_;
+    state->begin_close();
+    const ntl::status result =
+        ntl::current_irql() == ntl::irql::passive
+            ? state->wait_closed()
+            : ntl::status::ok();
+    state->release_reference();
+    return result;
+  }
+
+  std::size_t live_credentials() const noexcept {
+    auto *state = retain_state();
+    if (!state)
+      return 0;
+    const std::size_t result = state->live();
+    state->release_reference();
+    return result;
+  }
+  ntl::status start_status() const noexcept { return start_status_; }
+
+private:
+  schannel_state *retain_state() const noexcept {
+    KIRQL old_irql = PASSIVE_LEVEL;
+    KeAcquireSpinLock(&state_lock_, &old_irql);
+    auto *state = state_;
+    if (state)
+      state->add_reference();
+    KeReleaseSpinLock(&state_lock_, old_irql);
+    return state;
+  }
+  schannel_state *take_state() noexcept {
+    KIRQL old_irql = PASSIVE_LEVEL;
+    KeAcquireSpinLock(&state_lock_, &old_irql);
+    auto *state = std::exchange(state_, nullptr);
+    KeReleaseSpinLock(&state_lock_, old_irql);
+    return state;
+  }
+  void install_state(schannel_state *state) noexcept {
+    KIRQL old_irql = PASSIVE_LEVEL;
+    KeAcquireSpinLock(&state_lock_, &old_irql);
+    NT_ASSERT(state_ == nullptr);
+    state_ = state;
+    KeReleaseSpinLock(&state_lock_, old_irql);
+  }
+  void reset() noexcept {
+    auto *state = take_state();
+    if (!state)
+      return;
+    state->begin_close();
+    if (ntl::current_irql() == ntl::irql::passive)
+      (void)state->wait_closed();
+    state->release_reference();
+  }
+
+  mutable KSPIN_LOCK state_lock_{};
+  schannel_state *state_ = nullptr;
+  ntl::status start_status_ = ntl::status::ok();
+};
+
+inline bool schannel_credentials::credential_state::try_begin_use() noexcept {
+  KIRQL old_irql = 0;
+  KeAcquireSpinLock(&use_lock, &old_irql);
+  if (closing || !valid.load(std::memory_order_acquire)) {
+    KeReleaseSpinLock(&use_lock, old_irql);
+    return false;
+  }
+  if (active_uses++ == 0)
+    KeClearEvent(&idle);
+  add_reference();
+  KeReleaseSpinLock(&use_lock, old_irql);
+  return true;
+}
+
+inline void schannel_credentials::credential_state::end_use() noexcept {
+  KIRQL old_irql = 0;
+  KeAcquireSpinLock(&use_lock, &old_irql);
+  NT_ASSERT(active_uses != 0);
+  if (active_uses != 0 && --active_uses == 0)
+    KeSetEvent(&idle, IO_NO_INCREMENT, FALSE);
+  KeReleaseSpinLock(&use_lock, old_irql);
+}
+
+inline void schannel_credentials::credential_state::close_native() noexcept {
+  NT_ASSERT(ntl::current_irql() == ntl::irql::passive);
+  bool wait = false;
+  KIRQL old_irql = 0;
+  KeAcquireSpinLock(&use_lock, &old_irql);
+  closing = true;
+  wait = active_uses != 0;
+  KeReleaseSpinLock(&use_lock, old_irql);
+  if (wait)
+    (void)KeWaitForSingleObject(&idle, Executive, KernelMode, FALSE, nullptr);
+  if (valid.exchange(false, std::memory_order_acq_rel))
+    (void)FreeCredentialsHandle(&handle);
+  SecInvalidateHandle(&handle);
+}
+
+inline void schannel_credentials::credential_state::cleanup_at_passive(
+    void *context) noexcept {
+  auto *state = static_cast<credential_state *>(context);
+  state->close_native();
+  auto *owner = state->owner.load(std::memory_order_acquire);
+  NT_ASSERT(owner != nullptr);
+  if (owner)
+    owner->detach(*state);
+}
+
+inline schannel_credentials::schannel_credentials(
+    const schannel_credentials &other) noexcept
+    : schannel_credentials() {
+  state_ = other.retain_state();
+  if (state_)
+    state_->handles.fetch_add(1, std::memory_order_relaxed);
+}
+
+inline schannel_credentials &schannel_credentials::operator=(
+    const schannel_credentials &other) noexcept {
+  if (this != &other) {
+    auto *next = other.retain_state();
+    if (next)
+      next->handles.fetch_add(1, std::memory_order_relaxed);
+    reset();
+    install_state(next);
+  }
+  return *this;
+}
+
+inline schannel_credentials::operator bool() const noexcept {
+  auto *state = retain_state();
+  const bool result =
+      state && state->valid.load(std::memory_order_acquire);
+  if (state)
+    state->release_reference();
+  return result;
+}
+
+inline schannel_role schannel_credentials::role() const noexcept {
+  auto *state = retain_state();
+  const schannel_role result =
+      state ? state->role : schannel_role::client;
+  if (state)
+    state->release_reference();
+  return result;
+}
+
+inline bool schannel_credentials::manual_peer_validation() const noexcept {
+  auto *state = retain_state();
+  const bool result = state && state->manual_validation;
+  if (state)
+    state->release_reference();
+  return result;
+}
+
+inline ntl::result<schannel_credentials::credential_use>
+schannel_credentials::try_use() const noexcept {
+  auto *state = retain_state();
+  if (!state)
+    return ntl::unexpected(STATUS_DELETE_PENDING);
+  if (!state->try_begin_use()) {
+    state->release_reference();
+    return ntl::unexpected(STATUS_DELETE_PENDING);
+  }
+  state->release_reference();
+  return ntl::ok(credential_use{state});
+}
+
+inline bool schannel_credentials::same_identity(
+    const schannel_credentials &other) const noexcept {
+  auto *left = retain_state();
+  auto *right = other.retain_state();
+  const bool result = left && left == right;
+  if (right)
+    right->release_reference();
+  if (left)
+    left->release_reference();
+  return result;
+}
+
+inline schannel_credentials::credential_state *
+schannel_credentials::retain_state() const noexcept {
+  KIRQL old_irql = PASSIVE_LEVEL;
+  KeAcquireSpinLock(&state_lock_, &old_irql);
+  auto *state = state_;
+  if (state)
+    state->add_reference();
+  KeReleaseSpinLock(&state_lock_, old_irql);
+  return state;
+}
+
+inline schannel_credentials::credential_state *
+schannel_credentials::take_state() noexcept {
+  KIRQL old_irql = PASSIVE_LEVEL;
+  KeAcquireSpinLock(&state_lock_, &old_irql);
+  auto *state = std::exchange(state_, nullptr);
+  KeReleaseSpinLock(&state_lock_, old_irql);
+  return state;
+}
+
+inline void schannel_credentials::install_state(
+    credential_state *state) noexcept {
+  KIRQL old_irql = PASSIVE_LEVEL;
+  KeAcquireSpinLock(&state_lock_, &old_irql);
+  NT_ASSERT(state_ == nullptr);
+  state_ = state;
+  KeReleaseSpinLock(&state_lock_, old_irql);
+}
+
+inline void schannel_credentials::reset() noexcept {
+  auto *state = take_state();
+  if (!state)
+    return;
+  const bool last_handle =
+      state->handles.fetch_sub(1, std::memory_order_acq_rel) == 1;
+  if (last_handle &&
+      !state->retirement_started.exchange(true,
+                                          std::memory_order_acq_rel)) {
+    auto *owner = state->owner.load(std::memory_order_acquire);
+    NT_ASSERT(owner != nullptr);
+    if (owner)
+      owner->retire(*state);
+  }
+  state->release_reference();
+}
+
+inline ntl::status schannel_credentials::register_with(
+    schannel_state &owner, credential_state &state) noexcept {
+  return owner.register_state(state);
+}
+
+inline ntl::status schannel_state::register_state(
+    schannel_credentials::credential_state &state) noexcept {
+  if (ntl::current_irql() != ntl::irql::passive)
+    return STATUS_INVALID_DEVICE_STATE;
+  KIRQL old_irql = 0;
+  KeAcquireSpinLock(&registry_lock_, &old_irql);
+  if (stopping_) {
+    KeReleaseSpinLock(&registry_lock_, old_irql);
+    return STATUS_DELETE_PENDING;
+  }
+  const ntl::status registered = domain_->register_item(state.cleanup);
+  if (registered.is_ok()) {
+    state.owner.store(this, std::memory_order_release);
+    state.add_reference();
+    add_reference();
+    state.listed = true;
+    InsertTailList(&credentials_, &state.registry_entry);
+    if (live_++ == 0)
+      KeClearEvent(&idle_);
+  }
+  KeReleaseSpinLock(&registry_lock_, old_irql);
+  return registered;
+}
+
+inline void schannel_state::detach(
+    schannel_credentials::credential_state &state) noexcept {
+  bool release_owner = false;
+  KIRQL old_irql = 0;
+  KeAcquireSpinLock(&registry_lock_, &old_irql);
+  if (state.listed) {
+    RemoveEntryList(&state.registry_entry);
+    InitializeListHead(&state.registry_entry);
+    state.listed = false;
+    NT_ASSERT(live_ != 0);
+    if (live_ != 0 && --live_ == 0)
+      KeSetEvent(&idle_, IO_NO_INCREMENT, FALSE);
+    release_owner = true;
+  }
+  state.owner.store(nullptr, std::memory_order_release);
+  KeReleaseSpinLock(&registry_lock_, old_irql);
+  state.release_reference();
+  if (release_owner)
+    release_reference();
+}
+
+inline void schannel_state::begin_close() noexcept {
+  for (;;) {
+    schannel_credentials::credential_state *selected = nullptr;
+    KIRQL old_irql = 0;
+    KeAcquireSpinLock(&registry_lock_, &old_irql);
+    stopping_ = true;
+    for (auto *entry = credentials_.Flink; entry != &credentials_;
+         entry = entry->Flink) {
+      auto *state = CONTAINING_RECORD(
+          entry, schannel_credentials::credential_state, registry_entry);
+      bool expected = false;
+      if (state->retirement_started.compare_exchange_strong(
+              expected, true, std::memory_order_acq_rel)) {
+        selected = state;
+        break;
+      }
+    }
+    KeReleaseSpinLock(&registry_lock_, old_irql);
+    if (!selected)
+      break;
+    retire(*selected);
+  }
+}
+
+struct schannel_handshake_result {
+  SECURITY_STATUS security_status = detail::security_internal_error;
+  owned_bytes output_token{};
+  owned_bytes extra_input{};
+
+  bool complete() const noexcept {
+    return security_status == detail::security_ok;
+  }
+  bool needs_input() const noexcept {
+    return security_status == detail::security_continue_needed ||
+           security_status == detail::security_incomplete_message;
+  }
+};
+
+struct schannel_decrypt_result {
+  SECURITY_STATUS security_status = detail::security_internal_error;
+  owned_bytes plaintext{};
+  owned_bytes extra_ciphertext{};
+
+  bool complete_record() const noexcept {
+    return security_status == detail::security_ok ||
+           security_status == detail::security_renegotiate ||
+           security_status == detail::security_context_expired;
+  }
+};
+
+/**
+ * @brief Bounded copy of the DER certificate chain supplied by kernel
+ * Schannel.
+ *
+ * Certificates retain Schannel's wire order; certificate(0) is the peer leaf.
+ * The object owns nonpaged storage and is safe after QueryContextAttributesW
+ * returns.
+ */
+class schannel_peer_certificate_chain {
+public:
+  schannel_peer_certificate_chain() noexcept = default;
+  schannel_peer_certificate_chain(
+      const schannel_peer_certificate_chain &) = delete;
+  schannel_peer_certificate_chain &
+  operator=(const schannel_peer_certificate_chain &) = delete;
+  schannel_peer_certificate_chain(
+      schannel_peer_certificate_chain &&) noexcept = default;
+  schannel_peer_certificate_chain &
+  operator=(schannel_peer_certificate_chain &&) noexcept = default;
+
+  std::size_t size() const noexcept { return certificate_count_; }
+  bool empty() const noexcept { return certificate_count_ == 0; }
+
+  ntl::result<std::span<const std::byte>>
+  certificate(std::size_t index) const noexcept {
+    if (index >= certificate_count_)
+      return ntl::unexpected(STATUS_NOT_FOUND);
+    std::span<const std::byte> remaining = encoded_.span();
+    for (std::size_t current = 0; current != certificate_count_; ++current) {
+      if (remaining.size() < sizeof(ULONG))
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      ULONG length = 0;
+      std::memcpy(&length, remaining.data(), sizeof(length));
+      remaining = remaining.subspan(sizeof(length));
+      if (length == 0 || length > remaining.size())
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      const auto value = remaining.first(length);
+      if (current == index)
+        return ntl::ok(value);
+      remaining = remaining.subspan(length);
+    }
+    return ntl::unexpected(STATUS_DATA_ERROR);
+  }
+
+  ntl::result<std::span<const std::byte>> leaf() const noexcept {
+    return certificate(0);
+  }
+
+  /**
+   * @brief Validates and owns Schannel's length-prefixed raw-chain format.
+   *
+   * This is also useful to test policy code without an active TLS context.
+   */
+  static ntl::result<schannel_peer_certificate_chain>
+  try_copy_encoded(std::span<const std::byte> encoded,
+                   std::size_t certificate_count,
+                   const schannel_limits &limits = {}) noexcept {
+    if (encoded.empty() || certificate_count == 0 ||
+        certificate_count > limits.maximum_peer_certificates ||
+        encoded.size() > limits.maximum_peer_certificate_chain)
+      return ntl::unexpected(STATUS_INVALID_BUFFER_SIZE);
+    auto copied = owned_bytes::try_copy(
+        encoded, buffer_limits{limits.maximum_peer_certificate_chain},
+        ntl::pool_tag("cStN"));
+    if (!copied)
+      return ntl::unexpected(copied.status());
+
+    std::span<const std::byte> remaining = copied->span();
+    for (std::size_t current = 0; current != certificate_count; ++current) {
+      if (remaining.size() < sizeof(ULONG))
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      ULONG length = 0;
+      std::memcpy(&length, remaining.data(), sizeof(length));
+      remaining = remaining.subspan(sizeof(length));
+      if (length == 0 || length > remaining.size())
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      remaining = remaining.subspan(length);
+    }
+    if (!remaining.empty())
+      return ntl::unexpected(STATUS_DATA_ERROR);
+
+    schannel_peer_certificate_chain result;
+    result.encoded_ = std::move(*copied);
+    result.certificate_count_ = certificate_count;
+    return ntl::ok(std::move(result));
+  }
+
+  /**
+   * @brief Copies the native raw-chain object used by kernel Schannel.
+   *
+   * Kernel MsQuic supplies this same SecPkgContext_Certificates layout when
+   * QUIC_CREDENTIAL_FLAG_INDICATE_CERTIFICATE_RECEIVED is requested without
+   * QUIC_CREDENTIAL_FLAG_INPROC_PEER_CERTIFICATE.  The native pointer is
+   * callback-scoped; this function validates the advertised bounds and owns a
+   * copy before returning.  Passing any other provider representation is an
+   * API contract violation.
+   */
+  static ntl::result<schannel_peer_certificate_chain>
+  try_copy_native_schannel_chain(
+      const void *native_chain,
+      const schannel_limits &limits = {}) noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL || !native_chain ||
+        limits.maximum_peer_certificate_chain == 0 ||
+        limits.maximum_peer_certificates == 0)
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+    const auto &native =
+        *static_cast<const detail::native_secpkg_context_certificates *>(
+            native_chain);
+    if (native.certificate_count == 0 || !native.certificate_chain ||
+        native.certificate_count > limits.maximum_peer_certificates ||
+        native.certificate_chain_size >
+            limits.maximum_peer_certificate_chain)
+      return ntl::unexpected(STATUS_INVALID_BUFFER_SIZE);
+    return try_copy_encoded(
+        std::span<const std::byte>(
+            reinterpret_cast<const std::byte *>(native.certificate_chain),
+            native.certificate_chain_size),
+        native.certificate_count, limits);
+  }
+
+private:
+  friend class schannel_context;
+
+  static ntl::result<schannel_peer_certificate_chain>
+  try_query(CtxtHandle &context, const schannel_limits &limits) noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL ||
+        limits.maximum_peer_certificate_chain == 0 ||
+        limits.maximum_peer_certificates == 0)
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+
+    detail::native_secpkg_context_certificates native{};
+    const SECURITY_STATUS queried = QueryContextAttributesW(
+        &context, detail::secpkg_attr_remote_certificates, &native);
+    struct native_buffer_guard {
+      UCHAR *value = nullptr;
+      ~native_buffer_guard() {
+        if (value)
+          (void)FreeContextBuffer(value);
+      }
+    } release{native.certificate_chain};
+    if (queried != detail::security_ok)
+      return ntl::unexpected(static_cast<NTSTATUS>(queried));
+    return try_copy_native_schannel_chain(&native, limits);
+  }
+
+  owned_bytes encoded_{};
+  std::size_t certificate_count_ = 0;
+};
+
+/**
+ * @brief Additional authorization applied to a system-validated or manually
+ * validated peer chain.
+ *
+ * Returning a failure aborts the TLS handshake before application data is
+ * exposed.  With manual_peer_validation enabled, this policy is mandatory and
+ * assumes full responsibility for trusting the chain.
+ */
+class schannel_peer_certificate_policy {
+public:
+  virtual ~schannel_peer_certificate_policy() = default;
+  virtual ntl::status verify(
+      const schannel_peer_certificate_chain &chain,
+      std::wstring_view peer_name) noexcept = 0;
+};
+
+/** @brief Pins one exact DER-encoded leaf certificate. */
+class schannel_exact_leaf_certificate_policy final
+    : public schannel_peer_certificate_policy {
+public:
+  schannel_exact_leaf_certificate_policy(
+      const schannel_exact_leaf_certificate_policy &) = delete;
+  schannel_exact_leaf_certificate_policy &
+  operator=(const schannel_exact_leaf_certificate_policy &) = delete;
+  schannel_exact_leaf_certificate_policy(
+      schannel_exact_leaf_certificate_policy &&) noexcept = default;
+  schannel_exact_leaf_certificate_policy &
+  operator=(schannel_exact_leaf_certificate_policy &&) noexcept = default;
+
+  static ntl::result<schannel_exact_leaf_certificate_policy>
+  try_create(std::span<const std::byte> certificate,
+             std::size_t maximum_size = 64 * 1024) noexcept {
+    if (certificate.empty() || maximum_size == 0)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    auto copied = owned_bytes::try_copy(
+        certificate, buffer_limits{maximum_size}, ntl::pool_tag("pStN"));
+    if (!copied)
+      return ntl::unexpected(copied.status());
+    return ntl::ok(schannel_exact_leaf_certificate_policy(
+        std::move(*copied)));
+  }
+
+  ntl::status verify(const schannel_peer_certificate_chain &chain,
+                     std::wstring_view) noexcept override {
+    const auto leaf = chain.leaf();
+    if (!leaf)
+      return leaf.status();
+    if (leaf->size() != expected_.size())
+      return STATUS_ACCESS_DENIED;
+    unsigned difference = 0;
+    for (std::size_t index = 0; index != leaf->size(); ++index)
+      difference |= std::to_integer<unsigned>((*leaf)[index] ^
+                                               expected_.span()[index]);
+    return difference == 0 ? ntl::status::ok()
+                           : ntl::status{STATUS_ACCESS_DENIED};
+  }
+
+private:
+  explicit schannel_exact_leaf_certificate_policy(
+      owned_bytes expected) noexcept
+      : expected_(std::move(expected)) {}
+
+  owned_bytes expected_{};
+};
+
+/**
+ * @brief One synchronous Schannel context for a PASSIVE_LEVEL worker.
+ *
+ * The caller owns network I/O and feeds complete or partial ciphertext into
+ * handshake()/decrypt(). Every SSPI input buffer is copied to process virtual
+ * memory as required by the kernel SSPI contract. Returned bytes are bounded,
+ * independently owned nonpaged buffers.
+ */
+class schannel_context {
+public:
+  explicit schannel_context(schannel_limits limits = {}) noexcept
+      : limits_(limits) {
+    SecInvalidateHandle(&context_);
+  }
+
+  schannel_context(const schannel_context &) = delete;
+  schannel_context &operator=(const schannel_context &) = delete;
+
+  ~schannel_context() { reset(); }
+
+  ntl::status set_client_target(std::wstring_view target) noexcept {
+    if (target.empty() || target.size() >= target_.size() ||
+        target.size() > (std::numeric_limits<USHORT>::max)() /
+                            sizeof(wchar_t))
+      return STATUS_INVALID_PARAMETER;
+    std::copy(target.begin(), target.end(), target_.begin());
+    target_[target.size()] = L'\0';
+    target_length_ = target.size();
+    return ntl::status::ok();
+  }
+
+  ntl::status set_application_protocols(
+      std::span<const std::string_view> protocols,
+      bool require_negotiation = false) noexcept {
+    if (context_valid_)
+      return STATUS_INVALID_DEVICE_STATE;
+    application_protocol_size_ = 0;
+    require_application_protocol_ = require_negotiation;
+    if (protocols.empty())
+      return require_negotiation ? ntl::status{STATUS_INVALID_PARAMETER}
+                                 : ntl::status::ok();
+    std::size_t list_size = 0;
+    for (const auto protocol : protocols) {
+      if (protocol.empty() || protocol.size() > 255 ||
+          protocol.size() > (std::numeric_limits<USHORT>::max)() -
+                                list_size - 1)
+        return STATUS_INVALID_PARAMETER;
+      list_size += protocol.size() + 1;
+    }
+    constexpr std::size_t prefix = sizeof(ULONG) + sizeof(ULONG) +
+                                   sizeof(USHORT);
+    if (prefix + list_size > application_protocol_input_.size())
+      return STATUS_BUFFER_OVERFLOW;
+    const ULONG protocol_lists_size = static_cast<ULONG>(
+        sizeof(ULONG) + sizeof(USHORT) + list_size);
+    const ULONG extension = SecApplicationProtocolNegotiationExt_ALPN;
+    const USHORT encoded_list_size = static_cast<USHORT>(list_size);
+    std::memcpy(application_protocol_input_.data(), &protocol_lists_size,
+                sizeof(protocol_lists_size));
+    std::memcpy(application_protocol_input_.data() + sizeof(ULONG),
+                &extension, sizeof(extension));
+    std::memcpy(application_protocol_input_.data() + sizeof(ULONG) * 2,
+                &encoded_list_size, sizeof(encoded_list_size));
+    std::size_t position = prefix;
+    for (const auto protocol : protocols) {
+      application_protocol_input_[position++] =
+          static_cast<std::byte>(protocol.size());
+      std::memcpy(application_protocol_input_.data() + position,
+                  protocol.data(), protocol.size());
+      position += protocol.size();
+    }
+    application_protocol_size_ = position;
+    return ntl::status::ok();
+  }
+
+  ntl::status require_client_certificate(bool value = true) noexcept {
+    if (context_valid_)
+      return STATUS_INVALID_DEVICE_STATE;
+    require_client_certificate_ = value;
+    return ntl::status::ok();
+  }
+
+  ntl::result<schannel_handshake_result>
+  handshake(schannel_credentials &credentials,
+            std::span<const std::byte> ciphertext = {}) noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL || !credentials ||
+        limits_.maximum_handshake_token == 0 ||
+        limits_.maximum_ciphertext == 0 ||
+        ciphertext.size() > limits_.maximum_ciphertext)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    if (context_valid_ && !credentials_.same_identity(credentials))
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+    if (!context_valid_) {
+      credentials_ = credentials;
+      role_ = credentials.role();
+    } else if (role_ != credentials.role()) {
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+    }
+    if (role_ == schannel_role::client && target_length_ == 0)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    auto credential_use = credentials.try_use();
+    if (!credential_use)
+      return ntl::unexpected(credential_use.status());
+
+    auto input_storage = detail::process_buffer::try_copy(ciphertext);
+    if (!input_storage)
+      return ntl::unexpected(input_storage.status());
+
+    const bool first = !context_valid_;
+    auto application_storage = detail::process_buffer::try_copy(
+        first ? std::span<const std::byte>(application_protocol_input_)
+                    .first(application_protocol_size_)
+              : std::span<const std::byte>{});
+    if (!application_storage)
+      return ntl::unexpected(application_storage.status());
+
+    SecBuffer input_buffers[4]{};
+    SecBufferDesc input_desc{SECBUFFER_VERSION, 0, input_buffers};
+    SecBufferDesc *input = nullptr;
+    if (!ciphertext.empty()) {
+      input_buffers[input_desc.cBuffers++] = {
+          static_cast<ULONG>(ciphertext.size()), SECBUFFER_TOKEN,
+          input_storage->data()};
+      input_buffers[input_desc.cBuffers++].BufferType = SECBUFFER_EMPTY;
+      // AcceptSecurityContext uses the buffer immediately following the
+      // token for SECBUFFER_EXTRA/SECBUFFER_MISSING. Keep ALPN after the
+      // scratch buffers, matching the user-mode tls_stream contract.
+      if (role_ == schannel_role::server)
+        input_buffers[input_desc.cBuffers++].BufferType = SECBUFFER_EMPTY;
+    }
+    if (first && application_protocol_size_ != 0) {
+      input_buffers[input_desc.cBuffers++] = {
+          static_cast<ULONG>(application_protocol_size_),
+          SECBUFFER_APPLICATION_PROTOCOLS, application_storage->data()};
+    }
+    if (input_desc.cBuffers != 0)
+      input = &input_desc;
+
+    SecBuffer output_buffer{};
+    output_buffer.BufferType = SECBUFFER_TOKEN;
+    SecBufferDesc output{SECBUFFER_VERSION, 1, &output_buffer};
+    ULONG attributes = 0;
+    TimeStamp expiry{};
+    SECURITY_STATUS status = detail::security_internal_error;
+
+    if (role_ == schannel_role::client) {
+      const std::size_t target_bytes =
+          (target_length_ + 1) * sizeof(wchar_t);
+      auto target_storage =
+          detail::process_buffer::try_allocate(target_bytes);
+      if (!target_storage) {
+        if (output_buffer.pvBuffer)
+          (void)FreeContextBuffer(output_buffer.pvBuffer);
+        return ntl::unexpected(target_storage.status());
+      }
+      std::memcpy(target_storage->data(), target_.data(), target_bytes);
+      UNICODE_STRING target{};
+      target.Buffer =
+          reinterpret_cast<wchar_t *>(target_storage->data());
+      target.Length = static_cast<USHORT>(target_length_ * sizeof(wchar_t));
+      target.MaximumLength = static_cast<USHORT>(
+          (target_length_ + 1) * sizeof(wchar_t));
+      ULONG request = ISC_REQ_SEQUENCE_DETECT | ISC_REQ_REPLAY_DETECT |
+                      ISC_REQ_CONFIDENTIALITY | ISC_REQ_EXTENDED_ERROR |
+                      ISC_REQ_ALLOCATE_MEMORY | ISC_REQ_STREAM;
+      if (credentials.manual_peer_validation())
+        request |= ISC_REQ_MANUAL_CRED_VALIDATION;
+      status = InitializeSecurityContextW(
+          credential_use->borrowed_native_handle(),
+          context_valid_ ? &context_ : nullptr,
+          reinterpret_cast<PSECURITY_STRING>(&target), request, 0, 0, input,
+          0, &context_, &output, &attributes, &expiry);
+    } else {
+      ULONG request = ASC_REQ_SEQUENCE_DETECT | ASC_REQ_REPLAY_DETECT |
+                      ASC_REQ_CONFIDENTIALITY | ASC_REQ_EXTENDED_ERROR |
+                      ASC_REQ_ALLOCATE_MEMORY | ASC_REQ_STREAM;
+      if (require_client_certificate_)
+        request |= ASC_REQ_MUTUAL_AUTH;
+      status = AcceptSecurityContext(
+          credential_use->borrowed_native_handle(),
+          context_valid_ ? &context_ : nullptr, input,
+          request, 0, &context_, &output, &attributes, &expiry);
+    }
+
+    if (detail::context_may_exist(status))
+      context_valid_ = context_valid_ || SecIsValidHandle(&context_);
+    status = detail::complete_auth_if_needed(status, context_, output);
+
+    schannel_handshake_result result;
+    result.security_status = status;
+    auto token = detail::copy_security_buffer(
+        output_buffer, limits_.maximum_handshake_token,
+        ntl::pool_tag("hStN"));
+    if (output_buffer.pvBuffer)
+      (void)FreeContextBuffer(output_buffer.pvBuffer);
+    if (!token) {
+      if (status < 0)
+        return ntl::unexpected(static_cast<NTSTATUS>(status));
+      return ntl::unexpected(token.status());
+    }
+    result.output_token = std::move(*token);
+
+    if (input && status != detail::security_incomplete_message) {
+      const SecBuffer *extra = detail::find_buffer(
+          input_buffers, RTL_NUMBER_OF(input_buffers), SECBUFFER_EXTRA);
+      if (extra && extra->cbBuffer != 0) {
+        std::span<const std::byte> extra_bytes;
+        if (extra->pvBuffer) {
+          extra_bytes = {static_cast<const std::byte *>(extra->pvBuffer),
+                         extra->cbBuffer};
+        } else if (extra->cbBuffer <= ciphertext.size()) {
+          extra_bytes = ciphertext.last(extra->cbBuffer);
+        } else {
+          if (status < 0)
+            return ntl::unexpected(static_cast<NTSTATUS>(status));
+          return ntl::unexpected(STATUS_INVALID_BUFFER_SIZE);
+        }
+        auto copied = owned_bytes::try_copy(
+            extra_bytes, buffer_limits{limits_.maximum_ciphertext},
+            ntl::pool_tag("xStN"));
+        if (!copied)
+          return ntl::unexpected(copied.status());
+        result.extra_input = std::move(*copied);
+      }
+    } else if (status == detail::security_incomplete_message &&
+               !ciphertext.empty()) {
+      auto copied = owned_bytes::try_copy(
+          ciphertext, buffer_limits{limits_.maximum_ciphertext},
+          ntl::pool_tag("xStN"));
+      if (!copied)
+        return ntl::unexpected(copied.status());
+      result.extra_input = std::move(*copied);
+    }
+
+    if (status == detail::security_ok && !closing_) {
+      const bool preserve_negotiated_protocol = handshaken_;
+      const SECURITY_STATUS sizes_status = QueryContextAttributesW(
+          &context_, SECPKG_ATTR_STREAM_SIZES, &stream_sizes_);
+      if (sizes_status != detail::security_ok ||
+          stream_sizes_.cbMaximumMessage == 0)
+        return ntl::unexpected(static_cast<NTSTATUS>(
+            sizes_status == detail::security_ok
+                ? detail::security_internal_error
+                : sizes_status));
+      if (!preserve_negotiated_protocol)
+        negotiated_application_protocol_size_ = 0;
+      SecPkgContext_ApplicationProtocol application{};
+      const SECURITY_STATUS application_status = QueryContextAttributesW(
+          &context_, SECPKG_ATTR_APPLICATION_PROTOCOL, &application);
+      if (application_status == detail::security_ok &&
+          application.ProtoNegoStatus ==
+              SecApplicationProtocolNegotiationStatus_Success &&
+          application.ProtocolIdSize != 0) {
+        negotiated_application_protocol_size_ = application.ProtocolIdSize;
+        std::memcpy(negotiated_application_protocol_.data(),
+                    application.ProtocolId, application.ProtocolIdSize);
+      } else if (require_application_protocol_) {
+        if (negotiated_application_protocol_size_ == 0)
+          return ntl::unexpected(static_cast<NTSTATUS>(
+              application_status == detail::security_ok
+                  ? detail::security_internal_error
+                  : application_status));
+      }
+      handshaken_ = true;
+    }
+    return ntl::ok(std::move(result));
+  }
+
+  ntl::result<owned_bytes>
+  encrypt(std::span<const std::byte> plaintext) noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL || !handshaken_ ||
+        plaintext.empty() || plaintext.size() > limits_.maximum_plaintext ||
+        plaintext.size() > stream_sizes_.cbMaximumMessage)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    const std::size_t header = stream_sizes_.cbHeader;
+    const std::size_t trailer = stream_sizes_.cbTrailer;
+    if (header > limits_.maximum_ciphertext ||
+        plaintext.size() > limits_.maximum_ciphertext - header ||
+        trailer > limits_.maximum_ciphertext - header - plaintext.size())
+      return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+    const std::size_t total = header + plaintext.size() + trailer;
+    auto record = detail::process_buffer::try_allocate(total);
+    if (!record)
+      return ntl::unexpected(record.status());
+    std::memcpy(record->data() + header, plaintext.data(), plaintext.size());
+
+    SecBuffer buffers[4]{};
+    buffers[0] = {static_cast<ULONG>(header), SECBUFFER_STREAM_HEADER,
+                  record->data()};
+    buffers[1] = {static_cast<ULONG>(plaintext.size()), SECBUFFER_DATA,
+                  record->data() + header};
+    buffers[2] = {static_cast<ULONG>(trailer), SECBUFFER_STREAM_TRAILER,
+                  record->data() + header + plaintext.size()};
+    buffers[3].BufferType = SECBUFFER_EMPTY;
+    SecBufferDesc message{SECBUFFER_VERSION, 4, buffers};
+    const SECURITY_STATUS status = SealMessage(&context_, 0, &message, 0);
+    if (status != detail::security_ok)
+      return ntl::unexpected(static_cast<NTSTATUS>(status));
+    const std::size_t ciphertext = buffers[0].cbBuffer +
+                                   buffers[1].cbBuffer +
+                                   buffers[2].cbBuffer;
+    if (ciphertext > total || ciphertext > limits_.maximum_ciphertext)
+      return ntl::unexpected(STATUS_INVALID_BUFFER_SIZE);
+    return owned_bytes::try_copy(
+        std::span<const std::byte>(record->data(), ciphertext),
+        buffer_limits{limits_.maximum_ciphertext}, ntl::pool_tag("eStN"));
+  }
+
+  ntl::result<schannel_decrypt_result>
+  decrypt(std::span<const std::byte> ciphertext) noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL || !handshaken_ ||
+        ciphertext.empty() || ciphertext.size() > limits_.maximum_ciphertext)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    auto input = detail::process_buffer::try_copy(ciphertext);
+    if (!input)
+      return ntl::unexpected(input.status());
+
+    SecBuffer buffers[4]{};
+    buffers[0] = {static_cast<ULONG>(ciphertext.size()), SECBUFFER_DATA,
+                  input->data()};
+    for (std::size_t index = 1; index != RTL_NUMBER_OF(buffers); ++index)
+      buffers[index].BufferType = SECBUFFER_EMPTY;
+    SecBufferDesc message{SECBUFFER_VERSION, 4, buffers};
+    schannel_decrypt_result result;
+    result.security_status = UnsealMessage(&context_, &message, 0, nullptr);
+
+    if (result.security_status == detail::security_incomplete_message) {
+      auto saved = owned_bytes::try_copy(
+          ciphertext, buffer_limits{limits_.maximum_ciphertext},
+          ntl::pool_tag("xStN"));
+      if (!saved)
+        return ntl::unexpected(saved.status());
+      result.extra_ciphertext = std::move(*saved);
+      return ntl::ok(std::move(result));
+    }
+    if (result.security_status != detail::security_ok &&
+        result.security_status != detail::security_renegotiate &&
+        result.security_status != detail::security_context_expired)
+      return ntl::ok(std::move(result));
+
+    // On SEC_I_CONTEXT_EXPIRED Schannel may leave the original input buffer
+    // tagged as SECBUFFER_DATA. It is the encrypted TLS alert record, not
+    // application plaintext, and must never escape through read_some().
+    if (result.security_status != detail::security_context_expired) {
+      if (const SecBuffer *data = detail::find_buffer(
+              buffers, RTL_NUMBER_OF(buffers), SECBUFFER_DATA);
+          data && data->cbBuffer != 0) {
+        auto copied = detail::copy_security_buffer(
+            *data, limits_.maximum_plaintext, ntl::pool_tag("pStN"));
+        if (!copied)
+          return ntl::unexpected(copied.status());
+        result.plaintext = std::move(*copied);
+      }
+    }
+    if (const SecBuffer *extra = detail::find_buffer(
+            buffers, RTL_NUMBER_OF(buffers), SECBUFFER_EXTRA);
+        extra && extra->cbBuffer != 0) {
+      auto copied = detail::copy_security_buffer(
+          *extra, limits_.maximum_ciphertext, ntl::pool_tag("xStN"));
+      if (!copied)
+        return ntl::unexpected(copied.status());
+      result.extra_ciphertext = std::move(*copied);
+    }
+    return ntl::ok(std::move(result));
+  }
+
+  ntl::result<schannel_handshake_result> close_notify() noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL || !handshaken_ ||
+        !credentials_)
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+    auto control_storage = detail::process_buffer::try_allocate(sizeof(ULONG));
+    if (!control_storage)
+      return ntl::unexpected(control_storage.status());
+    const ULONG value = detail::schannel_shutdown;
+    std::memcpy(control_storage->data(), &value, sizeof(value));
+    SecBuffer control{sizeof(ULONG), SECBUFFER_TOKEN,
+                      control_storage->data()};
+    SecBufferDesc control_desc{SECBUFFER_VERSION, 1, &control};
+    const SECURITY_STATUS applied = ApplyControlToken(&context_,
+                                                       &control_desc);
+    if (applied != detail::security_ok)
+      return ntl::unexpected(static_cast<NTSTATUS>(applied));
+    struct closing_scope {
+      bool &value;
+      ~closing_scope() { value = false; }
+    } reset_closing{closing_};
+    closing_ = true;
+    auto result = handshake(credentials_);
+    // Sending close_notify closes the local TLS write side, but the security
+    // context must remain decrypt-capable until tls_stream consumes the peer's
+    // close_notify. reset() owns the eventual context invalidation.
+    return result;
+  }
+
+  bool is_handshaken() const noexcept { return handshaken_; }
+  std::size_t maximum_plaintext_record() const noexcept {
+    return handshaken_ ? stream_sizes_.cbMaximumMessage : 0;
+  }
+  std::string_view negotiated_application_protocol() const noexcept {
+    return {negotiated_application_protocol_.data(),
+            negotiated_application_protocol_size_};
+  }
+
+  ntl::result<schannel_peer_certificate_chain>
+  peer_certificates() noexcept {
+    if (!handshaken_ || !context_valid_)
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+    return schannel_peer_certificate_chain::try_query(context_, limits_);
+  }
+
+  void reset() noexcept {
+    if (context_valid_) {
+      NT_ASSERT(KeGetCurrentIrql() == PASSIVE_LEVEL);
+      (void)DeleteSecurityContext(&context_);
+    }
+    context_valid_ = false;
+    handshaken_ = false;
+    credentials_ = {};
+    target_length_ = 0;
+    application_protocol_size_ = 0;
+    negotiated_application_protocol_size_ = 0;
+    require_application_protocol_ = false;
+    require_client_certificate_ = false;
+    closing_ = false;
+    stream_sizes_ = {};
+    SecInvalidateHandle(&context_);
+  }
+
+private:
+  schannel_limits limits_{};
+  CtxtHandle context_{};
+  SecPkgContext_StreamSizes stream_sizes_{};
+  schannel_credentials credentials_{};
+  schannel_role role_ = schannel_role::client;
+  std::array<wchar_t, 256> target_{};
+  std::array<std::byte, 1024> application_protocol_input_{};
+  std::array<char, 255> negotiated_application_protocol_{};
+  std::size_t target_length_ = 0;
+  std::size_t application_protocol_size_ = 0;
+  std::size_t negotiated_application_protocol_size_ = 0;
+  bool context_valid_ = false;
+  bool handshaken_ = false;
+  bool require_application_protocol_ = false;
+  bool require_client_certificate_ = false;
+  bool closing_ = false;
+};
+
+} // namespace ntl::net::kernel

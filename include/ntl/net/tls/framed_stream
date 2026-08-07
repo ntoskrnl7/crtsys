@@ -19,6 +19,7 @@
 #include <cstddef>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -42,7 +43,8 @@ public:
       tls_stream &stream, Framer framer,
       ntl::net::framing::frame_limits limits = {},
       std::size_t receive_chunk_size = 4096)
-      : stream_(&stream), framer_(std::move(framer)), limits_(limits),
+      : stream_(stream.share_state_for_child()),
+        framer_(std::move(framer)), limits_(limits),
         receive_chunk_size_(receive_chunk_size) {
     if (limits_.maximum_frame_size == 0 || receive_chunk_size_ == 0)
       throw std::invalid_argument(
@@ -150,7 +152,7 @@ public:
             "TLS framed message made no bounded progress");
 
       buffer_.resize(target);
-      const std::size_t received = co_await stream_->read_some(
+      const std::size_t received = co_await stream_->read_some_borrowed(
           std::span<std::byte>(
               buffer_.data() + current, target - current));
       buffer_.resize(current + received);
@@ -222,7 +224,7 @@ private:
       framer_.reset();
   }
 
-  tls_stream *stream_ = nullptr;
+  std::shared_ptr<tls_stream_state> stream_;
   Framer framer_;
   ntl::net::framing::frame_limits limits_{};
   std::size_t receive_chunk_size_ = 4096;

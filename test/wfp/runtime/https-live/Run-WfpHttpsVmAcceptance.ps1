@@ -16,6 +16,9 @@ param(
 
   [string] $GuestRoot = 'C:\crtsys-wfp-https',
 
+  [string] $DisposableGuestSentinelPath =
+      'C:\crtsys-disposable-test-guest.sentinel',
+
   [string] $StagingRoot = '',
 
   [string] $LogRoot = '',
@@ -26,14 +29,13 @@ param(
 
   [switch] $AllowUnavailableRevocation,
 
-  [uri] $BrowserUrl = 'https://example.com/',
+  [Parameter(Mandatory)]
+  [uri] $BrowserUrl,
 
   [ValidateRange(10, 600)]
   [int] $BrowserDurationSeconds = 60,
 
   [switch] $RequireQuicBlockedFallback = $true,
-
-  [switch] $CaptureBrowserNetLog,
 
   [switch] $IncludeManagedHttp3,
 
@@ -44,6 +46,8 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..\..')).Path
+$crashPostcheckScript = Join-Path $PSScriptRoot (
+    '..\..\..\common\Test-VmCrashPostcheck.ps1')
 if ([string]::IsNullOrWhiteSpace($StagingRoot)) {
   $StagingRoot = Join-Path $repoRoot 'artifacts\wfp-https-live-staging'
 }
@@ -72,6 +76,9 @@ if (-not (Test-Path -LiteralPath $VmxPath -PathType Leaf)) {
 }
 if (-not (Test-Path -LiteralPath $StagingRoot -PathType Container)) {
   throw "The HTTPS staging package was not found: $StagingRoot"
+}
+if (-not (Test-Path -LiteralPath $crashPostcheckScript -PathType Leaf)) {
+  throw "The VM crash postcheck script was not found: $crashPostcheckScript"
 }
 if ($BrowserUrl.Scheme -ne 'https') {
   throw 'BrowserUrl must use HTTPS.'
@@ -193,19 +200,21 @@ New-Item -ItemType Directory -Path `$root -Force | Out-Null
 foreach ($file in Get-ChildItem -LiteralPath $StagingRoot -File) {
   Copy-ToGuest $file.FullName (Join-Path $GuestRoot $file.Name)
 }
+Copy-ToGuest $crashPostcheckScript (
+    Join-Path $GuestRoot 'Test-VmCrashPostcheck.ps1')
 
 $hostNameLiteral = ConvertTo-PowerShellLiteral $HostName
 $allowUnavailableRevocationLiteral =
     if ($AllowUnavailableRevocation) { '$true' } else { '$false' }
 $requireQuicBlockedFallbackLiteral =
     if ($RequireQuicBlockedFallback) { '$true' } else { '$false' }
-$captureBrowserNetLogLiteral =
-    if ($CaptureBrowserNetLog) { '$true' } else { '$false' }
 $includeManagedHttp3Literal =
     if ($IncludeManagedHttp3) { '$true' } else { '$false' }
 $skipControlledHostLiteral =
     if ($SkipControlledHost) { '$true' } else { '$false' }
 $browserUrlLiteral = ConvertTo-PowerShellLiteral $BrowserUrl.AbsoluteUri
+$sentinelLiteral =
+    ConvertTo-PowerShellLiteral $DisposableGuestSentinelPath
 $guestLog = Join-Path $GuestRoot 'vm-acceptance.log'
 $guestEvidence = Join-Path $GuestRoot 'vm-acceptance-evidence.zip'
 $guestLogLiteral = ConvertTo-PowerShellLiteral $guestLog
@@ -217,7 +226,20 @@ Set-StrictMode -Version Latest
 `$root = $guestRootLiteral
 `$log = $guestLogLiteral
 `$evidence = Join-Path `$root 'evidence'
-`$started = Get-Date
+`$crashPostcheck = Join-Path `$root 'Test-VmCrashPostcheck.ps1'
+`$eventBaseline = Join-Path `$root 'crash-event-baseline.txt'
+`$dumpBaseline = Join-Path `$root 'crash-dump-baseline.txt'
+`$postcheck = Join-Path `$root 'postcheck.txt'
+`$sentinelPath = $sentinelLiteral
+if (-not (Test-Path -LiteralPath `$sentinelPath -PathType Leaf) -or
+    (Get-Content -LiteralPath `$sentinelPath -Raw).Trim() -cne
+        'CRTSYS_DISPOSABLE_TEST_GUEST') {
+  throw (
+    'The disposable-guest sentinel is missing or invalid. The VM runner ' +
+    'never creates it because that decision belongs to the operator.')
+}
+& `$crashPostcheck -EventBaselinePath `$eventBaseline `
+    -DumpBaselinePath `$dumpBaseline -CaptureBaseline
 `$installed = [Collections.Generic.List[string]]::new()
 function Get-DriverVerifierSnapshot {
   return (@(
@@ -258,6 +280,8 @@ try {
       PackageRoot = `$root
       HostName = $hostNameLiteral
       AllowUnavailableRevocation = $allowUnavailableRevocationLiteral
+      AllowDisposableGuestMutation = `$true
+      DisposableGuestSentinelPath = `$sentinelPath
     }
     & (Join-Path `$root 'Run-WfpHttpsLiveTest.ps1') @controlledHostArguments *>&1 |
         Tee-Object -FilePath (Join-Path `$evidence 'controlled-host.log')
@@ -269,11 +293,8 @@ try {
     LogDirectory = Join-Path `$root 'browser-log'
     DurationSeconds = $BrowserDurationSeconds
     RequireQuicBlockedFallback = $requireQuicBlockedFallbackLiteral
-  }
-  if ($captureBrowserNetLogLiteral -or
-      $requireQuicBlockedFallbackLiteral) {
-    `$browserArguments.NetLogPath =
-        Join-Path `$root 'browser-log\edge-netlog.json'
+    AllowDisposableGuestMutation = `$true
+    DisposableGuestSentinelPath = `$sentinelPath
   }
   & (Join-Path `$root 'Start-WfpBrowserHttpsInspection.ps1') @browserArguments *>&1 |
       Tee-Object -FilePath (Join-Path `$evidence 'browser-run.log')
@@ -310,21 +331,15 @@ try {
     throw 'A temporary WFP driver service remained after the tests.'
   }
 
-  `$events = @(Get-WinEvent -FilterHashtable @{
-    LogName='System'; StartTime=`$started
-  } -ErrorAction SilentlyContinue | Where-Object Id -in @(41,1001,6008))
-  `$dumps = @()
-  if (Test-Path -LiteralPath 'C:\Windows\Minidump') {
-    `$dumps += Get-ChildItem -LiteralPath 'C:\Windows\Minidump' -Filter '*.dmp' -File |
-        Where-Object LastWriteTime -ge `$started
+  & `$crashPostcheck -EventBaselinePath `$eventBaseline `
+      -DumpBaselinePath `$dumpBaseline -OutputPath `$postcheck
+  `$postcheckText = Get-Content -LiteralPath `$postcheck -Raw
+  if (`$postcheckText -notmatch 'EVENT_COUNT=0' -or
+      `$postcheckText -notmatch 'DUMP_COUNT=0' -or
+      `$postcheckText -notmatch 'EVENT_LOG_RESET=0') {
+    throw "Crash postcheck failed: `$postcheckText"
   }
-  if (Test-Path -LiteralPath 'C:\Windows\MEMORY.DMP') {
-    `$dump = Get-Item -LiteralPath 'C:\Windows\MEMORY.DMP'
-    if (`$dump.LastWriteTime -ge `$started) { `$dumps += `$dump }
-  }
-  if (`$events.Count -ne 0 -or `$dumps.Count -ne 0) {
-    throw "Crash postcheck failed: events=`$(`$events.Count), dumps=`$(`$dumps.Count)"
-  }
+  Copy-Item -LiteralPath `$postcheck -Destination `$evidence -Force
   `$verifierAfter = Get-DriverVerifierSnapshot
   if (`$verifierAfter -cne `$verifierBefore) {
     throw 'Driver Verifier settings changed during HTTPS acceptance.'

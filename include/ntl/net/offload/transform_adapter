@@ -1,0 +1,95 @@
+/**
+ * @file offload_transform_adapter
+ * @brief Explicit offload stage for ntl::net::borrowed_transform_pipeline.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include <ntl/net/offload/backend>
+#include <ntl/net/transform_pipeline>
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#include <ntl/irql>
+#endif
+
+#include <atomic>
+#include <cstdint>
+#include <limits>
+#include <memory>
+#include <utility>
+
+namespace ntl::net::offload {
+
+class transform_adapter {
+public:
+  explicit transform_adapter(
+      std::shared_ptr<backend> implementation,
+      operation kind = operation::transform_content,
+      std::uint32_t timeout_milliseconds = 30'000,
+      inspection::failure_policy failure =
+          inspection::failure_policy::fail_closed) noexcept
+      : implementation_(std::move(implementation)), kind_(kind),
+        timeout_milliseconds_(timeout_milliseconds), failure_(failure) {}
+
+  transform_adapter(const transform_adapter &) = delete;
+  transform_adapter &operator=(const transform_adapter &) = delete;
+
+  borrowed_rewrite_stage stage() noexcept {
+    return {&transform_adapter::invoke, this, execution_path::offloaded};
+  }
+
+  inspection::failure_policy failure_policy() const noexcept {
+    return failure_;
+  }
+
+private:
+  static ntl::result<std::size_t>
+  invoke(void *context, const transform_context &metadata,
+         inspection::content_view input,
+         std::span<std::byte> output) noexcept {
+    auto &self = *static_cast<transform_adapter *>(context);
+    if (!self.implementation_ || input.size() >
+                                     (std::numeric_limits<std::uint32_t>::max)() ||
+        output.size() >
+            (std::numeric_limits<std::uint32_t>::max)() ||
+        self.timeout_milliseconds_ == 0)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+    if (ntl::current_irql() != ntl::irql::passive)
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+#endif
+
+    std::uint64_t request_id =
+        self.next_request_id_.fetch_add(1, std::memory_order_relaxed);
+    if (request_id == 0)
+      request_id =
+          self.next_request_id_.fetch_add(1, std::memory_order_relaxed);
+    const auto request = make_request(
+        self.kind_, request_id, metadata.network, metadata.protocol_features,
+        input.size(), output.size(), self.timeout_milliseconds_, self.failure_);
+    if (!request)
+      return ntl::unexpected(request.status());
+    response_header response{};
+    const ntl::status executed = self.implementation_->execute(
+        *request, input.bytes(), output, response);
+    if (!executed.is_ok())
+      return ntl::unexpected(executed);
+    if (!NT_SUCCESS(response.completion_status))
+      return ntl::unexpected(response.completion_status);
+    if (response.verdict != inspection::verdict::permit)
+      return ntl::unexpected(
+          response.verdict == inspection::verdict::drop_flow
+              ? STATUS_CONNECTION_DISCONNECTED
+              : STATUS_ACCESS_DENIED);
+    return ntl::ok(static_cast<std::size_t>(response.output_size));
+  }
+
+  std::shared_ptr<backend> implementation_;
+  operation kind_ = operation::transform_content;
+  std::uint32_t timeout_milliseconds_ = 30'000;
+  inspection::failure_policy failure_ =
+      inspection::failure_policy::fail_closed;
+  std::atomic<std::uint64_t> next_request_id_{1};
+};
+
+} // namespace ntl::net::offload

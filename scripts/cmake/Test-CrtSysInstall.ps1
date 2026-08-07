@@ -75,7 +75,10 @@ function Invoke-CrtSysConsumerBuild {
 
   Write-Host "Building $Label"
   & cmake --build $BuildDirectory --config $Configuration --target `
-      crtsys_install_consumer crtsys_http_transform_consumer --parallel
+      crtsys_install_consumer `
+      crtsys_install_kernel_msquic_consumer `
+      crtsys_http_transform_consumer `
+      --parallel
   if ($LASTEXITCODE -ne 0) {
     throw "$Label build failed with exit code $LASTEXITCODE."
   }
@@ -83,6 +86,11 @@ function Invoke-CrtSysConsumerBuild {
   $driverPath = Join-Path $BuildDirectory "$Configuration\crtsys_install_consumer.sys"
   if (-not (Test-Path $driverPath)) {
     throw "$Label driver was not produced: $driverPath"
+  }
+  $kernelMsQuicDriverPath = Join-Path $BuildDirectory (
+      "$Configuration\crtsys_install_kernel_msquic_consumer.sys")
+  if (-not (Test-Path $kernelMsQuicDriverPath)) {
+    throw "$Label kernel MsQuic WFP driver was not produced: $kernelMsQuicDriverPath"
   }
   $httpTransformPath = Join-Path $BuildDirectory (
       "$Configuration\crtsys_http_transform_consumer.exe")
@@ -94,7 +102,7 @@ function Invoke-CrtSysConsumerBuild {
     throw "$Label HTTP transform consumer failed with exit code $LASTEXITCODE."
   }
 
-  Write-Host "$Label passed: $driverPath; $httpTransformPath"
+  Write-Host "$Label passed: $driverPath; $kernelMsQuicDriverPath; $httpTransformPath"
 }
 
 $configureArgs = @(
@@ -130,6 +138,8 @@ if ($LASTEXITCODE -ne 0) {
 
 foreach ($requiredPath in @(
   "include\ntl\driver",
+  "include\ntl\net\borrowed_bounded_writer",
+  "include\ntl\net\borrowed_memory_resource",
   "include\ntl\net\inspection\standard_content_decoders",
   "include\ntl\net\inspection\standard_content_encoders",
   "include\ntl\net\inspection\content_encoder",
@@ -137,8 +147,24 @@ foreach ($requiredPath in @(
   "include\ntl\net\inspection\content_encoder_zlib",
   "include\ntl\net\inspection\content_stream",
   "include\ntl\net\websocket\permessage_deflate",
+  "include\ntl\net\kernel\all",
+  "include\ntl\net\kernel\executor",
+  "include\ntl\net\kernel\started_task",
+  "include\ntl\net\kernel\workspace_pool",
+  "include\ntl\net\kernel\http1_proxy_session",
+  "include\ntl\net\kernel\http2_proxy_session",
+  "include\ntl\net\user\task",
+  "include\ntl\net\user\redirected_tls_session",
+  "include\ntl\net\user\redirected_tls_inspection",
   "include\ntl\net\http\http1_transform",
   "include\ntl\net\http\http1_stream_transform",
+  "include\ntl\net\http\http1_proxy_connection",
+  "include\ntl\net\http\authority",
+  "include\ntl\net\http\http1_proxy_types",
+  "include\ntl\net\http\inspection_context_view",
+  "include\ntl\net\http\inspection_conditions",
+  "include\ntl\net\http\decision_policy",
+  "include\ntl\net\http\inspection_policy",
   "include\ntl\net\http\async_transform",
   "include\ntl\net\http\stream_transform",
   "include\ntl\net\http\transform",
@@ -146,9 +172,19 @@ foreach ($requiredPath in @(
   "include\ntl\net\grpc\transform",
   "include\ntl\net\http2\transform",
   "include\ntl\net\http2\stream_transform",
+  "include\ntl\net\http2\flow_control",
+  "include\ntl\net\http2\proxy_connection",
+  "include\ntl\net\http2\proxy_session",
+  "include\ntl\net\http2\websocket_tunnel",
+  "include\ntl\net\http3\async_origin_pool",
   "include\ntl\net\http3\backend",
   "include\ntl\net\http3\inspection_proxy",
+  "include\ntl\net\http3\msquic_backend",
+  "include\ntl\net\http3\msquic_runtime",
+  "include\ntl\net\http3\msquic_server",
+  "include\ntl\net\http3\proxy_connection",
   "include\ntl\net\http3\qpack",
+  "include\ntl\net\http3\qpack_core",
   "include\ntl\net\http3\standard_inspection_proxy",
   "include\ntl\net\http3\stream_transform",
   "include\ntl\net\http3\webtransport_transform",
@@ -166,6 +202,7 @@ foreach ($requiredPath in @(
   "share\crtsys\cmake\crtsys-config.cmake",
   "share\crtsys\cmake\CrtSys.cmake",
   "share\crtsys\cmake\NtlContentCodecs.cmake",
+  "share\crtsys\cmake\NtlMsQuic.cmake",
   "lib\native\v143\$Architecture\$Configuration\crtsys.lib",
   "lib\native\v143\$Architecture\$Configuration\Ldk.lib"
 )) {

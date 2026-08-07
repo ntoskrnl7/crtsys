@@ -1,0 +1,85 @@
+/**
+ * @file kernel_net_all
+ * @brief Supported NTL networking surface for kernel-mode consumers.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/net/kernel/all is a kernel-mode header"
+#endif
+
+#include <ntl/net/borrowed_bounded_writer>
+#include <ntl/net/borrowed_memory_resource>
+#include <ntl/net/buffer/owned_bytes>
+#include <ntl/net/buffer/scatter_view>
+#include <ntl/net/executor>
+#include <ntl/net/framing>
+#include <ntl/net/grpc/framing>
+#include <ntl/net/grpc/transform>
+#include <ntl/net/http/datagram>
+#include <ntl/net/http/decision_policy>
+#include <ntl/net/http/extended_connect>
+#include <ntl/net/http/http1_framing>
+#include <ntl/net/http/http1_transform>
+#include <ntl/net/http/http1_stream_transform>
+#include <ntl/net/http/inspection_context_view>
+#include <ntl/net/http/inspection_conditions>
+#include <ntl/net/http/inspection_policy>
+#include <ntl/net/http/stream_transform>
+#include <ntl/net/http/transform>
+#include <ntl/net/http2/framing>
+#include <ntl/net/http2/hpack>
+#include <ntl/net/http2/proxy_connection>
+#include <ntl/net/http2/stream_transform>
+#include <ntl/net/http2/transform>
+#include <ntl/net/http2/websocket_tunnel>
+#include <ntl/net/http3/framing>
+#include <ntl/net/http3/inspection_proxy>
+#include <ntl/net/http3/backend>
+#include <ntl/net/http3/qpack>
+#include <ntl/net/http3/qpack_core>
+#include <ntl/net/http3/stream_transform>
+#include <ntl/net/http3/webtransport>
+#include <ntl/net/http3/webtransport_session>
+#include <ntl/net/http3/webtransport_transform>
+#include <ntl/net/inspection/core>
+#include <ntl/net/io/async_byte_stream>
+#include <ntl/net/io/async_transport_stream>
+#include <ntl/net/io/transport>
+#include <ntl/net/kernel/executor>
+#include <ntl/net/kernel/continuation>
+#include <ntl/net/kernel/http3_origin_pool>
+#include <ntl/net/kernel/http1_proxy_session>
+#include <ntl/net/kernel/bidirectional_join>
+#include <ntl/net/kernel/bounded_wait_set>
+#include <ntl/net/kernel/http2_proxy_session>
+#include <ntl/net/kernel/redirected_tls_inspection>
+#include <ntl/net/kernel/redirected_tls_session>
+#include <ntl/net/kernel/schannel>
+#include <ntl/net/kernel/started_task>
+#include <ntl/net/kernel/task>
+#include <ntl/net/kernel/waitable_task>
+#include <ntl/net/kernel/tls_stream>
+#include <ntl/net/kernel/tls_client_hello>
+#include <ntl/net/kernel/wsk_transport>
+#include <ntl/net/kernel/wsk_datagram>
+#include <ntl/net/kernel/wsk_datagram_relay>
+#include <ntl/net/kernel/workspace_pool>
+#include <ntl/net/kernel/x509>
+#include <ntl/net/offload/backend>
+#include <ntl/net/offload/async_backend>
+#include <ntl/net/offload/inspect_adapter>
+#include <ntl/net/offload/protocol>
+#include <ntl/net/offload/transform_adapter>
+#include <ntl/net/quic/transport>
+#include <ntl/net/quic/borrowed_callback_transport>
+#include <ntl/net/runtime>
+#include <ntl/net/tls/client_hello_parser>
+#include <ntl/net/tls/inspection_policy>
+#include <ntl/net/tls/product_policy>
+#include <ntl/net/transform_pipeline>
+#include <ntl/net/websocket/framing>
+#include <ntl/net/websocket/permessage_deflate>
+#include <ntl/net/websocket/transform>

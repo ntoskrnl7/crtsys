@@ -77,6 +77,10 @@ For a WFP callout driver, keep the WDK project type as WDM and set
 NTDDI contract; it links `fwpkclnt.lib` and selects the `ntl::main` entry
 wrapper. Packet-processing projects that directly call NDIS routines must
 still add `ndis.lib` for those routines.
+If the driver uses the kernel MsQuic NMR backend, also enable
+**NTL kernel MsQuic backend** on the same page. That one switch selects the
+pinned public ABI, Windows 10 version-2004 contract, and `netio.lib`; it does
+not install a runtime provider.
 
 ![Visual Studio selecting the crtsys NTL WFP entry point and implementing ntl::main](./assets/visual-studio-ntl-wfp-entrypoint.gif)
 
@@ -134,6 +138,12 @@ libraries, and the startup object for the selected driver model.
 | NTL minifilter | `<CrtSysWdmEntryPoint>NtlMinifilter</CrtSysWdmEntryPoint>` | `ntl::flt::main` |
 | NTL WFP callout | `<CrtSysWdmEntryPoint>NtlWfp</CrtSysWdmEntryPoint>` | `ntl::main` |
 | Export driver | WDK `ExportDriver` + no crtsys entry selection | WDK export-driver entry model |
+
+`CrtSysUseNtlKernelMsQuic` is an independent, opt-in driver capability rather
+than another entry-point shape. Enable it only for a driver that consumes the
+kernel MsQuic NMR backend; the package then selects the pinned ABI, Windows 10
+version 2004 contract, and `netio.lib` while leaving provider deployment to the
+product.
 
 The NTL KMDF entry is optional. In both KMDF modes WDF retains its normal PnP,
 power, queue, request, object-lifetime, and dispatch ownership.

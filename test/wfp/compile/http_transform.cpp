@@ -12,17 +12,30 @@
 #include <vector>
 
 #include <ntl/net/http/http1_transform>
+#include <ntl/net/borrowed_memory_resource>
 #include <ntl/net/http/http1_stream_transform>
 #include <ntl/net/http/async_transform>
+#include <ntl/net/http/inspection_resource_profile>
 #include <ntl/net/http/stream_transform>
 #include <ntl/net/http/transform>
 #include <ntl/net/http2/transform>
+#include <ntl/net/http2/flow_control>
+#include <ntl/net/http2/proxy_connection>
 #include <ntl/net/http2/stream_transform>
 #include <ntl/net/http3/stream_transform>
 #include <ntl/net/inspection/standard_content_decoders>
 #include <ntl/net/inspection/standard_content_encoders>
 
 namespace {
+
+static_assert(ntl::net::http::inspection_resource_profile{}.valid());
+static_assert([] {
+  auto profile = ntl::net::http::inspection_resource_profile{};
+  profile.http1_workspace_budget =
+      profile.http1.maximum_wire_message_size - 1;
+  return profile.validate() == ntl::net::http::inspection_resource_error::
+                                   http1_workspace_budget_too_small;
+}());
 
 template <class T> class blocking_task {
 public:
@@ -55,10 +68,28 @@ private:
 };
 
 blocking_task<ntl::net::http::pipeline_outcome> apply_async(
-    ntl::net::http::async_transform_pipeline &pipeline,
+    ntl::net::http::async_transform_runtime &pipeline,
     ntl::net::http::request_message &message,
     std::stop_token cancellation = {}) {
-  co_return co_await pipeline.apply(message, cancellation);
+  co_return co_await pipeline.apply_borrowed(message, cancellation);
+}
+
+blocking_task<ntl::net::http::async_transform_result<
+    ntl::net::http::request_message>>
+apply_async_owned(
+    ntl::net::http::async_transform_runtime &pipeline,
+    ntl::net::http::request_message message) {
+  co_return co_await pipeline.apply(std::move(message));
+}
+
+blocking_task<bool> wait_for_send_window_owner_close(
+    ntl::net::http2::send_window &window) {
+  try {
+    co_await window.reserve(1, 1);
+    co_return false;
+  } catch (const std::runtime_error &) {
+    co_return true;
+  }
 }
 
 std::vector<std::byte> bytes(std::string_view value) {
@@ -361,7 +392,8 @@ bool test_http1_backend() {
       "Content-Length: 0\r\n\r\n");
   auto transformed_request =
       ntl::net::http::transform_http1_request(
-          request_wire, pipeline, decoders, encoders);
+          request_wire, pipeline, decoders, encoders,
+          {.origin_scheme = "https"});
   if (!transformed_request ||
       transformed_request->message.authority != "example.test" ||
       text(transformed_request->wire).find(
@@ -544,13 +576,14 @@ bool test_http2_connection_transformer() {
             std::move(rewritten));
       });
 
-  ntl::net::http2::exchange_store exchanges;
+  auto exchanges = std::make_shared<ntl::net::http2::exchange_store>();
   ntl::net::http2::connection_transformer requests(
       ntl::net::http2::connection_direction::requests,
       exchanges, pipeline, decoders, encoders, 7);
   ntl::net::http2::connection_transformer responses(
       ntl::net::http2::connection_direction::responses,
       exchanges, pipeline, decoders, encoders, 11);
+  exchanges.reset();
 
   auto semantic_request = request();
   semantic_request.headers.set("content-length", "0");
@@ -646,7 +679,8 @@ bool test_http2_connection_transformer() {
       [](const ntl::net::http::request_message &) {
         return ntl::net::inspection::verdict::block;
       });
-  ntl::net::http2::exchange_store blocked_exchanges;
+  auto blocked_exchanges =
+      std::make_shared<ntl::net::http2::exchange_store>();
   ntl::net::http2::connection_transformer blocker(
       ntl::net::http2::connection_direction::requests,
       blocked_exchanges, blocking, decoders, encoders);
@@ -675,11 +709,197 @@ bool test_http2_connection_transformer() {
   return true;
 }
 
+bool test_http1_request_target_and_transfer_coding() {
+  ntl::net::inspection::content_decoder_registry decoders;
+  ntl::net::inspection::content_encoder_registry encoders;
+  ntl::net::http::transform_pipeline pipeline;
+
+  const auto origin = ntl::net::http::parse_http1_request(
+      bytes("GET /items?q=1 HTTP/1.1\r\nHost: example.test\r\n\r\n"),
+      decoders, {.origin_scheme = "http"});
+  if (!origin || origin->message.scheme != "http" ||
+      origin->message.authority != "example.test" ||
+      origin->message.path != "/items?q=1")
+    return false;
+
+  const auto absolute_wire = bytes(
+      "GET https://Example.Test:443/items?q=1 HTTP/1.1\r\n"
+      "Host: example.test:443\r\n\r\n");
+  const auto absolute = ntl::net::http::transform_http1_request(
+      absolute_wire, pipeline, decoders, encoders,
+      {.origin_scheme = "https"});
+  if (!absolute || !absolute->absolute_form ||
+      absolute->message.scheme != "https" ||
+      absolute->message.authority != "Example.Test:443" ||
+      absolute->message.path != "/items?q=1" ||
+      !text(absolute->wire).starts_with("GET /items?q=1 HTTP/1.1\r\n"))
+    return false;
+
+  const auto duplicate_host = ntl::net::http::parse_http1_request(
+      bytes("GET / HTTP/1.1\r\nHost: one.test\r\nHost: two.test\r\n\r\n"),
+      decoders, {.origin_scheme = "https"});
+  const auto mismatched_authority = ntl::net::http::parse_http1_request(
+      bytes("GET https://one.test/ HTTP/1.1\r\nHost: two.test\r\n\r\n"),
+      decoders, {.origin_scheme = "https"});
+  const auto mismatched_scheme = ntl::net::http::parse_http1_request(
+      bytes("GET http://example.test/ HTTP/1.1\r\nHost: example.test\r\n\r\n"),
+      decoders, {.origin_scheme = "https"});
+  const auto missing_transport_scheme = ntl::net::http::parse_http1_request(
+      bytes("GET / HTTP/1.1\r\nHost: example.test\r\n\r\n"), decoders,
+      {.origin_scheme = {}});
+  if (duplicate_host || mismatched_authority || mismatched_scheme ||
+      missing_transport_scheme)
+    return false;
+
+  const auto unsupported_request_coding =
+      ntl::net::http::parse_http1_request(
+          bytes("POST / HTTP/1.1\r\nHost: example.test\r\n"
+                "Transfer-Encoding: gzip, chunked\r\n\r\n"
+                "1\r\nx\r\n0\r\n\r\n"),
+          decoders, {.origin_scheme = "https"});
+  const auto unsupported_response_coding =
+      ntl::net::http::parse_http1_response(
+          bytes("HTTP/1.1 200 OK\r\n"
+                "Transfer-Encoding: gzip, chunked\r\n\r\n"
+                "1\r\nx\r\n0\r\n\r\n"),
+          decoders);
+  return !unsupported_request_coding &&
+         unsupported_request_coding.status() == STATUS_NOT_SUPPORTED &&
+         !unsupported_response_coding &&
+         unsupported_response_coding.status() == STATUS_NOT_SUPPORTED;
+}
+
+bool test_http2_extended_connect_transformer() {
+  ntl::net::inspection::content_decoder_registry decoders;
+  ntl::net::inspection::content_encoder_registry encoders;
+  ntl::net::http::transform_pipeline pipeline;
+  auto exchanges = std::make_shared<ntl::net::http2::exchange_store>();
+  exchanges->peer_extended_connect_enabled(true);
+  ntl::net::http2::connection_transformer requests(
+      ntl::net::http2::connection_direction::requests,
+      exchanges, pipeline, decoders, encoders);
+  ntl::net::http2::connection_transformer responses(
+      ntl::net::http2::connection_direction::responses,
+      exchanges, pipeline, decoders, encoders);
+
+  ntl::net::http::request_message connect;
+  connect.wire_protocol = ntl::net::http::protocol::http2;
+  connect.method = "CONNECT";
+  connect.scheme = "https";
+  connect.authority = "example.test";
+  connect.path = "/chat";
+  connect.extended_protocol = "websocket";
+  connect.headers.append("origin", "https://example.test");
+  auto opening = ntl::net::http2::encode_request_frames(
+      7, connect, {}, 16 * 1024, 256 * 1024, false);
+  if (!opening)
+    return false;
+  ntl::net::http2::connection_transform_result opened_request;
+  for (const auto &encoded : *opening) {
+    auto frame = ntl::net::http2::frame_view::parse(
+        ntl::net::scatter_view::from_contiguous(encoded.wire));
+    if (!frame || frame->header().end_stream())
+      return false;
+    auto transformed = requests.consume(*frame);
+    if (!transformed)
+      return false;
+    if (transformed->message_complete)
+      opened_request = std::move(*transformed);
+  }
+  if (!opened_request.message_complete ||
+      !opened_request.request || opened_request.forward.empty() ||
+      exchanges->is_connect_admitted(7) ||
+      !exchanges->admit_connect(
+           7, ntl::net::http2::connect_disposition::inspect)
+           .is_ok() ||
+      !exchanges->is_connect_admitted(7))
+    return false;
+
+  std::vector<ntl::net::http2::outbound_frame> request_data;
+  if (!ntl::net::http2::transform_detail::append_data_frames(
+           request_data, 7, bytes("client tunnel"), false,
+           16 * 1024)
+           .is_ok())
+    return false;
+  auto request_data_frame = ntl::net::http2::frame_view::parse(
+      ntl::net::scatter_view::from_contiguous(
+          request_data.front().wire));
+  if (!request_data_frame)
+    return false;
+  auto request_passthrough = requests.consume(*request_data_frame);
+  if (!request_passthrough || request_passthrough->consumed)
+    return false;
+
+  // A tunnel DATA frame is still governed by both peer send windows. Tiny
+  // asymmetric windows exercise the exact path that an opaque passthrough
+  // adapter must reserve before writing in each direction.
+  ntl::net::http2::send_window client_to_origin_window(2, 2);
+  const auto request_credit = static_cast<std::uint32_t>(
+      request_data_frame->header().payload_size);
+  if (client_to_origin_window.try_reserve(7, request_credit) ||
+      !client_to_origin_window.update(0, request_credit - 2) ||
+      !client_to_origin_window.update(7, request_credit - 2) ||
+      !client_to_origin_window.try_reserve(7, request_credit))
+    return false;
+
+  ntl::net::http::response_message accepted;
+  accepted.wire_protocol = ntl::net::http::protocol::http2;
+  accepted.status = 200;
+  auto response_opening = ntl::net::http2::encode_response_frames(
+      7, accepted, {}, 16 * 1024, 256 * 1024, true, false);
+  if (!response_opening)
+    return false;
+  ntl::net::http2::connection_transform_result opened_response;
+  for (const auto &encoded : *response_opening) {
+    auto frame = ntl::net::http2::frame_view::parse(
+        ntl::net::scatter_view::from_contiguous(encoded.wire));
+    if (!frame || frame->header().end_stream())
+      return false;
+    auto transformed = responses.consume(*frame);
+    if (!transformed)
+      return false;
+    if (transformed->message_complete)
+      opened_response = std::move(*transformed);
+  }
+  if (!opened_response.message_complete ||
+      !opened_response.response || opened_response.forward.empty() ||
+      !exchanges->is_tunnel(7))
+    return false;
+
+  std::vector<ntl::net::http2::outbound_frame> response_data;
+  if (!ntl::net::http2::transform_detail::append_data_frames(
+           response_data, 7, bytes("server tunnel"), true,
+           16 * 1024)
+           .is_ok())
+    return false;
+  auto response_data_frame = ntl::net::http2::frame_view::parse(
+      ntl::net::scatter_view::from_contiguous(
+          response_data.front().wire));
+  if (!response_data_frame)
+    return false;
+  ntl::net::http2::send_window origin_to_client_window(1, 3);
+  const auto response_credit = static_cast<std::uint32_t>(
+      response_data_frame->header().payload_size);
+  if (origin_to_client_window.try_reserve(7, response_credit) ||
+      !origin_to_client_window.update(0, response_credit - 1) ||
+      !origin_to_client_window.update(7, response_credit - 3) ||
+      !origin_to_client_window.try_reserve(7, response_credit))
+    return false;
+  auto response_passthrough = responses.consume(*response_data_frame);
+  if (!response_passthrough || response_passthrough->consumed ||
+      !exchanges->is_tunnel(7))
+    return false;
+  // The session releases state only after this final DATA frame has been
+  // transformed and written; the transformer cannot erase it beforehand.
+  exchanges->erase(7);
+  return !exchanges->is_tunnel(7);
+}
+
 bool test_stream_transform() {
   using namespace ntl::net::http;
   stream_transform_pipeline pipeline;
   pipeline.chunks().transform(
-      [](const stream_message_context &, const stream_chunk &chunk) {
+      [](const stream_message_context_view &, const stream_chunk_view &chunk) {
         std::vector<std::byte> replacement(
             chunk.bytes.begin(), chunk.bytes.end());
         for (auto &value : replacement) {
@@ -740,10 +960,10 @@ bool test_stateful_stream_transform() {
   using namespace ntl::net::http;
   stream_transform_pipeline pipeline;
   pipeline.chunks().transform_session(
-      [](const stream_message_context &) {
+      [](const stream_message_context_view &) {
         return [expected_offset = std::uint64_t{0}](
-                   const stream_message_context &,
-                   const stream_chunk &chunk) mutable {
+                   const stream_message_context_view &,
+                   const stream_chunk_view &chunk) mutable {
           if (chunk.input_offset != expected_offset)
             return stream_rewrite_result::block();
           expected_offset += chunk.bytes.size();
@@ -796,7 +1016,7 @@ bool test_http1_streaming_message_transformer() {
   stream_limits.maximum_content_expansion_ratio = 2048;
   stream_transform_pipeline pipeline(stream_limits);
   pipeline.chunks().transform(
-      [](const stream_message_context &, const stream_chunk &chunk) {
+      [](const stream_message_context_view &, const stream_chunk_view &chunk) {
         std::vector<std::byte> output(chunk.bytes.begin(), chunk.bytes.end());
         for (auto &value : output) {
           const auto character = std::to_integer<unsigned char>(value);
@@ -841,6 +1061,7 @@ bool test_http1_streaming_message_transformer() {
     head += "\r\n";
     http1_streaming_message_transformer transformer(
         http1_request_stream, pipeline, decoders, encoders,
+        {.origin_scheme = "https"},
         {.maximum_encoded_body_bytes = 256 * 1024,
          .maximum_decoded_body_bytes = 256 * 1024,
          .maximum_expansion_ratio = 2048},
@@ -876,7 +1097,7 @@ bool test_http1_streaming_message_transformer() {
       offset += count;
     }
     auto parsed = parse_http1_request(
-        output, decoders,
+        output, decoders, {.origin_scheme = "https"},
         {.maximum_encoded_body_bytes = 256 * 1024,
          .maximum_decoded_body_bytes = 256 * 1024,
          .maximum_expansion_ratio = 2048});
@@ -915,6 +1136,7 @@ bool test_http1_streaming_message_transformer() {
 
     http1_streaming_message_transformer transformer(
         http1_request_stream, pipeline, decoders, encoders,
+        {.origin_scheme = "https"},
         {.maximum_encoded_body_bytes = 256 * 1024,
          .maximum_decoded_body_bytes = 256 * 1024,
          .maximum_expansion_ratio = 2048},
@@ -941,7 +1163,7 @@ bool test_http1_streaming_message_transformer() {
       offset += count;
     }
     auto parsed = parse_http1_request(
-        output, decoders,
+        output, decoders, {.origin_scheme = "https"},
         {.maximum_encoded_body_bytes = 256 * 1024,
          .maximum_decoded_body_bytes = 256 * 1024,
          .maximum_expansion_ratio = 2048});
@@ -1008,6 +1230,7 @@ bool test_http1_streaming_message_transformer() {
   const auto truncated_fixed = [&] {
     http1_streaming_message_transformer transformer(
         http1_request_stream, pipeline, decoders, encoders,
+        {.origin_scheme = "https"},
         {.maximum_encoded_body_bytes = 256 * 1024,
          .maximum_decoded_body_bytes = 256 * 1024,
          .maximum_expansion_ratio = 2048},
@@ -1022,6 +1245,7 @@ bool test_http1_streaming_message_transformer() {
   const auto truncated_chunked = [&] {
     http1_streaming_message_transformer transformer(
         http1_request_stream, pipeline, decoders, encoders,
+        {.origin_scheme = "https"},
         {.maximum_encoded_body_bytes = 256 * 1024,
          .maximum_decoded_body_bytes = 256 * 1024,
          .maximum_expansion_ratio = 2048},
@@ -1033,19 +1257,55 @@ bool test_http1_streaming_message_transformer() {
         true);
     return !result && result.status() == STATUS_DATA_ERROR;
   }();
+  const auto rejected_head = [&](std::string_view wire,
+                                 NTSTATUS expected_status) {
+    http1_streaming_message_transformer transformer(
+        http1_request_stream, pipeline, decoders, encoders,
+        {.origin_scheme = "https"});
+    const auto result = transformer.consume(bytes(wire), true);
+    return !result && result.status() == expected_status;
+  };
+  const bool duplicate_host = rejected_head(
+      "GET / HTTP/1.1\r\nHost: one.test\r\nHost: two.test\r\n\r\n",
+      STATUS_DATA_ERROR);
+  const bool unsupported_transfer = rejected_head(
+      "POST / HTTP/1.1\r\nHost: example.test\r\n"
+      "Transfer-Encoding: gzip, chunked\r\n\r\n"
+      "1\r\nx\r\n0\r\n\r\n",
+      STATUS_NOT_SUPPORTED);
+  const auto absolute_form = [&] {
+    http1_streaming_message_transformer transformer(
+        http1_request_stream, pipeline, decoders, encoders,
+        {.origin_scheme = "https"});
+    const auto result = transformer.consume(
+        bytes("POST https://Example.Test:443/upload?q=1 HTTP/1.1\r\n"
+              "Host: example.test:443\r\nContent-Length: 1\r\n\r\nx"),
+        true);
+    return result && result->request &&
+           result->request->scheme == "https" &&
+           result->request->authority == "Example.Test:443" &&
+           result->request->path == "/upload?q=1" &&
+           text(result->wire).starts_with(
+               "POST /upload?q=1 HTTP/1.1\r\n");
+  }();
   if (!fixed_identity || !fixed_gzip || !fixed_br ||
       !chunked_gzip || !close_br || !truncated_fixed ||
-      !truncated_chunked)
+      !truncated_chunked || !duplicate_host || !unsupported_transfer ||
+      !absolute_form)
     std::cerr << "http1 stream fixed=" << fixed_identity
               << " gzip=" << fixed_gzip
               << " br=" << fixed_br
               << " chunked=" << chunked_gzip
               << " close=" << close_br
               << " truncated-fixed=" << truncated_fixed
-              << " truncated-chunked=" << truncated_chunked << '\n';
+              << " truncated-chunked=" << truncated_chunked
+              << " duplicate-host=" << duplicate_host
+              << " unsupported-transfer=" << unsupported_transfer
+              << " absolute-form=" << absolute_form << '\n';
   return fixed_identity && fixed_gzip && fixed_br &&
          chunked_gzip && close_br && truncated_fixed &&
-         truncated_chunked;
+         truncated_chunked && duplicate_host && unsupported_transfer &&
+         absolute_form;
 }
 
 bool test_http2_streaming_connection_transformer() {
@@ -1063,7 +1323,7 @@ bool test_http2_streaming_connection_transformer() {
   stream_limits.maximum_content_expansion_ratio = 2048;
   stream_transform_pipeline pipeline(stream_limits);
   pipeline.chunks().transform(
-      [](const stream_message_context &, const stream_chunk &chunk) {
+      [](const stream_message_context_view &, const stream_chunk_view &chunk) {
         std::vector<std::byte> output(
             chunk.bytes.begin(), chunk.bytes.end());
         for (auto &value : output) {
@@ -1105,7 +1365,7 @@ bool test_http2_streaming_connection_transformer() {
     if (!frames)
       return false;
 
-    ntl::net::http2::exchange_store exchanges;
+    auto exchanges = std::make_shared<ntl::net::http2::exchange_store>();
     ntl::net::http2::streaming_connection_transformer transformer(
         ntl::net::http2::connection_direction::requests,
         exchanges, pipeline, decoders, encoders, {}, 7);
@@ -1180,7 +1440,8 @@ bool test_http2_streaming_connection_transformer() {
       3, with_trailer, with_trailer.body, 16);
   if (!frames)
     return false;
-  ntl::net::http2::exchange_store trailer_exchanges;
+  auto trailer_exchanges =
+      std::make_shared<ntl::net::http2::exchange_store>();
   ntl::net::http2::streaming_connection_transformer trailer_transformer(
       ntl::net::http2::connection_direction::requests,
       trailer_exchanges, pipeline, decoders, encoders, {}, 16);
@@ -1214,7 +1475,8 @@ bool test_http2_streaming_connection_transformer() {
       {64 * 1024, false});
   if (!initial_frame)
     return false;
-  ntl::net::http2::exchange_store invalid_exchanges;
+  auto invalid_exchanges =
+      std::make_shared<ntl::net::http2::exchange_store>();
   ntl::net::http2::streaming_connection_transformer invalid_transformer(
       ntl::net::http2::connection_direction::requests,
       invalid_exchanges, pipeline, decoders, encoders, {}, 16);
@@ -1236,7 +1498,7 @@ bool test_http2_streaming_connection_transformer() {
     return false;
   auto rejected = invalid_transformer.consume(*forbidden_frame);
   return !rejected && rejected.status() == STATUS_DATA_ERROR &&
-         !invalid_exchanges.request(5);
+         !invalid_exchanges->request(5);
 }
 
 bool test_http3_streaming_connection_transformer() {
@@ -1247,6 +1509,51 @@ bool test_http3_streaming_connection_transformer() {
   inspection::register_standard_content_decoders(decoders);
   inspection::register_standard_content_encoders(encoders);
 
+  const std::vector<ntl::net::http3::header_field> uppercase_request{
+      {":method", "GET"},
+      {":scheme", "https"},
+      {":authority", "example.test"},
+      {":path", "/"},
+      {"X-Policy", "inspect"}};
+  const std::vector<ntl::net::http3::header_field> uppercase_response{
+      {":status", "200"}, {"X-Policy", "inspect"}};
+  const std::vector<ntl::net::http3::header_field> duplicate_empty_method{
+      {":method", ""},
+      {":method", "GET"},
+      {":scheme", "https"},
+      {":authority", "example.test"},
+      {":path", "/"}};
+  const std::vector<ntl::net::http3::header_field> host_and_authority{
+      {":method", "GET"},
+      {":scheme", "https"},
+      {":authority", "one.example.test"},
+      {":path", "/"},
+      {"host", "two.example.test"}};
+  const std::vector<ntl::net::http3::header_field> switching_protocols{
+      {":status", "101"}};
+  const auto invalid_request =
+      ntl::net::http3::stream_transform_detail::parse_request_head(
+          uppercase_request, {});
+  const auto invalid_response =
+      ntl::net::http3::stream_transform_detail::parse_response_head(
+          uppercase_response, {});
+  const auto duplicate =
+      ntl::net::http3::stream_transform_detail::parse_request_head(
+          duplicate_empty_method, {});
+  const auto ambiguous =
+      ntl::net::http3::stream_transform_detail::parse_request_head(
+          host_and_authority, {});
+  const auto invalid_upgrade =
+      ntl::net::http3::stream_transform_detail::parse_response_head(
+          switching_protocols, {});
+  if (invalid_request || invalid_request.status() != STATUS_DATA_ERROR ||
+      invalid_response || invalid_response.status() != STATUS_DATA_ERROR)
+    return false;
+  if (duplicate || duplicate.status() != STATUS_DATA_ERROR || ambiguous ||
+      ambiguous.status() != STATUS_DATA_ERROR || invalid_upgrade ||
+      invalid_upgrade.status() != STATUS_DATA_ERROR)
+    return false;
+
   stream_transform_limits stream_limits;
   stream_limits.maximum_input_chunk_bytes = 7;
   stream_limits.maximum_output_chunk_bytes = 256 * 1024;
@@ -1254,7 +1561,7 @@ bool test_http3_streaming_connection_transformer() {
   stream_limits.maximum_content_expansion_ratio = 2048;
   stream_transform_pipeline pipeline(stream_limits);
   pipeline.chunks().transform(
-      [](const stream_message_context &, const stream_chunk &chunk) {
+      [](const stream_message_context_view &, const stream_chunk_view &chunk) {
         std::vector<std::byte> output(chunk.bytes.begin(), chunk.bytes.end());
         for (auto &value : output) {
           const auto character = std::to_integer<unsigned char>(value);
@@ -1294,7 +1601,8 @@ bool test_http3_streaming_connection_transformer() {
       request_fields.push_back(
           {"content-encoding", std::string(coding)});
 
-    ntl::net::http3::stream_exchange_store exchanges;
+    auto exchanges =
+        std::make_shared<ntl::net::http3::stream_exchange_store>();
     ntl::net::http3::streaming_connection_transformer requests(
         ntl::net::http3::stream_direction::requests,
         exchanges, pipeline, decoders, encoders, {}, 64 * 1024);
@@ -1401,7 +1709,7 @@ bool test_http3_streaming_connection_transformer() {
         !response_end->response || !collect(*response_end) ||
         !final_write || !matches())
       return false;
-    return !exchanges.request(1);
+    return !exchanges->request(1);
   };
 
   return exercise("") && exercise("gzip") && exercise("br");
@@ -1454,7 +1762,7 @@ bool test_compressed_stream_transform() {
       limits.maximum_content_expansion_ratio = 2048;
       stream_transform_pipeline pipeline(limits);
       pipeline.chunks().transform(
-          [](const stream_message_context &, const stream_chunk &chunk) {
+          [](const stream_message_context_view &, const stream_chunk_view &chunk) {
             std::vector<std::byte> replacement(chunk.bytes.begin(),
                                                chunk.bytes.end());
             for (auto &value : replacement) {
@@ -1587,14 +1895,16 @@ bool test_async_transform() {
   options.maximum_concurrency = 2;
   options.maximum_queue_depth = 4;
   options.timeout = std::chrono::milliseconds(250);
-  async_transform_pipeline pipeline({}, options);
-  pipeline.requests().transform(
+  async_transform_policy_builder pipeline_builder({}, options);
+  pipeline_builder.requests().transform(
       [](request_message &message, const async_policy_context &context) {
         if (context.cancellation_requested())
           return rewrite_result::block();
         message.headers.set("x-async-policy", "complete");
         return rewrite_result::headers_changed();
       });
+  auto pipeline = async_transform_runtime::create(
+      std::move(pipeline_builder).build());
   auto incoming = request();
   const auto transformed = apply_async(pipeline, incoming).get();
   if (transformed.action != rewrite_action::forward ||
@@ -1606,13 +1916,15 @@ bool test_async_transform() {
   timeout_options.maximum_concurrency = 1;
   timeout_options.maximum_queue_depth = 2;
   timeout_options.timeout = std::chrono::milliseconds(20);
-  async_transform_pipeline timeout_pipeline({}, timeout_options);
-  timeout_pipeline.requests().transform(
+  async_transform_policy_builder timeout_builder({}, timeout_options);
+  timeout_builder.requests().transform(
       [](request_message &, const async_policy_context &context) {
         while (!context.cancellation_requested())
           std::this_thread::sleep_for(std::chrono::milliseconds(1));
         return rewrite_result::unchanged();
       });
+  auto timeout_pipeline = async_transform_runtime::create(
+      std::move(timeout_builder).build());
   auto timed_message = request();
   const auto timed = apply_async(timeout_pipeline, timed_message).get();
   const auto timeout_statistics = timeout_pipeline.statistics();
@@ -1625,11 +1937,13 @@ bool test_async_transform() {
     return failed(2);
   }
 
-  async_transform_pipeline cancelled_pipeline({}, options);
-  cancelled_pipeline.requests().transform(
+  async_transform_policy_builder cancelled_builder({}, options);
+  cancelled_builder.requests().transform(
       [](request_message &, const async_policy_context &) {
         return rewrite_result::unchanged();
       });
+  auto cancelled_pipeline = async_transform_runtime::create(
+      std::move(cancelled_builder).build());
   std::stop_source cancelled;
   cancelled.request_stop();
   auto cancelled_message = request();
@@ -1645,12 +1959,12 @@ bool test_async_transform() {
   overload_options.maximum_concurrency = 1;
   overload_options.maximum_queue_depth = 1;
   overload_options.timeout = std::chrono::seconds(2);
-  async_transform_pipeline overloaded_pipeline({}, overload_options);
+  async_transform_policy_builder overloaded_builder({}, overload_options);
   std::promise<void> entered;
   auto entered_future = entered.get_future();
   std::atomic_bool release = false;
   std::atomic_bool first = true;
-  overloaded_pipeline.requests().transform(
+  overloaded_builder.requests().transform(
       [&](request_message &, const async_policy_context &context) {
         if (first.exchange(false))
           entered.set_value();
@@ -1659,6 +1973,8 @@ bool test_async_transform() {
           std::this_thread::yield();
         return rewrite_result::unchanged();
       });
+  auto overloaded_pipeline = async_transform_runtime::create(
+      std::move(overloaded_builder).build());
   auto first_message = request();
   auto second_message = request();
   auto third_message = request();
@@ -1687,7 +2003,416 @@ bool test_async_transform() {
               << '\n';
     return failed(5);
   }
+
+  async_transform_policy_builder callback_builder(transform_limits{}, options);
+  std::unique_ptr<async_transform_runtime> callback_pipeline;
+  callback_builder.requests().transform(
+      [&callback_pipeline](request_message &message,
+                           const async_policy_context &) {
+        message.headers.set("x-owner-lifetime", "safe");
+        callback_pipeline.reset();
+        return rewrite_result::headers_changed();
+      });
+  callback_pipeline = std::make_unique<async_transform_runtime>(
+      async_transform_runtime::create(std::move(callback_builder).build()));
+  auto *const callback_facade = callback_pipeline.get();
+  const auto callback_closed =
+      apply_async_owned(*callback_facade, request()).get();
+  if (callback_pipeline ||
+      callback_closed.outcome.action != rewrite_action::block ||
+      callback_closed.outcome.failure != STATUS_CANCELLED)
+    return failed(6);
+
+  async_transform_policy_builder raced_builder({}, options);
+  std::promise<void> race_entered;
+  auto race_entered_future = race_entered.get_future();
+  std::atomic_bool race_release = false;
+  raced_builder.requests().transform(
+      [&race_entered, &race_release](request_message &,
+                                    const async_policy_context &context) {
+        race_entered.set_value();
+        while (!race_release.load(std::memory_order_acquire) &&
+               !context.cancellation_requested())
+          std::this_thread::yield();
+        return rewrite_result::unchanged();
+      });
+  auto raced_pipeline = async_transform_runtime::create(
+      std::move(raced_builder).build());
+  auto raced_task = apply_async_owned(raced_pipeline, request());
+  if (race_entered_future.wait_for(std::chrono::seconds(1)) !=
+      std::future_status::ready)
+    return failed(7);
+  std::thread closer([&raced_pipeline] {
+    raced_pipeline.close();
+    raced_pipeline.close();
+  });
+  const auto raced = raced_task.get();
+  race_release.store(true, std::memory_order_release);
+  closer.join();
+  if (raced.outcome.action != rewrite_action::block ||
+      raced.outcome.failure != STATUS_CANCELLED)
+    return failed(8);
+  try {
+    auto rejected = raced_pipeline.apply(request());
+    (void)rejected;
+    return failed(9);
+  } catch (const std::logic_error &) {
+  }
   return true;
+}
+
+bool test_bounded_message_memory() {
+  using namespace ntl::net;
+  using namespace ntl::net::http;
+
+  borrowed_bounded_memory_resource counted(
+      *std::pmr::new_delete_resource(),
+      {.maximum_allocated_bytes = 1024,
+       .maximum_single_allocation = 256});
+  bool single_allocation_rejected = false;
+  {
+    request_message message(message_memory_ref{&counted});
+    try {
+      message.body.resize(257);
+    } catch (const std::bad_alloc &) {
+      single_allocation_rejected = true;
+    }
+  }
+  if (!single_allocation_rejected || counted.allocated_bytes() != 0) {
+    std::cerr << "bounded-memory: single-allocation/release\n";
+    return false;
+  }
+
+  inspection::content_decoder_registry decoders;
+  inspection::content_encoder_registry encoders;
+  inspection::register_standard_content_encoders(encoders);
+  const auto plain = bytes(std::string(2048, 'A'));
+  header_collection coding_headers;
+  coding_headers.append("content-encoding", "gzip");
+  auto compressed = encode_body(
+      coding_headers, plain, "gzip",
+      transformed_body_coding::preserve, encoders);
+  if (!compressed) {
+    std::cerr << "bounded-memory: encode fixture\n";
+    return false;
+  }
+  decoders.add("gzip", [] {
+    return std::make_unique<inspection::content_decoder_adapter<
+        inspection::zlib_content_decoder>>(
+        inspection::zlib_stream_format::gzip,
+        inspection::codec_memory_limits{
+            .maximum_allocated_bytes = 1,
+            .maximum_single_allocation = 1});
+  });
+  auto codec_failure = decode_body(
+      coding_headers, *compressed, decoders,
+      {.maximum_encoded_body_bytes = 4096,
+       .maximum_decoded_body_bytes = 4096});
+  if (codec_failure ||
+      static_cast<NTSTATUS>(codec_failure.status()) !=
+          STATUS_INSUFFICIENT_RESOURCES) {
+    std::cerr << "bounded-memory: codec status="
+              << (codec_failure ? 0 : static_cast<unsigned long>(
+                     static_cast<NTSTATUS>(codec_failure.status()))) << '\n';
+    return false;
+  }
+
+  const std::string wire =
+      "POST /inspect HTTP/1.1\r\nHost: example.test\r\n"
+      "Content-Length: 512\r\n\r\n" +
+      std::string(512, 'x');
+  const auto wire_bytes = std::as_bytes(std::span(wire));
+  transform_pipeline pipeline;
+  inspection::content_decoder_registry identity_decoders;
+  inspection::content_encoder_registry identity_encoders;
+
+  std::array<std::byte, 256> exhausted_storage{};
+  borrowed_fixed_workspace_resource exhausted(exhausted_storage);
+  auto exhausted_result = transform_http1_request(
+      wire_bytes, pipeline, identity_decoders, identity_encoders,
+      {.origin_scheme = "https"},
+      message_memory_ref{exhausted.resource()});
+  if (exhausted_result ||
+      static_cast<NTSTATUS>(exhausted_result.status()) !=
+          STATUS_INSUFFICIENT_RESOURCES) {
+    std::cerr << "bounded-memory: exhausted status="
+              << (exhausted_result ? 0 : static_cast<unsigned long>(
+                     static_cast<NTSTATUS>(exhausted_result.status()))) << '\n';
+    return false;
+  }
+
+  const std::array<ntl::net::http2::header_field, 5> h2_fields{{
+      {":method", "POST", false},
+      {":scheme", "https", false},
+      {":authority", "example.test", false},
+      {":path", "/inspect", false},
+      {"content-length", "512", false},
+  }};
+  std::array<std::byte, 256> h2_exhausted_storage{};
+  borrowed_fixed_workspace_resource h2_exhausted(h2_exhausted_storage);
+  auto h2_exhausted_result = ntl::net::http2::transform_request(
+      1, h2_fields, std::as_bytes(std::span(wire)).last(512), {},
+      pipeline, identity_decoders, identity_encoders,
+      ntl::net::http2::default_maximum_frame_size, true,
+      message_memory_ref{h2_exhausted.resource()});
+  if (h2_exhausted_result ||
+      static_cast<NTSTATUS>(h2_exhausted_result.status()) !=
+          STATUS_INSUFFICIENT_RESOURCES) {
+    std::cerr << "bounded-memory: HTTP/2 exhausted status="
+              << (h2_exhausted_result
+                      ? 0
+                      : static_cast<unsigned long>(static_cast<NTSTATUS>(
+                            h2_exhausted_result.status())))
+              << '\n';
+    return false;
+  }
+
+  const std::string h3_authority(512, 'a');
+  const std::array<ntl::net::http3::header_field, 4> h3_fields{{
+      {":method", "GET", false},
+      {":scheme", "https", false},
+      {":authority", h3_authority, false},
+      {":path", "/inspect", false},
+  }};
+  std::array<std::byte, 256> h3_exhausted_storage{};
+  borrowed_fixed_workspace_resource h3_exhausted(h3_exhausted_storage);
+  auto h3_exhausted_result =
+      ntl::net::http3::stream_transform_detail::parse_request_head(
+          h3_fields,
+          {.maximum_header_bytes = 4096},
+          message_memory_ref{h3_exhausted.resource()});
+  if (h3_exhausted_result ||
+      static_cast<NTSTATUS>(h3_exhausted_result.status()) !=
+          STATUS_INSUFFICIENT_RESOURCES) {
+    std::cerr << "bounded-memory: HTTP/3 exhausted status="
+              << (h3_exhausted_result
+                      ? 0
+                      : static_cast<unsigned long>(static_cast<NTSTATUS>(
+                            h3_exhausted_result.status())))
+              << '\n';
+    return false;
+  }
+
+  std::array<std::byte, 4096> storage{};
+  borrowed_fixed_workspace_resource workspace(storage);
+  auto transformed = transform_http1_request(
+      wire_bytes, pipeline, identity_decoders, identity_encoders,
+      {.origin_scheme = "https"},
+      message_memory_ref{workspace.resource()});
+  const bool valid = transformed &&
+         transformed->message.resource() == workspace.resource() &&
+         transformed->wire.get_allocator().resource() == workspace.resource();
+  if (!valid)
+    std::cerr << "bounded-memory: successful binding\n";
+  return valid;
+}
+
+bool test_selector_owner_first_lifetime() {
+  auto request_policy = [] {
+    ntl::net::http::transform_pipeline owner;
+    auto selector = owner.requests();
+    return std::pair{owner, std::move(selector)};
+  }();
+  request_policy.second.transform(
+      [](ntl::net::http::request_message &request) {
+        request.headers.set("x-owner-first", "safe");
+        return ntl::net::http::rewrite_result::headers_changed();
+      });
+
+  ntl::net::http::request_message request;
+  request.method = "GET";
+  request.authority = "example.test";
+  const auto request_result = request_policy.first.apply(request);
+  if (request_result.action != ntl::net::http::rewrite_action::forward ||
+      request.headers.first("x-owner-first") != "safe")
+    return false;
+
+  auto response_policy = [] {
+    ntl::net::http::transform_pipeline owner;
+    auto selector = owner.responses();
+    return std::pair{owner, std::move(selector)};
+  }();
+  response_policy.second.transform(
+      [](const ntl::net::http::request_message &,
+         ntl::net::http::response_message &response) {
+        response.headers.set("x-owner-first", "safe");
+        return ntl::net::http::rewrite_result::headers_changed();
+      });
+
+  ntl::net::http::response_message response;
+  response.status = 200;
+  const auto response_result =
+      response_policy.first.apply(request, response);
+  return response_result.action ==
+             ntl::net::http::rewrite_action::forward &&
+         response.headers.first("x-owner-first") == "safe";
+}
+
+bool test_stream_policy_owner_first_lifetime() {
+  auto opened = [] {
+    ntl::net::http::stream_transform_pipeline owner;
+    auto selector = owner.chunks();
+    selector.transform(
+        [](const ntl::net::http::stream_message_context_view &context,
+           const ntl::net::http::stream_chunk_view &chunk) {
+          if (!context.request || context.request->path != "/lifetime")
+            return ntl::net::http::stream_rewrite_result::block();
+          return ntl::net::http::stream_rewrite_result::replace(
+              std::vector<std::byte>(chunk.bytes.begin(), chunk.bytes.end()));
+        });
+    ntl::net::http::request_message request;
+    request.method = "POST";
+    request.authority = "example.test";
+    request.path = "/lifetime";
+    return owner.open(request);
+  }();
+  if (!opened)
+    return false;
+  const std::array payload{std::byte{'o'}, std::byte{'k'}};
+  const auto outcome = opened->consume(payload, true);
+  return outcome.action ==
+             ntl::net::http::stream_rewrite_action::forward &&
+         outcome.failure == STATUS_SUCCESS && outcome.final &&
+         outcome.bytes == std::vector<std::byte>(payload.begin(), payload.end());
+}
+
+bool test_http2_goaway_graceful_shutdown_boundary() {
+  ntl::net::http2::exchange_store exchanges;
+  auto retained = request();
+  if (!exchanges.remember(1, retained).is_ok() || exchanges.empty())
+    return false;
+  exchanges.erase(1);
+  if (!exchanges.empty())
+    return false;
+
+  auto pipeline =
+      std::make_shared<ntl::net::http::transform_pipeline>();
+  auto decoders = std::make_shared<
+      ntl::net::inspection::content_decoder_registry>();
+  auto encoders = std::make_shared<
+      ntl::net::inspection::content_encoder_registry>();
+  ntl::net::http2::proxy_connection connection(
+      pipeline, decoders, encoders,
+      {.require_first_settings = false});
+  if (connection.ready_for_graceful_shutdown(
+          ntl::net::http2::connection_direction::responses))
+    return false;
+  const std::array<std::byte, 8> payload{};
+  auto wire = ntl::net::http2::transform_detail::make_frame(
+      ntl::net::http2::frame_type::goaway, 0, 0, payload);
+  if (!wire)
+    return false;
+  auto frame = ntl::net::http2::frame_view::parse(
+      ntl::net::scatter_view::from_contiguous(wire->wire),
+      {1024 * 1024, false});
+  if (!frame)
+    return false;
+  auto consumed = connection.consume(
+      ntl::net::http2::connection_direction::responses, *frame);
+  return consumed && connection.ready_for_graceful_shutdown(
+                         ntl::net::http2::connection_direction::responses) &&
+         !connection.ready_for_graceful_shutdown(
+             ntl::net::http2::connection_direction::requests);
+}
+
+bool test_http2_local_settings_ack_boundary() {
+  auto pipeline =
+      std::make_shared<ntl::net::http::transform_pipeline>();
+  auto decoders = std::make_shared<
+      ntl::net::inspection::content_decoder_registry>();
+  auto encoders = std::make_shared<
+      ntl::net::inspection::content_encoder_registry>();
+  ntl::net::http2::proxy_connection connection(
+      pipeline, decoders, encoders,
+      {.require_first_settings = false});
+  if (!connection.accept_client_preface(
+          ntl::net::http2::client_connection_preface).is_ok() ||
+      !connection.expect_local_downstream_settings_ack().is_ok() ||
+      connection.expect_local_downstream_settings_ack() !=
+          STATUS_INVALID_DEVICE_STATE)
+    return false;
+  auto wire = ntl::net::http2::transform_detail::make_frame(
+      ntl::net::http2::frame_type::settings, 0x01u, 0, {});
+  if (!wire)
+    return false;
+  auto frame = ntl::net::http2::frame_view::parse(
+      ntl::net::scatter_view::from_contiguous(wire->wire),
+      {1024 * 1024, false});
+  if (!frame)
+    return false;
+  auto local = connection.consume(
+      ntl::net::http2::connection_direction::requests, *frame);
+  if (!local || !local->consumed || local->forward_original ||
+      !local->forward.empty())
+    return false;
+  auto origin = connection.consume(
+      ntl::net::http2::connection_direction::requests, *frame);
+  return origin && origin->forward_original;
+}
+
+bool test_http2_send_window_owner_first_close() {
+  auto owner = std::make_unique<ntl::net::http2::send_window>(0, 0);
+  auto waiting = wait_for_send_window_owner_close(*owner);
+  owner.reset();
+  return waiting.get();
+}
+
+bool test_http1_to_h2_h3_forwarding_headers() {
+  using namespace ntl::net::http;
+
+  response_message response;
+  response.wire_protocol = protocol::http1;
+  response.status = 200;
+  response.headers.append("Connection", " close, X-Hop ");
+  response.headers.append("X-Hop", "remove-me");
+  response.headers.append("Keep-Alive", "timeout=5");
+  response.headers.append("Proxy-Connection", "keep-alive");
+  response.headers.append("Transfer-Encoding", "chunked");
+  response.headers.append("Upgrade", "example");
+  response.headers.append("TE", "trailers, trailers");
+  response.headers.append("X-End-To-End", "preserve-me");
+  response.trailers.push_back({"x-hop", "remove-me", false});
+  response.trailers.push_back({"x-end-trailer", "preserve-me", false});
+  const ntl::status adapted =
+      adapt_forwarded_message(response, protocol::http3);
+  if (!adapted.is_ok() || response.wire_protocol != protocol::http3 ||
+      response.headers.contains("connection") ||
+      response.headers.contains("x-hop") ||
+      response.headers.contains("keep-alive") ||
+      response.headers.contains("proxy-connection") ||
+      response.headers.contains("transfer-encoding") ||
+      response.headers.contains("upgrade") ||
+      response.headers.first("te") != "trailers" ||
+      response.headers.first("x-end-to-end") != "preserve-me" ||
+      std::any_of(
+          response.trailers.begin(), response.trailers.end(),
+          [](const header_field &field) { return field.name == "x-hop"; }) ||
+      !std::any_of(
+          response.trailers.begin(), response.trailers.end(),
+          [](const header_field &field) {
+            return field.name == "x-end-trailer";
+          }))
+    return false;
+
+  request_message request;
+  request.wire_protocol = protocol::http1;
+  request.method = "GET";
+  request.authority = "example.test";
+  request.path = "/";
+  request.headers.append("Host", "example.test");
+  request.headers.append("Connection", "X-Request-Hop");
+  request.headers.append("X-Request-Hop", "remove-me");
+  if (!adapt_forwarded_message(request, protocol::http2).is_ok() ||
+      request.headers.contains("host") ||
+      request.headers.contains("connection") ||
+      request.headers.contains("x-request-hop"))
+    return false;
+
+  response_message malformed;
+  malformed.wire_protocol = protocol::http1;
+  malformed.headers.append("connection", "close,");
+  return adapt_forwarded_message(malformed, protocol::http3) ==
+         STATUS_DATA_ERROR;
 }
 
 } // namespace
@@ -1700,9 +2425,13 @@ int main() {
   const bool protocol_safety =
       test_protocol_safety_and_bodyless_responses();
   const bool http1 = test_http1_backend();
+  const bool http1_target =
+      test_http1_request_target_and_transfer_coding();
   const bool http2 = test_http2_backend();
   const bool http2_connection =
       test_http2_connection_transformer();
+  const bool http2_extended_connect =
+      test_http2_extended_connect_transformer();
   const bool stream = test_stream_transform();
   const bool stateful_stream = test_stateful_stream_transform();
   const bool http1_streaming =
@@ -1713,20 +2442,40 @@ int main() {
       test_http3_streaming_connection_transformer();
   const bool compressed_stream = test_compressed_stream_transform();
   const bool asynchronous = test_async_transform();
+  const bool bounded_memory = test_bounded_message_memory();
+  const bool selector_owner_first =
+      test_selector_owner_first_lifetime();
+  const bool stream_owner_first =
+      test_stream_policy_owner_first_lifetime();
+  const bool http2_goaway_shutdown =
+      test_http2_goaway_graceful_shutdown_boundary();
+  const bool http2_local_settings_ack =
+      test_http2_local_settings_ack_boundary();
+  const bool http2_send_window_owner_first =
+      test_http2_send_window_owner_first_close();
+  const bool forwarding_headers =
+      test_http1_to_h2_h3_forwarding_headers();
   if (!pipeline || !content || !terminal || !failure ||
-      !protocol_safety || !http1 || !http2 ||
-       !http2_connection || !stream || !stateful_stream ||
+      !protocol_safety || !http1 || !http1_target || !http2 ||
+       !http2_connection || !http2_extended_connect ||
+       !stream || !stateful_stream ||
        !http1_streaming ||
        !http2_streaming || !http3_streaming ||
-       !compressed_stream || !asynchronous) {
+       !compressed_stream || !asynchronous || !bounded_memory ||
+       !selector_owner_first || !stream_owner_first ||
+        !http2_goaway_shutdown || !http2_local_settings_ack ||
+        !http2_send_window_owner_first || !forwarding_headers) {
     std::cerr << "pipeline=" << pipeline
               << " content=" << content
               << " terminal=" << terminal
               << " failure=" << failure
               << " protocol-safety=" << protocol_safety
               << " http1=" << http1
+              << " http1-target=" << http1_target
               << " http2=" << http2
               << " http2-connection=" << http2_connection
+              << " http2-extended-connect="
+              << http2_extended_connect
               << " stream=" << stream
               << " stateful-stream=" << stateful_stream
               << " http1-streaming=" << http1_streaming
@@ -1734,6 +2483,15 @@ int main() {
               << " http3-streaming=" << http3_streaming
               << " compressed-stream=" << compressed_stream
               << " async=" << asynchronous
+              << " bounded-memory=" << bounded_memory
+              << " selector-owner-first=" << selector_owner_first
+              << " stream-owner-first=" << stream_owner_first
+              << " http2-goaway-shutdown=" << http2_goaway_shutdown
+              << " http2-local-settings-ack="
+              << http2_local_settings_ack
+              << " http2-send-window-owner-first="
+              << http2_send_window_owner_first
+              << " forwarding-headers=" << forwarding_headers
               << '\n';
     std::cerr << "NTL HTTP transform contracts failed\n";
     return 1;

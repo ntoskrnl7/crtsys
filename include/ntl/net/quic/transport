@@ -1,0 +1,170 @@
+/**
+ * @file quic_transport
+ * @brief Execution-domain-neutral QUIC connection and stream contract.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include <ntl/net/buffer/scatter_view>
+#include <ntl/net/runtime>
+#include <ntl/status>
+
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <string_view>
+
+namespace ntl::net::quic {
+
+struct backend_capabilities {
+  bool available = false;
+  bool tls13_termination = false;
+  bool destination_redirection = false;
+  bool qpack_dynamic_table = false;
+  bool bidirectional_streams = false;
+  bool unidirectional_streams = false;
+  bool quic_datagrams = false;
+  bool reliable_reset_at = false;
+  bool extended_connect = false;
+  bool webtransport = false;
+  bool origin_client = false;
+  bool encrypted_client_hello = false;
+  bool arbitrary_browser_server_identity = false;
+
+  constexpr bool ready_for_transparent_browser() const noexcept {
+    return available && tls13_termination && destination_redirection &&
+           arbitrary_browser_server_identity;
+  }
+};
+
+/**
+ * @brief Callback-scoped view of a QUIC peer certificate indication.
+ *
+ * The certificate and chain are provider/platform objects and remain valid
+ * only while on_peer_certificate() is running.  Code that needs them later
+ * must make a bounded platform-appropriate copy during the callback.  When
+ * provider validation was deferred, deferred_error_flags and deferred_status
+ * describe the native validation result; the default sink policy below fails
+ * closed when either reports an error.
+ */
+struct peer_certificate_view {
+  const void *native_certificate = nullptr;
+  const void *native_chain = nullptr;
+  std::uint32_t deferred_error_flags = 0;
+  NTSTATUS deferred_status = STATUS_SUCCESS;
+
+  bool native_validation_succeeded() const noexcept {
+    return deferred_error_flags == 0 &&
+           ntl::status{deferred_status}.is_ok();
+  }
+};
+
+class transport_backend;
+
+class backend_sink {
+public:
+  virtual ~backend_sink() = default;
+  /**
+   * Called exactly once after the backend has installed its native callback
+   * but before a client connection starts or a server connection is given its
+   * configuration.  A sink that needs to initiate streams from on_connected()
+   * receives shared ownership of the backend. A sink that needs the backend
+   * after this callback stores a weak pointer to avoid the backend/sink cycle,
+   * and locks it for each operation.
+   */
+  virtual ntl::status on_transport_ready(
+      std::shared_ptr<transport_backend>) noexcept {
+    return ntl::status::ok();
+  }
+  virtual ntl::status
+  on_peer_certificate(const peer_certificate_view &certificate) noexcept {
+    return certificate.native_validation_succeeded()
+               ? ntl::status::ok()
+               : ntl::status{STATUS_ACCESS_DENIED};
+  }
+  virtual ntl::status on_connected(std::string_view negotiated_alpn) noexcept = 0;
+  virtual ntl::status on_request_stream(
+      std::uint64_t stream_id, scatter_view plaintext, bool final) noexcept = 0;
+  virtual ntl::status on_qpack_encoder_stream(scatter_view plaintext) noexcept = 0;
+  virtual ntl::status on_peer_bidirectional_stream(
+      std::uint64_t, scatter_view, bool) noexcept {
+    return STATUS_NOT_SUPPORTED;
+  }
+  virtual ntl::status on_peer_unidirectional_stream(
+      std::uint64_t, scatter_view, bool) noexcept {
+    return STATUS_NOT_SUPPORTED;
+  }
+  virtual ntl::status on_datagram(scatter_view) noexcept {
+    return STATUS_NOT_SUPPORTED;
+  }
+  virtual ntl::status on_peer_send_aborted(
+      std::uint64_t, std::uint64_t) noexcept {
+    return ntl::status::ok();
+  }
+  virtual ntl::status on_peer_receive_aborted(
+      std::uint64_t, std::uint64_t) noexcept {
+    return ntl::status::ok();
+  }
+  virtual void on_datagram_send_state(bool, std::size_t) noexcept {}
+  virtual void on_reliable_reset_negotiated(bool) noexcept {}
+  virtual void on_closed(NTSTATUS status) noexcept = 0;
+};
+
+/**
+ * @brief Common contract implemented by user MsQuic, kernel MsQuic, or offload.
+ *
+ * Implementations own QUIC packet protection, TLS 1.3, recovery, connection
+ * IDs, flow control, and stream lifetime.  Callbacks never transfer ownership
+ * of their byte views.  stop() prevents new work from being accepted and
+ * starts provider shutdown.  drain() does not return success until every
+ * accepted callback has left NTL and caller-owned driver code.  Kernel callers
+ * must complete both operations before unloading the provider or its sink.
+ */
+class transport_backend {
+public:
+  virtual ~transport_backend() = default;
+
+  virtual runtime_descriptor runtime() const noexcept {
+    return {
+        .domain = native_execution_domain,
+        .path = execution_path::direct,
+        .features = feature_set(network_feature::quic_transport),
+    };
+  }
+
+  virtual backend_capabilities capabilities() const noexcept = 0;
+  /** Low-level blocking join for a sink already retained by the backend. */
+  virtual ntl::status run_borrowed(backend_sink &sink) noexcept = 0;
+  virtual ntl::status write_stream(
+      std::uint64_t stream_id, scatter_view plaintext, bool final) noexcept = 0;
+  virtual ntl::status write_qpack_decoder_stream(scatter_view) noexcept {
+    return STATUS_NOT_SUPPORTED;
+  }
+  virtual ntl::status prepare_qpack_decoder_stream() noexcept {
+    return STATUS_NOT_SUPPORTED;
+  }
+  virtual ntl::status open_bidirectional_stream(std::uint64_t &) noexcept {
+    return STATUS_NOT_SUPPORTED;
+  }
+  virtual ntl::status open_request_stream(std::uint64_t &stream_id) noexcept {
+    return open_bidirectional_stream(stream_id);
+  }
+  virtual ntl::status open_unidirectional_stream(std::uint64_t &) noexcept {
+    return STATUS_NOT_SUPPORTED;
+  }
+  virtual ntl::status send_datagram(scatter_view) noexcept {
+    return STATUS_NOT_SUPPORTED;
+  }
+  virtual ntl::status reset_stream(std::uint64_t, std::uint64_t) noexcept {
+    return STATUS_NOT_SUPPORTED;
+  }
+  virtual ntl::status reset_stream_at(
+      std::uint64_t, std::uint64_t, std::uint64_t) noexcept {
+    return STATUS_NOT_SUPPORTED;
+  }
+  virtual void stop() noexcept = 0;
+  virtual ntl::status drain() noexcept = 0;
+};
+
+} // namespace ntl::net::quic

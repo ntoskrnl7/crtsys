@@ -1,0 +1,850 @@
+/**
+ * @file redirected_tls_session
+ * @brief Structured lifetime for one user-mode WFP redirected TLS session.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/user/redirected_tls_session is a user-mode header"
+#endif
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+
+#include <ntl/net/http/inspection_context_view>
+#include <ntl/net/io/async_socket>
+#include <ntl/net/tls/client_hello>
+#include <ntl/net/tls/certificate>
+#include <ntl/net/tls/inspection_frontend>
+#include <ntl/net/tls/stream>
+#include <ntl/net/user/task>
+#include <ntl/wfp/connect_redirect>
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <condition_variable>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <functional>
+#include <limits>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <span>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <utility>
+#include <vector>
+
+namespace ntl::net::user {
+
+enum class inspected_http_protocol : std::uint8_t {
+  http1 = 1,
+  http2 = 2,
+};
+
+struct inspected_http_session_summary {
+  std::size_t completed_exchanges = 0;
+  unsigned last_status = 0;
+  bool blocked = false;
+  bool dropped = false;
+};
+
+/** Protocol adapter boundary; the TLS/WFP lifetime remains independent. */
+class redirected_tls_http_dispatcher {
+public:
+  virtual ~redirected_tls_http_dispatcher() = default;
+  virtual task<inspected_http_session_summary> run(
+      inspected_http_protocol protocol,
+      std::shared_ptr<ntl::net::tls_stream> downstream,
+      std::shared_ptr<ntl::net::tls_stream> upstream,
+      const ntl::net::http::inspection_session_metadata &metadata) = 0;
+};
+
+struct redirected_tls_session_limits {
+  ntl::net::tls_client_hello_limits client_hello{
+      .maximum_buffered_ciphertext = 256 * 1024,
+      .maximum_client_hello = 128 * 1024,
+      .receive_chunk_size = 4096,
+      .maximum_alpn_protocols = 32};
+  ntl::net::tls_stream_limits downstream_tls{
+      .maximum_buffered_ciphertext = 1024 * 1024,
+      .receive_chunk_size = 16 * 1024};
+  ntl::net::tls_stream_limits upstream_tls{
+      .maximum_buffered_ciphertext = 1024 * 1024,
+      .receive_chunk_size = 16 * 1024};
+
+  constexpr bool valid() const noexcept {
+    return client_hello.maximum_buffered_ciphertext != 0 &&
+           client_hello.maximum_client_hello != 0 &&
+           client_hello.maximum_client_hello <=
+               client_hello.maximum_buffered_ciphertext &&
+           client_hello.receive_chunk_size != 0 &&
+           client_hello.receive_chunk_size <=
+               client_hello.maximum_buffered_ciphertext &&
+           client_hello.maximum_alpn_protocols != 0 &&
+           downstream_tls.maximum_buffered_ciphertext != 0 &&
+           downstream_tls.receive_chunk_size != 0 &&
+           downstream_tls.receive_chunk_size <=
+               downstream_tls.maximum_buffered_ciphertext &&
+           upstream_tls.maximum_buffered_ciphertext != 0 &&
+           upstream_tls.receive_chunk_size != 0 &&
+           upstream_tls.receive_chunk_size <=
+               upstream_tls.maximum_buffered_ciphertext;
+  }
+};
+
+/** Origin validation is system-default unless an exact/custom policy is set. */
+struct redirected_tls_origin_options {
+  std::shared_ptr<ntl::net::inspection::origin_client_identity_provider>
+      client_identities;
+  std::shared_ptr<ntl::net::tls_peer_certificate_policy>
+      peer_certificate_policy;
+  bool require_client_identity = false;
+  ntl::net::tls_certificate_revocation_check revocation_check =
+      ntl::net::tls_certificate_revocation_check::system_default;
+  bool ignore_missing_revocation_information = false;
+  bool ignore_offline_revocation = false;
+};
+
+struct redirected_tls_downstream_options {
+  bool require_client_certificate = false;
+  std::shared_ptr<ntl::net::tls_client_certificate_policy>
+      client_certificate_policy;
+};
+
+struct owned_endpoint_metadata {
+  std::string address;
+  std::uint16_t port = 0;
+};
+
+struct redirected_tls_connection_metadata {
+  std::uint64_t connection_id = 0;
+  std::uint64_t flow_id = 0;
+  ntl::net::inspection::direction flow_direction =
+      ntl::net::inspection::direction::unknown;
+  owned_endpoint_metadata source;
+  owned_endpoint_metadata destination;
+  owned_endpoint_metadata original_source;
+  owned_endpoint_metadata original_destination;
+  std::uint64_t process_id = 0;
+  std::vector<std::byte> application_id;
+  std::string application;
+  int address_family = AF_UNSPEC;
+};
+
+struct redirected_tls_session_result {
+  redirected_tls_connection_metadata connection;
+  std::wstring server_name;
+  inspected_http_protocol protocol = inspected_http_protocol::http1;
+  inspected_http_session_summary http;
+};
+
+namespace redirected_tls_detail {
+
+class socket_owner {
+public:
+  explicit socket_owner(SOCKET value = INVALID_SOCKET) noexcept
+      : value_(value) {}
+  socket_owner(const socket_owner &) = delete;
+  socket_owner &operator=(const socket_owner &) = delete;
+  socket_owner(socket_owner &&other) noexcept
+      : value_(std::exchange(other.value_, INVALID_SOCKET)) {}
+  ~socket_owner() { reset(); }
+
+  SOCKET get() const noexcept { return value_; }
+  SOCKET release() noexcept {
+    return std::exchange(value_, INVALID_SOCKET);
+  }
+  void reset() noexcept {
+    const SOCKET value = std::exchange(value_, INVALID_SOCKET);
+    if (value != INVALID_SOCKET)
+      (void)::closesocket(value);
+  }
+
+private:
+  SOCKET value_ = INVALID_SOCKET;
+};
+
+struct owned_endpoint {
+  std::string address;
+  std::uint16_t port = 0;
+};
+
+inline owned_endpoint endpoint_from_native(
+    const SOCKADDR_STORAGE &storage) {
+  std::array<char, INET6_ADDRSTRLEN> text{};
+  owned_endpoint result;
+  if (storage.ss_family == AF_INET) {
+    const auto &value = reinterpret_cast<const sockaddr_in &>(storage);
+    if (!::InetNtopA(AF_INET, const_cast<IN_ADDR *>(&value.sin_addr),
+                     text.data(), static_cast<DWORD>(text.size())))
+      throw std::system_error(::WSAGetLastError(), std::system_category(),
+                              "InetNtopA(IPv4)");
+    result.port = ::ntohs(value.sin_port);
+  } else if (storage.ss_family == AF_INET6) {
+    const auto &value = reinterpret_cast<const sockaddr_in6 &>(storage);
+    if (!::InetNtopA(AF_INET6, const_cast<IN6_ADDR *>(&value.sin6_addr),
+                     text.data(), static_cast<DWORD>(text.size())))
+      throw std::system_error(::WSAGetLastError(), std::system_category(),
+                              "InetNtopA(IPv6)");
+    result.port = ::ntohs(value.sin6_port);
+  } else {
+    throw std::system_error(WSAEAFNOSUPPORT, std::system_category(),
+                            "redirected TLS endpoint family");
+  }
+  result.address = text.data();
+  return result;
+}
+
+inline SOCKADDR_STORAGE query_socket_endpoint(SOCKET socket, bool peer) {
+  SOCKADDR_STORAGE result{};
+  int size = sizeof(result);
+  const int status = peer
+                         ? ::getpeername(
+                               socket, reinterpret_cast<sockaddr *>(&result),
+                               &size)
+                         : ::getsockname(
+                               socket, reinterpret_cast<sockaddr *>(&result),
+                               &size);
+  if (status == SOCKET_ERROR)
+    throw std::system_error(::WSAGetLastError(), std::system_category(),
+                            peer ? "getpeername(redirected TLS)"
+                                 : "getsockname(redirected TLS)");
+  return result;
+}
+
+inline std::string utf8(std::wstring_view value) {
+  if (value.empty())
+    return {};
+  if (value.size() > static_cast<std::size_t>(
+                         (std::numeric_limits<int>::max)()))
+    throw std::length_error("TLS server name is too long");
+  const int input_size = static_cast<int>(value.size());
+  const int required = ::WideCharToMultiByte(
+      CP_UTF8, WC_ERR_INVALID_CHARS, value.data(), input_size, nullptr, 0,
+      nullptr, nullptr);
+  if (required <= 0)
+    throw std::system_error(static_cast<int>(::GetLastError()),
+                            std::system_category(),
+                            "WideCharToMultiByte(TLS server name)");
+  std::string result(static_cast<std::size_t>(required), '\0');
+  if (::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, value.data(),
+                            input_size, result.data(), required, nullptr,
+                            nullptr) != required)
+    throw std::system_error(static_cast<int>(::GetLastError()),
+                            std::system_category(),
+                            "WideCharToMultiByte(TLS server name)");
+  return result;
+}
+
+inline std::vector<std::string> origin_protocols(
+    const ntl::net::tls_client_hello &hello) {
+  std::vector<std::string> result;
+  const auto &offered = hello.application_protocols();
+  for (std::string_view supported : {std::string_view("h2"),
+                                     std::string_view("http/1.1")}) {
+    if (std::find(offered.begin(), offered.end(), supported) != offered.end())
+      result.emplace_back(supported);
+  }
+  if (result.empty() && offered.empty())
+    result.emplace_back("http/1.1");
+  if (result.empty())
+    throw std::system_error(ERROR_NOT_SUPPORTED, std::system_category(),
+                            "ClientHello has no supported HTTP ALPN");
+  return result;
+}
+
+inline inspected_http_protocol selected_protocol(
+    std::string_view negotiated,
+    const ntl::net::tls_client_hello &hello) {
+  if (negotiated == "h2")
+    return inspected_http_protocol::http2;
+  if (negotiated == "http/1.1" ||
+      (negotiated.empty() && hello.application_protocols().empty()))
+    return inspected_http_protocol::http1;
+  throw std::system_error(ERROR_NOT_SUPPORTED, std::system_category(),
+                          "origin selected an unsupported HTTP ALPN");
+}
+
+inline std::string_view protocol_name(inspected_http_protocol protocol) {
+  return protocol == inspected_http_protocol::http2 ? "h2" : "http/1.1";
+}
+
+inline std::uint64_t next_connection_id() {
+  static std::atomic<std::uint64_t> value{1};
+  const std::uint64_t result = value.fetch_add(1, std::memory_order_relaxed);
+  if (result == 0 || result == (std::numeric_limits<std::uint64_t>::max)())
+    throw std::overflow_error("redirected TLS connection identity exhausted");
+  return result;
+}
+
+} // namespace redirected_tls_detail
+
+/**
+ * @brief One accepted socket, WFP handoff, two TLS legs, and HTTP lifetime.
+ *
+ * create() owns accepted_socket immediately and closes it on every failure.
+ * The session retains the IO completion state, identity providers, dispatcher,
+ * policies, and WFP handoff. run() puts a strong session owner into its lazy
+ * coroutine frame before returning, so the facade may be released before the
+ * returned task is awaited.
+ */
+class redirected_tls_session
+    : public std::enable_shared_from_this<redirected_tls_session> {
+public:
+  redirected_tls_session(const redirected_tls_session &) = delete;
+  redirected_tls_session &operator=(const redirected_tls_session &) = delete;
+
+  static std::shared_ptr<redirected_tls_session> create(
+      ntl::net::io_completion_context context, SOCKET accepted_socket,
+      std::shared_ptr<ntl::net::tls_server_identity_provider>
+          downstream_identities,
+      std::shared_ptr<redirected_tls_http_dispatcher> dispatcher,
+      redirected_tls_origin_options origin = {},
+      redirected_tls_downstream_options downstream = {},
+      redirected_tls_session_limits limits = {},
+      std::string application_display_name = {}) {
+    redirected_tls_detail::socket_owner accepted(accepted_socket);
+    if (accepted.get() == INVALID_SOCKET)
+      throw std::system_error(WSAENOTSOCK, std::system_category(),
+                              "redirected TLS accepted socket");
+    if (!limits.valid())
+      throw std::invalid_argument("invalid redirected TLS session limits");
+    if (!downstream_identities || !dispatcher)
+      throw std::invalid_argument(
+          "redirected TLS session requires owning providers");
+    if (origin.require_client_identity && !origin.client_identities)
+      throw std::invalid_argument(
+          "required origin mTLS needs an identity provider");
+    if (downstream.require_client_certificate &&
+        !downstream.client_certificate_policy)
+      throw std::invalid_argument(
+          "required downstream mTLS needs a certificate policy");
+
+    const auto source = redirected_tls_detail::endpoint_from_native(
+        redirected_tls_detail::query_socket_endpoint(accepted.get(), true));
+    const auto destination = redirected_tls_detail::endpoint_from_native(
+        redirected_tls_detail::query_socket_endpoint(accepted.get(), false));
+    auto handoff = ntl::wfp::redirected_connection::capture(accepted.get());
+    const auto original_source =
+        redirected_tls_detail::endpoint_from_native(
+            handoff.original_source_ref());
+    const auto original_destination =
+        redirected_tls_detail::endpoint_from_native(
+            handoff.original_destination_ref());
+    redirected_tls_detail::socket_owner outbound(
+        handoff.prepare_original_socket());
+
+    return std::shared_ptr<redirected_tls_session>(new redirected_tls_session(
+        context, accepted.release(), outbound.release(), std::move(handoff),
+        std::move(downstream_identities), std::move(dispatcher),
+        std::move(origin), std::move(downstream), limits,
+        std::move(application_display_name), source, destination,
+        original_source, original_destination));
+  }
+
+  task<redirected_tls_session_result> run() {
+    return run_owned(shared_from_this());
+  }
+
+private:
+  static task<redirected_tls_session_result> run_owned(
+      std::shared_ptr<redirected_tls_session> self) {
+    co_return co_await self->run_borrowed();
+  }
+
+  task<redirected_tls_session_result> run_borrowed() {
+    try {
+      auto hello = co_await ntl::net::read_tls_client_hello(
+          inbound_socket_.share(), limits_.client_hello);
+      server_name_.assign(hello.server_name());
+      if (server_name_.empty())
+        throw std::system_error(ERROR_NOT_FOUND, std::system_category(),
+                                "TLS ClientHello has no SNI");
+      server_name_utf8_ = redirected_tls_detail::utf8(server_name_);
+
+      auto identity = downstream_identities_->select(hello);
+      if (!identity)
+        throw std::system_error(ERROR_NOT_FOUND, std::system_category(),
+                                "downstream TLS identity provider");
+
+      ntl::net::inspection::selected_client_identity selected_identity;
+      if (origin_.client_identities) {
+        auto selected = origin_.client_identities->select(
+            {.server_name = server_name_, .acceptable_issuers = {}});
+        if (!selected)
+          throw std::system_error(
+              static_cast<int>(static_cast<NTSTATUS>(selected.status())),
+              std::system_category(), "origin mTLS identity provider");
+        selected_identity = std::move(*selected);
+      }
+      if (origin_.require_client_identity && !selected_identity)
+        throw std::system_error(ERROR_NOT_FOUND, std::system_category(),
+                                "origin mTLS identity is unavailable");
+
+      auto upstream_credentials = ntl::net::tls_credentials::client(
+          {.manual_peer_validation =
+               origin_.peer_certificate_policy != nullptr,
+           .borrowed_certificate =
+               selected_identity
+                   ? selected_identity.borrowed_certificate()
+                   : nullptr,
+           .revocation_check = origin_.revocation_check,
+           .ignore_missing_revocation_information =
+               origin_.ignore_missing_revocation_information,
+           .ignore_offline_revocation = origin_.ignore_offline_revocation});
+      const auto &original_destination = handoff_.original_destination_ref();
+      const int original_destination_size =
+          original_destination.ss_family == AF_INET
+              ? sizeof(SOCKADDR_IN)
+              : sizeof(SOCKADDR_IN6);
+      co_await upstream_socket_.connect(
+          reinterpret_cast<const sockaddr *>(&original_destination),
+          original_destination_size);
+      auto upstream = std::make_shared<ntl::net::tls_stream>(
+          upstream_socket_, upstream_credentials, limits_.upstream_tls);
+      const auto offered_protocols =
+          redirected_tls_detail::origin_protocols(hello);
+      co_await upstream->handshake_client(
+          {.server_name = server_name_,
+           .certificate_policy = origin_.peer_certificate_policy,
+           .application_protocols = offered_protocols,
+           .require_application_protocol =
+               !hello.application_protocols().empty()});
+      const inspected_http_protocol protocol =
+          redirected_tls_detail::selected_protocol(
+              upstream->negotiated_application_protocol(), hello);
+
+      auto downstream = std::make_shared<ntl::net::tls_stream>(
+          inbound_socket_, identity->credentials(), limits_.downstream_tls);
+      const std::string_view selected_name =
+          redirected_tls_detail::protocol_name(protocol);
+      std::vector<std::string> downstream_protocols;
+      if (!hello.application_protocols().empty())
+        downstream_protocols.emplace_back(selected_name);
+      co_await downstream->handshake_server(
+          hello.initial_ciphertext(),
+          {.application_protocols = std::move(downstream_protocols),
+           .require_application_protocol =
+               !hello.application_protocols().empty(),
+           .require_client_certificate =
+               downstream_.require_client_certificate,
+           .client_certificate_policy =
+                downstream_.client_certificate_policy});
+      if ((!downstream->negotiated_application_protocol().empty() &&
+           downstream->negotiated_application_protocol() != selected_name) ||
+          (!hello.application_protocols().empty() &&
+           downstream->negotiated_application_protocol() != selected_name))
+        throw std::system_error(ERROR_PROTOCOL_UNREACHABLE,
+                                std::system_category(),
+                                "downstream and origin ALPN differ");
+
+      application_protocol_.assign(selected_name);
+      refresh_metadata();
+      auto connection = connection_snapshot();
+      auto summary = co_await dispatcher_->run(
+          protocol, std::move(downstream), std::move(upstream), metadata_);
+      redirected_tls_session_result result;
+      result.connection = std::move(connection);
+      result.server_name = server_name_;
+      result.protocol = protocol;
+      result.http = std::move(summary);
+      co_return result;
+    } catch (...) {
+      cancel();
+      throw;
+    }
+  }
+
+public:
+  void cancel() noexcept {
+    (void)inbound_socket_.cancel();
+    (void)upstream_socket_.cancel();
+    const SOCKET inbound = inbound_socket_.borrowed_native_handle();
+    const SOCKET upstream = upstream_socket_.borrowed_native_handle();
+    if (inbound != INVALID_SOCKET)
+      (void)::shutdown(inbound, SD_BOTH);
+    if (upstream != INVALID_SOCKET)
+      (void)::shutdown(upstream, SD_BOTH);
+  }
+
+  const ntl::net::http::inspection_session_metadata &
+  metadata_ref() const noexcept {
+    return metadata_;
+  }
+
+private:
+  redirected_tls_session(
+      ntl::net::io_completion_context &context, SOCKET accepted,
+      SOCKET outbound, ntl::wfp::redirected_connection handoff,
+      std::shared_ptr<ntl::net::tls_server_identity_provider>
+          downstream_identities,
+      std::shared_ptr<redirected_tls_http_dispatcher> dispatcher,
+      redirected_tls_origin_options origin,
+      redirected_tls_downstream_options downstream,
+      redirected_tls_session_limits limits,
+      std::string application_display_name,
+      redirected_tls_detail::owned_endpoint source,
+      redirected_tls_detail::owned_endpoint destination,
+      redirected_tls_detail::owned_endpoint original_source,
+      redirected_tls_detail::owned_endpoint original_destination)
+      : handoff_(std::move(handoff)), inbound_socket_(context, accepted),
+        upstream_socket_(context, outbound),
+        downstream_identities_(std::move(downstream_identities)),
+        dispatcher_(std::move(dispatcher)), origin_(std::move(origin)),
+        downstream_(std::move(downstream)),
+        limits_(limits), application_(std::move(application_display_name)),
+        source_(std::move(source)), destination_(std::move(destination)),
+        original_source_(std::move(original_source)),
+        original_destination_(std::move(original_destination)),
+        application_id_(handoff_.application_id().begin(),
+                        handoff_.application_id().end()) {
+    metadata_.connection.connection_id =
+        redirected_tls_detail::next_connection_id();
+    if (const auto flow_id = handoff_.flow_id(); flow_id != 0)
+      metadata_.connection.flow_id = flow_id;
+    metadata_.connection.flow_direction =
+        ntl::net::inspection::direction::outbound;
+    metadata_.connection.process_id = handoff_.process_id();
+    refresh_metadata();
+  }
+
+  void refresh_metadata() {
+    metadata_.connection.source = ntl::net::http::endpoint_metadata{
+        source_.address, source_.port};
+    metadata_.connection.destination = ntl::net::http::endpoint_metadata{
+        destination_.address, destination_.port};
+    metadata_.connection.original_source =
+        ntl::net::http::endpoint_metadata{
+            original_source_.address, original_source_.port};
+    metadata_.connection.original_destination =
+        ntl::net::http::endpoint_metadata{
+            original_destination_.address, original_destination_.port};
+    if (application_id_.empty())
+      metadata_.connection.application_id.reset();
+    else
+      metadata_.connection.application_id = application_id_;
+    if (application_.empty())
+      metadata_.connection.application_label.reset();
+    else
+      metadata_.connection.application_label = application_;
+    if (server_name_utf8_.empty())
+      metadata_.tls.server_name.reset();
+    else
+      metadata_.tls.server_name = server_name_utf8_;
+    if (application_protocol_.empty())
+      metadata_.tls.alpn.reset();
+    else
+      metadata_.tls.alpn = application_protocol_;
+  }
+
+  redirected_tls_connection_metadata connection_snapshot() const {
+    redirected_tls_connection_metadata result;
+    result.connection_id = metadata_.connection.connection_id.value();
+    result.flow_id = metadata_.connection.flow_id.value_or(0);
+    result.flow_direction = metadata_.connection.flow_direction.value_or(
+        ntl::net::inspection::direction::unknown);
+    result.source = {source_.address, source_.port};
+    result.destination = {destination_.address, destination_.port};
+    result.original_source = {original_source_.address,
+                              original_source_.port};
+    result.original_destination = {original_destination_.address,
+                                   original_destination_.port};
+    result.process_id = metadata_.connection.process_id.value_or(0);
+    result.application_id = application_id_;
+    result.application = application_;
+    result.address_family = handoff_.original_destination_ref().ss_family;
+    return result;
+  }
+
+  ntl::wfp::redirected_connection handoff_;
+  ntl::net::async_socket inbound_socket_;
+  ntl::net::async_socket upstream_socket_;
+  std::shared_ptr<ntl::net::tls_server_identity_provider>
+      downstream_identities_;
+  std::shared_ptr<redirected_tls_http_dispatcher> dispatcher_;
+  redirected_tls_origin_options origin_{};
+  redirected_tls_downstream_options downstream_{};
+  redirected_tls_session_limits limits_{};
+  std::string application_;
+  redirected_tls_detail::owned_endpoint source_;
+  redirected_tls_detail::owned_endpoint destination_;
+  redirected_tls_detail::owned_endpoint original_source_;
+  redirected_tls_detail::owned_endpoint original_destination_;
+  std::vector<std::byte> application_id_;
+  std::wstring server_name_;
+  std::string server_name_utf8_;
+  std::string application_protocol_;
+  ntl::net::http::inspection_session_metadata metadata_{};
+};
+
+enum class redirected_tls_start_result : std::uint8_t {
+  started = 1,
+  capacity_exhausted = 2,
+  stopping = 3,
+};
+
+class redirected_tls_session_completion_sink {
+public:
+  virtual ~redirected_tls_session_completion_sink() = default;
+  virtual void completed(const redirected_tls_session_result &) noexcept {}
+  virtual void failed(
+      const ntl::net::http::inspection_session_metadata &,
+      std::exception_ptr) noexcept {}
+};
+
+class null_redirected_tls_session_completion_sink final
+    : public redirected_tls_session_completion_sink {};
+
+namespace redirected_tls_detail {
+
+/** Eager bridge whose frame is owned transitively by a registered session. */
+class owned_session_operation {
+public:
+  struct promise_type {
+    owned_session_operation get_return_object() const noexcept { return {}; }
+    std::suspend_never initial_suspend() const noexcept { return {}; }
+    std::suspend_never final_suspend() const noexcept { return {}; }
+    void return_void() const noexcept {}
+    void unhandled_exception() const noexcept { std::terminate(); }
+  };
+};
+
+} // namespace redirected_tls_detail
+
+/**
+ * @brief Bounded owning service for redirected TLS connection coroutines.
+ *
+ * close() is idempotent and non-blocking: it rejects new connections and
+ * cancels every child. Live children retain the complete service state until
+ * their completion callback has returned, so destroying this facade from a
+ * callback or before a child is safe and needs no manual drain ordering.
+ */
+#if defined(_MSC_VER) && defined(_M_ARM64)
+#pragma warning(push)
+// std::mutex/condition_variable use an over-aligned ARM64 implementation.
+// The registry state is private, so the intentional padding is not an ABI.
+#pragma warning(disable : 4324)
+#endif
+class redirected_tls_session_registry {
+private:
+  class state;
+
+public:
+  redirected_tls_session_registry(
+      ntl::net::io_completion_context context, std::size_t capacity,
+      std::shared_ptr<ntl::net::tls_server_identity_provider>
+          downstream_identities,
+      std::shared_ptr<redirected_tls_http_dispatcher> dispatcher,
+      std::shared_ptr<redirected_tls_session_completion_sink> completion,
+      redirected_tls_origin_options origin = {},
+      redirected_tls_downstream_options downstream = {},
+      redirected_tls_session_limits limits = {})
+      : state_(std::make_shared<state>(
+            std::move(context), capacity, std::move(downstream_identities),
+            std::move(dispatcher), std::move(completion), std::move(origin),
+            std::move(downstream), limits)) {}
+
+  redirected_tls_session_registry(
+      const redirected_tls_session_registry &) = delete;
+  redirected_tls_session_registry &operator=(
+      const redirected_tls_session_registry &) = delete;
+  redirected_tls_session_registry(
+      redirected_tls_session_registry &&) noexcept = default;
+  redirected_tls_session_registry &operator=(
+      redirected_tls_session_registry &&other) noexcept {
+    if (this != &other) {
+      close();
+      state_ = std::move(other.state_);
+    }
+    return *this;
+  }
+
+  ~redirected_tls_session_registry() { close(); }
+
+  redirected_tls_start_result start(
+      SOCKET accepted_socket, std::string application_display_name = {}) {
+    auto current = state_;
+    if (!current) {
+      redirected_tls_detail::socket_owner accepted(accepted_socket);
+      return redirected_tls_start_result::stopping;
+    }
+    return current->start(accepted_socket,
+                          std::move(application_display_name));
+  }
+
+  void close() noexcept {
+    auto current = state_;
+    if (current)
+      current->close();
+  }
+
+  std::size_t active() const noexcept {
+    auto current = state_;
+    return current ? current->active() : 0;
+  }
+
+private:
+  struct entry : std::enable_shared_from_this<entry> {
+    entry(std::shared_ptr<state> owner_value,
+          std::shared_ptr<redirected_tls_session> session_value)
+        : owner(std::move(owner_value)), session(std::move(session_value)) {}
+
+    void start() { drive(shared_from_this()); }
+
+    static redirected_tls_detail::owned_session_operation drive(
+        std::shared_ptr<entry> self) noexcept {
+      std::optional<redirected_tls_session_result> result;
+      std::exception_ptr failure;
+      try {
+        result = co_await self->session->run();
+      } catch (...) {
+        failure = std::current_exception();
+      }
+      self->owner->finish(self, result, std::move(failure));
+    }
+
+    std::shared_ptr<state> owner;
+    std::shared_ptr<redirected_tls_session> session;
+  };
+
+  class state final : public std::enable_shared_from_this<state> {
+  public:
+    state(ntl::net::io_completion_context context, std::size_t capacity,
+          std::shared_ptr<ntl::net::tls_server_identity_provider>
+              downstream_identities,
+          std::shared_ptr<redirected_tls_http_dispatcher> dispatcher,
+          std::shared_ptr<redirected_tls_session_completion_sink> completion,
+          redirected_tls_origin_options origin,
+          redirected_tls_downstream_options downstream,
+          redirected_tls_session_limits limits)
+        : context_(std::move(context)), capacity_(capacity),
+          downstream_identities_(std::move(downstream_identities)),
+          dispatcher_(std::move(dispatcher)), completion_(std::move(completion)),
+          origin_(std::move(origin)), downstream_(std::move(downstream)),
+          limits_(limits) {
+      if (capacity_ == 0 || !limits_.valid() || !downstream_identities_ ||
+          !dispatcher_ || !completion_)
+        throw std::invalid_argument(
+            "redirected TLS registry requires owning bounded dependencies");
+    }
+
+    redirected_tls_start_result start(
+        SOCKET accepted_socket, std::string application_display_name) {
+      redirected_tls_detail::socket_owner accepted(accepted_socket);
+      {
+        std::lock_guard lock(lock_);
+        if (closing_)
+          return redirected_tls_start_result::stopping;
+        if (entries_.size() + starting_ >= capacity_)
+          return redirected_tls_start_result::capacity_exhausted;
+        ++starting_;
+      }
+
+      std::shared_ptr<entry> value;
+      try {
+        auto session = redirected_tls_session::create(
+            context_, accepted.release(), downstream_identities_, dispatcher_,
+            origin_, downstream_, limits_, std::move(application_display_name));
+        value = std::make_shared<entry>(this->shared_from_this(),
+                                        std::move(session));
+      } catch (...) {
+        std::lock_guard lock(lock_);
+        --starting_;
+        changed_.notify_all();
+        throw;
+      }
+
+      {
+        std::lock_guard lock(lock_);
+        --starting_;
+        if (closing_) {
+          changed_.notify_all();
+          value->session->cancel();
+          return redirected_tls_start_result::stopping;
+        }
+        entries_.push_back(value);
+      }
+      value->start();
+      return redirected_tls_start_result::started;
+    }
+
+    void close() noexcept {
+      std::vector<std::shared_ptr<entry>> snapshot;
+      {
+        std::lock_guard lock(lock_);
+        if (!closing_)
+          closing_ = true;
+        snapshot = entries_;
+        changed_.notify_all();
+      }
+      for (const auto &value : snapshot)
+        value->session->cancel();
+
+      if (!context_.running_on_completion_thread()) {
+        std::unique_lock lock(lock_);
+        changed_.wait(lock, [this] {
+          return entries_.empty() && starting_ == 0;
+        });
+      }
+    }
+
+    std::size_t active() const noexcept {
+      std::lock_guard lock(lock_);
+      return entries_.size() + starting_;
+    }
+
+    void finish(const std::shared_ptr<entry> &value,
+                const std::optional<redirected_tls_session_result> &result,
+                std::exception_ptr failure) noexcept {
+      try {
+        if (result)
+          completion_->completed(*result);
+        else
+          completion_->failed(value->session->metadata_ref(),
+                              std::move(failure));
+      } catch (...) {
+        // Telemetry must not change connection lifetime or policy outcome.
+      }
+
+      std::lock_guard lock(lock_);
+      entries_.erase(
+          std::remove(entries_.begin(), entries_.end(), value), entries_.end());
+      changed_.notify_all();
+    }
+
+  private:
+    ntl::net::io_completion_context context_;
+    std::size_t capacity_ = 0;
+    std::shared_ptr<ntl::net::tls_server_identity_provider>
+        downstream_identities_;
+    std::shared_ptr<redirected_tls_http_dispatcher> dispatcher_;
+    std::shared_ptr<redirected_tls_session_completion_sink> completion_;
+    redirected_tls_origin_options origin_{};
+    redirected_tls_downstream_options downstream_{};
+    redirected_tls_session_limits limits_{};
+    mutable std::mutex lock_;
+    std::condition_variable changed_;
+    std::vector<std::shared_ptr<entry>> entries_;
+    std::size_t starting_ = 0;
+    bool closing_ = false;
+  };
+
+  std::shared_ptr<state> state_;
+};
+#if defined(_MSC_VER) && defined(_M_ARM64)
+#pragma warning(pop)
+#endif
+
+} // namespace ntl::net::user

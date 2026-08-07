@@ -6,6 +6,9 @@ param(
   [ValidateSet('v143', 'v145')]
   [string] $PlatformToolset = 'v145',
 
+  [ValidateSet('x64', 'ARM64')]
+  [string] $Architecture = 'x64',
+
   [ValidatePattern('^(_[A-Za-z0-9]+)?$')]
   [string] $BuildDirectorySuffix = '',
 
@@ -31,11 +34,22 @@ $samples = @(
     Project = 'wfp-tls-inspection-proxy'
     Directory = 'tls-inspection-proxy'
     BaseName = 'crtsys_wfp_tls_inspection_proxy'
+    ApplicationNames = @(
+      'crtsys_wfp_tls_inspection_proxy_service.exe'
+      'crtsys_wfp_tls_inspection_proxy_acceptance.exe'
+      'crtsys_wfp_tls_inspection_proxy_live_acceptance.exe'
+    )
   },
   [pscustomobject]@{
     Project = 'wfp-browser-https-inspection'
     Directory = 'browser-https-inspection'
     BaseName = 'crtsys_wfp_browser_https_inspection'
+    ApplicationNames = @(
+      'crtsys_wfp_browser_https_inspection_controller.exe'
+      'crtsys_wfp_browser_https_inspection_http3_proxy_service.exe'
+      'crtsys_wfp_browser_https_inspection_acceptance.exe'
+      'crtsys_wfp_browser_https_inspection_managed_client_acceptance.exe'
+    )
   }
 )
 
@@ -53,7 +67,7 @@ function Assert-SafeOutputRoot([string] $Path) {
 if (-not $SkipBuild) {
   foreach ($sample in $samples) {
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $buildScript `
-        -Project $sample.Project -Architecture x64 `
+        -Project $sample.Project -Architecture $Architecture `
         -Configuration $Configuration `
         -WindowsSdkVersion $WindowsSdkVersion `
         -WdkVersion $WindowsSdkVersion `
@@ -72,19 +86,16 @@ if (Test-Path -LiteralPath $resolvedOutputRoot) {
 $packageRoot = New-Item -ItemType Directory -Force -Path $resolvedOutputRoot
 
 Copy-Item -LiteralPath (
+    Join-Path $PSScriptRoot '..\common\DisposableGuestGuard.ps1') `
+    -Destination $packageRoot.FullName
+Copy-Item -LiteralPath (
     Join-Path $PSScriptRoot 'Run-WfpHttpsLiveTest.ps1') `
     -Destination $packageRoot.FullName
 Copy-Item -LiteralPath (
     Join-Path $PSScriptRoot 'Start-WfpBrowserHttpsInspection.ps1') `
     -Destination $packageRoot.FullName
 Copy-Item -LiteralPath (
-    Join-Path $PSScriptRoot 'Test-EdgeNetLogQuicPolicy.ps1') `
-    -Destination $packageRoot.FullName
-Copy-Item -LiteralPath (
-    Join-Path $PSScriptRoot 'Test-WfpQuicTelemetry.ps1') `
-    -Destination $packageRoot.FullName
-Copy-Item -LiteralPath (
-    Join-Path $PSScriptRoot 'Start-BrowserHttp3SpkiDiagnostic.ps1') `
+    Join-Path $PSScriptRoot 'Test-WfpBrowserTransportEvidence.ps1') `
     -Destination $packageRoot.FullName
 Copy-Item -LiteralPath (
     Join-Path $PSScriptRoot 'Start-ManagedHttp3Inspection.ps1') `
@@ -109,14 +120,16 @@ $applications = @()
 $certificates = @()
 foreach ($sample in $samples) {
   $buildRoot = Join-Path $repoRoot (
-      "examples\wfp\$($sample.Directory)\" +
-      "build_x64_$PlatformToolset$BuildDirectorySuffix\$Configuration")
+      "examples\wfp\user\$($sample.Directory)\" +
+      "build_${Architecture}_$PlatformToolset$BuildDirectorySuffix\$Configuration")
   $driverSource = Join-Path $buildRoot "$($sample.BaseName).sys"
-  $applicationSource =
-      Join-Path $buildRoot "$($sample.BaseName)_app.exe"
+  $applicationSources = @(
+    $sample.ApplicationNames |
+        ForEach-Object { Join-Path $buildRoot $_ }
+  )
   $infSource = Join-Path $repoRoot (
-      "examples\wfp\$($sample.Directory)\$($sample.BaseName).inf")
-  foreach ($path in @($driverSource, $applicationSource, $infSource)) {
+      "examples\wfp\user\$($sample.Directory)\$($sample.BaseName).inf")
+  foreach ($path in @($driverSource) + $applicationSources + @($infSource)) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
       throw "Required live HTTPS artifact was not found: $path"
     }
@@ -124,12 +137,15 @@ foreach ($sample in $samples) {
 
   $driver =
       Join-Path $packageRoot.FullName "$($sample.BaseName).sys"
-  $application =
-      Join-Path $packageRoot.FullName "$($sample.BaseName)_app.exe"
   $certificate =
       Join-Path $packageRoot.FullName "$($sample.BaseName).cer"
   Copy-Item -LiteralPath $driverSource -Destination $driver
-  Copy-Item -LiteralPath $applicationSource -Destination $application
+  foreach ($applicationSource in $applicationSources) {
+    $application = Join-Path $packageRoot.FullName (
+        Split-Path -Leaf $applicationSource)
+    Copy-Item -LiteralPath $applicationSource -Destination $application
+    $applications += $application
+  }
   Copy-Item -LiteralPath $infSource -Destination $packageRoot.FullName
 
   $signingRoot =
@@ -149,22 +165,12 @@ foreach ($sample in $samples) {
     }
   }
   $drivers += $driver
-  $applications += $application
   $certificates += $certificate
 }
 
 $browserBuildRoot = Join-Path $repoRoot (
-    "examples\wfp\browser-https-inspection\" +
-    "build_x64_$PlatformToolset$BuildDirectorySuffix\$Configuration")
-$managedClientSource =
-    Join-Path $browserBuildRoot 'crtsys_ntl_managed_http3_client.exe'
-if (-not (Test-Path -LiteralPath $managedClientSource -PathType Leaf)) {
-  throw "Required managed HTTP/3 client was not found: $managedClientSource"
-}
-$managedClient =
-    Join-Path $packageRoot.FullName 'crtsys_ntl_managed_http3_client.exe'
-Copy-Item -LiteralPath $managedClientSource -Destination $managedClient
-$applications += $managedClient
+    "examples\wfp\user\browser-https-inspection\" +
+    "build_${Architecture}_$PlatformToolset$BuildDirectorySuffix\$Configuration")
 $http3RuntimeLibraries = @(
   (Join-Path $browserBuildRoot 'msh3.dll'),
   (Join-Path $browserBuildRoot 'msquic.dll')
@@ -215,6 +221,7 @@ foreach ($notice in $http3Notices) {
 Write-Host "Prepared live HTTPS runtime package: $($packageRoot.FullName)"
 [pscustomobject]@{
   Root = $packageRoot.FullName
+  Architecture = $Architecture
   Drivers = $drivers
   Applications = $applications
   DriverCertificates = $certificates
@@ -223,9 +230,6 @@ Write-Host "Prepared live HTTPS runtime package: $($packageRoot.FullName)"
   BrowserTest =
       (Join-Path $packageRoot.FullName `
           'Start-WfpBrowserHttpsInspection.ps1')
-  BrowserHttp3SpkiTest =
-      (Join-Path $packageRoot.FullName `
-          'Start-BrowserHttp3SpkiDiagnostic.ps1')
   ManagedHttp3Test =
       (Join-Path $packageRoot.FullName `
           'Start-ManagedHttp3Inspection.ps1')

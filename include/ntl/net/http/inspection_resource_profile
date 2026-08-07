@@ -1,0 +1,95 @@
+/**
+ * @file inspection_resource_profile
+ * @brief One bounded resource contract for HTTP/1.1, HTTP/2, and HTTP/3.
+ */
+#pragma once
+
+#include <ntl/net/http/http1_proxy_types>
+#include <ntl/net/http2/proxy_connection>
+#include <ntl/net/http3/proxy_connection>
+
+#include <cstddef>
+#include <cstdint>
+
+namespace ntl::net::http {
+
+enum class inspection_resource_error : std::uint8_t {
+  none,
+  invalid_http1_limits,
+  invalid_http2_limits,
+  invalid_http3_limits,
+  zero_session_limit,
+  http1_workspace_budget_too_small,
+  http2_workspace_budget_too_small,
+  http3_workspace_budget_too_small,
+};
+
+/**
+ * The parser limits and their backing workspace budgets are configured as one
+ * value. A dispatcher must reject the profile before accepting traffic if any
+ * admitted message cannot fit its corresponding bounded workspace.
+ */
+struct inspection_resource_profile {
+  http1_proxy_limits http1{};
+  ntl::net::http2::proxy_connection_limits http2{};
+  ntl::net::http3::proxy_connection_limits http3{};
+  std::size_t maximum_concurrent_http1_sessions = 16;
+  std::size_t maximum_concurrent_http2_sessions = 16;
+  std::size_t maximum_concurrent_http3_sessions = 16;
+  // Zero selects the exact size derived from the corresponding parser limit.
+  // A nonzero value is an explicit product budget and is validated eagerly.
+  std::size_t http1_workspace_budget = 0;
+  std::size_t http2_workspace_budget = 0;
+  std::size_t http3_workspace_budget = 0;
+
+  constexpr std::size_t required_http1_workspace_bytes() const noexcept {
+    return http1.maximum_wire_message_size;
+  }
+  constexpr std::size_t required_http2_workspace_bytes() const noexcept {
+    return http2.maximum_frame_payload;
+  }
+  constexpr std::size_t required_http3_workspace_bytes() const noexcept {
+    return http3.maximum_frame_payload;
+  }
+  constexpr std::size_t effective_http1_workspace_bytes() const noexcept {
+    return http1_workspace_budget ? http1_workspace_budget
+                                  : required_http1_workspace_bytes();
+  }
+  constexpr std::size_t effective_http2_workspace_bytes() const noexcept {
+    return http2_workspace_budget ? http2_workspace_budget
+                                  : required_http2_workspace_bytes();
+  }
+  constexpr std::size_t effective_http3_workspace_bytes() const noexcept {
+    return http3_workspace_budget ? http3_workspace_budget
+                                  : required_http3_workspace_bytes();
+  }
+
+  constexpr inspection_resource_error validate() const noexcept {
+    if (!http1.valid())
+      return inspection_resource_error::invalid_http1_limits;
+    if (!http2.valid())
+      return inspection_resource_error::invalid_http2_limits;
+    if (!http3.valid())
+      return inspection_resource_error::invalid_http3_limits;
+    if (maximum_concurrent_http1_sessions == 0 ||
+        maximum_concurrent_http2_sessions == 0 ||
+        maximum_concurrent_http3_sessions == 0)
+      return inspection_resource_error::zero_session_limit;
+    if (http1_workspace_budget != 0 &&
+        required_http1_workspace_bytes() > http1_workspace_budget)
+      return inspection_resource_error::http1_workspace_budget_too_small;
+    if (http2_workspace_budget != 0 &&
+        required_http2_workspace_bytes() > http2_workspace_budget)
+      return inspection_resource_error::http2_workspace_budget_too_small;
+    if (http3_workspace_budget != 0 &&
+        required_http3_workspace_bytes() > http3_workspace_budget)
+      return inspection_resource_error::http3_workspace_budget_too_small;
+    return inspection_resource_error::none;
+  }
+
+  constexpr bool valid() const noexcept {
+    return validate() == inspection_resource_error::none;
+  }
+};
+
+} // namespace ntl::net::http
