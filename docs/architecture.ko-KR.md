@@ -1,6 +1,6 @@
 # 아키텍처
 
-[한국어 문서로 돌아가기](./ko-kr.md)
+[한국어 문서로 돌아가기](./README.ko-KR.md)
 
 `crtsys`는 Windows 드라이버를 위한 커널 모드 runtime substrate입니다.
 목표는 driver project가 익숙한 MSVC C++ runtime, CRT, STL entry point를
@@ -14,25 +14,25 @@ compatibility substrate 위에 매핑하는 것입니다.
 hosted runtime이 보통 user-mode facility에 의존하는 부분에는 kernel-mode
 runtime adapter를 제공하며, 그 결과를 driver test와 연결합니다.
 
-`LDK`는 runtime과 STL path가 사용하는 Windows/NTDLL-compatible API surface와
-ICU ABI substrate를 제공합니다. 여기에는 정상적인 user-mode process 밖에서
-MSVC runtime code가 기대하는 lower-level primitive가 포함됩니다.
+`LDK`는 runtime과 STL 경로가 사용하는 Windows/NTDLL 호환 API 계층과 ICU ABI
+기반을 제공합니다. 여기에는 정상적인 사용자 모드 process 밖에서 MSVC runtime
+코드가 기대하는 저수준 primitive가 포함됩니다.
 
-`NTL`은 driver code에 노출되는 C++ helper layer입니다. C++ entry point
-wrapper, driver/device helper, synchronization helper, RPC-style control path,
-IRQL helper, stack expansion tool을 제공합니다.
+`NTL`은 드라이버 코드에 노출되는 C++ 도우미 계층입니다. C++ 진입점 wrapper,
+driver/device 도우미, 동기화 도우미, RPC 방식 control path, IRQL 도우미 및
+stack expansion 도구를 제공합니다.
 
 ## 계층별 책임
 
-| Layer | Responsibility |
+| 계층 | 역할 |
 | --- | --- |
 | MSVC CRT/STL/VCRT/UCRT source path | Driver code가 사용하는 익숙한 MSVC C++/CRT/STL entry point를 유지합니다. |
 | crtsys compatibility layer | Kernel-mode runtime adapter, ABI helper, 선택된 CRT/STL integration, driver-tested coverage contract를 제공합니다. |
 | LDK substrate | Runtime/STL path가 요구하는 Windows/NTDLL-compatible API와 ICU ABI entry point를 제공합니다. |
-| NTL | 기본 MSVC STL 표면을 바꾸지 않고 driver 형태의 선택적 C++ helper를 제공합니다. |
+| NTL | 기본 MSVC STL API를 바꾸지 않고 드라이버용 선택적 C++ helper를 제공합니다. |
 | WDK / NT kernel | 실제 kernel primitive, object model, IRQL rule, pool allocation, verifier environment를 제공합니다. |
 
-## 사용자 코드에 보이는 C++ 표면
+## 사용자 코드에 노출되는 C++ 영역
 
 기본 의도는 일반 MSVC C++에 가깝습니다. MSVC 표준 header를 include하고,
 표준 CRT/STL type을 사용하며, runtime substrate를 driver에 link합니다.
@@ -72,7 +72,7 @@ crtsys는 하나의 static runtime library 안에 진입 경로를 별도 object
 분리합니다. 따라서 모든 project가 같은 driver model을 강제로 사용할 필요가
 없습니다.
 
-| Project model | OS image entry | Driver code entry |
+| 프로젝트 모델 | OS image 진입점 | 드라이버 코드 진입점 |
 | --- | --- | --- |
 | NTL WDM | `CrtSysDriverEntry` | `ntl::main` |
 | 일반 WDM | `CrtSysWdmDriverEntry` | 일반 `DriverEntry` |
@@ -91,7 +91,7 @@ ownership과 major-function 처리는 그대로 유지합니다.
 
 Visual Studio/MSBuild driver project는 보통 `PackageReference`,
 `Install-Package crtsys`, `msbuild /restore` 경로로 NuGet package를
-사용합니다. 자세한 내용은 [MSBuild/NuGet 빠른 시작](./ko-kr-msbuild-nuget-quickstart.md)을
+사용합니다. 자세한 내용은 [MSBuild/NuGet 빠른 시작](./msbuild-nuget-quickstart.ko-KR.md)을
 보세요. CMake project는 GitHub Release prebuilt bundle을
 `find_package(crtsys CONFIG REQUIRED)`로 소비하거나, CPM.cmake와
 `CPMAddPackage("gh:ntoskrnl7/crtsys@<version>")`로 GitHub의 `crtsys`를
@@ -100,7 +100,7 @@ Visual Studio/MSBuild driver project는 보통 `PackageReference`,
 세 경로 모두 같은 모델을 대상으로 합니다. `crtsys`는 driver에 link되고,
 driver는 정상적인 WDK driver로 남습니다.
 
-## 테스트된 표면
+## 검증된 영역
 
 Feature coverage matrix는 증거 기반 문서입니다. 목록에 있는 C++/CRT/STL
 path는 kernel driver test target에 포함되어 그 harness에서 실행됩니다.

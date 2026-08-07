@@ -1,6 +1,6 @@
 # 설계 근거와 운영 경계
 
-[한국어 문서로 돌아가기](./ko-kr.md)
+[한국어 문서로 돌아가기](./README.ko-KR.md)
 
 이 문서는 `crtsys`가 어떤 프로젝트인지, 어떤 실행 문맥을 기준으로
 설계되었는지, 그리고 어디부터는 일반 WDK 규칙을 그대로 의식해야 하는지를
@@ -23,9 +23,9 @@ coverage surface를 명시적으로 문서화하고 테스트한다.
 
 이 구분은 중요합니다. `crtsys`는 알려진 driver/runtime path를 위한 runtime
 substrate 및 Windows API compatibility layer이지, 임의의 user-mode 가정을
-커널 모드로 그대로 가져와도 된다는 허가가 아닙니다. driver는 여전히 IRQL,
-stack, pool allocation, pageable code, unload safety, verifier, HVCI,
-target OS validation 같은 WDK 규칙을 따라야 합니다.
+커널 모드로 그대로 가져와도 된다는 허가가 아닙니다. 드라이버는 여전히 IRQL,
+stack, pool 할당, pageable code, unload 안전성, Driver Verifier, HVCI 및
+대상 OS 검증 같은 WDK 규칙을 따라야 합니다.
 
 ## 왜 필요한가
 
@@ -33,7 +33,7 @@ target OS validation 같은 WDK 규칙을 따라야 합니다.
 대부분 없습니다. 실제 드라이버에서 현대적인 C++을 쓰려면 다음 지원이
 필요해집니다.
 
-- static/dynamic initialization
+- 정적/동적 초기화
 - 선택된 exception runtime 경로
 - STL 코드가 요구하는 일부 CRT 함수
 - 통제된 문맥에서 쓰는 STL synchronization/threading 경로
@@ -78,12 +78,12 @@ substrate로 사용됩니다. 임의의 user-mode module을 커널 공간에서 
 
 `crtsys`는 주로 드라이버 제어 경로를 대상으로 설계되었습니다.
 
-- driver initialization / unload
-- device creation / teardown
-- IOCTL 및 RPC request handling
-- worker thread coordination
-- ownership cleanup 및 error handling
-- diagnostic 및 test code
+- 드라이버 초기화/언로드
+- 장치 생성/해제
+- IOCTL 및 RPC 요청 처리
+- worker thread 조정
+- 소유권 정리 및 오류 처리
+- 진단 및 테스트 코드
 
 이런 경로는 보통 `PASSIVE_LEVEL`에서 실행되며, underlying WDK API가 허용하는
 일부 경우에만 `APC_LEVEL`까지 수용합니다. 이것이 기본 설계 가정입니다.
@@ -139,7 +139,7 @@ stream formatting, pageable code, 임의의 STL/runtime 호출을 보호하는 �
 | iostream | diagnostic 및 test | production hot path와 stack-sensitive path |
 | `ntl::expand_stack` | 깊은 stack 사용이 예상되고 테스트된 경로 | 얕은 call graph 설계를 대체하는 용도 |
 
-## Exception 정책
+## 예외 정책
 
 `crtsys`는 선택된 C++ exception 시나리오를 지원합니다. 이 지원은 커널
 드라이버에서 통제된 C++ runtime path를 가능하게 하기 위한 것이지,
@@ -154,7 +154,7 @@ driver hot path를 user-mode exception 스타일로 작성하라는 권장이 �
 - exception-heavy path는 stack-sensitive path로 취급합니다.
 - unwinding 중 실행되는 destructor는 kernel-safe해야 합니다.
 
-## Stack 정책
+## 스택 정책
 
 커널 스택은 작고, C++ runtime 계층은 stack pressure를 늘릴 수 있습니다.
 dispatch path는 얕게 유지하고, 큰 local object와 recursive design을 피하며,
@@ -164,7 +164,7 @@ production hot path에서는 stream formatting을 피하는 것이 좋습니다.
 사용하세요. stack expansion은 통제된 도구이지, stack discipline을 무시해도
 된다는 허가가 아닙니다.
 
-## Memory와 HVCI 정책
+## 메모리와 HVCI 정책
 
 최종 driver binary는 여전히 driver binary로 검증해야 합니다. Driver
 Verifier, Code Integrity check, 배포 요구사항에 따른 Memory Integrity,
@@ -175,13 +175,13 @@ writable/executable mapping을 만들거나, executable memory를 patch하거나
 임의의 executable image를 load하거나, data file을 executable code처럼
 취급하는 설계는 이 모델 밖입니다.
 
-## Non-goals
+## 목표로 하지 않는 범위
 
 `crtsys`가 목표로 하지 않는 것은 다음과 같습니다.
 
-- full user-mode CRT compatibility
-- full Win32 또는 NTDLL compatibility
-- arbitrary user-mode DLL execution in kernel mode
+- 완전한 사용자 모드 CRT 호환성
+- 완전한 Win32 또는 NTDLL 호환성
+- 임의의 사용자 모드 DLL을 커널 모드에서 실행하는 기능
 - 모든 STL 기능이 모든 driver context에서 안전하다는 보장
 - WDK object ownership, IRQL, pageable-code, pool-allocation rule을 숨기기
 - Driver Verifier, HLK, VM test, crash dump analysis 대체
@@ -200,6 +200,6 @@ writable/executable mapping을 만들거나, executable memory를 patch하거나
 - `DPC-level only`
 - `test/diagnostic only`
 
-allocation, blocking, pageable code, exception, stack expansion, runtime
-adapter path가 관련되어 있다면 왜 그런 계약이 필요한지도 API 문서에 함께
+할당, blocking, pageable code, 예외, stack expansion, runtime adapter 경로가
+관련되어 있다면 왜 그런 계약이 필요한지도 API 문서에 함께
 적어야 합니다.

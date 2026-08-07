@@ -16,5 +16,15 @@
 | [`usb`](./usb/README.ko-KR.md) | USB 장치·인터페이스·파이프와 연속 판독기 | 일치하는 USB 하드웨어 |
 | [`wmi`](./wmi/README.ko-KR.md) | MOF 기반 WMI 조회·설정·메서드·이벤트 | 예제 INF를 설치한 VM |
 
-모든 프로젝트는 CMake와 Visual Studio 프로젝트를 제공합니다. 스트레스 및
-Verifier 검증은 예제가 아니라 [`test/kmdf`](../../test/kmdf)에 있습니다.
+모든 프로젝트는 독립 CMake 빌드를 지원합니다. 공개 예제마다 Visual Studio
+solution/project도 포함되어 있어 package restore와 Driver Settings를 직접 사용할
+수 있습니다. 저장소 project convention은
+`scripts/ci/Test-CrtSysExampleProjects.ps1`에서 검사합니다.
+
+stress 및 verifier fixture는 의도적으로 예제에 포함하지 않고
+[`test/kmdf`](../../test/kmdf)에 유지합니다. 여기에는 concurrent
+[`verifier-stress`](../../test/kmdf/verifier-stress) driver/app 쌍도 포함됩니다.
+[WDK 예제 coverage matrix](../../test/kmdf/WDK-SAMPLE-COVERAGE.ko-KR.md)는 지원하는
+공통 영역을 정의하며,
+[software-only runtime suite](../../test/kmdf/runtime)는 공개 예제들을 하나의
+설치/재시작/제거 VM gate로 조합합니다.

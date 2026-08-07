@@ -1,6 +1,6 @@
 # 기능 지원 현황
 
-[한국어 문서로 돌아가기](./ko-kr.md)
+[한국어 문서로 돌아가기](./README.ko-KR.md)
 
 이 문서는 crtsys가 지원하는 전체 STL/CRT 기능의 한계표나 부정적인 호환성
 목록이 아니라, driver-tested feature coverage matrix입니다. 여기에는
@@ -11,7 +11,7 @@ harness에서 실행되는 기능과 code path를 기록합니다.
 고정하지 않았다는 의미입니다. 실제 미지원/제약이 확인된 항목은 known
 limitation 또는 blocker에 따로 표시합니다.
 
-실제로 사용할 수 있는 표면은 아래 표보다 넓은 경우가 많습니다. `crtsys`는
+실제로 사용할 수 있는 API 범위는 아래 표보다 넓은 경우가 많습니다. `crtsys`는
 MSVC CRT/STL source path를 사용하고, 그 경로가 필요로 하는 Win32/NTDLL/ICU
 의존성은 LDK를 통해 kernel-mode substrate로 연결합니다. 그래서 matrix에
 개별 행이 없는 인접 header 함수나 overload도 별도 테스트 없이 동작하는
@@ -44,8 +44,8 @@ lifetime coverage가 이 검증에 포함됩니다.
 뜻입니다. 모든 driver execution context에서 유효하다는 의미도 아니고,
 사용 가능한 모든 MSVC STL/header path를 전부 나열한다는 뜻도 아닙니다. API가
 더 넓은 계약을 문서화하지 않았다면 기본값은 `PASSIVE_LEVEL`로 보세요.
-실행 문맥은 [설계 근거와 운영 경계](./ko-kr-design-rationale.md)와
-[NTL API 문서](./ko-kr-ntl-api.md)를 참고하세요.
+실행 문맥은 [설계 근거와 운영 경계](./design-rationale.ko-KR.md)와
+[NTL API 문서](./ntl-api.ko-KR.md)를 참고하세요.
 
 ## IRQL 지원 계약
 
@@ -69,13 +69,14 @@ exception 없음, 유효한 WDK 문맥을 직접 보장해야 합니다. driver 
 | C math 및 floating-point helper | math function, floating-point classification helper | exact helper를 별도 감사하지 않았다면 `PASSIVE_LEVEL` | floating-point state와 helper dependency는 driver context에 민감합니다. |
 | NTL entry, driver, device, RPC server helper | `ntl::main`, `ntl::driver`, `ntl::device`, `ntl::rpc::server` | `PASSIVE_LEVEL` only | initialization, teardown, device setup, IOCTL/RPC control path 용도입니다. RPC는 원래 호출자의 보안 context를 보존하고 request 역직렬화 전에 method별 authorization을 수행할 수 있습니다. |
 | NTL IRP view and typed IOCTL helper | `ntl::irp`, `ntl::device_control::in_buffer`, `ntl::device_control::out_buffer`, `ntl::ioctl` | IRP를 넘겨준 dispatch path를 따름 | NTL device callback은 exact callback body를 별도 감사하지 않았다면 `PASSIVE_LEVEL`로 보세요. |
-| NTL status wrapper | `ntl::status` | caller context | `NTSTATUS`를 감싼 value-only wrapper입니다. |
+| NTL 상태/결과 래퍼 | `ntl::status`, `ntl::result<T>`, `ntl::result<void>` | 상태 검사는 호출자 컨텍스트에서 가능하며, 저장된 값과 실패한 `value()` 경로는 각자의 계약을 따름 | C++ 제어 경로에서 `NTSTATUS`를 보존하는 값/상태 도우미입니다. |
 | NTL stack expansion | `ntl::expand_stack` | `PASSIVE_LEVEL` only | runtime-backed control-path helper입니다. hot path 회피 수단이 아닙니다. |
 | NTL handle/object ownership | `ntl::unique_handle`, `ntl::unique_object`, `try_reference_object_by_handle` | `unique_handle`은 user mode에서 `CloseHandle`, kernel mode에서 `ZwClose`로 매핑됩니다. object helper는 정확한 WDK primitive가 더 넓은 contract를 문서화하지 않는 한 `PASSIVE_LEVEL` | build mode별 HANDLE ownership과 `ObDereferenceObject` reference ownership을 분리합니다. |
 | NTL registry helper | `ntl::registry_key`, `ntl::registry_value`, `ntl::driver_config`, `try_open_driver_parameters` | `PASSIVE_LEVEL` only | driver configuration path에서 Zw registry key handle을 RAII로 관리하고 typed `REG_*` value query/set/default helper를 제공합니다. |
 | NTL pool ownership and allocator | `ntl::pool_ptr`, `ntl::pool_buffer`, `ntl::pool_allocator`, `ntl::nonpaged_pool_allocator`, `ntl::paged_pool_allocator`, `ntl::pmr::pool_resource` | raw nonpaged pool은 `<= DISPATCH_LEVEL`; raw paged pool은 `<= APC_LEVEL`; 일반 STL/PMR 사용은 `PASSIVE_LEVEL` | native pool 및 allocator policy 검사 함수를 제공하고, Debug build는 STL/PMR allocation hook가 `PASSIVE_LEVEL`보다 높은 곳에서 실행되면 경고합니다. allocator를 호출하지 않는 capacity-preserving 연산은 감지할 수 없으며, nonpaged storage만으로 임의의 STL 연산이 DPC-safe가 되지는 않습니다. |
 | NTL lookaside list | `ntl::lookaside_list` | raw nonpaged allocate/free는 WDK lookaside 규칙을 따름; object construction/destruction은 별도 감사 전에는 `PASSIVE_LEVEL` | `LOOKASIDE_LIST_EX` 기반 fixed-size kernel object cache를 pool kind/tag가 보이는 형태로 감쌉니다. |
 | NTL MDL helper | `ntl::mdl` | underlying WDK MDL/page-locking primitive를 따름 | `IoAllocateMdl`로 만든 MDL을 RAII로 소유하고 nonpaged-pool description, page locking, mapping, release path를 제공합니다. |
+| NTL 프로세스 매핑 I/O 및 미니필터 교체 버퍼 | `ntl::ipc::try_map_io_buffers`, `ntl::ipc::try_map_completed_io_buffers`, 형식화된 `ntl::flt::try_map_io_buffers`, 형식화된 `ntl::flt::try_swap_io_buffers`, 보류/지연 도우미 | 매핑, 대상 프로세스 매핑 해제, 교체 준비, 서비스 대기 및 되쓰기는 `PASSIVE_LEVEL`; 전달된 정리 전용 교체 컨텍스트, 취소 큐 콜백 및 지연 작업 제출은 별도로 DISPATCH-safe | IRP 또는 IOPB 메타데이터에서 논리 입력/출력을 자동으로 도출하고, 단방향 작업은 유효한 교체 방향을 추론하며, 양방향 작업에만 명시적 선택자를 요구합니다. 부분 페이지와 커널 backing은 기본적으로 격리하고 매핑, 교체, 전송 및 보류 소유권을 분리합니다. [I/O 버퍼 매핑](./ntl/io-buffer-mapping.ko-KR.md)을 참조하십시오. |
 | NTL symbolic link wrapper | `ntl::symbolic_link` | `PASSIVE_LEVEL` | driver setup/teardown path에서 `IoCreateSymbolicLink` / `IoDeleteSymbolicLink`를 RAII로 감쌉니다. |
 | NTL PnP device-interface wrapper | `ntl::device_interface_link`, `try_register_device_interface` | `PASSIVE_LEVEL` PnP/control path | `IoRegisterDeviceInterface`가 반환한 symbolic link를 소유합니다. generic test는 valid PDO가 없으므로 empty-owner safety path만 검증합니다. |
 | NTL event wrapper | `ntl::event` | `KEVENT` 계약을 따름; NTL usage에서 blocking `wait()`는 `PASSIVE_LEVEL` | notification/synchronization event setup, signal/reset/clear, state query, wait를 감쌉니다. |
@@ -83,6 +84,7 @@ exception 없음, 유효한 WDK 문맥을 직접 보장해야 합니다. driver 
 | NTL system thread wrapper | `ntl::system_thread` | `PASSIVE_LEVEL` | `PsCreateSystemThread`를 native WDK thread-handle owner로 감쌉니다. 표준 C++ threading은 `std::thread`를 쓰고, `NTSTATUS`, `OBJECT_ATTRIBUTES`, `CLIENT_ID`, 명시적 `ZwClose` ownership이 필요할 때 이 helper를 씁니다. |
 | NTL wait helpers | `ntl::try_wait`, `ntl::wait_for`, `ntl::zero_timeout`, `ntl::relative_timeout_ms` | wait 대상의 native contract를 따름; blocking wait는 NTL usage에서 `PASSIVE_LEVEL` | event, timer, system-thread wrapper에 공통으로 쓰는 timeout과 wait status classification helper입니다. |
 | NTL work item / passive executor | `ntl::work_item`, `ntl::passive_work_item`, `ntl::passive_executor` | `queue()` / `post()`는 `<= DISPATCH_LEVEL`; `wait()` / `queue_and_wait()`는 `PASSIVE_LEVEL` | resident work를 `PASSIVE_LEVEL` system worker thread로 넘깁니다. executor는 이미 passive이면 inline 실행할 수 있습니다. |
+| NTL 필터 관리자 작업 항목 | `ntl::flt::queue_instance_work_item`, `ntl::flt::queue_filter_work_item` | 제출은 `<= DISPATCH_LEVEL`; 콜백은 `PASSIVE_LEVEL`에서 실행 | `FltQueueGenericWorkItem`으로 큐에 넣고, 필터 관리자 삭제가 시작되면 새 작업을 거부하며, 콜백이 반환할 때까지 필터 런다운 참조를 유지합니다. 미니필터 소유의 분리 작업에는 원시 executive 작업 항목 대신 이를 사용하십시오. |
 | NTL kernel coroutine context | C++20 `ntl::resume_on_passive` | `DISPATCH_LEVEL`까지 호출 가능; queue에 성공한 continuation은 `PASSIVE_LEVEL`에서 resume | 명시적으로 await한 지점만 제어하며 임의의 `coroutine_handle::resume()`에는 관여하지 않습니다. queue 실패는 원래 caller context에서 `ntl::status`로 반환되므로 passive-only 작업 전에 반드시 검사해야 합니다. |
 | NTL remove lock | `ntl::remove_lock`, `ntl::remove_lock_guard` | WDK `IO_REMOVE_LOCK` 계약을 따름; waiting teardown path는 wait 가능해야 함 | dispatch/remove/unload synchronization을 RAII guard로 감쌉니다. |
 | NTL ERESOURCE wrapper | `ntl::resource`, `ntl::unique_lock<ntl::resource>`, `ntl::shared_lock<ntl::resource>` | `<= APC_LEVEL` | blocking/resource-style synchronization입니다. DPC, ISR, spin-lock-held path에서 쓰지 마세요. |
@@ -90,14 +92,14 @@ exception 없음, 유효한 WDK 문맥을 직접 보장해야 합니다. driver 
 | NTL IRQL helper | `ntl::irql`, `ntl::raise_irql`, `ntl::raise_irql_to_dpc_level`, `ntl::raise_irql_to_synch_level` | 현재 IRQL을 명시적으로 조작 | raised scope는 최대한 작게 유지하세요. |
 | NTL RPC client | `ntl::rpc::client` | user mode, kernel IRQL 아님 | 공유 macro가 typed method descriptor 위에서 양쪽 코드를 생성합니다. bounded reply, malformed/trailing payload 거부, x86 client와 x64 driver schema를 검증합니다. |
 
-## C++ Standard
+## C++ 표준 라이브러리
 
 테스트는 [cppreference](https://en.cppreference.com)의 예제와 동작 설명을
 기준으로 작성되었습니다.
 cppreference Example 코드를 이식한 항목은
-[cppreference attribution note](./cppreference-attribution.md)에 별도로 정리합니다.
+[cppreference attribution note](./cppreference-attribution.ko-KR.md)에 별도로 정리합니다.
 
-### Initialization
+### 초기화
 
 - [x] [Non-local variables](https://en.cppreference.com/w/cpp/language/initialization#Non-local_variables)
   - [x] [Static initialization](https://en.cppreference.com/w/cpp/language/initialization#Static_initialization)
@@ -110,7 +112,7 @@ cppreference Example 코드를 이식한 항목은
 - [x] [Function-local `static` variables](https://en.cppreference.com/w/cpp/language/storage_duration#Static_local_variables)
   [(tested)](../test/cmake/driver/src/cpp/lang/initialization.cpp#L124)
   [(regression)](../test/cmake/driver/src/cpp/lang/initialization.cpp#L229)
-- [x] Multi-driver compiler TLS slot isolation
+- [x] 여러 드라이버의 컴파일러 TLS 슬롯 격리
   - 여러 crtsys-linked driver image가 동시에 load되어도 thread-safe
     function-local `static` initialization 같은 runtime path에서 사용하는
     MSVC compiler TLS `_tls_index`가 서로 충돌하지 않습니다. 보장하는 것은
@@ -123,7 +125,7 @@ cppreference Example 코드를 이식한 항목은
 - [ ] [`thread_local`](https://en.cppreference.com/w/cpp/language/storage_duration#Thread_storage_duration)
   [(disabled cppreference example)](../test/cmake/driver/src/cpp/lang/initialization.cpp#L79)
 
-### Exceptions
+### 예외
 
 - [x] [throw](https://en.cppreference.com/w/cpp/language/throw)
   [(tested)](../test/cmake/driver/src/cpp/lang/exceptions.cpp#L42)
@@ -194,7 +196,7 @@ cppreference Example 코드를 이식한 항목은
     coverage는 active MSVC STL에서 해당 clock을 노출하는 경우
     `system_clock`, `file_clock`, `utc_clock`, `tai_clock`, `gps_clock`
     round trip을 확인합니다.
-- [x] CRT time semantic check
+- [x] CRT 시간 의미 체계 검사
   - `_time64`, `_ftime64_s`, `gmtime_s`, `localtime_s`, `_tzset`,
     `_get_timezone`, `_get_daylight`, `_get_tzname`, `strftime`, `wcsftime`,
     `asctime_s`, `_ctime64_s`, `mktime`, `_mkgmtime64`, `difftime` 경로를
@@ -280,21 +282,21 @@ cppreference Example 코드를 이식한 항목은
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/containers.cpp)
 - [x] [std::locale](https://en.cppreference.com/w/cpp/locale/locale)
   [(cppreference examples)](../test/cmake/driver/src/cpp/stl/locale.cpp)
-- [x] Locale facet semantic check
+- [x] 로캘 패싯 의미 체계 검사
   - named `std::locale`의 ctype, collate compare/transform/hash, wide
     collate, codecvt, numpunct, moneypunct facet을 LDK 기반 locale/NLS
     substrate 기준으로 검증하며, locale facet 기반 grouped numeric
     parsing도 확인합니다.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/locale.cpp)
-- [x] NLS and text conversion semantic check
+- [x] NLS 및 텍스트 변환 의미 체계 검사
   - `MultiByteToWideChar`, `WideCharToMultiByte`, `GetStringTypeA/W`,
-    `GetStringTypeExW`, `LCMapStringEx` upper/lower mapping, `CompareStringEx`,
+    `GetStringTypeExW`, `LCMapStringEx` 대문자/소문자 매핑, `CompareStringEx`,
     `CompareStringOrdinal`, CP_ACP / UTF-8 round trip, insufficient-buffer 및
-    invalid-sequence / invalid-flag error case, UCRT `mbtowc` / `wctomb` /
+    잘못된 시퀀스/플래그 오류 사례, UCRT `mbtowc` / `wctomb` /
     `mbstowcs` / `mbstowcs_s` / `wcstombs` / `wcstombs_s` / `mbrtowc` /
-    `wcrtomb`, CRT collation transform `strcoll` / `strxfrm` / `wcscoll` /
+    `wcrtomb`, CRT 데이터 정렬 변환 `strcoll` / `strxfrm` / `wcscoll` /
     `wcsxfrm`, C++ UTF conversion 함수 `mbrtoc16` / `c16rtomb` /
-    `mbrtoc32` / `c32rtomb`, filesystem UTF-8 path
+    `mbrtoc32` / `c32rtomb`, 파일 시스템 UTF-8 경로
     create/read/copy/rename/enumeration 경로를 검증합니다.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/nls.cpp)
 - [x] [std::map](https://en.cppreference.com/w/cpp/container/map)
@@ -332,7 +334,7 @@ cppreference Example 코드를 이식한 항목은
   [(cppreference make_pair example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::pmr::monotonic_buffer_resource](https://en.cppreference.com/w/cpp/memory/monotonic_buffer_resource)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/memory.cpp)
-- [x] PMR pool/resource API:
+- [x] PMR 풀/리소스 API:
       [`std::pmr::unsynchronized_pool_resource`](https://en.cppreference.com/w/cpp/memory/unsynchronized_pool_resource),
       [`std::pmr::synchronized_pool_resource`](https://en.cppreference.com/w/cpp/memory/synchronized_pool_resource),
       [`std::pmr::polymorphic_allocator`](https://en.cppreference.com/w/cpp/memory/polymorphic_allocator),
@@ -364,6 +366,7 @@ cppreference Example 코드를 이식한 항목은
       [`std::views::elements`](https://en.cppreference.com/w/cpp/ranges/elements_view)
   [(cppreference examples)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::views::zip](https://en.cppreference.com/w/cpp/ranges/zip_view),
+      [std::views::zip_transform](https://en.cppreference.com/w/cpp/ranges/zip_transform_view),
       [std::views::chunk](https://en.cppreference.com/w/cpp/ranges/chunk_view),
       [std::views::slide](https://en.cppreference.com/w/cpp/ranges/slide_view),
       [std::views::stride](https://en.cppreference.com/w/cpp/ranges/stride_view),
@@ -376,7 +379,6 @@ cppreference Example 코드를 이식한 항목은
       [std::views::adjacent](https://en.cppreference.com/w/cpp/ranges/adjacent_view),
       [std::views::adjacent_transform](https://en.cppreference.com/w/cpp/ranges/adjacent_transform_view),
       [std::views::enumerate](https://en.cppreference.com/w/cpp/ranges/enumerate_view)
-  [(feature-test-gated cppreference examples)](../test/cmake/driver/src/cpp/stl/algorithm.cpp)
 - [x] [std::ratio](https://en.cppreference.com/w/cpp/numeric/ratio)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::reference_wrapper](https://en.cppreference.com/w/cpp/utility/functional/reference_wrapper)
@@ -418,11 +420,13 @@ cppreference Example 코드를 이식한 항목은
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::format](https://en.cppreference.com/w/cpp/utility/format)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
+- [x] [`std::range_formatter`](https://en.cppreference.com/w/cpp/utility/format/range_formatter)
+  [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [`std::formatter`](https://en.cppreference.com/w/cpp/utility/format/formatter)
       customization
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [`std::range_formatter`](https://en.cppreference.com/w/cpp/utility/format/range_formatter)
-      range-format specification snippet
+      범위 형식 지정 예제
   [(cppreference snippets)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::print](https://en.cppreference.com/w/cpp/io/print)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
@@ -444,8 +448,8 @@ cppreference Example 코드를 이식한 항목은
       및 `basic_filebuf::open`, `is_open`, `seekoff`, `seekpos`,
       `underflow`, `basic_ifstream::is_open`, `basic_fstream::open` /
       `is_open` 파일 지향 예제. 추가 driver semantic coverage는
-      `std::fstream` in-place update, append-mode write, exception-mask open
-      failure, EOF/fail/clear state transition을 확인합니다.
+	      `std::fstream` 제자리 갱신, 추가 모드 쓰기, 예외 마스크가 설정된 열기
+	      실패, EOF/실패/초기화 상태 전환을 확인합니다.
   [(cppreference examples)](../test/cmake/driver/src/cpp/stl/streams.cpp)
 - [x] [`std::spanstream`](https://en.cppreference.com/w/cpp/io/basic_spanstream)
       / [`basic_spanstream::span`](https://en.cppreference.com/w/cpp/io/basic_spanstream/span)
@@ -513,29 +517,29 @@ cppreference Example 코드를 이식한 항목은
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
 - [x] [std::filesystem::canonical / weakly_canonical](https://en.cppreference.com/w/cpp/filesystem/canonical)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
-- [x] `std::filesystem` semantic edge check
-  - Error-code overload, throwing overload parity, missing/existing/directory
-    negative path, file 변경 후 metadata refresh, recursive traversal pruning은
-    driver semantic test로 검증합니다.
+- [x] `std::filesystem` 의미 체계 경계 검사
+  - 오류 코드 오버로드와 예외 발생 오버로드의 동등성, 누락/존재/디렉터리
+    실패 경로, 파일 변경 후 메타데이터 갱신, 재귀 순회 가지치기는
+    드라이버 의미 체계 테스트로 검증합니다.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/filesystem.cpp)
-- [x] CRT stdio / lowio file I/O semantic check
+- [x] CRT stdio/lowio 파일 I/O 의미 체계 검사
   - `fopen` / `fread` / `fwrite` / `fseek` / `ftell` 및 `_open` / `_read` /
     `_write` / `_lseek` / `_close`, `remove` 경로를 success,
-    missing-file, invalid-descriptor, read-only descriptor, `errno` /
+    파일 없음, 잘못된 기술자, 읽기 전용 기술자, `errno` /
     `_doserrno` propagation 기준으로 검증합니다. `setvbuf`,
     `fgetpos` / `fsetpos`, `ungetc`, `tmpfile`, `tmpnam_s`, `_tempnam`,
-    `freopen`, append/update stdio mode, EOF/error/`clearerr` state transition,
+    `freopen`, 추가/갱신 stdio 모드, EOF/오류/`clearerr` 상태 전환,
     wide stdio(`_wfopen`, `fputwc`, `fputws`, `fgetwc`, `fgetws`)도 driver
     semantic test에서 실행합니다.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/cstdio.cpp)
-- [x] CRT file/process-state semantic check
+- [x] CRT 파일/프로세스 상태 의미 체계 검사
   - `_stat` / `_stat64` / `_wstat64`, `_fstat` / `_fstat64`,
     `_access` / `_waccess`,
     `_fullpath` / `_wfullpath`, `_getcwd` / `_wgetcwd`, `_chdir` / `_wchdir`,
     `_findfirst` / `_findnext`, `_findfirst64` / `_findnext64`,
     `_dup` / `_dup2`, `_tell`, `_telli64`, `_filelength`, `_filelengthi64`,
     `_lseeki64`, `_commit`, `_chsize`, `_chsize_s`, `_eof`, `_locking`,
-    `_setmode`, text/binary newline translation, `_get_osfhandle`, `_umask`
+    `_setmode`, 텍스트/이진 줄 바꿈 변환, `_get_osfhandle`, `_umask`
     경로를 LDK가 제공하는
     current-directory, file-handle, enumeration, metadata substrate 기준으로
     검증합니다. `_O_EXCL`,
@@ -545,14 +549,14 @@ cppreference Example 코드를 이식한 항목은
     `GetModuleHandleA/W`, `GetModuleFileNameA/W`와 `_get_pgmptr` /
     `_get_wpgmptr`는 CRT program-path 및 module-handle state를 검증합니다.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/cstdio_file_state.cpp)
-- [x] CRT environment semantic check
+- [x] CRT 환경 의미 체계 검사
   - `getenv` / `getenv_s` / `_dupenv_s` 및 wide `_wgetenv` / `_wgetenv_s` /
     `_wdupenv_s` 경로를 CRT-managed environment variable 기준으로
     검증합니다. `_putenv_s` / `_wputenv_s`의 add, update, delete 경로와
     `GetEnvironmentVariableA/W`를 통한 Win32 environment visibility도
     함께 검증합니다.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/cstdlib.cpp)
-- [x] CRT runtime-state semantic check
+- [x] CRT 런타임 상태 의미 체계 검사
   - `_get_fmode` / `_set_fmode`, `_query_new_mode` / `_set_new_mode`,
     `_get_errno` / `_set_errno`, `_get_doserrno` / `_set_doserrno`를 CRT
     process/runtime state 기준으로 검증합니다. `_get_errno`,
@@ -560,17 +564,17 @@ cppreference Example 코드를 이식한 항목은
     확인합니다. 테스트가 끝나기 전에 원래 상태를 복구하여 뒤의 driver
     test가 startup default를 보도록 합니다.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/cstdlib.cpp)
-- [x] Error and diagnostics semantic check
+- [x] 오류 및 진단 의미 체계 검사
   - `GetLastError`, `FormatMessageA/W`, `std::system_category`,
     `std::generic_category`, `std::system_error`, `errno`, `_get_errno`,
-    `_get_doserrno`, default error-condition mapping,
+    `_get_doserrno`, 기본 오류 조건 매핑,
     `FormatMessageA/W` failure-edge, invalid-parameter handler 경로를 Win32
     및 CRT failure case 기준으로 검증합니다. `FORMAT_MESSAGE_ALLOCATE_BUFFER`,
     `LocalFree`, `std::filesystem_error` message quality도 확인합니다.
   [(driver semantic test)](../test/cmake/driver/src/cpp/stl/diagnostics.cpp)
 - [x] [std::string](https://en.cppreference.com/w/cpp/string/basic_string)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/string.cpp)
-- [x] String member operation:
+- [x] 문자열 멤버 연산:
       [`std::string::find`](https://en.cppreference.com/w/cpp/string/basic_string/find),
       [`std::string::substr`](https://en.cppreference.com/w/cpp/string/basic_string/substr),
       [`std::string::starts_with`](https://en.cppreference.com/w/cpp/string/basic_string/starts_with),
@@ -580,7 +584,7 @@ cppreference Example 코드를 이식한 항목은
   [(cppreference member examples)](../test/cmake/driver/src/cpp/stl/string.cpp)
 - [x] [std::string_view](https://en.cppreference.com/w/cpp/string/basic_string_view)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/string.cpp)
-- [x] String view member operation:
+- [x] 문자열 뷰 멤버 연산:
       [`std::string_view::find`](https://en.cppreference.com/w/cpp/string/basic_string_view/find),
       [`std::string_view::substr`](https://en.cppreference.com/w/cpp/string/basic_string_view/substr),
       [`std::string_view::starts_with`](https://en.cppreference.com/w/cpp/string/basic_string_view/starts_with),
@@ -593,7 +597,7 @@ cppreference Example 코드를 이식한 항목은
   [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp#L35)
 - [x] [std::jthread](https://en.cppreference.com/w/cpp/thread/jthread)
   [(cppreference constructor example)](../test/cmake/driver/src/cpp/stl/thread.cpp)
-- [x] Coroutine library:
+- [x] 코루틴 라이브러리:
       [`std::noop_coroutine`](https://en.cppreference.com/w/cpp/coroutine/noop_coroutine)
       and [`std::generator`](https://en.cppreference.com/w/cpp/coroutine/generator)
   [(feature-test-gated cppreference examples)](../test/cmake/driver/src/cpp/stl/cxx_latest.cpp)
@@ -621,7 +625,7 @@ cppreference Example 코드를 이식한 항목은
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/utility.cpp)
 - [x] [std::vector](https://en.cppreference.com/w/cpp/container/vector)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/containers.cpp)
-- [x] Container member operation:
+- [x] 컨테이너 멤버 연산:
       [`std::vector::emplace`](https://en.cppreference.com/w/cpp/container/vector/emplace),
       [`std::vector::erase`](https://en.cppreference.com/w/cpp/container/vector/erase),
       [`std::map::insert_or_assign`](https://en.cppreference.com/w/cpp/container/map/insert_or_assign),
@@ -631,7 +635,7 @@ cppreference Example 코드를 이식한 항목은
       [`merge`](https://en.cppreference.com/w/cpp/container/map/merge)
       ordered/unordered associative container 경로
   [(cppreference member examples)](../test/cmake/driver/src/cpp/stl/containers.cpp)
-- [x] Sequence container member operation:
+- [x] 시퀀스 컨테이너 멤버 연산:
       [`std::deque::emplace`](https://en.cppreference.com/w/cpp/container/deque/emplace),
       [`std::deque::erase`](https://en.cppreference.com/w/cpp/container/deque/erase),
       [`std::list::emplace`](https://en.cppreference.com/w/cpp/container/list/emplace),
@@ -701,7 +705,7 @@ cppreference Example 코드를 이식한 항목은
   [(tested)](../test/cmake/driver/src/cpp/stl/thread.cpp)
 - [x] [std::shared_future](https://en.cppreference.com/w/cpp/thread/shared_future)
   [(cppreference example)](../test/cmake/driver/src/cpp/stl/thread.cpp)
-- [x] Threading/future semantic edge check
+- [x] 스레딩/future 의미 체계 경계 검사
   - timed shared-lock timeout/reacquire 동작,
     `std::condition_variable` / `std::condition_variable_any` timeout 및
     predicate wake 동작, `std::future` / `std::shared_future` timeout/ready
@@ -754,7 +758,7 @@ cppreference Example 코드를 이식한 항목은
 ### OS substrate coverage 우선순위
 
 앞으로의 coverage는 MSVC CRT/STL이 hosted Windows process에서 기대하는
-Win32 / NTDLL / UCRT / ICU 표면을 실제로 밟는 테스트를 우선합니다. 순수
+Win32 / NTDLL / UCRT / ICU API를 실제로 실행하는 테스트를 우선합니다. 순수
 header algorithm이나 value utility도 의미는 있지만, LDK가 받쳐주는
 runtime substrate를 증명하는 테스트보다 우선순위는 낮습니다.
 
@@ -794,131 +798,135 @@ runtime substrate를 증명하는 테스트보다 우선순위는 낮습니다.
   - 현재 driver-test matrix에서 사용하는 active MSVC STL toolset은 아직
     이 header를 노출하지 않으므로 driver test를 컴파일하지 않습니다.
 
-## C Standard
+## C 표준 라이브러리
 
-- [x] Math functions
+- [x] 수학 함수
   - 필요한 경우 작은 portable 구현을 참고해 보강했습니다.
   - 참고:
     [RetrievAL](https://github.com/SpoilerScriptsGroup/RetrievAL),
     [musl](https://github.com/bminor/musl)
-- [x] Floating-point classification helpers
+- [x] 부동소수점 분류 도우미
   [(source)](../src/custom/crt/math/fpclassify.c)
 
-## NTL: NT Template Library
+## NTL: NT 템플릿 라이브러리
 
 NTL은 드라이버 코드를 위한 C++ helper를 제공합니다. API 수준 설명은
-[NTL API 문서](./ko-kr-ntl-api.md)를 참고하세요.
+[NTL API 문서](./ntl-api.ko-KR.md)를 참고하세요.
 
 - [x] `ntl::expand_stack`
   [(tested)](../test/cmake/driver/src/ntl.cpp#L6)
 - [x] `ntl::status`
+- [x] `ntl::result<T>` / `ntl::result<void>`
+  - [x] 값/상태 접근, `value_or`, 실패 시 `value()`가 던지는 예외
+  - [x] pool buffer/pointer factory, device result 생성 및 symbolic-link result
+        factory 생성
+    [(tested)](../test/cmake/driver/src/ntl.cpp)
+    [(docs)](./ntl/result.ko-KR.md)
 - [x] `ntl::unique_handle` / `ntl::unique_object`
-  - [x] user-mode `CloseHandle` ownership for companion apps
-  - [x] kernel-mode `ZwClose` handle close, move, release, adopt path
+  - [x] 동반 앱의 사용자 모드 `CloseHandle` 소유권
+  - [x] 커널 모드 `ZwClose` 핸들 닫기, 이동, 해제 및 인수 경로
   - [x] `ObReferenceObjectByHandle`에서 얻은 object-manager reference
         ownership
     [(tested)](../test/cmake/driver/src/ntl.cpp)
-    [(docs)](./ntl/ownership.md)
+    [(docs)](./ntl/ownership.ko-KR.md)
 - [x] `ntl::registry_key`
-  - [x] volatile key create/open/delete path
-  - [x] `try_open_driver_parameters` `RegistryPath\\Parameters` open path
-  - [x] `ntl::driver_config` optional setting default path
+  - [x] 휘발성 키 생성/열기/삭제 경로
+  - [x] `try_open_driver_parameters`의 `RegistryPath\\Parameters` 열기 경로
+  - [x] `ntl::driver_config` 선택적 설정의 기본값 경로
   - [x] typed `REG_DWORD`, `REG_QWORD`, `REG_SZ`, `REG_EXPAND_SZ`,
         `REG_BINARY` query/set path
-  - [x] value delete, missing-value status, move, release, adopt, close
-        ownership path
+  - [x] 값 삭제, 값 없음 상태, 이동, 해제, 인수 및 닫기 소유권 경로
     [(tested)](../test/cmake/driver/src/ntl.cpp)
-    [(docs)](./ntl/registry.md)
+    [(docs)](./ntl/registry.ko-KR.md)
 - [x] `ntl::pool_ptr` / `ntl::pool_allocator`
-  - [x] raw pool allocation and RAII pool buffer ownership
+  - [x] 원시 풀 할당 및 RAII 풀 버퍼 소유권
   - [x] `ntl::pool_ptr<T>`를 사용한 pool-backed object construction/destruction
   - [x] nonpaged/paged pool allocator를 사용한 `std::vector`
   - [x] `ntl::pmr::pool_resource`를 사용한 `std::pmr::vector`
     [(tested)](../test/cmake/driver/src/ntl.cpp)
-    [(docs)](./ntl/pool-allocator.md)
+    [(docs)](./ntl/pool-allocator.ko-KR.md)
 - [x] `ntl::lookaside_list`
-  - [x] raw nonpaged lookaside allocation and explicit construction
-  - [x] RAII object creation, `try_make`, move, reset, destruction
-  - [x] paged/cache-aligned nonpaged lookaside list construction
+  - [x] 원시 비페이지 룩어사이드 할당 및 명시적 생성
+  - [x] RAII 객체 생성, `try_make`, 이동, 재설정 및 소멸
+  - [x] 페이지/캐시 정렬 비페이지 룩어사이드 목록 생성
     [(tested)](../test/cmake/driver/src/ntl.cpp)
-    [(docs)](./ntl/lookaside-list.md)
+    [(docs)](./ntl/lookaside-list.ko-KR.md)
 - [x] `ntl::mdl`
-  - [x] MDL allocation, nonpaged-pool description, system-address lookup,
-        move, release/manual free, empty-owner error path
+  - [x] MDL 할당, 비페이지 풀 기술, 시스템 주소 조회, 이동, 해제/수동 반환 및
+        빈 소유자 오류 경로
     [(tested)](../test/cmake/driver/src/ntl.cpp)
-    [(docs)](./ntl/mdl.md)
+    [(docs)](./ntl/mdl.ko-KR.md)
 - [x] `ntl::symbolic_link`
-  - [x] create, move, close, scope cleanup, release/manual-delete path
+  - [x] 생성, 이동, 닫기, 범위 정리 및 해제/수동 삭제 경로
     [(tested)](../test/cmake/driver/src/ntl.cpp)
-    [(docs)](./ntl/symbolic-link.md)
+    [(docs)](./ntl/symbolic-link.ko-KR.md)
 - [x] `ntl::device_interface_link`
-  - [x] empty-owner safety path
-  - Real `IoRegisterDeviceInterface` registration requires a valid PnP PDO.
+  - [x] 빈 소유자 안전 경로
+  - 실제 `IoRegisterDeviceInterface` 등록에는 유효한 PnP PDO가 필요합니다.
     [(tested)](../test/cmake/driver/src/ntl.cpp)
-    [(docs)](./ntl/device-interface.md)
+    [(docs)](./ntl/device-interface.ko-KR.md)
 - [x] `ntl::event`
-  - [x] notification event set/clear/reset/wait state
-  - [x] synchronization event auto-reset wait behavior
+  - [x] 알림 이벤트 설정/해제/재설정/대기 상태
+  - [x] 동기화 이벤트의 자동 재설정 대기 동작
     [(tested)](../test/cmake/driver/src/ntl.cpp)
-    [(docs)](./ntl/event.md)
+    [(docs)](./ntl/event.ko-KR.md)
 - [x] `ntl::timer` / `ntl::kdpc`
-  - [x] direct DPC queue and callback argument forwarding
-  - [x] one-shot synchronization timer wait
-  - [x] one-shot timer with DPC callback
-  - [x] periodic timer setup/cancel path
+  - [x] 직접 DPC 큐잉 및 콜백 인수 전달
+  - [x] 일회성 동기화 타이머 대기
+  - [x] DPC 콜백을 사용하는 일회성 타이머
+  - [x] 주기 타이머 설정/취소 경로
     [(tested)](../test/cmake/driver/src/ntl.cpp)
-    [(docs)](./ntl/timer.md)
+    [(docs)](./ntl/timer.ko-KR.md)
 - [x] `ntl::system_thread`
   - [x] `ntl::result`를 통한 `PsCreateSystemThread` 생성
   - [x] thread routine의 `PASSIVE_LEVEL` 실행
   - [x] `join()` wait와 handle close
-  - [x] move, release, adopt ownership path
+  - [x] 이동, 해제 및 인수 소유권 경로
     [(tested)](../test/cmake/driver/src/ntl.cpp)
-    [(docs)](./ntl/system-thread.md)
+    [(docs)](./ntl/system-thread.ko-KR.md)
 - [x] `ntl::wait`
   - [x] zero-timeout `try_wait`
   - [x] `wait_signaled` / `wait_timed_out` classification
   - [x] timer와 system-thread wrapper 대상 `wait_for`
     [(tested)](../test/cmake/driver/src/ntl.cpp)
-    [(docs)](./ntl/wait.md)
+    [(docs)](./ntl/wait.ko-KR.md)
 - [x] `ntl::remove_lock`
-  - [x] acquire, guard move/reset, multiple acquired references,
-        `release_and_wait`, post-remove acquire rejection
+  - [x] 획득, 가드 이동/재설정, 여러 획득 참조, `release_and_wait` 및
+        제거 후 획득 거부
     [(tested)](../test/cmake/driver/src/ntl.cpp)
-    [(docs)](./ntl/remove-lock.md)
+    [(docs)](./ntl/remove-lock.ko-KR.md)
 - [x] `ntl::work_item` / `ntl::passive_work_item`
-  - [x] raw context work item queue/wait path
+  - [x] 원시 컨텍스트 작업 항목 큐잉/대기 경로
   - [x] `DISPATCH_LEVEL`에서 queue하고 `PASSIVE_LEVEL` worker에서 실행되는
-        callable work item
+        호출 가능 작업 항목
   - [x] pending 상태의 duplicate queue rejection
     [(tested)](../test/cmake/driver/src/ntl.cpp)
-    [(docs)](./ntl/work-item.md)
+    [(docs)](./ntl/work-item.ko-KR.md)
 - [x] `ntl::passive_executor`
   - [x] `PASSIVE_LEVEL` inline 실행
-  - [x] detached nonpaged work posting
-  - [x] raised IRQL `execute()` deferral
+  - [x] 분리된 비페이지 작업 게시
+  - [x] 상승된 IRQL에서 `execute()` 지연 실행
   - [x] DPC callback에서 `post()`로 PASSIVE worker에 넘기는 path
-  - [x] caller-owned work item `queue_and_wait()`
+  - [x] 호출자 소유 작업 항목의 `queue_and_wait()`
     [(tested)](../test/cmake/driver/src/ntl.cpp)
-    [(docs)](./ntl/passive-executor.md)
+    [(docs)](./ntl/passive-executor.ko-KR.md)
 - [x] `ntl::driver`
-  - [x] unload callback
+  - [x] 언로드 콜백
     [(tested)](../test/cmake/driver/src/main.cpp#L73)
-  - [x] device creation
+  - [x] 장치 생성
     [(tested)](../test/cmake/driver/src/main.cpp#L44)
 - [x] `ntl::device`
-  - [x] device extension
+  - [x] 장치 확장
     [(tested)](../test/cmake/driver/src/main.cpp#L33)
   - [x] `ntl::irp` result helper와 typed device-control buffer helper
     [(tested)](../test/cmake/driver/src/main.cpp#L64)
-  - [x] `ntl::ioctl` typed IOCTL descriptor and input/output helpers
+  - [x] `ntl::ioctl` 형식화된 IOCTL 기술자 및 입력/출력 도우미
     [(tested)](../test/cmake/driver/src/ntl.cpp)
-    [(docs)](./ntl/ioctl.md)
-  - [x] typed IOCTL, remove-lock guard, MDL scratch storage, output byte
-        reporting, teardown rejection을 함께 쓰는 practical device-control
-        dispatch pattern
+    [(docs)](./ntl/ioctl.ko-KR.md)
+  - [x] 형식화된 IOCTL, 제거 잠금 가드, MDL 임시 저장소, 출력 바이트 보고 및
+        종료 처리 중 거부를 함께 사용하는 실용적인 장치 제어 디스패치 패턴
     [(tested)](../test/cmake/driver/src/ntl.cpp)
-    [(docs)](./ntl/device-control-pattern.md)
+    [(docs)](./ntl/device-control-pattern.ko-KR.md)
   - [x] `IRP_MJ_CREATE`
     [(app test)](../test/cmake/app/src/main.cpp#L77)
   - [x] `IRP_MJ_CLOSE`

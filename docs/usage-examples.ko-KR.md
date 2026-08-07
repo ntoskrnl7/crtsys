@@ -1,6 +1,6 @@
 # NTL 사용 예제
 
-[한국어 문서로 돌아가기](./ko-kr.md)
+[한국어 문서로 돌아가기](./README.ko-KR.md)
 
 이 문서는 NTL을 드라이버와 companion user-mode 앱에서 함께 사용하는 작은
 골격을 보여줍니다. 예제는 의도적으로 작게 유지했습니다. 목적은 WDK 설계를
@@ -9,6 +9,9 @@
 
 실제로 빌드되는 코드는 다음 위치를 참고하세요.
 
+- 완전한 NTL 예제 드라이버: [`examples/ntl-driver`](../examples/ntl-driver)
+- 완전한 NTL RPC 예제 드라이버:
+  [`examples/ntl-rpc-driver`](../examples/ntl-rpc-driver)
 - 공유 RPC schema: [`test/cmake/common/rpc.hpp`](../test/cmake/common/rpc.hpp)
 - 드라이버 쪽: [`test/cmake/driver/src/main.cpp`](../test/cmake/driver/src/main.cpp)
 - 앱 쪽: [`test/cmake/app/src/main.cpp`](../test/cmake/app/src/main.cpp)
@@ -38,13 +41,26 @@ NuGet 패키지도 같은 구분을 따릅니다.
 ```cpp
 #include <string>
 #include <ntl/driver>
+#include <ntl/registry>
 
 ntl::status ntl::main(ntl::driver& driver,
                       const std::wstring& registry_path) {
-  (void)registry_path;
+  unsigned long flags = 0;
+  auto parameters = ntl::try_open_driver_parameters(registry_path);
+  if (parameters) {
+    auto configured_flags = parameters->query_dword(L"Flags");
+    if (configured_flags) {
+      flags = *configured_flags;
+    }
+  } else if (static_cast<NTSTATUS>(parameters.status()) !=
+             STATUS_OBJECT_NAME_NOT_FOUND) {
+    return parameters.status();
+  }
+
+  (void)flags;
 
   driver.on_unload([] {
-    // driver-owned object를 여기에서 정리합니다.
+    // Release driver-owned objects here.
   });
 
   return ntl::status::ok();
@@ -60,7 +76,8 @@ ntl::status ntl::main(ntl::driver& driver,
 RPC helper는 하나의 공유 macro 선언에서 kernel callback dispatcher와
 user-mode wrapper를 같이 생성합니다. 드라이버는 schema 전에
 `<ntl/rpc/server>`를 include하고, 앱은 같은 schema 전에
-`<ntl/rpc/client>`를 include합니다.
+`<ntl/rpc/client>`를 include합니다. 전체 예제는
+[`examples/ntl-rpc-driver`](../examples/ntl-rpc-driver)를 참고하세요.
 
 `NTL_ADD_CALLBACK_0`부터 `NTL_ADD_CALLBACK_5`까지의 숫자는 callback 인자
 개수입니다. macro가 이 정보를 이용해 양쪽의 함수 인자와 직렬화 코드를
@@ -95,7 +112,8 @@ NTL_RPC_END(demo_rpc)
 ```
 
 custom object는 `zpp::serializer` serialization function을 제공해야 합니다.
-테스트의 `point` class가 그 패턴을 보여줍니다.
+[`test/cmake/common/rpc.hpp`](../test/cmake/common/rpc.hpp)의 `point` class가 그
+패턴을 보여줍니다.
 NTL은 같은 필드 목록에서 method의 wire schema fingerprint를 자동으로
 계산하므로 별도의 숫자 hash를 지정할 필요가 없습니다.
 
@@ -130,7 +148,7 @@ server callback은 driver device-control dispatch path에서 실행됩니다. �
 유지하고, 입력을 검증하며, runtime-backed driver control code와 같은 IRQL
 규칙을 적용하세요.
 
-### User-Mode Client
+### 사용자 모드 client
 
 ```cpp
 #include <exception>
@@ -160,7 +178,50 @@ device handle을 재사용할 수 있습니다. 가변 크기 결과는
 
 앱이 RPC device를 열려면 드라이버가 먼저 로드되어 있어야 합니다.
 
-## Raw IOCTL 골격
+## DPC에서 PASSIVE 작업자로 전달
+
+DPC와 타이머 콜백은 높은 IRQL에서 실행됩니다. 콜백은 짧게 유지하고 임의의
+STL/CRT 작업을 피해야 합니다. 일반적으로 DPC에서는 상주 상태만 캡처하고 실제
+작업은 `ntl::passive_executor`에 맡깁니다.
+
+```cpp
+#include <atomic>
+#include <ntl/event>
+#include <ntl/passive_executor>
+#include <ntl/timer>
+#include <ntl/wait>
+
+struct cleanup_context {
+  ntl::passive_executor executor;
+  ntl::event completed;
+  std::atomic<long> value = 0;
+};
+
+void on_timer_dpc(void* context, void*, void*) noexcept {
+  auto* state = static_cast<cleanup_context*>(context);
+
+  // The DPC remains tiny. The lambda runs later at PASSIVE_LEVEL.
+  (void)state->executor.post([state] {
+    state->value.store(42);
+    state->completed.set();
+  });
+}
+
+cleanup_context state;
+ntl::kdpc dpc(on_timer_dpc, &state);
+ntl::timer timer;
+
+timer.set_once(ntl::relative_due_time_ms(10), &dpc);
+
+auto timeout = ntl::relative_timeout_ms(1000);
+(void)state.completed.wait(&timeout);
+```
+
+컨텍스트, 실행기, DPC, 타이머 및 캡처된 객체는 타이머/DPC의 취소 또는 종료
+대기가 끝나고 PASSIVE 작업이 완료될 때까지 유효해야 합니다. 이는 일반적인 WDK
+수명 관리이며, NTL은 소유권과 전달 구조를 더 명확하게 표현하도록 도와줍니다.
+
+## Raw IOCTL 기본 구조
 
 RPC는 편의 계층일 뿐입니다. 일반 device를 만들고 IOCTL을 직접 처리할 수도
 있습니다.
@@ -219,7 +280,7 @@ callback에서 extension state가 필요하다면, 같은 device에 저장되는
 안에서 owning `std::shared_ptr`를 직접 capture하지 마세요. repository test
 driver처럼 `std::weak_ptr`를 capture하는 편이 안전합니다.
 
-### User-Mode App
+### 사용자 모드 앱
 
 ```cpp
 #define WIN32_LEAN_AND_MEAN

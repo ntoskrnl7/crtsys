@@ -1,6 +1,6 @@
 # NTL API 문서
 
-[한국어 문서로 돌아가기](./ko-kr.md)
+[한국어 문서로 돌아가기](./README.ko-KR.md)
 
 NTL은 `crtsys`가 함께 제공하는 작은 C++ helper 레이어입니다. WDK 객체를
 숨기기보다는, 드라이버 코드에서 RAII ownership, callback 등록, user-mode와
@@ -22,7 +22,7 @@ NTL은 주로 드라이버 제어 경로를 대상으로 설계되었습니다. 
 - `<= DISPATCH_LEVEL` 또는 DPC 전용 계약은 해당 문맥을 의도하고 작성한 API에만
   명시합니다.
 
-프로젝트 수준의 실행 모델은 [설계 근거와 운영 경계](./ko-kr-design-rationale.md)를
+프로젝트 수준의 실행 모델은 [설계 근거와 운영 경계](./design-rationale.ko-KR.md)를
 참고하세요.
 
 ## 진입점
@@ -56,7 +56,7 @@ IRQL: `PASSIVE_LEVEL`.
 IRQL: 값 타입 연산 자체는 allocation이나 wait를 하지 않습니다. 다만 해당
 status 흐름이 현재 IRQL에서 유효한지는 surrounding WDK call path가 결정합니다.
 
-## Exceptions
+## 예외
 
 헤더: [`include/ntl/except`](../include/ntl/except)
 
@@ -73,7 +73,7 @@ boundary, spin-lock-held region, DPC, ISR, paging I/O 경로를 exception이
 넘어가게 하지 마세요. 그런 동작이 필요하다면 별도 테스트와 문서화가 먼저
 필요합니다.
 
-## Stack Expansion
+## 스택 확장
 
 헤더: [`include/ntl/expand_stack`](../include/ntl/expand_stack)
 
@@ -100,7 +100,7 @@ IRQL: `crtsys`에서 문서화한 사용 문맥은 `PASSIVE_LEVEL`입니다. wra
 runtime path를 사용하고 실패 시 throw할 수 있습니다. hot path escape hatch가
 아니라 control-path helper로 보아야 합니다.
 
-## Driver Object
+## 드라이버 객체
 
 헤더: [`include/ntl/driver`](../include/ntl/driver)
 
@@ -117,7 +117,7 @@ runtime path를 사용하고 실패 시 throw할 수 있습니다. hot path esca
 IRQL: `PASSIVE_LEVEL`. C++ object와 container를 사용하며, driver initialization,
 unload registration, setup path를 위한 helper입니다.
 
-## IRP View
+## IRP 뷰
 
 헤더: [`include/ntl/irp`](../include/ntl/irp)
 
@@ -139,7 +139,7 @@ complete하거나 reference하거나 보관하지 않습니다.
 
 IRQL: IRP를 전달한 dispatch routine의 문맥을 따릅니다.
 
-## Device Object
+## 장치 객체
 
 헤더: [`include/ntl/device`](../include/ntl/device)
 
@@ -158,10 +158,10 @@ IRQL: IRP를 전달한 dispatch routine의 문맥을 따릅니다.
   - typed extension 객체를 반환합니다.
 - `on_create(callback)`
   - `IRP_MJ_CREATE` handler를 등록합니다.
-  - callback signature: `void(ntl::irp&)`
+  - callback signature는 `void(ntl::irp&)`입니다.
 - `on_close(callback)`
   - `IRP_MJ_CLOSE` handler를 등록합니다.
-  - callback signature: `void(ntl::irp&)`
+  - callback signature는 `void(ntl::irp&)`입니다.
 - `on_device_control(callback)`
   - `IRP_MJ_DEVICE_CONTROL` handler를 등록합니다.
 - `name() const`
@@ -169,7 +169,7 @@ IRQL: IRP를 전달한 dispatch routine의 문맥을 따릅니다.
 - `detach()`
   - raw device object ownership을 해제합니다.
 
-Device control helper type:
+장치 제어 도우미 형식:
 
 - `ntl::device_control::code`
 - `ntl::device_control::in_buffer`
@@ -254,7 +254,7 @@ method, notification, stream의 wire schema fingerprint는 인자와 payload
 volatile/nonvolatile 정책과 정리는 사용하는 드라이버가 결정합니다.
 
 전체 schema 예시는 [`test/cmake/common/rpc.hpp`](../test/cmake/common/rpc.hpp)를
-참고하세요. 더 작은 app/driver 흐름 예시는 [NTL 사용 예제](./ko-kr-usage-examples.md)를
+참고하세요. 더 작은 app/driver 흐름 예시는 [NTL 사용 예제](./usage-examples.ko-KR.md)를
 참고하세요.
 
 IRQL: server-side callback은 `PASSIVE_LEVEL`로 취급하세요. user-mode
@@ -267,7 +267,7 @@ contract에는 여전히 의존합니다.
 
 `ntl::irql`은 주요 `KIRQL` 값을 감싸는 enum입니다.
 
-Helper:
+도우미:
 
 - `ntl::raised_irql`
   - destructor에서 IRQL을 낮추는 RAII 객체입니다.
@@ -280,7 +280,7 @@ IRQL: 이 helper들은 IRQL을 직접 조작하거나 관찰합니다. RAII 객�
 최대한 짧게 유지하고, IRQL이 올라간 동안에는 해당 문맥을 문서화한 helper만
 호출하세요.
 
-## Kernel Coroutine Context
+## 커널 coroutine 문맥
 
 헤더: [`include/ntl/coroutine`](../include/ntl/coroutine)
 
@@ -305,9 +305,9 @@ captured state는 queued continuation이 끝날 때까지 살아 있어야 하�
 전에 outstanding continuation을 모두 drain해야 합니다.
 
 상세 계약과 driver test 범위는
-[Kernel coroutine context](./ntl/coroutine.md)를 참고하세요.
+[Kernel coroutine context](./ntl/coroutine.ko-KR.md)를 참고하세요.
 
-## Spin Lock
+## 스핀 락
 
 헤더: [`include/ntl/spin_lock`](../include/ntl/spin_lock)
 
@@ -354,7 +354,7 @@ IRQL: `lock()`과 성공한 `try_lock()`은 `DISPATCH_LEVEL`로 올리고,
 - `shared_waiter_count() const`
 - `native_handle()`
 
-Lock helper:
+락 도우미:
 
 - `ntl::unique_lock<ntl::resource>`
 - `ntl::shared_lock<ntl::resource>`
@@ -365,7 +365,7 @@ IRQL: `<= APC_LEVEL`. 이 helper는 blocking/resource-style synchronization
 `adopt_critical_region`은 caller가 critical region boundary를 의도적으로
 직접 관리할 때 사용합니다.
 
-## Unicode String
+## 유니코드 문자열
 
 헤더: [`include/ntl/unicode_string`](../include/ntl/unicode_string)
 
