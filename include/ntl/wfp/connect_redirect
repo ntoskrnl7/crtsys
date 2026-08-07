@@ -27,6 +27,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <array>
+#include <limits>
+#include <span>
 #include <type_traits>
 #include <utility>
 
@@ -134,7 +136,8 @@ struct bind_redirect_selector {
 namespace detail {
 
 inline constexpr std::uint32_t redirect_context_magic = 0x52544c4eu;
-inline constexpr std::uint16_t redirect_context_version = 1;
+inline constexpr std::uint16_t redirect_context_version = 2;
+inline constexpr std::size_t maximum_redirect_application_id_size = 2048;
 
 struct connect_redirect_context {
   std::uint32_t magic = redirect_context_magic;
@@ -142,9 +145,35 @@ struct connect_redirect_context {
   std::uint16_t size = sizeof(connect_redirect_context);
   SOCKADDR_STORAGE original_remote{};
   SOCKADDR_STORAGE original_local{};
+  std::uint64_t process_id = 0;
+  std::uint64_t flow_id = 0;
+  std::uint16_t application_id_size = 0;
+  std::uint16_t reserved = 0;
+  std::array<std::uint8_t, maximum_redirect_application_id_size>
+      application_id{};
 };
 
 static_assert(std::is_trivially_copyable_v<connect_redirect_context>);
+static_assert(std::is_standard_layout_v<connect_redirect_context>);
+static_assert(offsetof(connect_redirect_context, magic) == 0);
+static_assert(offsetof(connect_redirect_context, original_remote) == 8);
+static_assert(offsetof(connect_redirect_context, original_local) == 136);
+static_assert(offsetof(connect_redirect_context, process_id) == 264);
+static_assert(offsetof(connect_redirect_context, flow_id) == 272);
+static_assert(offsetof(connect_redirect_context, application_id_size) == 280);
+static_assert(offsetof(connect_redirect_context, application_id) == 284);
+static_assert(sizeof(connect_redirect_context) == 2336);
+static_assert(sizeof(connect_redirect_context) <=
+              (std::numeric_limits<std::uint16_t>::max)());
+
+inline bool valid_connect_redirect_context(
+    const connect_redirect_context &context) noexcept {
+  return context.magic == redirect_context_magic &&
+         context.version == redirect_context_version &&
+         context.size == sizeof(connect_redirect_context) &&
+         context.process_id != 0 && context.application_id_size != 0 &&
+         context.application_id_size <= context.application_id.size();
+}
 
 } // namespace detail
 
@@ -191,14 +220,14 @@ public:
    * without another redirect. Every native failure returns block.
    */
   template <class Layer>
-  decision redirect(const classify_event<Layer> &event,
+  terminating_decision redirect(const classify_event<Layer> &event,
                     local_proxy_target target) const noexcept {
     static_assert(detail::connect_redirect_layer<Layer>,
                   "redirect() requires an ALE_CONNECT_REDIRECT layer");
 
     if (!handle_ || !target.valid() || !event.metadata_ ||
         !event.classify_context_ || !event.filter_ || !event.output_)
-      return decision::block;
+      return terminating_decision::block;
 
     if ((event.metadata_->currentMetadataValues &
          FWPS_METADATA_FIELD_REDIRECT_RECORD_HANDLE) != 0 &&
@@ -207,14 +236,14 @@ public:
           event.metadata_->redirectRecords, handle_, nullptr);
       if (state == FWPS_CONNECTION_REDIRECTED_BY_SELF ||
           state == FWPS_CONNECTION_PREVIOUSLY_REDIRECTED_BY_SELF)
-        return decision::permit;
+        return terminating_decision::permit;
     }
 
     UINT64 classify_handle = 0;
     NTSTATUS status = FwpsAcquireClassifyHandle0(
         const_cast<void *>(event.classify_context_), 0, &classify_handle);
     if (!NT_SUCCESS(status))
-      return decision::block;
+      return terminating_decision::block;
 
     void *writable = nullptr;
     status = FwpsAcquireWritableLayerDataPointer0(
@@ -222,7 +251,7 @@ public:
         event.output_);
     if (!NT_SUCCESS(status)) {
       FwpsReleaseClassifyHandle0(classify_handle);
-      return decision::block;
+      return terminating_decision::block;
     }
 
     auto *request = static_cast<FWPS_CONNECT_REQUEST0 *>(writable);
@@ -233,7 +262,7 @@ public:
       event.output_->rights |= FWPS_RIGHT_ACTION_WRITE;
       FwpsApplyModifiedLayerData0(classify_handle, request, 0);
       FwpsReleaseClassifyHandle0(classify_handle);
-      return decision::permit;
+      return terminating_decision::permit;
     }
 
     detail::connect_redirect_context *context = nullptr;
@@ -247,7 +276,7 @@ public:
       if (!context) {
         FwpsApplyModifiedLayerData0(classify_handle, request, 0);
         FwpsReleaseClassifyHandle0(classify_handle);
-        return decision::block;
+        return terminating_decision::block;
       }
 
       RtlZeroMemory(context, sizeof(*context));
@@ -260,6 +289,22 @@ public:
       RtlCopyMemory(&context->original_local,
                     &request->localAddressAndPort,
                     sizeof(SOCKADDR_STORAGE));
+      context->process_id = event.metadata().process_id().value_or(0);
+      context->flow_id = event.metadata().flow_handle().value_or(0);
+      const auto *application =
+          event.value(Layer::field::app_id).byte_blob();
+      if (context->process_id == 0 || !application ||
+          application->size == 0 || !application->data ||
+          application->size > context->application_id.size()) {
+        ntl::free_pool(context, ntl::pool_tag("rClN"));
+        FwpsApplyModifiedLayerData0(classify_handle, request, 0);
+        FwpsReleaseClassifyHandle0(classify_handle);
+        return terminating_decision::block;
+      }
+      context->application_id_size =
+          static_cast<std::uint16_t>(application->size);
+      RtlCopyMemory(context->application_id.data(), application->data,
+                    application->size);
     }
 
     RtlZeroMemory(&request->remoteAddressAndPort,
@@ -289,7 +334,7 @@ public:
     event.output_->rights |= FWPS_RIGHT_ACTION_WRITE;
     FwpsApplyModifiedLayerData0(classify_handle, request, 0);
     FwpsReleaseClassifyHandle0(classify_handle);
-    return decision::permit;
+    return terminating_decision::permit;
   }
 
   explicit operator bool() const noexcept { return handle_ != nullptr; }
@@ -312,7 +357,7 @@ private:
 class bind_redirector {
 public:
   template <class Layer>
-  static decision redirect(
+  static terminating_decision redirect(
       const classify_event<Layer> &event,
       const local_bind_target_v4 &target) noexcept {
     static_assert(
@@ -322,7 +367,7 @@ public:
   }
 
   template <class Layer>
-  static decision redirect(
+  static terminating_decision redirect(
       const classify_event<Layer> &event,
       const local_bind_target_v6 &target) noexcept {
     static_assert(
@@ -333,19 +378,19 @@ public:
 
 private:
   template <class Layer, class Target>
-  static decision redirect_impl(
+  static terminating_decision redirect_impl(
       const classify_event<Layer> &event,
       const Target &target) noexcept {
     static_assert(detail::bind_redirect_layer<Layer>,
                   "bind redirect requires an ALE_BIND_REDIRECT layer");
     if (!event.classify_context_ || !event.filter_ || !event.output_)
-      return decision::block;
+        return terminating_decision::block;
 
     UINT64 classify_handle = 0;
     NTSTATUS status = FwpsAcquireClassifyHandle0(
         const_cast<void *>(event.classify_context_), 0, &classify_handle);
     if (!NT_SUCCESS(status))
-      return decision::block;
+      return terminating_decision::block;
 
     void *writable = nullptr;
     status = FwpsAcquireWritableLayerDataPointer0(
@@ -353,7 +398,7 @@ private:
         event.output_);
     if (!NT_SUCCESS(status)) {
       FwpsReleaseClassifyHandle0(classify_handle);
-      return decision::block;
+      return terminating_decision::block;
     }
 
     auto *request = static_cast<FWPS_BIND_REQUEST0 *>(writable);
@@ -364,7 +409,7 @@ private:
       event.output_->rights |= FWPS_RIGHT_ACTION_WRITE;
       FwpsApplyModifiedLayerData0(classify_handle, request, 0);
       FwpsReleaseClassifyHandle0(classify_handle);
-      return decision::permit;
+      return terminating_decision::permit;
     }
 
     RtlZeroMemory(
@@ -393,7 +438,7 @@ private:
     event.output_->rights |= FWPS_RIGHT_ACTION_WRITE;
     FwpsApplyModifiedLayerData0(classify_handle, request, 0);
     FwpsReleaseClassifyHandle0(classify_handle);
-    return decision::permit;
+    return terminating_decision::permit;
   }
 };
 
@@ -432,30 +477,43 @@ public:
       throw_last_socket_error(
           "SIO_QUERY_WFP_CONNECTION_REDIRECT_CONTEXT");
     if (returned != sizeof(context) ||
-        context.magic != detail::redirect_context_magic ||
-        context.version != detail::redirect_context_version ||
-        context.size != sizeof(context))
+        !detail::valid_connect_redirect_context(context))
       throw std::runtime_error("unsupported WFP redirect context");
 
     return redirected_connection(
-        context.original_remote, context.original_local, records);
+        context.original_remote, context.original_local, context.process_id,
+        context.flow_id,
+        std::vector<std::byte>(
+            reinterpret_cast<const std::byte *>(
+                context.application_id.data()),
+            reinterpret_cast<const std::byte *>(
+                context.application_id.data() + context.application_id_size)),
+        records);
   }
 
-  const SOCKADDR_STORAGE &original_destination() const noexcept {
+  const SOCKADDR_STORAGE &original_destination_ref() const noexcept {
     return original_remote_;
   }
 
-  const SOCKADDR_STORAGE &original_source() const noexcept {
+  const SOCKADDR_STORAGE &original_source_ref() const noexcept {
     return original_local_;
   }
 
+  std::uint64_t process_id() const noexcept { return process_id_; }
+
+  std::uint64_t flow_id() const noexcept { return flow_id_; }
+
+  std::span<const std::byte> application_id() const noexcept {
+    return application_id_;
+  }
+
   /**
-   * @brief Creates an overlapped TCP socket and connects to the original
-   * destination with the captured redirect records already attached.
+   * @brief Creates and binds an overlapped socket with redirect records set.
    *
-   * The caller owns the returned SOCKET.
+   * ConnectEx requires a bound socket. The returned socket is ready for an
+   * asynchronous connect to original_destination_ref(); the caller owns it.
    */
-  SOCKET connect_original(
+  SOCKET prepare_original_socket(
       DWORD socket_flags = WSA_FLAG_OVERLAPPED) const {
     const ADDRESS_FAMILY family = original_remote_.ss_family;
     if (family != AF_INET && family != AF_INET6)
@@ -480,6 +538,39 @@ public:
         throw_last_socket_error(
             "SIO_SET_WFP_CONNECTION_REDIRECT_RECORDS");
 
+      if (family == AF_INET) {
+        SOCKADDR_IN local{};
+        local.sin_family = AF_INET;
+        local.sin_addr.s_addr = htonl(INADDR_ANY);
+        if (::bind(outbound, reinterpret_cast<const sockaddr *>(&local),
+                   sizeof(local)) == SOCKET_ERROR)
+          throw_last_socket_error("bind(proxy outbound IPv4)");
+      } else {
+        SOCKADDR_IN6 local{};
+        local.sin6_family = AF_INET6;
+        local.sin6_addr = in6addr_any;
+        if (::bind(outbound, reinterpret_cast<const sockaddr *>(&local),
+                   sizeof(local)) == SOCKET_ERROR)
+          throw_last_socket_error("bind(proxy outbound IPv6)");
+      }
+      return outbound;
+    } catch (...) {
+      (void)::closesocket(outbound);
+      throw;
+    }
+  }
+
+  /**
+   * @brief Synchronously connects a prepared socket to the original peer.
+   *
+   * Coroutine services should prefer prepare_original_socket() followed by
+   * async_socket::connect so a slow origin cannot block their IOCP worker.
+   */
+  SOCKET connect_original(
+      DWORD socket_flags = WSA_FLAG_OVERLAPPED) const {
+    SOCKET outbound = prepare_original_socket(socket_flags);
+    try {
+      const ADDRESS_FAMILY family = original_remote_.ss_family;
       const int address_size =
           family == AF_INET ? sizeof(SOCKADDR_IN)
                             : sizeof(SOCKADDR_IN6);
@@ -498,8 +589,12 @@ public:
 private:
   redirected_connection(
       const SOCKADDR_STORAGE &remote, const SOCKADDR_STORAGE &local,
+      std::uint64_t process_id, std::uint64_t flow_id,
+      std::vector<std::byte> application_id,
       std::vector<std::byte> records) noexcept
       : original_remote_(remote), original_local_(local),
+        process_id_(process_id), flow_id_(flow_id),
+        application_id_(std::move(application_id)),
         records_(std::move(records)) {}
 
   [[noreturn]] static void
@@ -510,36 +605,39 @@ private:
 
   static std::vector<std::byte>
   query_blob(SOCKET socket, DWORD operation) {
-    std::vector<std::byte> result(1024);
-    DWORD returned = 0;
-    int queried = ::WSAIoctl(
-        socket, operation, nullptr, 0, result.data(),
-        static_cast<DWORD>(result.size()), &returned, nullptr,
-        nullptr);
-    if (queried == SOCKET_ERROR) {
-      const int error = WSAGetLastError();
-      if (error != ERROR_INSUFFICIENT_BUFFER ||
-          returned <= result.size())
+    constexpr DWORD initial_blob_size = 8 * 1024;
+    constexpr DWORD maximum_blob_size = 1024 * 1024;
+    std::vector<std::byte> result(initial_blob_size);
+    for (unsigned attempt = 0; attempt != 2; ++attempt) {
+      DWORD returned = 0;
+      if (::WSAIoctl(
+              socket, operation, nullptr, 0, result.data(),
+              static_cast<DWORD>(result.size()), &returned,
+              nullptr, nullptr) != SOCKET_ERROR) {
+        if (returned == 0 || returned > result.size())
+          throw std::runtime_error("WFP returned invalid redirect records");
+        result.resize(returned);
+        return result;
+      }
+
+      const int error = ::WSAGetLastError();
+      const bool size_failure =
+          error == ERROR_INSUFFICIENT_BUFFER || error == WSAEFAULT;
+      if (!size_failure || returned <= result.size() ||
+          returned > maximum_blob_size)
         throw std::system_error(
             error, std::system_category(),
             "SIO_QUERY_WFP_CONNECTION_REDIRECT_RECORDS");
       result.resize(returned);
-      queried = ::WSAIoctl(
-          socket, operation, nullptr, 0, result.data(),
-          static_cast<DWORD>(result.size()), &returned, nullptr,
-          nullptr);
-      if (queried == SOCKET_ERROR)
-        throw_last_socket_error(
-            "SIO_QUERY_WFP_CONNECTION_REDIRECT_RECORDS");
     }
-    if (returned == 0)
-      throw std::runtime_error("WFP returned empty redirect records");
-    result.resize(returned);
-    return result;
+    throw std::runtime_error("WFP redirect records changed size repeatedly");
   }
 
   SOCKADDR_STORAGE original_remote_{};
   SOCKADDR_STORAGE original_local_{};
+  std::uint64_t process_id_ = 0;
+  std::uint64_t flow_id_ = 0;
+  std::vector<std::byte> application_id_;
   std::vector<std::byte> records_;
 };
 

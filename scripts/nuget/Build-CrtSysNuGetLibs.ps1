@@ -37,6 +37,9 @@ foreach ($selectedToolset in $Toolset) {
   }
 }
 
+& (Join-Path $PSScriptRoot 'Stage-CrtSysMsQuicHeader.ps1') `
+  -OutputDirectory (Join-Path $OutputDirectory 'msquic')
+
 $platformByArchitecture = @{
   x86 = 'Win32'
   x64 = 'x64'
@@ -60,8 +63,9 @@ foreach ($toolsetName in $Toolset) {
       $effectiveWdkVersion = $WindowsSdkVersion
     }
     $useLibcntpr = 'ON'
+    $toolchainKey = "sdk_$($WindowsSdkVersion.Replace('.', '_'))_wdk_$($effectiveWdkVersion.Replace('.', '_'))"
 
-    $buildDir = Join-Path $repoRoot "artifacts\build\crtsys_${toolsetName}_${arch}_$config"
+    $buildDir = Join-Path $repoRoot "artifacts\build\crtsys_${toolsetName}_${arch}_${config}_$toolchainKey"
     $libOutputDir = Join-Path $OutputDirectory "lib\native\$toolsetName\$arch\$config"
 
     New-Item -ItemType Directory -Force -Path $buildDir | Out-Null
@@ -79,6 +83,7 @@ foreach ($toolsetName in $Toolset) {
       "-DCMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION=$WindowsSdkVersion",
       '-DCMAKE_CXX_FLAGS=/MP',
       '-DCRTSYS_NTL_MAIN=ON',
+      '-DCRTSYS_BUILD_NTL_KERNEL_CONTENT_CODECS=ON',
       "-DCRTSYS_USE_LIBCNTPR=$useLibcntpr"
     )
 
@@ -92,6 +97,13 @@ foreach ($toolsetName in $Toolset) {
     & cmake --build $buildDir --config $config --target crtsys --parallel
     if ($LASTEXITCODE -ne 0) {
       throw "CMake build failed with exit code $LASTEXITCODE."
+    }
+
+    Write-Host "Building NTL kernel content codecs $toolsetName $arch $config"
+    & cmake --build $buildDir --config $config --target `
+        crtsys_ntl_kernel_zlib crtsys_ntl_kernel_brotli --parallel
+    if ($LASTEXITCODE -ne 0) {
+      throw "Kernel content codec build failed with exit code $LASTEXITCODE."
     }
 
     # Debug libraries stay under the build tree. Release libraries may also be
@@ -135,7 +147,7 @@ foreach ($toolsetName in $Toolset) {
     }
 
     $codecBuildDir = Join-Path $repoRoot (
-      "artifacts\build\content_codecs_${toolsetName}_${arch}_$config")
+      "artifacts\build\content_codecs_${toolsetName}_${arch}_${config}_$toolchainKey")
     $codecInstallDir = Join-Path $codecBuildDir 'install'
     $codecSourceDir = Join-Path $repoRoot 'test\nuget\content-codecs'
     $codecConfigureArgs = @(
@@ -175,7 +187,25 @@ foreach ($toolsetName in $Toolset) {
     Copy-Item -Path (Join-Path $codecInstallDir 'include\*') `
       -Destination $codecIncludeOutputDir -Recurse -Force
 
-    Write-Host "Staged crtsys libraries in $libOutputDir and codecs in $codecLibOutputDir"
+    $kernelCodecLibOutputDir = Join-Path $OutputDirectory (
+      "kernel-codecs\lib\$toolsetName\$arch\$config")
+    New-Item -ItemType Directory -Force -Path $kernelCodecLibOutputDir | Out-Null
+    foreach ($kernelCodecName in @(
+      'crtsys_ntl_kernel_zlib.lib',
+      'crtsys_ntl_kernel_brotli.lib'
+    )) {
+      $kernelCodecCandidates = @(
+        Get-ChildItem -Path $buildDir -Filter $kernelCodecName -Recurse -File |
+          Sort-Object FullName
+      )
+      if ($kernelCodecCandidates.Count -ne 1) {
+        throw "Expected exactly one $kernelCodecName under $buildDir, found $($kernelCodecCandidates.Count)."
+      }
+      Copy-Item -LiteralPath $kernelCodecCandidates[0].FullName `
+        -Destination (Join-Path $kernelCodecLibOutputDir $kernelCodecName) -Force
+    }
+
+    Write-Host "Staged crtsys libraries in $libOutputDir, user codecs in $codecLibOutputDir, and kernel codecs in $kernelCodecLibOutputDir"
     }
   }
 }

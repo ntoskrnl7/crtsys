@@ -42,7 +42,7 @@ The registry must distinguish task completion from temporary IOCP idleness.
 During shutdown it first requests cancellation for every connection, waits
 until every owning task has completed, and then calls `wait_for_idle()` before
 destroying the shared context. The
-[`browser-https-inspection` sample](../../examples/wfp/browser-https-inspection)
+[`browser-https-inspection` sample](../../examples/wfp/user/browser-https-inspection)
 uses this model and its relay contract test exercises many simultaneous socket
 pairs on one context.
 
@@ -51,13 +51,15 @@ pairs on one context.
 The socket provides three awaiters:
 
 ```cpp
-auto count = co_await connection.read_some(buffer);
-auto exact = co_await connection.read_exactly(message);
+auto count = co_await connection.read_some_borrowed(buffer);
+auto exact = co_await connection.read_exactly_borrowed(message);
 auto sent = co_await connection.write_all(message);
 ```
 
-- `read_some()` completes after one receive and returns zero for clean EOF.
-- `read_exactly()` resubmits partial receives until the span is full. Clean EOF
+- `read_some_borrowed()` completes after one receive and returns zero for clean
+  EOF.
+- `read_exactly_borrowed()` resubmits partial receives until the span is full.
+  The destination span must remain alive until the await completes. Clean EOF
   before that point throws `std::system_error(ERROR_HANDLE_EOF, ...)`.
 - `write_all()` resubmits partial sends until the entire span is accepted.
 
@@ -75,15 +77,16 @@ outside the frame.
 ## Lifetime and cancellation
 
 - The destination/source span must remain valid until `await_resume()`.
-- `io_completion_context` must outlive every associated socket, pending
-  operation, and coroutine that can submit another operation.
-- Do not destroy the context from its own completion worker.
+- Each socket and pending operation retains the IOCP runtime state. The
+  `io_completion_context` facade may therefore be closed or destroyed before
+  its children, independently of member declaration order.
 - `async_socket::cancel()` calls `CancelIoEx` for the socket. This cancels all
   pending operations on that socket, not one selected read or write.
 - Closing a socket also causes its pending overlapped operations to complete.
-- Destroy sockets or request cancellation before destroying the context. The
-  context waits for its submitted operations, posts a shutdown packet, joins
-  its worker, and only then closes the completion port.
+- `io_completion_context::close()` is idempotent, rejects new children, waits
+  for submitted operations, and joins the worker before releasing the native
+  completion port. Calling it from a completion continuation is supported;
+  the worker retains the final runtime reference until that callback returns.
 - `wait_for_idle()` means that currently submitted OS operations completed. A
   resumed coroutine may submit another operation, so task completion remains
   the authoritative end-of-work signal.
@@ -99,8 +102,9 @@ recursion. `<ntl/net/tls/stream>` is the separate Schannel TLS layer built above
 it; WFP connect redirection and application framing remain separate concerns.
 See [User-mode Schannel TLS streams](./tls-stream.md).
 
-The [`stream-edit` controller](../../examples/wfp/stream-edit) is the runtime
-proof. Its actual loopback client/server path uses `co_await read_exactly()` and
+The [`stream-edit` controller](../../examples/wfp/kernel/stream-edit) is the runtime
+proof. Its actual loopback client/server path uses
+`co_await read_exactly_borrowed()` and
 `co_await write_all()` while the kernel callout replaces a token split across
 two writes. Its `--coroutine-self-test` mode also verifies fragmented
 loopback transfer, `CancelIoEx`, and incomplete-read EOF behavior without

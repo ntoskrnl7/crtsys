@@ -15,9 +15,17 @@ param(
                'wfp-connect-redirect', 'wfp-bind-redirect',
                'wfp-tls-inspection-proxy',
                'wfp-browser-https-inspection',
+               'wfp-http3-inspection',
                'wfp-udp-content-filter',
                'wfp-tcp-content-filter',
-               'wfp-specialized-observation')]
+               'wfp-kernel-connect-redirect',
+               'wfp-kernel-tls-inspection-proxy',
+               'wfp-kernel-browser-https-inspection',
+               'wfp-kernel-http3-inspection',
+               'wfp-kernel-udp-content-filter',
+               'wfp-kernel-tcp-content-filter',
+               'wfp-specialized-observation',
+               'ntl-net-kernel-contracts')]
   [string] $Project,
 
   [Parameter(Mandatory = $true)]
@@ -56,13 +64,32 @@ $sourceDir = if ($Project -like 'kmdf-example-*') {
   Join-Path $repoRoot 'test\flt\cross-bitness'
 } elseif ($Project -eq 'flt-verifier-stress') {
   Join-Path $repoRoot 'test\flt\verifier-stress'
-  } elseif ($Project -eq 'wfp-compile') {
-    Join-Path $repoRoot 'test\wfp\compile'
-} elseif ($Project -eq 'wfp-ale-connect-block') {
-  Join-Path $repoRoot 'examples\wfp\ale-connect-block'
-} elseif ($Project -like 'wfp-*') {
+} elseif ($Project -eq 'wfp-compile') {
+  Join-Path $repoRoot 'test\wfp\compile'
+} elseif ($Project -eq 'ntl-net-kernel-contracts') {
+  Join-Path $repoRoot 'test\net\kernel-contracts'
+} elseif ($Project -in @(
+    'wfp-ale-connect-block',
+    'wfp-datagram-proxy',
+    'wfp-async-inspection',
+    'wfp-flow-monitor',
+    'wfp-stream-edit',
+    'wfp-bind-redirect',
+    'wfp-specialized-observation')) {
   $sample = $Project.Substring(('wfp-').Length)
-  Join-Path $repoRoot "examples\wfp\$sample"
+  Join-Path $repoRoot "examples\wfp\kernel\$sample"
+} elseif ($Project -in @(
+    'wfp-connect-redirect',
+    'wfp-tls-inspection-proxy',
+    'wfp-browser-https-inspection',
+    'wfp-http3-inspection',
+    'wfp-udp-content-filter',
+    'wfp-tcp-content-filter')) {
+  $sample = $Project.Substring(('wfp-').Length)
+  Join-Path $repoRoot "examples\wfp\user\$sample"
+} elseif ($Project -like 'wfp-kernel-*') {
+  $sample = $Project.Substring(('wfp-kernel-').Length)
+  Join-Path $repoRoot "examples\wfp\kernel\$sample"
 } elseif ($Project -eq 'rpc-lifecycle-stress') {
   Join-Path $repoRoot 'test\rpc\lifecycle-stress'
 } elseif ($Project -eq 'rpc-async') {

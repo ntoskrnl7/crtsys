@@ -385,6 +385,53 @@ read_huffman_string(cursor &input, std::size_t encoded_size,
   return ntl::ok(std::move(decoded));
 }
 
+/** Allocation-free HPACK/QPACK Huffman decode into caller-owned storage. */
+inline ntl::result<std::size_t>
+read_huffman_to(cursor &input, std::size_t encoded_size,
+                std::span<std::byte> output) noexcept {
+  if (encoded_size > input.remaining())
+    return ntl::unexpected(STATUS_DATA_ERROR);
+
+  std::size_t decoded_size = 0;
+  std::int16_t node = 0;
+  unsigned trailing_count = 0;
+  unsigned trailing_value = 0;
+  for (std::size_t offset = 0; offset != encoded_size; ++offset) {
+    std::uint8_t octet = 0;
+    if (!input.at(offset, octet))
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    for (unsigned index = 0; index != 8; ++index) {
+      const unsigned bit = (octet >> (7 - index)) & 1u;
+      trailing_value = ((trailing_value << 1) | bit) & 0xffu;
+      ++trailing_count;
+      const auto child = huffman_tree.nodes[
+          static_cast<std::size_t>(node)].child[bit];
+      if (child < 0)
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      node = child;
+      const auto symbol = huffman_tree.nodes[
+          static_cast<std::size_t>(node)].symbol;
+      if (symbol < 0)
+        continue;
+      if (symbol == 256)
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      if (decoded_size == output.size())
+        return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+      output[decoded_size++] = static_cast<std::byte>(symbol);
+      node = 0;
+      trailing_count = 0;
+      trailing_value = 0;
+    }
+  }
+  if (!input.advance(encoded_size))
+    return ntl::unexpected(STATUS_DATA_ERROR);
+  if (node != 0 &&
+      (trailing_count > 7 ||
+       trailing_value != ((1u << trailing_count) - 1u)))
+    return ntl::unexpected(STATUS_DATA_ERROR);
+  return ntl::ok(decoded_size);
+}
+
 inline ntl::result<std::string>
 read_string(cursor &input,
             std::size_t maximum_decoded_size) {

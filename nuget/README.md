@@ -41,11 +41,41 @@ Install-Package crtsys
   `Content-Encoding` stream API. Set
   `<CrtSysUseNtlContentCodecs>false</CrtSysUseNtlContentCodecs>` only when the
   app does not use those standard codecs or supplies its own registries.
+- User and driver projects receive the exact public `msquic.h` revision used
+  by NTL's optional QUIC backends. The package supplies this compile-time ABI
+  only; it does not install `msquic.dll` or a kernel NMR provider. Set
+  `<CrtSysUseNtlMsQuicHeaders>false</CrtSysUseNtlMsQuicHeaders>` only when the
+  project does not compile an MsQuic-backed NTL header or deliberately supplies
+  the same pinned ABI through another include directory.
 - Driver projects (WDK) get automatic WDK linkage for
   `crtsys.lib` / `Ldk.lib` (x86/x64/ARM/ARM64 depending on the selected
   MSVC toolset).
-- WFP callout projects can select **NTL WFP** to receive the NTL entry wrapper,
-  WFP/NDIS target definitions, and `fwpkclnt.lib` automatically.
+- Kernel MsQuic is an explicit deployment choice. Enable **NTL kernel MsQuic
+  backend** on the driver-model property page, or set
+  `<CrtSysUseNtlKernelMsQuic>true</CrtSysUseNtlKernelMsQuic>` in a driver
+  project to select the Windows 10 version-2004-or-newer contract and link
+  `netio.lib`, which resolves the documented NMR client calls used by
+  `ntl::net::kernel::msquic_provider`. Merely making the pinned headers
+  available does not raise the minimum OS version of every driver.
+
+### Driver model selection
+
+Choose the entry model under **Project Properties > Driver Settings > Driver
+Model**:
+
+| Project model | Select | Implement | Package behavior |
+| --- | --- | --- | --- |
+| WDM | **NTL WDM** | `ntl::main` | Uses the NTL WDM entry wrapper |
+| KMDF | **NTL KMDF** | `ntl::kmdf::main` | Uses the NTL KMDF entry wrapper while WDF retains PnP, power, and dispatch ownership |
+| Minifilter | **NTL Minifilter** | `ntl::flt::main` | Uses the Filter Manager entry wrapper and links `fltmgr.lib` |
+| WFP callout | **NTL WFP** | `ntl::main` | Applies the WFP/NDIS target definitions and links `fwpkclnt.lib` and the kernel content codecs |
+
+Select **No NTL entry point** to keep the project's existing `DriverEntry`,
+`WdfDriverCreate`, minifilter, or WFP entry path. For model-specific APIs and
+complete examples, see the [KMDF guide](../docs/ntl/kmdf.md),
+[minifilter guide](../docs/ntl/minifilter.md),
+[WFP guide](../docs/ntl/wfp-guide.md), and the
+[example catalog](../examples).
 
 What this NuGet package is for:
 
@@ -67,20 +97,6 @@ ntl::status ntl::main(ntl::driver& driver,
   return ntl::status::ok();
 }
 ```
-
-### WFP callout driver
-
-In Visual Studio, open **Project Properties > Driver Settings > Driver Model**
-and set **crtsys WDM entry point** to **NTL WFP**. A project file can make the
-same selection explicitly:
-
-```xml
-<CrtSysWdmEntryPoint>NtlWfp</CrtSysWdmEntryPoint>
-```
-
-The package uses `ntl::main`, targets the Windows 8 WFP callout contract,
-selects `NDIS60` or `NDIS630` for the target architecture, and links
-`fwpkclnt.lib`. Include `<ntl/wfp/all>` for the kernel callout surface.
 
 ### IOCTL sample (kernel + app pair)
 
@@ -245,6 +261,7 @@ project into a driver project.
 
 - `include/` headers
 - native MSBuild props/targets (`build/native`)
+- pinned MsQuic public ABI header (`build/native/msquic/include/msquic.h`)
 - prebuilt libs by MSVC toolset, architecture, and configuration:
   `build/native/lib/native/<toolset>/{x86,x64,ARM,ARM64}/{Debug,Release}/(crtsys.lib|Ldk.lib)`.
   For example, VS2019 uses `build/native/lib/native/v142/x64/Release`,
@@ -257,6 +274,10 @@ toolset, architecture, and Debug/Release combination. x86 and x64 consumers
 also execute gzip, deflate, Brotli, and chained gzip+Brotli one-byte-split
 incremental round trips; ARM and ARM64 are cross-link validation on the hosted
 Windows runners.
+
+Package CI also compiles both the user HTTP/3 backend and kernel NMR wrapper
+against the redistributed, SHA-256-verified MsQuic header. Runtime deployment
+of the corresponding user DLL or kernel provider remains a product decision.
 
 The NTL minifilter entry supports Windows 7+ consumers even though the
 prebuilt library itself is compiled with the Windows 8 Filter Manager

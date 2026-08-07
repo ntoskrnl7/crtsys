@@ -1,0 +1,334 @@
+/**
+ * @file tls_client_hello_parser
+ * @brief Allocation-free TLS ClientHello parser for user and kernel callers.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include <ntl/net/buffer/scatter_view>
+#include <ntl/result>
+#include <ntl/status>
+
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <span>
+#include <string_view>
+
+namespace ntl::net {
+
+struct tls_client_hello_limits {
+  std::size_t maximum_buffered_ciphertext = 256 * 1024;
+  std::size_t maximum_client_hello = 128 * 1024;
+  std::size_t receive_chunk_size = 4 * 1024;
+  std::size_t maximum_alpn_protocols = 32;
+};
+
+class tls_client_hello_observer {
+public:
+  virtual ~tls_client_hello_observer() = default;
+  virtual ntl::status on_server_name(std::string_view) noexcept {
+    return ntl::status::ok();
+  }
+  virtual ntl::status on_application_protocol(std::string_view) noexcept {
+    return ntl::status::ok();
+  }
+};
+
+struct tls_client_hello_parse_result {
+  std::size_t consumed_ciphertext = 0;
+  std::size_t handshake_size = 0;
+  std::size_t application_protocol_count = 0;
+  bool server_name_present = false;
+  bool encrypted_client_hello_extension_present = false;
+};
+
+namespace client_hello_detail {
+
+inline std::uint16_t read_u16(std::span<const std::byte> bytes,
+                              std::size_t offset) noexcept {
+  return static_cast<std::uint16_t>(
+      (static_cast<std::uint16_t>(
+           std::to_integer<std::uint8_t>(bytes[offset]))
+       << 8) |
+      static_cast<std::uint16_t>(
+          std::to_integer<std::uint8_t>(bytes[offset + 1])));
+}
+
+inline std::uint32_t read_u24(std::span<const std::byte> bytes,
+                              std::size_t offset) noexcept {
+  return (static_cast<std::uint32_t>(
+              std::to_integer<std::uint8_t>(bytes[offset]))
+          << 16) |
+         (static_cast<std::uint32_t>(
+              std::to_integer<std::uint8_t>(bytes[offset + 1]))
+          << 8) |
+         static_cast<std::uint32_t>(
+             std::to_integer<std::uint8_t>(bytes[offset + 2]));
+}
+
+inline ntl::status observe_server_name(
+    std::span<std::byte> encoded,
+    tls_client_hello_observer &observer) noexcept {
+  if (encoded.empty() || encoded.size() > 253)
+    return STATUS_DATA_ERROR;
+
+  std::size_t label_size = 0;
+  for (std::byte &value : encoded) {
+    unsigned char character = std::to_integer<unsigned char>(value);
+    if (character >= 'A' && character <= 'Z') {
+      character = static_cast<unsigned char>(character - 'A' + 'a');
+      value = static_cast<std::byte>(character);
+    }
+    if (character == '.') {
+      if (label_size == 0 || label_size > 63)
+        return STATUS_DATA_ERROR;
+      label_size = 0;
+      continue;
+    }
+    const bool accepted =
+        (character >= 'a' && character <= 'z') ||
+        (character >= '0' && character <= '9') || character == '-' ||
+        character == '_';
+    if (!accepted)
+      return STATUS_DATA_ERROR;
+    ++label_size;
+  }
+  if (label_size == 0 || label_size > 63)
+    return STATUS_DATA_ERROR;
+
+  return observer.on_server_name(std::string_view(
+      reinterpret_cast<const char *>(encoded.data()), encoded.size()));
+}
+
+inline ntl::status parse_server_name_extension(
+    std::span<std::byte> extension,
+    tls_client_hello_observer &observer,
+    bool &present) noexcept {
+  if (extension.size() < 2)
+    return STATUS_DATA_ERROR;
+  const std::size_t list_size = read_u16(extension, 0);
+  if (list_size != extension.size() - 2)
+    return STATUS_DATA_ERROR;
+
+  std::size_t offset = 2;
+  while (offset != extension.size()) {
+    if (extension.size() - offset < 3)
+      return STATUS_DATA_ERROR;
+    const auto type = std::to_integer<std::uint8_t>(extension[offset]);
+    const std::size_t size = read_u16(extension, offset + 1);
+    offset += 3;
+    if (size > extension.size() - offset)
+      return STATUS_DATA_ERROR;
+    if (type == 0) {
+      if (present)
+        return STATUS_DATA_ERROR;
+      const ntl::status observed = observe_server_name(
+          extension.subspan(offset, size), observer);
+      if (!observed.is_ok())
+        return observed;
+      present = true;
+    }
+    offset += size;
+  }
+  return present ? ntl::status::ok()
+                 : ntl::status{STATUS_DATA_ERROR};
+}
+
+inline ntl::status parse_alpn_extension(
+    std::span<const std::byte> extension, std::size_t maximum_protocols,
+    tls_client_hello_observer &observer, std::size_t &count) noexcept {
+  if (extension.size() < 2)
+    return STATUS_DATA_ERROR;
+  const std::size_t list_size = read_u16(extension, 0);
+  if (list_size != extension.size() - 2)
+    return STATUS_DATA_ERROR;
+
+  std::size_t offset = 2;
+  while (offset != extension.size()) {
+    const std::size_t size =
+        std::to_integer<std::uint8_t>(extension[offset++]);
+    if (size == 0 || size > extension.size() - offset ||
+        count == maximum_protocols)
+      return STATUS_DATA_ERROR;
+    const ntl::status observed = observer.on_application_protocol(
+        std::string_view(reinterpret_cast<const char *>(extension.data() + offset),
+                         size));
+    if (!observed.is_ok())
+      return observed;
+    ++count;
+    offset += size;
+  }
+  return count != 0 ? ntl::status::ok()
+                    : ntl::status{STATUS_DATA_ERROR};
+}
+
+inline ntl::status parse_body(
+    std::span<std::byte> body, const tls_client_hello_limits &limits,
+    tls_client_hello_observer &observer,
+    tls_client_hello_parse_result &result) noexcept {
+  if (body.size() < 2 + 32 + 1)
+    return STATUS_DATA_ERROR;
+
+  std::size_t offset = 2 + 32;
+  const std::size_t session_id_size =
+      std::to_integer<std::uint8_t>(body[offset++]);
+  if (session_id_size > 32 || session_id_size > body.size() - offset)
+    return STATUS_DATA_ERROR;
+  offset += session_id_size;
+
+  if (body.size() - offset < 2)
+    return STATUS_DATA_ERROR;
+  const std::size_t cipher_size = read_u16(body, offset);
+  offset += 2;
+  if (cipher_size < 2 || (cipher_size & 1) != 0 ||
+      cipher_size > body.size() - offset)
+    return STATUS_DATA_ERROR;
+  offset += cipher_size;
+
+  if (offset == body.size())
+    return STATUS_DATA_ERROR;
+  const std::size_t compression_size =
+      std::to_integer<std::uint8_t>(body[offset++]);
+  if (compression_size == 0 || compression_size > body.size() - offset)
+    return STATUS_DATA_ERROR;
+  bool supports_null_compression = false;
+  for (std::size_t index = 0; index != compression_size; ++index) {
+    if (body[offset + index] == std::byte{0})
+      supports_null_compression = true;
+  }
+  if (!supports_null_compression)
+    return STATUS_DATA_ERROR;
+  offset += compression_size;
+
+  if (offset == body.size())
+    return ntl::status::ok();
+  if (body.size() - offset < 2)
+    return STATUS_DATA_ERROR;
+  const std::size_t extension_size = read_u16(body, offset);
+  offset += 2;
+  if (extension_size != body.size() - offset)
+    return STATUS_DATA_ERROR;
+
+  bool saw_server_name = false;
+  bool saw_alpn = false;
+  const std::size_t end = offset + extension_size;
+  while (offset != end) {
+    if (end - offset < 4)
+      return STATUS_DATA_ERROR;
+    const std::uint16_t type = read_u16(body, offset);
+    const std::size_t size = read_u16(body, offset + 2);
+    offset += 4;
+    if (size > end - offset)
+      return STATUS_DATA_ERROR;
+    auto extension = body.subspan(offset, size);
+
+    if (type == 0) {
+      if (saw_server_name)
+        return STATUS_DATA_ERROR;
+      const ntl::status parsed = parse_server_name_extension(
+          extension, observer, result.server_name_present);
+      if (!parsed.is_ok())
+        return parsed;
+      saw_server_name = true;
+    } else if (type == 16) {
+      if (saw_alpn)
+        return STATUS_DATA_ERROR;
+      const ntl::status parsed = parse_alpn_extension(
+          extension, limits.maximum_alpn_protocols, observer,
+          result.application_protocol_count);
+      if (!parsed.is_ok())
+        return parsed;
+      saw_alpn = true;
+    } else if (type == 0xfe0d) {
+      result.encrypted_client_hello_extension_present = true;
+    }
+    offset += size;
+  }
+  return ntl::status::ok();
+}
+
+} // namespace client_hello_detail
+
+/**
+ * @brief Parses a complete ClientHello from arbitrarily fragmented input.
+ *
+ * `workspace` receives the reassembled handshake and must remain alive while
+ * observer callbacks execute.  STATUS_BUFFER_TOO_SMALL means more ciphertext
+ * is required; STATUS_BUFFER_OVERFLOW means the configured/workspace bound was
+ * exceeded.  The input is never retained.
+ */
+inline ntl::result<tls_client_hello_parse_result>
+inspect_tls_client_hello(
+    scatter_view wire, std::span<std::byte> workspace,
+    tls_client_hello_observer &observer,
+    tls_client_hello_limits limits = {}) noexcept {
+  if (!wire || limits.maximum_client_hello == 0 ||
+      limits.maximum_buffered_ciphertext == 0 ||
+      limits.maximum_alpn_protocols == 0 || workspace.size() < 4 ||
+      limits.maximum_client_hello >
+          (std::numeric_limits<std::size_t>::max)() - 4)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+  if (wire.size() > limits.maximum_buffered_ciphertext)
+    return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+
+  const std::size_t maximum_handshake = limits.maximum_client_hello + 4;
+  if (workspace.size() < maximum_handshake)
+    return ntl::unexpected(STATUS_BUFFER_TOO_SMALL);
+
+  std::size_t wire_offset = 0;
+  std::size_t handshake_size = 0;
+  std::size_t required_handshake = 0;
+  while (true) {
+    if (wire.size() - wire_offset < 5)
+      return ntl::unexpected(STATUS_BUFFER_TOO_SMALL);
+    const auto content_type = wire.read<std::uint8_t>(wire_offset);
+    const auto size_high = wire.read<std::uint8_t>(wire_offset + 3);
+    const auto size_low = wire.read<std::uint8_t>(wire_offset + 4);
+    if (!content_type || !size_high || !size_low)
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    const std::size_t record_size =
+        (static_cast<std::size_t>(*size_high) << 8) | *size_low;
+    if (*content_type != 22 || record_size == 0 || record_size > 18 * 1024)
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    if (record_size > wire.size() - wire_offset - 5)
+      return ntl::unexpected(STATUS_BUFFER_TOO_SMALL);
+    if (record_size > maximum_handshake - handshake_size)
+      return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+
+    auto record = wire.subview(wire_offset + 5, record_size);
+    if (!record)
+      return ntl::unexpected(record.status());
+    const ntl::status copied = record->copy_to(
+        workspace.subspan(handshake_size, record_size));
+    if (!copied.is_ok())
+      return ntl::unexpected(copied);
+    handshake_size += record_size;
+    wire_offset += 5 + record_size;
+
+    if (handshake_size >= 4 && required_handshake == 0) {
+      if (std::to_integer<std::uint8_t>(workspace[0]) != 1)
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      const std::size_t body_size =
+          client_hello_detail::read_u24(workspace, 1);
+      if (body_size == 0 || body_size > limits.maximum_client_hello)
+        return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+      required_handshake = 4 + body_size;
+    }
+    if (required_handshake != 0 && handshake_size >= required_handshake) {
+      tls_client_hello_parse_result result{
+          .consumed_ciphertext = wire_offset,
+          .handshake_size = required_handshake,
+      };
+      const ntl::status parsed = client_hello_detail::parse_body(
+          workspace.subspan(4, required_handshake - 4), limits, observer,
+          result);
+      if (!parsed.is_ok())
+        return ntl::unexpected(parsed);
+      return ntl::ok(result);
+    }
+  }
+}
+
+} // namespace ntl::net

@@ -1,5 +1,8 @@
 cmake_policy(SET CMP0021 NEW)
 
+set(_CRTSYS_CMAKE_MODULE_DIR "${CMAKE_CURRENT_LIST_DIR}")
+include("${_CRTSYS_CMAKE_MODULE_DIR}/NtlMsQuic.cmake")
+
 set(CMAKE_CXX_STANDARD_LIBRARIES " ")
 set(CMAKE_C_STANDARD_LIBRARIES ${CMAKE_CXX_STANDARD_LIBRARIES})
 set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR};${CMAKE_MODULE_PATH}")
@@ -448,7 +451,7 @@ function(crtsys_link_prebuilt_driver_libraries _target)
 endfunction()
 
 function(crtsys_add_driver _target)
-    cmake_parse_arguments(WDK "NTL;MINIFILTER;WFP" "WINVER;KMDF" "" ${ARGN})
+    cmake_parse_arguments(WDK "NTL;MINIFILTER;WFP;KERNEL_MSQUIC;KERNEL_CONTENT_CODECS" "WINVER;KMDF" "" ${ARGN})
 
     if((WDK_MINIFILTER AND WDK_KMDF) OR
        (WDK_MINIFILTER AND WDK_WFP) OR
@@ -465,7 +468,16 @@ function(crtsys_add_driver _target)
     # mistaking that global default for a per-target argument.
     list(FIND ARGN "WINVER" _crtsys_winver_argument_index)
     if(NOT _crtsys_winver_argument_index EQUAL -1)
+        if(WDK_KERNEL_MSQUIC)
+            math(EXPR _crtsys_kernel_msquic_winver "${WDK_WINVER}")
+            if(_crtsys_kernel_msquic_winver LESS 0x0A00)
+                message(FATAL_ERROR
+                    "KERNEL_MSQUIC requires WINVER 0x0A00 or newer.")
+            endif()
+        endif()
         list(APPEND _crtsys_wdk_arguments WINVER "${WDK_WINVER}")
+    elseif(WDK_KERNEL_MSQUIC)
+        list(APPEND _crtsys_wdk_arguments WINVER "0x0A00")
     elseif(WDK_WFP)
         # ntl::wfp uses the version-2 callout contract introduced in Windows 8.
         list(APPEND _crtsys_wdk_arguments WINVER "0x0602")
@@ -564,17 +576,43 @@ function(crtsys_add_driver _target)
         else()
             set(_crtsys_wfp_ndis_version NDIS60)
         endif()
+        if(WDK_KERNEL_MSQUIC)
+            set(_crtsys_wfp_ntddi NTDDI_WIN10_VB)
+        else()
+            set(_crtsys_wfp_ntddi NTDDI_WIN8)
+        endif()
         target_compile_definitions(
             ${_target}
             PUBLIC
                 CRTSYS_USE_WFP
                 ${_crtsys_wfp_ndis_version}
                 NDIS_SUPPORT_NDIS6
-                NTDDI_VERSION=NTDDI_WIN8
+                NTDDI_VERSION=${_crtsys_wfp_ntddi}
         )
+    elseif(WDK_KERNEL_MSQUIC)
+        target_compile_definitions(
+            ${_target} PUBLIC NTDDI_VERSION=NTDDI_WIN10_VB)
     endif()
 
     set(CMAKE_GENERATOR_PLATFORM "${_CRTSYS_ORIGINAL_GENERATOR_PLATFORM}")
+
+    if(WDK_KERNEL_MSQUIC)
+        if(NOT TARGET WDK::NETIO)
+            message(FATAL_ERROR
+                "KERNEL_MSQUIC requires the WDK::NETIO NMR client import target.")
+        endif()
+        crtsys_add_ntl_msquic_headers()
+        target_link_libraries(
+            ${_target} crtsys_ntl_msquic_headers WDK::NETIO)
+    endif()
+
+    if(WDK_KERNEL_CONTENT_CODECS)
+        include("${_CRTSYS_CMAKE_MODULE_DIR}/NtlContentCodecs.cmake")
+        crtsys_add_ntl_kernel_content_codecs()
+        target_link_libraries(
+            ${_target} crtsys_ntl_kernel_content_codecs)
+    endif()
+
     crtsys_scope_compile_options_to_c_cxx(${_target})
 
     crtsys_apply_driver_settings(
@@ -621,4 +659,13 @@ function(crtsys_add_driver _target)
         endif()
         target_link_libraries(${_target} WDK::WDMSEC)
     endif()
+
+    # NTL's owning kernel-network facades use WSK and the standard NPI WSK
+    # interface identifier. Keep these system dependencies on the driver
+    # model itself so a consumer does not have to rediscover netio.lib and
+    # uuid.lib after including ntl/net/kernel/wsk_transport.
+    if(NOT TARGET WDK::NETIO)
+        message(FATAL_ERROR "WDK::NETIO is required for NTL kernel networking.")
+    endif()
+    target_link_libraries(${_target} WDK::NETIO uuid.lib)
 endfunction()

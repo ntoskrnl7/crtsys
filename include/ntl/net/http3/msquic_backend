@@ -2,24 +2,29 @@
  * @file http3_msquic_backend
  * @brief Raw MsQuic stream and Datagram adapter for HTTP/3 extensions.
  *
- * This optional user-mode header requires msquic.h. It complements the
- * decoded msh3 request/response backend when extended CONNECT,
- * WebTransport streams, or QUIC DATAGRAM callbacks are required.
+ * This optional dual-runtime header requires msquic.h. It supplies the raw
+ * QUIC transport used by the shared `http3::proxy_connection` protocol layer,
+ * including Extended CONNECT, WebTransport streams, and QUIC DATAGRAMs.
  */
 #pragma once
-
-#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
-#error "ntl/net/http3/msquic_backend is a user-mode header"
-#endif
 
 #ifndef _WIN32
 #error "ntl/net/http3/msquic_backend currently requires Windows"
 #endif
 
+#if !defined(_KERNEL_MODE) && defined(_KERNEL32_)
+#define NTL_NET_HTTP3_MSQUIC_RESTORE_KERNEL_MODE
+#define _KERNEL_MODE
+#endif
 #include <msquic.h>
+#if defined(NTL_NET_HTTP3_MSQUIC_RESTORE_KERNEL_MODE)
+#undef _KERNEL_MODE
+#undef NTL_NET_HTTP3_MSQUIC_RESTORE_KERNEL_MODE
+#endif
 
 #include <ntl/net/http3/backend>
 #include <ntl/net/http3/framing>
+#include <ntl/net/quic/transport>
 #include <ntl/result>
 #include <ntl/net/buffer/scatter_view>
 #include <ntl/status>
@@ -30,10 +35,12 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <new>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -41,6 +48,12 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#include <ntl/net/kernel/passive_cleanup_domain>
+#else
+#include <ntl/net/user/cleanup_domain>
+#endif
 
 namespace ntl::net::http3::msquic_backend {
 
@@ -58,12 +71,161 @@ struct connection_limits {
       std::chrono::seconds(15)};
 };
 
+struct peer_stream_statistics {
+  std::uint64_t bidirectional_started = 0;
+  std::uint64_t unidirectional_started = 0;
+  std::uint64_t receive_events = 0;
+  std::uint64_t receive_fin_events = 0;
+  std::uint64_t peer_send_shutdown_events = 0;
+  std::uint64_t request_streams_classified = 0;
+  std::uint64_t request_sink_calls = 0;
+  std::uint64_t request_sink_final_calls = 0;
+  std::int32_t last_request_sink_status = STATUS_SUCCESS;
+};
+
+/**
+ * Identifies the logical HTTP/3 peer independently from its routed endpoint.
+ *
+ * `server_name` is used for SNI and certificate validation. When
+ * `remote_address` is present, MsQuic sends to that address instead of
+ * resolving `server_name`; the address port may be zero and is then filled
+ * from `port`. This is useful for transparent proxies and service discovery
+ * without weakening peer identity validation.
+ */
+struct connection_target {
+  std::string server_name;
+  std::uint16_t port = 0;
+  QUIC_ADDRESS_FAMILY family = QUIC_ADDRESS_FAMILY_UNSPEC;
+  std::optional<QUIC_ADDR> remote_address;
+};
+
+/**
+ * Native MsQuic handles plus the owning state which keeps them valid.
+ * User and kernel configuration facades both produce this value; callers do
+ * not manage provider/registration/configuration destruction order.
+ */
+class connection;
+
+class connection_context {
+public:
+  connection_context() noexcept = default;
+
+  /**
+   * Retains the native owner while presenting explicitly borrowed handles to
+   * MsQuic. Normal callers obtain this value from an owning configuration.
+   */
+  static connection_context retain_borrowed_native(
+      const QUIC_API_TABLE *api, HQUIC registration, HQUIC configuration,
+      std::shared_ptr<void> native_owner) noexcept {
+    connection_context result;
+    result.api_ = api;
+    result.registration_ = registration;
+    result.configuration_ = configuration;
+    result.native_owner_ = std::move(native_owner);
+    return result;
+  }
+
+  explicit operator bool() const noexcept {
+    return api_ && registration_ && configuration_ && native_owner_;
+  }
+
+  const QUIC_API_TABLE *borrowed_native_api() const noexcept { return api_; }
+  HQUIC borrowed_native_registration() const noexcept { return registration_; }
+  HQUIC borrowed_native_configuration() const noexcept {
+    return configuration_;
+  }
+
+private:
+  friend class connection;
+  const QUIC_API_TABLE *api_ = nullptr;
+  HQUIC registration_ = nullptr;
+  HQUIC configuration_ = nullptr;
+  std::shared_ptr<void> native_owner_;
+};
+
+/** Callback-scoped metadata. String fields borrow the MsQuic indication. */
+struct accepted_connection_info_view {
+  std::string_view server_name;
+  std::string_view negotiated_alpn;
+  QUIC_ADDR local_address{};
+  QUIC_ADDR remote_address{};
+  bool has_local_address = false;
+  bool has_remote_address = false;
+};
+
+/**
+ * Move-only callback-scoped access to a newly indicated MsQuic connection.
+ *
+ * A listener sink either moves this value into `connection::try_accept*()`
+ * before returning or rejects the indication. It owns no native handle and
+ * must not be stored beyond the listener callback.
+ */
+class borrowed_accepted_connection {
+public:
+  borrowed_accepted_connection() noexcept = default;
+  borrowed_accepted_connection(const borrowed_accepted_connection &) = delete;
+  borrowed_accepted_connection &
+  operator=(const borrowed_accepted_connection &) = delete;
+  borrowed_accepted_connection(borrowed_accepted_connection &&other) noexcept
+      : native_(std::exchange(other.native_, nullptr)),
+        information_(other.information_) {}
+  borrowed_accepted_connection &
+  operator=(borrowed_accepted_connection &&other) noexcept {
+    if (this != &other) {
+      native_ = std::exchange(other.native_, nullptr);
+      information_ = other.information_;
+    }
+    return *this;
+  }
+
+  static borrowed_accepted_connection from_native(
+      HQUIC native,
+      const QUIC_NEW_CONNECTION_INFO &source) noexcept {
+    borrowed_accepted_connection result;
+    result.native_ = native;
+    result.information_.server_name =
+        source.ServerName && source.ServerNameLength != 0
+            ? std::string_view(source.ServerName, source.ServerNameLength)
+            : std::string_view{};
+    result.information_.negotiated_alpn =
+        source.NegotiatedAlpn && source.NegotiatedAlpnLength != 0
+            ? std::string_view(
+                  reinterpret_cast<const char *>(source.NegotiatedAlpn),
+                  source.NegotiatedAlpnLength)
+            : std::string_view{};
+    if (source.LocalAddress) {
+      result.information_.local_address = *source.LocalAddress;
+      result.information_.has_local_address = true;
+    }
+    if (source.RemoteAddress) {
+      result.information_.remote_address = *source.RemoteAddress;
+      result.information_.has_remote_address = true;
+    }
+    return result;
+  }
+
+  explicit operator bool() const noexcept { return native_ != nullptr; }
+  accepted_connection_info_view information() const noexcept {
+    return information_;
+  }
+  HQUIC borrowed_native_handle() const noexcept { return native_; }
+
+private:
+  friend class connection;
+  HQUIC release_native_handle() noexcept {
+    return std::exchange(native_, nullptr);
+  }
+
+  HQUIC native_ = nullptr;
+  accepted_connection_info_view information_{};
+};
+
 enum class connection_role : std::uint8_t {
   client,
   server,
 };
 
-inline constexpr quic_backend_capabilities capabilities{
+inline constexpr ntl::net::quic::backend_capabilities capabilities{
     .available = true,
     .tls13_termination = true,
     .destination_redirection = false,
@@ -90,7 +252,7 @@ inline ntl::status from_quic_status(
     QUIC_STATUS value) noexcept {
   return QUIC_SUCCEEDED(value)
              ? ntl::status::ok()
-             : ntl::status{STATUS_UNSUCCESSFUL};
+             : ntl::status{static_cast<NTSTATUS>(value)};
 }
 
 struct send_context {
@@ -124,96 +286,251 @@ struct send_context {
  * `try_connect()` is the client factory. `try_accept()` is called from a
  * QUIC_LISTENER_EVENT_NEW_CONNECTION callback before that callback returns.
  * Both install all callbacks before the handshake can deliver application
- * data. The sink must outlive the connection.
+ * data. The ordinary factories retain a shared sink. The explicitly named
+ * `*_borrowed` factories are the only variants that require an external sink
+ * lifetime.
  */
-class connection final : public quic_transport_backend {
+class connection final : public ntl::net::quic::transport_backend {
 public:
+  peer_stream_statistics peer_streams() const noexcept {
+    return {
+        .bidirectional_started =
+            peer_bidirectional_started_.load(std::memory_order_relaxed),
+        .unidirectional_started =
+            peer_unidirectional_started_.load(std::memory_order_relaxed),
+        .receive_events =
+            peer_receive_events_.load(std::memory_order_relaxed),
+        .receive_fin_events =
+            peer_receive_fin_events_.load(std::memory_order_relaxed),
+        .peer_send_shutdown_events =
+            peer_send_shutdown_events_.load(std::memory_order_relaxed),
+        .request_streams_classified =
+            request_streams_classified_.load(std::memory_order_relaxed),
+        .request_sink_calls =
+            request_sink_calls_.load(std::memory_order_relaxed),
+        .request_sink_final_calls =
+            request_sink_final_calls_.load(std::memory_order_relaxed),
+        .last_request_sink_status =
+            last_request_sink_status_.load(std::memory_order_relaxed),
+    };
+  }
+
   connection(const connection &) = delete;
   connection &operator=(const connection &) = delete;
 
   ~connection() override {
-    stop();
-    (void)wait_for_shutdown(limits_.shutdown_timeout);
-    close_handles();
+    if (handle_) {
+      stop();
+      // Destruction runs on the owning cleanup domain, never in an MsQuic
+      // callback. Prefer the graceful shutdown barrier, but do not let a
+      // missing SHUTDOWN_COMPLETE callback pin that domain (and therefore
+      // RegistrationClose or driver unload) forever. ConnectionClose is the
+      // documented abortive cleanup path when graceful shutdown did not
+      // complete; it synchronously retires the native handle before this
+      // object's callback state is released.
+      (void)wait_for_shutdown(limits_.shutdown_timeout);
+      close_handles();
+    }
   }
 
-  static ntl::result<std::unique_ptr<connection>>
+  static ntl::result<std::shared_ptr<connection>>
   try_connect(
+      connection_context configured,
+      connection_target target,
+      std::shared_ptr<ntl::net::quic::backend_sink> sink,
+      connection_limits limits = {}) noexcept {
+    if (!configured || !sink)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    if (!configured.api_ || !configured.registration_ ||
+        !configured.configuration_ || !valid_target(target) ||
+        !valid_limits(limits))
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    try {
+      auto result = adopt(new (std::nothrow) connection(
+          configured.api_, std::move(sink), connection_role::client, limits,
+          std::move(configured.native_owner_)));
+      if (!result)
+        return ntl::unexpected(result.status());
+      const ntl::status started = (*result)->start_client(
+          std::static_pointer_cast<ntl::net::quic::transport_backend>(*result),
+          configured.registration_, configured.configuration_,
+          std::move(target));
+      if (!started.is_ok())
+        return ntl::unexpected(started);
+      return ntl::ok(std::move(*result));
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+  static ntl::result<std::shared_ptr<connection>>
+  try_connect(
+      connection_context configured,
+      std::string server_name,
+      std::uint16_t port,
+      std::shared_ptr<ntl::net::quic::backend_sink> sink,
+      QUIC_ADDRESS_FAMILY family =
+          QUIC_ADDRESS_FAMILY_UNSPEC,
+      connection_limits limits = {}) noexcept {
+    return try_connect(
+        std::move(configured),
+        {.server_name = std::move(server_name),
+         .port = port,
+         .family = family},
+        std::move(sink), limits);
+  }
+
+  static ntl::result<std::shared_ptr<connection>>
+  try_connect_borrowed(
+      const QUIC_API_TABLE *api,
+      HQUIC registration,
+      HQUIC configuration,
+      connection_target target,
+      ntl::net::quic::backend_sink &sink,
+      connection_limits limits = {}) noexcept {
+    if (!api || !registration || !configuration ||
+        !valid_target(target) ||
+        !valid_limits(limits))
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    try {
+      auto result = adopt(new (std::nothrow) connection(
+          api, sink, connection_role::client, limits, {}));
+      if (!result)
+        return ntl::unexpected(result.status());
+
+      HQUIC handle = nullptr;
+      const QUIC_STATUS opened = api->ConnectionOpen(
+          registration, &connection_callback, result->get(),
+          &handle);
+      if (QUIC_FAILED(opened))
+        return ntl::unexpected(detail::from_quic_status(opened));
+      (*result)->handle_ = handle;
+
+      const ntl::status remote =
+          configure_remote_address(api, handle, target);
+      if (!remote.is_ok()) {
+        (*result)->release_unstarted_connection();
+        return ntl::unexpected(remote);
+      }
+
+      const ntl::status attached = (*result)->invoke_sink(
+          [&] {
+            return sink.on_transport_ready(
+                std::static_pointer_cast<
+                    ntl::net::quic::transport_backend>(*result));
+          });
+      if (!attached.is_ok()) {
+        (*result)->release_unstarted_connection();
+        return ntl::unexpected(attached);
+      }
+
+      const QUIC_STATUS started = api->ConnectionStart(
+          handle, configuration, target.family, target.server_name.c_str(),
+          target.port);
+      if (QUIC_FAILED(started)) {
+        (*result)->release_unstarted_connection();
+        return ntl::unexpected(detail::from_quic_status(started));
+      }
+      (*result)->started_.store(true, std::memory_order_release);
+      return ntl::ok(std::move(*result));
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(
+          STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+  static ntl::result<std::shared_ptr<connection>>
+  try_accept(
+      connection_context configured,
+      borrowed_accepted_connection accepted,
+      std::shared_ptr<ntl::net::quic::backend_sink> sink,
+      connection_limits limits = {}) noexcept {
+    if (!configured || !sink)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    if (!configured.api_ || !accepted ||
+        !configured.configuration_ || !valid_limits(limits))
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    try {
+      auto result = adopt(new (std::nothrow) connection(
+          configured.api_, std::move(sink), connection_role::server, limits,
+          std::move(configured.native_owner_)));
+      if (!result)
+        return ntl::unexpected(result.status());
+      const ntl::status started = (*result)->start_server(
+          std::static_pointer_cast<ntl::net::quic::transport_backend>(*result),
+          accepted.release_native_handle(), configured.configuration_);
+      if (!started.is_ok())
+        return ntl::unexpected(started);
+      return ntl::ok(std::move(*result));
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+  static ntl::result<std::shared_ptr<connection>>
+  try_connect_borrowed(
       const QUIC_API_TABLE *api,
       HQUIC registration,
       HQUIC configuration,
       std::string server_name,
       std::uint16_t port,
-      quic_backend_sink &sink,
+      ntl::net::quic::backend_sink &sink,
       QUIC_ADDRESS_FAMILY family =
           QUIC_ADDRESS_FAMILY_UNSPEC,
       connection_limits limits = {}) noexcept {
-    if (!api || !registration || !configuration ||
-        server_name.empty() || port == 0 ||
-        !valid_limits(limits))
-      return ntl::unexpected(STATUS_INVALID_PARAMETER);
-    try {
-      auto result = std::unique_ptr<connection>(
-          new (std::nothrow) connection(
-              api, sink, connection_role::client, limits));
-      if (!result)
-        return ntl::unexpected(
-            STATUS_INSUFFICIENT_RESOURCES);
-
-      HQUIC handle = nullptr;
-      const QUIC_STATUS opened = api->ConnectionOpen(
-          registration, &connection_callback, result.get(),
-          &handle);
-      if (QUIC_FAILED(opened))
-        return ntl::unexpected(STATUS_UNSUCCESSFUL);
-      result->handle_ = handle;
-
-      const QUIC_STATUS started = api->ConnectionStart(
-          handle, configuration, family, server_name.c_str(),
-          port);
-      if (QUIC_FAILED(started))
-        return ntl::unexpected(STATUS_UNSUCCESSFUL);
-      result->started_.store(true, std::memory_order_release);
-      return ntl::ok(std::move(result));
-    } catch (const std::bad_alloc &) {
-      return ntl::unexpected(
-          STATUS_INSUFFICIENT_RESOURCES);
-    } catch (...) {
-      return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
-    }
+    return try_connect_borrowed(
+        api, registration, configuration,
+        {.server_name = std::move(server_name),
+         .port = port,
+         .family = family},
+        sink, limits);
   }
 
-  static ntl::result<std::unique_ptr<connection>>
-  try_accept(
+  static ntl::result<std::shared_ptr<connection>>
+  try_accept_borrowed(
       const QUIC_API_TABLE *api,
-      HQUIC accepted_connection,
+      borrowed_accepted_connection accepted,
       HQUIC configuration,
-      quic_backend_sink &sink,
+      ntl::net::quic::backend_sink &sink,
       connection_limits limits = {}) noexcept {
-    if (!api || !accepted_connection || !configuration ||
+    if (!api || !accepted || !configuration ||
         !valid_limits(limits))
       return ntl::unexpected(STATUS_INVALID_PARAMETER);
     try {
-      auto result = std::unique_ptr<connection>(
-          new (std::nothrow) connection(
-              api, sink, connection_role::server, limits));
+      auto result = adopt(new (std::nothrow) connection(
+          api, sink, connection_role::server, limits, {}));
       if (!result)
-        return ntl::unexpected(
-            STATUS_INSUFFICIENT_RESOURCES);
-      result->handle_ = accepted_connection;
+        return ntl::unexpected(result.status());
+      (*result)->handle_ = accepted.release_native_handle();
       api->SetCallbackHandler(
-          accepted_connection,
+          (*result)->handle_,
           reinterpret_cast<void *>(&connection_callback),
-          result.get());
+          result->get());
+      const ntl::status attached = (*result)->invoke_sink(
+          [&] {
+            return sink.on_transport_ready(
+                std::static_pointer_cast<
+                    ntl::net::quic::transport_backend>(*result));
+          });
+      if (!attached.is_ok()) {
+        (*result)->release_rejected_connection();
+        return ntl::unexpected(attached);
+      }
       const QUIC_STATUS configured =
           api->ConnectionSetConfiguration(
-              accepted_connection, configuration);
+              (*result)->handle_, configuration);
       if (QUIC_FAILED(configured)) {
-        result->handle_ = nullptr;
-        return ntl::unexpected(STATUS_UNSUCCESSFUL);
+        (*result)->release_rejected_connection();
+        return ntl::unexpected(detail::from_quic_status(configured));
       }
-      result->started_.store(true, std::memory_order_release);
-      return ntl::ok(std::move(result));
+      (*result)->started_.store(true, std::memory_order_release);
+      return ntl::ok(std::move(*result));
     } catch (const std::bad_alloc &) {
       return ntl::unexpected(
           STATUS_INSUFFICIENT_RESOURCES);
@@ -222,7 +539,7 @@ public:
     }
   }
 
-  quic_backend_capabilities
+  ntl::net::quic::backend_capabilities
   capabilities() const noexcept override {
     auto result = msquic_backend::capabilities;
     result.origin_client =
@@ -230,11 +547,12 @@ public:
     return result;
   }
 
-  ntl::status run(quic_backend_sink &sink) noexcept override {
+  ntl::status run_borrowed(
+      ntl::net::quic::backend_sink &sink) noexcept override {
     if (&sink != sink_)
       return STATUS_INVALID_PARAMETER;
     std::unique_lock lock(state_lock_);
-    state_changed_.wait(lock, [this] { return shutdown_complete_; });
+    state_changed_.wait(lock, [this] { return drained_locked(); });
     return terminal_status_;
   }
 
@@ -248,15 +566,15 @@ public:
     auto stream = find_stream(stream_id);
     if (!stream)
       return STATUS_NOT_FOUND;
-    return send_on_stream(*stream, plaintext, final);
+    return send_on_stream(std::move(stream), plaintext, final);
   }
 
-  ntl::status write_qpack_decoder_stream(
-      ntl::net::scatter_view plaintext) noexcept override {
-    if (!plaintext ||
-        plaintext.size() > limits_.maximum_send_size)
-      return STATUS_INVALID_PARAMETER;
-
+  /**
+   * Opens the one mandatory QPACK decoder stream before encoder callbacks
+   * begin.  Preparing it outside a peer-stream callback also avoids making
+   * stream-credit acquisition part of QPACK unblock processing.
+   */
+  ntl::status prepare_qpack_decoder_stream() noexcept override {
     // Opening the mandatory decoder stream is a one-time operation. Keep the
     // check, stream creation, type prefix, and publication in one critical
     // section so concurrent QPACK acknowledgements cannot create two decoder
@@ -290,6 +608,58 @@ public:
       else
         stream_id = qpack_decoder_stream_id_;
     }
+    return ntl::status::ok();
+  }
+
+  /**
+   * Creates a sink after the transport object exists but before MsQuic can
+   * deliver handshake/application callbacks. This removes the cyclic
+   * lifetime problem for high-level connection sinks which require a backend
+   * reference in their constructor. The returned connection owns the sink.
+   */
+  template <class SinkFactory>
+  static ntl::result<std::shared_ptr<connection>>
+  try_accept_with_sink(
+      connection_context configured,
+      borrowed_accepted_connection accepted,
+      SinkFactory &&factory,
+      connection_limits limits = {}) noexcept {
+    if (!configured)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    return try_accept_with_sink_retaining_native(
+        configured.api_, std::move(accepted),
+        configured.configuration_, std::forward<SinkFactory>(factory),
+        limits, std::move(configured.native_owner_));
+  }
+
+  template <class SinkFactory>
+  static ntl::result<std::shared_ptr<connection>>
+  try_accept_with_sink_borrowed(
+      const QUIC_API_TABLE *api,
+      borrowed_accepted_connection accepted,
+      HQUIC configuration,
+      SinkFactory &&factory,
+      connection_limits limits = {}) noexcept {
+    return try_accept_with_sink_retaining_native(
+        api, std::move(accepted), configuration,
+        std::forward<SinkFactory>(factory), limits, {});
+  }
+
+  ntl::status write_qpack_decoder_stream(
+      ntl::net::scatter_view plaintext) noexcept override {
+    if (!plaintext ||
+        plaintext.size() > limits_.maximum_send_size)
+      return STATUS_INVALID_PARAMETER;
+    const ntl::status prepared = prepare_qpack_decoder_stream();
+    if (!prepared.is_ok())
+      return prepared;
+    std::uint64_t stream_id = invalid_stream_id;
+    {
+      std::lock_guard guard(state_lock_);
+      stream_id = qpack_decoder_stream_id_;
+    }
+    if (stream_id == invalid_stream_id)
+      return STATUS_INVALID_DEVICE_STATE;
     return write_stream(stream_id, plaintext, false);
   }
 
@@ -337,7 +707,7 @@ public:
         QUIC_SEND_FLAG_NONE, context);
     if (QUIC_FAILED(sent)) {
       delete context;
-      return STATUS_UNSUCCESSFUL;
+      return detail::from_quic_status(sent);
     }
     return ntl::status::ok();
   }
@@ -355,13 +725,16 @@ public:
     auto stream = find_stream(stream_id);
     if (!stream)
       return STATUS_NOT_FOUND;
+    stream_operation operation(*this, stream);
+    if (!operation)
+      return STATUS_INVALID_DEVICE_STATE;
     const QUIC_STATUS configured = api_->SetParam(
-        stream->handle, QUIC_PARAM_STREAM_RELIABLE_OFFSET,
+        operation.handle(), QUIC_PARAM_STREAM_RELIABLE_OFFSET,
         sizeof(reliable_size), &reliable_size);
     if (QUIC_FAILED(configured))
-      return STATUS_INVALID_DEVICE_STATE;
+      return detail::from_quic_status(configured);
     return detail::from_quic_status(api_->StreamShutdown(
-        stream->handle, QUIC_STREAM_SHUTDOWN_FLAG_ABORT_SEND,
+        operation.handle(), QUIC_STREAM_SHUTDOWN_FLAG_ABORT_SEND,
         error_code));
 #else
     (void)stream_id;
@@ -379,8 +752,11 @@ public:
     auto stream = find_stream(stream_id);
     if (!stream)
       return STATUS_NOT_FOUND;
+    stream_operation operation(*this, stream);
+    if (!operation)
+      return STATUS_INVALID_DEVICE_STATE;
     return detail::from_quic_status(api_->StreamShutdown(
-        stream->handle, QUIC_STREAM_SHUTDOWN_FLAG_ABORT,
+        operation.handle(), QUIC_STREAM_SHUTDOWN_FLAG_ABORT,
         error_code));
   }
 
@@ -393,19 +769,92 @@ public:
         h3_internal_error);
   }
 
+  ntl::status drain() noexcept override {
+    return wait_for_shutdown(limits_.shutdown_timeout)
+               ? ntl::status::ok()
+               : ntl::status{STATUS_IO_TIMEOUT};
+  }
+
+  void drain_exact() noexcept {
+    if (!handle_)
+      return;
+    stop();
+    wait_for_shutdown_exact();
+  }
+
   bool wait_for_shutdown(
       std::chrono::milliseconds timeout) noexcept {
     std::unique_lock lock(state_lock_);
     return state_changed_.wait_for(
         lock, timeout,
-        [this] {
-          return shutdown_complete_ && streams_.empty();
-        });
+        [this] { return drained_locked(); });
   }
 
   connection_role role() const noexcept { return role_; }
 
+  /** Non-owning view; valid until this connection is destroyed. */
+  ntl::net::quic::backend_sink *borrowed_sink() noexcept { return sink_; }
+  const ntl::net::quic::backend_sink *borrowed_sink() const noexcept {
+    return sink_;
+  }
+
 private:
+  template <class SinkFactory>
+  static ntl::result<std::shared_ptr<connection>>
+  try_accept_with_sink_retaining_native(
+      const QUIC_API_TABLE *api,
+      borrowed_accepted_connection accepted,
+      HQUIC configuration,
+      SinkFactory &&factory,
+      connection_limits limits,
+      std::shared_ptr<void> native_owner) noexcept {
+    if (!api || !accepted || !configuration ||
+        !valid_limits(limits))
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    try {
+      auto result = adopt(new (std::nothrow) connection(
+          api, connection_role::server, limits,
+          std::move(native_owner)));
+      if (!result)
+        return ntl::unexpected(result.status());
+      std::shared_ptr<ntl::net::quic::backend_sink> owned =
+          std::invoke(
+              std::forward<SinkFactory>(factory),
+              std::static_pointer_cast<ntl::net::quic::transport_backend>(
+                  *result));
+      if (!owned)
+        return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+      (*result)->sink_ = owned.get();
+      (*result)->retained_sink_ = std::move(owned);
+      (*result)->handle_ = accepted.release_native_handle();
+      api->SetCallbackHandler(
+          (*result)->handle_,
+          reinterpret_cast<void *>(&connection_callback), result->get());
+      const ntl::status attached = (*result)->invoke_sink(
+          [&] {
+            return (*result)->sink_->on_transport_ready(
+                std::static_pointer_cast<
+                    ntl::net::quic::transport_backend>(*result));
+          });
+      if (!attached.is_ok()) {
+        (*result)->release_rejected_connection();
+        return ntl::unexpected(attached);
+      }
+      const QUIC_STATUS configured = api->ConnectionSetConfiguration(
+          (*result)->handle_, configuration);
+      if (QUIC_FAILED(configured)) {
+        (*result)->release_rejected_connection();
+        return ntl::unexpected(detail::from_quic_status(configured));
+      }
+      (*result)->started_.store(true, std::memory_order_release);
+      return ntl::ok(std::move(*result));
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
   enum class stream_kind : std::uint8_t {
     undecided_bidirectional,
     request,
@@ -416,24 +865,199 @@ private:
     local,
   };
 
+  struct stream_callback_context;
+
   struct stream_state {
     connection *owner = nullptr;
     HQUIC handle = nullptr;
-    std::uint64_t id = invalid_stream_id;
+    std::atomic<std::uint64_t> id{invalid_stream_id};
     stream_kind kind = stream_kind::local;
     std::vector<std::byte> prefix;
     bool final_delivered = false;
+    std::mutex lifecycle_lock;
+    std::size_t operations = 0;
+    std::size_t callbacks = 0;
+    bool published = false;
+    bool shutdown_complete = false;
+    bool finalizing = false;
+    stream_callback_context *callback_context = nullptr;
+  };
+
+  struct stream_callback_context {
+    explicit stream_callback_context(
+        std::shared_ptr<stream_state> value) noexcept
+        : state(std::move(value)) {}
+
+    std::shared_ptr<stream_state> state;
+  };
+
+  class callback_guard {
+  public:
+    explicit callback_guard(connection &owner) noexcept : owner_(&owner) {
+      std::lock_guard guard(owner_->state_lock_);
+      ++owner_->active_callbacks_;
+    }
+    callback_guard(const callback_guard &) = delete;
+    callback_guard &operator=(const callback_guard &) = delete;
+    ~callback_guard() {
+      {
+        std::lock_guard guard(owner_->state_lock_);
+        --owner_->active_callbacks_;
+      }
+      owner_->state_changed_.notify_all();
+    }
+
+  private:
+    connection *owner_;
+  };
+
+  class stream_callback_guard {
+  public:
+    stream_callback_guard(
+        connection &owner,
+        std::shared_ptr<stream_state> state) noexcept
+        : owner_(&owner), state_(std::move(state)) {
+      std::lock_guard guard(state_->lifecycle_lock);
+      ++state_->callbacks;
+    }
+    stream_callback_guard(const stream_callback_guard &) = delete;
+    stream_callback_guard &operator=(const stream_callback_guard &) = delete;
+    ~stream_callback_guard() {
+      owner_->finish_stream_callback(state_);
+    }
+
+  private:
+    connection *owner_;
+    std::shared_ptr<stream_state> state_;
+  };
+
+  class stream_operation {
+  public:
+    stream_operation(
+        connection &owner,
+        std::shared_ptr<stream_state> state) noexcept
+        : owner_(&owner), state_(std::move(state)) {
+      std::lock_guard guard(state_->lifecycle_lock);
+      if (!state_->shutdown_complete && state_->handle) {
+        ++state_->operations;
+        handle_ = state_->handle;
+      }
+    }
+    stream_operation(const stream_operation &) = delete;
+    stream_operation &operator=(const stream_operation &) = delete;
+    ~stream_operation() {
+      if (handle_)
+        owner_->finish_stream_operation(state_);
+    }
+
+    explicit operator bool() const noexcept { return handle_ != nullptr; }
+    HQUIC handle() const noexcept { return handle_; }
+
+  private:
+    connection *owner_;
+    std::shared_ptr<stream_state> state_;
+    HQUIC handle_ = nullptr;
   };
 
   static constexpr std::uint64_t invalid_stream_id =
       (std::numeric_limits<std::uint64_t>::max)();
 
+  static ntl::result<std::shared_ptr<connection>>
+  adopt(connection *value) noexcept {
+    if (!value)
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+    auto *domain =
+        ntl::net::kernel::borrowed_runtime_passive_cleanup_domain();
+    if (!domain) {
+      delete value;
+      return ntl::unexpected(STATUS_DEVICE_NOT_READY);
+    }
+    value->cleanup_domain_ = domain;
+    const ntl::status registered = domain->register_item(value->cleanup_);
+    if (!registered.is_ok()) {
+      delete value;
+      return ntl::unexpected(static_cast<NTSTATUS>(registered));
+    }
+    try {
+      return ntl::ok(std::shared_ptr<connection>(
+          value, [](connection *owned) noexcept {
+            owned->cleanup_domain_->retire_deferred(owned->cleanup_);
+          }));
+    } catch (...) {
+      domain->retire_deferred(value->cleanup_);
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+#else
+    auto *domain = ntl::net::user::borrowed_runtime_cleanup_domain();
+    if (!domain) {
+      delete value;
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+    value->cleanup_domain_ = domain;
+    try {
+      return ntl::ok(std::shared_ptr<connection>(
+          value, [](connection *owned) noexcept {
+            if (!owned->cleanup_domain_->retire_deferred(owned->cleanup_)
+                     .is_ok())
+              std::terminate();
+          }));
+    } catch (...) {
+      if (!domain->retire_deferred(value->cleanup_).is_ok())
+        std::terminate();
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+#endif
+  }
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+  static void cleanup_at_passive(void *context) noexcept {
+    delete static_cast<connection *>(context);
+  }
+#else
+  static void cleanup_deferred(void *context) noexcept {
+    delete static_cast<connection *>(context);
+  }
+#endif
+
   connection(
       const QUIC_API_TABLE *api,
-      quic_backend_sink &sink,
+      ntl::net::quic::backend_sink &sink,
       connection_role role,
-      connection_limits limits) noexcept
-      : api_(api), sink_(&sink), role_(role), limits_(limits) {}
+      connection_limits limits,
+      std::shared_ptr<void> native_owner) noexcept
+      : api_(api), sink_(&sink), role_(role), limits_(limits),
+        native_owner_(std::move(native_owner)),
+        next_local_bidirectional_stream_id_(
+            role == connection_role::server ? 1u : 0u),
+        next_local_unidirectional_stream_id_(
+            role == connection_role::server ? 3u : 2u) {}
+
+  connection(
+      const QUIC_API_TABLE *api,
+      std::shared_ptr<ntl::net::quic::backend_sink> sink,
+      connection_role role,
+      connection_limits limits,
+      std::shared_ptr<void> native_owner) noexcept
+      : api_(api), native_owner_(std::move(native_owner)),
+        retained_sink_(std::move(sink)), sink_(retained_sink_.get()),
+        role_(role), limits_(limits),
+        next_local_bidirectional_stream_id_(
+            role == connection_role::server ? 1u : 0u),
+        next_local_unidirectional_stream_id_(
+            role == connection_role::server ? 3u : 2u) {}
+
+  connection(
+      const QUIC_API_TABLE *api,
+      connection_role role,
+      connection_limits limits,
+      std::shared_ptr<void> native_owner) noexcept
+      : api_(api), role_(role), limits_(limits),
+        native_owner_(std::move(native_owner)),
+        next_local_bidirectional_stream_id_(
+            role == connection_role::server ? 1u : 0u),
+        next_local_unidirectional_stream_id_(
+            role == connection_role::server ? 3u : 2u) {}
 
   static bool valid_limits(
       const connection_limits &limits) noexcept {
@@ -444,23 +1068,127 @@ private:
            limits.shutdown_timeout.count() > 0;
   }
 
+  static bool valid_target(const connection_target &target) noexcept {
+    if (target.server_name.empty() || target.port == 0)
+      return false;
+    if (!target.remote_address)
+      return true;
+    const QUIC_ADDRESS_FAMILY remote_family =
+        QuicAddrGetFamily(&*target.remote_address);
+    if (remote_family != QUIC_ADDRESS_FAMILY_INET &&
+        remote_family != QUIC_ADDRESS_FAMILY_INET6)
+      return false;
+    if (target.family != QUIC_ADDRESS_FAMILY_UNSPEC &&
+        target.family != remote_family)
+      return false;
+    const std::uint16_t remote_port =
+        QuicAddrGetPort(&*target.remote_address);
+    return remote_port == 0 || remote_port == target.port;
+  }
+
+  static ntl::status configure_remote_address(
+      const QUIC_API_TABLE *api, HQUIC handle,
+      connection_target &target) noexcept {
+    if (!target.remote_address)
+      return ntl::status::ok();
+    if (QuicAddrGetPort(&*target.remote_address) == 0)
+      QuicAddrSetPort(&*target.remote_address, target.port);
+    target.family = QuicAddrGetFamily(&*target.remote_address);
+    return detail::from_quic_status(api->SetParam(
+        handle, QUIC_PARAM_CONN_REMOTE_ADDRESS,
+        sizeof(*target.remote_address), &*target.remote_address));
+  }
+
+  ntl::status start_client(
+      std::shared_ptr<ntl::net::quic::transport_backend> self,
+      HQUIC registration, HQUIC configuration,
+      connection_target target) noexcept {
+    HQUIC handle = nullptr;
+    const QUIC_STATUS opened = api_->ConnectionOpen(
+        registration, &connection_callback, this, &handle);
+    if (QUIC_FAILED(opened))
+      return detail::from_quic_status(opened);
+    handle_ = handle;
+    const ntl::status remote =
+        configure_remote_address(api_, handle, target);
+    if (!remote.is_ok()) {
+      release_unstarted_connection();
+      return remote;
+    }
+    const ntl::status attached =
+        invoke_sink([&] { return sink_->on_transport_ready(std::move(self)); });
+    if (!attached.is_ok()) {
+      release_unstarted_connection();
+      return attached;
+    }
+    const QUIC_STATUS started = api_->ConnectionStart(
+        handle, configuration, target.family, target.server_name.c_str(),
+        target.port);
+    if (QUIC_FAILED(started)) {
+      release_unstarted_connection();
+      return detail::from_quic_status(started);
+    }
+    started_.store(true, std::memory_order_release);
+    return ntl::status::ok();
+  }
+
+  ntl::status start_server(
+      std::shared_ptr<ntl::net::quic::transport_backend> self,
+      HQUIC accepted_connection, HQUIC configuration) noexcept {
+    handle_ = accepted_connection;
+    api_->SetCallbackHandler(
+        accepted_connection,
+        reinterpret_cast<void *>(&connection_callback), this);
+    const ntl::status attached =
+        invoke_sink([&] { return sink_->on_transport_ready(std::move(self)); });
+    if (!attached.is_ok()) {
+      release_rejected_connection();
+      return attached;
+    }
+    const QUIC_STATUS configured =
+        api_->ConnectionSetConfiguration(accepted_connection, configuration);
+    if (QUIC_FAILED(configured)) {
+      release_rejected_connection();
+      return detail::from_quic_status(configured);
+    }
+    started_.store(true, std::memory_order_release);
+    return ntl::status::ok();
+  }
+
   static QUIC_STATUS QUIC_API connection_callback(
       HQUIC,
       void *context,
       QUIC_CONNECTION_EVENT *event) noexcept {
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+    NT_ASSERT(KeGetCurrentIrql() == PASSIVE_LEVEL);
+#endif
     auto *self = static_cast<connection *>(context);
     if (!self || !event)
       return QUIC_STATUS_INVALID_PARAMETER;
+    callback_guard guard(*self);
     return self->on_connection_event(*event);
+  }
+
+  static QUIC_STATUS QUIC_API discarded_connection_callback(
+      HQUIC, void *, QUIC_CONNECTION_EVENT *) noexcept {
+    return QUIC_STATUS_SUCCESS;
   }
 
   static QUIC_STATUS QUIC_API stream_callback(
       HQUIC,
       void *context,
       QUIC_STREAM_EVENT *event) noexcept {
-    auto *state = static_cast<stream_state *>(context);
-    if (!state || !state->owner || !event)
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+    NT_ASSERT(KeGetCurrentIrql() == PASSIVE_LEVEL);
+#endif
+    auto *callback = static_cast<stream_callback_context *>(context);
+    if (!callback || !callback->state || !event)
       return QUIC_STATUS_INVALID_PARAMETER;
+    auto state = callback->state;
+    if (!state->owner)
+      return QUIC_STATUS_INVALID_PARAMETER;
+    callback_guard connection_guard(*state->owner);
+    stream_callback_guard stream_guard(*state->owner, state);
     return state->owner->on_stream_event(*state, *event);
   }
 
@@ -479,6 +1207,23 @@ private:
         return QUIC_STATUS_ABORTED;
       }
       connected_.store(true, std::memory_order_release);
+      return QUIC_STATUS_SUCCESS;
+    }
+    case QUIC_CONNECTION_EVENT_PEER_CERTIFICATE_RECEIVED: {
+      const ntl::net::quic::peer_certificate_view certificate{
+          .native_certificate =
+              event.PEER_CERTIFICATE_RECEIVED.Certificate,
+          .native_chain = event.PEER_CERTIFICATE_RECEIVED.Chain,
+          .deferred_error_flags =
+              event.PEER_CERTIFICATE_RECEIVED.DeferredErrorFlags,
+          .deferred_status = static_cast<NTSTATUS>(
+              event.PEER_CERTIFICATE_RECEIVED.DeferredStatus)};
+      const ntl::status result = invoke_sink(
+          [&] { return sink_->on_peer_certificate(certificate); });
+      if (!result.is_ok()) {
+        fail(result);
+        return QUIC_STATUS_ABORTED;
+      }
       return QUIC_STATUS_SUCCESS;
     }
     case QUIC_CONNECTION_EVENT_PEER_STREAM_STARTED:
@@ -536,18 +1281,19 @@ private:
       return QUIC_STATUS_SUCCESS;
 #endif
     case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT:
-      set_terminal(STATUS_CONNECTION_ABORTED);
+      set_terminal(static_cast<NTSTATUS>(
+          event.SHUTDOWN_INITIATED_BY_TRANSPORT.Status));
       return QUIC_STATUS_SUCCESS;
     case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_PEER:
       set_terminal(STATUS_CONNECTION_DISCONNECTED);
       return QUIC_STATUS_SUCCESS;
     case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE: {
+      NTSTATUS status = STATUS_SUCCESS;
       {
         std::lock_guard guard(state_lock_);
         shutdown_complete_ = true;
+        status = static_cast<NTSTATUS>(terminal_status_);
       }
-      const NTSTATUS status =
-          static_cast<NTSTATUS>(terminal_status_);
       invoke_sink_void(
           [&] { sink_->on_closed(status); });
       state_changed_.notify_all();
@@ -575,29 +1321,52 @@ private:
         unidirectional
             ? stream_kind::undecided_unidirectional
             : stream_kind::undecided_bidirectional;
-    std::uint32_t size = sizeof(state->id);
+    (unidirectional ? peer_unidirectional_started_
+                    : peer_bidirectional_started_)
+        .fetch_add(1, std::memory_order_relaxed);
+    std::uint64_t queried_id = invalid_stream_id;
+    std::uint32_t size = sizeof(queried_id);
     const QUIC_STATUS queried = api_->GetParam(
-        handle, QUIC_PARAM_STREAM_ID, &size, &state->id);
+        handle, QUIC_PARAM_STREAM_ID, &size, &queried_id);
     if (QUIC_FAILED(queried)) {
       api_->StreamShutdown(
           handle, QUIC_STREAM_SHUTDOWN_FLAG_ABORT,
           h3_internal_error);
       return queried;
     }
+    state->id.store(queried_id, std::memory_order_release);
+    auto callback = std::unique_ptr<stream_callback_context>(
+        new (std::nothrow) stream_callback_context(state));
+    if (!callback) {
+      api_->StreamShutdown(
+          handle, QUIC_STREAM_SHUTDOWN_FLAG_ABORT,
+          h3_internal_error);
+      return QUIC_STATUS_OUT_OF_MEMORY;
+    }
     {
       std::lock_guard guard(state_lock_);
       if (streams_.size() >= limits_.maximum_streams ||
-          streams_.contains(state->id)) {
+          streams_.contains(queried_id)) {
         api_->StreamShutdown(
             handle, QUIC_STREAM_SHUTDOWN_FLAG_ABORT,
             h3_internal_error);
         return QUIC_STATUS_OUT_OF_MEMORY;
       }
-      streams_.emplace(state->id, state);
+      try {
+        streams_.emplace(queried_id, state);
+      } catch (...) {
+        api_->StreamShutdown(
+            handle, QUIC_STREAM_SHUTDOWN_FLAG_ABORT,
+            h3_internal_error);
+        return QUIC_STATUS_OUT_OF_MEMORY;
+      }
+      state->published = true;
+      state->callback_context = callback.get();
+      ++live_stream_contexts_;
     }
     api_->SetCallbackHandler(
         handle, reinterpret_cast<void *>(&stream_callback),
-        state.get());
+        callback.release());
     return QUIC_STATUS_SUCCESS;
   }
 
@@ -605,7 +1374,28 @@ private:
       stream_state &state,
       QUIC_STREAM_EVENT &event) noexcept {
     switch (event.Type) {
+    case QUIC_STREAM_EVENT_START_COMPLETE:
+      if (QUIC_FAILED(event.START_COMPLETE.Status)) {
+        set_terminal(
+            static_cast<NTSTATUS>(event.START_COMPLETE.Status));
+        mark_stream_shutdown(state);
+      } else {
+        const auto expected =
+            state.id.load(std::memory_order_acquire);
+        if (expected != invalid_stream_id &&
+            expected != event.START_COMPLETE.ID) {
+          set_terminal(STATUS_DATA_ERROR);
+          api_->StreamShutdown(
+              state.handle, QUIC_STREAM_SHUTDOWN_FLAG_ABORT,
+              h3_internal_error);
+          return QUIC_STATUS_ABORTED;
+        }
+        state.id.store(
+            event.START_COMPLETE.ID, std::memory_order_release);
+      }
+      return QUIC_STATUS_SUCCESS;
     case QUIC_STREAM_EVENT_RECEIVE: {
+      peer_receive_events_.fetch_add(1, std::memory_order_relaxed);
       if (event.RECEIVE.TotalBufferLength >
               limits_.maximum_receive_indication ||
           event.RECEIVE.TotalBufferLength >
@@ -630,6 +1420,8 @@ private:
       }
       const bool final =
           (event.RECEIVE.Flags & QUIC_RECEIVE_FLAG_FIN) != 0;
+      if (final)
+        peer_receive_fin_events_.fetch_add(1, std::memory_order_relaxed);
       const ntl::status consumed =
           consume_stream(state, bytes, final);
       if (!consumed.is_ok())
@@ -637,6 +1429,7 @@ private:
       return QUIC_STATUS_SUCCESS;
     }
     case QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN:
+      peer_send_shutdown_events_.fetch_add(1, std::memory_order_relaxed);
       if (!state.final_delivered) {
         const ntl::status consumed =
             consume_stream(state, {}, true);
@@ -647,7 +1440,8 @@ private:
     case QUIC_STREAM_EVENT_PEER_SEND_ABORTED: {
       const ntl::status reported = invoke_sink([&] {
         return sink_->on_peer_send_aborted(
-            state.id, event.PEER_SEND_ABORTED.ErrorCode);
+            state.id.load(std::memory_order_acquire),
+            event.PEER_SEND_ABORTED.ErrorCode);
       });
       return reported.is_ok() ? QUIC_STATUS_SUCCESS
                               : abort_stream(state, reported);
@@ -655,7 +1449,8 @@ private:
     case QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED: {
       const ntl::status reported = invoke_sink([&] {
         return sink_->on_peer_receive_aborted(
-            state.id, event.PEER_RECEIVE_ABORTED.ErrorCode);
+            state.id.load(std::memory_order_acquire),
+            event.PEER_RECEIVE_ABORTED.ErrorCode);
       });
       return reported.is_ok() ? QUIC_STATUS_SUCCESS
                               : abort_stream(state, reported);
@@ -666,7 +1461,7 @@ private:
       event.SEND_COMPLETE.ClientContext = nullptr;
       return QUIC_STATUS_SUCCESS;
     case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE:
-      remove_stream(state.id, state.handle);
+      mark_stream_shutdown(state);
       return QUIC_STATUS_SUCCESS;
     default:
       return QUIC_STATUS_SUCCESS;
@@ -719,6 +1514,9 @@ private:
                     webtransport_bidirectional_signal
                 ? stream_kind::extension_bidirectional
                 : stream_kind::request;
+        if (state.kind == stream_kind::request)
+          request_streams_classified_.fetch_add(
+              1, std::memory_order_relaxed);
         combined = std::move(state.prefix);
         payload = combined;
       } else if (
@@ -746,15 +1544,20 @@ private:
     ntl::status result = ntl::status::ok();
     switch (state.kind) {
     case stream_kind::request:
+      request_sink_calls_.fetch_add(1, std::memory_order_relaxed);
+      if (final)
+        request_sink_final_calls_.fetch_add(1, std::memory_order_relaxed);
       result = invoke_sink([&] {
         return sink_->on_request_stream(
-            state.id, bytes, final);
+            state.id.load(std::memory_order_acquire), bytes, final);
       });
+      last_request_sink_status_.store(
+          static_cast<NTSTATUS>(result), std::memory_order_relaxed);
       break;
     case stream_kind::extension_bidirectional:
       result = invoke_sink([&] {
         return sink_->on_peer_bidirectional_stream(
-            state.id, bytes, final);
+            state.id.load(std::memory_order_acquire), bytes, final);
       });
       break;
     case stream_kind::qpack_encoder:
@@ -769,7 +1572,7 @@ private:
     case stream_kind::extension_unidirectional:
       result = invoke_sink([&] {
         return sink_->on_peer_unidirectional_stream(
-            state.id, bytes, final);
+            state.id.load(std::memory_order_acquire), bytes, final);
       });
       break;
     default:
@@ -795,10 +1598,23 @@ private:
       bool unidirectional,
       std::uint64_t &stream_id,
       stream_kind local_kind) noexcept {
+    // MsQuic queues StreamStart asynchronously, including when this method is
+    // called from CONNECTED.  QUIC_PARAM_STREAM_ID is consequently not valid
+    // until START_COMPLETE and cannot be queried synchronously without either
+    // racing or deadlocking the connection worker.  Local QUIC stream IDs are
+    // deterministic, so serialize opens and reserve the next ID from the
+    // role/direction sequence before queueing StreamStart.
+    std::lock_guard open_guard(local_stream_open_lock_);
     stream_id = invalid_stream_id;
     if (!handle_ ||
         stopping_.load(std::memory_order_acquire))
       return STATUS_INVALID_DEVICE_STATE;
+    auto &next_stream_id =
+        unidirectional ? next_local_unidirectional_stream_id_
+                       : next_local_bidirectional_stream_id_;
+    if (next_stream_id > maximum_quic_varint - 4)
+      return STATUS_INTEGER_OVERFLOW;
+    const std::uint64_t reserved_stream_id = next_stream_id;
 
     std::shared_ptr<stream_state> state;
     try {
@@ -808,53 +1624,59 @@ private:
     }
     state->owner = this;
     state->kind = local_kind;
+    auto callback = std::unique_ptr<stream_callback_context>(
+        new (std::nothrow) stream_callback_context(state));
+    if (!callback)
+      return STATUS_INSUFFICIENT_RESOURCES;
     HQUIC stream = nullptr;
     const QUIC_STATUS opened = api_->StreamOpen(
         handle_,
         unidirectional
             ? QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL
             : QUIC_STREAM_OPEN_FLAG_NONE,
-        &stream_callback, state.get(), &stream);
+        &stream_callback, callback.get(), &stream);
     if (QUIC_FAILED(opened))
-      return STATUS_UNSUCCESSFUL;
-    state->handle = stream;
+      return detail::from_quic_status(opened);
+    {
+      std::lock_guard guard(state->lifecycle_lock);
+      state->handle = stream;
+      state->callback_context = callback.get();
+    }
+    {
+      std::lock_guard guard(state_lock_);
+      ++live_stream_contexts_;
+    }
+    callback.release();
+    stream_operation construction(*this, state);
+    state->id.store(reserved_stream_id, std::memory_order_release);
     const QUIC_STATUS started = api_->StreamStart(
         stream,
         static_cast<QUIC_STREAM_START_FLAGS>(
             QUIC_STREAM_START_FLAG_IMMEDIATE |
             QUIC_STREAM_START_FLAG_SHUTDOWN_ON_FAIL));
     if (QUIC_FAILED(started)) {
-      api_->StreamClose(stream);
-      return STATUS_UNSUCCESSFUL;
+      mark_stream_shutdown(*state);
+      return detail::from_quic_status(started);
     }
-    std::uint32_t size = sizeof(state->id);
-    const QUIC_STATUS queried = api_->GetParam(
-        stream, QUIC_PARAM_STREAM_ID, &size, &state->id);
-    if (QUIC_FAILED(queried)) {
+    next_stream_id += 4;
+    const ntl::status published = publish_stream(state);
+    if (!published.is_ok()) {
       api_->StreamShutdown(
           stream, QUIC_STREAM_SHUTDOWN_FLAG_ABORT,
           h3_internal_error);
-      return STATUS_UNSUCCESSFUL;
+      return published;
     }
-    {
-      std::lock_guard guard(state_lock_);
-      if (streams_.size() >= limits_.maximum_streams ||
-          streams_.contains(state->id)) {
-        api_->StreamShutdown(
-            stream, QUIC_STREAM_SHUTDOWN_FLAG_ABORT,
-            h3_internal_error);
-        return STATUS_QUOTA_EXCEEDED;
-      }
-      streams_.emplace(state->id, state);
-    }
-    stream_id = state->id;
+    stream_id = reserved_stream_id;
     return ntl::status::ok();
   }
 
   ntl::status send_on_stream(
-      stream_state &stream,
+      std::shared_ptr<stream_state> stream,
       ntl::net::scatter_view plaintext,
       bool final) noexcept {
+    stream_operation operation(*this, stream);
+    if (!operation)
+      return STATUS_INVALID_DEVICE_STATE;
     detail::send_context *context = nullptr;
     try {
       context = new detail::send_context(
@@ -867,14 +1689,14 @@ private:
       return STATUS_UNHANDLED_EXCEPTION;
     }
     const QUIC_STATUS sent = api_->StreamSend(
-        stream.handle,
+        operation.handle(),
         context->buffer.Length == 0 ? nullptr : &context->buffer,
         context->buffer.Length == 0 ? 0u : 1u,
         final ? QUIC_SEND_FLAG_FIN : QUIC_SEND_FLAG_NONE,
         context);
     if (QUIC_FAILED(sent)) {
       delete context;
-      return STATUS_UNSUCCESSFUL;
+      return detail::from_quic_status(sent);
     }
     return ntl::status::ok();
   }
@@ -888,14 +1710,143 @@ private:
                : found->second;
   }
 
-  void remove_stream(
-      std::uint64_t id, HQUIC handle) noexcept {
+  ntl::status publish_stream(
+      const std::shared_ptr<stream_state> &state) noexcept {
+    std::lock_guard lifecycle_guard(state->lifecycle_lock);
+    if (state->shutdown_complete)
+      return STATUS_CONNECTION_DISCONNECTED;
+    std::lock_guard guard(state_lock_);
+    if (streams_.size() >= limits_.maximum_streams)
+      return STATUS_QUOTA_EXCEEDED;
+    const std::uint64_t id =
+        state->id.load(std::memory_order_acquire);
+    if (streams_.contains(id))
+      return STATUS_OBJECT_NAME_COLLISION;
+    try {
+      streams_.emplace(id, state);
+    } catch (...) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    state->published = true;
+    return ntl::status::ok();
+  }
+
+  void mark_stream_shutdown(stream_state &state) noexcept {
+    bool remove = false;
+    std::uint64_t id = invalid_stream_id;
+    {
+      std::lock_guard guard(state.lifecycle_lock);
+      state.shutdown_complete = true;
+      remove = std::exchange(state.published, false);
+      id = state.id.load(std::memory_order_acquire);
+    }
+    if (remove) {
+      std::lock_guard guard(state_lock_);
+      const auto found = streams_.find(id);
+      if (found != streams_.end() && found->second.get() == &state)
+        streams_.erase(found);
+    }
+    state_changed_.notify_all();
+  }
+
+  static bool prepare_stream_finalization_locked(
+      stream_state &state) noexcept {
+    if (!state.shutdown_complete || state.operations != 0 ||
+        state.callbacks != 0 || state.finalizing)
+      return false;
+    state.finalizing = true;
+    return true;
+  }
+
+  void finish_stream_operation(
+      const std::shared_ptr<stream_state> &state) noexcept {
+    bool finalize = false;
+    {
+      std::lock_guard guard(state->lifecycle_lock);
+      if (state->operations != 0)
+        --state->operations;
+      finalize = prepare_stream_finalization_locked(*state);
+    }
+    if (finalize)
+      finalize_stream(state);
+  }
+
+  void finish_stream_callback(
+      const std::shared_ptr<stream_state> &state) noexcept {
+    bool finalize = false;
+    {
+      std::lock_guard guard(state->lifecycle_lock);
+      if (state->callbacks != 0)
+        --state->callbacks;
+      finalize = prepare_stream_finalization_locked(*state);
+    }
+    if (finalize)
+      finalize_stream(state);
+  }
+
+  void finalize_stream(
+      const std::shared_ptr<stream_state> &state) noexcept {
+    HQUIC handle = nullptr;
+    stream_callback_context *callback = nullptr;
+    {
+      std::lock_guard guard(state->lifecycle_lock);
+      handle = std::exchange(state->handle, nullptr);
+      callback = std::exchange(state->callback_context, nullptr);
+      state->owner = nullptr;
+    }
+    if (handle)
+      api_->StreamClose(handle);
+    delete callback;
     {
       std::lock_guard guard(state_lock_);
-      streams_.erase(id);
+      if (live_stream_contexts_ != 0)
+        --live_stream_contexts_;
     }
-    api_->StreamClose(handle);
     state_changed_.notify_all();
+  }
+
+  bool drained_locked() const noexcept {
+    return shutdown_complete_ && live_stream_contexts_ == 0 &&
+           active_callbacks_ == 0;
+  }
+
+  void wait_for_shutdown_exact() noexcept {
+    std::unique_lock lock(state_lock_);
+    state_changed_.wait(lock, [this] { return drained_locked(); });
+  }
+
+  void wait_for_callbacks_exact() noexcept {
+    std::unique_lock lock(state_lock_);
+    state_changed_.wait(
+        lock, [this] { return active_callbacks_ == 0; });
+  }
+
+  void release_unstarted_connection() noexcept {
+    HQUIC handle = handle_;
+    if (!handle)
+      return;
+    api_->SetCallbackHandler(
+        handle,
+        reinterpret_cast<void *>(&discarded_connection_callback),
+        nullptr);
+    wait_for_callbacks_exact();
+    api_->ConnectionClose(handle);
+    handle_ = nullptr;
+  }
+
+  void release_rejected_connection() noexcept {
+    HQUIC handle = handle_;
+    if (!handle)
+      return;
+    // The listener still owns a rejected server connection.  Do not close it
+    // here: returning failure from NEW_CONNECTION makes MsQuic release it.
+    // Remove the object-backed callback before that ownership transition.
+    api_->SetCallbackHandler(
+        handle,
+        reinterpret_cast<void *>(&discarded_connection_callback),
+        nullptr);
+    wait_for_callbacks_exact();
+    handle_ = nullptr;
   }
 
   template <class Invoke>
@@ -935,7 +1886,9 @@ private:
   }
 
   const QUIC_API_TABLE *api_ = nullptr;
-  quic_backend_sink *sink_ = nullptr;
+  std::shared_ptr<void> native_owner_;
+  std::shared_ptr<ntl::net::quic::backend_sink> retained_sink_;
+  ntl::net::quic::backend_sink *sink_ = nullptr;
   connection_role role_ = connection_role::client;
   connection_limits limits_{};
   HQUIC handle_ = nullptr;
@@ -943,17 +1896,40 @@ private:
   std::atomic<bool> connected_{false};
   std::atomic<bool> stopping_{false};
   std::atomic<bool> reliable_reset_negotiated_{false};
+  std::atomic<std::uint64_t> peer_bidirectional_started_{0};
+  std::atomic<std::uint64_t> peer_unidirectional_started_{0};
+  std::atomic<std::uint64_t> peer_receive_events_{0};
+  std::atomic<std::uint64_t> peer_receive_fin_events_{0};
+  std::atomic<std::uint64_t> peer_send_shutdown_events_{0};
+  std::atomic<std::uint64_t> request_streams_classified_{0};
+  std::atomic<std::uint64_t> request_sink_calls_{0};
+  std::atomic<std::uint64_t> request_sink_final_calls_{0};
+  std::atomic<std::int32_t> last_request_sink_status_{STATUS_SUCCESS};
   std::mutex sink_lock_;
   std::mutex qpack_stream_lock_;
+  std::mutex local_stream_open_lock_;
   std::mutex state_lock_;
   std::condition_variable state_changed_;
   std::unordered_map<
       std::uint64_t, std::shared_ptr<stream_state>>
       streams_;
+  std::size_t live_stream_contexts_ = 0;
+  std::size_t active_callbacks_ = 0;
   std::uint64_t qpack_decoder_stream_id_ =
       invalid_stream_id;
+  std::uint64_t next_local_bidirectional_stream_id_ = 0;
+  std::uint64_t next_local_unidirectional_stream_id_ = 2;
   ntl::status terminal_status_ = ntl::status::ok();
   bool shutdown_complete_ = false;
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+  ntl::net::kernel::passive_cleanup_item cleanup_{
+      &connection::cleanup_at_passive, this};
+  ntl::net::kernel::passive_cleanup_domain *cleanup_domain_ = nullptr;
+#else
+  ntl::net::user::cleanup_item cleanup_{
+      &connection::cleanup_deferred, this};
+  ntl::net::user::cleanup_domain *cleanup_domain_ = nullptr;
+#endif
 };
 
 } // namespace ntl::net::http3::msquic_backend

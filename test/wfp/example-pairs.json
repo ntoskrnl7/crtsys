@@ -1,0 +1,941 @@
+{
+  "version": 1,
+  "supportDirectories": {
+    "user": [],
+    "kernel": []
+  },
+  "sharedPolicies": [
+    {
+      "name": "connect-redirect",
+      "path": "examples/wfp/shared/connect_redirect_policy.hpp",
+      "contains": ["make_filter", "original_destination_context::preserve", "callout_unavailable::block"],
+      "userConsumers": [
+        {"path": "examples/wfp/user/connect-redirect/app/main.cpp", "contains": ["connect_redirect_policy.hpp", "connect_redirect::make_filter"]}
+      ],
+      "kernelConsumers": [
+        {"path": "examples/wfp/kernel/connect-redirect/app/main.cpp", "contains": ["connect_redirect_policy.hpp", "connect_redirect::make_filter"]}
+      ]
+    },
+    {
+      "name": "tcp-content-filter",
+      "path": "examples/wfp/shared/content_filter_record.hpp",
+      "contains": ["parse", "decide", "verdict::permit", "verdict::block", "verdict::drop_flow"],
+      "userConsumers": [
+        {"path": "examples/wfp/user/tcp-content-filter/shared/tcp_content_filter_contract.hpp", "contains": ["content_filter_record.hpp"]},
+        {"path": "examples/wfp/user/tcp-content-filter/app/main.cpp", "contains": ["content_filter::decide"]}
+      ],
+      "kernelConsumers": [
+        {"path": "examples/wfp/kernel/tcp-content-filter/shared/tcp_content_filter_contract.hpp", "contains": ["content_filter_record.hpp"]},
+        {"path": "examples/wfp/kernel/tcp-content-filter/driver/main.cpp", "contains": ["content_filter::decide"]}
+      ]
+    },
+    {
+      "name": "udp-content-filter",
+      "path": "examples/wfp/shared/content_filter_record.hpp",
+      "contains": ["parse", "decide", "verdict::permit", "verdict::block", "verdict::drop_flow"],
+      "userConsumers": [
+        {"path": "examples/wfp/user/udp-content-filter/shared/udp_content_filter_contract.hpp", "contains": ["content_filter_record.hpp"]},
+        {"path": "examples/wfp/user/udp-content-filter/app/main.cpp", "contains": ["content_filter::decide"]}
+      ],
+      "kernelConsumers": [
+        {"path": "examples/wfp/kernel/udp-content-filter/shared/udp_content_filter_contract.hpp", "contains": ["content_filter_record.hpp"]},
+        {"path": "examples/wfp/kernel/udp-content-filter/driver/main.cpp", "contains": ["content_filter::decide"]}
+      ]
+    },
+    {
+      "name": "tls-inspection-proxy",
+      "path": "examples/wfp/shared/tls_inspection_policy.hpp",
+      "contains": ["make_inspection_policy", "at_message_complete", "complete_body_contains", "inspected by ntl"],
+      "userConsumers": [
+        {"path": "examples/wfp/user/tls-inspection-proxy/app/inspection_policy.cpp", "contains": ["tls_inspection_policy.hpp", "tls_inspection::make_inspection_policy"]}
+      ],
+      "kernelConsumers": [
+        {"path": "examples/wfp/kernel/tls-inspection-proxy/driver/inspection_policy.cpp", "contains": ["tls_inspection_policy.hpp", "tls_inspection::make_inspection_policy"]}
+      ]
+    },
+    {
+      "name": "browser-https-inspection",
+      "path": "examples/wfp/shared/browser_http_policy.hpp",
+      "contains": ["configure_browser_inspection_policy", "make_browser_inspection_policy", "configure_decisions", "make_browser_webtransport_policy", "transform_limits", "x-ntl-inspected"],
+      "userConsumers": [
+        {"path": "examples/wfp/user/browser-https-inspection/app/browser_runtime.cpp", "contains": ["browser_http_policy.hpp", "make_browser_inspection_policy", "make_browser_http_dispatcher"]},
+        {"path": "examples/wfp/user/browser-https-inspection/app/http3_live_proxy.cpp", "contains": ["make_browser_inspection_policy", "make_browser_webtransport_policy", "webtransport_policy_", "webtransport_echo_handler", "proxy_limits"]}
+      ],
+      "kernelConsumers": [
+        {"path": "examples/wfp/kernel/browser-https-inspection/driver/tcp_service.hpp", "contains": ["make_browser_inspection_policy", "make_browser_tcp_dispatcher"]},
+        {"path": "examples/wfp/kernel/browser-https-inspection/driver/http3_service.hpp", "contains": ["make_browser_inspection_policy", "make_browser_webtransport_policy", "proxy_connection::create", "http3_origin_pool"]}
+      ]
+    },
+    {
+      "name": "http3-inspection",
+      "path": "examples/wfp/shared/http3_inspection_policy.hpp",
+      "contains": ["configure_ordinary_policy", "make_ordinary_policy", "ordinary_request_blocked", "make_webtransport_policy", "blocked by NTL HTTP/3 policy"],
+      "userConsumers": [
+        {"path": "examples/wfp/user/http3-inspection/app/http3_service.cpp", "contains": ["msquic_server", "make_ordinary_policy", "make_webtransport_policy", "ordinary_origin", "ordinary_terminal_responses", "proxy_connection::create", "listener.drain"]}
+      ],
+      "kernelConsumers": [
+        {"path": "examples/wfp/kernel/http3-inspection/driver/http3_service.hpp", "contains": ["http3_inspection_policy.hpp", "make_ordinary_policy", "ordinary_origin", "ordinary_terminal_responses", "proxy_connection::create"]}
+      ]
+    }
+  ],
+  "pairs": [
+    {
+      "name": "connect-redirect",
+      "requiredCapabilities": [
+        "ipv4", "ipv6", "original-destination", "redirect-records",
+        "bidirectional-relay", "fail-closed", "policy-removal"
+      ],
+      "user": {
+        "buildProject": "wfp-connect-redirect",
+        "fixtureDirectory": "test/wfp/runtime/fixtures/user/connect-redirect",
+        "targets": [
+          "crtsys_wfp_connect_redirect",
+          "crtsys_wfp_connect_redirect_proxy_service",
+          "crtsys_wfp_connect_redirect_acceptance"
+        ],
+        "evidence": [
+          {"path": "examples/wfp/user/connect-redirect/README.md", "contains": ["IPv4 and IPv6", "opaque redirect records", "relays", "policy restores"]},
+          {"path": "test/wfp/runtime/advanced/Run-WfpAdvancedSuite.ps1", "contains": ["Name = 'connect-redirect'", "NTL WFP connect-redirect ok:"]}
+        ]
+      },
+      "kernel": {
+        "buildProject": "wfp-kernel-connect-redirect",
+        "fixtureDirectory": "test/wfp/runtime/fixtures/kernel/connect-redirect",
+        "targets": [
+          "crtsys_wfp_kernel_connect_redirect",
+          "crtsys_wfp_kernel_connect_redirect_controller",
+          "crtsys_wfp_kernel_connect_redirect_acceptance"
+        ],
+        "evidence": [
+          {"path": "examples/wfp/kernel/connect-redirect/README.md", "contains": ["IPv4", "IPv6", "opaque WFP redirect records", "both directions", "fail-closed"]},
+          {"path": "test/wfp/runtime/advanced/Run-WfpAdvancedSuite.ps1", "contains": ["Name = 'kernel-connect-redirect'", "Kernel connect-redirect PASS:"]}
+        ]
+      }
+    },
+    {
+      "name": "tcp-content-filter",
+      "requiredCapabilities": [
+        "ipv4", "ipv6", "bounded-framing", "structured-record", "permit",
+        "block", "malformed", "fail-closed", "policy-removal"
+      ],
+      "user": {
+        "buildProject": "wfp-tcp-content-filter",
+        "fixtureDirectory": "test/wfp/runtime/fixtures/user/tcp-content-filter",
+        "targets": [
+          "crtsys_wfp_tcp_content_filter",
+          "crtsys_wfp_tcp_content_filter_policy_service",
+          "crtsys_wfp_tcp_content_filter_acceptance",
+          "crtsys_wfp_content_filter_record_contracts"
+        ],
+        "evidence": [
+          {"path": "examples/wfp/user/tcp-content-filter/README.md", "contains": ["IPv4/IPv6", "structured permit/block/malformed", "policy removal", "fail-closed"]},
+          {"path": "test/wfp/runtime/advanced/Run-WfpAdvancedSuite.ps1", "contains": ["Name = 'tcp-content-filter'", "fail-closed self-test"]}
+        ]
+      },
+      "kernel": {
+        "buildProject": "wfp-kernel-tcp-content-filter",
+        "fixtureDirectory": "test/wfp/runtime/fixtures/kernel/tcp-content-filter",
+        "targets": [
+          "crtsys_wfp_kernel_tcp_content_filter",
+          "crtsys_wfp_kernel_tcp_content_filter_controller",
+          "crtsys_wfp_kernel_tcp_content_filter_acceptance"
+        ],
+        "evidence": [
+          {"path": "examples/wfp/kernel/tcp-content-filter/README.md", "contains": ["IPv4/IPv6", "permit/block", "malformed", "fail closed"]},
+          {"path": "test/wfp/runtime/advanced/Run-WfpAdvancedSuite.ps1", "contains": ["Name = 'kernel-tcp-content-filter'", "Kernel TCP content-filter acceptance PASS:"]}
+        ]
+      }
+    },
+    {
+      "name": "udp-content-filter",
+      "requiredCapabilities": [
+        "ipv4", "ipv6", "complete-datagram", "structured-record", "permit",
+        "block", "malformed", "fail-closed", "policy-removal"
+      ],
+      "user": {
+        "buildProject": "wfp-udp-content-filter",
+        "fixtureDirectory": "test/wfp/runtime/fixtures/user/udp-content-filter",
+        "targets": [
+          "crtsys_wfp_udp_content_filter",
+          "crtsys_wfp_udp_content_filter_policy_service",
+          "crtsys_wfp_udp_content_filter_acceptance"
+        ],
+        "evidence": [
+          {"path": "examples/wfp/user/udp-content-filter/README.md", "contains": ["IPv4 and IPv6", "structured permit/block/malformed", "policy removal", "fail-closed"]},
+          {"path": "test/wfp/runtime/advanced/Run-WfpAdvancedSuite.ps1", "contains": ["Name = 'udp-content-filter'", "fail-closed self-test"]}
+        ]
+      },
+      "kernel": {
+        "buildProject": "wfp-kernel-udp-content-filter",
+        "fixtureDirectory": "test/wfp/runtime/fixtures/kernel/udp-content-filter",
+        "targets": [
+          "crtsys_wfp_kernel_udp_content_filter",
+          "crtsys_wfp_kernel_udp_content_filter_controller",
+          "crtsys_wfp_kernel_udp_content_filter_acceptance"
+        ],
+        "evidence": [
+          {"path": "examples/wfp/kernel/udp-content-filter/README.md", "contains": ["DATAGRAM_DATA_V4/V6", "IPv4/IPv6", "permit/block/malformed", "fail closed"]},
+          {"path": "test/wfp/runtime/advanced/Run-WfpAdvancedSuite.ps1", "contains": ["Name = 'kernel-udp-content-filter'", "Kernel UDP content-filter acceptance PASS:"]}
+        ]
+      }
+    },
+    {
+      "name": "tls-inspection-proxy",
+      "requiredCapabilities": [
+        "ipv4", "ipv6", "two-leg-schannel", "sni-identity", "http1",
+        "http1-policy-pipeline", "http2", "http2-policy-pipeline",
+        "bounded-hpack", "request-transform", "response-transform",
+        "permit", "block", "fail-closed", "policy-removal"
+      ],
+      "user": {
+        "buildProject": "wfp-tls-inspection-proxy",
+        "fixtureDirectory": "test/wfp/runtime/fixtures/user/tls-inspection-proxy",
+        "targets": [
+          "crtsys_wfp_tls_inspection_proxy",
+          "crtsys_wfp_tls_inspection_proxy_service",
+          "crtsys_wfp_tls_inspection_proxy_acceptance",
+          "crtsys_wfp_tls_inspection_proxy_live_acceptance",
+          "crtsys_wfp_tls_inspection_http1_contracts",
+          "crtsys_wfp_tls_inspection_http2_contracts",
+          "crtsys_wfp_tls_redirect_handoff_contracts",
+          "crtsys_wfp_redirected_tls_session_contracts"
+        ],
+        "evidence": [
+          {"path": "examples/wfp/user/tls-inspection-proxy/app/proxy_engine.cpp", "contains": ["make_inspection_policy", "inspection_context_view", "standard_redirected_tls_inspection"]},
+          {"path": "examples/wfp/shared/tls_inspection_policy.hpp", "contains": ["at_message_complete", "path_is", "header_is", "complete_body_contains", "inspected by ntl"]},
+          {"path": "examples/wfp/user/tls-inspection-proxy/app/main.cpp", "contains": ["redirected_tls_session_registry", "connection_io", "inspection_policy->dispatcher()"]},
+          {"path": "test/wfp/runtime/fixtures/user/tls-inspection-proxy/main.cpp", "contains": ["exchange_http1", "exchange_http2", "NTL WFP TLS inspection acceptance PASS:", "permit=4, block=4"]},
+          {"path": "test/wfp/runtime/advanced/Run-WfpAdvancedSuite.ps1", "contains": ["Name = 'tls-inspection-proxy'", "NTL WFP TLS inspection acceptance PASS:"]}
+        ]
+      },
+      "kernel": {
+        "buildProject": "wfp-kernel-tls-inspection-proxy",
+        "fixtureDirectory": "test/wfp/runtime/fixtures/kernel/tls-inspection-proxy",
+        "targets": ["crtsys_wfp_kernel_tls_inspection_proxy", "crtsys_wfp_kernel_tls_inspection_proxy_controller", "crtsys_wfp_kernel_tls_inspection_proxy_acceptance", "crtsys_wfp_kernel_tls_inspection_policy_contracts"],
+        "evidence": [
+          {"path": "test/wfp/runtime/fixtures/kernel/tls-inspection-proxy/main.cpp", "contains": ["exchange_http1", "exchange_http2", "ALPN HTTP/1.1+HTTP/2", "common request/response transforms"]},
+          {"path": "include/ntl/net/kernel/redirected_tls_inspection", "contains": ["proxy_connection", "run_kernel_proxy_session", "workspace_pool"]},
+          {"path": "examples/wfp/kernel/tls-inspection-proxy/test/inspection_policy_contracts.cpp", "contains": ["supports_application_protocol", "http1_contract", "http2_contract", "bounded fail-closed transform"]},
+          {"path": "test/wfp/runtime/advanced/Run-WfpAdvancedSuite.ps1", "contains": ["Name = 'kernel-tls-inspection-proxy'", "Kernel TLS inspection acceptance PASS:"]}
+        ]
+      }
+    },
+    {
+      "name": "browser-https-inspection",
+      "requiredCapabilities": [
+        "ipv4", "ipv6", "tls", "http1", "persistent-http1", "http2",
+        "multiplexed-http2", "h2-flow-control", "http3", "qpack-ack",
+        "html", "gzip", "deflate", "brotli", "websocket", "webtransport",
+        "dynamic-sni-identity", "origin-system-validation", "exact-pin",
+        "mtls-controlled-negative", "protocol-specific-e2e", "permit",
+        "block", "fail-closed", "clean-drain-unload",
+        "existing-browser-no-reconfigure", "grpc-message-transform",
+        "capture-privacy", "origin-transport-fallback",
+        "non-safe-replay-rejected",
+        "unsupported-extended-connect-fail-closed"
+      ],
+      "user": {
+        "buildProject": "wfp-browser-https-inspection",
+        "fixtureDirectory": "test/wfp/runtime/fixtures/user/browser-https-inspection",
+        "cmakeFiles": [
+          "examples/wfp/user/browser-https-inspection/CMakeLists.txt",
+          "test/wfp/runtime/fixtures/user/browser-https-inspection/CMakeLists.txt"
+        ],
+        "targets": [
+          "crtsys_wfp_browser_https_inspection",
+          "crtsys_wfp_browser_https_inspection_controller",
+          "crtsys_wfp_browser_https_inspection_http3_proxy_service",
+          "crtsys_wfp_browser_https_inspection_acceptance",
+          "crtsys_wfp_browser_https_inspection_managed_client_acceptance",
+          "crtsys_wfp_browser_https_inspection_msh3_client_acceptance",
+          "crtsys_wfp_browser_https_inspection_raw_msquic_acceptance",
+          "crtsys_wfp_browser_https_inspection_msquic_loopback_acceptance",
+          "crtsys_ntl_bidirectional_relay_contracts",
+          "crtsys_ntl_http1_adapter_contracts",
+          "crtsys_ntl_http1_inspection_contracts",
+          "crtsys_ntl_http2_adapter_contracts",
+          "crtsys_ntl_http2_proxy_connection_contracts",
+          "crtsys_ntl_http3_inspection_proxy_contracts",
+          "crtsys_ntl_http3_origin_fallback_contracts",
+          "crtsys_ntl_http3_proxy_connection_contracts",
+          "crtsys_ntl_browser_http_policy_contracts",
+          "crtsys_ntl_browser_log_privacy_contracts"
+        ],
+        "evidence": [
+          {"path": "examples/wfp/user/browser-https-inspection/README.md", "contains": ["HTTP/1.1", "HTTP/2", "HTTP/3", "WebSocket", "gzip", "deflate", "Brotli", "gRPC", "capture", "never launches"]},
+          {"path": "test/wfp/runtime/https-live/Prepare-WfpHttpsLiveArtifacts.ps1", "contains": ["wfp-browser-https-inspection"]},
+          {"path": "test/wfp/runtime/https-live/Run-WfpManagedHttp3Suite.ps1", "contains": ["WFP managed HTTP/3 driver suite passed."]}
+        ]
+      },
+      "kernel": {
+        "buildProject": "wfp-kernel-browser-https-inspection",
+        "fixtureDirectory": "test/wfp/runtime/fixtures/kernel/browser-https-inspection",
+        "targets": [
+          "crtsys_wfp_kernel_browser_https_inspection",
+          "crtsys_wfp_kernel_browser_https_inspection_controller",
+          "crtsys_wfp_kernel_browser_https_inspection_acceptance",
+          "crtsys_wfp_kernel_browser_http1_evidence_contracts",
+          "crtsys_wfp_kernel_browser_http2_evidence_contracts",
+          "crtsys_wfp_kernel_browser_http3_evidence_contracts",
+          "crtsys_wfp_kernel_browser_http3_origin_contracts",
+          "crtsys_wfp_kernel_browser_http3_fallback_contracts",
+          "crtsys_wfp_kernel_browser_request_capture_contracts",
+          "crtsys_wfp_kernel_browser_capture_log_privacy_contracts",
+          "crtsys_wfp_kernel_browser_http_policy_contracts",
+          "crtsys_wfp_kernel_browser_service_info_abi_contracts",
+          "crtsys_wfp_kernel_browser_webtransport_capsule_contracts"
+        ],
+        "evidence": [
+          {"path": "examples/wfp/kernel/browser-https-inspection/README.md", "contains": ["HTTP/1.1", "HTTP/2", "HTTP/3", "WebSocket", "gzip/deflate/Brotli", "gRPC", "capture", "not replayed", "bypass certificate pinning", "does not silently label that fallback as HTTP/3"]},
+          {"path": "examples/wfp/kernel/browser-https-inspection/driver/http3_service.hpp", "contains": ["proxy_connection::create", "make_browser_webtransport_policy", "http3_origin_pool", "shutdown"]},
+          {"path": "include/ntl/net/http3/proxy_connection", "contains": ["flush_qpack_decoder", "webtransport_sessions_", "maximum_blocked_streams"]},
+          {"path": "include/ntl/net/kernel/http3_origin_client", "contains": ["try_create(", "std::string server_name_;", "request_cancellation_event", "service_cancellation_event", "http3_origin_allocation_budget", "wait_for_event_or_cancel"]},
+          {"path": "examples/wfp/kernel/browser-https-inspection/test/http3_origin_client_contracts.cpp", "contains": ["noexcept(exchange::try_create", "!std::is_copy_constructible_v", "request_cancellation_event", "service_cancellation_event", "peer_settings_received", "qpack_decoder_acknowledgement_queued", "allocation_reservation"]},
+          {"path": "test/wfp/runtime/advanced/Run-WfpAdvancedSuite.ps1", "contains": ["Name = 'kernel-browser-https-inspection'", "Kernel browser HTTPS inspection PASS:"]}
+        ]
+      }
+    },
+    {
+      "name": "http3-inspection",
+      "requiredCapabilities": [
+        "ipv4", "ipv6", "app-scoped-wfp-gate", "quic-tls13", "http3", "dynamic-qpack", "blocked-stream-resume",
+        "decoder-ack", "gzip", "deflate", "brotli", "extended-connect",
+        "webtransport-bidi", "webtransport-unidi", "datagram", "capsule",
+        "reliable-reset", "permit", "block", "exact-shutdown"
+      ],
+      "user": {
+        "buildProject": "wfp-http3-inspection",
+        "fixtureDirectory": "test/wfp/runtime/fixtures/user/http3-inspection",
+        "targets": ["crtsys_wfp_http3_inspection_driver", "crtsys_wfp_http3_inspection_service", "crtsys_wfp_http3_inspection_acceptance", "crtsys_wfp_http3_replay_contracts"],
+        "evidence": [
+          {"path": "examples/wfp/user/http3-inspection/crtsys_wfp_http3_inspection_driver.inf", "contains": ["[DefaultInstall.NTamd64]", "[DefaultInstall.NTarm64]", "[DefaultInstall.NTarm64.Services]", "[SourceDisksFiles]", "[SourceDisksNames]"]},
+          {"path": "examples/wfp/user/http3-inspection/app/wfp_gate.cpp", "contains": ["application_equal(application_)", "callout_unavailable::block"]},
+          {"path": "test/wfp/runtime/fixtures/user/http3-inspection/http3_acceptance_role.inl", "contains": ["policy_lifetime=ephemeral", "unavailable_callout=blocked", "origin_hit=0"]},
+          {"path": "test/wfp/runtime/advanced/Run-WfpAdvancedSuite.ps1", "contains": ["Name = 'http3-inspection'", "controlled-msquic-http3: WFP gate PASS"]},
+          {"path": "examples/wfp/user/http3-inspection/README.md", "contains": ["TLS 1.3/HTTP/3", "dynamic QPACK", "gzip, deflate, and Brotli", "Extended CONNECT", "WebTransport", "reset mapping", "exact connection shutdown"]},
+          {"path": "test/wfp/runtime/fixtures/user/http3-inspection/http3_acceptance_role.inl", "contains": ["WebTransport PASS", "dynamic QPACK and codecs PASS", "gzip deflate br", "permit=6", "block=2"]},
+          {"path": "examples/wfp/user/http3-inspection/CMakeLists.txt", "contains": ["add_test(NAME crtsys_wfp_http3_replay_contracts"]}
+        ]
+      },
+      "kernel": {
+        "buildProject": "wfp-kernel-http3-inspection",
+        "fixtureDirectory": "test/wfp/runtime/fixtures/kernel/http3-inspection",
+        "targets": ["crtsys_wfp_kernel_http3_inspection", "crtsys_wfp_kernel_http3_inspection_controller", "crtsys_wfp_kernel_http3_inspection_acceptance", "crtsys_wfp_kernel_http3_inspection_policy_contracts"],
+        "evidence": [
+          {"path": "test/wfp/runtime/fixtures/kernel/http3-inspection/main.cpp", "contains": ["dynamic QPACK resume/ack", "gzip/deflate/Brotli HTML", "Extended CONNECT/WebTransport", "96-connection sequential churn"]},
+          {"path": "examples/wfp/kernel/http3-inspection/driver/http3_service.hpp", "contains": ["proxy_connection::create", "bounded_memory_resource", "reap_closed_connections", "make_webtransport_policy"]},
+          {"path": "examples/wfp/kernel/http3-inspection/test/http3_policy_contracts.cpp", "contains": ["request_policy_contract", "dynamic_qpack_contract", "response_contract", "webtransport_contract", "bounded failures"]},
+          {"path": "test/wfp/runtime/advanced/Run-WfpAdvancedSuite.ps1", "contains": ["Name = 'kernel-http3-inspection'", "Kernel HTTP/3 inspection PASS:"]}
+        ]
+      }
+    }
+  ],
+  "capabilityProofs": [
+    {
+      "id": "connect-user-runtime",
+      "pair": "connect-redirect", "side": "user", "kind": "runtime",
+      "target": "crtsys_wfp_connect_redirect_acceptance",
+      "source": "test/wfp/runtime/fixtures/user/connect-redirect/main.cpp",
+      "marker": "NTL WFP connect-redirect ok:",
+      "requiredTokens": ["IPv4=", "IPv6=", "coroutine_up=", "coroutine_down=", "restored=direct", "unavailable_proxy=blocked", "origin_bypass=none", "failure_restored=IPv4/IPv6"],
+      "runner": "test/wfp/runtime/advanced/Run-WfpAdvancedSuite.ps1",
+      "runnerRequiredTokens": ["IPv4=", "IPv6=", "coroutine_up=", "coroutine_down=", "restored=direct", "unavailable_proxy=blocked", "origin_bypass=none", "failure_restored=IPv4/IPv6"],
+      "covers": ["ipv4", "ipv6", "original-destination", "redirect-records", "bidirectional-relay", "policy-removal"]
+    },
+    {
+      "id": "connect-user-fail-closed-runtime",
+      "pair": "connect-redirect", "side": "user", "kind": "runtime",
+      "target": "crtsys_wfp_connect_redirect_acceptance",
+      "source": "test/wfp/runtime/fixtures/user/connect-redirect/main.cpp",
+      "marker": "NTL WFP connect-redirect ok:",
+      "requiredTokens": ["unavailable_proxy=blocked", "origin_bypass=none", "failure_restored=IPv4/IPv6"],
+      "runner": "test/wfp/runtime/advanced/Run-WfpAdvancedSuite.ps1",
+      "runnerRequiredTokens": ["unavailable_proxy=blocked", "origin_bypass=none", "failure_restored=IPv4/IPv6"],
+      "covers": ["fail-closed"]
+    },
+    {
+      "id": "connect-kernel-runtime",
+      "pair": "connect-redirect", "side": "kernel", "kind": "runtime",
+      "target": "crtsys_wfp_kernel_connect_redirect_acceptance",
+      "source": "test/wfp/runtime/fixtures/kernel/connect-redirect/main.cpp",
+      "marker": "Kernel connect-redirect PASS:",
+      "requiredTokens": ["IPv4/IPv6", "original-destination", "redirect records", "restored=IPv4/IPv6", "cleanup"],
+      "runner": "test/wfp/runtime/advanced/Run-WfpAdvancedSuite.ps1",
+      "runnerRequiredTokens": ["IPv4/IPv6 ALE redirect", "original-destination WSK relay", "redirect records", "counters", "restored=IPv4/IPv6", "cleanup"],
+      "covers": ["ipv4", "ipv6", "original-destination", "redirect-records", "bidirectional-relay", "policy-removal"]
+    },
+    {
+      "id": "connect-kernel-fail-closed-runtime",
+      "pair": "connect-redirect", "side": "kernel", "kind": "runtime",
+      "target": "crtsys_wfp_kernel_connect_redirect_acceptance",
+      "source": "test/wfp/runtime/fixtures/kernel/connect-redirect/main.cpp",
+      "marker": "Kernel connect-redirect PASS:",
+      "requiredTokens": ["failed_origin=blocked", "failed_counter=2", "failure_restored=IPv4/IPv6"],
+      "runner": "test/wfp/runtime/advanced/Run-WfpAdvancedSuite.ps1",
+      "runnerRequiredTokens": ["failed_origin=blocked", "failed_counter=2", "failure_restored=IPv4/IPv6"],
+      "covers": ["fail-closed"]
+    },
+    {
+      "id": "tcp-user-runtime",
+      "pair": "tcp-content-filter", "side": "user", "kind": "runtime",
+      "target": "crtsys_wfp_tcp_content_filter_acceptance",
+      "source": "test/wfp/runtime/fixtures/user/tcp-content-filter/main.cpp",
+      "marker": "NTL WFP TCP content-filter acceptance PASS:",
+      "requiredTokens": ["complete-tcp=8", "permit=4", "policy-block=2", "malformed=2", "structured-record=used", "ipv4=pass", "ipv6=pass", "restored=success"],
+      "runner": "test/wfp/runtime/advanced/Run-WfpAdvancedSuite.ps1",
+      "runnerRequiredTokens": ["complete-tcp=8", "permit=4", "policy-block=2", "malformed=2", "same-flow=2-per-family", "tcp-prefix-split=handled", "outbound=pass-through", "structured-record=used", "coroutine=used", "ipv4=pass", "ipv6=pass", "restored=success"],
+      "covers": ["ipv4", "ipv6", "bounded-framing", "structured-record", "permit", "block", "malformed", "policy-removal"]
+    },
+    {
+      "id": "tcp-user-fail-closed-runtime",
+      "pair": "tcp-content-filter", "side": "user", "kind": "runtime",
+      "target": "crtsys_wfp_tcp_content_filter_acceptance",
+      "source": "test/wfp/runtime/fixtures/user/tcp-content-filter/main.cpp",
+      "marker": "NTL WFP TCP content-filter failure acceptance PASS:",
+      "requiredTokens": ["framing=blocked", "ipv4/ipv6-timeout=flow-dropped", "late-permit=rejected", "session-loss=cancelled"],
+      "runner": "test/wfp/runtime/advanced/Run-WfpAdvancedSuite.ps1",
+      "runnerRequiredTokens": ["framing=blocked", "ipv4/ipv6-timeout=flow-dropped", "late-permit=rejected", "session-loss=cancelled"],
+      "covers": ["fail-closed"]
+    },
+    {
+      "id": "tcp-user-record-contract",
+      "pair": "tcp-content-filter", "side": "user", "kind": "contract",
+      "target": "crtsys_wfp_content_filter_record_contracts",
+      "source": "examples/wfp/shared/content_filter_record_contracts.cpp",
+      "marker": "WFP content-filter record contracts passed:",
+      "requiredTokens": ["record::encode", "scatter_view::from_segments", "malformed", "truncated"],
+      "runnerRequiredTokens": [],
+      "covers": ["structured-record", "malformed"]
+    },
+    {
+      "id": "tcp-kernel-runtime",
+      "pair": "tcp-content-filter", "side": "kernel", "kind": "runtime",
+      "target": "crtsys_wfp_kernel_tcp_content_filter_acceptance",
+      "source": "test/wfp/runtime/fixtures/kernel/tcp-content-filter/main.cpp",
+      "marker": "Kernel TCP content-filter acceptance PASS:",
+      "requiredTokens": ["IPv4/IPv6", "same-flow framing", "typed record", "malformed fail-close", "cleanup"],
+      "runner": "test/wfp/runtime/advanced/Run-WfpAdvancedSuite.ps1",
+      "runnerRequiredTokens": ["IPv4/IPv6 same-flow framing", "typed record policy", "malformed fail-close", "fragmentation", "outbound pass-through", "statistics", "cleanup"],
+      "covers": ["ipv4", "ipv6", "bounded-framing", "structured-record", "permit", "block", "malformed", "fail-closed", "policy-removal"]
+    },
+    {
+      "id": "udp-user-runtime",
+      "pair": "udp-content-filter", "side": "user", "kind": "runtime",
+      "target": "crtsys_wfp_udp_content_filter_acceptance",
+      "source": "test/wfp/runtime/fixtures/user/udp-content-filter/main.cpp",
+      "marker": "NTL WFP UDP content-filter acceptance PASS:",
+      "requiredTokens": ["complete-udp=6", "permit=2", "policy-block=2", "malformed=2", "structured-record=used", "ipv4=pass", "ipv6=pass", "restored=success"],
+      "runner": "test/wfp/runtime/advanced/Run-WfpAdvancedSuite.ps1",
+      "runnerRequiredTokens": ["complete-udp=6", "permit=2", "policy-block=2", "malformed=2", "structured-record=used", "coroutine=used", "ipv4=pass", "ipv6=pass", "restored=success"],
+      "covers": ["ipv4", "ipv6", "complete-datagram", "structured-record", "permit", "block", "malformed", "policy-removal"]
+    },
+    {
+      "id": "udp-user-fail-closed-runtime",
+      "pair": "udp-content-filter", "side": "user", "kind": "runtime",
+      "target": "crtsys_wfp_udp_content_filter_acceptance",
+      "source": "test/wfp/runtime/fixtures/user/udp-content-filter/main.cpp",
+      "marker": "NTL WFP UDP content-filter failure acceptance PASS:",
+      "requiredTokens": ["malformed=blocked", "ipv4/ipv6-timeout=blocked", "quota=bounded", "late-permit=rejected", "session-loss=cancelled"],
+      "runner": "test/wfp/runtime/advanced/Run-WfpAdvancedSuite.ps1",
+      "runnerRequiredTokens": ["malformed=blocked", "ipv4/ipv6-timeout=blocked", "quota=bounded", "late-permit=rejected", "session-loss=cancelled"],
+      "covers": ["fail-closed"]
+    },
+    {
+      "id": "udp-kernel-runtime",
+      "pair": "udp-content-filter", "side": "kernel", "kind": "runtime",
+      "target": "crtsys_wfp_kernel_udp_content_filter_acceptance",
+      "source": "test/wfp/runtime/fixtures/kernel/udp-content-filter/main.cpp",
+      "marker": "Kernel UDP content-filter acceptance PASS:",
+      "requiredTokens": ["IPv4/IPv6", "typed permit", "malformed fail-close", "cleanup"],
+      "runner": "test/wfp/runtime/advanced/Run-WfpAdvancedSuite.ps1",
+      "runnerRequiredTokens": ["IPv4/IPv6 typed permit", "block", "malformed fail-close", "statistics", "cleanup"],
+      "covers": ["ipv4", "ipv6", "complete-datagram", "structured-record", "permit", "block", "malformed", "fail-closed", "policy-removal"]
+    },
+    {
+      "id": "tls-user-runtime",
+      "pair": "tls-inspection-proxy", "side": "user", "kind": "runtime",
+      "target": "crtsys_wfp_tls_inspection_proxy_acceptance",
+      "source": "test/wfp/runtime/fixtures/user/tls-inspection-proxy/main.cpp",
+      "marker": "NTL WFP TLS inspection acceptance PASS:",
+      "requiredTokens": ["ipv4=verified", "ipv6=verified", "tls_legs=2", "sni=dynamic", "identity_handoff=8", "restored=direct"],
+      "runner": "test/wfp/runtime/advanced/Run-WfpAdvancedSuite.ps1",
+      "runnerRequiredTokens": ["ipv4=verified", "ipv6=verified", "tls_legs=2", "sni=dynamic", "identity_handoff=8", "restored=direct"],
+      "covers": ["ipv4", "ipv6", "two-leg-schannel", "sni-identity", "fail-closed", "policy-removal"]
+    },
+    {
+      "id": "tls-user-http1-runtime",
+      "pair": "tls-inspection-proxy", "side": "user", "kind": "runtime",
+      "target": "crtsys_wfp_tls_inspection_proxy_acceptance",
+      "source": "test/wfp/runtime/fixtures/user/tls-inspection-proxy/main.cpp",
+      "marker": "NTL WFP TLS inspection acceptance PASS:",
+      "requiredTokens": ["permit=4", "block=4", "http1=bounded", "h1_request_transformed=2", "h1_response_transformed=2", "h1_origin_blocked=2"],
+      "runner": "test/wfp/runtime/advanced/Run-WfpAdvancedSuite.ps1",
+      "runnerRequiredTokens": ["permit=4", "block=4", "http1=bounded", "h1_request_transformed=2", "h1_response_transformed=2", "h1_origin_blocked=2"],
+      "covers": ["http1", "http1-policy-pipeline", "request-transform", "response-transform", "permit", "block"]
+    },
+    {
+      "id": "tls-user-http2-runtime",
+      "pair": "tls-inspection-proxy", "side": "user", "kind": "runtime",
+      "target": "crtsys_wfp_tls_inspection_proxy_acceptance",
+      "source": "test/wfp/runtime/fixtures/user/tls-inspection-proxy/main.cpp",
+      "marker": "NTL WFP TLS inspection acceptance PASS:",
+      "requiredTokens": ["permit=4", "block=4", "http2=bounded", "hpack=bounded", "h2_redirected=4", "h2_alpn=4", "h2_origin_forwarded=2", "h2_origin_blocked=2"],
+      "runner": "test/wfp/runtime/advanced/Run-WfpAdvancedSuite.ps1",
+      "runnerRequiredTokens": ["permit=4", "block=4", "http2=bounded", "hpack=bounded", "h2_redirected=4", "h2_alpn=4", "h2_origin_forwarded=2", "h2_origin_blocked=2"],
+      "covers": ["http2", "http2-policy-pipeline", "bounded-hpack", "request-transform", "response-transform", "permit", "block"]
+    },
+    {
+      "id": "tls-user-http1-contract",
+      "pair": "tls-inspection-proxy", "side": "user", "kind": "contract",
+      "target": "crtsys_wfp_tls_inspection_http1_contracts",
+      "source": "examples/wfp/user/tls-inspection-proxy/test/http1_contracts.cpp",
+      "marker": "TLS inspection HTTP/1 contract passed:",
+      "requiredTokens": ["transform_http1_request", "transform_http1_response", "request-transform", "response-transform", "block"],
+      "runnerRequiredTokens": [],
+      "covers": ["http1", "http1-policy-pipeline", "request-transform", "response-transform", "permit", "block"]
+    },
+    {
+      "id": "tls-user-http2-contract",
+      "pair": "tls-inspection-proxy", "side": "user", "kind": "contract",
+      "target": "crtsys_wfp_tls_inspection_http2_contracts",
+      "source": "examples/wfp/user/tls-inspection-proxy/test/http2_contracts.cpp",
+      "marker": "TLS inspection HTTP/2 contract passed",
+      "requiredTokens": ["connection_transformer", "encode_request_frames", "encode_response_frames"],
+      "runnerRequiredTokens": [],
+      "covers": ["http2", "http2-policy-pipeline", "bounded-hpack", "request-transform", "response-transform", "permit", "block"]
+    },
+    {
+      "id": "tls-user-redirect-handoff-contract",
+      "pair": "tls-inspection-proxy", "side": "user", "kind": "contract",
+      "target": "crtsys_wfp_tls_redirect_handoff_contracts",
+      "source": "examples/wfp/user/tls-inspection-proxy/test/redirect_handoff_contracts.cpp",
+      "marker": "redirect handoff contracts passed",
+      "requiredTokens": ["preserves_opaque_process_identity", "valid_connect_redirect_context", "application_id_size", "oversized ALE_APP_ID was not rejected fail closed"],
+      "runnerRequiredTokens": [],
+      "covers": ["fail-closed"]
+    },
+    {
+      "id": "tls-user-session-contract",
+      "pair": "tls-inspection-proxy", "side": "user", "kind": "contract",
+      "target": "crtsys_wfp_redirected_tls_session_contracts",
+      "source": "examples/wfp/user/tls-inspection-proxy/test/redirected_tls_session_contracts.cpp",
+      "marker": "redirected TLS session contracts passed",
+      "requiredTokens": ["standard_redirected_tls_inspection", "redirected_tls_session_limits", "maximum_client_hello", "opaque application identity"],
+      "runnerRequiredTokens": [],
+      "covers": ["http1-policy-pipeline", "http2-policy-pipeline", "fail-closed"]
+    },
+    {
+      "id": "tls-kernel-runtime",
+      "pair": "tls-inspection-proxy", "side": "kernel", "kind": "runtime",
+      "target": "crtsys_wfp_kernel_tls_inspection_proxy_acceptance",
+      "source": "test/wfp/runtime/fixtures/kernel/tls-inspection-proxy/main.cpp",
+      "marker": "Kernel TLS inspection acceptance PASS:",
+      "requiredTokens": ["IPv4/IPv6", "original destination", "redirect records", "system-validated Schannel", "sni=identity-selected", "fail-closed", "restored=IPv4/IPv6", "cleanup"],
+      "runner": "test/wfp/runtime/advanced/Run-WfpAdvancedSuite.ps1",
+      "runnerRequiredTokens": ["IPv4/IPv6 original destination", "redirect records", "two-leg system-validated Schannel", "sni=identity-selected", "fail-closed block", "malformed/timeout", "bounded capture", "restored=IPv4/IPv6", "cleanup"],
+      "covers": ["ipv4", "ipv6", "two-leg-schannel", "sni-identity", "fail-closed", "policy-removal"]
+    },
+    {
+      "id": "tls-kernel-http1-runtime",
+      "pair": "tls-inspection-proxy", "side": "kernel", "kind": "runtime",
+      "target": "crtsys_wfp_kernel_tls_inspection_proxy_acceptance",
+      "source": "test/wfp/runtime/fixtures/kernel/tls-inspection-proxy/main.cpp",
+      "marker": "Kernel TLS inspection acceptance PASS:",
+      "requiredTokens": ["common request/response transforms", "h1_permit=1", "h1_block=1", "h1_request_transformed=1", "h1_response_transformed=1"],
+      "runner": "test/wfp/runtime/advanced/Run-WfpAdvancedSuite.ps1",
+      "runnerRequiredTokens": ["ALPN HTTP/1.1+HTTP/2", "common request/response transforms", "h1_permit=1", "h1_block=1", "h1_request_transformed=1", "h1_response_transformed=1"],
+      "covers": ["http1", "http1-policy-pipeline", "request-transform", "response-transform", "permit", "block"]
+    },
+    {
+      "id": "tls-kernel-http2-runtime",
+      "pair": "tls-inspection-proxy", "side": "kernel", "kind": "runtime",
+      "target": "crtsys_wfp_kernel_tls_inspection_proxy_acceptance",
+      "source": "test/wfp/runtime/fixtures/kernel/tls-inspection-proxy/main.cpp",
+      "marker": "Kernel TLS inspection acceptance PASS:",
+      "requiredTokens": ["common request/response transforms", "h2_permit=1", "h2_block=1", "h2_request_transformed=1", "h2_response_transformed=1"],
+      "runner": "test/wfp/runtime/advanced/Run-WfpAdvancedSuite.ps1",
+      "runnerRequiredTokens": ["ALPN HTTP/1.1+HTTP/2", "common request/response transforms", "h2_permit=1", "h2_block=1", "h2_request_transformed=1", "h2_response_transformed=1"],
+      "covers": ["http2", "http2-policy-pipeline", "bounded-hpack", "request-transform", "response-transform", "permit", "block"]
+    },
+    {
+      "id": "tls-kernel-policy-contract",
+      "pair": "tls-inspection-proxy", "side": "kernel", "kind": "contract",
+      "target": "crtsys_wfp_kernel_tls_inspection_policy_contracts",
+      "source": "examples/wfp/kernel/tls-inspection-proxy/test/inspection_policy_contracts.cpp",
+      "marker": "kernel TLS policy contracts passed:",
+      "requiredTokens": ["ALPN, HTTP/1, HTTP/2", "bounded fail-closed transform", "http1_contract", "http2_contract", "maximum_http_body_size"],
+      "runnerRequiredTokens": [],
+      "covers": ["http1", "http1-policy-pipeline", "http2", "http2-policy-pipeline", "bounded-hpack", "request-transform", "response-transform", "permit", "block", "fail-closed"]
+    },
+    {
+      "id": "browser-user-ordinary-runtime",
+      "pair": "browser-https-inspection", "side": "user", "kind": "runtime",
+      "target": "crtsys_wfp_browser_https_inspection_controller",
+      "source": "test/wfp/runtime/https-live/Run-WfpHttpsVmAcceptance.ps1",
+      "marker": "BROWSER_HTTPS=PASS",
+      "requiredTokens": ["BROWSER_QUIC_BLOCKED_FALLBACK=PASS", "BROWSER_TRANSPORT=PASS", "TEMP_SERVICES_REMOVED=PASS"],
+      "runner": "test/wfp/runtime/https-live/Run-WfpHttpsVmAcceptance.ps1",
+      "runnerRequiredTokens": ["BROWSER_QUIC_BLOCKED_FALLBACK=PASS", "BROWSER_TRANSPORT=PASS", "TEMP_SERVICES_REMOVED=PASS"],
+      "covers": ["ipv4", "ipv6", "tls", "http1", "persistent-http1", "http2", "multiplexed-http2", "h2-flow-control", "html", "gzip", "deflate", "brotli", "websocket", "dynamic-sni-identity", "origin-system-validation", "exact-pin", "mtls-controlled-negative", "protocol-specific-e2e", "permit", "block", "fail-closed", "clean-drain-unload", "existing-browser-no-reconfigure"]
+    },
+    {
+      "id": "browser-user-managed-http3-runtime",
+      "pair": "browser-https-inspection", "side": "user", "kind": "runtime",
+      "target": "crtsys_wfp_browser_https_inspection_acceptance",
+      "source": "test/wfp/runtime/https-live/Start-ControlledHttp3EndToEnd.ps1",
+      "marker": "CONTROLLED_HTTP3=PASS",
+      "requiredTokens": ["CLIENT_TO_PROXY_H3=PASS", "PROXY_TO_ORIGIN_H3=PASS", "PRIVATE_CA_EXACT_TRUST=PASS", "WRONG_CA_REJECTED=PASS", "GZIP_DECODE=PASS", "DEFLATE_DECODE=PASS", "BROTLI_DECODE=PASS", "GRPC_REQUEST_TRANSFORM=PASS", "GRPC_RESPONSE_TRANSFORM=PASS", "CONCURRENCY_", "PASS"],
+      "runner": "test/wfp/runtime/https-live/Start-ControlledHttp3EndToEnd.ps1",
+      "runnerRequiredTokens": ["CLIENT_TO_PROXY_H3=PASS", "PROXY_TO_ORIGIN_H3=PASS", "PRIVATE_CA_EXACT_TRUST=PASS", "WRONG_CA_REJECTED=PASS", "GRPC_REQUEST_TRANSFORM=PASS", "GRPC_RESPONSE_TRANSFORM=PASS"],
+      "covers": ["http3", "qpack-ack", "gzip", "deflate", "brotli", "webtransport", "exact-pin", "protocol-specific-e2e", "permit", "block", "fail-closed", "clean-drain-unload", "grpc-message-transform"]
+    },
+    {
+      "id": "browser-user-bidirectional-relay-contract",
+      "pair": "browser-https-inspection", "side": "user", "kind": "contract",
+      "target": "crtsys_ntl_bidirectional_relay_contracts",
+      "source": "examples/wfp/user/browser-https-inspection/test/bidirectional_relay_contracts.cpp",
+      "marker": "bidirectional relay coroutine contracts passed",
+      "requiredTokens": ["test_first_failure_wins", "test_first_completion_stops_socket_peer", "test_many_relays_share_one_completion_context"],
+      "runnerRequiredTokens": [],
+      "covers": ["clean-drain-unload"]
+    },
+    {
+      "id": "browser-user-http1-inspection-contract",
+      "pair": "browser-https-inspection", "side": "user", "kind": "contract",
+      "target": "crtsys_ntl_http1_inspection_contracts",
+      "source": "examples/wfp/user/browser-https-inspection/test/http1_inspection_contracts.cpp",
+      "marker": "HTTP/1 inspection contracts passed",
+      "requiredTokens": ["test_incremental_http1_framing", "test_standard_response_decoders", "test_invalid_response_encoding_fails_closed", "test_websocket_compression_negotiation"],
+      "runnerRequiredTokens": [],
+      "covers": ["http1", "html", "gzip", "deflate", "brotli", "websocket", "fail-closed"]
+    },
+    {
+      "id": "browser-user-http1-adapter-contract",
+      "pair": "browser-https-inspection", "side": "user", "kind": "contract",
+      "target": "crtsys_ntl_http1_adapter_contracts",
+      "source": "examples/wfp/user/browser-https-inspection/test/http1_adapter_contracts.cpp",
+      "marker": "HTTP/1 actual adapter contracts passed",
+      "requiredTokens": ["test_persistent_adapter", "HTTP/1 adapter request transform was bypassed", "test_websocket_carry_over", "tls_fixture"],
+      "runnerRequiredTokens": [],
+      "covers": ["tls", "http1", "persistent-http1", "html", "websocket", "protocol-specific-e2e", "permit", "block"]
+    },
+    {
+      "id": "browser-user-http2-adapter-contract",
+      "pair": "browser-https-inspection", "side": "user", "kind": "contract",
+      "target": "crtsys_ntl_http2_adapter_contracts",
+      "source": "examples/wfp/user/browser-https-inspection/test/http2_adapter_contracts.cpp",
+      "marker": "HTTP/2 actual adapter contracts passed",
+      "requiredTokens": ["test_multiplex_flow_and_policy", "flow-control credit path was not exercised", "response HTML transform was bypassed", "test_extended_connect_websocket"],
+      "runnerRequiredTokens": [],
+      "covers": ["tls", "http2", "multiplexed-http2", "h2-flow-control", "html", "websocket", "protocol-specific-e2e", "permit", "block"]
+    },
+    {
+      "id": "browser-user-http2-proxy-connection-contract",
+      "pair": "browser-https-inspection", "side": "user", "kind": "contract",
+      "target": "crtsys_ntl_http2_proxy_connection_contracts",
+      "source": "examples/wfp/user/browser-https-inspection/test/http2_proxy_connection_contracts.cpp",
+      "marker": "HTTP/2 proxy connection contracts passed",
+      "requiredTokens": ["test_context_continuation_flow_and_response_association", "test_header_block_body_drop_and_head", "test_connect_admission_reset_goaway_and_bounds", "test_peer_maximum_frame_size_is_an_outbound_bound"],
+      "runnerRequiredTokens": [],
+      "covers": ["http2", "multiplexed-http2", "h2-flow-control", "websocket", "permit", "block", "fail-closed"]
+    },
+    {
+      "id": "browser-user-managed-http3-client-contract",
+      "pair": "browser-https-inspection", "side": "user", "kind": "contract",
+      "target": "crtsys_wfp_browser_https_inspection_msh3_client_acceptance",
+      "source": "test/wfp/runtime/fixtures/user/browser-https-inspection/managed_http3_client_contracts.cpp",
+      "marker": "NTL msh3 managed client contract passed",
+      "requiredTokens": ["test_request_validation", "test_synchronous_receive_consumes_once", "maximum_response_body_bytes"],
+      "runnerRequiredTokens": [],
+      "covers": ["http3", "fail-closed"]
+    },
+    {
+      "id": "browser-user-http3-inspection-proxy-contract",
+      "pair": "browser-https-inspection", "side": "user", "kind": "contract",
+      "target": "crtsys_ntl_http3_inspection_proxy_contracts",
+      "source": "examples/wfp/user/browser-https-inspection/test/http3_inspection_proxy_contracts.cpp",
+      "marker": "NTL HTTP/3 inspection proxy contracts passed",
+      "requiredTokens": ["test_valid_gzip_exchange", "test_origin_protocol_and_bounds", "test_policy_is_enforced", "test_common_transform_pipeline"],
+      "runnerRequiredTokens": [],
+      "covers": ["http3", "html", "gzip", "permit", "block", "fail-closed"]
+    },
+    {
+      "id": "browser-user-http3-proxy-connection-contract",
+      "pair": "browser-https-inspection", "side": "user", "kind": "contract",
+      "target": "crtsys_ntl_http3_proxy_connection_contracts",
+      "source": "examples/wfp/user/browser-https-inspection/test/http3_proxy_connection_contracts.cpp",
+      "marker": "HTTP/3 proxy connection contracts passed",
+      "requiredTokens": ["test_strict_sni_authority_binding", "test_unknown_extended_connect_is_terminal", "test_async_pool_namespaces_stream_ids"],
+      "runnerRequiredTokens": [],
+      "covers": ["http3", "fail-closed", "clean-drain-unload", "unsupported-extended-connect-fail-closed"]
+    },
+    {
+      "id": "browser-user-origin-fallback-contract",
+      "pair": "browser-https-inspection", "side": "user", "kind": "contract",
+      "target": "crtsys_ntl_http3_origin_fallback_contracts",
+      "source": "examples/wfp/user/browser-https-inspection/test/http3_origin_fallback_contracts.cpp",
+      "marker": "HTTP/3 origin fallback contracts passed:",
+      "requiredTokens": ["quic-transport=fallback", "non-idempotent-after-commit=no-retry", "validation=fail-closed", "h3-success=strict", "protocol=recorded"],
+      "runnerRequiredTokens": [],
+      "covers": ["origin-transport-fallback", "non-safe-replay-rejected", "fail-closed"]
+    },
+    {
+      "id": "browser-user-http-policy-contract",
+      "pair": "browser-https-inspection", "side": "user", "kind": "contract",
+      "target": "crtsys_ntl_browser_http_policy_contracts",
+      "source": "examples/wfp/user/browser-https-inspection/test/browser_http_policy_contracts.cpp",
+      "marker": "Browser HTTP policy contracts passed:",
+      "requiredTokens": ["grpc-http1=pass", "grpc-http2=pass", "grpc-http3=pass", "grpc-request=transformed", "grpc-response=transformed", "grpc-malformed=blocked", "h2-unsupported-extended-connect=blocked", "h3-websocket-extended-connect=blocked"],
+      "runnerRequiredTokens": [],
+      "covers": ["grpc-message-transform", "unsupported-extended-connect-fail-closed", "fail-closed"]
+    },
+    {
+      "id": "browser-user-capture-privacy-contract",
+      "pair": "browser-https-inspection", "side": "user", "kind": "contract",
+      "target": "crtsys_ntl_browser_log_privacy_contracts",
+      "source": "examples/wfp/user/browser-https-inspection/test/browser_log_privacy_contracts.cpp",
+      "marker": "Browser capture privacy contracts passed:",
+      "requiredTokens": ["path=metadata-only", "query=redacted", "headers=metadata-only", "request-body=excluded", "html=explicit"],
+      "runnerRequiredTokens": [],
+      "covers": ["capture-privacy"]
+    },
+    {
+      "id": "browser-user-raw-msquic-backend-contract",
+      "pair": "browser-https-inspection", "side": "user", "kind": "contract",
+      "target": "crtsys_wfp_browser_https_inspection_raw_msquic_acceptance",
+      "source": "test/wfp/runtime/fixtures/user/browser-https-inspection/raw_msquic_backend_contracts.cpp",
+      "marker": "raw-msquic-backend contracts passed:",
+      "requiredTokens": ["extended-connect=pass", "datagram=pass", "preview-capabilities=consistent", "callback-drain=ordered"],
+      "runnerRequiredTokens": [],
+      "covers": ["http3", "clean-drain-unload"]
+    },
+    {
+      "id": "browser-user-raw-msquic-loopback-contract",
+      "pair": "browser-https-inspection", "side": "user", "kind": "contract",
+      "target": "crtsys_wfp_browser_https_inspection_msquic_loopback_acceptance",
+      "source": "test/wfp/runtime/fixtures/user/browser-https-inspection/raw_msquic_loopback_contracts.cpp",
+      "marker": "raw-msquic-loopback:",
+      "requiredTokens": ["tls13", "settings", "extended-connect", "webtransport-bidi", "webtransport-uni", "h3-datagram", "reliable-reset-at", "application-error-map PASS"],
+      "runnerRequiredTokens": [],
+      "covers": ["tls", "http3", "webtransport", "protocol-specific-e2e", "clean-drain-unload"]
+    },
+    {
+      "id": "browser-kernel-runtime",
+      "pair": "browser-https-inspection", "side": "kernel", "kind": "runtime",
+      "target": "crtsys_wfp_kernel_browser_https_inspection_acceptance",
+      "source": "test/wfp/runtime/fixtures/kernel/browser-https-inspection/managed_acceptance.cpp",
+      "marker": "Kernel browser HTTPS inspection PASS:",
+      "requiredTokens": [
+        "http1_policy_pipeline=", "http1_compression=", "http1_grpc=", "http1_websocket=", "http1_ipv4_ipv6_wfp=", "http1_pipelining=",
+        "http2_policy_pipeline=", "http2_compression=", "http2_grpc=", "http2_websocket=", "http2_extended_connect=", "http2_unsupported_connect=blocked", "http2_ipv4_ipv6_wfp=", "http2_multiplex=", "http2_flow_control=", "http2_goaway=",
+        "http3_policy_pipeline=", "http3_compression=", "http3_grpc=", "http3_qpack=", "http3_inbound_peer_settings=", "http3_origin_h3_negotiated=", "http3_origin_peer_settings=", "http3_origin_qpack_acknowledgement=", "http3_webtransport=", "http3_capsule_stream=", "http3_single_connection_multiplex=", "http3_reverse_completion=", "http3_stream_local_block=", "http3_stream_local_reset=", "http3_aggregate_quota=", "http3_origin_single_qpack_encoder_stream=", "http3_multiplex_clean_drain=", "http3_webtransport_policy_rejected=", "http3_webtransport_rejection_no_session=", "http3_unsupported_extended_connect_fail_closed=", "http3_invalid_request_headers_fail_closed=", "http3_negative_origin_isolation=",
+        "tcp_wfp_redirect=", "udp_wfp_relay=", "origin_system_validation=", "origin_exact_pin=", "origin_mtls=", "origin_negative_cases=", "origin_fallback_h2=", "origin_fallback_http1=", "origin_fallback_non_safe=blocked", "origin_fallback_security=blocked", "origin_security_replace_rollback=", "dynamic_sni=", "identity_replacement=", "unknown_sni_fail_closed=", "churn_over_quota=", "permit_block=", "clean_drain="
+      ],
+      "runner": "test/wfp/runtime/advanced/Run-WfpAdvancedSuite.ps1",
+      "runnerRequiredTokens": [
+        "http1_policy_pipeline=pass", "http1_compression=pass", "http1_grpc=pass", "http1_websocket=pass", "http1_ipv4_ipv6_wfp=pass", "http1_pipelining=pass",
+        "http2_policy_pipeline=pass", "http2_compression=pass", "http2_grpc=pass", "http2_websocket=pass", "http2_extended_connect=pass", "http2_unsupported_connect=blocked", "http2_ipv4_ipv6_wfp=pass", "http2_multiplex=pass", "http2_flow_control=pass", "http2_goaway=pass",
+        "http3_policy_pipeline=pass", "http3_compression=pass", "http3_grpc=pass", "http3_qpack=pass", "http3_inbound_peer_settings=pass", "http3_origin_h3_negotiated=pass", "http3_origin_peer_settings=pass", "http3_origin_qpack_acknowledgement=pass", "http3_webtransport=pass", "http3_capsule_stream=pass", "http3_single_connection_multiplex=pass", "http3_reverse_completion=pass", "http3_stream_local_block=pass", "http3_stream_local_reset=pass", "http3_aggregate_quota=pass", "http3_origin_single_qpack_encoder_stream=pass", "http3_multiplex_clean_drain=pass", "http3_webtransport_policy_rejected=pass", "http3_webtransport_rejection_no_session=pass", "http3_unsupported_extended_connect_fail_closed=pass", "http3_invalid_request_headers_fail_closed=pass", "http3_negative_origin_isolation=pass",
+        "tcp_wfp_redirect=pass", "udp_wfp_relay=pass", "origin_system_validation=pass", "origin_exact_pin=pass", "origin_mtls=pass", "origin_negative_cases=pass", "origin_fallback_h2=pass", "origin_fallback_http1=pass", "origin_fallback_non_safe=blocked", "origin_fallback_security=blocked", "origin_security_replace_rollback=pass", "dynamic_sni=pass", "identity_replacement=pass", "unknown_sni_fail_closed=pass", "churn_over_quota=pass", "permit_block=pass", "clean_drain=pass"
+      ],
+      "covers": [
+        "ipv4", "ipv6", "tls", "http1", "persistent-http1", "http2", "multiplexed-http2", "h2-flow-control", "http3", "qpack-ack", "html", "gzip", "deflate", "brotli", "websocket", "webtransport", "dynamic-sni-identity", "origin-system-validation", "exact-pin", "mtls-controlled-negative", "protocol-specific-e2e", "permit", "block", "fail-closed", "clean-drain-unload", "existing-browser-no-reconfigure", "grpc-message-transform", "origin-transport-fallback", "non-safe-replay-rejected", "unsupported-extended-connect-fail-closed"
+      ]
+    },
+    {
+      "id": "browser-kernel-http1-evidence-contract",
+      "pair": "browser-https-inspection", "side": "kernel", "kind": "contract",
+      "target": "crtsys_wfp_kernel_browser_http1_evidence_contracts",
+      "source": "examples/wfp/kernel/browser-https-inspection/test/http1_evidence_contracts.cpp",
+      "marker": "Kernel browser HTTP/1 evidence contract PASS:",
+      "requiredTokens": ["http1_policy_pipeline", "http1_pipelining", "http1_compression", "grpc=pass", "http1_websocket", "http1_ipv4_ipv6_wfp", "tls_origin=pass"],
+      "runnerRequiredTokens": [],
+      "covers": ["ipv4", "ipv6", "tls", "http1", "persistent-http1", "html", "gzip", "deflate", "brotli", "websocket", "origin-system-validation", "exact-pin", "mtls-controlled-negative", "permit", "block"]
+    },
+    {
+      "id": "browser-kernel-http2-evidence-contract",
+      "pair": "browser-https-inspection", "side": "kernel", "kind": "contract",
+      "target": "crtsys_wfp_kernel_browser_http2_evidence_contracts",
+      "source": "examples/wfp/kernel/browser-https-inspection/test/http2_evidence_contracts.cpp",
+      "marker": "Kernel browser HTTP/2 evidence contract PASS:",
+      "requiredTokens": ["http2_policy_pipeline", "http2_multiplexing", "http2_flow_control", "http2_goaway", "http2_compression", "grpc=pass", "http2_websocket", "http2_extended_connect", "unsupported_connect=blocked", "ipv4_ipv6_wfp=pass", "tls_origin=pass"],
+      "runnerRequiredTokens": [],
+      "covers": ["ipv4", "ipv6", "tls", "http2", "multiplexed-http2", "h2-flow-control", "html", "gzip", "deflate", "brotli", "websocket", "origin-system-validation", "exact-pin", "mtls-controlled-negative", "permit", "block", "grpc-message-transform", "unsupported-extended-connect-fail-closed"]
+    },
+    {
+      "id": "browser-kernel-http3-evidence-contract",
+      "pair": "browser-https-inspection", "side": "kernel", "kind": "contract",
+      "target": "crtsys_wfp_kernel_browser_http3_evidence_contracts",
+      "source": "examples/wfp/kernel/browser-https-inspection/test/http3_evidence_contracts.cpp",
+      "marker": "Kernel browser HTTP/3 evidence contract PASS:",
+      "requiredTokens": ["dynamic_qpack", "grpc=pass", "origin_h3_negotiated", "origin_qpack_acknowledgement", "origin_single_qpack_encoder=pass", "webtransport", "capsule_stream", "aggregate_quota", "tls_origin=pass"],
+      "runnerRequiredTokens": [],
+      "covers": ["tls", "http3", "qpack-ack", "html", "gzip", "deflate", "brotli", "webtransport", "origin-system-validation", "exact-pin", "mtls-controlled-negative", "permit", "block", "fail-closed", "clean-drain-unload", "grpc-message-transform"]
+    },
+    {
+      "id": "browser-kernel-request-capture-contract",
+      "pair": "browser-https-inspection", "side": "kernel", "kind": "contract",
+      "target": "crtsys_wfp_kernel_browser_request_capture_contracts",
+      "source": "examples/wfp/kernel/browser-https-inspection/test/request_capture_contracts.cpp",
+      "marker": "Kernel browser sanitized request capture contract PASS:",
+      "requiredTokens": ["headers=redacted", "body=redacted", "bounded=pass"],
+      "runnerRequiredTokens": [],
+      "covers": ["capture-privacy"]
+    },
+    {
+      "id": "browser-kernel-capture-log-privacy-contract",
+      "pair": "browser-https-inspection", "side": "kernel", "kind": "contract",
+      "target": "crtsys_wfp_kernel_browser_capture_log_privacy_contracts",
+      "source": "examples/wfp/kernel/browser-https-inspection/test/capture_log_privacy_contracts.cpp",
+      "marker": "Kernel browser capture log privacy contract PASS:",
+      "requiredTokens": ["request-file=absent", "non-html-response-file=absent", "request-secrets=absent", "html=content-type-gated", "metadata=bounded"],
+      "runnerRequiredTokens": [],
+      "covers": ["capture-privacy"]
+    },
+    {
+      "id": "browser-kernel-http-policy-contract",
+      "pair": "browser-https-inspection", "side": "kernel", "kind": "contract",
+      "target": "crtsys_wfp_kernel_browser_http_policy_contracts",
+      "source": "examples/wfp/kernel/browser-https-inspection/test/browser_http_policy_contracts.cpp",
+      "marker": "Kernel browser HTTP policy contracts passed:",
+      "requiredTokens": ["grpc-http1=transformed", "grpc-http2=transformed", "grpc-http3=transformed", "grpc-malformed=fail-closed", "h2-webtransport=blocked", "h3-websocket=blocked", "ordinary-connect=blocked"],
+      "runnerRequiredTokens": [],
+      "covers": ["grpc-message-transform", "unsupported-extended-connect-fail-closed", "fail-closed"]
+    },
+    {
+      "id": "browser-kernel-service-info-abi-contract",
+      "pair": "browser-https-inspection", "side": "kernel", "kind": "contract",
+      "target": "crtsys_wfp_kernel_browser_service_info_abi_contracts",
+      "source": "examples/wfp/kernel/browser-https-inspection/test/service_info_abi_contracts.cpp",
+      "marker": "Kernel browser service ABI contract PASS:",
+      "requiredTokens": ["valid_service_info_abi", "service_info_version", "size="],
+      "runnerRequiredTokens": [],
+      "covers": ["fail-closed"]
+    },
+    {
+      "id": "browser-kernel-webtransport-capsule-contract",
+      "pair": "browser-https-inspection", "side": "kernel", "kind": "contract",
+      "target": "crtsys_wfp_kernel_browser_webtransport_capsule_contracts",
+      "source": "examples/wfp/kernel/browser-https-inspection/test/webtransport_capsule_stream_contracts.cpp",
+      "marker": "WebTransport Capsule stream PASS:",
+      "requiredTokens": ["split=", "coalesced=", "final_tail=", "maximum_payload=", "oversized_length=", "truncated_varint=", "bounded_overflow="],
+      "runnerRequiredTokens": [],
+      "covers": ["webtransport", "fail-closed"]
+    },
+    {
+      "id": "http3-user-wfp-gate-runtime",
+      "pair": "http3-inspection", "side": "user", "kind": "runtime",
+      "target": "crtsys_wfp_http3_inspection_acceptance",
+      "source": "test/wfp/runtime/fixtures/user/http3-inspection/http3_acceptance_role.inl",
+      "marker": "controlled-msquic-http3: WFP gate PASS",
+      "requiredTokens": ["wfp_ipv4_delta=", "wfp_ipv6_delta=", "original_v4_port=", "original_v6_port=", "process_id=", "app_hash=", "tuple=IPv4/IPv6", "policy_lifetime=ephemeral", "policy_removed_direct=IPv4/IPv6", "counter_unchanged=yes", "unavailable_callout=blocked", "origin_hit=0", "webtransport_block=IPv4/IPv6", "inactive_after_403=yes"],
+      "runner": "test/wfp/runtime/advanced/Run-WfpAdvancedSuite.ps1",
+      "runnerRequiredTokens": ["wfp_ipv4_delta=", "wfp_ipv6_delta=", "original_v4_port=", "original_v6_port=", "process_id=", "app_hash=", "tuple=IPv4/IPv6", "policy_lifetime=ephemeral", "policy_removed_direct=IPv4/IPv6", "counter_unchanged=yes", "unavailable_callout=blocked", "origin_hit=0", "webtransport_block=IPv4/IPv6", "inactive_after_403=yes"],
+      "covers": ["app-scoped-wfp-gate"]
+    },
+    {
+      "id": "http3-user-controlled-e2e",
+      "pair": "http3-inspection", "side": "user", "kind": "e2e-target",
+      "target": "crtsys_wfp_http3_inspection_acceptance",
+      "source": "test/wfp/runtime/fixtures/user/http3-inspection/http3_acceptance_role.inl",
+      "marker": "controlled-msquic-http3: WebTransport PASS",
+      "requiredTokens": ["dynamic QPACK and codecs PASS", "ipv4=pass", "ipv6=pass", "gzip deflate br", "webtransport-bidi", "webtransport-uni", "h3-datagram", "capsule=pass", "capsule-fragmentation=pass", "reliable-reset-at", "permit=6", "block=2", "client->drain().is_ok()", "connections=8"],
+      "runnerRequiredTokens": [],
+      "covers": ["ipv4", "ipv6", "quic-tls13", "http3", "dynamic-qpack", "blocked-stream-resume", "decoder-ack", "gzip", "deflate", "brotli", "extended-connect", "webtransport-bidi", "webtransport-unidi", "datagram", "capsule", "reliable-reset", "permit", "block", "exact-shutdown"]
+    },
+    {
+      "id": "http3-user-replay-contract",
+      "pair": "http3-inspection", "side": "user", "kind": "contract",
+      "target": "crtsys_wfp_http3_replay_contracts",
+      "source": "test/wfp/runtime/fixtures/user/http3-inspection/replay_contract.cpp",
+      "marker": "NTL HTTP/3 inspection ok:",
+      "requiredTokens": ["split QUIC stream", "static QPACK", "Brotli HTML", "bounded decode", "cleanly_closed"],
+      "runnerRequiredTokens": [],
+      "covers": ["http3", "brotli", "exact-shutdown"]
+    },
+    {
+      "id": "http3-kernel-runtime",
+      "pair": "http3-inspection", "side": "kernel", "kind": "runtime",
+      "target": "crtsys_wfp_kernel_http3_inspection_acceptance",
+      "source": "test/wfp/runtime/fixtures/kernel/http3-inspection/main.cpp",
+      "marker": "Kernel HTTP/3 inspection PASS:",
+      "requiredTokens": ["MsQuic TLS 1.3", "dynamic QPACK resume/ack", "gzip/deflate/Brotli", "Extended CONNECT/WebTransport", "streams/datagram/capsule/reliable-reset", "96-connection sequential churn", "cleanup"],
+      "runner": "test/wfp/runtime/advanced/Run-WfpAdvancedSuite.ps1",
+      "runnerRequiredTokens": ["IPv4/IPv6 WFP", "kernel MsQuic TLS 1.3", "SETTINGS", "dynamic QPACK resume/ack", "gzip/deflate/Brotli HTML", "Extended CONNECT/WebTransport", "streams/datagram/capsule/reliable-reset", "permit/block", "96-connection sequential churn", "capture", "cleanup"],
+      "covers": ["ipv4", "ipv6", "app-scoped-wfp-gate", "quic-tls13", "http3", "dynamic-qpack", "blocked-stream-resume", "decoder-ack", "gzip", "deflate", "brotli", "extended-connect", "webtransport-bidi", "webtransport-unidi", "datagram", "capsule", "reliable-reset", "permit", "block", "exact-shutdown"]
+    },
+    {
+      "id": "http3-kernel-policy-contract",
+      "pair": "http3-inspection", "side": "kernel", "kind": "contract",
+      "target": "crtsys_wfp_kernel_http3_inspection_policy_contracts",
+      "source": "examples/wfp/kernel/http3-inspection/test/http3_policy_contracts.cpp",
+      "marker": "kernel HTTP/3 policy contracts passed:",
+      "requiredTokens": ["request policy", "dynamic QPACK resume/ack", "gzip/deflate/br", "WebTransport", "bounded failures", "request_policy_contract", "dynamic_qpack_contract", "response_contract", "webtransport_contract", "bounded_capsule_stream", "STATUS_END_OF_FILE"],
+      "runnerRequiredTokens": [],
+      "covers": ["http3", "dynamic-qpack", "blocked-stream-resume", "decoder-ack", "gzip", "deflate", "brotli", "extended-connect", "webtransport-bidi", "webtransport-unidi", "datagram", "capsule", "permit", "block"]
+    }
+  ],
+  "protocolBoundaries": [
+    {
+      "id": "user-browser-ordinary-versus-managed-http3",
+      "path": "examples/wfp/user/browser-https-inspection/README.md",
+      "contains": ["HTTP/3 proxy service is deliberately separate", "Ordinary browser TCP redirect", "transparent HTTP/3 MITM of an unmodified stock browser"]
+    },
+    {
+      "id": "kernel-browser-ordinary-versus-managed-http3",
+      "path": "examples/wfp/kernel/browser-https-inspection/README.md",
+      "contains": ["bypass certificate pinning", "separate acceptance executable proves the real kernel HTTP/3", "does not silently label that fallback as HTTP/3"]
+    }
+  ],
+  "kernelOnly": [
+    {
+      "name": "ale-connect-block",
+      "buildProject": "wfp-ale-connect-block",
+      "mechanism": "classify/action enforcement",
+      "targets": ["crtsys_wfp_ale_connect_block", "crtsys_wfp_ale_connect_block_controller", "crtsys_wfp_ale_connect_block_acceptance"],
+      "fixtureDirectory": "test/wfp/runtime/fixtures/kernel/ale-connect-block"
+    },
+    {
+      "name": "async-inspection",
+      "buildProject": "wfp-async-inspection",
+      "mechanism": "pended operation and retained packet ownership",
+      "targets": ["crtsys_wfp_async_inspection", "crtsys_wfp_async_inspection_controller", "crtsys_wfp_async_inspection_acceptance"],
+      "fixtureDirectory": "test/wfp/runtime/fixtures/kernel/async-inspection"
+    },
+    {
+      "name": "bind-redirect",
+      "buildProject": "wfp-bind-redirect",
+      "mechanism": "writable bind-request mutation",
+      "targets": ["crtsys_wfp_bind_redirect", "crtsys_wfp_bind_redirect_controller", "crtsys_wfp_bind_redirect_acceptance"],
+      "fixtureDirectory": "test/wfp/runtime/fixtures/kernel/bind-redirect"
+    },
+    {
+      "name": "datagram-proxy",
+      "buildProject": "wfp-datagram-proxy",
+      "mechanism": "NBL clone and asynchronous reinjection",
+      "targets": ["crtsys_wfp_datagram_proxy", "crtsys_wfp_datagram_proxy_controller", "crtsys_wfp_datagram_proxy_acceptance", "crtsys_wfp_datagram_proxy_fragmented_buffer_contract"],
+      "fixtureDirectory": "test/wfp/runtime/fixtures/kernel/datagram-proxy"
+    },
+    {
+      "name": "flow-monitor",
+      "buildProject": "wfp-flow-monitor",
+      "mechanism": "WFP flow-context lifetime",
+      "targets": ["crtsys_wfp_flow_monitor", "crtsys_wfp_flow_monitor_controller", "crtsys_wfp_flow_monitor_acceptance"],
+      "fixtureDirectory": "test/wfp/runtime/fixtures/kernel/flow-monitor"
+    },
+    {
+      "name": "stream-edit",
+      "buildProject": "wfp-stream-edit",
+      "mechanism": "stream continuation, clone, edit and injection",
+      "targets": ["crtsys_wfp_stream_edit", "crtsys_wfp_stream_edit_controller", "crtsys_wfp_stream_edit_acceptance"],
+      "fixtureDirectory": "test/wfp/runtime/fixtures/kernel/stream-edit"
+    },
+    {
+      "name": "specialized-observation",
+      "buildProject": "wfp-specialized-observation",
+      "mechanism": "IPsec, MAC/frame, vSwitch, endpoint-close and fast-layer capabilities",
+      "targets": ["crtsys_wfp_specialized_observation", "crtsys_wfp_specialized_observation_controller", "crtsys_wfp_specialized_observation_acceptance"],
+      "fixtureDirectory": "test/wfp/runtime/fixtures/kernel/specialized-observation"
+    }
+  ]
+}

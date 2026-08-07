@@ -18,6 +18,11 @@
 
 namespace ntl::wfp {
 
+namespace detail {
+template <class Binding, std::size_t SlotCount, callout_kind Kind>
+struct owning_stream_slots;
+}
+
 class stream_injector;
 
 namespace detail {
@@ -461,7 +466,6 @@ private:
     allow_connection,
   };
 
-  template <class, class, auto> friend struct detail_stream_adapter;
   friend void detail_apply_stream_result(
       stream_result, const FWPS_FILTER2 *, FWPS_STREAM_CALLOUT_IO_PACKET0 *,
       FWPS_CLASSIFY_OUT0 &) noexcept;
@@ -541,7 +545,8 @@ public:
   }
 
 private:
-  template <class, class, auto> friend struct detail_stream_adapter;
+  template <class, std::size_t, callout_kind>
+  friend struct detail::owning_stream_slots;
 
   stream_event(const FWPS_INCOMING_VALUES0 *values,
                const FWPS_INCOMING_METADATA_VALUES0 *metadata,
@@ -573,11 +578,14 @@ inline void detail_apply_stream_result(
 
   if (filter &&
       filter->action.type == FWP_ACTION_CALLOUT_INSPECTION) {
-    detail::apply_decision(decision::continue_classification, filter, output);
+    detail::apply_decision(
+        detail::classification_action::continue_classification,
+        filter, output);
     return;
   }
 
-  const auto enforce_all = [&](decision action) noexcept {
+  const auto enforce_all =
+      [&](detail::classification_action action) noexcept {
     io_packet->countBytesEnforced = io_packet->streamData->dataLength;
     detail::apply_decision(action, filter, output);
   };
@@ -602,7 +610,7 @@ inline void detail_apply_stream_result(
   case stream_result::kind::need_more:
     if ((output.flags & (FWPS_CLASSIFY_OUT_FLAG_BUFFER_LIMIT_REACHED |
                          FWPS_CLASSIFY_OUT_FLAG_NO_MORE_DATA)) != 0) {
-      enforce_all(decision::block);
+      enforce_all(detail::classification_action::block);
       return;
     }
     io_packet->streamAction = FWPS_STREAM_ACTION_NEED_MORE_DATA;
@@ -612,7 +620,7 @@ inline void detail_apply_stream_result(
     return;
   case stream_result::kind::defer:
     if ((io_packet->streamData->flags & FWPS_STREAM_FLAG_RECEIVE) == 0) {
-      enforce_all(decision::block);
+      enforce_all(detail::classification_action::block);
       return;
     }
     io_packet->streamAction = FWPS_STREAM_ACTION_DEFER;
@@ -621,7 +629,7 @@ inline void detail_apply_stream_result(
   case stream_result::kind::drop_connection:
     if (filter &&
         filter->action.type != FWP_ACTION_CALLOUT_UNKNOWN) {
-      enforce_all(decision::block);
+      enforce_all(detail::classification_action::block);
       return;
     }
     io_packet->streamAction = FWPS_STREAM_ACTION_DROP_CONNECTION;
@@ -633,35 +641,5 @@ inline void detail_apply_stream_result(
     return;
   }
 }
-
-template <class Layer, class Context, auto Callback>
-struct detail_stream_adapter {
-  static_assert(
-      detail::stream_layer<Layer>,
-      "a stream callback can only be registered at a stream layer");
-  static_assert(
-      std::is_nothrow_invocable_r_v<stream_result, decltype(Callback),
-                                    const stream_event<Layer, Context> &>,
-      "a WFP stream callback must be noexcept and return stream_result");
-
-  static void NTAPI invoke(
-      const FWPS_INCOMING_VALUES0 *values,
-      const FWPS_INCOMING_METADATA_VALUES0 *metadata, void *layer_data,
-      const void *, const FWPS_FILTER2 *filter, UINT64 flow_context,
-      FWPS_CLASSIFY_OUT0 *output) noexcept {
-    if (!layer_data || !output)
-      return;
-
-    auto *io_packet =
-        static_cast<FWPS_STREAM_CALLOUT_IO_PACKET0 *>(layer_data);
-    auto *holder =
-        reinterpret_cast<detail::flow_context_holder<Layer, Context> *>(
-            flow_context);
-    Context *context = holder ? holder->context.get() : nullptr;
-    stream_event<Layer, Context> event(values, metadata, io_packet, filter,
-                                       context, output);
-    detail_apply_stream_result(Callback(event), filter, io_packet, *output);
-  }
-};
 
 } // namespace ntl::wfp

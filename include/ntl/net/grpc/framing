@@ -4,10 +4,7 @@
  */
 #pragma once
 
-#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
-#error "ntl/net/grpc/framing is a user-mode header"
-#endif
-
+#include <ntl/net/borrowed_bounded_writer>
 #include <ntl/net/buffer/scatter_view>
 #include <ntl/net/framing>
 #include <ntl/result>
@@ -75,6 +72,34 @@ inspect_header(ntl::net::scatter_view wire,
   const auto compressed = wire.read<std::uint8_t>(0);
   return ntl::ok(message_header{*compressed == 1,
                                 static_cast<std::uint32_t>(probe.content_size())});
+}
+
+/**
+ * @brief Encodes one gRPC message into caller-owned storage.
+ *
+ * This overload performs no allocation and is the canonical user/kernel
+ * contract.  The returned size covers the five-byte gRPC header and payload.
+ */
+inline ntl::result<std::size_t>
+encode_message_to(std::span<std::byte> output,
+                  std::span<const std::byte> payload, bool compressed,
+                  std::size_t maximum_message_size =
+                      4 * 1024 * 1024) noexcept {
+  if (payload.size() > maximum_message_size ||
+      payload.size() > (std::numeric_limits<std::uint32_t>::max)())
+    return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+  if (output.size() < 5 || payload.size() > output.size() - 5)
+    return ntl::unexpected(STATUS_BUFFER_TOO_SMALL);
+
+  ntl::net::borrowed_bounded_writer writer(output);
+  ntl::status written = writer.write_u8(compressed ? 1 : 0);
+  if (written.is_ok())
+    written = writer.write_be32(static_cast<std::uint32_t>(payload.size()));
+  if (written.is_ok())
+    written = writer.append(payload);
+  if (!written.is_ok())
+    return ntl::unexpected(written);
+  return ntl::ok(writer.size());
 }
 
 inline ntl::result<std::vector<std::byte>>

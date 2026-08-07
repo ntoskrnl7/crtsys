@@ -11,10 +11,6 @@
  */
 #pragma once
 
-#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
-#error "ntl/net/http3/qpack is a user-mode header"
-#endif
-
 #include <ntl/net/http2/hpack>
 #include <ntl/net/http3/framing>
 

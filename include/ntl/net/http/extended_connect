@@ -6,18 +6,14 @@
  */
 #pragma once
 
-#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
-#error "ntl/net/http/extended_connect is a user-mode header"
-#endif
-
 #include <ntl/result>
 #include <ntl/status>
 
 #include <cstddef>
-#include <new>
 #include <span>
-#include <string>
 #include <string_view>
+#include <new>
+#include <string>
 #include <utility>
 
 namespace ntl::net::http {
@@ -30,6 +26,17 @@ struct connect_request {
   std::string authority;
   std::string path;
   std::string origin;
+};
+
+/** Callback-lifetime decoded CONNECT fields without allocation. */
+struct connect_request_view {
+  bool extended = false;
+  bool capsule_protocol = false;
+  std::string_view protocol;
+  std::string_view scheme;
+  std::string_view authority;
+  std::string_view path;
+  std::string_view origin;
 };
 
 struct connect_validation_options {
@@ -72,6 +79,117 @@ inline bool valid_capsule_protocol_true(
 }
 
 } // namespace connect_detail
+
+/**
+ * @brief Allocation-free CONNECT validation for user and kernel callers.
+ *
+ * Returned views refer to the supplied header fields and must not outlive
+ * them.  A caller that needs ownership must copy only after validation.
+ */
+template <class HeaderField>
+ntl::result<connect_request_view>
+validate_connect_request_view(
+    std::span<const HeaderField> fields,
+    connect_validation_options options = {}) noexcept {
+  if (fields.empty() || options.maximum_field_bytes == 0)
+    return ntl::unexpected(STATUS_INVALID_PARAMETER);
+
+  connect_request_view output;
+  std::string_view method;
+  bool regular_seen = false;
+  bool method_seen = false;
+  bool protocol_seen = false;
+  bool scheme_seen = false;
+  bool authority_seen = false;
+  bool path_seen = false;
+  bool origin_seen = false;
+  bool capsule_seen = false;
+  bool capsule_forbidden_field_seen = false;
+  std::size_t decoded_bytes = 0;
+
+  for (const auto &field : fields) {
+    const std::string_view name(field.name);
+    const std::string_view value(field.value);
+    if (!connect_detail::is_lowercase_name(name) ||
+        name.size() > options.maximum_field_bytes - decoded_bytes ||
+        value.size() >
+            options.maximum_field_bytes - decoded_bytes - name.size())
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    decoded_bytes += name.size() + value.size();
+
+    const bool pseudo = name.front() == ':';
+    if (pseudo && regular_seen)
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    if (!pseudo)
+      regular_seen = true;
+
+    if (name == ":method") {
+      if (method_seen)
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      method_seen = true;
+      method = value;
+    } else if (name == ":protocol") {
+      if (protocol_seen)
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      protocol_seen = true;
+      output.protocol = value;
+    } else if (name == ":scheme") {
+      if (scheme_seen)
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      scheme_seen = true;
+      output.scheme = value;
+    } else if (name == ":authority") {
+      if (authority_seen)
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      authority_seen = true;
+      output.authority = value;
+    } else if (name == ":path") {
+      if (path_seen)
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      path_seen = true;
+      output.path = value;
+    } else if (name == ":status" || name == ":") {
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    } else if (name == "origin") {
+      if (origin_seen)
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      origin_seen = true;
+      output.origin = value;
+    } else if (name == "capsule-protocol") {
+      if (capsule_seen)
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      capsule_seen = true;
+      output.capsule_protocol =
+          connect_detail::valid_capsule_protocol_true(value);
+    } else if (name == "content-length" || name == "content-type" ||
+               name == "transfer-encoding") {
+      capsule_forbidden_field_seen = true;
+    } else if (pseudo) {
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    }
+  }
+
+  if (!method_seen || method != "CONNECT" || !authority_seen ||
+      output.authority.empty())
+    return ntl::unexpected(STATUS_DATA_ERROR);
+
+  output.extended = protocol_seen;
+  if (!output.extended) {
+    if (scheme_seen || path_seen || capsule_seen)
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    return ntl::ok(output);
+  }
+
+  if (!options.peer_enabled_extended_connect || output.protocol.empty() ||
+      !scheme_seen || output.scheme.empty() || !path_seen ||
+      output.path.empty())
+    return ntl::unexpected(STATUS_NOT_SUPPORTED);
+  if (output.capsule_protocol && capsule_forbidden_field_seen)
+    return ntl::unexpected(STATUS_DATA_ERROR);
+  if (options.browser_origin_required && output.origin.empty())
+    return ntl::unexpected(STATUS_ACCESS_DENIED);
+  return ntl::ok(output);
+}
 
 /**
  * @brief Validates a decoded HTTP/2 or HTTP/3 CONNECT header section.

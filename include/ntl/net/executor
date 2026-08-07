@@ -1,0 +1,61 @@
+/**
+ * @file net_executor
+ * @brief Lifetime-aware execution contract shared by network backends.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include <ntl/status>
+
+namespace ntl::net {
+
+/**
+ * @brief Explicitly non-owning callback invocation.
+ *
+ * The context must remain valid until the accepted callback returns. Normal
+ * kernel callers should use kernel::executor::post() with a shared owner;
+ * post_borrowed() exists for intrusive states that already retain themselves.
+ */
+struct borrowed_work_item {
+  using callback_type = void (*)(void *) noexcept;
+
+  callback_type callback = nullptr;
+  void *context = nullptr;
+
+  constexpr explicit operator bool() const noexcept {
+    return callback != nullptr;
+  }
+  void invoke() const noexcept {
+    if (callback)
+      callback(context);
+  }
+};
+
+class executor {
+public:
+  virtual ~executor() = default;
+  virtual ntl::status post_borrowed(borrowed_work_item work) noexcept = 0;
+  virtual void stop_accepting() noexcept = 0;
+  virtual ntl::status drain() noexcept = 0;
+};
+
+class inline_executor final : public executor {
+public:
+  ntl::status post_borrowed(borrowed_work_item work) noexcept override {
+    if (!work)
+      return STATUS_INVALID_PARAMETER;
+    if (stopped_)
+      return STATUS_DELETE_PENDING;
+    work.invoke();
+    return ntl::status::ok();
+  }
+
+  void stop_accepting() noexcept override { stopped_ = true; }
+  ntl::status drain() noexcept override { return ntl::status::ok(); }
+
+private:
+  bool stopped_ = false;
+};
+
+} // namespace ntl::net

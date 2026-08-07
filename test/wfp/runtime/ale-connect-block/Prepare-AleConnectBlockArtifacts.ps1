@@ -68,12 +68,15 @@ $packageRoot = New-Item -ItemType Directory -Force -Path $resolvedOutputRoot
 
 $buildRoot = Join-Path $resolvedBuildRoot $Configuration
 $driverSource = Join-Path $buildRoot 'crtsys_wfp_ale_connect_block.sys'
-$appSource =
-    Join-Path $buildRoot 'crtsys_wfp_ale_connect_block_app.exe'
+$controllerSource = Join-Path $buildRoot (
+    'crtsys_wfp_ale_connect_block_controller.exe')
+$acceptanceSource = Join-Path $buildRoot (
+    'crtsys_wfp_ale_connect_block_acceptance.exe')
 $infSource =
     Join-Path $repoRoot (
-      'examples\wfp\ale-connect-block\crtsys_wfp_ale_connect_block.inf')
-foreach ($path in @($driverSource, $appSource, $infSource)) {
+      'examples\wfp\kernel\ale-connect-block\crtsys_wfp_ale_connect_block.inf')
+foreach ($path in @(
+    $driverSource, $controllerSource, $acceptanceSource, $infSource)) {
   if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
     throw "Required WFP runtime artifact was not found: $path"
   }
@@ -82,7 +85,8 @@ foreach ($path in @($driverSource, $appSource, $infSource)) {
 $driver =
     Join-Path $packageRoot.FullName 'crtsys_wfp_ale_connect_block.sys'
 Copy-Item -LiteralPath $driverSource -Destination $driver
-Copy-Item -LiteralPath $appSource -Destination $packageRoot.FullName
+Copy-Item -LiteralPath $controllerSource -Destination $packageRoot.FullName
+Copy-Item -LiteralPath $acceptanceSource -Destination $packageRoot.FullName
 Copy-Item -LiteralPath $infSource -Destination $packageRoot.FullName
 
 $signingRoot = Join-Path $resolvedOutputRoot 'signing'
@@ -101,7 +105,8 @@ Write-Host (
 [pscustomobject]@{
   Root = $packageRoot.FullName
   Driver = $driver
-  Application =
-      Join-Path $packageRoot.FullName (
-        'crtsys_wfp_ale_connect_block_app.exe')
+  Controller = Join-Path $packageRoot.FullName (
+      'crtsys_wfp_ale_connect_block_controller.exe')
+  Acceptance = Join-Path $packageRoot.FullName (
+      'crtsys_wfp_ale_connect_block_acceptance.exe')
 }

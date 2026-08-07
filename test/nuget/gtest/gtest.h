@@ -1,5 +1,10 @@
 #pragma once
 
+// The NuGet consumer uses this deliberately small, kernel-safe test harness.
+// Code shared with the full GoogleTest runner can use this marker to omit
+// optional listener APIs which are not needed by the compile/package contract.
+#define CRTSYS_MINIMAL_GTEST 1
+
 #include <cstring>
 #include <iostream>
 

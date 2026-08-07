@@ -1,0 +1,360 @@
+/**
+ * @file user_task
+ * @brief Lazy move-only coroutine task for user-mode network composition.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/user/task is a user-mode header"
+#endif
+
+#include <coroutine>
+#include <condition_variable>
+#include <exception>
+#include <mutex>
+#include <optional>
+#include <stdexcept>
+#include <utility>
+
+namespace ntl::net::user {
+
+/**
+ * @brief A lazy child operation resumed and owned by its awaiting coroutine.
+ *
+ * Calling a function that returns task does not start it.  The operation
+ * starts when the returned object is co_awaited.  Destroying an unawaited task
+ * destroys its coroutine frame, which makes connection/session ownership
+ * explicit and prevents detached work.
+ */
+template <class T> class task {
+public:
+  struct promise_type;
+  using handle_type = std::coroutine_handle<promise_type>;
+
+  task(const task &) = delete;
+  task &operator=(const task &) = delete;
+
+  task(task &&other) noexcept
+      : handle_(std::exchange(other.handle_, {})) {}
+
+  task &operator=(task &&other) noexcept {
+    if (this != &other) {
+      if (handle_)
+        handle_.destroy();
+      handle_ = std::exchange(other.handle_, {});
+    }
+    return *this;
+  }
+
+  ~task() {
+    if (handle_)
+      handle_.destroy();
+  }
+
+  class awaiter {
+  public:
+    explicit awaiter(handle_type handle) noexcept : handle_(handle) {}
+    awaiter(const awaiter &) = delete;
+    awaiter &operator=(const awaiter &) = delete;
+    awaiter(awaiter &&other) noexcept
+        : handle_(std::exchange(other.handle_, {})) {}
+    ~awaiter() {
+      if (handle_)
+        handle_.destroy();
+    }
+
+    bool await_ready() const noexcept {
+      return !handle_ || handle_.done();
+    }
+
+    std::coroutine_handle<>
+    await_suspend(std::coroutine_handle<> continuation) noexcept {
+      handle_.promise().continuation = continuation;
+      return handle_;
+    }
+
+    T await_resume() {
+      if (!handle_)
+        throw std::logic_error("awaited an empty user task");
+      auto &promise = handle_.promise();
+      if (promise.exception)
+        std::rethrow_exception(promise.exception);
+      if (!promise.value)
+        throw std::logic_error("user task produced no result");
+      return std::move(*promise.value);
+    }
+
+  private:
+    handle_type handle_{};
+  };
+
+  awaiter operator co_await() && noexcept {
+    return awaiter(std::exchange(handle_, {}));
+  }
+
+  struct promise_type {
+    task get_return_object() noexcept {
+      return task(handle_type::from_promise(*this));
+    }
+    std::suspend_always initial_suspend() const noexcept { return {}; }
+
+    struct final_awaiter {
+      bool await_ready() const noexcept { return false; }
+      std::coroutine_handle<>
+      await_suspend(handle_type handle) const noexcept {
+        const auto next = handle.promise().continuation;
+        return next ? next : std::noop_coroutine();
+      }
+      void await_resume() const noexcept {}
+    };
+
+    final_awaiter final_suspend() const noexcept { return {}; }
+
+    template <class U> void return_value(U &&result) {
+      value.emplace(std::forward<U>(result));
+    }
+
+    void unhandled_exception() noexcept {
+      exception = std::current_exception();
+    }
+
+    std::coroutine_handle<> continuation{};
+    std::optional<T> value;
+    std::exception_ptr exception;
+  };
+
+private:
+  explicit task(handle_type handle) noexcept : handle_(handle) {}
+
+  handle_type handle_{};
+};
+
+template <> class task<void> {
+public:
+  struct promise_type;
+  using handle_type = std::coroutine_handle<promise_type>;
+
+  task(const task &) = delete;
+  task &operator=(const task &) = delete;
+
+  task(task &&other) noexcept
+      : handle_(std::exchange(other.handle_, {})) {}
+
+  task &operator=(task &&other) noexcept {
+    if (this != &other) {
+      if (handle_)
+        handle_.destroy();
+      handle_ = std::exchange(other.handle_, {});
+    }
+    return *this;
+  }
+
+  ~task() {
+    if (handle_)
+      handle_.destroy();
+  }
+
+  class awaiter {
+  public:
+    explicit awaiter(handle_type handle) noexcept : handle_(handle) {}
+    awaiter(const awaiter &) = delete;
+    awaiter &operator=(const awaiter &) = delete;
+    awaiter(awaiter &&other) noexcept
+        : handle_(std::exchange(other.handle_, {})) {}
+    ~awaiter() {
+      if (handle_)
+        handle_.destroy();
+    }
+
+    bool await_ready() const noexcept {
+      return !handle_ || handle_.done();
+    }
+
+    std::coroutine_handle<>
+    await_suspend(std::coroutine_handle<> continuation) noexcept {
+      handle_.promise().continuation = continuation;
+      return handle_;
+    }
+
+    void await_resume() {
+      if (!handle_)
+        throw std::logic_error("awaited an empty user task");
+      if (handle_.promise().exception)
+        std::rethrow_exception(handle_.promise().exception);
+    }
+
+  private:
+    handle_type handle_{};
+  };
+
+  awaiter operator co_await() && noexcept {
+    return awaiter(std::exchange(handle_, {}));
+  }
+
+  struct promise_type {
+    task get_return_object() noexcept {
+      return task(handle_type::from_promise(*this));
+    }
+    std::suspend_always initial_suspend() const noexcept { return {}; }
+
+    struct final_awaiter {
+      bool await_ready() const noexcept { return false; }
+      std::coroutine_handle<>
+      await_suspend(handle_type handle) const noexcept {
+        const auto next = handle.promise().continuation;
+        return next ? next : std::noop_coroutine();
+      }
+      void await_resume() const noexcept {}
+    };
+
+    final_awaiter final_suspend() const noexcept { return {}; }
+    void return_void() const noexcept {}
+    void unhandled_exception() noexcept {
+      exception = std::current_exception();
+    }
+
+    std::coroutine_handle<> continuation{};
+    std::exception_ptr exception;
+  };
+
+private:
+  explicit task(handle_type handle) noexcept : handle_(handle) {}
+
+  handle_type handle_{};
+};
+
+namespace detail {
+
+/** Self-destroying root coroutine used only while sync_wait owns its state. */
+struct sync_wait_root {
+  struct promise_type {
+    sync_wait_root get_return_object() const noexcept { return {}; }
+    std::suspend_never initial_suspend() const noexcept { return {}; }
+    std::suspend_never final_suspend() const noexcept { return {}; }
+    void return_void() const noexcept {}
+    [[noreturn]] void unhandled_exception() const noexcept {
+      std::terminate();
+    }
+  };
+};
+
+template <class T> class sync_wait_state {
+public:
+  template <class U> void complete(U &&value) noexcept {
+    {
+      std::lock_guard lock(lock_);
+      try {
+        value_.emplace(std::forward<U>(value));
+      } catch (...) {
+        exception_ = std::current_exception();
+      }
+      completed_ = true;
+    }
+    completed_event_.notify_one();
+  }
+
+  void fail(std::exception_ptr exception) noexcept {
+    {
+      std::lock_guard lock(lock_);
+      exception_ = std::move(exception);
+      completed_ = true;
+    }
+    completed_event_.notify_one();
+  }
+
+  T wait() {
+    std::unique_lock lock(lock_);
+    completed_event_.wait(lock, [this] { return completed_; });
+    if (exception_)
+      std::rethrow_exception(exception_);
+    if (!value_)
+      throw std::logic_error("user task produced no result");
+    return std::move(*value_);
+  }
+
+private:
+  std::mutex lock_;
+  std::condition_variable completed_event_;
+  bool completed_ = false;
+  std::optional<T> value_;
+  std::exception_ptr exception_;
+};
+
+template <> class sync_wait_state<void> {
+public:
+  void complete() noexcept {
+    {
+      std::lock_guard lock(lock_);
+      completed_ = true;
+    }
+    completed_event_.notify_one();
+  }
+
+  void fail(std::exception_ptr exception) noexcept {
+    {
+      std::lock_guard lock(lock_);
+      exception_ = std::move(exception);
+      completed_ = true;
+    }
+    completed_event_.notify_one();
+  }
+
+  void wait() {
+    std::unique_lock lock(lock_);
+    completed_event_.wait(lock, [this] { return completed_; });
+    if (exception_)
+      std::rethrow_exception(exception_);
+  }
+
+private:
+  std::mutex lock_;
+  std::condition_variable completed_event_;
+  bool completed_ = false;
+  std::exception_ptr exception_;
+};
+
+template <class T>
+sync_wait_root run_sync_wait(task<T> operation,
+                             sync_wait_state<T> &state) noexcept {
+  try {
+    state.complete(co_await std::move(operation));
+  } catch (...) {
+    state.fail(std::current_exception());
+  }
+}
+
+inline sync_wait_root run_sync_wait(task<void> operation,
+                                    sync_wait_state<void> &state) noexcept {
+  try {
+    co_await std::move(operation);
+    state.complete();
+  } catch (...) {
+    state.fail(std::current_exception());
+  }
+}
+
+} // namespace detail
+
+/**
+ * @brief Starts one lazy task and blocks the calling thread until completion.
+ *
+ * This is a top-level bridge for console/service entry points. It must not be
+ * called from an IOCP completion callback that the operation itself needs.
+ * Child operations remain owned by the root coroutine until they complete or
+ * abandon their lifetime-safe awaiter during exception unwinding.
+ */
+template <class T> T sync_wait(task<T> operation) {
+  detail::sync_wait_state<T> state;
+  detail::run_sync_wait(std::move(operation), state);
+  return state.wait();
+}
+
+inline void sync_wait(task<void> operation) {
+  detail::sync_wait_state<void> state;
+  detail::run_sync_wait(std::move(operation), state);
+  state.wait();
+}
+
+} // namespace ntl::net::user

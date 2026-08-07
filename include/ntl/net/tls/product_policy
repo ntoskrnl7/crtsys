@@ -90,7 +90,7 @@ public:
       : options_(options) {}
 
   constexpr inspection_plan plan(
-      const tls_inspection_observation &observation,
+      const tls_inspection_observation_view &observation,
       const inspection_capabilities &capabilities) const noexcept {
     if (options_.requirement == inspection_requirement::metadata_only)
       return metadata(tls_inspection_issue::none);
@@ -143,7 +143,7 @@ public:
 
 private:
   static constexpr bool adapter_available(
-      const tls_inspection_observation &observation,
+      const tls_inspection_observation_view &observation,
       const inspection_capabilities &capabilities) noexcept {
     switch (observation.protocol) {
     case application_protocol::http1:

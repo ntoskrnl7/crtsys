@@ -11,6 +11,7 @@
 #endif
 
 #include <ntl/net/tls/stream>
+#include <ntl/net/tls/client_hello_parser>
 
 #include <algorithm>
 #include <cstddef>
@@ -20,18 +21,12 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <utility>
 #include <vector>
 
 namespace ntl::net {
-
-struct tls_client_hello_limits {
-  std::size_t maximum_buffered_ciphertext = 256 * 1024;
-  std::size_t maximum_client_hello = 128 * 1024;
-  std::size_t receive_chunk_size = 4 * 1024;
-  std::size_t maximum_alpn_protocols = 32;
-};
 
 /**
  * @brief Metadata from one complete ClientHello plus every consumed byte.
@@ -42,12 +37,9 @@ struct tls_client_hello_limits {
  */
 class tls_client_hello {
 public:
-  const std::wstring &server_name() const noexcept {
-    return server_name_;
-  }
+  std::wstring_view server_name() const noexcept { return server_name_; }
 
-  const std::vector<std::string> &
-  application_protocols() const noexcept {
+  std::span<const std::string> application_protocols() const noexcept {
     return application_protocols_;
   }
 
@@ -73,7 +65,7 @@ public:
 
 private:
   friend detail::tls_task<tls_client_hello>
-  read_tls_client_hello(async_socket &, tls_client_hello_limits);
+  read_tls_client_hello(async_socket, tls_client_hello_limits);
 
   std::wstring server_name_;
   std::vector<std::string> application_protocols_;
@@ -366,7 +358,7 @@ inline client_hello_parse_result parse_client_hello(
  */
 inline detail::tls_task<tls_client_hello>
 read_tls_client_hello(
-    async_socket &socket, tls_client_hello_limits limits = {}) {
+    async_socket socket, tls_client_hello_limits limits = {}) {
   if (!socket ||
       limits.maximum_buffered_ciphertext == 0 ||
       limits.maximum_client_hello == 0 ||
@@ -415,7 +407,7 @@ read_tls_client_hello(
     const std::size_t old_size = ciphertext.size();
     ciphertext.resize(old_size + growth);
     const std::size_t received =
-        co_await socket.read_some(
+        co_await socket.read_some_borrowed(
             std::span<std::byte>(
                 ciphertext.data() + old_size, growth));
     ciphertext.resize(old_size + received);

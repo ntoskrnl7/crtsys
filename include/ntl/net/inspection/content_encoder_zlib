@@ -4,17 +4,12 @@
  */
 #pragma once
 
-#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
-#error "ntl/net/inspection/content_encoder_zlib is a user-mode header"
-#endif
-
 #include <ntl/net/inspection/content_decoder_zlib>
 #include <ntl/net/inspection/content_encoder>
 
 #include <limits>
 #include <memory>
 #include <span>
-#include <array>
 
 #include <zlib.h>
 
@@ -23,8 +18,10 @@ namespace ntl::net::inspection {
 class zlib_content_encoder {
 public:
   explicit zlib_content_encoder(
-      zlib_stream_format format) noexcept
-      : window_bits_(static_cast<int>(format)) {}
+      zlib_stream_format format,
+      codec_memory_limits memory_limits = {}) noexcept
+      : memory_(memory_limits), scratch_(memory_),
+        window_bits_(static_cast<int>(format)) {}
 
   zlib_content_encoder(const zlib_content_encoder &) = delete;
   zlib_content_encoder &operator=(const zlib_content_encoder &) = delete;
@@ -43,6 +40,8 @@ public:
     if (!initialize())
       return encode_result::malformed(STATUS_INSUFFICIENT_RESOURCES);
 
+    const std::span<std::byte> buffer = scratch_.bytes();
+
     std::size_t offset = 0;
     for (;;) {
       const std::size_t available = (std::min)(
@@ -54,7 +53,6 @@ public:
       const bool finishing = final && offset + available == input.size();
 
       do {
-        std::array<std::byte, 16 * 1024> buffer{};
         const std::size_t remaining = output.maximum_size() - output.size();
         const std::size_t capacity =
             remaining == 0 ? 1 : (std::min)(remaining, buffer.size());
@@ -98,12 +96,31 @@ private:
   bool initialize() noexcept {
     if (initialized_)
       return true;
+    if (!scratch_.ensure(scratch_size))
+      return false;
     stream_ = {};
+    stream_.zalloc = &allocate;
+    stream_.zfree = &release_allocation;
+    stream_.opaque = &memory_;
     const int status = ::deflateInit2(
         &stream_, Z_DEFAULT_COMPRESSION, Z_DEFLATED, window_bits_, 8,
         Z_DEFAULT_STRATEGY);
     initialized_ = status == Z_OK;
+    if (!initialized_)
+      scratch_.reset();
     return initialized_;
+  }
+
+  static voidpf allocate(voidpf opaque, uInt count, uInt size) noexcept {
+    if (!opaque)
+      return nullptr;
+    return static_cast<codec_memory_budget *>(opaque)->allocate_array(
+        static_cast<std::size_t>(count), static_cast<std::size_t>(size));
+  }
+
+  static void release_allocation(voidpf opaque, voidpf pointer) noexcept {
+    if (opaque)
+      static_cast<codec_memory_budget *>(opaque)->release(pointer);
   }
 
   void release() noexcept {
@@ -111,9 +128,13 @@ private:
       (void)::deflateEnd(&stream_);
     stream_ = {};
     initialized_ = false;
+    scratch_.reset();
   }
 
+  codec_memory_budget memory_;
+  borrowed_codec_scratch_buffer scratch_;
   z_stream stream_{};
+  static constexpr std::size_t scratch_size = 16 * 1024;
   int window_bits_ = MAX_WBITS;
   bool initialized_ = false;
   bool ended_ = false;

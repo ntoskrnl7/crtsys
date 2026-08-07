@@ -1,0 +1,1640 @@
+#pragma once
+
+#include <ntddk.h>
+
+#include <array>
+#include <atomic>
+#include <charconv>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <memory>
+#include <new>
+#include <limits>
+#include <optional>
+#include <span>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+#include <ntl/net/http/transform>
+#include <ntl/net/http3/backend>
+#include <ntl/net/http3/framing>
+#include <ntl/net/http3/msquic_backend>
+#include <ntl/net/http3/qpack>
+#include <ntl/net/http3/stream_transform>
+#include <ntl/net/http3/webtransport_session>
+#include <ntl/net/kernel/bounded_wait_set>
+#include <ntl/net/kernel/msquic>
+#include <ntl/net/kernel/schannel>
+#include <ntl/result>
+#include <ntl/status>
+
+namespace ntl::net::kernel {
+
+struct http3_origin_result {
+  ntl::net::http::response_message message;
+  std::string negotiated_protocol;
+  bool peer_validated = false;
+  bool peer_settings_received = false;
+  bool dynamic_qpack = false;
+  bool qpack_decoder_acknowledgement_queued = false;
+};
+
+/**
+ * Why a strict HTTP/3 attempt failed.
+ *
+ * Fallback code must use this stage instead of guessing from NTSTATUS.  A
+ * certificate rejection and a disconnected UDP path can otherwise surface
+ * through the same provider shutdown status.
+ */
+enum class http3_origin_failure_kind : std::uint8_t {
+  none,
+  invalid_state,
+  request_validation,
+  resource_exhaustion,
+  cancellation,
+  transport_connection,
+  transport_timeout,
+  peer_authentication,
+  application_protocol,
+  http_protocol,
+  internal,
+};
+
+inline constexpr bool http3_origin_quic_status_equals(
+    NTSTATUS value, QUIC_STATUS expected) noexcept {
+  return static_cast<std::uint32_t>(value) ==
+         static_cast<std::uint32_t>(expected);
+}
+
+inline constexpr bool http3_origin_is_quic_tls_alert(
+    NTSTATUS value) noexcept {
+  constexpr std::uint32_t alert_mask = 0xffffff00u;
+  const std::uint32_t prefix =
+      static_cast<std::uint32_t>(QUIC_STATUS_TLS_ALERT(0)) & alert_mask;
+  return (static_cast<std::uint32_t>(value) & alert_mask) == prefix;
+}
+
+/**
+ * Classifies only exact MsQuic/NT transport evidence as retryable. Unknown
+ * aborts remain `internal`, which is deliberately not a fallback authority.
+ */
+inline constexpr http3_origin_failure_kind
+classify_http3_origin_connection_status(NTSTATUS value) noexcept {
+  if (value == STATUS_IO_TIMEOUT ||
+      http3_origin_quic_status_equals(
+          value, QUIC_STATUS_CONNECTION_TIMEOUT) ||
+      http3_origin_quic_status_equals(value, QUIC_STATUS_CONNECTION_IDLE))
+    return http3_origin_failure_kind::transport_timeout;
+  if (http3_origin_quic_status_equals(value, QUIC_STATUS_UNREACHABLE) ||
+      http3_origin_quic_status_equals(value, QUIC_STATUS_CONNECTION_REFUSED))
+    return http3_origin_failure_kind::transport_connection;
+  if (http3_origin_quic_status_equals(value, QUIC_STATUS_HANDSHAKE_FAILURE) ||
+      http3_origin_is_quic_tls_alert(value) ||
+      http3_origin_quic_status_equals(value, QUIC_STATUS_CERT_EXPIRED) ||
+      http3_origin_quic_status_equals(
+          value, QUIC_STATUS_CERT_UNTRUSTED_ROOT) ||
+      http3_origin_quic_status_equals(value, QUIC_STATUS_CERT_NO_CERT))
+    return http3_origin_failure_kind::peer_authentication;
+  if (http3_origin_quic_status_equals(value, QUIC_STATUS_ALPN_NEG_FAILURE) ||
+      http3_origin_quic_status_equals(value, QUIC_STATUS_ALPN_IN_USE) ||
+      http3_origin_quic_status_equals(value, QUIC_STATUS_VER_NEG_ERROR))
+    return http3_origin_failure_kind::application_protocol;
+  if (value == STATUS_INSUFFICIENT_RESOURCES || value == STATUS_NO_MEMORY ||
+      value == STATUS_QUOTA_EXCEEDED ||
+      http3_origin_quic_status_equals(value, QUIC_STATUS_OUT_OF_MEMORY))
+    return http3_origin_failure_kind::resource_exhaustion;
+  if (value == STATUS_CANCELLED ||
+      http3_origin_quic_status_equals(value, QUIC_STATUS_ABORTED) ||
+      http3_origin_quic_status_equals(value, QUIC_STATUS_USER_CANCELED))
+    return http3_origin_failure_kind::cancellation;
+  if (value == STATUS_INVALID_PARAMETER ||
+      value == STATUS_INVALID_DEVICE_STATE || value == STATUS_NOT_SUPPORTED ||
+      http3_origin_quic_status_equals(value, QUIC_STATUS_INVALID_PARAMETER) ||
+      http3_origin_quic_status_equals(value, QUIC_STATUS_INVALID_STATE) ||
+      http3_origin_quic_status_equals(value, QUIC_STATUS_NOT_SUPPORTED))
+    return http3_origin_failure_kind::invalid_state;
+  return http3_origin_failure_kind::internal;
+}
+
+struct http3_origin_failure {
+  http3_origin_failure_kind kind = http3_origin_failure_kind::none;
+  ntl::status status = ntl::status::ok();
+  bool request_committed = false;
+  bool request_method_safe = false;
+
+  constexpr bool route_retry_permitted() const noexcept {
+    return !request_committed &&
+           (kind == http3_origin_failure_kind::transport_connection ||
+            kind == http3_origin_failure_kind::transport_timeout);
+  }
+
+  /**
+   * Protocol fallback is more restrictive than trying the next resolved
+   * address. Retrying another route is safe before commit for every method;
+   * changing from HTTP/3 to TLS/TCP remains limited to idempotent requests.
+   */
+  constexpr bool transport_fallback_permitted() const noexcept {
+    return request_method_safe && route_retry_permitted();
+  }
+};
+
+class kernel_http3_origin_exchange;
+class kernel_http_origin_fallback_exchange;
+
+/** Opaque proof produced only by a completed strict HTTP/3 exchange. */
+class http3_origin_attempt {
+public:
+  http3_origin_attempt(const http3_origin_attempt &) = delete;
+  http3_origin_attempt &operator=(const http3_origin_attempt &) = delete;
+  http3_origin_attempt(http3_origin_attempt &&) noexcept = default;
+  http3_origin_attempt &operator=(http3_origin_attempt &&) noexcept = default;
+
+  const ntl::result<http3_origin_result> &outcome() const noexcept {
+    return outcome_;
+  }
+  ntl::result<http3_origin_result> &&take_outcome() noexcept {
+    return std::move(outcome_);
+  }
+  const http3_origin_failure &failure() const noexcept { return failure_; }
+  bool transport_fallback_permitted() const noexcept {
+    return failure_.transport_fallback_permitted() && retry_request_.has_value();
+  }
+  bool route_retry_permitted() const noexcept {
+    return failure_.route_retry_permitted() && retry_request_.has_value();
+  }
+  std::optional<ntl::net::http::request_message>
+  take_uncommitted_request_for_route_retry() noexcept {
+    if (!route_retry_permitted())
+      return std::nullopt;
+    return std::move(retry_request_);
+  }
+
+private:
+  friend class kernel_http3_origin_exchange;
+  friend class kernel_http_origin_fallback_exchange;
+
+  http3_origin_attempt(
+      ntl::result<http3_origin_result> &&outcome,
+      http3_origin_failure failure,
+      std::optional<ntl::net::http::request_message> &&retry) noexcept
+      : outcome_(std::move(outcome)), failure_(failure),
+        retry_request_(std::move(retry)) {}
+
+  std::optional<ntl::net::http::request_message>
+  take_retry_request() noexcept {
+    return std::move(retry_request_);
+  }
+
+  ntl::result<http3_origin_result> outcome_;
+  http3_origin_failure failure_{};
+  // Present only when transport_fallback_permitted() is true.  Moving the
+  // original request avoids a second multi-megabyte body copy.
+  std::optional<ntl::net::http::request_message> retry_request_;
+};
+
+struct http3_origin_exchange_limits {
+  std::size_t maximum_request_wire = 4 * 1024 * 1024;
+  std::size_t maximum_response_wire = 4 * 1024 * 1024;
+  std::size_t maximum_qpack_wire = 256 * 1024;
+  std::size_t maximum_control_wire = 64 * 1024;
+  std::size_t maximum_header_wire = 64 * 1024;
+  std::size_t maximum_reserved_bytes = 32 * 1024 * 1024;
+  unsigned maximum_qpack_resume_attempts = 32;
+  std::chrono::milliseconds connect_timeout = std::chrono::seconds(10);
+  std::chrono::milliseconds response_timeout = std::chrono::seconds(15);
+  std::chrono::milliseconds qpack_progress_timeout = std::chrono::seconds(2);
+  std::chrono::milliseconds qpack_ack_flush_delay =
+      std::chrono::milliseconds(10);
+
+  ntl::result<std::size_t> allocation_reservation() const noexcept {
+    constexpr auto maximum_timeout_milliseconds =
+        (std::numeric_limits<LONGLONG>::max)() / 10'000;
+    if (maximum_request_wire == 0 || maximum_response_wire == 0 ||
+        maximum_qpack_wire == 0 || maximum_control_wire == 0 ||
+        maximum_header_wire == 0 || maximum_reserved_bytes == 0 ||
+        maximum_qpack_resume_attempts == 0 || connect_timeout.count() <= 0 ||
+        response_timeout.count() <= 0 ||
+        qpack_progress_timeout.count() <= 0 ||
+        qpack_ack_flush_delay.count() < 0 ||
+        connect_timeout.count() > maximum_timeout_milliseconds ||
+        response_timeout.count() > maximum_timeout_milliseconds ||
+        qpack_progress_timeout.count() > maximum_timeout_milliseconds ||
+        qpack_ack_flush_delay.count() > maximum_timeout_milliseconds)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+
+    std::size_t total = 0;
+    const auto add = [&total](std::size_t value,
+                              std::size_t multiplier) noexcept {
+      if (value > (std::numeric_limits<std::size_t>::max)() / multiplier)
+        return false;
+      const std::size_t product = value * multiplier;
+      if (product > (std::numeric_limits<std::size_t>::max)() - total)
+        return false;
+      total += product;
+      return true;
+    };
+    // Charge a conservative peak rather than only vector.size(): request
+    // encode/copy, response wire/snapshot/inspector/body, QPACK snapshots and
+    // control/header staging can coexist while a blocked field section is
+    // resumed. A service-wide budget can reserve this amount before any
+    // connection or large vector is created.
+    if (!add(maximum_request_wire, 2) ||
+        !add(maximum_response_wire, 4) ||
+        !add(maximum_qpack_wire, 3) ||
+        !add(maximum_control_wire, 2) ||
+        !add(maximum_header_wire, 4) || total > maximum_reserved_bytes)
+      return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+    return ntl::ok(total);
+  }
+};
+
+class http3_origin_allocation_budget {
+public:
+  explicit http3_origin_allocation_budget(std::size_t maximum) noexcept
+      : maximum_(maximum) {}
+
+  bool try_acquire(std::size_t bytes) noexcept {
+    if (bytes == 0 || bytes > maximum_)
+      return false;
+    std::size_t current = current_.load(std::memory_order_acquire);
+    while (current <= maximum_ - bytes) {
+      if (current_.compare_exchange_weak(
+              current, current + bytes, std::memory_order_acq_rel,
+              std::memory_order_acquire)) {
+        std::size_t peak = peak_.load(std::memory_order_relaxed);
+        while (peak < current + bytes &&
+               !peak_.compare_exchange_weak(
+                   peak, current + bytes, std::memory_order_relaxed)) {
+        }
+        return true;
+      }
+    }
+    return false;
+  }
+
+  void release(std::size_t bytes) noexcept {
+    std::size_t current = current_.load(std::memory_order_acquire);
+    for (;;) {
+      if (bytes == 0 || current < bytes) {
+        NT_ASSERT(false);
+        return;
+      }
+      if (current_.compare_exchange_weak(
+              current, current - bytes, std::memory_order_acq_rel,
+              std::memory_order_acquire))
+        return;
+    }
+  }
+
+  std::size_t current() const noexcept {
+    return current_.load(std::memory_order_acquire);
+  }
+  std::size_t peak() const noexcept {
+    return peak_.load(std::memory_order_acquire);
+  }
+  std::size_t maximum() const noexcept { return maximum_; }
+
+private:
+  const std::size_t maximum_ = 0;
+  std::atomic<std::size_t> current_{0};
+  std::atomic<std::size_t> peak_{0};
+};
+
+struct http3_origin_exchange_options {
+  http3_origin_exchange_limits limits{};
+  // An owning route value. The logical server_name remains the SNI and
+  // certificate identity even when name resolution is performed by WSK.
+  std::optional<QUIC_ADDR> resolved_remote_address;
+  http3_origin_allocation_budget *borrowed_allocation_budget = nullptr;
+  // The owner keeps both notification events alive until run() returns.
+  // Request cancellation and service shutdown remain distinct authorities,
+  // and every blocking wait observes both without polling.
+  PKEVENT borrowed_request_cancellation_event = nullptr;
+  PKEVENT borrowed_service_cancellation_event = nullptr;
+};
+
+namespace http3_origin_detail {
+
+class passive_fast_mutex_guard {
+public:
+  explicit passive_fast_mutex_guard(FAST_MUTEX &value) noexcept
+      : value_(&value) {
+    NT_ASSERT(KeGetCurrentIrql() == PASSIVE_LEVEL);
+    KeEnterCriticalRegion();
+    ExAcquireFastMutexUnsafe(value_);
+  }
+  passive_fast_mutex_guard(const passive_fast_mutex_guard &) = delete;
+  passive_fast_mutex_guard &
+  operator=(const passive_fast_mutex_guard &) = delete;
+  ~passive_fast_mutex_guard() {
+    ExReleaseFastMutexUnsafe(value_);
+    KeLeaveCriticalRegion();
+  }
+
+private:
+  FAST_MUTEX *value_ = nullptr;
+};
+
+inline LARGE_INTEGER relative_timeout(
+    std::chrono::milliseconds value) noexcept {
+  LARGE_INTEGER result{};
+  result.QuadPart = -static_cast<LONGLONG>(value.count()) * 10'000;
+  return result;
+}
+
+template <class ByteContainer>
+inline ntl::status append_scatter(
+    ntl::net::scatter_view source, ByteContainer &destination,
+    std::size_t maximum) noexcept {
+  if (source.size() == 0)
+    return ntl::status::ok();
+  if (!source || destination.size() > maximum ||
+      source.size() > maximum - destination.size())
+    return source ? ntl::status{STATUS_BUFFER_OVERFLOW}
+                  : ntl::status{STATUS_INVALID_PARAMETER};
+  const std::size_t offset = destination.size();
+  try {
+    destination.resize(offset + source.size());
+  } catch (const std::bad_alloc &) {
+    return STATUS_INSUFFICIENT_RESOURCES;
+  } catch (...) {
+    return STATUS_UNHANDLED_EXCEPTION;
+  }
+  const ntl::status copied = source.copy_to(
+      std::span<std::byte>(destination.data(), destination.size())
+          .subspan(offset));
+  if (!copied.is_ok())
+    destination.resize(offset);
+  return copied;
+}
+
+inline ntl::status append_http3_frame(
+    std::vector<std::byte> &wire, ntl::net::http3::frame_type type,
+    std::span<const std::byte> payload,
+    std::size_t maximum) noexcept {
+  try {
+    if (wire.size() > maximum || payload.size() > maximum - wire.size())
+      return STATUS_BUFFER_OVERFLOW;
+    std::vector<std::byte> header;
+    header.reserve(16);
+    ntl::status status = ntl::net::http3::append_quic_varint(
+        header, static_cast<std::uint64_t>(type));
+    if (status.is_ok())
+      status = ntl::net::http3::append_quic_varint(header, payload.size());
+    if (!status.is_ok())
+      return status;
+    if (header.size() > maximum - wire.size() ||
+        payload.size() > maximum - wire.size() - header.size())
+      return STATUS_BUFFER_OVERFLOW;
+    wire.insert(wire.end(), header.begin(), header.end());
+    wire.insert(wire.end(), payload.begin(), payload.end());
+    return ntl::status::ok();
+  } catch (const std::bad_alloc &) {
+    return STATUS_INSUFFICIENT_RESOURCES;
+  } catch (...) {
+    return STATUS_UNHANDLED_EXCEPTION;
+  }
+}
+
+class allocation_budget_lease {
+public:
+  allocation_budget_lease(http3_origin_allocation_budget *budget,
+                          std::size_t bytes) noexcept
+      : budget_(budget), bytes_(bytes), acquired_(!budget) {
+    if (budget_)
+      acquired_ = budget_->try_acquire(bytes_);
+  }
+  allocation_budget_lease(const allocation_budget_lease &) = delete;
+  allocation_budget_lease &
+  operator=(const allocation_budget_lease &) = delete;
+  ~allocation_budget_lease() {
+    if (budget_ && acquired_)
+      budget_->release(bytes_);
+  }
+
+  explicit operator bool() const noexcept { return acquired_; }
+
+private:
+  http3_origin_allocation_budget *budget_ = nullptr;
+  std::size_t bytes_ = 0;
+  bool acquired_ = false;
+};
+
+class response_sink final : public ntl::net::http3::inspection_sink {
+public:
+  response_sink(std::size_t maximum_body_size,
+                std::size_t maximum_header_size) noexcept
+      : maximum_body_size_(maximum_body_size),
+        maximum_header_size_(maximum_header_size) {}
+
+  ntl::status on_headers(
+      std::uint64_t,
+      std::span<const ntl::net::http3::header_field> fields) noexcept override {
+    try {
+      if (headers_seen_)
+        return STATUS_NOT_SUPPORTED;
+      headers_seen_ = true;
+      bool status_seen = false;
+      for (const auto &field : fields) {
+        if (field.name == ":status") {
+          if (status_seen || field.value.size() != 3)
+            return STATUS_DATA_ERROR;
+          unsigned value = 0;
+          for (const char digit : field.value) {
+            if (digit < '0' || digit > '9')
+              return STATUS_DATA_ERROR;
+            value = value * 10 + static_cast<unsigned>(digit - '0');
+          }
+          message_.status = value;
+          status_seen = true;
+          continue;
+        }
+        if (field.name.empty() || field.name.front() == ':')
+          return STATUS_DATA_ERROR;
+        for (const unsigned char character : field.name) {
+          if (character >= 'A' && character <= 'Z')
+            return STATUS_DATA_ERROR;
+        }
+        message_.headers.append(field.name, field.value, field.never_index);
+      }
+      if (message_.status < 100 || message_.status > 599)
+        return STATUS_DATA_ERROR;
+      return status_seen ? ntl::status::ok()
+                         : ntl::status{STATUS_DATA_ERROR};
+    } catch (const std::invalid_argument &) {
+      return STATUS_DATA_ERROR;
+    } catch (const std::bad_alloc &) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    } catch (...) {
+      return STATUS_UNHANDLED_EXCEPTION;
+    }
+  }
+
+  ntl::status on_data(std::uint64_t,
+                      ntl::net::scatter_view data) noexcept override {
+    return append_scatter(data, message_.body, maximum_body_size_);
+  }
+
+  ntl::status on_stream_end(std::uint64_t) noexcept override {
+    complete_ = true;
+    return headers_seen_ ? ntl::status::ok()
+                         : ntl::status{STATUS_DATA_ERROR};
+  }
+
+  bool complete() const noexcept { return complete_; }
+  ntl::status validate(
+      const ntl::net::http::request_message &request) const noexcept {
+    if (message_.status < 200)
+      return STATUS_DATA_ERROR;
+    ntl::net::http::transform_limits limits{};
+    limits.maximum_header_bytes = maximum_header_size_;
+    limits.maximum_encoded_body_bytes = maximum_body_size_;
+    limits.maximum_decoded_body_bytes = maximum_body_size_;
+    const ntl::status headers = message_.headers.validate(
+        ntl::net::http::protocol::http3, limits);
+    if (!headers.is_ok())
+      return headers;
+    if (ntl::net::http::response_body_forbidden(request, message_))
+      return message_.body.empty() ? ntl::status::ok()
+                                   : ntl::status{STATUS_DATA_ERROR};
+    const auto declared = message_.headers.first("content-length");
+    if (!declared)
+      return ntl::status::ok();
+    std::size_t length = 0;
+    const auto parsed = std::from_chars(
+        declared->data(), declared->data() + declared->size(), length);
+    return parsed.ec == std::errc{} &&
+                   parsed.ptr == declared->data() + declared->size() &&
+                   length == message_.body.size()
+               ? ntl::status::ok()
+               : ntl::status{STATUS_DATA_ERROR};
+  }
+  ntl::net::http::response_message take() noexcept {
+    message_.wire_protocol = ntl::net::http::protocol::http3;
+    return std::move(message_);
+  }
+
+private:
+  std::size_t maximum_body_size_ = 0;
+  std::size_t maximum_header_size_ = 0;
+  ntl::net::http::response_message message_{};
+  bool headers_seen_ = false;
+  bool complete_ = false;
+};
+
+} // namespace http3_origin_detail
+
+static_assert(std::is_nothrow_move_constructible_v<
+                  ntl::net::http::request_message>,
+              "origin exchange construction requires a no-throw request move");
+static_assert(std::is_nothrow_move_constructible_v<std::string>,
+              "origin exchange construction requires a no-throw host move");
+static_assert(std::is_nothrow_copy_constructible_v<
+                  http3_origin_exchange_options>,
+              "origin exchange options must remain allocation-free");
+
+/**
+ * One bounded, peer-validating HTTP/3 origin exchange.
+ *
+ * The object is created and run by a PASSIVE_LEVEL work item. MsQuic callbacks
+ * only copy bounded wire bytes into pre-reserved nonpaged storage and signal
+ * events; QPACK and HTTP semantics are decoded by run() after the callback
+ * returns. This also avoids waiting recursively inside an MsQuic callback.
+ * The connection context, certificate policy, request, and server name are
+ * retained by the exchange. Allocation-budget and cancellation-event pointers
+ * in the explicitly borrowed options remain callback-scoped service inputs.
+ */
+class kernel_http3_origin_exchange final
+    : public ntl::net::quic::backend_sink,
+      public std::enable_shared_from_this<kernel_http3_origin_exchange> {
+public:
+  static ntl::result<std::shared_ptr<kernel_http3_origin_exchange>>
+  try_create(
+      ntl::net::http3::msquic_backend::connection_context configured,
+      std::string_view server_name, std::uint16_t port,
+      ntl::net::http::request_message &&request,
+      std::shared_ptr<
+          ntl::net::kernel::schannel_peer_certificate_policy> peer_policy,
+      http3_origin_exchange_options options = {}) noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+    if (!configured || server_name.empty() || port == 0)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    const auto reservation = options.limits.allocation_reservation();
+    if (!reservation)
+      return ntl::unexpected(reservation.status());
+    if (server_name.size() > options.limits.maximum_header_wire)
+      return ntl::unexpected(STATUS_INVALID_ADDRESS);
+    for (const unsigned char character : server_name) {
+      if (character == 0 || character > 0x7f)
+        return ntl::unexpected(STATUS_INVALID_ADDRESS);
+    }
+    try {
+      std::string owned_server_name(server_name);
+      auto result = std::shared_ptr<kernel_http3_origin_exchange>(
+          new (std::nothrow) kernel_http3_origin_exchange(
+              std::move(configured),
+              std::move(owned_server_name), port, std::move(request),
+              std::move(peer_policy), options));
+      if (!result)
+        return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+      return ntl::ok(std::move(result));
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+private:
+  kernel_http3_origin_exchange(
+      ntl::net::http3::msquic_backend::connection_context configured,
+      std::string &&server_name, std::uint16_t port,
+      ntl::net::http::request_message &&request,
+      std::shared_ptr<
+          ntl::net::kernel::schannel_peer_certificate_policy> peer_policy,
+      http3_origin_exchange_options options = {}) noexcept
+      : configured_(std::move(configured)), options_(options),
+        server_name_(std::move(server_name)), port_(port),
+        request_(std::move(request)), peer_policy_(std::move(peer_policy)),
+        response_sink_(options_.limits.maximum_response_wire,
+                       options_.limits.maximum_header_wire) {
+    ExInitializeFastMutex(&receive_lock_);
+    KeInitializeEvent(&ready_event_, NotificationEvent, FALSE);
+    KeInitializeEvent(&settings_event_, NotificationEvent, FALSE);
+    KeInitializeEvent(&response_event_, NotificationEvent, FALSE);
+    KeInitializeEvent(&qpack_event_, NotificationEvent, FALSE);
+    KeInitializeEvent(&cancellation_event_, NotificationEvent, FALSE);
+  }
+
+public:
+  kernel_http3_origin_exchange(const kernel_http3_origin_exchange &) = delete;
+  kernel_http3_origin_exchange &
+  operator=(const kernel_http3_origin_exchange &) = delete;
+
+  void cancel() noexcept {
+    KeSetEvent(&cancellation_event_, IO_NO_INCREMENT, FALSE);
+  }
+
+  /**
+   * Runs the strict HTTP/3 attempt and retains an uncommitted request only
+   * when a TLS/TCP retry is provably allowed.
+   */
+  http3_origin_attempt run_classified() noexcept {
+    auto outcome = run();
+    const http3_origin_failure failure{
+        .kind = failure_kind_.load(std::memory_order_acquire),
+        .status = ntl::status{
+            last_failure_status_.load(std::memory_order_acquire)},
+        .request_committed =
+            request_committed_.load(std::memory_order_acquire),
+        .request_method_safe = safe_method(request_.method)};
+    std::optional<ntl::net::http::request_message> retry;
+    if (!outcome && failure.route_retry_permitted())
+      retry.emplace(std::move(request_));
+    return http3_origin_attempt(
+        std::move(outcome), failure, std::move(retry));
+  }
+
+  ntl::result<http3_origin_result> run() noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL || !configured_ ||
+        server_name_.empty() || port_ == 0 ||
+        run_started_.exchange(true, std::memory_order_acq_rel))
+      return fail_without_connection(
+          STATUS_INVALID_DEVICE_STATE,
+          http3_origin_failure_kind::invalid_state);
+
+    const auto reservation = options_.limits.allocation_reservation();
+    if (!reservation)
+      return fail_without_connection(
+          reservation.status(),
+          http3_origin_failure_kind::request_validation);
+    http3_origin_detail::allocation_budget_lease lease(
+        options_.borrowed_allocation_budget, *reservation);
+    if (!lease)
+      return fail_without_connection(
+          STATUS_QUOTA_EXCEEDED,
+          http3_origin_failure_kind::resource_exhaustion);
+    if (cancellation_requested())
+      return fail_without_connection(
+          STATUS_CANCELLED, http3_origin_failure_kind::cancellation);
+
+    try {
+      const ntl::status prepared = prepare_exchange();
+      if (!prepared.is_ok())
+        return fail_without_connection(
+            prepared, classify_local_failure(prepared));
+      auto connected = ntl::net::http3::msquic_backend::connection::
+          try_connect(
+          configured_,
+          {.server_name = std::string(server_name_),
+           .port = port_,
+           .family = QUIC_ADDRESS_FAMILY_UNSPEC,
+           .remote_address = options_.resolved_remote_address},
+          shared_from_this(),
+          {.maximum_streams = 16,
+           .maximum_receive_indication = 128 * 1024,
+           .maximum_send_size = options_.limits.maximum_request_wire,
+           .maximum_prefix_bytes = 8,
+           .shutdown_timeout = std::chrono::seconds(10)});
+      if (!connected)
+        return fail_without_connection(
+            connected.status(),
+            classify_connect_start_failure(connected.status()));
+      connection_ = std::move(*connected);
+
+      NTSTATUS waited = wait_for_event_or_cancel(
+          ready_event_, options_.limits.connect_timeout);
+      if (!NT_SUCCESS(waited))
+        return finish_with_error(
+            waited, classify_http3_origin_connection_status(waited));
+      const NTSTATUS handshake =
+          handshake_status_.load(std::memory_order_acquire);
+      if (!NT_SUCCESS(handshake) ||
+          !alpn_validated_.load(std::memory_order_acquire) ||
+          !peer_validated_.load(std::memory_order_acquire))
+        return finish_with_error(
+            NT_SUCCESS(handshake) ? STATUS_ACCESS_DENIED : handshake,
+            failure_kind_.load(std::memory_order_acquire) ==
+                    http3_origin_failure_kind::none
+                ? http3_origin_failure_kind::peer_authentication
+                : failure_kind_.load(std::memory_order_acquire));
+      if (cancellation_requested())
+        return finish_with_error(
+            STATUS_CANCELLED, http3_origin_failure_kind::cancellation);
+
+      ntl::status status = connection_->prepare_qpack_decoder_stream();
+      if (status.is_ok())
+        status = send_settings();
+      if (!status.is_ok())
+        return finish_with_error(
+            status, status == STATUS_CANCELLED
+                        ? http3_origin_failure_kind::cancellation
+                        : http3_origin_failure_kind::http_protocol);
+      status = send_request();
+      if (!status.is_ok())
+        return finish_with_error(
+            status, status == STATUS_CANCELLED
+                        ? http3_origin_failure_kind::cancellation
+                        : http3_origin_failure_kind::request_validation);
+
+      waited = wait_for_event_or_cancel(
+          response_event_, options_.limits.response_timeout);
+      if (!NT_SUCCESS(waited))
+        return finish_with_error(
+            waited, classify_http3_origin_connection_status(waited));
+      const NTSTATUS response_status =
+          response_status_.load(std::memory_order_acquire);
+      if (!NT_SUCCESS(response_status) ||
+          !response_final_.load(std::memory_order_acquire))
+        {
+          const NTSTATUS failure =
+              NT_SUCCESS(response_status)
+                  ? close_status_.load(std::memory_order_acquire)
+                  : response_status;
+          return finish_with_error(
+              failure, classify_http3_origin_connection_status(failure));
+        }
+
+      if (!peer_settings_received_.load(std::memory_order_acquire)) {
+        waited = wait_for_event_or_cancel(
+            settings_event_, options_.limits.connect_timeout);
+        if (!NT_SUCCESS(waited))
+          return finish_with_error(
+              waited, waited == STATUS_CANCELLED
+                          ? http3_origin_failure_kind::cancellation
+                          : http3_origin_failure_kind::http_protocol);
+      }
+      const NTSTATUS settings_status =
+          peer_settings_status_.load(std::memory_order_acquire);
+      if (!NT_SUCCESS(settings_status) ||
+          !peer_settings_received_.load(std::memory_order_acquire))
+        return finish_with_error(
+            NT_SUCCESS(settings_status)
+                ? ntl::status{STATUS_PROTOCOL_NOT_SUPPORTED}
+                : ntl::status{settings_status},
+            http3_origin_failure_kind::http_protocol);
+
+      status = decode_response();
+      if (!status.is_ok())
+        return finish_with_error(
+            status, status == STATUS_CANCELLED
+                        ? http3_origin_failure_kind::cancellation
+                        : http3_origin_failure_kind::http_protocol);
+      status = flush_qpack_acknowledgement();
+      if (!status.is_ok())
+        return finish_with_error(
+            status, status == STATUS_CANCELLED
+                        ? http3_origin_failure_kind::cancellation
+                        : http3_origin_failure_kind::http_protocol);
+      const NTSTATUS final_settings_status =
+          peer_settings_status_.load(std::memory_order_acquire);
+      if (!NT_SUCCESS(final_settings_status) ||
+          !peer_settings_received_.load(std::memory_order_acquire))
+        return finish_with_error(
+            NT_SUCCESS(final_settings_status)
+                ? ntl::status{STATUS_PROTOCOL_NOT_SUPPORTED}
+                : ntl::status{final_settings_status},
+            http3_origin_failure_kind::http_protocol);
+      auto message = response_sink_.take();
+      stop_and_drain();
+      clear_failure();
+      return ntl::ok(http3_origin_result{
+          .message = std::move(message),
+          .negotiated_protocol = "h3",
+          .peer_validated = peer_validated_.load(std::memory_order_acquire),
+          .peer_settings_received =
+              peer_settings_received_.load(std::memory_order_acquire),
+          .dynamic_qpack = dynamic_qpack_,
+          .qpack_decoder_acknowledgement_queued =
+              qpack_acknowledgement_queued_});
+    } catch (const std::bad_alloc &) {
+      stop_and_drain();
+      return fail_without_connection(
+          STATUS_INSUFFICIENT_RESOURCES,
+          http3_origin_failure_kind::resource_exhaustion);
+    } catch (...) {
+      stop_and_drain();
+      return fail_without_connection(
+          STATUS_UNHANDLED_EXCEPTION,
+          http3_origin_failure_kind::internal);
+    }
+  }
+
+  ntl::status on_connected(std::string_view alpn) noexcept override {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL) {
+      fail_handshake(STATUS_INVALID_DEVICE_STATE,
+                     http3_origin_failure_kind::internal);
+      return STATUS_INVALID_DEVICE_STATE;
+    }
+    const bool valid = alpn == "h3";
+    if (!valid) {
+      fail_handshake(STATUS_PROTOCOL_NOT_SUPPORTED,
+                     http3_origin_failure_kind::application_protocol);
+      return STATUS_PROTOCOL_NOT_SUPPORTED;
+    }
+    alpn_validated_.store(true, std::memory_order_release);
+    complete_handshake_if_ready();
+    return ntl::status::ok();
+  }
+
+  ntl::status on_peer_certificate(
+      const ntl::net::quic::peer_certificate_view &certificate) noexcept
+      override {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL ||
+        !certificate.native_validation_succeeded()) {
+      fail_handshake(STATUS_ACCESS_DENIED,
+                     http3_origin_failure_kind::peer_authentication);
+      return STATUS_ACCESS_DENIED;
+    }
+    ntl::status verified = ntl::status::ok();
+    if (peer_policy_) {
+      if (!certificate.native_chain) {
+        fail_handshake(STATUS_ACCESS_DENIED,
+                       http3_origin_failure_kind::peer_authentication);
+        return STATUS_ACCESS_DENIED;
+      }
+      ntl::net::kernel::schannel_limits limits{};
+      limits.maximum_peer_certificate_chain = 16 * 1024;
+      limits.maximum_peer_certificates = 8;
+      auto chain = ntl::net::kernel::schannel_peer_certificate_chain::
+          try_copy_native_schannel_chain(certificate.native_chain, limits);
+      if (!chain) {
+        fail_handshake(chain.status(),
+                       http3_origin_failure_kind::peer_authentication);
+        return chain.status();
+      }
+      verified = peer_policy_->verify(*chain, wide_server_name_);
+    }
+    if (!verified.is_ok()) {
+      fail_handshake(verified,
+                     http3_origin_failure_kind::peer_authentication);
+      return verified;
+    }
+    peer_validated_.store(true, std::memory_order_release);
+    complete_handshake_if_ready();
+    return verified;
+  }
+
+  ntl::status on_request_stream(std::uint64_t stream_id,
+                                ntl::net::scatter_view bytes,
+                                bool final) noexcept override {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return STATUS_INVALID_DEVICE_STATE;
+    http3_origin_detail::passive_fast_mutex_guard guard(receive_lock_);
+    ntl::status status = ntl::status::ok();
+    const std::uint64_t expected =
+        expected_response_stream_id_.load(std::memory_order_acquire);
+    if (expected == invalid_stream_id || expected != stream_id) {
+      status = STATUS_INVALID_PARAMETER;
+    } else {
+      status = http3_origin_detail::append_scatter(
+          bytes, response_wire_, options_.limits.maximum_response_wire);
+      if (status.is_ok() && final) {
+        response_final_.store(true, std::memory_order_release);
+        response_status_.store(STATUS_SUCCESS, std::memory_order_release);
+      }
+    }
+    if (!status.is_ok())
+      response_status_.store(
+          static_cast<NTSTATUS>(status), std::memory_order_release);
+    if (!status.is_ok() || final)
+      KeSetEvent(&response_event_, IO_NO_INCREMENT, FALSE);
+    return status;
+  }
+
+  ntl::status on_qpack_encoder_stream(
+      ntl::net::scatter_view bytes) noexcept override {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return STATUS_INVALID_DEVICE_STATE;
+    http3_origin_detail::passive_fast_mutex_guard guard(receive_lock_);
+    const ntl::status status = http3_origin_detail::append_scatter(
+        bytes, qpack_encoder_wire_, options_.limits.maximum_qpack_wire);
+    if (status.is_ok()) {
+      qpack_sequence_.fetch_add(1, std::memory_order_release);
+      KeSetEvent(&qpack_event_, IO_NO_INCREMENT, FALSE);
+    }
+    return status;
+  }
+
+  ntl::status on_peer_unidirectional_stream(
+      std::uint64_t stream_id, ntl::net::scatter_view bytes,
+      bool final) noexcept override {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+      return STATUS_INVALID_DEVICE_STATE;
+    if (bytes.size() > options_.limits.maximum_control_wire ||
+        (bytes.size() != 0 && !bytes))
+      return bytes.size() > options_.limits.maximum_control_wire
+                 ? ntl::status{STATUS_BUFFER_OVERFLOW}
+                 : ntl::status{STATUS_INVALID_PARAMETER};
+    http3_origin_detail::passive_fast_mutex_guard guard(receive_lock_);
+    if (is_ignored_unidirectional_stream(stream_id))
+      return ntl::status::ok();
+
+    const std::uint64_t control_id =
+        peer_control_stream_id_.load(std::memory_order_acquire);
+    if (control_id != invalid_stream_id && control_id != stream_id) {
+      const auto type = ntl::net::http3::read_quic_varint(bytes);
+      if (!type)
+        return !final && type.status() == STATUS_BUFFER_TOO_SMALL
+                   ? ntl::status::ok()
+                   : type.status();
+      if (type->value ==
+          ntl::net::http3::webtransport::control_stream_type)
+        return fail_peer_settings(STATUS_OBJECT_NAME_COLLISION);
+      return remember_ignored_unidirectional_stream(stream_id);
+    }
+
+    if (control_id == invalid_stream_id) {
+      const auto type = ntl::net::http3::read_quic_varint(bytes);
+      if (!type)
+        return !final && type.status() == STATUS_BUFFER_TOO_SMALL
+                   ? ntl::status::ok()
+                   : type.status();
+      if (type->value !=
+          ntl::net::http3::webtransport::control_stream_type)
+        return remember_ignored_unidirectional_stream(stream_id);
+      peer_control_stream_id_.store(stream_id, std::memory_order_release);
+    }
+
+    const ntl::status appended = http3_origin_detail::append_scatter(
+        bytes, peer_control_wire_, options_.limits.maximum_control_wire);
+    if (!appended.is_ok())
+      return fail_peer_settings(appended);
+
+    if (peer_settings_received_.load(std::memory_order_acquire))
+      return consume_post_settings_control(final);
+
+    const auto control = ntl::net::scatter_view::from_contiguous(
+        std::span<const std::byte>(peer_control_wire_));
+    const auto type = ntl::net::http3::read_quic_varint(control);
+    if (!type)
+      return final ? fail_peer_settings(type.status())
+                   : ntl::status::ok();
+    auto frame_wire = control.subview(
+        type->encoded_size, control.size() - type->encoded_size);
+    if (!frame_wire)
+      return fail_peer_settings(frame_wire.status());
+    const ntl::net::http3::frame_framer framer(
+        {options_.limits.maximum_control_wire});
+    const auto probe = framer.probe(*frame_wire);
+    if (probe.state() == ntl::net::framing::probe_state::need_more)
+      return final ? fail_peer_settings(STATUS_END_OF_FILE)
+                   : ntl::status::ok();
+    if (probe.state() == ntl::net::framing::probe_state::malformed)
+      return fail_peer_settings(probe.error());
+    auto first = control.subview(
+        0, type->encoded_size + probe.frame_size());
+    if (!first)
+      return fail_peer_settings(first.status());
+    const auto settings =
+        ntl::net::http3::webtransport::parse_control_stream(
+            *first, options_.limits.maximum_control_wire);
+    if (!settings)
+      return fail_peer_settings(settings.status());
+    if (final)
+      return fail_peer_settings(STATUS_CONNECTION_DISCONNECTED);
+    peer_settings_received_.store(true, std::memory_order_release);
+    peer_settings_status_.store(STATUS_SUCCESS, std::memory_order_release);
+    peer_control_wire_.erase(
+        peer_control_wire_.begin(),
+        peer_control_wire_.begin() + static_cast<std::ptrdiff_t>(
+                                         type->encoded_size +
+                                         probe.frame_size()));
+    const ntl::status trailing = consume_post_settings_control(false);
+    if (!trailing.is_ok())
+      return trailing;
+    KeSetEvent(&settings_event_, IO_NO_INCREMENT, FALSE);
+    return ntl::status::ok();
+  }
+
+  void on_closed(NTSTATUS status) noexcept override {
+    close_status_.store(status, std::memory_order_release);
+    closed_.store(true, std::memory_order_release);
+    if (handshake_status_.load(std::memory_order_acquire) == STATUS_PENDING)
+      fail_handshake(status,
+                     classify_http3_origin_connection_status(status));
+    if (response_status_.load(std::memory_order_acquire) == STATUS_PENDING)
+      response_status_.store(
+          NT_SUCCESS(status) ? STATUS_CONNECTION_DISCONNECTED : status,
+          std::memory_order_release);
+    KeSetEvent(&ready_event_, IO_NO_INCREMENT, FALSE);
+    if (peer_settings_status_.load(std::memory_order_acquire) ==
+        STATUS_PENDING)
+      peer_settings_status_.store(
+          NT_SUCCESS(status) ? STATUS_CONNECTION_DISCONNECTED : status,
+          std::memory_order_release);
+    KeSetEvent(&settings_event_, IO_NO_INCREMENT, FALSE);
+    KeSetEvent(&response_event_, IO_NO_INCREMENT, FALSE);
+    KeSetEvent(&qpack_event_, IO_NO_INCREMENT, FALSE);
+  }
+
+private:
+  static bool safe_method(std::string_view method) noexcept {
+    return method == "GET" || method == "HEAD" || method == "OPTIONS" ||
+           method == "TRACE";
+  }
+
+  static http3_origin_failure_kind classify_local_failure(
+      ntl::status status) noexcept {
+    const NTSTATUS value = static_cast<NTSTATUS>(status);
+    if (value == STATUS_INSUFFICIENT_RESOURCES ||
+        value == STATUS_QUOTA_EXCEEDED)
+      return http3_origin_failure_kind::resource_exhaustion;
+    if (value == STATUS_CANCELLED)
+      return http3_origin_failure_kind::cancellation;
+    return http3_origin_failure_kind::request_validation;
+  }
+
+  static http3_origin_failure_kind classify_connect_start_failure(
+      ntl::status status) noexcept {
+    return classify_http3_origin_connection_status(
+        static_cast<NTSTATUS>(status));
+  }
+
+  void record_failure(ntl::status status,
+                      http3_origin_failure_kind kind) noexcept {
+    last_failure_status_.store(static_cast<NTSTATUS>(status),
+                               std::memory_order_release);
+    failure_kind_.store(kind, std::memory_order_release);
+  }
+
+  void clear_failure() noexcept {
+    last_failure_status_.store(STATUS_SUCCESS, std::memory_order_release);
+    failure_kind_.store(http3_origin_failure_kind::none,
+                        std::memory_order_release);
+  }
+
+  ntl::result<http3_origin_result> fail_without_connection(
+      ntl::status status, http3_origin_failure_kind kind) noexcept {
+    record_failure(status, kind);
+    return ntl::unexpected(status);
+  }
+
+  ntl::status prepare_exchange() {
+    if (server_name_.empty() ||
+        server_name_.size() > options_.limits.maximum_header_wire)
+      return STATUS_INVALID_ADDRESS;
+    wide_server_name_.clear();
+    wide_server_name_.reserve(server_name_.size());
+    for (const unsigned char character : server_name_) {
+      if (character == 0 || character > 0x7f)
+        return STATUS_INVALID_ADDRESS;
+      wide_server_name_.push_back(static_cast<wchar_t>(character));
+    }
+    response_wire_.reserve(options_.limits.maximum_response_wire);
+    qpack_encoder_wire_.reserve(options_.limits.maximum_qpack_wire);
+    peer_control_wire_.reserve(options_.limits.maximum_control_wire);
+    pending_qpack_acknowledgement_.reserve(
+        options_.limits.maximum_qpack_wire);
+    auto qpack = std::unique_ptr<response_qpack_type>(
+        new (std::nothrow) response_qpack_type(
+            ntl::net::http3::dynamic_qpack_limits{
+                .maximum_table_capacity = 4096,
+                .maximum_blocked_streams = 8,
+                .maximum_encoder_stream_buffer =
+                    options_.limits.maximum_qpack_wire,
+                .maximum_literal_size =
+                    options_.limits.maximum_header_wire}));
+    if (!qpack)
+      return STATUS_INSUFFICIENT_RESOURCES;
+    auto inspector = std::unique_ptr<ntl::net::http3::borrowed_connection_inspector>(
+        new (std::nothrow) ntl::net::http3::borrowed_connection_inspector(
+            *qpack,
+            {.maximum_concurrent_request_streams = 1,
+             .maximum_buffered_bytes_per_stream =
+                 options_.limits.maximum_response_wire,
+             .frames = {options_.limits.maximum_response_wire}},
+            options_.limits.maximum_header_wire));
+    if (!inspector)
+      return STATUS_INSUFFICIENT_RESOURCES;
+    response_qpack_ = std::move(qpack);
+    response_inspector_ = std::move(inspector);
+    return ntl::status::ok();
+  }
+
+  bool cancellation_requested() const noexcept {
+    return KeReadStateEvent(
+               const_cast<KEVENT *>(&cancellation_event_)) != 0 ||
+           (options_.borrowed_request_cancellation_event &&
+            KeReadStateEvent(options_.borrowed_request_cancellation_event) != 0) ||
+           (options_.borrowed_service_cancellation_event &&
+            KeReadStateEvent(options_.borrowed_service_cancellation_event) != 0);
+  }
+
+  NTSTATUS wait_for_event_or_cancel(
+      KEVENT &target, std::chrono::milliseconds timeout) noexcept {
+    if (cancellation_requested())
+      return STATUS_CANCELLED;
+    ntl::net::kernel::bounded_wait_set<4> objects;
+    if (!objects.try_add_unique(&target) ||
+        !objects.try_add_unique(&cancellation_event_))
+      return STATUS_INVALID_PARAMETER;
+    if (options_.borrowed_request_cancellation_event &&
+        !objects.try_add_unique(
+            options_.borrowed_request_cancellation_event))
+      return STATUS_INVALID_PARAMETER;
+    if (options_.borrowed_service_cancellation_event &&
+        !objects.try_add_unique(
+            options_.borrowed_service_cancellation_event))
+      return STATUS_INVALID_PARAMETER;
+    LARGE_INTEGER interval = http3_origin_detail::relative_timeout(timeout);
+    const NTSTATUS waited = objects.wait_any(
+        Executive, KernelMode, FALSE, &interval);
+    if (cancellation_requested())
+      return STATUS_CANCELLED;
+    if (waited == STATUS_WAIT_0)
+      return STATUS_SUCCESS;
+    if (waited == STATUS_TIMEOUT)
+      return STATUS_IO_TIMEOUT;
+    if (waited >= STATUS_WAIT_1 &&
+        waited < STATUS_WAIT_0 + static_cast<NTSTATUS>(objects.size()))
+      return STATUS_CANCELLED;
+    return waited;
+  }
+
+  ntl::status wait_for_cancellation_delay(
+      std::chrono::milliseconds delay) noexcept {
+    if (cancellation_requested())
+      return STATUS_CANCELLED;
+    if (delay.count() == 0)
+      return ntl::status::ok();
+    ntl::net::kernel::bounded_wait_set<3> objects;
+    if (!objects.try_add_unique(&cancellation_event_))
+      return STATUS_INVALID_PARAMETER;
+    if (options_.borrowed_request_cancellation_event &&
+        !objects.try_add_unique(
+            options_.borrowed_request_cancellation_event))
+      return STATUS_INVALID_PARAMETER;
+    if (options_.borrowed_service_cancellation_event &&
+        !objects.try_add_unique(
+            options_.borrowed_service_cancellation_event))
+      return STATUS_INVALID_PARAMETER;
+    LARGE_INTEGER interval = http3_origin_detail::relative_timeout(delay);
+    const NTSTATUS waited = objects.wait_any(
+        Executive, KernelMode, FALSE, &interval);
+    if (waited == STATUS_TIMEOUT)
+      return cancellation_requested() ? ntl::status{STATUS_CANCELLED}
+                                      : ntl::status::ok();
+    if (waited >= STATUS_WAIT_0 &&
+        waited < STATUS_WAIT_0 + static_cast<NTSTATUS>(objects.size()))
+      return STATUS_CANCELLED;
+    return waited;
+  }
+
+  void fail_handshake(
+      ntl::status status, http3_origin_failure_kind kind) noexcept {
+    NTSTATUS failure = static_cast<NTSTATUS>(status);
+    if (NT_SUCCESS(failure))
+      failure = STATUS_CONNECTION_DISCONNECTED;
+    // Authentication and ALPN callbacks carry more trustworthy semantics
+    // than a concurrent generic shutdown notification, so they may replace
+    // the provisional transport classification.
+    const auto current = failure_kind_.load(std::memory_order_acquire);
+    if (current == http3_origin_failure_kind::none ||
+        kind == http3_origin_failure_kind::peer_authentication ||
+        kind == http3_origin_failure_kind::application_protocol)
+      failure_kind_.store(kind, std::memory_order_release);
+    last_failure_status_.store(failure, std::memory_order_release);
+    NTSTATUS pending = STATUS_PENDING;
+    (void)handshake_status_.compare_exchange_strong(
+        pending, failure, std::memory_order_acq_rel,
+        std::memory_order_acquire);
+    KeSetEvent(&ready_event_, IO_NO_INCREMENT, FALSE);
+  }
+
+  void complete_handshake_if_ready() noexcept {
+    if (!alpn_validated_.load(std::memory_order_acquire) ||
+        !peer_validated_.load(std::memory_order_acquire))
+      return;
+    NTSTATUS pending = STATUS_PENDING;
+    if (handshake_status_.compare_exchange_strong(
+            pending, STATUS_SUCCESS, std::memory_order_acq_rel,
+            std::memory_order_acquire))
+      KeSetEvent(&ready_event_, IO_NO_INCREMENT, FALSE);
+  }
+
+  NTSTATUS normalized_close_status() const noexcept {
+    const NTSTATUS status = close_status_.load(std::memory_order_acquire);
+    return NT_SUCCESS(status) ? STATUS_CONNECTION_DISCONNECTED : status;
+  }
+
+  bool is_ignored_unidirectional_stream(
+      std::uint64_t stream_id) const noexcept {
+    for (std::size_t index = 0;
+         index != ignored_unidirectional_stream_count_; ++index) {
+      if (ignored_unidirectional_streams_[index] == stream_id)
+        return true;
+    }
+    return false;
+  }
+
+  ntl::status remember_ignored_unidirectional_stream(
+      std::uint64_t stream_id) noexcept {
+    if (is_ignored_unidirectional_stream(stream_id))
+      return ntl::status::ok();
+    if (ignored_unidirectional_stream_count_ ==
+        ignored_unidirectional_streams_.size())
+      return STATUS_QUOTA_EXCEEDED;
+    ignored_unidirectional_streams_[
+        ignored_unidirectional_stream_count_++] = stream_id;
+    return ntl::status::ok();
+  }
+
+  ntl::status fail_peer_settings(ntl::status status) noexcept {
+    NTSTATUS failure = static_cast<NTSTATUS>(status);
+    if (NT_SUCCESS(failure))
+      failure = STATUS_DATA_ERROR;
+    NTSTATUS current =
+        peer_settings_status_.load(std::memory_order_acquire);
+    while (NT_SUCCESS(current) &&
+           !peer_settings_status_.compare_exchange_weak(
+               current, failure, std::memory_order_acq_rel,
+               std::memory_order_acquire)) {
+    }
+    KeSetEvent(&settings_event_, IO_NO_INCREMENT, FALSE);
+    return failure;
+  }
+
+  ntl::status consume_post_settings_control(bool final) noexcept {
+    const ntl::net::http3::frame_framer framer(
+        {options_.limits.maximum_control_wire});
+    while (!peer_control_wire_.empty()) {
+      const auto wire = ntl::net::scatter_view::from_contiguous(
+          std::span<const std::byte>(peer_control_wire_));
+      const auto probe = framer.probe(wire);
+      if (probe.state() == ntl::net::framing::probe_state::need_more)
+        return final ? fail_peer_settings(STATUS_END_OF_FILE)
+                     : ntl::status::ok();
+      if (probe.state() == ntl::net::framing::probe_state::malformed)
+        return fail_peer_settings(probe.error());
+      auto frame_wire = wire.subview(0, probe.frame_size());
+      if (!frame_wire)
+        return fail_peer_settings(frame_wire.status());
+      const auto frame = ntl::net::http3::frame_view::parse(
+          *frame_wire, {options_.limits.maximum_control_wire});
+      if (!frame)
+        return fail_peer_settings(frame.status());
+      switch (frame->header().type()) {
+      case ntl::net::http3::frame_type::settings:
+        return fail_peer_settings(STATUS_OBJECT_NAME_COLLISION);
+      case ntl::net::http3::frame_type::data:
+      case ntl::net::http3::frame_type::headers:
+      case ntl::net::http3::frame_type::push_promise:
+        return fail_peer_settings(STATUS_DATA_ERROR);
+      default:
+        break;
+      }
+      peer_control_wire_.erase(
+          peer_control_wire_.begin(),
+          peer_control_wire_.begin() +
+              static_cast<std::ptrdiff_t>(probe.frame_size()));
+    }
+    return final ? fail_peer_settings(STATUS_CONNECTION_DISCONNECTED)
+                 : ntl::status::ok();
+  }
+
+  ntl::status send_settings() {
+    if (cancellation_requested())
+      return STATUS_CANCELLED;
+    std::uint64_t control_stream = 0;
+    ntl::status status = connection_->open_unidirectional_stream(control_stream);
+    if (!status.is_ok())
+      return status;
+    std::vector<std::byte> payload;
+    payload.reserve(128);
+    const auto append_setting = [&payload](std::uint64_t identifier,
+                                           std::uint64_t value) noexcept {
+      ntl::status appended =
+          ntl::net::http3::append_quic_varint(payload, identifier);
+      return appended.is_ok()
+                 ? ntl::net::http3::append_quic_varint(payload, value)
+                 : appended;
+    };
+    status = append_setting(settings_qpack_max_table_capacity, 4096);
+    if (status.is_ok())
+      status = append_setting(settings_qpack_blocked_streams, 8);
+    if (status.is_ok())
+      status = append_setting(ntl::net::http::settings_h3_datagram, 1);
+    if (status.is_ok())
+      status = append_setting(
+          ntl::net::http3::webtransport::settings_wt_enabled, 1);
+    const ntl::net::http3::webtransport::session_limits webtransport_limits{};
+    if (status.is_ok())
+      status = append_setting(
+          ntl::net::http3::webtransport::
+              settings_wt_initial_max_streams_unidirectional,
+          webtransport_limits.maximum_unidirectional_streams);
+    if (status.is_ok())
+      status = append_setting(
+          ntl::net::http3::webtransport::
+              settings_wt_initial_max_streams_bidirectional,
+          webtransport_limits.maximum_bidirectional_streams);
+    if (status.is_ok())
+      status = append_setting(
+          ntl::net::http3::webtransport::settings_wt_initial_max_data,
+          webtransport_limits.maximum_stream_data);
+    if (!status.is_ok())
+      return status;
+
+    std::vector<std::byte> settings;
+    settings.reserve(payload.size() + 17);
+    status = ntl::net::http3::append_quic_varint(
+        settings,
+        ntl::net::http3::webtransport::control_stream_type);
+    if (status.is_ok())
+      status = http3_origin_detail::append_http3_frame(
+          settings, ntl::net::http3::frame_type::settings, payload,
+          options_.limits.maximum_control_wire);
+    if (!status.is_ok())
+      return status;
+    if (settings.size() > options_.limits.maximum_control_wire)
+      return STATUS_BUFFER_OVERFLOW;
+    return connection_->write_stream(
+        control_stream,
+        ntl::net::scatter_view::from_contiguous(settings), false);
+  }
+
+  ntl::status send_request() noexcept {
+    try {
+      if (cancellation_requested())
+        return STATUS_CANCELLED;
+      const ntl::status request_headers = request_.headers.validate(
+          ntl::net::http::protocol::http3,
+          {.maximum_header_count = 256,
+           .maximum_header_bytes = options_.limits.maximum_header_wire,
+           .maximum_encoded_body_bytes =
+               options_.limits.maximum_request_wire,
+           .maximum_decoded_body_bytes =
+               options_.limits.maximum_request_wire});
+      if (!request_headers.is_ok() ||
+          request_.body.size() > options_.limits.maximum_request_wire)
+        return request_headers.is_ok()
+                   ? ntl::status{STATUS_BUFFER_OVERFLOW}
+                   : request_headers;
+      if (const auto declared = request_.headers.first("content-length")) {
+        std::size_t length = 0;
+        const auto parsed = std::from_chars(
+            declared->data(), declared->data() + declared->size(), length);
+        if (parsed.ec != std::errc{} ||
+            parsed.ptr != declared->data() + declared->size() ||
+            length != request_.body.size())
+          return STATUS_DATA_ERROR;
+      }
+      if (!request_.trailers.empty())
+        return STATUS_NOT_SUPPORTED;
+      if (request_.method.empty() || request_.authority.empty() ||
+          ((request_.method != "CONNECT" || request_.extended_protocol) &&
+           (request_.scheme.empty() || request_.path.empty())))
+        return STATUS_DATA_ERROR;
+      std::size_t decoded_header_bytes = 0;
+      const auto account_field = [&](std::string_view name,
+                                     std::string_view value) noexcept {
+        if (name.size() > options_.limits.maximum_header_wire -
+                              decoded_header_bytes ||
+            value.size() > options_.limits.maximum_header_wire -
+                               decoded_header_bytes - name.size())
+          return false;
+        decoded_header_bytes += name.size() + value.size();
+        return true;
+      };
+      if (!account_field(":method", request_.method) ||
+          !account_field(":authority", request_.authority) ||
+          ((request_.method != "CONNECT" || request_.extended_protocol) &&
+           (!account_field(":scheme", request_.scheme) ||
+            !account_field(":path", request_.path))) ||
+          (request_.extended_protocol &&
+           !account_field(":protocol", *request_.extended_protocol)))
+        return STATUS_BUFFER_OVERFLOW;
+      for (const auto &field : request_.headers.fields()) {
+        if (!account_field(field.name, field.value))
+          return STATUS_BUFFER_OVERFLOW;
+      }
+      std::vector<ntl::net::http3::header_field> fields;
+      fields.reserve(request_.headers.size() + 5);
+      fields.push_back(
+          {":method", std::string(request_.method.begin(), request_.method.end())});
+      if (request_.method != "CONNECT" || request_.extended_protocol) {
+        fields.push_back(
+            {":scheme", std::string(request_.scheme.begin(), request_.scheme.end())});
+        fields.push_back(
+            {":path", std::string(request_.path.begin(), request_.path.end())});
+      }
+      fields.push_back(
+          {":authority",
+           std::string(request_.authority.begin(), request_.authority.end())});
+      if (request_.extended_protocol)
+        fields.push_back(
+            {":protocol",
+             std::string(request_.extended_protocol->begin(),
+                         request_.extended_protocol->end())});
+      for (const auto &field : request_.headers.fields())
+        fields.push_back(
+            {std::string(field.name.begin(), field.name.end()),
+             std::string(field.value.begin(), field.value.end()),
+             field.sensitive});
+
+      ntl::net::http3::bounded_static_qpack_encoder encoder;
+      auto encoded = encoder.encode(
+          fields, options_.limits.maximum_header_wire);
+      if (!encoded)
+        return encoded.status();
+      std::vector<std::byte> wire;
+      wire.reserve(options_.limits.maximum_request_wire);
+      ntl::status status = http3_origin_detail::append_http3_frame(
+          wire, ntl::net::http3::frame_type::headers, *encoded,
+          options_.limits.maximum_request_wire);
+      if (status.is_ok() && !request_.body.empty())
+        status = http3_origin_detail::append_http3_frame(
+            wire, ntl::net::http3::frame_type::data, request_.body,
+            options_.limits.maximum_request_wire);
+      if (!status.is_ok())
+        return status;
+      std::uint64_t stream_id = 0;
+      status = connection_->open_request_stream(stream_id);
+      if (!status.is_ok())
+        return status;
+      expected_response_stream_id_.store(stream_id,
+                                         std::memory_order_release);
+      if (cancellation_requested()) {
+        (void)connection_->reset_stream(stream_id, h3_request_cancelled);
+        return STATUS_CANCELLED;
+      }
+      // From this point a successful or failed provider return cannot prove
+      // that the peer observed zero bytes.  Conservatively forbid replay.
+      request_committed_.store(true, std::memory_order_release);
+      return connection_->write_stream(
+          stream_id, ntl::net::scatter_view::from_contiguous(wire), true);
+    } catch (const std::bad_alloc &) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    } catch (...) {
+      return STATUS_UNHANDLED_EXCEPTION;
+    }
+  }
+
+  ntl::status decode_response() {
+    if (cancellation_requested())
+      return STATUS_CANCELLED;
+    // Snapshot with a PASSIVE_LEVEL lock that does not raise IRQL. QPACK
+    // instructions may continue to arrive until the field section is
+    // unblocked and acknowledged.
+    std::vector<std::byte> response;
+    std::vector<std::byte> qpack;
+    {
+      http3_origin_detail::passive_fast_mutex_guard guard(receive_lock_);
+      response = response_wire_;
+      qpack = qpack_encoder_wire_;
+    }
+    dynamic_qpack_ = !qpack.empty();
+    const std::uint64_t stream_id =
+        expected_response_stream_id_.load(std::memory_order_acquire);
+    if (stream_id == invalid_stream_id)
+      return STATUS_INVALID_DEVICE_STATE;
+    if (!qpack.empty()) {
+      const ntl::status encoder = response_inspector_->consume_qpack_encoder_stream(
+          ntl::net::scatter_view::from_contiguous(qpack));
+      if (!encoder.is_ok())
+        return encoder;
+    }
+    ntl::status status = response_inspector_->consume_request_stream(
+        stream_id, ntl::net::scatter_view::from_contiguous(response), true,
+        response_sink_);
+    std::size_t qpack_consumed = qpack.size();
+    for (unsigned attempt = 0;
+         status == STATUS_RETRY &&
+         attempt != options_.limits.maximum_qpack_resume_attempts;
+         ++attempt) {
+      if (cancellation_requested())
+        return STATUS_CANCELLED;
+      const std::uint64_t before =
+          qpack_sequence_.load(std::memory_order_acquire);
+      KeClearEvent(&qpack_event_);
+      std::vector<std::byte> delta;
+      {
+        http3_origin_detail::passive_fast_mutex_guard guard(receive_lock_);
+        if (qpack_encoder_wire_.size() > qpack_consumed) {
+          delta.assign(qpack_encoder_wire_.begin() +
+                           static_cast<std::ptrdiff_t>(qpack_consumed),
+                       qpack_encoder_wire_.end());
+          qpack_consumed = qpack_encoder_wire_.size();
+        }
+      }
+      if (delta.empty() &&
+          before == qpack_sequence_.load(std::memory_order_acquire)) {
+        const NTSTATUS waited = wait_for_event_or_cancel(
+            qpack_event_, options_.limits.qpack_progress_timeout);
+        if (!NT_SUCCESS(waited))
+          return waited;
+        if (closed_.load(std::memory_order_acquire) &&
+            before == qpack_sequence_.load(std::memory_order_acquire))
+          return normalized_close_status();
+        continue;
+      }
+      if (!delta.empty()) {
+        dynamic_qpack_ = true;
+        const ntl::status consumed =
+            response_inspector_->consume_qpack_encoder_stream(
+                ntl::net::scatter_view::from_contiguous(delta));
+        if (!consumed.is_ok())
+          return consumed;
+      }
+      status = response_inspector_->resume_request_stream(
+          stream_id, response_sink_);
+    }
+    if (status == STATUS_RETRY)
+      return STATUS_IO_TIMEOUT;
+    if (!status.is_ok() || !response_sink_.complete())
+      return status.is_ok() ? ntl::status{STATUS_DATA_ERROR} : status;
+    status = response_sink_.validate(request_);
+    if (!status.is_ok())
+      return status;
+    auto acknowledgement = response_inspector_->take_qpack_decoder_stream();
+    if (!acknowledgement)
+      return acknowledgement.status();
+    if (acknowledgement->size() > options_.limits.maximum_qpack_wire)
+      return STATUS_BUFFER_OVERFLOW;
+    pending_qpack_acknowledgement_ = std::move(*acknowledgement);
+    return ntl::status::ok();
+  }
+
+  ntl::status flush_qpack_acknowledgement() noexcept {
+    if (cancellation_requested())
+      return STATUS_CANCELLED;
+    if (pending_qpack_acknowledgement_.empty()) {
+      qpack_acknowledgement_queued_ = true;
+      return ntl::status::ok();
+    }
+    const ntl::status sent = connection_->write_qpack_decoder_stream(
+        ntl::net::scatter_view::from_contiguous(
+            pending_qpack_acknowledgement_));
+    if (!sent.is_ok())
+      return sent;
+    qpack_acknowledgement_queued_ = true;
+    // MsQuic owns a copy after write_stream succeeds. Give the queued decoder
+    // instruction a bounded opportunity to leave before initiating shutdown;
+    // cancellation remains observable during this grace interval.
+    return wait_for_cancellation_delay(
+        options_.limits.qpack_ack_flush_delay);
+  }
+
+  ntl::result<http3_origin_result>
+  finish_with_error(ntl::status status,
+                    http3_origin_failure_kind kind) noexcept {
+    record_failure(status, kind);
+    stop_and_drain();
+    return ntl::unexpected(status);
+  }
+
+  void stop_and_drain() noexcept {
+    if (!connection_)
+      return;
+    connection_->stop();
+    const ntl::status drained = connection_->drain();
+    if (!drained.is_ok())
+      connection_->drain_exact();
+    connection_.reset();
+  }
+
+  static constexpr std::uint64_t invalid_stream_id =
+      (std::numeric_limits<std::uint64_t>::max)();
+  static constexpr std::uint64_t h3_request_cancelled = 0x010c;
+  static constexpr std::uint64_t settings_qpack_max_table_capacity = 0x01;
+  static constexpr std::uint64_t settings_qpack_blocked_streams = 0x07;
+
+  ntl::net::http3::msquic_backend::connection_context configured_;
+  http3_origin_exchange_options options_{};
+  std::string server_name_;
+  std::uint16_t port_ = 0;
+  ntl::net::http::request_message request_;
+  std::shared_ptr<ntl::net::kernel::schannel_peer_certificate_policy>
+      peer_policy_;
+  std::wstring wide_server_name_;
+  std::shared_ptr<ntl::net::http3::msquic_backend::connection> connection_;
+  using response_qpack_type = ntl::net::http3::qpack_decoder_adapter<
+      ntl::net::http3::bounded_dynamic_qpack_decoder>;
+  std::unique_ptr<response_qpack_type> response_qpack_;
+  std::unique_ptr<ntl::net::http3::borrowed_connection_inspector>
+      response_inspector_;
+  http3_origin_detail::response_sink response_sink_;
+  FAST_MUTEX receive_lock_{};
+  KEVENT ready_event_{};
+  KEVENT settings_event_{};
+  KEVENT response_event_{};
+  KEVENT qpack_event_{};
+  KEVENT cancellation_event_{};
+  std::vector<std::byte> response_wire_;
+  std::vector<std::byte> qpack_encoder_wire_;
+  std::vector<std::byte> peer_control_wire_;
+  std::vector<std::byte> pending_qpack_acknowledgement_;
+  std::array<std::uint64_t, 16> ignored_unidirectional_streams_{};
+  std::size_t ignored_unidirectional_stream_count_ = 0;
+  std::atomic<bool> run_started_{false};
+  std::atomic<bool> request_committed_{false};
+  std::atomic<http3_origin_failure_kind> failure_kind_{
+      http3_origin_failure_kind::none};
+  std::atomic<bool> alpn_validated_{false};
+  std::atomic<bool> peer_validated_{false};
+  std::atomic<bool> closed_{false};
+  std::atomic<bool> response_final_{false};
+  std::atomic<std::uint64_t> qpack_sequence_{0};
+  std::atomic<std::uint64_t> expected_response_stream_id_{
+      invalid_stream_id};
+  std::atomic<std::uint64_t> peer_control_stream_id_{invalid_stream_id};
+  std::atomic<NTSTATUS> handshake_status_{STATUS_PENDING};
+  std::atomic<NTSTATUS> peer_settings_status_{STATUS_PENDING};
+  std::atomic<NTSTATUS> response_status_{STATUS_PENDING};
+  std::atomic<NTSTATUS> close_status_{STATUS_CONNECTION_DISCONNECTED};
+  std::atomic<NTSTATUS> last_failure_status_{STATUS_SUCCESS};
+  bool dynamic_qpack_ = false;
+  std::atomic<bool> peer_settings_received_{false};
+  bool qpack_acknowledgement_queued_ = false;
+};
+
+} // namespace ntl::net::kernel

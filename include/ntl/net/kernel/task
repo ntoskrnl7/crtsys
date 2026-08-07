@@ -1,0 +1,126 @@
+/**
+ * @file kernel_net_task
+ * @brief Lazy structured coroutine task for PASSIVE_LEVEL network flows.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/net/kernel/task is a kernel-mode header"
+#endif
+
+#include <ntl/coroutine>
+#include <ntl/except>
+
+#include <coroutine>
+#include <exception>
+#include <optional>
+#include <utility>
+
+namespace ntl::net::kernel {
+
+#if NTL_HAS_COROUTINE_SUPPORT
+
+/**
+ * @brief Move-only child task resumed by and joined into its parent.
+ *
+ * This task never detaches and never creates a thread. Destroying an unawaited
+ * task destroys its still-suspended frame. Once awaited, ownership moves to
+ * the awaiter, which destroys the completed child after await_resume().
+ */
+template <class T> class task {
+public:
+  struct promise_type;
+  using handle_type = std::coroutine_handle<promise_type>;
+
+  task(const task &) = delete;
+  task &operator=(const task &) = delete;
+  task(task &&other) noexcept
+      : handle_(std::exchange(other.handle_, {})) {}
+  task &operator=(task &&other) noexcept {
+    if (this != &other) {
+      if (handle_)
+        handle_.destroy();
+      handle_ = std::exchange(other.handle_, {});
+    }
+    return *this;
+  }
+  ~task() {
+    if (handle_)
+      handle_.destroy();
+  }
+
+  class awaiter {
+  public:
+    explicit awaiter(handle_type handle) noexcept : handle_(handle) {}
+    awaiter(const awaiter &) = delete;
+    awaiter &operator=(const awaiter &) = delete;
+    awaiter(awaiter &&other) noexcept
+        : handle_(std::exchange(other.handle_, {})) {}
+    ~awaiter() {
+      if (handle_)
+        handle_.destroy();
+    }
+
+    bool await_ready() const noexcept {
+      return !handle_ || handle_.done();
+    }
+    std::coroutine_handle<>
+    await_suspend(std::coroutine_handle<> continuation) noexcept {
+      handle_.promise().continuation = continuation;
+      return handle_;
+    }
+    T await_resume() {
+      auto &promise = handle_.promise();
+      if (promise.failure)
+        std::rethrow_exception(promise.failure);
+      if (!promise.value)
+        throw ntl::exception(STATUS_UNSUCCESSFUL,
+                             "kernel network task produced no value");
+      return std::move(*promise.value);
+    }
+
+  private:
+    handle_type handle_{};
+  };
+
+  awaiter operator co_await() && noexcept {
+    return awaiter(std::exchange(handle_, {}));
+  }
+
+  struct promise_type {
+    task get_return_object() noexcept {
+      return task(handle_type::from_promise(*this));
+    }
+    std::suspend_always initial_suspend() const noexcept { return {}; }
+    struct final_awaiter {
+      bool await_ready() const noexcept { return false; }
+      std::coroutine_handle<>
+      await_suspend(handle_type handle) const noexcept {
+        const auto next = handle.promise().continuation;
+        return next ? next : std::noop_coroutine();
+      }
+      void await_resume() const noexcept {}
+    };
+    final_awaiter final_suspend() const noexcept { return {}; }
+    template <class U> void return_value(U &&result) {
+      value.emplace(std::forward<U>(result));
+    }
+    void unhandled_exception() noexcept {
+      failure = std::current_exception();
+    }
+
+    std::coroutine_handle<> continuation{};
+    std::optional<T> value{};
+    std::exception_ptr failure{};
+  };
+
+private:
+  explicit task(handle_type handle) noexcept : handle_(handle) {}
+  handle_type handle_{};
+};
+
+#endif // NTL_HAS_COROUTINE_SUPPORT
+
+} // namespace ntl::net::kernel

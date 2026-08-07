@@ -1,0 +1,346 @@
+/**
+ * @file http2_flow_control
+ * @brief Awaitable HTTP/2 connection and stream send-window accounting.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include <coroutine>
+#include <cstddef>
+#include <cstdint>
+#include <algorithm>
+#include <memory>
+#include <mutex>
+#include <stdexcept>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#include <ntl/net/kernel/continuation>
+#endif
+
+namespace ntl::net::http2 {
+
+using continuation_resumer =
+    void (*)(std::coroutine_handle<>) noexcept;
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+inline constexpr continuation_resumer default_continuation_resumer =
+    &ntl::net::kernel::resume_deferred;
+#else
+inline constexpr continuation_resumer default_continuation_resumer = nullptr;
+#endif
+
+/**
+ * @brief Reserves both peer connection and stream credit before DATA writes.
+ *
+ * One instance represents the send windows advertised by one HTTP/2 peer.
+ * DATA must be written only after reserve() completes. WINDOW_UPDATE and
+ * SETTINGS_INITIAL_WINDOW_SIZE are applied with update() and set_initial().
+ */
+class send_window {
+private:
+  struct shared_state;
+
+public:
+  class reservation {
+  public:
+    reservation(const reservation &) = delete;
+    reservation &operator=(const reservation &) = delete;
+    reservation(reservation &&) = delete;
+    reservation &operator=(reservation &&) = delete;
+
+    ~reservation() { unregister(); }
+
+    bool await_ready() {
+      if (!state_) {
+        cancelled_ = true;
+        return true;
+      }
+      std::lock_guard lock(state_->lock);
+      if (reserve_locked(*state_, stream_id_, bytes_))
+        return true;
+      if (cannot_wait_locked(*state_, stream_id_, bytes_)) {
+        cancelled_ = true;
+        return true;
+      }
+      return false;
+    }
+
+    bool await_suspend(std::coroutine_handle<> continuation) {
+      if (!state_) {
+        cancelled_ = true;
+        return false;
+      }
+      std::lock_guard lock(state_->lock);
+      if (reserve_locked(*state_, stream_id_, bytes_))
+        return false;
+      if (cannot_wait_locked(*state_, stream_id_, bytes_)) {
+        cancelled_ = true;
+        return false;
+      }
+      continuation_ = continuation;
+      queued_ = true;
+      state_->waiters.push_back(this);
+      return true;
+    }
+
+    void await_resume() {
+      if (cancelled_)
+        throw std::runtime_error("HTTP/2 send window cancelled");
+    }
+
+  private:
+    friend class send_window;
+
+    reservation(std::shared_ptr<shared_state> state,
+                std::uint32_t stream_id, std::size_t bytes) noexcept
+        : state_(std::move(state)), stream_id_(stream_id), bytes_(bytes) {}
+
+    void unregister() noexcept {
+      if (!state_ || !queued_)
+        return;
+      std::lock_guard lock(state_->lock);
+      if (!queued_)
+        return;
+      const auto found = std::find(
+          state_->waiters.begin(), state_->waiters.end(), this);
+      if (found != state_->waiters.end())
+        state_->waiters.erase(found);
+      queued_ = false;
+    }
+
+    std::shared_ptr<shared_state> state_;
+    std::uint32_t stream_id_;
+    std::size_t bytes_;
+    std::coroutine_handle<> continuation_{};
+    bool cancelled_ = false;
+    bool queued_ = false;
+  };
+
+  explicit send_window(
+      std::uint32_t connection = default_window,
+      std::uint32_t stream = default_window,
+      continuation_resumer resumer = default_continuation_resumer)
+      : state_(
+            std::make_shared<shared_state>(connection, stream, resumer)) {}
+
+  send_window(const send_window &) = delete;
+  send_window &operator=(const send_window &) = delete;
+
+  send_window(send_window &&other) noexcept
+      : state_(std::move(other.state_)) {}
+
+  send_window &operator=(send_window &&other) noexcept {
+    if (this != &other) {
+      close();
+      state_ = std::move(other.state_);
+    }
+    return *this;
+  }
+
+  ~send_window() { close(); }
+
+  reservation reserve(std::uint32_t stream_id,
+                       std::size_t bytes) noexcept {
+    return reservation(state_, stream_id, bytes);
+  }
+
+  /** Synchronous reservation used by adapters that already own a scheduler. */
+  bool try_reserve(std::uint32_t stream_id, std::size_t bytes) noexcept {
+    const auto state = state_;
+    if (!state)
+      return false;
+    try {
+      std::lock_guard lock(state->lock);
+      return reserve_locked(*state, stream_id, bytes);
+    } catch (...) {
+      fail_closed(*state);
+      return false;
+    }
+  }
+
+  bool update(std::uint32_t stream_id, std::uint32_t increment) noexcept {
+    if (increment == 0 || increment > maximum_window)
+      return false;
+    const auto state = state_;
+    if (!state)
+      return false;
+    try {
+      std::lock_guard lock(state->lock);
+      if (state->cancelled)
+        return false;
+      std::int64_t &window =
+          stream_id == 0
+              ? state->connection_window
+              : state->stream_windows.try_emplace(
+                    stream_id, state->initial_stream_window)
+                    .first->second;
+      if (window > static_cast<std::int64_t>(maximum_window - increment))
+        return false;
+      window += increment;
+    } catch (...) {
+      fail_closed(*state);
+      return false;
+    }
+    resume_ready(*state);
+    return true;
+  }
+
+  bool set_initial(std::uint32_t value) noexcept {
+    if (value > maximum_window)
+      return false;
+    const auto state = state_;
+    if (!state)
+      return false;
+    {
+      std::lock_guard lock(state->lock);
+      if (state->cancelled)
+        return false;
+      const std::int64_t next = value;
+      const std::int64_t delta = next - state->initial_stream_window;
+      if (delta > 0) {
+        for (const auto &[stream_id, window] : state->stream_windows) {
+          (void)stream_id;
+          if (window > static_cast<std::int64_t>(maximum_window) - delta)
+            return false;
+        }
+      }
+      for (auto &[stream_id, window] : state->stream_windows) {
+        (void)stream_id;
+        window += delta;
+      }
+      state->initial_stream_window = next;
+    }
+    resume_ready(*state);
+    return true;
+  }
+
+  void close(std::uint32_t stream_id) noexcept {
+    const auto state = state_;
+    if (!state)
+      return;
+    try {
+      std::lock_guard lock(state->lock);
+      state->stream_windows.erase(stream_id);
+      state->closed_streams.insert(stream_id);
+    } catch (...) {
+      fail_closed(*state);
+      return;
+    }
+    resume_ready(*state);
+  }
+
+  void cancel() noexcept {
+    const auto state = state_;
+    if (!state)
+      return;
+    {
+      std::lock_guard lock(state->lock);
+      if (state->cancelled)
+        return;
+      state->cancelled = true;
+    }
+    resume_ready(*state);
+  }
+
+  /** Idempotently rejects new reservations and resumes pending ones canceled. */
+  void close() noexcept { cancel(); }
+
+  static constexpr std::uint32_t default_window = 65535;
+  static constexpr std::uint32_t maximum_window = 0x7fffffffu;
+
+private:
+  struct shared_state {
+    shared_state(std::uint32_t connection, std::uint32_t stream,
+                 continuation_resumer resume) noexcept
+        : connection_window(connection), initial_stream_window(stream),
+          resumer(resume) {}
+
+    std::mutex lock;
+    std::int64_t connection_window = default_window;
+    std::int64_t initial_stream_window = default_window;
+    std::unordered_map<std::uint32_t, std::int64_t> stream_windows;
+    std::unordered_set<std::uint32_t> closed_streams;
+    std::vector<reservation *> waiters;
+    bool cancelled = false;
+    continuation_resumer resumer = nullptr;
+  };
+
+  static bool cannot_wait_locked(const shared_state &state,
+                                 std::uint32_t stream_id,
+                                 std::size_t bytes) noexcept {
+    return state.cancelled || bytes > maximum_window ||
+           state.closed_streams.contains(stream_id);
+  }
+
+  static bool reserve_locked(shared_state &state,
+                             std::uint32_t stream_id,
+                             std::size_t bytes) {
+    if (cannot_wait_locked(state, stream_id, bytes))
+      return false;
+    auto &stream =
+        state.stream_windows.try_emplace(
+            stream_id, state.initial_stream_window)
+            .first->second;
+    const auto count = static_cast<std::int64_t>(bytes);
+    if (state.connection_window < count || stream < count)
+      return false;
+    state.connection_window -= count;
+    stream -= count;
+    return true;
+  }
+
+  static void fail_closed(shared_state &state) noexcept {
+    {
+      std::lock_guard lock(state.lock);
+      state.cancelled = true;
+    }
+    resume_ready(state);
+  }
+
+  static void resume_ready(shared_state &state) noexcept {
+    for (;;) {
+      std::coroutine_handle<> continuation;
+      {
+        std::lock_guard lock(state.lock);
+        for (auto current = state.waiters.begin();
+             current != state.waiters.end(); ++current) {
+          auto *waiter = *current;
+          bool ready = false;
+          if (cannot_wait_locked(state, waiter->stream_id_, waiter->bytes_)) {
+            waiter->cancelled_ = true;
+            ready = true;
+          } else {
+            try {
+              ready = reserve_locked(
+                  state, waiter->stream_id_, waiter->bytes_);
+            } catch (...) {
+              state.cancelled = true;
+              waiter->cancelled_ = true;
+              ready = true;
+            }
+          }
+          if (!ready)
+            continue;
+          waiter->queued_ = false;
+          continuation = waiter->continuation_;
+          state.waiters.erase(current);
+          break;
+        }
+      }
+      if (!continuation)
+        return;
+      if (state.resumer)
+        state.resumer(continuation);
+      else
+        continuation.resume();
+    }
+  }
+
+  std::shared_ptr<shared_state> state_;
+};
+
+} // namespace ntl::net::http2

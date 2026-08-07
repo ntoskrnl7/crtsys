@@ -1,0 +1,842 @@
+/**
+ * @file http2_proxy_connection
+ * @brief Connection-local HTTP/2 inspection proxy state and flow control.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#include <ntl/net/kernel/dispatcher_executor>
+#endif
+
+#include <ntl/net/http2/flow_control>
+#include <ntl/net/http2/transform>
+#include <ntl/net/http/authority>
+#include <ntl/net/http/inspection_policy>
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <new>
+#include <mutex>
+#include <optional>
+#include <span>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+namespace ntl::net::http2 {
+
+inline constexpr std::array<std::byte, 24> client_connection_preface{
+    std::byte{0x50}, std::byte{0x52}, std::byte{0x49}, std::byte{0x20},
+    std::byte{0x2a}, std::byte{0x20}, std::byte{0x48}, std::byte{0x54},
+    std::byte{0x54}, std::byte{0x50}, std::byte{0x2f}, std::byte{0x32},
+    std::byte{0x2e}, std::byte{0x30}, std::byte{0x0d}, std::byte{0x0a},
+    std::byte{0x0d}, std::byte{0x0a}, std::byte{0x53}, std::byte{0x4d},
+    std::byte{0x0d}, std::byte{0x0a}, std::byte{0x0d}, std::byte{0x0a}};
+
+struct proxy_connection_limits {
+  /** Local acceptance cap; independent of what either peer advertises. */
+  std::size_t maximum_frame_payload = 1024 * 1024;
+  /** RFC 9113 default before each peer sends SETTINGS_MAX_FRAME_SIZE. */
+  std::size_t initial_peer_maximum_frame_payload =
+      default_maximum_frame_size;
+  std::uint32_t initial_connection_window = send_window::default_window;
+  std::uint32_t initial_stream_window = send_window::default_window;
+  /** Maximum number of request messages retained for response association. */
+  std::size_t maximum_retained_request_streams = 256;
+  /** Aggregate semantic request bytes retained across all active streams. */
+  std::size_t maximum_retained_request_bytes = 16 * 1024 * 1024;
+  /** Bind each request authority to this TLS connection's SNI. */
+  bool require_server_name_authority_binding = false;
+  bool require_first_settings = true;
+
+  constexpr bool valid() const noexcept {
+    return maximum_frame_payload != 0 &&
+           maximum_frame_payload <= absolute_maximum_frame_size &&
+           initial_peer_maximum_frame_payload >=
+               default_maximum_frame_size &&
+           initial_peer_maximum_frame_payload <=
+               absolute_maximum_frame_size &&
+           initial_connection_window <= send_window::maximum_window &&
+           initial_stream_window <= send_window::maximum_window &&
+           maximum_retained_request_streams != 0 &&
+           maximum_retained_request_bytes != 0;
+  }
+};
+
+struct goaway_state {
+  bool received = false;
+  std::uint32_t last_stream_id = 0;
+  std::uint32_t error_code = 0;
+};
+
+/**
+ * @brief Result of consuming one frame from one side of a proxy connection.
+ *
+ * `forward` is written to the opposite peer and `reverse` to the peer which
+ * supplied the frame. If `forward_original` is true, the adapter deliberately
+ * left an opaque control or established-tunnel frame untouched; the caller
+ * forwards its original wire bytes and then calls acknowledge_forwarded_data
+ * for DATA after that write completes.
+ */
+struct proxy_connection_step : connection_transform_result {
+  bool forward_original = false;
+  bool draining = false;
+  ntl::net::inspection::verdict staged_verdict =
+      ntl::net::inspection::verdict::permit;
+  bool drop_flow = false;
+};
+
+/** Owning, noexcept observer used by the normal proxy API. */
+class inspection_observer {
+public:
+  inspection_observer() noexcept = default;
+
+  template <class Observer>
+  explicit inspection_observer(std::shared_ptr<Observer> observer) noexcept
+      : context_(std::move(observer)),
+        notify_([](void *value,
+                   const ntl::net::http::inspection_context_view &context)
+                    noexcept {
+          try {
+            if constexpr (requires(Observer &candidate) {
+                            candidate.on_inspection(context);
+                          })
+              static_cast<Observer *>(value)->on_inspection(context);
+            else
+              (*static_cast<Observer *>(value))(context);
+          } catch (...) {
+          }
+        }) {}
+
+  void notify(
+      const ntl::net::http::inspection_context_view &context) const noexcept {
+    if (notify_)
+      notify_(context_.get(), context);
+  }
+  explicit operator bool() const noexcept {
+    return context_ && notify_;
+  }
+
+private:
+  using notify_function = void (*)(
+      void *, const ntl::net::http::inspection_context_view &) noexcept;
+  std::shared_ptr<void> context_;
+  notify_function notify_ = nullptr;
+};
+
+namespace proxy_connection_detail {
+
+template <class T>
+inline const T &required_shared(
+    const std::shared_ptr<const T> &value, const char *name) {
+  if (!value)
+    throw std::invalid_argument(name);
+  return *value;
+}
+
+inline std::shared_ptr<const ntl::net::http::transform_pipeline>
+owned_transforms(
+    const std::shared_ptr<const ntl::net::http::inspection_policy> &policy) {
+  if (!policy)
+    throw std::invalid_argument("HTTP/2 inspection policy is null");
+  return {policy, &policy->transforms_ref()};
+}
+
+inline ntl::result<std::uint32_t>
+read_u32(scatter_view bytes, std::size_t offset = 0) noexcept {
+  std::array<std::byte, 4> value{};
+  const ntl::status copied = bytes.copy_to(value, offset);
+  if (!copied.is_ok())
+    return ntl::unexpected(copied);
+  return ntl::ok(
+      (static_cast<std::uint32_t>(
+           std::to_integer<std::uint8_t>(value[0]))
+       << 24) |
+      (static_cast<std::uint32_t>(
+           std::to_integer<std::uint8_t>(value[1]))
+       << 16) |
+      (static_cast<std::uint32_t>(
+           std::to_integer<std::uint8_t>(value[2]))
+       << 8) |
+      static_cast<std::uint32_t>(
+          std::to_integer<std::uint8_t>(value[3])));
+}
+
+inline ntl::result<std::uint16_t>
+read_u16(scatter_view bytes, std::size_t offset) noexcept {
+  std::array<std::byte, 2> value{};
+  const ntl::status copied = bytes.copy_to(value, offset);
+  if (!copied.is_ok())
+    return ntl::unexpected(copied);
+  return ntl::ok(static_cast<std::uint16_t>(
+      (std::to_integer<std::uint8_t>(value[0]) << 8) |
+      std::to_integer<std::uint8_t>(value[1])));
+}
+
+inline ntl::status append_credit(
+    std::vector<outbound_frame> &output, std::uint32_t stream_id,
+    std::size_t bytes, bool end_stream) noexcept {
+  if (bytes == 0)
+    return ntl::status::ok();
+  if (bytes > send_window::maximum_window)
+    return STATUS_BUFFER_OVERFLOW;
+  const auto increment = static_cast<std::uint32_t>(bytes);
+  auto connection = encode_window_update(0, increment);
+  if (!connection)
+    return connection.status();
+  try {
+    output.push_back(std::move(*connection));
+    if (!end_stream) {
+      auto stream = encode_window_update(stream_id, increment);
+      if (!stream)
+        return stream.status();
+      output.push_back(std::move(*stream));
+    }
+    return ntl::status::ok();
+  } catch (...) {
+    return STATUS_INSUFFICIENT_RESOURCES;
+  }
+}
+
+} // namespace proxy_connection_detail
+
+/**
+ * @brief Owns the two semantic HTTP/2 directions of one inspected connection.
+ *
+ * This type is deliberately transport agnostic. A TLS, clear-text test, WFP
+ * redirect, or another byte transport supplies framed input and writes the
+ * returned frames. The state object owns request/response association, HPACK
+ * state, continuation assembly, bounded message buffering and both peer send
+ * windows. It never creates a thread. The owning session retains it until
+ * both relay tasks have drained, so declaration order is not part of the
+ * public contract.
+ */
+class proxy_connection {
+public:
+  proxy_connection(
+      std::shared_ptr<const ntl::net::http::transform_pipeline> pipeline,
+      std::shared_ptr<const ntl::net::inspection::content_decoder_registry>
+          decoders,
+      std::shared_ptr<const ntl::net::inspection::content_encoder_registry>
+          encoders,
+      proxy_connection_limits limits = {},
+      ntl::net::http::message_memory_ref memory = {},
+      continuation_resumer resumer = default_continuation_resumer)
+      : pipeline_(std::move(pipeline)), decoders_(std::move(decoders)),
+        encoders_(std::move(encoders)), limits_(limits),
+        exchanges_(std::make_shared<exchange_store>(
+            limits.maximum_retained_request_streams,
+            limits.maximum_retained_request_bytes)),
+        requests_(connection_direction::requests, exchanges_,
+                  proxy_connection_detail::required_shared(
+                      pipeline_, "HTTP/2 transform pipeline is null"),
+                  proxy_connection_detail::required_shared(
+                      decoders_, "HTTP/2 decoder registry is null"),
+                  proxy_connection_detail::required_shared(
+                      encoders_, "HTTP/2 encoder registry is null"),
+                  limits.initial_peer_maximum_frame_payload, memory),
+        responses_(connection_direction::responses, exchanges_,
+                   proxy_connection_detail::required_shared(
+                       pipeline_, "HTTP/2 transform pipeline is null"),
+                   proxy_connection_detail::required_shared(
+                       decoders_, "HTTP/2 decoder registry is null"),
+                   proxy_connection_detail::required_shared(
+                       encoders_, "HTTP/2 encoder registry is null"),
+                   limits.initial_peer_maximum_frame_payload, memory),
+        downstream_window_(limits.initial_connection_window,
+                           limits.initial_stream_window, resumer),
+        upstream_window_(limits.initial_connection_window,
+                         limits.initial_stream_window, resumer) {
+    if (!pipeline_ || !decoders_ || !encoders_ || !limits_.valid())
+      throw std::invalid_argument("invalid HTTP/2 proxy connection limits");
+  }
+
+  proxy_connection(
+      std::shared_ptr<const ntl::net::http::inspection_policy> policy,
+      ntl::net::http::inspection_session_metadata session,
+      inspection_observer observer = {},
+      proxy_connection_limits limits = {},
+      ntl::net::http::message_memory_ref memory = {},
+      continuation_resumer resumer = default_continuation_resumer)
+      : proxy_connection(
+            proxy_connection_detail::owned_transforms(policy),
+            policy ? policy->content_decoders() : nullptr,
+            policy ? policy->content_encoders() : nullptr, limits, memory,
+            resumer) {
+    policy_ = std::move(policy);
+    staged_policy_ = &policy_->decisions_ref();
+    session_ = std::move(session);
+    observer_ = observer;
+  }
+
+  proxy_connection(
+      std::shared_ptr<const ntl::net::http::transform_pipeline> pipeline,
+      std::shared_ptr<const ntl::net::inspection::content_decoder_registry>
+          decoders,
+      std::shared_ptr<const ntl::net::inspection::content_encoder_registry>
+          encoders,
+      ntl::net::http::inspection_session_metadata session,
+      inspection_observer observer,
+      proxy_connection_limits limits = {},
+      ntl::net::http::message_memory_ref memory = {},
+      continuation_resumer resumer = default_continuation_resumer)
+      : proxy_connection(std::move(pipeline), std::move(decoders),
+                         std::move(encoders), limits, memory, resumer) {
+    session_ = std::move(session);
+    observer_ = observer;
+  }
+
+  proxy_connection(
+      std::shared_ptr<const ntl::net::http::transform_pipeline> pipeline,
+      std::shared_ptr<const ntl::net::http::decision_policy> policy,
+      std::shared_ptr<const ntl::net::inspection::content_decoder_registry>
+          decoders,
+      std::shared_ptr<const ntl::net::inspection::content_encoder_registry>
+          encoders,
+      ntl::net::http::inspection_session_metadata session,
+      inspection_observer observer = {},
+      proxy_connection_limits limits = {},
+      ntl::net::http::message_memory_ref memory = {},
+      continuation_resumer resumer = default_continuation_resumer)
+      : proxy_connection(std::move(pipeline), std::move(decoders),
+                         std::move(encoders), limits, memory, resumer) {
+    decision_policy_ = std::move(policy);
+    staged_policy_ = decision_policy_.get();
+    session_ = std::move(session);
+    observer_ = observer;
+  }
+
+  proxy_connection(const proxy_connection &) = delete;
+  proxy_connection &operator=(const proxy_connection &) = delete;
+  ~proxy_connection() { close(); }
+
+  ntl::status accept_client_preface(
+      std::span<const std::byte> bytes) noexcept {
+    std::lock_guard operation(state_lock_);
+    if (closed_.load(std::memory_order_acquire))
+      return STATUS_DELETE_PENDING;
+    if (client_preface_seen_ || bytes.size() != client_connection_preface.size())
+      return STATUS_INVALID_DEVICE_STATE;
+    if (!std::equal(bytes.begin(), bytes.end(),
+                    client_connection_preface.begin()))
+      return STATUS_DATA_ERROR;
+    client_preface_seen_ = true;
+    return ntl::status::ok();
+  }
+
+  bool client_preface_seen() const noexcept { return client_preface_seen_; }
+
+  send_window &
+  destination_window_ref(connection_direction direction) noexcept {
+    return direction == connection_direction::requests ? upstream_window_
+                                                        : downstream_window_;
+  }
+
+  std::size_t destination_maximum_frame_payload(
+      connection_direction direction) const noexcept {
+    return direction == connection_direction::requests
+               ? requests_.maximum_frame_size()
+               : responses_.maximum_frame_size();
+  }
+
+  goaway_state downstream_goaway() const noexcept {
+    std::lock_guard lock(control_lock_);
+    return downstream_goaway_;
+  }
+  goaway_state upstream_goaway() const noexcept {
+    std::lock_guard lock(control_lock_);
+    return upstream_goaway_;
+  }
+
+  /**
+   * True after the selected peer sent GOAWAY and every admitted exchange has
+   * completed. A transport adapter can then stop application relays before
+   * consuming TLS close_notify, leaving the TLS owner responsible for the
+   * bidirectional authenticated shutdown.
+   */
+  bool ready_for_graceful_shutdown(
+      connection_direction direction) const noexcept {
+    goaway_state state;
+    {
+      std::lock_guard lock(control_lock_);
+      state = direction == connection_direction::requests
+                  ? downstream_goaway_
+                  : upstream_goaway_;
+    }
+    return state.received && exchanges_->empty();
+  }
+
+  bool is_admitted_connect(std::uint32_t stream_id) const noexcept {
+    return exchanges_->is_connect_admitted(stream_id);
+  }
+
+  bool is_established_tunnel(std::uint32_t stream_id) const noexcept {
+    return exchanges_->is_tunnel(stream_id);
+  }
+
+  connect_disposition connect_mode(
+      std::uint32_t stream_id) const noexcept {
+    return exchanges_->connect_mode(stream_id);
+  }
+
+  /**
+   * Apply an explicit CONNECT decision before request HEADERS are
+   * written to the origin. Rejection replaces the pending request with a
+   * bounded 403 response to the downstream peer.
+   */
+  ntl::status admit_connect(
+      proxy_connection_step &step,
+      connect_disposition disposition) noexcept {
+    std::lock_guard operation(state_lock_);
+    if (closed_.load(std::memory_order_acquire))
+      return STATUS_DELETE_PENDING;
+    if (!step.message_complete || !step.request ||
+        step.request->method != "CONNECT" ||
+        step.forward.empty())
+      return STATUS_INVALID_DEVICE_STATE;
+    if (disposition != connect_disposition::reject)
+      return exchanges_->admit_connect(step.stream_id, disposition);
+
+    exchanges_->erase(step.stream_id);
+    auto terminal = blocked_response(step.stream_id, *step.request);
+    if (!terminal)
+      return terminal.status();
+    step.forward.clear();
+    step.reverse = std::move(*terminal);
+    step.forward_original = false;
+    step.transform_action = ntl::net::http::rewrite_action::block;
+    step.terminal_status = 403;
+    return ntl::status::ok();
+  }
+
+  ntl::result<proxy_connection_step>
+  consume(connection_direction direction, const frame_view &frame) noexcept {
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+    try {
+      // observe_control() can synchronously release a send-window waiter and
+      // resume the opposite relay. Keep that entire continuation chain off the
+      // ordinary 24 KiB worker stack; expanding only the HPACK transformer is
+      // insufficient because WINDOW_UPDATE is processed before it.
+      return ntl::net::kernel::dispatcher_executor::invoke(
+          [this, direction, &frame]() noexcept {
+            return consume_on_current_stack(direction, frame);
+          });
+    } catch (const ntl::exception &error) {
+      return ntl::unexpected(error.get_status());
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+#else
+    return consume_on_current_stack(direction, frame);
+#endif
+  }
+
+private:
+  ntl::result<proxy_connection_step>
+  consume_on_current_stack(connection_direction direction,
+                           const frame_view &frame) noexcept {
+    std::lock_guard operation(state_lock_);
+    if (closed_.load(std::memory_order_acquire))
+      return ntl::unexpected(STATUS_DELETE_PENDING);
+    try {
+      const auto &header = frame.header();
+      if (header.payload_size > limits_.maximum_frame_payload)
+        return ntl::unexpected(STATUS_BUFFER_OVERFLOW);
+      if (direction == connection_direction::requests &&
+          !client_preface_seen_)
+        return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+
+      bool &first = direction == connection_direction::requests
+                        ? first_request_frame_
+                        : first_response_frame_;
+      if (first) {
+        first = false;
+        if (limits_.require_first_settings &&
+            (header.type != frame_type::settings ||
+             header.acknowledgement()))
+          return ntl::unexpected(STATUS_DATA_ERROR);
+      }
+
+      goaway_state peer_goaway;
+      {
+        std::lock_guard lock(control_lock_);
+        peer_goaway = direction == connection_direction::requests
+                          ? upstream_goaway_
+                          : downstream_goaway_;
+      }
+      if (peer_goaway.received && header.stream_id != 0 &&
+          header.stream_id > peer_goaway.last_stream_id &&
+          (header.type == frame_type::headers ||
+           header.type == frame_type::continuation ||
+           header.type == frame_type::data))
+        return ntl::unexpected(STATUS_CONNECTION_DISCONNECTED);
+
+      const ntl::status control = observe_control(direction, frame);
+      if (!control.is_ok())
+        return ntl::unexpected(control);
+
+      auto transformed = direction == connection_direction::requests
+                             ? requests_.consume(frame)
+                             : responses_.consume(frame);
+      if (!transformed)
+        return ntl::unexpected(transformed.status());
+
+      proxy_connection_step result;
+      static_cast<connection_transform_result &>(result) =
+          std::move(*transformed);
+      result.forward_original = !result.consumed;
+      if (direction == connection_direction::requests &&
+          header.type == frame_type::settings &&
+          header.acknowledgement() &&
+          local_downstream_settings_ack_pending_) {
+        // This ACK belongs to the proxy's pre-origin SETTINGS, not to the
+        // origin.  Consuming it here prevents an early/duplicate ACK from
+        // being replayed when the permitted request is connected upstream.
+        local_downstream_settings_ack_pending_ = false;
+        result.forward_original = false;
+        result.consumed = true;
+        result.forward.clear();
+      }
+      {
+        std::lock_guard lock(control_lock_);
+        result.draining =
+            downstream_goaway_.received || upstream_goaway_.received;
+      }
+
+      const ntl::status inspected = apply_staged_policy(
+          direction, result);
+      if (!inspected.is_ok())
+        return ntl::unexpected(inspected);
+      // An observer is allowed to close the connection from its callback.
+      // Do not emit or stage more work after that close becomes visible.
+      if (closed_.load(std::memory_order_acquire))
+        return ntl::unexpected(STATUS_DELETE_PENDING);
+
+      if (direction == connection_direction::requests && result.request &&
+          result.transform_action ==
+              ntl::net::http::rewrite_action::forward &&
+          !result.drop_flow &&
+          limits_.require_server_name_authority_binding &&
+          !ntl::net::http::authority_matches_tls_session(
+              result.request->authority, session_)) {
+        exchanges_->erase(result.stream_id);
+        return ntl::unexpected(STATUS_ACCESS_DENIED);
+      }
+
+      if (!result.drop_flow &&
+          result.received_flow_controlled_bytes != 0) {
+        const ntl::status credited = proxy_connection_detail::append_credit(
+            result.reverse, result.stream_id,
+            result.received_flow_controlled_bytes, header.end_stream());
+        if (!credited.is_ok())
+          return ntl::unexpected(credited);
+      }
+      return ntl::ok(std::move(result));
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+public:
+  /** Expect the ACK for one proxy-generated downstream SETTINGS frame. */
+  ntl::status expect_local_downstream_settings_ack() noexcept {
+    std::lock_guard operation(state_lock_);
+    if (closed_.load(std::memory_order_acquire))
+      return STATUS_DELETE_PENDING;
+    if (local_downstream_settings_ack_pending_)
+      return STATUS_INVALID_DEVICE_STATE;
+    local_downstream_settings_ack_pending_ = true;
+    return ntl::status::ok();
+  }
+
+  /** Credit opaque tunnel DATA only after its peer-facing write completes. */
+  ntl::result<std::vector<outbound_frame>> acknowledge_forwarded_data(
+      std::uint32_t stream_id, std::size_t bytes,
+      bool end_stream) const noexcept {
+    std::lock_guard operation(state_lock_);
+    if (closed_.load(std::memory_order_acquire))
+      return ntl::unexpected(STATUS_DELETE_PENDING);
+    try {
+      std::vector<outbound_frame> result;
+      const ntl::status status = proxy_connection_detail::append_credit(
+          result, stream_id, bytes, end_stream);
+      if (!status.is_ok())
+        return ntl::unexpected(status);
+      return ntl::ok(std::move(result));
+    } catch (...) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+  }
+
+  /** Release an established tunnel only after its final DATA write. */
+  void finish_forwarded_tunnel_data(
+      connection_direction direction, std::uint32_t stream_id,
+      bool end_stream) noexcept {
+    std::lock_guard operation(state_lock_);
+    if (closed_.load(std::memory_order_acquire))
+      return;
+    if (direction != connection_direction::responses || !end_stream)
+      return;
+    exchanges_->erase(stream_id);
+    downstream_window_.close(stream_id);
+    upstream_window_.close(stream_id);
+  }
+
+  /** Idempotently rejects new work and wakes every flow-control waiter. */
+  void close() noexcept {
+    std::lock_guard operation(state_lock_);
+    if (closed_.exchange(true, std::memory_order_acq_rel))
+      return;
+    downstream_window_.cancel();
+    upstream_window_.cancel();
+    exchanges_->clear();
+  }
+
+  bool is_closed() const noexcept {
+    return closed_.load(std::memory_order_acquire);
+  }
+
+private:
+  ntl::net::inspection::verdict evaluate_stages(
+      std::uint32_t stream_id,
+      const ntl::net::http::request_message &request,
+      const ntl::net::http::response_message *response) const noexcept {
+    if (!staged_policy_ && !observer_)
+      return ntl::net::inspection::verdict::permit;
+    const auto body = response
+                          ? std::span<const std::byte>(response->body)
+                          : std::span<const std::byte>(request.body);
+    constexpr std::array stages{
+        ntl::net::http::inspection_stage::headers,
+        ntl::net::http::inspection_stage::body_chunk,
+        ntl::net::http::inspection_stage::message_complete};
+    for (const auto stage : stages) {
+      if (stage == ntl::net::http::inspection_stage::body_chunk &&
+          body.empty())
+        continue;
+      const auto chunk =
+          stage == ntl::net::http::inspection_stage::body_chunk
+              ? body
+              : std::span<const std::byte>{};
+      const auto context = response
+                               ? ntl::net::http::inspection_context_view::for_response(
+                                     ntl::net::http::protocol::http2, stream_id,
+                                     stream_id, stage, session_, request,
+                                     *response, chunk)
+                               : ntl::net::http::inspection_context_view::for_request(
+                                     ntl::net::http::protocol::http2, stream_id,
+                                     stream_id, stage, session_, request, chunk);
+      observer_.notify(context);
+      if (!staged_policy_)
+        continue;
+      const auto verdict = staged_policy_->evaluate(context);
+      if (verdict != ntl::net::inspection::verdict::permit)
+        return verdict;
+    }
+    return ntl::net::inspection::verdict::permit;
+  }
+
+  ntl::result<std::vector<outbound_frame>> blocked_response(
+      std::uint32_t stream_id,
+      const ntl::net::http::request_message &request) const noexcept {
+    try {
+      ntl::net::http::response_message response;
+      response.wire_protocol = ntl::net::http::protocol::http2;
+      response.status = 403;
+      response.headers.append(
+          "content-type", "text/plain; charset=utf-8");
+      constexpr std::string_view body_text =
+          "Request blocked by staged policy.\n";
+      response.body.assign(
+          reinterpret_cast<const std::byte *>(body_text.data()),
+          reinterpret_cast<const std::byte *>(
+              body_text.data() + body_text.size()));
+      response.headers.append(
+          "content-length", std::to_string(response.body.size()));
+      const auto body =
+          ntl::net::http::response_body_forbidden(request, response)
+              ? std::span<const std::byte>{}
+              : std::span<const std::byte>(response.body);
+      return encode_response_frames(
+          stream_id, response, body, responses_.maximum_frame_size(),
+          256 * 1024,
+          ntl::net::http::response_body_forbidden(request, response));
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+  ntl::status apply_staged_policy(
+      connection_direction direction,
+      proxy_connection_step &result) noexcept {
+    if (!result.message_complete ||
+        result.transform_action !=
+            ntl::net::http::rewrite_action::forward)
+      return ntl::status::ok();
+    const ntl::net::http::request_message *request = nullptr;
+    const ntl::net::http::response_message *response = nullptr;
+    if (direction == connection_direction::requests && result.request) {
+      request = &*result.request;
+    } else if (direction == connection_direction::responses &&
+               result.response && result.associated_request) {
+      request = result.associated_request.get();
+      response = &*result.response;
+    } else {
+      return STATUS_DATA_ERROR;
+    }
+
+    result.staged_verdict =
+        evaluate_stages(result.stream_id, *request, response);
+    if (result.staged_verdict ==
+        ntl::net::inspection::verdict::permit)
+      return ntl::status::ok();
+
+    exchanges_->erase(result.stream_id);
+    result.forward.clear();
+    result.reverse.clear();
+    result.forward_original = false;
+    if (result.staged_verdict ==
+        ntl::net::inspection::verdict::drop_flow) {
+      result.drop_flow = true;
+      return ntl::status::ok();
+    }
+
+    auto terminal = blocked_response(result.stream_id, *request);
+    if (!terminal)
+      return terminal.status();
+    result.terminal_status = 403;
+    if (direction == connection_direction::requests)
+      result.reverse = std::move(*terminal);
+    else
+      result.forward = std::move(*terminal);
+    return ntl::status::ok();
+  }
+
+  ntl::status observe_control(
+      connection_direction direction, const frame_view &frame) noexcept {
+    const auto &header = frame.header();
+    send_window &advertised_by_source =
+        direction == connection_direction::requests ? downstream_window_
+                                                    : upstream_window_;
+    if (header.type == frame_type::window_update) {
+      const auto encoded = proxy_connection_detail::read_u32(frame.payload());
+      if (!encoded)
+        return encoded.status();
+      const std::uint32_t increment = *encoded & 0x7fffffffu;
+      return advertised_by_source.update(header.stream_id, increment)
+                 ? ntl::status::ok()
+                 : ntl::status(STATUS_DATA_ERROR);
+    }
+
+    if (header.type == frame_type::settings && !header.acknowledgement()) {
+      for (std::size_t offset = 0; offset != header.payload_size;
+           offset += 6) {
+        const auto identifier =
+            proxy_connection_detail::read_u16(frame.payload(), offset);
+        const auto value =
+            proxy_connection_detail::read_u32(frame.payload(), offset + 2);
+        if (!identifier || !value)
+          return STATUS_DATA_ERROR;
+        switch (*identifier) {
+        case 0x2u: // SETTINGS_ENABLE_PUSH
+          if (*value > 1)
+            return STATUS_DATA_ERROR;
+          break;
+        case 0x4u: // SETTINGS_INITIAL_WINDOW_SIZE
+          if (!advertised_by_source.set_initial(*value))
+            return STATUS_DATA_ERROR;
+          break;
+        case 0x5u: // SETTINGS_MAX_FRAME_SIZE
+          if (*value < default_maximum_frame_size ||
+              *value > absolute_maximum_frame_size)
+            return STATUS_DATA_ERROR;
+          // The source advertises the largest frame it accepts.  Requests
+          // carry the downstream/client setting for response output; origin
+          // responses carry the upstream setting for request output.
+          if (direction == connection_direction::requests) {
+            if (!responses_.maximum_frame_size(*value).is_ok())
+              return STATUS_DATA_ERROR;
+          } else if (!requests_.maximum_frame_size(*value).is_ok()) {
+            return STATUS_DATA_ERROR;
+          }
+          break;
+        case 0x8u: // SETTINGS_ENABLE_CONNECT_PROTOCOL
+          if (*value > 1)
+            return STATUS_DATA_ERROR;
+          if (direction == connection_direction::responses)
+            exchanges_->peer_extended_connect_enabled(*value == 1);
+          break;
+        default:
+          break;
+        }
+      }
+      return ntl::status::ok();
+    }
+
+    if (header.type == frame_type::reset_stream) {
+      downstream_window_.close(header.stream_id);
+      upstream_window_.close(header.stream_id);
+      return ntl::status::ok();
+    }
+
+    if (header.type == frame_type::goaway) {
+      const auto last = proxy_connection_detail::read_u32(frame.payload());
+      const auto error = proxy_connection_detail::read_u32(frame.payload(), 4);
+      if (!last || !error)
+        return STATUS_DATA_ERROR;
+      std::lock_guard lock(control_lock_);
+      auto &state = direction == connection_direction::requests
+                        ? downstream_goaway_
+                        : upstream_goaway_;
+      const std::uint32_t stream_id = *last & 0x7fffffffu;
+      if (state.received && stream_id > state.last_stream_id)
+        return STATUS_DATA_ERROR;
+      state.received = true;
+      state.last_stream_id = stream_id;
+      state.error_code = *error;
+    }
+    return ntl::status::ok();
+  }
+
+  std::shared_ptr<const ntl::net::http::transform_pipeline> pipeline_;
+  std::shared_ptr<const ntl::net::http::inspection_policy> policy_;
+  std::shared_ptr<const ntl::net::http::decision_policy> decision_policy_;
+  std::shared_ptr<const ntl::net::inspection::content_decoder_registry>
+      decoders_;
+  std::shared_ptr<const ntl::net::inspection::content_encoder_registry>
+      encoders_;
+  proxy_connection_limits limits_{};
+  std::shared_ptr<exchange_store> exchanges_;
+  connection_transformer requests_;
+  connection_transformer responses_;
+  send_window downstream_window_;
+  send_window upstream_window_;
+  goaway_state downstream_goaway_{};
+  goaway_state upstream_goaway_{};
+  bool client_preface_seen_ = false;
+  bool first_request_frame_ = true;
+  bool first_response_frame_ = true;
+  bool local_downstream_settings_ack_pending_ = false;
+  const ntl::net::http::decision_policy *staged_policy_ = nullptr;
+  ntl::net::http::inspection_session_metadata session_{};
+  inspection_observer observer_{};
+  mutable std::recursive_mutex state_lock_;
+  mutable std::mutex control_lock_;
+  std::atomic<bool> closed_{false};
+};
+
+} // namespace ntl::net::http2

@@ -27,6 +27,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'CrtSysMsQuicHeaderContract.ps1')
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 
@@ -91,10 +92,28 @@ if ([string]::IsNullOrWhiteSpace($bundleRoot) -or -not (Test-Path (Join-Path $bu
 foreach ($requiredPath in @(
   "lib\native\$Toolset\$Architecture\$Configuration\crtsys.lib",
   "lib\native\$Toolset\$Architecture\$Configuration\Ldk.lib",
+  "build\native\codecs\include\zlib.h",
+  "build\native\codecs\include\brotli\decode.h",
+  'build\native\msquic\include\msquic.h',
+  'build\native\msquic\include\msquic_winuser.h',
+  'build\native\msquic\include\msquic_winkernel.h',
+  'build\native\msquic\REVISION.txt',
+  "build\native\codecs\lib\$Toolset\$Architecture\$Configuration\zlibstatic.lib",
+  "build\native\codecs\lib\$Toolset\$Architecture\$Configuration\brotlicommon.lib",
+  "build\native\codecs\lib\$Toolset\$Architecture\$Configuration\brotlidec.lib",
+  "build\native\codecs\lib\$Toolset\$Architecture\$Configuration\brotlienc.lib",
+  "build\native\kernel-codecs\lib\$Toolset\$Architecture\$Configuration\crtsys_ntl_kernel_zlib.lib",
+  "build\native\kernel-codecs\lib\$Toolset\$Architecture\$Configuration\crtsys_ntl_kernel_brotli.lib",
   'share\crtsys\cmake\crtsys-config.cmake',
   'share\crtsys\cmake\crtsys-config-version.cmake',
   'share\crtsys\cmake\CrtSys.cmake',
   'share\crtsys\cmake\NtlContentCodecs.cmake',
+  'share\crtsys\cmake\NtlMsQuic.cmake',
+  'include\ntl\net\borrowed_memory_resource',
+  'include\ntl\net\borrowed_bounded_writer',
+  'include\ntl\net\executor',
+  'include\ntl\net\runtime',
+  'include\ntl\net\transform_pipeline',
   'include\ntl\net\io\async_framed_stream',
   'include\ntl\net\io\async_socket',
   'include\ntl\net\inspection\content_decoder',
@@ -104,12 +123,29 @@ foreach ($requiredPath in @(
   'include\ntl\net\inspection\content_encoder_brotli',
   'include\ntl\net\inspection\content_encoder_zlib',
   'include\ntl\net\inspection\content_stream',
+  'include\ntl\net\inspection\codec_memory',
   'include\ntl\net\inspection\standard_content_encoders',
   'include\ntl\driver',
+  'include\ntl\net\kernel\all',
+  'include\ntl\net\kernel\executor',
+  'include\ntl\net\kernel\started_task',
+  'include\ntl\net\kernel\workspace_pool',
+  'include\ntl\net\kernel\http1_proxy_session',
+  'include\ntl\net\kernel\http2_proxy_session',
+  'include\ntl\net\user\task',
+  'include\ntl\net\user\redirected_tls_session',
+  'include\ntl\net\user\redirected_tls_inspection',
   'include\ntl\net\framing',
   'include\ntl\net\http\http1_framing',
   'include\ntl\net\http\http1_transform',
   'include\ntl\net\http\http1_stream_transform',
+  'include\ntl\net\http\http1_proxy_connection',
+  'include\ntl\net\http\authority',
+  'include\ntl\net\http\http1_proxy_types',
+  'include\ntl\net\http\inspection_context_view',
+  'include\ntl\net\http\inspection_conditions',
+  'include\ntl\net\http\decision_policy',
+  'include\ntl\net\http\inspection_policy',
   'include\ntl\net\http\async_transform',
   'include\ntl\net\http\stream_transform',
   'include\ntl\net\http\transform',
@@ -119,10 +155,20 @@ foreach ($requiredPath in @(
   'include\ntl\net\http2\hpack',
   'include\ntl\net\http2\transform',
   'include\ntl\net\http2\stream_transform',
+  'include\ntl\net\http2\flow_control',
+  'include\ntl\net\http2\proxy_connection',
+  'include\ntl\net\http2\proxy_session',
+  'include\ntl\net\http2\websocket_tunnel',
+  'include\ntl\net\http3\async_origin_pool',
   'include\ntl\net\http3\backend',
   'include\ntl\net\http3\framing',
   'include\ntl\net\http3\inspection_proxy',
+  'include\ntl\net\http3\msquic_backend',
+  'include\ntl\net\http3\msquic_runtime',
+  'include\ntl\net\http3\msquic_server',
+  'include\ntl\net\http3\proxy_connection',
   'include\ntl\net\http3\qpack',
+  'include\ntl\net\http3\qpack_core',
   'include\ntl\net\http3\standard_inspection_proxy',
   'include\ntl\net\http3\stream_transform',
   'include\ntl\net\http3\webtransport_transform',
@@ -180,6 +226,10 @@ foreach ($requiredPath in @(
   }
 }
 
+Assert-CrtSysMsQuicHeaderSet `
+  -IncludeDirectory (Join-Path $bundleRoot 'build\native\msquic\include') `
+  -Description 'Prebuilt bundle MsQuic public header set'
+
 if ($SkipDriverBuild) {
   Write-Host "Prebuilt release asset layout validation passed for $Architecture $Configuration."
   return
@@ -212,7 +262,10 @@ crtsys_add_driver(crtsys_release_asset_smoke MINIFILTER NTL main.cpp)
 '@ }
   'NTL_WFP' { @'
 set(CRTSYS_NTL_MAIN OFF)
-crtsys_add_driver(crtsys_release_asset_smoke WFP NTL main.cpp)
+crtsys_add_driver(
+  crtsys_release_asset_smoke
+  WFP NTL KERNEL_MSQUIC KERNEL_CONTENT_CODECS
+  main.cpp)
 '@ }
 }
 
@@ -302,7 +355,13 @@ ntl::status ntl::flt::main(ntl::flt::driver &driver,
 #include <memory>
 
 #include <ntl/driver>
+#include <ntl/net/kernel/all>
+#include <ntl/net/kernel/msquic>
 #include <ntl/wfp/all>
+
+static_assert(ntl::net::native_execution_domain ==
+              ntl::net::execution_domain::kernel);
+static_assert(sizeof(ntl::net::kernel::msquic_provider) > 0);
 
 namespace {
 using layer = ntl::wfp::layers::ale_auth_connect_v4;
@@ -310,21 +369,22 @@ using layer = ntl::wfp::layers::ale_auth_connect_v4;
 constexpr GUID callout_guid = {
     0xd33c2b8e, 0x3782, 0x4454,
     {0xaf, 0x7c, 0x9c, 0x72, 0x34, 0xab, 0x91, 0x20}};
-constexpr ntl::wfp::callout_key<layer> callout_key(callout_guid);
+constexpr ntl::wfp::terminating_callout_key<layer> callout_key(callout_guid);
 
 constexpr auto classify =
     +[](const ntl::wfp::classify_event<layer>&) noexcept {
-      return ntl::wfp::decision::continue_classification;
+      return ntl::wfp::terminating_decision::permit;
     };
 }
 
 ntl::status ntl::main(ntl::driver& driver, const std::wstring&) {
-  auto callouts = std::make_shared<ntl::wfp::callout_driver<>>(driver);
-  const ntl::status status = callouts->add<classify>(callout_key);
+  ntl::wfp::callout_driver<> callouts(driver);
+  const ntl::status status =
+      callouts.add_terminating(callout_key, classify);
   if (!status.is_ok())
     return status;
   driver.on_unload([callouts] {
-    const ntl::status result = callouts->reset();
+    const ntl::status result = callouts.close();
     NT_ASSERT(result.is_ok());
   });
   return ntl::status::ok();

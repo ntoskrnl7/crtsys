@@ -4,10 +4,6 @@
  */
 #pragma once
 
-#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
-#error "ntl/net/http3/webtransport_transform is a user-mode header"
-#endif
-
 #include <ntl/net/http3/webtransport>
 #include <ntl/net/inspection/core>
 
@@ -131,6 +127,13 @@ public:
     return guard_.open_stream(direction);
   }
 
+  /** Copies immutable rules and starts fresh per-session accounting. */
+  transform_session clone_for_new_session() const {
+    transform_session result(limits_);
+    result.rules_ = rules_;
+    return result;
+  }
+
   transform_outcome apply(payload &value) noexcept {
     if (!valid_session_id(value.session_id))
       return fail(STATUS_DATA_ERROR);
@@ -189,7 +192,7 @@ public:
     }
   }
 
-  const session_guard &accounting() const noexcept { return guard_; }
+  const session_guard &accounting_ref() const noexcept { return guard_; }
 
 private:
   static transform_outcome fail(ntl::status status) noexcept {

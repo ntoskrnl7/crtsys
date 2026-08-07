@@ -1,0 +1,610 @@
+/**
+ * @file kernel_wsk_datagram_relay
+ * @brief Bounded connectionless UDP relay for local kernel transports.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/net/kernel/wsk_datagram_relay is a kernel-mode header"
+#endif
+
+#include <ntl/net/kernel/executor>
+#include <ntl/net/kernel/passive_cleanup_domain>
+#include <ntl/net/kernel/wsk_datagram>
+#include <ntl/pool_allocator>
+#include <ntl/result>
+
+#include <array>
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <new>
+#include <optional>
+#include <utility>
+
+namespace ntl::net::kernel {
+
+struct wsk_datagram_relay_limits {
+  std::size_t maximum_flows = 512;
+  std::size_t maximum_pending_datagrams = 1024;
+  wsk_datagram_limits socket{};
+
+  constexpr bool valid() const noexcept {
+    return maximum_flows != 0 && maximum_flows <= 512 &&
+           maximum_pending_datagrams != 0 &&
+           maximum_pending_datagrams <= 4096 && socket.valid();
+  }
+};
+
+struct wsk_datagram_relay_statistics {
+  std::uint64_t client_datagrams = 0;
+  std::uint64_t upstream_datagrams = 0;
+  std::uint64_t forwarded_to_upstream = 0;
+  std::uint64_t forwarded_to_client = 0;
+  std::uint64_t dropped = 0;
+  std::uint64_t flow_creations = 0;
+  std::uint64_t flow_evictions = 0;
+  std::uint64_t active_flows = 0;
+};
+
+namespace detail {
+class wsk_datagram_relay_state;
+
+class relay_downstream_sink final : public wsk_datagram_sink {
+public:
+  explicit relay_downstream_sink(
+      std::weak_ptr<wsk_datagram_relay_state> owner) noexcept
+      : owner_(std::move(owner)) {}
+
+  ntl::status on_datagram(ip_endpoint remote,
+                          owned_bytes &&bytes) noexcept override;
+
+private:
+  std::weak_ptr<wsk_datagram_relay_state> owner_;
+};
+
+class relay_upstream_sink final : public wsk_datagram_sink {
+public:
+  relay_upstream_sink(std::weak_ptr<wsk_datagram_relay_state> owner,
+                      ip_endpoint client) noexcept
+      : owner_(std::move(owner)), client_(client) {}
+
+  ntl::status on_datagram(ip_endpoint,
+                          owned_bytes &&bytes) noexcept override;
+
+private:
+  std::weak_ptr<wsk_datagram_relay_state> owner_;
+  ip_endpoint client_{};
+};
+
+class wsk_datagram_relay_state {
+public:
+  static constexpr std::size_t storage_capacity = 512;
+
+  wsk_datagram_relay_state(wsk_provider &&provider,
+                           std::uint16_t upstream_port,
+                           wsk_datagram_relay_limits limits,
+                           passive_cleanup_domain &domain) noexcept
+      : cleanup_(&wsk_datagram_relay_state::cleanup_at_passive, this),
+        domain_(&domain), provider_(std::move(provider)),
+        upstream_port_(upstream_port), limits_(limits) {
+    KeInitializeMutex(&flows_lock_, 0);
+  }
+
+  ~wsk_datagram_relay_state() {
+    NT_ASSERT(KeGetCurrentIrql() == PASSIVE_LEVEL);
+    accepting_.store(false, std::memory_order_release);
+    executor_.stop_accepting();
+    (void)executor_.drain();
+    close_sockets();
+    provider_.close();
+  }
+
+  static void cleanup_at_passive(void *context) noexcept {
+    auto *const self = static_cast<wsk_datagram_relay_state *>(context);
+    self->~wsk_datagram_relay_state();
+    ntl::detail::free_pool_bytes(self, ntl::pool_kind::nonpaged,
+                                 ntl::pool_tag("rWdN"));
+  }
+
+  void retire() noexcept {
+    begin_close();
+    domain_->retire_deferred(cleanup_);
+  }
+
+  void begin_close() noexcept {
+    accepting_.store(false, std::memory_order_release);
+    executor_.stop_accepting();
+  }
+
+  ntl::status enqueue_from_client(ip_endpoint client,
+                                  owned_bytes &&bytes) noexcept {
+    client_datagrams_.fetch_add(1, std::memory_order_relaxed);
+    return enqueue(direction::to_upstream, client, std::move(bytes));
+  }
+
+  ntl::status enqueue_from_upstream(ip_endpoint client,
+                                    owned_bytes &&bytes) noexcept {
+    upstream_datagrams_.fetch_add(1, std::memory_order_relaxed);
+    return enqueue(direction::to_client, client, std::move(bytes));
+  }
+
+  void set_downstream(wsk_datagram_socket::pointer v4,
+                      wsk_datagram_socket::pointer v6,
+                      std::uint16_t port) noexcept {
+    downstream_v4_ = std::move(v4);
+    downstream_v6_ = std::move(v6);
+    downstream_port_ = port;
+  }
+
+  std::uint16_t downstream_port() const noexcept { return downstream_port_; }
+
+  wsk_datagram_relay_statistics statistics() const noexcept {
+    return {
+        client_datagrams_.load(std::memory_order_relaxed),
+        upstream_datagrams_.load(std::memory_order_relaxed),
+        forwarded_to_upstream_.load(std::memory_order_relaxed),
+        forwarded_to_client_.load(std::memory_order_relaxed),
+        dropped_.load(std::memory_order_relaxed),
+        flow_creations_.load(std::memory_order_relaxed),
+        flow_evictions_.load(std::memory_order_relaxed),
+        active_flows_.load(std::memory_order_relaxed),
+    };
+  }
+
+  ntl::result<ip_endpoint> resolve_client_endpoint(
+      const ip_endpoint &upstream_peer) noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL || !upstream_peer)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    (void)KeWaitForSingleObject(&flows_lock_, Executive, KernelMode, FALSE,
+                                nullptr);
+    std::optional<ip_endpoint> selected;
+    bool ambiguous = false;
+    for (std::size_t index = 0; index != limits_.maximum_flows; ++index) {
+      const auto &entry = flows_[index];
+      if (!entry.active || !entry.upstream ||
+          entry.upstream->local_endpoint() != upstream_peer)
+        continue;
+      if (selected) {
+        ambiguous = true;
+        break;
+      }
+      selected = entry.client;
+    }
+    KeReleaseMutex(&flows_lock_, FALSE);
+    if (ambiguous)
+      return ntl::unexpected(STATUS_OBJECT_NAME_COLLISION);
+    return selected ? ntl::ok(*selected)
+                    : ntl::unexpected(STATUS_NOT_FOUND);
+  }
+
+  wsk_provider &provider() noexcept { return provider_; }
+  const wsk_datagram_relay_limits &limits() const noexcept { return limits_; }
+
+private:
+  enum class direction { to_upstream, to_client };
+
+  struct flow_entry {
+    ip_endpoint client{};
+    wsk_datagram_socket::pointer upstream{};
+    std::uint64_t touched = 0;
+    bool active = false;
+  };
+
+  struct queued_datagram {
+    queued_datagram(std::shared_ptr<wsk_datagram_relay_state> owner_value,
+                    direction direction_value, ip_endpoint client_value,
+                    owned_bytes &&bytes_value) noexcept
+        : owner(std::move(owner_value)), route(direction_value),
+          client(client_value), bytes(std::move(bytes_value)) {}
+
+    std::shared_ptr<wsk_datagram_relay_state> owner;
+    direction route{};
+    ip_endpoint client{};
+    owned_bytes bytes{};
+  };
+
+  ntl::status enqueue(direction route, ip_endpoint client,
+                      owned_bytes &&bytes) noexcept {
+    if (!accepting_.load(std::memory_order_acquire))
+      return STATUS_DELETE_PENDING;
+    std::size_t pending = pending_.load(std::memory_order_acquire);
+    for (;;) {
+      if (pending >= limits_.maximum_pending_datagrams) {
+        dropped_.fetch_add(1, std::memory_order_relaxed);
+        return STATUS_DEVICE_BUSY;
+      }
+      if (pending_.compare_exchange_weak(pending, pending + 1,
+                                         std::memory_order_acq_rel,
+                                         std::memory_order_acquire))
+        break;
+    }
+
+    auto owner = weak_from_this_.lock();
+    if (!owner) {
+      pending_.fetch_sub(1, std::memory_order_acq_rel);
+      return STATUS_DELETE_PENDING;
+    }
+    void *const storage = ntl::detail::allocate_pool_bytes(
+        sizeof(queued_datagram), alignof(queued_datagram),
+        ntl::pool_kind::nonpaged, ntl::pool_option::none,
+        ntl::pool_tag("qWdN"));
+    if (!storage) {
+      pending_.fetch_sub(1, std::memory_order_acq_rel);
+      dropped_.fetch_add(1, std::memory_order_relaxed);
+      return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    auto *const queued = new (storage) queued_datagram(
+        std::move(owner), route, client, std::move(bytes));
+    const ntl::status posted = executor_.post_borrowed(
+        {&wsk_datagram_relay_state::process_queued, queued});
+    if (!posted.is_ok()) {
+      queued->~queued_datagram();
+      ntl::detail::free_pool_bytes(storage, ntl::pool_kind::nonpaged,
+                                   ntl::pool_tag("qWdN"));
+      pending_.fetch_sub(1, std::memory_order_acq_rel);
+      dropped_.fetch_add(1, std::memory_order_relaxed);
+    }
+    return posted;
+  }
+
+  static void process_queued(void *context) noexcept {
+    auto *const queued = static_cast<queued_datagram *>(context);
+    auto owner = queued->owner;
+    if (owner->accepting_.load(std::memory_order_acquire)) {
+      if (queued->route == direction::to_upstream)
+        owner->forward_to_upstream(queued->client, queued->bytes.span());
+      else
+        owner->forward_to_client(queued->client, queued->bytes.span());
+    } else {
+      owner->dropped_.fetch_add(1, std::memory_order_relaxed);
+    }
+    queued->~queued_datagram();
+    ntl::detail::free_pool_bytes(queued, ntl::pool_kind::nonpaged,
+                                 ntl::pool_tag("qWdN"));
+    owner->pending_.fetch_sub(1, std::memory_order_acq_rel);
+  }
+
+  static ip_endpoint loopback(ADDRESS_FAMILY family,
+                              std::uint16_t port) noexcept {
+    return family == AF_INET
+               ? ip_endpoint::ipv4({127, 0, 0, 1}, port)
+               : ip_endpoint::ipv6(
+                     {0, 0, 0, 0, 0, 0, 0, 0,
+                      0, 0, 0, 0, 0, 0, 0, 1},
+                     port);
+  }
+
+  void forward_to_upstream(ip_endpoint client,
+                           std::span<const std::byte> bytes) noexcept {
+    wsk_datagram_socket::pointer upstream;
+    (void)KeWaitForSingleObject(&flows_lock_, Executive, KernelMode, FALSE,
+                                nullptr);
+    std::size_t selected = storage_capacity;
+    std::size_t oldest = storage_capacity;
+    std::uint64_t oldest_touched = UINT64_MAX;
+    for (std::size_t index = 0; index != limits_.maximum_flows; ++index) {
+      auto &entry = flows_[index];
+      if (entry.active && entry.client == client) {
+        selected = index;
+        break;
+      }
+      if (!entry.active && selected == storage_capacity)
+        selected = index;
+      if (entry.active && entry.touched < oldest_touched) {
+        oldest = index;
+        oldest_touched = entry.touched;
+      }
+    }
+    if (selected == storage_capacity)
+      selected = oldest;
+
+    if (selected != storage_capacity && !flows_[selected].active) {
+      std::shared_ptr<wsk_datagram_sink> sink;
+      try {
+        sink = std::make_shared<relay_upstream_sink>(weak_from_this_, client);
+      } catch (...) {
+      }
+      if (sink) {
+        auto created = wsk_datagram_socket::try_bind(
+            provider_, loopback(client.family(), 0), std::move(sink),
+            limits_.socket);
+        if (created) {
+          auto &entry = flows_[selected];
+          entry.client = client;
+          entry.upstream = std::move(*created);
+          entry.active = true;
+          active_flows_.fetch_add(1, std::memory_order_relaxed);
+          flow_creations_.fetch_add(1, std::memory_order_relaxed);
+        }
+      }
+    } else if (selected != storage_capacity &&
+               flows_[selected].active && flows_[selected].client != client) {
+      auto previous = std::move(flows_[selected].upstream);
+      flows_[selected] = {};
+      KeReleaseMutex(&flows_lock_, FALSE);
+      if (previous)
+        previous->close();
+      flow_evictions_.fetch_add(1, std::memory_order_relaxed);
+      active_flows_.fetch_sub(1, std::memory_order_relaxed);
+      // Requeue the datagram so socket creation follows the normal empty-slot
+      // path without holding a stale upstream reference.
+      auto copied = owned_bytes::try_copy(
+          bytes, buffer_limits{limits_.socket.maximum_datagram_bytes},
+          ntl::pool_tag("eWdN"));
+      if (copied)
+        (void)enqueue_from_client(client, std::move(*copied));
+      else
+        dropped_.fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
+
+    if (selected != storage_capacity && flows_[selected].active) {
+      flows_[selected].touched = ++clock_;
+      upstream = flows_[selected].upstream;
+    }
+    KeReleaseMutex(&flows_lock_, FALSE);
+
+    if (!upstream ||
+        !upstream->send_to(bytes,
+                           loopback(client.family(), upstream_port_)).is_ok()) {
+      dropped_.fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
+    forwarded_to_upstream_.fetch_add(1, std::memory_order_relaxed);
+  }
+
+  void forward_to_client(ip_endpoint client,
+                         std::span<const std::byte> bytes) noexcept {
+    auto socket = client.family() == AF_INET ? downstream_v4_
+                                             : downstream_v6_;
+    if (!socket || !socket->send_to(bytes, client).is_ok()) {
+      dropped_.fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
+    forwarded_to_client_.fetch_add(1, std::memory_order_relaxed);
+  }
+
+  void close_sockets() noexcept {
+    if (downstream_v4_)
+      downstream_v4_->close();
+    if (downstream_v6_)
+      downstream_v6_->close();
+    downstream_v4_.reset();
+    downstream_v6_.reset();
+    (void)KeWaitForSingleObject(&flows_lock_, Executive, KernelMode, FALSE,
+                                nullptr);
+    for (auto &entry : flows_) {
+      if (entry.upstream)
+        entry.upstream->close();
+      entry = {};
+    }
+    active_flows_.store(0, std::memory_order_relaxed);
+    KeReleaseMutex(&flows_lock_, FALSE);
+  }
+
+public:
+  void publish_weak(std::weak_ptr<wsk_datagram_relay_state> weak) noexcept {
+    weak_from_this_ = std::move(weak);
+  }
+
+  passive_cleanup_item cleanup_;
+  passive_cleanup_domain *domain_ = nullptr;
+
+private:
+  wsk_provider provider_{};
+  executor executor_{};
+  KMUTEX flows_lock_{};
+  std::array<flow_entry, storage_capacity> flows_{};
+  wsk_datagram_socket::pointer downstream_v4_{};
+  wsk_datagram_socket::pointer downstream_v6_{};
+  std::weak_ptr<wsk_datagram_relay_state> weak_from_this_{};
+  std::uint16_t upstream_port_ = 0;
+  std::uint16_t downstream_port_ = 0;
+  wsk_datagram_relay_limits limits_{};
+  std::uint64_t clock_ = 0;
+  std::atomic<bool> accepting_{true};
+  std::atomic<std::size_t> pending_{0};
+  std::atomic<std::uint64_t> client_datagrams_{0};
+  std::atomic<std::uint64_t> upstream_datagrams_{0};
+  std::atomic<std::uint64_t> forwarded_to_upstream_{0};
+  std::atomic<std::uint64_t> forwarded_to_client_{0};
+  std::atomic<std::uint64_t> dropped_{0};
+  std::atomic<std::uint64_t> flow_creations_{0};
+  std::atomic<std::uint64_t> flow_evictions_{0};
+  std::atomic<std::uint64_t> active_flows_{0};
+};
+
+inline ntl::status relay_downstream_sink::on_datagram(
+    ip_endpoint remote, owned_bytes &&bytes) noexcept {
+  auto owner = owner_.lock();
+  return owner ? owner->enqueue_from_client(remote, std::move(bytes))
+               : ntl::status{STATUS_DELETE_PENDING};
+}
+
+inline ntl::status relay_upstream_sink::on_datagram(
+    ip_endpoint, owned_bytes &&bytes) noexcept {
+  auto owner = owner_.lock();
+  return owner ? owner->enqueue_from_upstream(client_, std::move(bytes))
+               : ntl::status{STATUS_DELETE_PENDING};
+}
+
+} // namespace detail
+
+/**
+ * @brief Owns a dual-stack local relay and one connectionless upstream socket
+ * per client tuple.
+ *
+ * Separate upstream sockets preserve UDP reply demultiplexing without parsing
+ * transport-specific connection IDs. The facade owns the WSK provider,
+ * sockets, sinks, queued work, and flow table; callers never perform manual
+ * rundown or depend on member declaration order.
+ */
+class wsk_datagram_relay {
+public:
+  wsk_datagram_relay() noexcept { KeInitializeSpinLock(&state_lock_); }
+  wsk_datagram_relay(const wsk_datagram_relay &) = delete;
+  wsk_datagram_relay &operator=(const wsk_datagram_relay &) = delete;
+  wsk_datagram_relay(wsk_datagram_relay &&other) noexcept
+      : wsk_datagram_relay() {
+    store_state(other.take_state());
+  }
+  wsk_datagram_relay &operator=(wsk_datagram_relay &&other) noexcept {
+    if (this != &other) {
+      close();
+      store_state(other.take_state());
+    }
+    return *this;
+  }
+  ~wsk_datagram_relay() { close(); }
+
+  static ntl::result<wsk_datagram_relay>
+  try_create(wsk_provider &&provider, std::uint16_t upstream_port,
+             wsk_datagram_relay_limits limits = {}) noexcept {
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL || !provider ||
+        upstream_port == 0 || !limits.valid())
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    auto *domain = borrowed_runtime_passive_cleanup_domain();
+    if (!domain)
+      return ntl::unexpected(STATUS_DEVICE_NOT_READY);
+    void *const storage = ntl::detail::allocate_pool_bytes(
+        sizeof(detail::wsk_datagram_relay_state),
+        alignof(detail::wsk_datagram_relay_state),
+        ntl::pool_kind::nonpaged, ntl::pool_option::none,
+        ntl::pool_tag("rWdN"));
+    if (!storage)
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    auto *const raw = new (storage) detail::wsk_datagram_relay_state(
+        std::move(provider), upstream_port, limits, *domain);
+    const ntl::status registered = domain->register_item(raw->cleanup_);
+    if (!registered.is_ok()) {
+      raw->~wsk_datagram_relay_state();
+      ntl::detail::free_pool_bytes(raw, ntl::pool_kind::nonpaged,
+                                   ntl::pool_tag("rWdN"));
+      return ntl::unexpected(registered);
+    }
+
+    std::shared_ptr<detail::wsk_datagram_relay_state> state;
+    try {
+      state = std::shared_ptr<detail::wsk_datagram_relay_state>(
+          raw, [](detail::wsk_datagram_relay_state *value) noexcept {
+            value->retire();
+          });
+    } catch (...) {
+      raw->retire();
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+    raw->publish_weak(state);
+
+    std::shared_ptr<wsk_datagram_sink> sink_v4;
+    std::shared_ptr<wsk_datagram_sink> sink_v6;
+    try {
+      sink_v4 = std::make_shared<detail::relay_downstream_sink>(state);
+      sink_v6 = std::make_shared<detail::relay_downstream_sink>(state);
+    } catch (...) {
+      state.reset();
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    }
+    auto v4 = wsk_datagram_socket::try_bind(
+        raw->provider(), ip_endpoint::ipv4({127, 0, 0, 1}, 0),
+        std::move(sink_v4), limits.socket);
+    if (!v4) {
+      const auto failure = v4.status();
+      state.reset();
+      return ntl::unexpected(failure);
+    }
+    const std::uint16_t port = (*v4)->local_endpoint().port();
+    auto v6 = wsk_datagram_socket::try_bind(
+        raw->provider(),
+        ip_endpoint::ipv6({0, 0, 0, 0, 0, 0, 0, 0,
+                           0, 0, 0, 0, 0, 0, 0, 1},
+                          port),
+        std::move(sink_v6), limits.socket);
+    if (!v6) {
+      const auto failure = v6.status();
+      (*v4)->close();
+      v4->reset();
+      state.reset();
+      return ntl::unexpected(failure);
+    }
+    raw->set_downstream(std::move(*v4), std::move(*v6), port);
+    return ntl::ok(wsk_datagram_relay(std::move(state)));
+  }
+
+  void close() noexcept {
+    auto state = take_state();
+    if (state)
+      state->begin_close();
+    state.reset();
+  }
+
+  explicit operator bool() const noexcept {
+    return static_cast<bool>(retain_state());
+  }
+  std::uint16_t local_port() const noexcept {
+    auto state = retain_state();
+    return state ? state->downstream_port() : 0;
+  }
+  wsk_datagram_relay_statistics statistics() const noexcept {
+    auto state = retain_state();
+    return state ? state->statistics() : wsk_datagram_relay_statistics{};
+  }
+
+
+  /**
+   * Maps the peer of the native upstream transport back to the value-owned
+   * client endpoint accepted by this relay. Callers never retain a flow-table
+   * pointer and the owning relay state remains alive for the lookup.
+   */
+  ntl::result<ip_endpoint> resolve_client_endpoint(
+      const ip_endpoint &upstream_peer) const noexcept {
+    auto state = retain_state();
+    return state ? state->resolve_client_endpoint(upstream_peer)
+                 : ntl::result<ip_endpoint>(
+                       ntl::unexpected(STATUS_DELETE_PENDING));
+  }
+
+private:
+  explicit wsk_datagram_relay(
+      std::shared_ptr<detail::wsk_datagram_relay_state> state) noexcept
+      : wsk_datagram_relay() {
+    store_state(std::move(state));
+  }
+
+  std::shared_ptr<detail::wsk_datagram_relay_state>
+  retain_state() const noexcept {
+    KIRQL previous = PASSIVE_LEVEL;
+    KeAcquireSpinLock(&state_lock_, &previous);
+    auto state = state_;
+    KeReleaseSpinLock(&state_lock_, previous);
+    return state;
+  }
+
+  std::shared_ptr<detail::wsk_datagram_relay_state>
+  take_state() noexcept {
+    KIRQL previous = PASSIVE_LEVEL;
+    KeAcquireSpinLock(&state_lock_, &previous);
+    auto state = std::move(state_);
+    KeReleaseSpinLock(&state_lock_, previous);
+    return state;
+  }
+
+  void store_state(
+      std::shared_ptr<detail::wsk_datagram_relay_state> state) noexcept {
+    std::shared_ptr<detail::wsk_datagram_relay_state> retired;
+    KIRQL previous = PASSIVE_LEVEL;
+    KeAcquireSpinLock(&state_lock_, &previous);
+    retired.swap(state_);
+    state_.swap(state);
+    KeReleaseSpinLock(&state_lock_, previous);
+    retired.reset();
+  }
+
+  mutable KSPIN_LOCK state_lock_{};
+  std::shared_ptr<detail::wsk_datagram_relay_state> state_;
+};
+
+} // namespace ntl::net::kernel

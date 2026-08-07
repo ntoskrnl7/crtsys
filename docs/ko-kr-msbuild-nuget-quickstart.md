@@ -40,6 +40,10 @@ WFP callout driver에서는 WDK project type을 WDM으로 유지하고
 **crtsys WDM entry point**를 **NTL WFP**로 선택한 뒤 `ntl::main`을
 구현합니다. Package가 WFP와 architecture별 NDIS 전처리기 정의를 적용하고
 `fwpkclnt.lib`를 자동으로 링크합니다.
+커널 MsQuic NMR backend를 사용하는 경우 같은 화면의
+**NTL kernel MsQuic backend**도 켭니다. 이 스위치 하나로 고정된 public ABI,
+Windows 10 version 2004 계약과 `netio.lib`를 선택하며 runtime provider를
+설치하지는 않습니다.
 
 ![Visual Studio에서 crtsys NTL WFP 진입점을 선택하고 ntl::main을 구현하는 화면](./assets/visual-studio-ntl-wfp-entrypoint-ko-kr.gif)
 
@@ -112,6 +116,11 @@ library, 선택한 driver model에 맞는 startup object가 포함됩니다.
 | NTL minifilter | `<CrtSysWdmEntryPoint>NtlMinifilter</CrtSysWdmEntryPoint>` | `ntl::flt::main` |
 | NTL WFP callout | `<CrtSysWdmEntryPoint>NtlWfp</CrtSysWdmEntryPoint>` | `ntl::main` |
 | Export driver | WDK `ExportDriver` + crtsys 진입점 선택 없음 | WDK export-driver 진입 모델 |
+
+`CrtSysUseNtlKernelMsQuic`는 별도의 진입점 형태가 아니라 독립적인 opt-in
+driver 기능입니다. kernel MsQuic NMR backend를 실제로 사용하는 driver에서만
+켜며, package가 고정된 ABI, Windows 10 version 2004 계약과 `netio.lib`를
+선택합니다. runtime provider 배포는 제품이 별도로 담당합니다.
 
 NTL KMDF 진입점은 선택 사항입니다. 두 KMDF 방식 모두 PnP, power, queue,
 request, object lifetime, dispatch 처리는 기존과 같이 WDF가 소유합니다.

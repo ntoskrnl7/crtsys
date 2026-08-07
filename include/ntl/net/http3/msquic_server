@@ -1,0 +1,552 @@
+/**
+ * @file http3_msquic_server
+ * @brief Drainable raw-MsQuic listener for high-level HTTP/3 sinks.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/http3/msquic_server is a user-mode header"
+#endif
+
+#include <ntl/net/http3/msquic_runtime>
+#include <ntl/net/user/cleanup_domain>
+
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <span>
+#include <string_view>
+#include <thread>
+#include <utility>
+#include <vector>
+
+namespace ntl::net::http3::msquic_backend {
+
+using server_configuration_selector = std::function<
+    ntl::result<configuration>(const accepted_connection_info_view &)>;
+
+using server_sink_factory = std::function<
+    ntl::result<std::shared_ptr<ntl::net::quic::backend_sink>>(
+        std::shared_ptr<ntl::net::quic::transport_backend>,
+        const accepted_connection_info_view &)>;
+
+struct server_runtime_limits {
+  std::size_t maximum_active_connections = 256;
+  connection_limits connection{};
+  std::chrono::milliseconds shutdown_timeout{
+      std::chrono::seconds(15)};
+
+  constexpr bool valid() const noexcept {
+    return maximum_active_connections != 0 &&
+           shutdown_timeout.count() > 0;
+  }
+};
+
+struct server_statistics {
+  std::uint64_t accepted = 0;
+  std::uint64_t rejected = 0;
+  std::size_t active = 0;
+};
+
+namespace server_detail {
+
+/**
+ * @brief Selects an SNI-specific configuration and owns accepted connections.
+ *
+ * The server deliberately does not own certificate issuance or HTTP policy.
+ * The configuration selector chooses a credential-bearing HQUIC, while the
+ * sink factory normally constructs `http3::proxy_connection`.  SETTINGS,
+ * QPACK, request-stream, WebTransport, and origin association therefore stay
+ * in the reusable sink rather than in an application listener callback.
+ */
+class server_state {
+public:
+  explicit server_state(ntl::net::user::cleanup_domain &cleanup) noexcept
+      : cleanup_domain_(&cleanup) {}
+  server_state(const server_state &) = delete;
+  server_state &operator=(const server_state &) = delete;
+  ~server_state() = default;
+
+  void request_cleanup() noexcept {
+    if (!cleanup_domain_ ||
+        !cleanup_domain_->retire_deferred(cleanup_).is_ok())
+      std::terminate();
+  }
+
+  ntl::status open(
+      runtime &owner,
+      server_configuration_selector configurations,
+      server_sink_factory sinks,
+      server_runtime_limits limits = {}) noexcept {
+    auto runtime_state = owner.retain_state();
+    if (!runtime_state || !configurations || !sinks || !limits.valid())
+      return STATUS_INVALID_PARAMETER;
+    std::lock_guard guard(lock_);
+    if (listener_)
+      return STATUS_INVALID_DEVICE_STATE;
+    try {
+      configurations_ = std::move(configurations);
+      sinks_ = std::move(sinks);
+      runtime_ = std::move(runtime_state);
+      api_ = runtime_->api;
+      registration_ = runtime_->registration;
+      limits_ = limits;
+      connections_.reserve(limits_.maximum_active_connections);
+      const QUIC_STATUS opened = api_->ListenerOpen(
+          registration_, &listener_callback, this, &listener_);
+      if (QUIC_FAILED(opened)) {
+        configurations_ = {};
+        sinks_ = {};
+        api_ = nullptr;
+        registration_ = nullptr;
+        runtime_.reset();
+        listener_ = nullptr;
+        return detail::from_quic_status(opened);
+      }
+      return ntl::status::ok();
+    } catch (const std::bad_alloc &) {
+      configurations_ = {};
+      sinks_ = {};
+      api_ = nullptr;
+      registration_ = nullptr;
+      runtime_.reset();
+      return STATUS_INSUFFICIENT_RESOURCES;
+    } catch (...) {
+      configurations_ = {};
+      sinks_ = {};
+      api_ = nullptr;
+      registration_ = nullptr;
+      runtime_.reset();
+      return STATUS_UNHANDLED_EXCEPTION;
+    }
+  }
+
+  ntl::status start(
+      std::span<const std::string_view> protocols,
+      const QUIC_ADDR *address = nullptr) noexcept {
+    if (protocols.empty())
+      return STATUS_INVALID_PARAMETER;
+    std::vector<QUIC_BUFFER> buffers;
+    try {
+      buffers.reserve(protocols.size());
+      for (const auto protocol : protocols) {
+        if (protocol.empty() || protocol.size() > QUIC_MAX_ALPN_LENGTH)
+          return STATUS_INVALID_PARAMETER;
+        buffers.push_back(
+            {static_cast<std::uint32_t>(protocol.size()),
+             reinterpret_cast<std::uint8_t *>(
+                 const_cast<char *>(protocol.data()))});
+      }
+    } catch (const std::bad_alloc &) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    } catch (...) {
+      return STATUS_UNHANDLED_EXCEPTION;
+    }
+
+    std::lock_guard guard(lock_);
+    if (!listener_ || started_ || stopping_)
+      return STATUS_INVALID_DEVICE_STATE;
+    listener_stop_complete_ = false;
+    const QUIC_STATUS started = api_->ListenerStart(
+        listener_, buffers.data(),
+        static_cast<std::uint32_t>(buffers.size()), address);
+    if (QUIC_FAILED(started))
+      return detail::from_quic_status(started);
+    started_ = true;
+    return ntl::status::ok();
+  }
+
+  void stop() noexcept {
+    HQUIC listener = nullptr;
+    {
+      std::lock_guard guard(lock_);
+      if (!listener_ || stopping_)
+        return;
+      stopping_ = true;
+      listener = started_ ? listener_ : nullptr;
+      for (const auto &accepted : connections_)
+        accepted->stop();
+    }
+    if (listener)
+      api_->ListenerStop(listener);
+    else {
+      std::lock_guard guard(lock_);
+      listener_stop_complete_ = true;
+      changed_.notify_all();
+    }
+  }
+
+  ntl::status drain(
+      std::chrono::milliseconds timeout =
+          std::chrono::seconds(15)) noexcept {
+    if (timeout.count() <= 0)
+      return STATUS_INVALID_PARAMETER;
+    stop();
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    std::vector<std::shared_ptr<connection>> accepted;
+    {
+      std::unique_lock guard(lock_);
+      if (!changed_.wait_until(guard, deadline, [this] {
+            return listener_stop_complete_ && callbacks_ == 0;
+          }))
+        return STATUS_IO_TIMEOUT;
+      for (const auto &item : connections_) {
+        item->stop();
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline ||
+            !item->wait_for_shutdown(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    deadline - now)))
+          return STATUS_IO_TIMEOUT;
+      }
+      accepted.swap(connections_);
+      started_ = false;
+    }
+
+    accepted.clear();
+    return ntl::status::ok();
+  }
+
+  ntl::status reset(
+      std::chrono::milliseconds timeout =
+          std::chrono::seconds(15)) noexcept {
+    if (!listener_)
+      return ntl::status::ok();
+    const ntl::status drained = drain(timeout);
+    if (!drained.is_ok())
+      return drained;
+    HQUIC listener = nullptr;
+    const QUIC_API_TABLE *api = nullptr;
+    {
+      std::lock_guard guard(lock_);
+      listener = std::exchange(listener_, nullptr);
+      api = api_;
+      configurations_ = {};
+      sinks_ = {};
+      api_ = nullptr;
+      registration_ = nullptr;
+      runtime_.reset();
+      stopping_ = false;
+      listener_stop_complete_ = false;
+    }
+    if (listener)
+      api->ListenerClose(listener);
+    return ntl::status::ok();
+  }
+
+  ntl::result<QUIC_ADDR> local_address() const noexcept {
+    std::lock_guard guard(lock_);
+    if (!api_ || !listener_ || !started_)
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+    QUIC_ADDR address{};
+    std::uint32_t size = sizeof(address);
+    const QUIC_STATUS queried = api_->GetParam(
+        listener_, QUIC_PARAM_LISTENER_LOCAL_ADDRESS,
+        &size, &address);
+    if (QUIC_FAILED(queried))
+      return ntl::unexpected(detail::from_quic_status(queried));
+    if (size != sizeof(address))
+      return ntl::unexpected(STATUS_INFO_LENGTH_MISMATCH);
+    return ntl::ok(address);
+  }
+
+  server_statistics statistics() noexcept {
+    std::lock_guard guard(lock_);
+    reap_completed_locked();
+    return {accepted_, rejected_, connections_.size()};
+  }
+
+private:
+  static void cleanup_deferred(void *context) noexcept {
+    auto *state = static_cast<server_state *>(context);
+    state->close_at_cleanup_worker();
+    delete state;
+  }
+
+  class callback_guard {
+  public:
+    explicit callback_guard(server_state &owner) noexcept : owner_(&owner) {
+      std::lock_guard guard(owner_->lock_);
+      ++owner_->callbacks_;
+    }
+    ~callback_guard() {
+      std::lock_guard guard(owner_->lock_);
+      if (owner_->callbacks_ != 0)
+        --owner_->callbacks_;
+      owner_->changed_.notify_all();
+    }
+
+  private:
+    server_state *owner_;
+  };
+
+  static QUIC_STATUS QUIC_API listener_callback(
+      HQUIC, void *context,
+      QUIC_LISTENER_EVENT *event) noexcept {
+    auto *owner = static_cast<server_state *>(context);
+    if (!owner || !event)
+      return QUIC_STATUS_INVALID_PARAMETER;
+    callback_guard callback(*owner);
+    if (event->Type == QUIC_LISTENER_EVENT_STOP_COMPLETE) {
+      std::lock_guard guard(owner->lock_);
+      owner->listener_stop_complete_ = true;
+      owner->changed_.notify_all();
+      return QUIC_STATUS_SUCCESS;
+    }
+    if (event->Type == QUIC_LISTENER_EVENT_DOS_MODE_CHANGED)
+      return QUIC_STATUS_SUCCESS;
+    if (event->Type != QUIC_LISTENER_EVENT_NEW_CONNECTION ||
+        !event->NEW_CONNECTION.Info ||
+        !event->NEW_CONNECTION.Connection)
+      return QUIC_STATUS_INVALID_PARAMETER;
+    try {
+      return owner->accept(
+          event->NEW_CONNECTION.Connection,
+          *event->NEW_CONNECTION.Info);
+    } catch (...) {
+      std::lock_guard guard(owner->lock_);
+      ++owner->rejected_;
+      return QUIC_STATUS_ABORTED;
+    }
+  }
+
+  QUIC_STATUS accept(
+      HQUIC handle,
+      const QUIC_NEW_CONNECTION_INFO &source) {
+    auto accepted = borrowed_accepted_connection::from_native(handle, source);
+    const accepted_connection_info_view information = accepted.information();
+
+    {
+      std::lock_guard guard(lock_);
+      reap_completed_locked();
+      if (stopping_ ||
+          connections_.size() + accepts_in_progress_ >=
+              limits_.maximum_active_connections) {
+        ++rejected_;
+        return QUIC_STATUS_ABORTED;
+      }
+      ++accepts_in_progress_;
+    }
+    struct accept_reservation {
+      server_state *owner;
+      ~accept_reservation() {
+        std::lock_guard guard(owner->lock_);
+        if (owner->accepts_in_progress_ != 0)
+          --owner->accepts_in_progress_;
+        owner->changed_.notify_all();
+      }
+    } reservation{this};
+
+    auto configuration = configurations_(information);
+    ntl::status factory_status{STATUS_PENDING};
+    ntl::result<std::shared_ptr<connection>> result =
+        configuration
+            ? connection::try_accept_with_sink(
+                  configuration->make_connection_context(),
+                  std::move(accepted),
+                  [&](std::shared_ptr<ntl::net::quic::transport_backend>
+                          backend) {
+                    auto sink = sinks_(std::move(backend), information);
+                    factory_status = sink.status();
+                    return sink
+                               ? std::move(sink).value()
+                               : std::shared_ptr<
+                                     ntl::net::quic::backend_sink>{};
+                  },
+                  limits_.connection)
+            : ntl::result<std::shared_ptr<connection>>(
+                  ntl::unexpected(configuration.status()));
+
+    {
+      std::lock_guard guard(lock_);
+      if (result) {
+        connections_.push_back(std::move(result).value());
+        if (stopping_)
+          connections_.back()->stop();
+        ++accepted_;
+      } else {
+        (void)factory_status;
+        ++rejected_;
+      }
+      changed_.notify_all();
+    }
+    if (!result)
+      return QUIC_STATUS_ABORTED;
+    return QUIC_STATUS_SUCCESS;
+  }
+
+  void reap_completed_locked() noexcept {
+    for (auto iterator = connections_.begin();
+         iterator != connections_.end();) {
+      if ((*iterator)->wait_for_shutdown(
+              std::chrono::milliseconds::zero()))
+        iterator = connections_.erase(iterator);
+      else
+        ++iterator;
+    }
+  }
+
+  void close_at_cleanup_worker() noexcept {
+    HQUIC listener = nullptr;
+    const QUIC_API_TABLE *api = nullptr;
+    std::vector<std::shared_ptr<connection>> accepted;
+    {
+      std::lock_guard guard(lock_);
+      if (!listener_)
+        return;
+    }
+    stop();
+    {
+      std::unique_lock guard(lock_);
+      changed_.wait(guard, [this] {
+        return listener_stop_complete_ && callbacks_ == 0 &&
+               accepts_in_progress_ == 0;
+      });
+      listener = std::exchange(listener_, nullptr);
+      api = api_;
+      accepted.swap(connections_);
+      started_ = false;
+    }
+    for (auto &item : accepted)
+      item->drain_exact();
+    accepted.clear();
+    if (listener)
+      api->ListenerClose(listener);
+    std::lock_guard guard(lock_);
+    configurations_ = {};
+    sinks_ = {};
+    api_ = nullptr;
+    registration_ = nullptr;
+    runtime_.reset();
+    stopping_ = false;
+    listener_stop_complete_ = false;
+  }
+
+  const QUIC_API_TABLE *api_ = nullptr;
+  HQUIC registration_ = nullptr;
+  std::shared_ptr<detail::runtime_state> runtime_;
+  HQUIC listener_ = nullptr;
+  server_configuration_selector configurations_;
+  server_sink_factory sinks_;
+  server_runtime_limits limits_{};
+  mutable std::mutex lock_;
+  std::condition_variable changed_;
+  std::vector<std::shared_ptr<connection>> connections_;
+  std::size_t callbacks_ = 0;
+  std::size_t accepts_in_progress_ = 0;
+  std::uint64_t accepted_ = 0;
+  std::uint64_t rejected_ = 0;
+  bool started_ = false;
+  bool stopping_ = false;
+  bool listener_stop_complete_ = false;
+  ntl::net::user::cleanup_domain *cleanup_domain_ = nullptr;
+  ntl::net::user::cleanup_item cleanup_{
+      &server_state::cleanup_deferred, this};
+};
+
+} // namespace server_detail
+
+/**
+ * Owning listener facade. close() is idempotent and never waits inside an
+ * MsQuic callback; a tracked private worker drains callbacks and native state.
+ */
+class server {
+public:
+  server() = default;
+  server(const server &) = delete;
+  server &operator=(const server &) = delete;
+  server(server &&) = delete;
+  server &operator=(server &&) = delete;
+  ~server() { close(); }
+
+  ntl::status open(
+      runtime &owner,
+      server_configuration_selector configurations,
+      server_sink_factory sinks,
+      server_runtime_limits limits = {}) noexcept {
+    std::unique_lock facade_guard(state_lock_);
+    if (state_)
+      return STATUS_INVALID_DEVICE_STATE;
+    try {
+      auto *cleanup = ntl::net::user::borrowed_runtime_cleanup_domain();
+      if (!cleanup)
+        return STATUS_INSUFFICIENT_RESOURCES;
+      auto *raw = new server_detail::server_state(*cleanup);
+      std::shared_ptr<server_detail::server_state> state(
+          raw, [](server_detail::server_state *value) noexcept {
+            value->request_cleanup();
+          });
+      const ntl::status opened = state->open(
+          owner, std::move(configurations), std::move(sinks), limits);
+      if (!opened.is_ok())
+        return opened;
+      state_ = std::move(state);
+      return ntl::status::ok();
+    } catch (const std::bad_alloc &) {
+      return STATUS_INSUFFICIENT_RESOURCES;
+    } catch (...) {
+      return STATUS_UNHANDLED_EXCEPTION;
+    }
+  }
+
+  ntl::status start(
+      std::span<const std::string_view> protocols,
+      const QUIC_ADDR *address = nullptr) noexcept {
+    auto state = retain_state();
+    return state ? state->start(protocols, address)
+                 : ntl::status{STATUS_INVALID_DEVICE_STATE};
+  }
+
+  void stop() noexcept {
+    auto state = retain_state();
+    if (state)
+      state->stop();
+  }
+
+  void close() noexcept {
+    std::shared_ptr<server_detail::server_state> state;
+    {
+      std::lock_guard guard(state_lock_);
+      state = std::move(state_);
+    }
+    if (state)
+      state->stop();
+  }
+
+  ntl::status drain(
+      std::chrono::milliseconds timeout =
+          std::chrono::seconds(15)) noexcept {
+    auto state = retain_state();
+    return state ? state->drain(timeout) : ntl::status::ok();
+  }
+
+  ntl::result<QUIC_ADDR> local_address() const noexcept {
+    auto state = retain_state();
+    return state ? state->local_address()
+                 : ntl::result<QUIC_ADDR>(
+                       ntl::unexpected(STATUS_INVALID_DEVICE_STATE));
+  }
+
+  server_statistics statistics() noexcept {
+    auto state = retain_state();
+    return state ? state->statistics() : server_statistics{};
+  }
+
+private:
+  std::shared_ptr<server_detail::server_state> retain_state() const noexcept {
+    std::lock_guard guard(state_lock_);
+    return state_;
+  }
+
+  mutable std::mutex state_lock_;
+  std::shared_ptr<server_detail::server_state> state_;
+};
+
+} // namespace ntl::net::http3::msquic_backend

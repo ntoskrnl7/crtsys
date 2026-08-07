@@ -8,6 +8,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'CrtSysMsQuicHeaderContract.ps1')
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 
@@ -106,6 +107,16 @@ foreach ($toolsetName in $Toolset) {
           throw "Required content codec library is missing: $fullCodecPath. Run scripts\nuget\Build-CrtSysNuGetLibs.ps1 first."
         }
       }
+      foreach ($kernelCodecLibrary in @(
+          'crtsys_ntl_kernel_zlib.lib',
+          'crtsys_ntl_kernel_brotli.lib')) {
+        $requiredKernelCodecPath =
+          "kernel-codecs\lib\$toolsetName\$arch\$config\$kernelCodecLibrary"
+        $fullKernelCodecPath = Join-Path $stagingDirectory $requiredKernelCodecPath
+        if (-not (Test-Path $fullKernelCodecPath)) {
+          throw "Required kernel content codec library is missing: $fullKernelCodecPath. Run scripts\nuget\Build-CrtSysNuGetLibs.ps1 first."
+        }
+      }
     }
   }
 }
@@ -118,11 +129,18 @@ foreach ($codecHeader in @(
   }
 }
 
+Assert-CrtSysMsQuicHeaderSet `
+  -IncludeDirectory (Join-Path $stagingDirectory 'msquic\include') `
+  -Description 'Staged NuGet MsQuic public header set'
+
 Remove-UnselectedStagedLibraries `
   -NativeDirectory (Join-Path $stagingDirectory 'lib\native') `
   -SelectedToolsets @($Toolset)
 Remove-UnselectedStagedLibraries `
   -NativeDirectory (Join-Path $stagingDirectory 'codecs\lib') `
+  -SelectedToolsets @($Toolset)
+Remove-UnselectedStagedLibraries `
+  -NativeDirectory (Join-Path $stagingDirectory 'kernel-codecs\lib') `
   -SelectedToolsets @($Toolset)
 
 Write-Host "Packing crtsys $Version to $OutputDirectory"

@@ -1,6 +1,6 @@
 /**
  * @file async_framed_stream
- * @brief User-mode IOCP coroutine reads with caller-defined message framing.
+ * @brief Owning user-mode coroutine stream with bounded message framing.
  *
  * @copyright Copyright (c) 2022 NT Template Library Authors.
  */
@@ -10,15 +10,15 @@
 #error "ntl/net/io/async_framed_stream is a user-mode header"
 #endif
 
-#include <ntl/net/io/async_socket>
 #include <ntl/net/framing>
+#include <ntl/net/io/async_socket>
+#include <ntl/net/user/task>
 
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
-#include <coroutine>
 #include <cstring>
-#include <limits>
+#include <memory>
 #include <span>
 #include <stdexcept>
 #include <system_error>
@@ -29,9 +29,7 @@ namespace ntl::net {
 
 template <class Framer> class tls_framed_stream;
 
-/**
- * @brief Owning result for one complete framed message.
- */
+/** Owning result for one complete framed message. */
 class framed_message {
 public:
   framed_message() = default;
@@ -41,8 +39,8 @@ public:
     if (content_offset_ > bytes_.size() ||
         content_size_ > bytes_.size() - content_offset_)
       return {};
-    return std::span<const std::byte>(
-        bytes_.data() + content_offset_, content_size_);
+    return std::span<const std::byte>(bytes_.data() + content_offset_,
+                                      content_size_);
   }
   bool empty() const noexcept { return bytes_.empty(); }
   std::size_t size() const noexcept { return bytes_.size(); }
@@ -51,8 +49,7 @@ private:
   template <class> friend class async_framed_stream;
   template <class> friend class tls_framed_stream;
 
-  framed_message(std::vector<std::byte> bytes,
-                 std::size_t content_offset,
+  framed_message(std::vector<std::byte> bytes, std::size_t content_offset,
                  std::size_t content_size) noexcept
       : bytes_(std::move(bytes)), content_offset_(content_offset),
         content_size_(content_size) {}
@@ -63,308 +60,211 @@ private:
 };
 
 /**
- * @brief Bounded single-reader framed stream over one async_socket.
+ * @brief Bounded single-reader framed stream that owns its async socket.
  *
- * Framer::probe(scatter_view) must be noexcept and return
- * ntl::net::framing::frame_probe. The stream may read beyond one frame and retains
- * that suffix for the next read_frame(). The socket, completion context,
- * stream, framer, and awaiting coroutine must remain alive through
- * await_resume(). Call async_socket::cancel() before abandoning a pending
- * operation.
+ * A read task retains the stream state through completion. Destroying or
+ * closing the facade cancels the native socket, while the callback continues
+ * to reference valid state until IOCP reports completion.
  */
+#if defined(_MSC_VER) && defined(_M_ARM64)
+#pragma warning(push)
+// MSVC's ARM64 atomic storage is over-aligned. shared_state is private and its
+// intentional tail padding is never part of a wire or public binary layout.
+#pragma warning(disable : 4324)
+#endif
 template <class Framer> class async_framed_stream {
 public:
-  async_framed_stream(
-      async_socket &socket, Framer framer,
-      ntl::net::framing::frame_limits limits = {},
-      std::size_t receive_chunk_size = 4096)
-      : socket_(&socket), framer_(std::move(framer)), limits_(limits),
-        receive_chunk_size_(receive_chunk_size) {
-    if (!socket || limits_.maximum_frame_size == 0 ||
-        receive_chunk_size_ == 0)
+  async_framed_stream(async_socket socket, Framer framer,
+                      ntl::net::framing::frame_limits limits = {},
+                      std::size_t receive_chunk_size = 4096) {
+    if (!socket || limits.maximum_frame_size == 0 ||
+        receive_chunk_size == 0)
       throw std::invalid_argument(
           "async_framed_stream requires a socket and positive limits");
+    state_ = std::make_shared<shared_state>(
+        std::move(socket), std::move(framer), limits,
+        receive_chunk_size);
   }
+
+  async_framed_stream(async_socket &socket, Framer framer,
+                      ntl::net::framing::frame_limits limits = {},
+                      std::size_t receive_chunk_size = 4096)
+      : async_framed_stream(socket.share(), std::move(framer), limits,
+                            receive_chunk_size) {}
 
   async_framed_stream(const async_framed_stream &) = delete;
-  async_framed_stream &
-  operator=(const async_framed_stream &) = delete;
-  async_framed_stream(async_framed_stream &&) = delete;
-  async_framed_stream &operator=(async_framed_stream &&) = delete;
-
-  std::size_t buffered_size() const noexcept { return buffer_.size(); }
-  std::size_t maximum_frame_size() const noexcept {
-    return limits_.maximum_frame_size;
+  async_framed_stream &operator=(const async_framed_stream &) = delete;
+  async_framed_stream(async_framed_stream &&other) noexcept
+      : state_(other.state_.exchange({}, std::memory_order_acq_rel)) {}
+  async_framed_stream &operator=(async_framed_stream &&other) noexcept {
+    if (this != &other) {
+      close();
+      state_.store(
+          other.state_.exchange({}, std::memory_order_acq_rel),
+          std::memory_order_release);
+    }
+    return *this;
   }
 
-  class read_operation {
-  public:
-    explicit read_operation(async_framed_stream *owner) noexcept
-        : owner_(owner) {
-      native_.owner = this;
-      native_.complete = &read_operation::completed;
-    }
+  ~async_framed_stream() { close(); }
 
-    read_operation(const read_operation &) = delete;
-    read_operation &operator=(const read_operation &) = delete;
-    read_operation(read_operation &&) = delete;
-    read_operation &operator=(read_operation &&) = delete;
+  void close() noexcept {
+    auto state = state_.exchange({}, std::memory_order_acq_rel);
+    if (state)
+      state->socket.close();
+  }
 
-    bool await_ready() noexcept {
-      if (!owner_ || !owner_->socket_ ||
-          !static_cast<bool>(*owner_->socket_)) {
-        error_ = WSAENOTSOCK;
-        return true;
-      }
-      if (owner_->reading_.exchange(true, std::memory_order_acq_rel)) {
-        error_ = ERROR_BUSY;
-        return true;
-      }
-      acquired_reader_ = true;
-      return inspect_buffer();
-    }
+  std::size_t buffered_size() const noexcept {
+    auto state = state_.load(std::memory_order_acquire);
+    return state ? state->buffered_size.load(std::memory_order_acquire) : 0;
+  }
+  std::size_t maximum_frame_size() const noexcept {
+    auto state = state_.load(std::memory_order_acquire);
+    return state ? state->limits.maximum_frame_size : 0;
+  }
 
-    bool await_suspend(std::coroutine_handle<> continuation) noexcept {
-      continuation_ = continuation;
-      io_completion_context *const context =
-          owner_->socket_->context_;
-      if (!context || !context->begin_operation()) {
-        error_ = ERROR_OPERATION_ABORTED;
-        return false;
-      }
-      context_ = context;
-      counted_ = true;
-
-      if (!submit_receive()) {
-        counted_ = false;
-        context_->end_operation();
-        return false;
-      }
-
-      const phase previous =
-          phase_.exchange(phase::suspended, std::memory_order_acq_rel);
-      return previous != phase::completed;
-    }
-
-    framed_message await_resume() {
-      struct reader_release {
-        async_framed_stream *owner;
-        ~reader_release() {
-          if (owner)
-            owner->reading_.store(false, std::memory_order_release);
-        }
-      } release{acquired_reader_ ? owner_ : nullptr};
-
-      if (error_ != ERROR_SUCCESS)
-        throw std::system_error(
-            static_cast<int>(error_), std::system_category(),
-            "async_framed_stream::read_frame");
-
-      std::vector<std::byte> frame(frame_size_);
-      if (frame_size_ != 0)
-        std::memcpy(frame.data(), owner_->buffer_.data(), frame_size_);
-      owner_->buffer_.erase(
-          owner_->buffer_.begin(),
-          owner_->buffer_.begin() +
-              static_cast<std::ptrdiff_t>(frame_size_));
-      owner_->reset_framer();
-      return framed_message(
-          std::move(frame), content_offset_, content_size_);
-    }
-
-  private:
-    enum class phase : std::uint8_t {
-      submitting,
-      suspended,
-      completed,
-    };
-
-    static DWORD map_status(NTSTATUS status) noexcept {
-      switch (status) {
-      case STATUS_BUFFER_OVERFLOW:
-      case STATUS_BUFFER_TOO_SMALL:
-        return ERROR_BUFFER_OVERFLOW;
-      case STATUS_INSUFFICIENT_RESOURCES:
-        return ERROR_NOT_ENOUGH_MEMORY;
-      case STATUS_IO_TIMEOUT:
-        return ERROR_TIMEOUT;
-      case STATUS_CANCELLED:
-        return ERROR_OPERATION_ABORTED;
-      case STATUS_END_OF_FILE:
-        return ERROR_HANDLE_EOF;
-      default:
-        return ERROR_INVALID_DATA;
-      }
-    }
-
-    bool inspect_buffer() noexcept {
-      const auto bytes = ntl::net::scatter_view::from_contiguous(
-          std::span<const std::byte>(
-              owner_->buffer_.data(), owner_->buffer_.size()));
-      const auto result = ntl::net::framing::probe(
-          owner_->framer_, bytes, owner_->limits_);
-      switch (result.state()) {
-      case ntl::net::framing::probe_state::complete:
-        frame_size_ = result.frame_size();
-        content_offset_ = result.content_offset();
-        content_size_ = result.content_size();
-        error_ = ERROR_SUCCESS;
-        return true;
-
-      case ntl::net::framing::probe_state::need_more:
-        required_total_ = result.required_total();
-        return false;
-
-      case ntl::net::framing::probe_state::malformed:
-        error_ = map_status(result.error());
-        return true;
-      }
-      error_ = ERROR_INVALID_DATA;
-      return true;
-    }
-
-    bool submit_receive() noexcept {
-      const std::size_t current = owner_->buffer_.size();
-      if (current >= owner_->limits_.maximum_frame_size) {
-        error_ = ERROR_BUFFER_OVERFLOW;
-        return false;
-      }
-
-      const std::size_t room =
-          owner_->limits_.maximum_frame_size - current;
-      const std::size_t native_max =
-          static_cast<std::size_t>(
-              (std::numeric_limits<ULONG>::max)());
-      const std::size_t growth = (std::min)(
-          (std::min)(owner_->receive_chunk_size_, room), native_max);
-      const std::size_t target =
-          (std::max)(required_total_, current + growth);
-      if (target <= current ||
-          target > owner_->limits_.maximum_frame_size ||
-          target - current > native_max) {
-        error_ = ERROR_BUFFER_OVERFLOW;
-        return false;
-      }
-
-      try {
-        owner_->buffer_.resize(target);
-      } catch (...) {
-        error_ = ERROR_NOT_ENOUGH_MEMORY;
-        return false;
-      }
-      submitted_offset_ = current;
-      submitted_size_ = target - current;
-
-      native_.overlapped = {};
-      WSABUF buffer{};
-      buffer.buf = reinterpret_cast<char *>(
-          owner_->buffer_.data() + submitted_offset_);
-      buffer.len = static_cast<ULONG>(submitted_size_);
-      receive_flags_ = 0;
-      DWORD ignored = 0;
-      const int result = ::WSARecv(
-          owner_->socket_->socket_, &buffer, 1, &ignored,
-          &receive_flags_, &native_.overlapped, nullptr);
-      if (result == 0)
-        return true;
-      const DWORD error = static_cast<DWORD>(::WSAGetLastError());
-      if (error == WSA_IO_PENDING)
-        return true;
-
-      owner_->buffer_.resize(submitted_offset_);
-      error_ = error;
-      return false;
-    }
-
-    static void completed(void *context, DWORD transferred,
-                          DWORD error) noexcept {
-      static_cast<read_operation *>(context)->on_completed(
-          transferred, error);
-    }
-
-    void on_completed(DWORD transferred, DWORD error) noexcept {
-      if (error != ERROR_SUCCESS) {
-        owner_->buffer_.resize(submitted_offset_);
-        finish(error);
-        return;
-      }
-      if (transferred == 0) {
-        owner_->buffer_.resize(submitted_offset_);
-        const auto bytes = ntl::net::scatter_view::from_contiguous(
-            std::span<const std::byte>(
-                owner_->buffer_.data(), owner_->buffer_.size()));
-        const auto result = ntl::net::framing::finish(
-            owner_->framer_, bytes, owner_->limits_);
-        if (result.state() ==
-            ntl::net::framing::probe_state::complete) {
-          frame_size_ = result.frame_size();
-          content_offset_ = result.content_offset();
-          content_size_ = result.content_size();
-          finish(ERROR_SUCCESS);
-        } else {
-          finish(map_status(result.error()));
-        }
-        return;
-      }
-      if (transferred > submitted_size_) {
-        owner_->buffer_.resize(submitted_offset_);
-        finish(ERROR_INVALID_DATA);
-        return;
-      }
-
-      owner_->buffer_.resize(submitted_offset_ + transferred);
-      if (inspect_buffer()) {
-        finish(error_);
-        return;
-      }
-      if (!submit_receive())
-        finish(error_);
-    }
-
-    void finish(DWORD error) noexcept {
-      error_ = error;
-      if (counted_) {
-        counted_ = false;
-        context_->end_operation();
-      }
-
-      const phase previous =
-          phase_.exchange(phase::completed, std::memory_order_acq_rel);
-      if (previous == phase::suspended && continuation_)
-        continuation_.resume();
-    }
-
-    async_framed_stream *owner_ = nullptr;
-    detail::iocp_operation native_{};
-    io_completion_context *context_ = nullptr;
-    std::coroutine_handle<> continuation_{};
-    std::atomic<phase> phase_{phase::submitting};
-    std::size_t required_total_ = 0;
-    std::size_t submitted_offset_ = 0;
-    std::size_t submitted_size_ = 0;
-    std::size_t frame_size_ = 0;
-    std::size_t content_offset_ = 0;
-    std::size_t content_size_ = 0;
-    DWORD receive_flags_ = 0;
-    DWORD error_ = ERROR_IO_PENDING;
-    bool acquired_reader_ = false;
-    bool counted_ = false;
-  };
-
-  read_operation read_frame() noexcept { return read_operation(this); }
+  ntl::net::user::task<framed_message> read_frame() {
+    return read_frame_impl(state_.load(std::memory_order_acquire));
+  }
 
 private:
-  void reset_framer() noexcept {
-    if constexpr (requires(Framer &value) { value.reset(); })
-      framer_.reset();
+  struct shared_state {
+    shared_state(async_socket socket_value, Framer framer_value,
+                 ntl::net::framing::frame_limits limits_value,
+                 std::size_t receive_chunk_size_value)
+        : socket(std::move(socket_value)), framer(std::move(framer_value)),
+          limits(limits_value),
+          receive_chunk_size(receive_chunk_size_value) {}
+
+    void reset_framer() noexcept {
+      if constexpr (requires(Framer &value) { value.reset(); })
+        framer.reset();
+    }
+
+    async_socket socket;
+    Framer framer;
+    ntl::net::framing::frame_limits limits{};
+    std::size_t receive_chunk_size = 4096;
+    std::vector<std::byte> buffer;
+    std::atomic<std::size_t> buffered_size{0};
+    std::atomic<bool> reading{false};
+  };
+
+  static DWORD map_status(NTSTATUS status) noexcept {
+    switch (status) {
+    case STATUS_BUFFER_OVERFLOW:
+    case STATUS_BUFFER_TOO_SMALL:
+      return ERROR_BUFFER_OVERFLOW;
+    case STATUS_INSUFFICIENT_RESOURCES:
+      return ERROR_NOT_ENOUGH_MEMORY;
+    case STATUS_IO_TIMEOUT:
+      return ERROR_TIMEOUT;
+    case STATUS_CANCELLED:
+      return ERROR_OPERATION_ABORTED;
+    case STATUS_END_OF_FILE:
+      return ERROR_HANDLE_EOF;
+    default:
+      return ERROR_INVALID_DATA;
+    }
   }
 
-  async_socket *socket_ = nullptr;
-  Framer framer_;
-  ntl::net::framing::frame_limits limits_{};
-  std::size_t receive_chunk_size_ = 4096;
-  std::vector<std::byte> buffer_;
-  std::atomic<bool> reading_{false};
+  static ntl::net::user::task<framed_message>
+  read_frame_impl(std::shared_ptr<shared_state> state) {
+    if (!state || !state->socket)
+      throw std::system_error(WSAENOTSOCK, std::system_category(),
+                              "async_framed_stream::read_frame");
+    if (state->reading.exchange(true, std::memory_order_acq_rel))
+      throw std::system_error(ERROR_BUSY, std::system_category(),
+                              "async_framed_stream::read_frame");
+    struct reader_release {
+      std::shared_ptr<shared_state> state;
+      ~reader_release() {
+        if (state)
+          state->reading.store(false, std::memory_order_release);
+      }
+    } release{state};
+
+    for (;;) {
+      const auto bytes = ntl::net::scatter_view::from_contiguous(
+          std::span<const std::byte>(state->buffer.data(),
+                                     state->buffer.size()));
+      const auto probe = ntl::net::framing::probe(
+          state->framer, bytes, state->limits);
+      if (probe.state() == ntl::net::framing::probe_state::complete) {
+        std::vector<std::byte> frame(probe.frame_size());
+        if (!frame.empty())
+          std::memcpy(frame.data(), state->buffer.data(), frame.size());
+        state->buffer.erase(
+            state->buffer.begin(),
+            state->buffer.begin() +
+                static_cast<std::ptrdiff_t>(frame.size()));
+        state->buffered_size.store(state->buffer.size(),
+                                   std::memory_order_release);
+        state->reset_framer();
+        co_return framed_message(std::move(frame), probe.content_offset(),
+                                 probe.content_size());
+      }
+      if (probe.state() == ntl::net::framing::probe_state::malformed)
+        throw std::system_error(
+            static_cast<int>(map_status(probe.error())),
+            std::system_category(), "async_framed_stream::read_frame");
+
+      const std::size_t current = state->buffer.size();
+      if (current >= state->limits.maximum_frame_size)
+        throw std::system_error(ERROR_BUFFER_OVERFLOW,
+                                std::system_category(),
+                                "async_framed_stream::read_frame");
+      const std::size_t room = state->limits.maximum_frame_size - current;
+      const std::size_t growth =
+          (std::min)(state->receive_chunk_size, room);
+      const std::size_t target =
+          (std::max)(probe.required_total(), current + growth);
+      if (target <= current || target > state->limits.maximum_frame_size)
+        throw std::system_error(ERROR_BUFFER_OVERFLOW,
+                                std::system_category(),
+                                "async_framed_stream::read_frame");
+
+      state->buffer.resize(target);
+      state->buffered_size.store(state->buffer.size(),
+                                 std::memory_order_release);
+      const std::size_t received = co_await detail_socket_operation(
+          state->socket.state_,
+          std::span<std::byte>(state->buffer.data() + current,
+                               target - current),
+          detail_socket_operation::transfer_kind::read_some);
+      state->buffer.resize(current + received);
+      state->buffered_size.store(state->buffer.size(),
+                                 std::memory_order_release);
+      if (received != 0)
+        continue;
+
+      const auto final_bytes = ntl::net::scatter_view::from_contiguous(
+          std::span<const std::byte>(state->buffer.data(),
+                                     state->buffer.size()));
+      const auto final = ntl::net::framing::finish(
+          state->framer, final_bytes, state->limits);
+      if (final.state() != ntl::net::framing::probe_state::complete)
+        throw std::system_error(
+            static_cast<int>(map_status(final.error())),
+            std::system_category(), "async_framed_stream::read_frame");
+      std::vector<std::byte> frame(final.frame_size());
+      if (!frame.empty())
+        std::memcpy(frame.data(), state->buffer.data(), frame.size());
+      state->buffer.erase(
+          state->buffer.begin(),
+          state->buffer.begin() + static_cast<std::ptrdiff_t>(frame.size()));
+      state->buffered_size.store(state->buffer.size(),
+                                 std::memory_order_release);
+      state->reset_framer();
+      co_return framed_message(std::move(frame), final.content_offset(),
+                               final.content_size());
+    }
+  }
+
+  std::atomic<std::shared_ptr<shared_state>> state_;
 };
+#if defined(_MSC_VER) && defined(_M_ARM64)
+#pragma warning(pop)
+#endif
 
 } // namespace ntl::net

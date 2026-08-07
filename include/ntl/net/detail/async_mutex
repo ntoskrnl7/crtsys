@@ -1,0 +1,148 @@
+/**
+ * @file async_mutex
+ * @brief Allocation-free coroutine mutex for short internal state transitions.
+ */
+#pragma once
+
+#include <coroutine>
+#include <mutex>
+#include <utility>
+
+namespace ntl::net::detail {
+
+class async_mutex {
+public:
+  class guard {
+  public:
+    guard() noexcept = default;
+    explicit guard(async_mutex &owner) noexcept : owner_(&owner) {}
+    guard(const guard &) = delete;
+    guard &operator=(const guard &) = delete;
+    guard(guard &&other) noexcept
+        : owner_(std::exchange(other.owner_, nullptr)) {}
+    guard &operator=(guard &&other) noexcept {
+      if (this != &other) {
+        reset();
+        owner_ = std::exchange(other.owner_, nullptr);
+      }
+      return *this;
+    }
+    ~guard() { reset(); }
+
+    void reset() noexcept {
+      if (auto *owner = std::exchange(owner_, nullptr))
+        owner->unlock();
+    }
+
+  private:
+    async_mutex *owner_ = nullptr;
+  };
+
+  class lock_operation {
+  public:
+    explicit lock_operation(async_mutex &owner) noexcept : owner_(&owner) {}
+    lock_operation(const lock_operation &) = delete;
+    lock_operation &operator=(const lock_operation &) = delete;
+    lock_operation(lock_operation &&) = delete;
+    lock_operation &operator=(lock_operation &&) = delete;
+    ~lock_operation() { unregister(); }
+
+    bool await_ready() noexcept {
+      std::lock_guard lock(owner_->lock_);
+      if (owner_->owned_)
+        return false;
+      owner_->owned_ = true;
+      acquired_ = true;
+      return true;
+    }
+
+    bool await_suspend(std::coroutine_handle<> continuation) noexcept {
+      std::lock_guard lock(owner_->lock_);
+      if (!owner_->owned_) {
+        owner_->owned_ = true;
+        acquired_ = true;
+        return false;
+      }
+      continuation_ = continuation;
+      previous_ = owner_->tail_;
+      if (previous_)
+        previous_->next_ = this;
+      else
+        owner_->head_ = this;
+      owner_->tail_ = this;
+      queued_ = true;
+      return true;
+    }
+
+    guard await_resume() noexcept {
+      return acquired_ ? guard(*owner_) : guard{};
+    }
+
+  private:
+    friend class async_mutex;
+
+    void unregister() noexcept {
+      if (!owner_ || !queued_)
+        return;
+      std::lock_guard lock(owner_->lock_);
+      if (!queued_)
+        return;
+      if (previous_)
+        previous_->next_ = next_;
+      else
+        owner_->head_ = next_;
+      if (next_)
+        next_->previous_ = previous_;
+      else
+        owner_->tail_ = previous_;
+      queued_ = false;
+      previous_ = nullptr;
+      next_ = nullptr;
+    }
+
+    async_mutex *owner_ = nullptr;
+    lock_operation *previous_ = nullptr;
+    lock_operation *next_ = nullptr;
+    std::coroutine_handle<> continuation_{};
+    bool acquired_ = false;
+    bool queued_ = false;
+  };
+
+  async_mutex() = default;
+  async_mutex(const async_mutex &) = delete;
+  async_mutex &operator=(const async_mutex &) = delete;
+
+  lock_operation acquire() noexcept { return lock_operation(*this); }
+
+private:
+  void unlock() noexcept {
+    std::coroutine_handle<> continuation{};
+    {
+      std::lock_guard lock(lock_);
+      if (head_) {
+        auto *next = head_;
+        head_ = next->next_;
+        if (head_)
+          head_->previous_ = nullptr;
+        else
+          tail_ = nullptr;
+        next->previous_ = nullptr;
+        next->next_ = nullptr;
+        next->queued_ = false;
+        next->acquired_ = true;
+        continuation = next->continuation_;
+      } else {
+        owned_ = false;
+      }
+    }
+    if (continuation)
+      continuation.resume();
+  }
+
+  std::mutex lock_;
+  lock_operation *head_ = nullptr;
+  lock_operation *tail_ = nullptr;
+  bool owned_ = false;
+};
+
+} // namespace ntl::net::detail

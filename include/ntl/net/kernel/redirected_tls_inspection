@@ -1,0 +1,752 @@
+/**
+ * @file kernel_redirected_tls_inspection
+ * @brief Standard bounded HTTP/1.1 and HTTP/2 policy for kernel TLS sessions.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/net/kernel/redirected_tls_inspection is a kernel-mode header"
+#endif
+
+#include <ntl/net/http/inspection_policy>
+#include <ntl/net/http/inspection_resource_profile>
+#include <ntl/coroutine>
+#include <ntl/net/io/async_transport_stream>
+#include <ntl/net/kernel/http1_proxy_session>
+#include <ntl/net/kernel/http2_proxy_session>
+#include <ntl/net/kernel/redirected_tls_session>
+#include <ntl/net/kernel/workspace_pool>
+
+#include <algorithm>
+#include <atomic>
+#include <cstddef>
+#include <functional>
+#include <memory>
+#include <new>
+#include <optional>
+#include <utility>
+#include <vector>
+
+namespace ntl::net::kernel {
+
+enum class redirected_http_session_error_stage : std::uint8_t {
+  workspace = 1,
+  admission = 2,
+  origin_setup = 3,
+  protocol = 4,
+  origin_shutdown = 5,
+};
+
+enum class redirected_http_session_io_direction : std::uint8_t {
+  none = 0,
+  requests = 1,
+  responses = 2,
+};
+
+enum class redirected_http_session_failure_point : std::uint8_t {
+  none = 0,
+  source_read = 1,
+  destination_write = 2,
+  source_write = 3,
+  protocol = 4,
+};
+
+class redirected_http_inspection_observer {
+public:
+  virtual ~redirected_http_inspection_observer() = default;
+  virtual void on_inspection(
+      const ntl::net::http::inspection_context_view &) noexcept {}
+  virtual void on_http1_request(
+      const ntl::net::http::http1_request_event_view &) noexcept {}
+  virtual void on_http1_response(
+      const ntl::net::http::http1_response_event_view &) noexcept {}
+  virtual ntl::status on_http2_step(
+      ntl::net::http2::connection_direction,
+      const ntl::net::http2::proxy_connection_step &) noexcept {
+    return ntl::status::ok();
+  }
+  virtual void on_session_complete(
+      inspected_http_protocol,
+      const ntl::net::http::inspection_session_metadata &,
+      const inspected_http_session_summary &) noexcept {}
+  virtual void on_session_error(
+      inspected_http_protocol,
+      const ntl::net::http::inspection_session_metadata &,
+       std::uint32_t, redirected_http_session_error_stage,
+       tls_close_stage = tls_close_stage::none,
+       io::async_transport_close_reason =
+           io::async_transport_close_reason::none,
+       redirected_http_session_io_direction =
+           redirected_http_session_io_direction::none,
+       redirected_http_session_failure_point =
+           redirected_http_session_failure_point::none) noexcept {}
+};
+
+class null_redirected_http_inspection_observer final
+    : public redirected_http_inspection_observer {};
+
+/** Connection-local HTTP/1 Upgrade policy owned by the dispatcher run. */
+class redirected_http1_upgrade_handler {
+public:
+  using context_type = ntl::net::http::http1_upgrade_context_view<
+      tls_stream, tls_stream>;
+
+  virtual ~redirected_http1_upgrade_handler() = default;
+  virtual ntl::result<ntl::net::http::http1_tunnel_disposition> admit(
+      const ntl::net::http::http1_tunnel_offer_view &offer) noexcept = 0;
+  virtual task<ntl::status> run(context_type &context) noexcept = 0;
+};
+
+class reject_redirected_http1_upgrade final
+    : public redirected_http1_upgrade_handler {
+public:
+  ntl::result<ntl::net::http::http1_tunnel_disposition> admit(
+      const ntl::net::http::http1_tunnel_offer_view &) noexcept override {
+    return ntl::ok(
+        ntl::net::http::http1_tunnel_disposition::reject);
+  }
+
+  task<ntl::status> run(context_type &) noexcept override {
+    co_return ntl::status{STATUS_NOT_SUPPORTED};
+  }
+};
+
+class redirected_http1_upgrade_handler_factory {
+public:
+  virtual ~redirected_http1_upgrade_handler_factory() = default;
+  virtual std::shared_ptr<redirected_http1_upgrade_handler> create(
+      const ntl::net::http::inspection_session_metadata &metadata) noexcept = 0;
+};
+
+class reject_redirected_http1_upgrade_factory final
+    : public redirected_http1_upgrade_handler_factory {
+public:
+  std::shared_ptr<redirected_http1_upgrade_handler> create(
+      const ntl::net::http::inspection_session_metadata &) noexcept override {
+    try {
+      return std::make_shared<reject_redirected_http1_upgrade>();
+    } catch (...) {
+      return {};
+    }
+  }
+};
+
+/** Connection-local HTTP/2 Extended CONNECT policy. */
+class redirected_http2_tunnel_handler {
+public:
+  virtual ~redirected_http2_tunnel_handler() = default;
+  virtual ntl::result<ntl::net::http2::connect_disposition> admit(
+      std::uint32_t stream_id,
+      const ntl::net::http::request_message &request) noexcept = 0;
+  virtual void observe_response(
+      std::uint32_t,
+      const ntl::net::http::response_message &) {}
+  virtual ntl::result<std::optional<std::vector<
+      ntl::net::http2::outbound_frame>>>
+  transform(ntl::net::http2::connection_direction direction,
+            const ntl::net::http2::frame_view &frame) noexcept = 0;
+  virtual ntl::status on_step(
+      ntl::net::http2::connection_direction,
+      const ntl::net::http2::proxy_connection_step &) noexcept {
+    return ntl::status::ok();
+  }
+  virtual void reset(std::uint32_t stream_id) noexcept = 0;
+};
+
+class reject_redirected_http2_tunnels final
+    : public redirected_http2_tunnel_handler {
+public:
+  ntl::result<ntl::net::http2::connect_disposition> admit(
+      std::uint32_t,
+      const ntl::net::http::request_message &) noexcept override {
+    return ntl::ok(ntl::net::http2::connect_disposition::reject);
+  }
+
+  ntl::result<std::optional<std::vector<
+      ntl::net::http2::outbound_frame>>>
+  transform(ntl::net::http2::connection_direction,
+            const ntl::net::http2::frame_view &) noexcept override {
+    return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+  }
+
+  void reset(std::uint32_t) noexcept override {}
+};
+
+class redirected_http2_tunnel_handler_factory {
+public:
+  virtual ~redirected_http2_tunnel_handler_factory() = default;
+  virtual std::shared_ptr<redirected_http2_tunnel_handler> create(
+      const ntl::net::http::inspection_session_metadata &metadata) noexcept = 0;
+};
+
+class reject_redirected_http2_tunnel_factory final
+    : public redirected_http2_tunnel_handler_factory {
+public:
+  std::shared_ptr<redirected_http2_tunnel_handler> create(
+      const ntl::net::http::inspection_session_metadata &) noexcept override {
+    try {
+      return std::make_shared<reject_redirected_http2_tunnels>();
+    } catch (...) {
+      return {};
+    }
+  }
+};
+
+struct redirected_tls_inspection_options {
+  ntl::net::http::inspection_resource_profile resources{};
+  ntl::net::http2::kernel_proxy_preflight_options http2_preflight{};
+  std::function<std::shared_ptr<redirected_http_inspection_observer>(
+      const ntl::net::http::inspection_session_metadata &)> make_observer;
+  std::shared_ptr<redirected_http1_upgrade_handler_factory> http1_upgrades;
+  std::shared_ptr<redirected_http2_tunnel_handler_factory> http2_tunnels;
+  bool require_http1_server_name_authority_binding = true;
+  bool require_http2_server_name_authority_binding = true;
+
+  constexpr bool valid() const noexcept {
+    return resources.valid() && http2_preflight.valid();
+  }
+};
+
+inline constexpr NTSTATUS resource_profile_status(
+    ntl::net::http::inspection_resource_error error) noexcept {
+  using error_type = ntl::net::http::inspection_resource_error;
+  switch (error) {
+  case error_type::none:
+    return STATUS_SUCCESS;
+  case error_type::zero_session_limit:
+    return STATUS_QUOTA_EXCEEDED;
+  case error_type::http1_workspace_budget_too_small:
+  case error_type::http2_workspace_budget_too_small:
+  case error_type::http3_workspace_budget_too_small:
+    return STATUS_BUFFER_TOO_SMALL;
+  default:
+    return STATUS_INVALID_PARAMETER;
+  }
+}
+
+namespace redirected_tls_inspection_detail {
+
+class http1_observer_adapter {
+public:
+  explicit http1_observer_adapter(
+      std::shared_ptr<redirected_http_inspection_observer> observer) noexcept
+      : observer_(std::move(observer)) {}
+
+  void on_inspection(
+      const ntl::net::http::inspection_context_view &context) noexcept {
+    observer_->on_inspection(context);
+  }
+
+  void on_request(
+      const ntl::net::http::http1_request_event_view &event) noexcept {
+    observer_->on_http1_request(event);
+  }
+
+  void on_response(
+      const ntl::net::http::http1_response_event_view &event) noexcept {
+    observer_->on_http1_response(event);
+  }
+
+private:
+  std::shared_ptr<redirected_http_inspection_observer> observer_;
+};
+
+class http1_upgrade_adapter {
+public:
+  http1_upgrade_adapter(
+      std::shared_ptr<redirected_http1_upgrade_handler> handler) noexcept
+      : handler_(std::move(handler)) {}
+
+  ntl::result<ntl::net::http::http1_tunnel_disposition> admit(
+      const ntl::net::http::http1_tunnel_offer_view &offer) noexcept {
+    return handler_->admit(offer);
+  }
+
+  task<ntl::status> operator()(
+      redirected_http1_upgrade_handler::context_type &context) noexcept {
+    co_return co_await handler_->run(context);
+  }
+
+private:
+  std::shared_ptr<redirected_http1_upgrade_handler> handler_;
+};
+
+class http2_handler_adapter {
+public:
+  http2_handler_adapter(
+      std::shared_ptr<redirected_http2_tunnel_handler> tunnels,
+      std::shared_ptr<redirected_http_inspection_observer> observer) noexcept
+      : tunnels_(std::move(tunnels)), observer_(std::move(observer)) {}
+
+  ntl::result<ntl::net::http2::connect_disposition> admit(
+      std::uint32_t stream_id,
+      const ntl::net::http::request_message &request) noexcept {
+    return tunnels_->admit(stream_id, request);
+  }
+  void observe_response(
+      std::uint32_t stream_id,
+      const ntl::net::http::response_message &response) {
+    tunnels_->observe_response(stream_id, response);
+  }
+  ntl::result<std::optional<std::vector<
+      ntl::net::http2::outbound_frame>>>
+  transform(ntl::net::http2::connection_direction direction,
+            const ntl::net::http2::frame_view &frame) noexcept {
+    return tunnels_->transform(direction, frame);
+  }
+  ntl::status on_step(
+      ntl::net::http2::connection_direction direction,
+      const ntl::net::http2::proxy_connection_step &step) noexcept {
+    const ntl::status tunnel = tunnels_->on_step(direction, step);
+    return tunnel.is_ok() ? observer_->on_http2_step(direction, step)
+                          : tunnel;
+  }
+  void reset(std::uint32_t stream_id) noexcept {
+    tunnels_->reset(stream_id);
+  }
+
+private:
+  std::shared_ptr<redirected_http2_tunnel_handler> tunnels_;
+  std::shared_ptr<redirected_http_inspection_observer> observer_;
+};
+
+inline inspected_http_session_summary summarize(
+    const ntl::net::http::http1_proxy_result &result) noexcept {
+  return {
+      .completed_exchanges = result.completed_exchanges,
+      .last_status = result.last_status,
+      .blocked = result.blocked_exchanges != 0 ||
+                 result.termination ==
+                     ntl::net::http::http1_proxy_termination::terminal_response,
+      .dropped = result.termination ==
+                     ntl::net::http::http1_proxy_termination::request_drop ||
+                 result.termination ==
+                     ntl::net::http::http1_proxy_termination::response_drop};
+}
+
+inline inspected_http_session_summary summarize(
+    const ntl::net::http2::kernel_proxy_session_result &result) noexcept {
+  return {
+      .completed_exchanges =
+          (std::max)(result.completed_requests, result.completed_responses),
+      .last_status = result.last_response_status != 0
+                         ? result.last_response_status
+                         : result.last_terminal_status,
+      .blocked = result.last_terminal_status != 0,
+      .dropped = result.termination ==
+                 ntl::net::http2::kernel_proxy_session_termination::policy_drop};
+}
+
+} // namespace redirected_tls_inspection_detail
+
+/**
+ * One owning policy facade shared by every accepted kernel TLS session.
+ *
+ * It provides the same semantic `http::inspection_policy` contract used by
+ * user mode. Per-connection framing, HPACK, policy callbacks, bounded message
+ * memory, workspace exhaustion, origin admission, and stream shutdown are
+ * handled internally. The default tunnel policy is fail-closed.
+ */
+class standard_redirected_tls_inspection final
+    : public redirected_tls_http_dispatcher,
+      public std::enable_shared_from_this<standard_redirected_tls_inspection> {
+public:
+  using http1_workspace = ntl::net::http::kernel_http1_proxy_workspace;
+  using http2_workspace = ntl::net::http2::kernel_proxy_session_workspace;
+  using http1_workspace_pool = workspace_pool<http1_workspace>;
+  using http2_workspace_pool = workspace_pool<http2_workspace>;
+
+  static ntl::result<std::shared_ptr<standard_redirected_tls_inspection>>
+  create(
+      std::shared_ptr<const ntl::net::http::inspection_policy> policy,
+      redirected_tls_inspection_options options = {}) noexcept {
+    if (!policy || !policy->content_decoders() ||
+        !policy->content_encoders())
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    const auto resource_error = options.resources.validate();
+    if (resource_error !=
+        ntl::net::http::inspection_resource_error::none)
+      return ntl::unexpected(resource_profile_status(resource_error));
+    if (!options.valid())
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+    try {
+      return ntl::ok(std::shared_ptr<standard_redirected_tls_inspection>(
+          new standard_redirected_tls_inspection(
+              std::move(policy), options)));
+    } catch (const ntl::exception &error) {
+      return ntl::unexpected(static_cast<NTSTATUS>(error.get_status()));
+    } catch (const std::bad_alloc &) {
+      return ntl::unexpected(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return ntl::unexpected(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+  ~standard_redirected_tls_inspection() override { close(); }
+
+  void close() noexcept {
+    if (closed_.exchange(true, std::memory_order_acq_rel))
+      return;
+    http1_workspaces_.close();
+    http2_workspaces_.close();
+  }
+
+  task<ntl::status> run(
+      inspected_http_protocol protocol,
+      std::shared_ptr<tls_stream> downstream,
+      std::shared_ptr<ntl::net::io::async_transport_stream>
+          downstream_transport,
+      std::shared_ptr<redirected_tls_origin> origin,
+      const ntl::net::http::inspection_session_metadata &metadata) override {
+    auto self = weak_from_this().lock();
+    if (!self)
+      return status_task(STATUS_INVALID_DEVICE_STATE);
+    try {
+      return run_owned(
+          std::move(self), protocol, std::move(downstream),
+          std::move(downstream_transport), std::move(origin), metadata);
+    } catch (const std::bad_alloc &) {
+      return status_task(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return status_task(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+private:
+  static task<ntl::status> status_task(NTSTATUS status) noexcept {
+    co_return ntl::status{status};
+  }
+
+  static task<ntl::status> run_owned(
+      std::shared_ptr<standard_redirected_tls_inspection> self,
+      inspected_http_protocol protocol,
+      std::shared_ptr<tls_stream> downstream,
+      std::shared_ptr<ntl::net::io::async_transport_stream>
+          downstream_transport,
+      std::shared_ptr<redirected_tls_origin> origin,
+      ntl::net::http::inspection_session_metadata metadata) {
+    const ntl::status passive = co_await ntl::resume_on_passive();
+    if (!passive.is_ok())
+      co_return passive;
+    if (self->closed_.load(std::memory_order_acquire) || !downstream ||
+        !downstream_transport || !origin)
+      co_return ntl::status{STATUS_DELETE_PENDING};
+    std::shared_ptr<redirected_http_inspection_observer> observer;
+    try {
+      observer = self->options_.make_observer
+                     ? self->options_.make_observer(metadata)
+                     : std::make_shared<
+                           null_redirected_http_inspection_observer>();
+    } catch (const std::bad_alloc &) {
+      co_return ntl::status{STATUS_INSUFFICIENT_RESOURCES};
+    } catch (...) {
+      co_return ntl::status{STATUS_UNHANDLED_EXCEPTION};
+    }
+    if (!observer)
+      co_return ntl::status{STATUS_INSUFFICIENT_RESOURCES};
+    if (protocol == inspected_http_protocol::http2)
+      co_return co_await self->run_http2(
+          std::move(downstream), std::move(downstream_transport), origin,
+          metadata, std::move(observer));
+    co_return co_await self->run_http1(
+        std::move(downstream), std::move(downstream_transport), origin,
+        metadata, std::move(observer));
+  }
+
+  standard_redirected_tls_inspection(
+      std::shared_ptr<const ntl::net::http::inspection_policy> policy,
+      redirected_tls_inspection_options options)
+      : policy_(std::move(policy)), options_(options),
+        http1_upgrades_(
+            options_.http1_upgrades
+                ? options_.http1_upgrades
+                : std::make_shared<
+                      reject_redirected_http1_upgrade_factory>()),
+        http2_tunnels_(
+            options_.http2_tunnels
+                ? options_.http2_tunnels
+                : std::make_shared<
+                      reject_redirected_http2_tunnel_factory>()),
+        http1_workspaces_(
+            0, options.resources.maximum_concurrent_http1_sessions),
+        http2_workspaces_(
+            0, options.resources.maximum_concurrent_http2_sessions) {}
+
+  task<ntl::status> run_http1(
+      std::shared_ptr<tls_stream> downstream,
+      std::shared_ptr<ntl::net::io::async_transport_stream>
+          downstream_transport,
+      std::shared_ptr<redirected_tls_origin> origin,
+      ntl::net::http::inspection_session_metadata metadata,
+      std::shared_ptr<redirected_http_inspection_observer> observer) {
+    auto workspace = http1_workspaces_.try_acquire(
+        options_.resources.effective_http1_workspace_bytes());
+    if (!workspace) {
+      observer->on_session_error(inspected_http_protocol::http1, metadata,
+                                 static_cast<std::uint32_t>(
+                                     static_cast<NTSTATUS>(workspace.status())),
+                                 redirected_http_session_error_stage::workspace,
+                                 tls_close_stage::none,
+                                 io::async_transport_close_reason::none);
+      co_return workspace.status();
+    }
+    auto tunnel = http1_upgrades_->create(metadata);
+    if (!tunnel) {
+      observer->on_session_error(inspected_http_protocol::http1, metadata,
+                                 static_cast<std::uint32_t>(
+                                     STATUS_INSUFFICIENT_RESOURCES),
+                                 redirected_http_session_error_stage::admission,
+                                 tls_close_stage::none,
+                                 io::async_transport_close_reason::none);
+      co_return ntl::status{STATUS_INSUFFICIENT_RESOURCES};
+    }
+    std::shared_ptr<redirected_tls_inspection_detail::http1_observer_adapter>
+        http1_observer;
+    try {
+      http1_observer = std::make_shared<
+          redirected_tls_inspection_detail::http1_observer_adapter>(observer);
+    } catch (const std::bad_alloc &) {
+      co_return ntl::status{STATUS_INSUFFICIENT_RESOURCES};
+    } catch (...) {
+      co_return ntl::status{STATUS_UNHANDLED_EXCEPTION};
+    }
+    auto policy = policy_;
+    auto limits = options_.resources.http1;
+    limits.require_server_name_authority_binding =
+        options_.require_http1_server_name_authority_binding;
+    auto preflight = co_await ntl::net::http::prepare_kernel_http1_proxy_session(
+        downstream, policy,
+        ntl::net::http::http1_request_target_context{
+            .origin_scheme = "https"},
+        std::move(*workspace), http1_observer, limits, metadata);
+    if (!preflight) {
+      observer->on_session_error(
+          inspected_http_protocol::http1, metadata,
+          static_cast<std::uint32_t>(
+              static_cast<NTSTATUS>(preflight.status())),
+          redirected_http_session_error_stage::protocol,
+          downstream->last_close_stage(),
+          downstream_transport->close_reason());
+      co_return preflight.status();
+    }
+    if (!preflight->requires_upstream()) {
+      const auto completed =
+          redirected_tls_inspection_detail::summarize(preflight->summary());
+      observer->on_session_complete(inspected_http_protocol::http1, metadata,
+                                    completed);
+      co_return ntl::status::ok();
+    }
+    auto summary = std::make_shared<inspected_http_session_summary>();
+    auto protocol_status = std::make_shared<std::atomic<NTSTATUS>>(
+        STATUS_PENDING);
+    auto origin_tls = std::make_shared<std::shared_ptr<tls_stream>>();
+    auto origin_transport = std::make_shared<
+        std::shared_ptr<ntl::net::io::async_transport_stream>>();
+    const ntl::status status = co_await origin->with_connection(
+        inspected_http_protocol::http1,
+        [downstream, downstream_transport, policy, observer, http1_observer,
+         tunnel, preflight = std::move(*preflight), metadata,
+         limits, summary, protocol_status, origin_tls,
+         origin_transport](std::shared_ptr<tls_stream> upstream,
+                   std::shared_ptr<ntl::net::io::async_transport_stream>
+                       upstream_transport)
+             mutable -> task<ntl::status> {
+          *origin_tls = upstream;
+          *origin_transport = upstream_transport;
+          auto upgrade = std::make_shared<
+              redirected_tls_inspection_detail::http1_upgrade_adapter>(
+              tunnel);
+          auto result =
+              co_await ntl::net::http::continue_kernel_http1_proxy_session(
+              downstream, std::move(upstream), policy,
+              ntl::net::http::http1_request_target_context{
+                  .origin_scheme = "https"},
+              std::move(preflight), http1_observer, std::move(upgrade),
+              limits, metadata);
+          if (!result) {
+            protocol_status->store(static_cast<NTSTATUS>(result.status()),
+                                   std::memory_order_release);
+            co_return result.status();
+          }
+          protocol_status->store(STATUS_SUCCESS, std::memory_order_release);
+          *summary = redirected_tls_inspection_detail::summarize(*result);
+          co_return ntl::status::ok();
+        });
+    if (status.is_ok())
+      observer->on_session_complete(inspected_http_protocol::http1, metadata,
+                                    *summary);
+    else
+      observer->on_session_error(
+          inspected_http_protocol::http1, metadata,
+          static_cast<std::uint32_t>(static_cast<NTSTATUS>(status)),
+          [value = protocol_status->load(std::memory_order_acquire)] {
+            if (value == STATUS_PENDING)
+              return redirected_http_session_error_stage::origin_setup;
+            if (NT_SUCCESS(value))
+              return redirected_http_session_error_stage::origin_shutdown;
+            return redirected_http_session_error_stage::protocol;
+          }(),
+          *origin_tls ? (*origin_tls)->last_close_stage()
+                      : tls_close_stage::none,
+          *origin_transport
+              ? (*origin_transport)->close_reason()
+              : io::async_transport_close_reason::none);
+    co_return status;
+  }
+
+  task<ntl::status> run_http2(
+      std::shared_ptr<tls_stream> downstream,
+      std::shared_ptr<ntl::net::io::async_transport_stream>
+          downstream_transport,
+      std::shared_ptr<redirected_tls_origin> origin,
+      ntl::net::http::inspection_session_metadata metadata,
+      std::shared_ptr<redirected_http_inspection_observer> observer) {
+    auto workspace = http2_workspaces_.try_acquire(
+        options_.resources.effective_http2_workspace_bytes());
+    if (!workspace) {
+      observer->on_session_error(inspected_http_protocol::http2, metadata,
+                                 static_cast<std::uint32_t>(
+                                     static_cast<NTSTATUS>(workspace.status())),
+                                 redirected_http_session_error_stage::workspace,
+                                 tls_close_stage::none,
+                                 io::async_transport_close_reason::none);
+      co_return workspace.status();
+    }
+    auto tunnels = http2_tunnels_->create(metadata);
+    if (!tunnels) {
+      observer->on_session_error(inspected_http_protocol::http2, metadata,
+                                 static_cast<std::uint32_t>(
+                                     STATUS_INSUFFICIENT_RESOURCES),
+                                 redirected_http_session_error_stage::admission,
+                                 tls_close_stage::none,
+                                 io::async_transport_close_reason::none);
+      co_return ntl::status{STATUS_INSUFFICIENT_RESOURCES};
+    }
+    auto handler = std::make_shared<
+        redirected_tls_inspection_detail::http2_handler_adapter>(
+        std::move(tunnels), observer);
+    auto limits = options_.resources.http2;
+    limits.require_server_name_authority_binding =
+        options_.require_http2_server_name_authority_binding;
+    auto connection = std::make_shared<ntl::net::http2::proxy_connection>(
+        policy_, metadata,
+        ntl::net::http2::inspection_observer(observer), limits,
+        ntl::net::http::message_memory_ref{},
+        &ntl::net::kernel::resume_deferred);
+    auto preflight_options = options_.http2_preflight;
+    preflight_options.maximum_frame_payload =
+        options_.resources.http2.maximum_frame_payload;
+    auto preflight = co_await ntl::net::http2::prepare_kernel_proxy_session(
+        downstream, connection, handler, std::move(*workspace),
+        preflight_options);
+    if (!preflight) {
+      observer->on_session_error(inspected_http_protocol::http2, metadata,
+                                 static_cast<std::uint32_t>(static_cast<NTSTATUS>(
+                                     preflight.status())),
+                                 redirected_http_session_error_stage::protocol,
+                                 tls_close_stage::none,
+                                 io::async_transport_close_reason::none);
+      co_return preflight.status();
+    }
+    if (!preflight->requires_upstream()) {
+      const auto summary =
+          redirected_tls_inspection_detail::summarize(preflight->summary());
+      observer->on_session_complete(inspected_http_protocol::http2, metadata,
+                                    summary);
+      co_return ntl::status::ok();
+    }
+
+    auto summary = std::make_shared<inspected_http_session_summary>();
+    auto protocol_status = std::make_shared<std::atomic<NTSTATUS>>(
+        STATUS_PENDING);
+    auto origin_tls = std::make_shared<std::shared_ptr<tls_stream>>();
+    auto origin_transport = std::make_shared<
+        std::shared_ptr<ntl::net::io::async_transport_stream>>();
+    auto failure_direction = std::make_shared<
+        std::atomic<redirected_http_session_io_direction>>(
+        redirected_http_session_io_direction::none);
+    auto failure_point = std::make_shared<
+        std::atomic<redirected_http_session_failure_point>>(
+        redirected_http_session_failure_point::none);
+    const ntl::status status = co_await origin->with_connection(
+        inspected_http_protocol::http2,
+        [downstream, downstream_transport, connection, handler, observer,
+         preflight = std::move(*preflight), maximum_frame_payload =
+              limits.maximum_frame_payload, summary, protocol_status,
+               origin_tls, origin_transport, failure_direction,
+               failure_point](
+            std::shared_ptr<tls_stream> upstream,
+            std::shared_ptr<ntl::net::io::async_transport_stream>
+                upstream_transport) mutable -> task<ntl::status> {
+          *origin_tls = upstream;
+          *origin_transport = upstream_transport;
+          auto stop = [downstream, upstream, downstream_transport,
+                       upstream_transport, failure_direction, failure_point](
+                          const ntl::net::http2::
+                              kernel_proxy_session_stop_context &context)
+                          noexcept {
+            failure_direction->store(
+                context.direction == ntl::net::http2::
+                                         connection_direction::requests
+                    ? redirected_http_session_io_direction::requests
+                    : redirected_http_session_io_direction::responses,
+                std::memory_order_release);
+            failure_point->store(
+                static_cast<redirected_http_session_failure_point>(
+                    context.failure_point),
+                std::memory_order_release);
+            if (context.mode == ntl::net::http2::
+                                    kernel_proxy_session_stop_mode::abortive) {
+              downstream->abort();
+              upstream->abort();
+            }
+          };
+          auto result = co_await ntl::net::http2::run_kernel_proxy_session(
+              downstream, std::move(upstream), connection,
+              std::move(preflight), std::move(stop), handler,
+              maximum_frame_payload);
+          if (!result) {
+            protocol_status->store(static_cast<NTSTATUS>(result.status()),
+                                   std::memory_order_release);
+            co_return result.status();
+          }
+          protocol_status->store(STATUS_SUCCESS, std::memory_order_release);
+          *summary = redirected_tls_inspection_detail::summarize(*result);
+          co_return ntl::status::ok();
+        });
+    if (status.is_ok())
+      observer->on_session_complete(inspected_http_protocol::http2, metadata,
+                                    *summary);
+    else
+      observer->on_session_error(
+          inspected_http_protocol::http2, metadata,
+          static_cast<std::uint32_t>(static_cast<NTSTATUS>(status)),
+          [value = protocol_status->load(std::memory_order_acquire)] {
+            if (value == STATUS_PENDING)
+              return redirected_http_session_error_stage::origin_setup;
+            if (NT_SUCCESS(value))
+              return redirected_http_session_error_stage::origin_shutdown;
+            return redirected_http_session_error_stage::protocol;
+          }(),
+          *origin_tls ? (*origin_tls)->last_close_stage()
+                      : tls_close_stage::none,
+          *origin_transport
+              ? (*origin_transport)->close_reason()
+              : io::async_transport_close_reason::none,
+          failure_direction->load(std::memory_order_acquire),
+          failure_point->load(std::memory_order_acquire));
+    co_return status;
+  }
+
+  std::shared_ptr<const ntl::net::http::inspection_policy> policy_;
+  redirected_tls_inspection_options options_{};
+  std::shared_ptr<redirected_http1_upgrade_handler_factory> http1_upgrades_;
+  std::shared_ptr<redirected_http2_tunnel_handler_factory> http2_tunnels_;
+  http1_workspace_pool http1_workspaces_;
+  http2_workspace_pool http2_workspaces_;
+  std::atomic<bool> closed_{false};
+};
+
+} // namespace ntl::net::kernel

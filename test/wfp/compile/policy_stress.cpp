@@ -42,9 +42,9 @@ private:
 };
 
 blocking_task<ntl::net::http::pipeline_outcome> apply(
-    ntl::net::http::async_transform_pipeline &pipeline,
+    ntl::net::http::async_transform_runtime &pipeline,
     ntl::net::http::request_message &message) {
-  co_return co_await pipeline.apply(message);
+  co_return co_await pipeline.apply_borrowed(message);
 }
 
 bool async_load() {
@@ -53,8 +53,8 @@ bool async_load() {
   options.maximum_concurrency = 8;
   options.maximum_queue_depth = operation_count;
   options.timeout = std::chrono::seconds(10);
-  ntl::net::http::async_transform_pipeline pipeline({}, options);
-  pipeline.requests().transform(
+  ntl::net::http::async_transform_policy_builder builder({}, options);
+  builder.requests().transform(
       [](ntl::net::http::request_message &message,
          const ntl::net::http::async_policy_context &context) {
         if (context.cancellation_requested())
@@ -62,6 +62,8 @@ bool async_load() {
         message.headers.set("x-load-policy", message.path);
         return ntl::net::http::rewrite_result::headers_changed();
       });
+  auto pipeline = ntl::net::http::async_transform_runtime::create(
+      std::move(builder).build());
 
   std::vector<ntl::net::http::request_message> messages;
   messages.reserve(operation_count);
@@ -120,8 +122,8 @@ bool streaming_load() {
   constexpr std::size_t chunk_count = 1024;
   ntl::net::http::stream_transform_pipeline pipeline;
   pipeline.chunks().inspect(
-      [](const ntl::net::http::stream_message_context &,
-         const ntl::net::http::stream_chunk &) {
+      [](const ntl::net::http::stream_message_context_view &,
+         const ntl::net::http::stream_chunk_view &) {
         return ntl::net::inspection::verdict::permit;
       });
   ntl::net::http::request_message request;

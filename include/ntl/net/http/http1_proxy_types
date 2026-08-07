@@ -1,0 +1,138 @@
+/**
+ * @file http1_proxy_types
+ * @brief Runtime-neutral HTTP/1 inspection proxy contracts.
+ */
+#pragma once
+
+#include <ntl/net/http/http1_framing>
+#include <ntl/net/http/transform>
+
+#include <cstddef>
+#include <concepts>
+#include <cstdint>
+#include <span>
+#include <string_view>
+
+namespace ntl::net::http {
+
+class inspection_context_view;
+
+enum class http1_expect_continue_policy : std::uint8_t {
+  local_continue = 1,
+  reject = 2,
+};
+
+struct http1_proxy_limits {
+  http1_framing_limits framing{};
+  std::size_t maximum_wire_message_size = 2 * 1024 * 1024;
+  std::size_t request_receive_chunk_size = 4 * 1024;
+  std::size_t response_receive_chunk_size = 16 * 1024;
+  http1_expect_continue_policy expect_continue =
+      http1_expect_continue_policy::local_continue;
+  /**
+   * Require an HTTPS request authority to match the SNI that selected this
+   * connection.  Generic clear-text proxy users may leave this disabled;
+   * redirected TLS adapters enable it by default and may disable it only
+   * when a separate, explicit origin-coalescing policy performs the check.
+   */
+  bool require_server_name_authority_binding = false;
+
+  constexpr bool valid() const noexcept {
+    return framing.maximum_header_size >= 4 &&
+           framing.maximum_body_size != 0 &&
+           framing.maximum_chunk_line_size >= 3 &&
+           framing.maximum_trailer_size >= 2 &&
+           maximum_wire_message_size >= framing.maximum_header_size &&
+           request_receive_chunk_size != 0 &&
+           response_receive_chunk_size != 0;
+  }
+};
+
+enum class http1_proxy_termination : std::uint8_t {
+  downstream_eof = 1,
+  connection_close = 2,
+  terminal_response = 3,
+  request_drop = 4,
+  response_drop = 5,
+  upgraded = 6,
+  closed = 7,
+};
+
+struct http1_proxy_result {
+  http1_proxy_termination termination =
+      http1_proxy_termination::downstream_eof;
+  std::size_t completed_exchanges = 0;
+  std::size_t blocked_exchanges = 0;
+  unsigned last_status = 0;
+};
+
+/** Callback-scoped request view. Do not retain references after the callback. */
+struct http1_request_event_view {
+  const request_message &message;
+  std::size_t wire_size = 0;
+  bool websocket_upgrade = false;
+};
+
+/** Callback-scoped response view. Do not retain references after the callback. */
+struct http1_response_event_view {
+  const request_message &request;
+  const response_message &message;
+  std::size_t wire_size = 0;
+  bool informational = false;
+  bool synthetic = false;
+  bool websocket_upgrade = false;
+};
+
+template <class Observer>
+concept http1_observer =
+    requires(Observer &observer, const http1_request_event_view &request,
+             const http1_response_event_view &response,
+             const inspection_context_view &inspection) {
+      { observer.on_request(request) } -> std::same_as<void>;
+      { observer.on_response(response) } -> std::same_as<void>;
+      { observer.on_inspection(inspection) } -> std::same_as<void>;
+    };
+
+/** Explicit no-op observer for callers that intentionally disable telemetry. */
+struct null_http1_observer {
+  void on_request(const http1_request_event_view &) const noexcept {}
+  void on_response(const http1_response_event_view &) const noexcept {}
+  void on_inspection(const inspection_context_view &) const noexcept {}
+};
+
+enum class http1_tunnel_kind : std::uint8_t {
+  websocket = 1,
+  connect = 2,
+  switch_protocol = 3,
+};
+
+enum class http1_tunnel_disposition : std::uint8_t {
+  reject = 1,
+  inspect = 2,
+  passthrough = 3,
+};
+
+/** Callback-scoped tunnel offer presented before bytes reach the origin. */
+struct http1_tunnel_offer_view {
+  const request_message &request;
+  std::string_view offered_websocket_extensions;
+  http1_tunnel_kind kind = http1_tunnel_kind::switch_protocol;
+};
+
+template <class DownstreamStream, class UpstreamStream>
+/** Callback-scoped upgrade view. The streams and messages are not retained. */
+struct http1_upgrade_context_view {
+  DownstreamStream &downstream;
+  UpstreamStream &upstream;
+  const request_message &request;
+  const response_message &response;
+  std::span<const std::byte> downstream_carry;
+  std::span<const std::byte> upstream_carry;
+  std::string_view offered_websocket_extensions;
+  std::string_view selected_websocket_extensions;
+  http1_tunnel_kind kind = http1_tunnel_kind::switch_protocol;
+  http1_tunnel_disposition disposition =
+      http1_tunnel_disposition::reject;
+};
+
+} // namespace ntl::net::http

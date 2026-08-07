@@ -15,9 +15,11 @@ $ErrorActionPreference = 'Stop'
 
 $root = (Resolve-Path -LiteralPath $PackageRoot).Path
 $serverApplication =
-    Join-Path $root 'crtsys_wfp_browser_https_inspection_app.exe'
+    Join-Path $root 'crtsys_wfp_browser_https_inspection_acceptance.exe'
 $clientApplication =
-    Join-Path $root 'crtsys_ntl_managed_http3_client.exe'
+    Join-Path $root (
+        'crtsys_wfp_browser_https_inspection_' +
+        'managed_client_acceptance.exe')
 foreach ($required in @(
     $serverApplication, $clientApplication,
     (Join-Path $root 'msh3.dll'),
@@ -249,7 +251,13 @@ try {
     if ((Test-Path -LiteralPath $inspectionAuthority -PathType Leaf) -and
         (Test-Path -LiteralPath $originAuthority -PathType Leaf) -and
         (Test-Path -LiteralPath $serverStdout -PathType Leaf)) {
-      $readyText = Get-Content -LiteralPath $serverStdout -Raw
+      # Redirection creates the file before the child flushes its first line.
+      # Treat that valid startup race as an empty snapshot.
+      $readyText = [string](
+          Get-Content -LiteralPath $serverStdout -Raw)
+      if ($null -eq $readyText) {
+        $readyText = ''
+      }
       $ready =
           $readyText.Contains('NTL controlled HTTP/3 ready:') -and
           $readyText.Contains(
@@ -338,7 +346,10 @@ try {
         "$($server.ExitCode): $serverError")
   }
 
-  $expectedRequests = $Concurrency + 7
+  # The topology performs one real gRPC POST before it announces readiness.
+  # Count it independently of the managed GET clients below so the acceptance
+  # cannot pass when the shared HTTP/3 request/response transform is bypassed.
+  $expectedRequests = $Concurrency + 8
   $expectedHtml = $Concurrency + 5
   $serverOutput =
       Get-Content -LiteralPath $serverStdout -Raw
@@ -352,6 +363,8 @@ try {
           "proxy-requests=$expectedRequests") -or
       -not $serverOutput.Contains(
           "origin-requests=$expectedRequests") -or
+      -not $serverOutput.Contains(
+          'NTL controlled HTTP/3 gRPC wire PASS: request=transformed response=transformed protocol=h3') -or
       -not $serverOutput.Contains(
           'downstream=h3, upstream=h3') -or
       -not $proxyEvents.Contains(
@@ -410,6 +423,8 @@ try {
     'GZIP_DECODE=PASS'
     'DEFLATE_DECODE=PASS'
     'BROTLI_DECODE=PASS'
+    'GRPC_REQUEST_TRANSFORM=PASS'
+    'GRPC_RESPONSE_TRANSFORM=PASS'
     'UPSTREAM_BODY_BOUND=PASS'
     "CONCURRENCY_$Concurrency=PASS"
     'ROOT_STORE_CHANGED=NO'

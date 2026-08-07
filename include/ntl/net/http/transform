@@ -11,22 +11,27 @@
  */
 #pragma once
 
-#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
-#error "ntl/net/http/transform is a user-mode header"
-#endif
-
 #include <ntl/net/inspection/content_decoder>
 #include <ntl/net/inspection/content_encoder>
 #include <ntl/net/inspection/core>
 #include <ntl/result>
 #include <ntl/status>
 
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#include <ntl/net/kernel/dispatcher_executor>
+#include <ntl/irql>
+#endif
+
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <iterator>
 #include <limits>
+#include <memory>
+#include <memory_resource>
 #include <new>
 #include <optional>
 #include <span>
@@ -66,11 +71,150 @@ struct transform_limits {
       transform_failure_policy::block;
 };
 
+using message_string = std::pmr::string;
+
+template <class Value>
+class message_vector
+    : public std::vector<Value, std::pmr::polymorphic_allocator<Value>> {
+  using base =
+      std::vector<Value, std::pmr::polymorphic_allocator<Value>>;
+
+public:
+  using base::base;
+  using base::operator=;
+
+  message_vector() = default;
+  message_vector(const message_vector &) = default;
+  message_vector(message_vector &&) noexcept = default;
+  message_vector &operator=(const message_vector &) = default;
+  message_vector &operator=(message_vector &&) noexcept = default;
+
+  template <class Allocator>
+  message_vector(const std::vector<Value, Allocator> &other,
+                 std::pmr::memory_resource *resource =
+                     std::pmr::get_default_resource())
+      : base(other.begin(), other.end(), resource) {}
+
+  template <class Allocator>
+  message_vector(std::vector<Value, Allocator> &&other,
+                 std::pmr::memory_resource *resource =
+                     std::pmr::get_default_resource())
+      : base(std::make_move_iterator(other.begin()),
+             std::make_move_iterator(other.end()), resource) {}
+
+  template <class Allocator>
+  message_vector &operator=(const std::vector<Value, Allocator> &other) {
+    this->assign(other.begin(), other.end());
+    return *this;
+  }
+
+  template <class Allocator>
+  message_vector &operator=(std::vector<Value, Allocator> &&other) {
+    this->assign(std::make_move_iterator(other.begin()),
+                 std::make_move_iterator(other.end()));
+    return *this;
+  }
+};
+
+/**
+ * @brief Explicit borrowed allocator binding for one semantic HTTP message.
+ *
+ * User-mode callers normally use the default constructor, whose process-wide
+ * PMR resource has static lifetime. Kernel hot paths pass this explicitly
+ * named reference to a leased fixed or byte-budgeted resource. The referenced
+ * resource must outlive only messages constructed with this binding.
+ */
+struct message_memory_ref {
+  std::pmr::memory_resource *resource =
+      std::pmr::get_default_resource();
+
+  bool valid() const noexcept { return resource != nullptr; }
+};
+
+template <class Traits, class Allocator>
+  requires(!std::is_same_v<
+           Allocator, std::pmr::polymorphic_allocator<char>>)
+bool operator==(const message_string &left,
+                const std::basic_string<char, Traits, Allocator> &right) {
+  return std::string_view(left.data(), left.size()) ==
+         std::string_view(right.data(), right.size());
+}
+
+template <class Traits, class Allocator>
+  requires(!std::is_same_v<
+           Allocator, std::pmr::polymorphic_allocator<char>>)
+bool operator==(const std::basic_string<char, Traits, Allocator> &left,
+                const message_string &right) {
+  return right == left;
+}
+
+template <class Value, class Allocator>
+  requires(!std::is_same_v<
+           Allocator, std::pmr::polymorphic_allocator<Value>>)
+bool operator==(const message_vector<Value> &left,
+                const std::vector<Value, Allocator> &right) {
+  return std::equal(left.begin(), left.end(), right.begin(), right.end());
+}
+
+template <class Value, class Allocator>
+  requires(!std::is_same_v<
+           Allocator, std::pmr::polymorphic_allocator<Value>>)
+bool operator==(const std::vector<Value, Allocator> &left,
+                const message_vector<Value> &right) {
+  return right == left;
+}
+
+using message_body = message_vector<std::byte>;
+
 struct header_field {
-  std::string name;
-  std::string value;
+  using allocator_type = std::pmr::polymorphic_allocator<std::byte>;
+
+  header_field() : header_field(allocator_type{}) {}
+  explicit header_field(allocator_type allocator)
+      : name(allocator.resource()), value(allocator.resource()) {}
+  header_field(std::string_view field_name, std::string_view field_value,
+               bool field_sensitive = false,
+               allocator_type allocator = {})
+      : name(field_name, allocator.resource()),
+        value(field_value, allocator.resource()),
+        sensitive(field_sensitive) {}
+  header_field(std::allocator_arg_t, allocator_type allocator)
+      : header_field(allocator) {}
+  header_field(std::allocator_arg_t, allocator_type allocator,
+               std::string_view field_name,
+               std::string_view field_value,
+               bool field_sensitive = false)
+      : header_field(field_name, field_value, field_sensitive, allocator) {}
+  header_field(const header_field &other)
+      : header_field(other, allocator_type{other.resource()}) {}
+  header_field(const header_field &other, allocator_type allocator)
+      : name(other.name, allocator.resource()),
+        value(other.value, allocator.resource()),
+        sensitive(other.sensitive) {}
+  header_field(std::allocator_arg_t, allocator_type allocator,
+               const header_field &other)
+      : header_field(other, allocator) {}
+  header_field(header_field &&) noexcept = default;
+  header_field(header_field &&other, allocator_type allocator)
+      : name(std::move(other.name), allocator.resource()),
+        value(std::move(other.value), allocator.resource()),
+        sensitive(other.sensitive) {}
+  header_field(std::allocator_arg_t, allocator_type allocator,
+               header_field &&other)
+      : header_field(std::move(other), allocator) {}
+  header_field &operator=(const header_field &) = default;
+  header_field &operator=(header_field &&) noexcept = default;
+
+  std::pmr::memory_resource *resource() const noexcept {
+    return name.get_allocator().resource();
+  }
+
+  message_string name;
+  message_string value;
   bool sensitive = false;
 };
+
+using header_list = message_vector<header_field>;
 
 namespace transform_detail {
 
@@ -92,17 +236,19 @@ inline bool ascii_equal_ci(
   return true;
 }
 
+inline bool is_token_character(unsigned char character) noexcept {
+  return (character >= 'A' && character <= 'Z') ||
+         (character >= 'a' && character <= 'z') ||
+         (character >= '0' && character <= '9') ||
+         std::string_view("!#$%&'*+-.^_`|~").find(
+             static_cast<char>(character)) != std::string_view::npos;
+}
+
 inline bool is_token(std::string_view value) noexcept {
   if (value.empty())
     return false;
   for (const unsigned char character : value) {
-    const bool valid =
-        (character >= 'A' && character <= 'Z') ||
-        (character >= 'a' && character <= 'z') ||
-        (character >= '0' && character <= '9') ||
-        std::string_view("!#$%&'*+-.^_`|~").find(
-            static_cast<char>(character)) != std::string_view::npos;
-    if (!valid)
+    if (!is_token_character(character))
       return false;
   }
   return true;
@@ -170,7 +316,8 @@ inline bool forbidden_h2_h3_header(
   return name == "te" && !ascii_equal_ci(value, "trailers");
 }
 
-inline std::string normalized_name(std::string value) {
+template <class String>
+inline String normalized_name(String value) {
   for (char &character : value) {
     if (character >= 'A' && character <= 'Z')
       character = static_cast<char>(character + ('a' - 'A'));
@@ -201,12 +348,37 @@ inline bool html_content_type(std::string_view value) noexcept {
  */
 class header_collection {
 public:
-  header_collection() = default;
-  explicit header_collection(std::vector<header_field> fields)
+  header_collection()
+      : header_collection(std::pmr::get_default_resource()) {}
+  explicit header_collection(std::pmr::memory_resource *resource)
+      : fields_(resource) {}
+  explicit header_collection(header_list fields)
       : fields_(std::move(fields)) {
     for (auto &field : fields_)
       field.name =
           transform_detail::normalized_name(std::move(field.name));
+  }
+  template <class Allocator>
+  explicit header_collection(
+      std::vector<header_field, Allocator> fields,
+      std::pmr::memory_resource *resource =
+          std::pmr::get_default_resource())
+      : fields_(std::move(fields), resource) {
+    for (auto &field : fields_)
+      field.name =
+          transform_detail::normalized_name(std::move(field.name));
+  }
+  header_collection(const header_collection &other)
+      : header_collection(other, other.resource()) {}
+  header_collection(const header_collection &other,
+                    std::pmr::memory_resource *resource)
+      : fields_(other.fields_.begin(), other.fields_.end(), resource) {}
+  header_collection(header_collection &&) noexcept = default;
+  header_collection &operator=(const header_collection &) = default;
+  header_collection &operator=(header_collection &&) noexcept = default;
+
+  std::pmr::memory_resource *resource() const noexcept {
+    return fields_.get_allocator().resource();
   }
 
   std::span<const header_field> fields() const noexcept {
@@ -241,25 +413,27 @@ public:
     return first(name).has_value();
   }
 
-  void append(std::string name, std::string value,
+  void append(std::string_view name, std::string_view value,
               bool sensitive = false) {
-    name = transform_detail::normalized_name(std::move(name));
-    if (!transform_detail::is_token(name) ||
+    message_string normalized(name, resource());
+    normalized = transform_detail::normalized_name(std::move(normalized));
+    if (!transform_detail::is_token(normalized) ||
         !transform_detail::valid_field_value(value))
       throw std::invalid_argument("invalid HTTP header field");
-    fields_.push_back(
-        {std::move(name), std::move(value), sensitive});
+    fields_.emplace_back(
+        std::move(normalized), value, sensitive);
   }
 
-  void set(std::string name, std::string value,
+  void set(std::string_view name, std::string_view value,
            bool sensitive = false) {
-    name = transform_detail::normalized_name(std::move(name));
-    if (!transform_detail::is_token(name) ||
+    message_string normalized(name, resource());
+    normalized = transform_detail::normalized_name(std::move(normalized));
+    if (!transform_detail::is_token(normalized) ||
         !transform_detail::valid_field_value(value))
       throw std::invalid_argument("invalid HTTP header field");
-    erase(name);
-    fields_.push_back(
-        {std::move(name), std::move(value), sensitive});
+    erase(normalized);
+    fields_.emplace_back(
+        std::move(normalized), value, sensitive);
   }
 
   std::size_t erase(std::string_view name) noexcept {
@@ -325,8 +499,169 @@ public:
   }
 
 private:
-  std::vector<header_field> fields_;
+  header_list fields_;
 };
+
+namespace transform_detail {
+
+inline bool ows(unsigned char value) noexcept {
+  return value == ' ' || value == '\t';
+}
+
+inline ntl::status collect_connection_options(
+    const header_collection &headers,
+    std::pmr::vector<std::pmr::string> &options) noexcept {
+  try {
+    for (const auto &field : headers.fields()) {
+      if (!ascii_equal_ci(field.name, "connection"))
+        continue;
+
+      std::string_view value = field.value;
+      std::size_t position = 0;
+      bool saw_option = false;
+      while (position < value.size()) {
+        while (position < value.size() &&
+               ows(static_cast<unsigned char>(value[position])))
+          ++position;
+        const std::size_t start = position;
+        while (position < value.size() &&
+               is_token_character(
+                   static_cast<unsigned char>(value[position])))
+          ++position;
+        if (start == position)
+          return STATUS_DATA_ERROR;
+
+        const std::string_view option = value.substr(start, position - start);
+        const bool duplicate = std::any_of(
+            options.begin(), options.end(),
+            [option](const std::pmr::string &existing) noexcept {
+              return ascii_equal_ci(existing, option);
+            });
+        if (!duplicate)
+          options.emplace_back(normalized_name(std::pmr::string(
+              option, options.get_allocator().resource())));
+        saw_option = true;
+
+        while (position < value.size() &&
+               ows(static_cast<unsigned char>(value[position])))
+          ++position;
+        if (position == value.size())
+          break;
+        if (value[position] != ',')
+          return STATUS_DATA_ERROR;
+        ++position;
+        if (position == value.size())
+          return STATUS_DATA_ERROR;
+      }
+      if (!saw_option)
+        return STATUS_DATA_ERROR;
+    }
+    return ntl::status::ok();
+  } catch (const std::bad_alloc &) {
+    return STATUS_INSUFFICIENT_RESOURCES;
+  } catch (...) {
+    return STATUS_UNHANDLED_EXCEPTION;
+  }
+}
+
+inline void erase_trailer(
+    header_list &trailers, std::string_view name) noexcept {
+  trailers.erase(
+      std::remove_if(
+          trailers.begin(), trailers.end(),
+          [name](const header_field &field) noexcept {
+            return ascii_equal_ci(field.name, name);
+          }),
+      trailers.end());
+}
+
+inline bool only_trailers_te(const header_collection &headers) noexcept {
+  bool found = false;
+  for (const auto &field : headers.fields()) {
+    if (!ascii_equal_ci(field.name, "te"))
+      continue;
+    found = true;
+    std::string_view value = field.value;
+    std::size_t position = 0;
+    bool saw_token = false;
+    while (position < value.size()) {
+      while (position < value.size() &&
+             ows(static_cast<unsigned char>(value[position])))
+        ++position;
+      const std::size_t start = position;
+      while (position < value.size() &&
+             is_token_character(
+                 static_cast<unsigned char>(value[position])))
+        ++position;
+      if (start == position ||
+          !ascii_equal_ci(value.substr(start, position - start), "trailers"))
+        return false;
+      saw_token = true;
+      while (position < value.size() &&
+             ows(static_cast<unsigned char>(value[position])))
+        ++position;
+      if (position == value.size())
+        break;
+      if (value[position] != ',')
+        return false;
+      ++position;
+      if (position == value.size())
+        return false;
+    }
+    if (!saw_token)
+      return false;
+  }
+  return found;
+}
+
+} // namespace transform_detail
+
+/**
+ * @brief Adapts ordinary fields when an intermediary changes HTTP versions.
+ *
+ * HTTP/1 Connection options and hop-by-hop fields belong to one transport hop
+ * and must never enter an HTTP/2 or HTTP/3 field section.  The operation also
+ * removes fields named by Connection, including matching trailer fields.  A
+ * malformed Connection option list fails closed instead of being forwarded.
+ */
+inline ntl::status adapt_forwarded_headers(
+    header_collection &headers, header_list &trailers,
+    protocol source, protocol destination) noexcept {
+  if (source != protocol::http1 || destination == protocol::http1)
+    return ntl::status::ok();
+
+  try {
+    std::pmr::vector<std::pmr::string> connection_options(
+        headers.resource());
+    const ntl::status collected = transform_detail::collect_connection_options(
+        headers, connection_options);
+    if (!collected.is_ok())
+      return collected;
+
+    for (const auto &option : connection_options) {
+      (void)headers.erase(option);
+      transform_detail::erase_trailer(trailers, option);
+    }
+
+    const bool retain_te = transform_detail::only_trailers_te(headers);
+    constexpr std::array<std::string_view, 5> hop_by_hop{
+        "connection", "keep-alive", "proxy-connection",
+        "transfer-encoding", "upgrade"};
+    for (const std::string_view name : hop_by_hop) {
+      (void)headers.erase(name);
+      transform_detail::erase_trailer(trailers, name);
+    }
+    (void)headers.erase("te");
+    transform_detail::erase_trailer(trailers, "te");
+    if (retain_te)
+      headers.append("te", "trailers");
+    return ntl::status::ok();
+  } catch (const std::bad_alloc &) {
+    return STATUS_INSUFFICIENT_RESOURCES;
+  } catch (...) {
+    return STATUS_UNHANDLED_EXCEPTION;
+  }
+}
 
 inline ntl::status validate_trailers(
     std::span<const header_field> trailers,
@@ -359,25 +694,124 @@ inline ntl::status validate_trailers(
 }
 
 struct request_message {
+  request_message() : request_message(message_memory_ref{}) {}
+  explicit request_message(message_memory_ref memory)
+      : request_message(require_resource(memory.resource), resource_tag{}) {}
+  request_message(const request_message &other)
+      : request_message(other, message_memory_ref{}) {}
+  request_message(const request_message &other, message_memory_ref memory)
+      : request_message(other, require_resource(memory.resource),
+                        resource_tag{}) {}
+  request_message(request_message &&) noexcept = default;
+  request_message &operator=(const request_message &) = default;
+  request_message &operator=(request_message &&) noexcept = default;
+
+  std::pmr::memory_resource *resource() const noexcept {
+    return body.get_allocator().resource();
+  }
+
+private:
+  struct resource_tag {};
+  static std::pmr::memory_resource *
+  require_resource(std::pmr::memory_resource *resource) {
+    if (!resource)
+      throw std::invalid_argument("HTTP message memory resource is null");
+    return resource;
+  }
+  request_message(std::pmr::memory_resource *resource, resource_tag)
+      : method(resource), scheme("https", resource), authority(resource),
+        path("/", resource), headers(resource), body(resource),
+        trailers(resource) {}
+  request_message(const request_message &other,
+                  std::pmr::memory_resource *resource, resource_tag)
+      : wire_protocol(other.wire_protocol), method(other.method, resource),
+        scheme(other.scheme, resource), authority(other.authority, resource),
+        path(other.path, resource), headers(other.headers, resource),
+        body(other.body.begin(), other.body.end(), resource),
+        trailers(other.trailers.begin(), other.trailers.end(), resource) {
+    if (other.extended_protocol)
+      extended_protocol.emplace(*other.extended_protocol, resource);
+  }
+
+public:
   protocol wire_protocol = protocol::http1;
-  std::string method;
-  std::string scheme = "https";
-  std::string authority;
-  std::string path = "/";
-  std::optional<std::string> extended_protocol;
+  message_string method;
+  message_string scheme;
+  message_string authority;
+  message_string path;
+  std::optional<message_string> extended_protocol;
   header_collection headers;
-  std::vector<std::byte> body;
-  std::vector<header_field> trailers;
+  message_body body;
+  header_list trailers;
 };
 
 struct response_message {
+  response_message() : response_message(message_memory_ref{}) {}
+  explicit response_message(message_memory_ref memory)
+      : response_message(require_resource(memory.resource), resource_tag{}) {}
+  response_message(const response_message &other)
+      : response_message(other, message_memory_ref{}) {}
+  response_message(const response_message &other, message_memory_ref memory)
+      : response_message(other, require_resource(memory.resource),
+                         resource_tag{}) {}
+  response_message(response_message &&) noexcept = default;
+  response_message &operator=(const response_message &) = default;
+  response_message &operator=(response_message &&) noexcept = default;
+
+  std::pmr::memory_resource *resource() const noexcept {
+    return body.get_allocator().resource();
+  }
+
+private:
+  struct resource_tag {};
+  static std::pmr::memory_resource *
+  require_resource(std::pmr::memory_resource *resource) {
+    if (!resource)
+      throw std::invalid_argument("HTTP message memory resource is null");
+    return resource;
+  }
+  response_message(std::pmr::memory_resource *resource, resource_tag)
+      : reason(resource), headers(resource), body(resource),
+        trailers(resource) {}
+  response_message(const response_message &other,
+                   std::pmr::memory_resource *resource, resource_tag)
+      : wire_protocol(other.wire_protocol), status(other.status),
+        reason(other.reason, resource), headers(other.headers, resource),
+        body(other.body.begin(), other.body.end(), resource),
+        trailers(other.trailers.begin(), other.trailers.end(), resource) {}
+
+public:
   protocol wire_protocol = protocol::http1;
   unsigned status = 200;
-  std::string reason;
+  message_string reason;
   header_collection headers;
-  std::vector<std::byte> body;
-  std::vector<header_field> trailers;
+  message_body body;
+  header_list trailers;
 };
+
+inline ntl::status adapt_forwarded_message(
+    request_message &message, protocol destination) noexcept {
+  const protocol source = message.wire_protocol;
+  const ntl::status adapted = adapt_forwarded_headers(
+      message.headers, message.trailers, source, destination);
+  if (!adapted.is_ok())
+    return adapted;
+  if (source == protocol::http1 && destination != protocol::http1)
+    (void)message.headers.erase("host");
+  message.wire_protocol = destination;
+  return ntl::status::ok();
+}
+
+inline ntl::status adapt_forwarded_message(
+    response_message &message, protocol destination) noexcept {
+  const ntl::status adapted = adapt_forwarded_headers(
+      message.headers, message.trailers,
+      message.wire_protocol, destination);
+  if (!adapted.is_ok())
+    return adapted;
+  message.wire_protocol = destination;
+  return ntl::status::ok();
+}
 
 inline bool response_body_forbidden(
     const request_message &request,
@@ -417,7 +851,7 @@ public:
   }
 
   static rewrite_result replace_body(
-      std::vector<std::byte> body,
+      message_body body,
       transformed_body_coding coding =
           transformed_body_coding::preserve) {
     rewrite_result result(
@@ -427,11 +861,34 @@ public:
     return result;
   }
 
+  template <class Allocator>
+  static rewrite_result replace_body(
+      std::vector<std::byte, Allocator> body,
+      transformed_body_coding coding =
+          transformed_body_coding::preserve) {
+    message_body converted;
+    converted.assign(
+        std::make_move_iterator(body.begin()),
+        std::make_move_iterator(body.end()));
+    return replace_body(std::move(converted), coding);
+  }
+
+  /** The callback already rewrote message.body using its bound allocator. */
+  static rewrite_result body_changed(
+      transformed_body_coding coding =
+          transformed_body_coding::preserve) noexcept {
+    rewrite_result result(
+        rewrite_action::forward, rewrite_change::body);
+    result.body_supplied_ = false;
+    result.coding_ = coding;
+    return result;
+  }
+
   static rewrite_result replace_text(
       std::string text,
       transformed_body_coding coding =
           transformed_body_coding::preserve) {
-    std::vector<std::byte> body(text.size());
+    message_body body(text.size());
     std::transform(
         text.begin(), text.end(), body.begin(),
         [](char value) noexcept {
@@ -463,9 +920,10 @@ public:
   transformed_body_coding coding() const noexcept {
     return coding_;
   }
-  std::vector<std::byte> release_body() noexcept {
+  message_body release_body() noexcept {
     return std::move(body_);
   }
+  bool body_supplied() const noexcept { return body_supplied_; }
   std::optional<response_message>
   release_response() noexcept {
     return std::move(response_);
@@ -480,11 +938,15 @@ private:
   rewrite_change change_ = rewrite_change::none;
   transformed_body_coding coding_ =
       transformed_body_coding::preserve;
-  std::vector<std::byte> body_;
+  message_body body_;
+  bool body_supplied_ = true;
   std::optional<response_message> response_;
 };
 
 struct pipeline_outcome {
+  static constexpr std::size_t no_terminal_rule =
+      (std::numeric_limits<std::size_t>::max)();
+
   rewrite_action action = rewrite_action::forward;
   bool headers_modified = false;
   bool body_modified = false;
@@ -492,6 +954,7 @@ struct pipeline_outcome {
       transformed_body_coding::preserve;
   std::optional<response_message> response;
   NTSTATUS failure = STATUS_SUCCESS;
+  std::size_t terminal_rule_index = no_terminal_rule;
 
   bool modified() const noexcept {
     return headers_modified || body_modified;
@@ -499,6 +962,7 @@ struct pipeline_outcome {
 };
 
 class transform_pipeline;
+struct transform_pipeline_state;
 
 class request_rule_selector {
 public:
@@ -520,12 +984,13 @@ public:
 
 private:
   friend class transform_pipeline;
-  request_rule_selector(transform_pipeline &pipeline,
+  request_rule_selector(
+                        std::shared_ptr<transform_pipeline_state> state,
                         predicate condition)
-      : pipeline_(&pipeline),
+      : state_(std::move(state)),
         condition_(std::move(condition)) {}
 
-  transform_pipeline *pipeline_ = nullptr;
+  std::shared_ptr<transform_pipeline_state> state_;
   predicate condition_;
 };
 
@@ -550,13 +1015,34 @@ public:
 
 private:
   friend class transform_pipeline;
-  response_rule_selector(transform_pipeline &pipeline,
+  response_rule_selector(
+                         std::shared_ptr<transform_pipeline_state> state,
                          predicate condition)
-      : pipeline_(&pipeline),
+      : state_(std::move(state)),
         condition_(std::move(condition)) {}
 
-  transform_pipeline *pipeline_ = nullptr;
+  std::shared_ptr<transform_pipeline_state> state_;
   predicate condition_;
+};
+
+struct transform_pipeline_state {
+  struct request_rule {
+    request_rule_selector::predicate condition;
+    std::function<rewrite_result(request_message &)> apply;
+  };
+
+  struct response_rule {
+    response_rule_selector::predicate condition;
+    std::function<rewrite_result(
+        const request_message &, response_message &)> apply;
+  };
+
+  explicit transform_pipeline_state(transform_limits configured_limits)
+      : limits(configured_limits) {}
+
+  transform_limits limits;
+  std::vector<request_rule> request_rules;
+  std::vector<response_rule> response_rules;
 };
 
 /**
@@ -568,7 +1054,8 @@ private:
 class transform_pipeline {
 public:
   explicit transform_pipeline(
-      transform_limits limits = {}) : limits_(limits) {
+      transform_limits limits = {})
+      : state_(std::make_shared<transform_pipeline_state>(limits)) {
     if (!valid_limits())
       throw std::invalid_argument(
           "HTTP transform pipeline limits are invalid");
@@ -576,24 +1063,52 @@ public:
 
   request_rule_selector requests() {
     return request_rule_selector(
-        *this, [](const request_message &) { return true; });
+        state_, [](const request_message &) { return true; });
   }
 
   response_rule_selector responses() {
     return response_rule_selector(
-        *this,
+        state_,
         [](const request_message &,
            const response_message &) { return true; });
   }
 
-  const transform_limits &limits() const noexcept {
-    return limits_;
+  const transform_limits &limits_ref() const noexcept {
+    return state_->limits;
   }
 
   pipeline_outcome
   apply(request_message &message) const noexcept {
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+    return apply_with_kernel_stack(
+        [this, &message]() noexcept {
+          return apply_request_on_current_stack(message);
+        });
+#else
+    return apply_request_on_current_stack(message);
+#endif
+  }
+
+  pipeline_outcome
+  apply(const request_message &request,
+        response_message &message) const noexcept {
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+    return apply_with_kernel_stack(
+        [this, &request, &message]() noexcept {
+          return apply_response_on_current_stack(request, message);
+        });
+#else
+    return apply_response_on_current_stack(request, message);
+#endif
+  }
+
+private:
+  pipeline_outcome
+  apply_request_on_current_stack(
+      request_message &message) const noexcept {
     std::optional<request_message> original;
-    if (limits_.on_failure ==
+    const auto state = state_;
+    if (state->limits.on_failure ==
         transform_failure_policy::forward_original) {
       try {
         original = message;
@@ -608,7 +1123,9 @@ public:
         return restore_or_fail(
             message, std::move(original),
             static_cast<NTSTATUS>(valid));
-      for (const auto &rule : request_rules_) {
+      for (std::size_t rule_index = 0;
+           rule_index != state->request_rules.size(); ++rule_index) {
+        const auto &rule = state->request_rules[rule_index];
         if (!rule.condition(message))
           continue;
         rewrite_result result = rule.apply(message);
@@ -626,8 +1143,10 @@ public:
           return restore_or_fail(
               message, std::move(original),
               STATUS_DATA_ERROR);
-        if (outcome.action != rewrite_action::forward)
+        if (outcome.action != rewrite_action::forward) {
+          outcome.terminal_rule_index = rule_index;
           return outcome;
+        }
       }
       return outcome;
     } catch (const std::bad_alloc &) {
@@ -642,10 +1161,12 @@ public:
   }
 
   pipeline_outcome
-  apply(const request_message &request,
-        response_message &message) const noexcept {
+  apply_response_on_current_stack(
+      const request_message &request,
+      response_message &message) const noexcept {
     std::optional<response_message> original;
-    if (limits_.on_failure ==
+    const auto state = state_;
+    if (state->limits.on_failure ==
         transform_failure_policy::forward_original) {
       try {
         original = message;
@@ -664,7 +1185,9 @@ public:
             message, std::move(original),
             valid.is_ok() ? STATUS_DATA_ERROR
                           : static_cast<NTSTATUS>(valid));
-      for (const auto &rule : response_rules_) {
+      for (std::size_t rule_index = 0;
+           rule_index != state->response_rules.size(); ++rule_index) {
+        const auto &rule = state->response_rules[rule_index];
         if (!rule.condition(request, message))
           continue;
         rewrite_result result =
@@ -686,8 +1209,10 @@ public:
           return restore_or_fail(
               message, std::move(original),
               STATUS_DATA_ERROR);
-        if (outcome.action != rewrite_action::forward)
+        if (outcome.action != rewrite_action::forward) {
+          outcome.terminal_rule_index = rule_index;
           return outcome;
+        }
       }
       return outcome;
     } catch (const std::bad_alloc &) {
@@ -701,28 +1226,56 @@ public:
     }
   }
 
-private:
   friend class request_rule_selector;
   friend class response_rule_selector;
 
-  struct request_rule {
-    request_rule_selector::predicate condition;
-    std::function<rewrite_result(request_message &)> apply;
-  };
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+  /**
+   * Kernel coroutine resume frames can already consume a material portion of
+   * the fixed kernel stack.  A policy may then nest protocol adapters (for
+   * example HTTP -> gRPC -> content decoder) and pool verification adds more
+   * call depth.  Keep that synchronous policy work behind one internal stack
+   * budget so callers never need to remember KeExpandKernelStackAndCalloutEx.
+   * Expansion failure does not run the callback and is mapped through the
+   * pipeline's configured failure policy.
+   */
+  template <class Function>
+  pipeline_outcome
+  apply_with_kernel_stack(Function &&function) const noexcept {
+    static_assert(std::is_nothrow_invocable_r_v<
+                  pipeline_outcome, Function &>);
+    static_assert(std::is_nothrow_move_assignable_v<
+                  pipeline_outcome>);
 
-  struct response_rule {
-    response_rule_selector::predicate condition;
-    std::function<rewrite_result(
-        const request_message &, response_message &)> apply;
-  };
+    if (ntl::current_irql() != ntl::irql::passive)
+      return failure(STATUS_INVALID_DEVICE_STATE);
+
+    pipeline_outcome outcome = failure(STATUS_UNSUCCESSFUL);
+    try {
+      ntl::net::kernel::dispatcher_executor::invoke(
+          [&function, &outcome]() noexcept {
+            outcome = function();
+          });
+      return outcome;
+    } catch (const ntl::exception &error) {
+      return failure(
+          static_cast<NTSTATUS>(error.get_status()));
+    } catch (const std::bad_alloc &) {
+      return failure(STATUS_INSUFFICIENT_RESOURCES);
+    } catch (...) {
+      return failure(STATUS_UNHANDLED_EXCEPTION);
+    }
+  }
+
+#endif
 
   bool valid_limits() const noexcept {
-    return limits_.maximum_header_count != 0 &&
-           limits_.maximum_header_bytes != 0 &&
-           limits_.maximum_encoded_body_bytes != 0 &&
-           limits_.maximum_decoded_body_bytes != 0 &&
-           limits_.maximum_expansion_ratio != 0 &&
-           limits_.maximum_coding_layers != 0;
+    return state_->limits.maximum_header_count != 0 &&
+           state_->limits.maximum_header_bytes != 0 &&
+           state_->limits.maximum_encoded_body_bytes != 0 &&
+           state_->limits.maximum_decoded_body_bytes != 0 &&
+           state_->limits.maximum_expansion_ratio != 0 &&
+           state_->limits.maximum_coding_layers != 0;
   }
 
   ntl::status validate(
@@ -731,16 +1284,16 @@ private:
     const bool extended_connect =
         connect && message.extended_protocol.has_value();
     const bool start_line_bounded =
-        message.method.size() <= limits_.maximum_header_bytes &&
+        message.method.size() <= state_->limits.maximum_header_bytes &&
         message.scheme.size() <=
-            limits_.maximum_header_bytes -
+            state_->limits.maximum_header_bytes -
                 message.method.size() &&
         message.authority.size() <=
-            limits_.maximum_header_bytes -
+            state_->limits.maximum_header_bytes -
                 message.method.size() -
                 message.scheme.size() &&
         message.path.size() <=
-            limits_.maximum_header_bytes -
+            state_->limits.maximum_header_bytes -
                 message.method.size() -
                 message.scheme.size() -
                 message.authority.size();
@@ -762,14 +1315,14 @@ private:
          message.extended_protocol.has_value()) ||
         !start_line_bounded ||
         message.body.size() >
-            limits_.maximum_decoded_body_bytes)
+            state_->limits.maximum_decoded_body_bytes)
       return STATUS_DATA_ERROR;
     const ntl::status headers = message.headers.validate(
-        message.wire_protocol, limits_);
+        message.wire_protocol, state_->limits);
     if (!headers.is_ok())
       return headers;
     return validate_trailers(
-        message.trailers, message.wire_protocol, limits_);
+        message.trailers, message.wire_protocol, state_->limits);
   }
 
   ntl::status validate(
@@ -777,16 +1330,16 @@ private:
     if (message.status < 100 || message.status > 999 ||
         !transform_detail::valid_field_value(message.reason) ||
         message.reason.size() >
-            limits_.maximum_header_bytes ||
+            state_->limits.maximum_header_bytes ||
         message.body.size() >
-            limits_.maximum_decoded_body_bytes)
+            state_->limits.maximum_decoded_body_bytes)
       return STATUS_DATA_ERROR;
     const ntl::status headers = message.headers.validate(
-        message.wire_protocol, limits_);
+        message.wire_protocol, state_->limits);
     if (!headers.is_ok())
       return headers;
     return validate_trailers(
-        message.trailers, message.wire_protocol, limits_);
+        message.trailers, message.wire_protocol, state_->limits);
   }
 
   template <class Message>
@@ -801,9 +1354,10 @@ private:
       outcome.headers_modified = true;
       break;
     case rewrite_change::body:
-      message.body = result.release_body();
+      if (result.body_supplied())
+        message.body = result.release_body();
       if (message.body.size() >
-          limits_.maximum_decoded_body_bytes)
+          state_->limits.maximum_decoded_body_bytes)
         return STATUS_BUFFER_OVERFLOW;
       outcome.body_modified = true;
       outcome.headers_modified = true;
@@ -844,7 +1398,7 @@ private:
   }
 
   static void remove_invalidated_validators(
-      std::vector<header_field> &trailers) noexcept {
+      header_list &trailers) noexcept {
     trailers.erase(
         std::remove_if(
             trailers.begin(), trailers.end(),
@@ -861,7 +1415,7 @@ private:
 
   pipeline_outcome failure(NTSTATUS status) const noexcept {
     return {
-        limits_.on_failure ==
+        state_->limits.on_failure ==
                 transform_failure_policy::forward_original
             ? rewrite_action::forward
             : rewrite_action::block,
@@ -884,9 +1438,7 @@ private:
     return failure(status);
   }
 
-  transform_limits limits_;
-  std::vector<request_rule> request_rules_;
-  std::vector<response_rule> response_rules_;
+  std::shared_ptr<transform_pipeline_state> state_;
 };
 
 inline request_rule_selector
@@ -896,7 +1448,7 @@ request_rule_selector::when(predicate condition) const {
         "HTTP request rule predicate is empty");
   const predicate previous = condition_;
   return request_rule_selector(
-      *pipeline_,
+      state_,
       [previous, condition = std::move(condition)](
           const request_message &message) {
         return previous(message) && condition(message);
@@ -907,7 +1459,7 @@ template <class Function>
 request_rule_selector &
 request_rule_selector::inspect(Function &&function) {
   using function_type = std::decay_t<Function>;
-  pipeline_->request_rules_.push_back({
+  state_->request_rules.push_back({
       condition_,
       [callback = function_type(
            std::forward<Function>(function))](
@@ -934,7 +1486,7 @@ template <class Function>
 request_rule_selector &
 request_rule_selector::transform(Function &&function) {
   using function_type = std::decay_t<Function>;
-  pipeline_->request_rules_.push_back({
+  state_->request_rules.push_back({
       condition_,
       [callback = function_type(
            std::forward<Function>(function))](
@@ -952,7 +1504,7 @@ response_rule_selector::when(predicate condition) const {
         "HTTP response rule predicate is empty");
   const predicate previous = condition_;
   return response_rule_selector(
-      *pipeline_,
+      state_,
       [previous, condition = std::move(condition)](
           const request_message &request,
           const response_message &response) {
@@ -978,7 +1530,7 @@ template <class Function>
 response_rule_selector &
 response_rule_selector::inspect(Function &&function) {
   using function_type = std::decay_t<Function>;
-  pipeline_->response_rules_.push_back({
+  state_->response_rules.push_back({
       condition_,
       [callback = function_type(
            std::forward<Function>(function))](
@@ -1007,7 +1559,7 @@ template <class Function>
 response_rule_selector &
 response_rule_selector::transform(Function &&function) {
   using function_type = std::decay_t<Function>;
-  pipeline_->response_rules_.push_back({
+  state_->response_rules.push_back({
       condition_,
       [callback = function_type(
            std::forward<Function>(function))](

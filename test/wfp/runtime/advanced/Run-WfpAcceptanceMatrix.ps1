@@ -87,13 +87,12 @@ foreach ($row in $rows) {
     VmPassword = $VmPassword
     GuestUser = $GuestCredential.UserName
     GuestPassword = $GuestCredential.Password
-    RestartMode = [string] (
-        Read-Property $row 'restartMode' 'Manual')
-    ManualRestartTimeoutSeconds = [int] (
-        Read-Property $row 'manualRestartTimeoutSeconds' 900)
     VmrunPath = $VmrunPath
     GuestRoot = [string] (
         Read-Property $row 'guestRoot' 'C:\crtsys-wfp-advanced')
+    DisposableGuestSentinelPath = [string] (
+        Read-Property $row 'disposableGuestSentinelPath' (
+            'C:\crtsys-disposable-test-guest.sentinel'))
     StagingRoot = Join-Path $rowRoot 'staging'
     PrebuiltRoot = [string] (
         Read-Property $row 'prebuiltRoot' '')
@@ -103,23 +102,7 @@ foreach ($row in $rows) {
     Architecture = $architecture
     WindowsSdkVersion = [string] (
         Read-Property $row 'windowsSdkVersion' '10.0.26100.0')
-    RestoreDriverFileName = @(
-      Read-Property $row 'restoreDriverFileName' @())
-    RestoreBootMode = [string] (
-        Read-Property $row 'restoreBootMode' 'Persistent')
-    VerifierFlags = [string] (
-        Read-Property $row 'verifierFlags' '0x209BB')
-    RestoreVerifierFlags = [string] (
-        Read-Property $row 'restoreVerifierFlags' 'standard')
     Iterations = [int] (Read-Property $row 'iterations' 20)
-    LowResourceMode = [string] (
-        Read-Property $row 'lowResourceMode' 'Systematic')
-    LowResourceProbability = [int] (
-        Read-Property $row 'lowResourceProbability' 10000)
-    LowResourceRunsPerSample = [int] (
-        Read-Property $row 'lowResourceRunsPerSample' 1)
-    SystematicInjectionPassesPerSample = [int] (
-        Read-Property $row 'systematicInjectionPassesPerSample' 4)
     SelectedWfpSample = @(
       Read-Property $row 'samples' @('all'))
     ExpectedProductType = $productType
@@ -127,8 +110,6 @@ foreach ($row in $rows) {
         Read-Property $row 'minimumBuild' 0)
     RequireHvci = [bool] (
         Read-Property $row 'requireHvci' $false)
-    SkipLowResourcePass = [bool] (
-        Read-Property $row 'skipLowResourcePass' $false)
     SkipBuild = [bool] $SkipBuild
   }
   $managedHttp3Url = [string] (

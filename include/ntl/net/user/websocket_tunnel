@@ -1,0 +1,182 @@
+/**
+ * @file user_websocket_tunnel
+ * @brief Owning bounded WebSocket relay over two user-mode TLS streams.
+ */
+#pragma once
+
+#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
+#error "ntl/net/user/websocket_tunnel is a user-mode header"
+#endif
+
+#include <ntl/net/http/http1_proxy_connection>
+#include <ntl/net/tls/framed_stream>
+#include <ntl/net/tls/stream>
+#include <ntl/net/user/structured_concurrency>
+#include <ntl/net/websocket/framing>
+#include <ntl/net/websocket/permessage_deflate>
+#include <ntl/net/websocket/transform>
+
+#include <array>
+#include <cstddef>
+#include <functional>
+#include <memory>
+#include <optional>
+#include <span>
+#include <stdexcept>
+#include <system_error>
+#include <utility>
+
+namespace ntl::net::user {
+
+struct websocket_tunnel_options {
+  std::size_t maximum_frame_size = 2 * 1024 * 1024;
+  std::size_t maximum_message_size = 8 * 1024 * 1024;
+  std::size_t receive_chunk_size = 16 * 1024;
+  std::function<std::array<std::byte, 4>()> client_mask_provider;
+
+  bool valid() const noexcept {
+    return maximum_frame_size != 0 && maximum_message_size != 0 &&
+           receive_chunk_size != 0 && client_mask_provider;
+  }
+};
+
+namespace websocket_tunnel_detail {
+
+inline bool contains_ascii_ci(std::string_view value,
+                              std::string_view token) noexcept {
+  if (token.empty())
+    return true;
+  if (token.size() > value.size())
+    return false;
+  const auto lower = [](char character) noexcept {
+    return character >= 'A' && character <= 'Z'
+               ? static_cast<char>(character + ('a' - 'A'))
+               : character;
+  };
+  for (std::size_t offset = 0; offset <= value.size() - token.size();
+       ++offset) {
+    bool equal = true;
+    for (std::size_t index = 0; index != token.size(); ++index) {
+      if (lower(value[offset + index]) != lower(token[index])) {
+        equal = false;
+        break;
+      }
+    }
+    if (equal)
+      return true;
+  }
+  return false;
+}
+
+inline task<void> relay_direction(
+    ntl::net::tls_stream &source, ntl::net::tls_stream &destination,
+    ntl::net::websocket::sender_role sender,
+    std::span<const std::byte> initial_plaintext,
+    std::shared_ptr<const ntl::net::websocket::message_transform_pipeline>
+        policy,
+    std::optional<ntl::net::websocket::permessage_deflate_parameters>
+        compression,
+    websocket_tunnel_options options) {
+  if (!policy || !options.valid())
+    throw std::invalid_argument("invalid WebSocket tunnel dependencies");
+  ntl::net::tls_framed_stream frames(
+      source,
+      ntl::net::websocket::frame_framer(
+          sender,
+          {options.maximum_frame_size,
+           compression && compression->enabled ? std::uint8_t{0x04}
+                                               : std::uint8_t{0}}),
+      {options.maximum_frame_size + 14}, options.receive_chunk_size);
+  frames.append_buffered(initial_plaintext);
+  ntl::net::websocket::wire_transformer transformer(
+      sender, *policy, std::move(compression),
+      sender == ntl::net::websocket::sender_role::client
+          ? options.client_mask_provider
+          : std::function<std::array<std::byte, 4>()>{});
+  for (;;) {
+    auto frame = co_await frames.read_frame_or_eof();
+    if (!frame)
+      co_return;
+    const auto view =
+        ntl::net::scatter_view::from_contiguous(frame->frame());
+    const auto header = ntl::net::websocket::inspect_header(
+        view, sender,
+        {options.maximum_frame_size,
+         compression && compression->enabled ? std::uint8_t{0x04}
+                                             : std::uint8_t{0}});
+    if (!header)
+      throw std::system_error(static_cast<int>(header.status()),
+                              std::system_category(),
+                              "WebSocket frame validation failed");
+    auto transformed = transformer.consume(view);
+    if (transformed.failure != STATUS_SUCCESS ||
+        transformed.action == ntl::net::websocket::rewrite_action::block)
+      throw std::system_error(
+          static_cast<int>(transformed.failure == STATUS_SUCCESS
+                               ? STATUS_ACCESS_DENIED
+                               : transformed.failure),
+          std::system_category(), "WebSocket policy rejected the message");
+    if (transformed.action != ntl::net::websocket::rewrite_action::drop &&
+        !transformed.wire.empty() &&
+        co_await destination.write_all(transformed.wire) !=
+            transformed.wire.size())
+      throw std::runtime_error("WebSocket relay completed short");
+    if (header->operation == ntl::net::websocket::opcode::close)
+      co_return;
+  }
+}
+
+} // namespace websocket_tunnel_detail
+
+/**
+ * Runs both WebSocket directions and owns both policies until they drain.
+ * The first terminal direction cancels the peer; callers do not manage child
+ * tasks, declaration order, or a separate rundown object.
+ */
+inline task<void> run_websocket_tunnel(
+    ntl::net::http::http1_upgrade_context_view<
+        ntl::net::tls_stream, ntl::net::tls_stream> &context,
+    std::shared_ptr<const ntl::net::websocket::message_transform_pipeline>
+        client_policy,
+    std::shared_ptr<const ntl::net::websocket::message_transform_pipeline>
+        server_policy,
+    websocket_tunnel_options options) {
+  if (context.kind != ntl::net::http::http1_tunnel_kind::websocket ||
+      context.disposition !=
+          ntl::net::http::http1_tunnel_disposition::inspect ||
+      !client_policy || !server_policy || !options.valid())
+    throw std::invalid_argument("invalid HTTP/1 WebSocket tunnel");
+  auto negotiated =
+      ntl::net::websocket::parse_permessage_deflate_response(
+          context.selected_websocket_extensions);
+  if (!negotiated)
+    throw std::system_error(static_cast<int>(negotiated.status()),
+                            std::system_category(),
+                            "invalid WebSocket extension response");
+  if (negotiated->enabled &&
+      !websocket_tunnel_detail::contains_ascii_ci(
+          context.offered_websocket_extensions, "permessage-deflate"))
+    throw std::runtime_error(
+        "origin selected permessage-deflate without a matching offer");
+  const auto compression = negotiated->enabled
+      ? std::optional<ntl::net::websocket::permessage_deflate_parameters>(
+            *negotiated)
+      : std::nullopt;
+  auto client = websocket_tunnel_detail::relay_direction(
+      context.downstream, context.upstream,
+      ntl::net::websocket::sender_role::client, context.downstream_carry,
+      std::move(client_policy), compression, options);
+  auto server = websocket_tunnel_detail::relay_direction(
+      context.upstream, context.downstream,
+      ntl::net::websocket::sender_role::server, context.upstream_carry,
+      std::move(server_policy), compression, options);
+  co_await ntl::net::user::when_all_stop_on_first(
+      std::move(client), std::move(server),
+      [&downstream = context.downstream,
+       &upstream = context.upstream]() noexcept {
+        downstream.cancel();
+        upstream.cancel();
+      });
+}
+
+} // namespace ntl::net::user

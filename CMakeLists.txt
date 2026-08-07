@@ -25,6 +25,8 @@ option(CRTSYS_NTL_MAIN      "Set to ON to use ntl::main" ON)
 option(CRTSYS_USE_LIBCNTPR  "Set to ON to use libcntpr" ON)
 option(CRTSYS_ENABLE_DIAGNOSTIC_BREAKPOINTS "Set to ON to enable crtsys diagnostic KdBreakPoint calls" OFF)
 option(CRTSYS_ENABLE_INSTALL "Enable crtsys install rules" ${CRTSYS_IS_TOP_LEVEL})
+option(CRTSYS_BUILD_NTL_KERNEL_CONTENT_CODECS
+  "Build the optional PASSIVE_LEVEL NTL kernel zlib/Brotli libraries" OFF)
 set(CRTSYS_LDK_SOURCE_DIR "" CACHE PATH "Use a local LDK source tree instead of fetching the default LDK release")
 
 function(crtsys_scope_compile_options_to_c_cxx TARGET_NAME)
@@ -364,6 +366,7 @@ target_include_directories(crtsys BEFORE PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/src/custom/ucrt/common/inc"
 )
 target_include_directories(crtsys PRIVATE "${raw_pdb_SOURCE_DIR}/src")
+target_include_directories(crtsys PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
 # The optional NTL KMDF entry object is part of crtsys.lib. Build that object
 # against the oldest KMDF contract supported by crtsys; a consuming driver may
@@ -464,6 +467,15 @@ elseif(UCXXRT_ENABLED AND "${CMAKE_VS_PLATFORM_NAME}" STREQUAL "x64")
   target_link_options(crtsys PUBLIC "/FORCE:MULTIPLE")
 endif()
 
+if(CRTSYS_BUILD_NTL_KERNEL_CONTENT_CODECS)
+  # The optional libraries are separate archives so ordinary crtsys users do
+  # not pay for networking codecs.  NuGet packaging enables this option and
+  # places the archives in its driver-specific codec layout.
+  include(cmake/CrtSys.cmake)
+  include(cmake/NtlContentCodecs.cmake)
+  crtsys_add_ntl_kernel_content_codecs()
+endif()
+
 if("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "Win32")
   # crtsys.lib(lowhelpr.obj) : error LNK2026: module unsafe for SAFESEH image.
   target_link_options(crtsys PUBLIC "/SAFESEH:NO")
@@ -545,6 +557,7 @@ if(CRTSYS_ENABLE_INSTALL)
       cmake/CrtSys.cmake
       cmake/FindWDK.cmake
       cmake/NtlContentCodecs.cmake
+      cmake/NtlMsQuic.cmake
       cmake/pkg-utils.cmake
       cmake/std-cxx.cmake
     DESTINATION "${CRTSYS_INSTALL_CMAKEDIR}"

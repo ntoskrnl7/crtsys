@@ -15,6 +15,7 @@
 #include <ntl/net/tls/stream>
 
 #include <memory>
+#include <optional>
 #include <utility>
 
 namespace ntl::net {
@@ -28,31 +29,31 @@ public:
   accepted_tls_stream &
   operator=(accepted_tls_stream &&) noexcept = default;
 
-  tls_stream &stream() noexcept { return *stream_; }
-  const tls_client_hello &client_hello() const noexcept {
+  tls_stream &borrowed_stream() noexcept { return *stream_; }
+  const tls_client_hello &client_hello_ref() const noexcept {
     return hello_;
   }
-  PCCERT_CONTEXT certificate() const noexcept {
-    return identity_->certificate();
+  PCCERT_CONTEXT borrowed_certificate() const noexcept {
+    return identity_->borrowed_certificate();
   }
 
 private:
   friend detail::tls_task<accepted_tls_stream>
-  accept_tls(async_socket &, tls_server_identity_provider &,
+  accept_tls(async_socket, std::shared_ptr<tls_server_identity_provider>,
              tls_client_hello_limits, tls_stream_limits,
              tls_server_handshake_options);
 
   accepted_tls_stream(
       tls_client_hello hello,
       std::shared_ptr<tls_server_identity> identity,
-      std::unique_ptr<tls_stream> stream) noexcept
+      tls_stream stream) noexcept
       : hello_(std::move(hello)),
         identity_(std::move(identity)),
         stream_(std::move(stream)) {}
 
   tls_client_hello hello_;
   std::shared_ptr<tls_server_identity> identity_;
-  std::unique_ptr<tls_stream> stream_;
+  std::optional<tls_stream> stream_;
 };
 
 /**
@@ -60,21 +61,23 @@ private:
  */
 inline detail::tls_task<accepted_tls_stream>
 accept_tls(
-    async_socket &socket,
-    tls_server_identity_provider &provider,
+    async_socket socket,
+    std::shared_ptr<tls_server_identity_provider> provider,
     tls_client_hello_limits hello_limits = {},
     tls_stream_limits stream_limits = {},
     tls_server_handshake_options handshake_options = {}) {
   auto hello =
-      co_await read_tls_client_hello(socket, hello_limits);
-  auto identity = provider.select(hello);
+      co_await read_tls_client_hello(socket.share(), hello_limits);
+  if (!provider)
+    throw std::invalid_argument("TLS identity provider is required");
+  auto identity = provider->select(hello);
   if (!identity)
     throw std::system_error(
         ERROR_NOT_FOUND, std::system_category(),
         "TLS identity provider declined ClientHello");
-  auto stream = std::make_unique<tls_stream>(
-      socket, identity->credentials(), stream_limits);
-  co_await stream->handshake_server(
+  tls_stream stream(std::move(socket), identity->credentials(),
+                    stream_limits);
+  co_await stream.handshake_server(
       hello.initial_ciphertext(), std::move(handshake_options));
   co_return accepted_tls_stream(
       std::move(hello), std::move(identity),

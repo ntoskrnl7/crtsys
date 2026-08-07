@@ -1,0 +1,216 @@
+/**
+ * @file kernel_websocket_tunnel
+ * @brief Owning bounded WebSocket relay over two kernel TLS streams.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/net/kernel/websocket_tunnel is a kernel-mode header"
+#endif
+
+#include <ntl/net/http/http1_proxy_types>
+#include <ntl/net/io/async_transport_stream>
+#include <ntl/net/kernel/bidirectional_join>
+#include <ntl/net/kernel/tls_stream>
+#include <ntl/net/websocket/permessage_deflate>
+#include <ntl/net/websocket/stream_transform>
+
+#include <array>
+#include <chrono>
+#include <cstddef>
+#include <functional>
+#include <memory>
+#include <new>
+#include <optional>
+#include <span>
+#include <utility>
+#include <vector>
+
+namespace ntl::net::kernel {
+
+struct websocket_tunnel_options {
+  std::size_t receive_chunk_size = 16 * 1024;
+  ntl::net::websocket::stream_transform_options stream{};
+  std::function<std::array<std::byte, 4>()> client_mask_provider;
+
+  bool valid() const noexcept {
+    return receive_chunk_size != 0 &&
+           stream.maximum_pending_wire_bytes >= 14 &&
+           stream.maximum_output_bytes_per_push != 0 &&
+           client_mask_provider;
+  }
+};
+
+namespace websocket_tunnel_detail {
+
+inline bool contains_ascii_ci(std::string_view value,
+                              std::string_view token) noexcept {
+  if (token.empty())
+    return true;
+  if (token.size() > value.size())
+    return false;
+  const auto lower = [](char character) noexcept {
+    return character >= 'A' && character <= 'Z'
+               ? static_cast<char>(character + ('a' - 'A'))
+               : character;
+  };
+  for (std::size_t offset = 0; offset <= value.size() - token.size();
+       ++offset) {
+    bool equal = true;
+    for (std::size_t index = 0; index != token.size(); ++index) {
+      if (lower(value[offset + index]) != lower(token[index])) {
+        equal = false;
+        break;
+      }
+    }
+    if (equal)
+      return true;
+  }
+  return false;
+}
+
+inline bool expected_shutdown(ntl::status value) noexcept {
+  const NTSTATUS status = static_cast<NTSTATUS>(value);
+  return status == STATUS_END_OF_FILE ||
+         status == STATUS_CONNECTION_DISCONNECTED ||
+         status == STATUS_CONNECTION_RESET ||
+         status == STATUS_CONNECTION_ABORTED ||
+         status == STATUS_REMOTE_DISCONNECT ||
+         status == STATUS_PIPE_DISCONNECTED ||
+         status == STATUS_CANCELLED || status == STATUS_DELETE_PENDING;
+}
+
+inline task<ntl::status> write_all(
+    tls_stream &stream, std::span<const std::byte> bytes) noexcept {
+  auto written = co_await stream.write_all(bytes);
+  if (!written)
+    co_return written.status();
+  co_return *written == bytes.size()
+                ? ntl::status::ok()
+                : ntl::status{STATUS_CONNECTION_DISCONNECTED};
+}
+
+inline bidirectional_status_task relay_direction(
+    tls_stream &source, tls_stream &destination,
+    ntl::net::websocket::sender_role sender,
+    std::span<const std::byte> initial_plaintext,
+    std::shared_ptr<const ntl::net::websocket::message_transform_pipeline>
+        policy,
+    std::optional<ntl::net::websocket::permessage_deflate_parameters>
+        compression,
+    websocket_tunnel_options options) {
+  if (!policy || !options.valid())
+    co_return ntl::status{STATUS_INVALID_PARAMETER};
+  try {
+    ntl::net::websocket::stream_transformer transform(
+        sender, *policy, std::move(compression),
+        sender == ntl::net::websocket::sender_role::client
+            ? options.client_mask_provider
+            : std::function<std::array<std::byte, 4>()>{},
+        options.stream);
+    bool close_forwarded = false;
+    const auto consume = [&](std::span<const std::byte> bytes)
+        -> task<ntl::status> {
+      auto result = transform.consume(
+          ntl::net::scatter_view::from_contiguous(bytes));
+      if (!result)
+        co_return result.status();
+      if (result->failure != STATUS_SUCCESS)
+        co_return ntl::status{result->failure};
+      if (result->action == ntl::net::websocket::rewrite_action::block)
+        co_return ntl::status{STATUS_ACCESS_DENIED};
+      if (result->action != ntl::net::websocket::rewrite_action::drop &&
+          !result->wire.empty()) {
+        const ntl::status written =
+            co_await write_all(destination, result->wire);
+        if (!written.is_ok())
+          co_return written;
+      }
+      close_forwarded = result->close_seen;
+      co_return ntl::status::ok();
+    };
+    if (!initial_plaintext.empty()) {
+      const ntl::status initial = co_await consume(initial_plaintext);
+      if (!initial.is_ok())
+        co_return initial;
+      if (close_forwarded)
+        co_return ntl::status::ok();
+    }
+    std::vector<std::byte> buffer(options.receive_chunk_size);
+    for (;;) {
+      auto received = co_await source.read_some_borrowed(
+          buffer, {.timeout = (std::chrono::milliseconds::max)()});
+      if (!received)
+        co_return received.status();
+      if (*received == 0)
+        co_return transform.pending_bytes() == 0
+                      ? ntl::status::ok()
+                      : ntl::status{STATUS_END_OF_FILE};
+      const ntl::status consumed =
+          co_await consume(std::span(buffer).first(*received));
+      if (!consumed.is_ok())
+        co_return consumed;
+      // A forwarded WebSocket close frame is a successful completion of this
+      // direction.  Do not report EOF here: join_bidirectional() deliberately
+      // cancels the peer after a non-success result, which would discard the
+      // opposite close reply before it can be forwarded.
+      if (close_forwarded)
+        co_return ntl::status::ok();
+    }
+  } catch (const std::bad_alloc &) {
+    co_return ntl::status{STATUS_INSUFFICIENT_RESOURCES};
+  } catch (...) {
+    co_return ntl::status{STATUS_UNHANDLED_EXCEPTION};
+  }
+}
+
+} // namespace websocket_tunnel_detail
+
+inline task<ntl::status> run_websocket_tunnel(
+    ntl::net::http::http1_upgrade_context_view<tls_stream, tls_stream>
+        &context,
+    std::shared_ptr<const ntl::net::websocket::message_transform_pipeline>
+        client_policy,
+    std::shared_ptr<const ntl::net::websocket::message_transform_pipeline>
+        server_policy,
+    websocket_tunnel_options options) noexcept {
+  if (context.kind != ntl::net::http::http1_tunnel_kind::websocket ||
+      context.disposition !=
+          ntl::net::http::http1_tunnel_disposition::inspect ||
+      !client_policy || !server_policy || !options.valid())
+    co_return ntl::status{STATUS_INVALID_PARAMETER};
+  const auto negotiated =
+      ntl::net::websocket::parse_permessage_deflate_response(
+          context.selected_websocket_extensions);
+  if (!negotiated)
+    co_return negotiated.status();
+  if (negotiated->enabled &&
+      !websocket_tunnel_detail::contains_ascii_ci(
+          context.offered_websocket_extensions, "permessage-deflate"))
+    co_return ntl::status{STATUS_DATA_ERROR};
+  const auto compression = negotiated->enabled
+      ? std::optional<ntl::net::websocket::permessage_deflate_parameters>(
+            *negotiated)
+      : std::nullopt;
+  const ntl::status joined = co_await join_bidirectional(
+      websocket_tunnel_detail::relay_direction(
+          context.downstream, context.upstream,
+          ntl::net::websocket::sender_role::client,
+          context.downstream_carry, std::move(client_policy), compression,
+          options),
+      websocket_tunnel_detail::relay_direction(
+          context.upstream, context.downstream,
+          ntl::net::websocket::sender_role::server,
+          context.upstream_carry, std::move(server_policy), compression,
+          options),
+      [&context]() noexcept {
+        // Wake the opposite relay without tearing down TLS. The owning
+        // tls_stream frames close_notify before its transport is stopped.
+        context.downstream.cancel_pending_read();
+        context.upstream.cancel_pending_read();
+      },
+      &websocket_tunnel_detail::expected_shutdown);
+  co_return joined;
+}
+
+} // namespace ntl::net::kernel

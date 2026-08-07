@@ -150,7 +150,7 @@ public:
     if (bytes.size() < prefix_size)
       return frame_probe::need_more(prefix_size);
 
-    ntl::net::byte_cursor cursor(bytes);
+    ntl::net::borrowed_byte_cursor cursor(bytes);
     const auto payload = cursor.read_be16();
     if (!payload)
       return frame_probe::malformed(
@@ -183,7 +183,7 @@ public:
     if (bytes.size() < prefix_size)
       return frame_probe::need_more(prefix_size);
 
-    ntl::net::byte_cursor cursor(bytes);
+    ntl::net::borrowed_byte_cursor cursor(bytes);
     const auto payload = cursor.read_be32();
     if (!payload)
       return frame_probe::malformed(

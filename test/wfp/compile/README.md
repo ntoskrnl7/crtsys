@@ -5,6 +5,11 @@ This fixture compiles the public WFP ownership and policy contracts with
 
 The kernel target covers:
 
+- the public `<ntl/net/kernel/all>` aggregate dual-runtime header, allocation-free
+  gRPC/WebSocket/datagram framing, fragmented static/Huffman QPACK, bounded
+  ClientHello observation, direct/offloaded transform metadata, typed
+  inspection verdicts, synchronous/asynchronous offload seams, the QUIC
+  provider seam, and drainable kernel lifetimes;
 - strongly typed layer/callout keys and non-escaping callback events;
 - ALE, flow-established, packet, and stream callback signatures;
 - flow-context ownership transfer, flow-delete destruction, and unload
@@ -52,6 +57,12 @@ RFC 9204 static QPACK vectors, gzip/deflate/Brotli chains and their corruption
 and expansion limits, ALPN selection, and fail-closed TLS policy contracts on
 x64 and x86.
 
+The same portable target cross-checks the allocation-free kernel-facing core
+in user mode. It rejects malformed offload metadata, verdicts, and ClientHello
+compression methods; exercises inline async completion, cancel, stop, and
+drain; and verifies that protocol, direction, flow, and port metadata survive
+the explicit offload boundary.
+
 The HTTP transform target runs one semantic request/response policy across
 HTTP/1.1 and HTTP/2 adapters. It covers chunked transfer decoding, stateless
 HPACK output, fragmented HEADERS/CONTINUATION, multiplexed request/response
@@ -62,6 +73,12 @@ trailers, and verifies HEAD/304 bodyless framing without misreading
 representation `Content-Length` or `Content-Encoding`. The browser HTTP/3
 proxy contract applies the same pipeline to a gzip response, verifies the
 re-encoded result, and checks the same HEAD metadata rule.
+
+The HTTP/2 contracts also exercise the bounded kernel preflight boundary.
+They verify that a first request can be blocked before an origin connection,
+that a permitted request transfers its move-only workspace and buffered
+frames exactly once, and that a browser-facing local SETTINGS acknowledgement
+is consumed locally instead of being replayed to the later origin connection.
 
 The transform contracts also execute the fixed-pool coroutine policy path,
 including cancellation, deadline, and queue overload. The streaming contract

@@ -1,0 +1,137 @@
+/**
+ * @file transform_pipeline
+ * @brief Allocation-free inspect, transform, and verdict pipeline.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include <ntl/net/inspection/core>
+#include <ntl/net/runtime>
+#include <ntl/result>
+#include <ntl/status>
+
+#include <cstddef>
+#include <span>
+
+namespace ntl::net {
+
+struct transform_context {
+  inspection::context network{};
+  feature_set protocol_features{};
+};
+
+struct transform_result {
+  inspection::verdict verdict = inspection::verdict::permit;
+  execution_path path = execution_path::direct;
+  std::size_t output_size = 0;
+  bool transformed = false;
+  bool forward_original = true;
+};
+
+struct borrowed_inspect_stage {
+  using function_type = ntl::status (*)(
+      void *, const transform_context &, inspection::content_view) noexcept;
+  function_type function = nullptr;
+  void *context = nullptr;
+  execution_path path = execution_path::direct;
+};
+
+struct borrowed_rewrite_stage {
+  using function_type = ntl::result<std::size_t> (*)(
+      void *, const transform_context &, inspection::content_view,
+      std::span<std::byte>) noexcept;
+  function_type function = nullptr;
+  void *context = nullptr;
+  execution_path path = execution_path::direct;
+};
+
+struct borrowed_verdict_stage {
+  using function_type = ntl::result<inspection::verdict> (*)(
+      void *, const transform_context &, inspection::content_view) noexcept;
+  function_type function = nullptr;
+  void *context = nullptr;
+  execution_path path = execution_path::direct;
+};
+
+/**
+ * @brief Fixed, non-owning pipeline with explicit storage and execution path.
+ *
+ * The pipeline never catches an allocation failure because it never allocates.
+ * A rewrite callback receives caller-owned output storage.  An offload adapter
+ * is installed as a rewrite callback with execution_path::offloaded, so a
+ * caller can audit the chosen path without a silent user/kernel fallback.
+ */
+class borrowed_transform_pipeline {
+public:
+  constexpr borrowed_transform_pipeline &inspect(
+      borrowed_inspect_stage stage) noexcept {
+    inspector_ = stage;
+    return *this;
+  }
+
+  constexpr borrowed_transform_pipeline &transform(
+      borrowed_rewrite_stage stage) noexcept {
+    transformer_ = stage;
+    return *this;
+  }
+
+  constexpr borrowed_transform_pipeline &decide(
+      borrowed_verdict_stage stage) noexcept {
+    policy_ = stage;
+    return *this;
+  }
+
+  ntl::result<transform_result>
+  run(const transform_context &context, inspection::content_view input,
+      std::span<std::byte> output = {}) const noexcept {
+    if (!input)
+      return ntl::unexpected(STATUS_INVALID_PARAMETER);
+
+    transform_result result;
+    if (inspector_.function) {
+      const ntl::status inspected =
+          inspector_.function(inspector_.context, context, input);
+      if (!inspected.is_ok())
+        return ntl::unexpected(inspected);
+      if (inspector_.path == execution_path::offloaded)
+        result.path = execution_path::offloaded;
+    }
+
+    inspection::content_view policy_input = input;
+    if (transformer_.function) {
+      if (output.empty())
+        return ntl::unexpected(STATUS_BUFFER_TOO_SMALL);
+      auto rewritten = transformer_.function(
+          transformer_.context, context, input, output);
+      if (!rewritten)
+        return ntl::unexpected(rewritten.status());
+      if (*rewritten > output.size())
+        return ntl::unexpected(STATUS_DATA_ERROR);
+      policy_input = inspection::content_view(output.first(*rewritten));
+      if (transformer_.path == execution_path::offloaded)
+        result.path = execution_path::offloaded;
+      result.output_size = *rewritten;
+      result.transformed = true;
+      result.forward_original = false;
+    }
+
+    if (policy_.function) {
+      auto verdict =
+          policy_.function(policy_.context, context, policy_input);
+      if (!verdict)
+        return ntl::unexpected(verdict.status());
+      result.verdict = *verdict;
+      if (policy_.path == execution_path::offloaded)
+        result.path = execution_path::offloaded;
+    }
+    return ntl::ok(result);
+  }
+
+private:
+  borrowed_inspect_stage inspector_{};
+  borrowed_rewrite_stage transformer_{};
+  borrowed_verdict_stage policy_{};
+};
+
+} // namespace ntl::net

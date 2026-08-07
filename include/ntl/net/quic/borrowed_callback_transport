@@ -1,0 +1,135 @@
+/**
+ * @file quic_borrowed_callback_transport
+ * @brief Allocation-free adapter for user or kernel QUIC provider vtables.
+ *
+ * @copyright Copyright (c) 2022 NT Template Library Authors.
+ */
+#pragma once
+
+#include <ntl/net/quic/transport>
+
+namespace ntl::net::quic {
+
+struct borrowed_transport_callbacks {
+  ntl::status (*run_borrowed)(void *, backend_sink &) noexcept = nullptr;
+  ntl::status (*write_stream)(void *, std::uint64_t, scatter_view,
+                              bool) noexcept = nullptr;
+  ntl::status (*write_qpack_decoder_stream)(void *, scatter_view) noexcept =
+      nullptr;
+  ntl::status (*open_bidirectional_stream)(void *, std::uint64_t &) noexcept =
+      nullptr;
+  ntl::status (*open_request_stream)(void *, std::uint64_t &) noexcept =
+      nullptr;
+  ntl::status (*open_unidirectional_stream)(void *, std::uint64_t &) noexcept =
+      nullptr;
+  ntl::status (*send_datagram)(void *, scatter_view) noexcept = nullptr;
+  ntl::status (*reset_stream)(void *, std::uint64_t,
+                              std::uint64_t) noexcept = nullptr;
+  ntl::status (*reset_stream_at)(void *, std::uint64_t, std::uint64_t,
+                                 std::uint64_t) noexcept = nullptr;
+  void (*stop)(void *) noexcept = nullptr;
+  ntl::status (*drain)(void *) noexcept = nullptr;
+};
+
+/**
+ * @brief Adapts a provider-owned connection without owning its ABI or memory.
+ *
+ * This is the kernel MsQuic/alternative-provider seam.  The provider binding
+ * owns NMR registration, handle lifetime, and callback synchronization; NTL
+ * supplies the stable high-level stream contract used by HTTP/3 code.
+ */
+class borrowed_callback_transport final : public transport_backend {
+public:
+  constexpr borrowed_callback_transport(
+      void *context, borrowed_transport_callbacks callbacks,
+      backend_capabilities capabilities,
+      runtime_descriptor runtime) noexcept
+      : context_(context), callbacks_(callbacks),
+        capabilities_(capabilities), runtime_(runtime) {}
+
+  runtime_descriptor runtime() const noexcept override { return runtime_; }
+  backend_capabilities capabilities() const noexcept override {
+    return capabilities_;
+  }
+  ntl::status run_borrowed(backend_sink &sink) noexcept override {
+    if (!capabilities_.available ||
+        !runtime_.supports(network_feature::quic_transport,
+                           runtime_.path))
+      return STATUS_NOT_SUPPORTED;
+    return callbacks_.run_borrowed
+               ? callbacks_.run_borrowed(context_, sink)
+               : ntl::status{STATUS_NOT_SUPPORTED};
+  }
+  ntl::status write_stream(std::uint64_t stream_id, scatter_view bytes,
+                           bool final) noexcept override {
+    if (!bytes || (!final && bytes.empty()) ||
+        bytes.size() > runtime_.limits.maximum_input_bytes)
+      return STATUS_INVALID_PARAMETER;
+    return callbacks_.write_stream
+               ? callbacks_.write_stream(context_, stream_id, bytes, final)
+               : ntl::status{STATUS_NOT_SUPPORTED};
+  }
+  ntl::status write_qpack_decoder_stream(scatter_view bytes) noexcept override {
+    if (!bytes || bytes.empty() ||
+        bytes.size() > runtime_.limits.maximum_input_bytes)
+      return STATUS_INVALID_PARAMETER;
+    return callbacks_.write_qpack_decoder_stream
+               ? callbacks_.write_qpack_decoder_stream(context_, bytes)
+               : ntl::status{STATUS_NOT_SUPPORTED};
+  }
+  ntl::status open_bidirectional_stream(
+      std::uint64_t &stream_id) noexcept override {
+    return callbacks_.open_bidirectional_stream
+               ? callbacks_.open_bidirectional_stream(context_, stream_id)
+               : ntl::status{STATUS_NOT_SUPPORTED};
+  }
+  ntl::status open_request_stream(
+      std::uint64_t &stream_id) noexcept override {
+    if (callbacks_.open_request_stream)
+      return callbacks_.open_request_stream(context_, stream_id);
+    return open_bidirectional_stream(stream_id);
+  }
+  ntl::status open_unidirectional_stream(
+      std::uint64_t &stream_id) noexcept override {
+    return callbacks_.open_unidirectional_stream
+               ? callbacks_.open_unidirectional_stream(context_, stream_id)
+               : ntl::status{STATUS_NOT_SUPPORTED};
+  }
+  ntl::status send_datagram(scatter_view bytes) noexcept override {
+    if (!bytes || bytes.empty() ||
+        bytes.size() > runtime_.limits.maximum_input_bytes)
+      return STATUS_INVALID_PARAMETER;
+    return callbacks_.send_datagram
+               ? callbacks_.send_datagram(context_, bytes)
+               : ntl::status{STATUS_NOT_SUPPORTED};
+  }
+  ntl::status reset_stream(std::uint64_t stream_id,
+                           std::uint64_t error) noexcept override {
+    return callbacks_.reset_stream
+               ? callbacks_.reset_stream(context_, stream_id, error)
+               : ntl::status{STATUS_NOT_SUPPORTED};
+  }
+  ntl::status reset_stream_at(std::uint64_t stream_id, std::uint64_t error,
+                              std::uint64_t reliable_size) noexcept override {
+    return callbacks_.reset_stream_at
+               ? callbacks_.reset_stream_at(context_, stream_id, error,
+                                            reliable_size)
+               : ntl::status{STATUS_NOT_SUPPORTED};
+  }
+  void stop() noexcept override {
+    if (callbacks_.stop)
+      callbacks_.stop(context_);
+  }
+  ntl::status drain() noexcept override {
+    return callbacks_.drain ? callbacks_.drain(context_)
+                            : ntl::status{STATUS_NOT_SUPPORTED};
+  }
+
+private:
+  void *context_ = nullptr;
+  borrowed_transport_callbacks callbacks_{};
+  backend_capabilities capabilities_{};
+  runtime_descriptor runtime_{};
+};
+
+} // namespace ntl::net::quic

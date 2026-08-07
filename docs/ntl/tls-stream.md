@@ -23,14 +23,15 @@ co_await tls.handshake_client({
 });
 
 auto protocol = tls.negotiated_application_protocol();
-auto received = co_await tls.read_some(buffer);
+auto received = co_await tls.read_some_borrowed(buffer);
 co_await tls.write_all(reply);
 co_await tls.shutdown();
 ```
 
-`tls_credentials` may be shared by several sessions and must outlive them.
-Every `tls_stream` is one TLS session over one already-connected
-`async_socket`.
+`tls_credentials` may be shared by several sessions. Each stream retains the
+credential and socket states it uses, so their facades and member declaration
+order do not control the session lifetime. Every `tls_stream` is one TLS
+session over one already-connected `async_socket`.
 
 ## Certificate policy
 
@@ -48,19 +49,20 @@ Applications that already know a server name can use
 one bounded ClientHello and selects an owning identity:
 
 ```cpp
-ntl::net::windows_tls_certificate_issuer issuer(
+auto issuer = std::make_shared<ntl::net::windows_tls_certificate_issuer>(
     authorized_ca,
     {.key_name_prefix = L"product-tls-leaf",
      .rsa_bits = 2048,
      .validity_days = 7,
      .machine_keys = true});
-ntl::net::cached_tls_server_identity_provider identities(
+auto identities = std::make_shared<
+    ntl::net::cached_tls_server_identity_provider>(
     issuer, 256);
 
 auto accepted = co_await ntl::net::accept_tls(
     accepted_socket, identities);
 auto &tls = accepted.stream();
-auto sni = accepted.client_hello().server_name();
+auto sni = accepted.client_hello_ref().server_name();
 ```
 
 `<ntl/net/tls/client_hello>` accepts fragmented TLS records and handshake
@@ -94,12 +96,13 @@ fail-closed and requires a `tls_peer_certificate_policy`:
 auto credentials = ntl::net::tls_credentials::client({
     .manual_peer_validation = true
 });
-ntl::net::exact_certificate_policy pin(expected_certificate);
+auto pin = std::make_shared<ntl::net::exact_certificate_policy>(
+    expected_certificate);
 ntl::net::tls_stream tls(socket, credentials);
 
 co_await tls.handshake_client({
     .server_name = L"fixture.example",
-    .certificate_policy = &pin
+    .certificate_policy = pin
 });
 ```
 
@@ -137,8 +140,9 @@ The two availability options map to Schannel's documented
 `SCH_CRED_IGNORE_REVOCATION_OFFLINE` flags. They do not disable chain,
 enhanced-key-usage, host-name, expiry, or positive revocation validation.
 
-Any custom policy must outlive the stream because TLS 1.3 post-handshake
-messages can cause the peer certificate to be checked again.
+Handshake options retain custom certificate policies. TLS 1.3 post-handshake
+validation can therefore reuse the policy even after the original policy
+facade has been released.
 
 An application can supply one explicit client certificate instead of asking
 Schannel to choose a default identity:
@@ -241,7 +245,7 @@ than as a clean TLS shutdown.
 
 ## WFP composition
 
-[`tls-inspection-proxy`](../../examples/wfp/tls-inspection-proxy) demonstrates
+[`tls-inspection-proxy`](../../examples/wfp/user/tls-inspection-proxy) demonstrates
 the intended split:
 
 1. a kernel WFP callout forces one selected TCP connection through a local
@@ -257,9 +261,10 @@ The kernel never receives TLS keys or plaintext. This keeps TLS libraries,
 certificate policy, parsers, and potentially blocking product decisions out
 of WFP classify callbacks.
 
-[`browser-https-inspection`](../../examples/wfp/browser-https-inspection)
-demonstrates a browser-scoped long-running workflow with isolated profile
-launch, temporary trust management, bounded HTTP/1.1 and multiplexed HTTP/2
+[`browser-https-inspection`](../../examples/wfp/user/browser-https-inspection)
+demonstrates a browser-scoped long-running workflow that observes an
+already-running exact executable path without launching, terminating, or
+reconfiguring the browser. It provides bounded HTTP/1.1 and multiplexed HTTP/2
 HTML logging, gzip/deflate/Brotli body decoding, negotiated WebSocket
 `permessage-deflate`, and transparent end-to-end HTTP/2 flow-control frames.
 
@@ -270,7 +275,7 @@ recovers the inner ClientHello. A `downstream_trust_provider` can identify a
 known pinned endpoint before interception, but cannot make it accept another
 certificate. Origin mutual TLS uses an explicit
 `origin_client_identity_provider`; NTL never guesses an identity. The
-[`http3-inspection`](../../examples/wfp/http3-inspection) example covers the
+[`http3-inspection`](../../examples/wfp/user/http3-inspection) example covers the
 decrypted QUIC/static-QPACK boundary, while transparent browser HTTP/3 still
 needs a product QUIC terminator and any negotiated dynamic QPACK provider.
 `<ntl/net/tls/inspection_policy>` represents each missing capability separately

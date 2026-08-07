@@ -29,6 +29,8 @@ $ErrorActionPreference = 'Stop'
 
 $repoRoot =
     (Resolve-Path (Join-Path $PSScriptRoot '..\..\..\..')).Path
+$crashPostcheckScript = Join-Path $PSScriptRoot (
+    '..\..\..\common\Test-VmCrashPostcheck.ps1')
 if ([string]::IsNullOrWhiteSpace($StagingRoot)) {
   $StagingRoot =
       Join-Path $repoRoot 'artifacts\controlled-http3-staging'
@@ -54,7 +56,8 @@ function ConvertTo-PowerShellLiteral([string] $Value) {
   return "'" + ($Value -replace "'", "''") + "'"
 }
 
-foreach ($required in @($VmrunPath, $VmxPath, $StagingRoot)) {
+foreach ($required in @(
+    $VmrunPath, $VmxPath, $StagingRoot, $crashPostcheckScript)) {
   if (-not (Test-Path -LiteralPath $required)) {
     throw "Required VM acceptance path was not found: $required"
   }
@@ -195,6 +198,8 @@ foreach ($file in Get-ChildItem -LiteralPath $StagingRoot -File) {
   Copy-ToGuest $file.FullName (
       Join-Path $GuestRoot $file.Name)
 }
+Copy-ToGuest $crashPostcheckScript (
+    Join-Path $GuestRoot 'Test-VmCrashPostcheck.ps1')
 
 $guestResult =
     Join-Path $GuestRoot 'vm-acceptance.result.txt'
@@ -211,7 +216,10 @@ Set-StrictMode -Version Latest
 `$result = $guestResultLiteral
 `$evidenceZip = $guestEvidenceLiteral
 `$evidence = Join-Path `$root 'evidence'
-`$started = Get-Date
+`$crashPostcheck = Join-Path `$root 'Test-VmCrashPostcheck.ps1'
+`$eventBaseline = Join-Path `$root 'crash-event-baseline.txt'
+`$dumpBaseline = Join-Path `$root 'crash-dump-baseline.txt'
+`$postcheck = Join-Path `$root 'postcheck.txt'
 function Get-VerifierSnapshot {
   return (@(
     & verifier.exe /querysettings 2>&1 |
@@ -262,6 +270,8 @@ function Get-ServiceSnapshot {
 try {
   New-Item -ItemType Directory -Path `$evidence -Force |
       Out-Null
+  & `$crashPostcheck -EventBaselinePath `$eventBaseline `
+      -DumpBaselinePath `$dumpBaseline -CaptureBaseline
   `$verifierBefore = Get-VerifierSnapshot
   `$rootsBefore = Get-RootSnapshot
   `$keysBefore = Get-KeySnapshot
@@ -327,28 +337,15 @@ try {
   if (`$processes.Count -ne 0) {
     throw 'A controlled HTTP/3 process remained.'
   }
-  `$events = @(
-    Get-WinEvent -FilterHashtable @{
-      LogName='System'; StartTime=`$started
-    } -ErrorAction SilentlyContinue |
-        Where-Object Id -in @(41, 1001, 6008))
-  `$dumps = @()
-  if (Test-Path -LiteralPath 'C:\Windows\Minidump') {
-    `$dumps += Get-ChildItem -LiteralPath (
-        'C:\Windows\Minidump') -Filter '*.dmp' -File |
-        Where-Object LastWriteTime -ge `$started
+  & `$crashPostcheck -EventBaselinePath `$eventBaseline `
+      -DumpBaselinePath `$dumpBaseline -OutputPath `$postcheck
+  `$postcheckText = Get-Content -LiteralPath `$postcheck -Raw
+  if (`$postcheckText -notmatch 'EVENT_COUNT=0' -or
+      `$postcheckText -notmatch 'DUMP_COUNT=0' -or
+      `$postcheckText -notmatch 'EVENT_LOG_RESET=0') {
+    throw "Crash postcheck failed: `$postcheckText"
   }
-  if (Test-Path -LiteralPath 'C:\Windows\MEMORY.DMP') {
-    `$dump = Get-Item -LiteralPath 'C:\Windows\MEMORY.DMP'
-    if (`$dump.LastWriteTime -ge `$started) {
-      `$dumps += `$dump
-    }
-  }
-  if (`$events.Count -ne 0 -or `$dumps.Count -ne 0) {
-    throw (
-        "Crash postcheck failed: events=`$(`$events.Count), " +
-        "dumps=`$(`$dumps.Count)")
-  }
+  Copy-Item -LiteralPath `$postcheck -Destination `$evidence -Force
 
   @(
     'CONTROLLED_HTTP3_VM=PASS'

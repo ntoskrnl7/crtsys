@@ -153,35 +153,54 @@ jobs:
             -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}'
 
       - name: Build WFP compile contracts and samples
-        if: matrix.project == 'driver' && matrix.config == 'Debug' && (matrix.arch == 'x86' || matrix.arch == 'x64')
+        if: matrix.project == 'driver' && (matrix.arch == 'x86' || matrix.arch == 'x64' || matrix.arch == 'ARM64')
         shell: pwsh
         run: |
           ./scripts/ci/Build-CrtSys.ps1 `
             -Project wfp-compile `
             -Architecture '${{ matrix.arch }}' `
-            -Configuration Debug `
+            -Configuration '${{ matrix.config }}' `
             -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}'
 
-          if ('${{ matrix.arch }}' -eq 'x64') {
+          if ('${{ matrix.arch }}' -in @('x64', 'ARM64')) {
             foreach ($wfpProject in @(
               'wfp-ale-connect-block',
               'wfp-datagram-proxy',
               'wfp-async-inspection',
               'wfp-flow-monitor',
               'wfp-stream-edit',
+              'wfp-bind-redirect',
+              'wfp-specialized-observation',
                'wfp-connect-redirect',
                'wfp-tls-inspection-proxy',
                'wfp-browser-https-inspection',
+               'wfp-http3-inspection',
                'wfp-udp-content-filter',
-              'wfp-tcp-content-filter'
+               'wfp-tcp-content-filter',
+               'wfp-kernel-connect-redirect',
+               'wfp-kernel-tls-inspection-proxy',
+               'wfp-kernel-browser-https-inspection',
+               'wfp-kernel-http3-inspection',
+               'wfp-kernel-udp-content-filter',
+              'wfp-kernel-tcp-content-filter'
             )) {
               ./scripts/ci/Build-CrtSys.ps1 `
                 -Project $wfpProject `
-                -Architecture x64 `
-                -Configuration Debug `
+                -Architecture '${{ matrix.arch }}' `
+                -Configuration '${{ matrix.config }}' `
                 -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}'
             }
           }
+
+      - name: Build NTL network dual-runtime contracts
+        if: matrix.project == 'driver'
+        shell: pwsh
+        run: |
+          ./scripts/ci/Build-CrtSys.ps1 `
+            -Project ntl-net-kernel-contracts `
+            -Architecture '${{ matrix.arch }}' `
+            -Configuration '${{ matrix.config }}' `
+            -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}'
 
       - name: Build grouped KMDF examples
         if: matrix.project == 'driver' && matrix.config == 'Debug' && (matrix.arch == 'x86' || matrix.arch == 'x64')
@@ -572,7 +591,7 @@ jobs:
           }
           ./scripts/ci/Build-CrtSys.ps1 @parameters
 
-          if ('${{ matrix.arch }}' -eq 'x64') {
+          if ('${{ matrix.arch }}' -in @('x64', 'ARM64')) {
             foreach ($wfpProject in @(
               'wfp-compile',
               'wfp-ale-connect-block',
@@ -580,21 +599,45 @@ jobs:
               'wfp-async-inspection',
               'wfp-flow-monitor',
               'wfp-stream-edit',
+              'wfp-bind-redirect',
+              'wfp-specialized-observation',
                'wfp-connect-redirect',
                'wfp-tls-inspection-proxy',
                'wfp-browser-https-inspection',
+               'wfp-http3-inspection',
                'wfp-udp-content-filter',
-              'wfp-tcp-content-filter'
+               'wfp-tcp-content-filter',
+               'wfp-kernel-connect-redirect',
+               'wfp-kernel-tls-inspection-proxy',
+               'wfp-kernel-browser-https-inspection',
+               'wfp-kernel-http3-inspection',
+               'wfp-kernel-udp-content-filter',
+              'wfp-kernel-tcp-content-filter'
             )) {
               $wfpParameters = @{
                 Project = $wfpProject
-                Architecture = 'x64'
+                Architecture = '${{ matrix.arch }}'
                 Configuration = 'Debug'
                 WindowsSdkVersion = '${{ env.CRTSYS_VS2026_WINDOWS_SDK_VERSION }}'
                 PlatformToolset = 'v145'
               }
               ./scripts/ci/Build-CrtSys.ps1 @wfpParameters
             }
+          }
+
+          if ('${{ matrix.project }}' -eq 'driver' -and
+              '${{ matrix.config }}' -eq 'Debug') {
+            $ntlNetParameters = @{
+              Project = 'ntl-net-kernel-contracts'
+              Architecture = '${{ matrix.arch }}'
+              Configuration = 'Debug'
+              WindowsSdkVersion = '${{ env.CRTSYS_VS2026_WINDOWS_SDK_VERSION }}'
+              PlatformToolset = 'v145'
+            }
+            if (-not [string]::IsNullOrWhiteSpace($wdkVersion)) {
+              $ntlNetParameters.WdkVersion = $wdkVersion
+            }
+            ./scripts/ci/Build-CrtSys.ps1 @ntlNetParameters
           }
 
           if ('${{ matrix.project }}' -eq 'driver' -and
@@ -611,6 +654,54 @@ jobs:
               $crossParameters.WdkVersion = $wdkVersion
             }
             ./scripts/ci/Build-CrtSys.ps1 @crossParameters
+          }
+
+      - name: Build v145 WFP and NTL network Release fixtures
+        if: matrix.project == 'driver' && matrix.config == 'Release' && (matrix.arch == 'x86' || matrix.arch == 'x64' || matrix.arch == 'ARM64')
+        shell: pwsh
+        run: |
+          $wdkVersion = ''
+          if ('${{ matrix.arch }}' -eq 'x86') {
+            $wdkVersion = '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}'
+          }
+
+          $common = @{
+            Architecture = '${{ matrix.arch }}'
+            Configuration = 'Release'
+            WindowsSdkVersion = '${{ env.CRTSYS_VS2026_WINDOWS_SDK_VERSION }}'
+            PlatformToolset = 'v145'
+          }
+          if (-not [string]::IsNullOrWhiteSpace($wdkVersion)) {
+            $common.WdkVersion = $wdkVersion
+          }
+
+          ./scripts/ci/Build-CrtSys.ps1 @common -Project wfp-compile
+          ./scripts/ci/Build-CrtSys.ps1 @common -Project ntl-net-kernel-contracts
+
+          if ('${{ matrix.arch }}' -in @('x64', 'ARM64')) {
+            foreach ($wfpProject in @(
+              'wfp-ale-connect-block',
+              'wfp-datagram-proxy',
+              'wfp-async-inspection',
+              'wfp-flow-monitor',
+              'wfp-stream-edit',
+              'wfp-bind-redirect',
+              'wfp-specialized-observation',
+              'wfp-connect-redirect',
+              'wfp-tls-inspection-proxy',
+              'wfp-browser-https-inspection',
+              'wfp-http3-inspection',
+              'wfp-udp-content-filter',
+              'wfp-tcp-content-filter',
+              'wfp-kernel-connect-redirect',
+              'wfp-kernel-tls-inspection-proxy',
+              'wfp-kernel-browser-https-inspection',
+              'wfp-kernel-http3-inspection',
+              'wfp-kernel-udp-content-filter',
+              'wfp-kernel-tcp-content-filter'
+            )) {
+              ./scripts/ci/Build-CrtSys.ps1 @common -Project $wfpProject
+            }
           }
 
   driver-load-test-preflight:

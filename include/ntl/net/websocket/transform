@@ -4,10 +4,6 @@
  */
 #pragma once
 
-#if defined(_KERNEL_MODE) || defined(_KERNEL32_)
-#error "ntl/net/websocket/transform is a user-mode header"
-#endif
-
 #include <ntl/net/inspection/core>
 #include <ntl/net/websocket/framing>
 #include <ntl/net/websocket/permessage_deflate>
@@ -261,7 +257,7 @@ public:
       sender_role sender, const message_transform_pipeline &pipeline,
       std::optional<permessage_deflate_parameters> compression = std::nullopt,
       std::function<std::array<std::byte, 4>()> mask_provider = {})
-      : sender_(sender), pipeline_(&pipeline),
+      : sender_(sender), pipeline_(pipeline),
         assembler_(pipeline.limits().maximum_decoded_message_bytes),
         mask_provider_(std::move(mask_provider)) {
     if (compression && compression->enabled) {
@@ -289,12 +285,12 @@ public:
     transform_outcome outcome;
     const auto header = inspect_header(
         frame, sender_,
-        {.maximum_payload_size = pipeline_->limits().maximum_wire_frame_bytes,
+        {.maximum_payload_size = pipeline_.limits().maximum_wire_frame_bytes,
          .allowed_reserved_bits = decoder_ ? std::uint8_t{0x04} : std::uint8_t{0}});
     if (!header)
       return fail(header.status());
     const auto payload = decode_payload(
-        frame, *header, pipeline_->limits().maximum_wire_frame_bytes);
+        frame, *header, pipeline_.limits().maximum_wire_frame_bytes);
     if (!payload)
       return fail(payload.status());
     auto assembled = assembler_.consume(*header, *payload);
@@ -316,7 +312,7 @@ public:
     }
 
     bool modified = false;
-    outcome.action = pipeline_->apply(value, modified);
+    outcome.action = pipeline_.apply(value, modified);
     outcome.complete_message = true;
     outcome.modified = modified;
     if (outcome.action != rewrite_action::forward)
@@ -330,7 +326,7 @@ public:
       value.reserved_bits |= 0x04u;
     }
     const std::size_t frame_limit =
-        pipeline_->limits().maximum_output_frame_payload;
+        pipeline_.limits().maximum_output_frame_payload;
     if (value.control && value.payload.size() > frame_limit)
       return fail(STATUS_BUFFER_OVERFLOW);
     std::size_t offset = 0;
@@ -348,7 +344,7 @@ public:
       if (!encoded)
         return fail(encoded.status());
       if (encoded->size() >
-          pipeline_->limits().maximum_encoded_message_bytes -
+          pipeline_.limits().maximum_encoded_message_bytes -
               outcome.wire.size())
         return fail(STATUS_BUFFER_OVERFLOW);
       outcome.wire.insert(outcome.wire.end(), encoded->begin(), encoded->end());
@@ -365,7 +361,7 @@ private:
   }
 
   sender_role sender_ = sender_role::either;
-  const message_transform_pipeline *pipeline_ = nullptr;
+  message_transform_pipeline pipeline_;
   message_assembler assembler_;
   std::function<std::array<std::byte, 4>()> mask_provider_;
   std::unique_ptr<permessage_deflate_decoder> decoder_;
