@@ -139,7 +139,48 @@ topology can additionally use `-SpecializedObservationRequireVSwitch`:
 The runner does not create a vSwitch or alter network topology. The operator
 must provide matching traffic and selects the required evidence explicitly.
 
-The remaining environment-specific gates are also opt-in and read-only:
+## Hyper-V vSwitch and IPsec evidence
+
+On 2026-08-10, the environment-specific `specialized-observation` paths were
+exercised in a disposable nested Hyper-V lab. A Windows L1 guest hosted an
+internal switch with `192.168.250.1/24` on its management-OS adapter, and a
+Windows L2 traffic peer used `192.168.250.2/24` on that switch. The driver,
+Driver Verifier, and temporary policy ran only in L1; L2 was only a traffic
+peer and did not require a test-signing boot or Driver Verifier.
+
+The vSwitch gate requires the inbox **Microsoft Windows Filtering Platform**
+switch extension to be enabled and running on the selected switch. With that
+precondition, three iterations passed with `registered-mask=63`,
+`exercised-mask=63`, and `required-mask=51`, proving endpoint IPv4/IPv6 and
+both vSwitch directions. A diagnostic run with the extension disabled reached
+only `exercised-mask=15`, so a registration-only result or ordinary ping is not
+sufficient vSwitch evidence. The evidence set must retain the suite log, the
+switch-extension state, and the before/after Verifier state. In the recorded
+run the selected driver's Verifier counters changed from load/unload `2/2` to
+`3/3`, while the Verifier settings remained byte-for-byte unchanged.
+
+The IPsec gate used temporary machine pre-shared-key transport rules scoped to
+the two peer addresses and separately selected TCP and UDP. Real TCP and UDP
+nonce traffic established four Quick Mode SAs on each peer: inbound and
+outbound rows for each protocol. The subsequent three-iteration driver run
+passed with `registered-mask=63`, `exercised-mask=63`, and `required-mask=3`,
+while Driver Verifier recorded a `+1` load and `+1` unload delta. The lower
+required mask is intentional, and the Verifier settings remained unchanged:
+IPsec policy layers are management-only, so the IPsec proof is the protected
+TCP/UDP traffic plus the live Quick Mode SAs; it is not a claim that an IPsec
+policy layer was registered as a classify callout.
+
+A reusable evidence set for that gate includes the policy inventory,
+before/after Quick Mode SA JSON from both peers, TCP/UDP listener results,
+`specialized-observation-ipsec.log`,
+`verifier-load-unload-evidence.json`, and scoped cleanup results. Cleanup must
+remove only the test rule group, authentication set, listeners, and temporary
+firewall rules. It must not stop or remove the built-in `IKEEXT` or
+`PolicyAgent` services. The recorded cleanup confirmed both peers were free of
+the test-scoped objects, left both built-in services running, and found no
+remaining temporary driver service.
+
+These environment-specific gates remain opt-in and read-only:
 
 - `-RequireActiveIpsecSecurityAssociation` requires
   `specialized-observation` and a

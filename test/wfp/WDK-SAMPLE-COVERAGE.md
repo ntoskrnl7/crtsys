@@ -23,7 +23,7 @@ separately; a compile-covered advanced path is not reported as runtime-tested.
 | Browser HTTPS inspection | application-scoped TCP redirect, native UDP/443 fallback enforcement, dynamic per-SNI identity, persistent HTTP/1.1, multiplexed HTTP/2, WebSocket, bounded content codecs, and managed HTTP/3/WebTransport inspection | WFP and user-mode TLS/HTTP/QUIC surfaces above, in an independent driver/app contract | `/W4 /WX`; deterministic HTTP/1.1, HTTP/2, and managed HTTP/3 contracts are packaged separately from the Internet-dependent isolated-browser proof in `test/wfp/runtime/https-live`; a stock browser's private-CA HTTP/3 trust boundary is not reported as transparent H3 inspection |
 | Direct kernel application-content policy | WSK TCP/UDP, kernel Schannel, CNG/DER X.509, kernel zlib/Brotli, direct HTTP/1.1 and HTTP/2 framing/transform policy, and kernel MsQuic HTTP/3 | `ntl::net::kernel` transports/providers with the shared `ntl::net` protocol core | `/W4 /WX`; the kernel browser aggregate passed three same-boot iterations as a preconfigured Driver Verifier target: HTTP/1.1, HTTP/2, and HTTP/3 inspect/block/rewrite, compression, gRPC, WebSocket/Extended CONNECT/WebTransport, IPv4/IPv6 WFP paths, workspace lifetime/exhaustion, connection churn, and clean drain; the gate found no new crash/dump and preserved the exact Verifier settings |
 | Direct kernel HTTP/3 | MsQuic NMR provider, TLS 1.3/QUIC lifecycle, SETTINGS, bounded dynamic/Huffman QPACK with blocked-stream resume and acknowledgement, gzip/deflate/Brotli, Extended CONNECT, and WebTransport streams/Datagrams/capsules/reliable reset | `kernel::msquic_provider`, shared QUIC/HTTP/3/QPACK/WebTransport contracts | `/W4 /WX`; x64 Debug and Release build with an official controller DLL; the browser aggregate's kernel HTTP/3 path passed three iterations under Driver Verifier, including origin H3 negotiation, peer SETTINGS, QPACK acknowledgement, multiplexing, quota reclamation, WebTransport policy, UDP relay, and clean drain; the standalone `kernel-http3-inspection` fixture also passed three isolated load/run/unload iterations, each with 96 sequential connections, IPv4/IPv6 policy removal/restoration, unavailable-callout fail-close, compression, WebTransport, capture, and no new crash/dump; that standalone run preserved Verifier settings but is not claimed as a Verifier-target result |
-| `WFPSampler` specialized scenarios | IPsec policy, MAC/frame, vSwitch, name-resolution cache, endpoint closure, fast-layer metadata | typed specialized layer tags, capability categories, and compile contracts | `/W4 /WX`; endpoint-closure IPv4/IPv6 and inbound/outbound MAC classify passed three iterations under Driver Verifier with the explicit MAC requirement; vSwitch registrations are runtime-tested but still require a Hyper-V topology to exercise classify; IPsec layers are management-only and fast layers are introspection-only rather than legal static-callout targets |
+| `WFPSampler` specialized scenarios | IPsec policy, MAC/frame, vSwitch, name-resolution cache, endpoint closure, fast-layer metadata | typed specialized layer tags, capability categories, and compile contracts | `/W4 /WX`; endpoint-closure IPv4/IPv6 and inbound/outbound MAC classify passed three iterations under Driver Verifier with the explicit MAC requirement; Hyper-V vSwitch classify passed three iterations with masks `63/63/51` after enabling the inbox WFP switch extension; active transport-mode IPsec produced bidirectional TCP and UDP Quick Mode SAs on both peers, and the associated Verifier run recorded a `+1/+1` load/unload delta; IPsec layers remain management-only and fast layers remain introspection-only rather than legal static-callout targets |
 
 ## ALE connect-block runtime result
 
@@ -180,15 +180,17 @@ unrepresentable:
     snapshots and reports queue drops. Changing machine-wide collection state
     requires an explicit option and the prior state is restored.
 
-## Remaining runtime gates
+## Environment-specific runtime coverage
 
-The representative dual-stack paths above, including the standalone Schannel
-TLS proxy and endpoint closure, are runtime-covered. The following
-environment-dependent surfaces must not be reported as exercised merely
-because their registrations and compile contracts passed:
-
-- vSwitch classify with a Hyper-V virtual-switch topology; and
-- IPsec policy integration with an active IPsec scenario.
+The Hyper-V vSwitch classify and active transport-mode IPsec integration
+gates are runtime-covered in addition to the representative dual-stack paths
+above. The vSwitch result requires a real Hyper-V switch data path with the
+inbox WFP switch extension enabled. The IPsec result requires two peers,
+protected TCP and UDP traffic, and matching bidirectional Quick Mode SAs on
+both peers. Registration and compile contracts alone still do not satisfy
+either gate. The topology, acceptance criteria, evidence artifacts, and
+cleanup boundary are documented in
+[`test/wfp/runtime/advanced`](runtime/advanced/README.md#hyper-v-vswitch-and-ipsec-evidence).
 
 Fast layers remain introspection-only because Windows does not support static
 filtering at those internal layers. IPsec policy layers remain
