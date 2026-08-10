@@ -26,6 +26,14 @@ $portfilePath = Join-Path $portRoot 'portfile.cmake'
 $bridgePath = Join-Path $portRoot 'crtsys-vcpkg.targets'
 $usagePath = Join-Path $portRoot 'usage'
 $uiContractPath = Join-Path $repoRoot 'test\vcpkg\msbuild-ui-contract.proj'
+$updatePortPath = Join-Path $PSScriptRoot 'Update-CrtSysVcpkgPort.ps1'
+$publishRegistryPath = Join-Path $PSScriptRoot `
+  'Publish-CrtSysVcpkgRegistry.ps1'
+$registryAutomationTestPath = Join-Path $PSScriptRoot `
+  'Test-CrtSysVcpkgRegistryAutomation.ps1'
+$prepareReleasePath = Join-Path $repoRoot `
+  'scripts\release\Prepare-CrtSysRelease.ps1'
+$packageWorkflowPath = Join-Path $repoRoot '.github\workflows\package.yml'
 
 function Assert-FileContains {
   param(
@@ -110,7 +118,12 @@ foreach ($requiredPath in @(
   $portfilePath,
   $bridgePath,
   $usagePath,
-  $uiContractPath
+  $uiContractPath,
+  $updatePortPath,
+  $publishRegistryPath,
+  $registryAutomationTestPath,
+  $prepareReleasePath,
+  $packageWorkflowPath
 )) {
   if (-not (Test-Path -LiteralPath $requiredPath)) {
     throw "Required vcpkg packaging file was not found: $requiredPath"
@@ -155,6 +168,37 @@ Assert-FileContains -Path $usagePath -Tokens @(
   'crtsys_add_driver',
   'crtsys-vcpkg.targets',
   'Reload Visual Studio'
+)
+Assert-FileContains -Path $updatePortPath -Tokens @(
+  'version-semver',
+  'Get-FileHash',
+  'SHA512',
+  'RegistryBaseline',
+  'Encoding UTF8'
+)
+Assert-FileContains -Path $publishRegistryPath -Tokens @(
+  'x-add-version',
+  'version-semver',
+  'git-tree',
+  'Refusing to republish non-current',
+  'Publish a new port-version instead of rewriting history',
+  'HEAD:refs/heads/$RegistryBranch'
+)
+Assert-FileContains -Path $registryAutomationTestPath -Tokens @(
+  'Idempotent registry retry',
+  'Refusing to republish non-current',
+  'Registry automation did not reject a baseline rollback'
+)
+Assert-FileContains -Path $prepareReleasePath -Tokens @(
+  'Update-CrtSysVcpkgPort.ps1',
+  'vcpkg/ports/crtsys/vcpkg.json'
+)
+Assert-FileContains -Path $packageWorkflowPath -Tokens @(
+  'publish-vcpkg-registry:',
+  'Publish-CrtSysVcpkgRegistry.ps1',
+  'Update-CrtSysVcpkgPort.ps1',
+  'steps.registry.outputs.baseline',
+  'HEAD:main'
 )
 
 $portfile = Get-Content -LiteralPath $portfilePath -Raw

@@ -36,6 +36,10 @@ jobs:
         shell: pwsh
         run: ./scripts/vcpkg/Test-CrtSysVcpkgPort.ps1 -ContractOnly
 
+      - name: Validate vcpkg registry automation
+        shell: pwsh
+        run: ./scripts/vcpkg/Test-CrtSysVcpkgRegistryAutomation.ps1
+
       - name: Reject hard-coded NTSTATUS values
         shell: pwsh
         run: ./scripts/ci/Test-NoHardcodedNtStatus.ps1

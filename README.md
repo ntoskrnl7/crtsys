@@ -488,6 +488,11 @@ The helper updates `include/.internal/version`, commits the version bump,
 creates the matching `v<version>` tag, and pushes both the commit and tag. The tag
 push starts the `Package` workflow.
 
+After the release assets pass validation and are uploaded, the workflow also
+publishes the new port to the `vcpkg-registry` branch. It computes the release
+ZIP SHA-512, updates the versions database and stable baseline, then commits the
+same version, hash, and baseline back to the source overlay documentation.
+
 The same flow is also available from the GitHub UI: open **Actions**,
 select **Release**, choose **Run workflow**, and enter the release version. The
 workflow creates the version bump commit and tag, then dispatches the `Package`

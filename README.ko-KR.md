@@ -502,6 +502,11 @@ crtsys_add_driver(my_driver src/main.cpp)
 일치하는 `v<version>` 태그를 생성하여 커밋과 태그를 모두 푸시합니다.
 태그가 푸시되면 `Package` 워크플로가 시작됩니다.
 
+릴리스 산출물 검증과 업로드가 끝나면 워크플로는 새 포트를
+`vcpkg-registry` 브랜치에도 게시합니다. 릴리스 ZIP의 SHA-512, versions DB 및
+안정 baseline을 갱신하고, 같은 버전·해시·baseline을 소스 overlay 문서에
+후속 커밋으로 동기화합니다.
+
 GitHub UI에서도 같은 작업을 수행할 수 있습니다. **Actions**를 열고
 **Release**를 선택한 다음 **Run workflow**에서 릴리스 버전을 입력합니다.
 워크플로는 버전 변경 커밋과 태그를 생성한 뒤 해당 태그에 대해 `Package`
