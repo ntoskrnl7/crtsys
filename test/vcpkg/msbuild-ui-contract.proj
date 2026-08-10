@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Validate" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <CrtSysPackageRoot Condition="'$(CrtSysPackageRoot)' == ''">__CRTSYS_PACKAGE_ROOT_REQUIRED__</CrtSysPackageRoot>
+    <Configuration>Release</Configuration>
+    <Platform>x64</Platform>
+    <ConfigurationType>Driver</ConfigurationType>
+    <DriverType Condition="'$(DriverType)' == ''">WDM</DriverType>
+    <CrtSysWdmEntryPoint Condition="'$(CrtSysWdmEntryPoint)' == '' and '$(DriverType)' != 'KMDF'">NtlWfp</CrtSysWdmEntryPoint>
+    <CrtSysKmdfEntryPoint Condition="'$(CrtSysKmdfEntryPoint)' == '' and '$(DriverType)' == 'KMDF'">NtlKmdf</CrtSysKmdfEntryPoint>
+    <ExpectedDriverModel Condition="'$(ExpectedDriverModel)' == ''">NtlWfp</ExpectedDriverModel>
+    <CrtSysUseDriverSupport>false</CrtSysUseDriverSupport>
+  </PropertyGroup>
+
+  <Import Project="$(CrtSysPackageRoot)\share\crtsys\msbuild\crtsys-vcpkg.targets" />
+
+  <Target Name="Validate">
+    <Error Condition="'$(CrtSysVcpkgIntegration)' != 'true'"
+           Text="The crtsys vcpkg MSBuild bridge was not imported." />
+    <Error Condition="'$(CrtSysEffectiveDriverModel)' != '$(ExpectedDriverModel)'"
+           Text="Expected $(ExpectedDriverModel), got '$(CrtSysEffectiveDriverModel)'." />
+    <Error Condition="('$(ExpectedDriverModel)' == 'NtlWdm' or '$(ExpectedDriverModel)' == 'NtlWfp') and '$(CrtSysUseNtlMain)' != 'true'"
+           Text="$(ExpectedDriverModel) did not enable the ntl::main wrapper." />
+    <Error Condition="'$(ExpectedDriverModel)' != 'NtlWdm' and '$(ExpectedDriverModel)' != 'NtlWfp' and '$(CrtSysUseNtlMain)' != 'false'"
+           Text="$(ExpectedDriverModel) unexpectedly enabled the WDM ntl::main wrapper." />
+    <Error Condition="'$(ExpectedDriverModel)' == 'NtlKmdf' and '$(CrtSysUseNtlKmdfMain)' != 'true'"
+           Text="NtlKmdf did not enable the KMDF ntl::main wrapper." />
+    <Error Condition="'$(ExpectedDriverModel)' == 'NtlMinifilter' and '$(CrtSysUseNtlFltMain)' != 'true'"
+           Text="NtlMinifilter did not enable the minifilter ntl::main wrapper." />
+    <Error Condition="'$(ExpectedDriverModel)' == 'NtlWfp' and '$(CrtSysIsWfp)' != 'true'"
+           Text="NtlWfp did not enable the WFP driver contract." />
+    <Error Condition="!Exists('$(CrtSysRoot)build\native\crtsys.xml')"
+           Text="The WDM/WFP property-page schema is missing." />
+    <Error Condition="!Exists('$(CrtSysRoot)build\native\crtsys-kmdf.xml')"
+           Text="The KMDF property-page schema is missing." />
+    <Error Condition="'@(PropertyPageSchema)' == ''"
+           Text="The crtsys property-page schema was not registered." />
+    <Message Importance="high"
+             Text="crtsys vcpkg MSBuild UI contract passed for $(ExpectedDriverModel)." />
+  </Target>
+</Project>

@@ -61,6 +61,7 @@ links `fwpkclnt.lib`.
 | Path | Use when | Start here |
 | --- | --- | --- |
 | NuGet / MSBuild | Visual Studio or Build Tools WDK driver project | `PackageReference` or `Install-Package crtsys` |
+| vcpkg | CMake or manifest-based Visual Studio/MSBuild project | `vcpkg install crtsys:x64-windows-static` |
 | CMake prebuilt | Offline or pinned CI dependency | `find_package(crtsys CONFIG REQUIRED)` |
 | CMake / CPM | CMake-based driver project that consumes `crtsys` from GitHub | `CPMAddPackage("gh:ntoskrnl7/crtsys@<version>")` |
 
@@ -422,6 +423,25 @@ GitHub Release publishes these offline-only assets:
 
 The prebuilt bundle is intended for CMake projects that want a checked-in or
 cached runtime package instead of fetching and building `crtsys` from source.
+
+## vcpkg Overlay Port
+
+The first-party overlay under [`vcpkg/ports`](./vcpkg/ports) installs the
+prebuilt release for one triplet architecture while retaining the supported
+MSVC toolset variants. crtsys requires a Windows desktop static-CRT triplet:
+
+```powershell
+vcpkg install crtsys:x64-windows-static `
+  --overlay-ports=path\to\crtsys\vcpkg\ports
+```
+
+CMake consumers use the installed `crtsys` package normally. Visual
+Studio/MSBuild consumers can additionally import the installed
+`share/crtsys/msbuild/crtsys-vcpkg.targets` bridge to retain the existing WDM,
+KMDF, minifilter, and WFP entry-point property pages. Run `vcpkg install` before
+opening the solution for the first time, then reload Visual Studio after adding
+the import. See the [vcpkg guide](./vcpkg/README.md) for the complete import and
+validation commands.
 
 For full packaging and publishing command details, see `nuget/README.md`.
 

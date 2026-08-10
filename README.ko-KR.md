@@ -60,6 +60,7 @@ Windows Filtering Platform 콜아웃 드라이버에서는 **NTL WFP**를 선택
 | 사용 방식 | 적합한 환경 | 시작 방법 |
 | --- | --- | --- |
 | NuGet / MSBuild | Visual Studio 또는 Build Tools 기반 WDK 드라이버 프로젝트 | `PackageReference` 또는 `Install-Package crtsys` |
+| vcpkg | CMake 또는 manifest 기반 Visual Studio/MSBuild 프로젝트 | `vcpkg install crtsys:x64-windows-static` |
 | CMake 사전 빌드 패키지 | 오프라인 환경 또는 버전을 고정한 CI 의존성 | `find_package(crtsys CONFIG REQUIRED)` |
 | CMake / CPM | GitHub의 `crtsys`를 사용하는 CMake 기반 드라이버 프로젝트 | `CPMAddPackage("gh:ntoskrnl7/crtsys@<version>")` |
 
@@ -436,6 +437,25 @@ GitHub 릴리스는 다음과 같은 오프라인 전용 파일을 배포합니�
 사전 빌드 번들은 `crtsys`를 소스에서 가져와 빌드하는 대신, 저장소에
 포함하거나 캐시한 런타임 패키지를 사용하려는 CMake 프로젝트를 위한
 배포물입니다.
+
+## vcpkg Overlay Port
+
+[`vcpkg/ports`](./vcpkg/ports)의 프로젝트 제공 overlay port는 선택한 triplet
+아키텍처의 사전 빌드 릴리스를 설치하면서 지원되는 MSVC 툴셋 변형을
+유지합니다. crtsys에는 Windows desktop 정적 CRT triplet이 필요합니다.
+
+```powershell
+vcpkg install crtsys:x64-windows-static `
+  --overlay-ports=path\to\crtsys\vcpkg\ports
+```
+
+CMake 사용자는 설치된 `crtsys` 패키지를 일반적인 방법으로 사용합니다.
+Visual Studio/MSBuild 사용자는 설치된
+`share/crtsys/msbuild/crtsys-vcpkg.targets` bridge를 추가로 import하여 기존
+WDM, KMDF, 미니필터 및 WFP 진입점 속성 페이지를 그대로 사용할 수 있습니다.
+최초로 솔루션을 열기 전에 `vcpkg install`을 실행하고 import를 추가한 뒤
+Visual Studio를 다시 여세요. 전체 import 및 검증 명령은
+[vcpkg 안내서](./vcpkg/README.ko-KR.md)를 참조하세요.
 
 전체 패키징 및 게시 명령은
 [`nuget/README.ko-KR.md`](./nuget/README.ko-KR.md)를 참조하세요.
