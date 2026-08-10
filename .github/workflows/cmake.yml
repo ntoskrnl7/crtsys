@@ -32,6 +32,10 @@ jobs:
         shell: pwsh
         run: ./scripts/ci/Test-CrtSysExampleProjects.ps1
 
+      - name: Validate vcpkg port contract
+        shell: pwsh
+        run: ./scripts/vcpkg/Test-CrtSysVcpkgPort.ps1 -ContractOnly
+
       - name: Reject hard-coded NTSTATUS values
         shell: pwsh
         run: ./scripts/ci/Test-NoHardcodedNtStatus.ps1
