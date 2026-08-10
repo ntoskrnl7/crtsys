@@ -1,0 +1,8 @@
+{
+  "default": {
+    "crtsys": {
+      "baseline": "0.1.39",
+      "port-version": 0
+    }
+  }
+}
