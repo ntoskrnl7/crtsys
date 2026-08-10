@@ -9,7 +9,31 @@ MSVC toolset variants, and exposes both supported consumption paths:
 - Visual Studio/MSBuild through the existing crtsys entry-point property page.
 
 The package is Windows/WDK-only and uses static libraries with the static MSVC
-runtime. For a manifest-based driver repository, add this `vcpkg.json`:
+runtime.
+
+## Git registry
+
+Published versions can be consumed without a source checkout. Add this
+`vcpkg-configuration.json` next to the consumer manifest:
+
+```json
+{
+  "default-registry": null,
+  "registries": [
+    {
+      "kind": "git",
+      "repository": "https://github.com/ntoskrnl7/crtsys",
+      "reference": "vcpkg-registry",
+      "baseline": "6e1c3ad29a817831bcbf1eff9cfbfdaf487d35c7",
+      "packages": ["crtsys"]
+    }
+  ]
+}
+```
+
+This minimal example disables the default registry. If the project has other
+vcpkg dependencies, keep its existing pinned default registry instead. Add the
+dependency to `vcpkg.json`:
 
 ```json
 {
@@ -19,7 +43,15 @@ runtime. For a manifest-based driver repository, add this `vcpkg.json`:
 }
 ```
 
-Then select a matching triplet and the overlay explicitly:
+Then select a matching static-CRT triplet:
+
+```powershell
+vcpkg install --triplet=x64-windows-static
+```
+
+## Overlay port
+
+For local port development or a source checkout, select the overlay explicitly:
 
 ```powershell
 vcpkg install --triplet=x64-windows-static `

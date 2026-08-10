@@ -430,6 +430,12 @@ The first-party overlay under [`vcpkg/ports`](./vcpkg/ports) installs the
 prebuilt release for one triplet architecture while retaining the supported
 MSVC toolset variants. crtsys requires a Windows desktop static-CRT triplet:
 
+Published versions are available from the repository's `vcpkg-registry`
+branch. Its current stable baseline is
+`6e1c3ad29a817831bcbf1eff9cfbfdaf487d35c7`; see the
+[vcpkg guide](./vcpkg/README.md) for the manifest configuration. A source
+checkout can instead use the overlay directly:
+
 ```powershell
 vcpkg install crtsys:x64-windows-static `
   --overlay-ports=path\to\crtsys\vcpkg\ports

@@ -444,6 +444,11 @@ GitHub 릴리스는 다음과 같은 오프라인 전용 파일을 배포합니�
 아키텍처의 사전 빌드 릴리스를 설치하면서 지원되는 MSVC 툴셋 변형을
 유지합니다. crtsys에는 Windows desktop 정적 CRT triplet이 필요합니다.
 
+게시된 버전은 이 저장소의 `vcpkg-registry` 브랜치에서 사용할 수 있습니다.
+현재 안정 baseline은 `6e1c3ad29a817831bcbf1eff9cfbfdaf487d35c7`이며,
+manifest 설정은 [vcpkg 안내서](./vcpkg/README.ko-KR.md)를 참조하세요. 소스
+checkout에서는 다음처럼 overlay를 직접 사용할 수도 있습니다.
+
 ```powershell
 vcpkg install crtsys:x64-windows-static `
   --overlay-ports=path\to\crtsys\vcpkg\ports

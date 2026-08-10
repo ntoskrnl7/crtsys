@@ -9,7 +9,31 @@
 - 기존 crtsys 진입점 속성 페이지를 사용하는 Visual Studio/MSBuild
 
 이 패키지는 Windows/WDK 전용 정적 라이브러리이며 정적 MSVC 런타임을
-사용합니다. manifest 기반 드라이버 저장소에는 다음 `vcpkg.json`을 추가합니다.
+사용합니다.
+
+## Git registry
+
+게시된 버전은 소스 checkout 없이 사용할 수 있습니다. 소비자 manifest 옆에
+다음 `vcpkg-configuration.json`을 추가합니다.
+
+```json
+{
+  "default-registry": null,
+  "registries": [
+    {
+      "kind": "git",
+      "repository": "https://github.com/ntoskrnl7/crtsys",
+      "reference": "vcpkg-registry",
+      "baseline": "6e1c3ad29a817831bcbf1eff9cfbfdaf487d35c7",
+      "packages": ["crtsys"]
+    }
+  ]
+}
+```
+
+이 최소 예제는 기본 registry를 비활성화합니다. 다른 vcpkg 의존성도 사용하는
+프로젝트라면 기존에 고정한 default registry 설정을 유지하세요. `vcpkg.json`에는
+다음 의존성을 추가합니다.
 
 ```json
 {
@@ -19,7 +43,15 @@
 }
 ```
 
-그런 다음 호환되는 triplet과 overlay를 명시적으로 선택합니다.
+그런 다음 호환되는 정적 CRT triplet을 선택합니다.
+
+```powershell
+vcpkg install --triplet=x64-windows-static
+```
+
+## Overlay port
+
+로컬 포트 개발 또는 소스 checkout에서는 overlay를 명시적으로 선택합니다.
 
 ```powershell
 vcpkg install --triplet=x64-windows-static `
