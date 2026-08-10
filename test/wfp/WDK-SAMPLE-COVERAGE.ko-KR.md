@@ -23,7 +23,7 @@
 | 브라우저 HTTPS 검사 | 애플리케이션 범위 TCP 리디렉션, 네이티브 UDP/443 대체 경로 강제, 동적 SNI별 ID, 지속 HTTP/1.1, 다중화 HTTP/2, WebSocket, 제한된 콘텐츠 코덱, 관리형 HTTP/3/WebTransport 검사 | 독립 드라이버/앱 계약의 WFP 및 사용자 모드 TLS/HTTP/QUIC 인터페이스 | `/W4 /WX`; 결정적 HTTP/1.1, HTTP/2 및 관리형 HTTP/3 계약은 `test/wfp/runtime/https-live`의 인터넷 의존 격리 브라우저 검증과 별도로 패키지됩니다. 일반 브라우저의 사설 CA HTTP/3 신뢰 경계를 투명 H3 검사로 보고하지 않습니다. |
 | 직접 커널 애플리케이션 콘텐츠 정책 | WSK TCP/UDP, 커널 Schannel, CNG/DER X.509, 커널 zlib/Brotli, 직접 HTTP/1.1·HTTP/2 프레이밍/변환 정책, 커널 MsQuic HTTP/3 | 공유 `ntl::net` 프로토콜 코어를 사용하는 `ntl::net::kernel` 전송/공급자 | `/W4 /WX`; 커널 브라우저 통합 드라이버는 사전 구성된 Driver Verifier 대상으로 동일 부팅 3회를 통과했습니다. HTTP/1.1·HTTP/2·HTTP/3 검사/차단/재작성, 압축, gRPC, WebSocket/확장 CONNECT/WebTransport, IPv4/IPv6 경로, 작업 공간 수명/소진, 연결 변동 및 정상 종료를 검증했고 새 충돌/덤프 없이 Verifier 설정을 보존했습니다. |
 | 직접 커널 HTTP/3 | MsQuic NMR 공급자, TLS 1.3/QUIC 수명 주기, SETTINGS, 차단 스트림 재개와 확인 응답을 지원하는 제한된 동적/Huffman QPACK, gzip/deflate/Brotli, 확장 CONNECT, WebTransport 스트림/데이터그램/캡슐/신뢰성 재설정 | `kernel::msquic_provider`, 공유 QUIC/HTTP/3/QPACK/WebTransport 계약 | `/W4 /WX`; 공식 컨트롤러 DLL을 사용한 x64 Debug/Release 빌드와 커널 HTTP/3 경로의 Driver Verifier 3회를 통과했습니다. 독립 `kernel-http3-inspection` 픽스처도 96개 순차 연결을 포함한 격리 로드/실행/언로드 3회를 통과했으며, 이 독립 실행은 Verifier 설정을 보존하지만 Verifier 대상 결과로 주장하지 않습니다. |
-| `WFPSampler` 특수 시나리오 | IPsec 정책, MAC/프레임, vSwitch, 이름 확인 캐시, 엔드포인트 종료, 고속 계층 메타데이터 | 형식화된 특수 계층 태그, 기능 범주, 컴파일 계약 | `/W4 /WX`; 엔드포인트 종료 IPv4/IPv6와 인바운드/아웃바운드 MAC 분류가 명시적 MAC 요구 조건 아래 Driver Verifier에서 3회 통과했습니다. vSwitch 등록은 런타임 검증되었지만 실제 분류에는 Hyper-V 토폴로지가 필요합니다. IPsec 계층은 관리 전용이고 고속 계층은 정적 콜아웃 대상이 아닌 검사 전용입니다. |
+| `WFPSampler` 특수 시나리오 | IPsec 정책, MAC/프레임, vSwitch, 이름 확인 캐시, 엔드포인트 종료, 고속 계층 메타데이터 | 형식화된 특수 계층 태그, 기능 범주, 컴파일 계약 | `/W4 /WX`; 엔드포인트 종료 IPv4/IPv6와 인바운드/아웃바운드 MAC 분류가 명시적 MAC 요구 조건 아래 Driver Verifier에서 3회 통과했습니다. 기본 제공 WFP 스위치 확장을 활성화한 Hyper-V vSwitch 분류는 `63/63/51` 마스크로 3회 통과했습니다. 활성 전송 모드 IPsec은 양쪽 피어에서 TCP와 UDP 양방향 Quick Mode SA를 생성했고, 관련 Verifier 실행의 로드/언로드 횟수도 `+1/+1` 증가했습니다. IPsec 계층은 관리 전용이고 고속 계층은 정적 콜아웃 대상이 아닌 검사 전용입니다. |
 
 ## ALE 연결 블록 런타임 결과
 
@@ -167,14 +167,16 @@ Verifier 구성을 복원하고 specialized-observation을 다시 실행해 이�
     스냅샷으로 복사하며 큐에서 삭제된 이벤트 수도 보고합니다. 시스템 전체 수집
     상태를 변경하려면 명시적 옵션이 필요하며 이전 상태를 복원합니다.
 
-## 남은 런타임 게이트
+## 환경 의존 런타임 적용 범위
 
-독립형 Schannel TLS 프록시와 엔드포인트 종료를 포함한 위의 대표 듀얼 스택
-경로는 런타임으로 검증했습니다. 다음 환경 의존 인터페이스는 등록 및 컴파일
-계약을 통과했다는 이유만으로 실제 실행됐다고 보고하면 안 됩니다.
-
-- Hyper-V 가상 스위치 토폴로지에서의 vSwitch 분류
-- 활성 IPsec 시나리오와의 IPsec 정책 통합
+Hyper-V vSwitch 분류와 활성 전송 모드 IPsec 통합 게이트도 위의 대표 듀얼 스택
+경로와 함께 런타임으로 검증했습니다. vSwitch 결과에는 기본 제공 WFP 스위치
+확장이 활성화된 실제 Hyper-V 스위치 데이터 경로가 필요합니다. IPsec 결과에는
+두 피어, 보호된 TCP 및 UDP 트래픽, 양쪽 피어에서 일치하는 양방향 Quick Mode
+SA가 필요합니다. 등록 및 컴파일 계약만으로는 여전히 어느 게이트도 충족하지
+않습니다. 토폴로지, 합격 기준, 증적 아티팩트 및 정리 범위는
+[`test/wfp/runtime/advanced`](runtime/advanced/README.ko-KR.md#hyper-v-vswitch-및-ipsec-증적)에
+기록되어 있습니다.
 
 Windows는 내부 고속 계층의 정적 필터링을 지원하지 않으므로 고속 계층은 검사
 전용으로 유지합니다. IPsec 정책 계층도 관리 전용이며, 두 범주 모두 콜아웃을

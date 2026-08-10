@@ -8,4 +8,8 @@
 | [`advanced`](./advanced) | dual-stack datagram redirect, 지연된 async inspection, flow/stream telemetry, UDP 콘텐츠 판정, framed-TCP 콘텐츠 판정, 로컬 TCP connect redirect, bind redirect, capability에 충실한 IPsec/MAC/vSwitch/fast/endpoint-closure 관찰을 선택 driver를 함께 대상으로 하는 Driver Verifier에서 실행합니다. stream-edit는 IOCP read/write/cancel/EOF와 동적 framing도 검사합니다. |
 | [`https-live`](./https-live) | browser를 시작·종료·재프로파일·flag 추가 없이 이미 실행 중인 일반 browser를 관찰하는 Internet 의존 host inspection입니다. IPv4/IPv6 TCP HTTPS 응답을 제한된 HTML로 기록하고, 네이티브 WFP UDP/443 filter는 같은 실행의 inventory와 classify-drop 증거로 검증합니다. |
 
+[고급 acceptance 안내서](./advanced/README.ko-KR.md#hyper-v-vswitch-및-ipsec-증적)에는
+실제 Hyper-V vSwitch 분류와 활성 전송 모드 TCP/UDP IPsec 실행에 필요한 추가
+토폴로지, 증적 및 정리 조건을 기록합니다.
+
 각 VM gate는 VM 경로, credential, staging directory를 매개변수로 받습니다. operator는 폐기 가능한 guest를 미리 부팅하고 선택한 Driver Verifier target을 미리 구성합니다. runner는 VM을 재부팅·reset·revert하지 않고, Driver Verifier도 변경하지 않습니다. 전후 상태만 검증합니다. driver service 또는 certificate를 설치하는 suite는 명시적 acknowledgement와 호출자가 만든 폐기 가능 guest sentinel도 필요합니다. 어떤 테스트도 특정 checkout, 사용자 계정, VM 이름에 묶이지 않습니다.

@@ -138,7 +138,44 @@ Hyper-V 토폴로지에서는 `-SpecializedObservationRequireVSwitch`도 사용�
 실행기는 vSwitch를 만들거나 네트워크 토폴로지를 변경하지 않습니다. 운영자가
 조건에 맞는 트래픽을 제공하고 필요한 증거를 명시적으로 선택해야 합니다.
 
-나머지 환경별 게이트도 옵트인 및 읽기 전용입니다.
+## Hyper-V vSwitch 및 IPsec 증적
+
+2026-08-10에 일회용 중첩 Hyper-V 시험 환경에서 환경 의존적인
+`specialized-observation` 경로를 실행했습니다. Windows L1 게스트는 관리 OS
+어댑터에 `192.168.250.1/24`를 설정한 내부 스위치를 호스팅했고, Windows L2
+트래픽 피어는 같은 스위치에서 `192.168.250.2/24`를 사용했습니다. 드라이버,
+Driver Verifier 및 임시 정책은 L1에서만 실행했습니다. L2는 트래픽 피어일 뿐이며
+테스트 서명 부팅이나 Driver Verifier가 필요하지 않습니다.
+
+vSwitch 게이트에서는 선택한 스위치의 기본 제공 **Microsoft Windows 필터링
+플랫폼** 스위치 확장이 활성화되어 실행 중이어야 합니다. 이 전제 조건에서 3회
+모두 `registered-mask=63`, `exercised-mask=63`, `required-mask=51`로 통과하여
+IPv4/IPv6 엔드포인트와 vSwitch 양방향을 증명했습니다. 확장을 끈 진단 실행에서는
+`exercised-mask=15`까지만 관찰됐으므로, 등록 성공이나 일반 ping만으로는 vSwitch
+증적이 되지 않습니다. 증적에는 제품군 로그, 스위치 확장 상태 및 Verifier 전후
+상태를 보존해야 합니다. 기록된 실행에서 선택한 드라이버의 Verifier 로드/언로드
+횟수는 `2/2`에서 `3/3`으로 증가했고 Verifier 설정은 바이트 단위로 같았습니다.
+
+IPsec 게이트는 두 피어 주소로 범위를 제한하고 TCP와 UDP를 각각 선택한 임시
+컴퓨터 사전 공유 키 전송 모드 규칙을 사용했습니다. 실제 TCP 및 UDP nonce
+트래픽으로 각 피어에 Quick Mode SA 4개, 즉 프로토콜별 인바운드·아웃바운드
+항목을 생성했습니다. 이후 3회 드라이버 실행은 `registered-mask=63`,
+`exercised-mask=63`, `required-mask=3`으로 통과했고 Driver Verifier의 로드와
+언로드 횟수도 각각 `+1` 증가했으며 Verifier 설정은 그대로 유지됐습니다. 낮은
+필수 마스크는 의도한 것입니다. IPsec 정책 계층은 관리 전용이므로 IPsec 증명은
+보호된 TCP/UDP 트래픽과 실제 Quick Mode SA를 바탕으로 하며, IPsec 정책 계층을
+분류 콜아웃으로 등록했다는 주장이 아닙니다.
+
+재사용 가능한 증적에는 정책 목록, 양쪽 피어의 Quick Mode SA 전후 JSON,
+TCP/UDP 수신 결과, `specialized-observation-ipsec.log`,
+`verifier-load-unload-evidence.json` 및 범위가 제한된 정리 결과가 포함됩니다.
+정리 작업은 시험 규칙 그룹, 인증 집합, 리스너 및 임시 방화벽 규칙만 제거해야
+합니다. 기본 제공 `IKEEXT` 또는 `PolicyAgent` 서비스를 중지하거나 제거해서는
+안 됩니다. 기록된 정리 결과에서는 양쪽 피어에서 시험 범위 객체가 모두
+제거됐고, 두 기본 제공 서비스는 계속 실행 중이었으며, 임시 드라이버 서비스도
+남지 않았습니다.
+
+이 환경별 게이트는 계속 옵트인 및 읽기 전용입니다.
 
 - `-RequireActiveIpsecSecurityAssociation`에는 `specialized-observation`과 보호된
   피어를 가리키는 `-SpecializedObservationTrafficTarget`이 필요합니다. 실행기는

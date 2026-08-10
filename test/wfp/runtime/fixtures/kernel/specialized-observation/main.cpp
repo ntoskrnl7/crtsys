@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <string_view>
 #include <system_error>
@@ -287,9 +288,14 @@ int wmain(int argc, wchar_t **argv) {
         exercised_mask |= 1u << index;
     }
     const auto required_mask = options.required_mask();
-    if ((exercised_mask & required_mask) != required_mask)
-      throw std::runtime_error(
-          "specialized observation missed a required classify layer");
+    if ((exercised_mask & required_mask) != required_mask) {
+      std::ostringstream failure;
+      failure << "specialized observation missed a required classify layer: "
+              << "registered-mask=" << all_layers_mask
+              << ", exercised-mask=" << exercised_mask
+              << ", required-mask=" << required_mask;
+      throw std::runtime_error(failure.str());
+    }
     std::wcout << L"Kernel specialized-observation acceptance PASS: "
                   L"registered-mask="
                << all_layers_mask << L", exercised-mask=" << exercised_mask
