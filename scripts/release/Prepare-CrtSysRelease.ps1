@@ -15,6 +15,9 @@ $ErrorActionPreference = 'Stop'
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $versionHeader = Join-Path $repoRoot 'include\.internal\version'
+$vcpkgPortManifest = Join-Path $repoRoot 'vcpkg\ports\crtsys\vcpkg.json'
+$updateVcpkgPortScript = Join-Path $repoRoot `
+  'scripts\vcpkg\Update-CrtSysVcpkgPort.ps1'
 $tagName = "v$Version"
 $gitExe = (Get-Command git.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source)
 
@@ -53,7 +56,7 @@ function Ensure-TrimmedString {
   )
 
   if ($null -eq $Value) {
-    throw "$Name was empty." 
+    throw "$Name was empty."
   }
 
   if ($Value -is [string]) {
@@ -103,8 +106,14 @@ try {
   $minor = $parts[1]
   $patch = $parts[2]
 
-  if (-not (Test-Path $versionHeader)) {
-    throw "Version header was not found: $versionHeader"
+  foreach ($requiredPath in @(
+    $versionHeader,
+    $vcpkgPortManifest,
+    $updateVcpkgPortScript
+  )) {
+    if (-not (Test-Path -LiteralPath $requiredPath)) {
+      throw "Required release file was not found: $requiredPath"
+    }
   }
 
   $currentVersion = Ensure-TrimmedString -Value (& (Join-Path $repoRoot 'scripts\nuget\Get-CrtSysVersion.ps1')) -Name 'Current version'
@@ -134,8 +143,22 @@ try {
     throw "Version header update failed. Expected $Version, got $resolvedVersion."
   }
 
+  & $updateVcpkgPortScript -Version $Version | Out-Null
+  $vcpkgPort = Get-Content `
+    -LiteralPath $vcpkgPortManifest `
+    -Raw `
+    -Encoding UTF8 |
+      ConvertFrom-Json
+  if ($vcpkgPort.'version-semver' -ne $Version) {
+    throw "vcpkg port version update failed. Expected $Version, got $($vcpkgPort.'version-semver')."
+  }
+
   Invoke-Git @('diff', '--check')
-  Invoke-Git @('add', '--', 'include/.internal/version')
+  Invoke-Git @(
+    'add', '--',
+    'include/.internal/version',
+    'vcpkg/ports/crtsys/vcpkg.json'
+  )
   Invoke-Git @('commit', '-m', "release crtsys $Version")
   Invoke-Git @('tag', '-a', $tagName, '-m', "crtsys $Version")
 

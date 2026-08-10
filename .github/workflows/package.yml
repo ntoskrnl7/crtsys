@@ -695,3 +695,123 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "GitHub Release upload failed with exit code $LASTEXITCODE."
           }
+
+  publish-vcpkg-registry:
+    name: Publish vcpkg Git registry
+    needs: [pack, github-release]
+    if: >-
+      (github.event_name != 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v')) ||
+      (github.event_name == 'workflow_dispatch' && inputs.github_release)
+    runs-on: windows-2022
+    permissions:
+      contents: write
+    concurrency:
+      group: crtsys-vcpkg-registry
+      cancel-in-progress: false
+
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          path: source
+
+      - name: Check out vcpkg registry
+        uses: actions/checkout@v5
+        with:
+          ref: vcpkg-registry
+          fetch-depth: 0
+          path: registry
+
+      - name: Download release assets
+        uses: actions/download-artifact@v7
+        with:
+          name: crtsys-release-assets-${{ needs.pack.outputs.package_version }}
+          path: artifacts/release
+
+      - name: Configure registry commit identity
+        shell: pwsh
+        run: |
+          git -C registry config user.name 'github-actions[bot]'
+          git -C registry config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+      - name: Publish registry version
+        id: registry
+        shell: pwsh
+        run: |
+          $version = '${{ needs.pack.outputs.package_version }}'
+          $archivePath = Join-Path '${{ github.workspace }}' `
+            "artifacts/release/crtsys-$version-prebuilt.zip"
+          ./source/scripts/vcpkg/Publish-CrtSysVcpkgRegistry.ps1 `
+            -Version $version `
+            -ArchivePath $archivePath `
+            -SourcePortDirectory '${{ github.workspace }}/source/vcpkg/ports/crtsys' `
+            -RegistryDirectory '${{ github.workspace }}/registry' `
+            -RegistryBranch vcpkg-registry `
+            -GitHubOutputPath $env:GITHUB_OUTPUT `
+            -Push
+
+      - name: Check out latest main
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+          path: main
+
+      - name: Synchronize source overlay metadata
+        shell: pwsh
+        run: |
+          $version = '${{ needs.pack.outputs.package_version }}'
+          $archivePath = Join-Path '${{ github.workspace }}' `
+            "artifacts/release/crtsys-$version-prebuilt.zip"
+          $baseline = '${{ steps.registry.outputs.baseline }}'
+
+          ./source/scripts/vcpkg/Update-CrtSysVcpkgPort.ps1 `
+            -Version $version `
+            -ArchivePath $archivePath `
+            -PortDirectory '${{ github.workspace }}/main/vcpkg/ports/crtsys' `
+            -DocumentationRoot '${{ github.workspace }}/main' `
+            -RegistryBaseline $baseline | Out-Host
+
+          ./main/scripts/vcpkg/Test-CrtSysVcpkgPort.ps1 -ContractOnly
+
+          Set-Location '${{ github.workspace }}/main'
+          $changes = @(git status --porcelain)
+          if ($changes.Count -eq 0) {
+            Write-Host "Source overlay metadata is already synchronized."
+            exit 0
+          }
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- `
+            README.md `
+            README.ko-KR.md `
+            vcpkg/README.md `
+            vcpkg/README.ko-KR.md `
+            vcpkg/ports/crtsys/portfile.cmake `
+            vcpkg/ports/crtsys/vcpkg.json
+          git commit -m "Sync vcpkg metadata for crtsys $version"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not commit synchronized vcpkg metadata."
+          }
+
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            git fetch origin main
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not fetch origin/main."
+            }
+            git rebase origin/main
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not rebase synchronized vcpkg metadata onto origin/main."
+            }
+            git push origin HEAD:main
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "Synchronized source overlay metadata for crtsys $version."
+              exit 0
+            }
+            Write-Host "Push raced with another main update; retrying ($attempt/3)."
+            Start-Sleep -Seconds 5
+          }
+
+          throw "Could not push synchronized vcpkg metadata to main."

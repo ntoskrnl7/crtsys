@@ -121,6 +121,25 @@ The full check installs the overlay port and evaluates the MSBuild UI contract:
   -Triplet x64-windows-static
 ```
 
-The overlay manifest version and archive SHA-512 must be updated for every new
-crtsys release before publishing the port to a Git registry or the curated
-vcpkg registry.
+Tagged release workflows update the overlay manifest version during release
+preparation. After the validated GitHub Release asset is uploaded, the Package
+workflow computes its SHA-512, publishes the port and versions database to the
+`vcpkg-registry` branch, and synchronizes the source overlay and documented
+baseline on `main`.
+
+The underlying maintenance commands are also available for local recovery or
+validation:
+
+```powershell
+./scripts/vcpkg/Update-CrtSysVcpkgPort.ps1 `
+  -Version <version> -ArchivePath <prebuilt-zip>
+
+./scripts/vcpkg/Publish-CrtSysVcpkgRegistry.ps1 `
+  -Version <version> `
+  -ArchivePath <prebuilt-zip> `
+  -SourcePortDirectory ./vcpkg/ports/crtsys `
+  -RegistryDirectory <registry-worktree>
+```
+
+Publishing rejects attempts to rewrite an existing version or move the
+registry baseline backwards.

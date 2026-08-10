@@ -119,5 +119,23 @@ overlay port 설치와 MSBuild UI 계약까지 확인하려면 다음을 실행�
   -Triplet x64-windows-static
 ```
 
-새 crtsys 릴리스를 Git registry 또는 공식 vcpkg registry에 게시하기 전에는
-overlay manifest 버전과 릴리스 SHA-512를 함께 갱신해야 합니다.
+태그 기반 릴리스 워크플로는 릴리스 준비 중 overlay manifest 버전을
+갱신합니다. 검증된 GitHub Release 산출물이 업로드되면 Package 워크플로가
+SHA-512를 계산하고 포트와 versions DB를 `vcpkg-registry` 브랜치에 게시한 뒤,
+`main`의 소스 overlay와 문서 baseline을 동기화합니다.
+
+로컬 복구 또는 검증에는 내부 유지보수 명령을 직접 사용할 수도 있습니다.
+
+```powershell
+./scripts/vcpkg/Update-CrtSysVcpkgPort.ps1 `
+  -Version <version> -ArchivePath <prebuilt-zip>
+
+./scripts/vcpkg/Publish-CrtSysVcpkgRegistry.ps1 `
+  -Version <version> `
+  -ArchivePath <prebuilt-zip> `
+  -SourcePortDirectory ./vcpkg/ports/crtsys `
+  -RegistryDirectory <registry-worktree>
+```
+
+게시 스크립트는 기존 버전의 이력 재작성과 registry baseline의 하향 이동을
+거부합니다.
