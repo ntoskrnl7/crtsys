@@ -8,9 +8,22 @@
 # libraries, use it; otherwise keep the discovered headers and only fall back
 # for missing library targets.
 
-if(NOT DEFINED FindWDK_SOURCE_DIR)
+if(NOT DEFINED FindWDK_SOURCE_DIR OR "${FindWDK_SOURCE_DIR}" STREQUAL "")
+    # CPM 0.32 loses the exported source directory when a package first comes
+    # from CPM_SOURCE_CACHE in a nested dependency (Ldk) and the parent asks
+    # for that package again.  The first successful lookup reaches this
+    # wrapper, so retain its source path for the parent-directory lookup.
+    get_property(_CRTSYS_FINDWDK_SOURCE_DIR GLOBAL PROPERTY CRTSYS_FINDWDK_SOURCE_DIR)
+    if(_CRTSYS_FINDWDK_SOURCE_DIR)
+        set(FindWDK_SOURCE_DIR "${_CRTSYS_FINDWDK_SOURCE_DIR}")
+    endif()
+endif()
+
+if(NOT DEFINED FindWDK_SOURCE_DIR OR "${FindWDK_SOURCE_DIR}" STREQUAL "")
     message(FATAL_ERROR "FindWDK_SOURCE_DIR is not defined. Add the upstream FindWDK package before find_package(WDK).")
 endif()
+
+set_property(GLOBAL PROPERTY CRTSYS_FINDWDK_SOURCE_DIR "${FindWDK_SOURCE_DIR}")
 
 set(_CRTSYS_UPSTREAM_FINDWDK "${FindWDK_SOURCE_DIR}/cmake/FindWdk.cmake")
 if(NOT EXISTS "${_CRTSYS_UPSTREAM_FINDWDK}")

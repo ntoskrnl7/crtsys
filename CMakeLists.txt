@@ -29,6 +29,16 @@ option(CRTSYS_BUILD_NTL_KERNEL_CONTENT_CODECS
   "Build the optional PASSIVE_LEVEL NTL kernel zlib/Brotli libraries" OFF)
 set(CRTSYS_LDK_SOURCE_DIR "" CACHE PATH "Use a local LDK source tree instead of fetching the default LDK release")
 
+# A source-tree consumer may intentionally link the prebuilt native archives.
+# In that mode CPM still enters this directory to expose crtsys_SOURCE_DIR, but
+# configuring the source targets would fetch dependencies and put crtsys back
+# into the consumer's build graph.  Leave the dependency directory target-free
+# so every consumer can reuse the archive prepared by CI.
+if(NOT CRTSYS_IS_TOP_LEVEL AND CRTSYS_USE_PREBUILT)
+  message(STATUS "crtsys source targets disabled; using prebuilt native archives")
+  return()
+endif()
+
 function(crtsys_scope_compile_options_to_c_cxx TARGET_NAME)
   get_target_property(TARGET_COMPILE_OPTIONS ${TARGET_NAME} COMPILE_OPTIONS)
   if(NOT TARGET_COMPILE_OPTIONS)

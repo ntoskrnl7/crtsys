@@ -15,7 +15,12 @@ if(NOT DEFINED CRTSYS_USE_LIBCNTPR)
     set(CRTSYS_USE_LIBCNTPR ON)
 endif()
 
-if(DEFINED crtsys_SOURCE_DIR)
+if(DEFINED CRTSYS_ROOT AND CRTSYS_USE_PREBUILT)
+    # An explicit prebuilt root must win over crtsys_SOURCE_DIR. Source-tree
+    # consumers still set the latter through CPM even when the native archives
+    # live in a separate staged bundle.
+    set(_CRTSYS_ROOT "${CRTSYS_ROOT}")
+elseif(DEFINED crtsys_SOURCE_DIR)
     set(_CRTSYS_ROOT "${crtsys_SOURCE_DIR}")
 elseif(DEFINED crtsys_ROOT)
     set(_CRTSYS_ROOT "${crtsys_ROOT}")
@@ -390,7 +395,14 @@ function(crtsys_apply_driver_settings _target _root _use_ntl_main _use_ntl_kmdf_
     endif()
 endfunction()
 
-function(crtsys_link_prebuilt_driver_libraries _target)
+function(crtsys_apply_prebuilt_driver_interface _target)
+    get_target_property(_target_type ${_target} TYPE)
+    if(_target_type STREQUAL "INTERFACE_LIBRARY")
+        set(_usage_requirement_scope INTERFACE)
+    else()
+        set(_usage_requirement_scope PUBLIC)
+    endif()
+
     crtsys_get_prebuilt_library(_crtsys_debug crtsys.lib Debug)
     crtsys_get_prebuilt_library(_ldk_debug Ldk.lib Debug)
     crtsys_get_prebuilt_library(_crtsys_release crtsys.lib Release)
@@ -404,51 +416,76 @@ function(crtsys_link_prebuilt_driver_libraries _target)
     endif()
 
     if(_crtsys_debug AND _crtsys_release)
-        target_link_libraries(
-            ${_target}
-            debug "${_crtsys_debug}"
-            debug "${_ldk_debug}"
-            optimized "${_crtsys_release}"
-            optimized "${_ldk_release}"
-        )
+        set(_crtsys_prebuilt_link_libraries
+            "$<$<CONFIG:Debug>:${_crtsys_debug}>"
+            "$<$<CONFIG:Debug>:${_ldk_debug}>"
+            "$<$<NOT:$<CONFIG:Debug>>:${_crtsys_release}>"
+            "$<$<NOT:$<CONFIG:Debug>>:${_ldk_release}>")
     elseif(_crtsys_debug)
-        target_link_libraries(${_target} "${_crtsys_debug}" "${_ldk_debug}")
+        set(_crtsys_prebuilt_link_libraries
+            "${_crtsys_debug}" "${_ldk_debug}")
     elseif(_crtsys_release)
-        target_link_libraries(${_target} "${_crtsys_release}" "${_ldk_release}")
+        set(_crtsys_prebuilt_link_libraries
+            "${_crtsys_release}" "${_ldk_release}")
     else()
         crtsys_get_prebuilt_toolset(_toolset)
         message(FATAL_ERROR "No crtsys prebuilt libraries were found under ${_CRTSYS_ROOT}/lib/native for ${_toolset}/${CMAKE_VS_PLATFORM_NAME}.")
     endif()
 
-    if(NOT TARGET WDK::CNG)
-        message(FATAL_ERROR "WDK::CNG is required for crtsys prebuilt driver support.")
-    endif()
-    if(NOT TARGET WDK::AUX_KLIB)
-        message(FATAL_ERROR "WDK::AUX_KLIB is required for crtsys prebuilt driver support.")
-    endif()
-    if(NOT TARGET WDK::WDMSEC)
-        message(FATAL_ERROR "WDK::WDMSEC is required for secure NTL control devices.")
-    endif()
-
-    target_link_libraries(${_target} WDK::CNG WDK::AUX_KLIB WDK::WDMSEC)
-
-    target_compile_definitions(${_target} PUBLIC "_KERNEL32_" "_ITERATOR_DEBUG_LEVEL=0" "_HAS_EXCEPTIONS")
-    target_compile_options(${_target} PUBLIC "$<$<COMPILE_LANGUAGE:C,CXX>:/MT>")
+    foreach(_required_target IN ITEMS WDK::CNG WDK::AUX_KLIB WDK::WDMSEC)
+        if(NOT TARGET ${_required_target})
+            message(FATAL_ERROR "${_required_target} is required for crtsys prebuilt driver support.")
+        endif()
+        list(APPEND _crtsys_prebuilt_link_libraries ${_required_target})
+    endforeach()
 
     if(CRTSYS_USE_LIBCNTPR)
         if(NOT TARGET WDK::LIBCNTPR)
             message(FATAL_ERROR "WDK::LIBCNTPR is required for crtsys prebuilt driver support.")
         endif()
-
-        target_link_libraries(${_target} WDK::LIBCNTPR)
-        target_compile_definitions(${_target} PUBLIC CRTSYS_USE_LIBCNTPR)
-        target_link_options(${_target} PUBLIC "/FORCE:MULTIPLE")
+        list(APPEND _crtsys_prebuilt_link_libraries WDK::LIBCNTPR)
     endif()
 
+    if(_target_type STREQUAL "INTERFACE_LIBRARY")
+        target_link_libraries(
+            ${_target} INTERFACE ${_crtsys_prebuilt_link_libraries})
+    else()
+        # FindWDK uses the plain target_link_libraries signature for driver
+        # targets, so keep using that signature here as well.
+        target_link_libraries(${_target} ${_crtsys_prebuilt_link_libraries})
+    endif()
+    target_compile_definitions(
+        ${_target} ${_usage_requirement_scope}
+        "_KERNEL32_" "_ITERATOR_DEBUG_LEVEL=0" "_HAS_EXCEPTIONS")
+    target_compile_options(
+        ${_target} ${_usage_requirement_scope}
+        "$<$<COMPILE_LANGUAGE:C,CXX>:/MT>")
+
+    if(CRTSYS_USE_LIBCNTPR)
+        target_compile_definitions(
+            ${_target} ${_usage_requirement_scope} CRTSYS_USE_LIBCNTPR)
+        target_link_options(
+            ${_target} ${_usage_requirement_scope} "/FORCE:MULTIPLE")
+    endif()
     if("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "Win32")
-        target_link_options(${_target} PUBLIC "/SAFESEH:NO")
+        target_link_options(
+            ${_target} ${_usage_requirement_scope} "/SAFESEH:NO")
     endif()
 endfunction()
+
+function(crtsys_link_prebuilt_driver_libraries _target)
+    crtsys_apply_prebuilt_driver_interface(${_target})
+endfunction()
+
+if(CRTSYS_USE_PREBUILT)
+    # Source-tree CPM consumers historically link the `crtsys` target from
+    # auxiliary kernel targets. Keep that target contract while redirecting
+    # it to the shared archives prepared by CI.
+    if(NOT TARGET crtsys)
+        add_library(crtsys INTERFACE IMPORTED GLOBAL)
+        crtsys_apply_prebuilt_driver_interface(crtsys)
+    endif()
+endif()
 
 function(crtsys_add_driver _target)
     cmake_parse_arguments(WDK "NTL;MINIFILTER;WFP;KERNEL_MSQUIC;KERNEL_CONTENT_CODECS" "WINVER;KMDF" "" ${ARGN})

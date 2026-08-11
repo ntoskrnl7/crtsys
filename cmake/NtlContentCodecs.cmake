@@ -24,20 +24,37 @@ if(_CRTSYS_NTL_PREBUILT_CODEC_ROOT)
       "${_codec_root}/lib/${_crtsys_ntl_codec_toolset}/${_crtsys_ntl_codec_arch}/Debug/${library}")
     set(_release_library
       "${_codec_root}/lib/${_crtsys_ntl_codec_toolset}/${_crtsys_ntl_codec_arch}/Release/${library}")
-    foreach(_required_library "${_debug_library}" "${_release_library}")
-      if(NOT EXISTS "${_required_library}")
-        message(FATAL_ERROR
-          "The prebuilt NTL codec library is missing: ${_required_library}")
-      endif()
-    endforeach()
+    set(_has_debug FALSE)
+    set(_has_release FALSE)
+    if(EXISTS "${_debug_library}")
+      set(_has_debug TRUE)
+    endif()
+    if(EXISTS "${_release_library}")
+      set(_has_release TRUE)
+    endif()
+    if(NOT _has_debug AND NOT _has_release)
+      message(FATAL_ERROR
+        "No prebuilt NTL codec library was found under ${_codec_root}/lib/${_crtsys_ntl_codec_toolset}/${_crtsys_ntl_codec_arch} for ${library}")
+    endif()
 
     add_library(${target} STATIC IMPORTED GLOBAL)
-    set_target_properties(${target} PROPERTIES
-      IMPORTED_CONFIGURATIONS "Debug;Release"
-      IMPORTED_LOCATION_DEBUG "${_debug_library}"
-      IMPORTED_LOCATION_RELEASE "${_release_library}"
-      MAP_IMPORTED_CONFIG_MINSIZEREL Release
-      MAP_IMPORTED_CONFIG_RELWITHDEBINFO Release)
+    if(_has_debug AND _has_release)
+      set_target_properties(${target} PROPERTIES
+        IMPORTED_CONFIGURATIONS "Debug;Release"
+        IMPORTED_LOCATION_DEBUG "${_debug_library}"
+        IMPORTED_LOCATION_RELEASE "${_release_library}"
+        MAP_IMPORTED_CONFIG_MINSIZEREL Release
+        MAP_IMPORTED_CONFIG_RELWITHDEBINFO Release)
+    elseif(_has_debug)
+      # CI matrix jobs prepare only the configuration they build. A generic
+      # imported location keeps a one-configuration bundle usable with a
+      # Visual Studio multi-config generator, matching crtsys.lib behavior.
+      set_target_properties(${target} PROPERTIES
+        IMPORTED_LOCATION "${_debug_library}")
+    else()
+      set_target_properties(${target} PROPERTIES
+        IMPORTED_LOCATION "${_release_library}")
+    endif()
   endfunction()
 
   _crtsys_add_prebuilt_codec_target(
@@ -48,6 +65,25 @@ if(_CRTSYS_NTL_PREBUILT_CODEC_ROOT)
     crtsys_ntl_prebuilt_brotli_decoder codecs brotlidec.lib)
   _crtsys_add_prebuilt_codec_target(
     crtsys_ntl_prebuilt_brotli_encoder codecs brotlienc.lib)
+
+  # Preserve the source-build target names for consumers that link a codec
+  # directly in addition to using crtsys_ntl_content_codecs. Without these
+  # aliases CMake treats names such as brotlienc as bare library filenames.
+  if(NOT TARGET zlibstatic)
+    add_library(zlibstatic ALIAS crtsys_ntl_prebuilt_zlib)
+  endif()
+  if(NOT TARGET ZLIB::ZLIBSTATIC)
+    add_library(ZLIB::ZLIBSTATIC ALIAS crtsys_ntl_prebuilt_zlib)
+  endif()
+  if(NOT TARGET brotlicommon)
+    add_library(brotlicommon ALIAS crtsys_ntl_prebuilt_brotli_common)
+  endif()
+  if(NOT TARGET brotlidec)
+    add_library(brotlidec ALIAS crtsys_ntl_prebuilt_brotli_decoder)
+  endif()
+  if(NOT TARGET brotlienc)
+    add_library(brotlienc ALIAS crtsys_ntl_prebuilt_brotli_encoder)
+  endif()
 
   add_library(crtsys_ntl_content_codecs INTERFACE)
   target_include_directories(crtsys_ntl_content_codecs SYSTEM INTERFACE
