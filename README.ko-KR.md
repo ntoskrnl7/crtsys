@@ -497,6 +497,13 @@ crtsys_add_driver(my_driver src/main.cpp)
 .\scripts\release\Prepare-CrtSysRelease.ps1 -Version <version> -Push
 ```
 
+공식 microsoft/vcpkg 갱신은 GitHub Release 게시 후 별도의 수동 **Update
+official vcpkg** 워크플로에서 수행합니다. `validate`는 푸시 없이 공식 포트와
+소비자 검증 전체를 실행하고, `submit`은 fork를 갱신해 upstream PR을 만들거나
+기존 PR을 갱신합니다. 필요한 secret과 최초 포트 제한은
+[vcpkg 안내서](./vcpkg/README.ko-KR.md#공식-microsoftvcpkg-포트-갱신)를
+참조하세요.
+
 이 도우미는 `include/.internal/version`을 갱신하고 버전 변경을 커밋한 뒤
 일치하는 `v<version>` 태그를 생성하여 커밋과 태그를 모두 푸시합니다.
 태그가 푸시되면 `Package` 워크플로가 시작됩니다.

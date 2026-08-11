@@ -160,3 +160,28 @@ validation:
 
 Publishing rejects attempts to rewrite an existing version or move the
 registry baseline backwards.
+
+## Updating the official microsoft/vcpkg port
+
+The separate **Update official vcpkg** workflow is intentionally manual. Run it
+only after the matching stable GitHub Release and
+`crtsys-<version>-prebuilt.zip` asset have been published:
+
+1. Open **Actions** and select **Update official vcpkg**.
+2. Enter the numeric release version without the `v` prefix.
+3. Choose `validate` to prepare the official port, regenerate its versions
+   database, install it without a binary cache, and test both CMake and Visual
+   Studio consumers without pushing anything.
+4. For later releases, choose `submit` to perform the same checks, update the
+   `ntoskrnl7/vcpkg` fork branch, and create or update the microsoft/vcpkg pull
+   request.
+
+`submit` requires the repository Actions secret `VCPKG_UPSTREAM_TOKEN`. Use a
+GitHub token owned by a maintainer that can write to the `ntoskrnl7/vcpkg` fork
+and create a public pull request. The workflow never merges the upstream pull
+request; microsoft/vcpkg review and CI approval remain required.
+
+Until the initial crtsys port pull request is merged, use `validate` only. Once
+the port exists on microsoft/vcpkg `master`, future released versions can use
+`submit` directly. Re-running `submit` for the same pending version safely
+updates the same fork branch and pull request instead of creating duplicates.

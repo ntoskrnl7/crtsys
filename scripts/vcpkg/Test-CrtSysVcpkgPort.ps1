@@ -23,6 +23,7 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $portRoot = Join-Path $repoRoot 'vcpkg\ports\crtsys'
 $manifestPath = Join-Path $portRoot 'vcpkg.json'
 $portfilePath = Join-Path $portRoot 'portfile.cmake'
+$ldkCopyrightPath = Join-Path $portRoot 'ldk-copyright'
 $bridgePath = Join-Path $portRoot 'crtsys-vcpkg.targets'
 $initScriptPath = Join-Path $portRoot 'tools\crtsys-vs-init.ps1'
 $initCommandPath = Join-Path $portRoot 'tools\crtsys-vs-init.cmd'
@@ -33,6 +34,10 @@ $uiInitContractPath = Join-Path $repoRoot `
 $uiInitTestPath = Join-Path $PSScriptRoot `
   'Test-CrtSysVcpkgVisualStudioInit.ps1'
 $updatePortPath = Join-Path $PSScriptRoot 'Update-CrtSysVcpkgPort.ps1'
+$prepareOfficialPortPath = Join-Path $PSScriptRoot `
+  'Prepare-CrtSysOfficialVcpkgUpdate.ps1'
+$officialConsumerTestPath = Join-Path $PSScriptRoot `
+  'Test-CrtSysOfficialVcpkgConsumer.ps1'
 $publishRegistryPath = Join-Path $PSScriptRoot `
   'Publish-CrtSysVcpkgRegistry.ps1'
 $registryAutomationTestPath = Join-Path $PSScriptRoot `
@@ -40,6 +45,8 @@ $registryAutomationTestPath = Join-Path $PSScriptRoot `
 $prepareReleasePath = Join-Path $repoRoot `
   'scripts\release\Prepare-CrtSysRelease.ps1'
 $packageWorkflowPath = Join-Path $repoRoot '.github\workflows\package.yml'
+$officialWorkflowPath = Join-Path $repoRoot `
+  '.github\workflows\vcpkg-official.yml'
 
 function Assert-FileContains {
   param(
@@ -122,6 +129,7 @@ function Resolve-MsBuildExecutable {
 foreach ($requiredPath in @(
   $manifestPath,
   $portfilePath,
+  $ldkCopyrightPath,
   $bridgePath,
   $initScriptPath,
   $initCommandPath,
@@ -130,10 +138,13 @@ foreach ($requiredPath in @(
   $uiInitContractPath,
   $uiInitTestPath,
   $updatePortPath,
+  $prepareOfficialPortPath,
+  $officialConsumerTestPath,
   $publishRegistryPath,
   $registryAutomationTestPath,
   $prepareReleasePath,
-  $packageWorkflowPath
+  $packageWorkflowPath,
+  $officialWorkflowPath
 )) {
   if (-not (Test-Path -LiteralPath $requiredPath)) {
     throw "Required vcpkg packaging file was not found: $requiredPath"
@@ -148,8 +159,8 @@ if ($manifest.name -ne 'crtsys') {
 if ($manifest.'version-semver' -ne $projectVersion) {
   throw "The vcpkg port version '$($manifest.'version-semver')' does not match crtsys '$projectVersion'."
 }
-if ($manifest.license -ne 'MIT') {
-  throw "Expected the vcpkg port to declare the MIT license."
+if ($manifest.license -ne 'MIT AND BSD-2-Clause AND Zlib') {
+  throw 'Expected the vcpkg port to declare all distributed licenses.'
 }
 foreach ($supportToken in @('windows', '!uwp', '!mingw', 'static', 'staticcrt')) {
   if (-not $manifest.supports.Contains($supportToken)) {
@@ -167,7 +178,14 @@ Assert-FileContains -Path $portfilePath -Tokens @(
   'crtsys-vs-init.ps1',
   'crtsys-vs-init.cmd',
   'vcpkg_install_copyright',
+  'requires Microsoft Visual Studio with the C++ workload',
+  'docs/third-party-notices.md',
+  'ldk-copyright',
   'VCPKG_POLICY_SKIP_CRT_LINKAGE_CHECK'
+)
+Assert-FileContains -Path $ldkCopyrightPath -Tokens @(
+  'MIT License',
+  'Copyright (c) 2022 J.K Lee'
 )
 Assert-FileContains -Path $bridgePath -Tokens @(
   '<CrtSysVcpkgIntegration>true</CrtSysVcpkgIntegration>',
@@ -202,6 +220,21 @@ Assert-FileContains -Path $updatePortPath -Tokens @(
   'RegistryBaseline',
   'Encoding UTF8'
 )
+Assert-FileContains -Path $prepareOfficialPortPath -Tokens @(
+  'AllowNewPort',
+  'x-add-version crtsys',
+  'x-add-version --all',
+  'x-ci-verify-versions',
+  'Official crtsys',
+  'ldk-copyright'
+)
+Assert-FileContains -Path $officialConsumerTestPath -Tokens @(
+  'crtsys-vs-init.cmd',
+  'msbuild-init-contract.proj',
+  'msbuild-ui-contract.proj',
+  'crtsys_install_consumer.sys',
+  'Visual Studio 17 2022'
+)
 Assert-FileContains -Path $publishRegistryPath -Tokens @(
   'x-add-version',
   'Set-PublishedVersionTree',
@@ -229,6 +262,17 @@ Assert-FileContains -Path $packageWorkflowPath -Tokens @(
   'Update-CrtSysVcpkgPort.ps1',
   'steps.registry.outputs.baseline',
   'HEAD:main'
+)
+Assert-FileContains -Path $officialWorkflowPath -Tokens @(
+  'workflow_dispatch:',
+  'mode:',
+  'validate',
+  'submit',
+  'VCPKG_UPSTREAM_TOKEN',
+  'Prepare-CrtSysOfficialVcpkgUpdate.ps1',
+  'Test-CrtSysOfficialVcpkgConsumer.ps1',
+  'microsoft/vcpkg',
+  'cancel-in-progress: false'
 )
 
 $portfile = Get-Content -LiteralPath $portfilePath -Raw

@@ -153,5 +153,29 @@ SHA-512를 계산하고 포트와 versions DB를 `vcpkg-registry` 브랜치에 �
   -RegistryDirectory <registry-worktree>
 ```
 
+## 공식 microsoft/vcpkg 포트 갱신
+
+별도의 **Update official vcpkg** 워크플로는 의도적으로 수동 실행합니다. 해당
+버전의 안정 GitHub Release와 `crtsys-<version>-prebuilt.zip` 파일이 게시된 뒤
+실행하세요.
+
+1. **Actions**에서 **Update official vcpkg**를 선택합니다.
+2. 앞에 `v`를 붙이지 않은 숫자 버전을 입력합니다.
+3. `validate`를 선택하면 아무것도 푸시하지 않고 공식 포트 준비, versions DB
+   생성, binary cache 없는 설치, CMake 및 Visual Studio 소비자 검증을 수행합니다.
+4. 이후 릴리스에서는 `submit`을 선택하면 같은 검증을 거친 뒤
+   `ntoskrnl7/vcpkg` fork 브랜치를 갱신하고 microsoft/vcpkg PR을 새로 만들거나
+   기존 PR을 갱신합니다.
+
+`submit`에는 저장소 Actions secret `VCPKG_UPSTREAM_TOKEN`이 필요합니다.
+`ntoskrnl7/vcpkg` fork에 쓸 수 있고 공개 PR을 만들 수 있는 유지보수자 소유
+GitHub token을 등록하세요. 이 워크플로는 upstream PR을 병합하지 않으므로
+microsoft/vcpkg의 CI와 리뷰 승인은 계속 필요합니다.
+
+최초 crtsys 포트 PR이 병합되기 전에는 `validate`만 사용합니다. 공식
+microsoft/vcpkg `master`에 포트가 들어간 뒤부터는 새 릴리스마다 `submit`을
+바로 실행할 수 있습니다. 같은 대기 중 버전에 대해 `submit`을 다시 실행해도
+중복 PR을 만들지 않고 같은 fork 브랜치와 PR을 안전하게 갱신합니다.
+
 게시 스크립트는 기존 버전의 이력 재작성과 registry baseline의 하향 이동을
 거부합니다.
