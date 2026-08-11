@@ -432,7 +432,7 @@ MSVC toolset variants. crtsys requires a Windows desktop static-CRT triplet:
 
 Published versions are available from the repository's `vcpkg-registry`
 branch. Its current stable baseline is
-`bde54df486d558f12e274a5c2c12e92a6e095d46`; see the
+`bd49aa5fffc3a5f625e9264f8c4510d06ecf625a`; see the
 [vcpkg guide](./vcpkg/README.md) for the manifest configuration. A source
 checkout can instead use the overlay directly:
 
