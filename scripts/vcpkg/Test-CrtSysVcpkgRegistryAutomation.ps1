@@ -58,6 +58,42 @@ function Invoke-Git {
   }
 }
 
+function Assert-RegistryVersionTree {
+  param([Parameter(Mandatory = $true)][string] $ExpectedVersion)
+
+  $versionPath = Join-Path $registryDirectory 'versions\c-\crtsys.json'
+  $versions = Get-Content -LiteralPath $versionPath -Raw -Encoding UTF8 |
+    ConvertFrom-Json
+  $entries = @(
+    @($versions.versions) |
+      Where-Object { $_.'version-semver' -eq $ExpectedVersion }
+  )
+  if ($entries.Count -ne 1) {
+    throw "Expected one registry entry for $ExpectedVersion, found $($entries.Count)."
+  }
+
+  $committedPortTree = (& git -C $registryDirectory `
+    rev-parse HEAD:ports/crtsys).Trim()
+  if ([string]$entries[0].'git-tree' -ne $committedPortTree) {
+    throw "Registry $ExpectedVersion points to $($entries[0].'git-tree') instead of committed port tree $committedPortTree."
+  }
+}
+
+function Assert-RegistryTreeFetchable {
+  $fetchDirectory = Join-Path $WorkDirectory 'consumer-registry-cache'
+  New-Item -ItemType Directory -Force -Path $fetchDirectory | Out-Null
+  Invoke-Git @('-C', $fetchDirectory, 'init')
+  Invoke-Git @(
+    '-C', $fetchDirectory,
+    'fetch', '--', $registryDirectory, 'vcpkg-registry')
+
+  $versionPath = Join-Path $registryDirectory 'versions\c-\crtsys.json'
+  $versions = Get-Content -LiteralPath $versionPath -Raw -Encoding UTF8 |
+    ConvertFrom-Json
+  $latestTree = [string]$versions.versions[0].'git-tree'
+  Invoke-Git @('-C', $fetchDirectory, 'read-tree', $latestTree)
+}
+
 Invoke-Git @('-C', $registryDirectory, 'init', '--initial-branch=vcpkg-registry')
 Invoke-Git @('-C', $registryDirectory, 'config', 'user.name', 'crtsys automation test')
 Invoke-Git @('-C', $registryDirectory, 'config', 'user.email', 'automation-test@crtsys.invalid')
@@ -76,7 +112,15 @@ $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
   (Join-Path $registryDirectory 'README.md'),
   $registryReadme,
   $utf8NoBom)
-Invoke-Git @('-C', $registryDirectory, 'add', '--', 'README.md')
+$versionsDirectory = Join-Path $registryDirectory 'versions'
+New-Item -ItemType Directory -Force -Path $versionsDirectory | Out-Null
+[System.IO.File]::WriteAllText(
+  (Join-Path $versionsDirectory 'baseline.json'),
+  "{`n  `"default`": {}`n}`n",
+  $utf8NoBom)
+Invoke-Git @(
+  '-C', $registryDirectory,
+  'add', '--', 'README.md', 'versions/baseline.json')
 Invoke-Git @('-C', $registryDirectory, 'commit', '-m', 'Initialize test registry')
 
 $commonArguments = @{
@@ -92,11 +136,14 @@ $firstPublish = & $publishScript @commonArguments -Version $currentVersion
 if ($firstPublish.Version -ne $currentVersion) {
   throw "Initial registry publish returned '$($firstPublish.Version)'."
 }
+Assert-RegistryVersionTree -ExpectedVersion $currentVersion
 
 $nextPublish = & $publishScript @commonArguments -Version $nextVersion
 if ($nextPublish.Version -ne $nextVersion) {
   throw "Next registry publish returned '$($nextPublish.Version)'."
 }
+Assert-RegistryVersionTree -ExpectedVersion $nextVersion
+Assert-RegistryTreeFetchable
 
 $headBeforeRetry = (& git -C $registryDirectory rev-parse HEAD).Trim()
 $retryPublish = & $publishScript @commonArguments -Version $nextVersion

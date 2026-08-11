@@ -178,6 +178,8 @@ Assert-FileContains -Path $updatePortPath -Tokens @(
 )
 Assert-FileContains -Path $publishRegistryPath -Tokens @(
   'x-add-version',
+  'Set-PublishedVersionTree',
+  'HEAD:ports/crtsys',
   'version-semver',
   'git-tree',
   'Refusing to republish non-current',
@@ -187,7 +189,9 @@ Assert-FileContains -Path $publishRegistryPath -Tokens @(
 Assert-FileContains -Path $registryAutomationTestPath -Tokens @(
   'Idempotent registry retry',
   'Refusing to republish non-current',
-  'Registry automation did not reject a baseline rollback'
+  'Registry automation did not reject a baseline rollback',
+  'Assert-RegistryVersionTree',
+  'read-tree'
 )
 Assert-FileContains -Path $prepareReleasePath -Tokens @(
   'Update-CrtSysVcpkgPort.ps1',
