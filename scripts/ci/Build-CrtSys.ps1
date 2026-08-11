@@ -44,6 +44,8 @@ param(
 
   [string] $BuildDirectory = '',
 
+  [string] $PrebuiltRoot = $env:CRTSYS_CI_PREBUILT_ROOT,
+
   [switch] $NoBreakpoint
 )
 
@@ -155,6 +157,25 @@ $configureArgs = @(
   '-DCMAKE_CXX_FLAGS=/MP'
 )
 
+if ([string]::IsNullOrWhiteSpace($PrebuiltRoot)) {
+  # Make repeated local invocations deterministic when a build directory was
+  # previously configured by a CI-style prebuilt build.
+  $configureArgs += '-DCRTSYS_USE_PREBUILT=OFF'
+} else {
+  if ($Project -eq 'driver') {
+    throw 'The main driver test requires its source-built crtsys test-hook variant.'
+  }
+  $PrebuiltRoot = [IO.Path]::GetFullPath($PrebuiltRoot)
+  $nativeLibraryRoot = Join-Path $PrebuiltRoot 'lib\native'
+  if (-not (Test-Path -LiteralPath $nativeLibraryRoot -PathType Container)) {
+    throw "The crtsys prebuilt native library root was not found: $nativeLibraryRoot"
+  }
+  $configureArgs += @(
+    '-DCRTSYS_USE_PREBUILT=ON',
+    "-DCRTSYS_ROOT:PATH=$($PrebuiltRoot.Replace('\', '/'))"
+  )
+}
+
 if ($Project -eq 'driver' -and $NoBreakpoint) {
   $configureArgs += @(
     '-DCRTSYS_TEST_BREAKPOINT=OFF',
@@ -163,9 +184,11 @@ if ($Project -eq 'driver' -and $NoBreakpoint) {
 }
 
 if ($PlatformToolset) {
-  Write-Host "Configuring $Project $Architecture $Configuration with Windows SDK $WindowsSdkVersion, WDK $WdkVersion, and $PlatformToolset"
+  $prebuiltDescription = if ([string]::IsNullOrWhiteSpace($PrebuiltRoot)) { 'source crtsys' } else { "prebuilt crtsys from $PrebuiltRoot" }
+  Write-Host "Configuring $Project $Architecture $Configuration with Windows SDK $WindowsSdkVersion, WDK $WdkVersion, $PlatformToolset, and $prebuiltDescription"
 } else {
-  Write-Host "Configuring $Project $Architecture $Configuration with Windows SDK $WindowsSdkVersion and WDK $WdkVersion"
+  $prebuiltDescription = if ([string]::IsNullOrWhiteSpace($PrebuiltRoot)) { 'source crtsys' } else { "prebuilt crtsys from $PrebuiltRoot" }
+  Write-Host "Configuring $Project $Architecture $Configuration with Windows SDK $WindowsSdkVersion, WDK $WdkVersion, and $prebuiltDescription"
 }
 & cmake @configureArgs
 if ($LASTEXITCODE -ne 0) {
