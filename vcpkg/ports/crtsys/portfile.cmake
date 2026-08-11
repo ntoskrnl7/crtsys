@@ -13,7 +13,7 @@ vcpkg_download_distfile(CRTSYS_ARCHIVE
     FILENAME
         "crtsys-${VERSION}-prebuilt.zip"
     SHA512
-        873621ad64fd890893ab368631a33bcf16d30b4a2e0eddb7679c7e35657da914863a1d12062491fde26a31e7ac2bc23ffd9154c996971238d289e2a2a327eeb5
+        49065db421314bf01e7f97b94fac80a4d4b4ae830e2423aad5cd5e2854a8575864abc21cd093b312cc53fd57665e5c335509f363688cfbd2a4b38610f73d4ba7
 )
 
 vcpkg_extract_source_archive(SOURCE_PATH
