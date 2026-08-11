@@ -5,7 +5,7 @@ separate from the source branch so vcpkg can consume the standard `ports/` and
 `versions/` registry layout directly.
 
 Add the registry to a consuming repository's `vcpkg-configuration.json`. The
-current stable baseline is `bde54df486d558f12e274a5c2c12e92a6e095d46`:
+current stable baseline is `bd49aa5fffc3a5f625e9264f8c4510d06ecf625a`:
 
 ```json
 {
@@ -14,7 +14,7 @@ current stable baseline is `bde54df486d558f12e274a5c2c12e92a6e095d46`:
       "kind": "git",
       "repository": "https://github.com/ntoskrnl7/crtsys",
       "reference": "vcpkg-registry",
-      "baseline": "bde54df486d558f12e274a5c2c12e92a6e095d46",
+      "baseline": "bd49aa5fffc3a5f625e9264f8c4510d06ecf625a",
       "packages": ["crtsys"]
     }
   ]
