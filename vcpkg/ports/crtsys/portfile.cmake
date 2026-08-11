@@ -80,6 +80,10 @@ crtsys_keep_package_architecture(
 
 file(INSTALL "${CURRENT_PORT_DIR}/crtsys-vcpkg.targets"
     DESTINATION "${CURRENT_PACKAGES_DIR}/share/crtsys/msbuild")
+file(INSTALL
+    "${CURRENT_PORT_DIR}/tools/crtsys-vs-init.ps1"
+    "${CURRENT_PORT_DIR}/tools/crtsys-vs-init.cmd"
+    DESTINATION "${CURRENT_PACKAGES_DIR}/tools/${PORT}")
 file(INSTALL "${CURRENT_PORT_DIR}/usage"
     DESTINATION "${CURRENT_PACKAGES_DIR}/share/${PORT}")
 file(INSTALL "${SOURCE_PATH}/README.md"

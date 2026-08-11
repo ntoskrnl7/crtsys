@@ -85,22 +85,35 @@ crtsys_add_driver(my_wfp WFP NTL src/main.cpp)
 
 vcpkg's MSBuild integration adds installed include and library directories, but
 does not automatically import a port's package-specific property pages. After
-the first `vcpkg install`, import the crtsys bridge from `Directory.Build.targets`
-or the consuming `.vcxproj`:
+the first `vcpkg install`, run the initializer once from the manifest root:
+If user-wide vcpkg MSBuild integration is not enabled yet, first run
+`vcpkg integrate install` once.
 
-```xml
-<Project>
-  <Import
-    Project="$([MSBuild]::NormalizePath('$(VcpkgManifestRoot)', 'vcpkg_installed', '$(VcpkgTriplet)', 'share', 'crtsys', 'msbuild', 'crtsys-vcpkg.targets'))"
-    Condition="Exists('$([MSBuild]::NormalizePath('$(VcpkgManifestRoot)', 'vcpkg_installed', '$(VcpkgTriplet)', 'share', 'crtsys', 'msbuild', 'crtsys-vcpkg.targets'))')" />
-</Project>
+```powershell
+.\vcpkg_installed\x64-windows-static\tools\crtsys\crtsys-vs-init.cmd
 ```
 
-Set `VcpkgTriplet` to a static-CRT triplet such as `x64-windows-static`. Reload
-the Visual Studio solution after the first install so MSBuild reevaluates the
-new import. The existing **No NTL entry point**, **NTL WDM**, **NTL KMDF**,
+The command enables the manifest, selects a static-CRT triplet, and adds the
+crtsys bridge while preserving other content in `Directory.Build.props` and
+`Directory.Build.targets`. Repeated runs are idempotent. A different default
+triplet can be selected, and the generated integration can be removed:
+
+```powershell
+.\vcpkg_installed\x64-windows-static\tools\crtsys\crtsys-vs-init.cmd `
+  -Triplet arm64-windows-static
+
+.\vcpkg_installed\x64-windows-static\tools\crtsys\crtsys-vs-init.cmd -Remove
+```
+
+Reload the Visual Studio solution after the first install and initialization so
+MSBuild reevaluates the new import. The existing **No NTL entry point**,
+**NTL WDM**, **NTL KMDF**,
 **NTL Minifilter**, and **NTL WFP** selections then behave exactly as they do
 for the NuGet package.
+
+For manual setup, the installed
+`share/crtsys/msbuild/crtsys-vcpkg.targets` bridge can still be imported from
+`Directory.Build.targets` directly.
 
 NuGet remains the zero-import Visual Studio installation path. The vcpkg bridge
 exists for repositories that standardize dependency restoration on a vcpkg
