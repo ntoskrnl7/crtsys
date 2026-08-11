@@ -93,6 +93,10 @@ If user-wide vcpkg MSBuild integration is not enabled yet, first run
 .\vcpkg_installed\x64-windows-static\tools\crtsys\crtsys-vs-init.cmd
 ```
 
+If this command is absent from the installation, the selected registry baseline
+predates the initializer. Update to a baseline that publishes the tool, or use
+the manual setup below.
+
 The command enables the manifest, selects a static-CRT triplet, and adds the
 crtsys bridge while preserving other content in `Directory.Build.props` and
 `Directory.Build.targets`. Repeated runs are idempotent. A different default

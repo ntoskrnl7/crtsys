@@ -92,6 +92,10 @@ vcpkg의 MSBuild 통합은 설치된 include 및 library 경로를 연결하지�
 .\vcpkg_installed\x64-windows-static\tools\crtsys\crtsys-vs-init.cmd
 ```
 
+설치 경로에 이 명령이 없다면 초기화 도구보다 오래된 registry baseline의
+포트를 사용 중인 것입니다. 초기화 도구가 게시된 최신 baseline으로 갱신하거나
+아래 수동 구성을 사용하세요.
+
 이 명령은 manifest 사용과 정적 CRT triplet을 설정하고, 기존
 `Directory.Build.props` 및 `Directory.Build.targets`의 다른 내용을 보존하면서
 crtsys bridge를 추가합니다. 중복 실행해도 같은 블록을 다시 만들지 않습니다.
