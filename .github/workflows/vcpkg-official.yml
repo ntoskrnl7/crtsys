@@ -1,0 +1,329 @@
+name: Update official vcpkg
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Released crtsys version, for example 0.1.42
+        required: true
+        type: string
+      mode:
+        description: Validate only, or push the fork branch and open/update the official PR
+        required: true
+        type: choice
+        default: validate
+        options:
+          - validate
+          - submit
+
+permissions:
+  contents: read
+
+concurrency:
+  group: crtsys-official-vcpkg
+  cancel-in-progress: false
+
+jobs:
+  update:
+    name: ${{ inputs.mode }} crtsys ${{ inputs.version }} for official vcpkg
+    runs-on: windows-2022
+    env:
+      CRTSYS_RELEASE_VERSION: ${{ inputs.version }}
+      CRTSYS_OFFICIAL_MODE: ${{ inputs.mode }}
+      CRTSYS_WINDOWS_SDK_VERSION: 10.0.22621.0
+      CPM_SOURCE_CACHE: ${{ github.workspace }}/.cpm-cache
+
+    steps:
+      - name: Check out crtsys main
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+          path: source
+          persist-credentials: false
+
+      - name: Require the official vcpkg submission credential
+        if: ${{ inputs.mode == 'submit' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.VCPKG_UPSTREAM_TOKEN }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:GH_TOKEN)) {
+            throw @'
+          VCPKG_UPSTREAM_TOKEN is not configured. Add a GitHub App or user
+          token that can push ntoskrnl7/vcpkg and create public pull requests.
+          '@
+          }
+
+      - name: Validate release and download the prebuilt archive
+        id: release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = $env:CRTSYS_RELEASE_VERSION
+          if ($version -notmatch '^\d+\.\d+\.\d+$') {
+            throw "Version must use numeric MAJOR.MINOR.PATCH form: $version"
+          }
+
+          $tagName = "v$version"
+          $assetName = "crtsys-$version-prebuilt.zip"
+          $assetDirectory = Join-Path '${{ github.workspace }}' 'release-assets'
+          New-Item -ItemType Directory -Path $assetDirectory -Force |
+            Out-Null
+
+          $release = & gh release view $tagName `
+            --repo '${{ github.repository }}' `
+            --json isDraft,isPrerelease,tagName,assets |
+            ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) {
+            throw "GitHub Release $tagName was not found."
+          }
+          if ($release.isDraft -or $release.isPrerelease) {
+            throw "Official vcpkg updates require a stable published release: $tagName"
+          }
+          if (-not (@($release.assets.name) -contains $assetName)) {
+            throw "GitHub Release $tagName does not contain $assetName."
+          }
+
+          & gh release download $tagName `
+            --repo '${{ github.repository }}' `
+            --pattern $assetName `
+            --dir $assetDirectory `
+            --clobber
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not download $assetName from $tagName."
+          }
+
+          $archivePath = Join-Path $assetDirectory $assetName
+          "archive_path=$archivePath" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "tag_name=$tagName" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Check out current microsoft/vcpkg master
+        shell: pwsh
+        run: |
+          git clone --depth 1 `
+            --branch master `
+            --single-branch `
+            https://github.com/microsoft/vcpkg.git `
+            '${{ github.workspace }}/official-vcpkg'
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Could not clone microsoft/vcpkg.'
+          }
+          git -C '${{ github.workspace }}/official-vcpkg' `
+            config core.autocrlf false
+
+      - name: Bootstrap the official vcpkg tool
+        shell: pwsh
+        working-directory: official-vcpkg
+        run: ./bootstrap-vcpkg.bat -disableMetrics
+
+      - name: Prepare official port and versions database
+        id: port
+        shell: pwsh
+        run: |
+          $allowNewPort = $env:CRTSYS_OFFICIAL_MODE -eq 'validate'
+          $result = ./source/scripts/vcpkg/Prepare-CrtSysOfficialVcpkgUpdate.ps1 `
+            -Version $env:CRTSYS_RELEASE_VERSION `
+            -ReleaseArchivePath '${{ steps.release.outputs.archive_path }}' `
+            -VcpkgRepositoryDirectory '${{ github.workspace }}/official-vcpkg' `
+            -SourcePortDirectory '${{ github.workspace }}/source/vcpkg/ports/crtsys' `
+            -AllowNewPort:$allowNewPort
+
+          "archive_sha512=$($result.ArchiveSha512)" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "git_tree=$($result.GitTree)" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "previous_version=$($result.PreviousVersion)" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Install the official port without a binary cache
+        shell: pwsh
+        working-directory: official-vcpkg
+        run: |
+          ./vcpkg.exe install crtsys:x64-windows-static `
+            --binarysource=clear `
+            --clean-after-build `
+            --disable-metrics
+          if ($LASTEXITCODE -ne 0) {
+            throw "Official crtsys port install failed with exit code $LASTEXITCODE."
+          }
+
+      - name: Ensure the Windows Driver Kit
+        shell: pwsh
+        run: |
+          ./source/scripts/nuget/Ensure-CrtSysWdk.ps1 `
+            -WindowsSdkVersion $env:CRTSYS_WINDOWS_SDK_VERSION `
+            -RequiredPlatforms x64
+
+      - name: Test CMake and Visual Studio consumers
+        shell: pwsh
+        run: |
+          ./source/scripts/vcpkg/Test-CrtSysOfficialVcpkgConsumer.ps1 `
+            -VcpkgRepositoryDirectory '${{ github.workspace }}/official-vcpkg' `
+            -WindowsSdkVersion $env:CRTSYS_WINDOWS_SDK_VERSION
+
+      - name: Validate the official vcpkg changeset
+        shell: pwsh
+        run: |
+          $vcpkgRoot = '${{ github.workspace }}/official-vcpkg'
+          $status = @(git -C $vcpkgRoot status --porcelain)
+          if ($status.Count -eq 0) {
+            throw 'The official vcpkg update produced no changes.'
+          }
+
+          $unexpected = @(
+            $status | Where-Object {
+              if ($_.Length -lt 4) {
+                return $true
+              }
+              $path = $_.Substring(3).Replace('\', '/')
+              return -not (
+                $path.StartsWith('ports/crtsys/') -or
+                $path -eq 'versions/baseline.json' -or
+                $path -eq 'versions/c-/crtsys.json'
+              )
+            }
+          )
+          if ($unexpected.Count -ne 0) {
+            throw "Unexpected official vcpkg changes:`n$($unexpected -join "`n")"
+          }
+
+          git -C $vcpkgRoot diff --check
+          if ($LASTEXITCODE -ne 0) {
+            throw 'The official vcpkg changes contain whitespace errors.'
+          }
+
+          git -C $vcpkgRoot add -- `
+            ports/crtsys `
+            versions/baseline.json `
+            versions/c-/crtsys.json
+          git -C $vcpkgRoot diff --cached --check
+          if ($LASTEXITCODE -ne 0) {
+            throw 'The staged official vcpkg changes contain whitespace errors.'
+          }
+
+          git -C $vcpkgRoot diff --cached --stat
+
+      - name: Submit or update the official vcpkg pull request
+        if: ${{ inputs.mode == 'submit' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.VCPKG_UPSTREAM_TOKEN }}
+        run: |
+          $version = $env:CRTSYS_RELEASE_VERSION
+          $branch = "crtsys-$version"
+          $owner = '${{ github.repository_owner }}'
+          $vcpkgRoot = '${{ github.workspace }}/official-vcpkg'
+
+          git -C $vcpkgRoot config user.name 'crtsys-vcpkg-bot'
+          git -C $vcpkgRoot config user.email `
+            '41898282+github-actions[bot]@users.noreply.github.com'
+          git -C $vcpkgRoot switch -c $branch
+          git -C $vcpkgRoot commit -m "[crtsys] Update to $version"
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Could not commit the official vcpkg update.'
+          }
+
+          & gh auth setup-git
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Could not configure Git authentication.'
+          }
+          git -C $vcpkgRoot remote add fork `
+            "https://github.com/$owner/vcpkg.git"
+          $remoteBranch = & git -C $vcpkgRoot ls-remote `
+            --heads fork "refs/heads/$branch"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not query $owner/vcpkg:$branch."
+          }
+          if ([string]::IsNullOrWhiteSpace($remoteBranch)) {
+            git -C $vcpkgRoot push --set-upstream `
+              fork "HEAD:refs/heads/$branch"
+          } else {
+            $remoteOid = ($remoteBranch -split '\s+')[0]
+            git -C $vcpkgRoot push `
+              "--force-with-lease=refs/heads/$branch`:$remoteOid" `
+              fork "HEAD:refs/heads/$branch"
+          }
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not push $owner/vcpkg:$branch."
+          }
+
+          $existingPr = & gh pr list `
+            --repo microsoft/vcpkg `
+            --state open `
+            --head "$owner`:$branch" `
+            --json number,url `
+            --jq '.[0]'
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Could not query existing official vcpkg pull requests.'
+          }
+
+          $bodyTemplate = @'
+          Updates crtsys to {0} from the authoritative GitHub Release.
+
+          Validation performed by the upstream release workflow:
+
+          - release asset presence and SHA-512 verification
+          - `vcpkg format-manifest`
+          - `vcpkg x-add-version --all`
+          - `vcpkg x-ci-verify-versions`
+          - clean `crtsys:x64-windows-static` install with binary caching disabled
+          - Visual Studio/MSBuild property-page contracts
+          - CMake Release WDK driver consumer build
+
+          - [x] The upstream version and SHA-512 were updated.
+          - [x] The supports expression remains accurate.
+          - [x] No patches are used by this port.
+          - [x] The version database was regenerated.
+          - [x] Exactly one version was added.
+          '@
+          $body = $bodyTemplate -f $version
+
+          if ([string]::IsNullOrWhiteSpace($existingPr)) {
+            $prUrl = & gh pr create `
+              --repo microsoft/vcpkg `
+              --base master `
+              --head "$owner`:$branch" `
+              --title "[crtsys] Update to $version" `
+              --body $body
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Could not create the official vcpkg pull request.'
+            }
+          } else {
+            $pr = $existingPr | ConvertFrom-Json
+            & gh pr edit $pr.number `
+              --repo microsoft/vcpkg `
+              --title "[crtsys] Update to $version" `
+              --body $body
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not update official vcpkg PR #$($pr.number)."
+            }
+            $prUrl = $pr.url
+          }
+
+          "Official vcpkg PR: $prUrl" |
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+
+      - name: Write validation summary
+        if: ${{ inputs.mode == 'validate' }}
+        shell: pwsh
+        env:
+          CRTSYS_ARCHIVE_SHA512: ${{ steps.port.outputs.archive_sha512 }}
+          CRTSYS_PORT_GIT_TREE: ${{ steps.port.outputs.git_tree }}
+        run: |
+          $summaryTemplate = @'
+          ## Official vcpkg validation passed
+
+          - Version: `{0}`
+          - SHA-512: `{1}`
+          - Port git tree: `{2}`
+          - No fork branch or pull request was created.
+          '@
+          $summaryTemplate -f `
+            $env:CRTSYS_RELEASE_VERSION, `
+            $env:CRTSYS_ARCHIVE_SHA512, `
+            $env:CRTSYS_PORT_GIT_TREE |
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY

@@ -498,6 +498,13 @@ workflow creates the version bump commit and tag, then dispatches the `Package`
 workflow for that tag. If branch protection blocks direct pushes to `main`, use
 the local helper or adjust the release rule first.
 
+Official microsoft/vcpkg updates use the separate manual **Update official
+vcpkg** workflow after the GitHub Release is published. Its `validate` mode
+performs the complete upstream port and consumer test without pushing; its
+`submit` mode updates the fork and opens or refreshes the upstream PR. See the
+[vcpkg guide](./vcpkg/README.md#updating-the-official-microsoftvcpkg-port) for
+the required secret and first-port limitation.
+
 ## Building This Repository
 
 Clone the repository and build the test app and driver for the host

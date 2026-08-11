@@ -1,3 +1,7 @@
+message(
+    "${PORT} requires Microsoft Visual Studio with the C++ workload and the Windows Driver Kit (WDK) to build consuming drivers."
+)
+
 vcpkg_check_linkage(
     ONLY_STATIC_LIBRARY
     ONLY_STATIC_CRT
@@ -90,7 +94,11 @@ file(INSTALL "${SOURCE_PATH}/README.md"
     DESTINATION "${CURRENT_PACKAGES_DIR}/share/${PORT}"
     RENAME "readme.md")
 
-vcpkg_install_copyright(FILE_LIST "${SOURCE_PATH}/LICENSE")
+vcpkg_install_copyright(FILE_LIST
+    "${SOURCE_PATH}/LICENSE"
+    "${SOURCE_PATH}/docs/third-party-notices.md"
+    "${CURRENT_PORT_DIR}/ldk-copyright"
+)
 
 # Debug and Release archives intentionally share crtsys' toolset-specific
 # lib/native tree. CrtSys.cmake and the MSBuild integration select the correct
