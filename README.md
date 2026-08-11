@@ -442,12 +442,11 @@ vcpkg install crtsys:x64-windows-static `
 ```
 
 CMake consumers use the installed `crtsys` package normally. Visual
-Studio/MSBuild consumers can additionally import the installed
-`share/crtsys/msbuild/crtsys-vcpkg.targets` bridge to retain the existing WDM,
-KMDF, minifilter, and WFP entry-point property pages. Run `vcpkg install` before
-opening the solution for the first time, then reload Visual Studio after adding
-the import. See the [vcpkg guide](./vcpkg/README.md) for the complete import and
-validation commands.
+Studio/MSBuild consumers can run the packaged `crtsys-vs-init` once after
+`vcpkg install` to retain the existing WDM, KMDF, minifilter, and WFP
+entry-point property pages. Reload Visual Studio after initialization. See the
+[vcpkg guide](./vcpkg/README.md) for the complete initialization and validation
+commands.
 
 For full packaging and publishing command details, see `nuget/README.md`.
 

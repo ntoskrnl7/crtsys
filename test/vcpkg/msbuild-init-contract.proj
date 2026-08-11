@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Validate" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <ConsumerRoot Condition="'$(ConsumerRoot)' == ''">__CONSUMER_ROOT_REQUIRED__</ConsumerRoot>
+    <ConsumerInstallRoot Condition="'$(ConsumerInstallRoot)' == ''">__CONSUMER_INSTALL_ROOT_REQUIRED__</ConsumerInstallRoot>
+    <VcpkgManifestRoot>$(ConsumerRoot)</VcpkgManifestRoot>
+    <VcpkgInstalledDir>$(ConsumerInstallRoot)</VcpkgInstalledDir>
+    <Configuration>Release</Configuration>
+    <Platform>x64</Platform>
+    <ConfigurationType>Driver</ConfigurationType>
+    <DriverType>WDM</DriverType>
+    <CrtSysWdmEntryPoint>NtlWfp</CrtSysWdmEntryPoint>
+    <CrtSysUseDriverSupport>false</CrtSysUseDriverSupport>
+  </PropertyGroup>
+
+  <Import Project="$(ConsumerRoot)\Directory.Build.props" />
+  <Import Project="$(ConsumerRoot)\Directory.Build.targets" />
+
+  <Target Name="Validate">
+    <Error Condition="'$(VcpkgEnableManifest)' != 'true'"
+           Text="The initializer did not enable the vcpkg manifest." />
+    <Error Condition="'$(VcpkgTriplet)' == ''"
+           Text="The initializer did not select a vcpkg triplet." />
+    <Error Condition="'$(CrtSysVcpkgIntegration)' != 'true'"
+           Text="The generated Directory.Build.targets did not import crtsys." />
+    <Error Condition="'$(CrtSysEffectiveDriverModel)' != 'NtlWfp'"
+           Text="The generated integration did not activate the NTL WFP model." />
+    <Error Condition="'@(PropertyPageSchema)' == ''"
+           Text="The generated integration did not register the crtsys property pages." />
+    <Message Importance="high"
+             Text="crtsys generated MSBuild integration contract passed." />
+  </Target>
+</Project>

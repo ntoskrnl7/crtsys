@@ -24,8 +24,14 @@ $portRoot = Join-Path $repoRoot 'vcpkg\ports\crtsys'
 $manifestPath = Join-Path $portRoot 'vcpkg.json'
 $portfilePath = Join-Path $portRoot 'portfile.cmake'
 $bridgePath = Join-Path $portRoot 'crtsys-vcpkg.targets'
+$initScriptPath = Join-Path $portRoot 'tools\crtsys-vs-init.ps1'
+$initCommandPath = Join-Path $portRoot 'tools\crtsys-vs-init.cmd'
 $usagePath = Join-Path $portRoot 'usage'
 $uiContractPath = Join-Path $repoRoot 'test\vcpkg\msbuild-ui-contract.proj'
+$uiInitContractPath = Join-Path $repoRoot `
+  'test\vcpkg\msbuild-init-contract.proj'
+$uiInitTestPath = Join-Path $PSScriptRoot `
+  'Test-CrtSysVcpkgVisualStudioInit.ps1'
 $updatePortPath = Join-Path $PSScriptRoot 'Update-CrtSysVcpkgPort.ps1'
 $publishRegistryPath = Join-Path $PSScriptRoot `
   'Publish-CrtSysVcpkgRegistry.ps1'
@@ -117,8 +123,12 @@ foreach ($requiredPath in @(
   $manifestPath,
   $portfilePath,
   $bridgePath,
+  $initScriptPath,
+  $initCommandPath,
   $usagePath,
   $uiContractPath,
+  $uiInitContractPath,
+  $uiInitTestPath,
   $updatePortPath,
   $publishRegistryPath,
   $registryAutomationTestPath,
@@ -154,6 +164,8 @@ Assert-FileContains -Path $portfilePath -Tokens @(
   'vcpkg_extract_source_archive',
   'crtsys_keep_package_architecture',
   'crtsys-vcpkg.targets',
+  'crtsys-vs-init.ps1',
+  'crtsys-vs-init.cmd',
   'vcpkg_install_copyright',
   'VCPKG_POLICY_SKIP_CRT_LINKAGE_CHECK'
 )
@@ -166,8 +178,22 @@ Assert-FileContains -Path $bridgePath -Tokens @(
 Assert-FileContains -Path $usagePath -Tokens @(
   'find_package(crtsys CONFIG REQUIRED)',
   'crtsys_add_driver',
-  'crtsys-vcpkg.targets',
+  'crtsys-vs-init',
   'Reload Visual Studio'
+)
+Assert-FileContains -Path $initScriptPath -Tokens @(
+  'VcpkgEnableManifest',
+  'VcpkgTriplet',
+  'crtsys-vcpkg.targets',
+  'crtsys-vcpkg-init:props:begin',
+  'crtsys-vcpkg-init:targets:begin',
+  '[switch] $Remove'
+)
+Assert-FileContains -Path $uiInitContractPath -Tokens @(
+  'Directory.Build.props',
+  'Directory.Build.targets',
+  'CrtSysVcpkgIntegration',
+  'PropertyPageSchema'
 )
 Assert-FileContains -Path $updatePortPath -Tokens @(
   'version-semver',
@@ -215,6 +241,7 @@ if (-not $sha512Match.Success) {
 }
 
 Write-Host "crtsys vcpkg port contract passed for version $projectVersion."
+& $uiInitTestPath
 if ($ContractOnly) {
   return
 }
@@ -289,6 +316,8 @@ $requiredInstalledPaths = @(
   'share\crtsys\msbuild\crtsys-vcpkg.targets',
   'share\crtsys\usage',
   'share\crtsys\copyright',
+  'tools\crtsys\crtsys-vs-init.ps1',
+  'tools\crtsys\crtsys-vs-init.cmd',
   'build\native\crtsys.targets',
   'build\native\crtsys.xml',
   'build\native\crtsys-kmdf.xml',
@@ -303,6 +332,45 @@ foreach ($relativePath in $requiredInstalledPaths) {
   }
 }
 
+$installedInitializer = Join-Path $packageRoot `
+  'tools\crtsys\crtsys-vs-init.cmd'
+& $installedInitializer -ProjectRoot $WorkDirectory -Triplet $Triplet
+if ($LASTEXITCODE -ne 0) {
+  throw "Installed crtsys-vs-init command failed with exit code $LASTEXITCODE."
+}
+
+$generatedPropsPath = Join-Path $WorkDirectory 'Directory.Build.props'
+$generatedTargetsPath = Join-Path $WorkDirectory 'Directory.Build.targets'
+Assert-FileContains -Path $generatedPropsPath -Tokens @(
+  'VcpkgEnableManifest',
+  $Triplet
+)
+Assert-FileContains -Path $generatedTargetsPath -Tokens @(
+  'crtsys-vcpkg-init:targets:begin',
+  'crtsys-vcpkg.targets'
+)
+
+$msbuild = Resolve-MsBuildExecutable
+& $msbuild $uiInitContractPath `
+  /nologo `
+  /verbosity:minimal `
+  /target:Validate `
+  "/property:ConsumerRoot=$WorkDirectory" `
+  "/property:ConsumerInstallRoot=$installRoot"
+if ($LASTEXITCODE -ne 0) {
+  throw "The generated vcpkg MSBuild integration failed with exit code $LASTEXITCODE."
+}
+
+& $installedInitializer -ProjectRoot $WorkDirectory -Remove
+if ($LASTEXITCODE -ne 0) {
+  throw "Installed crtsys-vs-init -Remove failed with exit code $LASTEXITCODE."
+}
+foreach ($generatedPath in @($generatedPropsPath, $generatedTargetsPath)) {
+  if (Test-Path -LiteralPath $generatedPath) {
+    throw "Installed initializer left a generated file behind: $generatedPath"
+  }
+}
+
 $unexpectedArchitectures = @('x86', 'x64', 'ARM', 'ARM64') |
   Where-Object { $_ -ne $architectureName }
 foreach ($unexpectedArchitecture in $unexpectedArchitectures) {
@@ -313,7 +381,6 @@ foreach ($unexpectedArchitecture in $unexpectedArchitectures) {
   }
 }
 
-$msbuild = Resolve-MsBuildExecutable
 $uiContractCases = @(
   @{ Name = 'Default'; DriverType = 'WDM'; Wdm = 'Default'; Kmdf = '' },
   @{ Name = 'NtlWdm'; DriverType = 'WDM'; Wdm = 'NtlWdm'; Kmdf = '' },

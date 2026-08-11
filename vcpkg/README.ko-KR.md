@@ -84,21 +84,37 @@ crtsys_add_driver(my_wfp WFP NTL src/main.cpp)
 
 vcpkg의 MSBuild 통합은 설치된 include 및 library 경로를 연결하지만 개별
 포트의 전용 속성 페이지까지 자동으로 import하지는 않습니다. 최초
-`vcpkg install` 실행 후 `Directory.Build.targets` 또는 사용하는 `.vcxproj`에서
-crtsys bridge를 가져옵니다.
+`vcpkg install` 실행 후 manifest 루트에서 초기화 도구를 한 번 실행합니다.
+아직 vcpkg의 사용자 단위 MSBuild 통합을 설정하지 않았다면 먼저
+`vcpkg integrate install`을 한 번 실행합니다.
 
-```xml
-<Project>
-  <Import
-    Project="$([MSBuild]::NormalizePath('$(VcpkgManifestRoot)', 'vcpkg_installed', '$(VcpkgTriplet)', 'share', 'crtsys', 'msbuild', 'crtsys-vcpkg.targets'))"
-    Condition="Exists('$([MSBuild]::NormalizePath('$(VcpkgManifestRoot)', 'vcpkg_installed', '$(VcpkgTriplet)', 'share', 'crtsys', 'msbuild', 'crtsys-vcpkg.targets'))')" />
-</Project>
+```powershell
+.\vcpkg_installed\x64-windows-static\tools\crtsys\crtsys-vs-init.cmd
 ```
 
-`VcpkgTriplet`은 `x64-windows-static`과 같은 정적 CRT triplet으로 지정합니다.
-최초 설치 후 Visual Studio 솔루션을 다시 열면 MSBuild가 새 import를 평가합니다.
+설치 경로에 이 명령이 없다면 초기화 도구보다 오래된 registry baseline의
+포트를 사용 중인 것입니다. 초기화 도구가 게시된 최신 baseline으로 갱신하거나
+아래 수동 구성을 사용하세요.
+
+이 명령은 manifest 사용과 정적 CRT triplet을 설정하고, 기존
+`Directory.Build.props` 및 `Directory.Build.targets`의 다른 내용을 보존하면서
+crtsys bridge를 추가합니다. 중복 실행해도 같은 블록을 다시 만들지 않습니다.
+다른 triplet을 기본값으로 지정하거나 통합을 제거할 수도 있습니다.
+
+```powershell
+.\vcpkg_installed\x64-windows-static\tools\crtsys\crtsys-vs-init.cmd `
+  -Triplet arm64-windows-static
+
+.\vcpkg_installed\x64-windows-static\tools\crtsys\crtsys-vs-init.cmd -Remove
+```
+
+최초 설치 및 초기화 후 Visual Studio 솔루션을 다시 열면 MSBuild가 새 import를 평가합니다.
 그러면 기존 **No NTL entry point**, **NTL WDM**, **NTL KMDF**,
 **NTL Minifilter**, **NTL WFP** 선택이 NuGet 패키지와 동일하게 동작합니다.
+
+초기화 도구를 사용하지 않는 수동 구성에서는 설치된
+`share/crtsys/msbuild/crtsys-vcpkg.targets`를 `Directory.Build.targets`에서
+직접 import할 수도 있습니다.
 
 NuGet은 별도 import가 필요 없는 Visual Studio 설치 경로로 계속 유지됩니다.
 vcpkg bridge는 의존성 복원을 vcpkg manifest로 통일하면서도 crtsys WDK 속성

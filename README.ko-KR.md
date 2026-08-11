@@ -455,11 +455,10 @@ vcpkg install crtsys:x64-windows-static `
 ```
 
 CMake 사용자는 설치된 `crtsys` 패키지를 일반적인 방법으로 사용합니다.
-Visual Studio/MSBuild 사용자는 설치된
-`share/crtsys/msbuild/crtsys-vcpkg.targets` bridge를 추가로 import하여 기존
-WDM, KMDF, 미니필터 및 WFP 진입점 속성 페이지를 그대로 사용할 수 있습니다.
-최초로 솔루션을 열기 전에 `vcpkg install`을 실행하고 import를 추가한 뒤
-Visual Studio를 다시 여세요. 전체 import 및 검증 명령은
+Visual Studio/MSBuild 사용자는 `vcpkg install` 후 패키지에 포함된
+`crtsys-vs-init`을 한 번 실행하면 기존 WDM, KMDF, 미니필터 및 WFP 진입점
+속성 페이지를 그대로 사용할 수 있습니다. 초기화 후 Visual Studio를 다시
+여세요. 전체 초기화 및 검증 명령은
 [vcpkg 안내서](./vcpkg/README.ko-KR.md)를 참조하세요.
 
 전체 패키징 및 게시 명령은
