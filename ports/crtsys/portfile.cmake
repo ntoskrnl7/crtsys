@@ -13,7 +13,7 @@ vcpkg_download_distfile(CRTSYS_ARCHIVE
     FILENAME
         "crtsys-${VERSION}-prebuilt.zip"
     SHA512
-        49065db421314bf01e7f97b94fac80a4d4b4ae830e2423aad5cd5e2854a8575864abc21cd093b312cc53fd57665e5c335509f363688cfbd2a4b38610f73d4ba7
+        96dfdd5c40895c6e4cea20d1176e90daa47164f00daf4bc96ef896077579a96a0b7f7124519a903bb9610bb900752681bf5bb3bbe104f6e6f644db76c12322ab
 )
 
 vcpkg_extract_source_archive(SOURCE_PATH
@@ -80,6 +80,10 @@ crtsys_keep_package_architecture(
 
 file(INSTALL "${CURRENT_PORT_DIR}/crtsys-vcpkg.targets"
     DESTINATION "${CURRENT_PACKAGES_DIR}/share/crtsys/msbuild")
+file(INSTALL
+    "${CURRENT_PORT_DIR}/tools/crtsys-vs-init.ps1"
+    "${CURRENT_PORT_DIR}/tools/crtsys-vs-init.cmd"
+    DESTINATION "${CURRENT_PACKAGES_DIR}/tools/${PORT}")
 file(INSTALL "${CURRENT_PORT_DIR}/usage"
     DESTINATION "${CURRENT_PACKAGES_DIR}/share/${PORT}")
 file(INSTALL "${SOURCE_PATH}/README.md"
