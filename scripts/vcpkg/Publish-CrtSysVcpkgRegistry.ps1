@@ -116,6 +116,41 @@ function Get-PublishedVersionEntry {
     Select-Object -First 1
 }
 
+function Set-PublishedVersionTree {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string] $ExpectedTree
+  )
+
+  $versionFilePath = Join-Path $RegistryDirectory 'versions\c-\crtsys.json'
+  $versionFile = Get-Content `
+    -LiteralPath $versionFilePath `
+    -Raw `
+    -Encoding UTF8 |
+      ConvertFrom-Json
+  $entries = @(
+    @($versionFile.versions) |
+      Where-Object { $_.'version-semver' -eq $Version }
+  )
+  if ($entries.Count -ne 1) {
+    throw "Expected one versions DB entry for crtsys $Version, found $($entries.Count)."
+  }
+
+  $generatedTree = [string]$entries[0].'git-tree'
+  if ($generatedTree -ne $ExpectedTree) {
+    Write-Host `
+      "Normalizing generated crtsys $Version tree $generatedTree to committed port tree $ExpectedTree."
+  }
+
+  $entries[0].'git-tree' = $ExpectedTree
+  $json = $versionFile | ConvertTo-Json -Depth 20
+  $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+  [System.IO.File]::WriteAllText(
+    $versionFilePath,
+    $json.TrimEnd() + "`n",
+    $utf8NoBom)
+}
+
 function Get-CurrentBaselineVersion {
   $baselinePath = Join-Path $RegistryDirectory 'versions\baseline.json'
   if (-not (Test-Path -LiteralPath $baselinePath)) {
@@ -127,10 +162,11 @@ function Get-CurrentBaselineVersion {
     -Raw `
     -Encoding UTF8 |
       ConvertFrom-Json
-  if ($null -eq $baseline.default.crtsys) {
+  $crtsysProperty = $baseline.default.PSObject.Properties['crtsys']
+  if ($null -eq $crtsysProperty -or $null -eq $crtsysProperty.Value) {
     return $null
   }
-  return [string]$baseline.default.crtsys.baseline
+  return [string]$crtsysProperty.Value.baseline
 }
 
 function Set-RegistryReadmeBaseline {
@@ -243,6 +279,11 @@ if ($null -ne $publishedEntry) {
     throw "crtsys $Version is already published with different port contents. Publish a new port-version instead of rewriting history."
   }
 
+  Invoke-Git -Arguments @('-C', $RegistryDirectory, 'add', '--', 'ports/crtsys')
+  if (Test-WorkingTreeChanges -Cached) {
+    throw "crtsys $Version formatter output differs from the published port contents."
+  }
+
   $currentPortTree = Invoke-Git `
     -Arguments @('-C', $RegistryDirectory, 'rev-parse', 'HEAD:ports/crtsys') `
     -Capture
@@ -251,7 +292,7 @@ if ($null -ne $publishedEntry) {
   }
 
   $stableBaseline = Invoke-Git `
-    -Arguments @('-C', $RegistryDirectory, 'log', '-1', '--format=%H', '--', 'versions/baseline.json') `
+    -Arguments @('-C', $RegistryDirectory, 'log', '-1', '--format=%H', '--', 'versions') `
     -Capture
 } else {
   Invoke-Git -Arguments @('-C', $RegistryDirectory, 'add', '--', 'ports/crtsys')
@@ -259,6 +300,10 @@ if ($null -ne $publishedEntry) {
     Invoke-Git -Arguments @(
       '-C', $RegistryDirectory, 'commit', '-m', "Add crtsys $Version port")
   }
+
+  $committedPortTree = Invoke-Git `
+    -Arguments @('-C', $RegistryDirectory, 'rev-parse', 'HEAD:ports/crtsys') `
+    -Capture
 
   Push-Location $RegistryDirectory
   try {
@@ -272,6 +317,13 @@ if ($null -ne $publishedEntry) {
     }
   } finally {
     Pop-Location
+  }
+
+  Set-PublishedVersionTree -ExpectedTree $committedPortTree
+  $generatedEntry = Get-PublishedVersionEntry
+  if ($null -eq $generatedEntry -or
+      [string]$generatedEntry.'git-tree' -ne $committedPortTree) {
+    throw "crtsys $Version versions DB does not point to committed port tree $committedPortTree."
   }
 
   Invoke-Git -Arguments @('-C', $RegistryDirectory, 'add', '--', 'versions')

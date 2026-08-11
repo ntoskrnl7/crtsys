@@ -24,7 +24,7 @@
       "kind": "git",
       "repository": "https://github.com/ntoskrnl7/crtsys",
       "reference": "vcpkg-registry",
-      "baseline": "e512c60be887e571fae3d8e17e791d91a0004820",
+      "baseline": "bde54df486d558f12e274a5c2c12e92a6e095d46",
       "packages": ["crtsys"]
     }
   ]
