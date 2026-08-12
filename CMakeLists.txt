@@ -303,15 +303,18 @@ function(crtsys_set_kernel_static_msvc_runtime target_name)
       PROPERTY MSVC_RUNTIME_LIBRARY
         "MultiThreaded"
     )
-  else()
-    # CMake 3.14 has no MSVC_RUNTIME_LIBRARY abstraction. Keep the documented
-    # minimum working while ensuring packaged archives never embed dynamic-CRT
-    # /DEFAULTLIB directives.
-    target_compile_options(
-      "${target_name}" PRIVATE
-      "/MT"
-    )
   endif()
+
+  # The Visual Studio property sheets used to compile the CRT implementation
+  # deliberately clear RuntimeLibrary. Keep an explicit private /MT after
+  # those imports so the CRT headers do not see _DLL and mark the definitions
+  # in this static archive as dllimport. Kernel consumers must use the same
+  # static runtime selection, so /MT remains part of the public build contract.
+  # This also keeps CMake 3.14 working.
+  target_compile_options(
+    "${target_name}" PUBLIC
+    "$<$<COMPILE_LANGUAGE:C,CXX>:/MT>"
+  )
 
   # Kernel libraries must not inject a user-mode CRT default library into the
   # consuming driver. They provide the required CRT surface themselves and
