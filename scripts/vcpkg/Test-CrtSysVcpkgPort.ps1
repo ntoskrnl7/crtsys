@@ -2,7 +2,6 @@ param(
   [ValidateSet(
     'x86-windows-static',
     'x64-windows-static',
-    'arm-windows-static',
     'arm64-windows-static'
   )]
   [string] $Triplet = 'x64-windows-static',
@@ -186,7 +185,16 @@ foreach ($feature in @('content-codecs', 'msquic-headers')) {
     throw "The vcpkg port is missing the optional '$feature' feature."
   }
 }
-foreach ($supportToken in @('windows', '!uwp', '!mingw', 'static', 'staticcrt')) {
+foreach ($supportToken in @(
+  'windows',
+  '!uwp',
+  '!mingw',
+  'static',
+  'staticcrt',
+  'x86',
+  'x64',
+  'arm64'
+)) {
   if (-not $manifest.supports.Contains($supportToken)) {
     throw "The vcpkg supports expression is missing '$supportToken'."
   }
@@ -205,6 +213,11 @@ $portfileTokens = @(
   'crtsys-vs-init.cmd',
   'vcpkg_install_copyright',
   'requires Microsoft Visual Studio with the C++ workload',
+  'Microsoft.Windows.SDK.CPP',
+  'Microsoft.Windows.WDK.',
+  'WDKContentRoot',
+  'CRTSYS_WDK_VERSION',
+  '10.0.28000.2526',
   'docs/third-party-notices.md',
   '${LDK_SOURCE_PATH}/LICENSE',
   '${RAW_PDB_SOURCE_PATH}/LICENSE',
