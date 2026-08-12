@@ -69,6 +69,27 @@ function Assert-FileContains {
   }
 }
 
+function Assert-FileDoesNotContain {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string] $Path,
+
+    [Parameter(Mandatory = $true)]
+    [string[]] $Tokens
+  )
+
+  if (-not (Test-Path -LiteralPath $Path)) {
+    throw "Required file was not found: $Path"
+  }
+
+  $content = Get-Content -LiteralPath $Path -Raw
+  foreach ($token in $Tokens) {
+    if ($content.Contains($token)) {
+      throw "Expected '$Path' not to contain '$token'."
+    }
+  }
+}
+
 function Resolve-VcpkgExecutable {
   param([string] $RequestedPath)
 
@@ -180,7 +201,9 @@ Assert-FileContains -Path $portfilePath -Tokens @(
   'vcpkg_install_copyright',
   'requires Microsoft Visual Studio with the C++ workload',
   'docs/third-party-notices.md',
-  'ldk-copyright',
+  'ldk-copyright'
+)
+Assert-FileDoesNotContain -Path $portfilePath -Tokens @(
   'VCPKG_POLICY_SKIP_CRT_LINKAGE_CHECK'
 )
 Assert-FileContains -Path $ldkCopyrightPath -Tokens @(

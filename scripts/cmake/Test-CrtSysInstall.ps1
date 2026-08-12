@@ -12,6 +12,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot '..\nuget\CrtSysCoffDirectiveContract.ps1')
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 
@@ -282,6 +283,13 @@ foreach ($requiredPath in @(
   if (-not (Test-Path $fullPath)) {
     throw "Installed crtsys tree is missing expected file: $fullPath"
   }
+}
+
+foreach ($libraryName in @('crtsys.lib', 'Ldk.lib')) {
+  Assert-CrtSysStaticCrtDirectives `
+    -LibraryPath (Join-Path $installDirectory (
+        "lib\native\v143\$Architecture\$Configuration\$libraryName")) `
+    -Configuration $Configuration
 }
 
 $installedCrtSysCMake = Get-Content -Raw -LiteralPath (

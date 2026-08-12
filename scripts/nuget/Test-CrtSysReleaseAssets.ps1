@@ -28,6 +28,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'CrtSysMsQuicHeaderContract.ps1')
+. (Join-Path $PSScriptRoot 'CrtSysCoffDirectiveContract.ps1')
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 
@@ -228,6 +229,13 @@ foreach ($requiredPath in @(
   if (-not (Test-Path $fullPath)) {
     throw "Prebuilt release bundle is missing expected file: $fullPath"
   }
+}
+
+foreach ($libraryName in @('crtsys.lib', 'Ldk.lib')) {
+  Assert-CrtSysStaticCrtDirectives `
+    -LibraryPath (Join-Path $bundleRoot (
+        "lib\native\$Toolset\$Architecture\$Configuration\$libraryName")) `
+    -Configuration $Configuration
 }
 
 $installedCrtSysCMake = Get-Content -Raw -LiteralPath (

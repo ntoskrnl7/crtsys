@@ -104,9 +104,3 @@ vcpkg_install_copyright(FILE_LIST
 # lib/native tree. CrtSys.cmake and the MSBuild integration select the correct
 # configuration explicitly rather than relying on vcpkg autolinking.
 set(VCPKG_POLICY_MISMATCHED_NUMBER_OF_BINARIES enabled)
-
-# Ldk.lib retains /DEFAULTLIB directives from its MSVC compilation, but crtsys
-# consumes it only in a WDK kernel link where crtsys supplies the runtime and
-# the driver target is compiled with /MT. vcpkg's user-mode CRT inspection
-# therefore cannot classify this archive correctly.
-set(VCPKG_POLICY_SKIP_CRT_LINKAGE_CHECK enabled)

@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.14)
 
 cmake_policy(SET CMP0021 NEW)
+if(POLICY CMP0091)
+  cmake_policy(SET CMP0091 NEW)
+endif()
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/")
 include(pkg-utils)
@@ -241,6 +244,29 @@ if(CRTSYS_LDK_SOURCE_DIR)
 else()
   CPMAddPackage("gh:ntoskrnl7/Ldk@0.7.25")
 endif()
+function(crtsys_set_kernel_static_msvc_runtime target_name)
+  if(NOT TARGET "${target_name}")
+    message(FATAL_ERROR "Expected CMake target was not defined: ${target_name}")
+  endif()
+
+  if(POLICY CMP0091)
+    set_property(
+      TARGET "${target_name}"
+      PROPERTY MSVC_RUNTIME_LIBRARY
+        "MultiThreaded"
+    )
+  else()
+    # CMake 3.14 has no MSVC_RUNTIME_LIBRARY abstraction. Keep the documented
+    # minimum working while ensuring packaged archives never embed dynamic-CRT
+    # /DEFAULTLIB directives.
+    target_compile_options(
+      "${target_name}" PRIVATE
+      "/MT"
+    )
+  endif()
+endfunction()
+
+crtsys_set_kernel_static_msvc_runtime(Ldk)
 CPMAddPackage(
   NAME raw_pdb
   GITHUB_REPOSITORY MolecularMatters/raw_pdb
@@ -457,9 +483,8 @@ if (UCXXRT_ENABLED)
   target_compile_options(crtsys PRIVATE "$<$<COMPILE_LANGUAGE:C,CXX>:/FI${ucxxrt_SOURCE_DIR}/ucxxrt.inl>")
 endif()
 
-target_compile_options(crtsys PUBLIC "$<$<COMPILE_LANGUAGE:C,CXX>:/MT>") # "/MT$<$<CONFIG:Debug>:d>"
+crtsys_set_kernel_static_msvc_runtime(crtsys)
 target_compile_options(crtsys PRIVATE "$<$<COMPILE_LANGUAGE:C,CXX>:/FS>")
-# [not working] set_property(TARGET crtsys PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 #
 # Generate Debug Info
