@@ -4,7 +4,7 @@ param(
   [string] $Version,
 
   [Parameter(Mandatory = $true)]
-  [string] $ArchivePath,
+  [string] $SourceArchivePath,
 
   [Parameter(Mandatory = $true)]
   [string] $SourcePortDirectory,
@@ -26,7 +26,7 @@ $ErrorActionPreference = 'Stop'
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $updatePortScript = Join-Path $PSScriptRoot 'Update-CrtSysVcpkgPort.ps1'
-$ArchivePath = (Resolve-Path -LiteralPath $ArchivePath).Path
+$SourceArchivePath = (Resolve-Path -LiteralPath $SourceArchivePath).Path
 $SourcePortDirectory = (Resolve-Path -LiteralPath $SourcePortDirectory).Path
 $RegistryDirectory = (Resolve-Path -LiteralPath $RegistryDirectory).Path
 
@@ -199,13 +199,13 @@ function Set-RegistryReadmeBaseline {
 function Write-PublishOutput {
   param(
     [Parameter(Mandatory = $true)][string] $Baseline,
-    [Parameter(Mandatory = $true)][string] $ArchiveSha512
+    [Parameter(Mandatory = $true)][string] $SourceArchiveSha512
   )
 
   if (-not [string]::IsNullOrWhiteSpace($GitHubOutputPath)) {
     Add-Content -LiteralPath $GitHubOutputPath -Encoding UTF8 -Value @(
       "baseline=$Baseline",
-      "archive_sha512=$ArchiveSha512",
+      "source_archive_sha512=$SourceArchiveSha512",
       "version=$Version"
     )
   }
@@ -213,7 +213,7 @@ function Write-PublishOutput {
   [pscustomobject]@{
     Version = $Version
     Baseline = $Baseline
-    ArchiveSha512 = $ArchiveSha512
+    SourceArchiveSha512 = $SourceArchiveSha512
   }
 }
 
@@ -262,9 +262,9 @@ Copy-Item -LiteralPath $SourcePortDirectory `
 
 $updateResult = & $updatePortScript `
   -Version $Version `
-  -ArchivePath $ArchivePath `
+  -SourceArchivePath $SourceArchivePath `
   -PortDirectory $destinationPortDirectory
-$archiveSha512 = [string]$updateResult.ArchiveSha512
+$sourceArchiveSha512 = [string]$updateResult.SourceArchiveSha512
 
 $VcpkgExe = Resolve-VcpkgExecutable -RequestedPath $VcpkgExe
 & $VcpkgExe format-manifest `
@@ -350,4 +350,6 @@ if ($Push) {
 }
 
 Write-Host "Published crtsys $Version with stable registry baseline $stableBaseline."
-Write-PublishOutput -Baseline $stableBaseline -ArchiveSha512 $archiveSha512
+Write-PublishOutput `
+  -Baseline $stableBaseline `
+  -SourceArchiveSha512 $sourceArchiveSha512

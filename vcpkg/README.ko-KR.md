@@ -1,20 +1,19 @@
 # crtsys vcpkg 포트
 
-이 디렉터리는 crtsys 사전 빌드 릴리스 번들을 설치하는 프로젝트 제공 overlay port를
-포함합니다. 선택한 triplet의 아키텍처만 설치하고 지원되는 MSVC 툴셋 변형을
-유지하며, 다음 두 사용 경로를 함께 제공합니다.
+이 디렉터리는 crtsys의 1차 제공 overlay 포트입니다. 공식 포트는 고정된
+소스 리비전을 선택한 Windows static-CRT triplet으로 직접 빌드하고,
+라이브러리를 vcpkg 표준 `lib/manual-link` 위치에 설치합니다.
 
-- `find_package(crtsys CONFIG REQUIRED)` 및 `crtsys_add_driver(...)`를
-  사용하는 CMake
-- 기존 crtsys 진입점 속성 페이지를 사용하는 Visual Studio/MSBuild
+- CMake: `find_package(crtsys CONFIG REQUIRED)`와
+  `crtsys_add_driver(...)`
+- Visual Studio/MSBuild: crtsys 드라이버 모델 속성 페이지
 
-이 패키지는 Windows/WDK 전용 정적 라이브러리이며 정적 MSVC 런타임을
-사용합니다.
+Visual Studio C++ 워크로드와 호환되는 WDK가 필요합니다. 설치된 CMake
+패키지는 소비자 구성 도중 의존성을 내려받지 않습니다.
 
 ## Git registry
 
-게시된 버전은 소스 checkout 없이 사용할 수 있습니다. 소비자 manifest 옆에
-다음 `vcpkg-configuration.json`을 추가합니다.
+소비자 `vcpkg.json` 옆에 다음 `vcpkg-configuration.json`을 둡니다.
 
 ```json
 {
@@ -31,9 +30,8 @@
 }
 ```
 
-이 최소 예제는 기본 registry를 비활성화합니다. 다른 vcpkg 의존성도 사용하는
-프로젝트라면 기존에 고정한 default registry 설정을 유지하세요. `vcpkg.json`에는
-다음 의존성을 추가합니다.
+다른 vcpkg 패키지를 사용한다면 기존 default registry 설정은 유지해야
+합니다. manifest에는 다음 의존성을 추가합니다.
 
 ```json
 {
@@ -43,27 +41,29 @@
 }
 ```
 
-그런 다음 호환되는 정적 CRT triplet을 선택합니다.
-
 ```powershell
 vcpkg install --triplet=x64-windows-static
 ```
 
-## Overlay port
+로컬 포트를 시험할 때는
+`--overlay-ports=D:\path\to\crtsys\vcpkg\ports`를 추가합니다.
 
-로컬 포트 개발 또는 소스 checkout에서는 overlay를 명시적으로 선택합니다.
+## 선택 기능
 
-```powershell
-vcpkg install --triplet=x64-windows-static `
-  --overlay-ports=D:\path\to\crtsys\vcpkg\ports
+사용자 모드 zlib/Brotli 지원은 `content-codecs`, 고정된 MsQuic 공개
+헤더는 `msquic-headers` 기능으로 명시적으로 선택합니다.
+
+```json
+"dependencies": [
+  { "name": "crtsys", "features": ["content-codecs", "msquic-headers"] }
+]
 ```
 
-독립 설치형 vcpkg에서는 classic mode의
-`vcpkg install crtsys:x64-windows-static --overlay-ports=...`도 사용할 수 있습니다.
+vcpkg의 사용자 모드 codec 라이브러리를 커널 드라이버에 연결하지는
+않습니다. 커널 codec이 필요하면 별도로 감사된 소스를 사용해 crtsys를
+직접 빌드해야 합니다.
 
 ## CMake
-
-vcpkg toolchain으로 사용 프로젝트를 구성한 뒤 설치된 패키지를 사용합니다.
 
 ```cmake
 find_package(crtsys CONFIG REQUIRED)
@@ -72,110 +72,40 @@ set(CRTSYS_NTL_MAIN ON)
 crtsys_add_driver(my_driver src/main.cpp)
 ```
 
-기존 모델별 호출도 그대로 지원됩니다.
-
-```cmake
-crtsys_add_driver(my_kmdf KMDF 1.15 NTL src/main.cpp)
-crtsys_add_driver(my_filter MINIFILTER NTL src/main.cpp)
-crtsys_add_driver(my_wfp WFP NTL src/main.cpp)
-```
+`KMDF`, `MINIFILTER`, `WFP`, `NTL` 옵션도 그대로 사용할 수 있습니다.
 
 ## Visual Studio/MSBuild UI
 
-vcpkg의 MSBuild 통합은 설치된 include 및 library 경로를 연결하지만 개별
-포트의 전용 속성 페이지까지 자동으로 import하지는 않습니다. 최초
-`vcpkg install` 실행 후 manifest 루트에서 초기화 도구를 한 번 실행합니다.
-아직 vcpkg의 사용자 단위 MSBuild 통합을 설정하지 않았다면 먼저
-`vcpkg integrate install`을 한 번 실행합니다.
+manifest를 처음 설치한 뒤 manifest 루트에서 초기화 도구를 한 번 실행하고
+솔루션을 다시 엽니다.
 
 ```powershell
-.\vcpkg_installed\x64-windows-static\tools\crtsys\crtsys-vs-init.cmd
+vcpkg env --tools --triplet=x64-windows-static "crtsys-vs-init.cmd"
 ```
 
-설치 경로에 이 명령이 없다면 초기화 도구보다 오래된 registry baseline의
-포트를 사용 중인 것입니다. 초기화 도구가 게시된 최신 baseline으로 갱신하거나
-아래 수동 구성을 사용하세요.
+초기화 도구는 기존 `Directory.Build.props`와
+`Directory.Build.targets`를 보존하며 반복 실행해도 안전합니다.
+`crtsys-vs-init.cmd -Remove`로 제거할 수 있습니다. 포트에는
+**No NTL entry point**, **NTL WDM**, **NTL KMDF**, **NTL Minifilter**,
+**NTL WFP** 속성 페이지가 포함됩니다. NuGet은 초기화가 필요 없는
+Visual Studio 설치 경로로 계속 제공됩니다.
 
-이 명령은 manifest 사용과 정적 CRT triplet을 설정하고, 기존
-`Directory.Build.props` 및 `Directory.Build.targets`의 다른 내용을 보존하면서
-crtsys bridge를 추가합니다. 중복 실행해도 같은 블록을 다시 만들지 않습니다.
-다른 triplet을 기본값으로 지정하거나 통합을 제거할 수도 있습니다.
-
-```powershell
-.\vcpkg_installed\x64-windows-static\tools\crtsys\crtsys-vs-init.cmd `
-  -Triplet arm64-windows-static
-
-.\vcpkg_installed\x64-windows-static\tools\crtsys\crtsys-vs-init.cmd -Remove
-```
-
-최초 설치 및 초기화 후 Visual Studio 솔루션을 다시 열면 MSBuild가 새 import를 평가합니다.
-그러면 기존 **No NTL entry point**, **NTL WDM**, **NTL KMDF**,
-**NTL Minifilter**, **NTL WFP** 선택이 NuGet 패키지와 동일하게 동작합니다.
-
-초기화 도구를 사용하지 않는 수동 구성에서는 설치된
-`share/crtsys/msbuild/crtsys-vcpkg.targets`를 `Directory.Build.targets`에서
-직접 import할 수도 있습니다.
-
-NuGet은 별도 import가 필요 없는 Visual Studio 설치 경로로 계속 유지됩니다.
-vcpkg bridge는 의존성 복원을 vcpkg manifest로 통일하면서도 crtsys WDK 속성
-UI가 필요한 저장소를 위한 경로입니다.
-
-## 검증
-
-릴리스를 다운로드하지 않는 빠른 계약 검사는 다음과 같습니다.
+## 검증과 게시
 
 ```powershell
 ./scripts/vcpkg/Test-CrtSysVcpkgPort.ps1 -ContractOnly
+./scripts/vcpkg/Test-CrtSysVcpkgPort.ps1 -Triplet x64-windows-static
 ```
 
-overlay port 설치와 MSBuild UI 계약까지 확인하려면 다음을 실행합니다.
-
-```powershell
-./scripts/vcpkg/Test-CrtSysVcpkgPort.ps1 `
-  -Triplet x64-windows-static
-```
-
-태그 기반 릴리스 워크플로는 릴리스 준비 중 overlay manifest 버전을
-갱신합니다. 검증된 GitHub Release 산출물이 업로드되면 Package 워크플로가
-SHA-512를 계산하고 포트와 versions DB를 `vcpkg-registry` 브랜치에 게시한 뒤,
-`main`의 소스 overlay와 문서 baseline을 동기화합니다.
-
-로컬 복구 또는 검증에는 내부 유지보수 명령을 직접 사용할 수도 있습니다.
+안정 태그를 게시한 뒤 태그 소스 archive로 포트 해시를 갱신합니다.
 
 ```powershell
 ./scripts/vcpkg/Update-CrtSysVcpkgPort.ps1 `
-  -Version <version> -ArchivePath <prebuilt-zip>
-
-./scripts/vcpkg/Publish-CrtSysVcpkgRegistry.ps1 `
-  -Version <version> `
-  -ArchivePath <prebuilt-zip> `
-  -SourcePortDirectory ./vcpkg/ports/crtsys `
-  -RegistryDirectory <registry-worktree>
+  -Version <version> -SourceArchivePath <source-tarball>
 ```
 
-## 공식 microsoft/vcpkg 포트 갱신
-
-별도의 **Update official vcpkg** 워크플로는 의도적으로 수동 실행합니다. 해당
-버전의 안정 GitHub Release와 `crtsys-<version>-prebuilt.zip` 파일이 게시된 뒤
-실행하세요.
-
-1. **Actions**에서 **Update official vcpkg**를 선택합니다.
-2. 앞에 `v`를 붙이지 않은 숫자 버전을 입력합니다.
-3. `validate`를 선택하면 아무것도 푸시하지 않고 공식 포트 준비, versions DB
-   생성, binary cache 없는 설치, CMake 및 Visual Studio 소비자 검증을 수행합니다.
-4. 이후 릴리스에서는 `submit`을 선택하면 같은 검증을 거친 뒤
-   `ntoskrnl7/vcpkg` fork 브랜치를 갱신하고 microsoft/vcpkg PR을 새로 만들거나
-   기존 PR을 갱신합니다.
-
-`submit`에는 저장소 Actions secret `VCPKG_UPSTREAM_TOKEN`이 필요합니다.
-`ntoskrnl7/vcpkg` fork에 쓸 수 있고 공개 PR을 만들 수 있는 유지보수자 소유
-GitHub token을 등록하세요. 이 워크플로는 upstream PR을 병합하지 않으므로
-microsoft/vcpkg의 CI와 리뷰 승인은 계속 필요합니다.
-
-최초 crtsys 포트 PR이 병합되기 전에는 `validate`만 사용합니다. 공식
-microsoft/vcpkg `master`에 포트가 들어간 뒤부터는 새 릴리스마다 `submit`을
-바로 실행할 수 있습니다. 같은 대기 중 버전에 대해 `submit`을 다시 실행해도
-중복 PR을 만들지 않고 같은 fork 브랜치와 PR을 안전하게 갱신합니다.
-
-게시 스크립트는 기존 버전의 이력 재작성과 registry baseline의 하향 이동을
-거부합니다.
+수동 **Update official vcpkg** Action은 안정 태그와 해시를 확인하고,
+versions DB를 재생성하고, binary cache 없이 소스 포트를 빌드한 다음 CMake와
+Visual Studio 소비자를 검사합니다. `validate`는 외부 상태를 바꾸지 않고,
+`submit`은 fork 브랜치와 PR을 갱신합니다. 최종 병합에는
+microsoft/vcpkg 리뷰와 CI 승인이 필요합니다.

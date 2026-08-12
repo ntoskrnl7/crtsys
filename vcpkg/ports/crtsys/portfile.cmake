@@ -1,5 +1,13 @@
+set(CRTSYS_WDK_NUGET_VERSION 10.0.28000.2526)
+set(CRTSYS_WDK_CONTENT_VERSION 10.0.28000.0)
+set(CRTSYS_WINDOWS_SDK_NUGET_ID Microsoft.Windows.SDK.CPP)
+set(CRTSYS_WINDOWS_SDK_NUGET_SHA512
+    6101550577ef29daa397c57a61db81b4309cbba562f2ff9a2e9a1cf28a8ceddf913b5a7c1509d2d4e37cbb7c7d7ff839d9ad0c704162383b6fc6a9e42cce65b4
+)
+
 message(
-    "${PORT} requires Microsoft Visual Studio with the C++ workload and the Windows Driver Kit (WDK) to build consuming drivers."
+    "${PORT} requires Microsoft Visual Studio with the C++ workload. "
+    "The matching Microsoft WDK is acquired from the official NuGet package."
 )
 
 vcpkg_check_linkage(
@@ -11,102 +19,234 @@ if(NOT VCPKG_TARGET_IS_WINDOWS OR VCPKG_TARGET_IS_UWP OR VCPKG_TARGET_IS_MINGW)
     message(FATAL_ERROR "crtsys supports Windows desktop MSVC/WDK triplets only.")
 endif()
 
-vcpkg_download_distfile(CRTSYS_ARCHIVE
-    URLS
-        "https://github.com/ntoskrnl7/crtsys/releases/download/v${VERSION}/crtsys-${VERSION}-prebuilt.zip"
-    FILENAME
-        "crtsys-${VERSION}-prebuilt.zip"
-    SHA512
-        96dfdd5c40895c6e4cea20d1176e90daa47164f00daf4bc96ef896077579a96a0b7f7124519a903bb9610bb900752681bf5bb3bbe104f6e6f644db76c12322ab
-)
-
-vcpkg_extract_source_archive(SOURCE_PATH
-    ARCHIVE "${CRTSYS_ARCHIVE}"
-)
-
-if(VCPKG_TARGET_ARCHITECTURE STREQUAL "arm")
-    set(CRTSYS_PACKAGE_ARCHITECTURE "ARM")
+if(VCPKG_TARGET_ARCHITECTURE STREQUAL "x86")
+    set(CRTSYS_WDK_NUGET_ARCH x86)
+    set(CRTSYS_WDK_NUGET_SHA512
+        5dbb7d770f49e4ebcd83fd40f132d2dd9ee81d74282e6227800cc475908310d90cdde489fb9029f85f1d6547c28665a8bcb72914e88221f1f85d2e9d8f40e549
+    )
+    set(CRTSYS_WINDOWS_SDK_ARCH_NUGET_SHA512
+        27888fbe8550575899b177da0160b292b723c97b8b776476262e33e9ee8b366554e2edbeb38cd809bd738d0452720b989ffa1a5726356a398a829d7fd57dd951
+    )
+elseif(VCPKG_TARGET_ARCHITECTURE STREQUAL "x64")
+    set(CRTSYS_WDK_NUGET_ARCH x64)
+    set(CRTSYS_WDK_NUGET_SHA512
+        7401926e48d3af89455fa8559dcc9cb410d283ceceef1dd0494afc61ff5d14b6744f74d6ba8fa2e16ad776f8925bbec1766ce7da2bb5a40f37c067b557fd5a92
+    )
+    set(CRTSYS_WINDOWS_SDK_ARCH_NUGET_SHA512
+        acc214a215407a18e536ebc01f3139d01ae08b8ce3536c90e7eefee83fe2d35d7b8edaf3a809b6382af4ae74d565c7df031054ca05c5d492d410ad3ea29b6d9c
+    )
 elseif(VCPKG_TARGET_ARCHITECTURE STREQUAL "arm64")
-    set(CRTSYS_PACKAGE_ARCHITECTURE "ARM64")
-elseif(VCPKG_TARGET_ARCHITECTURE STREQUAL "x86" OR
-       VCPKG_TARGET_ARCHITECTURE STREQUAL "x64")
-    set(CRTSYS_PACKAGE_ARCHITECTURE "${VCPKG_TARGET_ARCHITECTURE}")
+    set(CRTSYS_WDK_NUGET_ARCH arm64)
+    set(CRTSYS_WDK_NUGET_SHA512
+        3cb4587993b4e30768de2d0a831e3474754c589faa3af27ffb5f0cd020bf2dd4e708e877f3bbbecf7caf1d18c6d93faa3748c90329836554c4dd8229fd515724
+    )
+    set(CRTSYS_WINDOWS_SDK_ARCH_NUGET_SHA512
+        a5a277fb2b9eeb9a94596203322f3b62a28950284b0c283bc23066b3f9fc0bf6b3f38d4a2d2778f71d1d66d360d4e1ce7148acc9c065a7c4762daac5caee47fe
+    )
 else()
     message(FATAL_ERROR
-        "crtsys does not provide prebuilt libraries for ${VCPKG_TARGET_ARCHITECTURE}.")
+        "crtsys does not support ${VCPKG_TARGET_ARCHITECTURE}; the Microsoft WDK NuGet is available for x86, x64, and ARM64."
+    )
 endif()
 
-file(INSTALL "${SOURCE_PATH}/include"
-    DESTINATION "${CURRENT_PACKAGES_DIR}")
-file(INSTALL "${SOURCE_PATH}/lib"
-    DESTINATION "${CURRENT_PACKAGES_DIR}")
-file(INSTALL "${SOURCE_PATH}/build"
-    DESTINATION "${CURRENT_PACKAGES_DIR}")
-file(INSTALL "${SOURCE_PATH}/share/crtsys/cmake"
-    DESTINATION "${CURRENT_PACKAGES_DIR}/share/crtsys")
+set(CRTSYS_WDK_NUGET_ID "Microsoft.Windows.WDK.${CRTSYS_WDK_NUGET_ARCH}")
+set(CRTSYS_WINDOWS_SDK_ARCH_NUGET_ID
+    "Microsoft.Windows.SDK.CPP.${CRTSYS_WDK_NUGET_ARCH}"
+)
+string(TOLOWER "${CRTSYS_WDK_NUGET_ID}" CRTSYS_WDK_NUGET_ID_LOWER)
+string(TOLOWER "${CRTSYS_WINDOWS_SDK_NUGET_ID}" CRTSYS_WINDOWS_SDK_NUGET_ID_LOWER)
+string(TOLOWER "${CRTSYS_WINDOWS_SDK_ARCH_NUGET_ID}" CRTSYS_WINDOWS_SDK_ARCH_NUGET_ID_LOWER)
 
-# A crtsys release carries several MSVC toolsets and architectures. Keep all
-# toolsets so the package follows the consuming WDK project, but retain only
-# the architecture represented by the selected vcpkg triplet.
-function(crtsys_keep_package_architecture ROOT_DIRECTORY)
-    if(NOT EXISTS "${ROOT_DIRECTORY}")
-        return()
-    endif()
+vcpkg_download_distfile(CRTSYS_WINDOWS_SDK_NUGET_ARCHIVE
+    URLS
+        "https://api.nuget.org/v3-flatcontainer/${CRTSYS_WINDOWS_SDK_NUGET_ID_LOWER}/${CRTSYS_WDK_NUGET_VERSION}/${CRTSYS_WINDOWS_SDK_NUGET_ID_LOWER}.${CRTSYS_WDK_NUGET_VERSION}.nupkg"
+        "https://www.nuget.org/api/v2/package/${CRTSYS_WINDOWS_SDK_NUGET_ID}/${CRTSYS_WDK_NUGET_VERSION}"
+    FILENAME "${CRTSYS_WINDOWS_SDK_NUGET_ID}.${CRTSYS_WDK_NUGET_VERSION}.nupkg"
+    SHA512 "${CRTSYS_WINDOWS_SDK_NUGET_SHA512}"
+)
+vcpkg_extract_source_archive(
+    CRTSYS_WINDOWS_SDK_NUGET_PATH
+    ARCHIVE "${CRTSYS_WINDOWS_SDK_NUGET_ARCHIVE}"
+    NO_REMOVE_ONE_LEVEL
+)
 
-    file(GLOB CRTSYS_TOOLSET_DIRECTORIES LIST_DIRECTORIES TRUE
-        "${ROOT_DIRECTORY}/v*")
-    foreach(CRTSYS_TOOLSET_DIRECTORY IN LISTS CRTSYS_TOOLSET_DIRECTORIES)
-        if(NOT IS_DIRECTORY "${CRTSYS_TOOLSET_DIRECTORY}")
-            continue()
-        endif()
+vcpkg_download_distfile(CRTSYS_WINDOWS_SDK_ARCH_NUGET_ARCHIVE
+    URLS
+        "https://api.nuget.org/v3-flatcontainer/${CRTSYS_WINDOWS_SDK_ARCH_NUGET_ID_LOWER}/${CRTSYS_WDK_NUGET_VERSION}/${CRTSYS_WINDOWS_SDK_ARCH_NUGET_ID_LOWER}.${CRTSYS_WDK_NUGET_VERSION}.nupkg"
+        "https://www.nuget.org/api/v2/package/${CRTSYS_WINDOWS_SDK_ARCH_NUGET_ID}/${CRTSYS_WDK_NUGET_VERSION}"
+    FILENAME "${CRTSYS_WINDOWS_SDK_ARCH_NUGET_ID}.${CRTSYS_WDK_NUGET_VERSION}.nupkg"
+    SHA512 "${CRTSYS_WINDOWS_SDK_ARCH_NUGET_SHA512}"
+)
+vcpkg_extract_source_archive(
+    CRTSYS_WINDOWS_SDK_ARCH_NUGET_PATH
+    ARCHIVE "${CRTSYS_WINDOWS_SDK_ARCH_NUGET_ARCHIVE}"
+    NO_REMOVE_ONE_LEVEL
+)
 
-        file(GLOB CRTSYS_ARCHITECTURE_DIRECTORIES LIST_DIRECTORIES TRUE
-            "${CRTSYS_TOOLSET_DIRECTORY}/*")
-        foreach(CRTSYS_ARCHITECTURE_DIRECTORY IN LISTS CRTSYS_ARCHITECTURE_DIRECTORIES)
-            if(NOT IS_DIRECTORY "${CRTSYS_ARCHITECTURE_DIRECTORY}")
-                continue()
-            endif()
+vcpkg_download_distfile(CRTSYS_WDK_NUGET_ARCHIVE
+    URLS
+        "https://api.nuget.org/v3-flatcontainer/${CRTSYS_WDK_NUGET_ID_LOWER}/${CRTSYS_WDK_NUGET_VERSION}/${CRTSYS_WDK_NUGET_ID_LOWER}.${CRTSYS_WDK_NUGET_VERSION}.nupkg"
+        "https://www.nuget.org/api/v2/package/${CRTSYS_WDK_NUGET_ID}/${CRTSYS_WDK_NUGET_VERSION}"
+    FILENAME "${CRTSYS_WDK_NUGET_ID}.${CRTSYS_WDK_NUGET_VERSION}.nupkg"
+    SHA512 "${CRTSYS_WDK_NUGET_SHA512}"
+)
+vcpkg_extract_source_archive(
+    CRTSYS_WDK_NUGET_PATH
+    ARCHIVE "${CRTSYS_WDK_NUGET_ARCHIVE}"
+    NO_REMOVE_ONE_LEVEL
+)
 
-            get_filename_component(CRTSYS_ARCHITECTURE_NAME
-                "${CRTSYS_ARCHITECTURE_DIRECTORY}" NAME)
-            if(NOT CRTSYS_ARCHITECTURE_NAME STREQUAL CRTSYS_PACKAGE_ARCHITECTURE)
-                file(REMOVE_RECURSE "${CRTSYS_ARCHITECTURE_DIRECTORY}")
-            endif()
-        endforeach()
-    endforeach()
-endfunction()
+set(CRTSYS_WDK_ROOT
+    "${CURRENT_BUILDTREES_DIR}/windows-sdk-wdk-${CRTSYS_WDK_NUGET_ARCH}-${CRTSYS_WDK_NUGET_VERSION}"
+)
+file(REMOVE_RECURSE "${CRTSYS_WDK_ROOT}")
+file(MAKE_DIRECTORY "${CRTSYS_WDK_ROOT}")
+# Recreate NuGet's dependency overlay without invoking NuGet during a vcpkg
+# build: common SDK, architecture SDK libraries, then WDK additions.
+file(COPY "${CRTSYS_WINDOWS_SDK_NUGET_PATH}/c/" DESTINATION "${CRTSYS_WDK_ROOT}")
+file(COPY "${CRTSYS_WINDOWS_SDK_ARCH_NUGET_PATH}/c/" DESTINATION "${CRTSYS_WDK_ROOT}")
+file(COPY "${CRTSYS_WDK_NUGET_PATH}/c/" DESTINATION "${CRTSYS_WDK_ROOT}")
 
-crtsys_keep_package_architecture("${CURRENT_PACKAGES_DIR}/lib/native")
-crtsys_keep_package_architecture(
-    "${CURRENT_PACKAGES_DIR}/build/native/codecs/lib")
-crtsys_keep_package_architecture(
-    "${CURRENT_PACKAGES_DIR}/build/native/kernel-codecs/lib")
+if(NOT EXISTS "${CRTSYS_WDK_ROOT}/Include/${CRTSYS_WDK_CONTENT_VERSION}/shared/ntdef.h" OR
+   NOT EXISTS "${CRTSYS_WDK_ROOT}/Include/${CRTSYS_WDK_CONTENT_VERSION}/ucrt/stdlib.h" OR
+   NOT EXISTS "${CRTSYS_WDK_ROOT}/Include/${CRTSYS_WDK_CONTENT_VERSION}/km/ntddk.h" OR
+   NOT EXISTS "${CRTSYS_WDK_ROOT}/Lib/${CRTSYS_WDK_CONTENT_VERSION}/km/${CRTSYS_WDK_NUGET_ARCH}/ntoskrnl.lib")
+    message(FATAL_ERROR
+        "The Microsoft SDK/WDK NuGet packages do not form the expected ${CRTSYS_WDK_CONTENT_VERSION} layout."
+    )
+endif()
 
+set(ENV{WDKContentRoot} "${CRTSYS_WDK_ROOT}")
+message(STATUS
+    "BY USING THE MICROSOFT WINDOWS SDK/WDK NUGET PACKAGES ${CRTSYS_WDK_NUGET_VERSION}, "
+    "YOU ACCEPT THEIR TERMS: https://www.nuget.org/packages/${CRTSYS_WDK_NUGET_ID}/${CRTSYS_WDK_NUGET_VERSION}/License"
+)
+
+vcpkg_from_github(
+    OUT_SOURCE_PATH SOURCE_PATH
+    REPO ntoskrnl7/crtsys
+    REF "v${VERSION}"
+    SHA512 37acb5f8d0a047476bd96f9319db2f00d769dc9def4bfc9e2dbbee2ada33f5a4c1ecbbb8aff34a1094ffa9385b898f07ee3201b07b79a5caf62cf8344e6bd4f9
+    HEAD_REF main
+    PATCHES
+        fix-offline-source-build.patch
+)
+
+vcpkg_from_github(
+    OUT_SOURCE_PATH LDK_SOURCE_PATH
+    REPO ntoskrnl7/Ldk
+    REF v0.7.25
+    SHA512 196680723a2a175f2eb084476f52823717e7525dea10a95da62ee28a46f4400db9c65320176e5ce8b646b12f50c4a3281a5dcad6a5726c64a5cded763b020f0f
+)
+
+vcpkg_from_github(
+    OUT_SOURCE_PATH RAW_PDB_SOURCE_PATH
+    REPO MolecularMatters/raw_pdb
+    REF 43cc59b7037238ad84e1d5abe10711a06d998fa0
+    SHA512 04c7bd7d82598692069b7e371f90deb316dea450c1bafc1b1f6be06a392b3227c7fd547d24b22e77bc70ebdd13193c01a2f72ba26b6d0acfb14ac1398e1cac40
+)
+
+vcpkg_from_github(
+    OUT_SOURCE_PATH UCXXRT_SOURCE_PATH
+    REPO ntoskrnl7/ucxxrt
+    REF cfb00b2ad3595fa1f89a3b3a665fa742cf5aa1aa
+    SHA512 eaa472ca43457a356cbbb0a802e8119694c12dbacb173bd86b88c0286411b93cd67c07c389cc09ad52221804a2685e80100d61f6b70344c846cc0a04e871cf17
+)
+
+vcpkg_download_distfile(CPM_CMAKE
+    URLS "https://github.com/cpm-cmake/CPM.cmake/releases/download/v0.32.0/CPM.cmake"
+    FILENAME "CPM_0.32.0.cmake"
+    SHA512 7f18248e5fd3992a0752ce10009bc3862b34d29391db586f98979d5547bd910d9b4e558acaa7eb4965f0221782aac233731e54b0f1f45e18d9365564d4110eb1
+)
+set(CPM_SOURCE_CACHE "${CURRENT_BUILDTREES_DIR}/cpm-source-cache")
+file(MAKE_DIRECTORY "${CPM_SOURCE_CACHE}/cpm")
+file(COPY_FILE
+    "${CPM_CMAKE}"
+    "${CPM_SOURCE_CACHE}/cpm/CPM_0.32.0.cmake"
+)
+
+if(VCPKG_TARGET_ARCHITECTURE STREQUAL "arm64")
+    set(CRTSYS_TARGET_ARCHITECTURE ARM64)
+elseif(VCPKG_TARGET_ARCHITECTURE STREQUAL "x86" OR
+       VCPKG_TARGET_ARCHITECTURE STREQUAL "x64")
+    set(CRTSYS_TARGET_ARCHITECTURE "${VCPKG_TARGET_ARCHITECTURE}")
+else()
+    message(FATAL_ERROR "crtsys does not support ${VCPKG_TARGET_ARCHITECTURE}.")
+endif()
+
+vcpkg_cmake_configure(
+    SOURCE_PATH "${SOURCE_PATH}"
+    WINDOWS_USE_MSBUILD
+    DISABLE_PARALLEL_CONFIGURE
+    OPTIONS
+        "-DCRTSYS_LDK_SOURCE_DIR=${LDK_SOURCE_PATH}"
+        "-DCRTSYS_RAW_PDB_SOURCE_DIR=${RAW_PDB_SOURCE_PATH}"
+        "-DCRTSYS_UCXXRT_SOURCE_DIR=${UCXXRT_SOURCE_PATH}"
+        "-DCPM_SOURCE_CACHE=${CPM_SOURCE_CACHE}"
+        "-DCRTSYS_TARGET_ARCHITECTURE=${CRTSYS_TARGET_ARCHITECTURE}"
+        "-DCRTSYS_WDK_VERSION=${CRTSYS_WDK_CONTENT_VERSION}"
+        -DCRTSYS_ENABLE_INSTALL=ON
+        -DCRTSYS_BUILD_NTL_KERNEL_CONTENT_CODECS=OFF
+        -DCRTSYS_INSTALL_CMAKEDIR=share/crtsys
+    OPTIONS_RELEASE
+        -DCRTSYS_INSTALL_RELEASE_LIBDIR=lib/manual-link
+    OPTIONS_DEBUG
+        -DCRTSYS_INSTALL_DEBUG_LIBDIR=lib/manual-link
+)
+vcpkg_cmake_install()
+
+file(REMOVE_RECURSE
+    "${CURRENT_PACKAGES_DIR}/debug/include"
+    "${CURRENT_PACKAGES_DIR}/debug/share"
+)
+
+# Preserve the upstream Visual Studio property pages while the bridge selects
+# the standard vcpkg manual-link directories for the chosen triplet.
+file(INSTALL
+    "${SOURCE_PATH}/nuget/build/native/crtsys.props"
+    "${SOURCE_PATH}/nuget/build/native/crtsys.targets"
+    "${SOURCE_PATH}/nuget/build/native/crtsys.xml"
+    "${SOURCE_PATH}/nuget/build/native/crtsys-kmdf.xml"
+    DESTINATION "${CURRENT_PACKAGES_DIR}/build/native"
+)
 file(INSTALL "${CURRENT_PORT_DIR}/crtsys-vcpkg.targets"
-    DESTINATION "${CURRENT_PACKAGES_DIR}/share/crtsys/msbuild")
+    DESTINATION "${CURRENT_PACKAGES_DIR}/share/crtsys/msbuild"
+)
 file(INSTALL
     "${CURRENT_PORT_DIR}/tools/crtsys-vs-init.ps1"
     "${CURRENT_PORT_DIR}/tools/crtsys-vs-init.cmd"
-    DESTINATION "${CURRENT_PACKAGES_DIR}/tools/${PORT}")
+    DESTINATION "${CURRENT_PACKAGES_DIR}/tools/${PORT}"
+)
+
+if("msquic-headers" IN_LIST FEATURES)
+    vcpkg_from_github(
+        OUT_SOURCE_PATH MSQUIC_SOURCE_PATH
+        REPO microsoft/msquic
+        REF b3945bb0c9e44463c93dac13e40975a7c3a526ca
+        SHA512 3f3eb2d4d76a6246915df4abdc0588b27a2567409cc2e6fb250a9224563d65fe2c586e01ddea62d227e74f1cae9d47eb67df878a501cfe21c27a87a6988b662a
+    )
+    file(INSTALL
+        "${MSQUIC_SOURCE_PATH}/src/inc/msquic.h"
+        "${MSQUIC_SOURCE_PATH}/src/inc/msquic_winuser.h"
+        "${MSQUIC_SOURCE_PATH}/src/inc/msquic_winkernel.h"
+        DESTINATION "${CURRENT_PACKAGES_DIR}/share/crtsys/msquic/include"
+    )
+endif()
+
 file(INSTALL "${CURRENT_PORT_DIR}/usage"
-    DESTINATION "${CURRENT_PACKAGES_DIR}/share/${PORT}")
+    DESTINATION "${CURRENT_PACKAGES_DIR}/share/${PORT}"
+)
 file(INSTALL "${SOURCE_PATH}/README.md"
     DESTINATION "${CURRENT_PACKAGES_DIR}/share/${PORT}"
-    RENAME "readme.md")
+    RENAME "readme.md"
+)
 
 vcpkg_install_copyright(FILE_LIST
     "${SOURCE_PATH}/LICENSE"
     "${SOURCE_PATH}/docs/third-party-notices.md"
-    "${CURRENT_PORT_DIR}/ldk-copyright"
+    "${SOURCE_PATH}/include/ntl/deps/zpp/LICENSE"
+    "${SOURCE_PATH}/cmake/vendor/findwdk/LICENSE"
+    "${LDK_SOURCE_PATH}/LICENSE"
+    "${RAW_PDB_SOURCE_PATH}/LICENSE"
+    "${UCXXRT_SOURCE_PATH}/LICENSE"
 )
-
-# Debug and Release archives intentionally share crtsys' toolset-specific
-# lib/native tree. CrtSys.cmake and the MSBuild integration select the correct
-# configuration explicitly rather than relying on vcpkg autolinking.
-set(VCPKG_POLICY_MISMATCHED_NUMBER_OF_BINARIES enabled)
-
-# Ldk.lib retains /DEFAULTLIB directives from its MSVC compilation, but crtsys
-# consumes it only in a WDK kernel link where crtsys supplies the runtime and
-# the driver target is compiled with /MT. vcpkg's user-mode CRT inspection
-# therefore cannot classify this archive correctly.
-set(VCPKG_POLICY_SKIP_CRT_LINKAGE_CHECK enabled)

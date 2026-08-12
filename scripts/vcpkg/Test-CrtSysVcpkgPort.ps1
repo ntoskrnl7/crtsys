@@ -2,7 +2,6 @@ param(
   [ValidateSet(
     'x86-windows-static',
     'x64-windows-static',
-    'arm-windows-static',
     'arm64-windows-static'
   )]
   [string] $Triplet = 'x64-windows-static',
@@ -23,7 +22,7 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $portRoot = Join-Path $repoRoot 'vcpkg\ports\crtsys'
 $manifestPath = Join-Path $portRoot 'vcpkg.json'
 $portfilePath = Join-Path $portRoot 'portfile.cmake'
-$ldkCopyrightPath = Join-Path $portRoot 'ldk-copyright'
+$compatibilityPatchPath = Join-Path $portRoot 'fix-offline-source-build.patch'
 $bridgePath = Join-Path $portRoot 'crtsys-vcpkg.targets'
 $initScriptPath = Join-Path $portRoot 'tools\crtsys-vs-init.ps1'
 $initCommandPath = Join-Path $portRoot 'tools\crtsys-vs-init.cmd'
@@ -65,6 +64,27 @@ function Assert-FileContains {
   foreach ($token in $Tokens) {
     if (-not $content.Contains($token)) {
       throw "Expected '$Path' to contain '$token'."
+    }
+  }
+}
+
+function Assert-FileDoesNotContain {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string] $Path,
+
+    [Parameter(Mandatory = $true)]
+    [string[]] $Tokens
+  )
+
+  if (-not (Test-Path -LiteralPath $Path)) {
+    throw "Required file was not found: $Path"
+  }
+
+  $content = Get-Content -LiteralPath $Path -Raw
+  foreach ($token in $Tokens) {
+    if ($content.Contains($token)) {
+      throw "Expected '$Path' not to contain '$token'."
     }
   }
 }
@@ -129,7 +149,7 @@ function Resolve-MsBuildExecutable {
 foreach ($requiredPath in @(
   $manifestPath,
   $portfilePath,
-  $ldkCopyrightPath,
+  $compatibilityPatchPath,
   $bridgePath,
   $initScriptPath,
   $initCommandPath,
@@ -159,37 +179,80 @@ if ($manifest.name -ne 'crtsys') {
 if ($manifest.'version-semver' -ne $projectVersion) {
   throw "The vcpkg port version '$($manifest.'version-semver')' does not match crtsys '$projectVersion'."
 }
-if ($manifest.license -ne 'MIT AND BSD-2-Clause AND Zlib') {
+if ($manifest.license -ne 'MIT AND BSD-2-Clause AND BSD-3-Clause') {
   throw 'Expected the vcpkg port to declare all distributed licenses.'
 }
-foreach ($supportToken in @('windows', '!uwp', '!mingw', 'static', 'staticcrt')) {
+foreach ($feature in @('content-codecs', 'msquic-headers')) {
+  if (-not ($manifest.features.PSObject.Properties.Name -contains $feature)) {
+    throw "The vcpkg port is missing the optional '$feature' feature."
+  }
+}
+foreach ($supportToken in @(
+  'windows',
+  '!uwp',
+  '!mingw',
+  'static',
+  'staticcrt',
+  'x86',
+  'x64',
+  'arm64'
+)) {
   if (-not $manifest.supports.Contains($supportToken)) {
     throw "The vcpkg supports expression is missing '$supportToken'."
   }
 }
 
-Assert-FileContains -Path $portfilePath -Tokens @(
+$portfileTokens = @(
   'ONLY_STATIC_LIBRARY',
   'ONLY_STATIC_CRT',
-  'vcpkg_download_distfile',
-  'vcpkg_extract_source_archive',
-  'crtsys_keep_package_architecture',
+  'vcpkg_from_github',
+  'vcpkg_cmake_configure',
+  'WINDOWS_USE_MSBUILD',
+  'vcpkg_cmake_install',
+  'lib/manual-link',
   'crtsys-vcpkg.targets',
   'crtsys-vs-init.ps1',
   'crtsys-vs-init.cmd',
   'vcpkg_install_copyright',
   'requires Microsoft Visual Studio with the C++ workload',
+  'Microsoft.Windows.SDK.CPP',
+  'Microsoft.Windows.WDK.',
+  'WDKContentRoot',
+  'CRTSYS_WDK_VERSION',
+  '10.0.28000.2526',
   'docs/third-party-notices.md',
-  'ldk-copyright',
-  'VCPKG_POLICY_SKIP_CRT_LINKAGE_CHECK'
+  '${LDK_SOURCE_PATH}/LICENSE',
+  '${RAW_PDB_SOURCE_PATH}/LICENSE',
+  '${UCXXRT_SOURCE_PATH}/LICENSE'
 )
-Assert-FileContains -Path $ldkCopyrightPath -Tokens @(
-  'MIT License',
-  'Copyright (c) 2022 J.K Lee'
+if ([version]$projectVersion -lt [version]'0.1.42') {
+  $portfileTokens += 'fix-offline-source-build.patch'
+  Assert-FileContains -Path $compatibilityPatchPath -Tokens @(
+    'NOT CRTSYS_NATIVE_ARCH STREQUAL "ARM64" AND',
+    'target_link_libraries(crtsys PRIVATE WDK::NTOSKRNL)',
+    'target_link_options(crtsys PUBLIC "/INCLUDE:iscntrl")',
+    'list(APPEND _crtsys_prebuilt_link_libraries WDK::NTOSKRNL)',
+    'NOT _crtsys_driver_arch STREQUAL "ARM64"',
+    'target_link_options(${_target} PRIVATE "/INCLUDE:iscntrl")',
+    'src/custom/crt/ctype_arm64.c'
+  )
+}
+Assert-FileContains -Path $portfilePath -Tokens $portfileTokens
+if ([version]$projectVersion -ge [version]'0.1.42') {
+  Assert-FileDoesNotContain -Path $portfilePath -Tokens @(
+    'fix-offline-source-build.patch'
+  )
+}
+Assert-FileDoesNotContain -Path $portfilePath -Tokens @(
+  'prebuilt.zip',
+  'VCPKG_POLICY_SKIP_CRT_LINKAGE_CHECK',
+  'VCPKG_POLICY_MISMATCHED_NUMBER_OF_BINARIES'
 )
 Assert-FileContains -Path $bridgePath -Tokens @(
   '<CrtSysVcpkgIntegration>true</CrtSysVcpkgIntegration>',
   '<CrtSysRoot Condition=',
+  'debug\lib\manual-link',
+  'lib\manual-link',
   'build\native\crtsys.targets',
   'CrtSysValidateVcpkgBridge'
 )
@@ -197,7 +260,7 @@ Assert-FileContains -Path $usagePath -Tokens @(
   'find_package(crtsys CONFIG REQUIRED)',
   'crtsys_add_driver',
   'crtsys-vs-init',
-  'Reload Visual Studio'
+  'reload the'
 )
 Assert-FileContains -Path $initScriptPath -Tokens @(
   'VcpkgEnableManifest',
@@ -225,8 +288,7 @@ Assert-FileContains -Path $prepareOfficialPortPath -Tokens @(
   'x-add-version crtsys',
   'x-add-version --all',
   'x-ci-verify-versions',
-  'Official crtsys',
-  'ldk-copyright'
+  'Official crtsys'
 )
 Assert-FileContains -Path $officialConsumerTestPath -Tokens @(
   'crtsys-vs-init.cmd',
@@ -355,8 +417,8 @@ $architectureName = switch -Regex ($Triplet) {
 
 $requiredInstalledPaths = @(
   'include\ntl\driver',
-  'share\crtsys\cmake\crtsys-config.cmake',
-  'share\crtsys\cmake\CrtSys.cmake',
+  'share\crtsys\crtsys-config.cmake',
+  'share\crtsys\CrtSys.cmake',
   'share\crtsys\msbuild\crtsys-vcpkg.targets',
   'share\crtsys\usage',
   'share\crtsys\copyright',
@@ -365,9 +427,10 @@ $requiredInstalledPaths = @(
   'build\native\crtsys.targets',
   'build\native\crtsys.xml',
   'build\native\crtsys-kmdf.xml',
-  "lib\native\v143\$architectureName\Debug\crtsys.lib",
-  "lib\native\v143\$architectureName\Release\crtsys.lib",
-  "lib\native\v143\$architectureName\Release\Ldk.lib"
+  'debug\lib\manual-link\crtsys.lib',
+  'debug\lib\manual-link\Ldk.lib',
+  'lib\manual-link\crtsys.lib',
+  'lib\manual-link\Ldk.lib'
 )
 foreach ($relativePath in $requiredInstalledPaths) {
   $fullPath = Join-Path $packageRoot $relativePath
@@ -412,16 +475,6 @@ if ($LASTEXITCODE -ne 0) {
 foreach ($generatedPath in @($generatedPropsPath, $generatedTargetsPath)) {
   if (Test-Path -LiteralPath $generatedPath) {
     throw "Installed initializer left a generated file behind: $generatedPath"
-  }
-}
-
-$unexpectedArchitectures = @('x86', 'x64', 'ARM', 'ARM64') |
-  Where-Object { $_ -ne $architectureName }
-foreach ($unexpectedArchitecture in $unexpectedArchitectures) {
-  $unexpectedPath = Join-Path $packageRoot `
-    "lib\native\v143\$unexpectedArchitecture"
-  if (Test-Path -LiteralPath $unexpectedPath) {
-    throw "The vcpkg package retained an unrelated architecture: $unexpectedPath"
   }
 }
 

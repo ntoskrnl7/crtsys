@@ -1,20 +1,21 @@
 # crtsys vcpkg port
 
-This directory contains the first-party overlay port for the prebuilt crtsys
-release bundle. The port installs one target architecture, keeps the supported
-MSVC toolset variants, and exposes both supported consumption paths:
+This directory contains the first-party crtsys overlay port. The official port
+builds pinned source revisions with the selected Windows static-CRT triplet and
+installs its archives in vcpkg's `lib/manual-link` layout. It supports:
 
 - CMake through `find_package(crtsys CONFIG REQUIRED)` and
   `crtsys_add_driver(...)`.
-- Visual Studio/MSBuild through the existing crtsys entry-point property page.
+- Visual Studio/MSBuild through the crtsys driver-model property pages.
 
-The package is Windows/WDK-only and uses static libraries with the static MSVC
-runtime.
+Visual Studio with the C++ workload and a compatible Windows Driver Kit are
+required. The port never downloads dependencies while a consumer is being
+configured.
 
 ## Git registry
 
-Published versions can be consumed without a source checkout. Add this
-`vcpkg-configuration.json` next to the consumer manifest:
+Published versions can be consumed without a crtsys source checkout. Add this
+next to the consumer's `vcpkg.json`:
 
 ```json
 {
@@ -31,9 +32,8 @@ Published versions can be consumed without a source checkout. Add this
 }
 ```
 
-This minimal example disables the default registry. If the project has other
-vcpkg dependencies, keep its existing pinned default registry instead. Add the
-dependency to `vcpkg.json`:
+Keep an existing default registry if the project uses other vcpkg packages.
+The manifest dependency is:
 
 ```json
 {
@@ -43,28 +43,31 @@ dependency to `vcpkg.json`:
 }
 ```
 
-Then select a matching static-CRT triplet:
+Install with a static-CRT triplet:
 
 ```powershell
 vcpkg install --triplet=x64-windows-static
 ```
 
-## Overlay port
+For local port development, add
+`--overlay-ports=D:\path\to\crtsys\vcpkg\ports`.
 
-For local port development or a source checkout, select the overlay explicitly:
+## Optional features
 
-```powershell
-vcpkg install --triplet=x64-windows-static `
-  --overlay-ports=D:\path\to\crtsys\vcpkg\ports
+User-mode zlib and Brotli helpers are explicit vcpkg dependencies:
+
+```json
+"dependencies": [
+  { "name": "crtsys", "features": ["content-codecs"] }
+]
 ```
 
-Standalone vcpkg installations can also use classic mode with
-`vcpkg install crtsys:x64-windows-static --overlay-ports=...`.
+The pinned optional MsQuic public headers use the `msquic-headers` feature.
+Kernel-mode content codecs are not built from vcpkg's user-mode codec
+libraries; build crtsys from source when separately audited kernel codecs are
+required.
 
 ## CMake
-
-Configure the consumer with the vcpkg toolchain, then use the installed package
-normally:
 
 ```cmake
 find_package(crtsys CONFIG REQUIRED)
@@ -73,115 +76,46 @@ set(CRTSYS_NTL_MAIN ON)
 crtsys_add_driver(my_driver src/main.cpp)
 ```
 
-The existing model-specific forms remain available:
-
-```cmake
-crtsys_add_driver(my_kmdf KMDF 1.15 NTL src/main.cpp)
-crtsys_add_driver(my_filter MINIFILTER NTL src/main.cpp)
-crtsys_add_driver(my_wfp WFP NTL src/main.cpp)
-```
+The `KMDF`, `MINIFILTER`, `WFP`, and `NTL` options remain available.
 
 ## Visual Studio/MSBuild UI
 
-vcpkg's MSBuild integration adds installed include and library directories, but
-does not automatically import a port's package-specific property pages. After
-the first `vcpkg install`, run the initializer once from the manifest root:
-If user-wide vcpkg MSBuild integration is not enabled yet, first run
-`vcpkg integrate install` once.
+After the first manifest install, run the initializer once from the manifest
+root and reload the solution:
 
 ```powershell
-.\vcpkg_installed\x64-windows-static\tools\crtsys\crtsys-vs-init.cmd
+vcpkg env --tools --triplet=x64-windows-static "crtsys-vs-init.cmd"
 ```
 
-If this command is absent from the installation, the selected registry baseline
-predates the initializer. Update to a baseline that publishes the tool, or use
-the manual setup below.
+The initializer preserves existing `Directory.Build.props` and
+`Directory.Build.targets`, is idempotent, and can be removed with
+`crtsys-vs-init.cmd -Remove`. The **No NTL entry point**, **NTL WDM**,
+**NTL KMDF**, **NTL Minifilter**, and **NTL WFP** property-page choices are
+installed with the port. NuGet remains the zero-initializer Visual Studio path.
 
-The command enables the manifest, selects a static-CRT triplet, and adds the
-crtsys bridge while preserving other content in `Directory.Build.props` and
-`Directory.Build.targets`. Repeated runs are idempotent. A different default
-triplet can be selected, and the generated integration can be removed:
+## Validation and publishing
 
-```powershell
-.\vcpkg_installed\x64-windows-static\tools\crtsys\crtsys-vs-init.cmd `
-  -Triplet arm64-windows-static
-
-.\vcpkg_installed\x64-windows-static\tools\crtsys\crtsys-vs-init.cmd -Remove
-```
-
-Reload the Visual Studio solution after the first install and initialization so
-MSBuild reevaluates the new import. The existing **No NTL entry point**,
-**NTL WDM**, **NTL KMDF**,
-**NTL Minifilter**, and **NTL WFP** selections then behave exactly as they do
-for the NuGet package.
-
-For manual setup, the installed
-`share/crtsys/msbuild/crtsys-vcpkg.targets` bridge can still be imported from
-`Directory.Build.targets` directly.
-
-NuGet remains the zero-import Visual Studio installation path. The vcpkg bridge
-exists for repositories that standardize dependency restoration on a vcpkg
-manifest while still requiring the crtsys WDK property UI.
-
-## Validation
-
-The contract-only check is fast and does not download a release:
+The fast contract check is:
 
 ```powershell
 ./scripts/vcpkg/Test-CrtSysVcpkgPort.ps1 -ContractOnly
 ```
 
-The full check installs the overlay port and evaluates the MSBuild UI contract:
+The full check builds the source port and validates the MSBuild UI:
 
 ```powershell
-./scripts/vcpkg/Test-CrtSysVcpkgPort.ps1 `
-  -Triplet x64-windows-static
+./scripts/vcpkg/Test-CrtSysVcpkgPort.ps1 -Triplet x64-windows-static
 ```
 
-Tagged release workflows update the overlay manifest version during release
-preparation. After the validated GitHub Release asset is uploaded, the Package
-workflow computes its SHA-512, publishes the port and versions database to the
-`vcpkg-registry` branch, and synchronizes the source overlay and documented
-baseline on `main`.
-
-The underlying maintenance commands are also available for local recovery or
-validation:
+After publishing a stable tag, update the source hash with the tag archive:
 
 ```powershell
 ./scripts/vcpkg/Update-CrtSysVcpkgPort.ps1 `
-  -Version <version> -ArchivePath <prebuilt-zip>
-
-./scripts/vcpkg/Publish-CrtSysVcpkgRegistry.ps1 `
-  -Version <version> `
-  -ArchivePath <prebuilt-zip> `
-  -SourcePortDirectory ./vcpkg/ports/crtsys `
-  -RegistryDirectory <registry-worktree>
+  -Version <version> -SourceArchivePath <source-tarball>
 ```
 
-Publishing rejects attempts to rewrite an existing version or move the
-registry baseline backwards.
-
-## Updating the official microsoft/vcpkg port
-
-The separate **Update official vcpkg** workflow is intentionally manual. Run it
-only after the matching stable GitHub Release and
-`crtsys-<version>-prebuilt.zip` asset have been published:
-
-1. Open **Actions** and select **Update official vcpkg**.
-2. Enter the numeric release version without the `v` prefix.
-3. Choose `validate` to prepare the official port, regenerate its versions
-   database, install it without a binary cache, and test both CMake and Visual
-   Studio consumers without pushing anything.
-4. For later releases, choose `submit` to perform the same checks, update the
-   `ntoskrnl7/vcpkg` fork branch, and create or update the microsoft/vcpkg pull
-   request.
-
-`submit` requires the repository Actions secret `VCPKG_UPSTREAM_TOKEN`. Use a
-GitHub token owned by a maintainer that can write to the `ntoskrnl7/vcpkg` fork
-and create a public pull request. The workflow never merges the upstream pull
-request; microsoft/vcpkg review and CI approval remain required.
-
-Until the initial crtsys port pull request is merged, use `validate` only. Once
-the port exists on microsoft/vcpkg `master`, future released versions can use
-`submit` directly. Re-running `submit` for the same pending version safely
-updates the same fork branch and pull request instead of creating duplicates.
+The manual **Update official vcpkg** workflow validates the stable tag,
+regenerates the versions database, builds the port from source without a binary
+cache, and tests CMake and Visual Studio consumers. `validate` has no external
+side effects; `submit` pushes the fork branch and creates or updates a PR.
+Official microsoft/vcpkg review and CI approval are still required.

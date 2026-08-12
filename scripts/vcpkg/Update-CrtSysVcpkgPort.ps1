@@ -3,7 +3,7 @@ param(
   [ValidatePattern('^\d+\.\d+\.\d+$')]
   [string] $Version,
 
-  [string] $ArchivePath,
+  [string] $SourceArchivePath,
 
   [string] $PortDirectory,
 
@@ -76,20 +76,51 @@ $manifestContent = Replace-RequiredPattern `
   -Description 'version-semver field in the crtsys vcpkg manifest'
 Set-Utf8Content -Path $manifestPath -Content $manifestContent
 
-$archiveSha512 = $null
-if (-not [string]::IsNullOrWhiteSpace($ArchivePath)) {
-  $ArchivePath = (Resolve-Path -LiteralPath $ArchivePath).Path
-  $archiveSha512 = (Get-FileHash -LiteralPath $ArchivePath -Algorithm SHA512).Hash.ToLowerInvariant()
+# 0.1.41 predates the source-build/offline-consumer fixes and carries them as
+# a compatibility patch in the initial official port. Starting with 0.1.42 the
+# same changes are upstream, so applying the patch again would fail.
+if ([version]$Version -ge [version]'0.1.42') {
+  $compatibilityPatchPath = Join-Path `
+    $PortDirectory `
+    'fix-offline-source-build.patch'
+  $portfileContent = Get-Content `
+    -LiteralPath $portfilePath `
+    -Raw `
+    -Encoding UTF8
+  $patchPattern = '(?m)\r?\n\s*PATCHES\s*\r?\n\s*fix-offline-source-build\.patch\s*'
+  $patchMatches = @([regex]::Matches($portfileContent, $patchPattern))
+  if ($patchMatches.Count -gt 1) {
+    throw "Expected at most one compatibility PATCHES block, found $($patchMatches.Count)."
+  }
+  if ($patchMatches.Count -eq 1) {
+    $portfileContent = [regex]::Replace(
+      $portfileContent,
+      $patchPattern,
+      [Environment]::NewLine,
+      1)
+    Set-Utf8Content -Path $portfilePath -Content $portfileContent
+  }
+  if (Test-Path -LiteralPath $compatibilityPatchPath) {
+    Remove-Item -LiteralPath $compatibilityPatchPath -Force
+  }
+}
+
+$sourceArchiveSha512 = $null
+if (-not [string]::IsNullOrWhiteSpace($SourceArchivePath)) {
+  $SourceArchivePath = (Resolve-Path -LiteralPath $SourceArchivePath).Path
+  $sourceArchiveSha512 = (
+    Get-FileHash -LiteralPath $SourceArchivePath -Algorithm SHA512
+  ).Hash.ToLowerInvariant()
 
   $portfileContent = Get-Content -LiteralPath $portfilePath -Raw -Encoding UTF8
   $portfileContent = Replace-RequiredPattern `
     -Content $portfileContent `
-    -Pattern '(?ms)(SHA512\s+)([0-9a-fA-F]{128})(\s*\))' `
+    -Pattern '(?ms)(vcpkg_from_github\(\s*OUT_SOURCE_PATH\s+SOURCE_PATH.*?REPO\s+ntoskrnl7/crtsys.*?SHA512\s+)([0-9a-fA-F]{128})' `
     -Evaluator {
       param($match)
-      return $match.Groups[1].Value + $archiveSha512 + $match.Groups[3].Value
+      return $match.Groups[1].Value + $sourceArchiveSha512
     } `
-    -Description 'SHA512 field in the crtsys portfile'
+    -Description 'crtsys source SHA512 field in the portfile'
   Set-Utf8Content -Path $portfilePath -Content $portfileContent
 }
 
@@ -136,8 +167,8 @@ if (-not [string]::IsNullOrWhiteSpace($RegistryBaseline)) {
 }
 
 Write-Host "Updated crtsys vcpkg port to version $Version at $PortDirectory."
-if ($null -ne $archiveSha512) {
-  Write-Host "Release archive SHA-512: $archiveSha512"
+if ($null -ne $sourceArchiveSha512) {
+  Write-Host "Source archive SHA-512: $sourceArchiveSha512"
 }
 if (-not [string]::IsNullOrWhiteSpace($RegistryBaseline)) {
   Write-Host "Updated documented registry baseline to $($RegistryBaseline.ToLowerInvariant())."
@@ -145,7 +176,7 @@ if (-not [string]::IsNullOrWhiteSpace($RegistryBaseline)) {
 
 [pscustomobject]@{
   Version = $Version
-  ArchiveSha512 = $archiveSha512
+  SourceArchiveSha512 = $sourceArchiveSha512
   RegistryBaseline = if ([string]::IsNullOrWhiteSpace($RegistryBaseline)) {
     $null
   } else {

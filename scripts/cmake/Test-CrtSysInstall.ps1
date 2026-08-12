@@ -12,6 +12,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot '..\nuget\CrtSysCoffDirectiveContract.ps1')
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 
@@ -38,6 +39,8 @@ $buildDirectory = Join-Path $WorkDirectory 'build'
 $installDirectory = Join-Path $WorkDirectory 'prefix'
 $consumerSourceDirectory = Join-Path $repoRoot 'test\cmake\install-consumer'
 $installConsumerBuildDirectory = Join-Path $WorkDirectory 'install-consumer-build'
+$offlineConsumerSourceDirectory = Join-Path $repoRoot 'test\cmake\offline-consumer'
+$offlineConsumerBuildDirectory = Join-Path $WorkDirectory 'offline-consumer-build'
 
 Remove-Item -Recurse -Force -Path $WorkDirectory -ErrorAction SilentlyContinue
 
@@ -103,6 +106,72 @@ function Invoke-CrtSysConsumerBuild {
   }
 
   Write-Host "$Label passed: $driverPath; $kernelMsQuicDriverPath; $httpTransformPath"
+}
+
+function Invoke-CrtSysOfflineConsumerBuild {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string] $PackageRoot,
+
+    [Parameter(Mandatory = $true)]
+    [string] $BuildDirectory
+  )
+
+  $cmakePrefix = $PackageRoot.Replace('\', '/')
+  $configureArgs = @(
+    '-S', $offlineConsumerSourceDirectory,
+    '-B', $BuildDirectory,
+    '-G', 'Visual Studio 17 2022',
+    '-A', $generatorPlatform,
+    '-T', 'host=x64',
+    "-DCRTSYS_PACKAGE_ROOT:PATH=$cmakePrefix",
+    "-DCRTSYS_WDK_VERSION:STRING=$WindowsSdkVersion",
+    "-DLDK_WDK_VERSION:STRING=$WindowsSdkVersion",
+    "-DCMAKE_SYSTEM_VERSION:STRING=$WindowsSdkVersion",
+    "-DCMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION:STRING=$WindowsSdkVersion",
+    '-DFETCHCONTENT_FULLY_DISCONNECTED:BOOL=ON',
+    '-DCPM_LOCAL_PACKAGES_ONLY:BOOL=ON'
+  )
+
+  $proxyVariables = @('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY')
+  $previousProxyValues = @{}
+  foreach ($proxyVariable in $proxyVariables) {
+    $previousProxyValues[$proxyVariable] = [Environment]::GetEnvironmentVariable(
+        $proxyVariable, 'Process')
+    $proxyValue = if ($proxyVariable -eq 'NO_PROXY') {
+      ''
+    } else {
+      'http://127.0.0.1:1'
+    }
+    [Environment]::SetEnvironmentVariable($proxyVariable, $proxyValue, 'Process')
+  }
+
+  try {
+    Write-Host 'Configuring installed crtsys consumer with network access disabled'
+    & cmake @configureArgs
+    if ($LASTEXITCODE -ne 0) {
+      throw "Offline consumer configure failed with exit code $LASTEXITCODE."
+    }
+
+    Write-Host 'Building installed crtsys consumer with network access disabled'
+    & cmake --build $BuildDirectory --config $Configuration --target `
+        crtsys_offline_consumer --parallel
+    if ($LASTEXITCODE -ne 0) {
+      throw "Offline consumer build failed with exit code $LASTEXITCODE."
+    }
+  } finally {
+    foreach ($proxyVariable in $proxyVariables) {
+      [Environment]::SetEnvironmentVariable(
+          $proxyVariable, $previousProxyValues[$proxyVariable], 'Process')
+    }
+  }
+
+  $driverPath = Join-Path $BuildDirectory "$Configuration\crtsys_offline_consumer.sys"
+  if (-not (Test-Path $driverPath)) {
+    throw "Offline consumer driver was not produced: $driverPath"
+  }
+
+  Write-Host "Offline installed crtsys consumer passed: $driverPath"
 }
 
 $configureArgs = @(
@@ -201,6 +270,10 @@ foreach ($requiredPath in @(
   "include\.internal\adjust_link_order",
   "share\crtsys\cmake\crtsys-config.cmake",
   "share\crtsys\cmake\CrtSys.cmake",
+  "share\crtsys\cmake\FindWDK.cmake",
+  "share\crtsys\cmake\vendor\findwdk\cmake\FindWdk.cmake",
+  "share\crtsys\cmake\vendor\findwdk\LICENSE",
+  "share\crtsys\cmake\vendor\findwdk\REVISION.txt",
   "share\crtsys\cmake\NtlContentCodecs.cmake",
   "share\crtsys\cmake\NtlMsQuic.cmake",
   "lib\native\v143\$Architecture\$Configuration\crtsys.lib",
@@ -211,6 +284,28 @@ foreach ($requiredPath in @(
     throw "Installed crtsys tree is missing expected file: $fullPath"
   }
 }
+
+foreach ($libraryName in @('crtsys.lib', 'Ldk.lib')) {
+  Assert-CrtSysStaticCrtDirectives `
+    -LibraryPath (Join-Path $installDirectory (
+        "lib\native\v143\$Architecture\$Configuration\$libraryName")) `
+    -Configuration $Configuration
+}
+
+$installedCrtSysCMake = Get-Content -Raw -LiteralPath (
+  Join-Path $installDirectory 'share\crtsys\cmake\CrtSys.cmake')
+foreach ($forbiddenPattern in @(
+    'file(DOWNLOAD',
+    'CRTSYS_CPM_DOWNLOAD_URL',
+    'gh:ntoskrnl7/FindWDK#master')) {
+  if ($installedCrtSysCMake.Contains($forbiddenPattern)) {
+    throw "Installed CrtSys.cmake contains a consumer-time network dependency: $forbiddenPattern"
+  }
+}
+
+Invoke-CrtSysOfflineConsumerBuild `
+  -PackageRoot $installDirectory `
+  -BuildDirectory $offlineConsumerBuildDirectory
 
 Invoke-CrtSysConsumerBuild `
   -PackageRoot $installDirectory `

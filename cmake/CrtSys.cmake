@@ -31,7 +31,10 @@ else()
 endif()
 
 if(NOT DEFINED CRTSYS_USE_PREBUILT)
-    if(NOT TARGET crtsys AND EXISTS "${_CRTSYS_ROOT}/lib/native")
+    if(NOT TARGET crtsys AND
+       (EXISTS "${_CRTSYS_ROOT}/lib/native" OR
+        EXISTS "${_CRTSYS_ROOT}/lib/manual-link" OR
+        EXISTS "${_CRTSYS_ROOT}/debug/lib/manual-link"))
         set(CRTSYS_USE_PREBUILT ON)
     else()
         set(CRTSYS_USE_PREBUILT OFF)
@@ -191,82 +194,16 @@ string(REGEX REPLACE "/RTC(su|[1su])" "" CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FL
 string(REGEX REPLACE "/RTC(su|[1su])" "" CMAKE_CXX_FLAGS_MINSIZEREL "${CMAKE_CXX_FLAGS_MINSIZEREL}")
 string(REGEX REPLACE "/RTC(su|[1su])" "" CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO}")
 
-#---------------------------------------------------------------------------------------------------
-# include("${CMAKE_CURRENT_LIST_DIR}/CPM.cmake")
-
-set(CPM_DOWNLOAD_VERSION 0.32.0)
-
-if(CPM_SOURCE_CACHE)
-  # Expand relative path. This is important if the provided path contains a tilde (~)
-  get_filename_component(CPM_SOURCE_CACHE ${CPM_SOURCE_CACHE} ABSOLUTE)
-  set(CPM_DOWNLOAD_LOCATION "${CPM_SOURCE_CACHE}/cpm/CPM_${CPM_DOWNLOAD_VERSION}.cmake")
-elseif(DEFINED ENV{CPM_SOURCE_CACHE})
-  set(CPM_DOWNLOAD_LOCATION "$ENV{CPM_SOURCE_CACHE}/cpm/CPM_${CPM_DOWNLOAD_VERSION}.cmake")
-else()
-  set(CPM_DOWNLOAD_LOCATION "${CMAKE_BINARY_DIR}/cmake/CPM_${CPM_DOWNLOAD_VERSION}.cmake")
-endif()
-
-set(CRTSYS_CPM_DOWNLOAD_URL "https://github.com/cpm-cmake/CPM.cmake/releases/download/v${CPM_DOWNLOAD_VERSION}/CPM.cmake")
-
-function(crtsys_validate_cpm_download cpm_path out_var)
-    set(cpm_is_valid FALSE)
-    if(EXISTS "${cpm_path}")
-        file(READ "${cpm_path}" cpm_download_content LIMIT 1048576)
-        string(FIND "${cpm_download_content}" "CPMAddPackage" cpm_add_package_index)
-        if(NOT cpm_add_package_index EQUAL -1)
-            set(cpm_is_valid TRUE)
-        endif()
-    endif()
-
-    set("${out_var}" "${cpm_is_valid}" PARENT_SCOPE)
-endfunction()
-
-function(crtsys_download_cpm cpm_url cpm_path)
-    message(STATUS "Downloading CPM.cmake to ${cpm_path}")
-    get_filename_component(CPM_DOWNLOAD_DIRECTORY "${cpm_path}" DIRECTORY)
-    file(MAKE_DIRECTORY "${CPM_DOWNLOAD_DIRECTORY}")
-    file(DOWNLOAD
-        "${cpm_url}"
-        "${cpm_path}"
-        STATUS CPM_DOWNLOAD_STATUS
-        LOG CPM_DOWNLOAD_LOG
-        TLS_VERIFY ON
-    )
-    list(GET CPM_DOWNLOAD_STATUS 0 CPM_DOWNLOAD_STATUS_CODE)
-    list(GET CPM_DOWNLOAD_STATUS 1 CPM_DOWNLOAD_STATUS_MESSAGE)
-    if(NOT CPM_DOWNLOAD_STATUS_CODE EQUAL 0)
-        message(FATAL_ERROR "Failed to download CPM.cmake: ${CPM_DOWNLOAD_STATUS_MESSAGE}\n${CPM_DOWNLOAD_LOG}")
-    endif()
-endfunction()
-
-crtsys_validate_cpm_download("${CPM_DOWNLOAD_LOCATION}" CPM_DOWNLOAD_VALID)
-if(NOT CPM_DOWNLOAD_VALID)
-    if(EXISTS "${CPM_DOWNLOAD_LOCATION}")
-        message(WARNING "Existing CPM.cmake does not look valid; re-downloading ${CPM_DOWNLOAD_LOCATION}")
-        file(REMOVE "${CPM_DOWNLOAD_LOCATION}")
-    endif()
-
-    crtsys_download_cpm("${CRTSYS_CPM_DOWNLOAD_URL}" "${CPM_DOWNLOAD_LOCATION}")
-    crtsys_validate_cpm_download("${CPM_DOWNLOAD_LOCATION}" CPM_DOWNLOAD_VALID)
-    if(NOT CPM_DOWNLOAD_VALID)
-        message(FATAL_ERROR "Downloaded CPM.cmake does not contain CPMAddPackage: ${CPM_DOWNLOAD_LOCATION}")
-    endif()
-endif()
-
-include("${CPM_DOWNLOAD_LOCATION}")
-if(NOT COMMAND CPMAddPackage)
-    message(FATAL_ERROR "Downloaded CPM.cmake did not define CPMAddPackage: ${CPM_DOWNLOAD_LOCATION}")
-endif()
-#---------------------------------------------------------------------------------------------------
-
-
-
-CPMAddPackage("gh:ntoskrnl7/FindWDK#master")
-list(APPEND CMAKE_MODULE_PATH "${FindWDK_SOURCE_DIR}/cmake")
+# FindWDK is vendored at a pinned upstream revision under
+# cmake/vendor/findwdk. The crtsys package must remain fully usable without
+# downloading build helpers while a consumer runs find_package(crtsys).
 find_package(WDK REQUIRED)
 
 function(crtsys_get_prebuilt_arch _out_arch)
-    if("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "x64")
+    if(DEFINED CRTSYS_TARGET_ARCHITECTURE AND
+       NOT "${CRTSYS_TARGET_ARCHITECTURE}" STREQUAL "")
+        set(_arch "${CRTSYS_TARGET_ARCHITECTURE}")
+    elseif("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "x64")
         set(_arch x64)
     elseif("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "ARM64")
         set(_arch ARM64)
@@ -274,8 +211,31 @@ function(crtsys_get_prebuilt_arch _out_arch)
         set(_arch ARM)
     elseif("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "Win32")
         set(_arch x86)
+    elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(ARM64|arm64|aarch64)$")
+        set(_arch ARM64)
+    elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(ARM|arm)$")
+        set(_arch ARM)
+    elseif(CMAKE_SIZEOF_VOID_P EQUAL 8)
+        set(_arch x64)
+    elseif(CMAKE_SIZEOF_VOID_P EQUAL 4)
+        set(_arch x86)
     else()
-        message(FATAL_ERROR "Unsupported crtsys prebuilt platform: ${CMAKE_VS_PLATFORM_NAME}")
+        message(FATAL_ERROR
+            "Unable to determine the crtsys target architecture. Set "
+            "CRTSYS_TARGET_ARCHITECTURE to x86, x64, ARM, or ARM64.")
+    endif()
+
+    string(TOLOWER "${_arch}" _arch_lower)
+    if(_arch_lower STREQUAL "win32" OR _arch_lower STREQUAL "x86")
+        set(_arch x86)
+    elseif(_arch_lower STREQUAL "x64" OR _arch_lower STREQUAL "amd64")
+        set(_arch x64)
+    elseif(_arch_lower STREQUAL "arm")
+        set(_arch ARM)
+    elseif(_arch_lower STREQUAL "arm64" OR _arch_lower STREQUAL "aarch64")
+        set(_arch ARM64)
+    else()
+        message(FATAL_ERROR "Unsupported crtsys target architecture: ${_arch}")
     endif()
 
     set(${_out_arch} "${_arch}" PARENT_SCOPE)
@@ -298,14 +258,24 @@ function(crtsys_get_prebuilt_toolset _out_toolset)
 endfunction()
 
 function(crtsys_get_prebuilt_library _out_path _library _configuration)
-    crtsys_get_prebuilt_arch(_arch)
-    crtsys_get_prebuilt_toolset(_toolset)
-
     if("${_configuration}" STREQUAL "Debug")
         set(_config_dir Debug)
+        set(_standard_library
+            "${_CRTSYS_ROOT}/debug/lib/manual-link/${_library}")
     else()
         set(_config_dir Release)
+        set(_standard_library
+            "${_CRTSYS_ROOT}/lib/manual-link/${_library}")
     endif()
+
+    file(TO_CMAKE_PATH "${_standard_library}" _standard_library)
+    if(EXISTS "${_standard_library}")
+        set(${_out_path} "${_standard_library}" PARENT_SCOPE)
+        return()
+    endif()
+
+    crtsys_get_prebuilt_arch(_arch)
+    crtsys_get_prebuilt_toolset(_toolset)
 
     set(_has_toolset_layout FALSE)
     foreach(_known_toolset v142 v143 v145)
@@ -409,10 +379,10 @@ function(crtsys_apply_prebuilt_driver_interface _target)
     crtsys_get_prebuilt_library(_ldk_release Ldk.lib Release)
 
     if((_crtsys_debug AND NOT _ldk_debug) OR (_ldk_debug AND NOT _crtsys_debug))
-        message(FATAL_ERROR "The crtsys Debug prebuilt library pair is incomplete under ${_CRTSYS_ROOT}/lib/native.")
+        message(FATAL_ERROR "The crtsys Debug library pair is incomplete under ${_CRTSYS_ROOT}.")
     endif()
     if((_crtsys_release AND NOT _ldk_release) OR (_ldk_release AND NOT _crtsys_release))
-        message(FATAL_ERROR "The crtsys Release prebuilt library pair is incomplete under ${_CRTSYS_ROOT}/lib/native.")
+        message(FATAL_ERROR "The crtsys Release library pair is incomplete under ${_CRTSYS_ROOT}.")
     endif()
 
     if(_crtsys_debug AND _crtsys_release)
@@ -428,8 +398,22 @@ function(crtsys_apply_prebuilt_driver_interface _target)
         set(_crtsys_prebuilt_link_libraries
             "${_crtsys_release}" "${_ldk_release}")
     else()
-        crtsys_get_prebuilt_toolset(_toolset)
-        message(FATAL_ERROR "No crtsys prebuilt libraries were found under ${_CRTSYS_ROOT}/lib/native for ${_toolset}/${CMAKE_VS_PLATFORM_NAME}.")
+        message(FATAL_ERROR
+            "No crtsys libraries were found in the standard manual-link "
+            "directories or the legacy native layout under ${_CRTSYS_ROOT}.")
+    endif()
+
+    crtsys_get_prebuilt_arch(_crtsys_target_arch)
+    # Keep the ARM64 kernel import after Ldk. WDK 10.0.26100 packages wcslen
+    # and wcsnlen in one libcntpr member, while ntoskrnl already exports both.
+    # Resolving Ldk's reference here avoids pulling the conflicting member.
+    if(_crtsys_target_arch STREQUAL "ARM64")
+        if(NOT TARGET WDK::NTOSKRNL)
+            message(FATAL_ERROR "WDK::NTOSKRNL is required for ARM64 crtsys prebuilt driver support.")
+        endif()
+        list(APPEND _crtsys_prebuilt_link_libraries WDK::NTOSKRNL)
+        target_link_options(
+            ${_target} ${_usage_requirement_scope} "/INCLUDE:iscntrl")
     endif()
 
     foreach(_required_target IN ITEMS WDK::CNG WDK::AUX_KLIB WDK::WDMSEC)
@@ -461,13 +445,17 @@ function(crtsys_apply_prebuilt_driver_interface _target)
         ${_target} ${_usage_requirement_scope}
         "$<$<COMPILE_LANGUAGE:C,CXX>:/MT>")
 
-    if(CRTSYS_USE_LIBCNTPR)
+    if(CRTSYS_USE_LIBCNTPR AND
+       NOT _crtsys_target_arch STREQUAL "ARM64")
         target_compile_definitions(
             ${_target} ${_usage_requirement_scope} CRTSYS_USE_LIBCNTPR)
         target_link_options(
             ${_target} ${_usage_requirement_scope} "/FORCE:MULTIPLE")
+    elseif(CRTSYS_USE_LIBCNTPR)
+        target_compile_definitions(
+            ${_target} ${_usage_requirement_scope} CRTSYS_USE_LIBCNTPR)
     endif()
-    if("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "Win32")
+    if(_crtsys_target_arch STREQUAL "x86")
         target_link_options(
             ${_target} ${_usage_requirement_scope} "/SAFESEH:NO")
     endif()
@@ -688,8 +676,12 @@ function(crtsys_add_driver _target)
         # A source-tree consumer needs the same libcntpr duplicate-symbol
         # policy as a prebuilt-package consumer. Link options placed on the
         # static crtsys archive are not applied by every WDK generator path.
-        if(CRTSYS_USE_LIBCNTPR)
+        crtsys_get_prebuilt_arch(_crtsys_driver_arch)
+        if(CRTSYS_USE_LIBCNTPR AND
+           NOT _crtsys_driver_arch STREQUAL "ARM64")
             target_link_options(${_target} PRIVATE "/FORCE:MULTIPLE")
+        elseif(_crtsys_driver_arch STREQUAL "ARM64")
+            target_link_options(${_target} PRIVATE "/INCLUDE:iscntrl")
         endif()
         if(NOT TARGET WDK::WDMSEC)
             message(FATAL_ERROR "WDK::WDMSEC is required for secure NTL control devices.")

@@ -43,7 +43,7 @@ Remove-Item -LiteralPath $WorkDirectory -Recurse -Force -ErrorAction SilentlyCon
 New-Item -ItemType Directory -Force -Path $WorkDirectory | Out-Null
 
 $registryDirectory = Join-Path $WorkDirectory 'registry'
-$archivePath = Join-Path $WorkDirectory 'dummy-prebuilt.zip'
+$archivePath = Join-Path $WorkDirectory 'dummy-source.tar.gz'
 New-Item -ItemType Directory -Force -Path $registryDirectory | Out-Null
 [System.IO.File]::WriteAllBytes(
   $archivePath,
@@ -124,7 +124,7 @@ Invoke-Git @(
 Invoke-Git @('-C', $registryDirectory, 'commit', '-m', 'Initialize test registry')
 
 $commonArguments = @{
-  ArchivePath = $archivePath
+  SourceArchivePath = $archivePath
   SourcePortDirectory = $sourcePortDirectory
   RegistryDirectory = $registryDirectory
 }

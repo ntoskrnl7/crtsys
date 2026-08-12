@@ -4,7 +4,7 @@ param(
   [string] $Version,
 
   [Parameter(Mandatory = $true)]
-  [string] $ReleaseArchivePath,
+  [string] $SourceArchivePath,
 
   [Parameter(Mandatory = $true)]
   [string] $VcpkgRepositoryDirectory,
@@ -25,14 +25,14 @@ if ([string]::IsNullOrWhiteSpace($SourcePortDirectory)) {
   $SourcePortDirectory = Join-Path $repoRoot 'vcpkg\ports\crtsys'
 }
 
-$ReleaseArchivePath = (Resolve-Path -LiteralPath $ReleaseArchivePath).Path
+$SourceArchivePath = (Resolve-Path -LiteralPath $SourceArchivePath).Path
 $VcpkgRepositoryDirectory = (
   Resolve-Path -LiteralPath $VcpkgRepositoryDirectory
 ).Path
 $SourcePortDirectory = (Resolve-Path -LiteralPath $SourcePortDirectory).Path
 
 foreach ($requiredPath in @(
-  $ReleaseArchivePath,
+  $SourceArchivePath,
   $VcpkgRepositoryDirectory,
   $SourcePortDirectory,
   $updatePortScript,
@@ -40,8 +40,7 @@ foreach ($requiredPath in @(
   (Join-Path $VcpkgRepositoryDirectory 'ports'),
   (Join-Path $VcpkgRepositoryDirectory 'versions\baseline.json'),
   (Join-Path $SourcePortDirectory 'vcpkg.json'),
-  (Join-Path $SourcePortDirectory 'portfile.cmake'),
-  (Join-Path $SourcePortDirectory 'ldk-copyright')
+  (Join-Path $SourcePortDirectory 'portfile.cmake')
 )) {
   if (-not (Test-Path -LiteralPath $requiredPath)) {
     throw "Required official vcpkg update input was not found: $requiredPath"
@@ -93,7 +92,7 @@ Copy-Item -LiteralPath $SourcePortDirectory `
 
 & $updatePortScript `
   -Version $Version `
-  -ArchivePath $ReleaseArchivePath `
+  -SourceArchivePath $SourceArchivePath `
   -PortDirectory $targetPortFullPath | Out-Host
 
 $manifestPath = Join-Path $targetPortFullPath 'vcpkg.json'
@@ -158,14 +157,14 @@ if ($versionEntries.Count -ne 1) {
 
 $updatedManifest = Get-Content -LiteralPath $manifestPath -Raw |
   ConvertFrom-Json
-$archiveSha512 = (
-  Get-FileHash -LiteralPath $ReleaseArchivePath -Algorithm SHA512
+$sourceArchiveSha512 = (
+  Get-FileHash -LiteralPath $SourceArchivePath -Algorithm SHA512
 ).Hash.ToLowerInvariant()
 
 [pscustomobject]@{
   Version = $Version
   PreviousVersion = $existingVersion
-  ArchiveSha512 = $archiveSha512
+  SourceArchiveSha512 = $sourceArchiveSha512
   GitTree = [string]$versionEntries[0].'git-tree'
   PortDirectory = $targetPortFullPath
   ManifestLicense = [string]$updatedManifest.license

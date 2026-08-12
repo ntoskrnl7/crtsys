@@ -740,11 +740,14 @@ jobs:
         shell: pwsh
         run: |
           $version = '${{ needs.pack.outputs.package_version }}'
-          $archivePath = Join-Path '${{ github.workspace }}' `
-            "artifacts/release/crtsys-$version-prebuilt.zip"
+          $sourceArchivePath = Join-Path '${{ github.workspace }}' `
+            "artifacts/release/crtsys-$version-source.tar.gz"
+          Invoke-WebRequest -UseBasicParsing `
+            -Uri "https://github.com/${{ github.repository }}/archive/refs/tags/v$version.tar.gz" `
+            -OutFile $sourceArchivePath
           ./source/scripts/vcpkg/Publish-CrtSysVcpkgRegistry.ps1 `
             -Version $version `
-            -ArchivePath $archivePath `
+            -SourceArchivePath $sourceArchivePath `
             -SourcePortDirectory '${{ github.workspace }}/source/vcpkg/ports/crtsys' `
             -RegistryDirectory '${{ github.workspace }}/registry' `
             -RegistryBranch vcpkg-registry `
@@ -762,13 +765,13 @@ jobs:
         shell: pwsh
         run: |
           $version = '${{ needs.pack.outputs.package_version }}'
-          $archivePath = Join-Path '${{ github.workspace }}' `
-            "artifacts/release/crtsys-$version-prebuilt.zip"
+          $sourceArchivePath = Join-Path '${{ github.workspace }}' `
+            "artifacts/release/crtsys-$version-source.tar.gz"
           $baseline = '${{ steps.registry.outputs.baseline }}'
 
           ./source/scripts/vcpkg/Update-CrtSysVcpkgPort.ps1 `
             -Version $version `
-            -ArchivePath $archivePath `
+            -SourceArchivePath $sourceArchivePath `
             -PortDirectory '${{ github.workspace }}/main/vcpkg/ports/crtsys' `
             -DocumentationRoot '${{ github.workspace }}/main' `
             -RegistryBaseline $baseline | Out-Host
@@ -789,8 +792,7 @@ jobs:
             README.ko-KR.md `
             vcpkg/README.md `
             vcpkg/README.ko-KR.md `
-            vcpkg/ports/crtsys/portfile.cmake `
-            vcpkg/ports/crtsys/vcpkg.json
+            vcpkg/ports/crtsys
           git commit -m "Sync vcpkg metadata for crtsys $version"
           if ($LASTEXITCODE -ne 0) {
             throw "Could not commit synchronized vcpkg metadata."
