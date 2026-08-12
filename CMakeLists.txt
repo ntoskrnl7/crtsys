@@ -516,6 +516,13 @@ target_include_directories(crtsys PRIVATE "${CRTSYS_MINIMUM_KMDF_INCLUDE_DIR}")
 # link libraries
 #
 target_link_libraries(crtsys PRIVATE $<BUILD_INTERFACE:Ldk>)
+# On ARM64, WDK 10.0.26100's libcntpr archive stores wcslen and wcsnlen in
+# the same member. Ldk introduces the wcslen reference after the driver's
+# first ntoskrnl import library, so resolve the kernel import immediately
+# after Ldk instead of pulling that conflicting libcntpr member.
+if(CRTSYS_NATIVE_ARCH STREQUAL "ARM64")
+  target_link_libraries(crtsys PRIVATE WDK::NTOSKRNL)
+endif()
 target_link_libraries(crtsys PRIVATE WDK::AUX_KLIB)
 if(CRTSYS_USE_LIBCNTPR)
   target_link_libraries(crtsys PRIVATE WDK::LIBCNTPR)

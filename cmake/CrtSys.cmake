@@ -403,6 +403,17 @@ function(crtsys_apply_prebuilt_driver_interface _target)
             "directories or the legacy native layout under ${_CRTSYS_ROOT}.")
     endif()
 
+    crtsys_get_prebuilt_arch(_crtsys_target_arch)
+    # Keep the ARM64 kernel import after Ldk. WDK 10.0.26100 packages wcslen
+    # and wcsnlen in one libcntpr member, while ntoskrnl already exports both.
+    # Resolving Ldk's reference here avoids pulling the conflicting member.
+    if(_crtsys_target_arch STREQUAL "ARM64")
+        if(NOT TARGET WDK::NTOSKRNL)
+            message(FATAL_ERROR "WDK::NTOSKRNL is required for ARM64 crtsys prebuilt driver support.")
+        endif()
+        list(APPEND _crtsys_prebuilt_link_libraries WDK::NTOSKRNL)
+    endif()
+
     foreach(_required_target IN ITEMS WDK::CNG WDK::AUX_KLIB WDK::WDMSEC)
         if(NOT TARGET ${_required_target})
             message(FATAL_ERROR "${_required_target} is required for crtsys prebuilt driver support.")
@@ -432,13 +443,16 @@ function(crtsys_apply_prebuilt_driver_interface _target)
         ${_target} ${_usage_requirement_scope}
         "$<$<COMPILE_LANGUAGE:C,CXX>:/MT>")
 
-    if(CRTSYS_USE_LIBCNTPR)
+    if(CRTSYS_USE_LIBCNTPR AND
+       NOT _crtsys_target_arch STREQUAL "ARM64")
         target_compile_definitions(
             ${_target} ${_usage_requirement_scope} CRTSYS_USE_LIBCNTPR)
         target_link_options(
             ${_target} ${_usage_requirement_scope} "/FORCE:MULTIPLE")
+    elseif(CRTSYS_USE_LIBCNTPR)
+        target_compile_definitions(
+            ${_target} ${_usage_requirement_scope} CRTSYS_USE_LIBCNTPR)
     endif()
-    crtsys_get_prebuilt_arch(_crtsys_target_arch)
     if(_crtsys_target_arch STREQUAL "x86")
         target_link_options(
             ${_target} ${_usage_requirement_scope} "/SAFESEH:NO")
@@ -660,7 +674,9 @@ function(crtsys_add_driver _target)
         # A source-tree consumer needs the same libcntpr duplicate-symbol
         # policy as a prebuilt-package consumer. Link options placed on the
         # static crtsys archive are not applied by every WDK generator path.
-        if(CRTSYS_USE_LIBCNTPR)
+        crtsys_get_prebuilt_arch(_crtsys_driver_arch)
+        if(CRTSYS_USE_LIBCNTPR AND
+           NOT _crtsys_driver_arch STREQUAL "ARM64")
             target_link_options(${_target} PRIVATE "/FORCE:MULTIPLE")
         endif()
         if(NOT TARGET WDK::WDMSEC)

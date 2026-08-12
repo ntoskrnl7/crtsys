@@ -228,7 +228,10 @@ $portfileTokens = @(
 if ([version]$projectVersion -lt [version]'0.1.42') {
   $portfileTokens += 'fix-offline-source-build.patch'
   Assert-FileContains -Path $compatibilityPatchPath -Tokens @(
-    'NOT CRTSYS_NATIVE_ARCH STREQUAL "ARM64" AND'
+    'NOT CRTSYS_NATIVE_ARCH STREQUAL "ARM64" AND',
+    'target_link_libraries(crtsys PRIVATE WDK::NTOSKRNL)',
+    'list(APPEND _crtsys_prebuilt_link_libraries WDK::NTOSKRNL)',
+    'NOT _crtsys_driver_arch STREQUAL "ARM64"'
   )
 }
 Assert-FileContains -Path $portfilePath -Tokens $portfileTokens
