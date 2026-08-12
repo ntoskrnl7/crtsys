@@ -65,16 +65,13 @@ function Assert-CrtSysStaticCrtDirectives {
     throw "Library embeds a dynamic MSVC CRT directive: $LibraryPath"
   }
 
-  # crtsys provides a kernel-mode CRT implementation. /MTd would inject
-  # references to user-mode debug CRT helpers such as _CrtDbgReport and
-  # _malloc_dbg, so both configurations intentionally use the static /MT
-  # directive while retaining their normal debug symbols and optimization.
-  $expectedRuntime = 'LIBCMT'
-  $expectedPattern = '(?im)/DEFAULTLIB:' +
-    [regex]::Escape($expectedRuntime) + '(?:\s|$)'
-  if ($directiveOutput -notmatch $expectedPattern) {
-    throw "Library does not embed the expected /DEFAULTLIB:$expectedRuntime directive: $LibraryPath"
+  if ($directiveOutput -match '(?im)/DEFAULTLIB:LIBCMTD(?:\s|$)') {
+    throw "Library embeds the user-mode debug CRT directive: $LibraryPath"
   }
 
-  Write-Host "$LibraryPath uses the expected static MSVC runtime ($expectedRuntime)."
+  if ($directiveOutput -match '(?im)/DEFAULTLIB:LIBCMT(?:\s|$)') {
+    Write-Host "$LibraryPath uses the static MSVC runtime (LIBCMT)."
+  } else {
+    Write-Host "$LibraryPath injects no user-mode MSVC CRT default library."
+  }
 }

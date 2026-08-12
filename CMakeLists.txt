@@ -31,9 +31,57 @@ option(CRTSYS_ENABLE_INSTALL "Enable crtsys install rules" ${CRTSYS_IS_TOP_LEVEL
 option(CRTSYS_BUILD_NTL_KERNEL_CONTENT_CODECS
   "Build the optional PASSIVE_LEVEL NTL kernel zlib/Brotli libraries" OFF)
 set(CRTSYS_LDK_SOURCE_DIR "" CACHE PATH "Use a local LDK source tree instead of fetching the default LDK release")
+set(CRTSYS_RAW_PDB_SOURCE_DIR "" CACHE PATH "Use a local raw_pdb source tree instead of fetching the pinned revision")
+set(CRTSYS_UCXXRT_SOURCE_DIR "" CACHE PATH "Use a local ucxxrt source tree instead of fetching the pinned revision")
 set(CRTSYS_FINDWDK_SOURCE_DIR
   "${CMAKE_CURRENT_SOURCE_DIR}/cmake/vendor/findwdk" CACHE PATH
   "Use a local FindWDK source tree; defaults to the pinned bundled revision")
+set(CRTSYS_TARGET_ARCHITECTURE "" CACHE STRING
+  "Target architecture override for non-Visual Studio generators: x86, x64, ARM, or ARM64")
+
+function(crtsys_resolve_target_architecture out_var)
+  if(NOT "${CRTSYS_TARGET_ARCHITECTURE}" STREQUAL "")
+    set(_architecture "${CRTSYS_TARGET_ARCHITECTURE}")
+  elseif(NOT "${CMAKE_VS_PLATFORM_NAME}" STREQUAL "")
+    set(_architecture "${CMAKE_VS_PLATFORM_NAME}")
+  elseif(NOT "${CMAKE_GENERATOR_PLATFORM}" STREQUAL "")
+    string(REGEX REPLACE ",.*$" "" _architecture
+      "${CMAKE_GENERATOR_PLATFORM}")
+  elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(ARM64|arm64|aarch64)$")
+    set(_architecture "ARM64")
+  elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(ARM|arm)$")
+    set(_architecture "ARM")
+  elseif(CMAKE_SIZEOF_VOID_P EQUAL 8)
+    set(_architecture "x64")
+  elseif(CMAKE_SIZEOF_VOID_P EQUAL 4)
+    set(_architecture "x86")
+  else()
+    message(FATAL_ERROR
+      "Unable to determine the crtsys target architecture. Set "
+      "CRTSYS_TARGET_ARCHITECTURE to x86, x64, ARM, or ARM64.")
+  endif()
+
+  string(TOLOWER "${_architecture}" _architecture_lower)
+  if(_architecture_lower STREQUAL "win32" OR
+     _architecture_lower STREQUAL "x86")
+    set(_architecture "x86")
+  elseif(_architecture_lower STREQUAL "x64" OR
+         _architecture_lower STREQUAL "amd64")
+    set(_architecture "x64")
+  elseif(_architecture_lower STREQUAL "arm")
+    set(_architecture "ARM")
+  elseif(_architecture_lower STREQUAL "arm64" OR
+         _architecture_lower STREQUAL "aarch64")
+    set(_architecture "ARM64")
+  else()
+    message(FATAL_ERROR
+      "Unsupported crtsys target architecture: ${_architecture}")
+  endif()
+
+  set(${out_var} "${_architecture}" PARENT_SCOPE)
+endfunction()
+
+crtsys_resolve_target_architecture(CRTSYS_NATIVE_ARCH)
 
 # A source-tree consumer may intentionally link the prebuilt native archives.
 # In that mode CPM still enters this directory to expose crtsys_SOURCE_DIR, but
@@ -192,7 +240,7 @@ function(crtsys_generate_msvc_future_overlay OUT_VAR)
 endfunction()
 
 # x64 is always set to use libcntpr. (_NLG_Notify, _NLG_Return2)
-if ("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "x64")
+if(CRTSYS_NATIVE_ARCH STREQUAL "x64")
   set(CRTSYS_USE_LIBCNTPR ON)
 endif()
 
@@ -220,7 +268,7 @@ CPMAddPackage(
   DOWNLOAD_ONLY YES
 )
 
-if ("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "x64" AND
+if(CRTSYS_NATIVE_ARCH STREQUAL "x64" AND
     NOT CRTSYS_USE_LIBCNTPR)
   set(LDK_USE_RAISE_EXCEPTION ON CACHE BOOL
       "Set to ON to use ldk!RaiseException" FORCE)
@@ -264,15 +312,31 @@ function(crtsys_set_kernel_static_msvc_runtime target_name)
       "/MT"
     )
   endif()
+
+  # Kernel libraries must not inject a user-mode CRT default library into the
+  # consuming driver. They provide the required CRT surface themselves and
+  # the WDK supplies the remaining kernel imports.
+  target_compile_options(
+    "${target_name}" PRIVATE
+    "$<$<COMPILE_LANGUAGE:C,CXX>:/Zl>"
+  )
 endfunction()
 
 crtsys_set_kernel_static_msvc_runtime(Ldk)
-CPMAddPackage(
-  NAME raw_pdb
-  GITHUB_REPOSITORY MolecularMatters/raw_pdb
-  GIT_TAG 43cc59b7037238ad84e1d5abe10711a06d998fa0
-  DOWNLOAD_ONLY YES
-)
+if(CRTSYS_RAW_PDB_SOURCE_DIR)
+  CPMAddPackage(
+    NAME raw_pdb
+    SOURCE_DIR "${CRTSYS_RAW_PDB_SOURCE_DIR}"
+    DOWNLOAD_ONLY YES
+  )
+else()
+  CPMAddPackage(
+    NAME raw_pdb
+    GITHUB_REPOSITORY MolecularMatters/raw_pdb
+    GIT_TAG 43cc59b7037238ad84e1d5abe10711a06d998fa0
+    DOWNLOAD_ONLY YES
+  )
+endif()
 
 # FindWDK is bundled at a pinned revision so source builds and installed
 # consumers use the same reproducible WDK discovery implementation.
@@ -314,7 +378,7 @@ set_source_files_properties(
     COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:CXX>:/FI${CMAKE_CURRENT_SOURCE_DIR}/src/custom/misc/raw_pdb_kernel_compat.h>"
 )
 
-if("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "Win32")
+if(CRTSYS_NATIVE_ARCH STREQUAL "x86")
   file(GLOB MATH_SOURCE_FILES
     src/custom/crt/math/*.c
     )
@@ -338,7 +402,20 @@ if (UCXXRT_ENABLED)
   list(APPEND SOURCE_FILES src/custom/msvc/common/crt/src/stl/winapisupp.cpp)
   list(REMOVE_ITEM SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/custom/crt/math/ftol3.c)
 
-  CPMAddPackage("gh:ntoskrnl7/ucxxrt#master")
+  if(CRTSYS_UCXXRT_SOURCE_DIR)
+    CPMAddPackage(
+      NAME ucxxrt
+      SOURCE_DIR "${CRTSYS_UCXXRT_SOURCE_DIR}"
+      DOWNLOAD_ONLY YES
+    )
+  else()
+    CPMAddPackage(
+      NAME ucxxrt
+      GITHUB_REPOSITORY ntoskrnl7/ucxxrt
+      GIT_TAG cfb00b2ad3595fa1f89a3b3a665fa742cf5aa1aa
+      DOWNLOAD_ONLY YES
+    )
+  endif()
 
   file(GLOB_RECURSE UCXXRT_SOURCE_FILES
     ${ucxxrt_SOURCE_DIR}/src/*.cpp
@@ -348,7 +425,8 @@ if (UCXXRT_ENABLED)
   list(REMOVE_ITEM UCXXRT_SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/vcruntime/crt.cpp)
   list(REMOVE_ITEM UCXXRT_SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/vcruntime/locales.cpp)
   list(REMOVE_ITEM UCXXRT_SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/vcruntime/thread.cpp)
-  if(NOT "${CMAKE_VS_PLATFORM_NAME}" STREQUAL "Win32" AND NOT "${CMAKE_VS_PLATFORM_NAME}" STREQUAL "x64" )
+  if(NOT CRTSYS_NATIVE_ARCH STREQUAL "x86" AND
+     NOT CRTSYS_NATIVE_ARCH STREQUAL "x64")
     list(REMOVE_ITEM UCXXRT_SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/vcruntime/x86_exception_filter.cpp)
   endif()
   list(REMOVE_ITEM UCXXRT_SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/cpu_disp.cpp)
@@ -356,12 +434,12 @@ if (UCXXRT_ENABLED)
   list(REMOVE_ITEM UCXXRT_SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/misc/invalid_parameter.cpp)
   list(REMOVE_ITEM UCXXRT_SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/sys_main.cpp)
   list(REMOVE_ITEM UCXXRT_SOURCE_FILES ${ucxxrt_SOURCE_DIR}/src/unittest.cpp)
-  if("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "x64")
+  if(CRTSYS_NATIVE_ARCH STREQUAL "x64")
     file(GLOB PLATFORM_SOURCE_FILES
       ${ucxxrt_SOURCE_DIR}/src/x64/*.cpp
       ${ucxxrt_SOURCE_DIR}/src/x64/*.asm
     )
-  elseif("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "Win32")
+  elseif(CRTSYS_NATIVE_ARCH STREQUAL "x86")
     file(GLOB PLATFORM_SOURCE_FILES
         ${ucxxrt_SOURCE_DIR}/src/i386/*.cpp
         ${ucxxrt_SOURCE_DIR}/src/i386/*.asm
@@ -511,7 +589,7 @@ if (CRTSYS_USE_LIBCNTPR AND
   # Older libcntpr archives still collide with kernel/UCRT members that
   # cannot be isolated by the modern compatibility metadata below.
   target_link_options(crtsys PUBLIC "/FORCE:MULTIPLE")
-elseif(UCXXRT_ENABLED AND "${CMAKE_VS_PLATFORM_NAME}" STREQUAL "x64")
+elseif(UCXXRT_ENABLED AND CRTSYS_NATIVE_ARCH STREQUAL "x64")
   # ntoskrnl.lib(ntoskrnl.exe) : error LNK2005: RtlRaiseException already defined in Ldk.lib(except.obj).
   target_link_options(crtsys PUBLIC "/FORCE:MULTIPLE")
 endif()
@@ -525,7 +603,7 @@ if(CRTSYS_BUILD_NTL_KERNEL_CONTENT_CODECS)
   crtsys_add_ntl_kernel_content_codecs()
 endif()
 
-if("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "Win32")
+if(CRTSYS_NATIVE_ARCH STREQUAL "x86")
   # crtsys.lib(lowhelpr.obj) : error LNK2026: module unsafe for SAFESEH image.
   target_link_options(crtsys PUBLIC "/SAFESEH:NO")
 
@@ -555,10 +633,7 @@ set_target_properties(crtsys PROPERTIES VS_USER_PROPS "${CMAKE_CURRENT_SOURCE_DI
 # lets an unrelated build silently replace another configuration's archive.
 #
 if(CRTSYS_IS_TOP_LEVEL)
-  string(TOLOWER "${CMAKE_VS_PLATFORM_NAME}" PLATFROM_SHORT_NAME)
-  if(PLATFROM_SHORT_NAME STREQUAL "win32")
-      set(PLATFROM_SHORT_NAME "x86")
-  endif()
+  string(TOLOWER "${CRTSYS_NATIVE_ARCH}" PLATFROM_SHORT_NAME)
   set_target_properties(
     crtsys
     PROPERTIES
@@ -567,15 +642,6 @@ if(CRTSYS_IS_TOP_LEVEL)
   )
 endif()
 
-if("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "Win32")
-  set(CRTSYS_NATIVE_ARCH x86)
-elseif("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "ARM64")
-  set(CRTSYS_NATIVE_ARCH ARM64)
-elseif("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "ARM")
-  set(CRTSYS_NATIVE_ARCH ARM)
-else()
-  set(CRTSYS_NATIVE_ARCH "${CMAKE_VS_PLATFORM_NAME}")
-endif()
 set(CRTSYS_NATIVE_TOOLSET "v${MSVC_TOOLSET_VERSION}")
 
 if(CRTSYS_ENABLE_INSTALL)
@@ -583,7 +649,14 @@ if(CRTSYS_ENABLE_INSTALL)
   include(CMakePackageConfigHelpers)
 
   set(CRTSYS_INSTALL_CMAKEDIR "${CMAKE_INSTALL_DATADIR}/crtsys/cmake" CACHE STRING "crtsys CMake package install directory")
-  set(CRTSYS_INSTALL_LIBDIR "lib/native/${CRTSYS_NATIVE_TOOLSET}/${CRTSYS_NATIVE_ARCH}/$<CONFIG>")
+  set(CRTSYS_INSTALL_RELEASE_LIBDIR
+      "lib/native/${CRTSYS_NATIVE_TOOLSET}/${CRTSYS_NATIVE_ARCH}/Release"
+      CACHE STRING "crtsys Release library install directory")
+  set(CRTSYS_INSTALL_DEBUG_LIBDIR
+      "lib/native/${CRTSYS_NATIVE_TOOLSET}/${CRTSYS_NATIVE_ARCH}/Debug"
+      CACHE STRING "crtsys Debug library install directory")
+  set(CRTSYS_INSTALL_LIBDIR
+      "$<IF:$<CONFIG:Debug>,${CRTSYS_INSTALL_DEBUG_LIBDIR},${CRTSYS_INSTALL_RELEASE_LIBDIR}>")
 
   set(CRTSYS_INSTALL_TARGETS crtsys)
   if(TARGET Ldk)

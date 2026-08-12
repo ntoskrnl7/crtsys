@@ -1,0 +1,3 @@
+# Patch context lines may contain whitespace that represents patched content.
+*.diff -whitespace
+*.patch -whitespace

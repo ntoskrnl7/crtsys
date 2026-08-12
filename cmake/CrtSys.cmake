@@ -31,7 +31,10 @@ else()
 endif()
 
 if(NOT DEFINED CRTSYS_USE_PREBUILT)
-    if(NOT TARGET crtsys AND EXISTS "${_CRTSYS_ROOT}/lib/native")
+    if(NOT TARGET crtsys AND
+       (EXISTS "${_CRTSYS_ROOT}/lib/native" OR
+        EXISTS "${_CRTSYS_ROOT}/lib/manual-link" OR
+        EXISTS "${_CRTSYS_ROOT}/debug/lib/manual-link"))
         set(CRTSYS_USE_PREBUILT ON)
     else()
         set(CRTSYS_USE_PREBUILT OFF)
@@ -197,7 +200,10 @@ string(REGEX REPLACE "/RTC(su|[1su])" "" CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE
 find_package(WDK REQUIRED)
 
 function(crtsys_get_prebuilt_arch _out_arch)
-    if("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "x64")
+    if(DEFINED CRTSYS_TARGET_ARCHITECTURE AND
+       NOT "${CRTSYS_TARGET_ARCHITECTURE}" STREQUAL "")
+        set(_arch "${CRTSYS_TARGET_ARCHITECTURE}")
+    elseif("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "x64")
         set(_arch x64)
     elseif("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "ARM64")
         set(_arch ARM64)
@@ -205,8 +211,31 @@ function(crtsys_get_prebuilt_arch _out_arch)
         set(_arch ARM)
     elseif("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "Win32")
         set(_arch x86)
+    elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(ARM64|arm64|aarch64)$")
+        set(_arch ARM64)
+    elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(ARM|arm)$")
+        set(_arch ARM)
+    elseif(CMAKE_SIZEOF_VOID_P EQUAL 8)
+        set(_arch x64)
+    elseif(CMAKE_SIZEOF_VOID_P EQUAL 4)
+        set(_arch x86)
     else()
-        message(FATAL_ERROR "Unsupported crtsys prebuilt platform: ${CMAKE_VS_PLATFORM_NAME}")
+        message(FATAL_ERROR
+            "Unable to determine the crtsys target architecture. Set "
+            "CRTSYS_TARGET_ARCHITECTURE to x86, x64, ARM, or ARM64.")
+    endif()
+
+    string(TOLOWER "${_arch}" _arch_lower)
+    if(_arch_lower STREQUAL "win32" OR _arch_lower STREQUAL "x86")
+        set(_arch x86)
+    elseif(_arch_lower STREQUAL "x64" OR _arch_lower STREQUAL "amd64")
+        set(_arch x64)
+    elseif(_arch_lower STREQUAL "arm")
+        set(_arch ARM)
+    elseif(_arch_lower STREQUAL "arm64" OR _arch_lower STREQUAL "aarch64")
+        set(_arch ARM64)
+    else()
+        message(FATAL_ERROR "Unsupported crtsys target architecture: ${_arch}")
     endif()
 
     set(${_out_arch} "${_arch}" PARENT_SCOPE)
@@ -229,14 +258,24 @@ function(crtsys_get_prebuilt_toolset _out_toolset)
 endfunction()
 
 function(crtsys_get_prebuilt_library _out_path _library _configuration)
-    crtsys_get_prebuilt_arch(_arch)
-    crtsys_get_prebuilt_toolset(_toolset)
-
     if("${_configuration}" STREQUAL "Debug")
         set(_config_dir Debug)
+        set(_standard_library
+            "${_CRTSYS_ROOT}/debug/lib/manual-link/${_library}")
     else()
         set(_config_dir Release)
+        set(_standard_library
+            "${_CRTSYS_ROOT}/lib/manual-link/${_library}")
     endif()
+
+    file(TO_CMAKE_PATH "${_standard_library}" _standard_library)
+    if(EXISTS "${_standard_library}")
+        set(${_out_path} "${_standard_library}" PARENT_SCOPE)
+        return()
+    endif()
+
+    crtsys_get_prebuilt_arch(_arch)
+    crtsys_get_prebuilt_toolset(_toolset)
 
     set(_has_toolset_layout FALSE)
     foreach(_known_toolset v142 v143 v145)
@@ -340,10 +379,10 @@ function(crtsys_apply_prebuilt_driver_interface _target)
     crtsys_get_prebuilt_library(_ldk_release Ldk.lib Release)
 
     if((_crtsys_debug AND NOT _ldk_debug) OR (_ldk_debug AND NOT _crtsys_debug))
-        message(FATAL_ERROR "The crtsys Debug prebuilt library pair is incomplete under ${_CRTSYS_ROOT}/lib/native.")
+        message(FATAL_ERROR "The crtsys Debug library pair is incomplete under ${_CRTSYS_ROOT}.")
     endif()
     if((_crtsys_release AND NOT _ldk_release) OR (_ldk_release AND NOT _crtsys_release))
-        message(FATAL_ERROR "The crtsys Release prebuilt library pair is incomplete under ${_CRTSYS_ROOT}/lib/native.")
+        message(FATAL_ERROR "The crtsys Release library pair is incomplete under ${_CRTSYS_ROOT}.")
     endif()
 
     if(_crtsys_debug AND _crtsys_release)
@@ -359,8 +398,9 @@ function(crtsys_apply_prebuilt_driver_interface _target)
         set(_crtsys_prebuilt_link_libraries
             "${_crtsys_release}" "${_ldk_release}")
     else()
-        crtsys_get_prebuilt_toolset(_toolset)
-        message(FATAL_ERROR "No crtsys prebuilt libraries were found under ${_CRTSYS_ROOT}/lib/native for ${_toolset}/${CMAKE_VS_PLATFORM_NAME}.")
+        message(FATAL_ERROR
+            "No crtsys libraries were found in the standard manual-link "
+            "directories or the legacy native layout under ${_CRTSYS_ROOT}.")
     endif()
 
     foreach(_required_target IN ITEMS WDK::CNG WDK::AUX_KLIB WDK::WDMSEC)
@@ -398,7 +438,8 @@ function(crtsys_apply_prebuilt_driver_interface _target)
         target_link_options(
             ${_target} ${_usage_requirement_scope} "/FORCE:MULTIPLE")
     endif()
-    if("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "Win32")
+    crtsys_get_prebuilt_arch(_crtsys_target_arch)
+    if(_crtsys_target_arch STREQUAL "x86")
         target_link_options(
             ${_target} ${_usage_requirement_scope} "/SAFESEH:NO")
     endif()

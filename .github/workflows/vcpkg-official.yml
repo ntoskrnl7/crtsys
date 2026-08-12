@@ -55,7 +55,7 @@ jobs:
           '@
           }
 
-      - name: Validate release and download the prebuilt archive
+      - name: Validate release and download the source archive
         id: release
         shell: pwsh
         env:
@@ -67,14 +67,13 @@ jobs:
           }
 
           $tagName = "v$version"
-          $assetName = "crtsys-$version-prebuilt.zip"
           $assetDirectory = Join-Path '${{ github.workspace }}' 'release-assets'
           New-Item -ItemType Directory -Path $assetDirectory -Force |
             Out-Null
 
           $release = & gh release view $tagName `
             --repo '${{ github.repository }}' `
-            --json isDraft,isPrerelease,tagName,assets |
+            --json isDraft,isPrerelease,tagName |
             ConvertFrom-Json
           if ($LASTEXITCODE -ne 0) {
             throw "GitHub Release $tagName was not found."
@@ -82,21 +81,14 @@ jobs:
           if ($release.isDraft -or $release.isPrerelease) {
             throw "Official vcpkg updates require a stable published release: $tagName"
           }
-          if (-not (@($release.assets.name) -contains $assetName)) {
-            throw "GitHub Release $tagName does not contain $assetName."
-          }
+          $sourceArchivePath = Join-Path `
+            $assetDirectory `
+            "crtsys-$version-source.tar.gz"
+          Invoke-WebRequest -UseBasicParsing `
+            -Uri "https://github.com/${{ github.repository }}/archive/refs/tags/$tagName.tar.gz" `
+            -OutFile $sourceArchivePath
 
-          & gh release download $tagName `
-            --repo '${{ github.repository }}' `
-            --pattern $assetName `
-            --dir $assetDirectory `
-            --clobber
-          if ($LASTEXITCODE -ne 0) {
-            throw "Could not download $assetName from $tagName."
-          }
-
-          $archivePath = Join-Path $assetDirectory $assetName
-          "archive_path=$archivePath" |
+          "source_archive_path=$sourceArchivePath" |
             Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "tag_name=$tagName" |
             Out-File -FilePath $env:GITHUB_OUTPUT -Append
@@ -124,20 +116,26 @@ jobs:
         id: port
         shell: pwsh
         run: |
-          $allowNewPort = $env:CRTSYS_OFFICIAL_MODE -eq 'validate'
           $result = ./source/scripts/vcpkg/Prepare-CrtSysOfficialVcpkgUpdate.ps1 `
             -Version $env:CRTSYS_RELEASE_VERSION `
-            -ReleaseArchivePath '${{ steps.release.outputs.archive_path }}' `
+            -SourceArchivePath '${{ steps.release.outputs.source_archive_path }}' `
             -VcpkgRepositoryDirectory '${{ github.workspace }}/official-vcpkg' `
             -SourcePortDirectory '${{ github.workspace }}/source/vcpkg/ports/crtsys' `
-            -AllowNewPort:$allowNewPort
+            -AllowNewPort
 
-          "archive_sha512=$($result.ArchiveSha512)" |
+          "source_archive_sha512=$($result.SourceArchiveSha512)" |
             Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "git_tree=$($result.GitTree)" |
             Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "previous_version=$($result.PreviousVersion)" |
             Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Ensure the Windows Driver Kit
+        shell: pwsh
+        run: |
+          ./source/scripts/nuget/Ensure-CrtSysWdk.ps1 `
+            -WindowsSdkVersion $env:CRTSYS_WINDOWS_SDK_VERSION `
+            -RequiredPlatforms x64
 
       - name: Install the official port without a binary cache
         shell: pwsh
@@ -150,13 +148,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "Official crtsys port install failed with exit code $LASTEXITCODE."
           }
-
-      - name: Ensure the Windows Driver Kit
-        shell: pwsh
-        run: |
-          ./source/scripts/nuget/Ensure-CrtSysWdk.ps1 `
-            -WindowsSdkVersion $env:CRTSYS_WINDOWS_SDK_VERSION `
-            -RequiredPlatforms x64
 
       - name: Test CMake and Visual Studio consumers
         shell: pwsh
@@ -261,28 +252,28 @@ jobs:
             throw 'Could not query existing official vcpkg pull requests.'
           }
 
-          $bodyTemplate = @'
-          Updates crtsys to {0} from the authoritative GitHub Release.
+          $validationTemplate = @'
+          Upstream validation for crtsys {0}:
 
-          Validation performed by the upstream release workflow:
-
-          - release asset presence and SHA-512 verification
+          - stable release tag and source SHA-512 verification
           - `vcpkg format-manifest`
           - `vcpkg x-add-version --all`
           - `vcpkg x-ci-verify-versions`
           - clean `crtsys:x64-windows-static` install with binary caching disabled
           - Visual Studio/MSBuild property-page contracts
-          - CMake Release WDK driver consumer build
-
-          - [x] The upstream version and SHA-512 were updated.
-          - [x] The supports expression remains accurate.
-          - [x] No patches are used by this port.
-          - [x] The version database was regenerated.
-          - [x] Exactly one version was added.
+          - CMake Debug and Release WDK driver consumer builds
           '@
-          $body = $bodyTemplate -f $version
+          $validation = $validationTemplate -f $version
 
           if ([string]::IsNullOrWhiteSpace($existingPr)) {
+            $templatePath = Join-Path `
+              $vcpkgRoot `
+              '.github/pull_request_template.md'
+            if (-not (Test-Path -LiteralPath $templatePath)) {
+              throw "Official vcpkg PR template was not found: $templatePath"
+            }
+            $body = (Get-Content -LiteralPath $templatePath -Raw).TrimEnd() +
+              "`n`n" + $validation
             $prUrl = & gh pr create `
               --repo microsoft/vcpkg `
               --base master `
@@ -296,8 +287,7 @@ jobs:
             $pr = $existingPr | ConvertFrom-Json
             & gh pr edit $pr.number `
               --repo microsoft/vcpkg `
-              --title "[crtsys] Update to $version" `
-              --body $body
+              --title "[crtsys] Update to $version"
             if ($LASTEXITCODE -ne 0) {
               throw "Could not update official vcpkg PR #$($pr.number)."
             }
@@ -311,7 +301,7 @@ jobs:
         if: ${{ inputs.mode == 'validate' }}
         shell: pwsh
         env:
-          CRTSYS_ARCHIVE_SHA512: ${{ steps.port.outputs.archive_sha512 }}
+          CRTSYS_SOURCE_ARCHIVE_SHA512: ${{ steps.port.outputs.source_archive_sha512 }}
           CRTSYS_PORT_GIT_TREE: ${{ steps.port.outputs.git_tree }}
         run: |
           $summaryTemplate = @'
@@ -324,6 +314,6 @@ jobs:
           '@
           $summaryTemplate -f `
             $env:CRTSYS_RELEASE_VERSION, `
-            $env:CRTSYS_ARCHIVE_SHA512, `
+            $env:CRTSYS_SOURCE_ARCHIVE_SHA512, `
             $env:CRTSYS_PORT_GIT_TREE |
             Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY

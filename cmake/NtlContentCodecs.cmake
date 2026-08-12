@@ -1,5 +1,9 @@
 include_guard(GLOBAL)
 
+if(NOT DEFINED CRTSYS_ALLOW_NETWORK_DEPENDENCIES)
+  set(CRTSYS_ALLOW_NETWORK_DEPENDENCIES ON)
+endif()
+
 set(_CRTSYS_NTL_PREBUILT_CODEC_ROOT "")
 if(DEFINED _CRTSYS_ROOT AND CRTSYS_USE_PREBUILT AND
    COMMAND crtsys_get_prebuilt_arch AND
@@ -99,50 +103,24 @@ if(_CRTSYS_NTL_PREBUILT_CODEC_ROOT)
       "$<$<AND:$<COMPILE_LANGUAGE:C,CXX>,$<NOT:$<CONFIG:Debug>>>:/MT>")
   endif()
 else()
-  include("${CMAKE_CURRENT_LIST_DIR}/CPM.cmake")
+  # Official package managers should own public user-mode dependencies. This
+  # also prevents an installed crtsys CMake package from downloading sources
+  # while the consuming project is being configured.
+  find_package(ZLIB QUIET)
+  find_package(unofficial-brotli CONFIG QUIET)
 
-  set(ZLIB_BUILD_TESTING OFF CACHE BOOL "" FORCE)
-  set(ZLIB_BUILD_SHARED OFF CACHE BOOL "" FORCE)
-  set(ZLIB_BUILD_STATIC ON CACHE BOOL "" FORCE)
-  set(ZLIB_INSTALL OFF CACHE BOOL "" FORCE)
-  CPMAddPackage(
-    NAME zlib
-    GITHUB_REPOSITORY madler/zlib
-    GIT_TAG v1.3.2
-  )
-
-  set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-  set(BROTLI_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
-  set(BROTLI_DISABLE_TESTS ON CACHE BOOL "" FORCE)
-  set(BROTLI_BUNDLED_MODE ON CACHE BOOL "" FORCE)
-  CPMAddPackage(
-    NAME brotli
-    GITHUB_REPOSITORY google/brotli
-    GIT_TAG v1.2.0
-  )
-
-  if(MSVC)
-    foreach(codec_target
-        zlibstatic
-        brotlicommon
-        brotlidec
-        brotlienc)
-      if(TARGET ${codec_target})
-        set_property(
-          TARGET ${codec_target}
-          PROPERTY MSVC_RUNTIME_LIBRARY
-            "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-        target_compile_options(
-          ${codec_target}
-          PRIVATE
-            "$<$<CONFIG:Debug>:/MTd>"
-            "$<$<NOT:$<CONFIG:Debug>>:/MT>")
-      endif()
-    endforeach()
-  endif()
-
-  if(NOT TARGET crtsys_ntl_content_codecs)
+  if(TARGET ZLIB::ZLIB AND
+     TARGET unofficial::brotli::brotlidec AND
+     TARGET unofficial::brotli::brotlienc)
+    set(_CRTSYS_NTL_SYSTEM_CODECS TRUE)
     add_library(crtsys_ntl_content_codecs INTERFACE)
+    target_link_libraries(
+      crtsys_ntl_content_codecs
+      INTERFACE
+        ZLIB::ZLIB
+        unofficial::brotli::brotlidec
+        unofficial::brotli::brotlienc
+    )
     if(MSVC)
       target_compile_options(
         crtsys_ntl_content_codecs
@@ -151,14 +129,75 @@ else()
           "$<$<AND:$<COMPILE_LANGUAGE:C,CXX>,$<NOT:$<CONFIG:Debug>>>:/MT>"
       )
     endif()
-    target_link_libraries(
-      crtsys_ntl_content_codecs
-      INTERFACE
-        ZLIB::ZLIBSTATIC
-        brotlidec
-        brotlienc
-        brotlicommon
+  else()
+    if(NOT CRTSYS_ALLOW_NETWORK_DEPENDENCIES)
+      message(FATAL_ERROR
+        "The optional NTL content-codec libraries are not installed. Install "
+        "the zlib and brotli packages, use a crtsys package that provides "
+        "them, or use a source build with "
+        "CRTSYS_ALLOW_NETWORK_DEPENDENCIES=ON.")
+    endif()
+    include("${CMAKE_CURRENT_LIST_DIR}/CPM.cmake")
+
+    set(ZLIB_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+    set(ZLIB_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+    set(ZLIB_BUILD_STATIC ON CACHE BOOL "" FORCE)
+    set(ZLIB_INSTALL OFF CACHE BOOL "" FORCE)
+    CPMAddPackage(
+      NAME zlib
+      GITHUB_REPOSITORY madler/zlib
+      GIT_TAG v1.3.2
     )
+
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+    set(BROTLI_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+    set(BROTLI_DISABLE_TESTS ON CACHE BOOL "" FORCE)
+    set(BROTLI_BUNDLED_MODE ON CACHE BOOL "" FORCE)
+    CPMAddPackage(
+      NAME brotli
+      GITHUB_REPOSITORY google/brotli
+      GIT_TAG v1.2.0
+    )
+
+    if(MSVC)
+      foreach(codec_target
+          zlibstatic
+          brotlicommon
+          brotlidec
+          brotlienc)
+        if(TARGET ${codec_target})
+          set_property(
+            TARGET ${codec_target}
+            PROPERTY MSVC_RUNTIME_LIBRARY
+              "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+          target_compile_options(
+            ${codec_target}
+            PRIVATE
+              "$<$<CONFIG:Debug>:/MTd>"
+              "$<$<NOT:$<CONFIG:Debug>>:/MT>")
+        endif()
+      endforeach()
+    endif()
+
+    if(NOT TARGET crtsys_ntl_content_codecs)
+      add_library(crtsys_ntl_content_codecs INTERFACE)
+      if(MSVC)
+        target_compile_options(
+          crtsys_ntl_content_codecs
+          INTERFACE
+            "$<$<AND:$<COMPILE_LANGUAGE:C,CXX>,$<CONFIG:Debug>>:/MTd>"
+            "$<$<AND:$<COMPILE_LANGUAGE:C,CXX>,$<NOT:$<CONFIG:Debug>>>:/MT>"
+        )
+      endif()
+      target_link_libraries(
+        crtsys_ntl_content_codecs
+        INTERFACE
+          ZLIB::ZLIBSTATIC
+          brotlidec
+          brotlienc
+          brotlicommon
+      )
+    endif()
   endif()
 endif()
 
@@ -187,6 +226,14 @@ function(crtsys_add_ntl_kernel_content_codecs)
       SYSTEM INTERFACE
         "${_CRTSYS_NTL_PREBUILT_CODEC_ROOT}/codecs/include")
     return()
+  endif()
+
+  if(_CRTSYS_NTL_SYSTEM_CODECS)
+    message(FATAL_ERROR
+      "The installed zlib and brotli packages are user-mode libraries and "
+      "cannot be linked into a kernel driver. Build crtsys from source with "
+      "CRTSYS_BUILD_NTL_KERNEL_CONTENT_CODECS=ON, or provide separately "
+      "audited kernel-mode codec libraries.")
   endif()
 
   if(NOT COMMAND wdk_add_library)

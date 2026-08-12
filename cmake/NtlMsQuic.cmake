@@ -1,5 +1,9 @@
 include_guard(GLOBAL)
 
+if(NOT DEFINED CRTSYS_ALLOW_NETWORK_DEPENDENCIES)
+  set(CRTSYS_ALLOW_NETWORK_DEPENDENCIES ON)
+endif()
+
 set_property(GLOBAL PROPERTY CRTSYS_NTL_MSQUIC_MODULE_DIR
              "${CMAKE_CURRENT_LIST_DIR}")
 set(CRTSYS_NTL_MSQUIC_HEADER_REVISION
@@ -59,6 +63,7 @@ function(crtsys_add_ntl_msquic_headers)
   # <bundle>/share/crtsys/cmake. Prefer the offline header carried by the
   # release/NuGet bundle before considering a network fetch.
   list(APPEND _include_candidates
+    "${_module_dir}/msquic/include"
     "${_module_dir}/../build/native/msquic/include"
     "${_module_dir}/../../../build/native/msquic/include")
 
@@ -71,6 +76,13 @@ function(crtsys_add_ntl_msquic_headers)
   endforeach()
 
   if(NOT _msquic_include_dir)
+    if(NOT CRTSYS_ALLOW_NETWORK_DEPENDENCIES)
+      message(FATAL_ERROR
+        "The optional NTL MsQuic headers are not installed. Install a crtsys "
+        "package that provides the pinned MsQuic headers, set "
+        "CRTSYS_NTL_MSQUIC_INCLUDE_DIR explicitly, or use a source build with "
+        "CRTSYS_ALLOW_NETWORK_DEPENDENCIES=ON.")
+    endif()
     include("${_module_dir}/CPM.cmake")
     CPMAddPackage(
       # Keep the internal dependency name short. Visual Studio still applies

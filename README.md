@@ -426,9 +426,10 @@ cached runtime package instead of fetching and building `crtsys` from source.
 
 ## vcpkg Overlay Port
 
-The first-party overlay under [`vcpkg/ports`](./vcpkg/ports) installs the
-prebuilt release for one triplet architecture while retaining the supported
-MSVC toolset variants. crtsys requires a Windows desktop static-CRT triplet:
+The first-party overlay under [`vcpkg/ports`](./vcpkg/ports) builds crtsys and
+its pinned build dependencies from source for the selected triplet. It installs
+Debug and Release archives in vcpkg's standard `manual-link` directories.
+crtsys requires a Windows desktop static-CRT triplet and an installed WDK.
 
 Published versions are available from the repository's `vcpkg-registry`
 branch. Its current stable baseline is
@@ -442,9 +443,9 @@ vcpkg install crtsys:x64-windows-static `
 ```
 
 CMake consumers use the installed `crtsys` package normally. Visual
-Studio/MSBuild consumers can run the packaged `crtsys-vs-init` once after
-`vcpkg install` to retain the existing WDM, KMDF, minifilter, and WFP
-entry-point property pages. Reload Visual Studio after initialization. See the
+Studio/MSBuild consumers can run `crtsys-vs-init` through `vcpkg env --tools`
+once after `vcpkg install` to retain the existing WDM, KMDF, minifilter, and
+WFP entry-point property pages. Reload Visual Studio after initialization. See the
 [vcpkg guide](./vcpkg/README.md) for the complete initialization and validation
 commands.
 
@@ -488,9 +489,10 @@ creates the matching `v<version>` tag, and pushes both the commit and tag. The t
 push starts the `Package` workflow.
 
 After the release assets pass validation and are uploaded, the workflow also
-publishes the new port to the `vcpkg-registry` branch. It computes the release
-ZIP SHA-512, updates the versions database and stable baseline, then commits the
-same version, hash, and baseline back to the source overlay documentation.
+publishes the new source port to the `vcpkg-registry` branch. It computes the
+tag source archive SHA-512, updates the versions database and stable baseline,
+then commits the same version, hash, and baseline back to the source overlay
+documentation.
 
 The same flow is also available from the GitHub UI: open **Actions**,
 select **Release**, choose **Run workflow**, and enter the release version. The
@@ -502,8 +504,8 @@ Official microsoft/vcpkg updates use the separate manual **Update official
 vcpkg** workflow after the GitHub Release is published. Its `validate` mode
 performs the complete upstream port and consumer test without pushing; its
 `submit` mode updates the fork and opens or refreshes the upstream PR. See the
-[vcpkg guide](./vcpkg/README.md#updating-the-official-microsoftvcpkg-port) for
-the required secret and first-port limitation.
+[vcpkg guide](./vcpkg/README.md#validation-and-publishing) for the required
+secret and validation details.
 
 ## Building This Repository
 

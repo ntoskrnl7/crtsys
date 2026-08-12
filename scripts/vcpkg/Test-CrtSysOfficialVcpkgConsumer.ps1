@@ -33,7 +33,7 @@ if (-not $WorkDirectory.StartsWith(
 $installRoot = Join-Path $VcpkgRepositoryDirectory 'installed'
 $packageRoot = Join-Path $installRoot $Triplet
 $initializer = Join-Path $packageRoot 'tools\crtsys\crtsys-vs-init.cmd'
-$cmakePackage = Join-Path $packageRoot 'share\crtsys\cmake\crtsys-config.cmake'
+$cmakePackage = Join-Path $packageRoot 'share\crtsys\crtsys-config.cmake'
 $uiContract = Join-Path $repoRoot 'test\vcpkg\msbuild-ui-contract.proj'
 $uiInitContract = Join-Path $repoRoot 'test\vcpkg\msbuild-init-contract.proj'
 $consumerSource = Join-Path $repoRoot 'test\cmake\install-consumer'
@@ -183,7 +183,11 @@ try {
     '-G', $generator,
     '-A', 'x64',
     "-DCRTSYS_PACKAGE_ROOT=$packageRoot",
+    '-DCRTSYS_INSTALL_CONSUMER_ENABLE_KERNEL_MSQUIC=OFF',
+    '-DCRTSYS_INSTALL_CONSUMER_ENABLE_KERNEL_CONTENT_CODECS=OFF',
+    '-DCRTSYS_INSTALL_CONSUMER_ENABLE_USER_CONTENT_CODECS=OFF',
     "-DCRTSYS_WDK_VERSION=$WindowsSdkVersion",
+    "-DLDK_WDK_VERSION=$WindowsSdkVersion",
     "-DCMAKE_SYSTEM_VERSION=$WindowsSdkVersion",
     "-DCMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION=$WindowsSdkVersion"
   )
@@ -192,22 +196,23 @@ try {
     throw "Official vcpkg CMake consumer configure failed with exit code $LASTEXITCODE."
   }
 
-  & cmake --build $buildDirectory `
-    --config Release `
-    --target crtsys_install_consumer `
-    --parallel
-  if ($LASTEXITCODE -ne 0) {
-    throw "Official vcpkg CMake consumer build failed with exit code $LASTEXITCODE."
-  }
+  foreach ($configuration in @('Debug', 'Release')) {
+    & cmake --build $buildDirectory `
+      --config $configuration `
+      --target crtsys_install_consumer `
+      --parallel
+    if ($LASTEXITCODE -ne 0) {
+      throw "Official vcpkg CMake $configuration consumer build failed with exit code $LASTEXITCODE."
+    }
 
-  $driverPath = Join-Path `
-    $buildDirectory `
-    'Release\crtsys_install_consumer.sys'
-  if (-not (Test-Path -LiteralPath $driverPath)) {
-    throw "Official vcpkg CMake consumer did not produce a driver: $driverPath"
+    $driverPath = Join-Path `
+      $buildDirectory `
+      "$configuration\crtsys_install_consumer.sys"
+    if (-not (Test-Path -LiteralPath $driverPath)) {
+      throw "Official vcpkg CMake consumer did not produce a driver: $driverPath"
+    }
+    Write-Host "Official vcpkg $configuration consumer passed: $driverPath"
   }
-
-  Write-Host "Official vcpkg consumer passed: $driverPath"
 } finally {
   if ((Test-Path -LiteralPath $initializer) -and
       ((Test-Path -LiteralPath $generatedProps) -or
