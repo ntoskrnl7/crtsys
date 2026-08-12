@@ -230,8 +230,11 @@ if ([version]$projectVersion -lt [version]'0.1.42') {
   Assert-FileContains -Path $compatibilityPatchPath -Tokens @(
     'NOT CRTSYS_NATIVE_ARCH STREQUAL "ARM64" AND',
     'target_link_libraries(crtsys PRIVATE WDK::NTOSKRNL)',
+    'target_link_options(crtsys PUBLIC "/INCLUDE:iscntrl")',
     'list(APPEND _crtsys_prebuilt_link_libraries WDK::NTOSKRNL)',
-    'NOT _crtsys_driver_arch STREQUAL "ARM64"'
+    'NOT _crtsys_driver_arch STREQUAL "ARM64"',
+    'target_link_options(${_target} PRIVATE "/INCLUDE:iscntrl")',
+    'src/custom/crt/ctype_arm64.c'
   )
 }
 Assert-FileContains -Path $portfilePath -Tokens $portfileTokens

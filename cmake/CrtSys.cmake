@@ -412,6 +412,8 @@ function(crtsys_apply_prebuilt_driver_interface _target)
             message(FATAL_ERROR "WDK::NTOSKRNL is required for ARM64 crtsys prebuilt driver support.")
         endif()
         list(APPEND _crtsys_prebuilt_link_libraries WDK::NTOSKRNL)
+        target_link_options(
+            ${_target} ${_usage_requirement_scope} "/INCLUDE:iscntrl")
     endif()
 
     foreach(_required_target IN ITEMS WDK::CNG WDK::AUX_KLIB WDK::WDMSEC)
@@ -678,6 +680,8 @@ function(crtsys_add_driver _target)
         if(CRTSYS_USE_LIBCNTPR AND
            NOT _crtsys_driver_arch STREQUAL "ARM64")
             target_link_options(${_target} PRIVATE "/FORCE:MULTIPLE")
+        elseif(_crtsys_driver_arch STREQUAL "ARM64")
+            target_link_options(${_target} PRIVATE "/INCLUDE:iscntrl")
         endif()
         if(NOT TARGET WDK::WDMSEC)
             message(FATAL_ERROR "WDK::WDMSEC is required for secure NTL control devices.")

@@ -47,6 +47,16 @@ target_link_libraries(gtest crtsys)
 target_compile_options(gtest PRIVATE "/Gz")
 target_link_libraries(gtest_main PRIVATE crtsys)
 target_compile_options(gtest_main PRIVATE "/Gd")
+if(CMAKE_VS_PLATFORM_NAME STREQUAL "ARM64" AND MSVC_VERSION LESS 1930)
+    # WDK 10.0.26100's winnt.h uses the intrinsic before the v142 ARM64
+    # headers declare it. Keep the test framework compilable so the matrix
+    # reaches and validates the final crtsys_test.sys link.
+    target_compile_options(
+        gtest
+        PRIVATE
+            "/FI${CMAKE_CURRENT_SOURCE_DIR}/v142_arm64_intrinsics.h"
+    )
+endif()
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /W4 /WX")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /W4 /WX")

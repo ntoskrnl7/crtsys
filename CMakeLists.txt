@@ -522,6 +522,10 @@ target_link_libraries(crtsys PRIVATE $<BUILD_INTERFACE:Ldk>)
 # after Ldk instead of pulling that conflicting libcntpr member.
 if(CRTSYS_NATIVE_ARCH STREQUAL "ARM64")
   target_link_libraries(crtsys PRIVATE WDK::NTOSKRNL)
+  # Force the ARM64 ctype compatibility object into the final image before
+  # libcntpr is scanned. This prevents libcntpr's combined __ctype.obj from
+  # colliding with the ctype exports in the kernel import library.
+  target_link_options(crtsys PUBLIC "/INCLUDE:iscntrl")
 endif()
 target_link_libraries(crtsys PRIVATE WDK::AUX_KLIB)
 if(CRTSYS_USE_LIBCNTPR)
