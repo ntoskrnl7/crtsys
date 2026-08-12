@@ -22,6 +22,7 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $portRoot = Join-Path $repoRoot 'vcpkg\ports\crtsys'
 $manifestPath = Join-Path $portRoot 'vcpkg.json'
 $portfilePath = Join-Path $portRoot 'portfile.cmake'
+$compatibilityPatchPath = Join-Path $portRoot 'fix-offline-source-build.patch'
 $bridgePath = Join-Path $portRoot 'crtsys-vcpkg.targets'
 $initScriptPath = Join-Path $portRoot 'tools\crtsys-vs-init.ps1'
 $initCommandPath = Join-Path $portRoot 'tools\crtsys-vs-init.cmd'
@@ -148,6 +149,7 @@ function Resolve-MsBuildExecutable {
 foreach ($requiredPath in @(
   $manifestPath,
   $portfilePath,
+  $compatibilityPatchPath,
   $bridgePath,
   $initScriptPath,
   $initCommandPath,
@@ -225,6 +227,9 @@ $portfileTokens = @(
 )
 if ([version]$projectVersion -lt [version]'0.1.42') {
   $portfileTokens += 'fix-offline-source-build.patch'
+  Assert-FileContains -Path $compatibilityPatchPath -Tokens @(
+    'NOT CRTSYS_NATIVE_ARCH STREQUAL "ARM64" AND'
+  )
 }
 Assert-FileContains -Path $portfilePath -Tokens $portfileTokens
 if ([version]$projectVersion -ge [version]'0.1.42') {
