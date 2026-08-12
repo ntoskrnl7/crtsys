@@ -8,19 +8,18 @@
 # libraries, use it; otherwise keep the discovered headers and only fall back
 # for missing library targets.
 
-if(NOT DEFINED FindWDK_SOURCE_DIR OR "${FindWDK_SOURCE_DIR}" STREQUAL "")
-    # CPM 0.32 loses the exported source directory when a package first comes
-    # from CPM_SOURCE_CACHE in a nested dependency (Ldk) and the parent asks
-    # for that package again.  The first successful lookup reaches this
-    # wrapper, so retain its source path for the parent-directory lookup.
-    get_property(_CRTSYS_FINDWDK_SOURCE_DIR GLOBAL PROPERTY CRTSYS_FINDWDK_SOURCE_DIR)
-    if(_CRTSYS_FINDWDK_SOURCE_DIR)
-        set(FindWDK_SOURCE_DIR "${_CRTSYS_FINDWDK_SOURCE_DIR}")
-    endif()
-endif()
+set(_CRTSYS_BUNDLED_FINDWDK_SOURCE_DIR
+    "${CMAKE_CURRENT_LIST_DIR}/vendor/findwdk")
 
-if(NOT DEFINED FindWDK_SOURCE_DIR OR "${FindWDK_SOURCE_DIR}" STREQUAL "")
-    message(FATAL_ERROR "FindWDK_SOURCE_DIR is not defined. Add the upstream FindWDK package before find_package(WDK).")
+if(DEFINED CRTSYS_FINDWDK_SOURCE_DIR AND
+   NOT "${CRTSYS_FINDWDK_SOURCE_DIR}" STREQUAL "")
+    set(FindWDK_SOURCE_DIR "${CRTSYS_FINDWDK_SOURCE_DIR}")
+elseif(EXISTS "${_CRTSYS_BUNDLED_FINDWDK_SOURCE_DIR}/cmake/FindWdk.cmake")
+    set(FindWDK_SOURCE_DIR "${_CRTSYS_BUNDLED_FINDWDK_SOURCE_DIR}")
+else()
+    message(FATAL_ERROR
+        "The bundled FindWDK module was not found under "
+        "${_CRTSYS_BUNDLED_FINDWDK_SOURCE_DIR}. Reinstall crtsys from a complete package.")
 endif()
 
 set_property(GLOBAL PROPERTY CRTSYS_FINDWDK_SOURCE_DIR "${FindWDK_SOURCE_DIR}")

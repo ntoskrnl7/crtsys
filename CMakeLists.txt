@@ -28,6 +28,9 @@ option(CRTSYS_ENABLE_INSTALL "Enable crtsys install rules" ${CRTSYS_IS_TOP_LEVEL
 option(CRTSYS_BUILD_NTL_KERNEL_CONTENT_CODECS
   "Build the optional PASSIVE_LEVEL NTL kernel zlib/Brotli libraries" OFF)
 set(CRTSYS_LDK_SOURCE_DIR "" CACHE PATH "Use a local LDK source tree instead of fetching the default LDK release")
+set(CRTSYS_FINDWDK_SOURCE_DIR
+  "${CMAKE_CURRENT_SOURCE_DIR}/cmake/vendor/findwdk" CACHE PATH
+  "Use a local FindWDK source tree; defaults to the pinned bundled revision")
 
 # A source-tree consumer may intentionally link the prebuilt native archives.
 # In that mode CPM still enters this directory to expose crtsys_SOURCE_DIR, but
@@ -203,6 +206,17 @@ endif()
 
 include(cmake/CPM.cmake)
 
+if(NOT EXISTS "${CRTSYS_FINDWDK_SOURCE_DIR}/cmake/FindWdk.cmake")
+  message(FATAL_ERROR
+    "CRTSYS_FINDWDK_SOURCE_DIR does not contain cmake/FindWdk.cmake: "
+    "${CRTSYS_FINDWDK_SOURCE_DIR}")
+endif()
+CPMAddPackage(
+  NAME FindWDK
+  SOURCE_DIR "${CRTSYS_FINDWDK_SOURCE_DIR}"
+  DOWNLOAD_ONLY YES
+)
+
 if ("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "x64" AND
     NOT CRTSYS_USE_LIBCNTPR)
   set(LDK_USE_RAISE_EXCEPTION ON CACHE BOOL
@@ -234,8 +248,8 @@ CPMAddPackage(
   DOWNLOAD_ONLY YES
 )
 
-CPMAddPackage("gh:ntoskrnl7/FindWDK#master")
-list(APPEND CMAKE_MODULE_PATH "${FindWDK_SOURCE_DIR}/cmake")
+# FindWDK is bundled at a pinned revision so source builds and installed
+# consumers use the same reproducible WDK discovery implementation.
 find_package(WDK REQUIRED)
 crtsys_get_msvc_sdk_include_dirs(CRTSYS_MSVC_SDK_INCLUDE_DIRS)
 crtsys_generate_msvc_future_overlay(CRTSYS_MSVC_FUTURE_OVERLAY_DIR)
@@ -571,6 +585,10 @@ if(CRTSYS_ENABLE_INSTALL)
       cmake/pkg-utils.cmake
       cmake/std-cxx.cmake
     DESTINATION "${CRTSYS_INSTALL_CMAKEDIR}"
+  )
+  install(
+    DIRECTORY cmake/vendor/findwdk/
+    DESTINATION "${CRTSYS_INSTALL_CMAKEDIR}/vendor/findwdk"
   )
 
   configure_package_config_file(

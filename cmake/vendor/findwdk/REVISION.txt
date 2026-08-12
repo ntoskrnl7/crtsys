@@ -1,0 +1,2 @@
+Repository: https://github.com/ntoskrnl7/FindWDK
+Revision: 5e3c1cdd6ea92ab16ba47f82a49f645bf0ab7c1d

@@ -3,6 +3,42 @@
 crtsys는 다음 제3자 구성 요소를 포함하거나 이를 사용하여 빌드합니다. 라이선스
 원문은 법적 의미가 바뀌지 않도록 번역하지 않고 그대로 싣습니다.
 
+## FindWDK
+
+저장소: https://github.com/ntoskrnl7/FindWDK
+
+고정 리비전: `5e3c1cdd6ea92ab16ba47f82a49f645bf0ab7c1d`
+
+설치되는 CMake 패키지에 고정된 `FindWdk.cmake` 모듈을 포함하여, 소비자 구성 시
+네트워크 접근 없이 동일한 방식으로 WDK를 찾을 수 있게 합니다.
+
+Copyright (c) 2018 Sergey Podobry (sergey.podobry at gmail.com). All rights reserved.
+
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+
+  Redistributions of source code must retain the above copyright notice, this
+  list of conditions and the following disclaimer.
+
+  Redistributions in binary form must reproduce the above copyright notice, this
+  list of conditions and the following disclaimer in the documentation and/or
+  other materials provided with the distribution.
+
+  Neither the name of the {organization} nor the names of its
+  contributors may be used to endorse or promote products derived from
+  this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
 ## zlib
 
 저장소: https://github.com/madler/zlib

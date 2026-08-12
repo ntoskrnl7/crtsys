@@ -159,7 +159,7 @@ if ($manifest.name -ne 'crtsys') {
 if ($manifest.'version-semver' -ne $projectVersion) {
   throw "The vcpkg port version '$($manifest.'version-semver')' does not match crtsys '$projectVersion'."
 }
-if ($manifest.license -ne 'MIT AND BSD-2-Clause AND Zlib') {
+if ($manifest.license -ne 'MIT AND BSD-2-Clause AND BSD-3-Clause AND Zlib') {
   throw 'Expected the vcpkg port to declare all distributed licenses.'
 }
 foreach ($supportToken in @('windows', '!uwp', '!mingw', 'static', 'staticcrt')) {

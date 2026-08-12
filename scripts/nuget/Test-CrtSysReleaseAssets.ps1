@@ -107,6 +107,10 @@ foreach ($requiredPath in @(
   'share\crtsys\cmake\crtsys-config.cmake',
   'share\crtsys\cmake\crtsys-config-version.cmake',
   'share\crtsys\cmake\CrtSys.cmake',
+  'share\crtsys\cmake\FindWDK.cmake',
+  'share\crtsys\cmake\vendor\findwdk\cmake\FindWdk.cmake',
+  'share\crtsys\cmake\vendor\findwdk\LICENSE',
+  'share\crtsys\cmake\vendor\findwdk\REVISION.txt',
   'share\crtsys\cmake\NtlContentCodecs.cmake',
   'share\crtsys\cmake\NtlMsQuic.cmake',
   'include\ntl\net\borrowed_memory_resource',
@@ -223,6 +227,17 @@ foreach ($requiredPath in @(
   $fullPath = Join-Path $bundleRoot $requiredPath
   if (-not (Test-Path $fullPath)) {
     throw "Prebuilt release bundle is missing expected file: $fullPath"
+  }
+}
+
+$installedCrtSysCMake = Get-Content -Raw -LiteralPath (
+  Join-Path $bundleRoot 'share\crtsys\cmake\CrtSys.cmake')
+foreach ($forbiddenPattern in @(
+    'file(DOWNLOAD',
+    'CRTSYS_CPM_DOWNLOAD_URL',
+    'gh:ntoskrnl7/FindWDK#master')) {
+  if ($installedCrtSysCMake.Contains($forbiddenPattern)) {
+    throw "Installed CrtSys.cmake contains a consumer-time network dependency: $forbiddenPattern"
   }
 }
 
