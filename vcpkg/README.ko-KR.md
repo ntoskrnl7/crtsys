@@ -23,7 +23,7 @@ Visual Studio C++ 워크로드와 호환되는 WDK가 필요합니다. 설치된
       "kind": "git",
       "repository": "https://github.com/ntoskrnl7/crtsys",
       "reference": "vcpkg-registry",
-      "baseline": "bd49aa5fffc3a5f625e9264f8c4510d06ecf625a",
+      "baseline": "b125ae8c24005dd43ca003faf25f72d8ebf2297a",
       "packages": ["crtsys"]
     }
   ]

@@ -433,7 +433,7 @@ crtsys requires a Windows desktop static-CRT triplet and an installed WDK.
 
 Published versions are available from the repository's `vcpkg-registry`
 branch. Its current stable baseline is
-`bd49aa5fffc3a5f625e9264f8c4510d06ecf625a`; see the
+`b125ae8c24005dd43ca003faf25f72d8ebf2297a`; see the
 [vcpkg guide](./vcpkg/README.md) for the manifest configuration. A source
 checkout can instead use the overlay directly:
 
