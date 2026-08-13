@@ -9,9 +9,9 @@
 ## 위치
 
 `crtsys`는 Windows 드라이버를 위한 커널 모드 C++ 런타임 기반 계층입니다.
-MSVC C++ runtime, CRT, STL, helper library 지원을 LDK 기반
-Windows/NTDLL-compatible API 및 ICU ABI layer와 결합하고, 그 결과로 얻은
-driver-tested surface와 execution-context contract를 문서화합니다.
+MSVC C++ 런타임, CRT, STL, 도우미 라이브러리 지원을 LDK 기반
+Windows/NTDLL 호환 API 및 ICU ABI 계층과 결합하고, 그 결과로 얻은
+드라이버 검증 기능 범위와 실행 문맥 계약을 문서화합니다.
 
 실제 목표는 다음과 같습니다.
 
@@ -21,8 +21,8 @@ MSVC C++ / CRT / STL driver path에 필요한 런타임 기반을 제공하고,
 coverage surface를 명시적으로 문서화하고 테스트한다.
 ```
 
-이 구분은 중요합니다. `crtsys`는 알려진 driver/runtime path를 위한 runtime
-substrate 및 Windows API compatibility layer이지, 임의의 user-mode 가정을
+이 구분은 중요합니다. `crtsys`는 알려진 드라이버/런타임 경로를 위한 런타임
+기반 계층 및 Windows API 호환성 계층이지, 임의의 사용자 모드 가정을
 커널 모드로 그대로 가져와도 된다는 허가가 아닙니다. 드라이버는 여전히 IRQL,
 stack, pool 할당, pageable code, unload 안전성, Driver Verifier, HVCI 및
 대상 OS 검증 같은 WDK 규칙을 따라야 합니다.
@@ -34,19 +34,19 @@ stack, pool 할당, pageable code, unload 안전성, Driver Verifier, HVCI 및
 필요해집니다.
 
 - 정적/동적 초기화
-- 선택된 exception runtime 경로
+- 선택된 예외 런타임 경로
 - STL 코드가 요구하는 일부 CRT 함수
 - 통제된 문맥에서 쓰는 STL synchronization/threading 경로
 - stream 및 diagnostic 지원
-- driver object와 lock을 감싸는 RAII wrapper
+- 드라이버 객체와 잠금을 감싸는 RAII 래퍼
 
-공통 런타임 계층이 없으면 각 드라이버 프로젝트가 같은 저수준 runtime
-adaptation 작업을 반복해서 만들어야 합니다. `crtsys`는 그 작업을 한곳에
+공통 런타임 계층이 없으면 각 드라이버 프로젝트가 같은 저수준 런타임
+적응 작업을 반복해서 만들어야 합니다. `crtsys`는 그 작업을 한곳에
 모으고 테스트와 연결합니다.
 
 ## 계층 구조
 
-driver source에서 kernel primitive까지 내려가는 의도한 구조는 다음과
+드라이버 소스에서 커널 기본 기능까지 내려가는 의도한 구조는 다음과
 같습니다.
 
 ```text
@@ -68,10 +68,10 @@ LDK Windows/NTDLL-compatible API + ICU ABI substrate
 WDK / NT kernel primitive
 ```
 
-이 모델에서 `crtsys`는 MSVC runtime/STL integration, kernel-mode runtime
-adapter, 테스트된 C++ surface를 담당합니다. `Ldk`는 알려진 runtime
-dependency를 위한 kernel-backed Windows/NTDLL-compatible API 및 ICU ABI
-substrate로 사용됩니다. 임의의 user-mode module을 커널 공간에서 실행하는
+이 모델에서 `crtsys`는 MSVC 런타임/STL 통합, 커널 모드 런타임
+어댑터, 테스트된 C++ 기능 범위를 담당합니다. `LDK`는 알려진 런타임
+의존성을 위한 커널 기반 Windows/NTDLL 호환 API 및 ICU ABI
+기반 계층으로 사용됩니다. 임의의 사용자 모드 모듈을 커널 공간에서 실행하는
 수단으로 설명하지 않습니다.
 
 ## 실행 모델
@@ -112,11 +112,11 @@ CRT, STL, LDK 또는 NTL 상태를 소유한 객체는
 
 ## 동기화 철학
 
-NTL은 주된 드라이버 제어 경로에서 ownership clarity와
-blocking/resource-style coordination을 우선합니다. 그래서 `ERESOURCE` 기반
-helper가 중심입니다. `PASSIVE_LEVEL` / 일부 `APC_LEVEL` 모델에서는 더 긴
-수명의 driver state를 조율하고, underlying WDK contract가 허용하는 경우
-blocking을 사용할 수 있기 때문입니다.
+NTL은 주된 드라이버 제어 경로에서 소유권의 명확성과
+대기/리소스 방식의 조율을 우선합니다. 그래서 `ERESOURCE` 기반
+도우미가 중심입니다. `PASSIVE_LEVEL` / 일부 `APC_LEVEL` 모델에서는 더 긴
+수명의 드라이버 상태를 조율하고, 기본 WDK 계약이 허용하는 경우
+대기할 수 있기 때문입니다.
 
 Spin lock도 필요합니다. 하지만 runtime-backed C++ 모델의 기본 동기화
 abstraction은 아닙니다. Spin lock은 짧고, nonblocking이며, resident이고,

@@ -2,11 +2,11 @@
 
 [English](./README.md)
 
-이 샘플은 bounded 양방향 IPv4/IPv6 UDP tuple 변환을 보여 줍니다.
-`ALE_FLOW_ESTABLISHED_V4/V6`에서 typed flow 상태를 만들고,
+이 샘플은 제한된 양방향 IPv4/IPv6 UDP 튜플 변환을 보여 줍니다.
+`ALE_FLOW_ESTABLISHED_V4/V6`에서 타입이 지정된 flow 상태를 만들고,
 `DATAGRAM_DATA_V4/V6`에서 클라이언트 데이터그램을 로컬 프록시로 보내며,
 `OUTBOUND_IPPACKET_V4/V6`에서 해당 프록시가 보낸 응답인지 검증합니다. 응답은
-크기가 제한된 새 NBL로 복사하고 원래 원격 tuple로 복원한 뒤 network-send
+크기가 제한된 새 NBL로 복사하고 원래 원격 튜플로 복원한 뒤 네트워크 전송
 경로로 재주입하여 연결된 클라이언트에 전달합니다. 컨트롤러가 종료되면
 ephemeral 정책도 함께 제거됩니다.
 
@@ -32,9 +32,9 @@ ephemeral 정책도 함께 제거됩니다.
 [--duration-ms <100..300000>]
 ```
 
-컨트롤러는 정책 설치가 끝난 뒤에만 ready 파일을 만듭니다. fixture는 그
+컨트롤러는 정책 설치가 끝난 뒤에만 ready 파일을 만듭니다. 픽스처는 그
 후 외부에서 트래픽을 보내고 stop 파일을 만든 뒤, 컨트롤러의 stats 파일과
-정상 종료를 기다립니다. acceptance는 기본적으로 같은 디렉터리의 컨트롤러를
+정상 종료를 기다립니다. 허용성 검사는 기본적으로 같은 디렉터리의 컨트롤러를
 찾으며 `--controller <경로>`로 다른 위치를 지정할 수도 있습니다.
 
 ```powershell
@@ -43,8 +43,8 @@ cmake -S examples\wfp\kernel\datagram-proxy `
 cmake --build artifacts\examples\wfp-datagram-proxy --config Debug
 ```
 
-지원 범위는 bounded dual-stack UDP 목적지 리디렉션, 투명한 응답 tuple 복원,
-재주입 loop 방지와 안전한 주입 소유권입니다. mapping, PASSIVE 지연 작업, packet,
-control data와 비동기 주입 수를 각각 제한하며 quota 또는 할당 실패 시 선택된
+지원 범위는 제한된 이중 스택 UDP 목적지 리디렉션, 투명한 응답 튜플 복원,
+재주입 루프 방지와 안전한 주입 소유권입니다. 매핑, PASSIVE 지연 작업, 패킷,
+제어 데이터와 비동기 주입 수를 각각 제한하며 할당량 또는 할당 실패 시 선택된
 패킷을 흡수하고 진단 통계를 증가시킵니다. IPsec과 프록시 앱의 콘텐츠 정책은
 별도의 관심사입니다.

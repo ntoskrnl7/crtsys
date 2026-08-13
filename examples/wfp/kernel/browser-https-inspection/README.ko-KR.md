@@ -38,13 +38,14 @@ stop 명령을 보내며 controller 종료까지 기다립니다. 합쳐진 `_ap
 | --- | --- | --- | --- |
 | HTTP/1.1 | 애플리케이션 범위 IPv4/IPv6 TCP redirect, WSK + 커널 Schannel | pipelining, 허용·차단, HTML과 제한된 gRPC 변환, gzip/deflate/Brotli, WebSocket `permessage-deflate` | acceptance의 관리형 IPv4/IPv6 원본과 클라이언트 |
 | HTTP/2 | WSK + 커널 Schannel ALPN `h2` | 동시 stream, flow control, GOAWAY, HTTP/gRPC 변환, 압축, Extended CONNECT WebSocket, 미지원 CONNECT fail-close | 관리형 IPv4/IPv6 H2 교환과 evidence gate |
-| HTTP/3 | 애플리케이션 범위 양방향 UDP tuple translation, inbox 커널 MsQuic + TLS 1.3 | SETTINGS, 동적 QPACK, multiplexing, stream 단위 차단·reset, gRPC, 압축, strict H3 원본과 증명 기반 H2/H1 fallback | 관리형 QUIC 교환, outbound DATAGRAM_DATA와 reverse OUTBOUND_IPPACKET/network-send telemetry, no-replay와 원본 보안 음성 사례 |
+| HTTP/3 | 애플리케이션 범위 양방향 UDP tuple translation, inbox 커널 MsQuic + TLS 1.3 | SETTINGS, 동적 QPACK, multiplexing, stream 단위 차단·reset, gRPC, 압축, strict H3 원본과 증명 기반 H2/H1 fallback | 관리형 QUIC 교환, outbound DATAGRAM_DATA와 reverse OUTBOUND_IPPACKET/network-send telemetry, no-replay와 서버 신원 검증 실패 사례 |
 | WebTransport | 커널 HTTP/3 서비스 | Extended CONNECT, stream, datagram, reset, Capsule | 관리형 QUIC acceptance |
 
-원본 보안은 운영체제 체인 검증, 정확한 leaf pin, 클라이언트 인증서 인증,
+서버 신원 검증은 운영체제 체인 검증, 정확한 leaf pin, 클라이언트 인증서 인증,
 ALPN 협상, 보안 설정 교체 실패 후 rollback, unknown CA·잘못된 pin·잘못된
-클라이언트의 fail-close를 검증합니다. 리소스 시험은 stream, connection,
-대기 작업, 요청 버퍼, 원본 할당 한도와 취소·정상 drain을 포함합니다.
+클라이언트의 fail-close를 검증합니다. 안전하지 않은 요청과 모든 보안 실패는
+fallback 중에 재전송하지 않습니다. 리소스 시험은 stream, connection,
+대기 작업, 요청 버퍼, 오리진 할당 한도와 취소·정상 drain을 포함합니다.
 
 HTTP/1·HTTP/2의 큰 wire/frame 저장소는 활성 session quota가 있는 고정 nonpaged
 workspace pool에서 lease합니다. 크기가 달라지는 semantic header, body, codec
@@ -53,9 +54,9 @@ workspace pool에서 lease합니다. 크기가 달라지는 semantic header, bod
 fail-close하고 정상 stop/drain 뒤 활성 lease 수가 0이 되어야 합니다.
 
 두 listener를 열기 전에 드라이버는 pool의 owning 계약도 직접 검증합니다.
-quota 고갈은 fail-close하고, 중복 close는 멱등이며, pool facade보다 lease가
+quota 고갈은 fail-close하고, 중복 close는 멱등이며, pool 객체보다 lease가
 오래 살아도 안전하고, `DISPATCH_LEVEL`에서 마지막 lease를 해제하면 runtime이
-소유한 PASSIVE cleanup domain에서 파괴되어야 합니다. 이 결과는 service ABI에
+소유한 PASSIVE cleanup domain에서 소멸해야 합니다. 이 결과는 service ABI에
 포함되며 controller와 acceptance 실행 파일은 통과하지 않으면 진행하지 않습니다.
 
 WebSocket 양방향 relay는 `kernel::join_bidirectional`을 사용합니다. 어느 한
@@ -105,7 +106,8 @@ identity가 제거됩니다.
 브라우저가 검사 가능한 TCP fallback을 사용하게 하며, 그 fallback을 HTTP/3로
 표시하지 않습니다. 별도 acceptance 실행 파일이 브라우저 동작을 바꾸지 않고
 실제 커널 HTTP/3 경로를 증명합니다. certificate pinning과 클라이언트의 private
-CA 제한은 클라이언트 신뢰 정책의 경계입니다.
+CA 제한은 클라이언트 신뢰 정책의 경계이며, 이 예제가 certificate pinning을
+우회한다고 주장하지 않습니다.
 
 ## 관리형 런타임 acceptance
 

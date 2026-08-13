@@ -9,7 +9,7 @@
 고정 크기 buffered IOCTL에는 다음 형태를 사용하십시오.
 
 1. dispatch 경로에 대한 `ntl::remove_lock` guard를 획득합니다.
-2. 실행 시점의 `ntl::device_control::code`를 형식화된 `ntl::ioctl` descriptor와 비교합니다.
+2. 실행 시점의 `ntl::device_control::code`를 타입이 지정된 `ntl::ioctl` descriptor와 비교합니다.
 3. `ntl::ioctl_input_as`로 요청을 읽습니다.
 4. 코드에 MDL 소유자가 필요하면 `ntl::mdl`로 커널 버퍼를 준비하거나 매핑합니다.
 5. `ntl::ioctl_write_output`으로 응답을 씁니다.

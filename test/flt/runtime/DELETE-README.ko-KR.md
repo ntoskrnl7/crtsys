@@ -5,7 +5,7 @@
 fixture는 삭제 요청과 확인된 삭제를 구분합니다.
 
 - `create_parameters::delete_on_close()`는 `FILE_DELETE_ON_CLOSE`를 인식합니다.
-- `set_information_parameters::disposition()`은 legacy `FILE_DISPOSITION_INFORMATION` 또는 확장 `FILE_DISPOSITION_INFORMATION_EX`를 검증·복사하여 읽기 전용 형식화된 view로 제공합니다.
+- `set_information_parameters::disposition()`은 legacy `FILE_DISPOSITION_INFORMATION` 또는 확장 `FILE_DISPOSITION_INFORMATION_EX`를 검증·복사하여 읽기 전용 타입이 지정된 view로 제공합니다.
 - 각 stream context는 성공한 disposition 및 delete-on-close 상태를 추적합니다.
 - 겹치는 disposition 연산은 추적 상태를 불확실하게 만드므로, 마지막에 실행된 post callback만 신뢰하지 않고 cleanup도 검사합니다.
 - 동기화된 post-cleanup callback은 `try_query_cleanup_deletion(as_post(data))`를 호출합니다. `STATUS_FILE_DELETED`는 삭제를 확인하고, 성공한 standard-information query는 stream이 계속 존재함을 확인합니다.
@@ -22,7 +22,7 @@ app은 load된 x64 미니필터에서 다음을 모두 증명합니다.
 4. alternate data stream을 삭제하면 base file은 남아 있고 stream 삭제로 보고됩니다. base를 삭제하면 전체 파일 삭제로 보고됩니다.
 5. 기존의 두 번째 handle은 삭제가 보류된 동안에도 계속 사용할 수 있으며 마지막 handle이 닫힌 뒤 파일이 사라집니다.
 6. 결정적인 두 thread gate가 하나의 stream에서 set/clear disposition 연산을 겹치게 합니다. driver는 경쟁을 기록하고 이후 cleanup에서 최종 삭제를 확인합니다.
-7. 형식화된 completion-state 소유권이 정확히 균형을 이루고 filter가 unload되며, 같은 x64 driver에서 x64/x86 app이 모두 통과합니다.
+7. 타입이 지정된 completion-state 소유권이 정확히 균형을 이루고 filter가 unload되며, 같은 x64 driver에서 x64/x86 app이 모두 통과합니다.
 
 ## 빌드
 

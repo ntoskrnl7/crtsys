@@ -6,7 +6,7 @@
 
 | 디렉터리 | 핵심 내용 | 실행 조건 |
 | --- | --- | --- |
-| [`basic`](./basic/README.ko-KR.md) | 비 PnP 제어 장치, 형식화된 요청과 컨텍스트, 큐, 취소, WDF 객체 도우미 | 별도 하드웨어가 없는 폐기 가능한 VM |
+| [`basic`](./basic/README.ko-KR.md) | 비 PnP 제어 장치, 타입이 지정된 요청과 컨텍스트, 큐, 취소, WDF 객체 도우미 | 별도 하드웨어가 없는 폐기 가능한 VM |
 | [`echo`](./echo/README.ko-KR.md) | 큐 동기화, 타이머 완료, 취소 경쟁과 큐 복구 | 예제 INF를 설치한 VM |
 | [`pnp`](./pnp/README.ko-KR.md) | PnP/전원 콜백, 리소스, 장치 인터페이스와 IOCTL | 예제 INF를 설치한 VM |
 | [`bus`](./bus/README.ko-KR.md) | 동적 PDO 추가·제거·꺼내기와 자식 함수 드라이버 | 두 INF를 설치한 VM |

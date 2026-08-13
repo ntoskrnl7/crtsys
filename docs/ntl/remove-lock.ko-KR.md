@@ -4,7 +4,8 @@
 
 헤더: [`include/ntl/remove_lock`](../../include/ntl/remove_lock)
 
-`ntl::remove_lock`은 `IO_REMOVE_LOCK`을 래핑합니다. remove, unload 또는 teardown 경로가 최종 참조를 해제하기 전에 끝나야 하는 dispatch 경로에 사용하십시오.
+`ntl::remove_lock`은 `IO_REMOVE_LOCK`을 감쌉니다. 제거, 언로드 또는 정리 경로가
+마지막 참조를 해제하기 전에 반드시 끝나야 하는 디스패치 경로에 사용하세요.
 
 ## 예제
 
@@ -40,18 +41,26 @@ driver.on_unload([&] {
 - `native_handle()`
 - `ntl::remove_lock_guard::reset()`
 
-일반 dispatch 코드에서는 수동으로 `release()`를 호출하기보다 `acquire()`가 반환한 guard를 사용하십시오. `release_and_wait()`는 객체가 새 작업 수락을 중단한 뒤의 teardown 경로용입니다. `release_and_wait()`가 성공하면 래퍼는 종료 상태가 됩니다. 이후 `acquire()` 호출은 네이티브 remove-lock 상태를 다시 건드리지 않고 `STATUS_DELETE_PENDING`을 반환합니다. 래퍼는 `IoReleaseRemoveLockAndWait`를 호출하기 전에 remove 경로의 네이티브 acquire를 내부에서 수행하므로, 호출자가 그 WDK 전제 조건만 충족하기 위한 별도 guard를 유지할 필요가 없습니다.
+일반적인 디스패치 코드에서는 `release()`를 수동 호출하기보다 `acquire()`가 반환한
+guard를 사용하세요. `release_and_wait()`는 객체가 새 작업을 받지 않게 된 뒤의
+정리 경로용입니다. `release_and_wait()`가 성공하면 래퍼는 종료 상태가 됩니다.
+그 뒤 `acquire()`를 호출하면 네이티브 remove lock 상태를 다시 건드리지 않고
+`STATUS_DELETE_PENDING`을 반환합니다. 이 래퍼는
+`IoReleaseRemoveLockAndWait`를 호출하기 전에 제거 경로의 네이티브 acquire를
+내부에서 수행하므로, 호출자가 그 WDK 사전 조건만 충족하려고 별도 guard를
+유지할 필요가 없습니다.
 
 ## IRQL
 
-WDK `IO_REMOVE_LOCK` 계약을 따르십시오. 대기할 수 없는 경로에서 `release_and_wait()`를 호출하지 마십시오.
+WDK `IO_REMOVE_LOCK` 계약을 따르세요. 대기할 수 없는 경로에서는
+`release_and_wait()`를 호출하지 마세요.
 
 ## 드라이버 테스트 범위
 
-드라이버 테스트 모음은 다음을 검사합니다.
+드라이버 테스트 모음은 다음을 검증합니다.
 
 - acquire 성공
-- guard 이동 및 reset
+- guard 이동과 reset
 - 여러 acquire 참조
 - `release_and_wait`
-- remove 이후 acquire 거부
+- 제거 뒤 acquire 거부

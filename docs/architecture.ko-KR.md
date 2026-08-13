@@ -2,69 +2,68 @@
 
 [한국어 문서로 돌아가기](./README.ko-KR.md)
 
-`crtsys`는 Windows 드라이버를 위한 커널 모드 runtime substrate입니다.
-목표는 driver project가 익숙한 MSVC C++ runtime, CRT, STL entry point를
-사용하되, 그 runtime dependency를 driver-safe kernel facility와 명시적인
-compatibility substrate 위에 매핑하는 것입니다.
+`crtsys`는 Windows 드라이버용 커널 모드 런타임 기반 계층입니다.
+드라이버 프로젝트가 익숙한 MSVC C++ 런타임, CRT, STL 진입점을 사용하면서도,
+그 런타임 의존성을 드라이버에서 안전한 커널 기능과 명시적인 호환성 계층에
+연결하는 것이 목표입니다.
 
 ## 책임 분리
 
-`crtsys`는 driver binary 안의 MSVC runtime/STL integration을 담당합니다.
-테스트된 driver surface에 필요한 Microsoft runtime source path를 선택하고,
-hosted runtime이 보통 user-mode facility에 의존하는 부분에는 kernel-mode
-runtime adapter를 제공하며, 그 결과를 driver test와 연결합니다.
+`crtsys`는 드라이버 바이너리 안의 MSVC 런타임/STL 통합을 담당합니다.
+검증한 드라이버 기능 범위에 필요한 Microsoft 런타임 소스 경로를 선택하고,
+호스팅된 런타임이 보통 사용자 모드 기능에 의존하는 부분에는 커널 모드
+런타임 어댑터를 제공하며, 그 동작을 드라이버 테스트로 검증합니다.
 
-`LDK`는 runtime과 STL 경로가 사용하는 Windows/NTDLL 호환 API 계층과 ICU ABI
-기반을 제공합니다. 여기에는 정상적인 사용자 모드 process 밖에서 MSVC runtime
-코드가 기대하는 저수준 primitive가 포함됩니다.
+`LDK`는 런타임과 STL 경로가 사용하는 Windows/NTDLL 호환 API 계층과 ICU ABI
+기반을 제공합니다. 여기에는 일반적인 사용자 모드 프로세스 밖에서 MSVC 런타임
+코드가 호출할 것으로 기대하는 저수준 기본 기능이 포함됩니다.
 
-`NTL`은 드라이버 코드에 노출되는 C++ 도우미 계층입니다. C++ 진입점 wrapper,
-driver/device 도우미, 동기화 도우미, RPC 방식 control path, IRQL 도우미 및
-stack expansion 도구를 제공합니다.
+`NTL`은 드라이버 코드에 제공하는 C++ 도우미 계층입니다. C++ 진입점 래퍼,
+드라이버/디바이스 도우미, 동기화 도우미, RPC 방식 제어 경로, IRQL 도우미 및
+스택 확장 도구를 제공합니다.
 
 ## 계층별 책임
 
 | 계층 | 역할 |
 | --- | --- |
-| MSVC CRT/STL/VCRT/UCRT source path | Driver code가 사용하는 익숙한 MSVC C++/CRT/STL entry point를 유지합니다. |
-| crtsys compatibility layer | Kernel-mode runtime adapter, ABI helper, 선택된 CRT/STL integration, driver-tested coverage contract를 제공합니다. |
-| LDK substrate | Runtime/STL path가 요구하는 Windows/NTDLL-compatible API와 ICU ABI entry point를 제공합니다. |
-| NTL | 기본 MSVC STL API를 바꾸지 않고 드라이버용 선택적 C++ helper를 제공합니다. |
-| WDK / NT kernel | 실제 kernel primitive, object model, IRQL rule, pool allocation, verifier environment를 제공합니다. |
+| MSVC CRT/STL/VCRT/UCRT 소스 경로 | 드라이버 코드가 사용하는 익숙한 MSVC C++/CRT/STL 진입점을 유지합니다. |
+| crtsys 호환성 계층 | 커널 모드 런타임 어댑터, ABI 도우미, 선택된 CRT/STL 통합, 드라이버 검증 범위 계약을 제공합니다. |
+| LDK 기반 계층 | 런타임/STL 경로가 요구하는 Windows/NTDLL 호환 API와 ICU ABI 진입점을 제공합니다. |
+| NTL | 기본 MSVC STL API를 바꾸지 않고 드라이버용 선택적 C++ 도우미를 제공합니다. |
+| WDK / NT 커널 | 실제 커널 기본 기능, 객체 모델, IRQL 규칙, 풀 할당, Verifier 환경을 제공합니다. |
 
 ## 사용자 코드에 노출되는 C++ 영역
 
-기본 의도는 일반 MSVC C++에 가깝습니다. MSVC 표준 header를 include하고,
-표준 CRT/STL type을 사용하며, runtime substrate를 driver에 link합니다.
-NTL 같은 kernel-specific helper는 driver 형태의 작업을 돕기 위해 제공되지만,
-기본 STL path는 익숙한 MSVC STL path로 유지합니다.
+기본 사용 방식은 일반 MSVC C++와 같습니다. MSVC 표준 헤더를 include하고,
+표준 CRT/STL 타입을 사용하며, 런타임 기반 계층을 드라이버에 link합니다.
+NTL 같은 커널 전용 도우미는 드라이버 작업을 돕기 위해 제공되지만,
+기본 STL 경로는 익숙한 MSVC STL 경로로 유지합니다.
 
-그래서 coverage matrix는 별도의 compatibility 용어가 아니라 driver test에
-연결됩니다. Kernel driver harness에서 실제로 실행한 표준 C++/CRT/STL path를
+그래서 지원 범위 표는 별도의 호환성 용어가 아니라 드라이버 테스트에
+연결됩니다. 커널 드라이버 하니스에서 실제로 실행한 표준 C++/CRT/STL 경로를
 기록합니다.
 
 ## 여러 드라이버의 런타임 상태
 
-`crtsys`는 static runtime substrate로 link됩니다. 따라서 서로 다른 두
-드라이버가 같은 kernel session 안에서 서로 다른 crtsys runtime copy를 가질
-수 있습니다. user-mode의 process-wide 또는 loader-wide 동작을 흉내 내는
-runtime state는 이런 per-image 충돌을 피해야 합니다.
+`crtsys`는 정적 런타임 기반 계층으로 link됩니다. 따라서 서로 다른 두
+드라이버가 같은 커널 세션 안에서 서로 다른 crtsys 런타임 사본을 가질 수
+있습니다. 사용자 모드의 프로세스 전체 또는 로더 전체 동작을 흉내 내는 런타임
+상태는 이런 이미지별 충돌을 피해야 합니다.
 
-MSVC compiler TLS state에 대해서는 crtsys가 shared kernel section 안에
-system-space TLS slot vector와 slot allocator를 둡니다. 각 crtsys-linked
-driver는 고유한 MSVC `_tls_index`를 받고, 자기 compiler TLS image buffer를
-그 shared vector에 등록합니다. 그래서 thread-safe function-local `static`
-initialization 같은 runtime path가 여러 crtsys-linked driver를 동시에
-load했을 때 서로 충돌하지 않습니다.
+MSVC 컴파일러 TLS 상태에 대해서는 crtsys가 공유 커널 섹션 안에 시스템 공간
+TLS 슬롯 벡터와 슬롯 할당기를 둡니다. 각 crtsys 연결 드라이버는 고유한 MSVC
+`_tls_index`를 받고, 자신의 컴파일러 TLS 이미지 버퍼를 그 공유 벡터에
+등록합니다. 그래서 스레드 안전한 함수 지역 `static` 초기화 같은 런타임 경로가
+여러 crtsys 연결 드라이버를 동시에 로드했을 때 서로 충돌하지 않습니다.
 
-이 보장은 driver-image 격리이지 per-thread storage semantics가 아닙니다.
-두 crtsys-linked driver가 같은 compiler TLS slot을 공유하는 문제를 막지만,
-compiler TLS 값을 kernel thread마다 다르게 만들어주지는 않습니다.
-다시 말해 이 구조는 여러 driver image 사이의 `_tls_index` 충돌 방지 장치입니다.
-GS/TEB 기반 user-mode TLS처럼 같은 변수 선언이 thread별로 다른 저장소를
-갖도록 만드는 기능은 아닙니다. kernel mode에서 GS 기반 TLS 가정은 각 thread의
-user-mode TEB가 아니라 processor-local KPCR 쪽에 걸립니다. 따라서 사용자가
-`thread_local T value`를 C++ per-thread storage로 의존하면 안 됩니다.
+이 보장은 드라이버 이미지 격리이지 스레드별 저장소 의미가 아닙니다. 두 crtsys
+연결 드라이버가 같은 컴파일러 TLS 슬롯을 공유하는 문제를 막지만, 컴파일러 TLS
+값을 커널 스레드마다 다르게 만들어 주지는 않습니다. 다시 말해 이 구조는 여러
+드라이버 이미지 사이의 `_tls_index` 충돌 방지 장치입니다. GS/TEB 기반 사용자
+모드 TLS처럼 같은 변수 선언이 스레드별로 다른 저장소를 갖도록 만드는 기능은
+아닙니다. 커널 모드에서 GS 기반 TLS 가정은 각 스레드의 사용자 모드 TEB가 아니라
+프로세서 로컬 KPCR에 걸립니다. 따라서 `thread_local T value`를 C++ 스레드별
+저장소로 사용하면 안 됩니다.
 
 ## 드라이버 모델 통합
 

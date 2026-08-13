@@ -2,15 +2,15 @@
 
 [NTL 문서로 돌아가기](./README.ko-KR.md)
 
-`<ntl/net/tls/stream>`는 위에 코루틴 TLS 전송을 추가합니다.
-[`async_socket`](./async-socket.ko-KR.md). Windows에서 지원하는 사용자 모드 API입니다.
-채널. 관련 헤더에 제한된 ClientHello 관찰, 동적 서버 추가
-ID 및 애플리케이션 프레이밍. 그들 중 누구도 WFP 정책을 설치하지 않거나
-Windows 신뢰 저장소를 수정합니다.
+`<ntl/net/tls/stream>`은 [`async_socket`](./async-socket.ko-KR.md) 위에 코루틴 TLS
+전송을 추가합니다. Windows Schannel 기반 사용자 모드 API입니다. 관련 헤더는
+크기가 제한된 ClientHello 관찰, 동적 서버 ID 및 애플리케이션 framing을
+추가합니다. 어느 기능도 WFP 정책을 설치하거나 Windows 신뢰 저장소를 변경하지
+않습니다.
 
-일반 클라이언트 경로는 Windows 인증서 체인 및 호스트 이름을 사용합니다.
-검증. 프로토콜 및 암호 제품군 선택은 현재 Schannel에 남아 있습니다.
-`SCH_CREDENTIALS`를 통해 요청된 강력한 암호화를 사용하는 정책:
+일반 클라이언트 경로는 Windows 인증서 체인 및 호스트 이름 검증을 사용합니다.
+프로토콜 및 암호 스위트 선택은 현재 Schannel 정책에 맡기며,
+`SCH_CREDENTIALS`를 통해 강력한 암호화를 요청합니다.
 
 ```cpp
 auto credentials = ntl::net::tls_credentials::client();
@@ -28,10 +28,10 @@ co_await tls.write_all(reply);
 co_await tls.shutdown();
 ```
 
-`tls_credentials`는 여러 세션에서 공유될 수 있습니다. 각 스트림은
-자격 증명과 소켓 상태가 사용되므로 해당 파사드와 멤버 선언
-순서는 세션 수명을 제어하지 않습니다. 모든 `tls_stream`는 하나의 TLS입니다.
-이미 연결된 `async_socket`를 통한 세션.
+`tls_credentials`는 여러 세션에서 공유할 수 있습니다. 각 스트림은 자신이 사용하는
+자격 증명과 소켓 상태를 유지하므로, 상위 객체의 소멸 순서나 멤버 선언 순서가 세션
+수명을 좌우하지 않습니다. 각 `tls_stream`은 이미 연결된 `async_socket` 하나 위에서
+동작하는 하나의 TLS 세션입니다.
 
 ## 인증서 정책
 
@@ -44,9 +44,9 @@ ntl::net::tls_stream tls(socket, credentials);
 co_await tls.handshake_server();
 ```
 
-이미 서버 이름을 알고 있는 응용 프로그램은 다음을 사용할 수 있습니다.
-`tls_server_certificate_policy`. 대신 투명한 TLS 엔드포인트가 관찰합니다.
-하나의 제한된 ClientHello를 만들고 소유 ID를 선택합니다.
+서버 이름을 이미 아는 애플리케이션은 `tls_server_certificate_policy`를 사용할 수
+있습니다. 반면 투명 TLS 엔드포인트는 크기가 제한된 ClientHello 하나를 관찰하고
+소유권을 갖는 ID를 선택합니다.
 
 ```cpp
 auto issuer = std::make_shared<ntl::net::windows_tls_certificate_issuer>(
@@ -65,32 +65,30 @@ auto &tls = accepted.stream();
 auto sni = accepted.client_hello_ref().server_name();
 ```
 
-`<ntl/net/tls/client_hello>`는 조각화된 TLS 레코드 및 핸드셰이크를 허용합니다.
-메시지, 보유된 모든 바이트의 경계, SNI 보고, ALPN 식별자 제공,
-확장 유형 `0xfe0d`가 있는지 여부와 사용된 모든 항목을 유지하는지 여부
-암호문. 해당 확장은 단지 관찰일 뿐입니다. GREASE ECH는 동일합니다.
-와이어 모양이며 이 파서로 구별할 수 없습니다. `accept_tls`는 다음을 제공합니다.
-ID 선택 후 정확한 바이트를 Schannel에 전달합니다. 결코 재구성되지 않습니다
-또는 TLS 스트림의 일부를 삭제합니다.
+`<ntl/net/tls/client_hello>`는 조각난 TLS 레코드와 handshake 메시지를 받아들이고,
+보관하는 모든 바이트의 크기를 제한합니다. SNI, 클라이언트가 제안한 ALPN ID,
+확장 형식 `0xfe0d`의 존재 여부를 보고하며 소비한 암호문을 모두 유지합니다. 이
+확장은 관찰 정보일 뿐입니다. GREASE ECH도 같은 wire 형식을 사용하므로 이
+parser만으로는 구분할 수 없습니다. `accept_tls`는 ID를 선택한 뒤 정확히 그
+바이트를 Schannel에 전달하며 TLS 스트림 일부를 재구성하거나 버리지 않습니다.
 
 `<ntl/net/tls/certificate>`는 전역 CA가 아닌 인터페이스를 제공합니다.
 
-- `tls_certificate_issuer`는 애플리케이션 주입 지점입니다.
-- `windows_tls_certificate_issuer`는 단기 DNS SAN 리프에 서명합니다.
-  개인 키가 Windows에서 열 수 있는 응용 프로그램 제공 CA입니다.
-- `cached_tls_server_identity_provider`는 다음의 제한되고 동기화된 LRU입니다.
-  리프 인증서와 재사용 가능한 Schannel 자격 증명 그리고
-- 제거된 생성 리프는 지속되는 CNG 개인 키를 삭제합니다.
-  마지막 ID 소유자가 이를 해제합니다.
+- `tls_certificate_issuer`는 애플리케이션에서 구현을 주입하는 지점입니다.
+- `windows_tls_certificate_issuer`는 Windows가 개인 키를 열 수 있는 애플리케이션
+  제공 CA로 수명이 짧은 DNS SAN leaf 인증서에 서명합니다.
+- `cached_tls_server_identity_provider`는 leaf 인증서와 재사용 가능한 Schannel
+  credential을 보관하는 크기 제한·동기화 LRU입니다.
+- 캐시에서 제거된 생성 leaf는 마지막 ID 소유자가 해제할 때 영속 CNG 개인 키도
+  삭제합니다.
 
-인증서 발급은 중복 방지를 위해 캐시로 직렬화됩니다.
-동일한 호스트 생성. HSM, 원격 발급자, 비동기식을 사용하는 제품
-승인을 받거나 사전 프로비저닝된 매장에서 발급자/공급자를 구현해야 합니다.
-자체 일정 정책과 인터페이스합니다.
+캐시는 같은 호스트 인증서가 중복 생성되지 않도록 발급을 직렬화합니다. HSM, 원격
+발급자, 비동기 승인 또는 사전 프로비저닝 저장소를 사용하는 제품은 자체 스케줄링
+정책으로 issuer/provider 인터페이스를 구현해야 합니다.
 
-클라이언트 자격 증명은 다음을 제외하고 일반 시스템 유효성 검사를 사용합니다.
-`manual_peer_validation`가 명시적으로 활성화되었습니다. 수동 검증은
-페일클로즈되며 `tls_peer_certificate_policy`가 필요합니다.
+클라이언트 credential은 `manual_peer_validation`을 명시적으로 켜지 않는 한 일반
+시스템 검증을 사용합니다. 수동 검증은 fail-close하며
+`tls_peer_certificate_policy`가 필요합니다.
 
 ```cpp
 auto credentials = ntl::net::tls_credentials::client({
@@ -107,17 +105,16 @@ co_await tls.handshake_client({
 ```
 
 `exact_certificate_policy`는 전체 DER 인증서를 비교합니다.
-`certificate_authority_policy`는 하나를 중심으로 프라이빗 체인 엔진을 구축합니다.
-애플리케이션 소유 CA이며 서버 EKU 및 호스트 이름 유효성 검사를 수행합니다.
-신뢰할 수 있는 루트 저장소를 작성합니다. 이는 통제된 클라이언트와
-테스트. 일반 배포 클라이언트는 해당 클라이언트를 통해 인증된 CA를 받아야 합니다.
-일반 Schannel 검증을 활성화한 상태로 유지합니다.
+`certificate_authority_policy`는 애플리케이션 소유 CA 하나를 기준으로 전용 chain
+engine을 만들고, 신뢰 루트 저장소에 기록하지 않은 채 서버 EKU와 호스트 이름을
+검증합니다. 이는 통제된 클라이언트와 테스트를 위한 기능입니다. 일반 배포
+클라이언트는 관리자를 통해 승인된 CA를 받아야 하며 일반 Schannel 검증을 계속
+사용해야 합니다.
 
-재서명하는 관리형 네트워크의 업스트림 구간에도 동일한 규칙이 적용됩니다.
-HTTPS. 해당 필터링 CA는 해당 Windows에 이미 있어야 합니다.
-신뢰할 수 있는 루트 저장소. 그런 다음 `tls_credentials::client()`는 해당 체인을 검증합니다.
-일반적으로; CA가 없으면 `SEC_E_UNTRUSTED_ROOT`가 의도된 것입니다.
-실패 종료 결과.
+HTTPS를 재서명하는 관리형 네트워크의 업스트림 구간에도 같은 규칙이 적용됩니다.
+해당 필터링 CA는 적용 대상 Windows 신뢰 루트 저장소에 이미 있어야 합니다. 그러면
+`tls_credentials::client()`가 일반 방식으로 체인을 검증합니다. CA가 없다면
+`SEC_E_UNTRUSTED_ROOT`가 의도한 fail-close 결과입니다.
 
 인증서 해지 검사는 별도의 명시적 credential 정책입니다. 기본값은 시스템 동작을
 따릅니다. 특정 검사가 필요한 애플리케이션은 최종 인증서, 전체 chain 또는 root를
@@ -140,11 +137,11 @@ auto credentials = ntl::net::tls_credentials::client({
 usage, host name, 만료 또는 명시적으로 확인된 인증서 해지 검증을 끄지는 않습니다.
 
 핸드셰이크 옵션은 사용자 지정 인증서 정책을 보관합니다. 따라서 TLS 1.3
-post-handshake 검증은 원래 policy facade가 해제된 뒤에도 해당 정책을 다시 사용할
+post-handshake 검증은 원래 policy 객체가 해제된 뒤에도 해당 정책을 다시 사용할
 수 있습니다.
 
-애플리케이션은 요청하는 대신 하나의 명시적 클라이언트 인증서를 제공할 수 있습니다.
-기본 ID를 선택하는 채널:
+애플리케이션은 Schannel에 기본 ID 선택을 요청하는 대신 클라이언트 인증서 하나를
+명시적으로 제공할 수 있습니다.
 
 ```cpp
 auto client_credentials = ntl::net::tls_credentials::client({
@@ -198,7 +195,6 @@ ntl::net::tls_framed_stream requests(
 auto request = co_await requests.read_frame();
 ```
 
-`<ntl/net/http/http1_framing>`는 제한된 HTTP/1.0 및 HTTP/1.1을 인식합니다.
 `<ntl/net/http/http1_framing>`은 크기가 제한된 HTTP/1.0과 HTTP/1.1의
 `Content-Length` 및 마지막 `chunked` 메시지 경계를 인식합니다. 서로 모순되는
 길이, 길이와 Transfer-Encoding의 동시 사용, 폐기된 헤더 접기, 지나치게 큰
@@ -233,9 +229,9 @@ writer, 핸드셰이크와 종료의 경쟁은 변경 가능한 Schannel 상태�
 소켓을 닫지 않고 `close_notify`를 보냅니다. 이후에도 peer의 `close_notify`를 받기
 위해 read를 계속할 수 있으며, 소켓 닫기와 취소는 여전히 애플리케이션이 소유합니다.
 
-Schannel 및 Winsock 오류는 `std::system_error`로 나타납니다. 인증되지 않은
-설정된 TLS 읽기 중 전송 EOF는 오히려 오류로 보고됩니다.
-깨끗한 TLS 종료보다.
+Schannel 및 Winsock 오류는 `std::system_error`로 나타납니다. 설정을 마친 TLS
+세션을 읽는 도중 인증되지 않은 전송 EOF가 발생하면 정상 TLS 종료가 아니라 오류로
+보고합니다.
 
 ## WFP 구성
 
@@ -248,7 +244,7 @@ Schannel 및 Winsock 오류는 `std::system_error`로 나타납니다. 인증되
 4. Schannel 세션 하나는 accept된 구간을 종료하고, 다른 세션은 outbound 구간을
    검증하고 보호합니다.
 5. 크기가 제한된 HTTP/1.1 프레이밍이 복호화된 바이트 스트림에서 실행됩니다.
-6. [`ntl::net::inspection`](./inspection.ko-KR.md)는 형식화된 콘텐츠 결과를 반환합니다.
+6. [`ntl::net::inspection`](./inspection.ko-KR.md)는 구조화된 콘텐츠 결과를 반환합니다.
 
 커널은 TLS 키나 평문을 받지 않습니다. 따라서 TLS 라이브러리, 인증서 정책, 파서,
 블로킹될 수 있는 제품 판정을 WFP classify 콜백 밖에 둘 수 있습니다.
@@ -266,9 +262,9 @@ ECH는 `ech_frontend_provider`가 inner ClientHello를 성공적으로 복구한
 고정 엔드포인트를 식별할 수 있지만, 그 엔드포인트가 다른 인증서를 받아들이게 만들
 수는 없습니다. 오리진 mutual TLS에는 명시적 `origin_client_identity_provider`를
 사용하며 NTL은 ID를 추측하지 않습니다.
-[`http3-inspection`](../../examples/wfp/user/http3-inspection) 예시에서는
-QUIC/정적-QPACK 경계를 해독했지만 투명 브라우저 HTTP/3은 여전히
-제품 QUIC 터미네이터와 협상된 동적 QPACK 공급자가 필요합니다.
+[`http3-inspection`](../../examples/wfp/user/http3-inspection) 예제는 복호화된
+QUIC/static-QPACK 경계를 다룹니다. 반면 투명한 브라우저 HTTP/3 검사에는 여전히
+제품의 QUIC terminator와 협상된 dynamic QPACK 공급자가 필요합니다.
 `<ntl/net/tls/inspection_policy>`는 누락된 각 기능을 개별적으로 나타냅니다.
 모든 예외 경로는 기본적으로 페일클로즈됩니다. 참조
 [HTTP 및 WebSocket 프로토콜 검사](./protocol-inspection.ko-KR.md).

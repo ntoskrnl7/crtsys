@@ -2,7 +2,7 @@
 
 이 문서는 `Windows-driver-samples`가 보여 주는 재사용 가능한 KMDF mechanism을 NTL API 및 저장소 검증에 대응시킵니다.
 
-지원된다는 것은 NTL이 Microsoft sample을 복사하거나 모든 `Wdf*` routine의 이름을 바꾼다는 뜻이 아닙니다. 일반적인 driver 코드가 형식화된 공개 API로 수명과 callback 경로를 표현할 수 있고, 지원 toolchain과 architecture에서 contract가 컴파일되며, 동작이 문서화되고, 반복 가능한 hardware가 있을 때 load된 driver test가 런타임 민감 동작을 관찰 가능하게 하면 해당 mechanism은 지원됩니다.
+지원된다는 것은 NTL이 Microsoft sample을 복사하거나 모든 `Wdf*` routine의 이름을 바꾼다는 뜻이 아닙니다. 일반적인 driver 코드가 타입이 지정된 공개 API로 수명과 callback 경로를 표현할 수 있고, 지원 toolchain과 architecture에서 contract가 컴파일되며, 동작이 문서화되고, 반복 가능한 hardware가 있을 때 load된 driver test가 런타임 민감 동작을 관찰 가능하게 하면 해당 mechanism은 지원됩니다.
 
 device-class protocol과 class-extension API는 공통 KMDF object model과 분리되어 있습니다. driver는 명시적인 `native()`, `native_handle()`, `native_object()`, `wdm_*()` 상호 운용 지점을 통해 해당 네이티브 WDK contract를 `ntl::kmdf`와 나란히 사용할 수 있습니다.
 
@@ -20,7 +20,7 @@ device-class protocol과 class-extension API는 공통 KMDF object model과 분�
 | USB KMDF sample | USB target/config/interface/pipe, continuous reader, interrupt, child-device 구성 | 재사용 가능한 USB/KMDF mechanism 지원 | `examples/kmdf/usb`, `examples/kmdf/bus`, package compile contract; endpoint runtime에는 일치하는 hardware 필요 |
 | `wmi/wmisamp` | MOF data block, query/set/item/method callback, event | 지원됨 | `examples/kmdf/wmi` 및 ROOT\WMI application verifier |
 | `serial/serial` | queue, request, interrupt, DPC, timer, target mechanism | 공통 KMDF mechanism 지원 | 공통 example 및 compile contract; UART register/protocol 코드는 네이티브로 유지 |
-| PoFx WDF sample | component power 및 framework PoFx 통합 | 네이티브 상호 운용 | 일반적이지 않은 component-power policy는 형식화된 공통 표면 밖에 둠 |
+| PoFx WDF sample | component power 및 framework PoFx 통합 | 네이티브 상호 운용 | 일반적이지 않은 component-power policy는 타입이 지정된 공통 표면 밖에 둠 |
 | ACX, NetAdapterCx, WiFiCx, GPIO/SpbCx, UCM, HID 등 class family | WDF 위에 구성되는 class-extension/device-protocol contract | 공통 표면 범위 밖 | `ntl::kmdf`와 함께 네이티브 class contract 사용. 실제 driver에 필요할 때만 집중 adapter 추가 |
 | raw IRP preprocessing 및 miniport 통합 | WDM stack location, port-driver/miniport 소유권 | 네이티브 상호 운용 | 문서화된 KMDF 표면 경계와 명시적 WDM/native escape hatch |
 
@@ -41,7 +41,7 @@ host-side acceptance gate는 하나의 Verifier boot에서 소프트웨어 전�
 
 ## 공통 KMDF 표면의 정의
 
-공통 표면에는 driver/device entry, control 및 PnP device, 형식화된 context와 callback, queue와 forward progress, request와 I/O target, file object, PnP/power/resource callback, interrupt, timer, work item, DPC, child list와 PDO, query interface, registry/property, DMA, USB, WMI가 포함됩니다.
+공통 표면에는 driver/device entry, control 및 PnP device, 타입이 지정된 context와 callback, queue와 forward progress, request와 I/O target, file object, PnP/power/resource callback, interrupt, timer, work item, DPC, child list와 PDO, query interface, registry/property, DMA, USB, WMI가 포함됩니다.
 
 일반적인 control, function, filter 또는 bus driver가 framework 수명과 일반 I/O 경로를 `ntl::kmdf` 안에 둘 수 있고, device별 register layout, protocol structure, class-extension 호출은 알아볼 수 있는 네이티브 WDK 코드로 유지할 수 있을 때 이 표면은 충분합니다. 네이티브 호출이 0개인 것은 지원 범위의 목표가 아닙니다.
 

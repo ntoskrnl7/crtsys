@@ -242,7 +242,7 @@ callout이 판정하거나 다음 filter에 판단을 넘길 수 있을 때만 �
 동작할지를 정합니다. 보안 enforcement filter는 대개 fail-closed인 `block`이
 맞습니다. 하지만 loopback 전체처럼 넓게 관찰하는 reverse hook은 무조건 block하면
 로컬 네트워크 전체를 끊을 수 있습니다. 이런 예외는 예제에서 조립하지 않고
-`transparent_udp_proxy_policy/service` 같은 semantic facade가 내부 규칙으로
+`transparent_udp_proxy_policy/service` 같은 의미 기반 고수준 API가 내부 규칙으로
 고정합니다.
 
 ## 목적에 맞는 layer 고르기
@@ -373,7 +373,7 @@ bounded workspace 및 callback drain을 내부에서 처리합니다.
 
 ## 수명과 unload를 보는 방법
 
-NTL의 기본 공개 객체는 owning facade입니다. facade의 `close()`는 멱등적이며
+NTL의 기본 공개 객체는 소유권을 갖습니다. 이 객체의 `close()`는 멱등적이며
 신규 작업을 막고 child operation과 callback을 drain한 뒤 native state를
 정리합니다. 사용자가 provider/credential/transport 멤버 선언 순서를 기억하거나
 detached work item과 수동 rundown을 조립하는 방식이 기본 사용법이 아닙니다.
@@ -386,7 +386,7 @@ driver.on_unload([callouts] mutable {
 ```
 
 예제가 `close()`를 명시하는 것은 종료 결과와 최종 telemetry를 검증하기
-위해서입니다. 정상 RAII 파괴도 같은 shared state를 정리합니다. 저장 가능한
+위해서입니다. 정상적인 RAII 소멸도 같은 shared state를 정리합니다. 저장 가능한
 비소유 참조가 꼭 필요하면 이름에 `borrowed_*`, `*_view`, `*_ref`가 나타납니다.
 
 callback 안에서는 다음 원칙을 지킵니다.
@@ -395,7 +395,7 @@ callback 안에서는 다음 원칙을 지킵니다.
   type을 반환합니다.
 - callback-scoped view를 저장하지 않습니다.
 - 큰 parser, 압축, TLS 작업을 임의의 classify stack에서 동기 중첩하지 않습니다.
-- NTL semantic runtime/facade가 제공하는 executor와 workspace 경계를 사용합니다.
+- NTL의 의미 기반 런타임과 고수준 객체가 제공하는 executor 및 workspace 경계를 사용합니다.
 
 ## 예제 선택 지도
 
@@ -406,7 +406,7 @@ callback 안에서는 다음 원칙을 지킵니다.
 2. [`kernel/flow-monitor`](../../examples/wfp/kernel/flow-monitor/README.ko-KR.md)
    — flow context와 stream 관찰
 3. [`kernel/datagram-proxy`](../../examples/wfp/kernel/datagram-proxy/README.ko-KR.md)
-   — UDP clone/reinject 대신 semantic owning facade 사용
+   — UDP clone/reinject 대신 의미 기반 소유 객체 사용
 4. [`user/connect-redirect`](../../examples/wfp/user/connect-redirect/README.ko-KR.md)
    — TCP를 사용자 모드 proxy로 안전하게 넘기는 방법
 5. [`user/tls-inspection-proxy`](../../examples/wfp/user/tls-inspection-proxy/README.ko-KR.md)
@@ -480,4 +480,4 @@ WFP 개발은 “packet callback을 하나 등록하는 일”이 아니라 **�
 filter가 트래픽을 선택하고, typed callout이 관찰하거나 허용된 decision을
 반환하며, 필요할 때만 bounded transport/protocol runtime으로 내용을 해석하는
 정책 pipeline을 만드는 일**입니다. NTL은 그 조합과 수명을 타입과 owning
-facade로 고정하고, 제품 코드는 선택 조건과 실제 보안 정책에 집중하게 합니다.
+고수준 객체에 고정하고, 제품 코드는 선택 조건과 실제 보안 정책에 집중하게 합니다.

@@ -60,7 +60,7 @@ Resources 실행에서 의도적 할당 실패 1회를 관찰했고, 드라이�
   리디렉션 루프 없이 아웃바운드 구간을 연결하고 요청을 전달하며
   IPv4와 IPv6 모두에 대해 2개의 IOCP 코루틴을 사용한 응답 및 정책
   제거하면 두 제품군 모두에 대한 직접 연결이 복원됩니다.
-- `bind-redirect`: 형식화된 IPv4 및 IPv6 ALE 바인드 요청이 다음으로 다시 작성됩니다.
+- `bind-redirect`: 타입이 지정된 IPv4 및 IPv6 ALE 바인드 요청이 다음으로 다시 작성됩니다.
   루프백 포트를 선택한 후 동적 바인딩 후 임시 바인딩으로 돌아갑니다.
   정책 제거.
 - `tls-inspection-proxy`: 동일한 redirect handoff가 사용자 모드 Schannel 서버

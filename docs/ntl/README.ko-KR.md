@@ -10,7 +10,7 @@ NTL은 `crtsys`에 포함된 선택적 C++ 도우미 계층입니다. 실제 커
 
 빌드 가능한 예제:
 
-- [NTL 형식화된 IOCTL 예제 드라이버](../../examples/ntl-driver)
+- [NTL 타입이 지정된 IOCTL 예제 드라이버](../../examples/ntl-driver)
 - [NTL RPC 예제 드라이버](../../examples/ntl-rpc-driver)
 - [NTL 커널/사용자 모드 네트워킹 계약 테스트](../../test/net/kernel-contracts)
 - [NTL KMDF 드라이버/앱 예제](../../examples/kmdf)
@@ -39,20 +39,20 @@ NTL은 `crtsys`에 포함된 선택적 C++ 도우미 계층입니다. 실제 커
 | [상태, 예외, 스택 확장](./status-exceptions-stack.ko-KR.md) | `ntl::status`, `ntl::exception`, SEH 경계 도우미, `ntl::expand_stack` |
 | [Result](./result.ko-KR.md) | 드라이버 제어 경로를 위한 `NTSTATUS` 기반 값 또는 오류 도우미 |
 | [핸들 및 객체 소유권](./ownership.ko-KR.md) | Win32 `CloseHandle`, 커널 `ZwClose`, `ObDereferenceObject` 소유권 |
-| [파일 객체 파사드](./file-object.ko-KR.md) | 비소유 `PFILE_OBJECT` 및 `WDFFILEOBJECT` 뷰와 소유권 경계 |
-| [레지스트리](./registry.ko-KR.md) | Zw 레지스트리 키 RAII 래퍼, 드라이버 `Parameters` 조회, 형식화된 값 쿼리/설정 도우미 |
+| [파일 객체 뷰](./file-object.ko-KR.md) | 비소유 `PFILE_OBJECT` 및 `WDFFILEOBJECT` 뷰와 소유권 경계 |
+| [레지스트리](./registry.ko-KR.md) | Zw 레지스트리 키 RAII 래퍼, 드라이버 `Parameters` 조회, 타입이 지정된 값 쿼리/설정 도우미 |
 | [드라이버, 장치, IRP 도우미](./driver-device-irp.ko-KR.md) | `ntl::main`, `ntl::driver`, `ntl::device`, `ntl::device_endpoint`, dispatch 콜백, `ntl::irp` |
-| [KMDF 도우미](./kmdf.ko-KR.md) | 선택적 `ntl::kmdf::main`, C++ context, 형식화된 I/O, 수동 queue와 취소, 하드웨어 리소스, 전원 정책, DMA/USB/WMI, 공통 WDF 객체, interrupt/timer/work item, child list/PDO, 형식화된 query interface, 레지스트리, 장치 속성 facade |
+| [KMDF 도우미](./kmdf.ko-KR.md) | 선택적 `ntl::kmdf::main`, C++ context, 타입이 지정된 I/O, 수동 queue와 취소, 하드웨어 리소스, 전원 정책, DMA/USB/WMI, 공통 WDF 객체, interrupt/timer/work item, child list/PDO, 타입이 지정된 query interface, 레지스트리, 장치 속성 래퍼 |
 | [KMDF 엔지니어링 점검표](./kmdf-driver-checklist.ko-KR.md) | 소유권, 콜백 수명, 요청 취소, PnP/전원, ABI, Driver Verifier, 소프트웨어/하드웨어 릴리스 기준 |
-| [미니필터 도우미](./minifilter.ko-KR.md) | `ntl::flt::main`, 형식화된 pre/post 콜백과 context, 볼륨별 metadata, 소유 레거시 제어 장치, 형식화된 통신 포트와 공유 영역 |
-| [드라이버 개발자를 위한 WFP 가이드](./wfp-guide.ko-KR.md) | WFP 개념, 커널 중심/사용자 모드 중심 실행 모델, 형식화된 callout 결정, payload 경계, TLS/QUIC 검사, 예제 순서, 검증 |
-| [WFP 도우미](./wfp.ko-KR.md) | 형식화된 callout layer와 condition, 안전한 connect redirect와 proxy handoff, 조각난 packet/stream view, 제한된 coroutine 관찰, flow context, injection 소유권, 명시적 session/지속 정책 수명, 상태 점검, event telemetry |
+| [미니필터 도우미](./minifilter.ko-KR.md) | `ntl::flt::main`, 타입이 지정된 pre/post 콜백과 context, 볼륨별 metadata, 소유 레거시 제어 장치, 타입이 지정된 통신 포트와 공유 영역 |
+| [드라이버 개발자를 위한 WFP 가이드](./wfp-guide.ko-KR.md) | WFP 개념, 커널 중심/사용자 모드 중심 실행 모델, 타입이 지정된 callout 결정, payload 경계, TLS/QUIC 검사, 예제 순서, 검증 |
+| [WFP 도우미](./wfp.ko-KR.md) | 타입이 지정된 callout layer와 condition, 안전한 connect redirect와 proxy handoff, 조각난 packet/stream view, 제한된 coroutine 관찰, flow context, injection 소유권, 명시적 session/지속 정책 수명, 상태 점검, event telemetry |
 | [네트워크 이중 런타임 모델](./network-dual-runtime.ko-KR.md) | 사용자 및 커널 코드 전반의 제한된 하나의 protocol/policy 계약, 명시적 direct/offload capability, drain 중인 커널 실행, QUIC provider 경계 |
-| [콘텐츠 검사와 framing](./inspection.ko-KR.md) | 완전한 UDP/TCP 메시지 경계, 형식화된 판정, 사용자 정의 framer, decoder adapter, 제한된 HTTP/3 검사 구성, TLS 평문 경계 |
+| [콘텐츠 검사와 framing](./inspection.ko-KR.md) | 완전한 UDP/TCP 메시지 경계, 구조화된 판정, 사용자 정의 framer, decoder adapter, 제한된 HTTP/3 검사 구성, TLS 평문 경계 |
 | [HTTP, WebSocket, gRPC, WebTransport 검사](./protocol-inspection.ko-KR.md) | 공통 sync/async/stream transform, HTTP/1, HTTP/2/HPACK, HTTP/3/QPACK, WebSocket, gRPC, WebTransport, content coding, ALPN, ECH, pinning, mTLS, 제품 적용 경계 |
 | [사용자 모드 Schannel TLS stream](./tls-stream.ko-KR.md) | coroutine Schannel I/O, 제한된 ClientHello/SNI 관찰, 주입 가능한 host별 certificate 발급/cache, TLS 평문 framing, HTTP/1 경계, 정상 종료 |
-| [장치 제어 패턴](./device-control-pattern.ko-KR.md) | 형식화된 IOCTL, remove lock, MDL, 출력 보고를 사용하는 실용적 `IOCTL` dispatch 패턴 |
-| [형식화된 IOCTL 도우미](./ioctl.ko-KR.md) | 요청/응답 payload 형식과 연결된 컴파일 타임 `CTL_CODE` descriptor |
+| [장치 제어 패턴](./device-control-pattern.ko-KR.md) | 타입이 지정된 IOCTL, remove lock, MDL, 출력 보고를 사용하는 실용적 `IOCTL` dispatch 패턴 |
+| [타입이 지정된 IOCTL 도우미](./ioctl.ko-KR.md) | 요청/응답 payload 형식과 연결된 컴파일 타임 `CTL_CODE` descriptor |
 | [장치 인터페이스](./device-interface.ko-KR.md) | PnP `IoRegisterDeviceInterface` 소유권과 enable/disable 도우미 |
 | [RPC](./rpc.ko-KR.md) | 커널/사용자 모드 RPC schema, 안정적인 callback ID, framing 검사, x86/x64 wire 규칙 |
 | [IPC 공유 메모리](./ipc.ko-KR.md) | IOCTL RPC 및 미니필터 통신 포트를 위한 전송 중립 영역 token과 제한된 공유 메모리 ring |

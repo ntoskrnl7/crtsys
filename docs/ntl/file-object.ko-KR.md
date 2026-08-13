@@ -1,10 +1,10 @@
-# 파일 객체 파사드
+# 파일 객체 뷰
 
 [NTL 문서로 돌아가기](./README.ko-KR.md)
 
 `ntl::file`은 커널 `PFILE_OBJECT`의 비소유 C++ 뷰입니다. 경로를 열거나, `HANDLE`을 닫거나, 객체 관리자 참조를 획득하지 않으며 `std::fstream`과 `std::filesystem`을 대체하지도 않습니다.
 
-I/O 관리자 또는 프레임워크 콜백이 이미 유효한 `FILE_OBJECT`를 제공하고 드라이버에서 공통 필드의 형식화된 뷰가 필요할 때 사용하십시오.
+I/O 관리자 또는 프레임워크 콜백이 이미 유효한 `FILE_OBJECT`를 제공하고 드라이버에서 공통 필드의 타입이 지정된 뷰가 필요할 때 사용하십시오.
 
 ```cpp
 void inspect(PFILE_OBJECT native_file) noexcept {
@@ -37,7 +37,7 @@ ntl::kmdf::file_config<> files;
 files.on_create<on_file_create>();
 ```
 
-어느 파사드도 WDF 또는 WDM 객체를 소유하지 않습니다. 네이티브 API와 연동할 때는 `native_object()`를 사용할 수 있습니다.
+어느 뷰도 WDF 또는 WDM 객체를 소유하지 않습니다. 네이티브 API와 연동할 때는 `native_object()`를 사용할 수 있습니다.
 
 ## 올바른 형식 선택
 

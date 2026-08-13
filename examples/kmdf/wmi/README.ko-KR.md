@@ -2,7 +2,7 @@
 
 [English](./README.md)
 
-이 PnP 드라이버는 형식화된 `ntl::kmdf` WMI 영역을 처음부터 끝까지 보여줍니다.
+이 PnP 드라이버는 타입이 지정된 `ntl::kmdf` WMI API를 처음부터 끝까지 보여줍니다.
 
 - query, whole-instance set, set-item 및 method callback을 제공하는 MOF 기반 data
   provider

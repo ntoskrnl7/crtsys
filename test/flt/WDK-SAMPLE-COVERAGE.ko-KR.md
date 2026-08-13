@@ -4,7 +4,7 @@
 Filter Manager 메커니즘을 NTL API 및 저장소 검증에 대응시킵니다.
 
 적용된다고 해서 NTL이 Microsoft 샘플을 복사하거나 모든 구현 세부 사항을 재현한다는
-뜻은 아닙니다. 형식화된 공개 API, 컴파일 타임 계약, 문서, 그리고 런타임 동작이
+뜻은 아닙니다. 타입이 지정된 공개 API, 컴파일 타임 계약, 문서, 그리고 런타임 동작이
 중요할 때 관찰 가능한 로드 미니필터 테스트가 있으면 해당 메커니즘을 다룬 것입니다.
 파일 시스템 또는 Windows 버전 지원은 NTL 지원과 분리하여 보고합니다.
 
@@ -13,7 +13,7 @@ Filter Manager 메커니즘을 NTL API 및 저장소 검증에 대응시킵니�
 | Microsoft 샘플 | 재사용 가능한 메커니즘 | NTL 적용 범위 | 주요 근거 |
 | --- | --- | --- | --- |
 | `nullFilter` | 등록, 시작, 언로드 | 지원 | `examples/minifilter/basic` 및 VM 로드/언로드 픽스처 |
-| `passThrough` | 형식화된 작업 전/후 콜백, 작업 상태 콜백 | 지원 | 작업 컴파일 계약 및 일반 런타임 픽스처 |
+| `passThrough` | 타입이 지정된 작업 전/후 콜백, 작업 상태 콜백 | 지원 | 작업 컴파일 계약 및 일반 런타임 픽스처 |
 | `ctx` | 인스턴스, 파일, 스트림, 스트림 핸들, 트랜잭션 컨텍스트 | 지원 | 컨텍스트 컴파일 계약 및 다중 인스턴스/트랜잭션 수명 테스트 |
 | `cancelSafe` | 보류 작업 전 I/O, 취소, 작업자 완료, teardown | NTL 보류 큐 추상화로 지원 | `pending_pre_operation_queue` 컴파일 및 런타임 테스트 |
 | `swapBuffers` | I/O 및 제어 경로용 대체 버퍼와 MDL | 지원 | `examples/minifilter/swap-buffers` 및 I/O 버퍼 런타임 픽스처 |

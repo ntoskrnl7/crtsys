@@ -4,15 +4,15 @@
 
 이 디렉터리에는 실제 배포 경로에 해당하는 구성만 둡니다.
 
-- `crtsys_wfp_tls_inspection_proxy.sys`: 선택한 IPv4/IPv6 연결 redirect
+- `crtsys_wfp_tls_inspection_proxy.sys`: 선택한 IPv4/IPv6 연결 리디렉션
 - `crtsys_wfp_tls_inspection_proxy_service.exe`: 임시 WFP 정책, 원래 목적지와
-  redirect record 복구, SNI 인증서 선택, Schannel 양방향 TLS, ALPN 일치,
-  bounded HTTP/1.1·HTTP/2 검사와 변환, 운영 통계
+  리디렉션 레코드 복구, SNI 인증서 선택, Schannel 양방향 TLS, ALPN 일치,
+  제한된 HTTP/1.1·HTTP/2 검사와 변환, 운영 통계
 - `crtsys_wfp_tls_inspection_proxy_acceptance.exe`: 별도 디렉터리
   `test/wfp/runtime/fixtures/user/tls-inspection-proxy`에 있는 검증 프로그램
 
-loopback origin, 제어된 client, 비정상 TLS 입력 생성, PASS 판정은 예제에서
-제거하고 acceptance fixture로 옮겼습니다. 서비스와 fixture는 다음의 bounded
+루프백 원본 서버, 제어된 클라이언트, 비정상 TLS 입력 생성, PASS 판정은 예제에서
+제거하고 허용성 검사 픽스처로 옮겼습니다. 서비스와 픽스처는 다음의 제한된
 파일 IPC를 사용합니다.
 
 1. `--ready-file`: 인증서·listener·정책 준비 완료
@@ -21,10 +21,10 @@ loopback origin, 제어된 client, 비정상 TLS 입력 생성, PASS 판정은 �
 4. `--stop-file`: 서비스 종료 요청
 5. `--stats-file`: 프로토콜·변환·SNI·tuple·실패 통계
 
-실제 데이터 경로 기능은 그대로 유지됩니다. IPv4/IPv6 redirect record,
-검증된 두 TLS 구간, bounded ClientHello와 SNI identity cache, 양쪽 TLS 구간의
-필수 `http/1.1` 또는 `h2` ALPN, HTTP/1 framing, HTTP/2 frame/HPACK 상태,
-요청 header 변환, HTML 응답 변환, 내용 기반 fail-closed 차단을 수행합니다.
+실제 데이터 경로 기능은 그대로 유지됩니다. IPv4/IPv6 리디렉션 레코드,
+검증된 두 TLS 구간, 제한된 ClientHello와 SNI ID 캐시, 양쪽 TLS 구간의
+필수 `http/1.1` 또는 `h2` ALPN, HTTP/1 프레이밍, HTTP/2 frame/HPACK 상태,
+요청 헤더 변환, HTML 응답 변환, 내용 기반 실패 시 차단을 수행합니다.
 
 기본 HTTP/2 redirect session은 변환된 모든 `:authority`를 전달 전에 단일
 upstream TLS 연결을 선택한 SNI와 결합해 검증합니다. tunnel handler가 inspect

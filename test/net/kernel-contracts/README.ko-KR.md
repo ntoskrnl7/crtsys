@@ -107,5 +107,5 @@ unload는 새 작업을 막은 뒤 수락된 executor 작업을 모두 drain합�
 완료된 coroutine frame, WSK/TLS transport chain, MsQuic configuration chain,
 workspace lease를 의도적으로 `DISPATCH_LEVEL`에서 해제하며, runtime 소유 정리가
 `PASSIVE_LEVEL`에서 끝나야 성공합니다. 명시적 close와 drain은 deterministic
-service shutdown을 검증하기 위한 것이며 파괴 순서 요구 사항이 아닙니다.
+service shutdown을 검증하기 위한 것이며 소멸 순서 요구 사항이 아닙니다.
 사용자 모드 `msquic.dll` fallback은 사용하지 않습니다.

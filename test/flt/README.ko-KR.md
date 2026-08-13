@@ -14,9 +14,9 @@ Microsoft 샘플과 NTL 메커니즘의 저장소 전체 대응 관계는
 구성했지만, 필터 관리자 인스턴스를 마운트하지 않고도 일반 x86/x64 매트릭스에서
 컴파일하고 링크할 수 있습니다.
 
-이 컴파일 픽스처는 형식화된 콜백 시그니처, 네이티브 `PFLT_*` 콜백 시그니처의
+이 컴파일 픽스처는 타입이 지정된 콜백 시그니처, 네이티브 `PFLT_*` 콜백 시그니처의
 거부, 연속형 등록 API, 컨텍스트 형식, 트랜잭션 참여/제거, 크기가 제한된 이름
-출력, 데이터 스캔 설정/정리, 형식화된 취소 및 콜백 데이터 소유권 이전을
+출력, 데이터 스캔 설정/정리, 타입이 지정된 취소 및 콜백 데이터 소유권 이전을
 검증합니다. 필터 관리자를 시뮬레이션하지 않으므로 다음 동작은 일회용 VM에 실제
 미니필터를 로드해 검증해야 합니다.
 
@@ -25,7 +25,7 @@ Microsoft 샘플과 NTL 메커니즘의 저장소 전체 대응 관계는
 
 일반 런타임 픽스처는 KTM commit/rollback 전달, 데이터 스캔 섹션 충돌과 정리,
 생성된 동기/비동기 I/O의 취소와 해체를 검증합니다. 실제 overlapped 디렉터리
-알림도 발행하고, 형식화된 하위 스택 작업 상태 스냅샷, `STATUS_PENDING`, 요청
+알림도 발행하고, 타입이 지정된 하위 스택 작업 상태 스냅샷, `STATUS_PENDING`, 요청
 상태 파괴, 취소 및 언로드를 확인합니다. 네이티브 x64와 WOW64 클라이언트 모두
 x64 드라이버를 대상으로 실행됩니다.
 
@@ -38,13 +38,13 @@ C++ 편집기의 자동 완성 엔진이 문맥에 따라 인스턴스화되는 
 멤버를 안정적으로 나열하지 못하므로 공개 샘플은 명시적인 콜백 데이터 형식을
 사용합니다.
 
-`compile/context.cpp`는 형식화된 파일/스트림 컨텍스트 선언, 이동 전용 필터
+`compile/context.cpp`는 타입이 지정된 파일/스트림 컨텍스트 선언, 이동 전용 필터
 관리자 참조 소유자, 생성자 인수 전달 및 지원되는 전체 MSVC 도구 집합의
 등록 인터페이스를 검사합니다. 런타임 파일 시스템 동작은 일반 WDM 단위 테스트
 드라이버와 섞지 않고 미니필터 드라이버/앱 픽스처에서 검증합니다.
 
 `compile/control_device.cpp`는 미니필터가 `fltKernel.h`를 직접 포함하거나 원시
-WDM 디스패치 테이블을 설정하지 않고도 형식화된 `ntl::device`를 큐에 추가할 수
+WDM 디스패치 테이블을 설정하지 않고도 타입이 지정된 `ntl::device`를 큐에 추가할 수
 있는지 검증합니다.
 
 `compile/abi_win7_provider.cpp`와 `compile/abi_win8_consumer.cpp`는 대상 버전을
@@ -72,14 +72,14 @@ PASSIVE 지연, Fast I/O 재시도, 언로드/재로드 소유권, 양쪽 보류
 검증합니다. 자세한 내용은
 [`runtime/IO-BUFFER-README.md`](runtime/IO-BUFFER-README.ko-KR.md).
 
-`runtime/name_changer_*`는 별도의 형식화된 이름 공급자 쌍입니다. 존재하지 않는
+`runtime/name_changer_*`는 별도의 타입이 지정된 이름 공급자 쌍입니다. 존재하지 않는
 가상 graft에서 물리적 backing 디렉터리로 열기를 리디렉션하고, backing에 대한 직접
 접근을 막으며, 생성된 이름을 변환하고, 부모 디렉터리 열거·하드 링크 쿼리·이름을
 포함한 FSCTL 출력을 조정합니다. 검증 앱은 NTFS/ReFS와 x64/WOW64 호출자에서 필터
 언로드 전후의 매핑을 입증합니다. 정확한 검증 범위와 파일 시스템별 미지원 작업은
 [`runtime/NAME-CHANGER-README.md`](runtime/NAME-CHANGER-README.ko-KR.md).
 
-`runtime/simrep_*`는 격리된 SimRep 쌍입니다. 단계가 형식화된 pre-create 재분석,
+`runtime/simrep_*`는 격리된 SimRep 쌍입니다. 단계가 타입이 지정된 pre-create 재분석,
 network-query-open Fast I/O 대체 경로, 검증된 이름 변경/하드 링크 대상, 하위
 인스턴스 재발행 및 터널 이름 완료 상태 소유권을 x64와 WOW64 앱에서 검증합니다.
 자세한 내용은
@@ -91,7 +91,7 @@ network-query-open Fast I/O 대체 경로, 검증된 이름 변경/하드 링크
 검증합니다. 자세한 내용은
 [`runtime/DELETE-README.md`](runtime/DELETE-README.ko-KR.md).
 
-`runtime/scanner_*`는 격리된 Scanner/AvScan 쌍입니다. 형식화된 드라이버-앱 스캔
+`runtime/scanner_*`는 격리된 Scanner/AvScan 쌍입니다. 타입이 지정된 드라이버-앱 스캔
 요청, 성공한 post-create에서의 취소, 격리되고 취소에 안전한 보류 쓰기, 매핑
 쓰기 cleanup 재검사, 데이터 스캔 섹션 소유권, 연결 해제 시 허용 동작 및 TxF
 commit/rollback 전달을 x64와 WOW64 앱에서 검증합니다. 자세한 내용은
@@ -103,7 +103,7 @@ commit/rollback 전달을 x64와 WOW64 앱에서 검증합니다. 자세한 내�
 [`runtime/METADATA-README.md`](runtime/METADATA-README.ko-KR.md).
 
 `runtime/cdo_*`는 미니필터 소유 레거시 제어 장치의 시작과 해체, 사용자 모드
-열기, 형식화된 IOCTL, 선택적 언로드 거부, 계속되는 디스패치, cleanup/close 및
+열기, 타입이 지정된 IOCTL, 선택적 언로드 거부, 계속되는 디스패치, cleanup/close 및
 다시 열기를 검증합니다. 자세한 내용은
 [`runtime/CDO-README.md`](runtime/CDO-README.ko-KR.md).
 

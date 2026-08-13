@@ -2,17 +2,17 @@
 
 [English](./README.md)
 
-이 예제는 root-enumerated KMDF bus FDO와 child function driver가 형식화된 NTL
+이 예제는 root-enumerated KMDF bus FDO와 child function driver가 타입이 지정된 NTL
 KMDF query interface로 통신하는 방법을 보여줍니다. bus driver는 다음 작업을
 수행합니다.
 
-- 형식화된 dynamic `child_list` 구성
+- 타입이 지정된 dynamic `child_list` 구성
 - child-create callback에서 `ntl::kmdf::pdo_init` 수신
 - device, instance, hardware, compatible 및 localized text data 할당
-- 형식화된 resource-requirements와 boot-resource callback을 통해 virtual PDO의
+- 타입이 지정된 resource-requirements와 boot-resource callback을 통해 virtual PDO의
   빈 logical resource configuration 보고
 - 관리되는 C++ context storage를 포함한 `ntl::kmdf::pdo` 생성
-- 형식화된 eject, lock, wake 및 reported-missing PDO callback 등록
+- 타입이 지정된 eject, lock, wake 및 reported-missing PDO callback 등록
 - PDO에서 reference-counted driver-defined interface 노출
 - PDO identification과 parent 관계 검증
 

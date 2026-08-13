@@ -1,8 +1,8 @@
 # MetadataManager 런타임 fixture
 
-이 driver/app 쌍은 형식화된 NTL API로 Microsoft MetadataManager 미니필터의 재사용 가능한 수명 주기를 검증합니다.
+이 driver/app 쌍은 타입이 지정된 NTL API로 Microsoft MetadataManager 미니필터의 재사용 가능한 수명 주기를 검증합니다.
 
-각 NTFS/ReFS instance는 nonpaged `volume_metadata_instance_context` 안에 `volume_metadata_file`을 소유하고 `\System Volume Information\CrtSysMetadataRuntime.md`를 엽니다. 형식화된 create, cleanup, file-system-control, device-control, PnP, shutdown, instance-teardown callback이 해당 파일을 조정합니다.
+각 NTFS/ReFS instance는 nonpaged `volume_metadata_instance_context` 안에 `volume_metadata_file`을 소유하고 `\System Volume Information\CrtSysMetadataRuntime.md`를 엽니다. 타입이 지정된 create, cleanup, file-system-control, device-control, PnP, shutdown, instance-teardown callback이 해당 파일을 조정합니다.
 
 전문화된 context는 의도적으로 paged pool을 선택할 수 없습니다. 포함된 `ERESOURCE`, `KEVENT` 동기화 저장소가 상주해야 하기 때문입니다.
 

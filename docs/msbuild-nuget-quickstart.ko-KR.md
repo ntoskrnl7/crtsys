@@ -2,20 +2,20 @@
 
 [README로 돌아가기](./README.ko-KR.md)
 
-이 경로는 `crtsys`를 native NuGet package로 소비하는 Visual Studio 또는
-Build Tools WDK driver project용입니다. CMake/CPM GitHub 소비 경로와는
+이 경로는 `crtsys`를 네이티브 NuGet 패키지로 사용하는 Visual Studio 또는
+Build Tools WDK 드라이버 프로젝트용입니다. CMake/CPM GitHub 사용 경로와는
 독립적인 사용 방식입니다.
 
 ## 요구 사항
 
 - Visual Studio 또는 Build Tools 2017 이상
-- 선택한 toolset에 맞는 Windows SDK와 WDK
-- NuGet restore를 지원하는 MSBuild
-- `crtsys` package가 있는 NuGet source 접근 권한
+- 선택한 도구 집합에 맞는 Windows SDK와 WDK
+- NuGet 복원을 지원하는 MSBuild
+- `crtsys` 패키지가 있는 NuGet 소스 접근 권한
 
 modern `PackageReference` project에서는 `nuget.exe`가 필수는 아닙니다.
-MSBuild restore가 가능하면 `msbuild /restore`로 충분합니다. `nuget.exe`는
-구형 `packages.config` 흐름이나 script가 `nuget restore`를 직접 호출하는
+MSBuild 복원이 가능하면 `msbuild /restore`로 충분합니다. `nuget.exe`는
+구형 `packages.config` 흐름이나 스크립트가 `nuget restore`를 직접 호출하는
 경우에만 별도로 설치하면 됩니다.
 
 ## Visual Studio
@@ -47,15 +47,15 @@ Windows 10 version 2004 계약과 `netio.lib`를 선택하며 runtime provider�
 
 ![Visual Studio에서 crtsys NTL WFP 진입점을 선택하고 ntl::main을 구현하는 화면](./assets/visual-studio-ntl-wfp-entrypoint-ko-kr.gif)
 
-Visual Studio에서는 NuGet package UI를 사용하는 것이 가장 쉽습니다.
+Visual Studio에서는 NuGet 패키지 UI를 사용하는 것이 가장 쉽습니다.
 
 ![Visual Studio NuGet package UI에서 crtsys를 설치하는 화면](./assets/visual-studio-nuget-package-ui-ko-kr.gif)
 
 1. WDK driver solution을 엽니다.
 2. driver project를 우클릭하고 **Manage NuGet Packages...**를 선택합니다.
-3. `crtsys` package가 있는 package source를 선택합니다.
+3. `crtsys` 패키지가 있는 패키지 소스를 선택합니다.
 4. **crtsys**를 검색합니다.
-5. driver project에 package를 설치합니다.
+5. 드라이버 프로젝트에 패키지를 설치합니다.
 6. 사용하는 package/toolset 조합이 해당 architecture를 포함한다면 `x86`,
    `x64`, `ARM`, `ARM64`로 평소처럼 driver project를 빌드합니다.
 

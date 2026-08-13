@@ -5,9 +5,9 @@
 이 software-only 예제는 root-enumerated KMDF function driver와 NTL KMDF upper
 filter를 같은 device stack에 설치합니다.
 
-function driver는 device interface를 게시하고 형식화된 query IOCTL을 처리합니다.
-filter는 `device_init::filter()`를 호출하고, 받은 request를 현재 stack type으로
-format하고, 형식화된 completion callback을 등록한 뒤 request를
+function driver는 device interface를 게시하고 타입이 지정된 query IOCTL을 처리합니다.
+filter는 `device_init::filter()`를 호출하고, 받은 request를 현재 stack 형식에 맞게
+준비하고, 타입이 지정된 완료 콜백을 등록한 뒤 request를
 `device::default_io_target()`으로 보냅니다. target은 입력에 1을 더하고 filter
 completion은 10을 더한 뒤 자신의 layer를 기록합니다. 앱은 두 변환과 관찰 가능한
 두 layer bit를 모두 요구하므로 target만 설치된 상태가 잘못 통과할 수 없습니다.

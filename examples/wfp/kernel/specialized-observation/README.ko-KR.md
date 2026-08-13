@@ -2,20 +2,20 @@
 
 [English](./README.md)
 
-이 샘플은 endpoint closure, MAC frame, vSwitch frame, fast transport, IPsec
-management 같은 특수 WFP layer를 모델링합니다. 드라이버는 static callout을
-허용하는 endpoint/MAC/vSwitch layer에만 관찰 전용 callout을 등록합니다.
-컨트롤러는 fast와 IPsec management layer를 introspection하며, 이 layer가
-static callout을 허용하는 것처럼 표현하지 않습니다.
+이 샘플은 엔드포인트 종료, MAC 프레임, vSwitch 프레임, 고속 전송, IPsec
+관리 같은 특수 WFP 계층을 모델링합니다. 드라이버는 정적 콜아웃을
+허용하는 엔드포인트/MAC/vSwitch 계층에만 관찰 전용 콜아웃을 등록합니다.
+컨트롤러는 고속 및 IPsec 관리 계층을 검사하며, 이 계층이
+정적 콜아웃을 허용하는 것처럼 표현하지 않습니다.
 
 책임은 다음처럼 분리됩니다.
 
 - `crtsys_wfp_specialized_observation`: 드라이버
-- `crtsys_wfp_specialized_observation_controller`: layer 가용성을 확인하고
-  typed 통계 device를 열며, 지정된 애플리케이션의 관찰 정책과 전후 통계를
+- `crtsys_wfp_specialized_observation_controller`: 계층 가용성을 확인하고
+  타입이 지정된 통계 디바이스를 열며, 지정된 애플리케이션의 관찰 정책과 전후 통계를
   관리합니다.
 - `crtsys_wfp_specialized_observation_acceptance`:
-  `test/wfp/runtime/fixtures/kernel/specialized-observation`의 fixture. 실제
+  `test/wfp/runtime/fixtures/kernel/specialized-observation`의 픽스처. 실제
   IPv4/IPv6 endpoint를 만들고 통계를 판정합니다.
 
 컨트롤러 계약:
@@ -27,7 +27,7 @@ static callout을 허용하는 것처럼 표현하지 않습니다.
 ```
 
 endpoint closure filter는 애플리케이션 범위이므로, 컨트롤러 프로세스가 아니라
-실제로 소켓을 만드는 fixture 실행 파일 경로를 전달해야 합니다. acceptance는
+실제로 소켓을 만드는 픽스처 실행 파일 경로를 전달해야 합니다. 허용성 검사는
 기본적으로 같은 디렉터리의 컨트롤러를 실행하며 `--controller <경로>`도
 지원합니다.
 

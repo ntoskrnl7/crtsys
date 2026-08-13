@@ -1,4 +1,4 @@
-# NTL 형식화된 IOCTL 도우미
+# NTL 타입이 지정된 IOCTL 도우미
 
 [NTL 문서로 돌아가기](./README.ko-KR.md)
 
@@ -60,7 +60,7 @@ device.on_device_control([](const ntl::device_control::code& code,
 - `ntl::ioctl_input_as<Ioctl>(in_buffer)`
 - `ntl::ioctl_write_output<Ioctl>(out_buffer, value)`
 
-입력과 출력 도우미 함수에는 trivially copyable payload 형식이 필요합니다. 해당 방향에 형식화된 payload가 없는 IOCTL은 입력 또는 출력 형식으로 `void`를 사용하십시오.
+입력과 출력 도우미 함수에는 trivially copyable payload 형식이 필요합니다. 해당 방향에 타입이 지정된 payload가 없는 IOCTL은 입력 또는 출력 형식으로 `void`를 사용하십시오.
 
 `ioctl_from_contract`는 app/driver가 공유하는 계약 헤더를 위한 기능입니다. 원시 `CTL_CODE` 필드와 payload 형식을 하나의 계약 형식에 두고, 드라이버에서 그 형식으로 NTL descriptor를 파생시키십시오.
 
@@ -73,8 +73,8 @@ device.on_device_control([](const ntl::device_control::code& code,
 드라이버 테스트 모음은 다음을 검사합니다.
 
 - 컴파일 타임 `CTL_CODE` 일치
-- 공유 계약에서 형식화된 descriptor로의 매핑
+- 공유 계약에서 타입이 지정된 descriptor로의 매핑
 - 실행 시 코드 일치 및 불일치
-- 형식화된 입력 뷰
-- 형식화된 출력 쓰기
+- 타입이 지정된 입력 뷰
+- 타입이 지정된 출력 쓰기
 - 짧은 출력 버퍼 거부
