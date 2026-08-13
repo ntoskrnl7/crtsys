@@ -277,7 +277,7 @@ Assert-FileContains -Path $bridgePath -Tokens @(
 Assert-FileContains -Path $usagePath -Tokens @(
   'find_package(crtsys CONFIG REQUIRED)',
   'crtsys_add_driver',
-  'crtsys-vs-init',
+  'vcpkg env --tools --triplet=x64-windows-static "crtsys-vs-init.cmd"',
   'reload the'
 )
 Assert-FileContains -Path $initScriptPath -Tokens @(
