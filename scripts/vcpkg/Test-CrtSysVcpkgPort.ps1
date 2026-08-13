@@ -149,7 +149,6 @@ function Resolve-MsBuildExecutable {
 foreach ($requiredPath in @(
   $manifestPath,
   $portfilePath,
-  $compatibilityPatchPath,
   $bridgePath,
   $initScriptPath,
   $initCommandPath,
@@ -226,6 +225,9 @@ $portfileTokens = @(
   '${UCXXRT_SOURCE_PATH}/LICENSE'
 )
 if ([version]$projectVersion -lt [version]'0.1.42') {
+  if (-not (Test-Path -LiteralPath $compatibilityPatchPath)) {
+    throw "crtsys $projectVersion requires the compatibility patch: $compatibilityPatchPath"
+  }
   $portfileTokens += 'fix-offline-source-build.patch'
   Assert-FileContains -Path $compatibilityPatchPath -Tokens @(
     'NOT CRTSYS_NATIVE_ARCH STREQUAL "ARM64" AND',
@@ -242,6 +244,9 @@ if ([version]$projectVersion -ge [version]'0.1.42') {
   Assert-FileDoesNotContain -Path $portfilePath -Tokens @(
     'fix-offline-source-build.patch'
   )
+  if (Test-Path -LiteralPath $compatibilityPatchPath) {
+    throw "crtsys $projectVersion must not retain the 0.1.41 compatibility patch: $compatibilityPatchPath"
+  }
 }
 Assert-FileDoesNotContain -Path $portfilePath -Tokens @(
   'prebuilt.zip',
@@ -316,7 +321,8 @@ Assert-FileContains -Path $registryAutomationTestPath -Tokens @(
 )
 Assert-FileContains -Path $prepareReleasePath -Tokens @(
   'Update-CrtSysVcpkgPort.ps1',
-  'vcpkg/ports/crtsys/vcpkg.json'
+  "'vcpkg/ports/crtsys'",
+  'Release commit left uncommitted changes'
 )
 Assert-FileContains -Path $packageWorkflowPath -Tokens @(
   'publish-vcpkg-registry:',

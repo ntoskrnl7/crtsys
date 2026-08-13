@@ -157,9 +157,16 @@ try {
   Invoke-Git @(
     'add', '--',
     'include/.internal/version',
-    'vcpkg/ports/crtsys/vcpkg.json'
+    'vcpkg/ports/crtsys'
   )
   Invoke-Git @('commit', '-m', "release crtsys $Version")
+
+  $remainingStatus = (Invoke-Git @('status', '--porcelain'))
+  if ($null -ne $remainingStatus -and
+      -not [string]::IsNullOrWhiteSpace(($remainingStatus -join "`n"))) {
+    throw "Release commit left uncommitted changes:`n$($remainingStatus -join "`n")"
+  }
+
   Invoke-Git @('tag', '-a', $tagName, '-m', "crtsys $Version")
 
   if ($Push) {
