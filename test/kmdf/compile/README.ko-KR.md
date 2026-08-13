@@ -1,8 +1,11 @@
-# KMDF 컴파일 contract
+# KMDF 컴파일 계약
 
-이 target은 장치가 없어도, driver를 load하지 않아도 대표적인 `ntl::kmdf` contract를 컴파일합니다. move-only request/interface 소유권, callback signature, handle 크기 facade, queue/지연 callback, PnP/filter forwarding, child/PDO, interrupt, DMA, USB, WMI 생성 경로를 검사합니다.
+이 대상은 장치가 없고 드라이버를 로드하지 않은 상태에서도 대표적인 `ntl::kmdf`
+계약을 컴파일합니다. 이동 전용 요청/인터페이스 소유권, 콜백 시그니처, 핸들 너비
+래퍼, 큐/지연 콜백, PnP 및 필터 전달, 자식/PDO, 인터럽트, DMA, USB, WMI 생성
+경로를 검사합니다.
 
-CI entry point를 통해 지원하는 두 client/driver architecture를 모두 빌드하십시오.
+CI 진입점을 통해 지원하는 두 클라이언트/드라이버 아키텍처를 모두 빌드하십시오.
 
 ```powershell
 .\scripts\ci\Build-CrtSys.ps1 `
@@ -16,4 +19,5 @@ CI entry point를 통해 지원하는 두 client/driver architecture를 모두 �
   -Configuration Debug
 ```
 
-이 target은 `/W4 /WX`를 사용합니다. 공개 예제와 load된 driver VM 테스트를 보완하며 대체하지는 않습니다.
+이 대상은 `/W4 /WX`를 사용합니다. 공개 예제와 실제로 로드한 드라이버의 VM
+테스트를 보완하는 검사이며 이를 대체하지는 않습니다.

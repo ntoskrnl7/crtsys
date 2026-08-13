@@ -6,7 +6,7 @@
 
 - 공개 `<ntl/net/kernel/all>` 통합 이중 런타임 헤더, 할당 없는
   gRPC/WebSocket/데이터그램 프레이밍, 조각난 정적/Huffman QPACK, 제한된
-  ClientHello 관찰, 직접/오프로드 변환 메타데이터, 형식화된 검사 판정, 동기/비동기
+  ClientHello 관찰, 직접/오프로드 변환 메타데이터, 구조화된 검사 판정, 동기/비동기
   오프로드 경계, QUIC 공급자 경계, drain 가능한 커널 수명
 - 강한 형식의 레이어/callout 키와 콜백 범위 밖으로 벗어나지 않는 이벤트
 - ALE, flow-established, 패킷, 스트림 콜백 시그니처
@@ -20,7 +20,7 @@
 
 사용자 대상은 종료형 ALE 정책, 비종료형 flow 검사, 종료형 stream 편집 및 알 수 없는
 동작의 stream 제어를 포함하는 provider/sublayer/callout/filter 그래프를 컴파일합니다.
-레이어 범위 조건 빌더는 형식화된 IPv4/IPv6 네트워크, 포트, 프로토콜, ID, 플래그,
+레이어 범위 조건 빌더는 타입이 지정된 IPv4/IPv6 네트워크, 포트, 프로토콜, ID, 플래그,
 VLAN, MAC 주소, 원자적 ICMP 형식/코드 값을 다룹니다. 중복되거나 지원하지 않는
 필드는 엔진 트랜잭션을 만들기 전에 거부됩니다. 또한 필수 PID/포트 연결 리디렉션
 빌더, 영구 manifest reconciliation, 제한된 네트워크 이벤트 텔레메트리, 이동 전용

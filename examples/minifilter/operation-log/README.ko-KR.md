@@ -5,15 +5,15 @@
 이 예제는 WDK **MiniSpy** 예제의 작고 읽기 쉬운 대응 구현입니다. 전체 경로를 한
 예제에서 확인할 수 있습니다.
 
-`형식화된 I/O callback -> 크기가 제한된 nonpaged queue -> 형식화된 port RPC -> console`
+`타입이 지정된 I/O 콜백 -> 크기가 제한된 nonpaged 큐 -> 타입이 지정된 포트 RPC -> 콘솔`
 
 | WDK MiniSpy의 역할 | NTL 예제 표현 |
 | --- | --- |
-| `FLT_OPERATION_REGISTRATION` table | 형식화된 `registration::on*` 호출 |
+| `FLT_OPERATION_REGISTRATION` table | 타입이 지정된 `registration::on*` 호출 |
 | 형식 없는 completion context | `completion_slot<completion_state>` |
 | 열린 파일별 추적 | `stream_handle_context<tracked_handle>` |
 | record list 및 동기화 | `record_queue` |
-| command/reply protocol | 형식화된 `ntl::rpc::method` descriptor |
+| command/reply protocol | 타입이 지정된 `ntl::rpc::method` descriptor |
 | 필터 관리자 포트 | `driver::add_communication_port` |
 
 일반 system activity가 예제 출력을 뒤덮지 않도록 `.ntlspy`로 끝나는 파일만
@@ -25,7 +25,7 @@
 없습니다.
 
 queue는 의도적으로 별도 파일에 있습니다. 이는 일반적인 커널 측 정책이며,
-`driver/main.cpp`의 minifilter 전용 코드는 형식화된 callback과 소유권에만
+`driver/main.cpp`의 minifilter 전용 코드는 타입이 지정된 콜백과 소유권에만
 집중합니다.
 
 ## 빌드

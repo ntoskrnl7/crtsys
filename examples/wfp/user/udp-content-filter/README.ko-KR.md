@@ -36,7 +36,7 @@ datagram payload 하나가 공유 콘텐츠 필터 레코드 하나를 정확히
 `crtsys_wfp_udp_content_filter_policy_service.exe`에는 실제 정책 경로만 있습니다.
 이 서비스는 `--port`, `--ready-file`, `--stop-file`, `--stats-file`,
 `--expected-requests`, `--behavior normal|failure`를 받아 임시 정책을 설치하고,
-reliable RPC 요청을 처리하고, 형식화된 판정을 반환하며, 드라이버 통계를
+reliable RPC 요청을 처리하고, 구조화된 판정을 반환하며, 드라이버 통계를
 기록합니다. sender, receiver, 비정상 traffic 생성 또는 PASS 판정은 포함하지
 않습니다.
 

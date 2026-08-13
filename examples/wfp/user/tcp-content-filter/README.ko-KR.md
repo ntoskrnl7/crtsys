@@ -24,11 +24,11 @@ TCP에서는 먼저 다음과 같은 예제 전용 메시지 framing을 사용�
 `ordinary`는 허용하고 `restricted`는 차단합니다. parser는 magic, version,
 flags, 0이 아닌 rule ID, 정확한 본문 길이 및 4 KiB 본문 한도도 검증합니다.
 허용 acceptance 레코드에도 `BLOCKME`를 넣어 정책이 단순 문자열 검색이 아니라
-형식화된 필드를 기준으로 판정함을 입증합니다.
+구조화된 필드를 기준으로 판정함을 입증합니다.
 
 ## 적용 경로
 
-1. IPv4/IPv6 ALE flow-established callout이 형식화된 flow 상태를 연결합니다.
+1. IPv4/IPv6 ALE flow-established callout이 타입이 지정된 flow 상태를 연결합니다.
 2. `STREAM_V4/V6`가 크기 제한을 지키는 완전한 frame 하나에 필요한 바이트를
    요청합니다.
 3. 인바운드 바이트 처리를 보류하고 드라이버 소유 저장소로 복사합니다.
@@ -48,7 +48,7 @@ crtsys_wfp_tcp_content_filter_policy_service.exe
 ```
 
 서비스는 IPv4/IPv6 임시 WFP 정책을 설치하고 reliable RPC 검사 요청을 처리하며,
-형식화된 판정을 제출하고 ready 신호와 드라이버 통계를 기록한 뒤 종료 시 정책을
+구조화된 판정을 제출하고 ready 신호와 드라이버 통계를 기록한 뒤 종료 시 정책을
 제거합니다. listener, traffic generator, exchange 도우미 또는 PASS 판정은
 포함하지 않습니다.
 

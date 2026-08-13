@@ -1,10 +1,10 @@
-# Async-inspection acceptance 테스트
+# Async-inspection 허용성 테스트
 
-이 fixture가 listener, client connect, 시간 검증, PASS 출력 및
-unload-race fan-out을 모두 소유합니다. 제품 controller를 실행하고
+이 픽스처가 리스너, 클라이언트 연결, 시간 검증, PASS 출력 및
+언로드 경합 fan-out을 모두 소유합니다. 제품 컨트롤러를 실행하고
 `controller.ready`, 드라이버 중지/재시작 확인 응답, `release-policy`,
 `policy.released`, `stop.request`, `controller.stats` IPC로 조율합니다. race는
-pending decision drain, fail-closed cancellation, driver reload, 정책 cleanup을
+대기 중인 판정 drain, 실패 시 차단 취소, 드라이버 다시 로드, 정책 정리를
 검증합니다. WFP 정책을 직접 설치하거나 드라이버를 열지 않습니다.
 
 ```text

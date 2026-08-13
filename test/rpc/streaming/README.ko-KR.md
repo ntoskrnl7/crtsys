@@ -1,10 +1,10 @@
 # NTL RPC 스트리밍 fixture
 
-이 fixture는 양방향 session-bound 형식화된 streaming을 검증합니다.
+이 fixture는 양방향 세션 종속 타입이 지정된 스트리밍을 검증합니다.
 
 검사 범위:
 
-- STL을 포함하는 형식화된 app-to-driver, driver-to-app chunk
+- STL을 포함하는 타입이 지정된 app-to-driver, driver-to-app chunk
 - x64/x86 app에서 사용할 수 있는 x64 driver wire contract
 - 제한된 session별 download queue와 `STATUS_DEVICE_BUSY` backpressure
 - 명시적 ACK 및 queue capacity 회복

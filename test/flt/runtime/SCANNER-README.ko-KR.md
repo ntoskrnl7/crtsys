@@ -1,12 +1,12 @@
 # Scanner/AvScan 런타임 fixture
 
-이 격리된 driver/app 쌍은 Microsoft `scanner`, `avscan` 예제가 보여 주는 재사용 가능한 mechanism을 하나의 형식화된 NTL 수명 주기로 구성합니다. production antivirus engine이 아니라 policy 및 소유권 테스트입니다. `\crtsys-flt-scanner-runtime` 아래의 `*.scan` 파일만 관찰하고 테스트 signature `CRTSYS_FOUL`을 처음 4096바이트까지만 검사합니다.
+이 격리된 driver/app 쌍은 Microsoft `scanner`, `avscan` 예제가 보여 주는 재사용 가능한 mechanism을 하나의 타입이 지정된 NTL 수명 주기로 구성합니다. production antivirus engine이 아니라 policy 및 소유권 테스트입니다. `\crtsys-flt-scanner-runtime` 아래의 `*.scan` 파일만 관찰하고 테스트 signature `CRTSYS_FOUL`을 처음 4096바이트까지만 검사합니다.
 
 ## 파일과 책임
 
 | 파일 | 책임 |
 | --- | --- |
-| `scanner_shared/scanner_runtime.hpp` | 고정 폭 형식화된 RPC contract, 테스트 이름, verdict, 관찰 가능한 counter |
+| `scanner_shared/scanner_runtime.hpp` | 고정 폭 타입이 지정된 RPC contract, 테스트 이름, verdict, 관찰 가능한 counter |
 | `scanner_driver/main.cpp` | create/write/cleanup 정책, data-scan section, pending I/O, context, TxF enlistment |
 | `scanner_app/main.cpp` | 사용자 모드 scanner service와 end-to-end 검증 |
 | `scanner_driver/crtsys_flt_scanner_runtime_test.inf` | altitude `370030.233`의 개발 instance |
@@ -16,7 +16,7 @@
 - `create_callback_data`는 pre/post create를 처리합니다.
 - `write_callback_data`는 pre-write를 처리합니다.
 - `cleanup_callback_data`는 pre-cleanup을 처리합니다.
-- 형식화된 transaction 및 section-context callback이 각 notification을 처리합니다.
+- 타입이 지정된 transaction 및 section-context callback이 각 notification을 처리합니다.
 
 연기된 PASSIVE 수준 routine은 Filter Manager work-item ABI 때문에 네이티브 callback data를 받습니다. 이 routine은 곧바로 알려진 `write_callback_data` 형식을 복원합니다. 이는 구현 경계이지 원시 등록을 빠져나가는 통로가 아닙니다.
 
@@ -24,11 +24,11 @@
 
 | 연산 | driver 동작 | 사용자에게 보이는 결과 |
 | --- | --- | --- |
-| 성공한 open | 읽기 전용 data-scan section을 매핑하고 형식화된 요청을 보내며 감염 verdict에는 `try_cancel_file_open()` 호출 | 감염된 기존 파일은 `ERROR_ACCESS_DENIED`로 실패 |
-| 쓰기 가능한 open | 형식화된 stream-handle context를 붙이고 TxF가 있으면 형식화된 transaction context enlist | cleanup이 재검사 필요 여부를 앎 |
+| 성공한 open | 읽기 전용 data-scan section을 매핑하고 타입이 지정된 요청을 보내며 감염 verdict에는 `try_cancel_file_open()` 호출 | 감염된 기존 파일은 `ERROR_ACCESS_DENIED`로 실패 |
+| 쓰기 가능한 open | 타입이 지정된 stream-handle context를 붙이고 TxF가 있으면 타입이 지정된 transaction context enlist | cleanup이 재검사 필요 여부를 앎 |
 | non-paging write | PASSIVE 수준으로 연기하고 `try_swap_io_buffers()`로 격리 page에 복사하여 `pending_pre_operation_queue`에 보류하고 verdict 요청 | 정상 page는 하위 stack을 재개하고 감염 page는 해제되며 원래 write는 access denied로 완료 |
 | cleanup | data-scan section으로 마지막 파일 내용을 재검사 | 일반 pre-write 검사를 우회한 mapped/paging write를 감지하며 cleanup 자체는 실패하지 않음 |
-| transaction 종료 | enlist된 형식화된 transaction context로 commit-finalize 또는 rollback 수신 | 두 TxF 경로와 context 파괴를 관찰 |
+| transaction 종료 | enlist된 타입이 지정된 transaction context로 commit-finalize 또는 rollback 수신 | 두 TxF 경로와 context 파괴를 관찰 |
 | scanner disconnect | caller buffer를 acquire하거나 보류하기 전에 create/write policy 우회 | Microsoft Scanner sample의 service-availability policy와 같은 fail-open bootstrapping 및 test cleanup |
 
 write 경로는 격리된 `swapped_io_buffers` 소유자를 cancel-safe pending queue 안에 유지합니다. allow verdict는 하위 stack을 재개하기 전에 상주 replacement page를 적용합니다. deny, cancellation, disconnect, teardown은 오래된 user buffer가 file system에 보이지 않게 해당 page를 해제합니다.
@@ -43,7 +43,7 @@ app은 연결 전 파일을 준비해 disconnect 상태의 fail-open bootstrappi
 - 허용된 일반 `WriteFile` 하나와 거부된 것 하나
 - memory-mapped write 뒤 cleanup 감지
 - commit된 TxF write 하나와 rollback된 TxF write 하나
-- 전송 실패 없는 형식화된 kernel-to-user 요청
+- 전송 실패 없는 타입이 지정된 kernel-to-user 요청
 - 균형 잡힌 data-scan section, section context, pending write, stream-handle context, transaction context
 
 통과한 실행은 다음의 결정적인 policy count를 보고합니다.

@@ -30,7 +30,7 @@ ntl::net::async_socket connection(io, native);
 
 하나의 `io_completion_context`는 연결된 socket 여러 개를 소유할 수 있습니다. proxy는 수락한 connection마다 completion port 또는 OS thread를 만들 필요가 없습니다. context 하나를 유지하고 socket 쌍마다 소유 coroutine task를 만들며 이 task를 connection registry에 보관하십시오.
 
-registry는 task 완료와 일시적인 IOCP 유휴 상태를 구분해야 합니다. shutdown 중에는 먼저 모든 connection에 cancellation을 요청하고, 모든 소유 task가 끝날 때까지 기다린 다음 공유 context를 파괴하기 전에 `wait_for_idle()`을 호출합니다. [`browser-https-inspection` sample](../../examples/wfp/user/browser-https-inspection)은 이 모델을 사용하며 relay contract test는 하나의 context에서 동시에 실행되는 많은 socket 쌍을 검사합니다.
+registry는 task 완료와 일시적인 IOCP 유휴 상태를 구분해야 합니다. shutdown 중에는 먼저 모든 connection에 cancellation을 요청하고, 모든 소유 task가 끝날 때까지 기다린 다음 공유 context를 소멸시키기 전에 `wait_for_idle()`을 호출합니다. [`browser-https-inspection` sample](../../examples/wfp/user/browser-https-inspection)은 이 모델을 사용하며 relay contract test는 하나의 context에서 동시에 실행되는 많은 socket 쌍을 검사합니다.
 
 ## Coroutine 연산
 
@@ -53,7 +53,7 @@ C++ 표준에는 최상위 `task<T>`가 없으므로 이 header는 이를 강제
 ## 수명과 취소
 
 - destination/source span은 `await_resume()`까지 유효해야 합니다.
-- 각 socket과 pending operation은 IOCP runtime state를 유지합니다. 따라서 `io_completion_context` facade는 member 선언 순서와 무관하게 child보다 먼저 close/소멸할 수 있습니다.
+- 각 socket과 pending operation은 IOCP runtime state를 유지합니다. 따라서 `io_completion_context` 객체는 member 선언 순서와 무관하게 child보다 먼저 close/소멸할 수 있습니다.
 - `async_socket::cancel()`은 socket에 대해 `CancelIoEx`를 호출합니다. 선택한 read/write 하나가 아니라 해당 socket의 모든 pending operation을 취소합니다.
 - socket을 닫아도 pending overlapped operation은 완료됩니다.
 - `io_completion_context::close()`는 idempotent이며 새 child를 거부하고 제출된 operation을 기다린 뒤 native completion port를 해제하기 전에 worker를 join합니다. completion continuation 안에서 호출할 수 있으며 worker는 callback이 반환할 때까지 마지막 runtime reference를 유지합니다.

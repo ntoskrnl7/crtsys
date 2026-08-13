@@ -5,7 +5,7 @@
 이 예제는 `crtsys`를 통해 MSVC STL을 사용하는 NTL 방식 KMDF 드라이버를
 보여줍니다. KMDF는 WDF driver, device, queue, request, PnP, power 및 object 수명
 모델을 계속 소유합니다. `crtsys`는 kernel-compatible CRT/STL 시작·종료 경로와
-`ntl/kmdf/`의 얇은 C++ facade를 제공합니다.
+`ntl/kmdf/`의 얇은 C++ 래퍼를 제공합니다.
 
 드라이버는 격리된 테스트 VM에서 service로 load/unload할 수 있도록 non-PnP KMDF
 control driver로 구성됩니다. parallel default queue는 명시적으로
@@ -15,7 +15,7 @@ control driver로 구성됩니다. parallel default queue는 명시적으로
 잡으며 관찰한 server IRQL을 앱에 반환합니다.
 
 동일한 open/IOCTL/close 흐름에서 WDF 소유 context storage 안의 non-trivial
-`device_state`와 open별 `file_state` 객체를 생성하고 소멸합니다. 형식화된 file
+`device_state`와 open별 `file_state` 객체를 생성하고 소멸합니다. 타입이 지정된 file
 callback은 native `FILE_OBJECT`를 보는 non-owning `ntl::file` view로 연결하는
 `ntl::kmdf::file::wdm()` bridge도 보여줍니다. driver setup은 parent가 지정된 KMDF
 work item과 passive timer도 만듭니다. work item을 flush해 PASSIVE_LEVEL 실행을
@@ -23,7 +23,7 @@ work item과 passive timer도 만듭니다. work item을 flush해 PASSIVE_LEVEL 
 
 device setup 중에는 parent가 지정된 `WDFMEMORY`도 할당해 buffer copy를 검증하고,
 일반 I/O target을 만들고, 전송하지 않은 `ntl::kmdf::driver_request`를 생성한 뒤
-자동 삭제합니다. 하나의 runtime 경로에서 `spin_lock`, `wait_lock`, 이동 소유하는
+자동 삭제합니다. 하나의 runtime 경로에서 `spin_lock`, `wait_lock`, 이동으로 소유권을 이전하는
 lookaside memory, `collection`, `string`, standalone `dpc` 같은 공통 WDF object
 utility도 검증합니다. DPC callback은 `DISPATCH_LEVEL`에서 lock-free counter와
 event operation만 수행하고, passive setup 경로가 결과를 기다려 검사합니다.
@@ -40,7 +40,7 @@ request도 queue 삽입 전에 모두 기록하며 앱은 counter 증가를 검�
 view는 request를 완료하거나 forward할 수 없고 서로 다른 형식이므로 일반 I/O를
 reserved-request fallback traffic으로 잘못 취급할 수 없습니다.
 
-이 예제는 의도적으로 non-PnP control device로 유지합니다. 형식화된 child 열거와
+이 예제는 의도적으로 non-PnP control device로 유지합니다. 타입이 지정된 child 열거와
 PDO 생성은 별도 [KMDF bus 및 PDO 예제](../bus)를 참고하세요.
 
 ## Visual Studio 및 NuGet

@@ -4,14 +4,14 @@
 
 헤더: [`include/ntl/registry`](../../include/ntl/registry)
 
-`ntl::registry_key`는 네이티브 Zw 레지스트리 키 핸들을 관리하는 RAII 래퍼입니다.
-`NTSTATUS`를 그대로 다루면서 `\Registry\...` 키를 읽거나 써야 하는 드라이버의
-설정, 언로드, 구성 경로를 위한 도구입니다.
+`ntl::registry_key`는 네이티브 Zw 레지스트리 키 핸들용 RAII 래퍼입니다. `NTSTATUS`를
+그대로 보존하면서 `\Registry\...` 키를 읽거나 써야 하는 드라이버 설정·언로드·구성
+경로를 위한 도구입니다.
 
 ## 드라이버 매개 변수
 
 `ntl::main`은 `DriverEntry`에서 서비스 레지스트리 경로를 받습니다. 일반적인
-드라이버 구성 키는 그 경로 아래의 `Parameters` 하위 키입니다.
+드라이버 구성 키는 이 경로 아래의 `Parameters` 하위 키입니다.
 
 ```cpp
 #include <ntl/registry>
@@ -43,12 +43,11 @@ ntl::status ntl::main(ntl::driver& driver,
 <registry_path>\Parameters
 ```
 
-이 도우미는 키를 만들지 않습니다. 드라이버가 자체적인 휘발성 또는 영구적인
-테스트/구성 키를 만들어야 한다면 `registry_key::create`를 사용하세요.
+이 도우미는 키를 만들지 않습니다. 드라이버가 자체 휘발성 또는 영구 테스트/구성 키를
+만들어야 하면 `registry_key::create`를 사용하세요.
 
-`ntl::driver_config`는 같은 `Parameters` 키를 위한 작은 편의 래퍼입니다.
-내부 `registry_key`는 `key()`로 노출하며, 선택 설정을 위한 기본값 반환 도우미도
-추가합니다.
+`ntl::driver_config`는 같은 `Parameters` 키를 위한 작은 편의 래퍼입니다. `key()`로
+기본 `registry_key`를 노출하고, 선택 설정에 기본값을 반환하는 도우미를 추가합니다.
 
 ```cpp
 auto config = ntl::driver_config::open(registry_path);
@@ -82,7 +81,7 @@ auto flags = key->query_dword(L"Flags");
 auto blob = key->query_binary(L"OpaqueData");
 ```
 
-형식별 조회 도우미는 `REG_*` 형식을 검증하고 `ntl::result<T>`를 반환합니다.
+타입이 지정된 조회 도우미는 `REG_*` 형식을 검증하고 `ntl::result<T>`를 반환합니다.
 
 - `query_dword(name) -> ntl::result<std::uint32_t>`
 - `query_qword(name) -> ntl::result<std::uint64_t>`
@@ -90,14 +89,14 @@ auto blob = key->query_binary(L"OpaqueData");
 - `query_binary(name) -> ntl::result<std::vector<std::uint8_t>>`
 - `query_value(name) -> ntl::result<ntl::registry_value>`
 
-`driver_config`는 같은 형식별 조회 도우미를 전달하며, 다음도 제공합니다.
+`driver_config`는 같은 타입이 지정된 조회 도우미를 전달하며 다음도 제공합니다.
 
 - `dword_or(name, fallback)`
 - `qword_or(name, fallback)`
 - `string_or(name, fallback)`
 - `binary_or(name, fallback)`
 
-`query_string`은 `REG_SZ` 및 `REG_EXPAND_SZ`를 받아 끝의 NUL 문자를 제거합니다.
+`query_string`은 `REG_SZ`와 `REG_EXPAND_SZ`를 받고 끝의 NUL 문자를 제거합니다.
 환경 변수는 확장하지 않습니다.
 
 ## 값 설정
@@ -130,8 +129,8 @@ key->set_binary(L"Seed", std::vector<std::uint8_t>{1, 2, 3, 4});
 ## 소유권
 
 `registry_key`는 [`ntl::unique_handle`](./ownership.ko-KR.md)를 통해 네이티브
-키 핸들을 소유합니다. 이동, `close()`, `reset()`, `release()`, 그리고 WDK 출력
-매개 변수용 `put()`을 지원합니다.
+키 핸들을 소유합니다. 이동, `close()`, `reset()`, `release()`, WDK 출력 매개 변수용
+`put()`을 지원합니다.
 
 ```cpp
 auto opened = ntl::registry_key::open(path, KEY_READ);
@@ -147,16 +146,16 @@ ntl::registry_key adopted(raw);
 ## IRQL
 
 `ntl::registry_key`는 `PASSIVE_LEVEL` 전용으로 취급하세요. Zw 레지스트리 호출은
-제어 경로 작업이며, 이 도우미는 `std::wstring`, `std::vector`, `ntl::result<T>`를
+제어 경로 작업이며 이 도우미는 `std::wstring`, `std::vector`, `ntl::result<T>`를
 사용합니다.
 
 ## 드라이버 테스트 범위
 
-드라이버 테스트는 다음을 검증합니다.
+드라이버 테스트는 다음을 다룹니다.
 
 - 휘발성 키 생성/열기/삭제
 - `REG_DWORD`, `REG_QWORD`, `REG_SZ`, `REG_EXPAND_SZ`, `REG_BINARY`
 - 원시 `query_value`
 - `driver_config`의 기본값 반환 조회
-- 값 삭제와 없는 값의 상태
+- 값 삭제와 없는 값 상태
 - 이동, release, 인계, close 소유권 경로

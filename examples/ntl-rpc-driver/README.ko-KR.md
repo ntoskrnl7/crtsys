@@ -2,7 +2,7 @@
 
 [English](./README.md)
 
-이 예제는 NTL RPC 도우미 계층을 보여줍니다. `examples/ntl-driver`의 형식화된
+이 예제는 NTL RPC 도우미 계층을 보여줍니다. `examples/ntl-driver`의 타입이 지정된
 IOCTL 예제와는 의도적으로 분리되어 있습니다. IOCTL 예제는 수동으로 작성하는
 장치 제어 계약을 보여주고, 이 예제는 하나의 공유 callback 선언에서 양쪽 구현을
 생성합니다.
@@ -13,7 +13,7 @@ IOCTL 예제와는 의도적으로 분리되어 있습니다. IOCTL 예제는 �
 - 드라이버 unload callback이 수명을 소유하는 `ntl::rpc::server`
 - 사용자 모드 동반 앱에서 사용하는 `ntl::rpc::client`
 - 공유 schema 기반 RPC callback ID와 추론되는 반환 형식
-- 직접 생성되는 wrapper와 재사용 가능한 형식화된 client
+- 직접 생성되는 wrapper와 재사용 가능한 타입이 지정된 client
 - 호출 스레드를 다른 작업에 사용할 수 있게 하는 비동기 `OVERLAPPED` RPC
 - timeout, `CancelIoEx` 및 협력적 커널 callback 취소
 - 서버 callback 실행 전에 검사하는 크기 제한 가변 응답
@@ -23,7 +23,7 @@ IOCTL 예제와는 의도적으로 분리되어 있습니다. IOCTL 예제는 �
 - version, capability 및 method 호환성을 확인하는 시작 시점 계약 검색
 - 원래 호출자 신원과 역직렬화 전 method 권한 검사
 - 재연결 가능한 client session과 ACK 전까지 재생되는 reliable 알림
-- 제한된 backpressure를 적용하는 session 종속 형식화 stream
+- 제한된 backpressure를 적용하는 session 종속 타입이 지정된 stream
 - 단순 scalar 값, 사용자 정의 요청/응답 쌍 및 `std::vector` 직렬화
 
 소스는 역할별로 나뉩니다.
@@ -34,7 +34,7 @@ IOCTL 예제와는 의도적으로 분리되어 있습니다. IOCTL 예제는 �
 - `driver/caller_security.cpp`: 호출자 검사 및 method 권한 부여
 - `driver/operations.cpp`: 커널 callback 구현
 - `driver/notifications.cpp`: session 상태 및 reliable 알림 게시
-- `shared/ntl_rpc_sample.hpp`: 생성되는 RPC method와 형식화된 stream callback
+- `shared/ntl_rpc_sample.hpp`: 생성되는 RPC method와 타입이 지정된 stream callback
 - `app/caller_security.cpp`: 호출자 보안 client 호출
 - `app/synchronous_calls.cpp`: 생성된 wrapper와 재사용 가능한 동기 client
 - `app/asynchronous_call.cpp`: 성공하는 비동기 완료
@@ -42,7 +42,7 @@ IOCTL 예제와는 의도적으로 분리되어 있습니다. IOCTL 예제는 �
 - `app/coroutine_call.cpp`: C++20 `co_await` 완료
 - `app/stop_token_cancellation.cpp`: C++20 `stop_token` 취소
 - `app/reliable_notifications.cpp`: subscribe, reconnect, replay 및 ACK
-- `app/streaming.cpp`: 형식화된 stream 열기, 쓰기, 읽기, ACK 및 닫기
+- `app/streaming.cpp`: 타입이 지정된 stream 열기, 쓰기, 읽기, ACK 및 닫기
 - `app/streaming_batch.cpp`: 제한된 다중 chunk upload/download batch
 - `app/coroutine_task.hpp`: 앱에서 사용하는 최소한의 최상위 coroutine owner
 - `app/main.cpp`: 인자 해석, 계약 검증 및 예제 실행 순서
@@ -97,7 +97,7 @@ cmake -S examples\ntl-rpc-driver -B examples\ntl-rpc-driver\build_x64 -A x64 -DC
 
 공유 계약은 [`shared/ntl_rpc_sample.hpp`](./shared/ntl_rpc_sample.hpp)에 있습니다.
 macro body는 `<ntl/rpc/server>` 뒤에 포함하면 커널 callback이 되고,
-`<ntl/rpc/client>` 뒤에 포함하면 형식화된 사용자 모드 wrapper가 됩니다.
+`<ntl/rpc/client>` 뒤에 포함하면 타입이 지정된 사용자 모드 wrapper가 됩니다.
 
 schema는 다음 항목을 노출합니다.
 
@@ -134,7 +134,7 @@ macro로 선언한 method만 필요하다면 일반 `init()` 편의 API를 사�
 ## Reliable 알림 개요
 
 [`app/reliable_notifications.cpp`](./app/reliable_notifications.cpp)는 session을
-시작하고 `progress`를 subscribe한 뒤 형식화된 delivery를 수신하고, 의도적으로
+시작하고 `progress`를 subscribe한 뒤 타입이 지정된 delivery를 수신하고, 의도적으로
 ACK 전에 연결을 끊습니다. 두 번째 client가 불투명 token으로 session을 재개하여
 같은 sequence를 받고 ACK한 다음 session을 명시적으로 닫습니다.
 
@@ -151,7 +151,7 @@ client.acknowledge(crtsys_ntl_rpc_sample::progress, delivery);
 lifecycle 전체 사례는
 [`test/rpc/notifications`](../../test/rpc/notifications)에 두었습니다.
 
-## 형식화된 streaming
+## 타입이 지정된 streaming
 
 [`app/streaming.cpp`](./app/streaming.cpp)는 stress 로직을 섞지 않고 정상 경로
 전체를 보여줍니다. 공유 계약 macro는 하나의 선언에서 드라이버 upload callback

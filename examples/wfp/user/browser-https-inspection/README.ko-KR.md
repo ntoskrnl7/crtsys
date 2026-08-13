@@ -145,6 +145,10 @@ HTTP·TLS·WFP 문맥을 함께 조합할 때는 raw `when(inspection_context_vi
 같은 이름의 헤더가 반복되면 `header_is` 계열은 모든 필드를 검사하므로
 첫 번째 정상 값 뒤의 악성 값을 숨기는 방식으로 우회할 수 없습니다.
 
+같은 방향과 단계의 규칙은 등록한 순서대로 평가하며, 처음 일치한 규칙이 최종
+결정을 내립니다. 명시적 허용 목록을 만들 때는 조건이 좁은 허용 규칙을 조건 없는
+차단 규칙보다 먼저 등록하세요. 일치하는 규칙이 없으면 해당 단계는 허용됩니다.
+
 ## 빌드와 실행
 
 ```powershell
@@ -224,12 +228,23 @@ HTTP/2의 일반 DATA와 tunnel DATA는 모두 peer connection/stream send windo
 예약한 뒤 전송합니다. 입력 WINDOW_UPDATE credit은 제한된 transformer가
 보관했거나 목적지 쓰기가 완료된 바이트에 대해서만 돌려줍니다.
 
+HTTP/2는 양방향에서 독립적이고 크기가 제한된 HPACK 상태를 유지하며, 변환한
+헤더는 동적 테이블 결합 없이 다시 인코딩합니다.
+
 HTTP/1.1, HTTP/2, HTTP/3는 제한된 gzip, zlib `deflate`, Brotli
 decoder와 encoder를 공유합니다. 증분 스트리밍 API는 메시지마다 codec chain
 상태를 따로 유지하므로 임의의 HTTP chunk/DATA 분할에서도 압축 상태를
 초기화하지 않으며 전체 body를 한 번에 보관할 필요가 없습니다. coding 깊이,
 입력·출력 크기, 확장 비율, checksum, 잘린 입력, 연결 수 제한을 넘으면 fail
 closed합니다.
+
+이 예제는 HTML 기록과, 재작성한 본문의 바이트를 하나도 전달하기 전에 결정을
+내려야 하는 정책에 완전한 메시지 변환을 사용합니다. 라이브러리는
+`ntl/net/http/http1_stream_transform`, `ntl/net/http2/stream_transform`,
+`ntl/net/http3/stream_transform`의 라이브 변환 어댑터도 제공합니다. 이 어댑터는
+프레이밍과 codec 상태가 허용하는 즉시 변환한 조각을 전달합니다. 이후 거부하면
+stream을 reset하거나 닫지만 이미 보낸 바이트를 회수할 수는 없습니다. HTTP 버전이
+아니라 정책의 결정 경계를 기준으로 원자적 어댑터와 라이브 어댑터를 선택하세요.
 
 NTL HTTP/3 계층에는 분할 frame 재조립, 제한된 동적 RFC 9204 QPACK,
 RFC 9297 HTTP Datagram과 Capsule framing, HTTP/2·HTTP/3 extended CONNECT
@@ -262,9 +277,9 @@ NTL은 certificate pinning을 우회하지 않습니다. 정확한 앱·호스�
 분류하여 inspect, block, bypass 정책을 선택할 수는 있지만 pinned client가
 대체 leaf를 신뢰하도록 만들 수는 없습니다.
 
-origin mTLS는 TCP와 HTTP/3 경로 모두 명시적인 SNI-to-client-certificate
-provider로 지원합니다. 선택된 인증서에 접근 가능한 private key가 없거나
-필수 identity를 찾지 못하면 실패합니다.
+원격 서버에 대한 mTLS는 TCP와 HTTP/3 경로 모두 명시적인
+SNI-to-client-certificate provider로 지원합니다. 선택된 인증서에 접근 가능한
+private key가 없거나 필수 identity를 찾지 못하면 fail closed합니다.
 
 upstream Chromium의 QUIC proof verifier는 유효한 private-CA chain도
 `is_issued_by_known_root=false`이면 거부할 수 있습니다. Windows root store나
@@ -279,9 +294,9 @@ anchor를 Chromium QUIC의 `known root`로 바꾸지는 않습니다. 따라서 
 클라이언트가 바로 그 구조를 보여 줍니다.
 
 제품 TLS contract는 관리형 identity 선택, 실제 ECH frontend가 소유한 plaintext
-channel 인계, 명시적인 origin mTLS 선택, 제한된 audit를 제공합니다. 하지만
-private ECH configuration을 만들거나 endpoint pinning을 우회할 권한을 제공하지
-않습니다.
+인계, 명시적인 원격 서버 mTLS 선택, 크기가 제한된 감사를 제공합니다. 하지만
+private ECH configuration을 제공하거나 endpoint pinning을 우회할 권한은
+제공하지 않습니다.
 
 구성된 frontend가 없는 임의 공개 ECH, pinning 우회, 관리되지 않는
 client-certificate 자동 선택, 443 이외 origin, 수정되지 않은 일반 브라우저의

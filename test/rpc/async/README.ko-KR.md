@@ -6,7 +6,7 @@
 - 살아 있는 I/O buffer를 해제하지 않고 timeout을 보고하는 제한된 대기
 - 대상 지정 `CancelIoEx` 취소
 - `ntl::rpc::call_context`를 통한 실행 중 callback의 조기 종료
-- 형식화된 값 및 void 결과
+- 타입이 지정된 값 및 void 결과
 - 보류 요청 객체가 범위를 벗어날 때의 안전한 취소 및 drain
 - 하나의 장치 handle에서 동시에 실행되는 여러 overlapped 호출
 - callback 호출 전 초과 작업을 거부하는 구성된 pending-call 한도

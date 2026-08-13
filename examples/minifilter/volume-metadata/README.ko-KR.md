@@ -2,8 +2,8 @@
 
 [English](./README.md)
 
-이 예제는 WDK `MetadataManager` 예제에서 재사용할 수 있는 lifecycle을 형식화된
-NTL callback과 소유권으로 표현합니다.
+이 예제는 WDK `MetadataManager` 예제에서 재사용할 수 있는 lifecycle을 타입이 지정된
+NTL 콜백과 소유권으로 표현합니다.
 
 | WDK 기능 | NTL 표현 |
 | --- | --- |

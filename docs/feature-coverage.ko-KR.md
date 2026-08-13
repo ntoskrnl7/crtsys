@@ -76,7 +76,7 @@ exception 없음, 유효한 WDK 문맥을 직접 보장해야 합니다. driver 
 | NTL pool ownership and allocator | `ntl::pool_ptr`, `ntl::pool_buffer`, `ntl::pool_allocator`, `ntl::nonpaged_pool_allocator`, `ntl::paged_pool_allocator`, `ntl::pmr::pool_resource` | raw nonpaged pool은 `<= DISPATCH_LEVEL`; raw paged pool은 `<= APC_LEVEL`; 일반 STL/PMR 사용은 `PASSIVE_LEVEL` | native pool 및 allocator policy 검사 함수를 제공하고, Debug build는 STL/PMR allocation hook가 `PASSIVE_LEVEL`보다 높은 곳에서 실행되면 경고합니다. allocator를 호출하지 않는 capacity-preserving 연산은 감지할 수 없으며, nonpaged storage만으로 임의의 STL 연산이 DPC-safe가 되지는 않습니다. |
 | NTL lookaside list | `ntl::lookaside_list` | raw nonpaged allocate/free는 WDK lookaside 규칙을 따름; object construction/destruction은 별도 감사 전에는 `PASSIVE_LEVEL` | `LOOKASIDE_LIST_EX` 기반 fixed-size kernel object cache를 pool kind/tag가 보이는 형태로 감쌉니다. |
 | NTL MDL helper | `ntl::mdl` | underlying WDK MDL/page-locking primitive를 따름 | `IoAllocateMdl`로 만든 MDL을 RAII로 소유하고 nonpaged-pool description, page locking, mapping, release path를 제공합니다. |
-| NTL 프로세스 매핑 I/O 및 미니필터 교체 버퍼 | `ntl::ipc::try_map_io_buffers`, `ntl::ipc::try_map_completed_io_buffers`, 형식화된 `ntl::flt::try_map_io_buffers`, 형식화된 `ntl::flt::try_swap_io_buffers`, 보류/지연 도우미 | 매핑, 대상 프로세스 매핑 해제, 교체 준비, 서비스 대기 및 되쓰기는 `PASSIVE_LEVEL`; 전달된 정리 전용 교체 컨텍스트, 취소 큐 콜백 및 지연 작업 제출은 별도로 DISPATCH-safe | IRP 또는 IOPB 메타데이터에서 논리 입력/출력을 자동으로 도출하고, 단방향 작업은 유효한 교체 방향을 추론하며, 양방향 작업에만 명시적 선택자를 요구합니다. 부분 페이지와 커널 backing은 기본적으로 격리하고 매핑, 교체, 전송 및 보류 소유권을 분리합니다. [I/O 버퍼 매핑](./ntl/io-buffer-mapping.ko-KR.md)을 참조하십시오. |
+| NTL 프로세스 매핑 I/O 및 미니필터 교체 버퍼 | `ntl::ipc::try_map_io_buffers`, `ntl::ipc::try_map_completed_io_buffers`, 타입이 지정된 `ntl::flt::try_map_io_buffers`, 타입이 지정된 `ntl::flt::try_swap_io_buffers`, 보류/지연 도우미 | 매핑, 대상 프로세스 매핑 해제, 교체 준비, 서비스 대기 및 되쓰기는 `PASSIVE_LEVEL`; 전달된 정리 전용 교체 컨텍스트, 취소 큐 콜백 및 지연 작업 제출은 별도로 DISPATCH-safe | IRP 또는 IOPB 메타데이터에서 논리 입력/출력을 자동으로 도출하고, 단방향 작업은 유효한 교체 방향을 추론하며, 양방향 작업에만 명시적 선택자를 요구합니다. 부분 페이지와 커널 backing은 기본적으로 격리하고 매핑, 교체, 전송 및 보류 소유권을 분리합니다. [I/O 버퍼 매핑](./ntl/io-buffer-mapping.ko-KR.md)을 참조하십시오. |
 | NTL symbolic link wrapper | `ntl::symbolic_link` | `PASSIVE_LEVEL` | driver setup/teardown path에서 `IoCreateSymbolicLink` / `IoDeleteSymbolicLink`를 RAII로 감쌉니다. |
 | NTL PnP device-interface wrapper | `ntl::device_interface_link`, `try_register_device_interface` | `PASSIVE_LEVEL` PnP/control path | `IoRegisterDeviceInterface`가 반환한 symbolic link를 소유합니다. generic test는 valid PDO가 없으므로 empty-owner safety path만 검증합니다. |
 | NTL event wrapper | `ntl::event` | `KEVENT` 계약을 따름; NTL usage에서 blocking `wait()`는 `PASSIVE_LEVEL` | notification/synchronization event setup, signal/reset/clear, state query, wait를 감쌉니다. |
@@ -920,10 +920,10 @@ NTL은 드라이버 코드를 위한 C++ helper를 제공합니다. API 수준 �
     [(tested)](../test/cmake/driver/src/main.cpp#L33)
   - [x] `ntl::irp` result helper와 typed device-control buffer helper
     [(tested)](../test/cmake/driver/src/main.cpp#L64)
-  - [x] `ntl::ioctl` 형식화된 IOCTL 기술자 및 입력/출력 도우미
+  - [x] `ntl::ioctl` 타입이 지정된 IOCTL 기술자 및 입력/출력 도우미
     [(tested)](../test/cmake/driver/src/ntl.cpp)
     [(docs)](./ntl/ioctl.ko-KR.md)
-  - [x] 형식화된 IOCTL, 제거 잠금 가드, MDL 임시 저장소, 출력 바이트 보고 및
+  - [x] 타입이 지정된 IOCTL, 제거 잠금 가드, MDL 임시 저장소, 출력 바이트 보고 및
         종료 처리 중 거부를 함께 사용하는 실용적인 장치 제어 디스패치 패턴
     [(tested)](../test/cmake/driver/src/ntl.cpp)
     [(docs)](./ntl/device-control-pattern.ko-KR.md)

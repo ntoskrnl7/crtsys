@@ -254,7 +254,7 @@ flowchart TD
 | 동시성 | 드라이버 검증 완료 | thread, synchronization, async/future, atomic wait/notify |
 | locale / chrono / charconv | 드라이버 검증 완료 | locale facet, timezone/chrono 경로, 정수/부동소수점 문자 변환 |
 | NTL 드라이버 도우미 | 드라이버 검증 완료 | `ntl::main`, driver/device 도우미, symbolic link/event/work item RAII, RPC, IRQL 도우미, pool allocator, stack expansion |
-| NTL WFP 도우미 | 드라이버 검증 완료 | 형식화된 callout, layer-safe 정책, packet/stream 소유권, injection, redirect 및 사용자 모드 inspection |
+| NTL WFP 도우미 | 드라이버 검증 완료 | 타입이 지정된 callout, layer-safe 정책, packet/stream 소유권, injection, redirect 및 사용자 모드 inspection |
 | `thread_local` | 사용자 변수 용도 미지원 | kernel GS는 user-mode TEB가 아니라 processor-local KPCR이므로 사용자 `thread_local`은 thread별 storage가 아님 |
 
 상세 matrix는 의도적으로 test-linked 형태입니다. Kernel driver test suite에서

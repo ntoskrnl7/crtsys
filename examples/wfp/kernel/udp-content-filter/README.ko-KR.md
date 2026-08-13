@@ -27,7 +27,7 @@ reinjection은 없습니다. 이는 `examples/wfp/user/udp-content-filter`와 �
 
 별도 target `crtsys_wfp_kernel_udp_content_filter_acceptance.exe`의 소스는
 `test/wfp/runtime/fixtures/kernel/udp-content-filter`에 있습니다. acceptance가
-컨트롤러를 직접 시작하고 ready를 기다린 뒤 IPv4/IPv6 형식화된
+컨트롤러를 직접 시작하고 ready를 기다린 뒤 IPv4/IPv6 타입이 지정된
 허용/차단/비정상 traffic을 생성합니다. 이후 종료를 요청하고 counter를 검증하며
 두 주소 계열 모두에서 정책 제거 후 traffic이 복원됨을 입증합니다. acceptance는
 드라이버가 설치된 test-signing VM에서만 실행하세요.

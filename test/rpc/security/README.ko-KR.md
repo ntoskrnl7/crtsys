@@ -1,15 +1,15 @@
 # NTL RPC 호출자 보안 테스트
 
-이 fixture는 비동기 method가 시스템 worker thread로 이동하기 전에 NTL이 원래 I/O 요청자의 보안 context를 캡처하는지 검증합니다.
+이 픽스처는 비동기 메서드가 시스템 작업자 스레드로 넘어가기 전에 NTL이 원래 I/O 요청자의 보안 컨텍스트를 캡처하는지 검증합니다.
 
 테스트 범위:
 
-- 사용자 모드 requestor mode와 원래 process ID
-- 비동기 dispatch 이후에도 유지되는 참조된 subject context
-- 이미 열린 endpoint를 통해 적용되는 제한된 impersonation token
-- 요청 deserialization과 callback 실행 전에 이루어지는 method authorization
-- allow/deny security descriptor를 사용하는 `call_context::check_access()`
-- 거부된 method가 application callback에 도달하지 않음
-- x64/x86 client에서 동일한 고정 폭 contract
+- 사용자 모드 요청자 모드와 원래 프로세스 ID
+- 비동기 디스패치 뒤에도 유지되는 참조된 주체 컨텍스트
+- 이미 열린 엔드포인트를 통해 적용되는 제한된 가장 토큰
+- 요청 역직렬화와 콜백 실행 전에 이루어지는 메서드 권한 확인
+- 허용/거부 보안 설명자를 사용하는 `call_context::check_access()`
+- 거부된 메서드가 애플리케이션 콜백에 도달하지 않음
+- x64/x86 클라이언트에서 같은 고정 폭 계약
 
-process ID는 진단 metadata이며 인증 credential이 아닙니다. method authorization은 캡처된 Windows subject context, Authenticated Users DACL, security reference monitor를 사용합니다. 이 fixture는 `SECURITY_SUBJECT_CONTEXT`를 불투명하게 취급하며 멤버를 검사하지 않습니다.
+프로세스 ID는 진단 메타데이터일 뿐 인증 자격 증명이 아닙니다. 메서드 권한 확인에는 캡처한 Windows 주체 컨텍스트, Authenticated Users DACL, 보안 참조 모니터를 사용합니다. 이 픽스처는 `SECURITY_SUBJECT_CONTEXT`를 불투명한 값으로 취급하며 멤버를 검사하지 않습니다.

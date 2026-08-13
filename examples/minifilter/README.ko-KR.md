@@ -18,10 +18,10 @@
 
 | 예제 | 대응 WDK 예제 | 핵심 내용 |
 | --- | --- | --- |
-| [`basic`](./basic) | NullFilter / PassThrough 기반 | 형식화된 create/read/write/cleanup callback, 정규화된 이름, stream context 및 registration 수명 |
-| [`control-device`](./control-device) | CDO | minifilter 수명에 속하는 legacy control device, 형식화된 IOCTL dispatch 및 unload 거부 |
-| [`communication`](./communication) | Scanner/MiniSpy 통신 기반 | Filter Manager port, 형식화된 RPC, callback, 알림, stream 및 등록된 공유 메모리 ring |
-| [`operation-log`](./operation-log) | MiniSpy | 형식화된 I/O callback, 열린 파일별 상태, 크기가 제한된 record queue 및 형식화된 사용자 모드 drain |
+| [`basic`](./basic) | NullFilter / PassThrough 기반 | 타입이 지정된 create/read/write/cleanup 콜백, 정규화된 이름, stream context 및 registration 수명 |
+| [`control-device`](./control-device) | CDO | minifilter 수명에 속하는 legacy control device, 타입이 지정된 IOCTL dispatch 및 unload 거부 |
+| [`communication`](./communication) | Scanner/MiniSpy 통신 기반 | Filter Manager port, 타입이 지정된 RPC, 콜백, 알림, stream 및 등록된 공유 메모리 ring |
+| [`operation-log`](./operation-log) | MiniSpy | 타입이 지정된 I/O 콜백, 열린 파일별 상태, 크기가 제한된 record queue 및 타입이 지정된 사용자 모드 drain |
 | [`swap-buffers`](./swap-buffers) | SwapBuffers | `.ntlxor` 파일에 대한 안전한 pre-write 입력 교체와 post-read 출력 변환/copy-back |
 | [`volume-metadata`](./volume-metadata) | MetadataManager | lock, unlock, snapshot, PnP, shutdown 및 teardown 경로 전반의 volume별 metadata 소유권 |
 
@@ -37,9 +37,9 @@
 | SwapBuffers | [`swap-buffers`](./swap-buffers) | [`IO-BUFFER-README.ko-KR.md`](../../test/flt/runtime/IO-BUFFER-README.ko-KR.md) |
 | MetadataManager | [`volume-metadata`](./volume-metadata) | [`METADATA-README.ko-KR.md`](../../test/flt/runtime/METADATA-README.ko-KR.md) |
 | Scanner / AvScan | 위의 communication 및 buffer 예제 | [`SCANNER-README.ko-KR.md`](../../test/flt/runtime/SCANNER-README.ko-KR.md) |
-| SimRep | 기본 가이드의 형식화된 name API | [`SIMREP-README.ko-KR.md`](../../test/flt/runtime/SIMREP-README.ko-KR.md) |
-| NameChanger | 기본 가이드의 형식화된 name API | [`NAME-CHANGER-README.ko-KR.md`](../../test/flt/runtime/NAME-CHANGER-README.ko-KR.md) |
-| Delete | 기본 가이드의 형식화된 set-information API | [`DELETE-README.ko-KR.md`](../../test/flt/runtime/DELETE-README.ko-KR.md) |
+| SimRep | 기본 가이드의 타입이 지정된 name API | [`SIMREP-README.ko-KR.md`](../../test/flt/runtime/SIMREP-README.ko-KR.md) |
+| NameChanger | 기본 가이드의 타입이 지정된 name API | [`NAME-CHANGER-README.ko-KR.md`](../../test/flt/runtime/NAME-CHANGER-README.ko-KR.md) |
+| Delete | 기본 가이드의 타입이 지정된 set-information API | [`DELETE-README.ko-KR.md`](../../test/flt/runtime/DELETE-README.ko-KR.md) |
 
 NameChanger는 오해를 부르는 200줄짜리 예제로 축소하지 않고 의도적으로 커버리지
 픽스처로 유지합니다. 이 예제의 계약은 생성 리디렉션, 이름 생성 및 정규화,

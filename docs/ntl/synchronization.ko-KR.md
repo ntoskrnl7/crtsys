@@ -2,7 +2,7 @@
 
 [NTL 문서로 돌아가기](./README.ko-KR.md)
 
-이 문서는 IRQL, spin lock, ERESOURCE를 감싼 NTL 도우미를 다룹니다.
+이 문서는 IRQL, 스핀 잠금, ERESOURCE를 감싸는 NTL 도우미를 다룹니다.
 
 ## IRQL 도우미
 
@@ -23,14 +23,14 @@
 - `ntl::require_passive_level()`
 - `ntl::require_irql_at_most(maximum)`
 
-예제:
+예:
 
 ```cpp
 auto raised = ntl::raise_irql_to_dpc_level();
 // Do a short audited DPC-level operation here.
 ```
 
-계약 확인 예제:
+계약 확인 예:
 
 ```cpp
 ntl::status query_runtime_backed_state() {
@@ -44,12 +44,12 @@ ntl::status query_runtime_backed_state() {
 }
 ```
 
-IRQL: 이 도우미는 IRQL을 명시적으로 조작하거나 관찰합니다. 상승된 범위는 가능한
-작게 유지하세요. 현재 IRQL이 요청한 계약을 어기면 `require_passive_level()` 및
-`require_irql_at_most()`는 예외를 던지지 않고 `STATUS_INVALID_DEVICE_STATE`를
+IRQL: 이 도우미는 IRQL을 명시적으로 조작하거나 관찰합니다. 올린 상태의 범위는
+가능한 한 작게 유지하세요. `require_passive_level()`과 `require_irql_at_most()`는
+현재 IRQL이 요청한 계약을 위반하면 예외를 던지지 않고 `STATUS_INVALID_DEVICE_STATE`를
 반환합니다.
 
-## 스핀 락
+## 스핀 잠금
 
 헤더: [`include/ntl/spin_lock`](../../include/ntl/spin_lock)
 
@@ -68,7 +68,7 @@ API:
 `ntl::unique_lock<ntl::spin_lock>`은 `ntl::at_dpc_level_lock`으로
 `std::unique_lock`을 확장합니다.
 
-예제:
+예:
 
 ```cpp
 ntl::spin_lock lock;
@@ -79,20 +79,19 @@ ntl::spin_lock lock;
 }
 ```
 
-DPC 수준 예제:
+DPC 수준 예:
 
 ```cpp
 auto raised = ntl::raise_irql_to_dpc_level();
 ntl::unique_lock guard(lock, ntl::at_dpc_level_lock);
 ```
 
-IRQL: `lock()`과 성공한 `try_lock()`은 `DISPATCH_LEVEL`까지 올리고,
-`unlock()`은 이전 IRQL을 복원합니다. `lock_at_dpc_level()`과
-`unlock_from_dpc_level()`은 호출자가 이미 `DISPATCH_LEVEL`에서 실행 중이어야
-합니다.
+IRQL: `lock()`과 성공한 `try_lock()`은 `DISPATCH_LEVEL`까지 올리고 `unlock()`은
+이전 IRQL을 복원합니다. `lock_at_dpc_level()`과 `unlock_from_dpc_level()`은
+호출자가 이미 `DISPATCH_LEVEL`에서 실행 중이어야 합니다.
 
-spin lock을 든 동안 실행하는 코드는 resident이고 짧으며 nonblocking이어야 합니다.
-할당, 대기, 예외 발생, 임의의 runtime/STL 도우미 호출을 해서는 안 됩니다.
+스핀 잠금을 보유한 동안 실행하는 코드는 상주 상태여야 하고, 짧고, 차단하지 않아야
+하며, 할당·대기·예외 발생·임의의 런타임/STL 도우미 호출을 해서는 안 됩니다.
 
 ## ERESOURCE
 
@@ -126,7 +125,7 @@ API:
 - `ntl::shared_lock<ntl::resource>`
 - `ntl::adopt_critical_region`
 
-예제:
+예:
 
 ```cpp
 ntl::resource resource;
@@ -142,8 +141,8 @@ ntl::resource resource;
 }
 ```
 
-IRQL: 차단/리소스형 동기화 모델에 맞춰 `<= APC_LEVEL`입니다. DPC, ISR 또는 spin
-lock을 든 경로에서 `ntl::resource`를 쓰지 마세요.
+IRQL: 차단/리소스형 동기화 모델에 맞춰 `<= APC_LEVEL`입니다. DPC, ISR, 또는
+스핀 잠금을 보유한 경로에서 `ntl::resource`를 사용하지 마세요.
 
-`adopt_critical_region`은 호출자가 critical region 경계를 의도적으로 직접 관리할
-때 사용합니다.
+`adopt_critical_region`은 호출자가 임계 영역 경계를 의도적으로 직접 관리할 때
+사용합니다.

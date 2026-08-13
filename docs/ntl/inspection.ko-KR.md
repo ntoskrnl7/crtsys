@@ -9,7 +9,7 @@
    애플리케이션이 선택한 프레이머가 필요합니다.
 2. **어떤 바이트가 검사됩니까?** `content_view`는 불변 연속 또는
    제한된 바이너리 접두사 및 포함 작업이 포함된 조각화된 뷰입니다.
-3. **정책은 무엇을 결정할 수 있는가?** `inspection::verdict`는 형식화되어
+3. **정책은 무엇을 결정할 수 있는가?** `inspection::verdict`는 구조화되어
    있습니다. 네이티브 차단, 흡수, 지연 및 주입 동작은 애플리케이션 정책이
    아니라 WFP 어댑터가 담당합니다.
 
@@ -84,7 +84,7 @@ ntl::net::inspection::verdict policy(
 
 강제 적용 예제는 전송마다 다릅니다.
 [`udp-content-filter` 샘플](../../examples/wfp/user/udp-content-filter)은 완전한
-데이터그램 하나를 흡수한 뒤 형식화된 `permit` 판정이 내려진 경우에만 보관한
+데이터그램 하나를 흡수한 뒤 구조화된 `permit` 판정이 내려진 경우에만 보관한
 복제본을 재주입합니다.
 [`tcp-content-filter` 샘플](../../examples/wfp/user/tcp-content-filter)은 u32
 빅엔디언 길이 접두사를 사용하는 애플리케이션 프로토콜을 선택합니다. WFP에 한
@@ -232,7 +232,8 @@ policy.requests().at_headers()
 일치 규칙이 없으면 단계가 허용됩니다. 이전에 좁은 예외를 등록하세요.
 광범위한 규칙을 적용하고 원격 측정에 허용 규칙 대신 관찰자를 사용합니다.
 규칙 순서에 영향을 주어서는 안 됩니다.
-형식화된 도우미는 닫힌 규칙 언어가 아니라 편리합니다. 을 위한예를 들어 제품 정의 헤더 네임스페이스는 추가하지 않고도 선택할 수 있습니다.
+구조화된 도우미는 닫힌 규칙 언어가 아니라 편의를 위한 것입니다. 예를 들어 제품이
+정의한 헤더 네임스페이스는 새 NTL API를 추가하지 않고도 선택할 수 있습니다.
 모든 명명 규칙에 대한 새로운 NTL API:
 
 ```cpp
@@ -607,7 +608,7 @@ TLS record를 볼 수는 있지만 session key나 TLS 상태 없이는 HTTP 평�
 
 `<ntl/net/tls/stream>`은 사용자 모드 Schannel 전송 경계를 제공합니다. TLS를
 종단한 뒤 `<ntl/net/tls/framed_stream>`은 복호화하고 남은 바이트를 보존하며,
-호출자가 정의한 완전한 메시지를 동일한 `content_view`와 형식화된 판정 API에
+호출자가 정의한 완전한 메시지를 동일한 `content_view`와 구조화된 판정 API에
 전달합니다. `<ntl/net/http/http1_framing>`은 크기가 제한된
 `Content-Length`/`chunked` HTTP/1.x 경계. `<ntl/net/websocket/framing>`
 검증된 업그레이드 후 RFC 6455 프레임과 조각난 메시지를 처리합니다.

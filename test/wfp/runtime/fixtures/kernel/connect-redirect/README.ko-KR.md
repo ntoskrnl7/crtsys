@@ -1,12 +1,12 @@
-# 커널 connect-redirect acceptance
+# 커널 connect-redirect 허용성 테스트
 
-이 traffic 전용 fixture는 제품 controller를 실행하고 정책 ready를 기다린 뒤
-드라이버의 WSK proxy를 통과하는 IPv4/IPv6 loopback echo를 생성합니다. 종료를
-요청하고 opaque redirect-record 수, 양방향 relay byte, origin unavailable
-fail-closed counter, 정책 제거, direct 복구를 검증합니다. WFP 관리나 device
-control 호출은 포함하지 않습니다.
+이 트래픽 전용 픽스처는 제품 컨트롤러를 실행하고 정책 준비를 기다린 뒤
+드라이버의 WSK 프록시를 통과하는 IPv4/IPv6 루프백 echo를 생성합니다. 종료를
+요청하고 불투명 리디렉션 레코드 수, 양방향 릴레이 바이트, 원본 서버를 사용할 수
+없을 때의 실패 시 차단 카운터, 정책 제거, 직접 연결 복구를 검증합니다. WFP 관리나
+디바이스 제어 호출은 포함하지 않습니다.
 
 인자 없이 실행하면 같은 디렉터리의 controller를 찾아 고유한 임시 IPC
-디렉터리를 직접 소유합니다. fixture를 따로 디버깅할 때만
+디렉터리를 직접 소유합니다. 픽스처를 따로 디버깅할 때만
 `acceptance.exe <controller.exe> <ipc-directory>` 형태로 두 경로를 명시할 수
 있습니다.

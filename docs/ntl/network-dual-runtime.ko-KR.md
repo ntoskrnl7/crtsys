@@ -33,7 +33,7 @@ OS·codec backend             Winsock/WSK, Schannel, MsQuic, zlib/Brotli, RPC
 ## 공개 소유권 계약
 
 - 일반 factory와 callback은 사용하는 provider, runtime, credential, policy,
-  sink, workspace, native state를 보유합니다. member 선언 순서와 facade 파괴
+  sink, workspace, native state를 보유합니다. member 선언 순서와 상위 객체 소멸
   순서는 API 계약이 아닙니다.
 - `close()`는 멱등이며 새 작업 접수를 중단합니다. close 전에 접수된 작업은
   child와 callback이 끝날 때까지 native state를 유지합니다.
@@ -43,7 +43,7 @@ OS·codec backend             Winsock/WSK, Schannel, MsQuic, zlib/Brotli, RPC
 - 이름에 `borrowed_`, `_view`, `_ref`가 있으면 명시적인 비소유 값입니다. 이
   값은 동기 callback이나 low-level adapter 범위에서 사용하며, 그 범위를 넘어
   보존해야 하면 데이터를 복사하거나 owning factory를 사용합니다.
-- 일반 예제는 owning facade를 사용합니다. native ABI 경계를 설명하는 파일만
+- 일반 예제는 소유권을 갖는 객체를 사용합니다. native ABI 경계를 설명하는 파일만
   이름으로 borrowed 입력임을 분명히 표시한 API를 호출합니다.
 
 ## 커널에서 직접 실행되는 범위
@@ -76,8 +76,8 @@ cancel과 종료 계약을 명시합니다. 브라우저 process 실행과 신�
 `kernel::schannel`은 모든 native credential을 소유하고 드라이버 런타임의 합류
 가능한 PASSIVE_LEVEL 정리 도메인으로 폐기합니다. credential 생성은 계속
 `PASSIVE_LEVEL`에서 수행하지만,
-credential handle은 `DISPATCH_LEVEL` 이하에서 복사하고 파괴할 수 있습니다.
-`schannel`을 닫으면 native handle이 무효화되고 해제되며, 그 뒤에 파괴되는
+credential handle은 `DISPATCH_LEVEL` 이하에서 복사하고 소멸시킬 수 있습니다.
+`schannel`을 닫으면 native handle이 무효화되고 해제되며, 그 뒤에 소멸하는
 credential handle도 안전한 빈 handle로 남습니다. 따라서 member 선언 순서는
 API 계약이 아닙니다. 복사본은 같은 credential을 공유하므로 하나를 해제해도
 나머지는 유효하며, 마지막 복사본을 해제할 때 런타임 정리 도메인에서 native
@@ -147,8 +147,8 @@ co_return co_await ntl::net::kernel::with_tls_connection(
 
 `kernel::tls_stream`을 직접 생성해도 transport 상태를 함께 보유합니다.
 요청 단위 작업에는 결정적인 structured shutdown까지 수행하는
-`with_tls_connection()`을 우선 사용하고, 장기 실행 service는 owning stream
-facade를 직접 보유할 수 있습니다.
+`with_tls_connection()`을 우선 사용하고, 장기 실행 service는 소유권을 갖는 stream
+객체를 직접 보관할 수 있습니다.
 
 장기 실행 service가 `async_transport_stream`의 마지막 shared owner를 해제하면
 새 작업을 닫고 provider 정리를 runtime PASSIVE domain으로 넘깁니다.

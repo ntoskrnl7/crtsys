@@ -4,7 +4,7 @@
 메커니즘을 검증합니다. 개발 고도 `370030.231`에서 보이는 볼륨 상대 경로
 `\crtsys-flt-simrep-visible`를 `\crtsys-flt-simrep-backing`으로 매핑합니다.
 
-드라이버는 형식화된 NTL 콜백 경계만 사용합니다.
+드라이버는 타입이 지정된 NTL 콜백 경계만 사용합니다.
 
 - `try_complete_reparse(as_pre(create), absolute_name, absolute)`는
   `FILE_OBJECT` 이름을 바꾸고 `STATUS_REPARSE`/`IO_REPARSE`로 완료합니다.
@@ -13,7 +13,7 @@
 - `set_information_parameters::destination()`는 이름 바꾸기/링크 레이아웃을
   검증하고, `try_query_destination_name()`은 대상을 확인하며,
   `try_reissue_destination()`은 수정한 요청을 인스턴스 아래로 보냅니다.
-- 형식화된 create 완료 상태는 정규화한 작업 전 `name_information`을 보관하고,
+- 타입이 지정된 create 완료 상태는 정규화한 작업 전 `name_information`을 보관하고,
   작업 후 콜백은 `try_get_tunneled_name()`을 호출합니다.
 
 앱은 이름 제공자가 아닌 이 테스트 필터 아래에서 대상 이름 확인이 부모 디렉터리를
@@ -33,7 +33,7 @@
 4. 앱은 8.3 별칭이 있는 긴 이름을 만든 뒤 짧은 이름으로 삭제하고, 같은 짧은
    이름을 다시 만듭니다. `FltGetTunneledName`은 구문 분석한 최종 구성 요소가
    `Tunneled Long Name.tmp`로 복원된 null이 아닌 소유자를 반환해야 하며,
-   모든 형식화된 완료 상태는 정확히 한 번 소멸해야 합니다.
+   모든 타입이 지정된 완료 상태는 정확히 한 번 소멸해야 합니다.
 5. 같은 x64 드라이버는 x64 및 x86 앱 모두에서 통과하고 언로드되며, 매핑된
    테스트 트리를 남기지 않습니다.
 

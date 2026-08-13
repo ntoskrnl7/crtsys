@@ -2,41 +2,41 @@
 
 [English](./README.md) · [WFP 예제](../../README.ko-KR.md)
 
-이 예제는 공식 MsQuic kernel NMR provider에 연결해 driver 내부에서 실제
-QUIC/TLS 1.3 및 HTTP/3 endpoint를 실행합니다. parser replay가 아닙니다.
+이 예제는 공식 MsQuic 커널 NMR 공급자에 연결해 드라이버 내부에서 실제
+QUIC/TLS 1.3 및 HTTP/3 엔드포인트를 실행합니다. 파서 재생이 아닙니다.
 
 ```text
 제어된 client UDP connect
-  -> typed ALE_AUTH_CONNECT_V4/V6 WFP callout
-  -> msquic.sys NMR provider
-  -> kernel TLS 1.3 및 QUIC stream
-  -> HTTP/3 SETTINGS, frame 및 bounded QPACK
+  -> 타입이 지정된 ALE_AUTH_CONNECT_V4/V6 WFP 콜아웃
+  -> msquic.sys NMR 공급자
+  -> 커널 TLS 1.3 및 QUIC 스트림
+  -> HTTP/3 SETTINGS, frame 및 제한된 QPACK
   -> X-NTL-Block: 1 정책
   -> 200 또는 403 HTML 응답
 ```
 
-제품과 acceptance 역할은 분리되어 있습니다.
+제품과 허용성 검사 역할은 분리되어 있습니다.
 
-- `crtsys_wfp_kernel_http3_inspection.sys`는 callout, kernel MsQuic endpoint,
+- `crtsys_wfp_kernel_http3_inspection.sys`는 콜아웃, 커널 MsQuic 엔드포인트,
   HTTP/3/QPACK/codec 처리, WebTransport 상태, 제한된 connection quota,
-  telemetry와 PASSIVE_LEVEL reaper를 담당합니다.
+  원격 분석과 PASSIVE_LEVEL 회수 작업을 담당합니다.
 - `crtsys_wfp_kernel_http3_inspection_controller.exe`는 임시 인증서, 동적 WFP
-  정책, driver 제어와 lifecycle IPC를 담당합니다. 제어된 HTTP/3 client나
+  정책, 드라이버 제어와 수명 주기 IPC를 담당합니다. 제어된 HTTP/3 클라이언트나
   `PASS` 판정 코드는 포함하지 않습니다.
 - MsQuic client, 생성 트래픽, 검증과 최종 marker는
   `test/wfp/runtime/fixtures/kernel/http3-inspection`에 있습니다.
 
-driver는 IPv4/IPv6, 허용·차단, dynamic QPACK blocked-stream 재개와 확인 응답,
+드라이버는 IPv4/IPv6, 허용·차단, 동적 QPACK 차단 스트림 재개와 확인 응답,
 gzip/deflate/Brotli로 압축된 HTML, WebTransport Extended CONNECT,
 양방향·단방향 stream, Datagram, 분할 Capsule과 reliable reset을 처리합니다.
 `X-NTL-Block: 1`은 session 활성화 전에 Extended CONNECT를 최종 403으로
 거부합니다. 등록하지 않은 callout을 쓰는 별도 정책은 origin에 도달하지 않고
 `callout_unavailable::block`이 동작하는지도 검증합니다.
 
-64개 connection 제한은 누적 개수가 아니라 동시 연결 제한입니다. acceptance는
-추가로 96개 connection을 순차 실행합니다. shutdown callback과 stream drain이
-끝난 뒤 reaper가 slot을 반환해야 하며, 마지막 telemetry는 active connection 0과
-종료된 slot의 완전한 회수를 요구합니다.
+64개 연결 제한은 누적 개수가 아니라 동시 연결 제한입니다. 허용성 검사는
+추가로 96개 연결을 순차 실행합니다. 종료 콜백과 스트림 drain이
+끝난 뒤 회수 작업이 슬롯을 반환해야 하며, 마지막 원격 분석은 활성 연결 0과
+종료된 슬롯의 완전한 회수를 요구합니다.
 
 ## 빌드 결과
 

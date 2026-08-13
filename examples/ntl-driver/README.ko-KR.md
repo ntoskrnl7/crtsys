@@ -10,7 +10,7 @@
 - C++ 진입점으로 사용하는 `ntl::main`
 - 선택적 `Parameters` 레지스트리 설정을 읽는 `ntl::driver_config`
 - 장치와 DOS 심볼릭 링크의 수명을 관리하는 `ntl::device_endpoint`
-- 형식화된 `CTL_CODE` 계약을 정의하는 `ntl::ioctl`
+- 타입이 지정된 `CTL_CODE` 계약을 정의하는 `ntl::ioctl`
 - 디스패치와 언로드를 동기화하는 `ntl::remove_lock`
 - 작업을 PASSIVE_LEVEL로 넘기는 `ntl::passive_executor`
 - 커널 풀에서 STL/PMR 메모리를 할당하는 `ntl::pmr::pool_resource`

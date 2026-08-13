@@ -253,45 +253,46 @@ int wmain() {
 }
 ```
 
-이 패키지는 WDK/SDK 자체를 설치하지 않으며 일반 C++를 변환하지 않습니다.
-드라이버 프로젝트로 프로젝트하십시오.
+이 패키지는 WDK/SDK 자체를 설치하지 않으며, 일반 C++ 프로젝트를 드라이버
+프로젝트로 변환하지도 않습니다.
 
 ## 내용
 
-- `include/` 헤더- 네이티브 MSBuild 소품/대상(`build/native`)
+- `include/` 헤더
+- 네이티브 MSBuild props/targets(`build/native`)
 - 고정된 MsQuic 공개 ABI 헤더(`build/native/msquic/include/msquic.h`)
 - MSVC 도구 세트, 아키텍처 및 구성으로 사전 구축된 라이브러리:
   `build/native/lib/native/<toolset>/{x86,x64,ARM,ARM64}/{Debug,Release}/(crtsys.lib|Ldk.lib)`.
-  예를 들어 VS2019는 `build/native/lib/native/v142/x64/Release`를 사용합니다.
-  VS2022는 `build/native/lib/native/v143/x64/Release`를 사용하고 VS2026은
-  `build/native/lib/native/v145/x64/Release`. v142/v143에는 ARM이 제공됩니다.
-  v145는 x86/x64/ARM64를 전달합니다.
+  예를 들어 VS2019는 `build/native/lib/native/v142/x64/Release`, VS2022는
+  `build/native/lib/native/v143/x64/Release`, VS2026은
+  `build/native/lib/native/v145/x64/Release`를 사용합니다. ARM은 v142/v143에
+  제공되고, v145에는 x86/x64/ARM64가 제공됩니다.
 
-패키지 CI는 모든 패키지에 대한 실제 코덱 소비자를 컴파일하고 연결합니다.
-도구 세트, 아키텍처 및 디버그/릴리스 조합. x86 및 x64 소비자
-또한 gzip, deflate, Brotli 및 연결된 gzip+Brotli 1바이트 분할을 실행합니다.
-증분 왕복; ARM 및 ARM64는 호스팅된 호스트에서 교차 링크 검증입니다.
-Windows 주자.
+패키지 CI는 모든 패키지 툴셋·아키텍처·Debug/Release 조합에서 실제 codec
+소비자를 컴파일하고 링크합니다. x86 및 x64 소비자는 gzip, deflate, Brotli,
+연결된 gzip+Brotli의 한 바이트씩 분할한 증분 왕복도 실행합니다. ARM 및 ARM64는
+호스팅된 Windows runner에서 교차 링크 검증을 수행합니다.
 
-패키지 CI는 또한 사용자 HTTP/3 백엔드와 커널 NMR 래퍼를 모두 컴파일합니다.
-재배포된 SHA-256 인증 MsQuic 헤더에 대해. 런타임 배포
-해당 사용자 DLL 또는 커널 공급자에 대한 결정은 여전히 제품 결정에 달려 있습니다.
+패키지 CI는 재배포하는 SHA-256 검증 MsQuic 헤더를 대상으로 사용자 HTTP/3
+백엔드와 커널 NMR 래퍼도 모두 컴파일합니다. 해당 사용자 DLL이나 커널 provider의
+런타임 배포는 여전히 제품이 결정할 문제입니다.
 
-NTL 미니필터 항목은 Windows 7+ 소비자를 지원합니다.
-사전 구축된 라이브러리 자체는 Windows 8 필터 관리자로 컴파일됩니다.
-선언. 공개 소유자 레이아웃은 대상 버전에 따라 변하지 않으며
-기본 `FLT_REGISTRATION`는 소비자 번역에 의해 생성되고 삭제됩니다.
-크기와 버전이 프로젝트의 `NTDDI_VERSION`와 일치하도록 합니다.
+NTL 미니필터 진입점은 미리 빌드한 라이브러리 자체가 Windows 8 Filter Manager
+선언으로 컴파일되었더라도 Windows 7 이상 소비자를 지원합니다. 공개 소유 객체의
+레이아웃은 대상 버전과 무관하며, 네이티브 `FLT_REGISTRATION`은 소비자 번역
+단위에서 생성·소멸됩니다. 따라서 그 크기와 버전은 프로젝트의 `NTDDI_VERSION`과
+일치합니다.
 
 ## 릴리스 아티팩트
 
 - `crtsys-<version>-prebuilt.zip`
   헤더, 라이브러리, 문서 및 CMake 도우미가 포함된 사전 빌드된 번들입니다.
-  여기에는 CMake 기반 소비자에 대한 `CrtSys.cmake` 및 `find_package(crtsys CONFIG)` 지원이 포함되어 있으며 동일한 기본 MSBuild 빌드 지원 파일도 전달합니다.
+  CMake 기반 소비자를 위한 `CrtSys.cmake` 및 `find_package(crtsys CONFIG)` 지원과
+  동일한 네이티브 MSBuild 빌드 지원 파일도 포함합니다.
 - `crtsys-<version>-SHA256SUMS.txt`
   오프라인/수동 확인을 위한 체크섬 파일입니다.
 
-이 패키지 README는 의도적으로 nuget.org에 대해 자체 포함되어 있습니다. 패키지
-메타데이터에는 프로젝트 URL, 저장소 URL, 라이센스 및 릴리스 자산이 포함됩니다.
-별도로 링크하므로 이 문서에서는 저장소 관련 문서를 피합니다.
-패키지 페이지에서 해결되지 않는 링크.
+이 패키지 README는 nuget.org에서 자체 완결되도록 작성했습니다. 프로젝트 URL,
+저장소 URL, 라이선스, 릴리스 자산 링크는 패키지 메타데이터가 별도로 제공하므로,
+이 문서에서는 패키지 페이지에서 해석되지 않는 저장소 상대 문서 링크를 사용하지
+않습니다.

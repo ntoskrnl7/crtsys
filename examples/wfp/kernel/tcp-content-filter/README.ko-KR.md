@@ -12,7 +12,7 @@ stream callout 안에서 동기적으로 parsing하고 판정합니다.
 길이 prefix는 TCP 표준이 아니라 예제 애플리케이션 프로토콜입니다.
 `ordinary`는 허용하고 `restricted`는 flow를 종료하며, 비정상·초과·미완성
 또는 missed stream data는 fail closed입니다. 허용 본문에도 의도적으로
-`BLOCKME`를 넣어 형식화된 classification만 정책을 결정함을 입증합니다.
+`BLOCKME`를 넣어 타입이 지정된 classification만 정책을 결정함을 입증합니다.
 
 IPv4/IPv6 ALE flow-established callout이 상태를 연결하며 payload나 verdict는
 사용자 모드로 전달하지 않습니다. 이 차이로 사용자 예제에 있는 RPC queue,
@@ -31,5 +31,5 @@ drain할 비동기 작업도 없습니다. 드라이버는 먼저 새 요청 수
 별도 target `crtsys_wfp_kernel_tcp_content_filter_acceptance.exe`의 소스는
 `test/wfp/runtime/fixtures/kernel/tcp-content-filter`에 있습니다. acceptance가
 컨트롤러를 직접 시작하고 ready를 기다린 뒤 IPv4/IPv6 split framing과
-형식화된 허용/차단/비정상 traffic을 생성합니다. 이후 컨트롤러 종료를 요청하고
+타입이 지정된 허용/차단/비정상 traffic을 생성합니다. 이후 컨트롤러 종료를 요청하고
 보고된 counter를 검증하며 정책 제거 후 traffic이 복원됨을 입증합니다.

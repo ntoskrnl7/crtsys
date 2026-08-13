@@ -2,7 +2,7 @@
 
 아래 디렉터리에는 compile, runtime, stress 중심의 KMDF fixture가 있습니다. [`examples/kmdf`](../../examples/kmdf/README.ko-KR.md)의 온보딩 예제와는 분리되어 있습니다.
 
-Microsoft sample에서 형식화된 NTL mechanism으로의 저장소 전체 매핑은 [WDK KMDF sample coverage matrix](WDK-SAMPLE-COVERAGE.ko-KR.md)에서 관리합니다.
+Microsoft sample에서 타입이 지정된 NTL mechanism으로의 저장소 전체 매핑은 [WDK KMDF sample coverage matrix](WDK-SAMPLE-COVERAGE.ko-KR.md)에서 관리합니다.
 
 | 테스트 | 목적 |
 | --- | --- |

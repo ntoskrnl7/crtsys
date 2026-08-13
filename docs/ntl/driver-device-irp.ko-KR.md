@@ -2,22 +2,22 @@
 
 [NTL 문서로 돌아가기](./README.ko-KR.md)
 
-이 페이지에서는 일반 WDK를 연결하는 데 사용되는 드라이버 관련 도우미 클래스를 다룹니다.
-C++ 콜백이 포함된 드라이버.
+이 문서에서는 일반 WDK 드라이버를 C++ 콜백으로 구성할 때 사용하는 드라이버 측
+도우미 클래스를 설명합니다.
 
 ## 진입점
 
-`CRTSYS_NTL_MAIN`가 활성화되면 다음을 구현합니다.
+`CRTSYS_NTL_MAIN`을 활성화했다면 다음 함수를 구현합니다.
 
 ```cpp
 ntl::status ntl::main(ntl::driver& driver,
                       const std::wstring& registry_path);
 ```
 
-`crtsys`는 WDK 드라이버 진입점을 이 함수로 라우팅합니다. 포장지에도
-`ntl::main`를 호출하기 전에 스택 확장 도우미를 사용합니다.
+`crtsys`는 WDK 드라이버 진입점에서 이 함수를 호출합니다. 이 진입점 래퍼는
+`ntl::main`을 호출하기 전에 스택 확장 도우미도 적용합니다.
 
-예:
+예제:
 
 ```cpp
 #include <ntl/driver>
@@ -50,9 +50,9 @@ ntl::status ntl::main(ntl::driver& driver,
 
 IRQL: `PASSIVE_LEVEL`.
 
-`registry_path`는 I/O 관리자가 제공하는 서비스 키 경로입니다. 사용
-[`ntl::try_open_driver_parameters`](./registry.ko-KR.md) 드라이버에 옵션이 있는 경우
-표준 `Parameters` 하위 키 아래의 구성 값입니다.
+`registry_path`는 I/O 관리자가 전달한 서비스 키 경로입니다. 드라이버가 표준
+`Parameters` 하위 키에 선택적 구성 값을 둔다면
+[`ntl::try_open_driver_parameters`](./registry.ko-KR.md)를 사용하십시오.
 
 ## 드라이버 객체
 
@@ -62,19 +62,19 @@ IRQL: `PASSIVE_LEVEL`.
 
 API:
 
--`create_device<Extension>(device_options&)`
+- `create_device<Extension>(device_options&)`
   - `ntl::device<Extension>`를 생성합니다.
-  - 장치 확장 영역에 확장 개체를 구성합니다.
--`try_create_device<Extension>(device_options&)`
+  - 장치 확장 영역에 확장 객체를 생성합니다.
+- `try_create_device<Extension>(device_options&)`
   - `ntl::device<Extension>`를 생성합니다.
-  - 다음과 함께 `ntl::result<std::shared_ptr<ntl::device<Extension>>>`를 반환합니다.
-    생성 실패로 인해 발생하는 대신 `IoCreateDevice` 상태
--`on_unload(callback)`
+  - 생성 실패 시 예외를 던지는 대신 `IoCreateDevice`의 상태가 담긴
+    `ntl::result<std::shared_ptr<ntl::device<Extension>>>`를 반환합니다.
+- `on_unload(callback)`
   - C++ 언로드 콜백을 등록합니다.
--`name() const`
+- `name() const`
   - 드라이버 이름을 `std::wstring`로 반환합니다.
 
-예:
+예제:
 
 ```cpp
 struct device_extension {
@@ -92,8 +92,8 @@ driver.on_unload([device = std::move(device)]() mutable {
 });
 ```
 
-초기화 경로를 유지해야 하는 경우 `try_create_device`를 사용하세요.
-`IoCreateDevice` 실패를 예외로 변환하지 않고 `NTSTATUS`:
+초기화 경로에서 `IoCreateDevice` 실패를 예외로 바꾸지 않고 `NTSTATUS` 그대로
+보존해야 한다면 `try_create_device`를 사용하십시오.
 
 ```cpp
 auto device = driver.try_create_device<device_extension>(options);
@@ -104,25 +104,25 @@ if (!device) {
 (*device)->extension().open_count = 0;
 ```
 
-IRQL: `PASSIVE_LEVEL`. 도우미는 C++ 개체와 컨테이너를 사용하며
-드라이버 초기화, 언로드 등록 및 설정 경로용입니다.
+IRQL: `PASSIVE_LEVEL`. 이 도우미는 C++ 객체와 컨테이너를 사용하므로 드라이버
+초기화, unload 등록 및 설정 경로에서 사용하도록 설계되었습니다.
 
 ## 장치 엔드포인트
 
 헤더: [`include/ntl/device_endpoint`](../../include/ntl/device_endpoint)
 
-`ntl::device_endpoint<Extension>`는 복사 가능한 소유 핸들입니다.
-`ntl::device<Extension>` 및 이를 노출하는 DOS 장치 심볼릭 링크.
-복사본은 하나의 끝점 상태를 공유합니다. 복사본을 닫으면 모든 복사본의 상태가 닫힙니다.
-복사하고 작업은 멱등성을 갖습니다. 링크는 항상 삭제되기 전에 삭제됩니다.
-장치 개체가 해제되었습니다.
+`ntl::device_endpoint<Extension>`는 `ntl::device<Extension>`와 그 장치를 노출하는
+DOS 장치 심볼릭 링크를 함께 관리하는, 복사 가능한 소유 핸들입니다. 모든 복사본은
+하나의 엔드포인트 상태를 공유합니다. 어느 복사본에서든 닫으면 모든 복사본이 닫힌
+상태가 되며 이 작업은 멱등적입니다. 장치 객체를 해제하기 전에 항상 링크부터
+삭제합니다.
 
-드라이버가 공통 쌍을 원할 때 사용하십시오.
+드라이버에 다음과 같은 일반적인 이름 쌍이 필요할 때 사용합니다.
 
--`\\Device\\name`
--`\\DosDevices\\name`
+- `\\Device\\name`
+- `\\DosDevices\\name`
 
-예:
+예제:
 
 ```cpp
 #include <ntl/device_endpoint>
@@ -154,26 +154,26 @@ driver.on_unload([endpoint]() noexcept {
 
 API:
 
--`try_create_device_endpoint<Extension>(driver, options)`
+- `try_create_device_endpoint<Extension>(driver, options)`
   - `driver.try_create_device`를 통해 장치를 생성합니다.
-  - `\\DosDevices\\` + `options.name()` 타겟팅을 생성합니다.
-    `\\Device\\` + `options.name()`
+  - `\\Device\\` + `options.name()`을 대상으로 하는
+    `\\DosDevices\\` + `options.name()` 링크를 생성합니다.
   - `ntl::result<ntl::device_endpoint<Extension>>`를 반환합니다.
--`try_create_device_endpoint<Extension>(driver, options, link_name)`
+- `try_create_device_endpoint<Extension>(driver, options, link_name)`
   - `driver.try_create_device`를 통해 장치를 생성합니다.
-  - `\\Device\\` + `options.name()`를 대상으로 `link_name`를 생성합니다.
+  - `\\Device\\` + `options.name()`을 대상으로 하는 `link_name` 링크를 생성합니다.
   - `ntl::result<ntl::device_endpoint<Extension>>`를 반환합니다.
 - `create_device_endpoint<Extension>(driver, options)`
-  - 생성 실패 시 `ntl::exception`가 발생합니다.
+  - 생성에 실패하면 `ntl::exception`을 던집니다.
 - `create_device_endpoint<Extension>(driver, options, link_name)`
-  - 생성 실패 시 `ntl::exception`가 발생합니다.
+  - 생성에 실패하면 `ntl::exception`을 던집니다.
 - `dos_device_name(short_name)`
 - `device_target_name(short_name)`
 - `device_endpoint<Extension>::device()`
   - 공유된 `ntl::device<Extension>` 소유자를 반환합니다.
 - `device_endpoint<Extension>::unpublish()`
-  - 장치 객체를 유지하면서 새로운 사용자 모드 열기를 거부합니다.
-    구성한 종료 절차를 실행할 수 있게 합니다.
+  - 장치 객체는 유지하면서 새 사용자 모드 open을 거부하여, 여러 단계로 구성한
+    drain 절차를 수행할 수 있게 합니다.
 - `device_endpoint<Extension>::close()`
   - 링크를 멱등적으로 삭제하고 모든 복사본에 대해 장치를 해제합니다.
 - `device_endpoint<Extension>::link_name()`
@@ -191,22 +191,22 @@ API:
 호출합니다. 일반 호출자가 런타임의 `close()` 작업 하나만 호출하도록 이 순서를
 하위 시스템을 소유하는 런타임에 넣으세요.
 
-`device()`가 반환한 소유 장치는 엔드포인트 facade보다 오래 살 수 있습니다.
+`device()`가 반환한 소유 장치는 엔드포인트 래퍼보다 오래 살 수 있습니다.
 `close()` 뒤에는 모든 엔드포인트 복사본이 닫힘 상태를 보고하고 새 장치 소유자를
 반환하지 않지만, 이미 보관한 장치 소유자는 해제될 때까지 유효합니다. 따라서 아직
-사용 중인 자식이 facade 소멸 순서 때문에 무효화되지 않습니다.
+사용 중인 자식이 래퍼 소멸 순서 때문에 무효화되지 않습니다.
 
-생성, 접근자, `unpublish()` 및 `close()`에는 `PASSIVE_LEVEL`가 필요합니다.
-마지막 엔드포인트 핸들을 파기하는 것은 `DISPATCH_LEVEL`: NTL을 통해 안전합니다.
-엔드포인트 상태의 최종 정리를 조인된 `PASSIVE_LEVEL`로 연기합니다.
-필요한 경우 런타임 작업자. 호출자는 작업 항목을 대기열에 넣거나 비우지 않습니다.
+생성, 접근자, `unpublish()`, `close()`에는 `PASSIVE_LEVEL`이 필요합니다. 마지막
+엔드포인트 핸들의 소멸은 `DISPATCH_LEVEL`에서도 안전합니다. 필요하면 NTL이
+엔드포인트 상태의 최종 정리를 합류 가능한 `PASSIVE_LEVEL` 런타임 worker로
+미룹니다. 호출자가 별도로 work item을 큐에 넣거나 drain할 필요는 없습니다.
 
-### 형식화된 IOCTL 라우팅
+### 타입이 지정된 IOCTL 라우팅
 
-`on_ioctl<Contract>()`는 추론되거나 숨겨진 요청이 포함된 콜백이 아닙니다.
-레이아웃. `Contract::input_type` 및 `Contract::output_type`는 정확한 값을 정의합니다.
-공유 앱/드라이버 와이어 구조 및 계약은 `CTL_CODE`도 소유합니다.
-필드. 예를 들면:
+`on_ioctl<Contract>()`는 요청 레이아웃을 추론하거나 숨기는 콜백이 아닙니다.
+`Contract::input_type`과 `Contract::output_type`이 앱과 드라이버가 공유하는 정확한
+wire 구조를 정의하며, 계약 자체에 `CTL_CODE` 필드도 들어 있습니다. 예를 들면
+다음과 같습니다.
 
 ```cpp
 struct configure_proxy_request {
@@ -239,36 +239,35 @@ if (!routed.is_ok())
   return routed;
 ```
 
-라우터는 이 두 가지 유형에서 콜백 서명을 파생합니다. `void`
-입력은 입력 매개변수를 제거하고, `void` 출력은 출력을 제거합니다.
-매개변수이며 `void`가 아닌 엔드포인트 확장이 첫 번째로 전달됩니다.
-매개변수. 페이로드 유형은 쉽게 복사할 수 있어야 합니다. 소유한 경로는 다음과 같습니다.
-`METHOD_BUFFERED`로 제한되고 정확한 입력 크기를 검증하고 초기화합니다.
-정확한 출력 크기를 보고하고 콜백 캡처를 소유하며 중복을 거부합니다.
-엔드포인트가 닫히는 동안 코드를 생성하고 콜백을 배출합니다. 직접 I/O,
-`METHOD_NEITHER` 또는 의도적으로 보류 중인 IRP는 명시적으로 낮은 수준을 사용합니다.
-대신 `on_borrowed_pending_ioctl()` 경로를 사용하세요.
+라우터는 이 두 형식에서 콜백 서명을 도출합니다. 입력이 `void`이면 입력 매개변수가,
+출력이 `void`이면 출력 매개변수가 사라집니다. 엔드포인트 확장 형식이 `void`가
+아니면 확장 객체가 첫 번째 매개변수로 전달됩니다. payload 형식은 trivially
+copyable이어야 합니다. 이 소유형 라우팅은 `METHOD_BUFFERED`로 제한되며, 정확한 입력
+크기를 검증하고 정확한 출력 크기를 초기화해 보고합니다. 콜백의 capture를 소유하고,
+중복 코드를 거부하며, 엔드포인트를 닫을 때 콜백이 끝나기를 기다립니다. Direct I/O,
+`METHOD_NEITHER` 또는 의도적으로 보류할 IRP에는 명시적인 저수준 경로인
+`on_borrowed_pending_ioctl()`을 사용하십시오.
 
 ## IRP 보기
 
 헤더: [`include/ntl/irp`](../../include/ntl/irp)
 
-`ntl::irp`는 디스패치 시간 `PIRP`에 대한 비소유 뷰입니다. 그렇지 않다
-IRP를 완성, 참조 또는 보관합니다.
+`ntl::irp`는 디스패치 중인 `PIRP`를 감싸는 비소유 뷰입니다. IRP를 완료하거나
+참조를 획득하거나 보관하지 않습니다.
 
 API:
 
--`get() const`
--`operator->() const`
--`stack_location() const`
--`major_function() const`
--`status() const` / `status(NTSTATUS)`
--`information() const` / `information(ULONG_PTR)`
--`set_result(NTSTATUS, ULONG_PTR = 0)`
--`succeed(ULONG_PTR = 0)`
--`fail(NTSTATUS)`
+- `get() const`
+- `operator->() const`
+- `stack_location() const`
+- `major_function() const`
+- `status() const` / `status(NTSTATUS)`
+- `information() const` / `information(ULONG_PTR)`
+- `set_result(NTSTATUS, ULONG_PTR = 0)`
+- `succeed(ULONG_PTR = 0)`
+- `fail(NTSTATUS)`
 
-예:
+예제:
 
 ```cpp
 device.on_create([](ntl::irp& request) {
@@ -282,7 +281,7 @@ device.on_create([](ntl::irp& request) {
 
 IRQL: IRP를 제공한 디스패치 루틴을 따릅니다.
 
-## 장치 개체
+## 장치 객체
 
 헤더: [`include/ntl/device`](../../include/ntl/device)
 
@@ -290,46 +289,45 @@ IRQL: IRP를 제공한 디스패치 루틴을 따릅니다.
 
 API:
 
--`name(std::wstring)`
--`type(DEVICE_TYPE)`
--`exclusive(bool = true)`
--`name() const`
--`type() const`
--`is_exclusive() const`
+- `name(std::wstring)`
+- `type(DEVICE_TYPE)`
+- `exclusive(bool = true)`
+- `name() const`
+- `type() const`
+- `is_exclusive() const`
 
-`ntl::device<Extension>`는 `PDEVICE_OBJECT`를 소유하고 있습니다.
+`ntl::device<Extension>`는 `PDEVICE_OBJECT`를 소유합니다.
 
 API:
 
--`extension()`
--`on_create(callback)`
--`on_close(callback)`
--`on_device_control(callback)`
--`name() const`
--`type() const`
--`detach()`
+- `extension()`
+- `on_create(callback)`
+- `on_close(callback)`
+- `on_device_control(callback)`
+- `name() const`
+- `type() const`
+- `detach()`
 
-장치 제어 도우미 유형:
+장치 제어 도우미 형식:
 
--`ntl::device_control::code`
--`ntl::device_control::in_buffer`
--`ntl::device_control::out_buffer`
--`ntl::device_control::dispatch_fn`
+- `ntl::device_control::code`
+- `ntl::device_control::in_buffer`
+- `ntl::device_control::out_buffer`
+- `ntl::device_control::dispatch_fn`
 
-`in_buffer`는 다음에 대해 `can_read(bytes)` 및 `as<T>()`를 제공합니다.
-간단하게 복사 가능한 요청 페이로드. `out_buffer`는 다음을 제공합니다.
-`can_write(bytes)`, `clear()`, `as<T>()`, `write_bytes(ptr, bytes)` 및
-다음을 통해 정확한 출력 바이트 수를 보고하는 `write(value)`
-`IoStatus.Information`.
+`in_buffer`는 trivially-copyable 요청 payload를 읽는 `can_read(bytes)`와
+`as<T>()`를 제공합니다. `out_buffer`는 `can_write(bytes)`, `clear()`, `as<T>()`,
+`write_bytes(ptr, bytes)`, `write(value)`를 제공하며 정확한 출력 바이트 수를
+`IoStatus.Information`으로 보고합니다.
 
-간단하게 복사 가능한 고정된 요청 및 응답 페이로드가 있는 IOCTL의 경우 다음을 사용하세요.
-[`ntl::ioctl`](./ioctl.ko-KR.md) - `CTL_CODE` 값을 해당 페이로드 유형에 연결합니다.
+trivially-copyable 고정 요청 및 응답 payload를 사용하는 IOCTL이라면
+[`ntl::ioctl`](./ioctl.ko-KR.md)로 `CTL_CODE` 값을 해당 payload 형식에 연결하십시오.
 반복되는 크기 확인을 줄이면서도 디스패치 코드에는 원시 IOCTL 번호가 그대로
-드러납니다. 형식화된 IOCTL과 다음 요소를 결합하는 완전한 디스패치 본문 패턴은
-`ntl::remove_lock`, `ntl::mdl` 및 출력 바이트 수 보고는 다음을 참조하세요.
-[`Device-control pattern`](./device-control-pattern.ko-KR.md).
+드러납니다. 형식 지정 IOCTL, `ntl::remove_lock`, `ntl::mdl` 및 출력 바이트 수
+보고를 조합한 전체 디스패치 본문 패턴은
+[`장치 제어 패턴`](./device-control-pattern.ko-KR.md)을 참고하십시오.
 
-예:
+예제:
 
 ```cpp
 struct demo_reply {
@@ -357,23 +355,23 @@ device.on_device_control([](const ntl::device_control::code& code,
 });
 ```
 
-IRQL: 특정 디스패치 경로가 감사되지 않은 경우 `PASSIVE_LEVEL`
-달리 문서화되어 있습니다. 래퍼는 C++ 콜백과 소유권 도우미를 사용합니다.
+IRQL: 특정 디스패치 경로를 별도로 검토해 문서화하지 않았다면 `PASSIVE_LEVEL`입니다.
+이 래퍼는 C++ 콜백과 소유권 도우미를 사용합니다.
 
 ## 심볼릭 링크
 
 헤더: [`include/ntl/symbolic_link`](../../include/ntl/symbolic_link)
 
-`ntl::symbolic_link`는 다음에 의해 생성된 WDK 심볼릭 링크를 소유합니다.
-`IoCreateSymbolicLink`를 사용하고 `IoDeleteSymbolicLink`를 사용하여 삭제합니다.
+`ntl::symbolic_link`는 `IoCreateSymbolicLink`로 만든 WDK 심볼릭 링크를 소유하고
+`IoDeleteSymbolicLink`로 삭제합니다.
 
-예:
+예제:
 
 ```cpp
 ntl::symbolic_link link(L"\\DosDevices\\demo", L"\\Device\\demo");
 ```
 
-링크가 연결될 때 장치 개체와 함께 언로드 콜백으로 이동합니다.
-드라이버 평생 동안 살아야합니다.
+링크가 드라이버 수명 동안 유지되어야 한다면 장치 객체와 함께 unload 콜백으로
+이동하십시오.
 
 IRQL: `PASSIVE_LEVEL`.

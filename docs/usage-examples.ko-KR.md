@@ -2,10 +2,9 @@
 
 [한국어 문서로 돌아가기](./README.ko-KR.md)
 
-이 문서는 NTL을 드라이버와 companion user-mode 앱에서 함께 사용하는 작은
-골격을 보여줍니다. 예제는 의도적으로 작게 유지했습니다. 목적은 WDK 설계를
-대체하는 것이 아니라, ownership과 app/driver 경계를 빠르게 이해시키는
-것입니다.
+이 문서는 NTL을 드라이버와 함께 사용하는 사용자 모드 앱의 작은 골격을
+보여줍니다. 예제는 의도적으로 작게 유지했습니다. 목적은 WDK 설계를
+대체하는 것이 아니라, 소유권과 앱/드라이버 경계를 빠르게 이해시키는 것입니다.
 
 실제로 빌드되는 코드는 다음 위치를 참고하세요.
 
@@ -21,17 +20,17 @@
 
 `crtsys`는 보통 두 위치에서 함께 사용합니다.
 
-- 커널 드라이버는 device, RPC server, IOCTL callback, lifetime, unload
-  cleanup을 소유합니다.
-- user-mode 앱은 드라이버가 만든 device를 열고 `DeviceIoControl`을 통해
+- 커널 드라이버는 디바이스, RPC 서버, IOCTL 콜백, 수명, 언로드 시 정리를
+  소유합니다.
+- 사용자 모드 앱은 드라이버가 만든 디바이스를 열고 `DeviceIoControl`을 통해
   요청을 보냅니다. 직접 보내거나 `ntl::rpc::client`를 사용할 수 있습니다.
 
 NuGet 패키지도 같은 구분을 따릅니다.
 
-- App 프로젝트는 header-only app mode를 사용합니다. `ntl/rpc/client` 사용에
+- 앱 프로젝트는 헤더 전용 앱 모드를 사용합니다. `ntl/rpc/client` 사용에
   충분합니다.
-- WDK driver 프로젝트는 driver mode를 사용합니다. driver library,
-  entry-point wiring, include ordering, WDK 호환 설정이 추가됩니다.
+- WDK 드라이버 프로젝트는 드라이버 모드를 사용합니다. 드라이버 라이브러리,
+  진입점 연결, include 순서, WDK 호환 설정이 추가됩니다.
 
 ## 최소 드라이버 진입점
 
@@ -73,17 +72,17 @@ ntl::status ntl::main(ntl::driver& driver,
 
 ## RPC 골격
 
-RPC helper는 하나의 공유 macro 선언에서 kernel callback dispatcher와
-user-mode wrapper를 같이 생성합니다. 드라이버는 schema 전에
+RPC 도우미는 하나의 공유 매크로 선언에서 커널 콜백 디스패처와 사용자 모드
+래퍼를 같이 생성합니다. 드라이버는 스키마 전에
 `<ntl/rpc/server>`를 include하고, 앱은 같은 schema 전에
 `<ntl/rpc/client>`를 include합니다. 전체 예제는
 [`examples/ntl-rpc-driver`](../examples/ntl-rpc-driver)를 참고하세요.
 
-`NTL_ADD_CALLBACK_0`부터 `NTL_ADD_CALLBACK_5`까지의 숫자는 callback 인자
-개수입니다. macro가 이 정보를 이용해 양쪽의 함수 인자와 직렬화 코드를
-생성합니다. 기본형은 공유 schema의 line에서 양쪽에 같은 ID를 만들므로,
+`NTL_ADD_CALLBACK_0`부터 `NTL_ADD_CALLBACK_5`까지의 숫자는 콜백 인자
+개수입니다. 매크로가 이 정보를 이용해 양쪽의 함수 인자와 직렬화 코드를
+생성합니다. 기본형은 공유 스키마의 줄에서 양쪽에 같은 ID를 만들므로,
 드라이버와 앱이 같은 계약 헤더를 사용하는 일반적인 경우에 적합합니다.
-schema 재배치 뒤에도 같은 method ID를 유지해야 할 때
+스키마를 재배치한 뒤에도 같은 메서드 ID를 유지해야 할 때
 `NTL_ADD_CALLBACK_ID_N`으로 `0x800`부터 `0xFFF` 범위의 ID를 명시하세요.
 
 ### 공유 Schema

@@ -18,7 +18,9 @@
 `X-NTL-Block: 1` 허용·차단 정책을 처리합니다. WebTransport 경로는 Extended
 CONNECT, 양방향·단방향 stream, HTTP Datagram, 여러 DATA frame에 걸친 Capsule
 재조립, reliable reset mapping, session 활성화 전 차단을 다룹니다. UDP
-datagram 하나를 완전한 HTTP 메시지로 간주하지 않습니다.
+datagram 하나를 완전한 HTTP 메시지로 간주하지 않습니다. stream, session,
+connection의 소유권은 수락한 모든 작업을 drain한 뒤 정확히 connection을
+종료하도록 보장합니다.
 
 WFP 정책은 제어 대상 실행 파일, 프로세스, 주소 패밀리, 프로토콜과 선택된
 loopback port로 제한됩니다. 서비스는 숫자 증거만 기록하고 acceptance 성공
@@ -31,9 +33,9 @@ fail-closed 동작과 이때 origin 접속이 0인지 검증합니다.
 제품 실행 파일은 `ntl::net::http3::msquic_backend::runtime`,
 `configuration`, `server`를 사용합니다. server가 listener, 수락된 connection,
 sink callback과 그 native MsQuic 상태를 소유합니다. runtime 또는 configuration
-facade를 먼저 닫아도 이미 수락된 connection은 무효화되지 않습니다.
+상위 객체를 먼저 닫아도 이미 수락된 connection은 무효화되지 않습니다.
 `server::close()`는 멱등적으로 새 accept를 거부하고 추적되는 정리 작업을
-예약하므로, 애플리케이션이 detached worker나 native handle 파괴 순서를 관리할
+예약하므로, 애플리케이션이 detached worker나 native handle 소멸 순서를 관리할
 필요가 없습니다. 이후 코드가 종료 완료를 확인해야 할 때만
 `server::drain()`을 사용합니다. 이 service는 최종 검증 수치를 게시하기 전에
 그 확인이 필요합니다.
@@ -77,7 +79,7 @@ connection 내부에서 직렬화됩니다. reset, drain, stop, close는 대기 
 exchange를 취소하고, 경합으로 늦게 도착하거나 중복된 completion은 무시합니다.
 completion은 해당 request보다 늦게 끝날 수 있습니다. owning connection이
 backend와 origin 상태를 보유하고, `close()`가 새 작업을 거부한 뒤 callback과
-child를 drain하므로 호출자가 파괴 순서를 맞출 필요가 없습니다.
+child를 drain하므로 호출자가 소멸 순서를 맞출 필요가 없습니다.
 
 `immediate_origin_transport_adapter`는 크기가 제한되고 결과가 결정적인
 fixture에서 동기 origin을 감쌉니다. origin 호출이 끝날 때까지 submit callback을

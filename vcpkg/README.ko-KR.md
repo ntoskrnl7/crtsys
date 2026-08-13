@@ -8,8 +8,8 @@
   `crtsys_add_driver(...)`
 - Visual Studio/MSBuild: crtsys 드라이버 모델 속성 페이지
 
-Visual Studio C++ 워크로드와 호환되는 WDK가 필요합니다. 설치된 CMake
-패키지는 소비자 구성 도중 의존성을 내려받지 않습니다.
+Visual Studio C++ 워크로드와 호환되는 WDK가 필요합니다. 이 포트는 소비자를
+구성하는 동안 의존성을 내려받지 않습니다.
 
 ## Git registry
 
@@ -50,18 +50,17 @@ vcpkg install --triplet=x64-windows-static
 
 ## 선택 기능
 
-사용자 모드 zlib/Brotli 지원은 `content-codecs`, 고정된 MsQuic 공개
-헤더는 `msquic-headers` 기능으로 명시적으로 선택합니다.
+사용자 모드 zlib/Brotli 도우미는 명시적인 vcpkg 의존성입니다.
 
 ```json
 "dependencies": [
-  { "name": "crtsys", "features": ["content-codecs", "msquic-headers"] }
+  { "name": "crtsys", "features": ["content-codecs"] }
 ]
 ```
 
-vcpkg의 사용자 모드 codec 라이브러리를 커널 드라이버에 연결하지는
-않습니다. 커널 codec이 필요하면 별도로 감사된 소스를 사용해 crtsys를
-직접 빌드해야 합니다.
+고정된 선택적 MsQuic 공개 헤더는 `msquic-headers` 기능을 사용합니다.
+커널 모드 콘텐츠 codec은 vcpkg의 사용자 모드 codec 라이브러리로 빌드하지
+않습니다. 별도로 검토한 커널 codec이 필요하면 소스에서 crtsys를 빌드하세요.
 
 ## CMake
 
@@ -92,8 +91,15 @@ Visual Studio 설치 경로로 계속 제공됩니다.
 
 ## 검증과 게시
 
+빠른 계약 검사는 다음과 같습니다.
+
 ```powershell
 ./scripts/vcpkg/Test-CrtSysVcpkgPort.ps1 -ContractOnly
+```
+
+전체 검사는 소스 포트를 빌드하고 MSBuild UI도 검증합니다.
+
+```powershell
 ./scripts/vcpkg/Test-CrtSysVcpkgPort.ps1 -Triplet x64-windows-static
 ```
 

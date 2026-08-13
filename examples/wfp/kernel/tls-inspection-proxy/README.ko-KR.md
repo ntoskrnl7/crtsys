@@ -5,22 +5,22 @@
 실제 커널 TLS 데이터 경로와 제어된 런타임 검증을 분리했습니다.
 
 - `crtsys_wfp_kernel_tls_inspection_proxy.sys`: WSK redirect record와 원래
-  목적지 복구, 커널 Schannel, ALPN, bounded HTTP/1.1·HTTP/2 처리,
-  요청·응답 변환, 차단, capture telemetry
+  목적지 복구, 커널 Schannel, ALPN, 제한된 HTTP/1.1·HTTP/2 처리,
+  요청·응답 변환, 차단, 캡처 원격 분석
 - `crtsys_wfp_kernel_tls_inspection_proxy_controller.exe`: 단기 인증서 준비,
-  driver 설정, 임시 WFP 정책, 원시 counter/capture 통계
+  드라이버 설정, 임시 WFP 정책, 원시 카운터/캡처 통계
 - `crtsys_wfp_kernel_tls_inspection_proxy_acceptance.exe`: 별도 디렉터리
-  `test/wfp/runtime/fixtures/kernel/tls-inspection-proxy`의 origin/client,
-  비정상·idle 입력, 판정, PASS 표시
+  `test/wfp/runtime/fixtures/kernel/tls-inspection-proxy`의 원본 서버/클라이언트,
+  비정상·유휴 입력, 판정, PASS 표시
 
-fixture에는 WFP 관리, driver IOCTL, 서비스 제어 호출이 없습니다. IPC는
-`ready → 정책 제거 요청 → 제거 확인 → direct 연결 증명 → stop → stats`
+픽스처에는 WFP 관리, 드라이버 IOCTL, 서비스 제어 호출이 없습니다. IPC는
+`ready → 정책 제거 요청 → 제거 확인 → 직접 연결 증명 → stop → stats`
 순서입니다. 따라서 마지막 direct 증명이 끝날 때까지 임시 인증서 key가 살아
 있습니다.
 
-driver는 원래 IPv4/IPv6 tuple과 opaque redirect record를 보존하고, 임의로
-조각난 bounded ClientHello를 읽고, SNI로 machine-store identity를 선택하고,
-inbound 커널 Schannel을 종료합니다. upstream은 Windows 인증서 검증을 사용하며
+드라이버는 원래 IPv4/IPv6 튜플과 불투명 리디렉션 레코드를 보존하고, 임의로
+조각난 제한된 ClientHello를 읽고, SNI로 머신 저장소 ID를 선택하고,
+인바운드 커널 Schannel을 종료합니다. 업스트림은 Windows 인증서 검증을 사용하며
 같은 `http/1.1` 또는 `h2` ALPN을 필수로 요구합니다.
 
 - 요청에 `x-ntl-inspected: 1` 추가
@@ -54,9 +54,9 @@ ctest --test-dir artifacts\examples\wfp-kernel-tls `
 .\crtsys_wfp_kernel_tls_inspection_proxy_acceptance.exe
 ```
 
-acceptance는 인접 controller를 시작하여 실제 IPv4/IPv6 redirect record, 두 TLS
-구간, SNI, HTTP/1.1·HTTP/2 ALPN, 허용/차단, 요청·응답 변환, malformed와
-idle ClientHello 실패, bounded capture, 정책 제거, direct 연결과 정리를
+허용성 검사는 인접 컨트롤러를 시작하여 실제 IPv4/IPv6 리디렉션 레코드, 두 TLS
+구간, SNI, HTTP/1.1·HTTP/2 ALPN, 허용/차단, 요청·응답 변환, 잘못된 형식과
+유휴 ClientHello 실패, 제한된 캡처, 정책 제거, 직접 연결과 정리를
 검증합니다. 성공 표시는 다음으로 시작합니다.
 
 ```text

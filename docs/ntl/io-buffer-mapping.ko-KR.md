@@ -13,18 +13,18 @@
 
 API는 두 가지 작업을 구분합니다.
 
-- **매핑됨**은 연결된 하나의 사용자 프로세스에서 버퍼가 표시된다는 의미입니다.
-- **교체됨**은 미니필터가 설치된 페이지 분리 교체를 의미합니다.
-  작업의 IOPB에 저장됩니다.
+- **매핑**은 연결된 사용자 프로세스 하나에서 버퍼를 볼 수 있게 한다는 뜻입니다.
+- **교체**는 미니필터가 작업의 IOPB에 페이지 격리 교체 저장소를 설치한다는
+  뜻입니다.
 
-매핑, 교체, 필터 관리자 통신 및 보류는 의도적으로 수행됩니다.
-별도. 결합된 `pend_and_send` 작업이 없으며 호출자는 절대로
-`from_direct_io`, `from_buffered_io` 또는 `from_neither_io` 도우미를 선택합니다.
+매핑, 교체, Filter Manager 통신 및 보류 처리는 의도적으로 분리되어 있습니다.
+결합된 `pend_and_send` 작업은 없으며 호출자가 `from_direct_io`,
+`from_buffered_io`, `from_neither_io` 도우미를 선택할 일도 없습니다.
 
 ## 프로세스 연결 및 와이어 식별
 
-WDM 파일/IOCTL 연결의 경우 해당 파일에서 의도한 서비스 프로세스를 캡처합니다.
-콜백 생성:
+WDM 파일/IOCTL 연결에서는 해당 파일의 create 콜백에서 연결할 서비스 프로세스를
+캡처합니다.
 
 ```cpp
 auto connection = ntl::ipc::process_connection::try_capture_current_process({
@@ -80,10 +80,10 @@ server.on_connect([](ntl::flt::communication_connection &client) {
 });
 ```
 
-필터 관리자 연결 해제가 먼저 새 포트 작업을 차단한 다음 NTL이 닫힙니다.
-해당 프로세스의 모든 매핑을 수행하고 그 후에만 애플리케이션의
-관찰자의 연결을 끊습니다. 따라서 복사된 연결 파사드는 다음을 부활시킬 수 없습니다.
-연결이 끊어진 후 매핑되고 호출자는 이후 PID를 조회하지 않습니다.
+Filter Manager가 연결을 끊을 때는 먼저 새 포트 작업을 차단하고, NTL이 해당
+프로세스의 모든 매핑을 닫은 다음에야 애플리케이션의 disconnect observer를
+호출합니다. 따라서 복사된 연결 객체로 연결 해제 후 매핑을 되살릴 수 없으며,
+호출자가 나중 시점의 PID를 다시 조회하는 일도 없습니다.
 
 ## IRP 입력 및 출력
 
@@ -101,10 +101,10 @@ if (const auto *control = mapped->control_input())
   send_control_descriptor(control->descriptor());
 ```
 
-NTL은 주요 기능, 장치 플래그, 제어 코드 및 현재 스택을 읽습니다.
-위치. 자동 IRP 어댑터는 다음을 지원합니다.
+NTL은 major function, 장치 플래그, 제어 코드 및 현재 스택 위치를 읽습니다. 자동
+IRP 어댑터는 다음을 지원합니다.
 
-| 운영 | 논리 버퍼 |
+| 작업 | 논리 버퍼 |
 | --- | --- |
 | `IRP_MJ_WRITE` | `input()` |
 | `IRP_MJ_READ` | `output()` |
@@ -113,12 +113,12 @@ NTL은 주요 기능, 장치 플래그, 제어 코드 및 현재 스택을 읽�
 | `METHOD_OUT_DIRECT` | 시스템 헤더는 `control_input()`, 직접 페이로드는 `output()` |
 | IOCTL/FSCTL도 아님 | 독립적인 `input()` 및 `output()` |
 
-`IRP_MN_USER_FS_REQUEST` 및 `IRP_MN_KERNEL_CALL`만 FSCTL 버퍼를 사용합니다.
-레이아웃. 마운트, 확인 및 파일 시스템 로드 요청 반환
-`STATUS_NOT_SUPPORTED`.
+`IRP_MN_USER_FS_REQUEST`와 `IRP_MN_KERNEL_CALL`만 FSCTL 버퍼 레이아웃을
+사용합니다. 마운트, 검증 및 파일 시스템 로드 요청에는
+`STATUS_NOT_SUPPORTED`를 반환합니다.
 
-변경 가능한 옵션 비트가 아닌 진입점은 IRP가 다음과 같은지 여부를 기록합니다.
-완료 전이나 후에 관찰되는 것:
+IRP를 완료 전과 완료 후 중 어느 시점에 관찰하는지는 변경 가능한 옵션 비트가
+아니라 진입점 자체로 구분합니다.
 
 ```cpp
 auto submitted = ntl::ipc::try_map_io_buffers(
@@ -137,9 +137,9 @@ auto completed = ntl::ipc::try_map_completed_io_buffers(
 
 ### 페이지 안전 기본값 및 제로 복사
 
-사용자 모드 MDL 매핑은 페이지 단위 VAD를 생성합니다. 논리적 하위 범위는 다음을 수행할 수 없습니다.
-서비스가 첫 번째 페이지와 마지막 페이지의 나머지 부분을 처리하지 못하도록 합니다.
-결과적으로 상위 수준 어댑터는 기본적으로 이 정책을 사용합니다.
+사용자 모드 MDL 매핑은 페이지 단위 VAD를 만듭니다. 논리적 하위 범위를
+지정하더라도 서비스가 첫 페이지와 마지막 페이지의 나머지 부분에 접근하는 것을
+막을 수 없습니다. 따라서 고수준 어댑터는 기본적으로 다음 정책을 사용합니다.
 
 ```cpp
 ntl::ipc::map_io_options options{
@@ -164,22 +164,22 @@ options.user_mdls =
     ntl::ipc::user_mdl_policy::allow_page_padding_exposure;
 ```
 
-해당 선택은 성능 힌트가 아닌 보안 결정입니다. 낮은 수준
-`try_map_mdl(borrowed_mdl_view, ...)` API에는 동일한 호출자 책임이 있습니다.
-계약. NTL은 MDL을 소유하지 않는다고 기록되어 있습니다. 그건 인증하지 않아
-MDL은 공개해도 안전합니다.
+이 선택은 성능 힌트가 아니라 보안 결정입니다. 저수준
+`try_map_mdl(borrowed_mdl_view, ...)` API에도 호출자가 같은 책임을 집니다. 이 API는
+NTL이 MDL을 소유하지 않는다는 사실만 기록하며, 해당 MDL을 노출해도 안전하다고
+보증하지는 않습니다.
 
-`max_staging_bytes`, 연결 매핑 수 및 매핑된 바이트 할당량 바인딩
-클라이언트가 보유하는 메모리입니다. 매핑된 바이트 할당량은 전체 할당량에 대해 요금을 청구합니다.
-MDL 바이트 오프셋을 포함한 페이지 반올림 VAD 범위
-논리적 설명자 길이. 스테이징 및 교체 교체 한도도 청구됩니다.
-페이지 반올림된 물리적 할당. `kernel_buffer_policy::reject`는 다음과 같습니다.
-복사 대체가 허용되지 않는 경우에 사용됩니다.
+`max_staging_bytes`, 연결의 매핑 개수 및 매핑 바이트 할당량은 클라이언트가
+보유하는 메모리를 제한합니다. 매핑 바이트 할당량에는 논리 설명자의 길이만이 아니라
+MDL 바이트 오프셋을 포함해 페이지 단위로 반올림한 전체 VAD 범위가 반영됩니다.
+스테이징 및 교체 저장소 제한에도 페이지 단위로 반올림한 물리 할당량을 반영합니다.
+복사 방식의 대체 경로를 허용할 수 없다면 `kernel_buffer_policy::reject`를
+사용하십시오.
 
 ## 미니필터 매핑
 
-콜백 단계는 `PFLT_CALLBACK_DATA` 단독으로 수행되므로 유형의 일부입니다.
-출력이 유효한지 여부를 말하지 마십시오.
+`PFLT_CALLBACK_DATA`만으로는 출력이 유효한 시점인지 알 수 없으므로 콜백 단계도
+형식의 일부입니다.
 
 ```cpp
 auto write_input = ntl::flt::try_map_io_buffers(
@@ -197,8 +197,8 @@ FSCTL, IOCTL을 지원합니다. post 출력 길이는 `STATUS_BUFFER_OVERFLOW` 
 기존 MDL이 없는 post 사용자 포인터는 참조된 Filter Manager 요청자 프로세스에
 연결한 상태에서 복사합니다.
 
-매핑 도우미에는 `PASSIVE_LEVEL`가 필요합니다. 사전/사후 콜백이 아닌 경우
-이미 안전하다면 먼저 대기열에 추가하세요.
+매핑 도우미에는 `PASSIVE_LEVEL`이 필요합니다. pre/post 콜백이 이미 안전한
+실행 수준이 아니라면 먼저 큐에 넣으십시오.
 
 ```cpp
 auto status = ntl::flt::queue_post_operation_at_passive(
@@ -256,11 +256,11 @@ void finish_fsctl(
 }
 ```
 
-`try_visit()`는 `FltLockUserBuffer`를 호출하지 않으며 MDL을 해제하지도 않습니다.
-`valid_size()` by `IoStatus.Information`, 전체 방문자를 내부에서 실행합니다.
-NTL의 SEH 가드. 포인터가 방문자를 벗어나서는 안 됩니다. 더 낮은 필터인 경우
-더 이상 사전 작업, 액세스에서 검증된 MDL 또는 시스템 버퍼를 제공합니다.
-새로운 사후 작업 소유권을 생성하는 대신 실패합니다.
+`try_visit()`는 `FltLockUserBuffer`를 호출하거나 MDL을 해제하지 않습니다.
+`valid_size()`는 `IoStatus.Information`으로 제한되며 visitor 전체를 NTL의 SEH
+가드 안에서 실행합니다. 포인터를 visitor 밖으로 가져가면 안 됩니다. 하위 필터가
+pre-operation에서 검증한 MDL이나 시스템 버퍼를 더는 제공하지 않는다면, 새
+post-operation 소유권을 만들지 않고 접근을 실패 처리합니다.
 
 ## 작업 독립적인 미니필터 교체
 
@@ -276,15 +276,15 @@ function과 Fast I/O는 `STATUS_NOT_SUPPORTED`를 반환합니다. pre 콜백은
 
 작업 유형은 버퍼 선택기가 적합한지 여부도 제어합니다.
 
-| 형식화된 사전 작업 | API 양식 |
+| 타입이 지정된 사전 작업 | API 양식 |
 | --- | --- |
 | EA 생성, 쓰기, SET_INFORMATION, SET_EA, SET_VOLUME_INFORMATION, SET_SECURITY, SET_QUOTA | `try_swap_io_buffers(operation, options)`; 입력이 추론됨 |
 | 읽기, QUERY_INFORMATION, QUERY_VOLUME_INFORMATION, DIRECTORY_Control, QUERY_SECURITY | `try_swap_io_buffers(operation, options)`; 출력이 추론됨 |
 | QUERY_EA, QUERY_QUOTA, FILE_SYSTEM_Control, DEVICE_Control, INTERNAL_DEVICE_Control | `try_swap_io_buffers(operation, swap_buffer::input/output/all, options)` |
 
-`swap_io_options`에는 할당 및 실행 정책만 포함됩니다. 그럴 수 없다
-입력 또는 출력을 선택합니다. 읽기/쓰기에 선택기를 제공하거나 읽기/쓰기에 선택기를 생략합니다.
-이중 가능 작업은 컴파일 타임에 거부됩니다.
+`swap_io_options`에는 할당 및 실행 정책만 들어 있으며 입력이나 출력을 선택할 수
+없습니다. READ/WRITE에 선택기를 지정하거나 양방향 작업에서 선택기를 생략하면
+컴파일 시간에 거부됩니다.
 
 ```cpp
 auto read = ntl::flt::try_swap_io_buffers(ntl::flt::as_pre(read_data));
@@ -309,10 +309,10 @@ backing MDL에서 별도의 부분 교체 MDL을 만듭니다. 페이지 버퍼�
 비캐시 read/write 교체 용량은 볼륨 섹터 크기로 반올림하지만 공개 뷰와 되쓰기
 범위는 원래 논리 길이로 제한합니다.
 
-`apply()`, 출력 되쓰기, 완료 전에 사용자 매핑을 닫아야 합니다.
-`release_completion_context()`는 `apply()` 이후에 지원되는 전송입니다. 그것
-둘 다 소유자를 포스트 콜백으로 이동하고 대체 MDL을 전달된 것으로 표시합니다.
-필터 관리자에게.
+사용자 매핑은 `apply()`, 출력 되쓰기 또는 완료 전에 닫아야 합니다.
+`release_completion_context()`는 `apply()` 후에 지원되는 소유권 이전 경로입니다.
+이 함수는 소유자를 post 콜백으로 옮기는 동시에 교체 MDL을 Filter Manager에
+넘겼다고 표시합니다.
 
 ### 사전 쓰기 암호화
 
@@ -352,9 +352,9 @@ completion_context = *context;
 return ntl::flt::pre_result::success_with_callback;
 ```
 
-쓰기 포스트 콜백은 페이징되지 않은 대체 상태만 해제합니다. 왜냐하면`release_completion_context()`는 닫힌 매핑 레코드를 정리하고 비페이징을 사용합니다.
-소유자/제어 블록, 이 정리 전용 경로는 다음을 통해 유효합니다.
-`DISPATCH_LEVEL`:
+write post 콜백은 비페이지 교체 상태만 해제합니다.
+`release_completion_context()`가 닫힌 매핑 레코드를 제거하고 비페이지 소유자와
+제어 블록을 사용하므로, 이 정리 전용 경로는 `DISPATCH_LEVEL`까지 유효합니다.
 
 ```cpp
 auto owner = ntl::flt::swapped_io_buffers::adopt_completion_context(context);
@@ -365,8 +365,8 @@ return owner->complete();
 
 ### 읽은 후 암호 해독
 
-미리 읽기는 출력 교체를 생성, 설치 및 전송합니다. 하위 파일
-시스템은 여기에 암호문을 씁니다. 수동적 사후 읽기 작업자의 경우:
+pre-read는 출력 교체 저장소를 생성하고 설치한 뒤 소유권을 이전합니다. 하위 파일
+시스템은 여기에 암호문을 씁니다. 패시브 post-read 작업자는 다음과 같이 처리합니다.
 
 ```cpp
 auto owner = ntl::flt::swapped_io_buffers::adopt_completion_context(context);
@@ -394,7 +394,7 @@ auto complete_status = owner->complete();
 return copy_status.is_err() ? copy_status : complete_status;
 ```
 
-`copy_back()`은 형식화된 post 래퍼가 동일한 콜백 데이터를 참조하는지 확인하고,
+`copy_back()`은 타입이 지정된 post 래퍼가 동일한 콜백 데이터를 참조하는지 확인하고,
 오류 완료를 거부하며, 최대 `IoStatus.Information` 바이트만 복사합니다. 교체 버퍼
 매핑, 서비스 호출, 되쓰기는 계속 `PASSIVE_LEVEL` 작업이므로 read 변환은
 지연/보류 경로를 사용해야 합니다.
@@ -403,7 +403,7 @@ return copy_status.is_err() ? copy_status : complete_status;
 [`examples/minifilter/swap-buffers`](../../examples/minifilter/swap-buffers)
 예제에는 더 작은 로컬 변환 방식이 들어 있습니다. `.ntlxor` 파일만 pre-WRITE와
 post-READ에서 XOR 교체를 적용하고 일반 `.tmp` 스트림은 변경하지 않습니다.
-추가 사용자 서비스 보류 상태 없이 형식화된 단계, Fast I/O 대체 경로,
+추가 사용자 서비스 보류 상태 없이 타입이 지정된 단계, Fast I/O 대체 경로,
 PASSIVE_LEVEL 지연, `IoStatus.Information` 길이 제한, 되쓰기, 종료 정리, 확장자
 선택을 보여줍니다. XOR은 교체된 바이트를 눈에 보이게 할 목적으로만 사용하며,
 예제 문서에서 제품용 암호화 설계가 아닌 이유를 설명합니다.
@@ -445,7 +445,7 @@ I/O의 사용자 매핑은 계속 비활성화합니다.
 `queue_instance_work_item(instance, callable)`을 사용해야 합니다. 이 함수는 원시
 executive 작업 항목 대신 Filter Manager 일반 작업 항목을 할당해 큐에 넣으므로,
 호출 가능 래퍼가 반환할 때까지 필터 rundown 참조가 유지됩니다. 작업자는
-`context_ref::reference()`로 얻은 별도의 형식화된 컨텍스트 소유자도 유지해야
+`context_ref::reference()`로 얻은 별도의 타입이 지정된 컨텍스트 소유자도 유지해야
 합니다.
 
 ```cpp
@@ -469,8 +469,8 @@ auto queued = ntl::flt::queue_instance_work_item(
 
 ## 사용자 모드 유효성 검사
 
-`mapped_address`를 직접 전송하지 마세요. 설명자와 세션의 유효성을 검사합니다.
-세대 우선:
+`mapped_address`를 직접 포인터로 변환하지 마십시오. 먼저 설명자와 세션 세대를
+검증합니다.
 
 ```cpp
 ntl::ipc::mapped_client_buffer buffer;
@@ -512,7 +512,7 @@ if (result != ntl::ipc::validation_status::success)
 
 `test/flt/runtime/io_buffer_*`의 전용 미니필터 쌍은 실제 연결된 사용자 서비스를
 통해 pre-WRITE 교체와 post-READ 되쓰기를 검증합니다. 포트 연결 콜백이 서비스
-프로세스를 캡처하고 각 교체 버퍼를 해당 프로세스에 매핑한 뒤, 형식화된
+프로세스를 캡처하고 각 교체 버퍼를 해당 프로세스에 매핑한 뒤, 타입이 지정된
 `mapped_buffer_descriptor`를 사용자 요청 처리기에 보냅니다. 처리기는 논리적으로
 유효한 입력 또는 완료 출력 범위만 변경합니다. 드라이버는 입력 적용이나 출력
 되쓰기 전에 매핑을 동기적으로 닫고, 앱은 I/O 반환 후 VAD가 무효화됐는지
