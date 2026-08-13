@@ -128,8 +128,6 @@ vcpkg_from_github(
     REF "v${VERSION}"
     SHA512 37acb5f8d0a047476bd96f9319db2f00d769dc9def4bfc9e2dbbee2ada33f5a4c1ecbbb8aff34a1094ffa9385b898f07ee3201b07b79a5caf62cf8344e6bd4f9
     HEAD_REF main
-    PATCHES
-        fix-offline-source-build.patch
 )
 
 vcpkg_from_github(

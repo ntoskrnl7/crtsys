@@ -118,48 +118,63 @@ try {
 
   $currentVersion = Ensure-TrimmedString -Value (& (Join-Path $repoRoot 'scripts\nuget\Get-CrtSysVersion.ps1')) -Name 'Current version'
   if ($currentVersion -eq $Version) {
-    throw "Version header is already $Version."
+    $vcpkgPort = Get-Content `
+      -LiteralPath $vcpkgPortManifest `
+      -Raw `
+      -Encoding UTF8 |
+        ConvertFrom-Json
+    if ($vcpkgPort.'version-semver' -ne $Version) {
+      throw "Cannot resume release $Version because the vcpkg port version is $($vcpkgPort.'version-semver')."
+    }
+    Write-Host "Resuming prepared release $Version at the current commit."
+  } else {
+    $content = Get-Content -LiteralPath $versionHeader -Raw
+    $content = [regex]::Replace(
+      $content,
+      '(?m)^(#define\s+CRTSYS_VERSION_MAJOR\s+)\d+(\s*)$',
+      { param($match) "$($match.Groups[1].Value)$major$($match.Groups[2].Value)" })
+    $content = [regex]::Replace(
+      $content,
+      '(?m)^(#define\s+CRTSYS_VERSION_MINOR\s+)\d+(\s*)$',
+      { param($match) "$($match.Groups[1].Value)$minor$($match.Groups[2].Value)" })
+    $content = [regex]::Replace(
+      $content,
+      '(?m)^(#define\s+CRTSYS_VERSION_PATCH\s+)\d+(\s*)$',
+      { param($match) "$($match.Groups[1].Value)$patch$($match.Groups[2].Value)" })
+
+    $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+    [System.IO.File]::WriteAllText($versionHeader, $content, $utf8NoBom)
+
+    $resolvedVersion = Ensure-TrimmedString -Value (& (Join-Path $repoRoot 'scripts\nuget\Get-CrtSysVersion.ps1')) -Name 'Resolved version'
+    if ($resolvedVersion -ne $Version) {
+      throw "Version header update failed. Expected $Version, got $resolvedVersion."
+    }
+
+    & $updateVcpkgPortScript -Version $Version | Out-Null
+    $vcpkgPort = Get-Content `
+      -LiteralPath $vcpkgPortManifest `
+      -Raw `
+      -Encoding UTF8 |
+        ConvertFrom-Json
+    if ($vcpkgPort.'version-semver' -ne $Version) {
+      throw "vcpkg port version update failed. Expected $Version, got $($vcpkgPort.'version-semver')."
+    }
+
+    Invoke-Git @('diff', '--check')
+    Invoke-Git @(
+      'add', '--',
+      'include/.internal/version',
+      'vcpkg/ports/crtsys'
+    )
+    Invoke-Git @('commit', '-m', "release crtsys $Version")
+
+    $remainingStatus = (Invoke-Git @('status', '--porcelain'))
+    if ($null -ne $remainingStatus -and
+        -not [string]::IsNullOrWhiteSpace(($remainingStatus -join "`n"))) {
+      throw "Release commit left uncommitted changes:`n$($remainingStatus -join "`n")"
+    }
   }
 
-  $content = Get-Content -LiteralPath $versionHeader -Raw
-  $content = [regex]::Replace(
-    $content,
-    '(?m)^(#define\s+CRTSYS_VERSION_MAJOR\s+)\d+(\s*)$',
-    { param($match) "$($match.Groups[1].Value)$major$($match.Groups[2].Value)" })
-  $content = [regex]::Replace(
-    $content,
-    '(?m)^(#define\s+CRTSYS_VERSION_MINOR\s+)\d+(\s*)$',
-    { param($match) "$($match.Groups[1].Value)$minor$($match.Groups[2].Value)" })
-  $content = [regex]::Replace(
-    $content,
-    '(?m)^(#define\s+CRTSYS_VERSION_PATCH\s+)\d+(\s*)$',
-    { param($match) "$($match.Groups[1].Value)$patch$($match.Groups[2].Value)" })
-
-  $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
-  [System.IO.File]::WriteAllText($versionHeader, $content, $utf8NoBom)
-
-  $resolvedVersion = Ensure-TrimmedString -Value (& (Join-Path $repoRoot 'scripts\nuget\Get-CrtSysVersion.ps1')) -Name 'Resolved version'
-  if ($resolvedVersion -ne $Version) {
-    throw "Version header update failed. Expected $Version, got $resolvedVersion."
-  }
-
-  & $updateVcpkgPortScript -Version $Version | Out-Null
-  $vcpkgPort = Get-Content `
-    -LiteralPath $vcpkgPortManifest `
-    -Raw `
-    -Encoding UTF8 |
-      ConvertFrom-Json
-  if ($vcpkgPort.'version-semver' -ne $Version) {
-    throw "vcpkg port version update failed. Expected $Version, got $($vcpkgPort.'version-semver')."
-  }
-
-  Invoke-Git @('diff', '--check')
-  Invoke-Git @(
-    'add', '--',
-    'include/.internal/version',
-    'vcpkg/ports/crtsys/vcpkg.json'
-  )
-  Invoke-Git @('commit', '-m', "release crtsys $Version")
   Invoke-Git @('tag', '-a', $tagName, '-m', "crtsys $Version")
 
   if ($Push) {
