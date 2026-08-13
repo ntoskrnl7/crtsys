@@ -23,6 +23,7 @@ $portRoot = Join-Path $repoRoot 'vcpkg\ports\crtsys'
 $manifestPath = Join-Path $portRoot 'vcpkg.json'
 $portfilePath = Join-Path $portRoot 'portfile.cmake'
 $compatibilityPatchPath = Join-Path $portRoot 'fix-offline-source-build.patch'
+$legacyUcxxrtPatchPath = Join-Path $portRoot 'disable-legacy-ucxxrt.patch'
 $bridgePath = Join-Path $portRoot 'crtsys-vcpkg.targets'
 $initScriptPath = Join-Path $portRoot 'tools\crtsys-vs-init.ps1'
 $initCommandPath = Join-Path $portRoot 'tools\crtsys-vs-init.cmd'
@@ -149,6 +150,7 @@ function Resolve-MsBuildExecutable {
 foreach ($requiredPath in @(
   $manifestPath,
   $portfilePath,
+  $legacyUcxxrtPatchPath,
   $bridgePath,
   $initScriptPath,
   $initCommandPath,
@@ -222,7 +224,7 @@ $portfileTokens = @(
   'docs/third-party-notices.md',
   '${LDK_SOURCE_PATH}/LICENSE',
   '${RAW_PDB_SOURCE_PATH}/LICENSE',
-  '${UCXXRT_SOURCE_PATH}/LICENSE'
+  'disable-legacy-ucxxrt.patch'
 )
 if ([version]$projectVersion -lt [version]'0.1.42') {
   if (-not (Test-Path -LiteralPath $compatibilityPatchPath)) {
@@ -240,6 +242,17 @@ if ([version]$projectVersion -lt [version]'0.1.42') {
   )
 }
 Assert-FileContains -Path $portfilePath -Tokens $portfileTokens
+Assert-FileContains -Path $legacyUcxxrtPatchPath -Tokens @(
+  'MSVC toolset v142 or later'
+)
+Assert-FileDoesNotContain -Path $portfilePath -Tokens @(
+  'REPO ntoskrnl7/ucxxrt',
+  'UCXXRT_SOURCE_PATH',
+  'CRTSYS_UCXXRT_SOURCE_DIR'
+)
+Assert-FileContains -Path $usagePath -Tokens @(
+  'requires MSVC toolset v142 or later'
+)
 if ([version]$projectVersion -ge [version]'0.1.42') {
   Assert-FileDoesNotContain -Path $portfilePath -Tokens @(
     'fix-offline-source-build.patch'
