@@ -322,7 +322,8 @@ Assert-FileContains -Path $registryAutomationTestPath -Tokens @(
 Assert-FileContains -Path $prepareReleasePath -Tokens @(
   'Update-CrtSysVcpkgPort.ps1',
   "'vcpkg/ports/crtsys'",
-  'Release commit left uncommitted changes'
+  'Release commit left uncommitted changes',
+  'Resuming prepared release $Version at the current commit'
 )
 Assert-FileContains -Path $packageWorkflowPath -Tokens @(
   'publish-vcpkg-registry:',
