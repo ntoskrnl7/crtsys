@@ -338,7 +338,7 @@ jobs:
             $wdkVersion = '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}'
           }
 
-          foreach ($driverModel in @('NTL', 'WDM', 'KMDF', 'NTL_KMDF', 'NTL_FLT', 'NTL_WFP')) {
+          foreach ($driverModel in @('NTL', 'WDM', 'KMDF', 'NTL_KMDF', 'NTL_FLT', 'NTL_WFP', 'NTL_NDIS')) {
             $parameters = @{
               PackageDirectory = 'artifacts/nuget'
               Version = '${{ needs.pack.outputs.package_version }}'
@@ -540,7 +540,7 @@ jobs:
             $parameters.WdkVersion = $wdkVersion
           }
 
-          foreach ($driverModel in @('NTL', 'WDM', 'KMDF', 'NTL_KMDF', 'NTL_FLT', 'NTL_WFP')) {
+          foreach ($driverModel in @('NTL', 'WDM', 'KMDF', 'NTL_KMDF', 'NTL_FLT', 'NTL_WFP', 'NTL_NDIS')) {
             $parameters.DriverModel = $driverModel
             ./scripts/nuget/Test-CrtSysReleaseAssets.ps1 @parameters
           }

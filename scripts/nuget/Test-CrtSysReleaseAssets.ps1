@@ -13,7 +13,7 @@ param(
   [ValidateSet('v142', 'v143', 'v145')]
   [string] $Toolset = 'v143',
 
-  [ValidateSet('NTL', 'WDM', 'KMDF', 'NTL_KMDF', 'NTL_FLT', 'NTL_WFP')]
+  [ValidateSet('NTL', 'WDM', 'KMDF', 'NTL_KMDF', 'NTL_FLT', 'NTL_WFP', 'NTL_NDIS')]
   [string] $DriverModel = 'NTL',
 
   [string] $WindowsSdkVersion = '10.0.22621.0',
@@ -222,6 +222,12 @@ foreach ($requiredPath in @(
   'include\ntl\wfp\stream',
   'include\ntl\wfp\stream_reader',
   'include\ntl\wfp\telemetry',
+  'include\ntl\ndis\all',
+  'include\ntl\ndis\lwf',
+  'include\ntl\ndis\metadata',
+  'include\ntl\ndis\nbl',
+  'include\ntl\ndis\oid',
+  'include\ntl\ndis\tcp_reassembly',
   'include\.internal\winsdk\wfp_version_compat',
   'include\.internal\adjust_link_order'
 )) {
@@ -289,6 +295,10 @@ crtsys_add_driver(
   crtsys_release_asset_smoke
   WFP NTL KERNEL_MSQUIC KERNEL_CONTENT_CODECS
   main.cpp)
+'@ }
+  'NTL_NDIS' { @'
+set(CRTSYS_NTL_MAIN OFF)
+crtsys_add_driver(crtsys_release_asset_smoke NDIS NTL main.cpp)
 '@ }
 }
 
@@ -410,6 +420,38 @@ ntl::status ntl::main(ntl::driver& driver, const std::wstring&) {
     const ntl::status result = callouts.close();
     NT_ASSERT(result.is_ok());
   });
+  return ntl::status::ok();
+}
+'@ }
+  'NTL_NDIS' { @'
+#include <memory>
+
+#include <ntl/driver>
+#include <ntl/ndis/all>
+
+namespace {
+class release_ndis_module {
+public:
+  explicit release_ndis_module(ntl::ndis::attach_event) noexcept {}
+  ntl::status on_restart(ntl::ndis::restart_event) noexcept {
+    return ntl::status::ok();
+  }
+  void on_pause(ntl::ndis::pause_event) noexcept {}
+  void on_oid_request(ntl::ndis::oid_request_event event) noexcept {
+    (void)event.request().oid();
+  }
+};
+}
+
+ntl::status ntl::main(ntl::driver& driver, const std::wstring&) {
+  auto filter = ntl::ndis::lightweight_filter<release_ndis_module>::try_create(
+      driver.native_handle(),
+      {L"crtsys release NDIS filter",
+       L"{A708F414-62AF-4A97-9B8B-D31FF85281AD}",
+       L"crtsys_release_ndis", 1, 0});
+  if (!filter)
+    return filter.status();
+  driver.on_unload([filter = *filter] { filter->reset(); });
   return ntl::status::ok();
 }
 '@ }

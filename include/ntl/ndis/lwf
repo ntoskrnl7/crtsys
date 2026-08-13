@@ -11,6 +11,7 @@
 #include "../result"
 #include "../status"
 #include "nbl"
+#include "oid"
 
 #include <ndis.h>
 
@@ -33,6 +34,38 @@ struct filter_driver_identity {
   std::uint8_t major_driver_version = 1;
   std::uint8_t minor_driver_version = 0;
 };
+
+namespace detail {
+
+inline constexpr bool receive_returns_immediately(
+    ULONG flags) noexcept {
+  return NDIS_TEST_RECEIVE_CANNOT_PEND(flags) != FALSE;
+}
+
+template <class Restore, class Notify>
+inline void complete_immediate_receive(
+    ULONG flags, Restore &&restore, Notify &&notify)
+    noexcept(noexcept(restore()) &&
+             noexcept(notify(ULONG{}, std::size_t{}))) {
+  if (!receive_returns_immediately(flags))
+    return;
+  const std::size_t restored = restore();
+  notify(NDIS_TEST_RECEIVE_AT_DISPATCH_LEVEL(flags)
+             ? NDIS_RETURN_FLAGS_DISPATCH_LEVEL
+             : 0,
+         restored);
+}
+
+template <class Observe, class Forward>
+inline void forward_oid_cancellation(
+    void *request_id, Observe &&observe, Forward &&forward)
+    noexcept(noexcept(observe(request_id)) &&
+             noexcept(forward(request_id))) {
+  observe(request_id);
+  forward(request_id);
+}
+
+} // namespace detail
 
 class attach_event {
 public:
@@ -110,6 +143,12 @@ public:
   bool dispatch_level() const noexcept {
     return NDIS_TEST_SEND_AT_DISPATCH_LEVEL(flags_) != FALSE;
   }
+  ntl::result<preserved_metadata_chain_view>
+  try_preserve_metadata(
+      ULONG pool_tag = ntl::pool_tag("mNdN")) const noexcept {
+    return preserved_metadata_chain_view::try_create(
+        packets_.native_handle(), pool_tag);
+  }
 
 private:
   template <class> friend class lightweight_filter;
@@ -130,14 +169,19 @@ public:
   bool dispatch_level() const noexcept {
     return NDIS_TEST_SEND_COMPLETE_AT_DISPATCH_LEVEL(flags_) != FALSE;
   }
+  std::size_t restored_metadata_count() const noexcept {
+    return restored_metadata_count_;
+  }
 
 private:
   template <class> friend class lightweight_filter;
-  send_complete_event(NET_BUFFER_LIST *packets,
-                      ULONG flags) noexcept
-      : packets_(packets), flags_(flags) {}
+  send_complete_event(NET_BUFFER_LIST *packets, ULONG flags,
+                      std::size_t restored_metadata_count) noexcept
+      : packets_(packets), flags_(flags),
+        restored_metadata_count_(restored_metadata_count) {}
   net_buffer_list_chain_view packets_;
   ULONG flags_ = 0;
+  std::size_t restored_metadata_count_ = 0;
 };
 
 class receive_event {
@@ -154,6 +198,12 @@ public:
   bool can_pend() const noexcept {
     return NDIS_TEST_RECEIVE_CAN_PEND(flags_) != FALSE;
   }
+  ntl::result<preserved_metadata_chain_view>
+  try_preserve_metadata(
+      ULONG pool_tag = ntl::pool_tag("mNdN")) const noexcept {
+    return preserved_metadata_chain_view::try_create(
+        packets_.native_handle(), pool_tag);
+  }
 
 private:
   template <class> friend class lightweight_filter;
@@ -165,6 +215,192 @@ private:
   NDIS_PORT_NUMBER port_ = 0;
   ULONG count_ = 0;
   ULONG flags_ = 0;
+};
+
+class return_receive_event {
+public:
+  net_buffer_list_chain_view packets() const noexcept {
+    return packets_;
+  }
+  ULONG flags() const noexcept { return flags_; }
+  bool dispatch_level() const noexcept {
+    return NDIS_TEST_RETURN_AT_DISPATCH_LEVEL(flags_) != FALSE;
+  }
+  bool immediate() const noexcept { return immediate_; }
+  std::size_t restored_metadata_count() const noexcept {
+    return restored_metadata_count_;
+  }
+
+private:
+  template <class> friend class lightweight_filter;
+  return_receive_event(NET_BUFFER_LIST *packets, ULONG flags,
+                       bool immediate,
+                       std::size_t restored_metadata_count) noexcept
+      : packets_(packets), flags_(flags), immediate_(immediate),
+        restored_metadata_count_(restored_metadata_count) {}
+  net_buffer_list_chain_view packets_;
+  ULONG flags_ = 0;
+  bool immediate_ = false;
+  std::size_t restored_metadata_count_ = 0;
+};
+
+class oid_request_event {
+public:
+  oid_request_view request() const noexcept { return request_; }
+
+private:
+  template <class> friend class lightweight_filter;
+  explicit oid_request_event(NDIS_OID_REQUEST *request) noexcept
+      : request_(request) {}
+  oid_request_view request_;
+};
+
+class oid_request_complete_event {
+public:
+  oid_request_view request() const noexcept { return request_; }
+  NDIS_STATUS status() const noexcept { return status_; }
+
+private:
+  template <class> friend class lightweight_filter;
+  oid_request_complete_event(NDIS_OID_REQUEST *request,
+                             NDIS_STATUS status) noexcept
+      : request_(request), status_(status) {}
+  oid_request_view request_;
+  NDIS_STATUS status_ = NDIS_STATUS_FAILURE;
+};
+
+class cancel_oid_request_event {
+public:
+  void *request_id() const noexcept { return request_id_; }
+
+private:
+  template <class> friend class lightweight_filter;
+  explicit cancel_oid_request_event(void *request_id) noexcept
+      : request_id_(request_id) {}
+  void *request_id_ = nullptr;
+};
+
+class direct_oid_request_event {
+public:
+  oid_request_view request() const noexcept { return request_; }
+
+private:
+  template <class> friend class lightweight_filter;
+  explicit direct_oid_request_event(
+      NDIS_OID_REQUEST *request) noexcept : request_(request) {}
+  oid_request_view request_;
+};
+
+class direct_oid_request_complete_event {
+public:
+  oid_request_view request() const noexcept { return request_; }
+  NDIS_STATUS status() const noexcept { return status_; }
+
+private:
+  template <class> friend class lightweight_filter;
+  direct_oid_request_complete_event(
+      NDIS_OID_REQUEST *request, NDIS_STATUS status) noexcept
+      : request_(request), status_(status) {}
+  oid_request_view request_;
+  NDIS_STATUS status_ = NDIS_STATUS_FAILURE;
+};
+
+class cancel_direct_oid_request_event {
+public:
+  void *request_id() const noexcept { return request_id_; }
+
+private:
+  template <class> friend class lightweight_filter;
+  explicit cancel_direct_oid_request_event(void *request_id) noexcept
+      : request_id_(request_id) {}
+  void *request_id_ = nullptr;
+};
+
+class status_indication_event {
+public:
+  const NDIS_STATUS_INDICATION *native_handle() const noexcept {
+    return indication_;
+  }
+  NDIS_STATUS code() const noexcept {
+    return indication_ ? indication_->StatusCode : NDIS_STATUS_FAILURE;
+  }
+  NDIS_PORT_NUMBER port() const noexcept {
+    return indication_ ? indication_->PortNumber : 0;
+  }
+  ULONG flags() const noexcept {
+    return indication_ ? indication_->Flags : 0;
+  }
+  void *request_id() const noexcept {
+    return indication_ ? indication_->RequestId : nullptr;
+  }
+  std::span<const std::byte> buffer() const noexcept {
+    if (!indication_ || !indication_->StatusBuffer ||
+        indication_->StatusBufferSize == 0)
+      return {};
+    return {static_cast<const std::byte *>(indication_->StatusBuffer),
+            indication_->StatusBufferSize};
+  }
+
+private:
+  template <class> friend class lightweight_filter;
+  explicit status_indication_event(
+      const NDIS_STATUS_INDICATION *indication) noexcept
+      : indication_(indication) {}
+  const NDIS_STATUS_INDICATION *indication_ = nullptr;
+};
+
+class device_pnp_event {
+public:
+  const NET_DEVICE_PNP_EVENT *native_handle() const noexcept {
+    return event_;
+  }
+  NDIS_DEVICE_PNP_EVENT code() const noexcept {
+    return event_ ? event_->DevicePnPEvent
+                  : NdisDevicePnPEventMaximum;
+  }
+  NDIS_PORT_NUMBER port() const noexcept {
+    return event_ ? event_->PortNumber : 0;
+  }
+  std::span<const std::byte> information() const noexcept {
+    if (!event_ || !event_->InformationBuffer ||
+        event_->InformationBufferLength == 0)
+      return {};
+    return {static_cast<const std::byte *>(event_->InformationBuffer),
+            event_->InformationBufferLength};
+  }
+
+private:
+  template <class> friend class lightweight_filter;
+  explicit device_pnp_event(
+      const NET_DEVICE_PNP_EVENT *event) noexcept : event_(event) {}
+  const NET_DEVICE_PNP_EVENT *event_ = nullptr;
+};
+
+class net_pnp_event {
+public:
+  const NET_PNP_EVENT_NOTIFICATION *native_handle() const noexcept {
+    return event_;
+  }
+  NET_PNP_EVENT_CODE code() const noexcept {
+    return event_ ? event_->NetPnPEvent.NetEvent : NetEventMaximum;
+  }
+  NDIS_PORT_NUMBER port() const noexcept {
+    return event_ ? event_->PortNumber : 0;
+  }
+  ULONG flags() const noexcept { return event_ ? event_->Flags : 0; }
+  std::span<const std::byte> information() const noexcept {
+    if (!event_ || !event_->NetPnPEvent.Buffer ||
+        event_->NetPnPEvent.BufferLength == 0)
+      return {};
+    return {static_cast<const std::byte *>(event_->NetPnPEvent.Buffer),
+            event_->NetPnPEvent.BufferLength};
+  }
+
+private:
+  template <class> friend class lightweight_filter;
+  explicit net_pnp_event(
+      const NET_PNP_EVENT_NOTIFICATION *event) noexcept : event_(event) {}
+  const NET_PNP_EVENT_NOTIFICATION *event_ = nullptr;
 };
 
 enum class filter_module_state : std::uint8_t {
@@ -179,9 +415,18 @@ enum class filter_module_state : std::uint8_t {
  *
  * Module must be constructible from attach_event. Optional noexcept methods:
  * on_restart(restart_event), on_pause(pause_event), on_send(send_event),
- * on_send_complete(send_complete_event), and on_receive(receive_event).
+ * on_send_complete(send_complete_event), on_receive(receive_event),
+ * on_receive_return(return_receive_event), on_oid_request(oid_request_event),
+ * on_oid_request_complete(oid_request_complete_event),
+ * on_cancel_oid_request(cancel_oid_request_event),
+ * on_direct_oid_request(direct_oid_request_event),
+ * on_direct_oid_request_complete(direct_oid_request_complete_event),
+ * on_cancel_direct_oid_request(cancel_direct_oid_request_event),
+ * on_status(status_indication_event), on_device_pnp(device_pnp_event), and
+ * on_net_pnp(net_pnp_event).
  * This monitor profile never transfers NBL ownership to Module. Forwarding,
- * completion, return, pause, and detach remain adapter-owned.
+ * completion, return, status/PnP propagation, pause, and detach remain
+ * adapter-owned. on_pause returns void because an NDIS pause cannot fail.
  */
 template <class Module> class lightweight_filter {
 public:
@@ -235,6 +480,17 @@ public:
         &send_complete;
     characteristics.ReceiveNetBufferListsHandler = &receive;
     characteristics.ReturnNetBufferListsHandler = &return_receive;
+    characteristics.OidRequestHandler = &oid_request;
+    characteristics.OidRequestCompleteHandler = &oid_request_complete;
+    characteristics.CancelOidRequestHandler = &cancel_oid_request;
+    characteristics.DevicePnPEventNotifyHandler = &device_pnp;
+    characteristics.NetPnPEventHandler = &net_pnp;
+    characteristics.StatusHandler = &status_indication;
+    characteristics.DirectOidRequestHandler = &direct_oid_request;
+    characteristics.DirectOidRequestCompleteHandler =
+        &direct_oid_request_complete;
+    characteristics.CancelDirectOidRequestHandler =
+        &cancel_direct_oid_request;
 
     NDIS_HANDLE registration = nullptr;
     const NDIS_STATUS status = NdisFRegisterFilterDriver(
@@ -362,11 +618,13 @@ private:
       static_assert(noexcept(holder->module.on_pause(
                         pause_event(parameters))),
                     "Module::on_pause must be noexcept");
-      const ntl::status result =
-          holder->module.on_pause(pause_event(parameters));
-      if (!result.is_ok())
-        return static_cast<NDIS_STATUS>(
-            static_cast<NTSTATUS>(result));
+      static_assert(std::is_same_v<
+                        decltype(holder->module.on_pause(
+                            pause_event(parameters))),
+                        void>,
+                    "Module::on_pause must return void because NDIS pause "
+                    "requests cannot fail");
+      holder->module.on_pause(pause_event(parameters));
     }
     holder->state.store(
         filter_module_state::paused,
@@ -401,15 +659,22 @@ private:
     auto *holder = static_cast<module_holder *>(module_context);
     if (!holder)
       return;
+    const std::size_t restored_metadata_count =
+        detail::restore_metadata_chain(
+            packets,
+            detail::nbl_metadata_snapshot::restore_point::send_complete);
     if constexpr (requires(
                       Module &module, send_complete_event event) {
                     module.on_send_complete(event);
                   }) {
       static_assert(noexcept(holder->module.on_send_complete(
-                        send_complete_event(packets, flags))),
+                        send_complete_event(
+                            packets, flags,
+                            restored_metadata_count))),
                     "Module::on_send_complete must be noexcept");
       holder->module.on_send_complete(
-          send_complete_event(packets, flags));
+          send_complete_event(
+              packets, flags, restored_metadata_count));
     }
     NdisFSendNetBufferListsComplete(
         holder->filter_handle, packets, flags);
@@ -436,6 +701,18 @@ private:
     }
     NdisFIndicateReceiveNetBufferLists(
         holder->filter_handle, packets, port, count, flags);
+    detail::complete_immediate_receive(
+        flags,
+        [packets]() noexcept {
+          return detail::restore_metadata_chain(
+              packets,
+              detail::nbl_metadata_snapshot::restore_point::receive_return);
+        },
+        [holder, packets](
+            ULONG return_flags, std::size_t restored) noexcept {
+          notify_receive_return(
+              *holder, packets, return_flags, true, restored);
+        });
   }
 
   static void return_receive(
@@ -444,8 +721,291 @@ private:
     auto *holder = static_cast<module_holder *>(module_context);
     if (!holder)
       return;
+    const std::size_t restored_metadata_count =
+        detail::restore_metadata_chain(
+            packets,
+            detail::nbl_metadata_snapshot::restore_point::receive_return);
+    notify_receive_return(
+        *holder, packets, flags, false, restored_metadata_count);
     NdisFReturnNetBufferLists(
         holder->filter_handle, packets, flags);
+  }
+
+  static void notify_receive_return(
+      module_holder &holder, NET_BUFFER_LIST *packets,
+      ULONG flags, bool immediate,
+      std::size_t restored_metadata_count) noexcept {
+    if constexpr (requires(
+                      Module &module, return_receive_event event) {
+                    module.on_receive_return(event);
+                  }) {
+      static_assert(noexcept(holder.module.on_receive_return(
+                        return_receive_event(
+                            packets, flags, immediate,
+                            restored_metadata_count))),
+                    "Module::on_receive_return must be noexcept");
+      holder.module.on_receive_return(
+          return_receive_event(
+              packets, flags, immediate,
+              restored_metadata_count));
+    }
+  }
+
+  static NDIS_STATUS oid_request(
+      NDIS_HANDLE module_context,
+      NDIS_OID_REQUEST *request) noexcept {
+    auto *holder = static_cast<module_holder *>(module_context);
+    if (!holder || !request)
+      return NDIS_STATUS_INVALID_PARAMETER;
+
+    NDIS_OID_REQUEST *clone = nullptr;
+    NDIS_STATUS status = detail::clone_oid_request(
+        holder->filter_handle, request,
+        ntl::pool_tag("oNdN"), &clone);
+    if (status != NDIS_STATUS_SUCCESS)
+      return status;
+
+    return detail::forward_oid_clone(
+        clone,
+        [holder](NDIS_OID_REQUEST *observed) noexcept {
+          if constexpr (requires(
+                            Module &module, oid_request_event event) {
+                          module.on_oid_request(event);
+                        }) {
+            static_assert(noexcept(holder->module.on_oid_request(
+                              oid_request_event(observed))),
+                          "Module::on_oid_request must be noexcept");
+            holder->module.on_oid_request(
+                oid_request_event(observed));
+          }
+        },
+        [holder](NDIS_OID_REQUEST *submitted) noexcept {
+          return NdisFOidRequest(holder->filter_handle, submitted);
+        },
+        [holder](NDIS_OID_REQUEST *completed,
+                 NDIS_STATUS completed_status) noexcept {
+          oid_request_complete(holder, completed, completed_status);
+        });
+  }
+
+  static void oid_request_complete(
+      NDIS_HANDLE module_context,
+      NDIS_OID_REQUEST *request,
+      NDIS_STATUS status) noexcept {
+    auto *holder = static_cast<module_holder *>(module_context);
+    if (!holder || !request)
+      return;
+
+    detail::complete_oid_clone(
+        request, status,
+        [holder](NDIS_OID_REQUEST *observed,
+                 NDIS_STATUS observed_status) noexcept {
+          if constexpr (requires(
+                            Module &module,
+                            oid_request_complete_event event) {
+                          module.on_oid_request_complete(event);
+                        }) {
+            static_assert(noexcept(
+                              holder->module.on_oid_request_complete(
+                                  oid_request_complete_event(
+                                      observed, observed_status))),
+                          "Module::on_oid_request_complete must be noexcept");
+            holder->module.on_oid_request_complete(
+                oid_request_complete_event(observed, observed_status));
+          }
+        },
+        [holder](NDIS_OID_REQUEST *completed) noexcept {
+          return detail::release_oid_clone(
+              holder->filter_handle, completed);
+        },
+        [holder](NDIS_OID_REQUEST *original,
+                 NDIS_STATUS completed_status) noexcept {
+          NdisFOidRequestComplete(
+              holder->filter_handle, original, completed_status);
+        });
+  }
+
+  static void cancel_oid_request(
+      NDIS_HANDLE module_context, void *request_id) noexcept {
+    auto *holder = static_cast<module_holder *>(module_context);
+    if (!holder)
+      return;
+    detail::forward_oid_cancellation(
+        request_id,
+        [holder](void *id) noexcept {
+          if constexpr (requires(
+                            Module &module,
+                            cancel_oid_request_event event) {
+                          module.on_cancel_oid_request(event);
+                        }) {
+            static_assert(noexcept(holder->module.on_cancel_oid_request(
+                              cancel_oid_request_event(id))),
+                          "Module::on_cancel_oid_request must be noexcept");
+            holder->module.on_cancel_oid_request(
+                cancel_oid_request_event(id));
+          }
+        },
+        [holder](void *id) noexcept {
+          NdisFCancelOidRequest(holder->filter_handle, id);
+        });
+  }
+
+  static NDIS_STATUS direct_oid_request(
+      NDIS_HANDLE module_context,
+      NDIS_OID_REQUEST *request) noexcept {
+    auto *holder = static_cast<module_holder *>(module_context);
+    if (!holder || !request)
+      return NDIS_STATUS_INVALID_PARAMETER;
+
+    NDIS_OID_REQUEST *clone = nullptr;
+    NDIS_STATUS status = detail::clone_oid_request(
+        holder->filter_handle, request,
+        ntl::pool_tag("dNdN"), &clone);
+    if (status != NDIS_STATUS_SUCCESS)
+      return status;
+
+    return detail::forward_oid_clone(
+        clone,
+        [holder](NDIS_OID_REQUEST *observed) noexcept {
+          if constexpr (requires(
+                            Module &module,
+                            direct_oid_request_event event) {
+                          module.on_direct_oid_request(event);
+                        }) {
+            static_assert(noexcept(
+                              holder->module.on_direct_oid_request(
+                                  direct_oid_request_event(observed))),
+                          "Module::on_direct_oid_request must be noexcept");
+            holder->module.on_direct_oid_request(
+                direct_oid_request_event(observed));
+          }
+        },
+        [holder](NDIS_OID_REQUEST *submitted) noexcept {
+          return NdisFDirectOidRequest(
+              holder->filter_handle, submitted);
+        },
+        [holder](NDIS_OID_REQUEST *completed,
+                 NDIS_STATUS completed_status) noexcept {
+          direct_oid_request_complete(
+              holder, completed, completed_status);
+        });
+  }
+
+  static void direct_oid_request_complete(
+      NDIS_HANDLE module_context, NDIS_OID_REQUEST *request,
+      NDIS_STATUS status) noexcept {
+    auto *holder = static_cast<module_holder *>(module_context);
+    if (!holder || !request)
+      return;
+
+    detail::complete_oid_clone(
+        request, status,
+        [holder](NDIS_OID_REQUEST *observed,
+                 NDIS_STATUS observed_status) noexcept {
+          if constexpr (requires(
+                            Module &module,
+                            direct_oid_request_complete_event event) {
+                          module.on_direct_oid_request_complete(event);
+                        }) {
+            static_assert(noexcept(
+                              holder->module.on_direct_oid_request_complete(
+                                  direct_oid_request_complete_event(
+                                      observed, observed_status))),
+                          "Module::on_direct_oid_request_complete must be "
+                          "noexcept");
+            holder->module.on_direct_oid_request_complete(
+                direct_oid_request_complete_event(
+                    observed, observed_status));
+          }
+        },
+        [holder](NDIS_OID_REQUEST *completed) noexcept {
+          return detail::release_oid_clone(
+              holder->filter_handle, completed);
+        },
+        [holder](NDIS_OID_REQUEST *original,
+                 NDIS_STATUS completed_status) noexcept {
+          NdisFDirectOidRequestComplete(
+              holder->filter_handle, original, completed_status);
+        });
+  }
+
+  static void cancel_direct_oid_request(
+      NDIS_HANDLE module_context, void *request_id) noexcept {
+    auto *holder = static_cast<module_holder *>(module_context);
+    if (!holder)
+      return;
+    detail::forward_oid_cancellation(
+        request_id,
+        [holder](void *id) noexcept {
+          if constexpr (requires(
+                            Module &module,
+                            cancel_direct_oid_request_event event) {
+                          module.on_cancel_direct_oid_request(event);
+                        }) {
+            static_assert(noexcept(
+                              holder->module.on_cancel_direct_oid_request(
+                                  cancel_direct_oid_request_event(id))),
+                          "Module::on_cancel_direct_oid_request must be "
+                          "noexcept");
+            holder->module.on_cancel_direct_oid_request(
+                cancel_direct_oid_request_event(id));
+          }
+        },
+        [holder](void *id) noexcept {
+          NdisFCancelDirectOidRequest(holder->filter_handle, id);
+        });
+  }
+
+  static void status_indication(
+      NDIS_HANDLE module_context,
+      NDIS_STATUS_INDICATION *indication) noexcept {
+    auto *holder = static_cast<module_holder *>(module_context);
+    if (!holder || !indication)
+      return;
+    if constexpr (requires(
+                      Module &module, status_indication_event event) {
+                    module.on_status(event);
+                  }) {
+      static_assert(noexcept(holder->module.on_status(
+                        status_indication_event(indication))),
+                    "Module::on_status must be noexcept");
+      holder->module.on_status(status_indication_event(indication));
+    }
+    NdisFIndicateStatus(holder->filter_handle, indication);
+  }
+
+  static void device_pnp(
+      NDIS_HANDLE module_context,
+      NET_DEVICE_PNP_EVENT *event) noexcept {
+    auto *holder = static_cast<module_holder *>(module_context);
+    if (!holder || !event)
+      return;
+    if constexpr (requires(Module &module, device_pnp_event observed) {
+                    module.on_device_pnp(observed);
+                  }) {
+      static_assert(noexcept(holder->module.on_device_pnp(
+                        device_pnp_event(event))),
+                    "Module::on_device_pnp must be noexcept");
+      holder->module.on_device_pnp(device_pnp_event(event));
+    }
+    NdisFDevicePnPEventNotify(holder->filter_handle, event);
+  }
+
+  static NDIS_STATUS net_pnp(
+      NDIS_HANDLE module_context,
+      NET_PNP_EVENT_NOTIFICATION *event) noexcept {
+    auto *holder = static_cast<module_holder *>(module_context);
+    if (!holder || !event)
+      return NDIS_STATUS_INVALID_PARAMETER;
+    if constexpr (requires(Module &module, net_pnp_event observed) {
+                    module.on_net_pnp(observed);
+                  }) {
+      static_assert(noexcept(holder->module.on_net_pnp(
+                        net_pnp_event(event))),
+                    "Module::on_net_pnp must be noexcept");
+      holder->module.on_net_pnp(net_pnp_event(event));
+    }
+    return NdisFNetPnPEvent(holder->filter_handle, event);
   }
 
   NDIS_HANDLE registration_ = nullptr;

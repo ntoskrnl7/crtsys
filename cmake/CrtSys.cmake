@@ -476,15 +476,18 @@ if(CRTSYS_USE_PREBUILT)
 endif()
 
 function(crtsys_add_driver _target)
-    cmake_parse_arguments(WDK "NTL;MINIFILTER;WFP;KERNEL_MSQUIC;KERNEL_CONTENT_CODECS" "WINVER;KMDF" "" ${ARGN})
+    cmake_parse_arguments(WDK "NTL;MINIFILTER;WFP;NDIS;KERNEL_MSQUIC;KERNEL_CONTENT_CODECS" "WINVER;KMDF" "" ${ARGN})
 
     if((WDK_MINIFILTER AND WDK_KMDF) OR
        (WDK_MINIFILTER AND WDK_WFP) OR
-       (WDK_KMDF AND WDK_WFP))
-        message(FATAL_ERROR "MINIFILTER, KMDF, and WFP select different driver models and cannot be combined.")
+       (WDK_MINIFILTER AND WDK_NDIS) OR
+       (WDK_KMDF AND WDK_WFP) OR
+       (WDK_KMDF AND WDK_NDIS) OR
+       (WDK_WFP AND WDK_NDIS))
+        message(FATAL_ERROR "MINIFILTER, KMDF, WFP, and NDIS select different driver models and cannot be combined.")
     endif()
-    if(WDK_NTL AND NOT WDK_KMDF AND NOT WDK_MINIFILTER AND NOT WDK_WFP)
-        message(FATAL_ERROR "The NTL argument is valid with KMDF, MINIFILTER, or WFP. Use CRTSYS_NTL_MAIN for WDM NTL drivers.")
+    if(WDK_NTL AND NOT WDK_KMDF AND NOT WDK_MINIFILTER AND NOT WDK_WFP AND NOT WDK_NDIS)
+        message(FATAL_ERROR "The NTL argument is valid with KMDF, MINIFILTER, WFP, or NDIS. Use CRTSYS_NTL_MAIN for WDM NTL drivers.")
     endif()
 
     set(_crtsys_wdk_arguments ${WDK_UNPARSED_ARGUMENTS})
@@ -505,6 +508,9 @@ function(crtsys_add_driver _target)
         list(APPEND _crtsys_wdk_arguments WINVER "0x0A00")
     elseif(WDK_WFP)
         # ntl::wfp uses the version-2 callout contract introduced in Windows 8.
+        list(APPEND _crtsys_wdk_arguments WINVER "0x0602")
+    elseif(WDK_NDIS)
+        # ntl::ndis registers an NDIS 6.30 lightweight filter.
         list(APPEND _crtsys_wdk_arguments WINVER "0x0602")
     endif()
 
@@ -534,6 +540,16 @@ function(crtsys_add_driver _target)
         set(_crtsys_use_ntl_kmdf_main FALSE)
         set(_crtsys_use_ntl_flt_main FALSE)
     elseif(WDK_WFP)
+        set(_crtsys_entry_point CrtSysWdmDriverEntry)
+        set(_crtsys_use_ntl_main FALSE)
+        set(_crtsys_use_ntl_kmdf_main FALSE)
+        set(_crtsys_use_ntl_flt_main FALSE)
+    elseif(WDK_NDIS AND WDK_NTL)
+        set(_crtsys_entry_point CrtSysDriverEntry)
+        set(_crtsys_use_ntl_main TRUE)
+        set(_crtsys_use_ntl_kmdf_main FALSE)
+        set(_crtsys_use_ntl_flt_main FALSE)
+    elseif(WDK_NDIS)
         set(_crtsys_entry_point CrtSysWdmDriverEntry)
         set(_crtsys_use_ntl_main FALSE)
         set(_crtsys_use_ntl_kmdf_main FALSE)
@@ -613,6 +629,21 @@ function(crtsys_add_driver _target)
                 ${_crtsys_wfp_ndis_version}
                 NDIS_SUPPORT_NDIS6
                 NTDDI_VERSION=${_crtsys_wfp_ntddi}
+        )
+    elseif(WDK_NDIS)
+        if(NOT TARGET WDK::NDIS)
+            message(FATAL_ERROR "WDK::NDIS is required for NDIS lightweight-filter drivers.")
+        endif()
+        target_link_libraries(${_target} WDK::NDIS)
+        target_compile_definitions(
+            ${_target}
+            PUBLIC
+                CRTSYS_USE_NDIS
+                NDIS630
+                NDIS_SUPPORT_NDIS6
+                NDIS_WDM
+                NDISLWF
+                NTDDI_VERSION=NTDDI_WIN8
         )
     elseif(WDK_KERNEL_MSQUIC)
         target_compile_definitions(

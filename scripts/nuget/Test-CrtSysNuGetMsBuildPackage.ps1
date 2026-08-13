@@ -13,7 +13,7 @@ param(
   [ValidateSet('v142', 'v143', 'v145')]
   [string] $Toolset = 'v143',
 
-  [ValidateSet('NTL', 'WDM', 'KMDF', 'NTL_KMDF', 'NTL_FLT', 'NTL_WFP')]
+  [ValidateSet('NTL', 'WDM', 'KMDF', 'NTL_KMDF', 'NTL_FLT', 'NTL_WFP', 'NTL_NDIS')]
   [string] $DriverModel = 'NTL',
 
   [string] $WindowsSdkVersion = '10.0.22621.0',
@@ -153,6 +153,9 @@ if ($DriverModel -eq 'NTL_FLT') {
 if ($DriverModel -eq 'NTL_WFP') {
   $requiredWdkLibraries += 'fwpkclnt.lib'
 }
+if ($DriverModel -eq 'NTL_NDIS') {
+  $requiredWdkLibraries += 'ndis.lib'
+}
 foreach ($requiredLib in $requiredWdkLibraries) {
   if (-not (Test-Path (Join-Path $wdkKernelLibDirectory $requiredLib))) {
     throw "WDK kernel library directory is missing $requiredLib`: $wdkKernelLibDirectory"
@@ -250,6 +253,11 @@ $kernelMsQuicProperty = $driverModelRule.SelectSingleNode(
   "/*[local-name()='Rule']/*[local-name()='BoolProperty' and @Name='CrtSysUseNtlKernelMsQuic']")
 if (-not $kernelMsQuicProperty) {
   throw 'The package property page does not expose CrtSysUseNtlKernelMsQuic.'
+}
+$ndisEntryPoint = $driverModelRule.SelectSingleNode(
+  "/*[local-name()='Rule']/*[local-name()='EnumProperty' and @Name='CrtSysWdmEntryPoint']/*[local-name()='EnumValue' and @Name='NtlNdis']")
+if (-not $ndisEntryPoint) {
+  throw 'The package property page does not expose the NtlNdis driver model.'
 }
 if ($kernelMsQuicProperty.GetAttribute('Category') -ne 'DriverModel' -or
     $kernelMsQuicProperty.GetAttribute('Default') -ne 'false') {
@@ -372,6 +380,12 @@ foreach ($requiredPath in @(
   'include\ntl\wfp\stream',
   'include\ntl\wfp\stream_reader',
   'include\ntl\wfp\telemetry',
+  'include\ntl\ndis\all',
+  'include\ntl\ndis\lwf',
+  'include\ntl\ndis\metadata',
+  'include\ntl\ndis\nbl',
+  'include\ntl\ndis\oid',
+  'include\ntl\ndis\tcp_reassembly',
   'include\.internal\winsdk\wfp_version_compat',
   "build\native\lib\native\$Toolset\$Architecture\$Configuration\crtsys.lib",
   "build\native\lib\native\$Toolset\$Architecture\$Configuration\Ldk.lib"
@@ -428,7 +442,7 @@ $crtsysTargets = ConvertTo-XmlEscapedText (Join-Path $packageRoot 'build\native\
 $driverType = if ($isKmdf) { 'KMDF' } else { 'WDM' }
 $useNtlMain = if ($DriverModel -eq 'NTL') {
   'true'
-} elseif ($DriverModel -eq 'NTL_WFP') {
+} elseif ($DriverModel -in @('NTL_WFP', 'NTL_NDIS')) {
   ''
 } else {
   'false'
@@ -437,8 +451,11 @@ $useNtlKmdfMain = if ($DriverModel -eq 'NTL_KMDF') { 'true' } else { 'false' }
 $isMinifilter = if ($DriverModel -eq 'NTL_FLT') { 'true' } else { 'false' }
 $useNtlFltMain = $isMinifilter
 $isWfp = if ($DriverModel -eq 'NTL_WFP') { '' } else { 'false' }
+$isNdis = if ($DriverModel -eq 'NTL_NDIS') { '' } else { 'false' }
 $wdmEntryPointProperty = if ($DriverModel -eq 'NTL_WFP') {
   '    <CrtSysWdmEntryPoint>NtlWfp</CrtSysWdmEntryPoint>'
+} elseif ($DriverModel -eq 'NTL_NDIS') {
+  '    <CrtSysWdmEntryPoint>NtlNdis</CrtSysWdmEntryPoint>'
 } else {
   ''
 }
@@ -447,7 +464,13 @@ $kernelMsQuicProperty = if ($DriverModel -eq 'NTL_WFP') {
 } else {
   ''
 }
-$targetWinver = if ($DriverModel -eq 'NTL_WFP') { '0x0A00' } else { '0x0601' }
+$targetWinver = if ($DriverModel -eq 'NTL_WFP') {
+  '0x0A00'
+} elseif ($DriverModel -eq 'NTL_NDIS') {
+  '0x0602'
+} else {
+  '0x0601'
+}
 $kmdfVersionProperty = if ($isKmdf) { "    <KmdfVersion>$kmdfVersion</KmdfVersion>" } else { '' }
 $additionalDriverIncludes = if ($isKmdf) {
   (ConvertTo-XmlEscapedText $wdfIncludeDirectory) + ';'
@@ -496,6 +519,7 @@ $kmdfVersionProperty
     <CrtSysIsMinifilter>$isMinifilter</CrtSysIsMinifilter>
     <CrtSysUseNtlFltMain>$useNtlFltMain</CrtSysUseNtlFltMain>
     <CrtSysIsWfp>$isWfp</CrtSysIsWfp>
+    <CrtSysIsNdis>$isNdis</CrtSysIsNdis>
 $wdmEntryPointProperty
 $kernelMsQuicProperty
     <CrtSysExpectedLibToolset>$escapedToolset</CrtSysExpectedLibToolset>
@@ -709,6 +733,38 @@ ntl::status ntl::main(ntl::driver& driver, const std::wstring&) {
     const ntl::status result = callouts.close();
     NT_ASSERT(result.is_ok());
   });
+  return ntl::status::ok();
+}
+'@ }
+  'NTL_NDIS' { @'
+#include <memory>
+
+#include <ntl/driver>
+#include <ntl/ndis/all>
+
+namespace {
+class package_ndis_module {
+public:
+  explicit package_ndis_module(ntl::ndis::attach_event) noexcept {}
+  ntl::status on_restart(ntl::ndis::restart_event) noexcept {
+    return ntl::status::ok();
+  }
+  void on_pause(ntl::ndis::pause_event) noexcept {}
+  void on_oid_request(ntl::ndis::oid_request_event event) noexcept {
+    (void)event.request().oid();
+  }
+};
+}
+
+ntl::status ntl::main(ntl::driver& driver, const std::wstring&) {
+  auto filter = ntl::ndis::lightweight_filter<package_ndis_module>::try_create(
+      driver.native_handle(),
+      {L"crtsys package NDIS filter",
+       L"{84D813A2-3CD3-4C81-AE62-B4AD54172993}",
+       L"crtsys_package_ndis", 1, 0});
+  if (!filter)
+    return filter.status();
+  driver.on_unload([filter = *filter] { filter->reset(); });
   return ntl::status::ok();
 }
 '@ }

@@ -10,6 +10,7 @@
 
 #include "../result"
 #include <ntl/net/buffer/scatter_view>
+#include "../pool_allocator"
 #include "../status"
 #include "metadata"
 
@@ -25,6 +26,21 @@
 namespace ntl::ndis {
 
 namespace detail {
+
+inline std::size_t nbl_byte_count(
+    const NET_BUFFER_LIST *list) noexcept {
+  std::size_t total = 0;
+  if (!list)
+    return total;
+  for (auto *buffer = NET_BUFFER_LIST_FIRST_NB(list); buffer;
+       buffer = NET_BUFFER_NEXT_NB(buffer)) {
+    const std::size_t length = NET_BUFFER_DATA_LENGTH(buffer);
+    if (length > (std::numeric_limits<std::size_t>::max)() - total)
+      return 0;
+    total += length;
+  }
+  return total;
+}
 
 inline std::size_t nbl_chain_byte_count(
     const NET_BUFFER_LIST *chain) noexcept {
@@ -55,67 +71,221 @@ inline ntl::status enumerate_nbl_bytes(
 
   std::size_t skip = base_offset + offset;
   std::size_t remaining = length;
-  auto *chain = const_cast<NET_BUFFER_LIST *>(
+  auto *list = const_cast<NET_BUFFER_LIST *>(
       static_cast<const NET_BUFFER_LIST *>(source));
-  for (auto *list = chain; list && remaining != 0;
-       list = NET_BUFFER_LIST_NEXT_NBL(list)) {
-    for (auto *buffer = NET_BUFFER_LIST_FIRST_NB(list);
-         buffer && remaining != 0;
-         buffer = NET_BUFFER_NEXT_NB(buffer)) {
-      const std::size_t buffer_length =
-          NET_BUFFER_DATA_LENGTH(buffer);
-      if (skip >= buffer_length) {
-        skip -= buffer_length;
+  for (auto *buffer = list ? NET_BUFFER_LIST_FIRST_NB(list) : nullptr;
+       buffer && remaining != 0;
+       buffer = NET_BUFFER_NEXT_NB(buffer)) {
+    const std::size_t buffer_length = NET_BUFFER_DATA_LENGTH(buffer);
+    if (skip >= buffer_length) {
+      skip -= buffer_length;
+      continue;
+    }
+
+    std::size_t buffer_skip = skip;
+    skip = 0;
+    std::size_t buffer_remaining = buffer_length;
+    MDL *mdl = NET_BUFFER_CURRENT_MDL(buffer);
+    std::size_t mdl_offset = NET_BUFFER_CURRENT_MDL_OFFSET(buffer);
+    while (mdl && buffer_remaining != 0 && remaining != 0) {
+      const std::size_t mdl_length = MmGetMdlByteCount(mdl);
+      if (mdl_offset > mdl_length)
+        return STATUS_DATA_ERROR;
+      const std::size_t segment_length =
+          (std::min)(mdl_length - mdl_offset, buffer_remaining);
+      if (buffer_skip >= segment_length) {
+        buffer_skip -= segment_length;
+        buffer_remaining -= segment_length;
+        mdl = mdl->Next;
+        mdl_offset = 0;
         continue;
       }
 
-      std::size_t buffer_skip = skip;
-      skip = 0;
-      std::size_t buffer_remaining = buffer_length;
-      MDL *mdl = NET_BUFFER_CURRENT_MDL(buffer);
-      std::size_t mdl_offset =
-          NET_BUFFER_CURRENT_MDL_OFFSET(buffer);
-      while (mdl && buffer_remaining != 0 && remaining != 0) {
-        const std::size_t mdl_length = MmGetMdlByteCount(mdl);
-        if (mdl_offset > mdl_length)
-          return STATUS_DATA_ERROR;
-        const std::size_t segment_length =
-            (std::min)(mdl_length - mdl_offset, buffer_remaining);
-        if (buffer_skip >= segment_length) {
-          buffer_skip -= segment_length;
-          buffer_remaining -= segment_length;
-          mdl = mdl->Next;
-          mdl_offset = 0;
-          continue;
-        }
-
-        const std::size_t available =
-            segment_length - buffer_skip;
-        const std::size_t take =
-            (std::min)(available, remaining);
-        auto *mapped = static_cast<const std::byte *>(
-            MmGetSystemAddressForMdlSafe(
-                mdl, static_cast<MM_PAGE_PRIORITY>(
-                         NormalPagePriority |
-                         MdlMappingNoExecute)));
-        if (!mapped)
-          return STATUS_INSUFFICIENT_RESOURCES;
-        if (!visit(context,
-                   std::span<const std::byte>(
-                       mapped + mdl_offset + buffer_skip, take)))
-          return ntl::status::ok();
-        remaining -= take;
-        buffer_remaining -= segment_length;
-        buffer_skip = 0;
-        mdl = mdl->Next;
-        mdl_offset = 0;
-      }
-      if (buffer_remaining != 0 && remaining != 0)
-        return STATUS_DATA_ERROR;
+      const std::size_t available = segment_length - buffer_skip;
+      const std::size_t take = (std::min)(available, remaining);
+      auto *mapped = static_cast<const std::byte *>(
+          MmGetSystemAddressForMdlSafe(
+              mdl, static_cast<MM_PAGE_PRIORITY>(
+                       NormalPagePriority | MdlMappingNoExecute)));
+      if (!mapped)
+        return STATUS_INSUFFICIENT_RESOURCES;
+      if (!visit(context,
+                 std::span<const std::byte>(
+                     mapped + mdl_offset + buffer_skip, take)))
+        return ntl::status::ok();
+      remaining -= take;
+      buffer_remaining -= segment_length;
+      buffer_skip = 0;
+      mdl = mdl->Next;
+      mdl_offset = 0;
     }
+    if (buffer_remaining != 0 && remaining != 0)
+      return STATUS_DATA_ERROR;
   }
   return remaining == 0 ? ntl::status::ok()
                         : ntl::status{STATUS_BUFFER_TOO_SMALL};
+}
+
+struct nbl_metadata_snapshot {
+  void *checksum = nullptr;
+  void *large_send = nullptr;
+  void *receive_coalescing = nullptr;
+  void *vlan = nullptr;
+  void *hash_information = nullptr;
+  void *hash_value = nullptr;
+
+  static nbl_metadata_snapshot
+  capture(NET_BUFFER_LIST *list) noexcept {
+    if (!list)
+      return {};
+    return {
+        NET_BUFFER_LIST_INFO(
+            list, TcpIpChecksumNetBufferListInfo),
+        NET_BUFFER_LIST_INFO(
+            list, TcpLargeSendNetBufferListInfo),
+        NET_BUFFER_LIST_INFO(
+            list, TcpRecvSegCoalesceInfo),
+        NET_BUFFER_LIST_INFO(
+            list, Ieee8021QNetBufferListInfo),
+        NET_BUFFER_LIST_INFO(
+            list, NetBufferListHashInfo),
+        NET_BUFFER_LIST_INFO(
+            list, NetBufferListHashValue),
+    };
+  }
+
+  enum field : std::uint32_t {
+    checksum_field = 1u << 0,
+    large_send_field = 1u << 1,
+    receive_coalescing_field = 1u << 2,
+    vlan_field = 1u << 3,
+    receive_hash_field = 1u << 4,
+  };
+
+  enum class restore_point : std::uint8_t {
+    send_complete,
+    receive_return,
+  };
+
+  void restore(NET_BUFFER_LIST *list, std::uint32_t fields,
+               restore_point point) const noexcept {
+    if (!list)
+      return;
+    if ((fields & checksum_field) != 0)
+      NET_BUFFER_LIST_INFO(
+          list, TcpIpChecksumNetBufferListInfo) = checksum;
+    // A miniport overwrites this slot with LSO completion information. Keep
+    // that result on the send-completion path instead of restoring request
+    // fields over it.
+    if ((fields & large_send_field) != 0 &&
+        point == restore_point::receive_return)
+      NET_BUFFER_LIST_INFO(
+          list, TcpLargeSendNetBufferListInfo) = large_send;
+    if ((fields & receive_coalescing_field) != 0)
+      NET_BUFFER_LIST_INFO(
+          list, TcpRecvSegCoalesceInfo) = receive_coalescing;
+    if ((fields & vlan_field) != 0)
+      NET_BUFFER_LIST_INFO(
+          list, Ieee8021QNetBufferListInfo) = vlan;
+    if ((fields & receive_hash_field) != 0) {
+      NET_BUFFER_LIST_INFO(
+          list, NetBufferListHashInfo) = hash_information;
+      NET_BUFFER_LIST_INFO(
+          list, NetBufferListHashValue) = hash_value;
+    }
+  }
+};
+
+inline constexpr std::uint32_t nbl_metadata_context_magic =
+    0x4e646d31; // "Ndm1"
+
+struct nbl_metadata_restore_context {
+  std::uint32_t magic = nbl_metadata_context_magic;
+  std::uint32_t modified_fields = 0;
+  nbl_metadata_snapshot snapshot;
+};
+
+static_assert(sizeof(nbl_metadata_restore_context) <=
+              (std::numeric_limits<USHORT>::max)());
+
+inline nbl_metadata_restore_context *
+metadata_restore_context(NET_BUFFER_LIST *list) noexcept {
+  if (!list || !list->Context ||
+      NET_BUFFER_LIST_CONTEXT_DATA_SIZE(list) <
+          sizeof(nbl_metadata_restore_context))
+    return nullptr;
+  auto *context = reinterpret_cast<nbl_metadata_restore_context *>(
+      NET_BUFFER_LIST_CONTEXT_DATA_START(list));
+  return context->magic == nbl_metadata_context_magic
+             ? context
+             : nullptr;
+}
+
+inline ntl::status preserve_metadata_chain(
+    NET_BUFFER_LIST *chain, ULONG pool_tag) noexcept {
+  if (!chain)
+    return STATUS_INVALID_PARAMETER;
+
+  bool any_preserved = false;
+  bool all_preserved = true;
+  for (auto *list = chain; list;
+       list = NET_BUFFER_LIST_NEXT_NBL(list)) {
+    const bool preserved = metadata_restore_context(list) != nullptr;
+    any_preserved = any_preserved || preserved;
+    all_preserved = all_preserved && preserved;
+  }
+  if (any_preserved)
+    return all_preserved ? ntl::status::ok()
+                         : ntl::status{STATUS_INVALID_DEVICE_STATE};
+
+  for (auto *list = chain; list;
+       list = NET_BUFFER_LIST_NEXT_NBL(list)) {
+    const NDIS_STATUS status = NdisAllocateNetBufferListContext(
+        list,
+        static_cast<USHORT>(sizeof(nbl_metadata_restore_context)),
+        0, pool_tag);
+    if (status != NDIS_STATUS_SUCCESS) {
+      for (auto *rollback = chain; rollback != list;
+           rollback = NET_BUFFER_LIST_NEXT_NBL(rollback)) {
+        auto *context = metadata_restore_context(rollback);
+        if (!context)
+          continue;
+        context->magic = 0;
+        NdisFreeNetBufferListContext(
+            rollback,
+            static_cast<USHORT>(
+                sizeof(nbl_metadata_restore_context)));
+      }
+      return static_cast<NTSTATUS>(status);
+    }
+
+    auto *context = reinterpret_cast<nbl_metadata_restore_context *>(
+        NET_BUFFER_LIST_CONTEXT_DATA_START(list));
+    context->magic = nbl_metadata_context_magic;
+    context->modified_fields = 0;
+    context->snapshot = nbl_metadata_snapshot::capture(list);
+  }
+  return ntl::status::ok();
+}
+
+inline std::size_t restore_metadata_chain(
+    NET_BUFFER_LIST *chain,
+    nbl_metadata_snapshot::restore_point point) noexcept {
+  std::size_t restored = 0;
+  for (auto *list = chain; list;
+       list = NET_BUFFER_LIST_NEXT_NBL(list)) {
+    auto *context = metadata_restore_context(list);
+    if (!context)
+      continue;
+    context->snapshot.restore(
+        list, context->modified_fields, point);
+    context->magic = 0;
+    NdisFreeNetBufferListContext(
+        list,
+        static_cast<USHORT>(sizeof(nbl_metadata_restore_context)));
+    ++restored;
+  }
+  return restored;
 }
 
 } // namespace detail
@@ -126,7 +296,7 @@ public:
   NET_BUFFER_LIST *native_handle() const noexcept { return list_; }
 
   std::size_t byte_count() const noexcept {
-    return detail::nbl_chain_byte_count(list_);
+    return detail::nbl_byte_count(list_);
   }
 
   ntl::net::scatter_view bytes() const noexcept {
@@ -177,6 +347,7 @@ public:
 
 private:
   friend class net_buffer_list_chain_view;
+  friend class mutable_net_buffer_list_view;
   friend class cloned_net_buffer_list;
   explicit net_buffer_list_view(NET_BUFFER_LIST *list) noexcept
       : list_(list) {}
@@ -216,6 +387,149 @@ public:
   }
 
 private:
+  NET_BUFFER_LIST *chain_ = nullptr;
+};
+
+class mutable_net_buffer_list_view {
+public:
+  explicit operator bool() const noexcept { return list_ != nullptr; }
+  NET_BUFFER_LIST *native_handle() const noexcept { return list_; }
+
+  net_buffer_list_view view() const noexcept {
+    return net_buffer_list_view(list_);
+  }
+
+  void set_checksum(
+      NDIS_TCP_IP_CHECKSUM_NET_BUFFER_LIST_INFO value) noexcept {
+    set_field(TcpIpChecksumNetBufferListInfo, value.Value,
+              detail::nbl_metadata_snapshot::checksum_field);
+  }
+  void clear_checksum() noexcept {
+    set_field(TcpIpChecksumNetBufferListInfo, nullptr,
+              detail::nbl_metadata_snapshot::checksum_field);
+  }
+
+  void set_large_send(
+      NDIS_TCP_LARGE_SEND_OFFLOAD_NET_BUFFER_LIST_INFO value) noexcept {
+    set_field(TcpLargeSendNetBufferListInfo, value.Value,
+              detail::nbl_metadata_snapshot::large_send_field);
+  }
+  void clear_large_send() noexcept {
+    set_field(TcpLargeSendNetBufferListInfo, nullptr,
+              detail::nbl_metadata_snapshot::large_send_field);
+  }
+
+  void set_receive_segment_coalescing(
+      NDIS_RSC_NBL_INFO value) noexcept {
+    set_field(TcpRecvSegCoalesceInfo, value.Value,
+              detail::nbl_metadata_snapshot::receive_coalescing_field);
+  }
+  void clear_receive_segment_coalescing() noexcept {
+    set_field(TcpRecvSegCoalesceInfo, nullptr,
+              detail::nbl_metadata_snapshot::receive_coalescing_field);
+  }
+
+  void set_vlan(NDIS_NET_BUFFER_LIST_8021Q_INFO value) noexcept {
+    set_field(Ieee8021QNetBufferListInfo, value.Value,
+              detail::nbl_metadata_snapshot::vlan_field);
+  }
+  void clear_vlan() noexcept {
+    set_field(Ieee8021QNetBufferListInfo, nullptr,
+              detail::nbl_metadata_snapshot::vlan_field);
+  }
+
+  void set_receive_hash(receive_hash_metadata value) noexcept {
+    if (!list_)
+      return;
+    const auto old_information =
+        NET_BUFFER_LIST_INFO(list_, NetBufferListHashInfo);
+    const auto old_value =
+        NET_BUFFER_LIST_INFO(list_, NetBufferListHashValue);
+    NET_BUFFER_LIST_SET_HASH_VALUE(list_, value.value);
+    NET_BUFFER_LIST_SET_HASH_TYPE(list_, value.type);
+    NET_BUFFER_LIST_SET_HASH_FUNCTION(list_, value.function);
+    if (old_information !=
+            NET_BUFFER_LIST_INFO(list_, NetBufferListHashInfo) ||
+        old_value !=
+            NET_BUFFER_LIST_INFO(list_, NetBufferListHashValue))
+      mark_modified(
+          detail::nbl_metadata_snapshot::receive_hash_field);
+  }
+  void clear_receive_hash() noexcept {
+    if (!list_)
+      return;
+    if (NET_BUFFER_LIST_INFO(list_, NetBufferListHashInfo) == nullptr &&
+        NET_BUFFER_LIST_INFO(list_, NetBufferListHashValue) == nullptr)
+      return;
+    mark_modified(detail::nbl_metadata_snapshot::receive_hash_field);
+    NET_BUFFER_LIST_INFO(list_, NetBufferListHashInfo) = nullptr;
+    NET_BUFFER_LIST_INFO(list_, NetBufferListHashValue) = nullptr;
+  }
+
+private:
+  friend class preserved_metadata_chain_view;
+  explicit mutable_net_buffer_list_view(
+      NET_BUFFER_LIST *list,
+      detail::nbl_metadata_restore_context *context = nullptr) noexcept
+      : list_(list), context_(context) {}
+
+  void mark_modified(std::uint32_t field) noexcept {
+    if (context_)
+      context_->modified_fields |= field;
+  }
+
+  void set_field(NDIS_NET_BUFFER_LIST_INFO field, void *value,
+                 std::uint32_t modified_field) noexcept {
+    if (!list_ || NET_BUFFER_LIST_INFO(list_, field) == value)
+      return;
+    mark_modified(modified_field);
+    NET_BUFFER_LIST_INFO(list_, field) = value;
+  }
+
+  NET_BUFFER_LIST *list_ = nullptr;
+  detail::nbl_metadata_restore_context *context_ = nullptr;
+};
+
+/**
+ * @brief Callback-scoped mutable NBL metadata after restoration was armed.
+ *
+ * The LWF adapter restores only fields changed through this view before
+ * completing a send or returning a receive. The LSO slot is completion output
+ * on the send path, so its lower-driver result is deliberately retained. The
+ * view must not outlive the callback that created it.
+ */
+class preserved_metadata_chain_view {
+public:
+  static ntl::result<preserved_metadata_chain_view>
+  try_create(NET_BUFFER_LIST *chain,
+             ULONG pool_tag = ntl::pool_tag("mNdN")) noexcept {
+    const ntl::status status =
+        detail::preserve_metadata_chain(chain, pool_tag);
+    if (!status.is_ok())
+      return ntl::unexpected(status);
+    return ntl::ok(preserved_metadata_chain_view(chain));
+  }
+
+  explicit operator bool() const noexcept { return chain_ != nullptr; }
+  std::size_t list_count() const noexcept {
+    return net_buffer_list_chain_view(chain_).list_count();
+  }
+
+  template <class Visit>
+  ntl::status for_each(Visit &&visit) const
+      noexcept(noexcept(visit(mutable_net_buffer_list_view(nullptr)))) {
+    for (auto *list = chain_; list;
+         list = NET_BUFFER_LIST_NEXT_NBL(list)) {
+      if (!visit(mutable_net_buffer_list_view(
+              list, detail::metadata_restore_context(list))))
+        break;
+    }
+    return ntl::status::ok();
+  }
+
+private:
+  explicit preserved_metadata_chain_view(
+      NET_BUFFER_LIST *chain) noexcept : chain_(chain) {}
   NET_BUFFER_LIST *chain_ = nullptr;
 };
 

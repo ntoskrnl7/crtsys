@@ -226,6 +226,26 @@ jobs:
             -Configuration '${{ matrix.config }}' `
             -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}'
 
+      - name: Build NDIS compile contracts
+        if: matrix.project == 'driver' && matrix.config == 'Debug'
+        shell: pwsh
+        run: |
+          ./scripts/ci/Build-CrtSys.ps1 `
+            -Project ndis-compile `
+            -Architecture '${{ matrix.arch }}' `
+            -Configuration Debug `
+            -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}'
+
+      - name: Build x64 NDIS LWF reference pair
+        if: matrix.project == 'driver' && matrix.arch == 'x64' && matrix.config == 'Debug'
+        shell: pwsh
+        run: |
+          ./scripts/ci/Build-CrtSys.ps1 `
+            -Project ndis-lwf-monitor `
+            -Architecture x64 `
+            -Configuration Debug `
+            -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}'
+
       - name: Build grouped KMDF examples
         if: matrix.project == 'driver' && matrix.config == 'Debug' && (matrix.arch == 'x86' || matrix.arch == 'x64')
         shell: pwsh
@@ -497,6 +517,17 @@ jobs:
               -PlatformToolset v142
           }
 
+      - name: Build v142 NDIS contracts
+        if: matrix.project == 'driver' && matrix.arch == 'x64' && matrix.config == 'Debug'
+        shell: pwsh
+        run: |
+          ./scripts/ci/Build-CrtSys.ps1 `
+            -Project ndis-compile `
+            -Architecture x64 `
+            -Configuration Debug `
+            -WindowsSdkVersion '${{ env.CRTSYS_WINDOWS_SDK_VERSION }}' `
+            -PlatformToolset v142
+
   build-vs2026:
     name: VS2026/v145 ${{ matrix.project }} ${{ matrix.arch }} ${{ matrix.config }}
     runs-on: windows-2025-vs2026
@@ -713,6 +744,21 @@ jobs:
               $crossParameters.WdkVersion = $wdkVersion
             }
             ./scripts/ci/Build-CrtSys.ps1 @crossParameters
+          }
+
+      - name: Build v145 NDIS contracts and x64 reference pair
+        if: matrix.project == 'driver' && matrix.config == 'Debug' && (matrix.arch == 'x64' || matrix.arch == 'ARM64')
+        shell: pwsh
+        run: |
+          $parameters = @{
+            Architecture = '${{ matrix.arch }}'
+            Configuration = 'Debug'
+            WindowsSdkVersion = '${{ env.CRTSYS_VS2026_WINDOWS_SDK_VERSION }}'
+            PlatformToolset = 'v145'
+          }
+          ./scripts/ci/Build-CrtSys.ps1 @parameters -Project ndis-compile
+          if ('${{ matrix.arch }}' -eq 'x64') {
+            ./scripts/ci/Build-CrtSys.ps1 @parameters -Project ndis-lwf-monitor
           }
 
       - name: Build v145 WFP and NTL network Release fixtures

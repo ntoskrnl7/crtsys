@@ -206,6 +206,22 @@ crtsys_add_driver(my_wfp_callout WFP NTL src/main.cpp)
 [사용자 모드 TLS 스트림 가이드](./docs/ntl/tls-stream.ko-KR.md),
 [WDK 예제 지원 범위](./test/wfp/WDK-SAMPLE-COVERAGE.ko-KR.md)를 참조하세요.
 
+NDIS lightweight filter 드라이버에는 별도의 일급 모델이 있습니다. Visual
+Studio/NuGet 프로젝트에서는 **NTL NDIS LWF**를 선택하거나
+`<CrtSysWdmEntryPoint>NtlNdis</CrtSysWdmEntryPoint>`를 설정합니다. 패키지는
+NDIS 6.30 계약을 선택하고 `NDIS_WDM`/`NDISLWF`를 정의하며 `ndis.lib`와
+`ntl::main` 진입점 래퍼를 연결합니다. CMake에서는 다음을 사용합니다.
+
+```cmake
+crtsys_add_driver(my_lwf NDIS NTL src/main.cpp)
+```
+
+`ntl::ndis::lightweight_filter<Module>` 어댑터가 pass-through 전달, 완료,
+receive 반환, regular/direct OID clone/완료/취소, status/PnP 전달 및 metadata
+복구를 책임집니다. 자세한 내용은
+[NDIS 예제](./examples/ndis)와
+[일회용 VM acceptance gate](./test/ndis/runtime)를 참조하세요.
+
 ## 런타임 스택
 
 ```mermaid

@@ -1,6 +1,6 @@
 /**
  * @file ndis/metadata
- * @brief Read-only, typed NDIS NET_BUFFER_LIST offload metadata.
+ * @brief Typed NDIS NET_BUFFER_LIST offload metadata values.
  */
 #pragma once
 
@@ -51,6 +51,11 @@ public:
     return decoded().Receive.IpChecksumFailed != 0;
   }
 
+  NDIS_TCP_IP_CHECKSUM_NET_BUFFER_LIST_INFO
+  native_value() const noexcept {
+    return decoded();
+  }
+
 private:
   friend class net_buffer_list_view;
   explicit checksum_metadata(void *value) noexcept
@@ -87,6 +92,11 @@ public:
                    : decoded().LsoV1Transmit.TcpHeaderOffset);
   }
 
+  NDIS_TCP_LARGE_SEND_OFFLOAD_NET_BUFFER_LIST_INFO
+  native_value() const noexcept {
+    return decoded();
+  }
+
 private:
   friend class net_buffer_list_view;
   explicit large_send_metadata(void *value) noexcept
@@ -110,6 +120,10 @@ public:
   }
   std::uint16_t duplicate_ack_count() const noexcept {
     return decoded().Info.DupAckCount;
+  }
+
+  NDIS_RSC_NBL_INFO native_value() const noexcept {
+    return decoded();
   }
 
 private:
@@ -138,6 +152,10 @@ public:
   }
   bool canonical_format() const noexcept {
     return decoded().TagHeader.CanonicalFormatId != 0;
+  }
+
+  NDIS_NET_BUFFER_LIST_8021Q_INFO native_value() const noexcept {
+    return decoded();
   }
 
 private:

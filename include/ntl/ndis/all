@@ -7,4 +7,5 @@
 #include "lwf"
 #include "metadata"
 #include "nbl"
+#include "oid"
 #include "tcp_reassembly"

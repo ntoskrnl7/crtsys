@@ -68,12 +68,13 @@ Install-Package crtsys
 | KMDF | **NTL KMDF** | `ntl::kmdf::main` | NTL KMDF 진입점 래퍼 사용. PnP, 전원 및 디스패치는 계속 WDF가 담당 |
 | 미니필터 | **NTL Minifilter** | `ntl::flt::main` | Filter Manager 진입점 래퍼 사용 및 `fltmgr.lib` 링크 |
 | WFP 콜아웃 | **NTL WFP** | `ntl::main` | WFP/NDIS 대상 정의 적용, `fwpkclnt.lib` 및 커널 콘텐츠 코덱 링크 |
+| NDIS lightweight filter | **NTL NDIS LWF** | `ntl::main` | NDIS 6.30 LWF 정의 적용 및 `ndis.lib` 링크 |
 
-프로젝트의 기존 `DriverEntry`, `WdfDriverCreate`, 미니필터 또는 WFP 진입
+프로젝트의 기존 `DriverEntry`, `WdfDriverCreate`, 미니필터, WFP 또는 NDIS 진입
 경로를 유지하려면 **No NTL entry point**를 선택합니다. 모델별 API와 완전한
 예제는 [KMDF 가이드](../docs/ntl/kmdf.ko-KR.md),
 [미니필터 가이드](../docs/ntl/minifilter.ko-KR.md),
-[WFP 가이드](../docs/ntl/wfp-guide.ko-KR.md) 및
+[WFP 가이드](../docs/ntl/wfp-guide.ko-KR.md), [NDIS 예제](../examples/ndis) 및
 [예제 모음](../examples)을 참조하세요.
 
 이 NuGet 패키지는 다음 용도에 적합합니다.

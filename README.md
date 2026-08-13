@@ -201,6 +201,22 @@ its [Korean walkthrough](./examples/wfp/kernel/ale-connect-block/README.ko-KR.md
 [user-mode TLS stream guide](./docs/ntl/tls-stream.md), and the
 [WDK sample coverage map](./test/wfp/WDK-SAMPLE-COVERAGE.md).
 
+NDIS lightweight-filter drivers have a separate first-class model. Visual
+Studio/NuGet projects select **NTL NDIS LWF**, or set
+`<CrtSysWdmEntryPoint>NtlNdis</CrtSysWdmEntryPoint>`. The package selects the
+NDIS 6.30 contract, defines `NDIS_WDM`/`NDISLWF`, links `ndis.lib`, and uses
+the `ntl::main` entry wrapper. CMake consumers use:
+
+```cmake
+crtsys_add_driver(my_lwf NDIS NTL src/main.cpp)
+```
+
+`ntl::ndis::lightweight_filter<Module>` keeps pass-through forwarding,
+completion, receive return, regular/direct OID clone/completion/cancel,
+status/PnP propagation, and metadata restoration in the adapter. See the
+[NDIS examples](./examples/ndis) and the
+[disposable-VM acceptance gate](./test/ndis/runtime).
+
 ## Runtime Stack
 
 ```mermaid

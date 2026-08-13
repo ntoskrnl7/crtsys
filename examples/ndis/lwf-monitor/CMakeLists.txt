@@ -4,21 +4,12 @@ project(crtsys_ndis_lwf_monitor LANGUAGES C CXX)
 
 include("${CMAKE_CURRENT_LIST_DIR}/../../../cmake/CPM.cmake")
 
-set(CRTSYS_NTL_MAIN ON)
+set(CRTSYS_NTL_MAIN OFF)
 CPMAddPackage(NAME crtsys SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../../..")
 include("${crtsys_SOURCE_DIR}/cmake/CrtSys.cmake")
 
-crtsys_add_driver(crtsys_ndis_lwf_monitor
+crtsys_add_driver(crtsys_ndis_lwf_monitor NDIS NTL
   driver/main.cpp
-)
-target_link_libraries(crtsys_ndis_lwf_monitor
-  WDK::NDIS
-)
-target_compile_definitions(crtsys_ndis_lwf_monitor
-  PRIVATE
-    NDIS630=1
-    NDIS_WDM=1
-    NDISLWF=1
 )
 target_include_directories(crtsys_ndis_lwf_monitor
   PRIVATE "${CMAKE_CURRENT_LIST_DIR}/shared"
@@ -33,7 +24,7 @@ target_include_directories(crtsys_ndis_lwf_monitor_app
     "${CMAKE_CURRENT_LIST_DIR}/shared"
 )
 target_link_libraries(crtsys_ndis_lwf_monitor_app
-  PRIVATE ws2_32
+  PRIVATE iphlpapi ws2_32
 )
 
 foreach(target

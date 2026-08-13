@@ -37,6 +37,18 @@ struct monitor_stats {
   std::uint64_t receive_coalescing_metadata;
   std::uint64_t vlan_metadata;
   std::uint64_t receive_hash_metadata;
+  std::uint64_t metadata_preserved;
+  std::uint64_t metadata_restored;
+  std::uint64_t oid_requests;
+  std::uint64_t oid_completions;
+  std::uint64_t oid_cancellations;
+  std::uint64_t direct_oid_requests;
+  std::uint64_t direct_oid_completions;
+  std::uint64_t direct_oid_cancellations;
+  std::uint64_t status_indications;
+  std::uint64_t device_pnp_events;
+  std::uint64_t net_pnp_events;
+  std::uint64_t immediate_receive_returns;
 };
 
 struct query_stats_contract {
