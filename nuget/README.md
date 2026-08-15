@@ -69,12 +69,13 @@ Model**:
 | KMDF | **NTL KMDF** | `ntl::kmdf::main` | Uses the NTL KMDF entry wrapper while WDF retains PnP, power, and dispatch ownership |
 | Minifilter | **NTL Minifilter** | `ntl::flt::main` | Uses the Filter Manager entry wrapper and links `fltmgr.lib` |
 | WFP callout | **NTL WFP** | `ntl::main` | Applies the WFP/NDIS target definitions and links `fwpkclnt.lib` and the kernel content codecs |
+| NDIS lightweight filter | **NTL NDIS LWF** | `ntl::main` | Applies the NDIS 6.30 LWF definitions and links `ndis.lib` |
 
 Select **No NTL entry point** to keep the project's existing `DriverEntry`,
-`WdfDriverCreate`, minifilter, or WFP entry path. For model-specific APIs and
+`WdfDriverCreate`, minifilter, WFP, or NDIS entry path. For model-specific APIs and
 complete examples, see the [KMDF guide](../docs/ntl/kmdf.md),
 [minifilter guide](../docs/ntl/minifilter.md),
-[WFP guide](../docs/ntl/wfp-guide.md), and the
+[WFP guide](../docs/ntl/wfp-guide.md), [NDIS examples](../examples/ndis), and the
 [example catalog](../examples).
 
 What this NuGet package is for:

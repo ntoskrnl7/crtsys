@@ -58,6 +58,8 @@
     <CrtSysWdmEntryPoint
       Condition="'$(CrtSysWdmEntryPoint)' == '' and '$(CrtSysIsKmdf)' != 'true' and '$(CrtSysIsExportDriver)' != 'true' and '$(CrtSysIsWfp)' == 'true'">NtlWfp</CrtSysWdmEntryPoint>
     <CrtSysWdmEntryPoint
+      Condition="'$(CrtSysWdmEntryPoint)' == '' and '$(CrtSysIsKmdf)' != 'true' and '$(CrtSysIsExportDriver)' != 'true' and '$(CrtSysIsNdis)' == 'true'">NtlNdis</CrtSysWdmEntryPoint>
+    <CrtSysWdmEntryPoint
       Condition="'$(CrtSysWdmEntryPoint)' == '' and '$(CrtSysIsKmdf)' != 'true' and '$(CrtSysIsExportDriver)' != 'true' and '$(CrtSysUseNtlMain)' == 'false'">Default</CrtSysWdmEntryPoint>
     <CrtSysWdmEntryPoint
       Condition="'$(CrtSysWdmEntryPoint)' == '' and '$(CrtSysIsKmdf)' != 'true' and '$(CrtSysIsExportDriver)' != 'true' and '$(CrtSysUseNtlMain)' != 'false'">NtlWdm</CrtSysWdmEntryPoint>
@@ -74,14 +76,17 @@
     <CrtSysEffectiveDriverModel Condition="'$(CrtSysIsExportDriver)' == 'true'">Default</CrtSysEffectiveDriverModel>
     <CrtSysUseNtlMain Condition="'$(CrtSysEffectiveDriverModel)' == 'NtlWdm'">true</CrtSysUseNtlMain>
     <CrtSysUseNtlMain Condition="'$(CrtSysEffectiveDriverModel)' == 'NtlWfp'">true</CrtSysUseNtlMain>
+    <CrtSysUseNtlMain Condition="'$(CrtSysEffectiveDriverModel)' == 'NtlNdis'">true</CrtSysUseNtlMain>
     <CrtSysUseNtlMain Condition="'$(CrtSysEffectiveDriverModel)' == 'Default'">false</CrtSysUseNtlMain>
     <CrtSysIsMinifilter Condition="'$(CrtSysEffectiveDriverModel)' == 'NtlMinifilter'">true</CrtSysIsMinifilter>
     <CrtSysIsWfp Condition="'$(CrtSysEffectiveDriverModel)' == 'NtlWfp'">true</CrtSysIsWfp>
+    <CrtSysIsNdis Condition="'$(CrtSysEffectiveDriverModel)' == 'NtlNdis'">true</CrtSysIsNdis>
     <CrtSysUseNtlFltMain Condition="'$(CrtSysEffectiveDriverModel)' == 'NtlMinifilter'">true</CrtSysUseNtlFltMain>
     <CrtSysUseNtlKmdfMain Condition="'$(CrtSysEffectiveDriverModel)' == 'NtlKmdf'">true</CrtSysUseNtlKmdfMain>
     <CrtSysIsMinifilter Condition="'$(CrtSysIsMinifilter)' == '' and '$(CrtSysUseNtlFltMain)' == 'true'">true</CrtSysIsMinifilter>
     <CrtSysIsMinifilter Condition="'$(CrtSysIsMinifilter)' == ''">false</CrtSysIsMinifilter>
     <CrtSysIsWfp Condition="'$(CrtSysIsWfp)' == ''">false</CrtSysIsWfp>
+    <CrtSysIsNdis Condition="'$(CrtSysIsNdis)' == ''">false</CrtSysIsNdis>
     <CrtSysUseNtlKernelContentCodecs Condition="'$(CrtSysUseNtlKernelContentCodecs)' == '' and '$(CrtSysIsWfp)' == 'true'">true</CrtSysUseNtlKernelContentCodecs>
     <CrtSysUseNtlKernelContentCodecs Condition="'$(CrtSysUseNtlKernelContentCodecs)' == ''">false</CrtSysUseNtlKernelContentCodecs>
     <CrtSysUseNtlMain Condition="'$(CrtSysUseNtlMain)' == '' and ('$(CrtSysIsKmdf)' == 'true' or '$(CrtSysIsMinifilter)' == 'true' or '$(CrtSysIsExportDriver)' == 'true')">false</CrtSysUseNtlMain>
@@ -90,6 +95,7 @@
     <CrtSysWfpNdisVersion Condition="'$(CrtSysWfpNdisVersion)' == ''">NDIS60</CrtSysWfpNdisVersion>
     <CrtSysWfpNtddiVersion Condition="'$(CrtSysWfpNtddiVersion)' == '' and '$(CrtSysUseNtlKernelMsQuic)' == 'true'">NTDDI_WIN10_VB</CrtSysWfpNtddiVersion>
     <CrtSysWfpNtddiVersion Condition="'$(CrtSysWfpNtddiVersion)' == ''">NTDDI_WIN8</CrtSysWfpNtddiVersion>
+    <CrtSysNdisVersion Condition="'$(CrtSysNdisVersion)' == ''">NDIS630</CrtSysNdisVersion>
     <CrtSysUseLibcntpr Condition="'$(CrtSysUseLibcntpr)' == ''">true</CrtSysUseLibcntpr>
     <CrtSysDriverPreprocessorDefinitions Condition="'$(CrtSysDriverPreprocessorDefinitions)' == ''">_KERNEL32_;_ITERATOR_DEBUG_LEVEL=0;_HAS_EXCEPTIONS</CrtSysDriverPreprocessorDefinitions>
     <CrtSysDriverPreprocessorDefinitions Condition="'$(CrtSysUseLibcntpr)' == 'true'">$(CrtSysDriverPreprocessorDefinitions);CRTSYS_USE_LIBCNTPR</CrtSysDriverPreprocessorDefinitions>
@@ -99,12 +105,14 @@
     <CrtSysDriverPreprocessorDefinitions Condition="'$(CrtSysIsKmdf)' == 'true'">$(CrtSysDriverPreprocessorDefinitions);CRTSYS_USE_KMDF</CrtSysDriverPreprocessorDefinitions>
     <CrtSysDriverPreprocessorDefinitions Condition="'$(CrtSysIsMinifilter)' == 'true'">$(CrtSysDriverPreprocessorDefinitions);CRTSYS_USE_MINIFILTER</CrtSysDriverPreprocessorDefinitions>
     <CrtSysDriverPreprocessorDefinitions Condition="'$(CrtSysIsWfp)' == 'true'">$(CrtSysDriverPreprocessorDefinitions);CRTSYS_USE_WFP;$(CrtSysWfpNdisVersion);NDIS_SUPPORT_NDIS6;NTDDI_VERSION=$(CrtSysWfpNtddiVersion)</CrtSysDriverPreprocessorDefinitions>
+    <CrtSysDriverPreprocessorDefinitions Condition="'$(CrtSysIsNdis)' == 'true'">$(CrtSysDriverPreprocessorDefinitions);CRTSYS_USE_NDIS;$(CrtSysNdisVersion);NDIS_SUPPORT_NDIS6;NDIS_WDM;NDISLWF;NTDDI_VERSION=NTDDI_WIN8</CrtSysDriverPreprocessorDefinitions>
     <CrtSysDriverPreprocessorDefinitions Condition="'$(CrtSysIsWfp)' != 'true' and '$(CrtSysUseNtlKernelMsQuic)' == 'true'">$(CrtSysDriverPreprocessorDefinitions);NTDDI_VERSION=NTDDI_WIN10_VB</CrtSysDriverPreprocessorDefinitions>
     <CrtSysDriverPreprocessorDefinitions Condition="'$(CrtSysUseNtlKernelContentCodecs)' == 'true'">$(CrtSysDriverPreprocessorDefinitions);Z_SOLO</CrtSysDriverPreprocessorDefinitions>
     <CrtSysDriverLibraries>crtsys.lib;Ldk.lib;cng.lib;aux_klib.lib;wdmsec.lib;netio.lib;uuid.lib</CrtSysDriverLibraries>
     <CrtSysDriverLibraries Condition="'$(CrtSysUseLibcntpr)' == 'true'">$(CrtSysDriverLibraries);libcntpr.lib</CrtSysDriverLibraries>
     <CrtSysDriverLibraries Condition="'$(CrtSysIsMinifilter)' == 'true'">$(CrtSysDriverLibraries);fltmgr.lib</CrtSysDriverLibraries>
     <CrtSysDriverLibraries Condition="'$(CrtSysIsWfp)' == 'true'">$(CrtSysDriverLibraries);fwpkclnt.lib</CrtSysDriverLibraries>
+    <CrtSysDriverLibraries Condition="'$(CrtSysIsNdis)' == 'true'">$(CrtSysDriverLibraries);ndis.lib</CrtSysDriverLibraries>
     <DisableKernelFlag Condition="'$(CrtSysUseDriverSupport)' == 'true'">true</DisableKernelFlag>
     <Inf2CatUseLocalTime Condition="'$(CrtSysUseDriverSupport)' == 'true' and '$(Inf2CatUseLocalTime)' == ''">true</Inf2CatUseLocalTime>
   </PropertyGroup>
@@ -124,8 +132,8 @@
       Condition="'$(CrtSysUseDriverSupport)' == 'true' and '$(CrtSysUseNtlKmdfMain)' == 'true' and '$(CrtSysIsKmdf)' != 'true'"
       Text="CrtSysUseNtlKmdfMain requires a KMDF driver project." />
     <Error
-      Condition="'$(CrtSysUseDriverSupport)' == 'true' and '$(CrtSysIsExportDriver)' == 'true' and ('$(CrtSysUseNtlMain)' == 'true' or '$(CrtSysUseNtlKmdfMain)' == 'true' or '$(CrtSysUseNtlFltMain)' == 'true' or '$(CrtSysIsWfp)' == 'true')"
-      Text="Export driver projects cannot use an NTL WDM, KMDF, minifilter, or WFP entry point. Use the export driver's DllInitialize/DllUnload model." />
+      Condition="'$(CrtSysUseDriverSupport)' == 'true' and '$(CrtSysIsExportDriver)' == 'true' and ('$(CrtSysUseNtlMain)' == 'true' or '$(CrtSysUseNtlKmdfMain)' == 'true' or '$(CrtSysUseNtlFltMain)' == 'true' or '$(CrtSysIsWfp)' == 'true' or '$(CrtSysIsNdis)' == 'true')"
+      Text="Export driver projects cannot use an NTL WDM, KMDF, minifilter, WFP, or NDIS entry point. Use the export driver's DllInitialize/DllUnload model." />
     <Error
       Condition="'$(CrtSysUseDriverSupport)' == 'true' and '$(CrtSysIsKmdf)' == 'true' and '$(CrtSysIsMinifilter)' == 'true'"
       Text="A driver cannot select both KMDF and minifilter entry models." />
@@ -139,11 +147,17 @@
       Condition="'$(CrtSysUseDriverSupport)' == 'true' and '$(CrtSysUseNtlFltMain)' == 'true' and ('$(CrtSysUseNtlKmdfMain)' == 'true' or '$(CrtSysUseNtlMain)' == 'true')"
       Text="CrtSysUseNtlFltMain cannot be combined with another crtsys entry model." />
     <Error
-      Condition="'$(CrtSysUseDriverSupport)' == 'true' and '$(CrtSysIsWfp)' == 'true' and ('$(CrtSysIsKmdf)' == 'true' or '$(CrtSysIsMinifilter)' == 'true' or '$(CrtSysIsExportDriver)' == 'true')"
-      Text="The NTL WFP callout model cannot be combined with KMDF, minifilter, or ExportDriver." />
+      Condition="'$(CrtSysUseDriverSupport)' == 'true' and '$(CrtSysIsWfp)' == 'true' and ('$(CrtSysIsKmdf)' == 'true' or '$(CrtSysIsMinifilter)' == 'true' or '$(CrtSysIsExportDriver)' == 'true' or '$(CrtSysIsNdis)' == 'true')"
+      Text="The NTL WFP callout model cannot be combined with KMDF, minifilter, ExportDriver, or NDIS." />
     <Error
       Condition="'$(CrtSysUseDriverSupport)' == 'true' and '$(CrtSysIsWfp)' == 'true' and '$(CrtSysUseNtlMain)' != 'true'"
       Text="The NTL WFP callout model requires the ntl::main entry point." />
+    <Error
+      Condition="'$(CrtSysUseDriverSupport)' == 'true' and '$(CrtSysIsNdis)' == 'true' and ('$(CrtSysIsKmdf)' == 'true' or '$(CrtSysIsMinifilter)' == 'true' or '$(CrtSysIsExportDriver)' == 'true' or '$(CrtSysIsWfp)' == 'true')"
+      Text="The NTL NDIS lightweight-filter model cannot be combined with KMDF, minifilter, ExportDriver, or WFP." />
+    <Error
+      Condition="'$(CrtSysUseDriverSupport)' == 'true' and '$(CrtSysIsNdis)' == 'true' and '$(CrtSysUseNtlMain)' != 'true'"
+      Text="The NTL NDIS lightweight-filter model requires the ntl::main entry point." />
     <Error
       Condition="'$(CrtSysUseDriverSupport)' == 'true' and '$(CrtSysLibPlatform)' != 'x86' and '$(CrtSysLibPlatform)' != 'x64' and '$(CrtSysLibPlatform)' != 'ARM' and '$(CrtSysLibPlatform)' != 'ARM64'"
       Text="crtsys NuGet package contains prebuilt driver libraries for x86, x64, ARM, and ARM64 depending on the selected MSVC toolset. Current platform is '$(Platform)'." />

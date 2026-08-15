@@ -9,7 +9,7 @@
   </Rule.DataSource>
   <EnumProperty Name="CrtSysWdmEntryPoint"
                 DisplayName="crtsys WDM entry point"
-                Description="Select the crtsys entry point for this WDM, minifilter, or WFP callout project."
+                Description="Select the crtsys entry point for this WDM, minifilter, WFP callout, or NDIS lightweight-filter project."
                 Category="DriverModel"
                 F1Keyword="crtsys.drivermodel">
     <EnumProperty.DataSource>
@@ -30,6 +30,9 @@
     <EnumValue Name="NtlWfp"
                DisplayName="NTL WFP"
                Description="Use ntl::main for a Windows Filtering Platform callout driver and automatically apply the WFP build contract." />
+    <EnumValue Name="NtlNdis"
+               DisplayName="NTL NDIS LWF"
+               Description="Use ntl::main for an NDIS 6.30 lightweight-filter driver and automatically apply the NDIS build contract." />
   </EnumProperty>
   <BoolProperty Name="CrtSysUseNtlKernelMsQuic"
                 DisplayName="NTL kernel MsQuic backend"

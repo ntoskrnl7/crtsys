@@ -25,7 +25,8 @@ param(
                'wfp-kernel-udp-content-filter',
                'wfp-kernel-tcp-content-filter',
                'wfp-specialized-observation',
-               'ntl-net-kernel-contracts')]
+               'ntl-net-kernel-contracts',
+               'ndis-compile', 'ndis-lwf-monitor')]
   [string] $Project,
 
   [Parameter(Mandatory = $true)]
@@ -70,6 +71,10 @@ $sourceDir = if ($Project -like 'kmdf-example-*') {
   Join-Path $repoRoot 'test\wfp\compile'
 } elseif ($Project -eq 'ntl-net-kernel-contracts') {
   Join-Path $repoRoot 'test\net\kernel-contracts'
+} elseif ($Project -eq 'ndis-compile') {
+  Join-Path $repoRoot 'test\ndis\compile'
+} elseif ($Project -eq 'ndis-lwf-monitor') {
+  Join-Path $repoRoot 'examples\ndis\lwf-monitor'
 } elseif ($Project -in @(
     'wfp-ale-connect-block',
     'wfp-datagram-proxy',

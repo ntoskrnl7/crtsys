@@ -1,0 +1,259 @@
+/**
+ * @file ndis/oid
+ * @brief Callback-scoped typed views over regular NDIS OID requests.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/ndis/oid is a kernel-mode header"
+#endif
+
+#include <ndis.h>
+
+#include <cstddef>
+namespace ntl::ndis {
+
+class oid_request_view {
+public:
+  explicit operator bool() const noexcept { return request_ != nullptr; }
+  NDIS_OID_REQUEST *native_handle() const noexcept { return request_; }
+
+  NDIS_REQUEST_TYPE type() const noexcept {
+    return request_ ? request_->RequestType
+                    : NdisRequestQueryInformation;
+  }
+  NDIS_PORT_NUMBER port() const noexcept {
+    return request_ ? request_->PortNumber : 0;
+  }
+  void *request_id() const noexcept {
+    return request_ ? request_->RequestId : nullptr;
+  }
+  NDIS_OID oid() const noexcept {
+    if (!request_)
+      return 0;
+    switch (request_->RequestType) {
+    case NdisRequestMethod:
+      return request_->DATA.METHOD_INFORMATION.Oid;
+    case NdisRequestSetInformation:
+      return request_->DATA.SET_INFORMATION.Oid;
+    case NdisRequestQueryInformation:
+    case NdisRequestQueryStatistics:
+    default:
+      return request_->DATA.QUERY_INFORMATION.Oid;
+    }
+  }
+
+  ULONG method_id() const noexcept {
+    return request_ && request_->RequestType == NdisRequestMethod
+               ? request_->DATA.METHOD_INFORMATION.MethodId
+               : 0;
+  }
+
+  UCHAR supported_revision() const noexcept {
+    return request_ ? request_->SupportedRevision : 0;
+  }
+
+  void *information_buffer() const noexcept {
+    if (!request_)
+      return nullptr;
+    switch (request_->RequestType) {
+    case NdisRequestMethod:
+      return request_->DATA.METHOD_INFORMATION.InformationBuffer;
+    case NdisRequestSetInformation:
+      return request_->DATA.SET_INFORMATION.InformationBuffer;
+    case NdisRequestQueryInformation:
+    case NdisRequestQueryStatistics:
+    default:
+      return request_->DATA.QUERY_INFORMATION.InformationBuffer;
+    }
+  }
+
+  std::size_t input_buffer_length() const noexcept {
+    if (!request_)
+      return 0;
+    switch (request_->RequestType) {
+    case NdisRequestMethod:
+      return request_->DATA.METHOD_INFORMATION.InputBufferLength;
+    case NdisRequestSetInformation:
+      return request_->DATA.SET_INFORMATION.InformationBufferLength;
+    case NdisRequestQueryInformation:
+    case NdisRequestQueryStatistics:
+    default:
+      return 0;
+    }
+  }
+
+  std::size_t output_buffer_length() const noexcept {
+    if (!request_)
+      return 0;
+    switch (request_->RequestType) {
+    case NdisRequestMethod:
+      return request_->DATA.METHOD_INFORMATION.OutputBufferLength;
+    case NdisRequestQueryInformation:
+    case NdisRequestQueryStatistics:
+      return request_->DATA.QUERY_INFORMATION.InformationBufferLength;
+    case NdisRequestSetInformation:
+    default:
+      return 0;
+    }
+  }
+
+  std::size_t bytes_read() const noexcept {
+    if (!request_)
+      return 0;
+    switch (request_->RequestType) {
+    case NdisRequestMethod:
+      return request_->DATA.METHOD_INFORMATION.BytesRead;
+    case NdisRequestSetInformation:
+      return request_->DATA.SET_INFORMATION.BytesRead;
+    case NdisRequestQueryInformation:
+    case NdisRequestQueryStatistics:
+    default:
+      return 0;
+    }
+  }
+
+  std::size_t bytes_written() const noexcept {
+    if (!request_)
+      return 0;
+    switch (request_->RequestType) {
+    case NdisRequestMethod:
+      return request_->DATA.METHOD_INFORMATION.BytesWritten;
+    case NdisRequestQueryInformation:
+    case NdisRequestQueryStatistics:
+      return request_->DATA.QUERY_INFORMATION.BytesWritten;
+    case NdisRequestSetInformation:
+    default:
+      return 0;
+    }
+  }
+
+  std::size_t bytes_needed() const noexcept {
+    if (!request_)
+      return 0;
+    switch (request_->RequestType) {
+    case NdisRequestMethod:
+      return request_->DATA.METHOD_INFORMATION.BytesNeeded;
+    case NdisRequestSetInformation:
+      return request_->DATA.SET_INFORMATION.BytesNeeded;
+    case NdisRequestQueryInformation:
+    case NdisRequestQueryStatistics:
+    default:
+      return request_->DATA.QUERY_INFORMATION.BytesNeeded;
+    }
+  }
+
+private:
+  template <class> friend class lightweight_filter;
+  friend class oid_request_event;
+  friend class oid_request_complete_event;
+  friend class direct_oid_request_event;
+  friend class direct_oid_request_complete_event;
+  explicit oid_request_view(NDIS_OID_REQUEST *request) noexcept
+      : request_(request) {}
+  NDIS_OID_REQUEST *request_ = nullptr;
+};
+
+namespace detail {
+
+inline NDIS_STATUS clone_oid_request(
+    NDIS_HANDLE filter_handle, NDIS_OID_REQUEST *request,
+    ULONG pool_tag, NDIS_OID_REQUEST **clone) noexcept {
+  if (!filter_handle || !request || !clone)
+    return NDIS_STATUS_INVALID_PARAMETER;
+  *clone = nullptr;
+  const NDIS_STATUS status = NdisAllocateCloneOidRequest(
+      filter_handle, request, pool_tag, clone);
+  if (status != NDIS_STATUS_SUCCESS)
+    return status;
+
+  static_assert(sizeof(request) <= sizeof((*clone)->SourceReserved));
+  RtlCopyMemory((*clone)->SourceReserved, &request, sizeof(request));
+  (*clone)->RequestId = request->RequestId;
+  return NDIS_STATUS_SUCCESS;
+}
+
+inline NDIS_OID_REQUEST *original_oid_request(
+    const NDIS_OID_REQUEST *clone) noexcept {
+  if (!clone)
+    return nullptr;
+  NDIS_OID_REQUEST *original = nullptr;
+  static_assert(sizeof(original) <= sizeof(clone->SourceReserved));
+  RtlCopyMemory(&original, clone->SourceReserved, sizeof(original));
+  return original;
+}
+
+inline void copy_oid_completion(
+    NDIS_OID_REQUEST &destination,
+    const NDIS_OID_REQUEST &source) noexcept {
+  destination.SupportedRevision = source.SupportedRevision;
+  switch (source.RequestType) {
+  case NdisRequestMethod:
+    destination.DATA.METHOD_INFORMATION.OutputBufferLength =
+        source.DATA.METHOD_INFORMATION.OutputBufferLength;
+    destination.DATA.METHOD_INFORMATION.BytesRead =
+        source.DATA.METHOD_INFORMATION.BytesRead;
+    destination.DATA.METHOD_INFORMATION.BytesNeeded =
+        source.DATA.METHOD_INFORMATION.BytesNeeded;
+    destination.DATA.METHOD_INFORMATION.BytesWritten =
+        source.DATA.METHOD_INFORMATION.BytesWritten;
+    break;
+  case NdisRequestSetInformation:
+    destination.DATA.SET_INFORMATION.BytesRead =
+        source.DATA.SET_INFORMATION.BytesRead;
+    destination.DATA.SET_INFORMATION.BytesNeeded =
+        source.DATA.SET_INFORMATION.BytesNeeded;
+    break;
+  case NdisRequestQueryInformation:
+  case NdisRequestQueryStatistics:
+  default:
+    destination.DATA.QUERY_INFORMATION.BytesWritten =
+        source.DATA.QUERY_INFORMATION.BytesWritten;
+    destination.DATA.QUERY_INFORMATION.BytesNeeded =
+        source.DATA.QUERY_INFORMATION.BytesNeeded;
+    break;
+  }
+}
+
+inline NDIS_OID_REQUEST *release_oid_clone(
+    NDIS_HANDLE filter_handle, NDIS_OID_REQUEST *clone) noexcept {
+  if (!filter_handle || !clone)
+    return nullptr;
+  NDIS_OID_REQUEST *const original = original_oid_request(clone);
+  if (original)
+    copy_oid_completion(*original, *clone);
+  NdisFreeCloneOidRequest(filter_handle, clone);
+  return original;
+}
+
+template <class Observe, class Submit, class Complete>
+inline NDIS_STATUS forward_oid_clone(
+    NDIS_OID_REQUEST *clone, Observe &&observe,
+    Submit &&submit, Complete &&complete)
+    noexcept(noexcept(observe(clone)) && noexcept(submit(clone)) &&
+             noexcept(complete(clone, NDIS_STATUS{}))) {
+  observe(clone);
+  const NDIS_STATUS status = submit(clone);
+  if (status == NDIS_STATUS_PENDING)
+    return status;
+  complete(clone, status);
+  return NDIS_STATUS_PENDING;
+}
+
+template <class Observe, class Release, class Complete>
+inline void complete_oid_clone(
+    NDIS_OID_REQUEST *clone, NDIS_STATUS status,
+    Observe &&observe, Release &&release, Complete &&complete)
+    noexcept(noexcept(observe(clone, status)) &&
+             noexcept(release(clone)) &&
+             noexcept(complete(static_cast<NDIS_OID_REQUEST *>(nullptr),
+                               status))) {
+  observe(clone, status);
+  NDIS_OID_REQUEST *const original = release(clone);
+  if (original)
+    complete(original, status);
+}
+
+} // namespace detail
+
+} // namespace ntl::ndis

@@ -1,0 +1,264 @@
+/**
+ * @file ndis/tcp_reassembly
+ * @brief Bounded TCP sequence reassembly for copied LWF payload bytes.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/ndis/tcp_reassembly is a kernel-mode header"
+#endif
+
+#include <ntl/net/buffer/owned_bytes>
+#include "../result"
+#include <ntl/net/buffer/scatter_view>
+#include "../status"
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <utility>
+
+namespace ntl::ndis {
+
+struct tcp_segment_view {
+  std::uint32_t sequence = 0;
+  ntl::net::scatter_view payload;
+  bool finish = false;
+};
+
+struct tcp_reassembly_limits {
+  std::size_t maximum_buffered_bytes = 256 * 1024;
+  std::uint32_t maximum_forward_window = 4 * 1024 * 1024;
+};
+
+enum class tcp_reassembly_state : std::uint8_t {
+  delivered,
+  buffered,
+  duplicate,
+  finished,
+};
+
+struct tcp_reassembly_result {
+  tcp_reassembly_state state = tcp_reassembly_state::delivered;
+  std::size_t delivered_bytes = 0;
+  std::size_t buffered_bytes = 0;
+};
+
+template <std::size_t MaximumSegments = 64>
+class bounded_tcp_reassembler {
+public:
+  explicit bounded_tcp_reassembler(
+      std::uint32_t initial_sequence,
+      tcp_reassembly_limits limits = {}) noexcept
+      : next_(initial_sequence), limits_(limits) {}
+
+  bounded_tcp_reassembler(
+      const bounded_tcp_reassembler &) = delete;
+  bounded_tcp_reassembler &
+  operator=(const bounded_tcp_reassembler &) = delete;
+
+  std::uint32_t next_sequence() const noexcept { return next_; }
+  std::size_t buffered_bytes() const noexcept {
+    return buffered_bytes_;
+  }
+  bool finished() const noexcept { return finished_; }
+
+  template <class Sink>
+  ntl::result<tcp_reassembly_result>
+  push(tcp_segment_view segment, Sink &&sink,
+       ULONG pool_tag = ntl::default_pool_tag) noexcept {
+    if (finished_)
+      return ntl::unexpected(STATUS_INVALID_DEVICE_STATE);
+    if (segment.payload.size() >
+        (std::numeric_limits<std::uint32_t>::max)())
+      return ntl::unexpected(STATUS_INTEGER_OVERFLOW);
+
+    const std::int32_t relation =
+        static_cast<std::int32_t>(segment.sequence - next_);
+    std::size_t trim = 0;
+    if (relation < 0) {
+      const std::uint32_t behind =
+          next_ - segment.sequence;
+      if (behind >= segment.payload.size()) {
+        if (!segment.finish ||
+            behind != segment.payload.size())
+          return ntl::ok(tcp_reassembly_result{
+              tcp_reassembly_state::duplicate, 0,
+              buffered_bytes_});
+        segment.sequence = next_;
+        segment.payload = {};
+      } else {
+        trim = behind;
+        segment.sequence = next_;
+      }
+    } else if (
+        static_cast<std::uint32_t>(relation) >
+        limits_.maximum_forward_window) {
+      return ntl::unexpected(STATUS_INVALID_BUFFER_SIZE);
+    }
+
+    if (trim != 0) {
+      auto trimmed = segment.payload.subview(
+          trim, segment.payload.size() - trim);
+      if (!trimmed)
+        return ntl::unexpected(trimmed.status());
+      segment.payload = *trimmed;
+    }
+
+    if (segment.sequence == next_) {
+      tcp_reassembly_result result{};
+      const ntl::status delivered =
+          deliver(segment, sink, result.delivered_bytes);
+      if (!delivered.is_ok())
+        return ntl::unexpected(delivered);
+      result.state = finished_
+                         ? tcp_reassembly_state::finished
+                         : tcp_reassembly_state::delivered;
+      const ntl::status drained =
+          drain(sink, result.delivered_bytes);
+      if (!drained.is_ok())
+        return ntl::unexpected(drained);
+      result.buffered_bytes = buffered_bytes_;
+      if (finished_)
+        result.state = tcp_reassembly_state::finished;
+      return ntl::ok(result);
+    }
+
+    if (segment.payload.empty() && !segment.finish)
+      return ntl::ok(tcp_reassembly_result{
+          tcp_reassembly_state::duplicate, 0, buffered_bytes_});
+    if (overlaps_existing(segment))
+      return ntl::unexpected(STATUS_DATA_ERROR);
+    if (segment.payload.size() >
+        limits_.maximum_buffered_bytes - buffered_bytes_)
+      return ntl::unexpected(STATUS_QUOTA_EXCEEDED);
+
+    slot *free_slot = nullptr;
+    for (auto &candidate : slots_) {
+      if (!candidate.used) {
+        free_slot = &candidate;
+        break;
+      }
+    }
+    if (!free_slot)
+      return ntl::unexpected(STATUS_QUOTA_EXCEEDED);
+
+    auto copy = ntl::net::owned_bytes::try_copy(
+        segment.payload,
+        ntl::net::buffer_limits{
+            limits_.maximum_buffered_bytes},
+        pool_tag);
+    if (!copy)
+      return ntl::unexpected(copy.status());
+    free_slot->used = true;
+    free_slot->sequence = segment.sequence;
+    free_slot->payload = std::move(*copy);
+    free_slot->finish = segment.finish;
+    buffered_bytes_ += free_slot->payload.size();
+    return ntl::ok(tcp_reassembly_result{
+        tcp_reassembly_state::buffered, 0, buffered_bytes_});
+  }
+
+  void reset(std::uint32_t initial_sequence) noexcept {
+    for (auto &entry : slots_)
+      entry = slot{};
+    next_ = initial_sequence;
+    buffered_bytes_ = 0;
+    finished_ = false;
+  }
+
+private:
+  struct slot {
+    bool used = false;
+    std::uint32_t sequence = 0;
+    ntl::net::owned_bytes payload;
+    bool finish = false;
+  };
+
+  static std::uint32_t end_sequence(
+      std::uint32_t sequence, std::size_t length,
+      bool finish) noexcept {
+    return sequence + static_cast<std::uint32_t>(length) +
+           (finish ? 1u : 0u);
+  }
+
+  bool overlaps_existing(tcp_segment_view segment) const noexcept {
+    const std::uint32_t candidate_end = end_sequence(
+        segment.sequence, segment.payload.size(), segment.finish);
+    for (const auto &entry : slots_) {
+      if (!entry.used)
+        continue;
+      const std::uint32_t entry_end = end_sequence(
+          entry.sequence, entry.payload.size(), entry.finish);
+      const std::int32_t candidate_before_entry_end =
+          static_cast<std::int32_t>(
+              segment.sequence - entry_end);
+      const std::int32_t entry_before_candidate_end =
+          static_cast<std::int32_t>(
+              entry.sequence - candidate_end);
+      if (candidate_before_entry_end < 0 &&
+          entry_before_candidate_end < 0)
+        return true;
+    }
+    return false;
+  }
+
+  template <class Sink>
+  ntl::status deliver(
+      tcp_segment_view segment, Sink &sink,
+      std::size_t &delivered_bytes) noexcept {
+    if (!segment.payload.empty()) {
+      const ntl::status result = sink(segment.payload);
+      if (!result.is_ok())
+        return result;
+      next_ += static_cast<std::uint32_t>(
+          segment.payload.size());
+      delivered_bytes += segment.payload.size();
+    }
+    if (segment.finish) {
+      ++next_;
+      finished_ = true;
+    }
+    return ntl::status::ok();
+  }
+
+  template <class Sink>
+  ntl::status drain(
+      Sink &sink, std::size_t &delivered_bytes) noexcept {
+    for (;;) {
+      slot *next_slot = nullptr;
+      for (auto &entry : slots_) {
+        if (entry.used && entry.sequence == next_) {
+          next_slot = &entry;
+          break;
+        }
+      }
+      if (!next_slot)
+        return ntl::status::ok();
+
+      const std::size_t length = next_slot->payload.size();
+      tcp_segment_view segment{
+          next_slot->sequence,
+          ntl::net::scatter_view::from_contiguous(
+              next_slot->payload.span()),
+          next_slot->finish};
+      const ntl::status result =
+          deliver(segment, sink, delivered_bytes);
+      if (!result.is_ok())
+        return result;
+      buffered_bytes_ -= length;
+      *next_slot = slot{};
+      if (finished_)
+        return ntl::status::ok();
+    }
+  }
+
+  std::array<slot, MaximumSegments> slots_{};
+  std::uint32_t next_ = 0;
+  tcp_reassembly_limits limits_{};
+  std::size_t buffered_bytes_ = 0;
+  bool finished_ = false;
+};
+
+} // namespace ntl::ndis

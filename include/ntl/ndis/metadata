@@ -1,0 +1,185 @@
+/**
+ * @file ndis/metadata
+ * @brief Typed NDIS NET_BUFFER_LIST offload metadata values.
+ */
+#pragma once
+
+#if !defined(_KERNEL_MODE) && !defined(_KERNEL32_)
+#error "ntl/ndis/metadata is a kernel-mode header"
+#endif
+
+#include <ndis.h>
+
+#include <cstdint>
+
+namespace ntl::ndis {
+
+class checksum_metadata {
+public:
+  bool present() const noexcept { return raw_ != 0; }
+  bool transmit_ipv4() const noexcept { return decoded().Transmit.IsIPv4 != 0; }
+  bool transmit_ipv6() const noexcept { return decoded().Transmit.IsIPv6 != 0; }
+  bool transmit_tcp() const noexcept {
+    return decoded().Transmit.TcpChecksum != 0;
+  }
+  bool transmit_udp() const noexcept {
+    return decoded().Transmit.UdpChecksum != 0;
+  }
+  bool transmit_ip_header() const noexcept {
+    return decoded().Transmit.IpHeaderChecksum != 0;
+  }
+  std::uint16_t tcp_header_offset() const noexcept {
+    return static_cast<std::uint16_t>(
+        decoded().Transmit.TcpHeaderOffset);
+  }
+  bool receive_tcp_succeeded() const noexcept {
+    return decoded().Receive.TcpChecksumSucceeded != 0;
+  }
+  bool receive_tcp_failed() const noexcept {
+    return decoded().Receive.TcpChecksumFailed != 0;
+  }
+  bool receive_udp_succeeded() const noexcept {
+    return decoded().Receive.UdpChecksumSucceeded != 0;
+  }
+  bool receive_udp_failed() const noexcept {
+    return decoded().Receive.UdpChecksumFailed != 0;
+  }
+  bool receive_ip_succeeded() const noexcept {
+    return decoded().Receive.IpChecksumSucceeded != 0;
+  }
+  bool receive_ip_failed() const noexcept {
+    return decoded().Receive.IpChecksumFailed != 0;
+  }
+
+  NDIS_TCP_IP_CHECKSUM_NET_BUFFER_LIST_INFO
+  native_value() const noexcept {
+    return decoded();
+  }
+
+private:
+  friend class net_buffer_list_view;
+  explicit checksum_metadata(void *value) noexcept
+      : raw_(reinterpret_cast<std::uintptr_t>(value)) {}
+
+  NDIS_TCP_IP_CHECKSUM_NET_BUFFER_LIST_INFO decoded() const noexcept {
+    NDIS_TCP_IP_CHECKSUM_NET_BUFFER_LIST_INFO value{};
+    value.Value = reinterpret_cast<void *>(raw_);
+    return value;
+  }
+
+  std::uintptr_t raw_ = 0;
+};
+
+class large_send_metadata {
+public:
+  bool present() const noexcept { return raw_ != 0; }
+  bool version2() const noexcept {
+    return decoded().Transmit.Type ==
+           NDIS_TCP_LARGE_SEND_OFFLOAD_V2_TYPE;
+  }
+  bool ipv6() const noexcept {
+    return version2() &&
+           decoded().LsoV2Transmit.IPVersion ==
+               NDIS_TCP_LARGE_SEND_OFFLOAD_IPv6;
+  }
+  std::uint32_t maximum_segment_size() const noexcept {
+    return version2() ? decoded().LsoV2Transmit.MSS
+                      : decoded().LsoV1Transmit.MSS;
+  }
+  std::uint16_t tcp_header_offset() const noexcept {
+    return static_cast<std::uint16_t>(
+        version2() ? decoded().LsoV2Transmit.TcpHeaderOffset
+                   : decoded().LsoV1Transmit.TcpHeaderOffset);
+  }
+
+  NDIS_TCP_LARGE_SEND_OFFLOAD_NET_BUFFER_LIST_INFO
+  native_value() const noexcept {
+    return decoded();
+  }
+
+private:
+  friend class net_buffer_list_view;
+  explicit large_send_metadata(void *value) noexcept
+      : raw_(reinterpret_cast<std::uintptr_t>(value)) {}
+
+  NDIS_TCP_LARGE_SEND_OFFLOAD_NET_BUFFER_LIST_INFO
+  decoded() const noexcept {
+    NDIS_TCP_LARGE_SEND_OFFLOAD_NET_BUFFER_LIST_INFO value{};
+    value.Value = reinterpret_cast<void *>(raw_);
+    return value;
+  }
+
+  std::uintptr_t raw_ = 0;
+};
+
+class receive_segment_coalescing_metadata {
+public:
+  bool present() const noexcept { return raw_ != 0; }
+  std::uint16_t segment_count() const noexcept {
+    return decoded().Info.CoalescedSegCount;
+  }
+  std::uint16_t duplicate_ack_count() const noexcept {
+    return decoded().Info.DupAckCount;
+  }
+
+  NDIS_RSC_NBL_INFO native_value() const noexcept {
+    return decoded();
+  }
+
+private:
+  friend class net_buffer_list_view;
+  explicit receive_segment_coalescing_metadata(void *value) noexcept
+      : raw_(reinterpret_cast<std::uintptr_t>(value)) {}
+
+  NDIS_RSC_NBL_INFO decoded() const noexcept {
+    NDIS_RSC_NBL_INFO value{};
+    value.Value = reinterpret_cast<void *>(raw_);
+    return value;
+  }
+
+  std::uintptr_t raw_ = 0;
+};
+
+class vlan_metadata {
+public:
+  bool present() const noexcept { return raw_ != 0; }
+  std::uint16_t identifier() const noexcept {
+    return static_cast<std::uint16_t>(decoded().TagHeader.VlanId);
+  }
+  std::uint8_t priority() const noexcept {
+    return static_cast<std::uint8_t>(
+        decoded().TagHeader.UserPriority);
+  }
+  bool canonical_format() const noexcept {
+    return decoded().TagHeader.CanonicalFormatId != 0;
+  }
+
+  NDIS_NET_BUFFER_LIST_8021Q_INFO native_value() const noexcept {
+    return decoded();
+  }
+
+private:
+  friend class net_buffer_list_view;
+  explicit vlan_metadata(void *value) noexcept
+      : raw_(reinterpret_cast<std::uintptr_t>(value)) {}
+
+  NDIS_NET_BUFFER_LIST_8021Q_INFO decoded() const noexcept {
+    NDIS_NET_BUFFER_LIST_8021Q_INFO value{};
+    value.Value = reinterpret_cast<void *>(raw_);
+    return value;
+  }
+
+  std::uintptr_t raw_ = 0;
+};
+
+struct receive_hash_metadata {
+  std::uint32_t value = 0;
+  std::uint32_t type = 0;
+  std::uint32_t function = 0;
+
+  bool present() const noexcept {
+    return value != 0 || type != 0 || function != 0;
+  }
+};
+
+} // namespace ntl::ndis
