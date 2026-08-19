@@ -163,6 +163,28 @@ set(COMPILATION_DATE "")
 string(TIMESTAMP COMPILATION_DATE "%m/%d/%Y")
 message(STATUS "Compilation date: ${COMPILATION_DATE}")
 
+function(_wdk_find_arm_runtime _out_var)
+    string(TOLOWER "${WDK_PLATFORM}" _wdk_platform_lower)
+    set(_wdk_runtime_name "${_wdk_platform_lower}rt.lib")
+    set(_wdk_runtime_candidates
+        "${WDK_ROOT}/Lib/${WDK_VERSION}/um/${WDK_PLATFORM}/${_wdk_runtime_name}"
+        "${WDK_ROOT}/Lib/${WDK_VERSION}/um/${_wdk_platform_lower}/${_wdk_runtime_name}"
+        # Microsoft.Windows.SDK.CPP.<arch> NuGet packages place architecture
+        # libraries directly below c/um/<arch> instead of the installed SDK's
+        # Lib/<version>/um/<arch> layout.
+        "${WDK_ROOT}/um/${_wdk_platform_lower}/${_wdk_runtime_name}"
+    )
+    foreach(_wdk_runtime IN LISTS _wdk_runtime_candidates)
+        if(EXISTS "${_wdk_runtime}")
+            set(${_out_var} "${_wdk_runtime}" PARENT_SCOPE)
+            return()
+        endif()
+    endforeach()
+    message(FATAL_ERROR
+        "The ${WDK_PLATFORM} SDK runtime ${_wdk_runtime_name} was not found. "
+        "Checked: ${_wdk_runtime_candidates}")
+endfunction()
+
 function(wdk_add_driver _target)
     cmake_parse_arguments(WDK "EXTENDED_CPP_FEATURES" "CUSTOM_ENTRY_POINT;KMDF;WINVER" "" ${ARGN})
 
@@ -189,10 +211,10 @@ function(wdk_add_driver _target)
 
     target_link_libraries(${_target} WDK::NTOSKRNL WDK::HAL WDK::WMILIB)
     if (WDK_ARM)
-        string(TOLOWER ${CMAKE_GENERATOR_PLATFORM} __platform)
+        _wdk_find_arm_runtime(_wdk_arm_runtime)
         target_link_libraries(${_target}
             WDK::BUFFEROVERFLOWFASTFAILK
-            "${WDK_ROOT}/Lib/${WDK_VERSION}/um/${WDK_PLATFORM}/${__platform}rt.lib"
+            "${_wdk_arm_runtime}"
         )
     else()
         target_link_libraries(${_target} WDK::BUFFEROVERFLOWK)
